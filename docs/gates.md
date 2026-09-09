@@ -126,6 +126,37 @@ probe default stays "untouched" so earlier gates remain reproducible. See the
 scanout plane's `COLOR_ENCODING` to `ITU-R BT.2020 YCbCr` and leaves
 `COLOR_RANGE` at limited.**
 
+## MA0 — HDMI PCM audio bring-up (done)
+
+The first audio gate. One question: **can this vendor BSP play PCM over HDMI,
+and how does sink capability discovery actually work here?** Passthrough is
+explicitly not the target; AC-3, E-AC-3, DTS, TrueHD, DTS-HD MA, Atmos and
+IEC61937/HBR all belong to MA1.
+
+Result: `PASS`. The HDMI playback endpoint is `hw:0,0`
+(`rockchip-hdmi1 i2s-hifi-0`) on the same `fdea0000` HDMI controller the video
+path drives. Stereo 48 kHz PCM plays continuously for 60 s with `xrun = 0`,
+twice, with physical audio confirmed on the panel; every format except
+`S24_3LE` and every rate from 32 kHz to 192 kHz is granted exactly as
+requested; 4, 6 and 8 channel LPCM are accepted. Running PCM audio alongside
+the HDR video probe costs the video pipeline nothing measurable — 1413 frames
+presented, 0 dropped, 0 repeated, 0 late, at 23.9763 fps.
+
+Two findings carry forward:
+
+- **MP0's "no ELD" conclusion was a method error.** There is no ELD *file*, but
+  the vendor driver publishes a populated 128-byte ELD *control* on the PCM
+  interface. It advertises LPCM 6ch to 192 kHz, AC-3 640 kbps, DTS 1504 kbps
+  and 8-channel E-AC-3, so Kodi's passthrough capability detection has what it
+  needs and the MP0-era worry is retired.
+- **The driver's channel order is FL, FR, LFE, FC, RL, RR**, not the order a
+  channel list is usually written in. Anything hard-coding an interleave order
+  for this board will swap centre with LFE.
+
+The default ALSA buffer is 131072 frames — about 2.7 s at 48 kHz — so a player
+must set its own buffer before lip sync is possible at all. See the
+[`MA0 report`](../results/orangepi5-ultra-vendor/hdmi-audio-ma0-2026-09-09.md).
+
 ## Not yet authorised
 
 Everything below waits for its own gate, and none of it is started as a
@@ -133,7 +164,7 @@ side effect of an MP1 gate:
 
 - installing Kodi, or a GBM/Mesa/`libmali` user space
 - Stremio integration and the control bridge
-- audio passthrough and CEC
+- compressed HDMI audio passthrough (MA1) and CEC
 - frame-rate matching policy across 23.976/24/25/50/59.94/60
 - HDR10+ and Dolby Vision
 - any kernel, device-tree or boot configuration change
