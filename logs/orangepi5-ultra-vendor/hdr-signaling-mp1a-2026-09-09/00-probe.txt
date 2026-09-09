@@ -1,0 +1,24 @@
+probe card=/dev/dri/card0 crtcs=1 connectors=1
+connector id=201 HDMI-A-1 status=connected modes=48
+  mode[06] 3840x2160 3840x2160 clock=594000 refresh=60.000 flags=0x100005
+  mode[07] 3840x2160 3840x2160 clock=593407 refresh=59.940 flags=0x100005
+  mode[08] 3840x2160 3840x2160 clock=594000 refresh=50.000 flags=0x100005
+  mode[09] 3840x2160 3840x2160 clock=297000 refresh=30.000 flags=0x100005
+  mode[10] 3840x2160 3840x2160 clock=296703 refresh=29.970 flags=0x100005
+  mode[11] 3840x2160 3840x2160 clock=297000 refresh=25.000 flags=0x100005
+  mode[12] 3840x2160 3840x2160 clock=297000 refresh=24.000 flags=0x100005
+  mode[13] 3840x2160 3840x2160 clock=296703 refresh=23.976 flags=0x100005
+  property Colorspace             id=214 value=10 enums: BT2020_CYCC=8 BT2020_RGB=9 BT2020_YCC=10 BT709_YCC=2 DCI-P3_RGB_D65=11 DCI-P3_RGB_Theater=12 Default=0 SMPTE_170M_YCC=1 SYCC_601=5 XVYCC_601=3 XVYCC_709=4 opRGB=7 opYCC_601=6
+  property color_depth            id=202 value=10 enums: 24bit=8 30bit=10 Automatic=0
+  property color_depth_caps       id=204 value=7
+  property color_format           id=203 value=1 enums: invalid_output=6 rgb=0 ycbcr420=3 ycbcr422=2 ycbcr444=1 ycbcr_high_subsampling=4 ycbcr_low_subsampling=5
+  property color_format_caps      id=205 value=15
+  property HDR_OUTPUT_METADATA    id=7 value=0
+  property max bpc                ABSENT
+  property quant_range            id=213 value=0 enums: default=0 full=2 limit=1
+  property HDR_PANEL_METADATA     id=206 value=251
+plane id=73 type=Cursor possible_crtcs=0x1 nv12=1 nv15=1
+plane id=146 type=Overlay possible_crtcs=0x1 nv12=1 nv15=1
+plane id=162 type=Overlay possible_crtcs=0x1 nv12=1 nv15=1
+plane id=178 type=Overlay possible_crtcs=0x1 nv12=1 nv15=1
+probe complete; no modeset performed

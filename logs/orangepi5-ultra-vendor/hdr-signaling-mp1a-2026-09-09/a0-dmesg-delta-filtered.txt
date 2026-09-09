@@ -1,0 +1,33 @@
+1:[ 5840.058595] rockchip-vop2 fdd90000.vop: [drm] vop disable intf:1000
+2:[ 5840.058643] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_disable] Crtc atomic disable vp0
+3:[ 5840.089254] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_enable] Update mode to 3840x2160p24, type: 0(if:HDMI1, flag:0x0) for vp0 dclk: 296703000
+4:[ 5840.089413] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx_ropll_cmn_config bus_width:2d45f6 rate:1485000
+5:[ 5840.089659] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx phy pll locked!
+6:[ 5840.089691] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_enable] dclk_out0 div: 0 dclk_core0 div: 2
+7:[ 5840.089764] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx_ropll_cmn_config bus_width:2d45f6 rate:2967030
+8:[ 5840.090005] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx phy pll locked!
+9:[ 5840.090010] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_enable] set dclk_vop0 to 296703000, get 296703000
+10:[ 5840.090048] dwhdmi-rockchip fdea0000.hdmi: final tmdsclk = 296703000
+11:[ 5840.090076] dwhdmi-rockchip fdea0000.hdmi: don't use dsc mode
+12:[ 5840.090078] dwhdmi-rockchip fdea0000.hdmi: dw hdmi qp use tmds mode
+13:[ 5840.090083] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: bus_width:0x2d45f6,bit_rate:2967030
+14:[ 5840.090270] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx phy lane locked!
+15:[ 5840.090307] rockchip-vop2 fdd90000.vop: [drm] vop enable intf:1000
+16:[ 5869.337160] dwhdmi-rockchip fdea0000.hdmi: final tmdsclk = 296703000
+17:[ 5869.337218] dwhdmi-rockchip fdea0000.hdmi: don't use dsc mode
+18:[ 5869.337226] dwhdmi-rockchip fdea0000.hdmi: dw hdmi qp use tmds mode
+19:[ 5869.503707] rockchip-vop2 fdd90000.vop: [drm] vop disable intf:1000
+20:[ 5869.503808] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_disable] Crtc atomic disable vp0
+21:[ 5869.537655] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_enable] Update mode to 1920x1080p60, type: 0(if:HDMI1, flag:0x0) for vp0 dclk: 148500000
+22:[ 5869.537877] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx_ropll_cmn_config bus_width:16a8c8 rate:2967030
+23:[ 5869.538164] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx phy pll locked!
+24:[ 5869.538226] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_enable] dclk_out0 div: 0 dclk_core0 div: 2
+25:[ 5869.538337] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx_ropll_cmn_config bus_width:16a8c8 rate:1485000
+26:[ 5869.538620] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx phy pll locked!
+27:[ 5869.538632] rockchip-vop2 fdd90000.vop: [drm:vop2_crtc_atomic_enable] set dclk_vop0 to 148500000, get 148500000
+28:[ 5869.538694] dwhdmi-rockchip fdea0000.hdmi: final tmdsclk = 148500000
+29:[ 5869.538742] dwhdmi-rockchip fdea0000.hdmi: don't use dsc mode
+30:[ 5869.538753] dwhdmi-rockchip fdea0000.hdmi: dw hdmi qp use tmds mode
+31:[ 5869.538765] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: bus_width:0x16a8c8,bit_rate:1485000
+32:[ 5869.539028] rockchip-hdptx-phy-hdmi fed70000.hdmiphy: hdptx phy lane locked!
+33:[ 5869.539084] rockchip-vop2 fdd90000.vop: [drm] vop enable intf:1000
