@@ -1,0 +1,109 @@
+{
+  "device": "hw:0,0",
+  "card": 0,
+  "eld_present": true,
+  "eld_raw": "10 00 0a 00 6c 42 00 0f 00 00 00 00 00 00 00 00 4d d9 03 f3 53 4f 4e 59 20 54 56 20 20 2a 30 30 0d 7f 07 15 07 50 3d 07 bc 57 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+  "eld": {
+    "eld_ver": 2,
+    "baseline_len_bytes": 40,
+    "cea_edid_ver": 3,
+    "sad_count": 4,
+    "conn_type": 0,
+    "supports_ai": 1,
+    "hdcp": 0,
+    "audio_sync_delay_ms": 0,
+    "speaker_allocation": [
+      "FL/FR",
+      "LFE",
+      "FC",
+      "RL/RR"
+    ],
+    "monitor_name": "SONY TV  *00",
+    "sads": [
+      {
+        "format": "LPCM",
+        "max_channels": 6,
+        "rates_hz": [
+          32000,
+          44100,
+          48000,
+          88200,
+          96000,
+          176400,
+          192000
+        ],
+        "raw": "0d 7f 07",
+        "depths_bits": [
+          16,
+          20,
+          24
+        ]
+      },
+      {
+        "format": "AC-3",
+        "max_channels": 6,
+        "rates_hz": [
+          32000,
+          44100,
+          48000
+        ],
+        "raw": "15 07 50",
+        "max_bitrate_kbps": 640
+      },
+      {
+        "format": "DTS",
+        "max_channels": 6,
+        "rates_hz": [
+          32000,
+          44100,
+          48000
+        ],
+        "raw": "3d 07 bc",
+        "max_bitrate_kbps": 1504
+      },
+      {
+        "format": "E-AC-3",
+        "max_channels": 8,
+        "rates_hz": [
+          44100,
+          48000
+        ],
+        "raw": "57 06 00"
+      }
+    ]
+  },
+  "capabilities": {
+    "formats": {
+      "S16_LE": true,
+      "S24_LE": true,
+      "S32_LE": true,
+      "S24_3LE": false
+    },
+    "rates": {
+      "32000": true,
+      "44100": true,
+      "48000": true,
+      "88200": true,
+      "96000": true,
+      "176400": true,
+      "192000": true
+    },
+    "channels": {
+      "1": false,
+      "2": true,
+      "4": true,
+      "6": true,
+      "8": true
+    }
+  },
+  "chmap_idle": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ]
+}

@@ -1,0 +1,49 @@
+########## 6-channel LPCM, channel identification (2 s per channel) ##########
+ELD speaker allocation is FL/FR, LFE, FC, RL/RR -- the sink declares 5.1.
+playing 12.0s on hw:0,0: 48000 Hz, 6ch, S16_LE, channel identification
+  now playing: channel 0 (FL)
+  now playing: channel 1 (FR)
+  now playing: channel 2 (FC)
+---- /proc hw_params during 6ch playback:
+access: RW_INTERLEAVED
+format: S16_LE
+subformat: STD
+channels: 6
+rate: 48000 (48000/1)
+period_size: 257
+buffer_size: 43690
+--- active chmap:
+3,4,8,7,5,6,0,0
+  now playing: channel 3 (LFE)
+  now playing: channel 4 (SL)
+  now playing: channel 5 (SR)
+  granted rate       : 48000 Hz (requested 48000)
+  granted format     : S16_LE (2 bytes/sample)
+  granted channels   : 6
+  period / buffer    : 257 / 43690 frames
+  frames written     : 576000 (expected ~576000)
+  wall time          : 12.082 s
+  xruns              : 0
+AUDIO RESULT: PASS
+
+########## 8-channel LPCM (beyond the sink's declared 6ch LPCM) ##########
+playing 8.0s on hw:0,0: 48000 Hz, 8ch, S16_LE
+  granted rate       : 48000 Hz (requested 48000)
+  granted format     : S16_LE (2 bytes/sample)
+  granted channels   : 8
+  period / buffer    : 256 / 32768 frames
+  frames written     : 384000 (expected ~384000)
+  wall time          : 8.099 s
+  xruns              : 0
+AUDIO RESULT: PASS
+
+########## 4-channel LPCM ##########
+playing 6.0s on hw:0,0: 48000 Hz, 4ch, S16_LE
+  granted rate       : 48000 Hz (requested 48000)
+  granted format     : S16_LE (2 bytes/sample)
+  granted channels   : 4
+  period / buffer    : 256 / 65536 frames
+  frames written     : 288000 (expected ~288000)
+  wall time          : 6.06 s
+  xruns              : 0
+AUDIO RESULT: PASS

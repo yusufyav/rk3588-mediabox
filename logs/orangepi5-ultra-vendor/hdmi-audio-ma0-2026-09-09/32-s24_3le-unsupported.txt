@@ -1,0 +1,4 @@
+playing 6.0s on hw:0,0: 48000 Hz, 2ch, S24_3LE
+  rejected by the driver: set_format(S24_3LE): Invalid argument (-22)
+AUDIO RESULT: UNSUPPORTED
+exit=3

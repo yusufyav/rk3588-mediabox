@@ -1,0 +1,60 @@
+===== /proc/asound/card0 tree =====
+/proc/asound/card0:
+total 0
+-r--r--r-- 1 root root 0 Sep  9 21:42 id
+dr-xr-xr-x 4 root root 0 Sep  9 16:38 pcm0p
+
+/proc/asound/card0/pcm0p:
+total 0
+-r--r--r-- 1 root root 0 Sep  9 21:42 info
+dr-xr-xr-x 8 root root 0 Sep  9 16:38 sub0
+
+/proc/asound/card0/pcm0p/sub0:
+total 0
+-r--r--r-- 1 root root 0 Sep  9 21:42 hw_params
+-r--r--r-- 1 root root 0 Sep  9 21:42 info
+-rw-r--r-- 1 root root 0 Sep  9 21:42 prealloc
+-r--r--r-- 1 root root 0 Sep  9 21:42 prealloc_max
+-r--r--r-- 1 root root 0 Sep  9 21:42 status
+-r--r--r-- 1 root root 0 Sep  9 21:42 sw_params
+
+===== card0 pcm0p info / hw_params / sub0 =====
+---- /proc/asound/card0/pcm0p/info
+card: 0
+device: 0
+subdevice: 0
+stream: PLAYBACK
+id: rockchip-hdmi1 i2s-hifi-0
+name: rockchip-hdmi1 i2s-hifi-0
+subname: subdevice #0
+class: 0
+subclass: 0
+subdevices_count: 1
+subdevices_avail: 1
+---- /proc/asound/card0/pcm0p/sub0/hw_params
+closed
+---- /proc/asound/card0/pcm0p/sub0/status
+closed
+---- /proc/asound/card0/pcm0p/sub0/sw_params
+closed
+
+===== ELD search across /proc/asound and /sys =====
+(end of eld search)
+
+===== jack / status =====
+/proc/asound/card0/pcm0p/sub0/status
+/proc/asound/card1/pcm0c/sub0/status
+/proc/asound/card2/pcm0c/sub0/status
+/proc/asound/card2/pcm0p/sub0/status
+card0
+card1
+card2
+controlC0
+controlC1
+controlC2
+pcmC0D0p
+pcmC1D0c
+pcmC2D0c
+pcmC2D0p
+seq
+timer

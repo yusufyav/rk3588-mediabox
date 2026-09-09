@@ -1,0 +1,9 @@
+playing 15.0s on hw:0,0: 48000 Hz, 2ch, S16_LE
+  granted rate       : 48000 Hz (requested 48000)
+  granted format     : S16_LE (2 bytes/sample)
+  granted channels   : 2
+  period / buffer    : 256 / 131072 frames
+  frames written     : 720000 (expected ~720000)
+  wall time          : 15.041 s
+  xruns              : 0
+AUDIO RESULT: PASS

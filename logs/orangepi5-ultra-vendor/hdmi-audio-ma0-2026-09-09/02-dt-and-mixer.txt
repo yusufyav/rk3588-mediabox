@@ -1,0 +1,102 @@
+===== amixer controls on card 0 =====
+numid=12,iface=CARD,name='rockchip-hdmi1 Jack'
+numid=9,iface=MIXER,name='I2STDM Digital Loopback Mode'
+numid=17,iface=MIXER,name='ELD Bypass Switch'
+numid=4,iface=MIXER,name='Receive PATH0 Source Select'
+numid=3,iface=MIXER,name='Receive PATH1 Source Select'
+numid=2,iface=MIXER,name='Receive PATH2 Source Select'
+numid=1,iface=MIXER,name='Receive PATH3 Source Select'
+numid=8,iface=MIXER,name='Transmit SDO0 Source Select'
+numid=7,iface=MIXER,name='Transmit SDO1 Source Select'
+numid=6,iface=MIXER,name='Transmit SDO2 Source Select'
+numid=5,iface=MIXER,name='Transmit SDO3 Source Select'
+numid=16,iface=PCM,name='ELD'
+numid=15,iface=PCM,name='IEC958 Playback Default'
+numid=14,iface=PCM,name='IEC958 Playback Mask'
+numid=10,iface=PCM,name='PCM Read Wait Time MS'
+numid=11,iface=PCM,name='PCM Write Wait Time MS'
+numid=13,iface=PCM,name='Playback Channel Map'
+--- contents
+numid=12,iface=CARD,name='rockchip-hdmi1 Jack'
+  ; type=BOOLEAN,access=r-------,values=1
+  : values=on
+numid=9,iface=MIXER,name='I2STDM Digital Loopback Mode'
+  ; type=ENUMERATED,access=rw------,values=1,items=4
+  ; Item #0 'Disabled'
+  ; Item #1 'Mode1'
+  ; Item #2 'Mode2'
+  ; Item #3 'Mode2 Swap'
+  : values=0
+numid=17,iface=MIXER,name='ELD Bypass Switch'
+  ; type=BOOLEAN,access=rw------,values=1
+  : values=off
+numid=4,iface=MIXER,name='Receive PATH0 Source Select'
+  ; type=ENUMERATED,access=rw------,values=1,items=4
+  ; Item #0 'From SDI0'
+  ; Item #1 'From SDI1'
+  ; Item #2 'From SDI2'
+  ; Item #3 'From SDI3'
+  : values=0
+numid=3,iface=MIXER,name='Receive PATH1 Source Select'
+  ; type=ENUMERATED,access=rw------,values=1,items=4
+  ; Item #0 'From SDI0'
+  ; Item #1 'From SDI1'
+  ; Item #2 'From SDI2'
+  ; Item #3 'From SDI3'
+  : values=1
+numid=2,iface=MIXER,name='Receive PATH2 Source Select'
+  ; type=ENUMERATED,access=rw------,values=1,items=4
+  ; Item #0 'From SDI0'
+
+===== sound card DT nodes =====
+NODE /proc/device-tree/hdmi0-sound
+NODE /proc/device-tree/hdmi1-sound
+NODE /proc/device-tree/hdmiin-sound
+NODE /proc/device-tree/es8388-sound
+NODE /proc/device-tree/hdmi0-sound
+NODE /proc/device-tree/hdmi1-sound
+NODE /proc/device-tree/hdmiin-sound
+NODE /proc/device-tree/spdif-tx1-sound
+NODE /proc/device-tree/hdmi0-sound
+NODE /proc/device-tree/hdmi1-sound
+NODE /proc/device-tree/hdmi@fde80000
+NODE /proc/device-tree/hdmi@fdea0000
+NODE /proc/device-tree/hdmiin-sound
+NODE /proc/device-tree/hdmiphy@fed60000
+NODE /proc/device-tree/hdmiphy@fed70000
+NODE /proc/device-tree/hdmirx-controller@fdee0000
+---
+/proc/device-tree/
+
+===== compatible strings of audio-ish nodes =====
+/hdmi0-sound -> rockchip,hdmi 
+/hdmi1-sound -> rockchip,hdmi 
+/hdmi@fde80000 -> rockchip,rk3588-dw-hdmi 
+/hdmi@fdea0000 -> rockchip,rk3588-dw-hdmi 
+/hdmiin-sound -> rockchip,hdmi 
+/hdmiphy@fed60000 -> rockchip,rk3588-hdptx-phy-hdmi 
+/hdmiphy@fed70000 -> rockchip,rk3588-hdptx-phy-hdmi 
+/hdmirx-controller@fdee0000 -> rockchip,rk3588-hdmirx-ctrler rockchip,hdmirx-ctrler 
+/i2c@fec90000/es8388@11 -> everest,es8388 everest,es8323 
+/i2s@fddc0000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fddc8000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fddf0000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fddf4000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fddf8000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fddfc000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fde00000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fe470000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fe480000 -> rockchip,rk3588-i2s-tdm 
+/i2s@fe490000 -> rockchip,rk3588-i2s rockchip,rk3066-i2s 
+/i2s@fe4a0000 -> rockchip,rk3588-i2s rockchip,rk3066-i2s 
+/spdif-rx@fde08000 -> rockchip,rk3588-spdifrx rockchip,rk3308-spdifrx 
+/spdif-rx@fde10000 -> rockchip,rk3588-spdifrx rockchip,rk3308-spdifrx 
+/spdif-rx@fde18000 -> rockchip,rk3588-spdifrx rockchip,rk3308-spdifrx 
+/spdif-tx1-dc -> linux,spdif-dit 
+/spdif-tx1-sound -> simple-audio-card 
+/spdif-tx@fddb0000 -> rockchip,rk3588-spdif rockchip,rk3568-spdif 
+/spdif-tx@fddb8000 -> rockchip,rk3588-spdif rockchip,rk3568-spdif 
+/spdif-tx@fdde0000 -> rockchip,rk3588-spdif rockchip,rk3568-spdif 
+/spdif-tx@fdde8000 -> rockchip,rk3588-spdif rockchip,rk3568-spdif 
+/spdif-tx@fe4e0000 -> rockchip,rk3588-spdif rockchip,rk3568-spdif 
+/spdif-tx@fe4f0000 -> rockchip,rk3588-spdif rockchip,rk3568-spdif 
