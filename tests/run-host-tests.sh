@@ -54,6 +54,43 @@ echo "-- HDR metadata unit conversions"
 check "chroma unit scale"      "$(grep -c 'value) \* 50000.0' "$src")" "1"
 check "min luminance scale"    "$(grep -c 'value) \* 10000.0' "$src")" "1"
 
+# -- Gate MP1b -------------------------------------------------------------
+# The MP1b probe's whole value rests on it refusing every quiet degradation
+# rather than papering over one, so those refusals are what is guarded here.
+pb="$here/tools/hdr-playback-probe.cpp"
+core="$(cat "$here"/src/*/*.cpp "$here"/src/*/*.h)"
+
+echo "-- playback probe holds the MP1a A4 state fixed"
+contains "BT2020_YCC is not optional"   "$(cat "$pb")" "state.bt2020_ycc = true;"
+contains "30bit is not optional"        "$(cat "$pb")" "state.depth30 = true;"
+
+echo "-- playback probe refuses forbidden conversions"
+# Matches real use -- the libswscale include path and its sws_* API -- rather
+# than the word, which appears in the comments that explain the prohibition.
+if grep -qE 'libswscale/|sws_[a-z]+ *\(' "$pb" "$here"/src/*/*.cpp "$here"/src/*/*.h; then
+  printf 'FAIL playback probe or core references libswscale\n'
+  failures=$((failures + 1))
+else
+  printf 'ok   playback probe and core never reference libswscale\n'
+fi
+contains "non-drm_prime output is refused"  "$(cat "$pb")" "not drm_prime; this gate"
+contains "NV12 is refused as 8-bit narrowing" "$(cat "$pb")" "narrowed to 8-bit"
+contains "non-PQ assets are refused"        "$(cat "$pb")" "not SMPTE ST2084"
+contains "mid-run format change is refused" "$(cat "$pb")" "stopping rather than converting"
+
+echo "-- playback probe treats a wrong output rate as a failure"
+contains "rate mismatch is reported"    "$(cat "$pb")" "mode MISMATCH"
+contains "rate mismatch downgrades the verdict" "$(cat "$pb")" "rate_mismatch && !opt.allow_rate_mismatch"
+
+echo "-- HDR metadata is built from the asset, never invented"
+contains "absent primaries are left zero" "$core" "mastering display primaries unavailable (left zero)"
+contains "absent MaxCLL is left zero"     "$core" "MaxCLL/MaxFALL unavailable (left zero"
+check "chroma unit scale (core)"   "$(grep -c 'value) \* 50000.0' "$here/src/media/hdr_metadata.cpp")" "1"
+check "min luminance scale (core)" "$(grep -c 'value) \* 10000.0' "$here/src/media/hdr_metadata.cpp")" "1"
+
+echo "-- cadence is measured from the vblank counter, not wall clock"
+contains "repeats come from sequence deltas" "$core" "stats->repeated += delta - 1"
+
 assets="${MEDIABOX_ASSET_DIR:-$here/assets}"
 hdr="$assets/hdr10-4k-2398-main10.mp4"
 if [ -f "$hdr" ] && command -v ffprobe >/dev/null; then
