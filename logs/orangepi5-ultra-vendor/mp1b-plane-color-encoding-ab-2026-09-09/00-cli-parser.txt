@@ -1,0 +1,50 @@
+== hdr-playback-probe --plane-color-encoding parser, run on the target binary
+target: root@10.27.27.25   probe: /tmp/rk3588-mediabox/build/hdr-playback-probe
+
+---- value: 'default'
+usage:
+  hdr-playback-probe --input FILE [options]
+  hdr-playback-probe --reset
+
+exit=2
+---- value: 'bt601-ycc'
+usage:
+  hdr-playback-probe --input FILE [options]
+  hdr-playback-probe --reset
+
+exit=2
+---- value: 'bt709-ycc'
+usage:
+  hdr-playback-probe --input FILE [options]
+  hdr-playback-probe --reset
+
+exit=2
+---- value: 'bt2020-ycc'
+usage:
+  hdr-playback-probe --input FILE [options]
+  hdr-playback-probe --reset
+
+exit=2
+---- value: 'bt2020'
+error: --plane-color-encoding takes default|bt601-ycc|bt709-ycc|bt2020-ycc, got "bt2020"
+exit=2
+---- value: 'BT2020'
+error: --plane-color-encoding takes default|bt601-ycc|bt709-ycc|bt2020-ycc, got "BT2020"
+exit=2
+---- value: ''
+error: --plane-color-encoding takes default|bt601-ycc|bt709-ycc|bt2020-ycc, got ""
+exit=2
+---- value: 'bt2020_ycc'
+error: --plane-color-encoding takes default|bt601-ycc|bt709-ycc|bt2020-ycc, got "bt2020_ycc"
+exit=2
+---- flag absent (default path)
+  --plane-color-encoding NAME
+                      request COLOR_ENCODING on the scanout plane:
+                      default (leave untouched -- Gate MP1b behaviour),
+                      bt601-ycc, bt709-ycc or bt2020-ycc. This is the
+                      single variable of Gate MP1b-CSC. COLOR_RANGE is
+                      never set by this tool: the input stays limited
+                      range, and moving both at once would make the
+                      A/B two-variable.
+
+The output state is fixed at the Gate MP1a A4 configuration and is not

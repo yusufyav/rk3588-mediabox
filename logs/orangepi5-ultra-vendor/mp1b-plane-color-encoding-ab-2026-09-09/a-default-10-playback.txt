@@ -1,0 +1,146 @@
+mpp[64020]: mpp_info: mpp version: 0986d01 author: Yandong Lin    2026-08-26 fix[vproc]: Fix calloc transposed args
+asset path=/var/tmp/mp1b/past-lives.mkv size=12081238172 bytes container=matroska,webm
+asset codec=hevc profile=Main 10(2) level=150 3840x2080 pix_fmt=yuv420p10le bit_depth=10 chroma=4:2:0
+asset avg_frame_rate=24000/1001 (23.976024) r_frame_rate=24000/1001 time_base=1/1000 duration=6343.520s nb_frames=0 bit_rate=15236005
+asset color_range=tv primaries=bt2020 transfer=smpte2084 space=bt2020nc chroma_location=left
+asset dolby_vision_configuration absent
+asset hdr_side_data mastering=0 content_light_level=0 transfer=smpte2084 primaries=bt2020 space=bt2020nc
+asset mastering_display primaries ABSENT
+asset mastering_display luminance ABSENT
+asset MaxCLL/MaxFALL ABSENT
+playback target_rate=23.9760 fps (source: asset frame rate) duration=120.0s start=1200.0s loop=0
+mode selected index=13 name=3840x2160 3840x2160 clock=296703 refresh=23.9760 (requested 23.9760, delta -0.0000) flags=0x100005
+inherited plane id=57 is bound to CRTC 89; it will be disabled
+connector 201 properties Colorspace=1(value 0) color_depth=1(value 0) HDR_OUTPUT_METADATA=1; these values will be restored on exit
+seek to 1200.000s before playback
+decoder drm_prime layer_format=NV15 modifier=0x0 objects=1 planes=2 frame=3840x2080
+---- HDR metadata as built from this asset ----
+asset hdr_side_data mastering=1 content_light_level=1 transfer=smpte2084 primaries=bt2020 space=bt2020nc
+asset mastering_display primaries(FFmpeg R,G,B order)=[(0.68000,0.32000) (0.26500,0.69000) (0.15000,0.06000)] white_point=(0.31270,0.32900)
+asset mastering_display luminance min=0.005000 cd/m2 max=4000.000 cd/m2
+asset MaxCLL=401 MaxFALL=77
+hdr_metadata blob_size=32 metadata_type=0 eotf=2 infoframe_metadata_type=0
+hdr_metadata display_primaries(ST2086 order G,B,R)=[(13250,34500) (7500,3000) (34000,16000)] white_point=(15635,16450)
+hdr_metadata max_display_mastering_luminance=4000 (cd/m2) min_display_mastering_luminance=50 (0.0001 cd/m2) max_cll=401 max_fall=77
+hdr_metadata raw=00 00 00 00 02 00 c2 33 c4 86 4c 1d b8 0b d0 84 80 3e 13 3d 42 40 a0 0f 32 00 91 01 4d 00 00 00
+plane COLOR_ENCODING request: <default, property left untouched>
+hdr_metadata blob_id=277
+framebuffer format=NV15 modifier=0x0 planes=2 pitch0=4864 offset1=10117120 size=3840x2080
+placement src=3840x2080+0+0 dst=3840x2080+0+40 scaling=none (1:1, centred)
+plane candidate id=73 type=Cursor color_encoding_requested=<default, untouched> test_only=ACCEPTED
+plane selected id=73 type=Cursor
+plane 73 property COLOR_ENCODING     id=75 value=0 enums: ITU-R BT.2020 YCbCr=2 ITU-R BT.601 YCbCr=0 ITU-R BT.709 YCbCr=1 (left untouched by this gate)
+plane 73 property COLOR_RANGE        id=76 value=0 enums: YCbCr full range=1 YCbCr limited range=0 (left untouched by this gate)
+plane 73 property type               id=8 value=2 enums: Cursor=2 Overlay=0 Primary=1 (left untouched by this gate)
+plane 73 property zpos               id=80 value=11 (left untouched by this gate)
+plane 73 property rotation           id=77 value=1 enums: reflect-y=5 rotate-0=0 (left untouched by this gate)
+plane 73 property pixel blend mode   id=79 value=0 enums: Coverage=1 None=2 Pre-multiplied=0 (left untouched by this gate)
+TEST_ONLY plane=73 color_encoding=<default, untouched> color_range=<not set> result=0 (ACCEPTED)
+---- debugfs summary BEFORE playback begin (/sys/kernel/debug/dri/0/summary) ----
+Video Port0: ACTIVE
+    Connector:HDMI-A-1	Encoder: TMDS-200
+	bus_format[2025]: YUV8_1X24
+	overlay_mode[1] output_mode[f] SDR[0] color-encoding[BT.709] color-range[Limited]
+    Display mode: 1920x1080p60
+	dclk[148500 kHz] real_dclk[148500 kHz] aclk[750000 kHz] type[48] flag[5]
+	H: 1920 2008 2052 2200
+	V: 1080 1084 1089 1125
+	Fixed H: 1920 2008 2052 2200
+	Fixed V: 1080 1084 1089 1125
+    Cluster0-win0: ACTIVE
+	win_id: 0
+	format: XR24 little-endian (0x34325258) pixel_blend_mode[0] glb_alpha[0xff]
+	color: SDR[0] color-encoding[BT.601] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[0] r2y[1] csc mode[1]
+	zpos: 0
+	src: pos[0, 0] rect[1920 x 1080]
+	dst: pos[0, 0] rect[1920 x 1080]
+	buf[0]: addr: 0x0000000000000000 pitch: 7680 offset: 0
+---- debugfs summary BEFORE playback end ----
+atomic modeset committed
+---- debugfs summary AFTER modeset begin (/sys/kernel/debug/dri/0/summary) ----
+Video Port0: ACTIVE
+    Connector:HDMI-A-1	Encoder: TMDS-200
+	bus_format[200d]: YUYV10_1X20
+	overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+    Display mode: 3840x2160p24
+	dclk[296703 kHz] real_dclk[296703 kHz] aclk[750000 kHz] type[40] flag[5]
+	H: 3840 5116 5204 5500
+	V: 2160 2168 2178 2250
+	Fixed H: 3840 5116 5204 5500
+	Fixed V: 2160 2168 2178 2250
+    Esmart0-win0: ACTIVE
+	win_id: 8
+	format: NV15 little-endian (0x3531564e) pixel_blend_mode[0] glb_alpha[0xff]
+	color: SDR[0] color-encoding[BT.601] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[1] r2y[0] csc mode[0]
+	zpos: 11
+	src: pos[0, 0] rect[3840 x 2080]
+	dst: pos[0, 40] rect[3840 x 2080]
+	buf[0]: addr: 0x00000000007e9000 pitch: 4864 offset: 0
+	buf[1]: addr: 0x00000000007e9000 pitch: 4864 offset: 10117120
+---- debugfs summary AFTER modeset end ----
+---- requested vs actual ----
+Colorspace          requested=BT2020_YCC actual=BT2020_YCC (10)
+color_depth         requested=30bit actual=30bit (10)
+color_format        requested=<not set by probe> actual=ycbcr444 (1)
+HDR_OUTPUT_METADATA requested_blob=277 actual_blob=277
+plane COLOR_ENCODING requested=<default, untouched> actual=ITU-R BT.601 YCbCr (0)
+plane COLOR_RANGE    requested=<never set by this gate> actual=YCbCr limited range (0)
+playback begins: expected frame period 41.708 ms at 23.9760 fps; display refresh 23.9760 Hz (vblank 41.708 ms)
+playback clock anchored after 24 warmup frames at pts 1200.199s; steady-state cadence measurement starts here
+progress t=10.0s decoded=238 presented=214 dropped=0 repeated=0 late=0 imported_fbs=12
+progress t=20.0s decoded=478 presented=454 dropped=0 repeated=0 late=0 imported_fbs=12
+progress t=30.0s decoded=718 presented=694 dropped=0 repeated=0 late=0 imported_fbs=12
+progress t=40.0s decoded=958 presented=934 dropped=0 repeated=0 late=0 imported_fbs=12
+progress t=50.0s decoded=1198 presented=1174 dropped=0 repeated=0 late=0 imported_fbs=13
+progress t=60.1s decoded=1438 presented=1414 dropped=0 repeated=0 late=0 imported_fbs=13
+progress t=70.1s decoded=1678 presented=1654 dropped=0 repeated=0 late=0 imported_fbs=13
+progress t=80.1s decoded=1918 presented=1894 dropped=0 repeated=0 late=0 imported_fbs=13
+progress t=90.1s decoded=2158 presented=2134 dropped=0 repeated=0 late=0 imported_fbs=13
+progress t=100.1s decoded=2398 presented=2374 dropped=0 repeated=0 late=0 imported_fbs=13
+progress t=110.1s decoded=2638 presented=2614 dropped=0 repeated=0 late=0 imported_fbs=13
+---- playback finished after 120.035s wall ----
+---- debugfs summary AFTER playback begin (/sys/kernel/debug/dri/0/summary) ----
+Video Port0: ACTIVE
+    Connector:HDMI-A-1	Encoder: TMDS-200
+	bus_format[200d]: YUYV10_1X20
+	overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+    Display mode: 3840x2160p24
+	dclk[296703 kHz] real_dclk[296703 kHz] aclk[750000 kHz] type[40] flag[5]
+	H: 3840 5116 5204 5500
+	V: 2160 2168 2178 2250
+	Fixed H: 3840 5116 5204 5500
+	Fixed V: 2160 2168 2178 2250
+    Esmart0-win0: ACTIVE
+	win_id: 8
+	format: NV15 little-endian (0x3531564e) pixel_blend_mode[0] glb_alpha[0xff]
+	color: SDR[0] color-encoding[BT.601] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[1] r2y[0] csc mode[0]
+	zpos: 11
+	src: pos[0, 0] rect[3840 x 2080]
+	dst: pos[0, 40] rect[3840 x 2080]
+	buf[0]: addr: 0x0000000004d61000 pitch: 4864 offset: 0
+	buf[1]: addr: 0x0000000004d61000 pitch: 4864 offset: 10117120
+---- debugfs summary AFTER playback end ----
+---- requested vs actual ----
+Colorspace          requested=BT2020_YCC actual=BT2020_YCC (10)
+color_depth         requested=30bit actual=30bit (10)
+color_format        requested=<not set by probe> actual=ycbcr444 (1)
+HDR_OUTPUT_METADATA requested_blob=277 actual_blob=277
+plane COLOR_ENCODING requested=<default, untouched> actual=ITU-R BT.601 YCbCr (0)
+plane COLOR_RANGE    requested=<never set by this gate> actual=YCbCr limited range (0)
+cadence warmup presented=24 repeated=3 dropped=0 (excluded from the steady-state figures below)
+cadence decoded=2876 presented=2852 dropped=0 repeated=0 late=0 flip_errors=0 flip_timeouts=0 no_pts=0
+cadence totals presented=2876 repeated=3 dropped=0 (warmup + steady state)
+cadence vblank_sequence first=38192 last=41043 delta=2851 presented=2852 (delta-presented+1=0 extra refresh intervals)
+cadence wall_span=118.909s effective_rate=23.9763 fps (expected 23.9760 fps)
+cadence frame_interval_ms expected=41.708 mean=41.708 p50=41.707 p95=41.773 p99=41.795 min=41.584 max=41.870 n=2851
+cadence lateness_ms mean=-0.627 p50=-0.629 p95=0.160 p99=0.352 min=-1.742 max=0.500
+run decode_errors=0 seeks=1 loops=0 eof=0 hdr10plus_frames=0 metadata_changes=0 imported_framebuffers=13
+cadence_quality repeated_ratio=0.0000 dropped_ratio=0.0000
+PLAYBACK RESULT: PASS
+PLAYBACK NOTE: this verdict covers pipeline behaviour only. Colour, tone, highlight and shadow fidelity are assessed on the physical sink and reported separately.
