@@ -59,7 +59,7 @@ earlier rung, and the link is byte-identical between a3 and a4, which isolates
 the transition to the Dynamic Range and Mastering InfoFrame alone.
 Report: [`../results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md`](../results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md).
 
-## MP1b — real HDR10 content and picture fidelity (this gate)
+## MP1b — real HDR10 content and picture fidelity (done)
 
 MP1a proved the signalling path with a three-second synthetic test pattern.
 That says nothing about how graded film looks. MP1b asks the one question left
@@ -96,12 +96,35 @@ Tool: [`../tools/hdr-playback-probe.cpp`](../tools/hdr-playback-probe.cpp),
 built on the modules under [`../src`](../src). Gate MP1a's probe is left
 untouched so that gate stays byte-for-byte reproducible.
 
-Result: `PARTIAL_FIDELITY`. The measurable path passed twice from eMMC at
-23.976 fps with zero dropped, repeated or late steady-state frames, but the
-physical picture was not visually confirmed correct. The leading hypothesis
-is the scanout plane's default BT.601 input encoding while the content and
-output are BT.2020. See the
+Result: `PASS` (`PASS_WITHOUT_VISIBLE_DIFFERENCE`), reached in three stages.
+
+The measurable path passed twice from eMMC at 23.976 fps with zero dropped,
+repeated or late steady-state frames, but the physical picture was not
+visually confirmed correct, so the gate first closed as `PARTIAL_FIDELITY`
+with one hypothesis: the scanout plane's default BT.601 input encoding while
+the content and output are BT.2020. See the
 [`MP1b report`](../results/orangepi5-ultra-vendor/real-hdr10-playback-mp1b-2026-09-09.md).
+
+`MP1b-CSC` then settled the mechanical half of that hypothesis. Requesting
+`COLOR_ENCODING = ITU-R BT.2020 YCbCr` on the plane is accepted, reads back,
+and makes VOP2 load a different matrix (`csc mode[0]` to `csc mode[3]`), with
+HDMI state, cadence and TV HDR entry all unchanged. The perceptual half did
+not resolve: two 120 s legs four minutes apart is not an instrument that can
+detect a matrix error on muted material. See the
+[`MP1b-CSC report`](../results/orangepi5-ultra-vendor/mp1b-plane-color-encoding-ab-2026-09-09.md).
+
+`MP1b-FINAL` rebuilt the perceptual half as a double-blind, interleaved,
+counterbalanced comparison on the highest-chroma sustained scene in the asset
+(`SATAVG` 51 against the earlier scene's 17). The operator reported the two
+legs identical in every completed pair, in both presentation orders. The CSC
+visual hypothesis is therefore `NOT_MATERIALLY_VISIBLE`, and BT.2020 — the
+semantically correct matrix — is adopted as the product behaviour while the
+probe default stays "untouched" so earlier gates remain reproducible. See the
+[`MP1b-FINAL report`](../results/orangepi5-ultra-vendor/mp1b-final-blind-fidelity-2026-09-09.md).
+
+**Product decision carried forward: any player driving this pipeline sets the
+scanout plane's `COLOR_ENCODING` to `ITU-R BT.2020 YCbCr` and leaves
+`COLOR_RANGE` at limited.**
 
 ## Not yet authorised
 

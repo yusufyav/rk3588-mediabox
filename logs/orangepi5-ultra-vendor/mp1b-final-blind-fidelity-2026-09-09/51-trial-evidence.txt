@@ -1,0 +1,8 @@
+trial          variant plane COLOR_ENCODING     csc mode  bus_format         VP HDR     decoded presented   drop    rep   late
+----------------------------------------------------------------------------------------------------------------------------------
+pair1-trial1   B      ITU-R BT.2020 YCbCr      3         YUYV10_1X20        HDR10[2]/BT.2020      598      574      0      0      0
+pair1-trial2   A      ITU-R BT.601 YCbCr       0         YUYV10_1X20        HDR10[2]/BT.2020      598      574      0      0      0
+pair2-trial1   A      ITU-R BT.601 YCbCr       0         YUYV10_1X20        HDR10[2]/BT.2020      598      574      0      0      0
+pair2-trial2   B      ITU-R BT.2020 YCbCr      3         YUYV10_1X20        HDR10[2]/BT.2020      598      574      0      0      0
+pair3-trial1   B      ITU-R BT.2020 YCbCr      3         YUYV10_1X20        HDR10[2]/BT.2020      598      574      0      0      0
+pair3-trial2   A      ITU-R BT.601 YCbCr       0         YUYV10_1X20        HDR10[2]/BT.2020      598      574      0      0      0
