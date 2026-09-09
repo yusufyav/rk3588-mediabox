@@ -17,7 +17,7 @@ in [yusufyav/rk3588-screenbridge](https://github.com/yusufyav/rk3588-screenbridg
 Findings carried into this repository as inputs are listed in
 [`architecture.md`](architecture.md).
 
-## MP1a — HDR signalling isolation (this gate)
+## MP1a — HDR signalling isolation (done)
 
 One question: **when the vendor Linux DRM stack is handed a correct 10-bit +
 BT.2020 + HDR10 metadata atomic state, does the sink enter HDR10 mode?**
@@ -54,12 +54,59 @@ The differential the gate is designed to produce:
 | 3 | set | still SDR | — | DRM/VOP2 atomic property handling, vendor dependency |
 | 4 | NV15 commit fails | — | — | plane / framebuffer / modifier / CRTC compatibility |
 
+Result: `PASS`. All five rungs passed; the sink enters HDR10 at a4 and at no
+earlier rung, and the link is byte-identical between a3 and a4, which isolates
+the transition to the Dynamic Range and Mastering InfoFrame alone.
 Report: [`../results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md`](../results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md).
+
+## MP1b — real HDR10 content and picture fidelity (this gate)
+
+MP1a proved the signalling path with a three-second synthetic test pattern.
+That says nothing about how graded film looks. MP1b asks the one question left
+over from it:
+
+**does the same A4 output state show a real 4K23.976 HEVC Main 10 HDR10 film
+with correct colour, tone, highlights and shadows?**
+
+This is not a signalling gate. The A4 state is held fixed and is not a variable:
+
+| Held fixed from MP1a | Value |
+| --- | --- |
+| frame format | `NV15`, DRM PRIME, RKMPP hardware decode |
+| `Colorspace` | `BT2020_YCC` |
+| `color_depth` | `30bit` |
+| `HDR_OUTPUT_METADATA` | set, built from the asset |
+
+The single new variable is the content: synthetic pattern to real HDR10 film.
+Two things follow from that and are new instruments rather than new variables:
+
+- the output mode is chosen from the **asset's own frame rate**, and a mismatch
+  is a failure rather than a fallback — 23.976 content pulled to 60 Hz does not
+  pass this gate; and
+- frames are presented against their **PTS**, with cadence measured from the
+  DRM vblank sequence counter, so `repeated` frames are counted rather than
+  inferred from wall-clock jitter.
+
+Forbidden throughout, and checked rather than assumed: software HEVC decode,
+10-bit to 8-bit narrowing, `NV15` to `NV12`, BT.2020 to BT.709, PQ to SDR,
+software tone mapping, `libswscale` and any CPU colour conversion. The probe
+refuses to display a frame that is not DRM PRIME `NV15`.
+
+Tool: [`../tools/hdr-playback-probe.cpp`](../tools/hdr-playback-probe.cpp),
+built on the modules under [`../src`](../src). Gate MP1a's probe is left
+untouched so that gate stays byte-for-byte reproducible.
+
+Result: `PARTIAL_FIDELITY`. The measurable path passed twice from eMMC at
+23.976 fps with zero dropped, repeated or late steady-state frames, but the
+physical picture was not visually confirmed correct. The leading hypothesis
+is the scanout plane's default BT.601 input encoding while the content and
+output are BT.2020. See the
+[`MP1b report`](../results/orangepi5-ultra-vendor/real-hdr10-playback-mp1b-2026-09-09.md).
 
 ## Not yet authorised
 
 Everything below waits for its own gate, and none of it is started as a
-side effect of MP1a:
+side effect of an MP1 gate:
 
 - installing Kodi, or a GBM/Mesa/`libmali` user space
 - Stremio integration and the control bridge

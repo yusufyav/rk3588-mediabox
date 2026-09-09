@@ -27,10 +27,16 @@ Netflix, Prime Video, Widevine and any other licensed streaming application are
 out of scope. The target content is local, network, HTTP and torrent sourced
 media.
 
-**Status: Gate MP1a.** Kodi is not implemented yet and is not part of the
-current gate. What exists today is `hdr-signaling-probe`, a minimal tool that
-drives the decode-to-HDMI chain directly in order to characterise the vendor
-BSP's HDR behaviour. See [`docs/gates.md`](docs/gates.md).
+**Status: Gate MP1b.** Kodi is not implemented yet and is not part of the
+current gate. What exists today are two probes that drive the decode-to-HDMI
+chain directly:
+
+| Tool | Gate | Question it answers |
+| --- | --- | --- |
+| `hdr-signaling-probe` | MP1a (`PASS`) | does the sink enter HDR10 when handed a correct 10-bit + BT.2020 + HDR10 atomic state? |
+| `hdr-playback-probe` | MP1b (`PARTIAL_FIDELITY`) | does that same state show a real 4K23.976 HDR10 film correctly, at the right cadence? |
+
+See [`docs/gates.md`](docs/gates.md).
 
 ## Target
 
@@ -66,7 +72,15 @@ ssh root@10.27.27.25 /tmp/rk3588-mediabox/build/hdr-signaling-probe --probe
 
 # 6. run the A/B ladder and collect evidence under logs/
 ./scripts/run-mp1a.sh "" 30
+
+# 7. Gate MP1b: play a real HDR10 file and collect evidence under logs/
+./scripts/run-mp1b.sh --input /path/on/target/movie.mkv --duration 90 --start 1200
 ```
+
+Gate MP1b needs a real HDR10 asset rather than a generated one: HEVC Main 10,
+10-bit, BT.2020, SMPTE ST2084, ideally 3840x2160 at 23.976 or 24 fps and
+carrying mastering display metadata. The probe refuses anything that is not
+actually PQ, and refuses to display a frame that is not DRM PRIME `NV15`.
 
 A single rung can be run on its own; each prints `PASS`, `FAIL` or `BLOCKED`:
 
@@ -99,5 +113,6 @@ for how it is meant to go away.
 | Gate | Report |
 | --- | --- |
 | MP1a — HDR signalling isolation | [`results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md`](results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md) |
+| MP1b — real HDR10 playback fidelity | [`results/orangepi5-ultra-vendor/real-hdr10-playback-mp1b-2026-09-09.md`](results/orangepi5-ultra-vendor/real-hdr10-playback-mp1b-2026-09-09.md) |
 
 Raw evidence for each run is kept under `logs/orangepi5-ultra-vendor/`.
