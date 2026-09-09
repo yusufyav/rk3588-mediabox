@@ -1,0 +1,42 @@
+<!--
+  Gate MP2 appliance settings seed for Kodi on RK3588.
+
+  Only the settings this appliance actually depends on are listed; everything
+  else is left at Kodi's defaults so that upgrading Kodi does not silently
+  inherit a stale opinion from this file.
+
+  Deliberately NOT set here, because Gate MP2 proved upstream already does the
+  right thing and pinning them would only create drift:
+
+    * videoscreen.whitelist - left EMPTY on purpose. With an empty whitelist
+      Kodi builds a default one from every mode at or above the GUI resolution,
+      so a 1080p GUI still reaches 3840x2160@23.976 for the film. Writing an
+      explicit entry would mean guessing Kodi's own refresh-rate formatting.
+    * anything about deep colour - the vendor VOP2 already picks a 10-bit bus
+      format from the NV15 source; Gate MP1a's a1/a2 rungs show YUYV10_1X20
+      before color_depth was ever set.
+-->
+<settings version="2">
+  <!-- Hardware decode to DRM PRIME. This is the switch that makes Kodi look
+       for a decoder advertising AV_PIX_FMT_DRM_PRIME, which is how it finds
+       hevc_rkmpp. Without it Kodi falls back to software HEVC. -->
+  <setting id="videoplayer.useprimedecoderforhw">true</setting>
+
+  <!-- 2 = ADJUST_REFRESHRATE_ON_STARTSTOP: switch the display to the film's
+       own rate when playback starts and back when it stops. A 23.976 film
+       pulled to 60 Hz is a Gate MP1b failure, so this is not optional. -->
+  <setting id="videoplayer.adjustrefreshrate">2</setting>
+
+  <!-- Audio: PCM only. Gate MA0 proved the HDMI PCM path; compressed
+       passthrough is Gate MA1 and is explicitly off here so that a decoded
+       stream is what reaches ALSA. -->
+  <setting id="audiooutput.passthrough">false</setting>
+  <setting id="audiooutput.channels">1</setting>
+
+  <!-- JSON-RPC over HTTP, so this headless appliance can be driven and
+       measured without a keyboard on the TV. -->
+  <setting id="services.webserver">true</setting>
+  <setting id="services.webserverport">8080</setting>
+  <setting id="services.webserverauthentication">false</setting>
+  <setting id="services.esenabled">true</setting>
+</settings>
