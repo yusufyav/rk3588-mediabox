@@ -1,0 +1,6 @@
+build/
+assets/
+*.o
+*.mp4
+*.hevc
+*.bin.tmp
