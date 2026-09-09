@@ -27,6 +27,14 @@
 // 10-bit to 8-bit narrowing, NV15 to NV12, BT.2020 to BT.709, PQ to SDR,
 // software tone mapping and CPU colour conversion. The probe refuses to
 // display a frame that is not DRM PRIME NV15.
+//
+// Gate MP1b left one thing unexplained: VOP2 tags the scanout window
+// SDR[0]/color-encoding[BT.601] with y2r enabled, while the video port above
+// it runs HDR10[2]/color-encoding[BT.2020]. Gate MP1b-CSC tests whether that
+// window tag is the cause, by adding exactly one opt-in knob --
+// --plane-color-encoding -- and changing nothing else. Without the flag this
+// tool behaves exactly as it did for MP1b, so the A leg of the A/B is the
+// already-published path rather than a re-implementation of it.
 
 #include "common/log.h"
 #include "decode/decoder.h"
@@ -70,7 +78,25 @@ struct Options {
     bool allow_rate_mismatch = false;
     bool debugfs_during = false;
     long warmup_frames = 24;
+    // nullptr means "do not touch the plane's COLOR_ENCODING", which is the
+    // MP1b behaviour and therefore the default.
+    const char *plane_color_encoding = nullptr;
 };
+
+// Maps the CLI spelling onto the DRM enum name. The *value* behind the name is
+// never assumed here: it is resolved against the plane's own enum list at
+// runtime, so this table only has to agree with the kernel's property strings.
+const char *drm_color_encoding_name(const char *cli) {
+    if (!strcmp(cli, "default")) return nullptr;
+    if (!strcmp(cli, "bt601-ycc")) return "ITU-R BT.601 YCbCr";
+    if (!strcmp(cli, "bt709-ycc")) return "ITU-R BT.709 YCbCr";
+    if (!strcmp(cli, "bt2020-ycc")) return "ITU-R BT.2020 YCbCr";
+    fprintf(stderr,
+            "error: --plane-color-encoding takes default|bt601-ycc|bt709-ycc|bt2020-ycc, "
+            "got \"%s\"\n",
+            cli);
+    exit(2);
+}
 
 void usage() {
     printf(
@@ -94,6 +120,14 @@ void usage() {
         "                      the runner samples it over ssh instead\n"
         "  --plane ID          restrict the plane search to this plane id\n"
         "  --allow-rate-mismatch  do not treat a wrong output rate as a failure\n"
+        "  --plane-color-encoding NAME\n"
+        "                      request COLOR_ENCODING on the scanout plane:\n"
+        "                      default (leave untouched -- Gate MP1b behaviour),\n"
+        "                      bt601-ycc, bt709-ycc or bt2020-ycc. This is the\n"
+        "                      single variable of Gate MP1b-CSC. COLOR_RANGE is\n"
+        "                      never set by this tool: the input stays limited\n"
+        "                      range, and moving both at once would make the\n"
+        "                      A/B two-variable.\n"
         "\n"
         "The output state is fixed at the Gate MP1a A4 configuration and is not\n"
         "a variable of this gate: Colorspace=BT2020_YCC, color_depth=30bit,\n"
@@ -276,6 +310,10 @@ int run(const Options &opt) {
     mediabox::drm::OutputState state;
     state.bt2020_ycc = true;
     state.depth30 = true;
+    state.plane_color_encoding = opt.plane_color_encoding;
+    logf("plane COLOR_ENCODING request: %s",
+         state.plane_color_encoding ? state.plane_color_encoding
+                                    : "<default, property left untouched>");
     if (!display.create_hdr_blob(&metadata, sizeof(metadata), &state.hdr_blob_id, &error)) {
         logf("PLAYBACK RESULT: FAIL (%s)", error.c_str());
         av_frame_free(&frame);
@@ -304,12 +342,53 @@ int run(const Options &opt) {
 
     if (!display.select_plane(DRM_FORMAT_NV15, opt.forced_plane, state, first_fb, placement.src,
                               placement.dst, &error)) {
-        logf("PLAYBACK RESULT: FAIL (%s)", error.c_str());
+        const int test = display.last_plane_test_result();
+        if (state.plane_color_encoding) {
+            // With an encoding requested, a rejection is a fact about the
+            // property combination, not about NV15 scanout, which MP1b already
+            // proved works on this plane. Report the kernel's own errno.
+            logf("PLAYBACK RESULT: BLOCKED_DISPLAY (%s; last atomic TEST_ONLY returned %d (%s) "
+                 "with COLOR_ENCODING=%s requested on plane %u)",
+                 error.c_str(), test, test ? strerror(-test) : "success",
+                 state.plane_color_encoding, opt.forced_plane);
+        } else {
+            logf("PLAYBACK RESULT: FAIL (%s)", error.c_str());
+        }
         av_frame_free(&frame);
         return 1;
     }
 
-    display.log_plane_properties();
+    display.log_plane_properties(state);
+
+    // The requested encoding has to be expressible by this plane before any
+    // real modeset is attempted with it. A plane without the BT.2020 enum
+    // would otherwise take the commit and quietly stay at its default.
+    if (state.plane_color_encoding &&
+        !display.plane_supports_color_encoding(state.plane_color_encoding)) {
+        logf("PLAYBACK RESULT: BLOCKED_DISPLAY (plane %u COLOR_ENCODING has no enum named \"%s\"; "
+             "this kernel cannot express the requested encoding on this plane)",
+             display.plane_id(), state.plane_color_encoding);
+        av_frame_free(&frame);
+        return 1;
+    }
+
+    // An explicit TEST_ONLY of the exact combination that is about to be
+    // committed, recorded as its own line so the report can quote a verdict
+    // that was reached before anything was driven onto the wire.
+    {
+        const int test = display.test_only(state, first_fb, placement.src, placement.dst);
+        logf("TEST_ONLY plane=%u color_encoding=%s color_range=<not set> result=%d (%s)",
+             display.plane_id(),
+             state.plane_color_encoding ? state.plane_color_encoding : "<default, untouched>",
+             test, test ? strerror(-test) : "ACCEPTED");
+        if (test) {
+            logf("PLAYBACK RESULT: BLOCKED_DISPLAY (atomic TEST_ONLY rejected the requested "
+                 "property combination with errno %d (%s); no modeset was attempted)",
+                 -test, strerror(-test));
+            av_frame_free(&frame);
+            return 1;
+        }
+    }
 
     mediabox::dump_file(kDebugfsSummary, "debugfs summary BEFORE playback");
 
@@ -559,6 +638,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(arg, "--refresh")) opt.refresh_override = atof(next());
         else if (!strcmp(arg, "--drop-after")) opt.drop_after = atof(next());
         else if (!strcmp(arg, "--plane")) opt.forced_plane = strtoul(next(), nullptr, 0);
+        else if (!strcmp(arg, "--plane-color-encoding"))
+            opt.plane_color_encoding = drm_color_encoding_name(next());
         else if (!strcmp(arg, "--allow-rate-mismatch")) opt.allow_rate_mismatch = true;
         else if (!strcmp(arg, "--debugfs-during")) opt.debugfs_during = true;
         else if (!strcmp(arg, "--warmup")) opt.warmup_frames = atol(next());

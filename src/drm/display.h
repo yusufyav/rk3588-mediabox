@@ -43,6 +43,15 @@ struct OutputState {
     bool bt2020_ycc = false;
     bool depth30 = false;
     uint32_t hdr_blob_id = 0;  // 0 means HDR_OUTPUT_METADATA is left unset
+
+    // Gate MP1b-CSC's single variable: the DRM enum name to request on the
+    // scanout plane's COLOR_ENCODING property, e.g. "ITU-R BT.2020 YCbCr".
+    // nullptr -- the default -- leaves the property untouched, which is
+    // exactly the MP1b behaviour whose evidence is already published, so the
+    // A leg of the A/B is byte-for-byte the old path. COLOR_RANGE is
+    // deliberately absent: changing two colour properties at once would make
+    // the comparison two-variable and uninterpretable.
+    const char *plane_color_encoding = nullptr;
 };
 
 // Source and destination rectangles for the scanout plane. Kept explicit so a
@@ -82,6 +91,12 @@ class Display {
     bool select_plane(uint32_t fourcc, uint32_t forced_plane, const OutputState &state,
                       uint32_t first_fb, const Rect &src, const Rect &dst, std::string *error);
 
+    // Runs one atomic TEST_ONLY commit for the already-selected plane and the
+    // given state, changing nothing. Returns the kernel's return value (0, or
+    // a negative errno). Used to prove a property combination is accepted
+    // before a real modeset is attempted with it.
+    int test_only(const OutputState &state, uint32_t fb_id, const Rect &src, const Rect &dst) const;
+
     // Queues an atomic commit with DRM_MODE_PAGE_FLIP_EVENT. Returns 0 on
     // success; the flip has not completed yet on return.
     int submit(uint32_t fb_id, bool modeset, const OutputState &state, const Rect &src,
@@ -95,12 +110,23 @@ class Display {
     // that "requested" and "actual" can be reported as separate facts.
     void report_readback(const OutputState &state) const;
 
-    // Read-only inventory of the scanout plane's colour properties. Gate MP1a
-    // left COLOR_ENCODING and COLOR_RANGE at their defaults and recorded that
-    // VOP2 then tags the window SDR/BT.601 while the video port runs
-    // HDR10/BT.2020. This logs what those properties actually are, without
-    // setting them: changing them is outside this gate's locked output state.
-    void log_plane_properties() const;
+    // Inventory of the scanout plane's colour properties, with their enum
+    // maps, as found before any commit. Gate MP1a left COLOR_ENCODING and
+    // COLOR_RANGE at their defaults and recorded that VOP2 then tags the
+    // window SDR/BT.601 while the video port runs HDR10/BT.2020. `state` is
+    // passed only so the log can say which of these the run is requesting.
+    void log_plane_properties(const OutputState &state) const;
+
+    // True when the plane exposes COLOR_ENCODING and that property has an
+    // enum with this name. Only meaningful after select_plane() has bound a
+    // plane. A run that asks for an encoding this plane cannot express must
+    // report that rather than silently fall back to the default.
+    bool plane_supports_color_encoding(const char *enum_name) const;
+
+    // The return value of the last atomic TEST_ONLY commit select_plane()
+    // issued, so a caller can report the kernel's own errno for a rejected
+    // property combination instead of inventing a reason.
+    int last_plane_test_result() const { return last_plane_test_; }
 
     // Restores the connector colour properties as found, releases blobs and
     // drops master. Safe to call twice; also called from the signal handler.
@@ -160,6 +186,15 @@ class Display {
     uint32_t p_crtc_x_ = 0, p_crtc_y_ = 0, p_crtc_w_ = 0, p_crtc_h_ = 0;
 
     PropertyInfo colorspace_, color_depth_, hdr_metadata_;
+
+    // The scanout plane's colour properties, plus COLOR_ENCODING as it was
+    // found. Atomic plane state is sticky the same way the connector's is, so
+    // a run that requests BT.2020 here would leave the next run's "default"
+    // leg sitting on BT.2020 and quietly destroy the A/B it is half of.
+    PropertyInfo plane_color_encoding_, plane_color_range_;
+    uint64_t saved_plane_color_encoding_ = 0;
+    bool saved_plane_color_encoding_valid_ = false;
+    int last_plane_test_ = 0;
 
     // Planes the previous master (the kernel fbdev client) left bound to our
     // CRTC. They are disabled on modeset: VOP2 blends per window and tracks an

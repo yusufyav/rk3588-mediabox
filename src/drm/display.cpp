@@ -273,6 +273,19 @@ void Display::bind_plane_properties() {
     p_crtc_y_ = require_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "CRTC_Y");
     p_crtc_w_ = require_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "CRTC_W");
     p_crtc_h_ = require_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "CRTC_H");
+    // Discovered, never assumed: the property ids and the enum values behind
+    // "ITU-R BT.2020 YCbCr" are read from this plane at runtime. Hard-coding
+    // either would silently address the wrong property on another kernel.
+    plane_color_encoding_ =
+        lookup_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "COLOR_ENCODING");
+    plane_color_range_ = lookup_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "COLOR_RANGE");
+    saved_plane_color_encoding_ = plane_color_encoding_.value;
+    saved_plane_color_encoding_valid_ = plane_color_encoding_.present;
+}
+
+bool Display::plane_supports_color_encoding(const char *enum_name) const {
+    if (!enum_name || !plane_color_encoding_.present) return false;
+    return plane_color_encoding_.enums.count(enum_name) != 0;
 }
 
 void Display::build_request(drmModeAtomicReq *req, const OutputState &state, uint32_t fb_id,
@@ -299,6 +312,15 @@ void Display::build_request(drmModeAtomicReq *req, const OutputState &state, uin
     }
     if (hdr_metadata_.present)
         add_prop(req, connector_id_, hdr_metadata_.id, state.hdr_blob_id);
+
+    // The one variable of Gate MP1b-CSC. COLOR_RANGE is never added here:
+    // the input stays limited-range, as the asset is graded, and moving both
+    // at once would destroy the A/B.
+    if (state.plane_color_encoding && plane_color_encoding_.present) {
+        auto it = plane_color_encoding_.enums.find(state.plane_color_encoding);
+        if (it != plane_color_encoding_.enums.end())
+            add_prop(req, plane_id_, plane_color_encoding_.id, it->second);
+    }
 
     add_prop(req, plane_id_, p_plane_fb_, fb_id);
     add_prop(req, plane_id_, p_plane_crtc_, crtc_id_);
@@ -339,8 +361,13 @@ bool Display::select_plane(uint32_t fourcc, uint32_t forced_plane, const OutputS
             const int test = drmModeAtomicCommit(
                 fd_, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, nullptr);
             drmModeAtomicFree(req);
-            mediabox::logf("plane candidate id=%u type=%s test_only=%s", plane->plane_id,
-                           plane_type_name_.c_str(), test == 0 ? "ACCEPTED" : strerror(-test));
+            last_plane_test_ = test;
+            mediabox::logf("plane candidate id=%u type=%s color_encoding_requested=%s "
+                           "test_only=%s",
+                           plane->plane_id, plane_type_name_.c_str(),
+                           state.plane_color_encoding ? state.plane_color_encoding
+                                                      : "<default, untouched>",
+                           test == 0 ? "ACCEPTED" : strerror(-test));
             if (test == 0) found = true;
             else plane_id_ = 0;
         }
@@ -355,6 +382,16 @@ bool Display::select_plane(uint32_t fourcc, uint32_t forced_plane, const OutputS
     }
     mediabox::logf("plane selected id=%u type=%s", plane_id_, plane_type_name_.c_str());
     return true;
+}
+
+int Display::test_only(const OutputState &state, uint32_t fb_id, const Rect &src,
+                       const Rect &dst) const {
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    build_request(req, state, fb_id, true, src, dst);
+    const int ret = drmModeAtomicCommit(
+        fd_, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, nullptr);
+    drmModeAtomicFree(req);
+    return ret;
 }
 
 int Display::submit(uint32_t fb_id, bool modeset, const OutputState &state, const Rect &src,
@@ -430,9 +467,27 @@ void Display::report_readback(const OutputState &state) const {
         mediabox::logf("HDR_OUTPUT_METADATA requested_blob=%u actual_blob=%" PRIu64,
                        state.hdr_blob_id, now.value);
     }
+    if (plane_id_ && plane_color_encoding_.present) {
+        // Read back from the plane object, not from what was asked for. The
+        // whole point of Gate MP1b-CSC is that the DRM property and what VOP2
+        // actually programs are separate facts, and debugfs is a third.
+        const PropertyInfo now =
+            lookup_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "COLOR_ENCODING");
+        mediabox::logf("plane COLOR_ENCODING requested=%s actual=%s (%" PRIu64 ")",
+                       state.plane_color_encoding ? state.plane_color_encoding
+                                                  : "<default, untouched>",
+                       enum_name_for(now, now.value), now.value);
+    }
+    if (plane_id_ && plane_color_range_.present) {
+        const PropertyInfo now =
+            lookup_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "COLOR_RANGE");
+        mediabox::logf("plane COLOR_RANGE    requested=<never set by this gate> actual=%s (%" PRIu64
+                       ")",
+                       enum_name_for(now, now.value), now.value);
+    }
 }
 
-void Display::log_plane_properties() const {
+void Display::log_plane_properties(const OutputState &state) const {
     static const char *kNames[] = {"COLOR_ENCODING", "COLOR_RANGE", "type",
                                    "zpos",           "rotation",   "pixel blend mode"};
     for (const char *name : kNames) {
@@ -448,10 +503,19 @@ void Display::log_plane_properties() const {
             enums += "=";
             enums += std::to_string(e.second);
         }
-        mediabox::logf("plane %u property %-18s id=%u value=%" PRIu64 "%s (left untouched by this "
-                       "gate)",
-                       plane_id_, name, info.id, info.value,
-                       enums.empty() ? "" : (" enums:" + enums).c_str());
+        const bool overridden =
+            state.plane_color_encoding && !strcmp(name, "COLOR_ENCODING");
+        std::string note = " (left untouched by this gate)";
+        if (overridden) {
+            auto it = info.enums.find(state.plane_color_encoding);
+            note = std::string(" (THIS RUN REQUESTS \"") + state.plane_color_encoding + "\"";
+            if (it == info.enums.end()) note += ", which this plane does not expose";
+            else note += " = " + std::to_string(it->second);
+            note += ")";
+        }
+        mediabox::logf("plane %u property %-18s id=%u value=%" PRIu64 "%s%s", plane_id_, name,
+                       info.id, info.value,
+                       enums.empty() ? "" : (" enums:" + enums).c_str(), note.c_str());
     }
 }
 
@@ -468,6 +532,9 @@ void Display::restore_connector_state() {
         drmModeAtomicAddProperty(req, connector_id_, color_depth_.id, saved_color_depth_);
     if (hdr_metadata_.present)
         drmModeAtomicAddProperty(req, connector_id_, hdr_metadata_.id, 0);
+    if (saved_plane_color_encoding_valid_)
+        drmModeAtomicAddProperty(req, plane_id_, plane_color_encoding_.id,
+                                 saved_plane_color_encoding_);
     drmModeAtomicAddProperty(req, plane_id_, p_plane_fb_, last_fb_id_);
     drmModeAtomicAddProperty(req, plane_id_, p_plane_crtc_, crtc_id_);
     drmModeAtomicAddProperty(req, plane_id_, p_src_x_, static_cast<uint64_t>(last_src_.x) << 16);

@@ -91,6 +91,84 @@ check "min luminance scale (core)" "$(grep -c 'value) \* 10000.0' "$here/src/med
 echo "-- cadence is measured from the vblank counter, not wall clock"
 contains "repeats come from sequence deltas" "$core" "stats->repeated += delta - 1"
 
+# -- Gate MP1b-CSC ---------------------------------------------------------
+# The A/B is only worth running if the A leg is unchanged, the B leg moves
+# exactly one property, and the enum behind that property is discovered rather
+# than guessed. Those three are what is guarded here.
+echo "-- plane COLOR_ENCODING override is opt-in and single-variable"
+contains "default leaves the property untouched" "$core" \
+  "const char *plane_color_encoding = nullptr;"
+contains "probe defaults to the MP1b path"       "$(cat "$pb")" \
+  "const char *plane_color_encoding = nullptr;"
+contains "COLOR_ENCODING is only added when asked" "$core" \
+  "if (state.plane_color_encoding && plane_color_encoding_.present)"
+# COLOR_RANGE must never reach an atomic request: the gate forbids moving two
+# colour properties at once. The property may be read and logged, so what is
+# checked is that its id is never handed to add_prop.
+if grep -qE 'add_prop\(.*plane_color_range_' "$here"/src/*/*.cpp "$pb"; then
+  printf 'FAIL COLOR_RANGE is set somewhere; the A/B would be two-variable\n'
+  failures=$((failures + 1))
+else
+  printf 'ok   COLOR_RANGE is never written, only read back\n'
+fi
+
+echo "-- the BT.2020 enum value is discovered, never hard-coded"
+contains "encoding is carried as a DRM enum name" "$(cat "$pb")" \
+  'return "ITU-R BT.2020 YCbCr";'
+contains "value comes from the plane enum map"    "$core" \
+  "plane_color_encoding_.enums.find(state.plane_color_encoding)"
+contains "property id comes from lookup"          "$core" \
+  'lookup_property(fd_, plane_id_, DRM_MODE_OBJECT_PLANE, "COLOR_ENCODING")'
+# A literal enum value next to the property would mean the mapping was assumed.
+if grep -nE 'COLOR_ENCODING.*[=,] *2\b|plane_color_encoding_\.id, *[0-9]' \
+     "$here"/src/*/*.cpp "$pb"; then
+  printf 'FAIL a COLOR_ENCODING enum value looks hard-coded\n'
+  failures=$((failures + 1))
+else
+  printf 'ok   no hard-coded COLOR_ENCODING enum value\n'
+fi
+
+echo "-- a missing enum or a rejected combination blocks rather than falls back"
+contains "absent enum blocks the run"      "$(cat "$pb")" \
+  "this kernel cannot express the requested encoding"
+contains "TEST_ONLY runs before the modeset" "$(cat "$pb")" \
+  "display.test_only(state, first_fb, placement.src, placement.dst)"
+contains "a rejected TEST_ONLY is BLOCKED_DISPLAY" "$(cat "$pb")" \
+  "no modeset was attempted"
+contains "TEST_ONLY records the kernel errno"      "$(cat "$pb")" \
+  "TEST_ONLY rejected the requested "
+contains "readback is read from the plane object"  "$core" \
+  "plane COLOR_ENCODING requested=%s actual=%s"
+
+echo "-- the override is put back, so the next run's A leg is still A"
+contains "the as-found encoding is saved"    "$core" \
+  "saved_plane_color_encoding_ = plane_color_encoding_.value;"
+contains "and restored on the way out"       "$core" \
+  "saved_plane_color_encoding_);"
+
+echo "-- CLI parser"
+probe_bin="${MEDIABOX_PROBE_BIN:-}"
+if [ -x "$probe_bin" ]; then
+  parse_check() {
+    local desc="$1" value="$2" want="$3" got
+    "$probe_bin" --plane-color-encoding "$value" >/dev/null 2>&1
+    got=$?
+    # No --input, so a value the parser accepts falls through to usage (exit
+    # 2 as well). The parser is therefore probed on its own error text.
+    got="$("$probe_bin" --plane-color-encoding "$value" 2>&1 | \
+           grep -c 'takes default|bt601-ycc' || true)"
+    check "$desc" "$got" "$want"
+  }
+  parse_check "default is accepted"    "default"    "0"
+  parse_check "bt601-ycc is accepted"  "bt601-ycc"  "0"
+  parse_check "bt709-ycc is accepted"  "bt709-ycc"  "0"
+  parse_check "bt2020-ycc is accepted" "bt2020-ycc" "0"
+  parse_check "bt2020 (no suffix) is rejected" "bt2020" "1"
+  parse_check "an empty value is rejected"     ""       "1"
+else
+  echo "-- skipping CLI parser checks (set MEDIABOX_PROBE_BIN to a built probe)"
+fi
+
 assets="${MEDIABOX_ASSET_DIR:-$here/assets}"
 hdr="$assets/hdr10-4k-2398-main10.mp4"
 if [ -f "$hdr" ] && command -v ffprobe >/dev/null; then
