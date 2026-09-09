@@ -1,0 +1,18 @@
+access: RW_INTERLEAVED
+format: S24_LE
+subformat: STD
+channels: 2
+rate: 48000 (48000/1)
+period_size: 2400
+buffer_size: 9600
+--- status
+state: RUNNING
+owner_pid   : 33777
+trigger_time: 3891.037974687
+tstamp      : 0.000000000
+delay       : 8732
+avail       : 868
+avail_max   : 7216
+-----
+hw_ptr      : 2319272
+appl_ptr    : 2328004

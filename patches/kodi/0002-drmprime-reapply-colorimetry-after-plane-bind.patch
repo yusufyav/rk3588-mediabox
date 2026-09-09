@@ -1,0 +1,20 @@
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
+index 54509e2ee5..21db1977d6 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
+@@ -208,6 +208,15 @@ void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME* buffer)
+       plane->GetPropertyEnumValue("COLOR_RANGE", GetColorRange(picture));
+   if (colorRange)
+     m_DRM->AddProperty(plane, "COLOR_RANGE", colorRange.value());
++
++  // Re-apply the connector colorimetry now that a YUV buffer is really bound
++  // for direct scanout. The renderer already asked for it once, from
++  // CRendererDRMPRIME::Configure, but that runs before this plane exists: at
++  // that point the window system can only see the RGB GUI plane and picks an
++  // RGB colorimetry accordingly. What reaches the wire has changed since, and
++  // the AVI InfoFrame has to describe the new thing.
++  if (auto* winSystem = CServiceBroker::GetWinSystem())
++    winSystem->SetColorimetry(&picture);
+ }
+ 
+ void CVideoLayerBridgeDRMPRIME::SetVideoPlane(CVideoBufferDRMPRIME* buffer, const CRect& destRect)

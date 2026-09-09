@@ -1,0 +1,14 @@
+BUILD_OK
+drm node            : /dev/dri/card0 (fd 3)
+gbm_device backend  : drm
+egl version         : 1.5
+egl vendor          : Mesa Project
+egl apis            : OpenGL OpenGL_ES 
+egl configs matched : 1, native visual 0x30335258
+gl vendor           : Mesa
+gl renderer         : llvmpipe (LLVM 19.1.7, 128 bits)
+gl version          : OpenGL ES 3.2 Mesa 25.0.7-2+deb13u1
+glsl version        : OpenGL ES GLSL ES 3.20
+front buffer        : 1920x1080 stride 7680 format 0x30335258 modifier 0xffffffffffffff
+acceleration        : SOFTWARE (llvmpipe/swrast)
+GBM/EGL RESULT: PASS (software rendering)

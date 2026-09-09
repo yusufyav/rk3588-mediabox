@@ -1,0 +1,176 @@
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index 83e2085816..4dd05bc18c 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -32,6 +32,8 @@
+ #include <mutex>
+ #include <string.h>
+ 
++#include <drm_fourcc.h>
++
+ #ifndef HAVE_HDR_OUTPUT_METADATA
+ // HDR structs is copied from linux include/linux/hdmi.h
+ struct hdr_metadata_infoframe
+@@ -447,18 +449,27 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+   // (BT.2020_RGB, DCI-P3_RGB). BT.709 RGB and BT.601 RGB are signaled via
+   // "Default", with the sink inferring primaries from the transmitted mode
+   // (HD resolution -> BT.709, SD resolution -> BT.601).
++  // ... but only while the RGB plane really is what reaches the wire. With
++  // the direct-to-plane path a YUV video plane is scanned out instead, and
++  // drivers that compose to a YCbCr bus format then transmit YCbCr. Tagging
++  // that as RGB describes something the sink is not receiving, which is the
++  // same class of mismatch the comment above warns about, in the other
++  // direction. So the RGB substitution is applied only when no YUV video
++  // plane is bound for direct scanout.
++  const bool yuvScanout = IsDirectToPlaneYuvScanout();
++
+   KODI::UTILS::Colorimetry scanoutColorimetry;
+   switch (colorimetry)
+   {
+     case KODI::UTILS::Colorimetry::BT2020_YCC:
+     case KODI::UTILS::Colorimetry::BT2020_CYCC:
+-      scanoutColorimetry = KODI::UTILS::Colorimetry::BT2020_RGB;
++      scanoutColorimetry = yuvScanout ? colorimetry : KODI::UTILS::Colorimetry::BT2020_RGB;
+       break;
+     default:
+       // BT709_YCC, SMPTE_170M_YCC, and all other YCC variants map to Default,
+       // which signals sRGB/BT.709 RGB (HD) or BT.601 RGB (SD) based on the
+       // transmitted resolution.
+-      scanoutColorimetry = KODI::UTILS::Colorimetry::DEFAULT;
++      scanoutColorimetry = yuvScanout ? colorimetry : KODI::UTILS::Colorimetry::DEFAULT;
+       break;
+   }
+ 
+@@ -474,6 +485,95 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+   }
+ }
+ 
++bool CWinSystemGbm::IsDirectToPlaneYuvScanout() const
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return false;
++
++  const CDRMPlane* videoPlane = drm->GetVideoPlane();
++  if (!videoPlane)
++    return false;
++
++  // A video plane is only bound when a decoded buffer is being scanned out
++  // directly. Its DRM fourcc is what the display engine is reading, so it is
++  // also what decides whether the composed output can be RGB at all.
++  switch (videoPlane->GetFormat())
++  {
++    case DRM_FORMAT_NV12:
++    case DRM_FORMAT_NV21:
++    case DRM_FORMAT_NV16:
++    case DRM_FORMAT_NV61:
++    case DRM_FORMAT_NV24:
++    case DRM_FORMAT_NV42:
++    case DRM_FORMAT_YUV420:
++    case DRM_FORMAT_YVU420:
++    case DRM_FORMAT_YUYV:
++    case DRM_FORMAT_YVYU:
++    case DRM_FORMAT_UYVY:
++    case DRM_FORMAT_VYUY:
++    case DRM_FORMAT_P010:
++#ifdef DRM_FORMAT_NV15
++    case DRM_FORMAT_NV15:
++#endif
++#ifdef DRM_FORMAT_NV20
++    case DRM_FORMAT_NV20:
++#endif
++#ifdef DRM_FORMAT_NV30
++    case DRM_FORMAT_NV30:
++#endif
++      return true;
++    default:
++      return false;
++  }
++}
++
++void CWinSystemGbm::SetDeepColor(bool enable)
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return;
++
++  auto connector = drm->GetConnector();
++  if (!connector)
++    return;
++
++  // The standard property, where the driver has it.
++  if (connector->SupportsProperty("max bpc"))
++  {
++    const uint64_t bpc = enable ? 10 : 8;
++    CLog::LogF(LOGDEBUG, "setting max bpc to {}", bpc);
++    drm->AddProperty(connector, "max bpc", bpc);
++    drm->SetActive(true);
++    return;
++  }
++
++  // Some drivers expose no "max bpc" and carry a "color_depth" enum instead.
++  // Left alone, such a connector transmits 8 bits per component whatever HDR
++  // metadata is attached, so HDR10 would be signalled correctly and then sent
++  // at 8-bit. The enum is resolved by NAME: nothing here assumes how "30bit"
++  // is numbered, or that any particular driver is present.
++  if (connector->SupportsProperty("color_depth"))
++  {
++    const char* want = enable ? "30bit" : "Automatic";
++    std::optional<uint64_t> value = connector->GetPropertyEnumValue("color_depth", want);
++    if (value)
++    {
++      CLog::LogF(LOGDEBUG, "no \"max bpc\" property; setting color_depth to {}", want);
++      drm->AddProperty(connector, "color_depth", value.value());
++      drm->SetActive(true);
++    }
++    else
++    {
++      CLog::LogF(LOGWARNING, "connector has color_depth but no \"{}\" enum value", want);
++    }
++    return;
++  }
++
++  CLog::LogF(LOGDEBUG, "connector exposes neither \"max bpc\" nor \"color_depth\"; "
++                       "deep colour cannot be requested");
++}
++
+ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+ {
+   auto settingsComponent = CServiceBroker::GetSettingsComponent();
+@@ -506,6 +606,7 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+       m_hdrBlob.Reset();
+     }
+ 
++    SetDeepColor(false);
+     m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
+     return false;
+   }
+@@ -596,6 +697,7 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+     }
+ 
+     drm->AddProperty(connector, "HDR_OUTPUT_METADATA", m_hdrBlob.Get());
++    SetDeepColor(true);
+     drm->SetActive(true);
+   }
+ 
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+index e4d675704b..37e62a1ca8 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -67,6 +67,16 @@ public:
+   KODI::UTILS::Colorimetry GetColorimetry() const override { return m_colorimetry; }
+   KODI::UTILS::Eotf GetEotf() const override { return m_eotf; }
+   bool SetHDR(const VideoPicture* videoPicture) override;
++
++  // True when a YUV buffer is bound to a video plane for direct scanout, in
++  // which case the composed output reaching the connector is YCbCr rather
++  // than the RGB the GUI plane would produce on its own.
++  bool IsDirectToPlaneYuvScanout() const;
++
++  // Requests deep colour on the connector, using whichever property this
++  // driver exposes. Only tells the display driver how many bits per component
++  // the link may carry; it is not a video-format decision.
++  void SetDeepColor(bool enable);
+   bool IsHDRDisplay() override;
+   CHDRCapabilities GetDisplayHDRCapabilities() const override;
+ 

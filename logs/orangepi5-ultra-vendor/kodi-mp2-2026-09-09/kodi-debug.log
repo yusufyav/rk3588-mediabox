@@ -1,0 +1,1025 @@
+﻿2026-09-10 01:17:05.748 T:48854    info <general>: -----------------------------------------------------------------------
+2026-09-10 01:17:05.748 T:48854    info <general>: Starting Kodi (22.0-BETA2 (21.90.802) Git:20260831-e513e0ff43). Platform: Linux ARM 64-bit
+2026-09-10 01:17:05.748 T:48854    info <general>: Using Release Kodi x64
+2026-09-10 01:17:05.748 T:48854    info <general>: Kodi compiled 2026-09-09 by GCC 14.2.0 for Linux ARM 64-bit version 6.12.107 (396395)
+2026-09-10 01:17:05.748 T:48854    info <general>: Running on Armbian 26.11.0-trunk.35 trixie 13, kernel: Linux ARM 64-bit version 6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio
+2026-09-10 01:17:05.748 T:48854    info <general>: FFmpeg version/source: d90e3a1
+2026-09-10 01:17:05.748 T:48854    info <general>: 8 CPU cores available
+2026-09-10 01:17:05.748 T:48854    info <general>: ARM Features: Neon enabled
+2026-09-10 01:17:05.748 T:48854    info <general>: special://xbmc/ is mapped to: /opt/rk3588-mediabox/kodi/share/kodi
+2026-09-10 01:17:05.748 T:48854    info <general>: special://xbmcbin/ is mapped to: /opt/rk3588-mediabox/kodi/lib/kodi
+2026-09-10 01:17:05.748 T:48854    info <general>: special://xbmcbinaddons/ is mapped to: /opt/rk3588-mediabox/kodi/lib/kodi/addons
+2026-09-10 01:17:05.748 T:48854    info <general>: special://masterprofile/ is mapped to: /var/tmp/kodi-home/.kodi/userdata
+2026-09-10 01:17:05.748 T:48854    info <general>: special://envhome/ is mapped to: /var/tmp/kodi-home
+2026-09-10 01:17:05.748 T:48854    info <general>: special://home/ is mapped to: /var/tmp/kodi-home/.kodi
+2026-09-10 01:17:05.748 T:48854    info <general>: special://temp/ is mapped to: /var/tmp/kodi-home/.kodi/temp
+2026-09-10 01:17:05.748 T:48854    info <general>: special://logpath/ is mapped to: /var/tmp/kodi-home/.kodi/temp
+2026-09-10 01:17:05.748 T:48854    info <general>: Webserver extra whitelist paths: 
+2026-09-10 01:17:05.748 T:48854    info <general>: The executable running is: /opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm
+2026-09-10 01:17:05.748 T:48854    info <general>: Local hostname: orangepi5-ultra
+2026-09-10 01:17:05.748 T:48854    info <general>: Log File is located: /var/tmp/kodi-home/.kodi/temp/kodi.log
+2026-09-10 01:17:05.748 T:48854    info <general>: -----------------------------------------------------------------------
+2026-09-10 01:17:05.748 T:48854    info <general>: loading settings
+2026-09-10 01:17:05.750 T:48854    info <general>: special://profile/ is mapped to: special://masterprofile/
+2026-09-10 01:17:05.768 T:48854    info <general>: No settings file to load (special://xbmc/system/advancedsettings.xml)
+2026-09-10 01:17:05.768 T:48854    info <general>: No settings file to load (special://masterprofile/advancedsettings.xml)
+2026-09-10 01:17:05.768 T:48854    info <general>: Default Video Player: VideoPlayer
+2026-09-10 01:17:05.768 T:48854    info <general>: Default Audio Player: paplayer
+2026-09-10 01:17:05.768 T:48854    info <general>: Disabled debug logging due to GUI setting. Level 1.
+2026-09-10 01:17:05.768 T:48854   debug <general>: CSkinSettings: no <skinsettings> tag found
+2026-09-10 01:17:05.777 T:48854    info <general>: New Cache GUI Settings (replacement of cache in advancedsettings.xml) are:
+                                                     Buffer Mode: 4
+                                                     Memory Size: 64 MB
+                                                     Read Factor: 0.00 x (adaptive)
+                                                     Chunk Size : 131072 bytes
+2026-09-10 01:17:05.777 T:48854    info <general>: creating subdirectories
+2026-09-10 01:17:05.777 T:48854    info <general>: userdata folder: special://masterprofile/
+2026-09-10 01:17:05.777 T:48854    info <general>: recording folder: 
+2026-09-10 01:17:05.777 T:48854    info <general>: screenshots folder: 
+2026-09-10 01:17:05.778 T:48854    info <general>: SqliteDatabase: library version 3.46.1
+2026-09-10 01:17:05.778 T:48854    info <general>: Running database version Addons33
+2026-09-10 01:17:05.779 T:48854   error <general>: GetDirectory - Error getting /opt/rk3588-mediabox/kodi/lib/kodi/addons
+2026-09-10 01:17:05.779 T:48854   error <general>: GetDirectory - Error getting special://xbmcbin/addons
+2026-09-10 01:17:05.782 T:48854   debug <general>: static bool ADDON::CAddonInfoBuilder::ParseXMLTypes(ADDON::CAddonType&, const ADDON::AddonInfoPtr&, const tinyxml2::XMLElement*): Binary addon found: screensaver.xbmc.builtin.black
+2026-09-10 01:17:05.785 T:48854   debug <general>: static bool ADDON::CAddonInfoBuilder::ParseXMLTypes(ADDON::CAddonType&, const ADDON::AddonInfoPtr&, const tinyxml2::XMLElement*): Binary addon found: audioencoder.kodi.builtin.aac
+2026-09-10 01:17:05.787 T:48854   debug <general>: static bool ADDON::CAddonInfoBuilder::ParseXMLTypes(ADDON::CAddonType&, const ADDON::AddonInfoPtr&, const tinyxml2::XMLElement*): Binary addon found: screensaver.xbmc.builtin.dim
+2026-09-10 01:17:05.787 T:48854   debug <general>: static bool ADDON::CAddonInfoBuilder::ParseXMLTypes(ADDON::CAddonType&, const ADDON::AddonInfoPtr&, const tinyxml2::XMLElement*): Binary addon found: audioencoder.kodi.builtin.wma
+2026-09-10 01:17:05.788 T:48854   debug <general>: void ADDON::CAddonMgr::FindAddons(ADDON::AddonInfoMap&, const std::string&) const: Addon 'service.xbmc.versioncheck' already present with version 0.5.27+matrix.1 at '/opt/rk3588-mediabox/kodi/share/kodi/addons/service.xbmc.versioncheck/' replaced with version 0.5.30+matrix.1 at '/var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'audioencoder.kodi.builtin.aac v1.0.2'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'audioencoder.kodi.builtin.wma v1.0.2'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'game.controller.default v1.0.49'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'game.controller.keyboard v1.1.50'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'game.controller.mouse v1.0.32'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'game.controller.snes v1.0.49'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.global.audioengine v1.1.1'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.global.filesystem v1.1.11'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.global.general v1.0.5'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.global.gui v5.15.1'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.global.main v2.0.3'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.global.network v1.0.4'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.global.tools v1.0.4'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.audiodecoder v4.0.0'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.audioencoder v3.0.0'
+2026-09-10 01:17:05.790 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.game v8.0.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.imagedecoder v3.1.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.inputstream v3.4.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.peripheral v3.0.2'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.pvr v9.2.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.screensaver v2.2.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.shaderpreset v1.1.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.vfs v3.0.1'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.videocodec v2.2.1'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.binary.instance.visualization v5.0.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'kodi.resource v1.0.0'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.album.universal v3.1.20'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.artists.universal v4.3.24'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.common.allmusic.com v3.2.2'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.common.fanart.tv v3.6.5'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.common.musicbrainz.org v2.2.4'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.common.theaudiodb.com v2.0.3'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.generic.albums v1.0.19'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.generic.artists v1.0.19'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.local v1.0.1'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.themoviedb.org.python v3.2.2'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'metadata.tvshows.themoviedb.org.python v2.0.7'
+2026-09-10 01:17:05.791 T:48854    info <general>: Addon Manager: Found addon: 'repository.xbmc.org v3.5.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'resource.images.weathericons.default v1.1.9'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'resource.language.en_gb v2.0.2'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'resource.uisounds.kodi v1.0.1'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'screensaver.xbmc.builtin.black v1.0.34'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'screensaver.xbmc.builtin.dim v1.0.66'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'script.module.pil v5.1.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'script.module.pycryptodome v3.4.3'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'service.xbmc.versioncheck v0.5.30+matrix.1'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'skin.estuary v4.1.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'webinterface.default v21.x-1.0.1'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'xbmc.addon v21.90.802'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'xbmc.core v0.1.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'xbmc.gui v5.18.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'xbmc.json v13.200.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'xbmc.metadata v2.1.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'xbmc.python v3.1.0'
+2026-09-10 01:17:05.792 T:48854    info <general>: Addon Manager: Found addon: 'xbmc.webinterface v1.0.0'
+2026-09-10 01:17:05.793 T:48854   debug <general>: CFavourites::Load - no system favourites found, skipping
+2026-09-10 01:17:05.793 T:48854   debug <general>: CFavourites::Load - no userdata favourites found, skipping
+2026-09-10 01:17:05.794 T:48854   debug <general>: DBus method call to org.freedesktop.ConsoleKit.Manager.CanStop at /org/freedesktop/ConsoleKit/Manager of org.freedesktop.ConsoleKit failed: org.freedesktop.DBus.Error.ServiceUnknown - The name org.freedesktop.ConsoleKit was not provided by any .service files
+2026-09-10 01:17:05.794 T:48854    info <general>: Selected Logind/UPower as PowerSyscall
+2026-09-10 01:17:05.794 T:48854   error <general>: DBus error: org.freedesktop.DBus.Error.ServiceUnknown - The name org.freedesktop.UPower was not provided by any .service files
+2026-09-10 01:17:05.794 T:48854    info <general>: LogindUPowerSyscall - UPower not found, battery information will not be available
+2026-09-10 01:17:05.801 T:48854   debug <general>: LogindUPowerSyscall - inhibit lock taken, fd 14
+2026-09-10 01:17:05.802 T:48854   debug <general>: DBus method call to org.freedesktop.UPower.EnumerateDevices at /org/freedesktop/UPower of org.freedesktop.UPower failed: org.freedesktop.DBus.Error.ServiceUnknown - The name org.freedesktop.UPower was not provided by any .service files
+2026-09-10 01:17:05.802 T:48854   debug <general>: DBus method call to org.freedesktop.DBus.Peer.Ping at /org/freedesktop/UDisks2 of org.freedesktop.UDisks2 failed: org.freedesktop.DBus.Error.ServiceUnknown - The name org.freedesktop.UDisks2 was not provided by any .service files
+2026-09-10 01:17:05.802 T:48854   debug <general>: DBus method call to org.freedesktop.UDisks.EnumerateDevices at /org/freedesktop/UDisks of org.freedesktop.UDisks failed: org.freedesktop.DBus.Error.ServiceUnknown - The name org.freedesktop.UDisks was not provided by any .service files
+2026-09-10 01:17:05.802 T:48854   debug <general>: Selected UDev as storage provider
+2026-09-10 01:17:05.803 T:48854    info <general>: IANA Language Subtag Registry: loading...
+2026-09-10 01:17:05.803 T:48854    info <general>: IANA Language Subtag Registry: file /opt/rk3588-mediabox/kodi/share/kodi/system/language-subtag-registry.txt
+2026-09-10 01:17:05.803 T:48854    info <general>: IANA Language Subtag Registry: registry date 2025-08-25
+2026-09-10 01:17:05.882 T:48854   debug <general>: bool KODI::UTILS::I18N::CRegistryFile::Parse(CRegFile*): IANA Language Subtag Registry: file read.
+2026-09-10 01:17:05.883 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [in] redefines the description [indonesian] previously defined by subtag [id] - ignored
+2026-09-10 01:17:05.883 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [iw] redefines the description [hebrew] previously defined by subtag [he] - ignored
+2026-09-10 01:17:05.883 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [jw] redefines the description [javanese] previously defined by subtag [jv] - ignored
+2026-09-10 01:17:05.883 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [ro] redefines the description [moldavian] previously defined by deprecated subtag [mo] - overwritten
+2026-09-10 01:17:05.883 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [ro] redefines the description [moldovan] previously defined by deprecated subtag [mo] - overwritten
+2026-09-10 01:17:05.883 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [yi] redefines the description [yiddish] previously defined by deprecated subtag [ji] - overwritten
+2026-09-10 01:17:05.884 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [bzc] redefines the description [southern betsimisaraka malagasy] previously defined by deprecated subtag [bjq] - overwritten
+2026-09-10 01:17:05.884 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [dnj] redefines the description [dan] previously defined by deprecated subtag [daf] - overwritten
+2026-09-10 01:17:05.884 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [dwu] redefines the description [dhuwal] previously defined by deprecated subtag [duj] - overwritten
+2026-09-10 01:17:05.884 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [dze] redefines the description [djiwarli] previously defined by deprecated subtag [djl] - overwritten
+2026-09-10 01:17:05.885 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [gyz] redefines the description [geji] previously defined by deprecated subtag [gji] - overwritten
+2026-09-10 01:17:05.886 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [kpp] redefines the description [paku karen] previously defined by subtag [jkp] - ignored
+2026-09-10 01:17:05.886 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [lno] redefines the description [lango (south sudan)] previously defined by subtag [lgo] - ignored
+2026-09-10 01:17:05.888 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [nrk] redefines the description [ngarla] previously defined by deprecated subtag [nlr] - overwritten
+2026-09-10 01:17:05.888 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [nxq] redefines the description [naxi] previously defined by deprecated subtag [nbf] - overwritten
+2026-09-10 01:17:05.889 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [prf] redefines the description [paranan] previously defined by deprecated subtag [agp] - overwritten
+2026-09-10 01:17:05.889 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [rmr] redefines the description [caló] previously defined by subtag [rmq] - ignored
+2026-09-10 01:17:05.889 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [sdq] redefines the description [semandang] previously defined by deprecated subtag [sdm] - overwritten
+2026-09-10 01:17:05.890 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [spn] redefines the description [sanapaná] previously defined by deprecated subtag [sap] - overwritten
+2026-09-10 01:17:05.890 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [sul] redefines the description [surigaonon] previously defined by subtag [sgd] - ignored
+2026-09-10 01:17:05.891 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [tvu] redefines the description [tunen] previously defined by deprecated subtag [baz] - overwritten
+2026-09-10 01:17:05.891 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [uki] redefines the description [kui (india)] previously defined by deprecated subtag [kxu] - overwritten
+2026-09-10 01:17:05.891 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [wgw] redefines the description [wagawaga] previously defined by subtag [wgb] - ignored
+2026-09-10 01:17:05.891 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [wiw] redefines the description [wirangu] previously defined by subtag [wgu] - ignored
+2026-09-10 01:17:05.891 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [wnw] redefines the description [wintu] previously defined by deprecated subtag [wit] - overwritten
+2026-09-10 01:17:05.891 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [wyn] redefines the description [wyandot] previously defined by deprecated subtag [wya] - overwritten
+2026-09-10 01:17:05.892 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [xch] redefines the description [chimakum] previously defined by deprecated subtag [cmk] - overwritten
+2026-09-10 01:17:05.892 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [ynq] redefines the description [yendang] previously defined by deprecated subtag [yen] - overwritten
+2026-09-10 01:17:05.892 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: subtag [yyr] redefines the description [yir yoront] previously defined by deprecated subtag [yiy] - overwritten
+2026-09-10 01:17:05.893 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::LanguageSubTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [zua] redefines the description [zeem] previously defined by subtag [zem] - ignored
+2026-09-10 01:17:05.894 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::GrandfatheredTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [zh-hakka] redefines the description [hakka] previously defined by deprecated subtag [i-hak] - ignored
+2026-09-10 01:17:05.894 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::GrandfatheredTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [zh-min-nan] redefines the description [hokkien] previously defined by deprecated subtag [zh-min] - ignored
+2026-09-10 01:17:05.894 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::GrandfatheredTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [zh-min-nan] redefines the description [amoy] previously defined by deprecated subtag [zh-min] - ignored
+2026-09-10 01:17:05.894 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagsCollection<T>::InsertDescLookupElem(std::string&&, const T&) [with T = KODI::UTILS::I18N::GrandfatheredTag; std::string = std::__cxx11::basic_string<char>]: deprecated subtag [zh-min-nan] redefines the description [taiwanese] previously defined by deprecated subtag [zh-min] - ignored
+2026-09-10 01:17:05.894 T:48854    info <general>: IANA Language Subtag Registry: 9281 records loaded
+2026-09-10 01:17:05.897 T:48854    info <general>: CKeyboardLayoutManager: loading keyboard layouts from special://xbmc/system/keyboardlayouts...
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Persian QWERTY" successfully loaded
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Thai Kedmanee" successfully loaded
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "German QWERTZ" successfully loaded
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "German ABC" successfully loaded
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Lithuanian AZERTY" successfully loaded
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Lithuanian QWERTY" successfully loaded
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "French AZERTY" successfully loaded
+2026-09-10 01:17:05.898 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Turkish QWERTY" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Spanish QWERTY" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Arabic QWERTY" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Slovak QWERTZ" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Slovak QWERTY" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Slovak ABC" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Norwegian QWERTY" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Korean ㄱㄴㄷ" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Polish QWERTY" successfully loaded
+2026-09-10 01:17:05.899 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Greek QWERTY" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Estonian QWERTY" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Czech QWERTZ" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Swedish QWERTY" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Portuguese (Brazil) QWERTY" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Portuguese (Portugal) QWERTY" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Slovenian QWERTZ" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "English QWERTY" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "English AZERTY" successfully loaded
+2026-09-10 01:17:05.900 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "English ABC" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Bulgarian ЯВЕРТЪ" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Bulgarian АБВ" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Ukrainian ЙЦУКЕН" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Ukrainian АБВ" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Hungarian QWERTZ" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Russian ЙЦУКЕН" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Russian АБВ" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Chinese BasePY" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Italian QWERTY" successfully loaded
+2026-09-10 01:17:05.901 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Italian ABC" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Hebrew QWERTY" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Hebrew ABC" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Romanian QWERTY" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Icelandic QWERTY" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Silesian QWERTY" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Danish QWERTY" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CKeyboardLayoutManager: keyboard layout "Croatian QWERTY" successfully loaded
+2026-09-10 01:17:05.902 T:48854   debug <general>: CApplication::CreateGUI - trying to init gbm windowing system
+2026-09-10 01:17:06.354 T:48854   debug <general>: [xkb] Compiling from RMLVO: rules 'evdev', model 'pc105', layout 'us', variant '(null)', options '(null)'
+2026-09-10 01:17:06.354 T:48854   debug <general>: [xkb] Compiling from KcCGST: keycodes 'evdev+aliases(qwerty)', types 'complete', compat 'complete', symbols 'pc+us+inet(evdev)'
+2026-09-10 01:17:06.354 T:48854   debug <general>: [xkb] Compiling xkb_keycodes "(unnamed)"
+2026-09-10 01:17:06.355 T:48854   debug <general>: [xkb] Compiling xkb_types "(unnamed)"
+2026-09-10 01:17:06.356 T:48854   debug <general>: [xkb] Compiling xkb_compatibility "(unnamed)"
+2026-09-10 01:17:06.356 T:48854   debug <general>: [xkb] The "group" statement in compat is unsupported; Ignored
+2026-09-10 01:17:06.356 T:48854    info <general>: Skipped 2 duplicate messages..
+2026-09-10 01:17:06.356 T:48854   debug <general>: [xkb] The "allowExplicit" field in indicator statements is unsupported; Ignored
+2026-09-10 01:17:06.356 T:48854    info <general>: Skipped 3 duplicate messages..
+2026-09-10 01:17:06.356 T:48854   debug <general>: [xkb] The "indicatorDrivesKeyboard" field in indicator statements is unsupported; Ignored
+2026-09-10 01:17:06.356 T:48854   debug <general>: [xkb] The "allowExplicit" field in indicator statements is unsupported; Ignored
+2026-09-10 01:17:06.357 T:48854   debug <general>: [xkb] Indicator name "Shift Lock" was not declared in the keycodes section; Adding new indicator
+2026-09-10 01:17:06.357 T:48854   debug <general>: [xkb] Indicator name "Group 2" was not declared in the keycodes section; Adding new indicator
+2026-09-10 01:17:06.357 T:48854   debug <general>: [xkb] Indicator name "Mouse Keys" was not declared in the keycodes section; Adding new indicator
+2026-09-10 01:17:06.357 T:48854   debug <general>: [xkb] Compiling xkb_symbols "(unnamed)"
+2026-09-10 01:17:06.362 T:48854   debug <general>: [xkb] created compose table from locale C with path /usr/share/X11/locale/en_US.UTF-8/Compose
+2026-09-10 01:17:06.367 T:48978   debug <general>: Thread libinput start, auto delete: false
+2026-09-10 01:17:06.367 T:48854   debug <general>: [threads] name: 'libinput' priority: '1'
+2026-09-10 01:17:06.367 T:48854    info <general>: RetroPlayer[RENDER]: Registering renderer factory for DMAOpenGLES
+2026-09-10 01:17:06.367 T:48854    info <general>: RetroPlayer[RENDER]: Registering renderer factory for OpenGLES
+2026-09-10 01:17:06.367 T:48854   debug <general>: bool KODI::WINDOWING::GBM::CDRMUtils::OpenDrm(bool): drm devices found: 2
+2026-09-10 01:17:06.368 T:48854    info <general>: bool KODI::WINDOWING::GBM::CDRMUtils::FindConnector(): Using connector: HDMI-A-1
+2026-09-10 01:17:06.368 T:48854   debug <general>: bool KODI::WINDOWING::GBM::CDRMUtils::OpenDrm(bool): Opened device: /dev/dri/card0
+2026-09-10 01:17:06.368 T:48854   debug <general>: void KODI::WINDOWING::GBM::CDRMUtils::PrintDrmDeviceInfo(drmDevicePtr): DRM Device Info:
+                                                     available_nodes: 0x05
+                                                     nodes:
+                                                       nodes[0]: /dev/dri/card0
+                                                       nodes[2]: /dev/dri/renderD128
+                                                     bustype: 0x02
+                                                       platform:
+                                                         fullname: /display-subsystem
+2026-09-10 01:17:06.368 T:48854   debug <general>: bool KODI::WINDOWING::GBM::CDRMUtils::OpenDrm(bool): Opened render node: /dev/dri/renderD128
+2026-09-10 01:17:06.369 T:48854    info <general>: bool KODI::WINDOWING::GBM::CDRMUtils::FindConnector(): Using connector: HDMI-A-1
+2026-09-10 01:17:06.369 T:48854    info <general>: bool KODI::WINDOWING::GBM::CDRMUtils::FindEncoder(): Using encoder: 200
+2026-09-10 01:17:06.369 T:48854   debug <general>: bool KODI::WINDOWING::GBM::CDRMUtils::FindCrtc(): Original crtc id: 89, mode: 1920x1080 @ 60 Hz
+2026-09-10 01:17:06.370 T:48854   debug <general>: virtual bool KODI::WINDOWING::GBM::CDRMAtomic::InitDrm(): initialized atomic DRM
+2026-09-10 01:17:06.370 T:48854 warning <general>: [display-info] EDID parser warnings:
+2026-09-10 01:17:06.370 T:48854 warning <general>: [display-info] ----------------------------------------------
+2026-09-10 01:17:06.370 T:48854 warning <general>: [display-info] Block 1, CTA-861 Extension Block:
+2026-09-10 01:17:06.370 T:48854 warning <general>: [display-info]   Colorimetry Data Block: Reserved bits MD0-MD3 must be 0.
+2026-09-10 01:17:06.370 T:48854 warning <general>: [display-info] 
+2026-09-10 01:17:06.370 T:48854 warning <general>: [display-info] ----------------------------------------------
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info] make: 'Sony' model: 'SONY TV  *00'
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info] supports hdr static metadata type1: true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info] supported eotf:
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   traditional sdr: true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   traditional hdr: false
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   pq:              true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   hlg:             true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info] luma min: '0' avg: '0' max: '0'
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info] supported colorimetry:
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   xvycc_601:   true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   xvycc_709:   true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   sycc_601:    true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   opycc_601:   true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   oprgb:       true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   bt2020_cycc: true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   bt2020_ycc:  true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   bt2020_rgb:  true
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   st2113_rgb:  false
+2026-09-10 01:17:06.370 T:48854    info <general>: [display-info]   ictcp:       false
+2026-09-10 01:17:06.381 T:48854   debug <general>: virtual void KODI::WINDOWING::GBM::CWinSystemGbm::SetColorimetry(const VideoPicture*): setting connector colorspace to Default (source Default)
+2026-09-10 01:17:06.381 T:48854   debug <general>: virtual bool KODI::WINDOWING::GBM::CWinSystemGbm::SetHDR(const VideoPicture*): clearing HDR_OUTPUT_METADATA
+2026-09-10 01:17:06.381 T:48854   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetDeepColor(bool): no "max bpc" property; setting color_depth to Automatic
+2026-09-10 01:17:06.381 T:48854   debug <general>: virtual bool KODI::WINDOWING::GBM::CWinSystemGbm::SetHDR(const VideoPicture*): clearing HDR_OUTPUT_METADATA
+2026-09-10 01:17:06.381 T:48854   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetDeepColor(bool): no "max bpc" property; setting color_depth to Automatic
+2026-09-10 01:17:06.381 T:48854   debug <general>: CWinSystemGbm::InitWindowSystem - initialized DRM
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080 @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 4096x2160 with 4096x2160 @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 4096x2160 with 4096x2160 @ 59.940102 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 4096x2160 with 4096x2160 @ 50.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 4096x2160 with 4096x2160 @ 24.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 4096x2160 with 4096x2160 @ 23.976000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 59.940102 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 50.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 30.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 29.969999 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 25.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 24.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 3840x2160 with 3840x2160 @ 23.976000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080 @ 59.940201 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080i @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080i @ 59.940201 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080 @ 50.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080i @ 50.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080 @ 30.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080 @ 29.970100 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080 @ 24.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1920x1080 with 1920x1080 @ 23.976080 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1680x1050 with 1680x1050 @ 59.883251 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1600x900 with 1600x900 @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x1024 with 1280x1024 @ 60.019741 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1152x864 with 1152x864 @ 75.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x720 with 1280x720 @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x720 with 1280x720 @ 59.940201 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x720 with 1280x720 @ 50.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x720 with 1280x720 @ 30.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x720 with 1280x720 @ 29.970100 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x720 with 1280x720 @ 24.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1280x720 with 1280x720 @ 23.976162 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 1024x768 with 1024x768 @ 60.003841 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 800x600 with 800x600 @ 60.316540 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 720x576 with 720x576 @ 50.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 720x480 with 720x480 @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 720x480 with 720x480 @ 59.940060 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 640x480 with 640x480 @ 60.000000 Hz
+2026-09-10 01:17:06.381 T:48854    info <general>: Found resolution 640x480 with 640x480 @ 59.940475 Hz
+2026-09-10 01:17:06.382 T:48854    info <general>: EGL_VERSION = 1.5
+2026-09-10 01:17:06.382 T:48854    info <general>: EGL_VENDOR = Mesa Project
+2026-09-10 01:17:06.382 T:48854    info <general>: EGL_EXTENSIONS = EGL_ANDROID_blob_cache EGL_EXT_buffer_age EGL_EXT_config_select_group EGL_EXT_create_context_robustness EGL_EXT_image_dma_buf_import EGL_EXT_image_dma_buf_import_modifiers EGL_EXT_query_reset_notification_strategy EGL_EXT_surface_compression EGL_KHR_cl_event2 EGL_KHR_config_attribs EGL_KHR_context_flush_control EGL_KHR_create_context EGL_KHR_create_context_no_error EGL_KHR_fence_sync EGL_KHR_get_all_proc_addresses EGL_KHR_gl_colorspace EGL_KHR_gl_renderbuffer_image EGL_KHR_gl_texture_2D_image EGL_KHR_gl_texture_3D_image EGL_KHR_gl_texture_cubemap_image EGL_KHR_image EGL_KHR_image_base EGL_KHR_image_pixmap EGL_KHR_no_config_context EGL_KHR_reusable_sync EGL_KHR_surfaceless_context EGL_EXT_pixel_format_float EGL_KHR_wait_sync EGL_MESA_configless_context EGL_MESA_gl_interop EGL_MESA_image_dma_buf_export EGL_MESA_query_driver EGL_MESA_x11_native_visual_id 
+2026-09-10 01:17:06.382 T:48854    info <general>: EGL_CLIENT_EXTENSIONS = EGL_EXT_device_base EGL_EXT_device_enumeration EGL_EXT_device_query EGL_EXT_platform_base EGL_KHR_client_get_all_proc_addresses EGL_EXT_client_extensions EGL_KHR_debug EGL_EXT_platform_device EGL_EXT_explicit_device EGL_EXT_platform_wayland EGL_KHR_platform_wayland EGL_EXT_platform_x11 EGL_KHR_platform_x11 EGL_EXT_platform_xcb EGL_MESA_platform_gbm EGL_KHR_platform_gbm EGL_MESA_platform_surfaceless
+2026-09-10 01:17:06.382 T:48854   debug <general>: EGL Config Attributes:
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_BUFFER_SIZE: 32
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_ALPHA_SIZE: 8
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_BLUE_SIZE: 8
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_GREEN_SIZE: 8
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_RED_SIZE: 8
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_DEPTH_SIZE: 16
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_STENCIL_SIZE: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_CONFIG_CAVEAT: 0x3038
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_CONFIG_ID: 22
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_LEVEL: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_MAX_PBUFFER_HEIGHT: 4096
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_MAX_PBUFFER_PIXELS: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_MAX_PBUFFER_WIDTH: 4096
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_NATIVE_RENDERABLE: 1
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_NATIVE_VISUAL_ID: 875713089
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_NATIVE_VISUAL_TYPE: 0x3038
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_SAMPLES: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_SAMPLE_BUFFERS: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_SURFACE_TYPE: 4
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_TRANSPARENT_TYPE: 0x3038
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_TRANSPARENT_BLUE_VALUE: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_TRANSPARENT_GREEN_VALUE: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_TRANSPARENT_RED_VALUE: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_BIND_TO_TEXTURE_RGB: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_BIND_TO_TEXTURE_RGBA: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_MIN_SWAP_INTERVAL: 1
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_MAX_SWAP_INTERVAL: 1
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_LUMINANCE_SIZE: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_ALPHA_MASK_SIZE: 0
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_COLOR_BUFFER_TYPE: 0x308e
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_RENDERABLE_TYPE: 77
+2026-09-10 01:17:06.382 T:48854   debug <general>:   EGL_CONFORMANT: 77
+2026-09-10 01:17:06.415 T:48854 warning <general>: [GBM] missing support for EGL_KHR_fence_sync and EGL_ANDROID_native_fence_sync - performance may be impacted
+2026-09-10 01:17:06.415 T:48854   debug <general>: CUDMABufferObject::Register - unable to open /dev/udmabuf: No such file or directory
+2026-09-10 01:17:06.415 T:48854   debug <general>: CDMAHeapBufferObject::Register - using /dev/dma_heap/reserved
+2026-09-10 01:17:06.415 T:48854    info <general>: CApplication::CreateGUI - using the gbm windowing system
+2026-09-10 01:17:06.415 T:48854    info <general>: Checking resolution 16
+2026-09-10 01:17:06.415 T:48854   debug <general>: OnLostDevice - notify display change event
+2026-09-10 01:17:06.415 T:48854   debug <general>: CWinSystemGbmEGLContext::DestroyWindow - deinitialized GBM
+2026-09-10 01:17:06.415 T:48854   debug <general>: virtual bool KODI::WINDOWING::GBM::CDRMUtils::SetMode(const RESOLUTION_INFO&): Found crtc mode: 1920x1080 @ 60 Hz
+2026-09-10 01:17:06.415 T:48854   debug <general>: CGBMUtils::CreateSurface - created surface with size 1920x1080
+2026-09-10 01:17:06.425 T:48854    info <general>: bool KODI::WINDOWING::GBM::CDRMUtils::FindGuiPlane(uint32_t, uint64_t): Using gui plane [1920x1080] id:57, format:AR24, modifier:NONE_INVALID, crtc id:89
+2026-09-10 01:17:06.425 T:48854   debug <general>: CWinSystemGbmEGLContext::CreateNewWindow - initialized GBM
+2026-09-10 01:17:06.425 T:48854    info <general>: GL_VENDOR = Mesa
+2026-09-10 01:17:06.425 T:48854    info <general>: GL_RENDERER = llvmpipe (LLVM 19.1.7, 128 bits)
+2026-09-10 01:17:06.425 T:48854    info <general>: GL_VERSION = OpenGL ES 3.2 Mesa 25.0.7-2+deb13u1
+2026-09-10 01:17:06.425 T:48854    info <general>: GL_SHADING_LANGUAGE_VERSION = OpenGL ES GLSL ES 3.20
+2026-09-10 01:17:06.425 T:48854    info <general>: GL_EXTENSIONS = GL_EXT_blend_minmax GL_EXT_multi_draw_arrays GL_EXT_texture_filter_anisotropic GL_EXT_texture_compression_s3tc GL_EXT_texture_compression_dxt1 GL_EXT_texture_compression_rgtc GL_EXT_texture_format_BGRA8888 GL_OES_compressed_ETC1_RGB8_texture GL_OES_depth24 GL_OES_element_index_uint GL_OES_fbo_render_mipmap GL_OES_mapbuffer GL_OES_rgb8_rgba8 GL_OES_standard_derivatives GL_OES_stencil8 GL_OES_texture_3D GL_OES_texture_float GL_OES_texture_float_linear GL_OES_texture_half_float GL_OES_texture_half_float_linear GL_OES_texture_npot GL_OES_vertex_half_float GL_EXT_draw_instanced GL_EXT_texture_sRGB_decode GL_OES_EGL_image GL_OES_depth_texture GL_OES_packed_depth_stencil GL_EXT_texture_type_2_10_10_10_REV GL_NV_conditional_render GL_OES_get_program_binary GL_APPLE_texture_max_level GL_EXT_discard_framebuffer GL_EXT_read_format_bgra GL_EXT_texture_storage GL_NV_pack_subimage GL_NV_texture_barrier GL_EXT_frag_depth GL_NV_fbo_color_attachments GL_OES_EGL_image_external GL_OES_EGL_sync GL_OES_vertex_array_object GL_OES_viewport_array GL_ANGLE_pack_reverse_row_order GL_ANGLE_texture_compression_dxt3 GL_ANGLE_texture_compression_dxt5 GL_EXT_occlusion_query_boolean GL_EXT_robustness GL_EXT_texture_rg GL_EXT_unpack_subimage GL_NV_draw_buffers GL_NV_read_buffer GL_NV_read_depth GL_NV_read_depth_stencil GL_NV_read_stencil GL_APPLE_sync GL_EXT_draw_buffers GL_EXT_instanced_arrays GL_EXT_map_buffer_range GL_EXT_shadow_samplers GL_KHR_debug GL_KHR_robustness GL_KHR_texture_compression_astc_ldr GL_NV_generate_mipmap_sRGB GL_NV_pixel_buffer_object GL_OES_depth_texture_cube_map GL_OES_required_internalformat GL_OES_surfaceless_context GL_EXT_color_buffer_float GL_EXT_debug_label GL_EXT_sRGB_write_control GL_EXT_separate_shader_objects GL_EXT_shader_framebuffer_fetch GL_EXT_shader_group_vote GL_EXT_shader_implicit_conversions GL_EXT_shader_integer_mix GL_EXT_tessellation_point_size GL_EXT_tessellation_shader GL_ANDROID_extension_pack_es31a GL_ARM_shader_framebuffer_fetch_depth_stencil GL_EXT_base_instance GL_EXT_compressed_ETC1_RGB8_sub_texture GL_EXT_copy_image GL_EXT_draw_buffers_indexed GL_EXT_draw_elements_base_vertex GL_EXT_gpu_shader5 GL_EXT_multi_draw_indirect GL_EXT_polygon_offset_clamp GL_EXT_primitive_bounding_box GL_EXT_render_snorm GL_EXT_shader_io_blocks GL_EXT_texture_border_clamp GL_EXT_texture_buffer GL_EXT_texture_cube_map_array GL_EXT_texture_norm16 GL_EXT_texture_view GL_KHR_blend_equation_advanced GL_KHR_blend_equation_advanced_coherent GL_KHR_context_flush_control GL_KHR_robust_buffer_access_behavior GL_NV_image_formats GL_NV_shader_noperspective_interpolation GL_OES_copy_image GL_OES_draw_buffers_indexed GL_OES_draw_elements_base_vertex GL_OES_gpu_shader5 GL_OES_primitive_bounding_box GL_OES_sample_shading GL_OES_sample_variables GL_OES_shader_io_blocks GL_OES_shader_multisample_interpolation GL_OES_tessellation_point_size GL_OES_tessellation_shader GL_OES_texture_border_clamp GL_OES_texture_buffer GL_OES_texture_cube_map_array GL_OES_texture_stencil8 GL_OES_texture_storage_multisample_2d_array GL_OES_texture_view GL_EXT_blend_func_extended GL_EXT_buffer_storage GL_EXT_float_blend GL_EXT_geometry_point_size GL_EXT_geometry_shader GL_EXT_texture_filter_minmax GL_EXT_texture_sRGB_R8 GL_EXT_texture_sRGB_RG8 GL_KHR_no_error GL_KHR_texture_compression_astc_sliced_3d GL_OES_EGL_image_external_essl3 GL_OES_geometry_point_size GL_OES_geometry_shader GL_OES_shader_image_atomic GL_EXT_clear_texture GL_EXT_clip_cull_distance GL_EXT_conservative_depth GL_EXT_disjoint_timer_query GL_EXT_texture_compression_s3tc_srgb GL_MESA_shader_integer_functions GL_EXT_clip_control GL_EXT_color_buffer_half_float GL_EXT_memory_object GL_EXT_memory_object_fd GL_EXT_texture_compression_bptc GL_EXT_texture_mirror_clamp_to_edge GL_KHR_parallel_shader_compile GL_NV_alpha_to_coverage_dither_control GL_EXT_EGL_image_storage GL_EXT_shader_framebuffer_fetch_non_coherent GL_EXT_texture_shadow_lod GL_MESA_framebuffer_flip_y GL_OVR_multiview GL_OVR_multiview2 GL_EXT_depth_clamp GL_EXT_texture_query_lod GL_MESA_sampler_objects GL_EXT_EGL_image_storage_compression GL_EXT_texture_storage_compression GL_MESA_bgra 
+2026-09-10 01:17:06.449 T:48854   debug <general>: OnLostDevice - notify display change event
+2026-09-10 01:17:06.449 T:48854   debug <general>: virtual bool KODI::WINDOWING::GBM::CDRMUtils::SetMode(const RESOLUTION_INFO&): Found crtc mode: 1920x1080 @ 60 Hz
+2026-09-10 01:17:06.449 T:48854   debug <general>: virtual void KODI::WINDOWING::GBM::CDRMAtomic::FlipPage(gbm_bo*, bool, bool, bool): Execute modeset at next commit
+2026-09-10 01:17:06.455 T:48854    info <general>: GLES: Maximum texture width: 16384
+2026-09-10 01:17:06.455 T:48854   debug <general>: guilib: Fill viewport on change for solving rendering passes
+2026-09-10 01:17:06.521 T:48854   debug <general>: CWinSystemGbmGLESContext::PresentRender - Sending display reset to all clients
+2026-09-10 01:17:06.521 T:48854    info <general>: load keymapping
+2026-09-10 01:17:06.522 T:48854    info <general>: Loading special://xbmc/system/keymaps/appcommand.xml
+2026-09-10 01:17:06.522 T:48854    info <general>: Loading special://xbmc/system/keymaps/customcontroller.Harmony.xml
+2026-09-10 01:17:06.523 T:48854    info <general>: Loading special://xbmc/system/keymaps/customcontroller.SiriRemote.xml
+2026-09-10 01:17:06.523 T:48854    info <general>: Loading special://xbmc/system/keymaps/gamepad.xml
+2026-09-10 01:17:06.523 T:48854    info <general>: Loading special://xbmc/system/keymaps/joystick.xml
+2026-09-10 01:17:06.524 T:48854    info <general>: Loading special://xbmc/system/keymaps/keyboard.xml
+2026-09-10 01:17:06.525 T:48854    info <general>: Loading special://xbmc/system/keymaps/mouse.xml
+2026-09-10 01:17:06.525 T:48854    info <general>: Loading special://xbmc/system/keymaps/remote.xml
+2026-09-10 01:17:06.526 T:48854    info <general>: Loading special://xbmc/system/keymaps/touchscreen.xml
+2026-09-10 01:17:06.526 T:48854    info <general>: GUI format 1920x1080, Display 1920x1080 @ 60.000000 Hz
+2026-09-10 01:17:06.526 T:48996   debug <general>: Thread ActiveAE start, auto delete: false
+2026-09-10 01:17:06.527 T:48997   debug <general>: Thread AESink start, auto delete: false
+2026-09-10 01:17:06.527 T:48996   debug <general>: [threads] name: 'AESink' priority: '-1'
+2026-09-10 01:17:06.527 T:48998   debug <general>: Thread FDEventMonitor start, auto delete: false
+2026-09-10 01:17:06.556 T:48996    info <general>: Found 1 Lists of Devices
+2026-09-10 01:17:06.556 T:48996    info <general>: Enumerated ALSA devices:
+2026-09-10 01:17:06.556 T:48996    info <general>:     Device 1
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_deviceName      : default
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_displayName     : Default (rockchip-hdmi1 rockchip-hdmi1 i2s-hifi-0)
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_displayNameExtra: 
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_deviceType      : AE_DEVTYPE_PCM
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_channels        : FL, FR, LFE, UNKNOWN1, FC, BC, BL, BR, BLOC, BROC, FLOC, FROC
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_sampleRates     : 32000,44100,48000,88200,96000,176400,192000
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_dataFormats     : AE_FMT_S24NE4,AE_FMT_S32NE,AE_FMT_S16NE,AE_FMT_S16LE
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_streamTypes     : No passthrough capabilities
+2026-09-10 01:17:06.556 T:48996    info <general>:     Device 2
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_deviceName      : sysdefault:CARD=rockchiphdmi1
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_displayName     : rockchip-hdmi1
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_displayNameExtra: rockchip-hdmi1 i2s-hifi-0
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_deviceType      : AE_DEVTYPE_PCM
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_channels        : FL, FR, LFE, UNKNOWN1, FC, BC, BL, BR, BLOC, BROC, FLOC, FROC
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_sampleRates     : 32000,44100,48000,88200,96000,176400,192000
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_dataFormats     : AE_FMT_S24NE4,AE_FMT_S32NE,AE_FMT_S16NE,AE_FMT_S16LE
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_streamTypes     : No passthrough capabilities
+2026-09-10 01:17:06.556 T:48996    info <general>:     Device 3
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_deviceName      : sysdefault:CARD=rockchipes8388
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_displayName     : rockchip,es8388
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_displayNameExtra: dailink-multicodecs ES8323 HiFi-0
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_deviceType      : AE_DEVTYPE_PCM
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_channels        : FL, FR
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_sampleRates     : 8000,11025,16000,22050,32000,44100,48000,64000,88200,96000
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_dataFormats     : AE_FMT_S24NE4,AE_FMT_S16NE,AE_FMT_S16LE
+2026-09-10 01:17:06.556 T:48996    info <general>:         m_streamTypes     : No passthrough capabilities
+2026-09-10 01:17:06.556 T:48997    info <general>: CActiveAESink::OpenSink - initialize sink
+2026-09-10 01:17:06.556 T:48997   debug <general>: CActiveAESink::OpenSink - trying to open device ALSA:sysdefault:CARD=rockchiphdmi1
+2026-09-10 01:17:06.556 T:48997    info <general>: CAESinkALSA::Initialize - Attempting to open device "sysdefault:CARD=rockchiphdmi1"
+2026-09-10 01:17:06.560 T:48997    info <general>: CAESinkALSA::Initialize - Opened device "sysdefault:CARD=rockchiphdmi1"
+2026-09-10 01:17:06.560 T:48997    info <general>: CAESinkALSA::InitializeHW - Your hardware does not support AE_FMT_FLOAT, trying other formats
+2026-09-10 01:17:06.560 T:48997    info <general>: CAESinkALSA::InitializeHW - Using data format AE_FMT_S24NE4
+2026-09-10 01:17:06.560 T:48997   debug <general>: CAESinkALSA::InitializeHW - Request: periodSize 2400, bufferSize 9600
+2026-09-10 01:17:06.561 T:48997   debug <general>: CAESinkALSA::InitializeHW - Got: periodSize 2400, bufferSize 9600
+2026-09-10 01:17:06.562 T:48997   debug <general>: CAESinkALSA::InitializeHW - Setting timeout to 200 ms
+2026-09-10 01:17:06.562 T:48997   debug <general>: CAESinkALSA::GetChannelLayout - Input Channel Count: 2 Output Channel Count: 2
+2026-09-10 01:17:06.562 T:48997   debug <general>: CAESinkALSA::GetChannelLayout - Requested Layout: FL, FR
+2026-09-10 01:17:06.562 T:48997   debug <general>: CAESinkALSA::GetChannelLayout - Got Layout: FL, FR (ALSA: FL FR)
+2026-09-10 01:17:06.562 T:48997   debug <general>: CActiveAESink::OpenSink - ALSA Initialized:
+2026-09-10 01:17:06.562 T:48997   debug <general>:   Output Device : rockchip-hdmi1
+2026-09-10 01:17:06.562 T:48997   debug <general>:   Sample Rate   : 48000
+2026-09-10 01:17:06.562 T:48997   debug <general>:   Sample Format : AE_FMT_S24NE4
+2026-09-10 01:17:06.562 T:48997   debug <general>:   Channel Count : 2
+2026-09-10 01:17:06.562 T:48997   debug <general>:   Channel Layout: FL, FR
+2026-09-10 01:17:06.562 T:48997   debug <general>:   Frames        : 2400
+2026-09-10 01:17:06.562 T:48997   debug <general>:   Frame Size    : 8
+2026-09-10 01:17:06.564 T:48996   debug <general>: void ActiveAE::CActiveAE::ConfigureLowLatency(): Low latency mode: true - Initial buffer level: 20ms (resample: false)
+2026-09-10 01:17:06.564 T:48854    info <general>: CLangInfo: loading resource.language.en_gb language information...
+2026-09-10 01:17:06.564 T:48854   debug <general>: trying to set locale to en_US.UTF-8
+2026-09-10 01:17:06.565 T:48854    info <general>: global locale set to en_US.UTF-8
+2026-09-10 01:17:06.565 T:48854    info <general>: CLangInfo: loading resource.language.en_gb language strings...
+2026-09-10 01:17:06.568 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: adc-keys (event6)
+2026-09-10 01:17:06.568 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - could not get key repeat for event6 (Function not implemented)
+2026-09-10 01:17:06.568 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 400ms repeat: 80ms for adc-keys (event6)
+2026-09-10 01:17:06.569 T:48854   debug <general>: LocalizeStrings: loaded 4560 strings from file resource://resource.language.en_gb/strings.po
+2026-09-10 01:17:06.569 T:48854   debug <general>: LocalizeStrings: loaded 3 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/audioencoder.kodi.builtin.aac/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.569 T:48854   debug <general>: LocalizeStrings: loaded 3 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/audioencoder.kodi.builtin.wma/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.569 T:48854   debug <general>: LocalizeStrings: loaded 18 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/game.controller.default/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.569 T:48854   debug <general>: LocalizeStrings: loaded 141 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/game.controller.keyboard/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.569 T:48854   debug <general>: LocalizeStrings: loaded 11 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/game.controller.mouse/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.570 T:48854   debug <general>: LocalizeStrings: loaded 13 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/game.controller.snes/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.570 T:48854   debug <general>: LocalizeStrings: loaded 17 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/metadata.album.universal/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.570 T:48854   debug <general>: LocalizeStrings: loaded 32 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/metadata.artists.universal/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.570 T:48854   debug <general>: LocalizeStrings: loaded 17 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/metadata.generic.albums/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.570 T:48854   debug <general>: LocalizeStrings: loaded 15 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/metadata.generic.artists/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.570 T:48854   debug <general>: LocalizeStrings: loaded 24 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/metadata.themoviedb.org.python/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.571 T:48854   debug <general>: LocalizeStrings: loaded 34 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/metadata.tvshows.themoviedb.org.python/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.571 T:48854   debug <general>: LocalizeStrings: loaded 0 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/repository.xbmc.org/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.571 T:48854   debug <general>: LocalizeStrings: loaded 3 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/screensaver.xbmc.builtin.dim/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.572 T:48854   debug <general>: LocalizeStrings: loaded 22 strings from file /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.572 T:48854   debug <general>: No media sources file at special://profile/mediasources.xml
+2026-09-10 01:17:06.572 T:48999   debug <general>: Thread JobWorker start, auto delete: true
+2026-09-10 01:17:06.572 T:48999   debug <general>: [threads] name: 'JobWorker' priority: '1'
+2026-09-10 01:17:06.572 T:48999   debug <general>: bool CDatabaseManager::InitializeInternal(): updating databases...
+2026-09-10 01:17:06.574 T:48999    info <general>: Running database version Addons33
+2026-09-10 01:17:06.574 T:48999    info <general>: Running database version ViewModes6
+2026-09-10 01:17:06.575 T:48999    info <general>: Running database version Games1
+2026-09-10 01:17:06.576 T:48999    info <general>: Running database version Textures14
+2026-09-10 01:17:06.579 T:48999    info <general>: Running database version MyMusic84
+2026-09-10 01:17:06.584 T:48999    info <general>: Running database version MyVideos149
+2026-09-10 01:17:06.586 T:48999    info <general>: Running database version TV48
+2026-09-10 01:17:06.586 T:48999    info <general>: Running database version Epg21
+2026-09-10 01:17:06.587 T:48999   debug <general>: bool CDatabaseManager::InitializeInternal(): updating databases... DONE
+2026-09-10 01:17:06.600 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: headset-keys (event3)
+2026-09-10 01:17:06.600 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - could not get key repeat for event3 (Function not implemented)
+2026-09-10 01:17:06.600 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 400ms repeat: 80ms for headset-keys (event3)
+2026-09-10 01:17:06.607 T:48854   debug <general>: CGBMUtils - using 4 buffers
+2026-09-10 01:17:06.616 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: HP OMEN SPACER Wireless TKL Keyboard Dongle (event8)
+2026-09-10 01:17:06.616 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 250ms repeat: 33ms for HP OMEN SPACER Wireless TKL Keyboard Dongle (event8)
+2026-09-10 01:17:06.639 T:48978   debug <general>: CLibInputHandler::DeviceAdded - pointer type device added: HP OMEN SPACER Wireless TKL Keyboard Dongle Consumer Control (event10)
+2026-09-10 01:17:06.640 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: HP OMEN SPACER Wireless TKL Keyboard Dongle Consumer Control (event10)
+2026-09-10 01:17:06.640 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - could not get key repeat for event10 (Function not implemented)
+2026-09-10 01:17:06.640 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 400ms repeat: 80ms for HP OMEN SPACER Wireless TKL Keyboard Dongle Consumer Control (event10)
+2026-09-10 01:17:06.669 T:48978   debug <general>: CLibInputHandler::DeviceAdded - pointer type device added: HP OMEN SPACER Wireless TKL Keyboard Dongle Mouse (event11)
+2026-09-10 01:17:06.670 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: HP OMEN SPACER Wireless TKL Keyboard Dongle Keypad (event9)
+2026-09-10 01:17:06.670 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 250ms repeat: 33ms for HP OMEN SPACER Wireless TKL Keyboard Dongle Keypad (event9)
+2026-09-10 01:17:06.689 T:48978   debug <general>: CLibInputHandler::DeviceAdded - pointer type device added: dw_hdmi_qp (event0)
+2026-09-10 01:17:06.690 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: dw_hdmi_qp (event0)
+2026-09-10 01:17:06.690 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 0ms repeat: 125ms for dw_hdmi_qp (event0)
+2026-09-10 01:17:06.705 T:48854    info <general>: Unloaded skin
+2026-09-10 01:17:06.706 T:48854    info <general>:   load skin from: /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/ (version: 4.1.0)
+2026-09-10 01:17:06.706 T:48854    info <general>:   load fonts for skin...
+2026-09-10 01:17:06.706 T:48854    info <general>: Loading skin includes from /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/xml/Includes.xml
+2026-09-10 01:17:06.719 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: rk805 pwrkey (event7)
+2026-09-10 01:17:06.720 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - could not get key repeat for event7 (Function not implemented)
+2026-09-10 01:17:06.720 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 400ms repeat: 80ms for rk805 pwrkey (event7)
+2026-09-10 01:17:06.720 T:48854   debug <general>: void KODI::GUILIB::CSkinMapManager::LoadMaps(const TiXmlElement*): Skin map 'DefaultCodecMap' loaded 84 entries
+2026-09-10 01:17:06.720 T:48854   debug <general>: void KODI::GUILIB::CSkinMapManager::LoadMaps(const TiXmlElement*): Skin map 'DefaultAltAudioMap' references map 'DefaultCodecMap'
+2026-09-10 01:17:06.720 T:48854   debug <general>: void KODI::GUILIB::CSkinMapManager::LoadMaps(const TiXmlElement*): Skin map 'DefaultAltAudioMap' loaded 4 entries
+2026-09-10 01:17:06.720 T:48854   debug <general>: void KODI::GUILIB::CSkinMapManager::LoadMaps(const TiXmlElement*): Skin map 'DefaultResolutionMap' loaded 7 entries
+2026-09-10 01:17:06.720 T:48854   debug <general>: void KODI::GUILIB::CSkinMapManager::LoadMaps(const TiXmlElement*): Skin map 'DefaultHdrMap' loaded 4 entries
+2026-09-10 01:17:06.720 T:48854   debug <general>: void KODI::GUILIB::CSkinMapManager::LoadMaps(const TiXmlElement*): Skin map 'DefaultAudioTrackMap' references map 'DefaultCodecMap'
+2026-09-10 01:17:06.720 T:48854   debug <general>: void KODI::GUILIB::CSkinMapManager::LoadMaps(const TiXmlElement*): Skin map 'DefaultAudioTrackMap' loaded 7 entries
+2026-09-10 01:17:06.725 T:48885    info <general>: Loading special://xbmc/system/Lircmap.xml
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'mceusb'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'XboxDVDDongle'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'Microsoft_Xbox'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'PinnacleSysPCTVRemote'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'anysee'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'iMON-PAD'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'Antec_Veris_RM200'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'MCE_via_iMON'
+2026-09-10 01:17:06.726 T:48885    info <general>: * Adding remote mapping for device 'TwinHanRemote'
+2026-09-10 01:17:06.727 T:48885    info <general>: * Adding remote mapping for device 'linux-input-layer'
+2026-09-10 01:17:06.727 T:48885    info <general>: * Linking remote mapping for 'linux-input-layer' to 'cx23885_remote'
+2026-09-10 01:17:06.727 T:48885    info <general>: * Adding remote mapping for device 'mediacenter'
+2026-09-10 01:17:06.727 T:48885    info <general>: * Adding remote mapping for device 'devinput'
+2026-09-10 01:17:06.727 T:48885    info <general>: * Adding remote mapping for device 'devinput-32'
+2026-09-10 01:17:06.727 T:48885    info <general>: * Adding remote mapping for device 'devinput-64'
+2026-09-10 01:17:06.727 T:48885   debug <general>: CIRTranslator::Load - no userdata Lircmap.xml found, skipping
+2026-09-10 01:17:06.731 T:48854    info <general>: bool GUIFontManager::LoadFontsFromFile(const std::string&, const std::string&, std::string&): Loading <fontset> with name 'Default' from '/opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/xml/Font.xml'
+2026-09-10 01:17:06.733 T:48854   debug <general>: LocalizeStrings: loaded 183 strings from file /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/language/resource.language.en_gb/strings.po
+2026-09-10 01:17:06.733 T:48854    info <general>: void ADDON::CSkinInfo::LoadTimers(): Trying to load skin timers from /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/xml/Timers.xml
+2026-09-10 01:17:06.733 T:48854    info <general>:   load new skin...
+2026-09-10 01:17:06.733 T:48854    info <general>: Loading custom window XMLs from skin path /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/xml
+2026-09-10 01:17:06.736 T:48854   debug <general>: Load Skin XML: 3.17 ms
+2026-09-10 01:17:06.736 T:48854    info <general>:   initialize new skin...
+2026-09-10 01:17:06.736 T:48854   debug <general>: guilib: Fill viewport on change for solving rendering passes
+2026-09-10 01:17:06.736 T:48854    info <general>: Loading skin file: Custom_1109_TopBarOverlay.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.741 T:48854   debug <general>: OpenBundle - Opened bundle /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/media/Textures.xbt
+2026-09-10 01:17:06.741 T:48854    info <general>: Loading skin file: DialogBusy.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.741 T:48854    info <general>: Loading skin file: DialogNotification.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.742 T:48854    info <general>: Loading skin file: DialogSeekBar.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.749 T:48854    info <general>: Loading skin file: DialogExtendedProgressBar.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.749 T:48978   debug <general>: CLibInputHandler::DeviceAdded - keyboard type device added: bt-powerkey (event5)
+2026-09-10 01:17:06.750 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - could not get key repeat for event5 (Function not implemented)
+2026-09-10 01:17:06.750 T:48978   debug <general>: CLibInputKeyboard::GetRepeat - delay: 400ms repeat: 80ms for bt-powerkey (event5)
+2026-09-10 01:17:06.750 T:48854    info <general>: Loading skin file: Pointer.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.750 T:48854    info <general>: Loading skin file: DialogBusy.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.750 T:48854    info <general>: Loading skin file: DialogVolumeBar.xml, load type: LOAD_ON_GUI_INIT
+2026-09-10 01:17:06.751 T:48854    info <general>: Loading resource://resource.uisounds.kodi/sounds.xml
+2026-09-10 01:17:06.754 T:49002   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:06.754 T:48854    info <general>:   skin loaded...
+2026-09-10 01:17:06.754 T:48854   debug <general>: Activating window ID: 12997
+2026-09-10 01:17:06.754 T:48854   debug <general>: ------ Window Init () ------
+2026-09-10 01:17:06.759 T:48854   debug <general>: JSONRPC: JSON schema type definition references an unknown type Setting.Details.Setting
+2026-09-10 01:17:06.759 T:48854 warning <general>: JSONRPC: Could not parse type "Setting.Details.SettingList"
+2026-09-10 01:17:06.759 T:48854    info <general>: JSONRPC: Adding type "Setting.Details.SettingList" to list of incomplete definitions (waiting for "Setting.Details.Setting")
+2026-09-10 01:17:06.759 T:48854    info <general>: JSONRPC: Resolving incomplete types/methods referencing Setting.Details.Setting
+2026-09-10 01:17:06.767 T:48854    info <general>: JSONRPC v13.200.0: Successfully initialized
+2026-09-10 01:17:06.767 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "Motorola Nyxboard Hybrid"
+2026-09-10 01:17:06.767 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "CEC Adapter"
+2026-09-10 01:17:06.767 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "Pulse-Eight CEC Adapter"
+2026-09-10 01:17:06.768 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "iMON HID device"
+2026-09-10 01:17:06.768 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "WETEK Play remote"
+2026-09-10 01:17:06.768 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "OSMC RF Remote"
+2026-09-10 01:17:06.768 T:48854    info <general>: Skipped 1 duplicate messages..
+2026-09-10 01:17:06.768 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "Flirc"
+2026-09-10 01:17:06.768 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "joystick"
+2026-09-10 01:17:06.768 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "keyboard"
+2026-09-10 01:17:06.768 T:48854   debug <general>: bool PERIPHERALS::CPeripherals::LoadMappings(): loaded node "mouse"
+2026-09-10 01:17:06.768 T:49003   debug <general>: Thread PeripBusUSBUdev start, auto delete: false
+2026-09-10 01:17:06.768 T:48854   debug <general>: [threads] name: 'PeripBusUSBUdev' priority: '1'
+2026-09-10 01:17:06.768 T:49003   debug <general>: Process - initialised udev monitor
+2026-09-10 01:17:06.768 T:49004   debug <general>: Thread PeripBusAddon start, auto delete: false
+2026-09-10 01:17:06.768 T:48854   debug <general>: [threads] name: 'PeripBusAddon' priority: '1'
+2026-09-10 01:17:06.768 T:48854   debug <general>: GetMappingForDevice - device (0000:0000) mapped to keyboard (type = keyboard)
+2026-09-10 01:17:06.768 T:48854    info <general>: Loading controller layout: /opt/rk3588-mediabox/kodi/share/kodi/addons/game.controller.keyboard/resources/layout.xml
+2026-09-10 01:17:06.769 T:48854   debug <general>: Initialise - initialised peripheral on 'keyboard' with 1 features and 0 sub devices
+2026-09-10 01:17:06.769 T:48854    info <general>: Register - new keyboard device registered on application->keyboard: Keyboard (0000:0000)
+2026-09-10 01:17:06.769 T:48854   debug <general>: GetMappingForDevice - device (0000:0000) mapped to mouse (type = mouse)
+2026-09-10 01:17:06.769 T:48854    info <general>: Loading controller layout: /opt/rk3588-mediabox/kodi/share/kodi/addons/game.controller.mouse/resources/layout.xml
+2026-09-10 01:17:06.769 T:48854   debug <general>: Initialise - initialised peripheral on 'mouse' with 1 features and 0 sub devices
+2026-09-10 01:17:06.769 T:48854    info <general>: Register - new mouse device registered on application->mouse: Mouse (0000:0000)
+2026-09-10 01:17:06.769 T:49005   debug <general>: Thread PeripEventScan start, auto delete: false
+2026-09-10 01:17:06.769 T:48854   debug <general>: ContextMenuManager: addon menus reloaded.
+2026-09-10 01:17:06.769 T:48854    info <general>: Loading player core factory settings from special://xbmc/system/playercorefactory.xml.
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerCoreConfig::<ctor>: created player VideoPlayer
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerCoreConfig::<ctor>: created player PAPlayer
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerCoreConfig::<ctor>: created player RetroPlayer
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: system rules
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: mms/udp
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: lastfm/shout
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: rtmp
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: rtsp
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: streams
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: aacp/sdp
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: mp2
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: dvd
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: discimage
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: sdp/asf
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: nsv
+2026-09-10 01:17:06.769 T:48854   debug <general>: CPlayerSelectionRule::Initialize: creating rule: radio
+2026-09-10 01:17:06.769 T:48854    info <general>: Loaded playercorefactory configuration
+2026-09-10 01:17:06.769 T:48854    info <general>: Loading player core factory settings from special://masterprofile/playercorefactory.xml.
+2026-09-10 01:17:06.770 T:48854    info <general>: special://masterprofile/playercorefactory.xml does not exist. Skipping.
+2026-09-10 01:17:06.770 T:48854   debug <general>: Activating window ID: 12999
+2026-09-10 01:17:06.770 T:48854   debug <general>: ------ Window Init (Startup.xml) ------
+2026-09-10 01:17:06.770 T:48854    info <general>: Loading skin file: Startup.xml, load type: LOAD_EVERY_TIME
+2026-09-10 01:17:06.770 T:48854   debug <general>: Activating window ID: 10000
+2026-09-10 01:17:06.770 T:48854   debug <general>: ------ Window Deinit (Startup.xml) ------
+2026-09-10 01:17:06.770 T:48854   debug <general>: ------ Window Init (Home.xml) ------
+2026-09-10 01:17:06.770 T:48854    info <general>: Loading skin file: Home.xml, load type: KEEP_IN_MEMORY
+2026-09-10 01:17:06.801 T:48854   debug <general>: CDirectoryProvider[addons://]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[addons://sources/video/]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[addons://sources/audio/]: refreshing...
+2026-09-10 01:17:06.802 T:49007   debug <general>: Thread JobWorker start, auto delete: true
+2026-09-10 01:17:06.802 T:49007   debug <general>: [threads] name: 'JobWorker' priority: '1'
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[addons://sources/game/]: refreshing...
+2026-09-10 01:17:06.802 T:49008   debug <general>: Thread JobWorker start, auto delete: true
+2026-09-10 01:17:06.802 T:49008   debug <general>: [threads] name: 'JobWorker' priority: '1'
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[addons://sources/executable/]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[addons://sources/image/]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[library://video/]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[sources://video/]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[special://videoplaylists/]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[favourites://]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[sources://pictures/]: refreshing...
+2026-09-10 01:17:06.802 T:48854   debug <general>: CDirectoryProvider[addons://sources/game/]: refreshing...
+2026-09-10 01:17:06.803 T:48999   debug <general>: CAddonDatabase: SELECT repo.id FROM repo .. took 0 ms
+2026-09-10 01:17:06.803 T:48854    info <general>: removing tempfiles
+2026-09-10 01:17:06.804 T:49008   debug <general>: CMultiPathDirectory::GetDirectory(multipath://special%3a%2f%2fprofile%2fplaylists%2fvideo/special%3a%2f%2fprofile%2fplaylists%2fmixed/)
+2026-09-10 01:17:06.804 T:49008   debug <general>: Getting Directory (special://profile/playlists/video)
+2026-09-10 01:17:06.804 T:49008   debug <general>: Getting Directory (special://profile/playlists/mixed)
+2026-09-10 01:17:06.804 T:49008   debug <general>: CMultiPathDirectory::MergeItems, items = 0
+2026-09-10 01:17:06.804 T:48854   debug <general>: CRepositoryUpdater: closest next update check at 09/10/2026 6:47:11 AM (in 19805s)
+2026-09-10 01:17:06.804 T:48854   debug <general>: CRepositoryUpdater: checking in 19805000ms
+2026-09-10 01:17:06.805 T:49009   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:06.805 T:48854   debug <general>: CServiceAddonManager: starting service.xbmc.versioncheck
+2026-09-10 01:17:06.805 T:49010   debug <general>: Thread LanguageInvoker start, auto delete: false
+2026-09-10 01:17:06.805 T:48854    info <general>: initialize done
+2026-09-10 01:17:06.805 T:48854    info <general>: Running the application...
+2026-09-10 01:17:06.805 T:49010   debug <general>: initializing python script
+2026-09-10 01:17:06.805 T:49010   debug <general>: CPythonInvoker(0, /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib/runner.py): start processing
+2026-09-10 01:17:06.806 T:48854   debug <general>: NetworkMessage - Starting network services
+2026-09-10 01:17:06.808 T:48854    info <general>: CZeroconfAvahi::clientCallback: avahi server not available. But may become later...
+2026-09-10 01:17:06.808 T:48854    info <general>: starting zeroconf publishing
+2026-09-10 01:17:06.808 T:49012   debug <general>: Thread EventServer start, auto delete: false
+2026-09-10 01:17:06.808 T:49012    info <general>: ES: Starting UDP Event server on port 9777
+2026-09-10 01:17:06.809 T:49012    info <general>: UDP: Listening on port 9777 (ipv6 : false)
+2026-09-10 01:17:06.809 T:48854    info <general>: JSONRPC Server: Successfully initialized
+2026-09-10 01:17:06.809 T:49013   debug <general>: Thread TCPServer start, auto delete: false
+2026-09-10 01:17:06.810 T:48854    info <CWebserver[8080]>: Started on port 8080
+2026-09-10 01:17:06.810 T:49016   debug <general>: Thread WSDiscoveryListenerUDP start, auto delete: false
+2026-09-10 01:17:06.810 T:48854   debug <general>: [threads] name: 'WSDiscoveryListenerUDP' priority: '1'
+2026-09-10 01:17:06.810 T:48854    info <general>: CWSDiscoveryListenerUDP::Start - Started
+2026-09-10 01:17:06.828 T:48999   debug <general>: CAddonDatabase: query  SELECT addons.*, repo.addonID AS repoID FROM addons JOIN addonlinkrepo ON addons.id=addonlinkrepo.idAddon JOIN repo ON repo.id=addonlinkrepo.idRepo WHERE addonlinkrepo.idRepo IN (1) ORDER BY repo.addonID, addons.addonID returned 805 rows in 24 ms
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService identifier: servers.eventserver type: _xbmc-events._udp name:Kodi (orangepi5-ultra) eventserver port:9777
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService: client not running, queued for publishing
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService identifier: servers.jsonrpc-tcp type: _xbmc-jsonrpc._tcp name:Kodi (orangepi5-ultra) jsonrpc-tcp port:9090
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService: client not running, queued for publishing
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService identifier: servers.webserver type: _http._tcp name:Kodi (orangepi5-ultra) webserver port:8080
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService: client not running, queued for publishing
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService identifier: servers.jsonrpc-http type: _xbmc-jsonrpc-h._tcp name:Kodi (orangepi5-ultra) jsonrpc-http port:8080
+2026-09-10 01:17:06.830 T:49008   debug <general>: CZeroconfAvahi::doPublishService: client not running, queued for publishing
+2026-09-10 01:17:06.835 T:48854   debug <general>: ------ Window Init (Pointer.xml) ------
+2026-09-10 01:17:06.835 T:49007   debug <general>: CRecentlyAddedJob::UpdateMusic() - Running RecentlyAdded home screen update
+2026-09-10 01:17:06.845 T:49007   debug <general>: GetRecentlyAddedAlbumSongs() query: SELECT songview.*, songartistview.* FROM (SELECT idAlbum, dateAdded FROM album ORDER BY dateAdded DESC LIMIT 10) AS recentalbums JOIN songview ON songview.idAlbum = recentalbums.idAlbum JOIN songartistview ON songview.idSong = songartistview.idSong ORDER BY recentalbums.dateAdded DESC, songview.idAlbum DESC, songview.idSong, songartistview.idRole, songartistview.iOrder 
+2026-09-10 01:17:06.847 T:49007   debug <general>: bool CMusicDatabase::GetRecentlyAddedAlbums(std::vector<CAlbum>&, unsigned int): query: SELECT albumview.*, albumartistview.* FROM (SELECT idAlbum FROM album WHERE strAlbum != '' ORDER BY dateAdded DESC LIMIT 10) AS recentalbums JOIN albumview ON albumview.idAlbum = recentalbums.idAlbum JOIN albumartistview ON albumview.idAlbum = albumartistview.idAlbum ORDER BY dateAdded DESC, albumview.idAlbum desc, albumartistview.iOrder 
+2026-09-10 01:17:06.849 T:49010   debug <general>: -->Python Interpreter Initialized<--
+2026-09-10 01:17:06.849 T:49010   debug <general>: 
+                                                   
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0, /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib/runner.py): the source file to load is "/var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib/runner.py"
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0): full python path:
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):   custom python path:
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):     /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):   default python path:
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):     /usr/lib/python313.zip
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):     /usr/lib/python3.13
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):     /usr/lib/python3.13/lib-dynload
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):     /usr/local/lib/python3.13/dist-packages
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):     /usr/lib/python3/dist-packages
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0): adding args:
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0):  
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0, /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib/runner.py): entering source directory /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib
+2026-09-10 01:17:06.849 T:49010   debug <general>: CPythonInvoker(0, /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib/runner.py): instantiating addon using automatically obtained id of "service.xbmc.versioncheck" dependent on version 3.0.0 of the xbmc.python api
+2026-09-10 01:17:06.850 T:49007   debug <general>: CRecentlyAddedJob::UpdateVideos() - Running RecentlyAdded home screen update
+2026-09-10 01:17:06.868 T:49007   debug <general>: CRecentlyAddedJob::UpdateTotal() - Running RecentlyAdded home screen update
+2026-09-10 01:17:06.942 T:48999   debug <general>: CAddonDatabase::GetAddons took 138 ms
+2026-09-10 01:17:06.945 T:48999   debug <general>: CAddonMgr::GetAvailableUpdatesOrOutdatedAddons took 143 ms
+2026-09-10 01:17:06.998 T:49010   debug <general>: Version Check: Version 0.5.30+matrix.1 started
+2026-09-10 01:17:07.338 T:48854   debug <general>: LogindUPowerSyscall - Received unknown signal NameAcquired
+2026-09-10 01:17:09.738 T:49192   debug <CWebserver[8080]>: request received for /jsonrpc
+2026-09-10 01:17:10.705 T:48854   debug <general>: ------ Window Deinit (Pointer.xml) ------
+2026-09-10 01:17:12.012 T:49010   debug <general>: Version Check: Version installed {'major': 22, 'minor': 0, 'revision': '20260831-e513e0ff43', 'tag': 'beta', 'tagversion': '2'}
+2026-09-10 01:17:12.012 T:49010   debug <general>: CPythonInvoker(0, /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib/runner.py): script successfully run
+2026-09-10 01:17:12.013 T:49010   debug <general>: onExecutionDone(0, /var/tmp/kodi-home/.kodi/addons/service.xbmc.versioncheck/resources/lib/runner.py)
+2026-09-10 01:17:12.031 T:49010   debug <general>: .
+2026-09-10 01:17:12.059 T:49010   debug <general>: Python interpreter stopped
+2026-09-10 01:17:12.059 T:49010   debug <general>: Thread LanguageInvoker 281470505248896 terminating
+2026-09-10 01:17:22.532 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:22.533 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:17:22.533 T:49207   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:22.536 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:22.536 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:17:22.699 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:22.699 T:49207   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:17:22.738 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:22.856 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:22.856 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:17:22.866 T:49210   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:22.871 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:22.871 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:17:23.001 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:23.001 T:49210   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:17:23.005 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.185 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:23.185 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:17:23.196 T:49211   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:23.205 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.205 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:17:23.326 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:23.326 T:49211   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:17:23.355 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.404 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:23.404 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:17:23.415 T:49212   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:23.421 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.421 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:17:23.572 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:17:23.572 T:49212   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:17:23.621 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.645 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:17:23.645 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:17:23.655 T:49213   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:23.688 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.688 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:17:23.819 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:17:23.819 T:49213   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:17:23.838 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.900 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:17:23.900 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:17:23.901 T:49214   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:23.904 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:23.905 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:17:24.021 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:17:24.021 T:49214   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:17:24.038 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:24.064 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:17:24.064 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:17:24.074 T:49215   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:17:24.105 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:24.105 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:17:24.187 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:17:24.187 T:49215   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:17:24.238 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:17:36.880 T:49007   debug <general>: Thread JobWorker 281470530611328 terminating (autodelete)
+2026-09-10 01:17:36.951 T:48999   debug <general>: Thread JobWorker 281471327463552 terminating (autodelete)
+2026-09-10 01:17:36.955 T:49008   debug <general>: Thread JobWorker 281470522157184 terminating (autodelete)
+2026-09-10 01:18:06.754 T:49260   debug <general>: Thread JobWorker start, auto delete: true
+2026-09-10 01:18:06.755 T:49260   debug <general>: [threads] name: 'JobWorker' priority: '1'
+2026-09-10 01:18:06.755 T:49002   debug <general>: Thread Timer 281471319009408 terminating
+2026-09-10 01:18:06.761 T:49260   debug <general>: IMAGE_FILES::CleanerResult IMAGE_FILES::CImageCacheCleaner::ScanOldestCache(unsigned int): begin process to clean image cache
+2026-09-10 01:18:06.761 T:49260   debug <general>: IMAGE_FILES::CleanerResult IMAGE_FILES::CImageCacheCleaner::ScanOldestCache(unsigned int): found no old cached images to process
+2026-09-10 01:18:06.761 T:49260   debug <general>: std::chrono::milliseconds CTextureCache::ScanOldestCache(): scheduling the next image cache cleaning in 48 hours
+2026-09-10 01:18:06.762 T:49261   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:18:36.762 T:49260   debug <general>: Thread JobWorker 281470522157184 terminating (autodelete)
+2026-09-10 01:20:24.321 T:48854   debug <general>: ------ Window Init () ------
+2026-09-10 01:20:42.921 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:42.921 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:42.922 T:49420   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:42.923 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:42.923 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, screen saver/dpms woken up
+2026-09-10 01:20:43.116 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:43.117 T:49420   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:43.136 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:43.868 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:43.868 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:43.878 T:49421   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:43.903 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:43.903 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:43.903 T:48997    info <general>: CActiveAESink::OpenSink - initialize sink
+2026-09-10 01:20:43.903 T:48997   debug <general>: CActiveAESink::OpenSink - trying to open device ALSA:sysdefault:CARD=rockchiphdmi1
+2026-09-10 01:20:43.903 T:48997    info <general>: CAESinkALSA::Initialize - Attempting to open device "sysdefault:CARD=rockchiphdmi1"
+2026-09-10 01:20:43.907 T:48997    info <general>: CAESinkALSA::Initialize - Opened device "sysdefault:CARD=rockchiphdmi1"
+2026-09-10 01:20:43.907 T:48997    info <general>: CAESinkALSA::InitializeHW - Your hardware does not support AE_FMT_FLOAT, trying other formats
+2026-09-10 01:20:43.907 T:48997    info <general>: CAESinkALSA::InitializeHW - Using data format AE_FMT_S24NE4
+2026-09-10 01:20:43.907 T:48997   debug <general>: CAESinkALSA::InitializeHW - Request: periodSize 2400, bufferSize 9600
+2026-09-10 01:20:43.908 T:48997   debug <general>: CAESinkALSA::InitializeHW - Got: periodSize 2400, bufferSize 9600
+2026-09-10 01:20:43.908 T:48997   debug <general>: CAESinkALSA::InitializeHW - Setting timeout to 200 ms
+2026-09-10 01:20:43.908 T:48997   debug <general>: CAESinkALSA::GetChannelLayout - Input Channel Count: 2 Output Channel Count: 2
+2026-09-10 01:20:43.908 T:48997   debug <general>: CAESinkALSA::GetChannelLayout - Requested Layout: FL, FR
+2026-09-10 01:20:43.908 T:48997   debug <general>: CAESinkALSA::GetChannelLayout - Got Layout: FL, FR (ALSA: FL FR)
+2026-09-10 01:20:43.909 T:48997   debug <general>: CActiveAESink::OpenSink - ALSA Initialized:
+2026-09-10 01:20:43.909 T:48997   debug <general>:   Output Device : rockchip-hdmi1
+2026-09-10 01:20:43.909 T:48997   debug <general>:   Sample Rate   : 48000
+2026-09-10 01:20:43.909 T:48997   debug <general>:   Sample Format : AE_FMT_S24NE4
+2026-09-10 01:20:43.909 T:48997   debug <general>:   Channel Count : 2
+2026-09-10 01:20:43.909 T:48997   debug <general>:   Channel Layout: FL, FR
+2026-09-10 01:20:43.909 T:48997   debug <general>:   Frames        : 2400
+2026-09-10 01:20:43.909 T:48997   debug <general>:   Frame Size    : 8
+2026-09-10 01:20:43.976 T:48854   debug <general>: ------ Window Deinit () ------
+2026-09-10 01:20:44.075 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:44.075 T:49421   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:44.103 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:44.340 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:44.340 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:44.352 T:49422   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:44.369 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:44.370 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:44.517 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:44.518 T:49422   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:44.569 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:44.839 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:44.839 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:44.839 T:49425   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:44.919 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:44.920 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:20:44.977 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:44.977 T:49425   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:44.986 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.048 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:45.048 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:45.052 T:49426   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:45.053 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.053 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:20:45.152 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:45.152 T:49426   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:45.186 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.215 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:45.216 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:45.226 T:49427   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:45.253 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.253 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:20:45.286 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:45.286 T:49427   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:45.320 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.474 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:45.475 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:45.486 T:49428   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:45.519 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.520 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:45.622 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:45.622 T:49428   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:45.653 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.678 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:45.679 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:45.699 T:49429   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:45.719 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.720 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:45.773 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:45.773 T:49429   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:45.786 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.834 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:45.834 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:45.846 T:49430   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:45.853 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.853 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:45.924 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:45.925 T:49430   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:45.986 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:45.987 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:45.988 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:45.988 T:49431   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:46.053 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.053 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:46.065 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.066 T:49431   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:46.119 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.123 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.124 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:46.124 T:49432   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:46.186 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.186 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:46.199 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.200 T:49432   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:46.248 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.249 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:46.249 T:49433   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:46.253 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.253 T:48854    info <general>: Skipped 1 duplicate messages..
+2026-09-10 01:20:46.253 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:46.332 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.333 T:49433   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:46.386 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.397 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.398 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:46.398 T:49434   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:46.453 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.453 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:46.478 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.479 T:49434   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:46.519 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.525 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.525 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:46.525 T:49435   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:46.586 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.586 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:46.643 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.644 T:49435   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:46.669 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.858 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:46.859 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:46.866 T:49438   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:46.870 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:46.870 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:47.032 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:47.033 T:49438   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:47.069 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:47.127 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:47.128 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:47.131 T:49439   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:47.136 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:47.136 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:47.247 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:47.248 T:49439   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:47.269 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:47.308 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:47.309 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:47.318 T:49440   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:47.336 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:47.336 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:47.431 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:47.432 T:49440   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:47.469 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:47.970 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:47.970 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:47.979 T:49441   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:48.019 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.020 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:48.055 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:48.056 T:49441   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:48.086 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.136 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:48.137 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:48.149 T:49442   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:48.153 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.153 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:48.222 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:48.223 T:49442   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:48.286 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.589 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:48.590 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:48.599 T:49443   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:48.636 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.636 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:20:48.716 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:48.717 T:49443   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:48.769 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.801 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:48.802 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:48.811 T:49444   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:48.836 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.836 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:20:48.920 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:48.921 T:49444   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:48.962 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:48.963 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:48.973 T:49447   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:48.986 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:48.986 T:48854    info <general>: Skipped 1 duplicate messages..
+2026-09-10 01:20:48.986 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): up (0xf080) pressed, window 10000, action is Up
+2026-09-10 01:20:49.155 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x67, xkb keysym: 0xff52 (Up)
+2026-09-10 01:20:49.156 T:49447   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:49.219 T:48854   debug <general>: Keyboard: scancode: 0x67, sym: 0x111 (up), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:49.747 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:49.748 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:49.758 T:49448   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:49.769 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:49.770 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:49.861 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:49.862 T:49448   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:49.903 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:49.959 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:49.960 T:48978   debug <general>: CLibInputKeyboard::ProcessKey - using delay: 250ms repeat: 33ms
+2026-09-10 01:20:49.966 T:49449   debug <general>: Thread Timer start, auto delete: false
+2026-09-10 01:20:49.969 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:20:49.970 T:48854   debug <general>: bool CInputManager::HandleKey(const CKey&): down (0xf081) pressed, window 10000, action is Down
+2026-09-10 01:20:50.091 T:48978   debug <general>: void CLibInputKeyboard::ProcessKey(libinput_event_keyboard*): libinput key: 0x6c, xkb keysym: 0xff54 (Down)
+2026-09-10 01:20:50.092 T:49449   debug <general>: Thread Timer 281470102595712 terminating
+2026-09-10 01:20:50.103 T:48854   debug <general>: Keyboard: scancode: 0x6c, sym: 0x112 (down), unicode: 0x00, modifier: 0x0
+2026-09-10 01:23:50.147 T:48854   debug <general>: ------ Window Init () ------
+2026-09-10 01:26:32.185 T:49955   debug <CWebserver[8080]>: request received for /jsonrpc
+2026-09-10 01:26:32.187 T:48854    info <general>: Stopping the application...
+2026-09-10 01:26:32.187 T:48854    info <general>: Stopping player
+2026-09-10 01:26:32.187 T:48854    info <general>: Storing total System Uptime
+2026-09-10 01:26:32.187 T:48854    info <general>: Saving settings
+2026-09-10 01:26:32.203 T:48854    info <general>: Saving skin settings
+2026-09-10 01:26:32.205 T:48854    info <general>: Stopping all
+2026-09-10 01:26:32.205 T:48854   debug <general>: NetworkMessage - Signaling network services to stop
+2026-09-10 01:26:32.205 T:48854    info <general>: ES: Stopping event server
+2026-09-10 01:26:32.205 T:48854   debug <general>: CZeroconfAvahi::doRemoveService named: servers.jsonrpc-tcp
+2026-09-10 01:26:32.386 T:49013   debug <general>: Thread TCPServer 281470136412288 terminating
+2026-09-10 01:26:32.389 T:49012    info <general>: ES: UDP Event server stopped
+2026-09-10 01:26:32.390 T:49012   debug <general>: Thread EventServer 281470144866432 terminating
+2026-09-10 01:26:34.989 T:49016   debug <general>: Thread WSDiscoveryListenerUDP 281470111049856 terminating
+2026-09-10 01:26:34.989 T:48854    info <general>: CWSDiscoveryListenerUDP::Stop - Stopped
+2026-09-10 01:26:34.989 T:48854   debug <general>: NetworkMessage - Waiting for network services to stop
+2026-09-10 01:26:34.989 T:48854    info <general>: stopping zeroconf publishing
+2026-09-10 01:26:34.990 T:48854    info <CWebserver[8080]>: Stopped
+2026-09-10 01:26:34.990 T:48854   debug <general>: CServiceAddonManager: stopping service.xbmc.versioncheck.
+2026-09-10 01:26:34.990 T:48854    info <general>: CServiceAddonManager: failed to stop service.xbmc.versioncheck (may have ended)
+2026-09-10 01:26:34.990 T:48996   debug <general>: Thread ActiveAE 281471436728448 terminating
+2026-09-10 01:26:34.990 T:48997   debug <general>: Thread AESink 281471352825984 terminating
+2026-09-10 01:26:34.991 T:48854    info <general>: Application stopped
+2026-09-10 01:26:35.192 T:49005   debug <general>: Thread PeripEventScan 281470547519616 terminating
+2026-09-10 01:26:35.284 T:49003   debug <general>: Thread PeripBusUSBUdev 281471310555264 terminating
+2026-09-10 01:26:35.285 T:49004   debug <general>: Thread PeripBusAddon 281471302101120 terminating
+2026-09-10 01:26:35.285 T:48854    info <general>: unload skin
+2026-09-10 01:26:35.296 T:48854   debug <general>: ------ Window Deinit () ------
+2026-09-10 01:26:35.297 T:48854   debug <general>: ------ Window Deinit (Home.xml) ------
+2026-09-10 01:26:35.297 T:48854   debug <general>: FreeVisualisation() done
+2026-09-10 01:26:35.304 T:49261    info <general>: Skipped 1 duplicate messages..
+2026-09-10 01:26:35.304 T:49261   debug <general>: Thread Timer 281471319009408 terminating
+2026-09-10 01:26:35.307 T:48854   debug <general>: CloseBundle - Closed bundle
+2026-09-10 01:26:35.314 T:48854    info <general>: Unloaded skin
+2026-09-10 01:26:35.329 T:48854   debug <general>: void {anonymous}::DrmFbDestroyCallback(gbm_bo*, void*): Removing framebuffer: 239
+2026-09-10 01:26:35.333 T:48854   debug <general>: void {anonymous}::DrmFbDestroyCallback(gbm_bo*, void*): Removing framebuffer: 232
+2026-09-10 01:26:35.338 T:48854   debug <general>: void {anonymous}::DrmFbDestroyCallback(gbm_bo*, void*): Removing framebuffer: 236
+2026-09-10 01:26:35.341 T:48854   debug <general>: void {anonymous}::DrmFbDestroyCallback(gbm_bo*, void*): Removing framebuffer: 240
+2026-09-10 01:26:35.341 T:48854   debug <general>: CWinSystemGbmEGLContext::DestroyWindow - deinitialized GBM
+2026-09-10 01:26:35.342 T:48854    info <general>: unload sections
+2026-09-10 01:26:35.348 T:48854   debug <general>: void KODI::UTILS::I18N::CSubTagRegistryManager::Deinitialize(): registry unloaded
+2026-09-10 01:26:35.350 T:48854    info <general>: CWSDiscoveryListenerUDP::Stop - Stopped
+2026-09-10 01:26:35.350 T:48854   debug <general>: LogindUPowerSyscall - delay lock sleep released
+2026-09-10 01:26:35.351 T:49009   debug <general>: Thread Timer 281470513703040 terminating
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 0 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 1 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 2 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 3 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 4 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 5 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 6 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 7 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 8 --> 0 instances
+2026-09-10 01:26:35.352 T:48854   debug <general>: object 9 --> 0 instances
+2026-09-10 01:26:35.370 T:48854   debug <general>: CWinSystemGbm::DestroyWindowSystem - deinitialized DRM
+2026-09-10 01:26:35.430 T:48978   debug <general>: Thread libinput 281472714729600 terminating
+2026-09-10 01:26:36.066 T:48854   debug <general>: bool KODI::WINDOWING::GBM::CDRMUtils::RestoreOriginalMode(): Set original crtc mode
+2026-09-10 01:26:36.100 T:48998   debug <general>: Thread FDEventMonitor 281471335917696 terminating
+2026-09-10 01:26:36.100 T:48885   debug <general>: Thread Lirc 281472840099968 terminating
+2026-09-10 01:26:36.101 T:48884   debug <general>: Thread Announce 281472848554112 terminating
+2026-09-10 01:26:36.101 T:48854    info <general>: Exiting the application...

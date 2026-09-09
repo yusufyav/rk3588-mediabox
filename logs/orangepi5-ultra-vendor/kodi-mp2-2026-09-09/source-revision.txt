@@ -1,0 +1,28 @@
+Kodi upstream revision pinned for Gate MP2
+
+repository : https://github.com/xbmc/xbmc.git
+tag        : 22.0b2-Piers
+sha        : e513e0ff4331fc25fd2454659a9dd3e6b7670146
+tag date   : 2026-08-31
+
+Why this revision and not master:
+  master HEAD at audit time was 6db60394880183ae280e0278badd45d9926a9e96 (2026-09-09).
+  git log over the paths this gate touches --
+    xbmc/windowing/gbm
+    .../HwDecRender/RendererDRMPRIME.cpp
+    .../HwDecRender/VideoLayerBridgeDRMPRIME.cpp
+    .../DVDCodecs/Video/DVDVideoCodecDRMPRIME.cpp
+  -- returns ZERO commits between 22.0b2-Piers and master. The two are
+  identical where it matters here, so the named tag is chosen for
+  reproducibility at no functional cost.
+
+FFmpeg: system, /opt/rk3588-screenbridge (NOT Kodi's internal 9.0.1,
+        which has no Rockchip MPP decoder).
+/opt/rk3588-screenbridge/lib/pkgconfig/libavcodec.pc:Version: 62.28.102
+/opt/rk3588-screenbridge/lib/pkgconfig/libavdevice.pc:Version: 62.3.102
+/opt/rk3588-screenbridge/lib/pkgconfig/libavfilter.pc:Version: 11.14.102
+/opt/rk3588-screenbridge/lib/pkgconfig/libavformat.pc:Version: 62.12.102
+/opt/rk3588-screenbridge/lib/pkgconfig/libavutil.pc:Version: 60.26.102
+/opt/rk3588-screenbridge/lib/pkgconfig/librga.pc:Version: 1.10.6
+/opt/rk3588-screenbridge/lib/pkgconfig/libswresample.pc:Version: 6.3.102
+/opt/rk3588-screenbridge/lib/pkgconfig/libswscale.pc:Version: 9.5.102

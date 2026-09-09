@@ -1,0 +1,4 @@
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at e513e0ff43 Merge pull request #29092 from garbear/tag-beta2
+e513e0ff4331fc25fd2454659a9dd3e6b7670146

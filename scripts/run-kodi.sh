@@ -41,7 +41,12 @@ case "${1:-}" in
     mediabox_scp "$here/config/kodi/guisettings-appliance.xml" \
       "$MEDIABOX_TARGET:$userdata/guisettings.xml" >/dev/null
     echo "== starting Kodi (GBM/DRM standalone)"
+    # The FFmpeg this build links is static, but it pulls in the Rockchip MPP
+    # and RGA shared libraries, which live under the ScreenBridge prefix and
+    # are not on the default search path. Setting it here keeps the change
+    # inside this launcher rather than editing the system's ld.so config.
     mediabox_ssh "cd '$KODI_RUN_HOME' && HOME='$KODI_RUN_HOME' \
+        LD_LIBRARY_PATH='$MEDIABOX_FFMPEG_PREFIX/lib' \
         nohup '$KODI_PREFIX/lib/kodi/kodi-gbm' --standalone --debug \
         > '$KODI_RUN_HOME/kodi-stdout.log' 2>&1 & echo pid=\$!"
     echo "== waiting for JSON-RPC"
