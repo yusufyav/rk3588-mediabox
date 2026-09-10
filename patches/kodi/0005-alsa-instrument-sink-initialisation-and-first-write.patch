@@ -1,0 +1,195 @@
+diff --git a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp
+index 0a7f162f2f..6f8691677a 100644
+--- a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp
++++ b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp
+@@ -493,6 +493,35 @@ void CAESinkALSA::GetAESParams(const AEAudioFormat& format, std::string& params)
+   else params += ",AES3=0x01";
+ }
+ 
++namespace
++{
++/* ALSA reports PCM state as an integer. Writing that integer into a log turns
++   every later reading of it into a lookup, and the whole question this
++   instrumentation exists to answer -- "what state was the PCM in when the
++   write failed" -- is a state name. So it is resolved here, once. */
++const char* MP2PcmStateName(snd_pcm_state_t state)
++{
++  switch (state)
++  {
++    case SND_PCM_STATE_OPEN: return "OPEN";
++    case SND_PCM_STATE_SETUP: return "SETUP";
++    case SND_PCM_STATE_PREPARED: return "PREPARED";
++    case SND_PCM_STATE_RUNNING: return "RUNNING";
++    case SND_PCM_STATE_XRUN: return "XRUN";
++    case SND_PCM_STATE_DRAINING: return "DRAINING";
++    case SND_PCM_STATE_PAUSED: return "PAUSED";
++    case SND_PCM_STATE_SUSPENDED: return "SUSPENDED";
++    case SND_PCM_STATE_DISCONNECTED: return "DISCONNECTED";
++    default: return "UNKNOWN";
++  }
++}
++
++const char* MP2State(snd_pcm_t* pcm)
++{
++  return pcm ? MP2PcmStateName(snd_pcm_state(pcm)) : "NO-PCM";
++}
++} // namespace
++
+ bool CAESinkALSA::Initialize(AEAudioFormat &format, std::string &device)
+ {
+   m_initDevice = device;
+@@ -536,6 +565,13 @@ bool CAESinkALSA::Initialize(AEAudioFormat &format, std::string &device)
+ 
+   CLog::Log(LOGINFO, "CAESinkALSA::Initialize - Attempting to open device \"{}\"", device);
+ 
++  m_mp2Writes = 0;
++  CLog::Log(LOGINFO,
++            "MP2ALSA open:request device=\"{}\" devType={} passthrough={} rate={} channels={} "
++            "aeformat={} aesparams=\"{}\"",
++            device, static_cast<int>(devType), m_passthrough ? 1 : 0, inconfig.sampleRate,
++            inconfig.channels, static_cast<int>(inconfig.format), AESParams);
++
+   /* get the sound config */
+   std::unique_ptr<snd_config_t, SndConfigDeleter> config = SndConfigCopy(snd_config);
+ 
+@@ -550,6 +586,8 @@ bool CAESinkALSA::Initialize(AEAudioFormat &format, std::string &device)
+   m_device = device;
+ 
+   CLog::Log(LOGINFO, "CAESinkALSA::Initialize - Opened device \"{}\"", device);
++  CLog::Log(LOGINFO, "MP2ALSA open:result snd_pcm_name=\"{}\" type={} state={}", device,
++            static_cast<int>(snd_pcm_type(m_pcm)), MP2State(m_pcm));
+ 
+   snd_pcm_chmap_t* selectedChmap = NULL;
+   if (!m_passthrough)
+@@ -562,22 +600,51 @@ bool CAESinkALSA::Initialize(AEAudioFormat &format, std::string &device)
+     }
+   }
+ 
+-  if (!InitializeHW(inconfig, outconfig) || !InitializeSW(outconfig))
++  CLog::Log(LOGINFO, "MP2ALSA hw:before state={}", MP2State(m_pcm));
++
++  if (!InitializeHW(inconfig, outconfig))
++  {
++    CLog::Log(LOGERROR, "MP2ALSA hw:FAILED state={}", MP2State(m_pcm));
++    free(selectedChmap);
++    return false;
++  }
++  CLog::Log(LOGINFO,
++            "MP2ALSA hw:after state={} rate={} channels={} aeformat={} periodSize={} "
++            "frameSize={}",
++            MP2State(m_pcm), outconfig.sampleRate, outconfig.channels,
++            static_cast<int>(outconfig.format), outconfig.periodSize, outconfig.frameSize);
++
++  if (!InitializeSW(outconfig))
+   {
++    CLog::Log(LOGERROR, "MP2ALSA sw:FAILED state={}", MP2State(m_pcm));
+     free(selectedChmap);
+     return false;
+   }
++  CLog::Log(LOGINFO, "MP2ALSA sw:after state={}", MP2State(m_pcm));
+ 
+   if (selectedChmap)
+   {
+     /* failure is OK, that likely just means the selected chmap is fixed already */
+-    snd_pcm_set_chmap(m_pcm, selectedChmap);
++    std::string requested;
++    for (unsigned int i = 0; i < selectedChmap->channels; ++i)
++      requested += std::string(i ? " " : "") +
++                   snd_pcm_chmap_name(static_cast<snd_pcm_chmap_position>(selectedChmap->pos[i]));
++    int chmapRet = snd_pcm_set_chmap(m_pcm, selectedChmap);
++    CLog::Log(LOGINFO, "MP2ALSA chmap:set requested=\"{}\" ret={} state={}", requested, chmapRet,
++              MP2State(m_pcm));
+     free(selectedChmap);
+   }
++  else
++  {
++    CLog::Log(LOGINFO, "MP2ALSA chmap:set requested=none state={}", MP2State(m_pcm));
++  }
+ 
+   // we want it blocking
+-  snd_pcm_nonblock(m_pcm, 0);
+-  snd_pcm_prepare (m_pcm);
++  int nonblockRet = snd_pcm_nonblock(m_pcm, 0);
++  CLog::Log(LOGINFO, "MP2ALSA nonblock ret={} state={}", nonblockRet, MP2State(m_pcm));
++
++  int prepareRet = snd_pcm_prepare(m_pcm);
++  CLog::Log(LOGINFO, "MP2ALSA prepare ret={} state={}", prepareRet, MP2State(m_pcm));
+ 
+   if (m_passthrough && inconfig.channels != outconfig.channels)
+   {
+@@ -850,7 +917,20 @@ bool CAESinkALSA::InitializeSW(const ALSAConfig &inconfig)
+   snd_pcm_sw_params_set_silence_size     (m_pcm, sw_params, boundary);
+   snd_pcm_sw_params_set_avail_min        (m_pcm, sw_params, inconfig.periodSize);
+ 
+-  if (snd_pcm_sw_params(m_pcm, sw_params) < 0)
++  int swRet = snd_pcm_sw_params(m_pcm, sw_params);
++
++  snd_pcm_uframes_t startThreshold = 0, availMin = 0, silenceSize = 0;
++  snd_pcm_sw_params_get_start_threshold(sw_params, &startThreshold);
++  snd_pcm_sw_params_get_avail_min(sw_params, &availMin);
++  snd_pcm_sw_params_get_silence_size(sw_params, &silenceSize);
++  CLog::Log(LOGINFO,
++            "MP2ALSA sw:params ret={} start_threshold={} avail_min={} silence_size={} "
++            "boundary={} state={}",
++            swRet, static_cast<unsigned long>(startThreshold),
++            static_cast<unsigned long>(availMin), static_cast<unsigned long>(silenceSize),
++            static_cast<unsigned long>(boundary), MP2State(m_pcm));
++
++  if (swRet < 0)
+   {
+     CLog::Log(LOGERROR, "CAESinkALSA::InitializeSW - Failed to set the parameters");
+     return false;
+@@ -920,11 +1000,35 @@ unsigned int CAESinkALSA::AddPackets(uint8_t **data, unsigned int frames, unsign
+     else // take care as we can come here a second time if the sink does not eat all data
+       amount = (unsigned int) data_left;
+ 
++    /* The state immediately before and immediately after the first write is
++       the whole diagnosis for an EBADFD: OPEN means the hw params never took,
++       SETUP means prepare() was skipped or undone, PREPARED means something
++       else invalidated the descriptor between prepare and write. Logging it
++       after the failure alone would not distinguish those. */
++    const bool mp2First = (m_mp2Writes == 0);
++    const char* mp2StateBefore = MP2State(m_pcm);
++    if (mp2First)
++      CLog::Log(LOGINFO, "MP2ALSA write:first:before frames={} state={} fragmented={}", amount,
++                mp2StateBefore, m_fragmented ? 1 : 0);
++
+     int ret = snd_pcm_writei(m_pcm, buffer, amount);
++
++    if (mp2First)
++    {
++      m_mp2Writes = 1;
++      CLog::Log(ret < 0 ? LOGERROR : LOGINFO,
++                "MP2ALSA write:first:after frames={} ret={} ({}) state_before={} state_after={}",
++                amount, ret, ret < 0 ? snd_strerror(ret) : "ok", mp2StateBefore, MP2State(m_pcm));
++    }
++    else
++    {
++      ++m_mp2Writes;
++    }
++
+     if (ret < 0)
+     {
+-      CLog::Log(LOGERROR, "CAESinkALSA - snd_pcm_writei({}) {} - trying to recover", ret,
+-                snd_strerror(ret));
++      CLog::Log(LOGERROR, "CAESinkALSA - snd_pcm_writei({}) {} - trying to recover, state={}", ret,
++                snd_strerror(ret), MP2State(m_pcm));
+       ret = snd_pcm_recover(m_pcm, ret, 1);
+       if(ret < 0)
+       {
+diff --git a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.h b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.h
+index 90c532176d..0a8eefded9 100644
+--- a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.h
++++ b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.h
+@@ -63,6 +63,11 @@ private:
+   unsigned int m_bufferSize = 0;
+   double m_formatSampleRateMul = 0.0;
+   bool m_passthrough = false;
++
++  /* Gate MP2 instrumentation. Counts writes since the last Initialize() so the
++     FIRST snd_pcm_writei of a stream can be logged in full without drowning the
++     log in per-period noise afterwards. */
++  unsigned int m_mp2Writes{0};
+   std::string m_device;
+   snd_pcm_t *m_pcm;
+   int m_timeout = 0;
