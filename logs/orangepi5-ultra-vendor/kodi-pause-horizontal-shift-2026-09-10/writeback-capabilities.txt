@@ -1,0 +1,53 @@
+driver: rockchip 4.0.0 (RockChip Soc DRM)
+master: no (another process holds it)
+
+crtcs:
+  [0] id=89
+
+connectors:
+  id=199 type=Writeback-1 status=unknown encoders=1
+    encoder id=194 possible_crtcs=0x1
+    DPMS                         = 0 (On)
+    link-status                  = 0 (Good)
+    non-desktop                  = 0
+    TILE                         = 0
+    CRTC_ID                      = 0
+    WRITEBACK_OUT_FENCE_PTR      = 0
+    WRITEBACK_FB_ID              = 0
+    WRITEBACK_PIXEL_FORMATS      = 198 [blob 16 bytes]
+      formats: BG24 AR24 RG16 NV12
+    brightness                   = 50
+    contrast                     = 50
+    saturation                   = 50
+    hue                          = 50
+  id=201 type=HDMI-A-1 status=connected encoders=1
+    encoder id=200 possible_crtcs=0x1
+    EDID                         = 230 [blob 256 bytes]
+    DPMS                         = 0 (On)
+    link-status                  = 0 (Good)
+    non-desktop                  = 0
+    TILE                         = 0
+    CRTC_ID                      = 89
+    color_depth                  = 10 (30bit)
+    color_format                 = 1 (ycbcr444)
+    color_depth_caps             = 7
+    color_format_caps            = 15
+    HDR_PANEL_METADATA           = 228 [blob 8 bytes]
+    HDR_PANEL_DOVI_VSDB          = 229 [blob 26 bytes]
+    allm_capacity                = 0
+    allm_enable                  = 0 (disable)
+    output_hdmi_dvi              = 0 (auto)
+    VSIF_DATA                    = 0
+    output_type_capacity         = 1 (HDMI)
+    quant_range                  = 0 (default)
+    HDR_OUTPUT_METADATA          = 240 [blob 32 bytes]
+    Colorspace                   = 10 (BT2020_YCC)
+    CONNECTOR_ID                 = 1
+    Content Protection           = 0 (Undesired)
+    HDCP Content Type            = 0 (HDCP Type0)
+    hdcp_encrypted               = 0
+    MODE_COLOR_CAPACITY          = 232 [blob 3840 bytes]
+    brightness                   = 50
+    contrast                     = 50
+    saturation                   = 50
+    hue                          = 50

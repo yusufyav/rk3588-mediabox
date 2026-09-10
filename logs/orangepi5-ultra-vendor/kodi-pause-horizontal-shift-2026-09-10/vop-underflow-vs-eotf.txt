@@ -1,0 +1,37 @@
+# VOP2 video-port output FIFO underflow (POST_BUF_EMPTY) against the one
+# variable that matters: the EOTF tag on the composited GUI plane.
+# Identical planes, identical rectangles, identical HDR10 output, 12 s each.
+
+GUI plane EOTF=0  ->  POST_BUF_EMPTY count = 0
+GUI plane EOTF=1  ->  POST_BUF_EMPTY count = 0
+GUI plane EOTF=2  ->  POST_BUF_EMPTY count = 0
+GUI plane EOTF=3  ->  POST_BUF_EMPTY count = 0
+
+# Control: GUI layer absent entirely, video plane only.
+no GUI layer      ->  POST_BUF_EMPTY count = 0
+
+# Second pass: does the underflow appear only when a writeback capture is
+# taken? Writeback adds a memory client to the same video port, so this
+# separates a genuine display-path cost from an artefact of measuring.
+
+EOTF=0 WITH writeback capture -> POST_BUF_EMPTY = 0
+EOTF=2 WITH writeback capture -> POST_BUF_EMPTY = 0
+
+# Third pass: the real failing configuration -- Kodi, HDR playback,
+# 0009 binary, GUI plane tagged PQ when the OSD is drawn.
+Kodi HDR playback, no OSD (12 s) -> POST_BUF_EMPTY = 0
+Kodi HDR playback, OSD up (12 s) -> POST_BUF_EMPTY = 0
+
+# Conclusion on POST_BUF_EMPTY
+#
+# 140 POST_BUF_EMPTY events were present in the kernel ring buffer earlier in
+# the session, which made an output-FIFO underflow an attractive mechanism for
+# a frame that arrives late and lands to the right. It does not survive
+# testing. The counter is zero in every controlled arm above -- including the
+# EOTF=2 arm that reproduces the fault, including the same arm with a
+# writeback client added, and including the real Kodi HDR playback with the
+# OSD drawn, which is the configuration the operator sees fail.
+#
+# The earlier events are therefore not the mechanism. They are unattributed;
+# the likely source is mode-set churn from starting and stopping the probe
+# many times, but that was not established and is not claimed.

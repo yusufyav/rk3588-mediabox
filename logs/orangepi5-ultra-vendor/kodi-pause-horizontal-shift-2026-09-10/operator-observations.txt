@@ -1,0 +1,52 @@
+# Physical observations. Every line here is the operator's report of what the
+# panel showed; none of it is inferred by the tooling. They are recorded
+# separately from the machine measurements because they are the only evidence
+# of what actually leaves the HDMI connector -- writeback taps the composited
+# frame inside the SoC and cannot see the emitted signal.
+
+SINK INDEPENDENCE
+  The fault was reproduced on a second display, roughly fifty times. The
+  operator states plainly that it is not the Sony BRAVIA and that the cause is
+  in the source. This retires the whole sink branch of the gate, including the
+  Pixel Shift / Display Area / Wide Mode A/B that Phase 0 calls for: a setting
+  on one television cannot explain a fault that follows the source to another.
+
+TRIGGER IS THE GUI PLANE, NOT THE PAUSE
+  Asked to show the OSD while the film was still PLAYING, the operator
+  reported the same displacement. So the trigger is the OSD/GUI plane entering
+  the composition, not the picture freezing. This retires the television's
+  static-image / panel-protection hypothesis, which requires a still picture.
+
+SHAPE OF THE DISPLACEMENT
+  Black band appears at the LEFT edge; content is lost off the RIGHT edge.
+  A translation, not a zoom: a zoom or an underscan change would band all four
+  edges. Photographs of the panel corner accompany this: in them the OSD's own
+  banner and progress bar begin at the same x as the picture, so the video and
+  the OSD move together as one frame.
+
+SYNTHETIC REPRODUCTION, SDR OUTPUT PIPELINE
+  Static test pattern, no Kodi running, GUI layer toggled on and off.
+  Operator: "Hayır, desen hiç oynamıyor" -- no displacement.
+  This arm was later found to have run on an SDR output pipeline
+  (overlay_mode 0, RGB888), which is NOT the pipeline Kodi uses. The negative
+  result is therefore not evidence about Kodi's configuration, and is kept
+  here only because it is what prompted checking the output state at all.
+
+SYNTHETIC REPRODUCTION, HDR10 OUTPUT PIPELINE
+  Same pattern, same toggle, output driven to HDR10 / YUYV10_1X20 /
+  overlay_mode 1 -- matching Kodi's measured output state exactly.
+  Operator: "Evet, kayma var" -- the displacement reproduces.
+  Kodi is not running in this arm. Nothing above the DRM layer is involved.
+
+SYNTHETIC, HDR10 OUTPUT, GUI PLANE TAGGED SDR
+  Identical to the arm above except the GUI plane carries EOTF=0.
+  Operator: "Kayma kayboldu" -- no displacement.
+  Single variable, both directions, no player in the loop.
+
+CANDIDATE FIX IN KODI (rejected)
+  Kodi rebuilt with SetGuiPlaneEotf downgrading PQ to TRADITIONAL_HDR.
+  Operator: "Kayma düzeldi ama OSD nın soluk mavi rengi geri geldi",
+  and separately: OSD colours regressed while video stayed good.
+  The washed OSD blue is precisely the fault patch 0009 was accepted for
+  closing, so this trades one accepted fix for the other and is rejected
+  under the gate's own 0009 regression rule.

@@ -1,0 +1,36 @@
+# Rejected candidate fix: Kodi, SetGuiPlaneEotf downgrading PQ to
+# TRADITIONAL_HDR, so the composited GUI plane is tagged EOTF=1 instead of 2.
+#
+# Source change (experimental, applied on the target, NOT committed):
+#   xbmc/windowing/gbm/WinSystemGbm.cpp, in CWinSystemGbm::SetGuiPlaneEotf
+#     auto eotf = hdrEncoded ? m_eotf : Eotf::TRADITIONAL_SDR;
+#     if (eotf == Eotf::PQ) eotf = Eotf::TRADITIONAL_HDR;
+#
+# Measured on the target, HDR playback of the reference asset, OSD drawn:
+
+  overlay_mode                 0        (0009 baseline: 1)
+  GUI plane   Cluster0-win0    GAMMA HDR[1], csc mode[0], r2y[0]
+                                        (0009 baseline: HDR10[2], csc mode[3], r2y[1])
+  video plane Esmart0-win0     HDR10[2], csc mode[3], y2r[1]
+                                        (0009 baseline: HDR10[2], csc mode[0], y2r[0])
+  video geometry               src 3840x2080 -> dst 3840x2076+0+42   (unchanged)
+  VP                           HDR10[2], BT.2020, Limited            (unchanged)
+
+# Against the gate's 0009 regression criteria:
+#
+#   overlay_mode = 1     FAIL (became 0)
+#   video csc mode[0]    FAIL (became 3, with y2r engaged)
+#   GUI EOTF = 2         FAIL (became 1, by construction)
+#   video EOTF = 2       pass
+#   VP HDR10[2]          pass
+#
+# Physical verdict: the horizontal displacement is gone, and the washed-out
+# OSD blue that patch 0009 was accepted for fixing came back. Video quality
+# itself was reported unchanged.
+#
+# So the candidate does not fix the fault so much as choose which of the two
+# accepted results to give up. REJECTED under the gate's rule that picture
+# quality must not regress from the 0009 baseline.
+#
+# The target was returned to the 0009 binary and the 0009 source afterwards;
+# the restored state is verified in the report.

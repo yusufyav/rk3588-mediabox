@@ -1,0 +1,79 @@
+# DRM writeback registration -- synthetic reproduction, no Kodi involved.
+# Video layer: NV12 3840x2080 -> 3840x2076+0+42 (scaler engaged), EOTF=2, BT.2020 limited.
+# GUI layer:   ARGB8888 full-screen, toggled on/off with no modeset between.
+# Output:      HDR10, YUYV10_1X20, output_mode 9, 3840x2160p24 -- matching Kodi.
+
+================ GUI plane EOTF=0 ================
+reference: e0.c0.novideo.nv12
+test:      e0.c0.gui.nv12
+geometry:  3840x2160 NV12, luma plane only
+bands:     rows 900:1100 for dx, columns 1800:2200 for dy
+coherence: reference 1.0000  test 1.0000
+
+writeback_dx_pixels = 0
+writeback_dy_pixels = 0
+dx_correlation      = 0.999999 (next best outside peak 0.723471)
+dy_correlation      = 1.000000 (next best outside peak 0.974646)
+confidence          = high
+
+================ GUI plane EOTF=1 ================
+reference: e1.c0.novideo.nv12
+test:      e1.c0.gui.nv12
+geometry:  3840x2160 NV12, luma plane only
+bands:     rows 900:1100 for dx, columns 1800:2200 for dy
+coherence: reference 1.0000  test 1.0000
+
+writeback_dx_pixels = 0
+writeback_dy_pixels = 0
+dx_correlation      = 0.999999 (next best outside peak 0.723471)
+dy_correlation      = 1.000000 (next best outside peak 0.974646)
+confidence          = high
+
+================ GUI plane EOTF=2 ================
+reference: e2.c0.novideo.nv12
+test:      e2.c0.gui.nv12
+geometry:  3840x2160 NV12, luma plane only
+bands:     rows 900:1100 for dx, columns 1800:2200 for dy
+coherence: reference 1.0000  test -0.0333
+
+CAPTURE INVALID: a capture disagrees with itself across rows,
+so it was torn during readback. No displacement is measurable
+from it -- fix the capture before reading anything into dx.
+
+================ GUI plane EOTF=3 ================
+reference: e3.c0.novideo.nv12
+test:      e3.c0.gui.nv12
+geometry:  3840x2160 NV12, luma plane only
+bands:     rows 900:1100 for dx, columns 1800:2200 for dy
+coherence: reference 1.0000  test 1.0000
+
+writeback_dx_pixels = 0
+writeback_dy_pixels = 0
+dx_correlation      = 0.999999 (next best outside peak 0.723471)
+dy_correlation      = 1.000000 (next best outside peak 0.974646)
+confidence          = high
+
+================ 1920x1080 HDR (bandwidth control) ================
+-- GUI plane EOTF=0 --
+reference: hd0.c0.novideo.nv12
+test:      hd0.c0.gui.nv12
+geometry:  1920x1080 NV12, luma plane only
+bands:     rows 450:550 for dx, columns 900:1100 for dy
+coherence: reference 1.0000  test 1.0000
+
+writeback_dx_pixels = 0
+writeback_dy_pixels = not measurable (uniform row profile by design)
+dx_correlation      = 0.999999 (next best outside peak 0.725022)
+confidence          = high
+
+-- GUI plane EOTF=2 --
+reference: hd2.c0.novideo.nv12
+test:      hd2.c0.gui.nv12
+geometry:  1920x1080 NV12, luma plane only
+bands:     rows 450:550 for dx, columns 900:1100 for dy
+coherence: reference 1.0000  test -0.0485
+
+CAPTURE INVALID: a capture disagrees with itself across rows,
+so it was torn during readback. No displacement is measurable
+from it -- fix the capture before reading anything into dx.
+
