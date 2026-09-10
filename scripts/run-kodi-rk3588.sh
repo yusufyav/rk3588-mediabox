@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
-# Launches Kodi on the target in standalone GBM/DRM mode, in an isolated home.
+# Launches Kodi on the RK3588 target in standalone GBM/DRM mode.
 #
-#   scripts/run-kodi.sh start [--fresh]   start Kodi, wait for JSON-RPC
-#   scripts/run-kodi.sh stop              stop it and confirm the link is back
-#   scripts/run-kodi.sh rpc '<json>'      one JSON-RPC call
-#   scripts/run-kodi.sh log [N]           tail the Kodi log
+#   scripts/run-kodi-rk3588.sh start [--fresh]  start Kodi, wait for JSON-RPC
+#   scripts/run-kodi-rk3588.sh stop             stop it and confirm
+#   scripts/run-kodi-rk3588.sh rpc '<json>'     one JSON-RPC call
+#   scripts/run-kodi-rk3588.sh log [N]          tail the Kodi log
+#   scripts/run-kodi-rk3588.sh fetch-log        print the whole Kodi log
+#   scripts/run-kodi-rk3588.sh gl-info          the GL strings from the last run
+#
+# MEDIABOX_GPU selects the GL user space, and is the only difference between an
+# accelerated run and a software one:
+#
+#   mali (default) - the private libmali G610 runtime from
+#                    scripts/install-mali-runtime.sh, prepended to
+#                    LD_LIBRARY_PATH. Nothing is installed system-wide, so this
+#                    is per-process and reversible by unsetting one variable.
+#   mesa           - the untouched system Mesa, i.e. llvmpipe. Kept because the
+#                    Mali GUI claim is only worth as much as the software run it
+#                    is compared against, and because it is the fallback if the
+#                    vendor blob ever regresses.
 #
 # The home directory is /var/tmp/kodi-home, not root's: Kodi writes a database,
 # thumbnails and a log into it, none of which belong in this repository or in
-# the operator's own dotfiles. --fresh wipes it so a run starts from the
-# seeded appliance profile rather than from whatever the last run left.
+# the operator's own dotfiles. --fresh wipes it so a run starts from the seeded
+# appliance profile rather than from whatever the last run left.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=env.sh
@@ -18,9 +32,23 @@ source "$here/scripts/env.sh"
 : "${KODI_PREFIX:=/opt/rk3588-mediabox/kodi}"
 : "${KODI_RUN_HOME:=/var/tmp/kodi-home}"
 : "${KODI_RPC_PORT:=8080}"
+: "${MALI_RUNTIME:=/opt/rk3588-mediabox/mali-g24p0-runtime}"
+: "${MEDIABOX_GPU:=mali}"
 
 userdata="$KODI_RUN_HOME/.kodi/userdata"
 kodi_log="$KODI_RUN_HOME/.kodi/temp/kodi.log"
+
+# The FFmpeg this build links is static, but it pulls in the Rockchip MPP and
+# RGA shared libraries, which live under the ScreenBridge prefix and are not on
+# the default search path. Mali, when selected, goes in FRONT of it: kodi-gbm's
+# DT_NEEDED entries are the generic sonames (libEGL.so.1, libGLESv2.so.2,
+# libgbm.so.1), so first match on LD_LIBRARY_PATH decides the whole GL stack
+# with no rebuild and no change under /usr/lib.
+case "$MEDIABOX_GPU" in
+  mali) ld_path="$MALI_RUNTIME/lib:$MEDIABOX_FFMPEG_PREFIX/lib" ;;
+  mesa) ld_path="$MEDIABOX_FFMPEG_PREFIX/lib" ;;
+  *)    echo "MEDIABOX_GPU must be 'mali' or 'mesa', not '$MEDIABOX_GPU'" >&2; exit 2 ;;
+esac
 
 rpc() {
   mediabox_ssh "curl -s --max-time 10 -H 'Content-Type: application/json' \
@@ -31,22 +59,28 @@ case "${1:-}" in
   start)
     fresh=""
     [ "${2:-}" = "--fresh" ] && fresh=1
+    if [ "$MEDIABOX_GPU" = mali ] && ! mediabox_ssh "test -e '$MALI_RUNTIME/lib/libEGL.so.1'"; then
+      echo "no Mali runtime at $MALI_RUNTIME - run scripts/install-mali-runtime.sh first" >&2
+      exit 1
+    fi
     # Never start a second DRM master: the first one would keep the display and
     # the second would fail in a way that looks like a Kodi bug.
-    mediabox_ssh "pkill -f kodi.bin >/dev/null 2>&1; sleep 2; true"
+    mediabox_ssh "pkill -f kodi.bin >/dev/null 2>&1; pkill -f kodi-gbm >/dev/null 2>&1; sleep 2; true"
     if [ -n "$fresh" ]; then
       mediabox_ssh "rm -rf '$KODI_RUN_HOME'"
     fi
     mediabox_ssh "mkdir -p '$userdata' '$KODI_RUN_HOME/.kodi/temp'"
     mediabox_scp "$here/config/kodi/guisettings-appliance.xml" \
       "$MEDIABOX_TARGET:$userdata/guisettings.xml" >/dev/null
-    echo "== starting Kodi (GBM/DRM standalone)"
-    # The FFmpeg this build links is static, but it pulls in the Rockchip MPP
-    # and RGA shared libraries, which live under the ScreenBridge prefix and
-    # are not on the default search path. Setting it here keeps the change
-    # inside this launcher rather than editing the system's ld.so config.
+    echo "== starting Kodi (GBM/DRM standalone, GPU=$MEDIABOX_GPU)"
+    # AE_SINK pins the audio engine to ALSA. The build already has
+    # ENABLE_PULSEAUDIO=OFF, so this cannot silently pick PulseAudio; setting it
+    # anyway means a future build that re-enables PulseAudio cannot change the
+    # audio path underneath this gate's evidence without the change being loud.
     mediabox_ssh "cd '$KODI_RUN_HOME' && HOME='$KODI_RUN_HOME' \
-        LD_LIBRARY_PATH='$MEDIABOX_FFMPEG_PREFIX/lib' \
+        LD_LIBRARY_PATH='$ld_path' \
+        AE_SINK=ALSA \
+        MEDIABOX_GPU='$MEDIABOX_GPU' \
         nohup '$KODI_PREFIX/lib/kodi/kodi-gbm' --standalone --debug \
         > '$KODI_RUN_HOME/kodi-stdout.log' 2>&1 & echo pid=\$!"
     echo "== waiting for JSON-RPC"
@@ -54,6 +88,7 @@ case "${1:-}" in
       sleep 3
       if rpc '{"jsonrpc":"2.0","id":1,"method":"JSONRPC.Ping"}' 2>/dev/null | grep -q pong; then
         echo "== Kodi is up after $((i * 3))s"
+        "$0" gl-info
         exit 0
       fi
     done
@@ -63,8 +98,8 @@ case "${1:-}" in
   stop)
     rpc '{"jsonrpc":"2.0","id":1,"method":"Application.Quit"}' >/dev/null 2>&1
     sleep 6
-    mediabox_ssh "pkill -f kodi.bin >/dev/null 2>&1; sleep 2; \
-        pgrep -af kodi.bin | grep -v pgrep || echo 'kodi stopped'"
+    mediabox_ssh "pkill -f kodi.bin >/dev/null 2>&1; pkill -f kodi-gbm >/dev/null 2>&1; sleep 2; \
+        pgrep -af 'kodi.bin|kodi-gbm' | grep -v pgrep || echo 'kodi stopped'"
     ;;
   rpc)
     rpc "$2"
@@ -75,8 +110,24 @@ case "${1:-}" in
   fetch-log)
     mediabox_ssh "cat '$kodi_log' 2>/dev/null"
     ;;
+  gl-info)
+    # Kodi logs the GL strings once at start-up. Reading them back from its own
+    # log is the only claim that counts: a probe proving Mali says nothing about
+    # what this process loaded.
+    mediabox_ssh "
+      grep -m1 -A3 'GL_VENDOR' '$kodi_log' 2>/dev/null \
+        || grep -iE 'GL_VENDOR|GL_RENDERER|GL_VERSION|Vendor:|Renderer:|Version:' '$kodi_log' 2>/dev/null | head -8
+      echo '--- objects actually mapped by kodi-gbm ---'
+      pid=\$(pgrep -f kodi-gbm | head -1)
+      if [ -n \"\$pid\" ]; then
+        tr '\0' '\n' < /proc/\$pid/maps 2>/dev/null | true
+        awk '{print \$6}' /proc/\$pid/maps | grep -E 'libmali|libEGL|libGLES|libgbm|gallium|swrast|dri' | sort -u
+      else
+        echo '(kodi not running)'
+      fi"
+    ;;
   *)
-    echo "usage: $0 [start [--fresh]|stop|rpc <json>|log [N]|fetch-log]" >&2
+    echo "usage: $0 [start [--fresh]|stop|rpc <json>|log [N]|fetch-log|gl-info]" >&2
     exit 2
     ;;
 esac
