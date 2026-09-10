@@ -1,0 +1,112 @@
+Patch 0009 acceptance -- GUI plane EOTF, install + readback + operator A/B
+=========================================================================
+
+2026-09-10 15:35..15:38, Orange Pi 5 Ultra, vendor 6.1.115, Kodi 22.0b2-Piers
+with patches 0003/0006/0007/0008/0009. Sink: HP X27q, 2560x1440p60.
+File: past-lives.mkv at 30:00. GPU: Mali-G610 (g24p0 user space).
+
+The 0008-only build was backed up to kodi-gbm.pre0009 before installing, so
+the previous binary remains on the appliance for a direct A/B.
+
+Build provenance, verified rather than assumed
+----------------------------------------------
+  patch <-> source tree   `git apply --check --reverse` succeeds for both
+                          0008 and 0009, so the tree is exactly these patches
+  0009 compiled           nm: T CWinSystemGbm::SetGuiPlaneEotf(bool)
+  install                 installed binary gained "where=SetGuiPlaneEotf";
+                          the pre-0009 binary has 0 occurrences of it
+
+Plane EOTF readback across the whole lifecycle
+----------------------------------------------
+plane 57 = GUI (AR24), plane 73 = video (NV15). crtc/fb given to show which
+planes are actually scanning out.
+
+  state                        plane 57            plane 73
+  S0  SDR GUI                  crtc=89 EOTF=0      disabled  EOTF=2 (*)
+  S1  HDR video, no OSD        crtc=89 EOTF=2      crtc=89   EOTF=2
+  S2  HDR video + OSD          crtc=89 EOTF=2      crtc=89   EOTF=2
+  S3  stop                     crtc=89 EOTF=0      disabled  EOTF=2 (*)
+  S4  replay                   crtc=89 EOTF=2      crtc=89   EOTF=2
+
+  (*) see "Residual finding" below.
+
+The OSD transition, which is what 0009 exists to fix
+----------------------------------------------------
+With 0008 alone the previous gate measured `overlay_mode 1->0` on opening the
+player controls, the video CSC returning to `y2r=1, csc mode=3`, and the GUI
+plane staying `SDR[0]` while carrying PQ-coded pixels.
+
+Measured now, S1 -> S2 (OSD opened):
+
+                        S1 (no OSD)            S2 (OSD up)
+  bus_format            200d YUYV10_1X20       200d YUYV10_1X20   unchanged
+  Video Port0           overlay_mode[1]        overlay_mode[1]    unchanged
+                        HDR10[2] BT.2020 Ltd   HDR10[2] BT.2020 Ltd
+  Esmart0-win0 (video)  NV15 HDR10[2]          NV15 HDR10[2]      unchanged
+                        y2r[0] r2y[0] csc[0]   y2r[0] r2y[0] csc[0]
+  Cluster0-win0 (GUI)   AR24 HDR10[2]          AR24 HDR10[2]      unchanged
+                        plane EOTF=2           plane EOTF=2
+
+S2 is identical to S1 in every field. The second SDR-to-HDR conversion is
+gone: the video window stays at csc mode[0] with the OSD up, where before it
+returned to csc mode[3].
+
+Teardown and reacquisition
+--------------------------
+S3 (stop) returns the output to `100a RGB888_1X24`, SDR, BT.709, Full range,
+`overlay_mode[0]`, and the GUI plane to EOTF=0 -- identical to S0. S4 (replay)
+restores `200d YUYV10_1X20`, HDR10[2], BT.2020 Limited and EOTF=2 on both
+planes. Connector at S4: color_depth=30bit, color_format=ycbcr444,
+Colorspace=BT2020_YCC.
+
+Kodi's own log shows the whole cycle, GUI plane and video plane in step:
+
+  15:36:05.955  SetGuiPlaneEotf plane=57 hdr_encoded=true  eotf=2
+  15:36:05.956  VideoLayerBridge:Configure plane=73 NV15 ... eotf=2
+  15:37:45.299  SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+  15:37:45.487  VideoLayerBridge:Disable   plane=73 NV15
+  15:38:04.991  SetGuiPlaneEotf plane=57 hdr_encoded=true  eotf=2
+  15:38:04.994  VideoLayerBridge:Configure plane=73 NV15 ... eotf=2
+
+Operator's physical result
+--------------------------
+  "Ne yaptin sen boyle? Su ana kadarki en iyi goruntuyu aldik :)"
+
+Reported with the OSD up, which is the state 0009 targets, and it is the
+first time in this gate that the player controls have been called correct.
+
+Side effects across the session
+-------------------------------
+  snd_pcm_writei(-77)      : 0
+  OutputSamples failed     : 0
+  xrun / underrun          : 0
+  Kodi alive at end        : yes
+  kernel, last 10 min      : oops 0  panic 0  BUG 0  call trace 0
+                             gpu fault 0  iommu 0  out of I/O virtual memory 0
+                             reset 0  hang 0  underflow 0  atomic fail 0
+                             MPP err 0  hdmi error 0
+
+EBADFD is 0 here where the previous session saw four. That session drove the
+sink to a 23.976 film mode, re-training the HDMI link on each transition; this
+one ran the HP X27q without a film-rate mode change. The count is a property
+of how many modesets a session performs, not evidence that patch 0007 became
+unnecessary -- 0007 is still installed and still the reason a modeset is
+survivable.
+
+Residual finding: 0008 does not restore the video plane's EOTF
+--------------------------------------------------------------
+At S0 and S3 the video plane reads EOTF=2 while disabled (crtc=0, fb=0). It
+was first noticed with Kodi not running at all, and the log above shows why:
+`CVideoLayerBridgeDRMPRIME::Disable()` is called on stop and logs, but unlike
+0009's GUI path it never writes EOTF back to 0. The property stays latched at
+whatever the last played file set.
+
+No visual impact was observed and none is expected while the plane is
+disabled, and Kodi itself is self-consistent because 0008 rewrites EOTF from
+the picture on every Configure(). The exposure is a different DRM client --
+the MP1b raw probe, or Kodi replaying SDR content through a path that does not
+set the property -- inheriting a stale PQ tag. It is also an asymmetry with
+0009, which does restore SDR on teardown, and with this gate's own stated
+acceptance criterion that stop should return the plane to EOTF=0.
+
+Recorded as open. `Disable()` is the place for the fix.

@@ -1,0 +1,82 @@
+Refresh-rate cadence on a sink with no film-rate mode
+=====================================================
+
+2026-09-10, HP X27q (2560x1440), Orange Pi 5 Ultra vendor 6.1.115.
+Content: past-lives.mkv, 23.976023 fps (24000/1001).
+
+Symptom, reported by the operator during the 0009 acceptance run: the picture
+"slides at certain intervals" -- a visible hitch, repeating.
+
+The sink has no film-rate mode at all
+-------------------------------------
+The panel advertises 31 modes. Not one is 24, 23.976, 48 or 47.95 Hz; the
+lowest refresh rate on the whole list is 59.94. Gate MP1b's cadence result was
+obtained on a sink that did offer 3840x2160p23.976, so it does not transfer to
+this one.
+
+Why the hitch happens, and its period
+-------------------------------------
+The desktop mode is 2560x1440 at a real 59.9506 Hz (241500 kHz / (2720*1481)).
+
+  59.9506 / 23.976023 = 2.500437
+
+3:2 pulldown displays frames alternately for 2 and 3 refreshes, averaging 2.5.
+The residual 0.000437 refresh per frame accumulates until it is worth a whole
+refresh:
+
+  1 / 0.000437 = 2288 frames = 2288 / 23.976 = ~95 s
+
+So one extra frame repeat roughly every 95 seconds. That is the reported
+interval.
+
+Note that `modetest` prints the refresh rate rounded to two decimals, which
+hides exactly this: it shows both a perfect 59.9400 and a drifting 59.9506 as
+"59.94" / "59.95". Any judgement about cadence has to recompute the rate from
+the mode timing, which is what `scripts/monitor-cadence-probe.sh` does.
+
+Why Kodi could not fix it by switching modes
+--------------------------------------------
+Kodi's whitelist search (`CResolutionUtils::FindResolutionFromWhitelist`) looks
+for three ratios only -- x1, x2, and x2.5 (3:2 pulldown) -- and only against
+the video's own resolution or the current desktop resolution.
+
+  * The x2.5 target is 23.976023 * 2.5 = 59.940058 Hz.
+  * The desktop mode is 59.9506 Hz. The difference is 0.011 Hz against a
+    tolerance of 0.01 (`MathUtils::FloatEquals(..., 0.01f)`), so it misses by
+    a hair.
+  * The modes that do match exactly are all at 1920x1080 (59.9402 = exactly
+    2.5x, and 119.88 = exactly 5x), which is neither the video's resolution
+    (3840x2080) nor the desktop's, so the algorithm never considers them.
+  * 119.88 would be the best of all -- every frame shown exactly five times,
+    no 3:2 pattern at all -- but Kodi has no x5 tier, so it cannot be reached
+    by mode selection.
+
+The 3:2 and double-rate search tiers were also off: `whitelistpulldown` and
+`whitelistdoublerefreshrate` were both false, which is why the log shows only
+the two exact-rate passes before "No resolution matched".
+
+What was changed
+----------------
+`videoplayer.usedisplayasclock` ("Sync playback to display") was turned on. It
+makes the display's vblank the master clock and resamples audio to match, so
+the 2.500437 ratio is locked to a fixed 2.5 instead of being allowed to drift.
+
+  CVideoReferenceClock: Detected refreshrate: 59.951 hertz
+  CVideoPlayerAudio:: synctype set to 1: resample
+  CVideoReferenceClock: Clock speed 100.02 %
+
+100.02% is the 0.017% stretch the arithmetic above predicts. It costs no
+resolution and the pitch change is inaudible. HDR was unaffected: EOTF=2 on
+both planes, NV15, YUYV10_1X20, csc mode[0].
+
+This is a runtime setting in Kodi's profile, not a patch. It is recorded here
+rather than in a patch file because nothing in the source tree changed.
+
+What this does NOT fix
+----------------------
+Locking the clock removes the periodic hitch. It does not remove 3:2 pulldown
+judder itself, which is inherent to showing 23.976 fps content at 59.94 Hz --
+alternating 2 and 3 refreshes is uneven no matter how well the clock is
+locked. The only judder-free option this sink offers is 1920x1080 at 119.88 Hz
+(exactly 5:1), and reaching it would mean running the desktop at 1080p, since
+Kodi will not select it on its own.

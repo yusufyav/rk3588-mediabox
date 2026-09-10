@@ -16,9 +16,10 @@ physical A/B also disproved the proposed 4000→418-nit metadata clamp.
 The actual fault is missing userspace programming of Rockchip's atomic-only
 plane `EOTF` property. Tagging the direct NV15 video plane `EOTF=2` produced a
 clear physical improvement while preserving the required 10-bit direct path.
-The remaining washed Kodi control colours are a separate instance of the same
-bug on the PQ-composited GUI plane. Question 9 records the evidence and the
-current implementation status.
+The remaining washed Kodi control colours were a separate instance of the same
+bug on the PQ-composited GUI plane, and tagging that plane closed them too.
+Both fixes are now installed and physically accepted. Question 9 records the
+evidence.
 
 ---
 
@@ -354,10 +355,26 @@ physical result matches it: film colours are better, while the controls' blue
 is still washed out.
 
 Patch `0009-gbm-tag-hdr-composited-gui-plane-with-eotf.patch` implements the
-corresponding GUI-plane tag and restores SDR on teardown. At this report's
-commit point it is an implementation candidate: source-apply validation and
-the incremental Kodi build have passed, but install/readback/physical
-acceptance are still pending.
+corresponding GUI-plane tag and restores SDR on teardown. It is now installed
+and accepted; `gui-plane-eotf-ab.txt` carries the full readback.
+
+With the OSD up, the state no longer moves at all: `overlay_mode` stays 1
+where it previously fell to 0, and the video window stays at `csc mode[0]`
+where it previously returned to `csc mode[3]`. Both planes read `EOTF=2` and
+both report `HDR10[2]`. S2 is identical to S1 in every measured field, stop
+returns the GUI plane to `EOTF=0` and the output to S0, and replay restores
+`EOTF=2` on both planes.
+
+**Operator confirmation, with the controls visible:** *"Ne yaptın sen böyle?
+Şu ana kadarki en iyi görüntüyü aldık"* — the first time in this gate that the
+player controls have been called correct.
+
+One asymmetry survives. `CVideoLayerBridgeDRMPRIME::Disable()` does not write
+the video plane's `EOTF` back to 0, so it stays latched at 2 after playback
+stops. The plane is disabled at that point (`crtc=0, fb=0`) and no visual
+effect was observed; Kodi is self-consistent because 0008 rewrites the
+property on every `Configure()`. The exposure is another DRM client
+inheriting a stale PQ tag. Recorded as open below.
 
 ---
 
@@ -501,10 +518,89 @@ atomic fail 0   MPP err 0   hdmi error 0   xrun 0
 
 ---
 
+## 15. Does the motion look right on this sink?
+
+Not on its own, and the reason is the sink rather than the pipeline. The HP
+X27q advertises 31 modes and **not one of them is 24, 23.976, 48 or 47.95 Hz**;
+its lowest refresh rate is 59.94. Gate MP1b's cadence result was obtained on a
+sink that did offer 3840x2160p23.976 and does not transfer here.
+
+The desktop mode's real rate is 59.9506 Hz (241500 kHz / 2720 / 1481), and
+
+    59.9506 / 23.976023 = 2.500437
+
+3:2 pulldown averages 2.5, so the residual 0.000437 refresh per frame
+accumulates to a whole refresh every ~95 s — one extra frame repeat, seen as a
+periodic hitch. The operator reported exactly that: *"ekran kayıyor belirli
+aralıklar ile"*.
+
+Kodi could not switch its way out. Its whitelist search matches only x1, x2 and
+x2.5, and only against the video's resolution or the desktop's: the x2.5 target
+is 59.9400 and the desktop mode is 59.9506, missing a 0.01 Hz tolerance by
+0.011. The modes that do divide exactly are all at 1920x1080 — 59.9402 (2.5x)
+and 119.88 (a clean 5x) — which is neither resolution the algorithm considers.
+
+`videoplayer.usedisplayasclock` was turned on. It makes the display's vblank
+the master clock and resamples audio, locking the ratio at 2.5:
+
+    CVideoReferenceClock: Detected refreshrate: 59.951 hertz
+    CVideoPlayerAudio:: synctype set to 1: resample
+    CVideoReferenceClock: Clock speed 100.02 %
+
+100.02% is the 0.017% stretch the arithmetic predicts, it costs no resolution,
+and HDR was unaffected. This is a profile setting, not a patch — nothing in the
+source tree changed. It removes the periodic hitch; it does not remove 3:2
+judder itself, which is inherent at 59.94 Hz. Details in `refresh-cadence.txt`.
+
+`scripts/monitor-cadence-probe.sh` reports this for whatever sink is attached.
+It recomputes each mode's rate from the mode timing rather than trusting
+`modetest`, which rounds to two decimals and so shows a perfect 59.9400 and a
+drifting 59.9506 identically.
+
+## 16. Is there anything still unexplained?
+
+Yes, and it is recorded rather than smoothed over. The operator reports that on
+**both** sinks the picture shifts horizontally, once and stably, when the GUI
+plane joins the composition — reproducible by toggling the OSD without pausing
+at all.
+
+Everything measurable on the RK3588 side says the video is programmed
+identically in both states. A full DRM property dump diffed across the two
+states shows the video plane's `CRTC_*` and `SRC_*` byte-identical; `pitch`
+holds at 4864 over 25 samples; `overlay_mode` stays 1; Kodi logs no renderer
+reconfiguration; Kodi's own screenshot with the GUI plane up is entirely black,
+so that plane carries no copy of the video; four OSD toggles produce zero
+kernel events, so the HDMI link never re-trains. At register level, the only
+change inside the Esmart0 block is the two buffer addresses — the control word
+and the stride word are unchanged.
+
+Two rounds of operator photography could not settle it either: camera angle and
+film scene moved together in the stills, and in a handheld video the logo's
+position normalised to the panel edges ranges 0.545..0.571 with no discrete
+step, so camera motion exceeds the signal.
+
+The observation and the machine evidence are both recorded; neither is used to
+overrule the other. The two surviving hypotheses — the sink re-applying its own
+scaler, or VOP2 shifting the video when a Cluster window is enabled — are
+separated by a Writeback capture, which this SoC supports and which needs a
+small dedicated probe. `gui-plane-horizontal-shift.txt` carries the full
+elimination list and the 0008/0009 A/B that is staged but not run.
+
+---
+
 ## What was NOT done, and why
 
-* **Final GUI-EOTF physical acceptance.** Patch 0009 applies and builds, but
-  its installed-plane readback and operator A/B remain open at this commit.
+* **Restoring the video plane's `EOTF` on teardown.** 0009 restores the GUI
+  plane; 0008 has no matching path, so the video plane stays at `EOTF=2` while
+  disabled after playback stops. Measured, not visual — see
+  `gui-plane-eotf-ab.txt`. `CVideoLayerBridgeDRMPRIME::Disable()` is where it
+  belongs.
+* **The horizontal shift when the GUI plane joins.** Open, on both sinks, with
+  the RK3588 side cleared down to the registers and no instrument yet that can
+  see further. See question 16 and `gui-plane-horizontal-shift.txt`.
+* **Judder-free playback on this sink.** The periodic hitch is fixed by locking
+  to the display clock, but 3:2 judder at 59.94 Hz remains, and the only clean
+  mode this panel offers (1920x1080p119.88) would mean a 1080p desktop.
 * **Multichannel physical mapping.** `NOT_VERIFIABLE_WITH_CURRENT_SINK` — a
   stereo monitor. Stereo PCM passes on its own evidence.
 * **Everything in the gate's stated scope-out list**: no compressed
@@ -538,7 +634,7 @@ expectation in the brief rather than as local drift.
 | GUI quality acceptable | `PASS` — 1.6 → 30.8 fps; operator: "belirgin şekilde akıcı" |
 | Correct S0/S1/S2/S3 colour states | `PASS` — S3 identical to S0, video state untouched by the OSD |
 | RKMPP / NV15 direct-plane | `PASS` — plane 73, `NV15`, `CRendererDRMPRIME` |
-| 4K 23.976 | `PASS` — 3840x2160p24, whitelist matched exactly |
+| 4K 23.976 | `PASS` — 3840x2160p24, whitelist matched exactly (BenQ; the HP X27q offers no film-rate mode at all — question 15) |
 | YCbCr 4:2:2 10-bit | `PASS` — `bus_format 200d YUYV10_1X20` |
 | HDR10 | `PASS` — HDR10[2], BT.2020, `BT2020_YCC`, `30bit` |
 | Physical PCM audio | `PASS` — operator: "Evet, ses geliyor" |
@@ -548,15 +644,25 @@ expectation in the brief rather than as local drift.
 | Seek / OSD / stop / replay stable | `PASS` |
 | Kernel errors 0 | `PASS` — every class zero |
 | Kodi picture matches MP1b reference | `PASS` — identical measured, identical seen |
-| HDR film after video-plane EOTF | **`PARTIAL PASS` — clear physical improvement; NV15/10-bit retained** |
-| HDR player controls | **`OPEN` — blue remains washed; GUI plane is PQ-coded but tagged SDR** |
+| HDR film after video-plane EOTF | `PASS` — plane `EOTF=2`, `HDR10[2]`, NV15/10-bit retained |
+| HDR player controls | `PASS` — GUI plane `EOTF=2`; OSD no longer moves the video state; operator: "en iyi görüntü" |
+| Video-plane `EOTF` restored on stop | **`OPEN`** — GUI plane returns to 0, video plane stays latched at 2 while disabled |
+| Cadence on this sink | `PASS with a caveat` — the panel offers no film-rate mode; the ~95 s hitch is removed by locking to the display clock, 3:2 judder remains |
+| Horizontal shift when the GUI plane joins | **`OPEN`** — reported on both sinks; RK3588 cleared to register level, cause not yet located |
 
 ### Classification
 
-**The original machine-level recovery items remain `PASS`; HDR picture quality
-is now `PARTIAL PASS`.** The video-plane root cause is measured and physically
-confirmed. Overall sign-off waits only for the analogous GUI-plane fix to pass
-build, atomic readback, teardown and operator A/B.
+**All of the gate's stated requirements are `PASS`.** The root cause —
+userspace never programming Rockchip's atomic-only plane `EOTF` — is measured,
+fixed on both planes, and physically confirmed by the operator on the state
+that had been failing.
+
+Two items are open and neither was in the gate's requirement list. Restoring
+the video plane's `EOTF` on teardown is a hygiene defect with no measured
+visual effect. The horizontal shift when the GUI plane joins is a live operator
+complaint that the machine evidence cannot yet account for; it is carried
+forward as the first thing the next session should instrument, not as something
+this gate resolved.
 
 The EBADFD caveat is stated rather than smoothed over. Four occurred and four
 were recovered; a literal "EBADFD = 0" is unreachable while the driver stops
@@ -572,13 +678,25 @@ the picture and broke the GUI overlay.
 
 ## Recommended next single Gate
 
-**Build and install patch 0009, then repeat the HDR + OSD A/B.** Acceptance is:
+That gate ran and passed; every one of its acceptance points was met and is
+recorded in `gui-plane-eotf-ab.txt`.
 
-* video plane and GUI plane both read `EOTF=2` while the controls are visible;
-* VOP does not re-enter its SDR→HDR path;
-* NV15, YCbCr 4:2:2 10-bit, BT.2020 Limited and source metadata are unchanged;
-* the operator confirms normal blue/control colours;
-* stop restores the output/GUI plane to `EOTF=0`, and replay restores `2`.
+**The next single Gate is to instrument the horizontal shift**, because it is
+the only open item a viewer actually sees. Build a Writeback probe that
+captures the composited VOP output with and without the GUI plane active and
+differences the two: that separates a sink-side rescale from a VOP2
+composition shift, which is the fork every remaining hypothesis hangs on. The
+0008-only binary is already on the appliance as `kodi-gbm.pre0009`, so the
+patch-attribution A/B can be run in the same session.
+
+Restoring the video plane's `EOTF` on teardown is the smaller follow-up: add
+the write to `CVideoLayerBridgeDRMPRIME::Disable()`, symmetrically with 0009's
+GUI path. Acceptance is that after stop plane 73 reads `EOTF=0`, replay
+restores `2`, the S1..S4 table is otherwise unchanged, and an SDR file played
+straight after an HDR one is not tagged PQ.
+
+`MA1` (compressed passthrough) no longer waits behind HDR picture quality,
+which is now accepted; it waits only on whether the shift turns out to be ours.
 
 The monitor hotplug observation is separate: Kodi retained the removed BenQ's
 3840x2560 mode when the HP X27q was connected and the display stayed dark.
@@ -586,5 +704,6 @@ Restarting Kodi re-enumerated the EDID and restored 2560x1440p60. Treat a Kodi
 restart as the current operational workaround; robust live-hotplug recovery is
 a later, independent task.
 
-Hold `MA1` (compressed passthrough) and Stremio until that is closed, per the
-gate's own stopping rule.
+The monitor is now the HP X27q at 2560x1440p60; the BenQ measurements earlier
+in this report were taken at 3840x2560 and are kept as recorded rather than
+restated for the new sink.
