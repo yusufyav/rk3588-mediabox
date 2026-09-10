@@ -1,0 +1,177 @@
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
+index 21db197..e2e6934 100644
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
+@@ -13,6 +13,7 @@
+ #include "utils/log.h"
+ #include "windowing/WinSystem.h"
+ #include "windowing/gbm/drm/DRMAtomic.h"
++#include "utils/DRMHelpers.h"
+ 
+ #include <utility>
+ 
+@@ -38,7 +39,13 @@ void CVideoLayerBridgeDRMPRIME::Disable()
+ {
+   auto plane = m_DRM->GetVideoPlane();
+   if (!plane)
++  {
++    CLog::LogF(LOGDEBUG, "MP2COLOR where=VideoLayerBridge:Disable plane=none");
+     return;
++  }
++
++  CLog::LogF(LOGDEBUG, "MP2COLOR where=VideoLayerBridge:Disable plane={} plane_fourcc={}",
++             plane->GetPlaneId(), DRMHELPERS::FourCCToString(plane->GetFormat()));
+ 
+   // disable video plane
+   m_DRM->AddProperty(plane, "FB_ID", 0);
+@@ -215,6 +222,16 @@ void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME* buffer)
+   // that point the window system can only see the RGB GUI plane and picks an
+   // RGB colorimetry accordingly. What reaches the wire has changed since, and
+   // the AVI InfoFrame has to describe the new thing.
++  // The bridge's own view of the transition, logged before the window system
++  // is asked to re-tag the connector. Pairing this with the MP2COLOR line that
++  // SetColorimetry emits is what shows whether the re-apply actually runs, and
++  // with what, at each GUI/video/OSD transition.
++  CLog::LogF(LOGDEBUG,
++             "MP2COLOR where=VideoLayerBridge:Configure plane={} plane_fourcc={} encoding={} "
++             "range={}",
++             plane->GetPlaneId(), DRMHELPERS::FourCCToString(plane->GetFormat()),
++             GetColorEncoding(picture), GetColorRange(picture));
++
+   if (auto* winSystem = CServiceBroker::GetWinSystem())
+     winSystem->SetColorimetry(&picture);
+ }
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index 4dd05bc..74295b1 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -34,6 +34,8 @@
+ 
+ #include <drm_fourcc.h>
+ 
++#include <string>
++
+ #ifndef HAVE_HDR_OUTPUT_METADATA
+ // HDR structs is copied from linux include/linux/hdmi.h
+ struct hdr_metadata_infoframe
+@@ -422,6 +424,8 @@ bool CWinSystemGbm::SetVideoOutput(const VideoPicture* videoPicture)
+ 
+ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+ {
++  LogColorState(videoPicture ? "SetColorimetry:enter:picture" : "SetColorimetry:enter:null");
++
+   auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
+   if (!drm)
+     return;
+@@ -483,6 +487,68 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+     drm->AddProperty(connector, "Colorspace", colorspace.value());
+     drm->SetActive(true);
+   }
++  else
++  {
++    CLog::LogF(LOGWARNING, "connector has no \"{}\" Colorspace enum value; leaving it alone",
++               ColorimetryMap.at(scanoutColorimetry));
++  }
++
++  LogColorState("SetColorimetry:exit");
++}
++
++namespace
++{
++std::string FourccToString(uint32_t fourcc)
++{
++  if (fourcc == 0)
++    return "none";
++  char b[5] = {static_cast<char>(fourcc & 0xff), static_cast<char>((fourcc >> 8) & 0xff),
++               static_cast<char>((fourcc >> 16) & 0xff), static_cast<char>((fourcc >> 24) & 0xff),
++               0};
++  return std::string(b);
++}
++
++std::string PropOrDash(const KODI::WINDOWING::GBM::CDRMObject* obj, const char* name)
++{
++  if (!obj)
++    return "-";
++  auto* mutableObj = const_cast<KODI::WINDOWING::GBM::CDRMObject*>(obj);
++  if (!mutableObj->SupportsProperty(name))
++    return "absent";
++  auto v = obj->GetPropertyValue(name);
++  return v ? std::to_string(v.value()) : "?";
++}
++} // namespace
++
++void CWinSystemGbm::LogColorState(const char* where) const
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return;
++
++  const CDRMPlane* gui = drm->GetGuiPlane();
++  const CDRMPlane* video = drm->GetVideoPlane();
++  const CDRMConnector* connector = drm->GetConnector();
++  const CDRMCrtc* crtc = drm->GetCrtc();
++
++  CLog::Log(LOGDEBUG,
++            "MP2COLOR where={} gui_plane={}/{} video_plane={}/{} yuv_scanout={} "
++            "colorimetry={} eotf={} "
++            "gui[COLOR_ENCODING={} COLOR_RANGE={}] video[COLOR_ENCODING={} COLOR_RANGE={}] "
++            "conn[Colorspace={} color_depth={} max_bpc={} HDR_OUTPUT_METADATA={}] crtc={}",
++            where,
++            gui ? std::to_string(gui->GetPlaneId()) : "-",
++            gui ? FourccToString(gui->GetFormat()) : "-",
++            video ? std::to_string(video->GetPlaneId()) : "-",
++            video ? FourccToString(video->GetFormat()) : "-",
++            IsDirectToPlaneYuvScanout() ? 1 : 0,
++            KODI::UTILS::ColorimetryToString(m_colorimetry),
++            static_cast<int>(m_eotf),
++            PropOrDash(gui, "COLOR_ENCODING"), PropOrDash(gui, "COLOR_RANGE"),
++            PropOrDash(video, "COLOR_ENCODING"), PropOrDash(video, "COLOR_RANGE"),
++            PropOrDash(connector, "Colorspace"), PropOrDash(connector, "color_depth"),
++            PropOrDash(connector, "max bpc"), PropOrDash(connector, "HDR_OUTPUT_METADATA"),
++            crtc ? std::to_string(crtc->GetCrtcId()) : "-");
+ }
+ 
+ bool CWinSystemGbm::IsDirectToPlaneYuvScanout() const
+@@ -576,6 +642,8 @@ void CWinSystemGbm::SetDeepColor(bool enable)
+ 
+ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+ {
++  LogColorState(videoPicture ? "SetHDR:enter:picture" : "SetHDR:enter:null");
++
+   auto settingsComponent = CServiceBroker::GetSettingsComponent();
+   if (!settingsComponent)
+     return false;
+@@ -608,6 +676,7 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+ 
+     SetDeepColor(false);
+     m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
++    LogColorState("SetHDR:exit:cleared");
+     return false;
+   }
+ 
+@@ -699,6 +768,7 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+     drm->AddProperty(connector, "HDR_OUTPUT_METADATA", m_hdrBlob.Get());
+     SetDeepColor(true);
+     drm->SetActive(true);
++    LogColorState("SetHDR:exit:hdr");
+   }
+ 
+   return m_hdrBlob.IsValid();
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+index 37e62a1..78005de 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -77,6 +77,13 @@ public:
+   // driver exposes. Only tells the display driver how many bits per component
+   // the link may carry; it is not a video-format decision.
+   void SetDeepColor(bool enable);
++
++  // Emits one greppable line describing every colour-carrying piece of DRM
++  // state Kodi has *asked* for, tagged with the transition that produced it.
++  // Deliberately reports requests only: what the hardware ended up doing is
++  // read separately from the vendor debugfs, and conflating the two is how
++  // the GUI colour problem stayed unexplained for a whole gate.
++  void LogColorState(const char* where) const;
+   bool IsHDRDisplay() override;
+   CHDRCapabilities GetDisplayHDRCapabilities() const override;
+ 
