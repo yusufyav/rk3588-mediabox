@@ -1,5 +1,5 @@
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
-index 21db197..e2e6934 100644
+index 54509e2..1462b9b 100644
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
 @@ -13,6 +13,7 @@
@@ -24,23 +24,22 @@ index 21db197..e2e6934 100644
  
    // disable video plane
    m_DRM->AddProperty(plane, "FB_ID", 0);
-@@ -215,6 +222,16 @@ void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME* buffer)
-   // that point the window system can only see the RGB GUI plane and picks an
-   // RGB colorimetry accordingly. What reaches the wire has changed since, and
-   // the AVI InfoFrame has to describe the new thing.
-+  // The bridge's own view of the transition, logged before the window system
-+  // is asked to re-tag the connector. Pairing this with the MP2COLOR line that
-+  // SetColorimetry emits is what shows whether the re-apply actually runs, and
-+  // with what, at each GUI/video/OSD transition.
+@@ -208,6 +215,15 @@ void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME* buffer)
+       plane->GetPropertyEnumValue("COLOR_RANGE", GetColorRange(picture));
+   if (colorRange)
+     m_DRM->AddProperty(plane, "COLOR_RANGE", colorRange.value());
++
++  // The bridge's own view of the transition. Pairing this with the MP2COLOR
++  // line SetColorimetry emits is what shows which connector state each
++  // GUI/video/OSD transition actually asked for.
 +  CLog::LogF(LOGDEBUG,
 +             "MP2COLOR where=VideoLayerBridge:Configure plane={} plane_fourcc={} encoding={} "
 +             "range={}",
 +             plane->GetPlaneId(), DRMHELPERS::FourCCToString(plane->GetFormat()),
 +             GetColorEncoding(picture), GetColorRange(picture));
-+
-   if (auto* winSystem = CServiceBroker::GetWinSystem())
-     winSystem->SetColorimetry(&picture);
  }
+ 
+ void CVideoLayerBridgeDRMPRIME::SetVideoPlane(CVideoBufferDRMPRIME* buffer, const CRect& destRect)
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
 index 4dd05bc..74295b1 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp

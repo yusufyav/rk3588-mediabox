@@ -88,6 +88,7 @@ case "${1:-}" in
       sleep 3
       if rpc '{"jsonrpc":"2.0","id":1,"method":"JSONRPC.Ping"}' 2>/dev/null | grep -q pong; then
         echo "== Kodi is up after $((i * 3))s"
+        "$0" whitelist-modes
         "$0" gl-info
         exit 0
       fi
@@ -110,6 +111,51 @@ case "${1:-}" in
   fetch-log)
     mediabox_ssh "cat '$kodi_log' 2>/dev/null"
     ;;
+  whitelist-modes)
+    # Kodi's default mode whitelist is "every mode at least as large as the
+    # current one". That is a reasonable rule for a desktop and the wrong one
+    # for an appliance in front of a monitor whose native mode is not 16:9:
+    # this panel's is 3840x2560, so 3840x2160 is *shorter* than the desktop and
+    # is silently excluded -- and with it every 23.976 film mode. Playback then
+    # stays at the desktop's 49.98 Hz and the cadence Gate MP1b proved is lost.
+    #
+    # So the whitelist is filled in explicitly, from the option list Kodi itself
+    # publishes for this connector. Nothing about the modes is hard-coded or
+    # guessed: the value strings come from Kodi, so they are correct for
+    # whatever sink is attached, and a different monitor produces a different
+    # whitelist with no change here.
+    #
+    # Modes below 720 lines are left out. Switching a 4K panel down to 720x480
+    # for SD content is a worse picture than letting the display engine scale
+    # it, and it is the one case where "use what the sink offers" is not the
+    # right answer.
+    echo "== building the mode whitelist from what this sink advertises"
+    modes="$(rpc '{"jsonrpc":"2.0","id":1,"method":"Settings.GetSettings","params":{"level":"expert"}}'       | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+chosen = []
+for setting in doc["result"]["settings"]:
+    if setting["id"] != "videoscreen.whitelist":
+        continue
+    for option in setting["definition"]["options"]:
+        value = option["value"]
+        # "0384002160023.97600pstd" - width(5) height(5) refresh(9) flags
+        try:
+            height = int(value[5:10])
+        except ValueError:
+            continue
+        if height >= 720:
+            chosen.append(value)
+print(json.dumps(chosen))
+')"
+    if [ -z "$modes" ] || [ "$modes" = "[]" ]; then
+      echo "== no modes to whitelist (is Kodi up?)" >&2
+      exit 1
+    fi
+    rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"Settings.SetSettingValue\",\"params\":{\"setting\":\"videoscreen.whitelist\",\"value\":$modes}}"
+    echo
+    echo "== whitelisted $(echo "$modes" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') modes"
+    ;;
   gl-info)
     # Kodi logs the GL strings once at start-up. Reading them back from its own
     # log is the only claim that counts: a probe proving Mali says nothing about
@@ -127,7 +173,7 @@ case "${1:-}" in
       fi"
     ;;
   *)
-    echo "usage: $0 [start [--fresh]|stop|rpc <json>|log [N]|fetch-log|gl-info]" >&2
+    echo "usage: $0 [start [--fresh]|stop|rpc <json>|log [N]|fetch-log|gl-info|whitelist-modes]" >&2
     exit 2
     ;;
 esac
