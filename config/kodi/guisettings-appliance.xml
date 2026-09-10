@@ -22,6 +22,18 @@
        hevc_rkmpp. Without it Kodi falls back to software HEVC. -->
   <setting id="videoplayer.useprimedecoderforhw">true</setting>
 
+  <!-- The master switch above is gated on this one. It defaults to false, and
+       while it is false useprimedecoderforhw is *disabled* even though it
+       reads true, so Kodi silently software-decodes HEVC. Gate MP2 found this
+       by inspecting the running instance, not from the log. -->
+  <setting id="videoplayer.useprimedecoder">true</setting>
+
+  <!-- 0 = Direct To Plane. The default is 1 (EGL), which imports the decoded
+       buffer as a GL texture: every 4K frame would then be handled by the GUI
+       renderer instead of being scanned out by the display engine. Direct To
+       Plane is what Gate MP1b proved and what keeps NV15 on plane 73. -->
+  <setting id="videoplayer.useprimerenderer">0</setting>
+
   <!-- 2 = ADJUST_REFRESHRATE_ON_STARTSTOP: switch the display to the film's
        own rate when playback starts and back when it stops. A 23.976 film
        pulled to 60 Hz is a Gate MP1b failure, so this is not optional. -->

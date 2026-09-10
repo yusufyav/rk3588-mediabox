@@ -1,0 +1,52 @@
+diff --git a/xbmc/windowing/gbm/GBMUtils.cpp b/xbmc/windowing/gbm/GBMUtils.cpp
+index c4a6acabc3..a50cd4d48d 100644
+--- a/xbmc/windowing/gbm/GBMUtils.cpp
++++ b/xbmc/windowing/gbm/GBMUtils.cpp
+@@ -79,15 +79,44 @@ CGBMUtils::CGBMDevice::CGBMSurface::CGBMSurfaceBuffer& CGBMUtils::CGBMDevice::CG
+ {
+   m_buffers.emplace(std::make_unique<CGBMSurfaceBuffer>(m_surface));
+ 
+-  if (!static_cast<bool>(gbm_surface_has_free_buffers(m_surface)))
++  /*
++   * gbm_surface_has_free_buffers() is the only thing that releases a locked
++   * front buffer here, and the comment below already anticipates that its
++   * behaviour "may vary across other implementations". On one it does not vary
++   * so much as stop reporting: ARM's libmali returns non-zero unconditionally,
++   * so this queue never pops, one full GUI-sized buffer is leaked per frame,
++   * and the display IOMMU address space is exhausted within seconds. Nothing
++   * about that failure points back here -- it surfaces as EGL_BAD_ALLOC out of
++   * eglSwapBuffers, which Kodi turns into a std::runtime_error and dies on.
++   *
++   * So the pool is bounded a second way that needs no cooperation from the GBM
++   * implementation. The bound is deliberately above what a correct one reaches:
++   * Mesa converges to three locked buffers and never trips the cap, so its
++   * behaviour is untouched and this is not a tuning knob. It only stops an
++   * implementation that never says "full" from growing without limit.
++   *
++   * Popping is safe at this depth for the same reason it is safe when the pool
++   * reports itself exhausted: the oldest entry is several page flips behind the
++   * one being queued, so it is no longer being scanned out.
++   */
++  constexpr size_t MAX_LOCKED_BUFFERS = 4;
++
++  const bool poolExhausted = !static_cast<bool>(gbm_surface_has_free_buffers(m_surface));
++
++  if (poolExhausted || m_buffers.size() > MAX_LOCKED_BUFFERS)
+   {
+     /*
+      * We want to use call_once here because we want it to be logged the first time that
+      * we have to release buffers. This means that the maximum amount of buffers had been reached.
+      * For mesa this should be 4 buffers but it may vary across other implementations.
+      */
+-    std::call_once(flag, [this]()
+-                   { CLog::Log(LOGDEBUG, "CGBMUtils - using {} buffers", m_buffers.size()); });
++    std::call_once(flag,
++                   [this, poolExhausted]()
++                   {
++                     CLog::Log(LOGDEBUG, "CGBMUtils - using {} buffers ({})", m_buffers.size(),
++                               poolExhausted ? "surface reports no free buffers"
++                                             : "surface never reports full; bounded by Kodi");
++                   });
+ 
+     m_buffers.pop();
+   }
