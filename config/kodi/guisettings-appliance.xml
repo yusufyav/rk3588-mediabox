@@ -39,6 +39,16 @@
        pulled to 60 Hz is a Gate MP1b failure, so this is not optional. -->
   <setting id="videoplayer.adjustrefreshrate">2</setting>
 
+  <!-- The HDMI sink, named rather than left on "Default". Both resolve to the
+       same card today, but Kodi rewrites an unresolvable device setting to its
+       own default, and this appliance re-enumerates its audio devices every
+       time the display mode changes. Naming the endpoint means a rewrite is
+       visible in the diff instead of silently moving the audio somewhere else
+       -- the board also has an ES8323 analogue codec that would happily take
+       the stream. The string is Kodi's own, taken from the option list it
+       publishes for this machine. -->
+  <setting id="audiooutput.audiodevice">ALSA:sysdefault:CARD=rockchiphdmi1|rockchip-hdmi1</setting>
+
   <!-- Audio: PCM only. Gate MA0 proved the HDMI PCM path; compressed
        passthrough is Gate MA1 and is explicitly off here so that a decoded
        stream is what reaches ALSA. -->

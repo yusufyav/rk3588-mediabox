@@ -1,0 +1,52 @@
+diff --git a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp
+index 6f86916..0acc160 100644
+--- a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp
++++ b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp
+@@ -1080,6 +1080,47 @@ void CAESinkALSA::HandleError(const char* name, int err)
+                     name, err, snd_strerror(err));
+       break;
+ 
++    case -EBADFD:
++    {
++      /* A write into a PCM that is neither PREPARED nor RUNNING. That is not
++         necessarily the caller's mistake. On this appliance it is what the
++         display does: switching to the film's own 23.976 mode re-trains the
++         HDMI link, and the vendor driver stops the HDMI PCM substream while it
++         does, leaving it in SETUP with its hw params still applied. The very
++         next write returns EBADFD.
++
++         snd_pcm_recover() passes EBADFD straight back -- it only knows EPIPE,
++         ESTRPIPE and EINTR -- so without this case nothing ever prepares the
++         stream again. Audio is then dead for the whole of playback while video
++         carries on, which is exactly the failure Gate MP2 recorded and could
++         not explain.
++
++         SETUP still holds the hw params, so prepare() is the entire recovery
++         and the retry in AddPackets picks it up. Every other state is reported
++         and left alone: a DISCONNECTED endpoint is a real fault and must not
++         be papered over as if it were recoverable. */
++      const snd_pcm_state_t state = snd_pcm_state(m_pcm);
++      if (state != SND_PCM_STATE_SETUP)
++      {
++        CLog::Log(LOGERROR,
++                  "CAESinkALSA::HandleError({}) - EBADFD in state {}, not a recoverable stop",
++                  name, MP2PcmStateName(state));
++        break;
++      }
++
++      CLog::Log(LOGINFO,
++                "CAESinkALSA::HandleError({}) - the PCM was stopped underneath us (SETUP), "
++                "preparing it again",
++                name);
++      if ((err = snd_pcm_prepare(m_pcm)) < 0)
++        CLog::Log(LOGERROR, "CAESinkALSA::HandleError({}) - snd_pcm_prepare returned {} ({})", name,
++                  err, snd_strerror(err));
++      else
++        CLog::Log(LOGINFO, "CAESinkALSA::HandleError({}) - prepared, state is now {}", name,
++                  MP2PcmStateName(snd_pcm_state(m_pcm)));
++      break;
++    }
++
+     default:
+       CLog::Log(LOGERROR, "CAESinkALSA::HandleError({}) - snd_pcm_writei returned {} ({})", name,
+                 err, snd_strerror(err));
