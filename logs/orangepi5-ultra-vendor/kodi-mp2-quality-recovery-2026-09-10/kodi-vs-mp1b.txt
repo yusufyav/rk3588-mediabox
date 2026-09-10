@@ -43,22 +43,25 @@ Operator's visual comparison
   MP1b at 30:00 : "bu da ayni sekilde soluk" -- the raw reference looks the
                   same.
 
-Reading
+Corrected reading (after Windows and physical follow-up A/B tests)
   The reference path and Kodi are indistinguishable, measured and seen. Kodi
-  is therefore NOT a regression against the MP1b baseline: it reproduces it.
+  is therefore not a regression against the MP1b probe, but that probe is not
+  an independent proof of correctness: both RK3588 paths pass through the same
+  4000-nit source mastering maximum.
 
-  The washed-out HDR10 appearance belongs to the sink. This is a BenQ RD280UG,
-  a 28" productivity monitor, not the Sony BRAVIA KD-65XE9005 that Gates
-  MP1a/MP1b were judged on. Its EDID advertises PQ and BT.2020 and it reports
-  itself in HDR mode, but advertising ST2084 and rendering it well are
-  different things: a monitor of this class has neither the peak luminance nor
-  the tone mapping to make a PQ grade look right, and PQ shown flat is exactly
-  "washed out".
+  Windows + Kodi renders the same file correctly on this same BenQ RD280UG,
+  disproving the original sink-limitation inference. However, changing the
+  RK3588 mastering maximum from 4000 to the panel's decoded 418 nits made no
+  visual difference. Explicit Limited/Full quantisation and RGB 10-bit output
+  also made no improvement; RGB additionally removed GUI text. All temporary
+  changes were reverted.
 
-  Nothing in this gate can be concluded about HDR *picture quality* from this
-  display. What can be concluded, and is, is that the HDR *signal* is correct
-  and identical to the proven reference. Re-judging picture quality needs the
-  Sony back on the input; that is a sink swap, not a code change.
+  FINAL CORRECTION: EOTF is present but atomic-only; legacy `modetest -p` hid
+  it. With `modetest -a -p`, plane 73 exposes property 31 and initially reads
+  EOTF=0. Kodi patch 0008 now sets EOTF=2 for PQ NV15 video. Readback and VOP
+  summary both report HDR10[2], and the operator reports a clear improvement
+  in film colours on a second HP X27q monitor. NV15 and 10-bit YCbCr remain.
 
-  FAULT DOMAIN: sink (BenQ RD280UG HDR10 rendering), not the RK3588 pipeline
-  and not Kodi.
+  The remaining washed player-control blue is isolated to the GUI plane:
+  Kodi's GUI compositor writes PQ pixels, but plane 57 remains EOTF=0, causing
+  a second SDR-to-HDR conversion. Patch 0009 is the proposed userspace fix.

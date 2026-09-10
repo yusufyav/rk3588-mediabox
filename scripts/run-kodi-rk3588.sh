@@ -65,7 +65,10 @@ case "${1:-}" in
     fi
     # Never start a second DRM master: the first one would keep the display and
     # the second would fail in a way that looks like a Kodi bug.
-    mediabox_ssh "pkill -f kodi.bin >/dev/null 2>&1; pkill -f kodi-gbm >/dev/null 2>&1; sleep 2; true"
+    # Match process names exactly. `pkill -f kodi-gbm` also matches the remote
+    # shell command that contains this script's launch line, terminating setup
+    # halfway through and occasionally leaving two DRM masters behind.
+    mediabox_ssh "pkill -x kodi.bin >/dev/null 2>&1; pkill -x kodi-gbm >/dev/null 2>&1; sleep 2; true"
     if [ -n "$fresh" ]; then
       mediabox_ssh "rm -rf '$KODI_RUN_HOME'"
     fi
@@ -81,8 +84,9 @@ case "${1:-}" in
         LD_LIBRARY_PATH='$ld_path' \
         AE_SINK=ALSA \
         MEDIABOX_GPU='$MEDIABOX_GPU' \
-        nohup '$KODI_PREFIX/lib/kodi/kodi-gbm' --standalone --debug \
-        > '$KODI_RUN_HOME/kodi-stdout.log' 2>&1 & echo pid=\$!"
+        setsid --fork '$KODI_PREFIX/lib/kodi/kodi-gbm' --standalone --debug \
+        </dev/null > '$KODI_RUN_HOME/kodi-stdout.log' 2>&1; \
+        sleep 1; pgrep -nx kodi-gbm | sed 's/^/pid=/'"
     echo "== waiting for JSON-RPC"
     for i in $(seq 1 40); do
       sleep 3
@@ -99,8 +103,8 @@ case "${1:-}" in
   stop)
     rpc '{"jsonrpc":"2.0","id":1,"method":"Application.Quit"}' >/dev/null 2>&1
     sleep 6
-    mediabox_ssh "pkill -f kodi.bin >/dev/null 2>&1; pkill -f kodi-gbm >/dev/null 2>&1; sleep 2; \
-        pgrep -af 'kodi.bin|kodi-gbm' | grep -v pgrep || echo 'kodi stopped'"
+    mediabox_ssh "pkill -x kodi.bin >/dev/null 2>&1; pkill -x kodi-gbm >/dev/null 2>&1; sleep 2; \
+        pgrep -ax kodi.bin; pgrep -ax kodi-gbm; true"
     ;;
   rpc)
     rpc "$2"

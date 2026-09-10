@@ -49,6 +49,13 @@ the operator's own observation.
   Physical audio            : "Evet, ses geliyor"
   A/V sync at 30:00         : "Senkron iyi"
 
-  The monitor reports itself in HDR mode and the raw reference looks the
-  same as Kodi, so the washed-out HDR appearance is this panel's
-  rendering of PQ, not a fault in the source. See kodi-vs-mp1b.txt.
+  SUPERSEDED: the paragraph originally here attributed the washed image to
+  the panel. Windows + Kodi renders the same file correctly on this exact
+  panel, so that attribution was false. Subsequent RK3588 A/B tests found no
+  improvement from 4000->418-nit mastering clamp, Limited/Full quantisation,
+  or RGB 10-bit output. The surviving fault domain is the RK3588 VOP input.
+  Later atomic inspection found the plane EOTF property that legacy modetest
+  had hidden. Tagging NV15 as PQ/HDR10 produced a clear physical film-colour
+  improvement on a second HP X27q. The still-washed player controls are now
+  isolated to their PQ-coded GUI plane remaining tagged SDR. See
+  kodi-vs-mp1b.txt.

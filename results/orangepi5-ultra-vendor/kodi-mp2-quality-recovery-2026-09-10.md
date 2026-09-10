@@ -7,12 +7,18 @@ colour chain whose three descriptions of one signal disagreed, and a Kodi
 ALSA sink throwing `snd_pcm_writei -77`. All three are closed. Two of the
 three turned out to have a different cause than the one recorded.
 
-**The display changed under this gate and that limits one conclusion.** The
-sink is now a **BenQ RD280UG**, a 28" productivity monitor, not the Sony
-BRAVIA KD-65XE9005 that Gates MP1a and MP1b were judged on. It reaches
-3840x2160@23.976, advertises BT.2020 and ST2084, and reports itself in HDR
-mode, so every *signal* requirement is testable and was tested. HDR *picture
-quality* is not judgeable on it — see question 9.
+**Post-run correction.** The original report inferred from Kodi and the raw
+probe both looking washed out that the BenQ RD280UG could not render HDR10
+well. Windows + Kodi on that panel looks correct, and a second HP X27q shows
+the same washed RK3588 output, disproving the sink attribution twice. A
+physical A/B also disproved the proposed 4000→418-nit metadata clamp.
+
+The actual fault is missing userspace programming of Rockchip's atomic-only
+plane `EOTF` property. Tagging the direct NV15 video plane `EOTF=2` produced a
+clear physical improvement while preserving the required 10-bit direct path.
+The remaining washed Kodi control colours are a separate instance of the same
+bug on the PQ-composited GUI plane. Question 9 records the evidence and the
+current implementation status.
 
 ---
 
@@ -276,7 +282,7 @@ reads `ycbcr444` while the wire is 4:2:2 — the driver negotiating down to fit
 4K24 at 10 bits — which is why `bus_format` is the authority in this gate and
 the property readback is not.
 
-## 9. Does Kodi's picture match the raw MP1b reference?
+## 9. Does Kodi's picture match the raw MP1b reference, and what does that prove?
 
 **Yes — they are indistinguishable, measured and seen.**
 
@@ -297,17 +303,61 @@ Identical in every field.
 The operator reported Kodi's HDR picture as *"oldukça soluk"*. The raw MP1b
 reference at the same timestamp: *"bu da aynı şekilde soluk"*.
 
-**Kodi is therefore not a regression — it reproduces the proven baseline
-exactly.** The washed-out HDR appearance belongs to the sink: a 28"
-productivity monitor that advertises ST2084 and reports HDR mode, but has
-neither the peak luminance nor the tone mapping to render a PQ grade, and PQ
-shown flat is exactly "washed out".
+Kodi is not a regression *against the raw probe*: it reproduces that baseline
+exactly. That comparison does **not** establish that either output is correct,
+because both paths also reproduce the same bad HDR static metadata.
 
-`FAULT DOMAIN: sink (BenQ RD280UG HDR10 rendering)`, not the RK3588 pipeline
-and not Kodi. Re-judging HDR picture quality needs the Sony back on the input;
-that is a sink swap, not a code change. The operator is separately checking
-the same file on the same monitor from Windows + Kodi, which will confirm or
-refute this independently.
+The later Windows + Kodi comparison on this exact panel looks correct. The
+panel can therefore render HDR10, and the old `FAULT DOMAIN: sink` conclusion
+is false.
+
+The first follow-up hypothesis was static metadata. An experimental patch
+decoded panel code 98 as `50 * 2^(98/32) = 417.71` nits and changed only the
+emitted mastering maximum from 4000 to 418 nits. Readback of the committed DRM
+blob proved `max mastering=418`, `min mastering=50` (0.005 nit), `MaxCLL=401`,
+`MaxFALL=77`; the NV15 direct plane and YCbCr 4:2:2 10-bit link were unchanged.
+The operator still reported the film and GUI as washed out. **The mastering-
+luminance-clamp hypothesis is therefore rejected**, and the patch was removed.
+
+Two more controlled tests were also negative: explicit connector quantisation
+`Limited` versus `Full`, and RGB/BT.2020 10-bit versus YCbCr/BT.2020 10-bit.
+The RGB leg additionally lost the GUI text and was reverted. HDR10+ is not a
+candidate: the EDID advertises only PQ + Static Metadata Type 1, the connector
+has no dynamic-HDR property, and Kodi does not carry FFmpeg's per-frame HDR10+
+payload into the GBM output path.
+
+The surviving fault domain was the VOP input EOTF. During HDR output the NV15
+video window was consistently reported as `SDR[0]`. Rockchip's HDR10 path
+requires that plane to carry `EOTF=2` (PQ); otherwise, with an HDR video port
+and an SDR-labelled plane, the driver enables SDR→HDR processing.
+
+The first inspection used legacy `modetest -p`, which hides atomic-only
+properties, and incorrectly concluded that the kernel did not expose `EOTF`.
+`modetest -M rockchip -a -p` later found property 31, range 0–18, on both active
+planes. No kernel or device-tree change is required.
+
+Patch `0008-gbm-tag-direct-video-plane-with-eotf.patch` sets that property from
+Kodi's `VideoPicture` transfer function. It was built, installed and exercised
+on the HP X27q at the same 30:00 scene. The path remained NV15 direct scanout,
+`YUYV10_1X20`, HDR10/PQ, BT.2020 Limited at 2560x1440p60. Readback changed from
+plane `EOTF=0` / `color: SDR[0]` to `EOTF=2` / `color: HDR10[2]`; with no OSD,
+the unwanted conversion disappeared (`overlay_mode 1`, `y2r=0`, `csc mode=0`).
+The operator reported: *"Şu an film renklerinden belirgin bir düzelme var"*.
+
+Opening the player controls exposed the remaining half of the issue. The
+direct video plane stays `EOTF=2`, but the AR24 GUI plane remains `EOTF=0`.
+Kodi's existing HDR GUI compositor has already converted that plane from sRGB
+to BT.2020/PQ; VOP therefore mistakes the PQ-coded GUI buffer for SDR and runs
+a second SDR→HDR conversion. The measured transition is `overlay_mode 1→0`,
+with the video CSC path also returning to `y2r=1`, `csc mode=3`. The operator's
+physical result matches it: film colours are better, while the controls' blue
+is still washed out.
+
+Patch `0009-gbm-tag-hdr-composited-gui-plane-with-eotf.patch` implements the
+corresponding GUI-plane tag and restores SDR on teardown. At this report's
+commit point it is an implementation candidate: source-apply validation and
+the incremental Kodi build have passed, but install/readback/physical
+acceptance are still pending.
 
 ---
 
@@ -453,9 +503,8 @@ atomic fail 0   MPP err 0   hdmi error 0   xrun 0
 
 ## What was NOT done, and why
 
-* **HDR picture-quality judgement.** Deferred, with a reason: the sink cannot
-  render HDR10 well enough to judge by. The signal is proven correct and
-  identical to the MP1b reference; the picture is not judgeable here.
+* **Final GUI-EOTF physical acceptance.** Patch 0009 applies and builds, but
+  its installed-plane readback and operator A/B remain open at this commit.
 * **Multichannel physical mapping.** `NOT_VERIFIABLE_WITH_CURRENT_SINK` — a
   stereo monitor. Stereo PCM passes on its own evidence.
 * **Everything in the gate's stated scope-out list**: no compressed
@@ -499,39 +548,43 @@ expectation in the brief rather than as local drift.
 | Seek / OSD / stop / replay stable | `PASS` |
 | Kernel errors 0 | `PASS` — every class zero |
 | Kodi picture matches MP1b reference | `PASS` — identical measured, identical seen |
-| **HDR picture quality** | **`NOT_JUDGEABLE_WITH_CURRENT_SINK`** |
+| HDR film after video-plane EOTF | **`PARTIAL PASS` — clear physical improvement; NV15/10-bit retained** |
+| HDR player controls | **`OPEN` — blue remains washed; GUI plane is PQ-coded but tagged SDR** |
 
 ### Classification
 
-**`MP2 = PASS`**, with one item deferred rather than failed.
-
-Every machine-checkable requirement is met. The one requirement that is not
-answered — "does HDR look right" — is not answerable on this display, and the
-reason is proven rather than assumed: the raw MP1b reference, which *is* the
-proven-good baseline, looks exactly as washed out as Kodi on this monitor.
-That is a sink limitation, and it is the same limitation for any source.
+**The original machine-level recovery items remain `PASS`; HDR picture quality
+is now `PARTIAL PASS`.** The video-plane root cause is measured and physically
+confirmed. Overall sign-off waits only for the analogous GUI-plane fix to pass
+build, atomic readback, teardown and operator A/B.
 
 The EBADFD caveat is stated rather than smoothed over. Four occurred and four
 were recovered; a literal "EBADFD = 0" is unreachable while the driver stops
 the PCM on every modeset, and the honest measure is that none survived.
 
-### If the operator's Windows + Kodi test on this monitor also looks washed out
+### Windows + Kodi result
 
-That confirms the sink-limitation finding independently and closes the
-question. If it instead looks correct, the finding is wrong and the next step
-is to compare the HDR metadata blob and quantisation-range signalling between
-the two sources — not to change anything in the pipeline, which has already
-been shown to match its own reference.
+It looks correct on this monitor. That refutes the sink-limitation finding but
+does not imply that Windows clamps mastering metadata: Kodi's Windows renderer
+sends source mastering/CLL/FALL metadata, and its principal measured design
+difference is an RGB Full PQ swap-chain. Matching that on RK3588 did not fix
+the picture and broke the GUI overlay.
 
 ## Recommended next single Gate
 
-**Re-run the MP1b/MP2 picture-quality judgement on the Sony BRAVIA.**
+**Build and install patch 0009, then repeat the HDR + OSD A/B.** Acceptance is:
 
-Not a code gate. Every signal-level requirement is already proven; what is
-missing is a display that can render HDR10 well enough to judge picture
-quality on, and that is the only thing blocking a full MP2 sign-off. It is
-also the cheapest possible gate: reconnect the TV, play the same asset at the
-same timestamp, compare against `kodi-vs-mp1b.txt`.
+* video plane and GUI plane both read `EOTF=2` while the controls are visible;
+* VOP does not re-enter its SDR→HDR path;
+* NV15, YCbCr 4:2:2 10-bit, BT.2020 Limited and source metadata are unchanged;
+* the operator confirms normal blue/control colours;
+* stop restores the output/GUI plane to `EOTF=0`, and replay restores `2`.
+
+The monitor hotplug observation is separate: Kodi retained the removed BenQ's
+3840x2560 mode when the HP X27q was connected and the display stayed dark.
+Restarting Kodi re-enumerated the EDID and restored 2560x1440p60. Treat a Kodi
+restart as the current operational workaround; robust live-hotplug recovery is
+a later, independent task.
 
 Hold `MA1` (compressed passthrough) and Stremio until that is closed, per the
 gate's own stopping rule.

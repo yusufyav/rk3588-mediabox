@@ -1,0 +1,87 @@
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -67,6 +67,11 @@ public:
+   KODI::UTILS::Colorimetry GetColorimetry() const override { return m_colorimetry; }
+   KODI::UTILS::Eotf GetEotf() const override { return m_eotf; }
+   bool SetHDR(const VideoPicture* videoPicture) override;
++
++  // The HDR GUI compositor writes transfer-encoded pixels into the scanout
++  // buffer. Tell display hardware that the output plane is already HDR so it
++  // does not apply a second SDR-to-HDR conversion.
++  void SetGuiPlaneEotf(bool hdrEncoded);
+ 
+   // True when a YUV buffer is bound to a video plane for direct scanout, in
+   // which case the composed output reaching the connector is YCbCr rather
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -952,6 +952,31 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+   return m_hdrBlob.IsValid();
+ }
+ 
++void CWinSystemGbm::SetGuiPlaneEotf(bool hdrEncoded)
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return;
++
++  // Direct-to-plane uses the GUI plane for the EGL back buffer. In
++  // single-plane mode FindVideoPlane uses the video plane as the sole output.
++  CDRMPlane* plane = drm->GetGuiPlane();
++  if (!plane)
++    plane = drm->GetVideoPlane();
++
++  if (!plane || !plane->SupportsProperty("EOTF"))
++  {
++    if (hdrEncoded)
++      CLog::LogF(LOGWARNING, "HDR-composited GUI output plane has no EOTF property");
++    return;
++  }
++
++  const auto eotf = hdrEncoded ? m_eotf : KODI::UTILS::Eotf::TRADITIONAL_SDR;
++  drm->AddProperty(plane, "EOTF", static_cast<uint64_t>(eotf));
++  CLog::LogF(LOGDEBUG, "MP2COLOR where=SetGuiPlaneEotf plane={} hdr_encoded={} eotf={}",
++             plane->GetId(), hdrEncoded, static_cast<uint64_t>(eotf));
++}
++
+ bool CWinSystemGbm::IsHDRDisplay()
+ {
+   auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
+diff --git a/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp b/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp
+--- a/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp
+@@ -240,6 +240,7 @@ bool CWinSystemGbmGLContext::SetGuiCompositing(int colorTransfer)
+     m_compositeShader.reset();
+   }
+ 
++  SetGuiPlaneEotf(m_guiCompositing);
+   return m_guiCompositing;
+ }
+ 
+diff --git a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
+--- a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
+@@ -210,6 +210,7 @@ bool CWinSystemGbmGLESContext::SetGuiCompositing(int colorTransfer)
+       {
+         CLog::Log(LOGERROR, "CWinSystemGbmGLESContext: failed to compile GUI composite shader");
+         m_compositeShader.reset();
++        SetGuiPlaneEotf(false);
+         m_guiCompositing = false;
+         return false;
+       }
+@@ -220,6 +221,7 @@ bool CWinSystemGbmGLESContext::SetGuiCompositing(int colorTransfer)
+     {
+       CLog::Log(LOGERROR, "CWinSystemGbmGLESContext: failed to create LUTs");
+       m_compositeShader.reset();
++      SetGuiPlaneEotf(false);
+       m_guiCompositing = false;
+       return false;
+     }
+@@ -232,5 +234,6 @@ bool CWinSystemGbmGLESContext::SetGuiCompositing(int colorTransfer)
+     m_compositeShader.reset();
+   }
+ 
++  SetGuiPlaneEotf(m_guiCompositing);
+   return m_guiCompositing;
+ }
