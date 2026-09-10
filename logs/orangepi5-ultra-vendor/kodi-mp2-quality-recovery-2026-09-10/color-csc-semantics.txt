@@ -1,0 +1,70 @@
+What the vendor VOP2 actually uses to pick the RGB-to-YCbCr matrix
+==================================================================
+
+Gate MP2 stopped with this reading of the SDR GUI state:
+
+    GUI window: r2y BT.601        (from "color-encoding[BT.601]")
+    video port: BT.709
+    connector : Default
+
+and concluded the GUI was being converted with a BT.601 matrix while the
+port and the sink were told BT.709. That conclusion does not survive
+measurement, and the difference matters, because it is the difference
+between a real colour fault and a correctly converted picture.
+
+Method
+------
+Kodi stopped, so nothing else owns the display. modetest sets a mode and
+holds it while the vendor debugfs summary is read. The connector property
+writes have to go through the ATOMIC path (modetest -a); the legacy path
+returns "failed to set CONNECTOR 201 property Colorspace: Invalid argument"
+and silently leaves the old value, which is worth knowing before trusting
+any such experiment.
+
+Experiment 1 - move the PLANE's COLOR_ENCODING, watch the matrix
+---------------------------------------------------------------
+    plane 57 COLOR_ENCODING = 0 (BT.601)   -> window color-encoding[BT.601]  csc mode[1]
+    plane 57 COLOR_ENCODING = 1 (BT.709)   -> window color-encoding[BT.709]  csc mode[1]
+    plane 57 COLOR_ENCODING = 2 (BT.2020)  -> window color-encoding[BT.2020] csc mode[1]
+
+The property changes. The matrix does not. So COLOR_ENCODING on an RGB
+plane is stored and reported by this driver and NOT used to select the
+RGB-to-YCbCr conversion.
+
+Experiment 2 - move the OUTPUT colorimetry, watch the matrix
+------------------------------------------------------------
+Plane COLOR_ENCODING left alone at BT.601 throughout:
+
+    connector Colorspace = Default(0)      -> VP color-encoding[BT.709]  csc mode[1]
+    connector Colorspace = BT709_YCC(2)    -> VP color-encoding[BT.709]  csc mode[1]
+    connector Colorspace = BT2020_YCC(10)  -> VP color-encoding[BT.2020] csc mode[3]
+    connector Colorspace = Default(0)      -> VP color-encoding[BT.709]  csc mode[1]
+
+The matrix follows the OUTPUT state, exactly as the task's hypothesis
+allowed for. csc mode[1] is what this driver uses while the port is
+BT.709; csc mode[3] is what it uses while the port is BT.2020 -- the same
+mode[3] the NV15 video window shows during HDR playback, where BT.2020 is
+independently known to be correct.
+
+Conclusion
+----------
+The SDR GUI was already being converted with the BT.709 matrix. The
+"BT.601" in the previous reading is the plane's DRM property, which this
+driver ignores on the RGB-to-YCbCr path. There was no BT.601 conversion
+and there is no matrix mismatch between the GUI window and the video port.
+
+What IS wrong, and what the fix addresses
+-----------------------------------------
+The remaining disagreement is one step further out. The wire carries
+YCbCr 4:4:4 (bus_format 2025 YUV8_1X24) whenever the GUI is on screen,
+because this display engine composes an RGB plane to a YCbCr bus format
+with no video plane involved. Kodi decides the transmitted colorimetry
+from the scanned-out PLANE's fourcc, sees RGB, and sends "Default" --
+leaving the sink to infer the matrix from the resolution.
+
+Experiment 2 also shows what that costs and what it does not: Default and
+BT709_YCC produce an identical BT.709 conversion in the display engine and
+differ only in whether the sink is told. So signalling BT709_YCC is a pure
+signalling correction with no pipeline change, and it removes an inference
+step that a sink can get wrong -- particularly on a mode it does not
+recognise, such as this monitor's native 3840x2560.

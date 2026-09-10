@@ -1,0 +1,40 @@
+S1  HDR video, OSD hidden
+    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+
+OSD open/close x3
+  open  1    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  close 1    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  open  2    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  close 2    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  open  3    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  close 3    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+
+seeks
+  +30s -> 2m39s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  +60s -> 3m51s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  -30s -> 3m33s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+
+120 s continuous
+  t+30s  4m4s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  t+60s  4m34s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  t+90s  5m4s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  t+120s 5m35s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=1
+  wall clock 121 s, player 3m34s -> 5m35s
+
+ALSA final
+    access: RW_INTERLEAVED
+    format: S24_LE
+    subformat: STD
+    channels: 2
+    rate: 48000 (48000/1)
+    period_size: 2400
+    buffer_size: 9600
+    state: RUNNING
+
+stop
+    RGB888_1X24        SDR[0] color-encoding[BT.709] color-range[Full] depth=0 cs=0 alsa=RUNNING ebadfd=2
+  mode after stop : Display mode: 3840x2560p50
+
+replay
+  replaying at 1m11s    YUYV10_1X20        HDR10[2] color-encoding[BT.2020] color-range[Limited] depth=10 cs=10 alsa=RUNNING ebadfd=3
+  kodi alive: 1

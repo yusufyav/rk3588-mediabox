@@ -1,0 +1,7 @@
+expected (from task brief):
+32ffe853e8d56295284637252f1da15dd868a8f7c6b8da6b9f77616ba285eb1a
+
+actual (downloaded asset):
+32ffe853e8d56295284637252f1da15dd868a8f7c6b8da6b9f77616ba285eb1a  libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb
+
+RESULT: MATCH

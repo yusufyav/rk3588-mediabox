@@ -1,0 +1,54 @@
+Sink state and capability
+date: 2026-09-10T11:22:45+03:00
+
+IMPORTANT: this is NOT the Sony BRAVIA KD-65XE9005 that Gates MP1a and
+MP1b were judged against. scripts/tv-state.sh reads that TV's IP-control
+REST API; this sink has no such API, so its HDR state is not
+machine-readable. What follows is the connector's view of the panel plus
+the operator's own observation.
+
+== identity, from EDID ==
+  manufacturer : BNQ
+  product name : BenQ RD280UG
+  edid bytes   : 256 extensions: 1
+
+== CTA-861 capability blocks ==
+  HDMI 1.4 VSDB
+  HDMI Forum VSDB (2.0+)
+  vendor oui=00001a
+  Colorimetry : BT2020YCC,BT2020RGB
+  YCbCr420 capability map present
+  HDR static  : SDR,SMPTE ST2084 (PQ) | Static Metadata Type 1
+
+== connector capability properties ==
+  	204 color_depth_caps:
+  		flags: range
+  		values: 0 255
+  		value: 55
+  	205 color_format_caps:
+  		flags: range
+  		values: 0 15
+  		value: 15
+  	206 HDR_PANEL_METADATA:
+
+== modes relevant to this gate ==
+    #0 3840x2560 49.98 3840 3936 4000 4160 2560 2563 2573 2621 544960 flags: phsync, nvsync; type: preferred, driver
+    #8 3840x2160 24.00 3840 5116 5204 5500 2160 2168 2178 2250 297000 flags: phsync, pvsync; type: driver
+    #9 3840x2160 23.98 3840 5116 5204 5500 2160 2168 2178 2250 296703 flags: phsync, pvsync; type: driver
+
+== hotplug / link ==
+  /sys/class/drm/card0-HDMI-A-1/status: connected
+  /sys/class/drm/card0-HDMI-A-1/enabled: enabled
+
+== operator observations, recorded verbatim ==
+  SDR GUI after the RGB fix : "Ana menu guzel gorunuyor"
+  GUI smoothness on Mali    : "belirgin sekilde akici"
+  HDR film in Kodi          : "oldukca soluk"
+  HDR film via MP1b probe   : "bu da ayni sekilde soluk"
+  Monitor HDR indicator     : "HDR aktif gorunuyor"
+  Physical audio            : "Evet, ses geliyor"
+  A/V sync at 30:00         : "Senkron iyi"
+
+  The monitor reports itself in HDR mode and the raw reference looks the
+  same as Kodi, so the washed-out HDR appearance is this panel's
+  rendering of PQ, not a fault in the source. See kodi-vs-mp1b.txt.

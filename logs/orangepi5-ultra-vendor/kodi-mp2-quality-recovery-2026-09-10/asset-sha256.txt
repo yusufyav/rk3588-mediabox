@@ -1,0 +1,5 @@
+f4e32b8d3feb7efdebaaefaf7338a25bcc86ee144bf82bd4b93da6b80906f96a  /var/tmp/mp1b/past-lives.mkv
+12081238172 bytes
+
+Verified on the target at the start of this gate. Same asset as Gates MP1b
+and MP2, so the A/B against the raw reference is over identical bytes.

@@ -1,0 +1,64 @@
+Kodi GUI under llvmpipe and under Mali-G610
+date: 2026-09-10T11:04:42+03:00
+
+Same Kodi binary, same patch set, same appliance profile, same scripted
+navigation over JSON-RPC, same GUI resolution (the sink's native
+3840x2560). The only difference between the two runs is MEDIABOX_GPU,
+which is the only difference in LD_LIBRARY_PATH. Nothing is installed
+for either; the system Mesa is untouched throughout.
+
+===== GUI load: A - system Mesa (llvmpipe) =====
+renderer : GL_RENDERER = llvmpipe (LLVM 19.1.7, 128 bits)
+-- scripted navigation for 40s, sampling Kodi's own System.FPS --
+  process CPU     : 7.5% of one core
+  RSS             : 265 MiB
+  System.FPS      : n=11 min=0.2 avg=1.6 max=2.0
+  open fds        : 50 (dmabuf 0)
+  DRM IOVA arena  : total: 4294967296, used 55050240 free 4239917056
+
+===== GUI load: B - private Mali g24p0 runtime =====
+renderer : GL_RENDERER = Mali-G610
+-- scripted navigation for 40s, sampling Kodi's own System.FPS --
+  process CPU     : 8.7% of one core
+  RSS             : 266 MiB
+  System.FPS      : n=12 min=20.0 avg=30.8 max=47.0
+  open fds        : 67 (dmabuf 5)
+  DRM IOVA arena  : total: 4294967296, used 235929600 free 4059037696
+
+Reading
+-------
+  GUI frame rate   1.6 fps  ->  30.8 fps   (about 19x)
+  worst sample     0.2 fps  ->  20.0 fps
+  best sample      2.0 fps  ->  47.0 fps
+  process CPU      7.5%     ->  8.7%   of one core
+  RSS              265 MiB  ->  266 MiB
+
+The CPU and memory figures barely move, which is the point: llvmpipe was
+not saturating the CPU, it was simply unable to fill a 3840x2560 frame in
+anything like a frame's time. At 1.6 fps the GUI is not slow, it is
+unusable. Operator's assessment of the Mali run, unprompted: "belirgin
+sekilde akici" -- clearly smooth.
+
+The buffer figures are the other half of the story. Under Mali the GUI
+holds 5 dmabufs and 236 MB of display IOVA at 3840x2560 -- five buffers
+of 39.3 MB, exactly the bound patches/kodi/0003 imposes. Before that
+patch this same GUI consumed the entire 4 GiB arena in about eight
+seconds and Kodi died; see gbm-buffer-leak.txt.
+
+===== Kodi GL strings, from Kodi's own log =====
+2026-09-10 11:03:26.201 T:83360    info <general>: EGL_VERSION = 1.5 Valhall-"g24p0-00eac0"
+2026-09-10 11:03:26.201 T:83360    info <general>: EGL_VENDOR = ARM
+2026-09-10 11:03:26.217 T:83360    info <general>: GL_VENDOR = ARM
+2026-09-10 11:03:26.217 T:83360    info <general>: GL_RENDERER = Mali-G610
+2026-09-10 11:03:26.217 T:83360    info <general>: GL_VERSION = OpenGL ES 3.2 v1.g24p0-00eac0.071111a8920e863c7ed9b7ffed7fc78e
+2026-09-10 11:03:26.217 T:83360    info <general>: GL_SHADING_LANGUAGE_VERSION = OpenGL ES GLSL ES 3.20
+
+===== objects kodi-gbm actually mapped =====
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali-hook.so.1.9.0
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali.so.1.9.0
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libEGL.so.1
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libGLESv2.so.2
+
+No Mesa object is mapped: no libgallium, no libEGL_mesa, no swrast.
+llvmpipe is not merely unused, it is not loaded.

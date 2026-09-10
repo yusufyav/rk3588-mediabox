@@ -1,0 +1,15 @@
+mapped shared objects:
+  /usr/lib/aarch64-linux-gnu/libgcc_s.so.1
+  /usr/lib/aarch64-linux-gnu/libm.so.6
+  /usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33
+  /usr/lib/aarch64-linux-gnu/libdl.so.2
+  /usr/lib/aarch64-linux-gnu/libpthread.so.0
+  /usr/lib/aarch64-linux-gnu/libdrm.so.2.124.0
+  /opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali.so.1.9.0
+  /opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali-hook.so.1.9.0
+  /usr/lib/aarch64-linux-gnu/libc.so.6
+  /opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libGLESv2.so.2
+  /opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libEGL.so.1
+  /opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1
+  /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+teardown            : clean

@@ -1,0 +1,13 @@
+libmali package source
+
+repository : https://github.com/tsukumijima/libmali-rockchip
+release    : v1.9-1-20260312-bd33ee2 (release id 295721244)
+asset      : libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb
+url        : https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb
+size       : 19227596 bytes
+
+Variant choice: the plain -gbm asset. The release also ships -x11-gbm,
+-wayland-gbm, -x11-wayland-gbm and -dummy variants. Kodi runs standalone
+GBM/DRM here with no X11 and no Wayland compositor, so the GBM-only
+variant is the one that matches the runtime and pulls the fewest
+libraries. -dummy is a no-hardware stub and is not a candidate.

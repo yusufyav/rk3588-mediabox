@@ -1,0 +1,64 @@
+Kodi DRMPRIME vs the proven MP1b raw playback probe
+===================================================
+
+Purpose: settle whether the washed-out HDR appearance the operator reported
+is something Kodi does, or something this display does.
+
+Held constant
+  file        /var/tmp/mp1b/past-lives.mkv
+  sha256      f4e32b8d3feb7efdebaaefaf7338a25bcc86ee144bf82bd4b93da6b80906f96a
+  timestamp   30:00 in both runs
+  sink        BenQ RD280UG, same input, same picture mode, untouched between
+              the two runs
+  decoder     hevc_rkmpp in both
+  gap         under two minutes; Kodi stopped, probe started
+
+A = Kodi 22.0b2-Piers, GBM/DRM standalone, DRMPRIME direct-to-plane,
+    hardware Mali GUI, this gate's patch set
+B = tools/hdr-playback-probe, the Gate MP1b binary. No Kodi, no GUI plane,
+    no compositor: decoder straight onto a DRM plane.
+
+Measured output state
+                          A (Kodi)             B (MP1b raw)
+  bus_format              200d YUYV10_1X20     200d YUYV10_1X20
+  wire                    YCbCr 4:2:2 10-bit   YCbCr 4:2:2 10-bit
+  display mode            3840x2160p24         3840x2160p24
+  VP dynamic range        HDR10[2]             HDR10[2]
+  VP encoding / range     BT.2020 / Limited    BT.2020 / Limited
+  video plane             Esmart0-win0 NV15    Esmart0-win0 NV15
+  connector Colorspace    10 BT2020_YCC        10 BT2020_YCC
+  connector color_depth   10 30bit             10 30bit
+
+  Identical in every field.
+
+  (connector color_format read 1 under Kodi and 0 under the probe, and the
+  wire was 4:2:2 in both. Neither value describes the link: the driver
+  negotiates the output format down to fit 4K24 at 10 bits regardless of what
+  is requested. It is recorded here only to show again why bus_format is the
+  authority in this gate and the property readback is not.)
+
+Operator's visual comparison
+  Kodi at 30:00 : "oldukca soluk" -- washed out, and the player OSD carries a
+                  colour cast.
+  MP1b at 30:00 : "bu da ayni sekilde soluk" -- the raw reference looks the
+                  same.
+
+Reading
+  The reference path and Kodi are indistinguishable, measured and seen. Kodi
+  is therefore NOT a regression against the MP1b baseline: it reproduces it.
+
+  The washed-out HDR10 appearance belongs to the sink. This is a BenQ RD280UG,
+  a 28" productivity monitor, not the Sony BRAVIA KD-65XE9005 that Gates
+  MP1a/MP1b were judged on. Its EDID advertises PQ and BT.2020 and it reports
+  itself in HDR mode, but advertising ST2084 and rendering it well are
+  different things: a monitor of this class has neither the peak luminance nor
+  the tone mapping to make a PQ grade look right, and PQ shown flat is exactly
+  "washed out".
+
+  Nothing in this gate can be concluded about HDR *picture quality* from this
+  display. What can be concluded, and is, is that the HDR *signal* is correct
+  and identical to the proven reference. Re-judging picture quality needs the
+  Sony back on the input; that is a sink swap, not a code change.
+
+  FAULT DOMAIN: sink (BenQ RD280UG HDR10 rendering), not the RK3588 pipeline
+  and not Kodi.

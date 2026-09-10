@@ -1,0 +1,101 @@
+S0 / S1 / S2 / S3 - the colour chain across one Kodi session
+============================================================
+
+Sink: BenQ RD280UG. NOTE: NOT the Sony BRAVIA KD-65XE9005 that Gates MP1a and
+MP1b were judged against. Its native mode is 3840x2560p50 (3:2), which is what
+made the mode-selection problem below visible at all. Capability and operator
+observations: tv-state.txt.
+
+Legend
+  ACTUAL    = vendor VOP2 debugfs. What is being driven. The authority.
+  REQUESTED = DRM connector properties. What Kodi asked for.
+  csc mode  = this driver's colour matrix selector. Proven in
+              color-csc-semantics.txt to follow the OUTPUT state, not the
+              plane's COLOR_ENCODING: mode[1] while the port is BT.709,
+              mode[3] while it is BT.2020, mode[0] when no conversion runs.
+
+                       S0 SDR GUI      S1 HDR video     S2 HDR+OSD       S3 GUI restored
+                       idle            OSD hidden       OSD visible      after stop
+---------------------------------------------------------------------------------------------
+ACTUAL
+ bus_format            100a            200d             200d             100a
+                       RGB888_1X24     YUYV10_1X20      YUYV10_1X20      RGB888_1X24
+ wire                  RGB 4:4:4 8b    YCbCr 4:2:2 10b  YCbCr 4:2:2 10b  RGB 4:4:4 8b
+ mode                  3840x2560p50    3840x2160p24     3840x2160p24     3840x2560p50
+ VP dynamic range      SDR[0]          HDR10[2]         HDR10[2]         SDR[0]
+ VP encoding           BT.709          BT.2020          BT.2020          BT.709
+ VP range              Full            Limited          Limited          Full
+ overlay_mode          0               0                0                0
+
+ACTUAL - GUI window (Cluster0-win0, plane 57)
+ present               yes             no               yes              yes
+ fourcc                AR24            -                AR24             AR24
+ y2r / r2y             0 / 0           -                0 / 0            0 / 0
+ csc mode              0  (none)       -                0  (none)        0  (none)
+ plane COLOR_ENCODING  BT.601          -                BT.601           BT.601
+                       ^ stored by the driver and NOT used on this path;
+                         see color-csc-semantics.txt
+
+ACTUAL - video window (Esmart0-win0, plane 73)
+ present               no              yes              yes              no
+ fourcc                -               NV15             NV15             -
+ y2r / r2y             -               1 / 0            1 / 0            -
+ csc mode              -               3  (BT.2020)     3  (BT.2020)     -
+ colour tag            -               BT.2020 Limited  BT.2020 Limited  -
+
+REQUESTED - connector
+ Colorspace            0 Default       10 BT2020_YCC    10 BT2020_YCC    0 Default
+ color_depth           0 Automatic     10 30bit         10 30bit         0 Automatic
+ color_format          0 rgb           1 ycbcr444       1 ycbcr444       0 rgb
+ max bpc               absent          absent           absent           absent
+ HDR_OUTPUT_METADATA   cleared         set              set              cleared
+
+Readings
+--------
+1. S3 is identical to S0 in every field. The whole HDR acquisition is released
+   on stop -- metadata cleared, depth back to Automatic, colorimetry back to
+   Default, the link back to RGB, and the mode restored.
+
+   Getting S3 right needed one more fix than expected. Kodi calls
+   SetColorimetry(nullptr) from the renderer's destructor, which runs BEFORE
+   the video plane is released, so a decision based on the plane still saw YUV
+   and left the GUI on a YCbCr link. A null picture means "the GUI is what will
+   be on screen"; that is now what the decision uses.
+
+2. The SDR GUI carries no colour conversion at all: csc mode[0], r2y[0], full
+   range RGB on the wire. There is no matrix and no quantisation range for the
+   sink to get wrong, which is what fixed the washed-out GUI the operator
+   reported.
+
+3. S1 reproduces the Gate MP1b baseline on a different sink: NV15 on the
+   Esmart video plane, BT.2020 Limited, csc mode[3], 10-bit YCbCr 4:2:2 on the
+   wire, HDR10 signalled, 3840x2160 at 23.976.
+
+4. S2 keeps every bit of it with the OSD on screen -- same bus format, same 10
+   bits, same HDR10 tag, same BT2020_YCC, same csc mode[3] on the video
+   window. Three open/close cycles, all identical (playback-stats.txt).
+
+5. color_format reads ycbcr444 in S1/S2 while the wire is 4:2:2. That is the
+   driver negotiating the requested format down to fit 4K24 at 10 bits, and it
+   is why bus_format is the authority in this gate and the property readback
+   is not.
+
+6. The video path is deliberately NOT RGB. Requesting RGB there was measured:
+   the link comes up RGB888_1X24, which is 8-bit, while ycbcr444 + 30bit gives
+   a real 10-bit YUYV10_1X20. Trading HDR10 down to 8 bits to win a range
+   argument is the wrong trade.
+
+Changes against the pre-fix captures (*-before-fix.txt)
+------------------------------------------------------
+ S0/S3 wire            YCbCr 4:4:4 8-bit Limited  ->  RGB 4:4:4 8-bit Full
+ S0/S3 GUI csc         r2y[1] mode[1] (BT.709)    ->  r2y[0] mode[0] (none)
+ S0/S3 Colorspace      0 Default                  ->  0 Default (unchanged)
+ S1/S2                 unchanged in every field
+
+Separately, and not a colour change: before the mode whitelist was populated,
+playback stayed at the desktop's 3840x2560p50 and never reached 23.976. Kodi's
+default whitelist admits only modes at least as large as the current one, and
+on a 3:2 native panel 3840x2160 is shorter than the desktop, so every film
+mode was excluded. With the whitelist filled from Kodi's own option list the
+log reads "[WHITELIST] Matched an exact resolution with an exact refresh rate
+3840x2160 @ 23.976000 Hz".

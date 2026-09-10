@@ -1,5 +1,5 @@
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
-index 74295b1..b34e2ad 100644
+index 74295b1..e14c346 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
 @@ -95,6 +95,11 @@ constexpr auto ColorimetryMap = make_map<KODI::UTILS::Colorimetry, std::string_v
@@ -14,7 +14,7 @@ index 74295b1..b34e2ad 100644
  } // namespace
  
  CWinSystemGbm::CWinSystemGbm()
-@@ -460,7 +465,30 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+@@ -460,7 +465,34 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
    // same class of mismatch the comment above warns about, in the other
    // direction. So the RGB substitution is applied only when no YUV video
    // plane is bound for direct scanout.
@@ -36,7 +36,11 @@ index 74295b1..b34e2ad 100644
 +  // quantisation range for both ends to agree about -- which is exactly what
 +  // went wrong: the SDR GUI was transmitted as limited-range YCbCr and read
 +  // back as full range, lifting black and flattening the picture.
-+  const bool yuvVideo = IsDirectToPlaneYuvScanout();
++  // A null picture means the renderer is going away and the GUI is what will
++  // be on screen. Say so directly rather than asking the plane: on teardown
++  // this runs before the video plane is released, so the plane still reports a
++  // YUV format and the GUI would be left on the YCbCr link it no longer needs.
++  const bool yuvVideo = videoPicture && IsDirectToPlaneYuvScanout();
 +  const std::optional<bool> rgbOutput = RequestRgbOutput(!yuvVideo);
 +
 +  // What the link will carry. Prefer what was just asked for; fall back to
@@ -46,7 +50,7 @@ index 74295b1..b34e2ad 100644
  
    KODI::UTILS::Colorimetry scanoutColorimetry;
    switch (colorimetry)
-@@ -470,10 +498,31 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+@@ -470,10 +502,31 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
        scanoutColorimetry = yuvScanout ? colorimetry : KODI::UTILS::Colorimetry::BT2020_RGB;
        break;
      default:
@@ -82,7 +86,7 @@ index 74295b1..b34e2ad 100644
        break;
    }
  
-@@ -551,6 +600,106 @@ void CWinSystemGbm::LogColorState(const char* where) const
+@@ -551,6 +604,131 @@ void CWinSystemGbm::LogColorState(const char* where) const
              crtc ? std::to_string(crtc->GetCrtcId()) : "-");
  }
  
@@ -156,22 +160,47 @@ index 74295b1..b34e2ad 100644
 +  if (!rgb)
 +    return {};
 +
-+  // Remember what the driver picked on its own, once, before overriding it.
-+  // Handing that exact value back is safer than naming a YCbCr subsampling
-+  // here: the driver negotiates the link down from its own choice when the
-+  // bandwidth does not fit, and it is better placed to make that call.
-+  if (!m_driverColorFormat)
-+    m_driverColorFormat = ReadLiveConnectorProperty("color_format");
-+  if (!m_driverColorFormat)
++  std::optional<uint64_t> wanted;
++  const char* wantedName = nullptr;
++
++  if (wantRgb)
++  {
++    wanted = rgb;
++    wantedName = "rgb";
++  }
++  else
++  {
++    // Name a YCbCr format rather than trying to remember what the driver
++    // "originally" had. Connector state survives a Kodi restart, so anything
++    // read back at start-up may simply be this code's own request from the
++    // last run -- and handing that back would ask for RGB on the video path,
++    // get a YCbCr link anyway because 10-bit RGB does not fit, and then tag
++    // the wire as RGB. That is exactly the mismatch this file already warns
++    // about in the other direction.
++    //
++    // Best first: the driver negotiates the subsampling down to fit the link,
++    // and asking for 4:4:4 at 4K24 with 10 bits is how a real 4:2:2 10-bit
++    // output is reached here. Whatever it settles on stays YCbCr, so the tag
++    // chosen from this request stays correct.
++    for (const char* name : {"ycbcr444", "ycbcr422", "ycbcr420"})
++    {
++      wanted = connector->GetPropertyEnumValue("color_format", name);
++      if (wanted)
++      {
++        wantedName = name;
++        break;
++      }
++    }
++  }
++
++  if (!wanted)
 +    return {};
 +
-+  const uint64_t wanted = wantRgb ? rgb.value() : m_driverColorFormat.value();
-+  CLog::LogF(LOGDEBUG, "requesting output pixel format {} ({})", wanted,
-+             wantRgb ? "rgb" : "driver default");
-+  drm->AddProperty(connector, "color_format", wanted);
++  CLog::LogF(LOGDEBUG, "requesting output pixel format \"{}\" ({})", wantedName, wanted.value());
++  drm->AddProperty(connector, "color_format", wanted.value());
 +  drm->SetActive(true);
 +
-+  return wanted == rgb.value();
++  return wanted.value() == rgb.value();
 +}
 +
 +bool CWinSystemGbm::IsHdOrLargerMode() const
@@ -190,7 +219,7 @@ index 74295b1..b34e2ad 100644
  {
    auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
-index 78005de..f18902a 100644
+index 78005de..e644e16 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.h
 +++ b/xbmc/windowing/gbm/WinSystemGbm.h
 @@ -71,8 +71,29 @@ public:
@@ -207,9 +236,9 @@ index 78005de..f18902a 100644
 +  // exposes no property that says.
 +  std::optional<bool> IsYuvOutput() const;
 +
-+  // Asks the connector for an RGB or a YCbCr link. Returns what the output
-+  // will be: true for RGB. Empty when the driver has no such property, in
-+  // which case the caller must fall back to observing rather than choosing.
++  // Asks the connector for an RGB or a YCbCr link. Returns what was asked
++  // for: true for RGB. Empty when the driver has no such property, in which
++  // case the caller must fall back to observing rather than choosing.
 +  std::optional<bool> RequestRgbOutput(bool wantRgb);
 +
 +  // A connector property's CURRENT value, read from the kernel rather than
@@ -223,14 +252,11 @@ index 78005de..f18902a 100644
    // Requests deep colour on the connector, using whichever property this
    // driver exposes. Only tells the display driver how many bits per component
    // the link may carry; it is not a video-format decision.
-@@ -118,6 +139,10 @@ protected:
+@@ -118,6 +139,7 @@ protected:
  private:
    CDRMPropertyBlob m_hdrBlob;
    KODI::UTILS::Eotf m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
 +
-+  // The output pixel format the driver chose for itself, captured before
-+  // anything here overrides it, so it can be handed back untouched.
-+  std::optional<uint64_t> m_driverColorFormat;
    KODI::UTILS::Colorimetry m_colorimetry = KODI::UTILS::Colorimetry::DEFAULT;
  
    std::unique_ptr<UTILS::CDisplayInfo> m_info;
