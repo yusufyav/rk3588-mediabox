@@ -63,7 +63,7 @@ describe('Mock backend davranışı', () => {
     const api = new ApiClient(mock('playing'))
     const before = (await api.getKodi()).player?.position ?? 0
 
-    await api.seek(-30)
+    await api.seek(before - 30)
 
     expect((await api.getKodi()).player?.position).toBe(before - 30)
   })

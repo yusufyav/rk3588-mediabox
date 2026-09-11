@@ -90,11 +90,11 @@ export class MockTransport implements Transport {
         this.kodi = { ...fx.kodiIdle }
         break
       case ENDPOINTS.kodiSeek: {
-        const offset = (options.body as { offsetSeconds?: number } | undefined)?.offsetSeconds ?? 0
+        const seconds = (options.body as { seconds?: number } | undefined)?.seconds ?? 0
         const player = this.kodi.player
         if (player) {
           const duration = player.duration ?? 0
-          player.position = clamp((player.position ?? 0) + offset, 0, duration)
+          player.position = clamp(seconds, 0, duration)
         }
         break
       }

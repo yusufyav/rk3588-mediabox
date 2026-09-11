@@ -53,12 +53,12 @@ export interface StreamHandlers {
 
 const DEFAULT_TIMEOUT_MS = 8000
 
-/** Resolve `api/v1/` against the document base so a sub-path mount still works. */
+/** The UI may live under /ui/, while the API is always rooted at /api/v1/. */
 export function resolveApiBase(): string {
   const override = import.meta.env?.VITE_API_BASE
   if (override) return override.endsWith('/') ? override : `${override}/`
   const base = typeof document !== 'undefined' ? document.baseURI : 'http://localhost/'
-  return new URL('api/v1/', base).toString()
+  return new URL('/api/v1/', base).toString()
 }
 
 export class HttpTransport implements Transport {
@@ -183,14 +183,17 @@ export class ApiClient {
 
   stopPlayback = () => this.transport.request<void>(ENDPOINTS.kodiStop, { method: 'POST' })
 
-  seek = (offsetSeconds: number) =>
+  seek = (seconds: number) =>
     this.transport.request<void>(ENDPOINTS.kodiSeek, {
       method: 'POST',
-      body: { offsetSeconds },
+      body: { seconds },
     })
 
-  open = (path: string) =>
-    this.transport.request<void>(ENDPOINTS.kodiOpen, { method: 'POST', body: { path } })
+  open = (url: string, resumeSeconds = 0) =>
+    this.transport.request<void>(ENDPOINTS.kodiOpen, {
+      method: 'POST',
+      body: { url, resume_seconds: resumeSeconds },
+    })
 
   startKodi = () => this.transport.request<void>(ENDPOINTS.kodiServiceStart, { method: 'POST' })
 

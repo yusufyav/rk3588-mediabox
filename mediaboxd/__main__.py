@@ -8,8 +8,9 @@ import signal
 import socket
 import sys
 import threading
+from pathlib import Path
 
-from .api import APIContext, MediaBoxHTTPServer, handler_factory
+from .api import APIContext, MediaBoxHTTPServer, handler_factory, kodi_response
 from .config import load_config
 from .events import EventBroker, KodiEventMonitor
 from .kodi import KodiClient
@@ -36,13 +37,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     kodi = KodiClient(config.kodi)
     events = EventBroker()
-    monitor = KodiEventMonitor(kodi, events, config.event_poll_seconds)
+    monitor = KodiEventMonitor(
+        kodi,
+        events,
+        config.event_poll_seconds,
+        serializer=kodi_response,
+    )
     context = APIContext(
         kodi=kodi,
         lifecycle=KodiLifecycle(config.kodi, kodi),
         telemetry=Telemetry(),
         events=events,
         system_actions=SystemActions(config),
+        webui_root=Path(config.webui_root) if config.webui_root else None,
     )
     server_type = MediaBoxHTTPServer
     if ":" in config.bind_address:

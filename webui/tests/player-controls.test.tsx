@@ -31,14 +31,14 @@ describe('Oynatıcı kontrolleri', () => {
     ['Geri 10 saniye', -10],
     ['İleri 10 saniye', 10],
     ['İleri 30 saniye', 30],
-  ])('sends %s as a relative seek offset', async (label, offset) => {
+  ])('turns %s into the absolute M1A seek position', async (label, offset) => {
     const transport = new StubTransport(stubResponses())
     await openPlayerPage(transport)
     fireEvent.click(screen.getByRole('button', { name: label }))
 
     await waitFor(() => {
       const seek = transport.calls.find((c) => c.path === ENDPOINTS.kodiSeek)
-      expect(seek?.body).toEqual({ offsetSeconds: offset })
+      expect(seek?.body).toEqual({ seconds: 1284 + offset })
     })
   })
 

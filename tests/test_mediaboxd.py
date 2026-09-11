@@ -21,9 +21,7 @@ from mediaboxd.telemetry import Telemetry
 class FakeKodi:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
-
-    def status(self):
-        return {
+        self.status_payload = {
             "running": True,
             "pid": 42,
             "jsonrpc_reachable": True,
@@ -33,6 +31,9 @@ class FakeKodi:
             "time": None,
             "total_time": None,
         }
+
+    def status(self):
+        return self.status_payload
 
     def play_pause(self):
         self.calls.append(("playpause", None))
@@ -55,36 +56,89 @@ class FakeKodi:
 
 
 class FakeLifecycle:
+    def __init__(self):
+        self.calls = []
+
     def start(self):
+        self.calls.append("start")
         return {"changed": True, "running": True, "pid": 42}
 
     def stop(self):
+        self.calls.append("stop")
         return {"changed": True, "running": False, "pid": None}
 
     def restart(self):
+        self.calls.append("restart")
         return {"changed": True, "running": True, "pid": 43}
 
 
 class FakeTelemetry:
     def system(self):
-        return {"hostname": "test", "memory": {"total_bytes": 1024, "used_bytes": 512}}
+        return {
+            "hostname": "test",
+            "kernel": "6.1-test",
+            "architecture": "aarch64",
+            "uptime_seconds": 123.5,
+            "cpu_cores": 8,
+            "cpu_temperature_celsius": 55.0,
+            "load": {"1m": 1.0, "5m": 2.0, "15m": 3.0},
+            "memory": {
+                "total_bytes": 1024,
+                "used_bytes": 512,
+                "available_bytes": 512,
+            },
+            "root_filesystem": {"total_bytes": 4096, "used_bytes": 1024},
+        }
 
     def network(self):
-        return {"interfaces": [], "default_route": None, "active_wifi_ssid": None}
+        return {
+            "interfaces": [
+                {
+                    "name": "eth0",
+                    "link_state": "up",
+                    "ipv4": ["10.0.0.2"],
+                    "wireless": False,
+                    "mac": "00:11:22:33:44:55",
+                    "link_speed_mbps": 1000,
+                }
+            ],
+            "default_route": {"interface": "eth0", "gateway": "10.0.0.1"},
+            "active_wifi_ssid": None,
+        }
 
     def display(self):
-        return {"drm_card": None, "connected": False}
+        return {
+            "drm_card": "/dev/dri/card0",
+            "connector": "card0-HDMI-A-1",
+            "connected": True,
+            "mode": "3840x2160p60",
+            "refresh_hz": 60.0,
+            "colour": {
+                "encoding": "BT2020_YCC",
+                "range": "LIMITED",
+                "bus_format": "YUV10_1X30",
+            },
+            "depth_bits_per_component": 10,
+            "hdr": {"active": True, "mode": "HDR10", "eotf_tag": 2},
+        }
 
 
 class APITest(unittest.TestCase):
     def setUp(self):
         self.kodi = FakeKodi()
+        self.lifecycle = FakeLifecycle()
+        self.static_directory = tempfile.TemporaryDirectory()
+        static_root = Path(self.static_directory.name)
+        (static_root / "assets").mkdir()
+        (static_root / "index.html").write_text("<html>MediaBox UI</html>", encoding="utf-8")
+        (static_root / "assets/app.js").write_text("globalThis.mediabox=true", encoding="utf-8")
         context = APIContext(
             kodi=self.kodi,
-            lifecycle=FakeLifecycle(),
+            lifecycle=self.lifecycle,
             telemetry=FakeTelemetry(),
             events=EventBroker(),
             system_actions=SystemActions(Config()),
+            webui_root=static_root,
         )
         self.server = MediaBoxHTTPServer(("127.0.0.1", 0), handler_factory(context))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -95,8 +149,9 @@ class APITest(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+        self.static_directory.cleanup()
 
-    def request(self, method, path, body=None, headers=None):
+    def raw_request(self, method, path, body=None, headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
         encoded = None if body is None else json.dumps(body)
         request_headers = headers or {}
@@ -104,21 +159,75 @@ class APITest(unittest.TestCase):
             request_headers.setdefault("Content-Type", "application/json")
         connection.request(method, path, body=encoded, headers=request_headers)
         response = connection.getresponse()
-        payload = json.loads(response.read())
+        payload = response.read()
+        status = response.status
         result_headers = dict(response.getheaders())
         connection.close()
-        return response.status, result_headers, payload
+        return status, result_headers, payload
+
+    def request(self, method, path, body=None, headers=None):
+        status, result_headers, payload = self.raw_request(method, path, body, headers)
+        return status, result_headers, json.loads(payload)
 
     def test_health_endpoint_and_no_cors(self):
         status, headers, payload = self.request("GET", "/api/v1/health")
         self.assertEqual(status, 200)
-        self.assertEqual(payload, {"status": "ok"})
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["version"], "0.1.0")
+        self.assertEqual(
+            payload["actions"],
+            {
+                "kodiStart": True,
+                "kodiStop": True,
+                "kodiRestart": True,
+                "reboot": False,
+                "shutdown": False,
+                "reason": "Sistem güç işlemleri yapılandırmada devre dışı",
+            },
+        )
         self.assertNotIn("Access-Control-Allow-Origin", headers)
 
     def test_system_endpoint(self):
         status, _, payload = self.request("GET", "/api/v1/system")
         self.assertEqual(status, 200)
         self.assertEqual(payload["hostname"], "test")
+        self.assertEqual(payload["uptimeSeconds"], 123.5)
+        self.assertEqual(payload["cpu"]["loadAverage"], [1.0, 2.0, 3.0])
+        self.assertEqual(payload["memory"]["totalBytes"], 1024)
+        self.assertEqual(payload["storage"][0]["mountpoint"], "/")
+
+    def test_network_and_display_contract(self):
+        status, _, network = self.request("GET", "/api/v1/network")
+        self.assertEqual(status, 200)
+        self.assertTrue(network["online"])
+        self.assertEqual(network["defaultRoute"]["interface"], "eth0")
+        self.assertEqual(network["interfaces"][0]["linkSpeedMbps"], 1000)
+
+        status, _, display = self.request("GET", "/api/v1/display")
+        self.assertEqual(status, 200)
+        self.assertEqual(display["refreshHz"], 60.0)
+        self.assertEqual(display["colorDepth"], 10)
+        self.assertTrue(display["hdr"]["active"])
+
+    def test_kodi_idle_and_playing_contract(self):
+        status, _, idle = self.request("GET", "/api/v1/kodi")
+        self.assertEqual(status, 200)
+        self.assertEqual(idle, {"serviceActive": True, "state": "idle"})
+
+        self.kodi.status_payload.update(
+            {
+                "active_players": [{"playerid": 1, "type": "video"}],
+                "current_item": {"label": "Film", "type": "movie"},
+                "speed": 1,
+                "time": {"hours": 0, "minutes": 1, "seconds": 2, "milliseconds": 500},
+                "total_time": {"hours": 1, "minutes": 30, "seconds": 0, "milliseconds": 0},
+            }
+        )
+        status, _, playing = self.request("GET", "/api/v1/kodi")
+        self.assertEqual(status, 200)
+        self.assertEqual(playing["state"], "playing")
+        self.assertEqual(playing["player"]["position"], 62.5)
+        self.assertEqual(playing["player"]["duration"], 5400.0)
 
     def test_seek_validation(self):
         status, _, payload = self.request("POST", "/api/v1/kodi/seek", {"seconds": -1})
@@ -128,6 +237,18 @@ class APITest(unittest.TestCase):
         status, _, _ = self.request("POST", "/api/v1/kodi/seek", {"seconds": 30})
         self.assertEqual(status, 200)
         self.assertIn(("seek", 30), self.kodi.calls)
+
+    def test_playback_and_lifecycle_actions(self):
+        self.request("POST", "/api/v1/kodi/playpause")
+        self.request("POST", "/api/v1/kodi/stop")
+        self.request("POST", "/api/v1/kodi/open", {"url": "file:///media/film.mkv"})
+        self.request("POST", "/api/v1/kodi/start")
+        self.request("POST", "/api/v1/kodi/stop-service")
+        self.request("POST", "/api/v1/kodi/restart")
+        self.assertIn(("playpause", None), self.kodi.calls)
+        self.assertIn(("stop", None), self.kodi.calls)
+        self.assertIn(("open", ("file:///media/film.mkv", 0)), self.kodi.calls)
+        self.assertEqual(self.lifecycle.calls, ["start", "stop", "restart"])
 
     def test_invalid_url_scheme(self):
         status, _, payload = self.request(
@@ -148,8 +269,32 @@ class APITest(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
         chunk = response.readline() + response.readline()
-        self.assertIn(b"event: connected", chunk)
+        self.assertIn(b'"type":"connected"', chunk)
+        self.assertIn(b'"payload":{"status":"ok"}', chunk)
         connection.close()
+
+    def test_static_ui_assets_spa_fallback_and_traversal_rejection(self):
+        status, headers, body = self.raw_request("GET", "/ui/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"MediaBox UI", body)
+        self.assertIn("Content-Security-Policy", headers)
+
+        status, headers, body = self.raw_request("GET", "/ui/assets/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertIn(b"mediabox", body)
+
+        status, _, body = self.raw_request("GET", "/ui/device")
+        self.assertEqual(status, 200)
+        self.assertIn(b"MediaBox UI", body)
+
+        status, _, payload = self.request("GET", "/ui/%2e%2e/secret")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "INVALID_REQUEST")
+
+        status, _, payload = self.request("GET", "/api/v1/not-a-route")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "NOT_FOUND")
 
 
 class MockKodiHandler(BaseHTTPRequestHandler):

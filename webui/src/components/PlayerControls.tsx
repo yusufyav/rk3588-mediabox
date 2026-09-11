@@ -91,7 +91,10 @@ export function PlayerControls({
             disabled={busy || !hasMedia}
             disabledReason={hasMedia ? undefined : 'Oynatılan içerik yok'}
             aria-label={`${step > 0 ? 'İleri' : 'Geri'} ${Math.abs(step)} saniye`}
-            onClick={run(`seek${step}`, () => api.seek(step))}
+            onClick={run(
+              `seek${step}`,
+              () => api.seek(Math.min(Math.max(position + step, 0), duration || Number.MAX_SAFE_INTEGER)),
+            )}
           >
             {step > 0 ? `+${step}s` : `${step}s`}
           </Button>

@@ -50,6 +50,7 @@ class Config:
         "::1/128",
     )
     event_poll_seconds: float = 2.0
+    webui_root: str | None = "/opt/rk3588-mediabox/webui/dist"
     kodi: KodiConfig = field(default_factory=KodiConfig)
 
 
@@ -141,6 +142,10 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
     )
     for cidr in cidrs:
         ipaddress.ip_network(cidr, strict=False)
+    webui_root_value = raw.get("webui_root", Config().webui_root)
+    if webui_root_value is not None and not isinstance(webui_root_value, str):
+        raise ValueError("webui_root must be a string or omitted")
+    webui_root = webui_root_value or None
 
     return Config(
         bind_address=bind_address,
@@ -150,5 +155,6 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
         system_actions_enabled=actions_enabled,
         system_actions_allow_cidrs=cidrs,
         event_poll_seconds=_number(raw, "event_poll_seconds", Config().event_poll_seconds),
+        webui_root=webui_root,
         kodi=kodi,
     )

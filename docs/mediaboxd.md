@@ -5,7 +5,7 @@ arasındaki kontrol sınırıdır. M1A uygulaması Python 3.11+ standard library
 çalışır; Node, framework, veritabanı veya üçüncü taraf Python paketi kullanmaz.
 
 ```text
-browser / reverse proxy
+browser
           |
           | versioned HTTP + same-origin SSE
           v
@@ -17,8 +17,9 @@ browser / reverse proxy
 ```
 
 Tarayıcı Kodi'nin LAN'a açık, auth'suz JSON-RPC portuna doğrudan bağlanmaz.
-M1A'da `mediaboxd` varsayılan olarak yalnız `127.0.0.1:8787` dinler. Gelecek Web
-UI aynı origin'den bir reverse proxy üzerinden servis edilmelidir.
+`mediaboxd`, production Web UI bundle'ını `/ui/` altında ve API'yi aynı origin'de
+`/api/v1/` altında sunar. Varsayılan bind yalnız `127.0.0.1:8787`'dir; güvenilir
+LAN kurulumu `allow_lan = true` ile açıkça etkinleştirilir.
 
 ## Çalıştırma
 
@@ -44,6 +45,7 @@ yerleşimi bekler:
 
 - Python paketi: `/opt/rk3588-mediabox/mediaboxd`
 - Config: `/etc/mediaboxd.toml`
+- Web UI: `/opt/rk3588-mediabox/webui/dist`
 - Python: `/usr/bin/python3`
 
 Unit bu milestone sırasında target'a kurulmadı veya enable edilmedi.
@@ -79,7 +81,7 @@ Zorunlu Kodi sınıfları `KODI_UNREACHABLE`, `KODI_RPC_ERROR` ve
 
 | Method | Path | Davranış |
 | --- | --- | --- |
-| GET | `/api/v1/health` | Daemon liveness |
+| GET | `/api/v1/health` | Daemon liveness, sürüm ve action capability map |
 | GET | `/api/v1/system` | Hostname, kernel, arch, uptime/load, RAM, root FS, CPU sıcaklığı |
 | GET | `/api/v1/network` | Arayüzler, IPv4, link, default route, bulunursa Wi-Fi SSID |
 | GET | `/api/v1/kodi` | Process/PID, RPC erişimi, player/item/speed/time/total |
@@ -106,8 +108,9 @@ ve diğer şemalar reddedilir. `seek.seconds` finite, sıfır veya pozitif ve en
 fazla yedi gündür; Kodi'ye `value.time` şemasıyla gönderildiği için absolute
 pozisyondur.
 
-SSE stream ilk olarak `connected`, ardından durum değişince `kodi.state`, başarılı
-mutation sonrasında `control.action` üretir. On beş saniyelik yorum heartbeat'i
+SSE stream ilk olarak `connected`, ardından durum değişince `kodi`, başarılı
+mutation sonrasında `control.action` üretir. Her `data:` satırı frontend ile ortak
+`{"type":"…","payload":{…}}` envelope'unu taşır. On beş saniyelik yorum heartbeat'i
 idle bağlantıyı canlı tutar. M1A'da ek WebSocket dependency yerine SSE seçildi.
 
 ## Kodi lifecycle
@@ -135,6 +138,8 @@ olduktan sonra başarılı döner.
 - System actions default kapalıdır. Açıldığında da çağıran adres
   `system_actions_allow_cidrs` listesine uymalıdır.
 - Request body 64 KiB ile sınırlıdır ve mutation body'leri JSON object olmalıdır.
+- Static dosyalar yalnız configured `webui_root` altından sunulur; traversal ve
+  symlink escape reddedilir, SPA fallback hiçbir zaman `/api` isteklerine uygulanmaz.
 - Telemetri yalnız önceden tanımlı procfs/sysfs/debugfs yollarını okur. Filesystem
   browse, komut veya path parametresi sunan endpoint yoktur.
 - URL şeması ve seek/resume değerleri RPC'den önce doğrulanır.
@@ -158,4 +163,3 @@ Kodi, URL/seek doğrulaması ve command-injection regresyonunu kapsar.
 - Kodi TCP/WebSocket notification ingest; M1A polling yerine push
 - Privilege-separated lifecycle/power broker
 - HDMI-CEC, Bluetooth/input ve Wi-Fi write işlemleri için ayrı milestone'lar
-

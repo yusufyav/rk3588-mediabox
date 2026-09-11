@@ -4,6 +4,7 @@ port = 8787
 allow_lan = false
 log_level = "INFO"
 event_poll_seconds = 2.0
+webui_root = "/opt/rk3588-mediabox/webui/dist"
 
 # Disabled unless an operator explicitly enables it. Even then, the caller's
 # source address must match one of these networks.

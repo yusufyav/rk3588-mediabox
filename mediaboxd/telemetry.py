@@ -79,6 +79,7 @@ class Telemetry:
             "hostname": socket.gethostname(),
             "kernel": platform.release(),
             "architecture": platform.machine(),
+            "cpu_cores": os.cpu_count(),
             "uptime_seconds": uptime,
             "load": {"1m": load[0], "5m": load[1], "15m": load[2]},
             "memory": {
@@ -163,6 +164,8 @@ class Telemetry:
                     "link_state": operstate,
                     "ipv4": ipv4,
                     "wireless": is_wireless,
+                    "mac": (_read(network_root / name / "address") or "").strip() or None,
+                    "link_speed_mbps": self._link_speed(network_root / name / "speed"),
                 }
             )
         default_route = None
@@ -179,6 +182,14 @@ class Telemetry:
             "default_route": default_route,
             "active_wifi_ssid": wifi_ssid,
         }
+
+    @staticmethod
+    def _link_speed(path: Path) -> int | None:
+        try:
+            value = int((_read(path) or "").strip())
+        except ValueError:
+            return None
+        return value if value > 0 else None
 
     def _wifi_ssid(self, interface: str) -> str | None:
         executable = shutil.which("iwgetid")

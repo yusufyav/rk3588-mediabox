@@ -24,9 +24,9 @@ before packaging an image.
 
 ## Backend contract
 
-The UI speaks the mediaboxd v1 API. Paths are resolved relative to the
-document's base URL (`<base>/api/v1/…`), so the bundle works from any mount
-point without rebuilding.
+The UI speaks the mediaboxd v1 API. The production bundle is served below
+`/ui/`, while API requests are always resolved from the same origin at
+`/api/v1/…`.
 
 | Method | Path | Used by |
 | --- | --- | --- |
@@ -37,14 +37,14 @@ point without rebuilding.
 | GET | `/api/v1/display` | HDMI mode, colour, HDR state |
 | POST | `/api/v1/kodi/playpause` | Player, dashboard quick controls |
 | POST | `/api/v1/kodi/stop` | stop **playback** |
-| POST | `/api/v1/kodi/seek` | relative seek, body `{ "offsetSeconds": ±n }` |
-| POST | `/api/v1/kodi/open` | open a path, body `{ "path": "…" }` |
+| POST | `/api/v1/kodi/seek` | absolute seek, body `{ "seconds": n }` |
+| POST | `/api/v1/kodi/open` | open a URL, body `{ "url": "file:///…" }` |
 | POST | `/api/v1/kodi/start` | start the Kodi **service** |
 | POST | `/api/v1/kodi/stop-service` | stop the Kodi **service** |
 | POST | `/api/v1/kodi/restart` | restart the Kodi service |
 
 Event stream: the UI first tries `GET /api/v1/ws` (WebSocket), then falls back to
-`GET /api/v1/events` (SSE). Events are JSON objects of the shape
+`GET /api/v1/events` (SSE). M1 serves SSE; each `data:` value is a JSON object of the shape
 `{ "type": "kodi" | "system" | "network" | "display", "payload": { … } }` and
 carry the same body as the matching GET endpoint. If neither stream connects,
 polling alone keeps the UI correct.
@@ -65,8 +65,9 @@ the UI degrades safely when they are missing:
    the Settings power buttons. Until `health.actions` advertises them, those
    buttons render disabled and are never sent.
 
-Responses are read defensively: every field the UI consumes is optional, and a
-missing value renders as `—` rather than breaking a page.
+The backend adapters and frontend fixtures share this camelCase wire schema;
+hardware-dependent values remain optional and render as `—` when Linux does not
+expose them.
 
 ## Architecture
 

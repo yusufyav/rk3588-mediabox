@@ -8,7 +8,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 class EventBroker:
@@ -50,17 +50,23 @@ class EventBroker:
 
     @staticmethod
     def encode(event: dict[str, Any]) -> bytes:
-        data = json.dumps(event["data"], separators=(",", ":"), ensure_ascii=False)
-        return (
-            f"id: {event['id']}\nevent: {event['type']}\ndata: {data}\n\n"
-        ).encode("utf-8")
+        envelope = {"type": event["type"], "payload": event["data"]}
+        data = json.dumps(envelope, separators=(",", ":"), ensure_ascii=False)
+        return f"id: {event['id']}\ndata: {data}\n\n".encode("utf-8")
 
 
 class KodiEventMonitor:
-    def __init__(self, kodi: Any, broker: EventBroker, interval: float) -> None:
+    def __init__(
+        self,
+        kodi: Any,
+        broker: EventBroker,
+        interval: float,
+        serializer: Callable[[dict[str, Any]], dict[str, Any]] = lambda value: value,
+    ) -> None:
         self.kodi = kodi
         self.broker = broker
         self.interval = interval
+        self.serializer = serializer
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -78,9 +84,9 @@ class KodiEventMonitor:
     def _run(self) -> None:
         previous = None
         while not self._stop.is_set():
-            state = self.kodi.status()
+            state = self.serializer(self.kodi.status())
             serialized = json.dumps(state, sort_keys=True, separators=(",", ":"))
             if serialized != previous:
-                self.broker.publish("kodi.state", state)
+                self.broker.publish("kodi", state)
                 previous = serialized
             self._stop.wait(self.interval)

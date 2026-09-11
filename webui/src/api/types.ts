@@ -1,9 +1,8 @@
 /**
  * Wire types for the mediaboxd HTTP API (contract v1).
  *
- * Every field the UI reads is optional-tolerant: the backend is developed in
- * parallel (M1A), so a missing field must degrade to "bilinmiyor" rather than
- * crash a page.
+ * These names are the real mediaboxd v1 wire schema. Optional hardware fields
+ * remain tolerant because not every Linux target exposes every sensor.
  */
 
 export type KodiState = 'playing' | 'paused' | 'idle' | 'offline'
@@ -106,10 +105,11 @@ export interface ActionAvailability {
 }
 
 export interface SeekRequest {
-  /** Relative seek in seconds; negative rewinds. */
-  offsetSeconds: number
+  /** Absolute playback position in seconds. */
+  seconds: number
 }
 
 export interface OpenRequest {
-  path: string
+  url: string
+  resume_seconds?: number
 }

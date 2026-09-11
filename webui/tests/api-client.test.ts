@@ -15,8 +15,8 @@ describe('ApiClient', () => {
     await api.getDisplay()
     await api.playPause()
     await api.stopPlayback()
-    await api.seek(-30)
-    await api.open('/media/film.mkv')
+    await api.seek(30)
+    await api.open('file:///media/film.mkv')
     await api.startKodi()
     await api.stopKodi()
     await api.restartKodi()
@@ -48,14 +48,25 @@ describe('ApiClient', () => {
     expect(transport.calls[1].path).toBe(ENDPOINTS.kodiServiceStop)
   })
 
-  it('sends seek offsets as a JSON body', async () => {
+  it('sends an absolute seek position as the real M1A JSON body', async () => {
     const transport = new StubTransport()
     await new ApiClient(transport).seek(10)
 
     expect(transport.calls[0]).toMatchObject({
       path: ENDPOINTS.kodiSeek,
       method: 'POST',
-      body: { offsetSeconds: 10 },
+      body: { seconds: 10 },
+    })
+  })
+
+  it('sends media URL and resume time with the real M1A keys', async () => {
+    const transport = new StubTransport()
+    await new ApiClient(transport).open('file:///media/film.mkv', 12.5)
+
+    expect(transport.calls[0]).toMatchObject({
+      path: ENDPOINTS.kodiOpen,
+      method: 'POST',
+      body: { url: 'file:///media/film.mkv', resume_seconds: 12.5 },
     })
   })
 })
