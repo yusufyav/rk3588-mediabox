@@ -10,10 +10,11 @@ browser
           | versioned HTTP + same-origin SSE
           v
       mediaboxd
-       |  |  |
-       |  |  +-- allowlist tabanlı Linux sysfs/procfs telemetrisi
-       |  +----- sabit argv ile Kodi/host lifecycle
-       +-------- keşfedilmiş loopback Kodi HTTP JSON-RPC
+       |  |  |  |
+       |  |  |  +-- Stremio streaming server reverse proxy (loopback upstream)
+       |  |  +----- allowlist tabanlı Linux sysfs/procfs telemetrisi
+       |  +-------- sabit argv ile Kodi/host lifecycle
+       +----------- keşfedilmiş loopback Kodi HTTP JSON-RPC
 ```
 
 Tarayıcı Kodi'nin LAN'a açık, auth'suz JSON-RPC portuna doğrudan bağlanmaz.
@@ -96,6 +97,51 @@ Zorunlu Kodi sınıfları `KODI_UNREACHABLE`, `KODI_RPC_ERROR` ve
 | POST | `/api/v1/kodi/restart` | Stop + JSON-RPC-ready start |
 | POST | `/api/v1/system/reboot` | Policy izin verirse systemd reboot |
 | POST | `/api/v1/system/shutdown` | Policy izin verirse systemd poweroff |
+| GET | `/api/v1/stremio` | Akış sunucusu erişilebilirliği, sürümü, cast cihazı |
+| GET | `/api/v1/cast` | Devredilen aktif kaynak oturumu |
+| POST | `/api/v1/cast/kodi` | Shell'den pozisyonlu Kodi devri |
+
+## Stremio sınırı
+
+Tarayıcı ne Stremio akış sunucusuna ne de Kodi'ye doğrudan bağlanır. Stremio web
+uygulamasının ihtiyaç duyduğu her şey tek origin üzerinde tek bir mount altında
+sunulur (varsayılan `/server/`), ve bu mount altında yalnız iki yol upstream'e
+iletilmeden mediaboxd tarafından cevaplanır:
+
+| Yol | Davranış |
+| --- | --- |
+| `GET {mount}casting` | Upstream cihaz listesi + MediaBox cihazı başa eklenir |
+| `POST {mount}casting/{device}/player` | MediaBox cihazı ise Kodi'ye devredilir |
+| diğer her şey | Loopback upstream'e olduğu gibi iletilir |
+
+MediaBox cihazı Stremio'ya `external` tipiyle sunulur. Bu bilinçli bir seçimdir:
+upstream stremio-web `chromecast` ve `tv` tiplerini yalnız kendi masaüstü
+shell'inde gösterirken, `external` tipini sade tarayıcıda da gösterir.
+
+### Kaynak kimliği ve medya yolu
+
+Devirde Kodi'ye **aynı path ve query**, farklı origin ile verilir. Tarayıcı
+cihazın loopback'ine erişemediği için Stremio stream URL'lerini proxy mount'una
+göre çözer; Kodi ise cihazın üzerinde çalıştığı için doğrudan loopback akış
+sunucusu adresini alır. Sonuç: production oynatmada tek bir medya baytı bile
+Python proxy'sinden geçmez, ön izleme ise proxy'yi kullanmaya devam eder.
+
+`time` alanı upstream sözleşmesi gereği milisaniyedir ve Kodi'nin
+`Player.Open` `options.resume` alanına saniyeye çevrilerek verilir.
+
+Devir sırasında `Player.Open`'dan **önce** `cast.handoff` olayı yayımlanır;
+shell bunu görünce ön izlemeyi durdurur. Tek bir torrent engine'inin iki ayrı
+seek pozisyonunu beslemesi hem ön izlemeyi hem Kodi'yi buffer'a sokar.
+
+### Proxy sınırları
+
+- `upstream` yalnız loopback olabilir ve config'ten gelir; istekten alınmaz.
+  Load-time'da doğrulanır, dolayısıyla mount asla open proxy'ye dönüşemez.
+- `server.js`'in kendi `/proxy` (herhangi bir URL'i getiren) endpoint'i
+  iletilmez, `403 PROXY_DENIED` döner.
+- Yalnız `GET`, `HEAD`, `POST` kabul edilir.
+- `Range` iletilir (seek), yanıt parça parça aktarılır; gövde belleğe alınmaz.
+- `server.js`'in ürettiği `Access-Control-Allow-*` başlıkları **iletilmez**.
 
 `open` örneği:
 
@@ -140,6 +186,15 @@ olduktan sonra başarılı döner.
 - Request body 64 KiB ile sınırlıdır ve mutation body'leri JSON object olmalıdır.
 - Static dosyalar yalnız configured `webui_root` altından sunulur; traversal ve
   symlink escape reddedilir, SPA fallback hiçbir zaman `/api` isteklerine uygulanmaz.
+- Medya yüzeyinin CSP'si ayrı ve açıkça tanımlıdır (`MEDIA_APP_CSP`). Stremio
+  tasarımı gereği üçüncü taraf addon istemcisidir: katalog metadata'sı, posterler
+  ve stream tanımları ancak çalışma anında bilinen hostlardan gelir. Bu yüzden
+  `img-src`/`connect-src`/`media-src` https kaynaklarına açıktır; ama neyin
+  **çalıştığına** karar veren kısımlar kapalı kalır — script ve worker yalnız
+  same-origin (artı stremio-core'un ihtiyacı olan wasm), `unsafe-eval` yok,
+  inline script yok, `object-src 'none'`, `frame-ancestors 'none'`. Bu CORS
+  değildir: mediaboxd hâlâ hiçbir `Access-Control-Allow-*` başlığı üretmez ve
+  `OPTIONS` reddedilir.
 - Telemetri yalnız önceden tanımlı procfs/sysfs/debugfs yollarını okur. Filesystem
   browse, komut veya path parametresi sunan endpoint yoktur.
 - URL şeması ve seek/resume değerleri RPC'den önce doğrulanır.
@@ -161,8 +216,7 @@ Kodi, URL/seek doğrulaması ve command-injection regresyonunu kapsar.
 
 ## Sonraki entegrasyon noktaları
 
-- Aynı-origin Web UI ve authentication/session policy
-- Stremio streaming-server reverse proxy ve `Player.Open` handoff
-- Kodi TCP/WebSocket notification ingest; M1A polling yerine push
+- Authentication/session policy
+- Kodi TCP/WebSocket notification ingest; polling yerine push
 - Privilege-separated lifecycle/power broker
 - HDMI-CEC, Bluetooth/input ve Wi-Fi write işlemleri için ayrı milestone'lar
