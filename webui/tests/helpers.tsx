@@ -107,7 +107,7 @@ export class FakeCore {
  * A `<video>` standing in for the preview the media app is running, with the
  * playhead a test wants it to be at.
  */
-export function attachPreviewVideo(currentTime: number, src = 'http://box/server/abc/0') {
+export function attachPreviewVideo(currentTime: number, src = 'http://box/abc/0') {
   const video = document.createElement('video')
   Object.defineProperty(video, 'currentTime', { value: currentTime, writable: true })
   Object.defineProperty(video, 'duration', { value: 7200, writable: true })

@@ -146,29 +146,29 @@ class BridgeTestCase(unittest.TestCase):
 class CastingListTest(BridgeTestCase):
     def test_mediabox_device_is_offered_as_external(self):
         """`external` is the only device type stremio-web shows in a browser."""
-        status, _headers, payload = self.json_request("GET", "/server/casting")
+        status, _headers, payload = self.json_request("GET", "/casting")
         self.assertEqual(status, 200)
         self.assertEqual(payload[0]["id"], "mediabox-tv")
         self.assertEqual(payload[0]["type"], "external")
 
     def test_upstream_devices_are_preserved(self):
-        _status, _headers, payload = self.json_request("GET", "/server/casting")
+        _status, _headers, payload = self.json_request("GET", "/casting")
         ids = [item["id"] for item in payload]
         self.assertEqual(ids, ["mediabox-tv", "chromecast-1", "dlna-1"])
 
     def test_device_list_survives_a_dead_streaming_server(self):
         self.upstream.shutdown()
         self.upstream.server_close()
-        _status, _headers, payload = self.json_request("GET", "/server/casting")
+        _status, _headers, payload = self.json_request("GET", "/casting")
         self.assertEqual([item["id"] for item in payload], ["mediabox-tv"])
 
 
 class KodiHandoffTest(BridgeTestCase):
     def play(self, body, device="mediabox-tv"):
-        return self.json_request("POST", f"/server/casting/{device}/player", body)
+        return self.json_request("POST", f"/casting/{device}/player", body)
 
     def test_handoff_opens_the_stream_in_kodi(self):
-        source = f"http://127.0.0.1:{self.port}/server/abcdef/0?tr=udp%3A%2F%2Ftr"
+        source = f"http://127.0.0.1:{self.port}/abcdef/0?tr=udp%3A%2F%2Ftr"
         status, _headers, payload = self.play({"source": source, "time": 0})
         self.assertEqual(status, 200)
         self.assertEqual([call[0] for call in self.kodi.calls], ["open"])
@@ -182,7 +182,7 @@ class KodiHandoffTest(BridgeTestCase):
         is handed the streaming server directly and mediaboxd stays out of the
         production media path.
         """
-        source = f"http://127.0.0.1:{self.port}/server/abcdef/0?tr=udp%3A%2F%2Ftr&f=x"
+        source = f"http://127.0.0.1:{self.port}/abcdef/0?tr=udp%3A%2F%2Ftr&f=x"
         _status, _headers, payload = self.play({"source": source, "time": 0})
         opened_url = self.kodi.calls[0][1][0]
         self.assertEqual(opened_url, payload["kodiSource"])
@@ -191,7 +191,7 @@ class KodiHandoffTest(BridgeTestCase):
 
         preview = urlsplit(source)
         handed = urlsplit(opened_url)
-        self.assertEqual(preview.path.removeprefix("/server"), handed.path)
+        self.assertEqual(preview.path, handed.path)
         self.assertEqual(preview.query, handed.query)
         self.assertEqual(handed.netloc, urlsplit(self.bridge.upstream).netloc)
 
@@ -207,7 +207,13 @@ class KodiHandoffTest(BridgeTestCase):
         self.assertEqual(self.kodi.calls[0][1][1], 0.0)
 
     def test_direct_addon_stream_is_handed_over_unchanged(self):
+        """An addon's own host must never be rewritten to the local server."""
         source = "https://cdn.example.test/legal/BigBuckBunny.mp4"
+        self.play({"source": source, "time": 0})
+        self.assertEqual(self.kodi.calls[0][1][0], source)
+
+    def test_a_path_that_looks_local_on_a_foreign_host_is_left_alone(self):
+        source = "https://cdn.example.test/abcdef/0"
         self.play({"source": source, "time": 0})
         self.assertEqual(self.kodi.calls[0][1][0], source)
 
@@ -290,27 +296,27 @@ class ShellCastEndpointTest(BridgeTestCase):
 
 class ProxyTest(BridgeTestCase):
     def test_passthrough_reaches_upstream(self):
-        status, headers, payload = self.request("GET", "/server/stats.json?x=1")
+        status, headers, payload = self.request("GET", "/stats.json?x=1")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(payload)["streamLen"], len(MEDIA_BODY))
         self.assertIn(("GET", "/stats.json?x=1"), [(m, p) for m, p, _ in self.upstream.seen])
 
     def test_range_requests_are_forwarded_so_seeking_works(self):
         status, headers, payload = self.request(
-            "GET", "/server/abcdef/0", headers={"Range": "bytes=100-"}
+            "GET", "/abcdef/0", headers={"Range": "bytes=100-"}
         )
         self.assertEqual(status, 206)
         self.assertEqual(payload, MEDIA_BODY[100:])
         self.assertIn("bytes", headers.get("accept-ranges", ""))
 
     def test_cors_headers_from_the_streaming_server_are_not_relayed(self):
-        _status, headers, _payload = self.request("GET", "/server/stats.json")
+        _status, headers, _payload = self.request("GET", "/stats.json")
         self.assertNotIn("access-control-allow-origin", headers)
 
     def test_open_relay_endpoint_is_refused(self):
         """server.js /proxy fetches any URL; proxying it would relay anything."""
         status, _headers, payload = self.json_request(
-            "GET", "/server/proxy/d=https%3A%2F%2Fexample.test"
+            "GET", "/proxy/d=https%3A%2F%2Fexample.test"
         )
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"]["code"], "PROXY_DENIED")
@@ -319,18 +325,24 @@ class ProxyTest(BridgeTestCase):
     def test_unreachable_streaming_server_is_reported_as_such(self):
         self.upstream.shutdown()
         self.upstream.server_close()
-        status, _headers, payload = self.json_request("GET", "/server/stats.json")
+        status, _headers, payload = self.json_request("GET", "/stats.json")
         self.assertEqual(status, 502)
         self.assertEqual(payload["error"]["code"], "STREAMING_SERVER_UNREACHABLE")
 
     def test_method_outside_the_allowlist_is_refused(self):
-        status, _headers, _payload = self.request("DELETE", "/server/stats.json")
+        status, _headers, _payload = self.request("DELETE", "/stats.json")
         self.assertIn(status, (404, 405, 501))
 
-    def test_api_paths_are_never_owned_by_the_proxy(self):
-        for path in ("/api/v1/health", "/api/v1/kodi", "/ui/index.html"):
+    def test_mediaboxd_paths_are_never_owned_by_the_proxy(self):
+        """At a root mount, what mediaboxd keeps is what separates the two."""
+        for path in ("/", "/api", "/api/v1/health", "/api/v1/kodi", "/ui", "/ui/index.html"):
             with self.subTest(path=path):
                 self.assertFalse(self.bridge.owns(path))
+
+    def test_streaming_server_paths_are_owned(self):
+        for path in ("/casting", "/settings", "/hlsv2/x/master.m3u8", "/" + "a" * 40 + "/0"):
+            with self.subTest(path=path):
+                self.assertTrue(self.bridge.owns(path))
 
 
 class StatusTest(BridgeTestCase):
@@ -344,7 +356,7 @@ class StatusTest(BridgeTestCase):
         _status, _headers, payload = self.json_request("GET", "/api/v1/health")
         self.assertTrue(payload["media"]["stremio"])
         self.assertTrue(payload["media"]["castToKodi"])
-        self.assertEqual(payload["media"]["serverMount"], "/server/")
+        self.assertEqual(payload["media"]["serverMount"], "/")
 
     def test_status_survives_a_dead_streaming_server(self):
         self.upstream.shutdown()

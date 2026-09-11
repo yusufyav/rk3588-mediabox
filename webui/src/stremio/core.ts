@@ -25,7 +25,7 @@ declare global {
 /** Defaults stremio-core ships with; only these are silently replaced. */
 const DEFAULT_SERVER_URLS = ['http://127.0.0.1:11470/', 'http://localhost:11470/']
 
-export function streamingServerUrl(origin = location.origin, mount = '/server/'): string {
+export function streamingServerUrl(origin = location.origin, mount = '/'): string {
   return new URL(mount, origin).toString()
 }
 

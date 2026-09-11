@@ -30,7 +30,10 @@ export default defineConfig({
     // Only used by `npm run dev`; production serves the API from the same origin.
     proxy: {
       '/api': { target: 'http://localhost:8787', changeOrigin: true, ws: true },
-      '/server': { target: 'http://localhost:8787', changeOrigin: true },
+      // The streaming server occupies the appliance origin's root.
+      '/casting': { target: 'http://localhost:8787', changeOrigin: true },
+      '/settings': { target: 'http://localhost:8787', changeOrigin: true },
+      '/hlsv2': { target: 'http://localhost:8787', changeOrigin: true },
     },
   },
   test: {

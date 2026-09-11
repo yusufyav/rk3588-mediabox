@@ -498,7 +498,7 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
             device_id = body.get("deviceId", context.stremio.config.cast_device_id)
             if not isinstance(device_id, str):
                 raise InvalidRequest("deviceId must be a string")
-            result = context.stremio.play_on_device(device_id, body)
+            result = context.stremio.play_on_device(device_id, body, self.headers.get("Host"))
             self._json(HTTPStatus.OK, {"status": "ok", "result": result})
             context.events.publish("control.action", {"path": "/api/v1/cast/kodi", "status": "ok"})
 
@@ -510,7 +510,9 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
             if self.command == "POST":
                 device_id = bridge.cast_player_device(relative)
                 if device_id is not None and device_id == bridge.config.cast_device_id:
-                    result = bridge.play_on_device(device_id, self._body())
+                    result = bridge.play_on_device(
+                        device_id, self._body(), self.headers.get("Host")
+                    )
                     self._json(HTTPStatus.OK, result)
                     return
 

@@ -83,6 +83,12 @@ class CastSession:
         }
 
 
+#: Paths mediaboxd answers itself. At a root mount everything else belongs to
+#: the streaming server, so this list is what separates the two.
+RESERVED_PREFIXES = ("/api/", "/ui/")
+RESERVED_EXACT = ("/", "/ui", "/api")
+
+
 def _normalise_mount(mount: str) -> str:
     if not mount.startswith("/"):
         mount = "/" + mount
@@ -105,11 +111,29 @@ class StremioBridge:
 
     # ---------------------------------------------------------------- routing
 
+    @property
+    def rooted(self) -> bool:
+        """True when the streaming server occupies this origin's root.
+
+        Upstream needs this for transcoding: stremio-video builds its HLS URLs
+        as `url.resolve(streamingServerURL, '/hlsv2/…')`, and a leading slash
+        resolves against the origin, discarding any subpath. A server behind a
+        subpath therefore cannot transcode, so the default is the root and the
+        reserved prefixes above are what mediaboxd keeps for itself.
+        """
+        return self.mount == "/"
+
     def owns(self, path: str) -> bool:
-        return self.config.enabled and (path == self.mount.rstrip("/") or path.startswith(self.mount))
+        if not self.config.enabled:
+            return False
+        if self.rooted:
+            return not (path in RESERVED_EXACT or path.startswith(RESERVED_PREFIXES))
+        return path == self.mount.rstrip("/") or path.startswith(self.mount)
 
     def upstream_path(self, path: str) -> str:
         """The path below the mount, without a leading slash."""
+        if self.rooted:
+            return path.lstrip("/")
         if path == self.mount.rstrip("/"):
             return ""
         return path[len(self.mount) :]
@@ -152,17 +176,21 @@ class StremioBridge:
                 devices.append(item)
         return devices
 
-    def play_on_device(self, device_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def play_on_device(
+        self, device_id: str, body: dict[str, Any], request_host: str | None = None
+    ) -> dict[str, Any]:
         """Hand a Stremio-resolved stream to Kodi.
 
         `body` is the upstream `{source, time}` contract. `time` is milliseconds.
+        `request_host` is the authority the browser used, which is what makes it
+        possible to tell our own streaming URLs from a third-party addon's.
         """
         if device_id != self.config.cast_device_id:
             raise APIError("UNKNOWN_CAST_TARGET", "Unknown cast target", 404)
         source = body.get("source")
         safe_source = validate_media_url(source)
         resume_seconds = _cast_time_seconds(body.get("time", 0))
-        kodi_source = self.to_kodi_source(safe_source)
+        kodi_source = self.to_kodi_source(safe_source, request_host)
 
         # S0-A safety rule: a single torrent engine must not feed a browser
         # preview and Kodi at two different seek positions. The shell stops the
@@ -193,26 +221,27 @@ class StremioBridge:
         self._publish("cast.handoff", {"phase": "started", **session.as_dict()})
         return session.as_dict()
 
-    def to_kodi_source(self, source: str) -> str:
+    def to_kodi_source(self, source: str, request_host: str | None = None) -> str:
         """Point Kodi at the streaming server directly instead of at the proxy.
 
         Preview runs in a browser that can only reach the mediaboxd origin, so
-        Stremio resolves stream URLs against the proxy mount. Kodi runs on the
+        Stremio resolves stream URLs against the proxy. Kodi runs on the
         appliance itself, so it is given the loopback streaming-server origin:
         identical path and query, no proxy in the production media path.
+
+        Only a URL that came back through this origin is rewritten. A stream an
+        addon serves from its own host is handed over untouched — rewriting one
+        of those would point Kodi at a path the streaming server never had.
         """
         parsed = urlsplit(source)
-        if not parsed.path.startswith(self.mount):
+        if request_host is not None and parsed.netloc != request_host:
             return source
+        if not self.owns(parsed.path):
+            return source
+        relative = self.upstream_path(parsed.path)
         upstream = urlsplit(self.upstream)
         return urlunsplit(
-            (
-                upstream.scheme,
-                upstream.netloc,
-                "/" + parsed.path[len(self.mount) :],
-                parsed.query,
-                "",
-            )
+            (upstream.scheme, upstream.netloc, "/" + relative, parsed.query, "")
         )
 
     def session(self) -> dict[str, Any] | None:

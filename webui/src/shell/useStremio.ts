@@ -31,7 +31,7 @@ const PREVIEW_POLL_MS = 500
  * Nothing here reaches into Stremio's internals: it waits for the transport
  * Stremio itself publishes, then uses only documented core actions.
  */
-export function useStremio(mount = '/server/'): StremioBridgeState & {
+export function useStremio(mount = '/'): StremioBridgeState & {
   castToKodi: (deviceId: string) => Promise<PreviewState>
 } {
   const [status, setStatus] = useState<CoreStatus>('waiting')

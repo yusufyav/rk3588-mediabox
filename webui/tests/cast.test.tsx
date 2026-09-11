@@ -19,36 +19,36 @@ afterEach(() => {
 
 describe('Akış sunucusu adresi', () => {
   it('resolves against the appliance origin, not the browser loopback', () => {
-    expect(streamingServerUrl('http://10.27.27.25:8787')).toBe('http://10.27.27.25:8787/server/')
+    expect(streamingServerUrl('http://10.27.27.25:8787')).toBe('http://10.27.27.25:8787/')
   })
 
   it('replaces an untouched upstream default', () => {
-    const desired = 'http://10.27.27.25:8787/server/'
+    const desired = 'http://10.27.27.25:8787/'
     expect(shouldAdoptServerUrl('http://127.0.0.1:11470/', desired)).toBe(true)
     expect(shouldAdoptServerUrl('http://localhost:11470/', desired)).toBe(true)
     expect(shouldAdoptServerUrl(undefined, desired)).toBe(true)
   })
 
   it('leaves a server the user deliberately chose alone', () => {
-    const desired = 'http://10.27.27.25:8787/server/'
+    const desired = 'http://10.27.27.25:8787/'
     expect(shouldAdoptServerUrl('http://192.168.1.9:11470/', desired)).toBe(false)
   })
 
   it('does nothing when it is already pointed here', () => {
-    const desired = 'http://10.27.27.25:8787/server/'
+    const desired = 'http://10.27.27.25:8787/'
     expect(shouldAdoptServerUrl(desired, desired)).toBe(false)
   })
 
   it('applies the change through the core action the settings screen uses', async () => {
     const core = new FakeCore()
-    const outcome = await ensureStreamingServer(core, 'http://box:8787/server/')
+    const outcome = await ensureStreamingServer(core, 'http://box:8787/')
 
     expect(outcome).toBe('adopted')
     const ctx = core.actions('Ctx')
     const kinds = ctx.map((action) => (action.args as { action: string }).action)
     expect(kinds).toEqual(['AddServerUrl', 'UpdateSettings'])
     const settings = (ctx[1].args as { args: Record<string, unknown> }).args
-    expect(settings.streamingServerUrl).toBe('http://box:8787/server/')
+    expect(settings.streamingServerUrl).toBe('http://box:8787/')
   })
 
   it('keeps every other setting intact when it changes the server', async () => {
@@ -59,7 +59,7 @@ describe('Akış sunucusu adresi', () => {
         },
       },
     })
-    await ensureStreamingServer(core, 'http://box:8787/server/')
+    await ensureStreamingServer(core, 'http://box:8787/')
 
     const update = core.actions('Ctx')[1].args as { args: Record<string, unknown> }
     expect(update.args.subtitlesSize).toBe(125)
@@ -72,7 +72,7 @@ describe('Ön izleme durumu', () => {
       ctx: { profile: { settings: {} } },
       player: {
         selected: {
-          stream: { deepLinks: { externalPlayer: { streaming: 'http://box/server/abc/0' } } },
+          stream: { deepLinks: { externalPlayer: { streaming: 'http://box/abc/0' } } },
         },
       },
     })
@@ -80,15 +80,15 @@ describe('Ön izleme durumu', () => {
 
     const preview = await readPreview(core)
 
-    expect(preview.source).toBe('http://box/server/abc/0')
+    expect(preview.source).toBe('http://box/abc/0')
     expect(preview.timeMs).toBe(42_500)
   })
 
   it('falls back to the media element when core has no player yet', async () => {
     const core = new FakeCore({ ctx: { profile: { settings: {} } }, player: {} })
-    attachPreviewVideo(3, 'http://box/server/xyz/1')
+    attachPreviewVideo(3, 'http://box/xyz/1')
 
-    expect((await readPreview(core)).source).toBe('http://box/server/xyz/1')
+    expect((await readPreview(core)).source).toBe('http://box/xyz/1')
   })
 
   it('recognises the player route', () => {
@@ -106,18 +106,18 @@ describe('Ön izleme durumu', () => {
 describe('Kodi devri', () => {
   it('casts through the upstream action, on the documented contract', async () => {
     const core = new FakeCore()
-    await castToDevice(core, 'mediabox-tv', 'http://box/server/abc/0', 12_500)
+    await castToDevice(core, 'mediabox-tv', 'http://box/abc/0', 12_500)
 
     const [action] = core.actions('StreamingServer')
     expect(action.args).toEqual({
       action: 'PlayOnDevice',
-      args: { device: 'mediabox-tv', source: 'http://box/server/abc/0', time: 12_500 },
+      args: { device: 'mediabox-tv', source: 'http://box/abc/0', time: 12_500 },
     })
   })
 
   it('never sends a negative position', async () => {
     const core = new FakeCore()
-    await castToDevice(core, 'mediabox-tv', 'http://box/server/abc/0', -5)
+    await castToDevice(core, 'mediabox-tv', 'http://box/abc/0', -5)
     const [action] = core.actions('StreamingServer')
     expect((action.args as { args: { time: number } }).args.time).toBe(0)
   })
@@ -152,10 +152,10 @@ describe('Ön izle ve Kodi ayrı aksiyonlardır', () => {
 
   it('hands the running preview over with its position', async () => {
     const core = new FakeCore({
-      ctx: { profile: { settings: { streamingServerUrl: 'http://box:8787/server/' } } },
+      ctx: { profile: { settings: { streamingServerUrl: 'http://box:8787/' } } },
       player: {
         selected: {
-          stream: { deepLinks: { externalPlayer: { streaming: 'http://box:8787/server/abc/0' } } },
+          stream: { deepLinks: { externalPlayer: { streaming: 'http://box:8787/abc/0' } } },
         },
       },
     }).install()
@@ -169,7 +169,7 @@ describe('Ön izle ve Kodi ayrı aksiyonlardır', () => {
 
     await waitFor(() => expect(core.actions('StreamingServer')).toHaveLength(1))
     const args = (core.actions('StreamingServer')[0].args as { args: Record<string, unknown> }).args
-    expect(args.source).toBe('http://box:8787/server/abc/0')
+    expect(args.source).toBe('http://box:8787/abc/0')
     expect(args.time).toBe(31_000)
     // One torrent engine must not feed two readers at two positions.
     expect(video.paused).toBe(true)

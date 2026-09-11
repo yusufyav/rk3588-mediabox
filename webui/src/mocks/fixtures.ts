@@ -19,7 +19,7 @@ export const SCENARIOS: Array<{ id: ScenarioName; label: string }> = [
 ]
 
 export const health: HealthResponse = {
-  media: { stremio: true, castToKodi: true, serverMount: '/server/', castDeviceId: 'mediabox-tv' },
+  media: { stremio: true, castToKodi: true, serverMount: '/', castDeviceId: 'mediabox-tv' },
   status: 'ok',
   version: 'mediaboxd 0.1.0-dev',
   uptimeSeconds: 191_240,
@@ -120,7 +120,7 @@ export function kodiFor(scenario: ScenarioName): KodiResponse {
 export const stremio: StremioStatus = {
   enabled: true,
   reachable: true,
-  mount: '/server/',
+  mount: '/',
   serverVersion: '4.21.0',
   castDevice: { id: 'mediabox-tv', name: 'MediaBox TV (Kodi)', type: 'external' },
 }

@@ -28,7 +28,7 @@ export function Shell() {
   const { store, mock } = useDevice()
   const state = useDeviceState()
   const [panel, setPanel] = useState<Panel>('none')
-  const mount = state.health.data?.media?.serverMount ?? '/server/'
+  const mount = state.health.data?.media?.serverMount ?? '/'
   const castDeviceId = state.health.data?.media?.castDeviceId ?? 'mediabox-tv'
   const stremio = useStremio(mount)
 

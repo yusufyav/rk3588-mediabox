@@ -45,7 +45,7 @@ class StremioConfig:
     #: Must be a loopback origin: the streaming server is a local subprocess and
     #: the proxy must never be pointable at an arbitrary host.
     upstream: str = "http://127.0.0.1:11470"
-    mount: str = "/server/"
+    mount: str = "/"
     cast_device_id: str = "mediabox-tv"
     cast_device_name: str = "MediaBox TV (Kodi)"
     #: Control calls (/settings, /casting). These answer immediately or not at all.

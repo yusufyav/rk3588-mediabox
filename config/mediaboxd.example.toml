@@ -40,7 +40,10 @@ LD_LIBRARY_PATH = "/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-scree
 [stremio]
 enabled = true
 upstream = "http://127.0.0.1:11470"
-mount = "/server/"
+# The origin root. stremio-video builds its transcoding URLs against the
+# origin, so a streaming server behind a subpath cannot transcode. mediaboxd
+# keeps /api/, /ui/ and / for itself; everything else is the streaming server.
+mount = "/"
 # Offered to Stremio as an `external` playback device. `external` is the only
 # device type upstream stremio-web renders in a plain browser.
 cast_device_id = "mediabox-tv"
