@@ -505,23 +505,18 @@ class SecurityTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(config.name)
 
-    def test_lifecycle_arguments_do_not_invoke_shell(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            marker = root / "INJECTED"
-            config = KodiConfig(
-                executable="/bin/echo",
-                arguments=(f";touch {marker}",),
-                working_directory=str(root),
-                home=str(root),
-                stdout_path=str(root / "stdout.log"),
-                start_timeout_seconds=0.02,
-            )
-            lifecycle = KodiLifecycle(config, object())
-            with self.assertRaises(APIError):
-                lifecycle.start()
-            self.assertFalse(marker.exists())
-            self.assertIn(f";touch {marker}", (root / "stdout.log").read_text())
+    def test_lifecycle_cannot_be_pointed_at_an_arbitrary_command(self):
+        """Kodi is a unit name, not a command line.
+
+        mediaboxd stopped spawning Kodi because a child of this daemon inherits
+        its sandbox and loses its input devices. What reaches systemctl is a
+        unit name, and anything that is not one is refused before argv is built.
+        """
+        for unit in ("kodi.service; touch /tmp/INJECTED", "$(id).service", "kodi", "/bin/sh"):
+            with self.subTest(unit=unit):
+                lifecycle = KodiLifecycle(KodiConfig(unit=unit), object())
+                with self.assertRaises(APIError):
+                    lifecycle.start()
 
 
 if __name__ == "__main__":

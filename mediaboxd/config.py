@@ -15,6 +15,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 @dataclass(frozen=True, slots=True)
 class KodiConfig:
+    #: The systemd unit that owns Kodi. mediaboxd drives this unit instead of
+    #: launching Kodi itself, so Kodi's display and input context is identical
+    #: at boot and after any restart.
+    unit: str = "kodi.service"
     endpoint: str | None = None
     settings_paths: tuple[str, ...] = (
         "/var/tmp/kodi-home/.kodi/userdata/guisettings.xml",
@@ -136,6 +140,7 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
         raise ValueError("kodi.environment values must be strings")
 
     kodi = KodiConfig(
+        unit=str(kodi_raw.get("unit", KodiConfig().unit)),
         endpoint=_validate_endpoint(kodi_raw.get("endpoint")),
         settings_paths=_strings(kodi_raw, "settings_paths", KodiConfig().settings_paths),
         request_timeout_seconds=_number(

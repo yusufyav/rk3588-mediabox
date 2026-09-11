@@ -12,6 +12,11 @@ system_actions_enabled = false
 system_actions_allow_cidrs = ["127.0.0.0/8", "::1/128"]
 
 [kodi]
+# Kodi runs in its own systemd unit. mediaboxd starts and stops that unit and
+# never spawns Kodi itself: a child of this daemon inherits this daemon's
+# sandbox, and the address-family filter alone leaves Kodi with no udev monitor
+# and therefore no keyboard.
+unit = "kodi.service"
 # Empty means: discover the port/TLS/auth settings from the running Kodi HOME,
 # then from settings_paths. An override must be a complete http(s) URL.
 endpoint = ""

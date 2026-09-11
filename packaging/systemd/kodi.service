@@ -1,0 +1,35 @@
+[Unit]
+Description=Kodi media player (GBM/DRM standalone, RK3588)
+After=systemd-udev-settle.service network.target
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+# Kodi owns the display and reads the physical input devices directly. It is
+# started by systemd, never as a child of another service, so that the context
+# it runs in is the same at boot and after every restart: same unit, same user,
+# same environment, same access to udev and /dev/input.
+#
+# This unit is deliberately NOT sandboxed the way mediaboxd is. Kodi discovers
+# keyboards and remotes through a udev netlink monitor, so a unit that filtered
+# address families would leave it with no input devices at all — which is
+# exactly what happened while it was being spawned from inside mediaboxd.
+User=root
+WorkingDirectory=/var/tmp/kodi-home
+Environment=HOME=/var/tmp/kodi-home
+Environment=AE_SINK=ALSA
+Environment=MEDIABOX_GPU=mali
+Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
+ExecStartPre=/bin/mkdir -p /var/tmp/kodi-home/.kodi/temp
+ExecStart=/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm --standalone --debug
+# Kodi exits on Application.Quit; that is a normal stop, not a failure.
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+KillMode=mixed
+StandardInput=null
+StandardOutput=append:/var/tmp/kodi-home/kodi-stdout.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

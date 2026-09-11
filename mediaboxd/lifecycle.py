@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import ipaddress
-import os
-import signal
+import re
 import subprocess
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from .config import Config, KodiConfig
 from .errors import APIError
-from .processes import ProcessIdentity, find_kodi_process, same_process
+from .processes import find_kodi_process
 
 
 class KodiLifecycle:
@@ -22,107 +20,76 @@ class KodiLifecycle:
         self.kodi = kodi
         self._lock = threading.RLock()
 
-    def _validate_paths(self) -> None:
-        for name, value in (
-            ("executable", self.config.executable),
-            ("working_directory", self.config.working_directory),
-            ("home", self.config.home),
-            ("stdout_path", self.config.stdout_path),
-        ):
-            if not Path(value).is_absolute():
-                raise APIError("LIFECYCLE_ERROR", f"Kodi {name} must be an absolute path", 500)
+    def _unit(self) -> str:
+        """The systemd unit that owns Kodi, validated as a plain unit name."""
+        unit = self.config.unit
+        if not re.fullmatch(r"[A-Za-z0-9@._-]{1,64}\.service", unit):
+            raise APIError("LIFECYCLE_ERROR", "Kodi unit name is not valid", 500)
+        return unit
+
+    def _systemctl(self, verb: str) -> None:
+        """Drive the unit with a fixed argv. No shell, no caller-supplied words.
+
+        mediaboxd does not launch Kodi itself. A process spawned from inside
+        this daemon inherits this daemon's sandbox — including its address
+        family filter, which leaves Kodi unable to open the udev netlink
+        monitor and therefore with no keyboard at all. Kodi has to start in its
+        own unit, identically at boot and on every restart, so the display and
+        input context never depends on who asked for the restart.
+        """
+        argv = ["/usr/bin/systemctl", verb, self._unit()]
+        try:
+            result = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=self.config.start_timeout_seconds + 10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise APIError("LIFECYCLE_ERROR", f"Kodi unit could not be {verb}ed", 503) from exc
+        if result.returncode != 0:
+            raise APIError("LIFECYCLE_ERROR", f"Kodi unit could not be {verb}ed", 503)
+
+    def _wait_ready(self) -> dict[str, Any]:
+        deadline = time.monotonic() + self.config.start_timeout_seconds
+        while time.monotonic() < deadline:
+            process = find_kodi_process()
+            if process:
+                try:
+                    if self.kodi.ping():
+                        return {"changed": True, "running": True, "pid": process.pid}
+                except APIError:
+                    pass
+            time.sleep(0.2)
+        raise APIError(
+            "LIFECYCLE_ERROR", "Kodi did not become JSON-RPC ready before timeout", 504
+        )
 
     def start(self) -> dict[str, Any]:
         with self._lock:
             existing = find_kodi_process()
             if existing:
                 return {"changed": False, "running": True, "pid": existing.pid}
-            self._validate_paths()
-            executable = Path(self.config.executable)
-            if not executable.is_file() or not os.access(executable, os.X_OK):
-                raise APIError("LIFECYCLE_ERROR", "Configured Kodi executable is unavailable", 503)
-            working_directory = Path(self.config.working_directory)
-            if not working_directory.is_dir():
-                raise APIError("LIFECYCLE_ERROR", "Configured Kodi working directory is unavailable", 503)
-            stdout_path = Path(self.config.stdout_path)
-            stdout_path.parent.mkdir(parents=True, exist_ok=True)
-            environment = {
-                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "HOME": self.config.home,
-                "LANG": os.environ.get("LANG", "C.UTF-8"),
-                **self.config.environment,
-            }
-            argv = [self.config.executable, *self.config.arguments]
-            try:
-                with stdout_path.open("ab", buffering=0) as output:
-                    child = subprocess.Popen(
-                        argv,
-                        cwd=self.config.working_directory,
-                        env=environment,
-                        stdin=subprocess.DEVNULL,
-                        stdout=output,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                        close_fds=True,
-                    )
-                # Reap a normally exiting child without coupling Kodi's
-                # lifecycle to the daemon request thread.
-                threading.Thread(target=child.wait, name="kodi-reaper", daemon=True).start()
-            except OSError as exc:
-                raise APIError("LIFECYCLE_ERROR", "Kodi process could not be started", 503) from exc
-            deadline = time.monotonic() + self.config.start_timeout_seconds
-            while time.monotonic() < deadline:
-                process = find_kodi_process()
-                if process:
-                    try:
-                        if self.kodi.ping():
-                            return {"changed": True, "running": True, "pid": process.pid}
-                    except APIError:
-                        pass
-                time.sleep(0.1)
-            raise APIError(
-                "LIFECYCLE_ERROR", "Kodi did not become JSON-RPC ready before timeout", 504
-            )
+            self._systemctl("start")
+            return self._wait_ready()
 
     def stop(self) -> dict[str, Any]:
         with self._lock:
-            process = find_kodi_process()
-            if process is None:
+            if find_kodi_process() is None:
                 return {"changed": False, "running": False, "pid": None}
-            try:
-                self.kodi.quit()
-            except APIError:
-                pass
-            if self._wait_gone(process, self.config.stop_timeout_seconds):
-                return {"changed": True, "running": False, "pid": None}
-            self._signal(process, signal.SIGTERM)
-            if self._wait_gone(process, 3.0):
-                return {"changed": True, "running": False, "pid": None}
-            self._signal(process, signal.SIGKILL)
-            if self._wait_gone(process, 2.0):
-                return {"changed": True, "running": False, "pid": None}
+            self._systemctl("stop")
+            deadline = time.monotonic() + self.config.stop_timeout_seconds
+            while time.monotonic() < deadline:
+                if find_kodi_process() is None:
+                    return {"changed": True, "running": False, "pid": None}
+                time.sleep(0.2)
             raise APIError("LIFECYCLE_ERROR", "Kodi process did not stop", 504)
 
     def restart(self) -> dict[str, Any]:
-        self.stop()
-        return self.start()
-
-    @staticmethod
-    def _wait_gone(process: ProcessIdentity, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not same_process(process):
-                return True
-            time.sleep(0.1)
-        return not same_process(process)
-
-    @staticmethod
-    def _signal(process: ProcessIdentity, signum: signal.Signals) -> None:
-        if same_process(process):
-            try:
-                os.kill(process.pid, signum)
-            except ProcessLookupError:
-                pass
+        with self._lock:
+            self._systemctl("restart")
+            return self._wait_ready()
 
 
 class SystemActions:
