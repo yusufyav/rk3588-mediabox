@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { resolveApiBase } from '../api/client'
 import {
   castToDevice,
   ensureStreamingServer,
@@ -24,6 +25,27 @@ export interface StremioBridgeState {
 }
 
 const PREVIEW_POLL_MS = 500
+
+/**
+ * Tell the appliance the preview is over.
+ *
+ * `keepalive` is what makes this survive the page going away: a closing tab
+ * cannot wait for a response, and the transcoder it leaves behind is a busy
+ * core with nobody watching. The backend also reaps idle sessions on its own,
+ * because a browser that is killed outright sends nothing at all.
+ */
+function releasePreview(): void {
+  try {
+    void fetch(new URL('preview/stop', resolveApiBase()).toString(), {
+      method: 'POST',
+      keepalive: true,
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }).catch(() => undefined)
+  } catch {
+    // Never let cleanup throw into a teardown path.
+  }
+}
 
 /**
  * Binds the appliance shell to the Stremio app sharing this document.
@@ -70,6 +92,13 @@ export function useStremio(mount = '/'): StremioBridgeState & {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
 
+  // Leaving the player, or leaving the page at all, ends the preview.
+  useEffect(() => {
+    const onPageHide = () => releasePreview()
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [])
+
   // The playhead only exists on the media element, so it is sampled rather than
   // subscribed to. This runs only while a preview is actually on screen.
   useEffect(() => {
@@ -89,6 +118,8 @@ export function useStremio(mount = '/'): StremioBridgeState & {
     return () => {
       cancelled = true
       clearInterval(timer)
+      // Navigating away from the player is the ordinary end of a preview.
+      releasePreview()
     }
   }, [onPlayer, status])
 

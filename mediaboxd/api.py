@@ -353,6 +353,12 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                         "shutdown", self.client_address[0]
                     ),
                 }
+                if path == "/api/v1/preview/stop":
+                    if context.stremio is None:
+                        raise APIError("NOT_FOUND", "Endpoint not found", 404)
+                    result = context.stremio.stop_preview("client")
+                    self._json(HTTPStatus.OK, {"status": "ok", "result": result})
+                    return
                 if path == "/api/v1/cast/kodi":
                     self._cast_from_shell()
                     return
@@ -530,6 +536,8 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                 if length < 0 or length > MAX_BODY_BYTES:
                     raise InvalidRequest("request body is too large")
                 body = self.rfile.read(length) if length else b""
+
+            bridge.note_preview(relative)
 
             headers = {name.lower(): value for name, value in self.headers.items()}
             status, out_headers, stream, _response = bridge.forward(

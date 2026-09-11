@@ -30,6 +30,7 @@ export const ENDPOINTS = {
   stremio: 'stremio',
   cast: 'cast',
   castKodi: 'cast/kodi',
+  previewStop: 'preview/stop',
 } as const
 
 export type EndpointKey = keyof typeof ENDPOINTS

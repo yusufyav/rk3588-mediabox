@@ -57,6 +57,32 @@ DENIED_UPSTREAM_PREFIXES = ("proxy/", "proxy")
 
 MAX_CAST_BODY_BYTES = 64 * 1024
 
+#: How long a preview session may go untouched before it is torn down.
+#:
+#: The browser is asked to close its own session, but a closed tab, a killed
+#: browser or a lost network cannot ask for anything. Without a deadline here a
+#: transcoder outlives its only viewer and keeps a core busy indefinitely — on
+#: this board every hardware encode profile is rejected, so a transcode that
+#: nobody is watching is a software encode that nobody is watching.
+PREVIEW_IDLE_TIMEOUT_SECONDS = 45.0
+PREVIEW_REAPER_INTERVAL_SECONDS = 5.0
+
+
+@dataclass(slots=True)
+class PreviewSession:
+    """One transcoding session on the streaming server, and when it was last used."""
+
+    session_id: str
+    started_at: float
+    last_seen: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sessionId": self.session_id,
+            "startedAt": self.started_at,
+            "lastSeen": self.last_seen,
+        }
+
 
 @dataclass(slots=True)
 class CastSession:
@@ -108,6 +134,9 @@ class StremioBridge:
         self._events = events
         self._lock = threading.Lock()
         self._session: CastSession | None = None
+        self._preview: PreviewSession | None = None
+        self._reaper: threading.Thread | None = None
+        self._stopping = threading.Event()
 
     # ---------------------------------------------------------------- routing
 
@@ -207,6 +236,11 @@ class StremioBridge:
         )
         time.sleep(0.25)
 
+        # The browser is asked to stop its own player, but the transcoder lives
+        # on the appliance and has to be ended here — otherwise the television
+        # plays while a software encode nobody is watching keeps a core busy.
+        self.stop_preview("handoff")
+
         self._kodi.open(kodi_source, resume_seconds)
 
         session = CastSession(
@@ -244,6 +278,87 @@ class StremioBridge:
             (upstream.scheme, upstream.netloc, "/" + relative, parsed.query, "")
         )
 
+    # ---------------------------------------------------------------- preview
+
+    def note_preview(self, relative: str) -> None:
+        """Record that a transcoding session is being read.
+
+        Session ids appear in the path as `hlsv2/{id}/…`. Only one preview may
+        be alive at a time: starting a second one tears the first down, because
+        two transcoders is two busy cores for one person watching one thing.
+        """
+        parts = relative.split("/")
+        if len(parts) < 2 or parts[0] != "hlsv2" or parts[1] in {"probe", ""}:
+            return
+        session_id = parts[1]
+        now = time.time()
+        previous: str | None = None
+        with self._lock:
+            if self._preview is not None and self._preview.session_id != session_id:
+                previous = self._preview.session_id
+            if self._preview is None or self._preview.session_id != session_id:
+                self._preview = PreviewSession(session_id, now, now)
+            else:
+                self._preview.last_seen = now
+        if previous is not None:
+            self._destroy_preview(previous)
+        self._ensure_reaper()
+
+    def stop_preview(self, reason: str = "requested") -> dict[str, Any]:
+        """Tear down the active preview session, if there is one."""
+        with self._lock:
+            session = self._preview
+            self._preview = None
+        if session is None:
+            return {"stopped": False}
+        self._destroy_preview(session.session_id)
+        self._publish("preview.stopped", {"sessionId": session.session_id, "reason": reason})
+        return {"stopped": True, "sessionId": session.session_id, "reason": reason}
+
+    def preview(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self._preview.as_dict() if self._preview else None
+
+    def _destroy_preview(self, session_id: str) -> None:
+        """Ask the streaming server to end the session and reap its children."""
+        request = urllib.request.Request(
+            f"{self.upstream}/hlsv2/{session_id}/destroy", method="GET"
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.config.request_timeout_seconds
+            ) as response:
+                response.read(1024)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            LOG.warning("Preview session %s could not be destroyed: %s", session_id, exc)
+
+    def _ensure_reaper(self) -> None:
+        with self._lock:
+            if self._reaper is not None and self._reaper.is_alive():
+                return
+            self._reaper = threading.Thread(
+                target=self._reap_loop, name="preview-reaper", daemon=True
+            )
+            self._reaper.start()
+
+    def _reap_loop(self) -> None:
+        while not self._stopping.wait(PREVIEW_REAPER_INTERVAL_SECONDS):
+            with self._lock:
+                session = self._preview
+                idle = session is not None and (
+                    time.time() - session.last_seen > PREVIEW_IDLE_TIMEOUT_SECONDS
+                )
+            if session is None:
+                return
+            if idle:
+                LOG.info("Reaping idle preview session %s", session.session_id)
+                self.stop_preview("idle")
+                return
+
+    def shutdown(self) -> None:
+        self._stopping.set()
+        self.stop_preview("shutdown")
+
     def session(self) -> dict[str, Any] | None:
         with self._lock:
             return self._session.as_dict() if self._session else None
@@ -259,6 +374,7 @@ class StremioBridge:
             "mount": self.mount,
             "reachable": False,
             "serverVersion": None,
+            "preview": self.preview(),
             "castDevice": {
                 "id": self.config.cast_device_id,
                 "name": self.config.cast_device_name,

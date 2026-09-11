@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import pathlib
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -52,6 +54,13 @@ class FakeStreamingServer(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         self.server.seen.append(("GET", self.path, dict(self.headers)))
+        if "/destroy" in self.path:
+            self.server.destroyed.append(self.path)
+            self._send(200, {"destroyed": True})
+            return
+        if self.path.startswith("/hlsv2/"):
+            self._send(200, b"#EXTM3U\n", "application/vnd.apple.mpegurl")
+            return
         if self.path == "/casting":
             self._send(200, UPSTREAM_CASTING)
         elif self.path == "/settings":
@@ -90,6 +99,7 @@ class BridgeTestCase(unittest.TestCase):
     def setUp(self):
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeStreamingServer)
         self.upstream.seen = []
+        self.upstream.destroyed = []
         self.upstream_thread = threading.Thread(
             target=self.upstream.serve_forever, daemon=True
         )
@@ -420,3 +430,116 @@ class StaticRangeTest(unittest.TestCase):
         for header in (None, "", "items=0-1", "bytes=abc", "bytes=0-1,5-6", "bytes=5000-6000"):
             with self.subTest(header=header):
                 self.assertEqual(_parse_range(header, 1000), (0, 999))
+
+
+class PreviewLifecycleTest(BridgeTestCase):
+    """A transcoder must not outlive the person watching it.
+
+    Every hardware encode profile is rejected on this board, so a transcoding
+    session nobody is reading is a software encode burning a core.
+    """
+
+    def read_preview(self, session="abc123"):
+        return self.request("GET", f"/hlsv2/{session}/video0.m3u8")
+
+    def test_reading_a_session_registers_it(self):
+        self.read_preview()
+        self.assertEqual(self.bridge.preview()["sessionId"], "abc123")
+
+    def test_probe_is_not_a_session(self):
+        """/hlsv2/probe runs ffprobe and exits; it is not a transcoder."""
+        self.request("GET", "/hlsv2/probe?mediaURL=x")
+        self.assertIsNone(self.bridge.preview())
+
+    def test_stopping_destroys_the_session_upstream(self):
+        self.read_preview()
+        result = self.bridge.stop_preview("client")
+        self.assertTrue(result["stopped"])
+        self.assertIn("/hlsv2/abc123/destroy", self.upstream.destroyed)
+        self.assertIsNone(self.bridge.preview())
+
+    def test_stopping_twice_is_harmless(self):
+        self.read_preview()
+        self.bridge.stop_preview()
+        self.assertFalse(self.bridge.stop_preview()["stopped"])
+
+    def test_only_one_preview_may_be_alive(self):
+        """A second session tears the first down rather than joining it."""
+        self.read_preview("first")
+        self.read_preview("second")
+        self.assertIn("/hlsv2/first/destroy", self.upstream.destroyed)
+        self.assertEqual(self.bridge.preview()["sessionId"], "second")
+
+    def test_handoff_to_kodi_ends_the_preview(self):
+        self.read_preview()
+        self.json_request(
+            "POST",
+            "/casting/mediabox-tv/player",
+            {"source": "https://example.test/a.mp4", "time": 1000},
+        )
+        self.assertIn("/hlsv2/abc123/destroy", self.upstream.destroyed)
+        self.assertIsNone(self.bridge.preview())
+        self.assertEqual(self.kodi.calls[0][0], "open")
+
+    def test_client_can_release_its_preview(self):
+        self.read_preview()
+        status, _headers, payload = self.json_request("POST", "/api/v1/preview/stop")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["result"]["stopped"])
+        self.assertIn("/hlsv2/abc123/destroy", self.upstream.destroyed)
+
+    def test_an_abandoned_session_is_reaped(self):
+        """A closed tab sends nothing, so the deadline is enforced here."""
+        import mediaboxd.stremio as stremio_module
+
+        original = stremio_module.PREVIEW_IDLE_TIMEOUT_SECONDS
+        stremio_module.PREVIEW_IDLE_TIMEOUT_SECONDS = 0.2
+        stremio_module.PREVIEW_REAPER_INTERVAL_SECONDS = 0.1
+        try:
+            self.read_preview("orphan")
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline and self.bridge.preview() is not None:
+                time.sleep(0.1)
+            self.assertIsNone(self.bridge.preview())
+            self.assertIn("/hlsv2/orphan/destroy", self.upstream.destroyed)
+        finally:
+            stremio_module.PREVIEW_IDLE_TIMEOUT_SECONDS = original
+            stremio_module.PREVIEW_REAPER_INTERVAL_SECONDS = 5.0
+            self.bridge.shutdown()
+
+    def test_status_reports_the_live_preview(self):
+        self.read_preview()
+        _status, _headers, payload = self.json_request("GET", "/api/v1/stremio")
+        self.assertEqual(payload["preview"]["sessionId"], "abc123")
+
+
+class KodiLifecycleTest(unittest.TestCase):
+    """Kodi runs in its own unit; mediaboxd only drives that unit."""
+
+    def lifecycle(self, unit="kodi.service"):
+        from mediaboxd.config import KodiConfig
+        from mediaboxd.lifecycle import KodiLifecycle
+
+        return KodiLifecycle(KodiConfig(unit=unit), FakeKodi())
+
+    def test_the_canonical_unit_is_used(self):
+        self.assertEqual(self.lifecycle()._unit(), "kodi.service")
+
+    def test_a_unit_name_that_is_not_a_unit_is_refused(self):
+        """The unit name reaches systemctl argv, so it is not free-form."""
+        for bad in ("kodi.service; rm -rf /", "../../etc/passwd", "kodi", "", "kodi.target"):
+            with self.subTest(unit=bad):
+                with self.assertRaises(APIError):
+                    self.lifecycle(bad)._unit()
+
+    def test_mediaboxd_never_spawns_kodi_itself(self):
+        """A child of this daemon inherits its sandbox and loses its keyboard."""
+        source = pathlib.Path("mediaboxd/lifecycle.py").read_text(encoding="utf-8")
+        lifecycle_source = source[: source.index("class SystemActions")]
+        self.assertNotIn("Popen", lifecycle_source)
+        self.assertIn("/usr/bin/systemctl", lifecycle_source)
+
+    def test_only_lifecycle_verbs_are_issued(self):
+        source = pathlib.Path("mediaboxd/lifecycle.py").read_text(encoding="utf-8")
+        for verb in ('"start"', '"stop"', '"restart"'):
+            self.assertIn(verb, source)

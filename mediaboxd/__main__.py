@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_forever(poll_interval=0.5)
     finally:
         monitor.stop()
+        context.stremio.shutdown()
         server.server_close()
     return 0
 
