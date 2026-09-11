@@ -1,0 +1,35 @@
+{
+  "settingsOpen": true,
+  "sections": [
+    "Oynatma",
+    "Ağ",
+    "Bluetooth",
+    "HDMI / CEC",
+    "Ekran",
+    "Ses",
+    "Sistem",
+    "Tanılama"
+  ],
+  "diagText": "Ayarlar\n✕\nOynatma\nAğ\nBluetooth\nHDMI / CEC\nEkran\nSes\nSistem\nTanılama\nSISTEM\nAna makine\norangepi5-ultra\nÇekirdek\n6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio\nMimari\naarch64\nÇalışma süresi\n6 sa 11 dk\nYük ortalaması\n2.94 2.54 2.09\nÇekirdek sayısı\n8\nCPU sıcaklığı\n55.5 °C\nBellek\n687 MB / 7.7 GB (%9)\nKök dosya sistemi\n19.7 GB / 56.7 GB (%35)\nAĞ\nDurum\nÇevrimiçi\nVarsayılan geçit\n10.27.27.1\nÇıkış arayüzü\nenP3p49s0\nenP3p49s0\nup · 10.27.27.25 · c0:74:2b:fc:56:b7 · 1000 Mb/s\nlo\ndown · 127.0.0.1 · 00:00:00",
+  "backClosed": true,
+  "focusWalk": [
+    "INPUT:",
+    "INPUT:",
+    "INPUT:",
+    "INPUT:",
+    "INPUT:"
+  ],
+  "focusMoves": 1,
+  "openedByKeyboard": false,
+  "hashAfterEnter": "#/board",
+  "hashAfterBack": "#/board",
+  "settingsByKeyboard": true,
+  "panelWalk": [
+    "Durdur",
+    "Tanılama"
+  ],
+  "backClosedPanel": true,
+  "mobileShell": true,
+  "mobileSideways": false,
+  "mobileSettings": true
+}

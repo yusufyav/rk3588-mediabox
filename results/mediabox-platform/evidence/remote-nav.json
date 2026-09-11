@@ -1,0 +1,17 @@
+{
+  "initialFocus": "BODY",
+  "focusWalk": [
+    "DIV:",
+    "A[#/detail/movie/tt37275]:The Secret Woman",
+    "A[#/detail/movie/tt32332]:I Want Your Sex",
+    "A[#/detail/movie/tt14173]:The Invite",
+    "A[#/detail/series/tt1196]:The Mentalist"
+  ],
+  "distinct": 5,
+  "hashBefore": "",
+  "hashAfterEnter": "#/detail/series/tt1196946",
+  "hashAfterBack": "",
+  "settingsByKeyboard": true,
+  "panelFocus": "Durdur",
+  "backClosed": true
+}
