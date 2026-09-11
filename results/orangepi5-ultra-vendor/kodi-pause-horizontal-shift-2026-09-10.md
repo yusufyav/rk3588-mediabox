@@ -10,22 +10,38 @@ remove the behaviour without disturbing the picture quality accepted in Gate
 
 **Classification: `PARTIAL_FAULT_DOMAIN_ISOLATED`.**
 
-The cause is found, reproduced without Kodi, and reduced to a single binary
-condition. It is not in Kodi, not in the television, and not in plane geometry.
-It is in the RK3588 VOP2 HDR composition path, which this gate is forbidden to
-patch. The one lever available inside Kodi was built and physically tested; it
-removes the displacement by giving up the OSD colour fix that Gate 0009 was
-accepted for, so it was rejected and reverted. The appliance is back on the
-0009 binary with the 0009 baseline verified intact.
+The triggering condition is found, reproduced without Kodi, and reduced to
+three things that must hold together. It is not in Kodi, not in the television,
+and not in plane geometry. It is in the RK3588 VOP2 HDR composition path.
+
+Three fixes were built and physically tested, and all three were rejected:
+
+* a Kodi change that tags the GUI plane traditional-HDR instead of PQ -- removes
+  the displacement, gives back 0009's washed-out OSD blue;
+* a kernel change that forces RGB mixing for HDR10 output -- built from the
+  appliance's own kernel source and booted; does not remove the displacement
+  at all;
+* a Kodi workaround that keeps one tiny invisible non-PQ layer in the
+  composition -- removes the displacement completely, 0 of 20 cycles, and gives
+  back the washed-out OSD blue in both of its variants.
+
+Every route that removes the displacement costs the OSD colour fix, and the one
+route that preserves the colours does not remove the displacement. The
+appliance is back on the accepted 0009 binary and the accepted kernel, with the
+0009 baseline verified intact.
 
 ---
 
 ## 1. Root cause
 
-With the video port in HDR10 output, **tagging a second, composited plane
-`EOTF = 2` (SMPTE ST 2084 / PQ) displaces the whole output frame
-horizontally.** Any other EOTF tag on that plane — SDR, traditional HDR, HLG —
-leaves the frame where it belongs.
+The displacement needs three things to hold at once:
+
+1. the video port drives an **HDR10 output**;
+2. **two or more layers** are composited;
+3. **every one of those layers is tagged `EOTF = 2`** (SMPTE ST 2084 / PQ).
+
+Break any one of the three and the picture stays where it belongs. That is the
+whole of what is established; the mechanism inside the VOP2 is not.
 
 Kodi meets that condition because patch `0009-gbm-tag-hdr-composited-gui-plane-with-eotf`
 calls `SetGuiPlaneEotf()`, which tags the GUI plane with `m_eotf` — PQ during
@@ -35,6 +51,11 @@ and off exactly with the OSD, which is what makes the fault look like a
 pause/resume behaviour.
 
 It is not a pause behaviour. Pausing merely raises the OSD.
+
+Two candidate mechanisms were proposed for *why* the hardware does this, and
+direct measurement falsified both. They are recorded in sections 3 and 4
+because each one cost a build and a reboot, and because the next attempt should
+not start by repeating them.
 
 ## 2. How the fault domain was narrowed
 
@@ -167,7 +188,7 @@ Both halves are needed. Running the identical planes with a PQ-tagged GUI
 plane but an SDR output leaves the plane at `csc mode[0]` and `overlay_mode 0`,
 and nothing moves.
 
-## 3. The candidate fix, and why it was rejected
+## 3. Rejected fix 1: tag the GUI plane traditional-HDR
 
 The only lever inside Kodi is which EOTF that plane is tagged with. Kodi was
 rebuilt with `SetGuiPlaneEotf()` downgrading PQ to `TRADITIONAL_HDR`, which
@@ -199,7 +220,99 @@ be measured cleanly — the reference captures in that arm were themselves
 incoherent — and it is a substantial change, since Kodi's GUI plane is the EGL
 scanout buffer's plane.
 
-## 4. 0009 baseline, after the revert
+## 4. Rejected fix 2: force RGB mixing in the kernel
+
+Only `EOTF=2` on the GUI plane put the port into YUV mixing — `overlay_mode 1`,
+with an RGB-to-YUV conversion on that plane — and that was the configuration
+that displaced the picture. The driver already forces RGB mixing whenever
+sdr2hdr or hdr2sdr is active, so YUV mixing is reachable only in the all-PQ
+corner. That made it the obvious mechanism.
+
+The kernel was rebuilt to test it: `armbian/linux-rockchip` at
+`fd9f82366e235b8afbdf516765210e97d24dce93`, the same commit and the same
+cross toolchain that produced the kernel already on the appliance, with the
+ScreenBridge HDMI-RX patch kept and one change added in `vop2_setup_hdr10()`:
+
+```c
+if (vop2->version == VOP_VERSION_RK3588 && vp->hdr_out)
+        vcstate->yuv_overlay = false;
+```
+
+Installed beside the working kernel as
+`6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio-vop2rgb` and booted.
+
+It does what it says: `overlay_mode` is 0 in both OSD states, the output stays
+HDR10 / `YUYV10_1X20` / BT.2020, both planes keep `EOTF=2`, OSD colours and
+video quality are unaffected. **The displacement is unchanged.** YUV mixing is
+not the mechanism. Rolled back by re-pointing `/boot/Image`; both images remain
+installed and `scripts/deploy-kernel.sh` switches between them.
+
+Scan timing was measured across the same configurations and rules out the other
+obvious candidate, the port's pre-scan delay:
+
+| state | `pre_scan_htiming` | `BG_DLY` | picture |
+| --- | --- | --- | --- |
+| video plane only | `07b40058` | 53 | reference |
+| video + GUI plane tagged PQ | `07b40058` | 53 | **displaced** |
+| video + GUI plane tagged SDR | `07b40058` | 53 | in place |
+| video + GUI PQ + extra SDR layer | `07b60058` | 55 | in place |
+
+The first three are bit-identical and only the second displaces; the fourth is
+the one row whose timing differs and it does not displace. Neither the scan
+start nor the `bg_dly` the driver computes from the layer allocation explains
+the fault.
+
+## 5. Rejected fix 3: an invisible non-PQ sentinel layer
+
+With both mechanisms falsified, the remaining lever above the kernel is the
+condition itself: keep one layer in the composition that is not PQ.
+
+Implemented in `CDRMAtomic` as a 4x4 fully transparent ARGB plane, attached only
+while the GUI layer is composited and both the GUI and video planes read back
+`EOTF=2`, parked at the video plane's own origin so it never depends on a
+letterbox bar existing, and detached on stop or whenever the composition stops
+being all-PQ.
+
+Its invisibility is by construction rather than by being small. This SoC
+reports `pixel blend mode` as `None=2, Pre-multiplied=0, Coverage=1` and the
+planes sit at 0, Pre-multiplied, so an all-zero buffer contributes exactly
+nothing. The operator confirmed nothing is visible where it sits.
+
+It works, and it costs the same thing as fix 1:
+
+| | |
+| --- | --- |
+| horizontal shift | **0 of 20** pause/resume, 0 of 10 OSD open/close |
+| sentinel visible | no |
+| display mode over 3 seeks | `3840x2160p24` throughout |
+| stop / replay | detaches on stop, HDR10 restored on replay |
+| `POST_BUF_EMPTY` | 0 |
+| `drm *ERROR*` | 0 |
+| Kodi atomic failures | 0 |
+| TV HDR10 / video plane PQ / GUI plane PQ | all retained |
+| `overlay_mode` | 0 (0009 baseline is 1) |
+| **OSD colours** | **regressed — 0009's washed-out blue is back** |
+
+Two tags were tried. `EOTF=0` puts the port on its sdr2hdr path, which is what
+forces RGB mixing. `EOTF=3` was tried next because the driver counts only
+non-PQ, non-HLG layers as an SDR layer:
+
+```c
+if (vpstate->eotf != HDMI_EOTF_SMPTE_ST2084 &&
+    vpstate->eotf != HDMI_EOTF_BT_2100_HLG)
+        have_sdr_layer = true;
+```
+
+so an HLG sentinel should have stayed out of that count and left the OSD colour
+path alone. It did not — `overlay_mode` still dropped to 0 and the washed blue
+came back.
+
+`overlay_mode = 1` was one of the gate's PASS criteria and this workaround
+cannot meet it: the mechanism that removes the displacement *is* the driver
+switching away from YUV mixing. That was flagged before the work started. The
+criterion that decided it was the colour, not the mode.
+
+## 6. 0009 baseline, after the reverts
 
 The target runs the `kodi-gbm.with0009` binary, byte-identical to the accepted
 one, and the source tree carries the unmodified 0009 patch. Measured during
@@ -216,25 +329,31 @@ All five criteria hold: `overlay_mode = 1`, video `csc mode[0]`, GUI EOTF 2,
 video EOTF 2, VP `HDR10[2]`. No quality regression was introduced by this
 gate.
 
-## 5. What this gate did not do
+## 7. Where this leaves the fault
 
-The horizontal displacement is **not fixed**. It is understood, reproducible
-on demand in under a minute without Kodi, and reduced to one property value.
-The fix belongs in the VOP2 driver's handling of a PQ-tagged plane in an
-HDR10 composition, and kernel, DT and PHY patches are outside this gate.
+The horizontal displacement is **not fixed**. What is fixed is the cost of
+working on it: the condition is known, it reproduces on demand in under a
+minute without Kodi, and `scripts/writeback-probe.sh` flips it on and off.
 
-The 20-cycle stability run the gate's PASS criteria call for was not run:
-with the accepted binary restored, the fault is present by construction, so
-the run could only confirm what is already established.
+Two mechanisms are now ruled out by measurement rather than by argument — YUV
+versus RGB mixing, and the port's pre-scan delay — and a kernel built against
+the appliance's own source proves the first of those is not it. Whatever the
+VOP2 does differently when it mixes two PQ layers for an HDR10 output is not
+visible in the register file: plane geometry, scaler state, scan timing, layer
+delays and the overlay mode are all identical between a frame that is displaced
+and one that is not. Going further needs Rockchip's own documentation for that
+block, not more black-box bisection.
 
-Two things are worth carrying forward. The reproduction is now a tool rather
-than a procedure — `tools/drm-writeback-probe run --hdr --hdr-out --nv12
---gui --gui-eotf {0,2}` flips the fault on and off — which is what a driver
-investigation needs. And the writeback path itself is only trustworthy in the
-arms where it agrees with itself; the integrity check exists because it caught
-a wrong answer that had already been reported.
+The practical position for the appliance is a choice between two accepted
+results, and it is the operator's to make:
 
-## 6. Evidence
+* keep 0009 and live with the picture shifting while the OSD is on screen —
+  what is installed now;
+* take any of the three rejected fixes and live with a washed-out OSD blue.
+
+Both are one command away. Nothing in this gate needs to be redone to switch.
+
+## 8. Evidence
 
 `logs/orangepi5-ultra-vendor/kodi-pause-horizontal-shift-2026-09-10/`
 
@@ -252,4 +371,7 @@ a wrong answer that had already been reported.
 | `vop-underflow-vs-eotf.txt` | `POST_BUF_EMPTY` against every arm, and why it is not the mechanism |
 | `kodi-eotf1-candidate.txt` | the rejected candidate, measured against the 0009 criteria |
 | `operator-observations.txt` | the physical reports, kept separate from the instrument readings |
+| `scan-timing-vs-layers.txt` | `pre_scan_htiming` and `bg_dly` per layer configuration |
+| `kernel-rgb-composition-attempt.txt` | the kernel build, what it changed, and what it did not fix |
+| `sentinel-workaround.txt` | the sentinel's design, invisibility proof, and the full acceptance matrix result (20 pause/resume, 10 OSD toggles, 3 seeks, stop/replay) |
 | `dmesg-delta.txt`, `SHA256SUMS` | kernel log, checksums |

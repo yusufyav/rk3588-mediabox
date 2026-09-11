@@ -1,0 +1,24 @@
+# Kernel attempt: force RGB composition for HDR10 output on RK3588. REJECTED.
+#
+# Built from armbian/linux-rockchip fd9f82366e235b8afbdf516765210e97d24dce93 --
+# the source and cross toolchain (aarch64-linux-gnu-gcc 16.1.0) that produced
+# the kernel already running on the appliance -- with the ScreenBridge HDMI-RX
+# patch kept and one change added in vop2_setup_hdr10():
+#
+#     if (vop2->version == VOP_VERSION_RK3588 && vp->hdr_out)
+#             vcstate->yuv_overlay = false;
+#
+# Rationale at the time: only EOTF=2 on the GUI plane put the port into YUV
+# mixing (overlay_mode 1), and that was the configuration that displaced the
+# picture. The driver already forces RGB mixing whenever sdr2hdr or hdr2sdr is
+# active, so the RGB path is the one it exercises everywhere else.
+#
+# Installed as release 6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio-vop2rgb
+# beside the working kernel and booted.
+#
+# Result: overlay_mode became 0 in both OSD states, the output stayed HDR10 /
+# YUYV10_1X20 / BT.2020, both planes kept EOTF=2 -- and the operator reported
+# the horizontal shift UNCHANGED. OSD colours and video quality were unaffected.
+#
+# So YUV mixing is not the mechanism either. The kernel was rolled back by
+# re-pointing /boot/Image; both images remain installed.

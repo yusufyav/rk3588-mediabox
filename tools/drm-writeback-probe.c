@@ -445,6 +445,14 @@ struct opts {
 	 * asks whether the instability belongs to PQ compositing in general or
 	 * to the Cluster pipeline specifically. */
 	uint32_t gui_plane_override;
+	/* An extra small SDR layer. The driver turns sdr2hdr on as soon as one
+	 * non-PQ layer is present on a PQ output, and that path forces the port
+	 * to mix in RGB instead of YUV. Adding such a layer therefore changes
+	 * overlay_mode WITHOUT changing the GUI plane's own EOTF, which is the
+	 * only way to tell those two apart from user space. */
+	uint32_t sdr_plane;
+	uint32_t sentinel_size;   /* square edge, default 200 */
+	int sentinel_transparent; /* alpha 0 instead of an opaque fill */
 	uint32_t width, height, refresh;
 	/* Kodi does not put the video plane on screen 1:1 -- it scales a
 	 * 3840x2080 source into 3840x2076 at y=42. The scaler is therefore part
@@ -524,6 +532,7 @@ static int cmd_run(struct opts *o)
 	 * up with on this SoC, arrived at by capability rather than by id. */
 	drmModePlaneRes *pres = drmModeGetPlaneResources(fd);
 	uint32_t vid_plane = 0, gui_plane = 0;
+	uint64_t vid_zpos = UINT64_MAX;
 	for (uint32_t i = 0; i < pres->count_planes; i++) {
 		drmModePlane *pl = drmModeGetPlane(fd, pres->planes[i]);
 		if (!pl || !(pl->possible_crtcs & 1))
@@ -541,10 +550,16 @@ static int cmd_run(struct opts *o)
 			for (uint32_t f = 0; f < pl->count_formats; f++)
 				if (pl->formats[f] == DRM_FORMAT_NV12)
 					yuv = 1;
-			if (type == DRM_PLANE_TYPE_PRIMARY && !gui_plane)
-				gui_plane = pl->plane_id;
-			else if (yuv && zpos == 0 && !vid_plane)
+			/* Lowest zpos, not zpos==0: zpos is mutable state the last
+			 * compositor leaves behind, so an exact match silently
+			 * depends on whoever ran before and breaks after a reboot. */
+			if (type == DRM_PLANE_TYPE_PRIMARY) {
+				if (!gui_plane)
+					gui_plane = pl->plane_id;
+			} else if (yuv && zpos < vid_zpos) {
+				vid_zpos = zpos;
 				vid_plane = pl->plane_id;
+			}
 		}
 		drmModeFreePlane(pl);
 	}
@@ -625,6 +640,10 @@ static int cmd_run(struct opts *o)
 		 * asserted, not merely left unset. */
 		add(req, &cp, disp->connector_id, "HDR_OUTPUT_METADATA", 0);
 		add(req, &cp, disp->connector_id, "Colorspace", 0);    /* DEFAULT */
+		/* Depth and format persist too, and a console left on a 10-bit
+		 * YCbCr link is not the state this board boots into. */
+		add(req, &cp, disp->connector_id, "color_depth", 0);   /* automatic */
+		add(req, &cp, disp->connector_id, "color_format", 0);  /* automatic */
 	}
 	add(req, &rp, crtc_id, "MODE_ID", mode_blob);
 	add(req, &rp, crtc_id, "ACTIVE", 1);
@@ -669,6 +688,40 @@ static int cmd_run(struct opts *o)
 	} else {
 		add(req, &gp, gui_plane, "FB_ID", 0);
 		add(req, &gp, gui_plane, "CRTC_ID", 0);
+	}
+
+	struct fb sfb;
+	struct props sp;
+	if (o->sdr_plane) {
+		uint32_t ss = o->sentinel_size ?: 200;
+		if (fb_create(fd, ss, ss, DRM_FORMAT_ARGB8888, &sfb))
+			die("sdr fb: %s", strerror(errno));
+		/* Whether a fully transparent layer still counts as composited is
+		 * the question this flag exists to answer: if it does, the sentinel
+		 * can be invisible rather than merely small. */
+		uint32_t fill = o->sentinel_transparent ? 0x00000000u : 0xff000000u;
+		for (uint32_t y = 0; y < sfb.h; y++) {
+			uint32_t *row = (uint32_t *)(sfb.map + (size_t)y * sfb.pitch);
+			for (uint32_t x = 0; x < sfb.w; x++)
+				row[x] = fill;
+		}
+		props_get(fd, o->sdr_plane, DRM_MODE_OBJECT_PLANE, &sp);
+		add(req, &sp, o->sdr_plane, "FB_ID", sfb.fb_id);
+		add(req, &sp, o->sdr_plane, "CRTC_ID", crtc_id);
+		add(req, &sp, o->sdr_plane, "SRC_X", 0);
+		add(req, &sp, o->sdr_plane, "SRC_Y", 0);
+		add(req, &sp, o->sdr_plane, "SRC_W", (uint64_t)sfb.w << 16);
+		add(req, &sp, o->sdr_plane, "SRC_H", (uint64_t)sfb.h << 16);
+		/* Parked clear of the rows the registration tool samples for
+		 * capture coherence, so its presence does not read as tearing. */
+		add(req, &sp, o->sdr_plane, "CRTC_X", 3600);
+		add(req, &sp, o->sdr_plane, "CRTC_Y", 1900);
+		add(req, &sp, o->sdr_plane, "CRTC_W", sfb.w);
+		add(req, &sp, o->sdr_plane, "CRTC_H", sfb.h);
+		add(req, &sp, o->sdr_plane, "EOTF", 0);
+		printf("extra SDR layer: plane %u at 3600,1900 %ux%u %s, EOTF=0\n",
+		       o->sdr_plane, ss, ss,
+		       o->sentinel_transparent ? "fully transparent" : "opaque black");
 	}
 
 	if (drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL))
@@ -758,6 +811,12 @@ int main(int argc, char **argv)
 				o.gui_eotf = atoi(argv[++i]);
 			else if (!strcmp(argv[i], "--gui-plane") && i + 1 < argc)
 				o.gui_plane_override = strtoul(argv[++i], NULL, 0);
+			else if (!strcmp(argv[i], "--sdr-plane") && i + 1 < argc)
+				o.sdr_plane = strtoul(argv[++i], NULL, 0);
+			else if (!strcmp(argv[i], "--sentinel-size") && i + 1 < argc)
+				o.sentinel_size = strtoul(argv[++i], NULL, 0);
+			else if (!strcmp(argv[i], "--sentinel-transparent"))
+				o.sentinel_transparent = 1;
 			else if (!strcmp(argv[i], "--hold") && i + 1 < argc) o.hold = atoi(argv[++i]);
 			else if (!strcmp(argv[i], "--toggle") && i + 1 < argc) o.toggle = atoi(argv[++i]);
 			else if (!strcmp(argv[i], "--src") && i + 1 < argc)

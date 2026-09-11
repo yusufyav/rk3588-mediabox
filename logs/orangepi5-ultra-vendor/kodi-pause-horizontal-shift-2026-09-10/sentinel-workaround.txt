@@ -1,0 +1,53 @@
+# Kodi workaround: keep one non-PQ layer in the HDR composition. REJECTED.
+#
+# The displacement needs three things together: an HDR10 output, two or more
+# composited layers, and every one of those layers tagged PQ. Breaking the
+# third is the only lever available above the kernel, and the cheapest way to
+# break it is an extra layer that is not PQ.
+#
+# Implemented in CDRMAtomic as a 4x4 fully transparent ARGB plane, attached
+# only while the GUI layer is composited AND both the GUI and video planes read
+# back EOTF=2, parked at the video plane's own origin (not at a fixed screen
+# coordinate, so it never depends on a letterbox bar existing), and detached on
+# stop or whenever the composition stops being all-PQ.
+#
+# Invisibility is by construction, not by being small: this SoC reports
+# "pixel blend mode" as enums None=2, Pre-multiplied=0, Coverage=1 and the
+# planes sit at value 0, Pre-multiplied. An all-zero buffer is premultiplied
+# transparent, so the layer contributes exactly nothing. The operator confirmed
+# nothing is visible at the sentinel's position.
+#
+# Acceptance matrix, driven over JSON-RPC so every transition was logged:
+#   horizontal shift          0 of 20 pause/resume, 0 of 10 OSD open/close
+#   sentinel visible          no
+#   display mode over seeks   3840x2160p24 throughout
+#   stop / replay             sentinel detaches on stop, HDR10 restored on replay
+#   POST_BUF_EMPTY            0
+#   drm *ERROR*               0
+#   Kodi atomic failures      0
+#   TV HDR10                  retained
+#   video plane PQ            retained
+#   GUI plane PQ              retained
+#   overlay_mode              0  (the 0009 baseline is 1 -- see below)
+#   OSD colours               REGRESSED: the washed-out blue that patch 0009
+#                             was accepted for fixing came back
+#
+# Two sentinel tags were tried. EOTF=0 (SDR) puts the port on its sdr2hdr path,
+# which is what forces RGB mixing. EOTF=3 (HLG) was tried next because the
+# driver counts only non-PQ, non-HLG layers as "an SDR layer":
+#
+#     if (vpstate->eotf != HDMI_EOTF_SMPTE_ST2084 &&
+#         vpstate->eotf != HDMI_EOTF_BT_2100_HLG)
+#             have_sdr_layer = true;
+#
+# so an HLG sentinel should have stayed out of that count and left the OSD
+# colour path alone. It did not: overlay_mode still dropped to 0 and the
+# operator reported the washed blue again.
+#
+# Both variants remove the displacement completely and both cost the OSD colour
+# fix. The workaround therefore buys one accepted result with another, which is
+# the same trade the EOTF=1 candidate made, and it is rejected on the same rule.
+#
+# Kodi was returned to the accepted 0009 binary and the Kodi source tree to its
+# unmodified state; DRMAtomic.cpp/.h carry no repo patch, so restoring them from
+# git leaves the 0001-0009 series intact.

@@ -1,0 +1,20 @@
+# Does the displacement show up in the video port's scan timing?
+#
+# pre_scan_htiming (VP0 + 0x30) sets where the port begins fetching relative to
+# hsync, so a horizontal displacement introduced by the source would have to
+# appear here or in the bg_dly that feeds it. Measured on the appliance with a
+# static test pattern and no player running, one configuration per row.
+#
+# state                                    pre_scan_htiming  BG_MIX_CTRL(BG_DLY)  operator
+  1) video plane only                      07b40058          35000000 (53)        reference
+  2) video + GUI plane tagged PQ           07b40058          35000000 (53)        SHIFT
+  3) video + GUI plane tagged SDR          07b40058          35000000 (53)        no shift
+  4) video + GUI PQ + extra SDR layer      07b60058          37000000 (55)        no shift
+#
+# 0x07b40058 decodes as pre_scan_dly 1972, hsync_len 88, and 1972 = 53 + 1920 - 1
+# for a 3840-wide mode, which is the driver's own formula.
+#
+# States 1, 2 and 3 are bit-identical here and only state 2 displaces the
+# picture. State 4 is the one row whose timing differs, and it does NOT
+# displace. Scan timing is therefore not the mechanism, and neither is the
+# bg_dly the driver computes from the layer/port_mux allocation.
