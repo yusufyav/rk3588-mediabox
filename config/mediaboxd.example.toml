@@ -32,3 +32,17 @@ stop_timeout_seconds = 12.0
 AE_SINK = "ALSA"
 MEDIABOX_GPU = "mali"
 LD_LIBRARY_PATH = "/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib"
+
+# Stremio boundary. The streaming server is a local subprocess; only mediaboxd
+# talks to it, and the browser reaches it exclusively below `mount` on this
+# origin. `upstream` must stay loopback: it is validated as such at load time so
+# the mount can never become an open proxy.
+[stremio]
+enabled = true
+upstream = "http://127.0.0.1:11470"
+mount = "/server/"
+# Offered to Stremio as an `external` playback device. `external` is the only
+# device type upstream stremio-web renders in a plain browser.
+cast_device_id = "mediabox-tv"
+cast_device_name = "MediaBox TV (Kodi)"
+request_timeout_seconds = 10.0

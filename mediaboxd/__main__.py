@@ -15,6 +15,7 @@ from .config import load_config
 from .events import EventBroker, KodiEventMonitor
 from .kodi import KodiClient
 from .lifecycle import KodiLifecycle, SystemActions
+from .stremio import StremioBridge
 from .telemetry import Telemetry
 
 
@@ -50,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         events=events,
         system_actions=SystemActions(config),
         webui_root=Path(config.webui_root) if config.webui_root else None,
+        stremio=StremioBridge(config.stremio, kodi, events),
     )
     server_type = MediaBoxHTTPServer
     if ":" in config.bind_address:
@@ -72,11 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, stop)
     monitor.start()
     logging.getLogger(__name__).info(
-        "listening on %s:%d (LAN=%s, system_actions=%s)",
+        "listening on %s:%d (LAN=%s, system_actions=%s, stremio=%s)",
         config.bind_address,
         config.port,
         config.allow_lan,
         config.system_actions_enabled,
+        config.stremio.enabled,
     )
     try:
         server.serve_forever(poll_interval=0.5)

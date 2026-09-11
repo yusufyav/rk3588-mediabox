@@ -173,7 +173,7 @@ class APITest(unittest.TestCase):
         status, headers, payload = self.request("GET", "/api/v1/health")
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["version"], "0.1.0")
+        self.assertEqual(payload["version"], "0.2.0")
         self.assertEqual(
             payload["actions"],
             {

@@ -20,7 +20,45 @@ from .events import EventBroker
 
 LOG = logging.getLogger(__name__)
 MAX_BODY_BYTES = 64 * 1024
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+
+#: Types the stdlib map does not reliably carry. WebAssembly streaming
+#: instantiation refuses anything but application/wasm.
+STATIC_MEDIA_TYPES = {
+    ".wasm": "application/wasm",
+    ".mjs": "text/javascript",
+    ".json": "application/json",
+    ".woff2": "font/woff2",
+    ".webmanifest": "application/manifest+json",
+}
+
+#: Content Security Policy for the media surface.
+#:
+#: The appliance shell alone would run under `default-src 'self'`, but the media
+#: experience is the upstream Stremio web app, and Stremio is by design a client
+#: for third-party addons: catalogue metadata, posters and stream descriptors
+#: come from hosts that are only known at runtime, from whatever addons the user
+#: has installed. So `img-src`/`connect-src`/`media-src` admit https sources,
+#: while the parts that decide what executes stay closed: scripts and workers
+#: are same-origin only (plus wasm, which stremio-core needs), there is no
+#: 'unsafe-eval', no 'unsafe-inline' script, no plugins, and no framing.
+#:
+#: This is not CORS. mediaboxd still emits no Access-Control-Allow-* header and
+#: still rejects OPTIONS, so no other origin can read anything from this one.
+MEDIA_APP_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'wasm-unsafe-eval'; "
+    "worker-src 'self' blob:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "font-src 'self' data:; "
+    "img-src 'self' data: blob: https:; "
+    "media-src 'self' blob: https:; "
+    "connect-src 'self' ws: wss: https:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
 
 
 @dataclass(slots=True)
@@ -31,6 +69,7 @@ class APIContext:
     events: EventBroker
     system_actions: Any
     webui_root: Path | None = None
+    stremio: Any = None
 
 
 def _kodi_time_seconds(value: Any) -> float | None:
@@ -165,6 +204,16 @@ def display_response(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def stremio_response(context: APIContext) -> dict[str, Any]:
+    if context.stremio is None:
+        return {"enabled": False, "reachable": False}
+    return context.stremio.status()
+
+
+def _cast_session(context: APIContext) -> dict[str, Any] | None:
+    return None if context.stremio is None else context.stremio.session()
+
+
 def health_response(context: APIContext) -> dict[str, Any]:
     power_enabled = bool(getattr(context.system_actions, "enabled", False))
     actions: dict[str, Any] = {
@@ -176,7 +225,20 @@ def health_response(context: APIContext) -> dict[str, Any]:
     }
     if not power_enabled:
         actions["reason"] = "Sistem güç işlemleri yapılandırmada devre dışı"
-    return {"status": "ok", "version": VERSION, "actions": actions}
+    stremio = context.stremio
+    media: dict[str, Any] = {
+        "stremio": bool(stremio is not None and stremio.config.enabled),
+        "castToKodi": bool(stremio is not None and stremio.config.enabled),
+    }
+    if stremio is not None:
+        media["serverMount"] = stremio.mount
+        media["castDeviceId"] = stremio.config.cast_device_id
+    return {
+        "status": "ok",
+        "version": VERSION,
+        "actions": actions,
+        "media": media,
+    }
 
 
 class MediaBoxHTTPServer(ThreadingHTTPServer):
@@ -206,6 +268,10 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, kodi_response(context.kodi.status()))
                 elif path == "/api/v1/display":
                     self._json(HTTPStatus.OK, display_response(context.telemetry.display()))
+                elif path == "/api/v1/stremio":
+                    self._json(HTTPStatus.OK, stremio_response(context))
+                elif path == "/api/v1/cast":
+                    self._json(HTTPStatus.OK, {"session": _cast_session(context)})
                 elif path == "/api/v1/events":
                     self._events()
                 elif path == "/":
@@ -214,12 +280,27 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                     self._redirect("/ui/")
                 elif path.startswith("/ui/"):
                     self._static(path)
+                elif context.stremio is not None and context.stremio.owns(path):
+                    self._stremio(path)
                 else:
                     raise APIError("NOT_FOUND", "Endpoint not found", 404)
             except APIError as exc:
                 self._json(exc.status, exc.as_dict())
             except Exception:
                 LOG.exception("Unhandled GET failure for %s", path)
+                self._json(500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
+
+        def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            path = urlsplit(self.path).path
+            try:
+                if context.stremio is not None and context.stremio.owns(path):
+                    self._stremio(path)
+                else:
+                    raise APIError("NOT_FOUND", "Endpoint not found", 404)
+            except APIError as exc:
+                self._json(exc.status, exc.as_dict())
+            except Exception:
+                LOG.exception("Unhandled HEAD failure for %s", path)
                 self._json(500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -244,6 +325,12 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                         "shutdown", self.client_address[0]
                     ),
                 }
+                if path == "/api/v1/cast/kodi":
+                    self._cast_from_shell()
+                    return
+                if context.stremio is not None and context.stremio.owns(path):
+                    self._stremio(path)
+                    return
                 action = routes.get(path)
                 if action is None:
                     raise APIError("NOT_FOUND", "Endpoint not found", 404)
@@ -342,23 +429,88 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                 payload = requested.read_bytes()
             except OSError as exc:
                 raise APIError("STATIC_READ_ERROR", "Static asset could not be read", 500) from exc
-            content_type = mimetypes.guess_type(requested.name)[0] or "application/octet-stream"
+            content_type = (
+                STATIC_MEDIA_TYPES.get(requested.suffix.lower())
+                or mimetypes.guess_type(requested.name)[0]
+                or "application/octet-stream"
+            )
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", f"{content_type}; charset=utf-8" if content_type.startswith("text/") else content_type)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header(
-                "Content-Security-Policy",
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; connect-src 'self' ws: wss:",
-            )
+            self.send_header("Content-Security-Policy", MEDIA_APP_CSP)
             self.send_header(
                 "Cache-Control",
                 "no-store" if requested.name == "index.html" else "public, max-age=3600",
             )
             self.end_headers()
             self.wfile.write(payload)
+
+        def _cast_from_shell(self) -> None:
+            """Hand a stream to Kodi from the MediaBox shell.
+
+            Same handoff as the Stremio cast target, but reachable from the
+            appliance shell so it can supply the live preview position that the
+            upstream options menu does not pass on.
+            """
+            if context.stremio is None:
+                raise APIError("NOT_FOUND", "Endpoint not found", 404)
+            body = self._body()
+            device_id = body.get("deviceId", context.stremio.config.cast_device_id)
+            if not isinstance(device_id, str):
+                raise InvalidRequest("deviceId must be a string")
+            result = context.stremio.play_on_device(device_id, body)
+            self._json(HTTPStatus.OK, {"status": "ok", "result": result})
+            context.events.publish("control.action", {"path": "/api/v1/cast/kodi", "status": "ok"})
+
+        def _stremio(self, path: str) -> None:
+            bridge = context.stremio
+            split = urlsplit(self.path)
+            relative = bridge.upstream_path(path)
+
+            if self.command == "POST":
+                device_id = bridge.cast_player_device(relative)
+                if device_id is not None and device_id == bridge.config.cast_device_id:
+                    result = bridge.play_on_device(device_id, self._body())
+                    self._json(HTTPStatus.OK, result)
+                    return
+
+            if self.command == "GET" and relative == "casting":
+                self._json(HTTPStatus.OK, bridge.casting_devices())
+                return
+
+            body: bytes | None = None
+            if self.command == "POST":
+                length_text = self.headers.get("Content-Length", "0")
+                try:
+                    length = int(length_text)
+                except ValueError as exc:
+                    raise InvalidRequest("invalid Content-Length") from exc
+                if length < 0 or length > MAX_BODY_BYTES:
+                    raise InvalidRequest("request body is too large")
+                body = self.rfile.read(length) if length else b""
+
+            headers = {name.lower(): value for name, value in self.headers.items()}
+            status, out_headers, stream, _response = bridge.forward(
+                self.command, relative, split.query, headers, body
+            )
+            self.send_response(status)
+            has_length = any(name.lower() == "content-length" for name, _ in out_headers)
+            for name, value in out_headers:
+                self.send_header(name, value)
+            if not has_length:
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            try:
+                for block in stream:
+                    self.wfile.write(block)
+            except (BrokenPipeError, ConnectionResetError):
+                # The browser seeked or closed the tab mid-stream; not an error.
+                self.close_connection = True
 
         def _events(self) -> None:
             self.send_response(HTTPStatus.OK)

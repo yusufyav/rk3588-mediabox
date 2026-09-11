@@ -9,7 +9,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,39 @@ class KodiConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class StremioConfig:
+    enabled: bool = True
+    #: Must be a loopback origin: the streaming server is a local subprocess and
+    #: the proxy must never be pointable at an arbitrary host.
+    upstream: str = "http://127.0.0.1:11470"
+    mount: str = "/server/"
+    cast_device_id: str = "mediabox-tv"
+    cast_device_name: str = "MediaBox TV (Kodi)"
+    request_timeout_seconds: float = 10.0
+
+
+def validate_upstream(value: str) -> str:
+    """Accept only a loopback http(s) origin, with no path, query or fragment."""
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("stremio.upstream must be an http(s) URL")
+    host = parsed.hostname
+    if host is None:
+        raise ValueError("stremio.upstream must include a host")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        if host != "localhost":
+            raise ValueError("stremio.upstream must be a loopback address") from exc
+    else:
+        if not address.is_loopback:
+            raise ValueError("stremio.upstream must be a loopback address")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("stremio.upstream must be a bare origin")
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     bind_address: str = "127.0.0.1"
     port: int = 8787
@@ -52,6 +86,7 @@ class Config:
     event_poll_seconds: float = 2.0
     webui_root: str | None = "/opt/rk3588-mediabox/webui/dist"
     kodi: KodiConfig = field(default_factory=KodiConfig)
+    stremio: StremioConfig = field(default_factory=StremioConfig)
 
 
 def _number(data: dict[str, Any], key: str, default: float) -> float:
@@ -142,6 +177,27 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
     )
     for cidr in cidrs:
         ipaddress.ip_network(cidr, strict=False)
+    stremio_raw = raw.get("stremio", {})
+    if not isinstance(stremio_raw, dict):
+        raise ValueError("stremio must be a TOML table")
+    stremio_defaults = StremioConfig()
+    stremio_enabled = stremio_raw.get("enabled", stremio_defaults.enabled)
+    if not isinstance(stremio_enabled, bool):
+        raise ValueError("stremio.enabled must be true or false")
+    stremio_mount = str(stremio_raw.get("mount", stremio_defaults.mount))
+    if not stremio_mount.startswith("/") or stremio_mount.startswith("/api/"):
+        raise ValueError("stremio.mount must be an absolute path outside /api/")
+    stremio = StremioConfig(
+        enabled=stremio_enabled,
+        upstream=validate_upstream(str(stremio_raw.get("upstream", stremio_defaults.upstream))),
+        mount=stremio_mount,
+        cast_device_id=str(stremio_raw.get("cast_device_id", stremio_defaults.cast_device_id)),
+        cast_device_name=str(stremio_raw.get("cast_device_name", stremio_defaults.cast_device_name)),
+        request_timeout_seconds=_number(
+            stremio_raw, "request_timeout_seconds", stremio_defaults.request_timeout_seconds
+        ),
+    )
+
     webui_root_value = raw.get("webui_root", Config().webui_root)
     if webui_root_value is not None and not isinstance(webui_root_value, str):
         raise ValueError("webui_root must be a string or omitted")
@@ -157,4 +213,5 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
         event_poll_seconds=_number(raw, "event_poll_seconds", Config().event_poll_seconds),
         webui_root=webui_root,
         kodi=kodi,
+        stremio=stremio,
     )

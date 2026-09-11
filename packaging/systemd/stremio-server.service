@@ -1,0 +1,42 @@
+[Unit]
+Description=Stremio streaming server (torrent and stream resolution for MediaBox)
+Documentation=https://github.com/Stremio/stremio-linux-shell
+After=network-online.target
+Wants=network-online.target
+# mediaboxd proxies this service; it is useful on its own, so the dependency is
+# declared one way only and mediaboxd degrades gracefully when this is down.
+Before=mediaboxd.service
+
+[Service]
+Type=simple
+User=stremio
+Group=stremio
+WorkingDirectory=/var/lib/stremio-server
+Environment=HOME=/var/lib/stremio-server
+Environment=APP_PATH=/var/lib/stremio-server
+# Same-origin is enforced by mediaboxd, so the server needs no CORS of its own.
+Environment=NO_CORS=0
+# Everything reaching this server arrives through the mediaboxd proxy, which
+# terminates plain HTTP on the appliance origin. The server's own certificate
+# tunnel to *.strem.io is neither used nor wanted here.
+Environment=NO_HTTPS_SERVER=1
+ExecStart=/opt/rk3588-mediabox/node/bin/node /opt/rk3588-mediabox/stremio-server/server.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0027
+ReadWritePaths=/var/lib/stremio-server
+
+[Install]
+WantedBy=multi-user.target
