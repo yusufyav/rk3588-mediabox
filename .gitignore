@@ -1,6 +1,13 @@
-build/
+# Generated test assets (scripts/make-test-assets.sh) and media
 assets/
-*.o
 *.mp4
 *.hevc
+
+# Build output
+build/
+*.o
+*.a
 *.bin.tmp
+
+# Agent session telemetry and local tool settings
+.claude/
