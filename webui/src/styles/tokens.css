@@ -1,0 +1,85 @@
+/*
+ * MediaBox appliance palette.
+ *
+ * Dark, low-chroma, high contrast: the box is looked at on a TV in a dim room
+ * as often as on a phone. Accents are used to mean something (state, focus,
+ * danger) and never for decoration.
+ */
+:root {
+  --bg: #0d1013;
+  --bg-elevated: #14181d;
+  --surface: #171c22;
+  --surface-2: #1e242b;
+  --surface-3: #262e37;
+
+  --line: #28303a;
+  --line-strong: #3a4550;
+
+  --text: #e9eef3;
+  --text-dim: #9aa7b3;
+  --text-faint: #6d7883;
+
+  --accent: #4ea3e0;
+  --accent-soft: rgba(78, 163, 224, 0.14);
+  --ok: #4cbd82;
+  --ok-soft: rgba(76, 189, 130, 0.14);
+  --warn: #d59a3a;
+  --warn-soft: rgba(213, 154, 58, 0.14);
+  --danger: #e05f52;
+  --danger-soft: rgba(224, 95, 82, 0.14);
+  --focus: #8fd6ff;
+
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --gap-1: 0.25rem;
+  --gap-2: 0.5rem;
+  --gap-3: 0.75rem;
+  --gap-4: 1rem;
+  --gap-5: 1.5rem;
+  --gap-6: 2rem;
+
+  --fs-caption: 0.75rem;
+  --fs-small: 0.875rem;
+  --fs-body: 1rem;
+  --fs-lead: 1.125rem;
+  --fs-title: 1.375rem;
+  --fs-display: 2rem;
+  --fs-hero: 2.75rem;
+
+  --shell-pad: 1.25rem;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+/* Layout classes. Only the type scale and spacing change; structure is shared. */
+:root[data-layout='mobile'] {
+  font-size: 15px;
+  --shell-pad: 1rem;
+}
+
+:root[data-layout='tablet'] {
+  font-size: 16px;
+  --shell-pad: 1.25rem;
+}
+
+:root[data-layout='desktop'] {
+  font-size: 16px;
+  --shell-pad: 1.75rem;
+}
+
+/*
+ * TV is read from ~3 m away: everything scales up and the smallest step of the
+ * scale is lifted to body size, so no label can end up as fine print.
+ */
+:root[data-layout='tv'] {
+  font-size: 21px;
+  --shell-pad: 2.5rem;
+  --fs-caption: 0.9rem;
+  --fs-small: 1rem;
+  --fs-body: 1.125rem;
+  --fs-lead: 1.375rem;
+  --fs-title: 1.75rem;
+  --fs-display: 2.5rem;
+  --fs-hero: 3.5rem;
+}

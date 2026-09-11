@@ -1,0 +1,123 @@
+.grid {
+  display: grid;
+  gap: var(--gap-4);
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+
+.metricRow {
+  display: grid;
+  gap: var(--gap-5);
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+}
+
+.hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-4);
+  padding: var(--gap-5);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+}
+
+.heroText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-2);
+  min-width: 0;
+}
+
+.heroTitle {
+  font-size: var(--fs-display);
+  font-weight: 700;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.heroMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+}
+
+.heroPills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+  justify-content: flex-end;
+}
+
+.note {
+  color: var(--text-dim);
+  font-size: var(--fs-small);
+}
+
+.sectionTitle {
+  font-size: var(--fs-lead);
+  font-weight: 650;
+}
+
+.actionGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-3);
+}
+
+:root[data-layout='mobile'] .actionGroup {
+  flex-direction: column;
+}
+
+:root[data-layout='mobile'] .actionGroup > * {
+  width: 100%;
+}
+
+:root[data-layout='mobile'] .grid {
+  grid-template-columns: 1fr;
+}
+
+:root[data-layout='mobile'] .heroPills {
+  justify-content: flex-start;
+}
+
+:root[data-layout='tv'] .heroTitle {
+  font-size: var(--fs-hero);
+}
+
+:root[data-layout='tv'] .grid {
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+}
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  padding: var(--gap-6);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.placeholderTitle {
+  font-size: var(--fs-title);
+  font-weight: 650;
+}
+
+.list {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--text-dim);
+  display: grid;
+  gap: var(--gap-1);
+}
