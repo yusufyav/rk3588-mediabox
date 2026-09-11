@@ -20,6 +20,11 @@ Environment=NO_CORS=0
 # terminates plain HTTP on the appliance origin. The server's own certificate
 # tunnel to *.strem.io is neither used nor wanted here.
 Environment=NO_HTTPS_SERVER=1
+# Without these the server can only pass a stream through untouched: anything
+# needing a remux or a transcode fails with "video is not supported". Distro
+# packages, so the exact version is whatever the appliance image carries.
+Environment=FFMPEG_BIN=/usr/bin/ffmpeg
+Environment=FFPROBE_BIN=/usr/bin/ffprobe
 ExecStart=/opt/rk3588-mediabox/node/bin/node /opt/rk3588-mediabox/stremio-server/server.js
 Restart=on-failure
 RestartSec=5s
