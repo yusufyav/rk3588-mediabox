@@ -39,6 +39,14 @@
        pulled to 60 Hz is a Gate MP1b failure, so this is not optional. -->
   <setting id="videoplayer.adjustrefreshrate">2</setting>
 
+  <!-- Kodi gates passthrough on this in CVideoPlayerAudio: allowpassthrough is
+       literally !usedisplayasclock, so a true here switches compressed output
+       off in code, no matter what the audiooutput settings below say. It is
+       false by default and was already false when Gate MA1 started, but it is
+       written out explicitly because nothing else in this file hints that a
+       *video clock* setting can silence the audio path. -->
+  <setting id="videoplayer.usedisplayasclock">false</setting>
+
   <!-- The HDMI sink, named rather than left on "Default". Both resolve to the
        same card today, but Kodi rewrites an unresolvable device setting to its
        own default, and this appliance re-enumerates its audio devices every
@@ -46,13 +54,45 @@
        visible in the diff instead of silently moving the audio somewhere else
        -- the board also has an ES8323 analogue codec that would happily take
        the stream. The string is Kodi's own, taken from the option list it
-       publishes for this machine. -->
-  <setting id="audiooutput.audiodevice">ALSA:sysdefault:CARD=rockchiphdmi1|rockchip-hdmi1</setting>
+       publishes for this machine.
 
-  <!-- Audio: PCM only. Gate MA0 proved the HDMI PCM path; compressed
-       passthrough is Gate MA1 and is explicitly off here so that a decoded
-       stream is what reaches ALSA. -->
-  <setting id="audiooutput.passthrough">false</setting>
+       Gate MA1 moved both of these off "sysdefault" and onto the "hdmi" PCM
+       that config/alsa/rockchip-hdmi1.conf adds. That PCM is the only one Kodi
+       will ever consider for passthrough -- CAESinkALSA::AEDeviceTypeFromName()
+       decides AE_DEVTYPE_HDMI purely from the name's "hdmi" prefix -- and it is
+       also what applies the AES channel-status bytes per stream: 0x04 for PCM,
+       0x06 (non-audio) for a compressed burst. Pointing the PCM device at it
+       too keeps one device for both jobs, so switching between a GUI sound and
+       a film does not re-open a different endpoint mid-playback. -->
+  <setting id="audiooutput.audiodevice">ALSA:hdmi:CARD=rockchiphdmi1,DEV=0|rockchip-hdmi1</setting>
+  <setting id="audiooutput.passthroughdevice">ALSA:hdmi:CARD=rockchiphdmi1,DEV=0|rockchip-hdmi1</setting>
+
+  <!-- Compressed passthrough, validated in Gate MA1 against this sink's ELD
+       rather than against what Kodi is willing to offer. CAESinkALSA pushes
+       every stream type it can do onto an HDMI device on purpose ("we don't
+       trust ELD information"), so the UI lists TrueHD and DTS-HD here as well;
+       neither appears in the sink's SADs and both stay off.
+
+       What the ELD actually declares: LPCM 6ch, AC-3 6ch/640k, DTS 6ch/1504k,
+       E-AC-3 8ch. What the sink actually reproduces, measured at the TV:
+       AC-3 and E-AC-3 only. DTS and 6-channel LPCM are declared and silent,
+       so DTS passthrough is off and the PCM path stays at 2.0 -- a DTS title
+       is decoded and downmixed rather than sent as something that plays as
+       nothing.
+
+       ac3transcode is off for the same reason: with it on, a DTS source is
+       re-encoded (to E-AC-3, or to AC-3 when eac3passthrough is off) and this
+       sink produced silence from both, while the stream Kodi built was clean
+       at every machine-visible layer -- same 48 kHz S16_LE carrier and same
+       AES0=0x06 as the AC-3 passthrough that does work. That is its own fault
+       domain and not something MA1 settled. -->
+  <setting id="audiooutput.passthrough">true</setting>
+  <setting id="audiooutput.ac3passthrough">true</setting>
+  <setting id="audiooutput.eac3passthrough">true</setting>
+  <setting id="audiooutput.dtspassthrough">false</setting>
+  <setting id="audiooutput.ac3transcode">false</setting>
+  <setting id="audiooutput.truehdpassthrough">false</setting>
+  <setting id="audiooutput.dtshdpassthrough">false</setting>
   <setting id="audiooutput.channels">1</setting>
 
   <!-- JSON-RPC over HTTP, so this headless appliance can be driven and

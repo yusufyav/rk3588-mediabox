@@ -73,6 +73,16 @@ case "${1:-}" in
       mediabox_ssh "rm -rf '$KODI_RUN_HOME'"
     fi
     mediabox_ssh "mkdir -p '$userdata' '$KODI_RUN_HOME/.kodi/temp'"
+    # The "hdmi" ALSA PCM this card would otherwise not have. Kodi reads
+    # passthrough capability off the PCM *name* -- only a name starting with
+    # "hdmi" becomes AE_DEVTYPE_HDMI and gets AE_FMT_RAW -- so without this file
+    # the sink enumerates as AE_DEVTYPE_PCM and compressed output is impossible
+    # to select, which is exactly how Gate MA1 found the machine. It is copied
+    # on every start rather than installed once: guisettings.xml above names
+    # this PCM, and a profile pointing at a device that does not exist is the
+    # one failure that looks like a Kodi bug instead of a missing config file.
+    mediabox_scp "$here/config/alsa/rockchip-hdmi1.conf" \
+      "$MEDIABOX_TARGET:/usr/share/alsa/cards/rockchip-hdmi1.conf" >/dev/null
     mediabox_scp "$here/config/kodi/guisettings-appliance.xml" \
       "$MEDIABOX_TARGET:$userdata/guisettings.xml" >/dev/null
     echo "== starting Kodi (GBM/DRM standalone, GPU=$MEDIABOX_GPU)"
