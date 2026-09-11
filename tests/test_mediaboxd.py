@@ -154,11 +154,13 @@ class APITest(unittest.TestCase):
 
 class MockKodiHandler(BaseHTTPRequestHandler):
     methods: list[str] = []
+    requests: list[dict] = []
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers["Content-Length"])
         request = json.loads(self.rfile.read(length))
         self.__class__.methods.append(request["method"])
+        self.__class__.requests.append(request)
         responses = {
             "JSONRPC.Ping": "pong",
             "Player.GetActivePlayers": [{"playerid": 1, "type": "video"}],
@@ -168,6 +170,7 @@ class MockKodiHandler(BaseHTTPRequestHandler):
                 "totaltime": {"hours": 1, "minutes": 0, "seconds": 0, "milliseconds": 0},
             },
             "Player.GetItem": {"item": {"label": "Mock movie", "type": "movie"}},
+            "Player.Seek": {"percentage": 1.0},
         }
         payload = json.dumps(
             {"jsonrpc": "2.0", "id": request["id"], "result": responses[request["method"]]}
@@ -185,6 +188,7 @@ class MockKodiHandler(BaseHTTPRequestHandler):
 class KodiClientTest(unittest.TestCase):
     def setUp(self):
         MockKodiHandler.methods = []
+        MockKodiHandler.requests = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), MockKodiHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -226,6 +230,23 @@ class KodiClientTest(unittest.TestCase):
         with self.assertRaises(KodiUnavailable) as caught:
             client.ping()
         self.assertEqual(caught.exception.code, "KODI_UNREACHABLE")
+
+    def test_seek_uses_kodi_time_wrapper(self):
+        endpoint = f"http://127.0.0.1:{self.server.server_address[1]}/jsonrpc"
+        KodiClient(KodiConfig(endpoint=endpoint)).seek(30.25)
+        seek_request = MockKodiHandler.requests[-1]
+        self.assertEqual(seek_request["method"], "Player.Seek")
+        self.assertEqual(
+            seek_request["params"]["value"],
+            {
+                "time": {
+                    "hours": 0,
+                    "minutes": 0,
+                    "seconds": 30,
+                    "milliseconds": 250,
+                }
+            },
+        )
 
     def test_endpoint_discovery_from_xml(self):
         with tempfile.TemporaryDirectory() as directory:

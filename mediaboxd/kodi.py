@@ -205,7 +205,8 @@ class KodiClient:
             "milliseconds": milliseconds,
         }
         return self.call(
-            "Player.Seek", {"playerid": self.active_player_id(), "value": value}
+            "Player.Seek",
+            {"playerid": self.active_player_id(), "value": {"time": value}},
         )
 
     def open(self, url: Any, resume_seconds: Any = 0) -> Any:
