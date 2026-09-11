@@ -1,0 +1,35 @@
+### Gate MA1 / Phase 5 - AC-3 through Kodi
+### VERDICT: PASS
+
+Settings in force (all others off, transcoding off, so nothing could be confused
+with a real AC-3 source):
+  videoplayer.usedisplayasclock  false
+  audiooutput.passthrough        true
+  audiooutput.ac3passthrough     true
+  audiooutput.ac3transcode       false
+  eac3 / dts / truehd / dtshd    all false
+
+Passthrough device actually used
+  ALSA:hdmi:CARD=rockchiphdmi1,DEV=0|rockchip-hdmi1
+  - the real HDMI endpoint (card 0, device 0). Not "default", not a plug chain, and
+    the build has ENABLE_PULSEAUDIO=OFF with AE_SINK=ALSA pinned by the launch script,
+    so PulseAudio/PipeWire cannot be in the path.
+
+Machine evidence (kodi-ac3-log.txt, kodi-ac3-hwparams.txt)
+  CAEStreamParser::TrySyncAC3 - AC3 stream detected (6 channels, 48000Hz)
+      -> the stream is parsed, not decoded
+  Finding audio codec for: 86019            (AV_CODEC_ID_AC3)
+  Creating audio stream (codec: ac3, channels: 6, sample rate: 48000, pass-through)
+      -> "pass-through", and no CDVDAudioCodecFFmpeg is opened for audio anywhere in
+         the slice: Kodi never falls back to PCM decode
+  CVideoPlayerAudio: display reset occurred, checking for passthrough
+      -> allowpassthrough was true, i.e. usedisplayasclock=false did its job
+  MP2ALSA open:request device="hdmi:CARD=rockchiphdmi1,DEV=0" devType=2 passthrough=1
+      rate=48000 channels=2 aeformat=3 aesparams="AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02"
+      -> devType=2 is AE_DEVTYPE_HDMI, passthrough=1, AES0 non-audio set
+  CAESinkALSA::Initialize - Opened device "hdmi:CARD=rockchiphdmi1,DEV=0,AES0=0x06,..."
+  ALSA state RUNNING; xrun / underrun / write error / ALSA error: 0
+  Player.GetProperties: speed 1, codec "ac3", 6 channels, 640000 bit/s
+
+Physical evidence
+  Operator at the Sony TV: clean Dolby/AC-3 audio, sink reporting Dolby Digital.

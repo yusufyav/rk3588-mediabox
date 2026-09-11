@@ -1,0 +1,35 @@
+### Gate MA1 / Phase 3 - low-level IEC61937 AC-3 proof, Kodi entirely out of the path
+### VERDICT: PASS
+
+Command and carrier: lowlevel-ac3-command.txt
+hw_params captured while running: lowlevel-ac3-hwparams.txt
+
+Machine evidence
+  ffmpeg decodes nothing          -c:a copy -f spdif  (compressed frames -> IEC61937 bursts)
+  ALSA stream state               RUNNING, sustained (sampled at t=4s, 12s, 15s and in a
+                                  continuous loop afterwards)
+  hw_params                       S16_LE / 2ch / 48000 Hz, period 6000, buffer 24000
+                                  - the defined IEC61937 carrier, not a decoded stream
+  xrun                            none; aplay printed only its normal banner and no
+                                  underrun/write-error line for the whole run
+  IEC958 channel status           AES0=0x06 before, during and after the stream
+                                  (bit 1 = non-audio set)
+  dmesg delta                     no new lines beyond the pre-existing
+                                  "dw hdmi qp use tmds mode"; no HDMI/I2S/audio errors
+
+Physical evidence
+  Operator at the Sony TV: clean Dolby/AC-3 audio, sink reporting Dolby Digital.
+
+Why this gate mattered
+  A pass here fixes the fault domain before anything else is touched. The kernel,
+  the dw-hdmi-qp controller, the I2S path and the sink were all proven to carry a
+  real compressed burst with no patch of any kind. Everything that failed later was
+  therefore above this line, and no kernel or DT work was warranted - which is what
+  section 10 of the brief asks to be established before any code is written.
+
+The one non-default step
+  The card powers up with AES0=0x04, non-audio clear. Sent that way the same bytes
+  are decoded by the sink as PCM and come out as noise. `iecset -c 0 audio off`
+  sets the flag. This is not a workaround left in place: config/alsa/rockchip-hdmi1.conf
+  now carries it as a per-stream ctl_elems hook, so Kodi's own AES0=0x06 is applied
+  when a compressed stream opens and the byte is restored to 0x04 on close.

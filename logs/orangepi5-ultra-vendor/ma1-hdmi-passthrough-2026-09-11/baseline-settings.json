@@ -1,0 +1,18 @@
+{
+  "_source": "production Kodi profile at Gate MA1 start: runtime /var/tmp/kodi-home/.kodi/userdata/guisettings.xml, seeded from config/kodi/guisettings-appliance.xml at commit 1d3284dc8269144963ac79c9da0e5f0b331bb216",
+  "_note": "'default' means the value carried Kodi's own default marker (default=\"true\") and was not pinned by the appliance profile.",
+  "videoplayer.usedisplayasclock": { "value": false, "pinned_by_profile": false, "kodi_default": true },
+  "videoplayer.adjustrefreshrate": { "value": 2, "pinned_by_profile": true },
+  "audiooutput.audiodevice":       { "value": "ALSA:sysdefault:CARD=rockchiphdmi1|rockchip-hdmi1", "pinned_by_profile": true },
+  "audiooutput.passthrough":       { "value": false, "pinned_by_profile": true },
+  "audiooutput.passthroughdevice": { "value": "Default", "pinned_by_profile": false, "kodi_default": true },
+  "audiooutput.channels":          { "value": 1, "pinned_by_profile": true, "_meaning": "AE_CH_LAYOUT_2_0" },
+  "audiooutput.ac3passthrough":    { "value": true,  "pinned_by_profile": false, "kodi_default": true },
+  "audiooutput.eac3passthrough":   { "value": true,  "pinned_by_profile": false, "kodi_default": true },
+  "audiooutput.dtspassthrough":    { "value": true,  "pinned_by_profile": false, "kodi_default": true },
+  "audiooutput.truehdpassthrough": { "value": true,  "pinned_by_profile": false, "kodi_default": true },
+  "audiooutput.dtshdpassthrough":  { "value": true,  "pinned_by_profile": false, "kodi_default": true },
+  "audiooutput.ac3transcode":      { "value": false, "pinned_by_profile": false, "kodi_default": true },
+
+  "_usedisplayasclock_finding": "Already false before MA1 touched anything. CVideoPlayerAudio computes allowpassthrough = !usedisplayasclock, so a true here would have disabled compressed output in code; it did not, and no change to it was needed. The per-codec flags above were all at Kodi's permissive defaults but were dead: audiooutput.passthrough was false, and the sink enumerated with no passthrough-capable device at all."
+}

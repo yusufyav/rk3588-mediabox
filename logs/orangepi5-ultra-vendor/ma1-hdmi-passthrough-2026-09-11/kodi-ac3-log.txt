@@ -1,0 +1,51 @@
+2026-09-11 16:01:43.523 T:23002   debug <general>: CPlayerCoreFactory::GetPlayers(/var/tmp/ma1/ma1-ac3.mkv)
+2026-09-11 16:01:43.524 T:23002   debug <general>: CPlayerCoreFactory::GetPlayers(/var/tmp/ma1/ma1-ac3.mkv)
+2026-09-11 16:01:43.526 T:23002    info <general>: VideoPlayer::OpenFile: /var/tmp/ma1/ma1-ac3.mkv
+2026-09-11 16:01:43.530 T:23018   debug <general>: Loading settings for /var/tmp/ma1/ma1-ac3.mkv
+2026-09-11 16:01:43.531 T:25473    info <general>: ScanPathsForAssociatedItems: found associated file /var/tmp/ma1/ma1-ac3.ac3
+2026-09-11 16:01:43.534 T:23002   debug <general>: CVideoGUIInfo::InitCurrentItem(/var/tmp/ma1/ma1-ac3.mkv)
+2026-09-11 16:01:43.539 T:25473    info <general>: ffmpeg[0xaaaaebc90260]: Input #0, matroska,webm, from '/var/tmp/ma1/ma1-ac3.mkv':
+2026-09-11 16:01:43.540 T:25473    info <general>: ffmpeg[0xaaaaebc90260]:   Stream #0:1(eng): Audio: ac3, 48000 Hz, 5.1(side), fltp, 640 kb/s, start 1.402000 (default)
+2026-09-11 16:01:43.540 T:25473    info <general>: ffmpeg[0xaaaaebc90260]:       ENCODER         : Lavc62.28.102 ac3
+2026-09-11 16:01:43.540 T:25473   debug <general>: GetExternalStreamDetailsFromFilename - Language = '' / Name = '(External)' / Flag = '0' from /var/tmp/ma1/ma1-ac3.mkv
+2026-09-11 16:01:43.544 T:25473   debug <general>: Open - probing detected format [ac3]
+2026-09-11 16:01:43.544 T:23002   debug <general>: virtual bool CVideoThumbLoader::LoadItemLookup(CFileItem*): trying to extract filestream details from video file /var/tmp/ma1/ma1-ac3.mkv
+2026-09-11 16:01:43.544 T:25473   debug <general>: ffmpeg[0xaaaaebc90260]: [ac3] Estimating duration from bitrate, this may be inaccurate
+2026-09-11 16:01:43.545 T:25473    info <general>: ffmpeg[0xaaaaebc90260]: Input #0, ac3, from '/var/tmp/ma1/ma1-ac3.ac3':
+2026-09-11 16:01:43.545 T:25473    info <general>: ffmpeg[0xaaaaebc90260]:   Stream #0:0: Audio: ac3, 48000 Hz, 5.1(side), fltp, 640 kb/s
+2026-09-11 16:01:43.545 T:25473   debug <general>: GetExternalStreamDetailsFromFilename - Language = '' / Name = '(External)' / Flag = '0' from /var/tmp/ma1/ma1-ac3.ac3
+2026-09-11 16:01:44.313 T:23002   debug <general>: CPlayerGUIInfo::InitCurrentItem(/var/tmp/ma1/ma1-ac3.mkv)
+2026-09-11 16:01:44.516 T:23014   error <general>: CAESinkALSA - snd_pcm_writei(-77) File descriptor in bad state - trying to recover, state=SETUP
+2026-09-11 16:01:44.516 T:23014    info <general>: CAESinkALSA::HandleError(snd_pcm_writei(1)) - the PCM was stopped underneath us (SETUP), preparing it again
+2026-09-11 16:01:44.516 T:23014    info <general>: CAESinkALSA::HandleError(snd_pcm_writei(1)) - prepared, state is now PREPARED
+2026-09-11 16:01:44.575 T:25473   debug <general>: bool CEdl::ReadEditDecisionLists(const CFileItem&, float, std::chrono::milliseconds): Checking for edit decision lists (EDL) for: /var/tmp/ma1/ma1-ac3.mkv
+2026-09-11 16:01:44.577 T:25473    info <general>: Finding audio codec for: 86019
+2026-09-11 16:01:44.578 T:25473    info <general>: Creating audio thread
+2026-09-11 16:01:44.629 T:25495    info <general>: CAEStreamParser::TrySyncAC3 - AC3 stream detected (6 channels, 48000Hz)
+2026-09-11 16:01:44.629 T:25495    info <general>: CVideoPlayerAudio: display reset occurred, checking for passthrough
+2026-09-11 16:01:44.629 T:25495    info <general>: Creating audio stream (codec: ac3, channels: 6, sample rate: 48000, pass-through)
+2026-09-11 16:01:44.652 T:23002   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+2026-09-11 16:01:44.653 T:23002 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+2026-09-11 16:01:44.866 T:23014    info <general>: CAESinkALSA::Initialize - Attempting to open device "hdmi:CARD=rockchiphdmi1,DEV=0"
+2026-09-11 16:01:44.866 T:23014    info <general>: MP2ALSA open:request device="hdmi:CARD=rockchiphdmi1,DEV=0" devType=2 passthrough=1 rate=48000 channels=2 aeformat=3 aesparams="AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02"
+2026-09-11 16:01:44.873 T:23014    info <general>: CAESinkALSA::Initialize - Opened device "hdmi:CARD=rockchiphdmi1,DEV=0,AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02"
+2026-09-11 16:01:44.873 T:23014    info <general>: MP2ALSA open:result snd_pcm_name="hdmi:CARD=rockchiphdmi1,DEV=0,AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02" type=1 state=OPEN
+2026-09-11 16:01:44.873 T:23014    info <general>: MP2ALSA hw:before state=OPEN
+2026-09-11 16:01:44.873 T:23014   debug <general>: CAESinkALSA::InitializeHW - Request: periodSize 2400, bufferSize 9600
+2026-09-11 16:01:44.874 T:23014   debug <general>: CAESinkALSA::InitializeHW - Got: periodSize 2400, bufferSize 9600
+2026-09-11 16:01:44.874 T:23014   debug <general>: CAESinkALSA::InitializeHW - Setting timeout to 200 ms
+2026-09-11 16:01:44.874 T:23014    info <general>: MP2ALSA hw:after state=PREPARED rate=48000 channels=2 aeformat=3 periodSize=2400 frameSize=4
+2026-09-11 16:01:44.874 T:23014    info <general>: MP2ALSA sw:params ret=0 start_threshold=2147483647 avail_min=2400 silence_size=5404319552844595200 boundary=5404319552844595200 state=PREPARED
+2026-09-11 16:01:44.874 T:23014    info <general>: MP2ALSA sw:after state=PREPARED
+2026-09-11 16:01:44.874 T:23014    info <general>: MP2ALSA chmap:set requested=none state=PREPARED
+2026-09-11 16:01:44.874 T:23014    info <general>: MP2ALSA nonblock ret=0 state=PREPARED
+2026-09-11 16:01:44.874 T:23014    info <general>: MP2ALSA prepare ret=0 state=PREPARED
+2026-09-11 16:01:44.874 T:23014   debug <general>: CAESinkALSA::GetChannelLayout - Input Channel Count: 2 Output Channel Count: 2
+2026-09-11 16:01:44.874 T:23014   debug <general>: CAESinkALSA::GetChannelLayout - Requested Layout: RAW, RAW
+2026-09-11 16:01:44.874 T:23014   debug <general>: CAESinkALSA::GetChannelLayout - Got Layout: RAW, RAW (ALSA: none)
+2026-09-11 16:01:44.875 T:23014    info <general>: MP2ALSA write:first:before frames=1536 state=PREPARED fragmented=0
+2026-09-11 16:01:44.875 T:23014    info <general>: MP2ALSA write:first:after frames=1536 ret=1536 (ok) state_before=PREPARED state_after=PREPARED
+2026-09-11 16:01:45.025 T:23013   debug <general>: ActiveAE::SyncStream - average error of 1284.884583, start adjusting
+2026-09-11 16:01:46.277 T:23013   debug <general>: ActiveAE::SyncStream - average error 19.869887, last average error: 1284.884583
+2026-09-11 16:01:46.425 T:23013   debug <general>: ActiveAE::SyncStream - average error of -28.186071, start adjusting
+2026-09-11 16:01:46.425 T:23013   debug <general>: ActiveAE::SyncStream - average error 3.813929 below threshold of 30.000000

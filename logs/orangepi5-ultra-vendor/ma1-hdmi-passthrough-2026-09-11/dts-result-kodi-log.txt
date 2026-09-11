@@ -1,0 +1,28 @@
+2026-09-11 16:03:34.835 T:23002   debug <general>: CPlayerCoreFactory::GetPlayers(/var/tmp/ma1/ma1-dts.mkv)
+2026-09-11 16:03:34.835 T:23002   debug <general>: CPlayerCoreFactory::GetPlayers(/var/tmp/ma1/ma1-dts.mkv)
+2026-09-11 16:03:34.836 T:23002    info <general>: VideoPlayer::OpenFile: /var/tmp/ma1/ma1-dts.mkv
+2026-09-11 16:03:34.839 T:26278   debug <general>: Loading settings for /var/tmp/ma1/ma1-dts.mkv
+2026-09-11 16:03:34.843 T:23002   debug <general>: CVideoGUIInfo::InitCurrentItem(/var/tmp/ma1/ma1-dts.mkv)
+2026-09-11 16:03:34.847 T:23002   debug <general>: virtual bool CVideoThumbLoader::LoadItemLookup(CFileItem*): trying to extract filestream details from video file /var/tmp/ma1/ma1-dts.mkv
+2026-09-11 16:03:34.857 T:26921    info <general>: ffmpeg[0xaaaaebc90260]: Input #0, matroska,webm, from '/var/tmp/ma1/ma1-dts.mkv':
+2026-09-11 16:03:34.857 T:26921    info <general>: ffmpeg[0xaaaaebc90260]:   Stream #0:1(eng): Audio: dts (dca) (DTS), 48000 Hz, 5.1(side), fltp, 1411 kb/s, start 1.402000 (default)
+2026-09-11 16:03:35.496 T:23002   debug <general>: CPlayerGUIInfo::InitCurrentItem(/var/tmp/ma1/ma1-dts.mkv)
+2026-09-11 16:03:35.764 T:26921   debug <general>: bool CEdl::ReadEditDecisionLists(const CFileItem&, float, std::chrono::milliseconds): Checking for edit decision lists (EDL) for: /var/tmp/ma1/ma1-dts.mkv
+2026-09-11 16:03:35.766 T:26921    info <general>: Finding audio codec for: 86020
+2026-09-11 16:03:35.766 T:26921    info <general>: Creating audio thread
+2026-09-11 16:03:35.820 T:26943    info <general>: CAEStreamParser::SyncDTS - dts stream detected (6 channels, 48000Hz, 16bit BE, period: 512, syncword: 0x7ffe8001, target rate: 0x16, framesize 1884))
+2026-09-11 16:03:35.820 T:26943    info <general>: CVideoPlayerAudio: display reset occurred, checking for passthrough
+2026-09-11 16:03:35.820 T:26943    info <general>: Creating audio stream (codec: dts, channels: 6, sample rate: 48000, pass-through)
+2026-09-11 16:03:35.843 T:23002   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+2026-09-11 16:03:35.843 T:23002 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+2026-09-11 16:03:36.058 T:23014    info <general>: MP2ALSA open:request device="hdmi:CARD=rockchiphdmi1,DEV=0" devType=2 passthrough=1 rate=48000 channels=2 aeformat=3 aesparams="AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02"
+2026-09-11 16:03:36.062 T:23014    info <general>: MP2ALSA open:result snd_pcm_name="hdmi:CARD=rockchiphdmi1,DEV=0,AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02" type=1 state=OPEN
+2026-09-11 16:03:36.062 T:23014    info <general>: MP2ALSA hw:before state=OPEN
+2026-09-11 16:03:36.063 T:23014    info <general>: MP2ALSA hw:after state=PREPARED rate=48000 channels=2 aeformat=3 periodSize=2400 frameSize=4
+2026-09-11 16:03:36.063 T:23014    info <general>: MP2ALSA sw:params ret=0 start_threshold=2147483647 avail_min=2400 silence_size=5404319552844595200 boundary=5404319552844595200 state=PREPARED
+2026-09-11 16:03:36.063 T:23014    info <general>: MP2ALSA sw:after state=PREPARED
+2026-09-11 16:03:36.063 T:23014    info <general>: MP2ALSA chmap:set requested=none state=PREPARED
+2026-09-11 16:03:36.063 T:23014    info <general>: MP2ALSA nonblock ret=0 state=PREPARED
+2026-09-11 16:03:36.063 T:23014    info <general>: MP2ALSA prepare ret=0 state=PREPARED
+2026-09-11 16:03:36.064 T:23014    info <general>: MP2ALSA write:first:before frames=480 state=PREPARED fragmented=0
+2026-09-11 16:03:36.064 T:23014    info <general>: MP2ALSA write:first:after frames=480 ret=480 (ok) state_before=PREPARED state_after=PREPARED

@@ -1,0 +1,40 @@
+### Gate MA1 / Phase 6 - DTS core
+### VERDICT: DTS_SINK_LIMITED - declared by the ELD, not reproducible by this sink.
+###          Kodi passthrough machinery correct; disabled in the profile.
+
+Scope justification
+  Tested because ELD SAD3 declares DTS, 6ch, 32/44.1/48 kHz, max 1504 kbps.
+
+Test asset
+  /var/tmp/ma1/ma1-dts.mkv - canonical 4K HDR video stream copied, audio re-encoded
+  to DTS core 5.1 / 48 kHz / 1411.2 kbps (inside the ELD's 1504 kbps ceiling) with
+  the ffmpeg "dca" encoder already present under /opt/rk3588-screenbridge. No package
+  was installed and no production media was modified.
+
+Machine evidence (dts-result-kodi-log.txt)
+  Finding audio codec for: 86020            (AV_CODEC_ID_DTS)
+  Creating audio stream (codec: dts, channels: 6, sample rate: 48000, pass-through)
+  MP2ALSA open:request device="hdmi:CARD=rockchiphdmi1,DEV=0" devType=2 passthrough=1
+      rate=48000 channels=2 aeformat=3 aesparams="AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02"
+  CAESinkALSA::Initialize - Opened device "hdmi:CARD=rockchiphdmi1,DEV=0,AES0=0x06,..."
+  ALSA state RUNNING; AES0=0x06 held for the whole stream; xrun/underrun/write-error: 0
+
+  Every machine-visible layer is identical to the AC-3 passthrough that does work,
+  including the carrier (48 kHz S16_LE stereo) and the non-audio channel-status bit.
+
+Physical evidence
+  Operator: the attached audio system cannot reproduce DTS. Nothing came out.
+
+Asset ruled out as the cause
+  The DTS track decodes to the same content and the same level as the AC-3 and E-AC-3
+  assets built from the same source segment (mean -31.0 dB, max -1.0 dB for all three,
+  see audio-assets.txt). The file is valid DTS carrying real audio; the sink is the limit.
+
+Sink-state control
+  Re-verified after this result: E-AC-3 passthrough was still clean at the TV at the end
+  of the session (Phase 7/8 run). The sink had not latched into a mute state, so this
+  negative result stands on its own.
+
+Consequence
+  audiooutput.dtspassthrough = false. A DTS title is decoded and downmixed to the 2.0
+  PCM path, which this sink does reproduce.

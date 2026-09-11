@@ -1,0 +1,39 @@
+2026-09-11 16:25:10.166 T:40792    info <general>: Enumerated ALSA devices:
+2026-09-11 16:25:10.166 T:40792    info <general>:     Device 1
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_deviceName      : default
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_displayName     : Default (rockchip-hdmi1 rockchip-hdmi1 i2s-hifi-0)
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_displayNameExtra: 
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_deviceType      : AE_DEVTYPE_PCM
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_channels        : FL, FR, LFE, UNKNOWN1, FC, BC, BL, BR, BLOC, BROC, FLOC, FROC
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_sampleRates     : 32000,44100,48000,88200,96000,176400,192000
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_dataFormats     : AE_FMT_S24NE4,AE_FMT_S32NE,AE_FMT_S16NE,AE_FMT_S16LE
+2026-09-11 16:25:10.166 T:40792    info <general>:         m_streamTypes     : No passthrough capabilities
+2026-09-11 16:25:10.167 T:40792    info <general>:     Device 2
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_deviceName      : sysdefault:CARD=rockchiphdmi1
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_displayName     : rockchip-hdmi1
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_displayNameExtra: rockchip-hdmi1 i2s-hifi-0
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_deviceType      : AE_DEVTYPE_PCM
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_channels        : FL, FR, LFE, UNKNOWN1, FC, BC, BL, BR, BLOC, BROC, FLOC, FROC
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_sampleRates     : 32000,44100,48000,88200,96000,176400,192000
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_dataFormats     : AE_FMT_S24NE4,AE_FMT_S32NE,AE_FMT_S16NE,AE_FMT_S16LE
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_streamTypes     : No passthrough capabilities
+2026-09-11 16:25:10.167 T:40792    info <general>:     Device 3
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_deviceName      : hdmi:CARD=rockchiphdmi1,DEV=0
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_displayName     : rockchip-hdmi1
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_displayNameExtra: SNY SONY TV  *00 on HDMI
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_deviceType      : AE_DEVTYPE_HDMI
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_channels        : FL, FR, LFE, FC, BL, BR
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_sampleRates     : 32000,44100,48000,88200,96000,176400,192000
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_dataFormats     : AE_FMT_RAW,AE_FMT_S24NE4,AE_FMT_S32NE,AE_FMT_S16NE,AE_FMT_S16LE,AE_FMT_RAW
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_streamTypes     : STREAM_TYPE_AC3,STREAM_TYPE_DTSHD,STREAM_TYPE_DTSHD_MA,STREAM_TYPE_DTSHD_CORE,STREAM_TYPE_DTS_1024,STREAM_TYPE_DTS_2048,STREAM_TYPE_DTS_512,STREAM_TYPE_EAC3,STREAM_TYPE_TRUEHD
+2026-09-11 16:25:10.167 T:40792    info <general>:     Device 4
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_deviceName      : sysdefault:CARD=rockchipes8388
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_displayName     : rockchip,es8388
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_displayNameExtra: dailink-multicodecs ES8323 HiFi-0
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_deviceType      : AE_DEVTYPE_PCM
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_channels        : FL, FR
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_sampleRates     : 8000,11025,16000,22050,32000,44100,48000,64000,88200,96000
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_dataFormats     : AE_FMT_S24NE4,AE_FMT_S16NE,AE_FMT_S16LE
+2026-09-11 16:25:10.167 T:40792    info <general>:         m_streamTypes     : No passthrough capabilities
+2026-09-11 16:25:10.167 T:40793    info <general>: CActiveAESink::OpenSink - initialize sink
+2026-09-11 16:25:10.167 T:40793   debug <general>: CActiveAESink::OpenSink - trying to open device ALSA:hdmi:CARD=rockchiphdmi1,DEV=0

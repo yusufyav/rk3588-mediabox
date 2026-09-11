@@ -1,0 +1,75 @@
+### /proc/asound/cards
+ 0 [rockchiphdmi1  ]: rockchip-hdmi1 - rockchip-hdmi1
+                      rockchip-hdmi1
+ 1 [rockchiphdmiin ]: rockchip_hdmiin - rockchip,hdmiin
+                      rockchip,hdmiin
+ 2 [rockchipes8388 ]: rockchip_es8388 - rockchip,es8388
+                      rockchip,es8388
+
+### aplay -l
+**** List of PLAYBACK Hardware Devices ****
+card 0: rockchiphdmi1 [rockchip-hdmi1], device 0: rockchip-hdmi1 i2s-hifi-0 [rockchip-hdmi1 i2s-hifi-0]
+  Subdevices: 0/1
+  Subdevice #0: subdevice #0
+card 2: rockchipes8388 [rockchip,es8388], device 0: dailink-multicodecs ES8323 HiFi-0 [dailink-multicodecs ES8323 HiFi-0]
+  Subdevices: 1/1
+  Subdevice #0: subdevice #0
+
+### aplay -L
+null
+    Discard all samples (playback) or generate zero samples (capture)
+hw:CARD=rockchiphdmi1,DEV=0
+    rockchip-hdmi1, rockchip-hdmi1 i2s-hifi-0
+    Direct hardware device without any conversions
+plughw:CARD=rockchiphdmi1,DEV=0
+    rockchip-hdmi1, rockchip-hdmi1 i2s-hifi-0
+    Hardware device with all software conversions
+default:CARD=rockchiphdmi1
+    rockchip-hdmi1, rockchip-hdmi1 i2s-hifi-0
+    Default Audio Device
+sysdefault:CARD=rockchiphdmi1
+    rockchip-hdmi1, rockchip-hdmi1 i2s-hifi-0
+    Default Audio Device
+hdmi:CARD=rockchiphdmi1,DEV=0
+    rockchip-hdmi1, rockchip-hdmi1 i2s-hifi-0
+    HDMI Audio Output
+dmix:CARD=rockchiphdmi1,DEV=0
+    rockchip-hdmi1, rockchip-hdmi1 i2s-hifi-0
+    Direct sample mixing device
+hw:CARD=rockchipes8388,DEV=0
+    rockchip,es8388, dailink-multicodecs ES8323 HiFi-0
+    Direct hardware device without any conversions
+plughw:CARD=rockchipes8388,DEV=0
+    rockchip,es8388, dailink-multicodecs ES8323 HiFi-0
+    Hardware device with all software conversions
+default:CARD=rockchipes8388
+    rockchip,es8388, dailink-multicodecs ES8323 HiFi-0
+    Default Audio Device
+sysdefault:CARD=rockchipes8388
+    rockchip,es8388, dailink-multicodecs ES8323 HiFi-0
+    Default Audio Device
+dmix:CARD=rockchipes8388,DEV=0
+    rockchip,es8388, dailink-multicodecs ES8323 HiFi-0
+    Direct sample mixing device
+
+### amixer -c 0 controls
+numid=12,iface=CARD,name='rockchip-hdmi1 Jack'
+numid=9,iface=MIXER,name='I2STDM Digital Loopback Mode'
+numid=17,iface=MIXER,name='ELD Bypass Switch'
+numid=4,iface=MIXER,name='Receive PATH0 Source Select'
+numid=3,iface=MIXER,name='Receive PATH1 Source Select'
+numid=2,iface=MIXER,name='Receive PATH2 Source Select'
+numid=1,iface=MIXER,name='Receive PATH3 Source Select'
+numid=8,iface=MIXER,name='Transmit SDO0 Source Select'
+numid=7,iface=MIXER,name='Transmit SDO1 Source Select'
+numid=6,iface=MIXER,name='Transmit SDO2 Source Select'
+numid=5,iface=MIXER,name='Transmit SDO3 Source Select'
+numid=16,iface=PCM,name='ELD'
+numid=15,iface=PCM,name='IEC958 Playback Default'
+numid=14,iface=PCM,name='IEC958 Playback Mask'
+numid=10,iface=PCM,name='PCM Read Wait Time MS'
+numid=11,iface=PCM,name='PCM Write Wait Time MS'
+numid=13,iface=PCM,name='Playback Channel Map'
+
+### card0 driver/id
+rockchiphdmi1

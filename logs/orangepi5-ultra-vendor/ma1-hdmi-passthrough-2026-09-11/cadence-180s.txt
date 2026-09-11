@@ -1,0 +1,69 @@
+### Gate MA1 / Phase 8 - 180 s uninterrupted playback with passthrough active
+### VERDICT: CLEAN - no cadence regression, no A/V correction, no audio underrun
+
+Why 180 s and why this section exists at all
+  usedisplayasclock is the setting Kodi uses as !allowpassthrough, and it had been
+  looked at for cadence in earlier work. A regression around ~95 s had been seen
+  before, so the run has to be long enough to cross that point once, and only once.
+
+Conditions
+  videoplayer.usedisplayasclock  false
+  audiooutput.passthrough        true  (E-AC-3 passthrough active for the whole run)
+  asset                          /var/tmp/mp1b/past-lives.mkv - the canonical 4K HDR
+                                 asset, untouched, native E-AC-3 5.1 48 kHz 640 kbps
+  display mode                   3840x2160p24, mode #0 3840x2160 23.98,
+                                 296703 kHz pixel clock  (source 24000/1001 = 23.976)
+  start 16:17:49   passed 180 s at 16:20:49   still running, speed 1, at 3:30
+
+Events, whole run
+  audio xrun / underrun / write error / ALSA error     0
+  dropped / skipped / late frames                      0
+  clock jumps                                          0
+  sink re-opens                                        2 (the normal PCM->passthrough
+                                                       switch at start, nothing after)
+
+A/V sync activity - all of it in the first 43 s, none after
+  2026-09-11 16:17:49.739 T:35128    info <general>: void CVideoPlayerAudio::OpenStream(CDVDStreamInfo&, std::unique_ptr<CDVDAudioCodec>): Allowing max Out-Of-Sync Value of 50 ms
+  2026-09-11 16:17:49.761 T:23013   debug <general>: void ActiveAE::CActiveAE::ConfigureLowLatency(): Low latency mode: true - Initial buffer level: 20ms (resample: false)
+  2026-09-11 16:17:50.020 T:23013   debug <general>: void ActiveAE::CActiveAE::ConfigureLowLatency(): Low latency mode: true - Initial buffer level: 20ms (resample: false)
+  2026-09-11 16:17:50.027 T:35131   debug <general>: CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC(-127449.814316)
+  2026-09-11 16:17:50.027 T:35132   debug <general>: CVideoPlayerAudio - CDVDMsg::GENERAL_RESYNC(-127449.814316), level: 92, cache: 504937.897650
+  2026-09-11 16:17:50.170 T:23013   debug <general>: ActiveAE::SyncStream - average error of -89.500450, start adjusting
+  2026-09-11 16:17:50.170 T:23013   debug <general>: ActiveAE::SyncStream - average error -25.500450 below threshold of 30.000000
+  2026-09-11 16:18:20.601 T:35132   debug <general>: CVideoPlayerAudio - CDVDMsg::GENERAL_RESYNC(39940000.000000), level: 100, cache: 320000.022650
+  2026-09-11 16:18:20.601 T:35131   debug <general>: CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC(39940000.000000)
+  2026-09-11 16:18:20.770 T:23013   debug <general>: ActiveAE::SyncStream - average error of -88.549955, start adjusting
+  2026-09-11 16:18:20.770 T:23013   debug <general>: ActiveAE::SyncStream - average error -24.549955 below threshold of 30.000000
+  2026-09-11 16:18:24.976 T:35132   debug <general>: CVideoPlayerAudio - CDVDMsg::GENERAL_RESYNC(55846622.727350), level: 92, cache: 499552.106650
+  2026-09-11 16:18:24.976 T:35131   debug <general>: CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC(55846622.727350)
+  2026-09-11 16:18:25.120 T:23013   debug <general>: ActiveAE::SyncStream - average error of 18.733809, start adjusting
+  2026-09-11 16:18:25.120 T:23013   debug <general>: ActiveAE::SyncStream - average error 0.733809 below threshold of 30.000000
+  2026-09-11 16:18:28.576 T:35131   debug <general>: CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC(660452624.477350)
+  2026-09-11 16:18:28.576 T:35132   debug <general>: CVideoPlayerAudio - CDVDMsg::GENERAL_RESYNC(660452624.477350), level: 92, cache: 501844.355650
+  2026-09-11 16:18:28.720 T:23013   debug <general>: ActiveAE::SyncStream - average error of -1.214130, start adjusting
+  2026-09-11 16:18:28.720 T:23013   debug <general>: ActiveAE::SyncStream - average error -1.214130 below threshold of 30.000000
+  2026-09-11 16:18:30.689 T:35131   debug <general>: CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC(61962000.000000)
+  2026-09-11 16:18:30.689 T:35132   debug <general>: CVideoPlayerAudio - CDVDMsg::GENERAL_RESYNC(61962000.000000), level: 91, cache: 320000.022650
+  2026-09-11 16:18:30.820 T:23013   debug <general>: ActiveAE::SyncStream - average error of -111.537176, start adjusting
+  2026-09-11 16:18:30.820 T:23013   debug <general>: ActiveAE::SyncStream - average error -15.537176 below threshold of 30.000000
+  2026-09-11 16:18:32.441 T:35132   debug <general>: CVideoPlayerAudio - CDVDMsg::GENERAL_RESYNC(73974000.000000), level: 100, cache: 320000.022650
+  2026-09-11 16:18:32.441 T:35131   debug <general>: CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC(73974000.000000)
+  2026-09-11 16:18:32.620 T:23013   debug <general>: ActiveAE::SyncStream - average error of -105.750553, start adjusting
+  2026-09-11 16:18:32.670 T:23013   debug <general>: ActiveAE::SyncStream - average error -9.750553 below threshold of 30.000000
+
+  The last sync event of any kind is at 16:18:32.670, 43 s in, and it settles to
+  "average error -9.750553 below threshold of 30.000000". From 16:18:35 to the end
+  of the run the log contains zero RESYNC, SyncStream, drop, skip, xrun, underrun
+  or clock-jump lines - the ~150 s that includes the ~95 s mark (16:19:24) is silent.
+
+  The ~95 s regression did not return. usedisplayasclock=false is therefore accepted
+  as the passthrough-compatible profile state, and no cadence/passthrough conflict
+  was found: this is NOT a PASSTHROUGH_WORKS_CADENCE_CONFLICT outcome.
+
+ALSA at the end of the window
+  state: RUNNING, delay 33656, avail 4744, avail_max 9608, owner_pid 23014
+  IEC958 Playback Default: AES0=0x06 AES1=0x82 AES2=0x00 AES3=0x0e  (non-audio held throughout)
+
+Physical confirmation
+  Operator at the Sony TV after 3.5 minutes of continuous playback: audio and picture
+  both clean, no stutter or skipping.

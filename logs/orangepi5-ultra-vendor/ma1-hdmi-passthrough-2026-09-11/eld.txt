@@ -1,0 +1,41 @@
+### HDMI sink ELD, decoded from ALSA control numid=16 (iface=PCM, name='ELD')
+### Raw bytes are in eld-raw.txt. Decode follows CEA-861 baseline ELD + Short Audio Descriptors.
+
+eld_ver=2 baseline_len=40B cea_edid_ver=3 mnl=12
+sad_count=4 conn_type=HDMI S_AI=1 HDCP=0
+spk_alloc=0x0f mfg=d94d prod=f303
+monitor='SONY TV  *00'
+SAD1 0d7f07 fmt=1(LPCM) max_ch=6 rates_kHz=32,44.1,48,88.2,96,176.4,192 bitdepth=['16', '20', '24']
+SAD2 150750 fmt=2(AC-3) max_ch=6 rates_kHz=32,44.1,48 max_bitrate=640kbps
+SAD3 3d07bc fmt=7(DTS) max_ch=6 rates_kHz=32,44.1,48 max_bitrate=1504kbps
+SAD4 570600 fmt=10(E-AC-3) max_ch=8 rates_kHz=44.1,48 byte2=0x00
+
+### What this means for Gate MA1
+
+Declared compressed formats (the only ones in test scope):
+  AC-3    6ch  32/44.1/48 kHz  max 640 kbps
+  DTS     6ch  32/44.1/48 kHz  max 1504 kbps
+  E-AC-3  8ch  44.1/48 kHz
+
+NOT declared, therefore not enabled and not tested:
+  MLP / TrueHD  (CEA format code 12) - absent
+  DTS-HD        (CEA format code 11) - absent
+
+Kodi lists TrueHD and DTS-HD for this device anyway. That is not sink evidence:
+CAESinkALSA::EnumerateDevice pushes its full stream-type list onto any
+AE_DEVTYPE_HDMI device with the comment "we don't trust ELD information and
+push back our supported formats explicitly". The ELD above is the authority.
+
+### Declared vs. actually reproduced
+
+The sink over-declares. Measured at the TV, with a clean stream at every
+machine-visible layer in each case:
+
+  AC-3        declared, reproduced          PASS
+  E-AC-3      declared, reproduced          PASS
+  DTS         declared, SILENT at the sink  not usable
+  LPCM 6ch    declared, SILENT at the sink  not usable (PCM path stays 2.0)
+
+So ELD presence was necessary to scope the gate but was not sufficient to
+decide what to leave enabled. Both DTS entries are declared by a sink that
+cannot play them.
