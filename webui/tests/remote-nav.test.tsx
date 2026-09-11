@@ -207,3 +207,41 @@ describe('Geri tuşu', () => {
     window.removeEventListener(BACK_EVENT, consume)
   })
 })
+
+describe('Yazı alanından çıkış', () => {
+  function SearchHarness() {
+    useRemoteNavigation({ getRect: (el) => rect(0, el.tagName === 'INPUT' ? 0 : 100) })
+    return (
+      <div>
+        <input type="search" defaultValue="ara" />
+        <button type="button" data-focusable="">
+          Poster
+        </button>
+      </div>
+    )
+  }
+
+  it('lets a remote leave a focused search box', () => {
+    // The media app opens with its search box focused; a remote has no other
+    // way out of it.
+    render(<SearchHarness />)
+    const input = document.querySelector('input') as HTMLInputElement
+    input.focus()
+
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+
+    expect(document.activeElement?.textContent).toBe('Poster')
+  })
+
+  it('leaves left and right to the caret', () => {
+    render(<SearchHarness />)
+    const input = document.querySelector('input') as HTMLInputElement
+    input.focus()
+    const event = new KeyboardEvent('keydown', { key: 'ArrowRight', cancelable: true })
+
+    document.dispatchEvent(event)
+
+    expect(document.activeElement).toBe(input)
+    expect(event.defaultPrevented).toBe(false)
+  })
+})

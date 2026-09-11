@@ -87,7 +87,7 @@ export function useRemoteNavigation(options: RemoteNavigationOptions = {}) {
 
       const direction = directionForKey(event.key)
       if (!direction) return
-      if (isTextEntry(event.target as HTMLElement | null)) return
+      if (!canLeaveTextEntry(event.target as HTMLElement | null, direction)) return
 
       const { container, scoped } = scope()
       if (!scoped && isMediaKeyRoute()) return
@@ -144,4 +144,19 @@ function isTextEntry(element: HTMLElement | null): boolean {
   if (!element) return false
   const tag = element.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || element.isContentEditable
+}
+
+/**
+ * Whether an arrow press in a text field should move focus instead of the caret.
+ *
+ * A remote has no other way out of a text field, and the media app opens with
+ * its search box focused — so up and down leave the field, which is never what
+ * they do to a caret on one line anyway. Left and right stay with the caret.
+ * A textarea or a rich editor keeps all four: there, vertical really does move
+ * the caret.
+ */
+function canLeaveTextEntry(element: HTMLElement | null, direction: string): boolean {
+  if (!isTextEntry(element)) return true
+  if (element!.tagName !== 'INPUT') return false
+  return direction === 'up' || direction === 'down'
 }
