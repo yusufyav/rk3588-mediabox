@@ -1,0 +1,34 @@
+===== VOP2 summary: s7-replayed =====
+captured: 2026-09-11T15:32:50+03:00
+
+Video Port0: ACTIVE
+    Connector:HDMI-A-1	Encoder: TMDS-200
+	bus_format[200d]: YUYV10_1X20
+	overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+    Display mode: 3840x2160p24
+	dclk[296703 kHz] real_dclk[296703 kHz] aclk[750000 kHz] type[40] flag[5]
+	H: 3840 5116 5204 5500
+	V: 2160 2168 2178 2250
+	Fixed H: 3840 5116 5204 5500
+	Fixed V: 2160 2168 2178 2250
+    Cluster0-win0: ACTIVE
+	win_id: 0
+	format: AR24 little-endian (0x34325241) pixel_blend_mode[0] glb_alpha[0xff]
+	color: SDR[0] color-encoding[BT.601] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[0] r2y[0] csc mode[0]
+	zpos: 11
+	src: pos[0, 0] rect[3840 x 2160]
+	dst: pos[0, 0] rect[3840 x 2160]
+	buf[0]: addr: 0x0000000014c3a000 pitch: 15360 offset: 0
+    Esmart0-win0: ACTIVE
+	win_id: 8
+	format: NV15 little-endian (0x3531564e) pixel_blend_mode[0] glb_alpha[0xff]
+	color: HDR10[2] color-encoding[BT.2020] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[1] r2y[0] csc mode[3]
+	zpos: 0
+	src: pos[0, 0] rect[3840 x 2080]
+	dst: pos[0, 42] rect[3840 x 2076]
+	buf[0]: addr: 0x000000002198a000 pitch: 4864 offset: 0
+	buf[1]: addr: 0x000000002198a000 pitch: 4864 offset: 10117120

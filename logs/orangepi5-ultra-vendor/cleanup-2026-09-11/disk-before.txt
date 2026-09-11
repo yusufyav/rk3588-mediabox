@@ -1,0 +1,23 @@
+=== df -h ===
+Filesystem      Size  Used Avail Use% Mounted on
+udev            3.8G     0  3.8G   0% /dev
+tmpfs           793M  9.8M  784M   2% /run
+/dev/mmcblk0p1   57G   22G   35G  39% /
+tmpfs           3.9G     0  3.9G   0% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+tmpfs           3.9G  144K  3.9G   1% /tmp
+/dev/zram1       47M   14M   30M  32% /var/log
+tmpfs           793M  4.0K  793M   1% /run/user/0
+=== df / in bytes ===
+23364665344 36847001600
+=== du /opt ===
+738398283	/opt/rk3588-mediabox
+336699305	/opt/rk3588-screenbridge
+=== du /var/tmp ===
+13654110261	/var/tmp
+=== du /boot ===
+363121783	/boot
+=== du /lib/modules ===
+4102731797	/lib/modules
+=== du /var/cache/apt ===
+640558931	/var/cache/apt

@@ -1,0 +1,33 @@
+path	size_bytes	classification	reason	replacement_or_canonical_reference
+scripts/deploy-kernel.sh	3229	DELETE_REDUNDANT	sole purpose is installing the rejected RGB-force kernel (LOCALVERSION ...-vop2rgb, KERNEL_SRC ~/build/linux-rockchip-vop2); the accepted fix is userspace-only and the vop2rgb kernel is being removed from the target, so its rollback target no longer exists	results/orangepi5-ultra-vendor/kodi-pause-horizontal-shift-2026-09-10.md section 4; git history at d9f7230
+results/orangepi5-ultra-vendor/.gitkeep	0	DELETE_REDUNDANT	empty-directory placeholder; the directory holds eight reports	n/a
+logs/orangepi5-ultra-vendor/kodi-android-parity-sdr2hdr-2026-09-11/.claude	4096	DELETE_REDUNDANT	agent telemetry written into an evidence directory; not evidence, not in SHA256SUMS	n/a
+logs/orangepi5-ultra-vendor/kodi-pause-horizontal-shift-2026-09-10/.claude	4096	DELETE_REDUNDANT	agent telemetry written into an evidence directory; not evidence, not in SHA256SUMS	n/a
+README.md	3808	REWRITE	states "Status: Gate MP1b. Kodi is not implemented yet and is not part of the current gate" and lists only the two probes; contradicts the accepted Kodi baseline	Phase 3 consolidation
+docs/architecture.md	4297	REWRITE	states "None of this exists yet" about the Kodi/RKMPP/VOP2/HDMI chain that is now the accepted baseline	Phase 3 consolidation
+docs/gates.md	7551	REWRITE	stops at MA0 and lists "installing Kodi, or a GBM/Mesa/libmali user space" under "Not yet authorised"; MP2 and the Android-parity gate are missing	Phase 3 consolidation
+.gitignore	52	REWRITE	does not exclude .claude/ or CMake build output beyond build/	Phase 8
+CMakeLists.txt	2018	KEEP_CANONICAL	builds hdr-signaling-probe and hdr-playback-probe, the MP1a/MP1b reproduction tools	docs/gates.md MP1a/MP1b
+src/	81763	KEEP_CANONICAL	mediabox-core, the modules hdr-playback-probe is built on; asserted by tests/run-host-tests.sh	CMakeLists.txt:36-46
+tools/hdr-signaling-probe.cpp	n/a	KEEP_CANONICAL	MP1a gate tool; its source hash is published in the MP1a report, so it must stay byte-for-byte	results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md
+tools/hdr-playback-probe.cpp	n/a	KEEP_CANONICAL	MP1b gate tool	results/orangepi5-ultra-vendor/real-hdr10-playback-mp1b-2026-09-09.md
+tools/hdmi-audio-probe.py	n/a	KEEP_CANONICAL	MA0 HDMI PCM gate tool; MA1 builds directly on it	results/orangepi5-ultra-vendor/hdmi-audio-ma0-2026-09-09.md
+tools/android-hdr-oracle/capture-state.sh	n/a	KEEP_CANONICAL	produced the Android golden oracle	results/orangepi5-ultra-android/android-hdr-golden-reference-2026-09-11.md
+tools/vop2-sdr2hdr-capture/capture-state.sh	n/a	KEEP_CANONICAL	produced the accepted parity evidence and is the Phase 9 / MA1 regression instrument	results/orangepi5-ultra-vendor/kodi-android-parity-sdr2hdr-2026-09-11.md
+tools/drm-writeback-probe.c	n/a	KEEP_CANONICAL	only objective displacement instrument in the project; horizontal shift is a PASS criterion of every later gate	kodi-pause-horizontal-shift-2026-09-10.md section 2
+tools/mali-gbm-probe.c	n/a	KEEP_CANONICAL	driven by scripts/mali-probe.sh, the Mali-vs-llvmpipe check	scripts/mali-probe.sh
+tools/gbm-egl-probe.c	n/a	KEEP_CANONICAL	referenced by tools/mali-gbm-probe.c; records the renderer actually loaded	tools/mali-gbm-probe.c
+tools/gbm-buffer-recycle-probe.c	n/a	KEEP_CANONICAL	isolated the per-frame GBM buffer leak fixed by patch 0003	kodi-mp2-quality-recovery-2026-09-10.md
+patches/kodi/0001..0010	56000	KEEP_CANONICAL	the current Kodi patch series; scripts/build-kodi.sh applies patches/kodi/*.patch in order and this series produced the live binary	scripts/build-kodi.sh patch step
+scripts/vop-geometry-watch.py	n/a	KEEP_CANONICAL	produced logs/.../kodi-pause-horizontal-shift-2026-09-10/kodi-pause-path.log, cited in that report's evidence table	kodi-pause-horizontal-shift-2026-09-10.md line 362
+scripts/writeback-probe.sh scripts/writeback-registration.py	n/a	KEEP_CANONICAL	drive the writeback probe that produced the decisive dx measurements	kodi-pause-horizontal-shift-2026-09-10.md
+scripts/run-kodi-rk3588.sh scripts/build-kodi.sh scripts/install-mali-runtime.sh scripts/env.sh config/kodi/guisettings-appliance.xml	n/a	KEEP_RUNTIME	the current build/deploy/run path for the accepted baseline	runtime-keep-manifest.tsv
+scripts/run-mp1a.sh scripts/run-mp1b.sh scripts/blind-ab.py scripts/tv-state.sh scripts/build-remote.sh scripts/deploy-assets.sh scripts/make-test-assets.sh tests/run-host-tests.sh	n/a	KEEP_CANONICAL	reproduce the accepted MP1a/MP1b/MP1b-FINAL gates	docs/gates.md
+scripts/capture-kodi-state.sh scripts/capture-color-state.sh scripts/monitor-cadence-probe.sh scripts/gui-load-sample.sh scripts/mali-probe.sh	n/a	KEEP_CANONICAL	MP2 instruments cited by the quality-recovery report	kodi-mp2-quality-recovery-2026-09-10.md
+results/	207100	KEEP_CANONICAL	eight final reports including the Android oracle, the Android-parity fix, MP1a/MP1b and MA0	n/a
+logs/orangepi5-ultra-android/android-hdr-golden-reference-2026-09-11	11534336	KEEP_CANONICAL	raw evidence of the golden oracle, 117 files under a complete SHA256SUMS	results/orangepi5-ultra-android/android-hdr-golden-reference-2026-09-11.md
+logs/orangepi5-ultra-vendor/* (eight gate directories)	8400000	KEEP_CANONICAL	each is the raw evidence of a retained report and each carries a complete SHA256SUMS covering every file; removing any member would invalidate the manifest the reports cite	results/
+logs/orangepi5-ultra-vendor/kodi-mp2-2026-09-09/STATUS.md	4700	KEEP_AMBIGUOUS	an at-stop snapshot of the incomplete MP2 session; its conclusions are superseded but it is dated historical evidence inside a SHA256SUMS-verified set, so it is not a current document that contradicts the architecture	superseded by kodi-mp2-quality-recovery-2026-09-10.md
+assets/ (untracked)	12601310	KEEP_AMBIGUOUS	generated MP1a test clips; already gitignored, regenerable only with an ffmpeg built with libx265, and the input to scripts/run-mp1a.sh	scripts/make-test-assets.sh
+.claude/ (repo root, untracked)	1101300	KEEP_AMBIGUOUS	operator's local Claude settings and session telemetry; not the project's to delete, but added to .gitignore so it can never be committed	n/a
+~/build/linux-rockchip-vop2 (host, outside the repo)	n/a	KEEP_AMBIGUOUS	kernel source tree of the rejected RGB-force experiment; outside both the repository and the appliance, so outside this gate's stated scope	reported, not touched

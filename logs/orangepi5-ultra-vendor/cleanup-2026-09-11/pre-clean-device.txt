@@ -1,0 +1,323 @@
+=== pre-clean device snapshot (2026-09-11, before any deletion) ===
+
+--- boot ---
+=== uname -r ===
+6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio
+=== /boot/Image -> ===
+vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio
+=== /boot listing ===
+d	4096	/boot
+d	4096	/boot/dtb-6.1.115-vendor-rk35xx
+f	0	/boot/.next
+f	16406160	/boot/initrd.img-6.1.115-vendor-rk35xx
+f	16406224	/boot/uInitrd-6.1.115-vendor-rk35xx
+f	250	/boot/armbianEnv.txt
+f	251049	/boot/config-6.1.115-vendor-rk35xx
+f	38518	/boot/boot.bmp
+f	4077	/boot/boot.cmd
+f	4149	/boot/boot.scr
+f	46234112	/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio
+f	46234112	/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio.bad-modules
+f	46234112	/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio.bad-release
+f	46234112	/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio-vop2rgb
+f	46561792	/boot/vmlinuz-6.1.115-vendor-rk35xx
+f	56	/boot/.previous-image
+f	7229110	/boot/System.map-6.1.115-vendor-rk35xx
+l	25	/boot/dtb
+l	29	/boot/uInitrd
+l	55	/boot/Image
+=== /lib/modules ===
+6.1.115-vendor-rk35xx
+6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio
+6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio-vop2rgb
+=== sha256 of kept kernels ===
+f435ca4b619b4d6b86147bdf3673f6d0889b9f9abf3684173bf71ebff676e52d  /boot/vmlinuz-6.1.115-vendor-rk35xx
+546d873bcaaae877c65245149a368cbb359c019bb93e34f687abbacc391a5447  /boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio
+
+--- disk ---
+=== df -h ===
+Filesystem      Size  Used Avail Use% Mounted on
+udev            3.8G     0  3.8G   0% /dev
+tmpfs           793M  9.8M  784M   2% /run
+/dev/mmcblk0p1   57G   22G   35G  39% /
+tmpfs           3.9G     0  3.9G   0% /dev/shm
+tmpfs           5.0M     0  5.0M   0% /run/lock
+tmpfs           3.9G  144K  3.9G   1% /tmp
+/dev/zram1       47M   14M   30M  32% /var/log
+tmpfs           793M  4.0K  793M   1% /run/user/0
+=== df / in bytes ===
+23364665344 36847001600
+=== du /opt ===
+738398283	/opt/rk3588-mediabox
+336699305	/opt/rk3588-screenbridge
+=== du /var/tmp ===
+13654110261	/var/tmp
+=== du /boot ===
+363121783	/boot
+=== du /lib/modules ===
+4102731797	/lib/modules
+=== du /var/cache/apt ===
+640558931	/var/cache/apt
+
+--- live runtime proof ---
+=== PID: 31767 ===
+=== exe ===
+/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm
+=== cwd ===
+/var/tmp/kodi-home
+=== environ ===
+AE_SINK=ALSA
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+HOME=/var/tmp/kodi-home
+LANG=en_US.UTF-8
+LANGUAGE=en_US.UTF-8
+LC_MESSAGES=en_US.UTF-8
+LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
+LOGNAME=root
+MEDIABOX_GPU=mali
+MOTD_SHOWN=pam
+OLDPWD=/root
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PWD=/var/tmp/kodi-home
+SHELL=/usr/bin/bash
+SHLVL=1
+SSH_CLIENT=10.27.27.11 58758 22
+SSH_CONNECTION=10.27.27.11 58758 10.27.27.25 22
+USER=root
+_=/usr/bin/setsid
+XDG_RUNTIME_DIR=/run/user/0
+XDG_SESSION_CLASS=user
+XDG_SESSION_ID=169
+XDG_SESSION_TYPE=tty
+=== mapped files (unique, non-anon) ===
+/dev/mali0
+/dmabuf:
+/mali
+/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm
+/opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/fonts/NotoMono-Regular.ttf
+/opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/fonts/NotoSans-Regular.ttf
+/opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/fonts/Roboto-Thin.ttf
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali-hook.so.1.9.0
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali.so.1.9.0
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libEGL.so.1
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libGLESv2.so.2
+/opt/rk3588-screenbridge/lib/librga.so
+/opt/rk3588-screenbridge/lib/librockchip_mpp.so.0
+/usr/lib/aarch64-linux-gnu/gconv/gconv-modules.cache
+/usr/lib/aarch64-linux-gnu/gconv/MACINTOSH.so
+/usr/lib/aarch64-linux-gnu/gconv/UTF-16.so
+/usr/lib/aarch64-linux-gnu/gconv/UTF-32.so
+/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+/usr/lib/aarch64-linux-gnu/libasound.so.2.0.0
+/usr/lib/aarch64-linux-gnu/libass.so.9.3.1
+/usr/lib/aarch64-linux-gnu/libatomic.so.1.2.0
+/usr/lib/aarch64-linux-gnu/libavahi-client.so.3.2.9
+/usr/lib/aarch64-linux-gnu/libavahi-common.so.3.5.4
+/usr/lib/aarch64-linux-gnu/libbluetooth.so.3.19.15
+/usr/lib/aarch64-linux-gnu/libbrotlicommon.so.1.1.0
+/usr/lib/aarch64-linux-gnu/libbrotlidec.so.1.1.0
+/usr/lib/aarch64-linux-gnu/libbsd.so.0.12.2
+/usr/lib/aarch64-linux-gnu/libbz2.so.1.0.4
+/usr/lib/aarch64-linux-gnu/libcap.so.2.75
+/usr/lib/aarch64-linux-gnu/libcdio.so.19.0.0
+/usr/lib/aarch64-linux-gnu/libcom_err.so.2.1
+/usr/lib/aarch64-linux-gnu/libcrypto.so.3
+/usr/lib/aarch64-linux-gnu/libc.so.6
+/usr/lib/aarch64-linux-gnu/libcurl.so.4.8.0
+/usr/lib/aarch64-linux-gnu/libdbus-1.so.3.38.3
+/usr/lib/aarch64-linux-gnu/libdcerpc-binding.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libdisplay-info.so.0.2.0
+/usr/lib/aarch64-linux-gnu/libdl.so.2
+/usr/lib/aarch64-linux-gnu/libdrm.so.2.124.0
+/usr/lib/aarch64-linux-gnu/libevdev.so.2.3.0
+/usr/lib/aarch64-linux-gnu/libexpat.so.1.12.3
+/usr/lib/aarch64-linux-gnu/libffi.so.8.1.4
+/usr/lib/aarch64-linux-gnu/libfmt.so.10.1.0
+/usr/lib/aarch64-linux-gnu/libfontconfig.so.1.12.1
+/usr/lib/aarch64-linux-gnu/libfreetype.so.6.20.2
+/usr/lib/aarch64-linux-gnu/libfribidi.so.0.4.0
+/usr/lib/aarch64-linux-gnu/libfstrcmp.so.0.6.0
+/usr/lib/aarch64-linux-gnu/libgcc_s.so.1
+/usr/lib/aarch64-linux-gnu/libglib-2.0.so.0.8400.4
+/usr/lib/aarch64-linux-gnu/libgmp.so.10.5.0
+/usr/lib/aarch64-linux-gnu/libgnutls.so.30.40.3
+/usr/lib/aarch64-linux-gnu/libgobject-2.0.so.0.8400.4
+/usr/lib/aarch64-linux-gnu/libgraphite2.so.3.2.1
+/usr/lib/aarch64-linux-gnu/libgssapi_krb5.so.2.2
+/usr/lib/aarch64-linux-gnu/libgudev-1.0.so.0.3.0
+/usr/lib/aarch64-linux-gnu/libharfbuzz.so.0.61020.0
+/usr/lib/aarch64-linux-gnu/libhogweed.so.6.10
+/usr/lib/aarch64-linux-gnu/libicudata.so.76.1
+/usr/lib/aarch64-linux-gnu/libicui18n.so.76.1
+/usr/lib/aarch64-linux-gnu/libicuuc.so.76.1
+/usr/lib/aarch64-linux-gnu/libidn2.so.0.4.0
+/usr/lib/aarch64-linux-gnu/libinput.so.10.13.0
+/usr/lib/aarch64-linux-gnu/libiso9660.so.12.0.0
+/usr/lib/aarch64-linux-gnu/libjansson.so.4.14.0
+/usr/lib/aarch64-linux-gnu/libk5crypto.so.3.1
+/usr/lib/aarch64-linux-gnu/libkeyutils.so.1.10
+/usr/lib/aarch64-linux-gnu/libkrb5.so.3.3
+/usr/lib/aarch64-linux-gnu/libkrb5support.so.0.1
+/usr/lib/aarch64-linux-gnu/liblber.so.2.0.200
+/usr/lib/aarch64-linux-gnu/liblcms2.so.2.0.16
+/usr/lib/aarch64-linux-gnu/libldap.so.2.0.200
+/usr/lib/aarch64-linux-gnu/libldb.so.2.11.0
+/usr/lib/aarch64-linux-gnu/liblirc_client.so.0.6.0
+/usr/lib/aarch64-linux-gnu/liblzma.so.5.8.1
+/usr/lib/aarch64-linux-gnu/liblzo2.so.2.0.0
+/usr/lib/aarch64-linux-gnu/libmariadb.so.3
+/usr/lib/aarch64-linux-gnu/libmd.so.0.1.0
+/usr/lib/aarch64-linux-gnu/libmicrohttpd.so.12.62.1
+/usr/lib/aarch64-linux-gnu/libm.so.6
+/usr/lib/aarch64-linux-gnu/libmtdev.so.1.0.0
+/usr/lib/aarch64-linux-gnu/libndr-krb5pac.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libndr-nbt.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libndr.so.6.0.0
+/usr/lib/aarch64-linux-gnu/libndr-standard.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libnettle.so.8.10
+/usr/lib/aarch64-linux-gnu/libnfs.so.14.0.0
+/usr/lib/aarch64-linux-gnu/libnghttp2.so.14.28.3
+/usr/lib/aarch64-linux-gnu/libnghttp3.so.9.2.6
+/usr/lib/aarch64-linux-gnu/libp11-kit.so.0.4.1
+/usr/lib/aarch64-linux-gnu/libpcre2-8.so.0.14.0
+/usr/lib/aarch64-linux-gnu/libpipewire-0.3.so.0.1402.0
+/usr/lib/aarch64-linux-gnu/libplist-2.0.so.4.6.0
+/usr/lib/aarch64-linux-gnu/libpng16.so.16.48.0
+/usr/lib/aarch64-linux-gnu/libpsl.so.5.3.4
+/usr/lib/aarch64-linux-gnu/libpthread.so.0
+/usr/lib/aarch64-linux-gnu/libpython3.13.so.1.0
+/usr/lib/aarch64-linux-gnu/libresolv.so.2
+/usr/lib/aarch64-linux-gnu/librtmp.so.1
+/usr/lib/aarch64-linux-gnu/libsamba-credentials.so.1.0.0
+/usr/lib/aarch64-linux-gnu/libsamba-errors.so.1.0.0
+/usr/lib/aarch64-linux-gnu/libsamba-hostconfig.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libsamba-util.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libsamdb.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libsasl2.so.2.0.25
+/usr/lib/aarch64-linux-gnu/libshairplay.so.0.0.0
+/usr/lib/aarch64-linux-gnu/libsmbclient.so.0.8.0
+/usr/lib/aarch64-linux-gnu/libsmbconf.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libsndio.so.7.3
+/usr/lib/aarch64-linux-gnu/libspdlog.so.1.15.2
+/usr/lib/aarch64-linux-gnu/libsqlite3.so.0.8.6
+/usr/lib/aarch64-linux-gnu/libsrt.so.1.5.4
+/usr/lib/aarch64-linux-gnu/libssh2.so.1.0.1
+/usr/lib/aarch64-linux-gnu/libssl.so.3
+/usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33
+/usr/lib/aarch64-linux-gnu/libsystemd.so.0.40.0
+/usr/lib/aarch64-linux-gnu/libtag.so.2.0.2
+/usr/lib/aarch64-linux-gnu/libtalloc.so.2.4.3
+/usr/lib/aarch64-linux-gnu/libtasn1.so.6.6.4
+/usr/lib/aarch64-linux-gnu/libtdb.so.1.4.13
+/usr/lib/aarch64-linux-gnu/libtevent.so.0.16.2
+/usr/lib/aarch64-linux-gnu/libtevent-util.so.0.0.1
+/usr/lib/aarch64-linux-gnu/libtinyxml2.so.11.0.0
+/usr/lib/aarch64-linux-gnu/libtinyxml.so.2.6.2
+/usr/lib/aarch64-linux-gnu/libudev.so.1.7.10
+/usr/lib/aarch64-linux-gnu/libudfread.so.0.1.0
+/usr/lib/aarch64-linux-gnu/libunibreak.so.6.0.1
+/usr/lib/aarch64-linux-gnu/libunistring.so.5.2.0
+/usr/lib/aarch64-linux-gnu/libuuid.so.1.3.0
+/usr/lib/aarch64-linux-gnu/libwacom.so.9.0.0
+/usr/lib/aarch64-linux-gnu/libwbclient.so.0.16
+/usr/lib/aarch64-linux-gnu/libxkbcommon.so.0.0.0
+/usr/lib/aarch64-linux-gnu/libxml2.so.2.9.14
+/usr/lib/aarch64-linux-gnu/libxslt.so.1.1.35
+/usr/lib/aarch64-linux-gnu/libz.so.1.3.1
+/usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7
+/usr/lib/aarch64-linux-gnu/samba/libaddns-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libasn1-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libasn1util-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libauthkrb5-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libCHARSET3-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcliauth-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcli-cldap-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libclidns-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcli-ldap-common-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcli-ldap-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcli-nbt-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcli-smb-common-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcluster-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcom-err-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libcommon-auth-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libdbwrap-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libdcerpc-samba-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libflag-mapping-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libgenrand-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libgensec-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libgse-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libgssapi-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libhcrypto-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libheimbase-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libhx509-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libinterfaces-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libiov-buf-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libkrb5-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libkrb5samba-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libldbsamba-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/liblibcli-lsa3-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/liblibsmb-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libmessages-dgm-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libmessages-util-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libMESSAGING-SEND-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libmsghdr-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libmsrpc3-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libndr-samba4-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libndr-samba-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libnetif-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libnpa-tstream-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libreplace-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libroken-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsamba3-util-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsamba-cluster-support-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsamba-debug-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsamba-modules-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsamba-security-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsamba-sockets-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsamdb-common-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsecrets3-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libserver-id-db-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libserver-role-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsmbd-shim-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsmb-transport-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsocket-blocking-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libstable-sort-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libsys-rw-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libtalloc-report-printf-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libtdb-wrap-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libtime-basic-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libutil-reg-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libutil-setid-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libutil-tdb-private-samba.so.0
+/usr/lib/aarch64-linux-gnu/samba/libwind-private-samba.so.0
+/usr/lib/locale/locale-archive
+/var/cache/fontconfig/3f7329c5293ffd510edef78f73874cfd-le64.cache-9
+/var/cache/fontconfig/d589a48862398ed80a3d6066f4f56f4c-le64.cache-9
+=== open files (deleted/regular) ===
+/dev/dma_heap/system
+/dev/dma_heap/system-uncached
+/dev/dri/card0
+/dev/dri/renderD128
+/dev/input/event0
+/dev/input/event11
+/dev/input/event12
+/dev/input/event3
+/dev/input/event5
+/dev/input/event6
+/dev/input/event7
+/dev/input/event8
+/dev/input/event9
+/dev/mali0
+/dev/mpp_service
+/dev/null
+/dev/snd/pcmC0D0p
+/dmabuf:
+/opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/media/Textures.xbt
+/run/systemd/inhibit/4.ref
+/sys/kernel/debug/tracing/trace_marker
+/var/tmp/kodi-home/kodi-stdout.log
+/var/tmp/kodi-home/.kodi/temp/kodi.log
+/var/tmp/kodi-home/.kodi/userdata/Database/Addons33.db
+/var/tmp/kodi-home/.kodi/userdata/Database/Textures14.db
+/var/tmp/mp1b/past-lives.mkv

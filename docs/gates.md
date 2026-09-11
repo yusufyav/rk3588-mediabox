@@ -157,14 +157,86 @@ The default ALSA buffer is 131072 frames — about 2.7 s at 48 kHz — so a play
 must set its own buffer before lip sync is possible at all. See the
 [`MA0 report`](../results/orangepi5-ultra-vendor/hdmi-audio-ma0-2026-09-09.md).
 
+## MP2 — Kodi bring-up and display quality (done)
+
+The first gate with a real player in it. **Does Kodi, built for GBM/DRM on this
+board, reach the state MP1b proved, and does it look right once a GUI is on
+screen?**
+
+Kodi 22.0b2-Piers is pinned (`e513e0ff4331fc25fd2454659a9dd3e6b7670146`) and
+built on the target by [`../scripts/build-kodi.sh`](../scripts/build-kodi.sh)
+from the patch series in [`../patches/kodi`](../patches/kodi), against the
+RKMPP FFmpeg at `/opt/rk3588-screenbridge`. Nothing is vendored.
+
+Bring-up reached the MP1b video state — RKMPP decode, `CRendererDRMPRIME`
+direct to plane, `NV15` on plane 73, `3840x2160p24`, `YUYV10_1X20`, `30bit`,
+TV in HDR — and then exposed three faults that MP1a and MP1b could not have
+seen, because those probes scan out no GUI and play no audio:
+
+* **The GUI ran on llvmpipe.** No `libmali` existed in any configured
+  repository and there is no panfrost or panthor node, so Mesa had no hardware
+  path. Solved by [`../scripts/install-mali-runtime.sh`](../scripts/install-mali-runtime.sh),
+  which extracts a pinned `libmali` G610 build into a private prefix reached
+  through `LD_LIBRARY_PATH`, leaving Mesa untouched as the fallback.
+* **A GBM buffer leaked per frame** on that runtime. Isolated by
+  `tools/gbm-buffer-recycle-probe.c` and fixed by patch `0003`.
+* **HDMI PCM stopped after a modeset.** Kodi's ALSA sink threw
+  `snd_pcm_writei -77`; patch `0007` recovers the PCM.
+
+Result: `PASS`. See the
+[`MP2 quality recovery report`](../results/orangepi5-ultra-vendor/kodi-mp2-quality-recovery-2026-09-10.md).
+
+Two runtime settings are required and are not patches — both are now in
+[`../config/kodi/guisettings-appliance.xml`](../config/kodi/guisettings-appliance.xml):
+`videoplayer.useprimedecoder` must be true, or Kodi silently software-decodes
+HEVC, and `videoplayer.useprimerenderer` must be `0` (Direct To Plane), or every
+4K frame is imported as a GL texture.
+
+## MP2-display — Android-parity SDR/HDR composition (done)
+
+One fault survived MP2: with the OSD on screen the picture was displaced
+horizontally, and every attempt to fix it traded the displacement against
+washed-out OSD colour. **Three fixes were built, physically tested and
+rejected** — tagging the GUI plane traditional-HDR, forcing RGB mixing in the
+VOP2 driver with a custom kernel, and an invisible non-PQ sentinel layer. See
+the [`horizontal shift report`](../results/orangepi5-ultra-vendor/kodi-pause-horizontal-shift-2026-09-10.md).
+
+The gate was then reopened against an oracle rather than against a hypothesis:
+Android on the same silicon does not have this fault, so its composition state
+was captured with
+[`../tools/android-hdr-oracle/capture-state.sh`](../tools/android-hdr-oracle/capture-state.sh)
+and read as the specification. See the
+[`Android golden reference`](../results/orangepi5-ultra-android/android-hdr-golden-reference-2026-09-11.md).
+
+Android keeps its GUI genuinely SDR — plain sRGB pixels on a plane tagged
+`EOTF=0` — and lets VOP2's hardware SDR-to-HDR block lift it into the HDR10
+output. Linux did the opposite. Patch `0010` reproduces the Android contract in
+one userspace change, with no kernel or device-tree work.
+
+Result: `PASS`, `ROOT_CAUSE_CONFIRMED`. `SDR2HDR_CTRL` came up `0x0000000b`,
+byte-identical to Android; the composition state no longer changes when the OSD
+appears or when playback pauses; and the operator reported both the displacement
+gone and the best OSD colour of the project so far. See the
+[`Android-parity report`](../results/orangepi5-ultra-vendor/kodi-android-parity-sdr2hdr-2026-09-11.md).
+
+**Product decisions carried forward:** do not software-PQ encode the GUI on this
+path; never let a plane's `EOTF` tag disagree with its pixels; the Android model
+is SDR GUI plus hardware SDR-to-HDR, not a PQ GUI.
+
+## MA1 — compressed HDMI audio passthrough (next, not started)
+
+AC-3, E-AC-3, DTS, TrueHD, DTS-HD MA, Atmos and IEC61937/HBR. MA0 established
+that the vendor driver publishes a populated 128-byte ELD control advertising
+AC-3 640 kbps, DTS 1504 kbps and 8-channel E-AC-3, so Kodi's passthrough
+capability detection has what it needs.
+
 ## Not yet authorised
 
-Everything below waits for its own gate, and none of it is started as a
-side effect of an MP1 gate:
+Everything below waits for its own gate, and none of it is started as a side
+effect of another gate:
 
-- installing Kodi, or a GBM/Mesa/`libmali` user space
 - Stremio integration and the control bridge
-- compressed HDMI audio passthrough (MA1) and CEC
+- CEC
 - frame-rate matching policy across 23.976/24/25/50/59.94/60
 - HDR10+ and Dolby Vision
 - any kernel, device-tree or boot configuration change

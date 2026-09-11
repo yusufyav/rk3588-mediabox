@@ -1,0 +1,42 @@
+path_or_package	size_bytes	classification	reason	rollback_source
+/lib/modules/6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio-vop2rgb	1977126057	DELETE_EXPERIMENT	modules of the rejected RGB-force kernel; uname -r is ...-hdmirx-audio, no boot-config reference, not the /boot/Image target	scripts/build + git history; rejected fix 2 in kodi-pause-horizontal-shift-2026-09-10.md
+/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio-vop2rgb	46234112	DELETE_EXPERIMENT	rejected RGB-force kernel image; unowned by dpkg, not /boot/Image, not .previous-image	same report; accepted fix is userspace-only
+/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio.bad-modules	46234112	DELETE_EXPERIMENT	failed intermediate build of the accepted kernel, kept as a .bad- suffix; unowned, unreferenced	accepted kernel present and active
+/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio.bad-release	46234112	DELETE_EXPERIMENT	failed intermediate build (wrong release string); unowned, unreferenced	accepted kernel present and active
+/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm.with0009	160366920	DELETE_EXPERIMENT	A arm of the 0009-vs-parity A/B; superseded by the accepted 0010 build	patches/kodi/*.patch + scripts/build-kodi.sh
+/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm.pre0009	160301104	DELETE_EXPERIMENT	pre-0009 A/B binary; superseded	patches/kodi/*.patch + scripts/build-kodi.sh
+/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm.eotf1-candidate	160366920	DELETE_EXPERIMENT	rejected EOTF=1 candidate (rejected fix 1)	kodi-pause-horizontal-shift-2026-09-10.md section 3
+/var/tmp/kodi-gbm.a-0009	160366920	DELETE_EXPERIMENT	sha256-identical copy of kodi-gbm.with0009	same as above
+/var/tmp/kodi-gbm.b-parity	160367136	DELETE_EXPERIMENT	sha256-identical copy of the production binary already at KODI_PREFIX	/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm
+/var/tmp/verify	107390823	DELETE_BUILD	throwaway Kodi source copy used to verify the patch series applies	scripts/build-kodi.sh fetch+patch
+/var/tmp/kodi-series-check-0008	107395119	DELETE_BUILD	throwaway Kodi source copy for the 0008 series check	scripts/build-kodi.sh fetch+patch
+/var/tmp/kodi-0008-gen	83502	DELETE_BUILD	partial source tree used to generate patch 0008	patches/kodi/0008-*.patch
+/var/tmp/base	90319	DELETE_BUILD	partial source tree used as a patch generation base	patches/kodi/
+/var/tmp/base2	90723	DELETE_BUILD	partial source tree used as a patch generation base	patches/kodi/
+/var/tmp/base3	213091	DELETE_BUILD	partial source tree used as a patch generation base	patches/kodi/
+/var/tmp/patchall	38272	DELETE_BUILD	intermediate copy of the patch series, superseded by patches/kodi/	repo patches/kodi/
+/var/tmp/patchref	23077	DELETE_BUILD	intermediate copy including the dropped 0002 patch	repo patches/kodi/ + git history
+/var/tmp/kodi-patches-0008	44810	DELETE_BUILD	intermediate copy of the patch series	repo patches/kodi/
+/var/tmp/0008.patch /var/tmp/0008-updated.patch /var/tmp/0008-generated.patch /var/tmp/0008-final.patch /var/tmp/0008-eotf.patch /var/tmp/0009-gui-eotf.patch /var/tmp/rgb10-ab.patch	26187	DELETE_TEMP	intermediate patch drafts; final versions are in patches/kodi/	repo patches/kodi/
+/var/tmp/fix_*.py /var/tmp/drop_0002.py /var/tmp/regen_0004.py /var/tmp/restore_includes.py /var/tmp/revert_hdr_lum.py	~60000	DELETE_TEMP	one-off source-editing scripts used to author patches; outputs are the committed patches	repo patches/kodi/
+/var/tmp/kodi-build.log /var/tmp/kodi-build.rc /var/tmp/kodi-log-mark.txt /var/tmp/mp1b-ab.log /var/tmp/mp2hdr-dmesg-before.txt /var/tmp/mp2hdr-dmesg-during.txt /var/tmp/mt.txt /var/tmp/mtp.txt /var/tmp/window.log /var/tmp/dmesgmark /var/tmp/logmark /var/tmp/dmesg-accept-before.txt /var/tmp/kodi-start.sh	~690000	DELETE_TEMP	session scratch logs and markers; canonical copies are under logs/ on the host	logs/orangepi5-ultra-vendor/*
+/var/tmp/shots	17954	DELETE_TEMP	single stray Kodi screenshot	none needed
+/var/tmp/mali-stage (except the pinned .deb)	1349546	DELETE_TEMP	dmesg dumps and one-off GBM/Mali probe binaries from the GPU bring-up	tools/mali-gbm-probe.c + scripts/mali-probe.sh
+/var/cache/apt/archives/*.deb	546994724	DELETE_BUILD	downloaded package cache, 567 .deb files; apt-get clean removes no installed package	re-downloadable from the configured repositories
+/var/tmp/mali-stage/libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb	19227596	KEEP_ROLLBACK	offline reinstall source for the accepted GPU runtime; URL+SHA256 pinned in scripts/install-mali-runtime.sh	n/a
+/boot/vmlinuz-6.1.115-vendor-rk35xx	46561792	KEEP_ROLLBACK	stock Armbian kernel, dpkg-owned; the known-good fallback	linux-image-vendor-rk35xx
+/lib/modules/6.1.115-vendor-rk35xx	152043520	KEEP_ROLLBACK	modules of the stock fallback kernel	linux-image-vendor-rk35xx
+/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio	46234112	KEEP_BOOT	ACTIVE kernel, target of /boot/Image	n/a
+/lib/modules/6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio	1977126057	KEEP_BOOT	modules of the active kernel; lsmod resolves here	n/a
+/boot/uInitrd-6.1.115-vendor-rk35xx /boot/dtb-6.1.115-vendor-rk35xx /boot/boot.scr /boot/boot.cmd /boot/armbianEnv.txt /boot/Image /boot/dtb /boot/uInitrd	n/a	KEEP_BOOT	boot chain consumed by boot.cmd	n/a
+/opt/rk3588-mediabox/kodi	n/a	KEEP_RUNTIME	production Kodi prefix	runtime-keep-manifest.tsv
+/opt/rk3588-mediabox/mali-g24p0-root /opt/rk3588-mediabox/mali-g24p0-runtime	n/a	KEEP_RUNTIME	accepted GPU userspace, mapped by the live process	runtime-keep-manifest.tsv
+/opt/rk3588-screenbridge	337000000	KEEP_RUNTIME	RKMPP/RGA/FFmpeg prefix on LD_LIBRARY_PATH	runtime-keep-manifest.tsv
+/var/tmp/kodi-src	1075000000	KEEP_RUNTIME	canonical KODI_SRC; build/kodi-gbm sha256 == production binary; gate MA1 rebuilds here	scripts/build-kodi.sh:31
+/var/tmp/kodi-home	4194304	KEEP_RUNTIME	live Kodi HOME, cwd of the running process	runtime-keep-manifest.tsv
+/var/tmp/mp1b/past-lives.mkv	12081238172	KEEP_RUNTIME	accepted HDR10 test asset; operator instruction: do not delete	open fd of the live process
+/tmp/rk3588-mediabox /tmp/planes.txt /tmp/raw-p.txt	~150000	KEEP_AMBIGUOUS	/tmp is tmpfs and clears on the Phase 9 reboot; /tmp/rk3588-mediabox is recreated by build-kodi.sh	n/a
+/var/log.hdd	85000000	KEEP_AMBIGUOUS	persistent system logs; bulk truncation is out of scope by instruction	n/a
+build toolchain packages (build-essential, cmake, ninja-build, kodi build-dep set)	n/a	KEEP_AMBIGUOUS	gate MA1 is a Kodi-side audio change and rebuilds on target; scripts/build-kodi.sh deps step requires them	n/a
+mesa packages (libgl1-mesa-dri, libgbm1, libegl-mesa0, mesa-utils-bin)	n/a	KEEP_AMBIGUOUS	MEDIABOX_GPU=mesa is the documented llvmpipe fallback in scripts/run-kodi-rk3588.sh	n/a
+operator tools (vim, btop, fastfetch, tree, pciutils, lm-sensors, cmatrix)	n/a	KEEP_AMBIGUOUS	installed by the operator, not by an experiment; removal is not this gate's mandate	n/a

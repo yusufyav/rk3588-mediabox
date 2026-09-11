@@ -1,0 +1,16 @@
+=== df -h ===
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/mmcblk0p1   57G   19G   38G  33% /
+=== df / bytes ===
+19609116672 40602550272
+=== du /opt ===
+257363339	/opt/rk3588-mediabox
+336699305	/opt/rk3588-screenbridge
+=== du /var/tmp ===
+13115736743	/var/tmp
+=== du /boot ===
+224419447	/boot
+=== du /lib/modules ===
+2125605740	/lib/modules
+=== du /var/cache/apt ===
+93564167	/var/cache/apt

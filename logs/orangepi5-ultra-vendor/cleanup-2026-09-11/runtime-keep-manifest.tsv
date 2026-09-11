@@ -1,0 +1,28 @@
+path	reason	evidence
+/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm	production Kodi binary, Android-parity build	/proc/31767/exe; sha256 bfa5b1cb2ed73d139f0bcdb8652e73ea489f71edac51534fbeceddd73b1f71fb
+/opt/rk3588-mediabox/kodi/share/kodi/	skin, fonts, Textures.xbt mapped by the live process	runtime-proc.txt maps + open fds
+/opt/rk3588-mediabox/kodi/bin/	kodi / kodi-standalone launch wrappers	KODI_PREFIX in scripts/run-kodi-rk3588.sh
+/opt/rk3588-mediabox/mali-g24p0-runtime/lib/	LD_LIBRARY_PATH entry 1, resolves the whole GL stack	/proc/31767/environ LD_LIBRARY_PATH
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali.so.1.9.0	real Mali G610 blob, mapped	runtime-proc.txt maps
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/libmali-hook.so.1.9.0	mapped by the live process	runtime-proc.txt maps
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libEGL.so.1	mapped by the live process	runtime-proc.txt maps
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libGLESv2.so.2	mapped by the live process	runtime-proc.txt maps
+/opt/rk3588-mediabox/mali-g24p0-root/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1	mapped by the live process	runtime-proc.txt maps
+/opt/rk3588-screenbridge/lib/librockchip_mpp.so.0	RKMPP hardware decode, mapped	runtime-proc.txt maps
+/opt/rk3588-screenbridge/lib/librockchip_mpp.so.1	DT_NEEDED of kodi-gbm	ldd kodi-gbm
+/opt/rk3588-screenbridge/lib/librga.so	Rockchip RGA, DT_NEEDED and mapped	ldd + runtime-proc.txt maps
+/opt/rk3588-screenbridge/lib/	LD_LIBRARY_PATH entry 2 (RKMPP FFmpeg prefix)	MEDIABOX_FFMPEG_PREFIX in scripts/env.sh
+/var/tmp/kodi-home	Kodi HOME and cwd; databases, userdata, logs	/proc/31767/cwd, environ HOME, open fds
+/var/tmp/kodi-src	canonical KODI_SRC of scripts/build-kodi.sh; build/ produced the live binary	build-kodi.sh:31; sha256 of build/kodi-gbm == production binary
+/var/tmp/mp1b/past-lives.mkv	accepted HDR10 test asset, open by the live process	open fd; operator instruction: do not delete
+/usr/lib/aarch64-linux-gnu/libasound.so.2.0.0	ALSA HDMI PCM runtime, mapped	runtime-proc.txt maps; /dev/snd/pcmC0D0p open
+/usr/lib/aarch64-linux-gnu/libdrm.so.2.124.0	DRM/KMS, mapped	runtime-proc.txt maps; /dev/dri/card0 open
+/boot/Image	boot entry consumed by boot.cmd; symlink to the active kernel	boot.cmd:45; readlink /boot/Image
+/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio	ACTIVE kernel	uname -r; target of /boot/Image
+/lib/modules/6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio	modules of the active kernel	uname -r
+/boot/uInitrd-6.1.115-vendor-rk35xx	initrd loaded by boot.cmd	boot.cmd:44 via /boot/uInitrd symlink
+/boot/dtb-6.1.115-vendor-rk35xx	DTB tree loaded by boot.cmd	boot.cmd:47 via /boot/dtb symlink
+/boot/boot.scr	U-Boot script	boot chain
+/boot/armbianEnv.txt	boot environment	boot chain
+/boot/vmlinuz-6.1.115-vendor-rk35xx	stock Armbian kernel, dpkg-owned rollback	dpkg -S; linux-image-vendor-rk35xx
+/lib/modules/6.1.115-vendor-rk35xx	modules of the stock rollback kernel	dpkg-owned
