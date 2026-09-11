@@ -46,3 +46,5 @@ mount = "/server/"
 cast_device_id = "mediabox-tv"
 cast_device_name = "MediaBox TV (Kodi)"
 request_timeout_seconds = 10.0
+# A cold torrent finds peers and fetches a piece before it can answer at all.
+stream_timeout_seconds = 120.0

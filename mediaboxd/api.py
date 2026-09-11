@@ -204,6 +204,34 @@ def display_response(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_range(header: str | None, size: int) -> tuple[int, int]:
+    """Resolve a single byte range against `size`.
+
+    Anything unparseable, multi-range or unsatisfiable falls back to the whole
+    entity, which is what a server is allowed to do and what every player
+    handles.
+    """
+    if not header or size == 0 or not header.startswith("bytes="):
+        return 0, max(size - 1, 0)
+    spec = header[len("bytes=") :].strip()
+    if "," in spec or "-" not in spec:
+        return 0, max(size - 1, 0)
+    first, _, last = spec.partition("-")
+    try:
+        if not first:
+            length = int(last)
+            if length <= 0:
+                return 0, max(size - 1, 0)
+            return max(size - length, 0), size - 1
+        start = int(first)
+        end = int(last) if last else size - 1
+    except ValueError:
+        return 0, max(size - 1, 0)
+    if start < 0 or start >= size or end < start:
+        return 0, max(size - 1, 0)
+    return start, min(end, size - 1)
+
+
 def stremio_response(context: APIContext) -> dict[str, Any]:
     if context.stremio is None:
         return {"enabled": False, "reachable": False}
@@ -425,18 +453,28 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                 requested = root_path / "index.html"
             if not requested.is_file():
                 raise APIError("NOT_FOUND", "Static asset not found", 404)
-            try:
-                payload = requested.read_bytes()
-            except OSError as exc:
-                raise APIError("STATIC_READ_ERROR", "Static asset could not be read", 500) from exc
             content_type = (
                 STATIC_MEDIA_TYPES.get(requested.suffix.lower())
                 or mimetypes.guess_type(requested.name)[0]
                 or "application/octet-stream"
             )
-            self.send_response(HTTPStatus.OK)
+            try:
+                size = requested.stat().st_size
+                # A media appliance serves media: without ranges no player can
+                # seek, and some refuse to start at all.
+                start, end = _parse_range(self.headers.get("Range"), size)
+                partial = start != 0 or end != size - 1
+                with requested.open("rb") as handle:
+                    handle.seek(start)
+                    payload = handle.read(end - start + 1)
+            except OSError as exc:
+                raise APIError("STATIC_READ_ERROR", "Static asset could not be read", 500) from exc
+            self.send_response(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK)
             self.send_header("Content-Type", f"{content_type}; charset=utf-8" if content_type.startswith("text/") else content_type)
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Accept-Ranges", "bytes")
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Security-Policy", MEDIA_APP_CSP)

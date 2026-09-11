@@ -48,7 +48,12 @@ class StremioConfig:
     mount: str = "/server/"
     cast_device_id: str = "mediabox-tv"
     cast_device_name: str = "MediaBox TV (Kodi)"
+    #: Control calls (/settings, /casting). These answer immediately or not at all.
     request_timeout_seconds: float = 10.0
+    #: Media calls. A cold torrent has to find peers and fetch its first piece
+    #: before the server can answer at all, which is far longer than any control
+    #: call should ever be allowed to take.
+    stream_timeout_seconds: float = 120.0
 
 
 def validate_upstream(value: str) -> str:
@@ -195,6 +200,9 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
         cast_device_name=str(stremio_raw.get("cast_device_name", stremio_defaults.cast_device_name)),
         request_timeout_seconds=_number(
             stremio_raw, "request_timeout_seconds", stremio_defaults.request_timeout_seconds
+        ),
+        stream_timeout_seconds=_number(
+            stremio_raw, "stream_timeout_seconds", stremio_defaults.stream_timeout_seconds
         ),
     )
 

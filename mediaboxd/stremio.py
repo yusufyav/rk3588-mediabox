@@ -277,7 +277,7 @@ class StremioBridge:
                 request.add_header(name, value)
 
         try:
-            response = urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds)
+            response = urllib.request.urlopen(request, timeout=self.config.stream_timeout_seconds)
         except urllib.error.HTTPError as exc:
             # An upstream 4xx/5xx is a real answer; relay it rather than masking it.
             response = exc

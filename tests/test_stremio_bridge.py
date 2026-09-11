@@ -389,3 +389,22 @@ class UpstreamValidationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaticRangeTest(unittest.TestCase):
+    """A media appliance serves media, and media is fetched in ranges."""
+
+    def test_range_is_resolved_against_the_entity(self):
+        from mediaboxd.api import _parse_range
+
+        self.assertEqual(_parse_range("bytes=0-99", 1000), (0, 99))
+        self.assertEqual(_parse_range("bytes=500-", 1000), (500, 999))
+        self.assertEqual(_parse_range("bytes=-100", 1000), (900, 999))
+        self.assertEqual(_parse_range("bytes=900-5000", 1000), (900, 999))
+
+    def test_unusable_ranges_fall_back_to_the_whole_entity(self):
+        from mediaboxd.api import _parse_range
+
+        for header in (None, "", "items=0-1", "bytes=abc", "bytes=0-1,5-6", "bytes=5000-6000"):
+            with self.subTest(header=header):
+                self.assertEqual(_parse_range(header, 1000), (0, 999))
