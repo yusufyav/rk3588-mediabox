@@ -1,0 +1,77 @@
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/*
+ * Focus is never optional on this UI: a remote user has no cursor to fall back
+ * on. Pointer users get :focus-visible, remote users get a ring on every move.
+ */
+:focus {
+  outline: none;
+}
+
+:focus-visible,
+:root[data-input='remote'] [data-focusable]:focus {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+:root[data-layout='tv'] :focus-visible,
+:root[data-layout='tv'][data-input='remote'] [data-focusable]:focus {
+  outline-width: 4px;
+  outline-offset: 3px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
