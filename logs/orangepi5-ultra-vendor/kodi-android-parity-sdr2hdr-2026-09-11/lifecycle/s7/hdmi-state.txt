@@ -1,0 +1,11 @@
+----- what is on the wire -----
+  Connector:HDMI-A-1	Encoder: TMDS-200
+  bus_format[200d]: YUYV10_1X20
+  overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+  Display mode: 3840x2160p24
+
+----- connector properties (requested) -----
+
+----- connector sysfs -----
+  status: connected
+  enabled: enabled

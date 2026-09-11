@@ -1,0 +1,44 @@
+----- did Kodi run its software HDR GUI compositor? -----
+  (the composite shader and its PQ LUTs are built only by
+   SetGuiCompositing(); no line here means the path never ran)
+1259:2026-09-11 14:39:17.391 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+1260:2026-09-11 14:39:17.391 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+1262:2026-09-11 14:39:17.391 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+9385:2026-09-11 14:54:32.678 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+9386:2026-09-11 14:54:32.678 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+9388:2026-09-11 14:54:32.678 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+10212:2026-09-11 14:55:17.699 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+10213:2026-09-11 14:55:17.699 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+10215:2026-09-11 14:55:17.699 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+10591:2026-09-11 14:55:43.118 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+10592:2026-09-11 14:55:43.118 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+10594:2026-09-11 14:55:43.118 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+10966:2026-09-11 14:58:56.662 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+10967:2026-09-11 14:58:56.662 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+10969:2026-09-11 14:58:56.662 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+
+----- GUI plane EOTF tag decisions -----
+1261:2026-09-11 14:39:17.391 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+6384:2026-09-11 14:50:28.749 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+9387:2026-09-11 14:54:32.678 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+9916:2026-09-11 14:55:10.372 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10214:2026-09-11 14:55:17.699 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10327:2026-09-11 14:55:24.988 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10593:2026-09-11 14:55:43.118 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10722:2026-09-11 14:58:41.826 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10968:2026-09-11 14:58:56.662 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+
+----- video plane configuration -----
+5694:2026-09-11 14:49:14.471 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+9391:2026-09-11 14:54:32.678 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+10218:2026-09-11 14:55:17.701 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+10597:2026-09-11 14:55:43.119 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+10972:2026-09-11 14:58:56.664 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+
+----- colour state transitions -----
+10587:2026-09-11 14:55:43.118 T:11604   debug <general>: MP2COLOR where=SetColorimetry:exit gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+10590:2026-09-11 14:55:43.118 T:11604   debug <general>: MP2COLOR where=SetHDR:exit:hdr gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=2 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+10726:2026-09-11 14:58:41.826 T:11604   debug <general>: MP2COLOR where=SetHDR:exit:cleared gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=10 color_depth=10 max_bpc=absent HDR_OUTPUT_METADATA=244] crtc=89
+10730:2026-09-11 14:58:41.826 T:11604   debug <general>: MP2COLOR where=SetColorimetry:exit gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=Default eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=10 color_depth=10 max_bpc=absent HDR_OUTPUT_METADATA=244] crtc=89
+10962:2026-09-11 14:58:56.662 T:11604   debug <general>: MP2COLOR where=SetColorimetry:exit gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+10965:2026-09-11 14:58:56.662 T:11604   debug <general>: MP2COLOR where=SetHDR:exit:hdr gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=2 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89

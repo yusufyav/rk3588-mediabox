@@ -1,0 +1,57 @@
+===== Operator observation, Android-parity build (B) =====
+date    : 2026-09-11
+build   : Kodi 22.0b2-Piers + patches 0001-0010
+output  : 3840x2160 @ 23.976 Hz, HDR10, BT.2020, YCbCr 4:2:2 10-bit
+asset   : past.lives.2023.hdr.2160p.web.h265-huzzah.mkv
+          sha256 f4e32b8d3feb7efdebaaefaf7338a25bcc86ee144bf82bd4b93da6b80906f96a
+
+The operator drove the acceptance cycles at the appliance and reported the
+result directly. Their words are recorded verbatim rather than converted into
+a tally this session did not itself count.
+
+----- 1. Horizontal shift -----
+Cycles driven by the operator: pause/resume, OSD open/close, seek, stop,
+replay, in the same scene the fault was always reproduced in.
+
+Operator, verbatim:
+  "Ben baslattim izledim ve sorunun giderildi."
+  ("I started it, I watched it, and the problem is fixed.")
+
+Reading: the displacement that opened a black band at the left edge on every
+OSD transition is gone. The operator is the same person who rejected three
+earlier fixes at this exact step, so the judgement is a comparison against a
+fault they know by sight, not a first impression.
+
+  horizontal shift on pause   : none reported
+  reverse shift on resume     : none reported
+  shift on OSD open/close     : none reported
+
+Caveat kept on purpose: the operator ran the cycles themselves and reported the
+outcome as a whole. This session did not observe the screen and did not count
+individual cycles, so no "0/20" or "0/10" figure is claimed here. What is
+established is that the fault the gate was opened on is no longer present.
+
+----- 2. OSD / GUI colour -----
+Checked against the previously problematic blue OSD, and against the colour
+quality accepted in Gate 0009.
+
+Operator, verbatim:
+  "Su ana kadarki en iyi ve sorunsuz OSD/GUI renklerini aliyoruz su an."
+  ("These are the best and trouble-free OSD/GUI colours we have had so far.")
+
+  vs 0009            : better, not merely equal
+  washed out         : no
+  pale blue          : no
+  double-transfer    : no
+  video colour       : no degradation reported
+
+----- 3. Why this is not the experiment that was rejected before -----
+  previously rejected : PQ-encoded GUI buffer + SDR plane label
+                        -> hardware converted pixels Kodi had already
+                           converted; colour washed out
+  this build          : genuinely SDR GUI buffer + SDR plane label
+                        -> hardware performs the only conversion there is
+
+The tag and the pixels agree for the first time on Linux. That is the whole
+difference, and it is why both symptoms resolve together instead of trading
+against each other.

@@ -1,0 +1,78 @@
+----- per-window colour tag (VOP2's own classification) -----
+  Cluster0-win0: ACTIVE
+    format: AR24 little-endian (0x34325241) pixel_blend_mode[0] glb_alpha[0xff]
+    color: SDR[0] color-encoding[BT.601] color-range[Limited]
+    csc: y2r[0] r2y[0] csc mode[0]
+    zpos: 11
+  Esmart0-win0: ACTIVE
+    format: NV15 little-endian (0x3531564e) pixel_blend_mode[0] glb_alpha[0xff]
+    color: HDR10[2] color-encoding[BT.2020] color-range[Limited]
+    csc: y2r[1] r2y[0] csc mode[3]
+    zpos: 0
+
+----- overlay / output mode -----
+  bus_format[200d]: YUYV10_1X20
+  overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+  Display mode: 3840x2160p24
+
+----- atomic plane state (debugfs) -----
+plane[57]: Cluster0-win0
+	crtc=video_port0
+	fb=249
+		allocated by = kodi-gbm
+		refcount=2
+		format=AR24 little-endian (0x34325241)
+		modifier=0x0
+		size=3840x2160
+		layers:
+			size[0]=3840x2160
+			pitch[0]=15360
+			offset[0]=0
+			obj[0]:
+				name=0
+				refcount=2
+				start=00000000
+				size=33177600
+				imported=yes
+	crtc-pos=3840x2160+0+0
+	src-pos=3840.000000x2160.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=1
+	color-encoding=ITU-R BT.601 YCbCr
+	color-range=YCbCr limited range
+plane[73]: Esmart0-win0
+	crtc=video_port0
+	fb=258
+		allocated by = kodi-gbm
+		refcount=2
+		format=NV15 little-endian (0x3531564e)
+		modifier=0x0
+		size=3840x2080
+		layers:
+			size[0]=3840x2080
+			pitch[0]=4864
+			offset[0]=0
+			obj[0]:
+				name=0
+				refcount=2
+				start=00000000
+				size=18210816
+				imported=yes
+			size[1]=1920x1040
+			pitch[1]=4864
+			offset[1]=10117120
+			obj[1]:
+				name=0
+				refcount=2
+				start=00000000
+				size=18210816
+				imported=yes
+	crtc-pos=3840x2076+0+42
+	src-pos=3840.000000x2080.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=0
+	color-encoding=ITU-R BT.2020 YCbCr
+	color-range=YCbCr limited range
+plane[98]: Cluster1-win0
+	crtc=(null)
+	fb=0

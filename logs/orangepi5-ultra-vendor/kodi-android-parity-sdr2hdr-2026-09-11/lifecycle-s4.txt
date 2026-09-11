@@ -1,0 +1,222 @@
+############ lifecycle state: s4 ############
+# S4 = paused, OSD hidden
+
+===================== gui-render-path =====================
+----- did Kodi run its software HDR GUI compositor? -----
+  (the composite shader and its PQ LUTs are built only by
+   SetGuiCompositing(); no line here means the path never ran)
+1259:2026-09-11 14:39:17.391 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+1260:2026-09-11 14:39:17.391 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+1262:2026-09-11 14:39:17.391 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+9385:2026-09-11 14:54:32.678 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+9386:2026-09-11 14:54:32.678 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+9388:2026-09-11 14:54:32.678 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+10212:2026-09-11 14:55:17.699 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+10213:2026-09-11 14:55:17.699 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+10215:2026-09-11 14:55:17.699 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+10591:2026-09-11 14:55:43.118 T:11604   debug <general>: CRendererDRMPRIME::Configure: HDR passthrough: on
+10592:2026-09-11 14:55:43.118 T:11604   debug <general>: CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition
+10594:2026-09-11 14:55:43.118 T:11604 warning <general>: CRendererDRMPRIME::Configure: HDR passthrough active but GUI compositing not supported by windowing system
+
+----- GUI plane EOTF tag decisions -----
+1261:2026-09-11 14:39:17.391 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+6384:2026-09-11 14:50:28.749 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+9387:2026-09-11 14:54:32.678 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+9916:2026-09-11 14:55:10.372 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10214:2026-09-11 14:55:17.699 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10327:2026-09-11 14:55:24.988 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+10593:2026-09-11 14:55:43.118 T:11604   debug <general>: void KODI::WINDOWING::GBM::CWinSystemGbm::SetGuiPlaneEotf(bool): MP2COLOR where=SetGuiPlaneEotf plane=57 hdr_encoded=false eotf=0
+
+----- video plane configuration -----
+5631:2026-09-11 14:49:08.848 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+5694:2026-09-11 14:49:14.471 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+9391:2026-09-11 14:54:32.678 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+10218:2026-09-11 14:55:17.701 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+10597:2026-09-11 14:55:43.119 T:11604   debug <general>: virtual void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME*): MP2COLOR where=VideoLayerBridge:Configure plane=73 plane_fourcc=NV15 encoding=ITU-R BT.2020 YCbCr range=YCbCr limited range eotf=2
+
+----- colour state transitions -----
+10208:2026-09-11 14:55:17.699 T:11604   debug <general>: MP2COLOR where=SetColorimetry:exit gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+10211:2026-09-11 14:55:17.699 T:11604   debug <general>: MP2COLOR where=SetHDR:exit:hdr gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=2 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+10331:2026-09-11 14:55:24.988 T:11604   debug <general>: MP2COLOR where=SetHDR:exit:cleared gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=10 color_depth=10 max_bpc=absent HDR_OUTPUT_METADATA=244] crtc=89
+10335:2026-09-11 14:55:24.988 T:11604   debug <general>: MP2COLOR where=SetColorimetry:exit gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=Default eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=10 color_depth=10 max_bpc=absent HDR_OUTPUT_METADATA=244] crtc=89
+10587:2026-09-11 14:55:43.118 T:11604   debug <general>: MP2COLOR where=SetColorimetry:exit gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=0 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+10590:2026-09-11 14:55:43.118 T:11604   debug <general>: MP2COLOR where=SetHDR:exit:hdr gui_plane=57/AR24 video_plane=73/NV15 yuv_scanout=1 colorimetry=BT2020_YCC eotf=2 gui[COLOR_ENCODING=0 COLOR_RANGE=0] video[COLOR_ENCODING=2 COLOR_RANGE=0] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+
+===================== plane-state =====================
+----- per-window colour tag (VOP2's own classification) -----
+  Cluster0-win0: ACTIVE
+    format: AR24 little-endian (0x34325241) pixel_blend_mode[0] glb_alpha[0xff]
+    color: SDR[0] color-encoding[BT.601] color-range[Limited]
+    csc: y2r[0] r2y[0] csc mode[0]
+    zpos: 11
+  Esmart0-win0: ACTIVE
+    format: NV15 little-endian (0x3531564e) pixel_blend_mode[0] glb_alpha[0xff]
+    color: HDR10[2] color-encoding[BT.2020] color-range[Limited]
+    csc: y2r[1] r2y[0] csc mode[3]
+    zpos: 0
+
+----- overlay / output mode -----
+  bus_format[200d]: YUYV10_1X20
+  overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+  Display mode: 3840x2160p24
+
+----- atomic plane state (debugfs) -----
+plane[57]: Cluster0-win0
+	crtc=video_port0
+	fb=268
+		allocated by = kodi-gbm
+		refcount=2
+		format=AR24 little-endian (0x34325241)
+		modifier=0x0
+		size=3840x2160
+		layers:
+			size[0]=3840x2160
+			pitch[0]=15360
+			offset[0]=0
+			obj[0]:
+				name=0
+				refcount=2
+				start=00000000
+				size=33177600
+				imported=yes
+	crtc-pos=3840x2160+0+0
+	src-pos=3840.000000x2160.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=1
+	color-encoding=ITU-R BT.601 YCbCr
+	color-range=YCbCr limited range
+plane[73]: Esmart0-win0
+	crtc=video_port0
+	fb=251
+		allocated by = kodi-gbm
+		refcount=2
+		format=NV15 little-endian (0x3531564e)
+		modifier=0x0
+		size=3840x2080
+		layers:
+			size[0]=3840x2080
+			pitch[0]=4864
+			offset[0]=0
+			obj[0]:
+				name=0
+				refcount=2
+				start=00000000
+				size=18210816
+				imported=yes
+			size[1]=1920x1040
+			pitch[1]=4864
+			offset[1]=10117120
+			obj[1]:
+				name=0
+				refcount=2
+				start=00000000
+				size=18210816
+				imported=yes
+	crtc-pos=3840x2076+0+42
+	src-pos=3840.000000x2080.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=0
+	color-encoding=ITU-R BT.2020 YCbCr
+	color-range=YCbCr limited range
+plane[98]: Cluster1-win0
+	crtc=(null)
+	fb=0
+
+===================== sdr2hdr-registers =====================
+----- raw HDR register block (/sys/kernel/debug/dri/0/active_regs) -----
+HDR:
+fdd92000:  00000002 00000000 00000000 00000000
+fdd92010:  0000000b 00000000 00000300 00000300
+fdd92020:  00000100 00000000 06640000 00000000
+fdd92030:  00000000 00000000 00000000 00000287
+fdd92040:  000003b1 000004e6 00000625 0000076f
+fdd92050:  000008c1 00390a1a 01270b7c 02640ce3
+fdd92060:  040c0e50 06420fc3 0936113a 0b6012b5
+fdd92070:  0d261433 0eae15b4 100a1737 114618bd
+fdd92080:  12681a43 14731bbc 16441d22 17ea1e73
+fdd92090:  196d1fae 1c2720d2 1e9421de 20c622d1
+fdd920a0:  22cc23ab 266f246b 29ac250f 2c9b2598
+fdd920b0:  2f4d2603 34292651 387b2680 3fff2690
+fdd920c0:  00000000 00000700 00000e00 00000d90
+fdd920d0:  00000ada 00000823 0000056d 000002b6
+fdd920e0:  00000000 00000000 00000000 00000000
+fdd920f0:  00000000 0a70000b 0e38002d 1304006b
+fdd92100:  190000cc 20500152 25400201 290c02dc
+fdd92110:  334803e6 39f80521 3f04068f 4c3c0832
+fdd92120:  54a00a0d 5adc0c22 5fdc0e72 640410ff
+fdd92130:  679c13ca 6ac416d6 70201a24 74981db5
+fdd92140:  786c218b 7bc42391 7ec425a8 817427d1
+fdd92150:  83e82a0c 86282c59 8a2c2eb8 8db0312b
+fdd92160:  90d033b0 939c3647 988038f2 9cac3bb0
+fdd92170:  a04c3e82 a3843ff1 a6684166 a90442e0
+fdd92180:  ab6c445f afac45e2 b360476b b6a448f9
+fdd92190:  b9944a8b bc3c4c23 bea84dbf c0e44f61
+fdd921a0:  c2f45108 c4e452b4 c6b05464 c9f8561a
+fdd921b0:  ccec57d6 cf9458b5 d2045996 d43c5a78
+fdd921c0:  d6505b5c d83c5c40 da045d26 dd4c5e0e
+fdd921d0:  e0385ef6 e2dc5fe0 e54460cb e98461b8
+fdd921e0:  ed3062a6 f3486395 f83c6485 fc646577
+fdd921f0:  fffc6666 00000000 00000000 00000000
+
+----- decoded -----
+  SDR2HDR_CTRL (0xfdd92010) raw : 0x0000000b
+  sdr2hdr_eotf_en   (bit 0)     : 1
+  sdr2hdr_r2r_en    (bit 1)     : 1
+  sdr2hdr_r2r_mode  (bit 2)     : 0  # 0 = BT709_TO_BT2020
+  sdr2hdr_oetf_en   (bit 3)     : 1
+  sdr2hdr_bypass_en (bit 8)     : 0
+  => SDR2HDR: ACTIVE, eotf+r2r+oetf, r2r_mode=BT709_TO_BT2020
+
+----- HDR2SDR -----
+  HDR2SDR_CTRL (0xfdd92000) raw : 0x00000002
+  hdr2sdr_en   (bit 0)          : 0
+
+===================== hdmi-state =====================
+----- what is on the wire -----
+  Connector:HDMI-A-1	Encoder: TMDS-200
+  bus_format[200d]: YUYV10_1X20
+  overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+  Display mode: 3840x2160p24
+
+----- connector properties (requested) -----
+
+----- connector sysfs -----
+  status: connected
+  enabled: enabled
+
+===================== vop-summary =====================
+===== VOP2 summary: s4 =====
+captured: 2026-09-11T14:58:20+03:00
+
+Video Port0: ACTIVE
+    Connector:HDMI-A-1	Encoder: TMDS-200
+	bus_format[200d]: YUYV10_1X20
+	overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+    Display mode: 3840x2160p24
+	dclk[296703 kHz] real_dclk[296703 kHz] aclk[750000 kHz] type[40] flag[5]
+	H: 3840 5116 5204 5500
+	V: 2160 2168 2178 2250
+	Fixed H: 3840 5116 5204 5500
+	Fixed V: 2160 2168 2178 2250
+    Cluster0-win0: ACTIVE
+	win_id: 0
+	format: AR24 little-endian (0x34325241) pixel_blend_mode[0] glb_alpha[0xff]
+	color: SDR[0] color-encoding[BT.601] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[0] r2y[0] csc mode[0]
+	zpos: 11
+	src: pos[0, 0] rect[3840 x 2160]
+	dst: pos[0, 0] rect[3840 x 2160]
+	buf[0]: addr: 0x000000001d22c000 pitch: 15360 offset: 0
+    Esmart0-win0: ACTIVE
+	win_id: 8
+	format: NV15 little-endian (0x3531564e) pixel_blend_mode[0] glb_alpha[0xff]
+	color: HDR10[2] color-encoding[BT.2020] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[1] r2y[0] csc mode[3]
+	zpos: 0
+	src: pos[0, 0] rect[3840 x 2080]
+	dst: pos[0, 42] rect[3840 x 2076]
+	buf[0]: addr: 0x000000000cdaa000 pitch: 4864 offset: 0
+	buf[1]: addr: 0x000000000cdaa000 pitch: 4864 offset: 10117120
+

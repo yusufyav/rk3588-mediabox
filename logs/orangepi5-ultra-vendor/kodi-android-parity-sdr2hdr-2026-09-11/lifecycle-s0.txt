@@ -1,0 +1,179 @@
+############ lifecycle state: s0 ############
+# S0 = SDR Kodi GUI, no video
+
+===================== gui-render-path =====================
+----- did Kodi run its software HDR GUI compositor? -----
+  (the composite shader and its PQ LUTs are built only by
+   SetGuiCompositing(); no line here means the path never ran)
+
+----- GUI plane EOTF tag decisions -----
+
+----- video plane configuration -----
+
+----- colour state transitions -----
+336:2026-09-11 15:02:41.621 T:26749   debug <general>: MP2COLOR where=SetColorimetry:exit gui_plane=-/- video_plane=-/- yuv_scanout=0 colorimetry=Default eotf=0 gui[COLOR_ENCODING=- COLOR_RANGE=-] video[COLOR_ENCODING=- COLOR_RANGE=-] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+340:2026-09-11 15:02:41.621 T:26749   debug <general>: MP2COLOR where=SetHDR:exit:cleared gui_plane=-/- video_plane=-/- yuv_scanout=0 colorimetry=Default eotf=0 gui[COLOR_ENCODING=- COLOR_RANGE=-] video[COLOR_ENCODING=- COLOR_RANGE=-] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+344:2026-09-11 15:02:41.621 T:26749   debug <general>: MP2COLOR where=SetHDR:exit:cleared gui_plane=-/- video_plane=-/- yuv_scanout=0 colorimetry=Default eotf=0 gui[COLOR_ENCODING=- COLOR_RANGE=-] video[COLOR_ENCODING=- COLOR_RANGE=-] conn[Colorspace=0 color_depth=0 max_bpc=absent HDR_OUTPUT_METADATA=0] crtc=89
+
+===================== plane-state =====================
+----- per-window colour tag (VOP2's own classification) -----
+  Cluster0-win0: ACTIVE
+    format: AR24 little-endian (0x34325241) pixel_blend_mode[0] glb_alpha[0xff]
+    color: SDR[0] color-encoding[BT.601] color-range[Limited]
+    csc: y2r[0] r2y[0] csc mode[0]
+    zpos: 11
+
+----- overlay / output mode -----
+  bus_format[100a]: RGB888_1X24
+  overlay_mode[0] output_mode[f] SDR[0] color-encoding[BT.709] color-range[Full]
+  Display mode: 1920x1080p60
+
+----- atomic plane state (debugfs) -----
+plane[57]: Cluster0-win0
+	crtc=video_port0
+	fb=240
+		allocated by = kodi-gbm
+		refcount=2
+		format=AR24 little-endian (0x34325241)
+		modifier=0x0
+		size=1920x1080
+		layers:
+			size[0]=1920x1080
+			pitch[0]=7680
+			offset[0]=0
+			obj[0]:
+				name=0
+				refcount=2
+				start=00000000
+				size=8294400
+				imported=yes
+	crtc-pos=1920x1080+0+0
+	src-pos=1920.000000x1080.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=0
+	color-encoding=ITU-R BT.601 YCbCr
+	color-range=YCbCr limited range
+plane[73]: Esmart0-win0
+	crtc=(null)
+	fb=0
+	crtc-pos=0x0+0+0
+	src-pos=0.000000x0.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=0
+	color-encoding=ITU-R BT.2020 YCbCr
+	color-range=YCbCr limited range
+plane[98]: Cluster1-win0
+	crtc=(null)
+	fb=0
+	crtc-pos=0x0+0+0
+	src-pos=0.000000x0.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=2
+	color-encoding=ITU-R BT.601 YCbCr
+	color-range=YCbCr limited range
+plane[114]: Cluster2-win0
+	crtc=(null)
+	fb=0
+	crtc-pos=0x0+0+0
+	src-pos=0.000000x0.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=4
+	color-encoding=ITU-R BT.601 YCbCr
+	color-range=YCbCr limited range
+plane[130]: Cluster3-win0
+	crtc=(null)
+	fb=0
+	crtc-pos=0x0+0+0
+	src-pos=0.000000x0.000000+0.000000+0.000000
+	rotation=1
+	normalized-zpos=6
+	color-encoding=ITU-R BT.601 YCbCr
+	color-range=YCbCr limited range
+
+===================== sdr2hdr-registers =====================
+----- raw HDR register block (/sys/kernel/debug/dri/0/active_regs) -----
+HDR:
+fdd92000:  00000000 00000000 00000000 00000000
+fdd92010:  00000100 00000000 00000300 00000300
+fdd92020:  00000100 00000000 06640000 00000000
+fdd92030:  00000000 00000000 00000000 00000287
+fdd92040:  000003b1 000004e6 00000625 0000076f
+fdd92050:  000008c1 00390a1a 01270b7c 02640ce3
+fdd92060:  040c0e50 06420fc3 0936113a 0b6012b5
+fdd92070:  0d261433 0eae15b4 100a1737 114618bd
+fdd92080:  12681a43 14731bbc 16441d22 17ea1e73
+fdd92090:  196d1fae 1c2720d2 1e9421de 20c622d1
+fdd920a0:  22cc23ab 266f246b 29ac250f 2c9b2598
+fdd920b0:  2f4d2603 34292651 387b2680 3fff2690
+fdd920c0:  00000000 00000700 00000e00 00000d90
+fdd920d0:  00000ada 00000823 0000056d 000002b6
+fdd920e0:  00000000 00000000 00000000 00000000
+fdd920f0:  00000000 0a70000b 0e38002d 1304006b
+fdd92100:  190000cc 20500152 25400201 290c02dc
+fdd92110:  334803e6 39f80521 3f04068f 4c3c0832
+fdd92120:  54a00a0d 5adc0c22 5fdc0e72 640410ff
+fdd92130:  679c13ca 6ac416d6 70201a24 74981db5
+fdd92140:  786c218b 7bc42391 7ec425a8 817427d1
+fdd92150:  83e82a0c 86282c59 8a2c2eb8 8db0312b
+fdd92160:  90d033b0 939c3647 988038f2 9cac3bb0
+fdd92170:  a04c3e82 a3843ff1 a6684166 a90442e0
+fdd92180:  ab6c445f afac45e2 b360476b b6a448f9
+fdd92190:  b9944a8b bc3c4c23 bea84dbf c0e44f61
+fdd921a0:  c2f45108 c4e452b4 c6b05464 c9f8561a
+fdd921b0:  ccec57d6 cf9458b5 d2045996 d43c5a78
+fdd921c0:  d6505b5c d83c5c40 da045d26 dd4c5e0e
+fdd921d0:  e0385ef6 e2dc5fe0 e54460cb e98461b8
+fdd921e0:  ed3062a6 f3486395 f83c6485 fc646577
+fdd921f0:  fffc6666 00000000 00000000 00000000
+
+----- decoded -----
+  SDR2HDR_CTRL (0xfdd92010) raw : 0x00000100
+  sdr2hdr_eotf_en   (bit 0)     : 0
+  sdr2hdr_r2r_en    (bit 1)     : 0
+  sdr2hdr_r2r_mode  (bit 2)     : 0  # 0 = BT709_TO_BT2020
+  sdr2hdr_oetf_en   (bit 3)     : 0
+  sdr2hdr_bypass_en (bit 8)     : 1
+  => SDR2HDR: BYPASSED (hardware conversion NOT running)
+
+----- HDR2SDR -----
+  HDR2SDR_CTRL (0xfdd92000) raw : 0x00000000
+  hdr2sdr_en   (bit 0)          : 0
+
+===================== hdmi-state =====================
+----- what is on the wire -----
+  Connector:HDMI-A-1	Encoder: TMDS-200
+  bus_format[100a]: RGB888_1X24
+  overlay_mode[0] output_mode[f] SDR[0] color-encoding[BT.709] color-range[Full]
+  Display mode: 1920x1080p60
+
+----- connector properties (requested) -----
+
+----- connector sysfs -----
+  status: connected
+  enabled: enabled
+
+===================== vop-summary =====================
+===== VOP2 summary: s0 =====
+captured: 2026-09-11T15:02:53+03:00
+
+Video Port0: ACTIVE
+    Connector:HDMI-A-1	Encoder: TMDS-200
+	bus_format[100a]: RGB888_1X24
+	overlay_mode[0] output_mode[f] SDR[0] color-encoding[BT.709] color-range[Full]
+    Display mode: 1920x1080p60
+	dclk[148500 kHz] real_dclk[148500 kHz] aclk[750000 kHz] type[48] flag[5]
+	H: 1920 2008 2052 2200
+	V: 1080 1084 1089 1125
+	Fixed H: 1920 2008 2052 2200
+	Fixed V: 1080 1084 1089 1125
+    Cluster0-win0: ACTIVE
+	win_id: 0
+	format: AR24 little-endian (0x34325241) pixel_blend_mode[0] glb_alpha[0xff]
+	color: SDR[0] color-encoding[BT.601] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[0] r2y[0] csc mode[0]
+	zpos: 11
+	src: pos[0, 0] rect[1920 x 1080]
+	dst: pos[0, 0] rect[1920 x 1080]
+	buf[0]: addr: 0x0000000001fa4000 pitch: 7680 offset: 0
+
