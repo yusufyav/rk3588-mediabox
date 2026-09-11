@@ -8,6 +8,8 @@ build/
 *.o
 *.a
 *.bin.tmp
+__pycache__/
+*.py[cod]
 
 # Agent session telemetry and local tool settings
 .claude/
