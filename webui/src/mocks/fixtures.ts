@@ -1,8 +1,10 @@
 import type {
+  CastSession,
   DisplayResponse,
   HealthResponse,
   KodiResponse,
   NetworkResponse,
+  StremioStatus,
   SystemResponse,
 } from '../api/types'
 
@@ -17,6 +19,7 @@ export const SCENARIOS: Array<{ id: ScenarioName; label: string }> = [
 ]
 
 export const health: HealthResponse = {
+  media: { stremio: true, castToKodi: true, serverMount: '/server/', castDeviceId: 'mediabox-tv' },
   status: 'ok',
   version: 'mediaboxd 0.1.0-dev',
   uptimeSeconds: 191_240,
@@ -112,4 +115,20 @@ export function kodiFor(scenario: ScenarioName): KodiResponse {
     default:
       return kodiOffline
   }
+}
+
+export const stremio: StremioStatus = {
+  enabled: true,
+  reachable: true,
+  mount: '/server/',
+  serverVersion: '4.21.0',
+  castDevice: { id: 'mediabox-tv', name: 'MediaBox TV (Kodi)', type: 'external' },
+}
+
+export const castSession: CastSession = {
+  source: 'http://mediabox.local/server/2c0f4b1a/0',
+  kodiSource: 'http://127.0.0.1:11470/2c0f4b1a/0',
+  resumeSeconds: 21.5,
+  deviceId: 'mediabox-tv',
+  startedAt: 1_757_600_000,
 }

@@ -26,6 +26,10 @@ export const ENDPOINTS = {
 
   systemReboot: 'system/reboot',
   systemShutdown: 'system/shutdown',
+
+  stremio: 'stremio',
+  cast: 'cast',
+  castKodi: 'cast/kodi',
 } as const
 
 export type EndpointKey = keyof typeof ENDPOINTS

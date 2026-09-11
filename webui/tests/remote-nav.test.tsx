@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render } from '@testing-library/react'
 import { directionForKey, isBackKey, resolveNextFocus, type Candidate } from '../src/nav/spatial'
-import { BACK_EVENT, useRemoteNavigation } from '../src/nav/useRemoteNavigation'
-import { renderApp, StubTransport, stubResponses } from './helpers'
+import { BACK_EVENT, FOCUSABLE_SELECTOR, useRemoteNavigation } from '../src/nav/useRemoteNavigation'
 
 function rect(left: number, top: number, width = 100, height = 40) {
   return { left, top, width, height }
@@ -122,44 +121,89 @@ describe('Uzaktan kumanda gezinmesi', () => {
   })
 })
 
-describe('Uygulama içi gezinme', () => {
-  it('exposes every section as a focusable nav control in DOM order', async () => {
-    renderApp(new StubTransport(stubResponses()))
-    await screen.findByText('48.6 °C')
+describe('Medya uygulamasıyla ortak odak ağacı', () => {
+  it('also treats the media app\'s own controls as reachable', () => {
+    // Stremio marks its controls the ordinary way; from the sofa there is one
+    // UI, so both kinds have to be candidates.
+    const media = document.createElement('div')
+    media.setAttribute('tabindex', '0')
+    media.textContent = 'Poster'
+    document.body.appendChild(media)
+    const shellControl = document.createElement('button')
+    shellControl.setAttribute('data-focusable', '')
+    document.body.appendChild(shellControl)
 
-    const focusables = Array.from(document.querySelectorAll('[data-focusable]'))
-    const labels = focusables.slice(0, 6).map((element) => element.textContent)
+    const matches = Array.from(document.querySelectorAll(FOCUSABLE_SELECTOR))
 
-    expect(labels).toEqual([
-      'Genel Bakış',
-      'Oynatıcı',
-      'Cihaz',
-      'Ağ',
-      'Ayarlar',
-      'StremioYakında',
-    ])
+    expect(matches).toContain(media)
+    expect(matches).toContain(shellControl)
+    media.remove()
+    shellControl.remove()
   })
 
-  it('returns to the dashboard when the back key is pressed on a sub-page', async () => {
-    renderApp(new StubTransport(stubResponses()))
-    fireEvent.click(await screen.findByRole('button', { name: 'Cihaz' }))
-    expect(screen.getByRole('heading', { name: 'Cihaz', level: 1 })).toBeDefined()
+  it('does not offer controls that are switched off', () => {
+    const disabled = document.createElement('button')
+    disabled.disabled = true
+    document.body.appendChild(disabled)
+    const skipped = document.createElement('div')
+    skipped.setAttribute('tabindex', '-1')
+    document.body.appendChild(skipped)
 
-    fireEvent.keyDown(document, { key: 'Escape' })
+    const matches = Array.from(document.querySelectorAll(FOCUSABLE_SELECTOR))
 
-    expect(screen.getByRole('heading', { name: 'Genel Bakış', level: 1 })).toBeDefined()
+    expect(matches).not.toContain(disabled)
+    expect(matches).not.toContain(skipped)
+    disabled.remove()
+    skipped.remove()
+  })
+})
+
+describe('Kumandanın sahipliği', () => {
+  function MediaRouteHarness() {
+    useRemoteNavigation({
+      getRect: () => rect(0, 0),
+      isMediaKeyRoute: () => true,
+    })
+    return (
+      <button type="button" data-focusable="">
+        A
+      </button>
+    )
+  }
+
+  it('leaves the arrow keys to the media app while it is playing', () => {
+    // On the Stremio player, arrows seek. Taking them over would break scrubbing.
+    render(<MediaRouteHarness />)
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    const event = new KeyboardEvent('keydown', { key: 'ArrowRight', cancelable: true })
+
+    document.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(document.body)
+  })
+})
+
+describe('Geri tuşu', () => {
+  it('is left to the media app when the shell has nothing open', () => {
+    render(<Harness onActivate={() => {}} />)
+    const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+
+    document.dispatchEvent(event)
+
+    // Nothing consumed the back event, so the key is not claimed.
+    expect(event.defaultPrevented).toBe(false)
   })
 
-  it('keeps the back key inside an open dialog instead of leaving the page', async () => {
-    renderApp(new StubTransport(stubResponses()))
-    fireEvent.click(await screen.findByRole('button', { name: 'Ayarlar' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Cihazı yeniden başlat' }))
-    expect(await screen.findByRole('alertdialog')).toBeDefined()
+  it('is claimed when the shell consumes it', () => {
+    render(<Harness onActivate={() => {}} />)
+    const consume = (custom: Event) => custom.preventDefault()
+    window.addEventListener(BACK_EVENT, consume)
+    const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
 
-    fireEvent.keyDown(document, { key: 'Escape' })
+    document.dispatchEvent(event)
 
-    expect(screen.queryByRole('alertdialog')).toBeNull()
-    // The dialog consumed the back press; the page did not change underneath it.
-    expect(screen.getByRole('heading', { name: 'Ayarlar', level: 1 })).toBeDefined()
+    expect(event.defaultPrevented).toBe(true)
+    window.removeEventListener(BACK_EVENT, consume)
   })
 })

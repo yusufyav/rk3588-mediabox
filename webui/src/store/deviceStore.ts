@@ -5,6 +5,7 @@ import type {
   HealthResponse,
   KodiResponse,
   NetworkResponse,
+  StremioStatus,
   SystemResponse,
 } from '../api/types'
 
@@ -22,6 +23,8 @@ export interface DeviceState {
   network: Resource<NetworkResponse>
   kodi: Resource<KodiResponse>
   display: Resource<DisplayResponse>
+  /** Streaming-server reachability; drives Settings and Diagnostics only. */
+  stremio: Resource<StremioStatus>
   /** True while a push stream is delivering updates. */
   streamConnected: boolean
   /** False once every resource is failing with an unreachable error. */
@@ -31,7 +34,7 @@ export interface DeviceState {
   pendingAction?: string
 }
 
-type ResourceKey = 'health' | 'system' | 'network' | 'kodi' | 'display'
+type ResourceKey = 'health' | 'system' | 'network' | 'kodi' | 'display' | 'stremio'
 
 /** Poll cadences in ms. Kodi is fast because the player scrubber rides on it. */
 export const CADENCE: Record<ResourceKey, number> = {
@@ -40,6 +43,7 @@ export const CADENCE: Record<ResourceKey, number> = {
   health: 10_000,
   network: 10_000,
   display: 10_000,
+  stremio: 10_000,
 }
 
 /** When a push stream is live, polling drops to a slow safety net. */
@@ -57,6 +61,7 @@ function initialState(): DeviceState {
     network: { ...EMPTY },
     kodi: { ...EMPTY },
     display: { ...EMPTY },
+    stremio: { ...EMPTY },
     streamConnected: false,
     backendReachable: true,
   }
@@ -102,6 +107,7 @@ export class DeviceStore {
       network: () => this.load('network', this.api.getNetwork),
       kodi: () => this.load('kodi', this.api.getKodi),
       display: () => this.load('display', this.api.getDisplay),
+      stremio: () => this.load('stremio', this.api.getStremio),
     }
 
     for (const key of Object.keys(fetchers) as ResourceKey[]) {
@@ -149,6 +155,7 @@ export class DeviceStore {
       this.load('network', this.api.getNetwork),
       this.load('kodi', this.api.getKodi),
       this.load('display', this.api.getDisplay),
+      this.load('stremio', this.api.getStremio),
     ])
   }
 
@@ -201,7 +208,7 @@ export class DeviceStore {
   }
 
   private recomputeReachability() {
-    const keys: ResourceKey[] = ['health', 'system', 'network', 'kodi', 'display']
+    const keys: ResourceKey[] = ['health', 'system', 'network', 'kodi', 'display', 'stremio']
     const touched = keys.filter((k) => this.state[k].error || this.state[k].updatedAt)
     const reachable =
       touched.length === 0 || touched.some((k) => !this.state[k].error?.unreachable)

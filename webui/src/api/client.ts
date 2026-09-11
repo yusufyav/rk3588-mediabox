@@ -1,9 +1,12 @@
 import { ENDPOINTS } from './endpoints'
 import type {
+  CastRequest,
+  CastSession,
   DisplayResponse,
   HealthResponse,
   KodiResponse,
   NetworkResponse,
+  StremioStatus,
   SystemResponse,
 } from './types'
 
@@ -200,6 +203,21 @@ export class ApiClient {
   stopKodi = () => this.transport.request<void>(ENDPOINTS.kodiServiceStop, { method: 'POST' })
 
   restartKodi = () => this.transport.request<void>(ENDPOINTS.kodiServiceRestart, { method: 'POST' })
+
+  getStremio = (signal?: AbortSignal) =>
+    this.transport.request<StremioStatus>(ENDPOINTS.stremio, { signal })
+
+  getCastSession = (signal?: AbortSignal) =>
+    this.transport
+      .request<{ session: CastSession | null }>(ENDPOINTS.cast, { signal })
+      .then((response) => response?.session ?? null)
+
+  /** Hand a Stremio-resolved stream to Kodi, carrying the preview position. */
+  castToKodi = (request: CastRequest) =>
+    this.transport.request<{ status: string; result: CastSession }>(ENDPOINTS.castKodi, {
+      method: 'POST',
+      body: request,
+    })
 
   reboot = () => this.transport.request<void>(ENDPOINTS.systemReboot, { method: 'POST' })
 

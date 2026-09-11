@@ -21,20 +21,33 @@ describe('Yerleşim sınıfları', () => {
 })
 
 describe('Mobil yerleşim', () => {
-  it('renders the full dashboard on a phone viewport', async () => {
+  it('keeps the appliance controls usable on a phone', async () => {
     setViewport(390, 844)
     renderApp(new StubTransport(stubResponses()))
 
     await waitFor(() => expect(document.documentElement.dataset.layout).toBe('mobile'))
 
-    // Navigation, status and telemetry all survive the collapse to one column.
-    expect(screen.getByRole('button', { name: 'Ayarlar' })).toBeDefined()
-    expect(screen.getByText('48.6 °C')).toBeDefined()
-    expect(screen.getAllByText('Oynatılıyor').length).toBeGreaterThan(0)
-    expect(screen.getByRole('button', { name: 'Duraklat' })).toBeDefined()
+    // The same shell, on a touch screen: settings and TV control both reachable.
+    expect(screen.getByRole('button', { name: 'MediaBox ayarları' })).toBeDefined()
+    expect(screen.getByRole('button', { name: "TV'de oynatılanı göster" })).toBeDefined()
   })
 
-  it('switches to the TV class when the viewport grows', async () => {
+  it('carries the layout class onto the shell so TV spacing is scoped to it', async () => {
+    setViewport(1920, 1080)
+    renderApp(new StubTransport(stubResponses()))
+
+    const shell = await waitFor(() => {
+      const found = document.querySelector('[data-mediabox-shell]')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+
+    // The class lives on the shell, not only on <html>: the media app sharing
+    // this document must not inherit the appliance's type scale.
+    await waitFor(() => expect(shell.dataset.layout).toBe('tv'))
+  })
+
+  it('switches class when the viewport grows', async () => {
     setViewport(390, 844)
     renderApp(new StubTransport(stubResponses()))
     await waitFor(() => expect(document.documentElement.dataset.layout).toBe('mobile'))
@@ -42,6 +55,5 @@ describe('Mobil yerleşim', () => {
     setViewport(1920, 1080)
 
     await waitFor(() => expect(document.documentElement.dataset.layout).toBe('tv'))
-    expect(screen.getByRole('heading', { name: 'Genel Bakış', level: 1 })).toBeDefined()
   })
 })

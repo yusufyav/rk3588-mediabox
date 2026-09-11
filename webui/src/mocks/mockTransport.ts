@@ -60,6 +60,10 @@ export class MockTransport implements Transport {
         return fx.network as T
       case ENDPOINTS.display:
         return fx.display as T
+      case ENDPOINTS.stremio:
+        return fx.stremio as T
+      case ENDPOINTS.cast:
+        return { session: null } as T
       case ENDPOINTS.kodi:
         return structuredClone(this.kodi) as T
     }

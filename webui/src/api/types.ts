@@ -13,6 +13,39 @@ export interface HealthResponse {
   uptimeSeconds?: number
   /** Optional capability map; absent means "assume nothing is permitted". */
   actions?: ActionAvailability
+  /** Which media surfaces the backend is wired for. */
+  media?: MediaCapabilities
+}
+
+export interface MediaCapabilities {
+  /** The Stremio mount is served and proxied by this backend. */
+  stremio?: boolean
+  /** Streams can be handed to Kodi through the backend. */
+  castToKodi?: boolean
+  /** Path the streaming server is reachable under, e.g. `/server/`. */
+  serverMount?: string
+  /** Id of the cast device the backend registers with Stremio. */
+  castDeviceId?: string
+}
+
+export interface StremioStatus {
+  enabled: boolean
+  reachable: boolean
+  mount?: string
+  serverVersion?: string | null
+  castDevice?: { id: string; name: string; type: string }
+}
+
+/** The handoff the backend is currently responsible for. */
+export interface CastSession {
+  /** The stream URL as Stremio resolved it, against the proxy mount. */
+  source: string
+  /** The same stream as handed to Kodi: same path, loopback origin. */
+  kodiSource: string
+  resumeSeconds: number
+  deviceId: string
+  /** Epoch seconds. */
+  startedAt: number
 }
 
 export interface SystemResponse {
@@ -112,4 +145,11 @@ export interface SeekRequest {
 export interface OpenRequest {
   url: string
   resume_seconds?: number
+}
+
+export interface CastRequest {
+  source: string
+  /** Playback position in milliseconds, matching the upstream cast contract. */
+  time?: number
+  deviceId?: string
 }

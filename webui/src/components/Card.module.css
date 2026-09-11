@@ -1,32 +1,32 @@
 .card {
   display: flex;
   flex-direction: column;
-  gap: var(--gap-3);
-  padding: var(--gap-4) var(--gap-5);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  gap: var(--mb-gap-3);
+  padding: var(--mb-gap-4) var(--mb-gap-5);
+  background: var(--mb-surface);
+  border: 1px solid var(--mb-line);
+  border-radius: var(--mb-radius-lg);
 }
 
 .header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--gap-3);
+  gap: var(--mb-gap-3);
 }
 
 .title {
-  font-size: var(--fs-small);
+  font-size: var(--mb-fs-small);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--mb-text-faint);
 }
 
 .body {
   display: flex;
   flex-direction: column;
-  gap: var(--gap-3);
+  gap: var(--mb-gap-3);
 }
 
 .metric {
@@ -36,36 +36,36 @@
 }
 
 .metricLabel {
-  font-size: var(--fs-caption);
+  font-size: var(--mb-fs-caption);
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--mb-text-faint);
 }
 
 .metricValue {
-  font-size: var(--fs-title);
+  font-size: var(--mb-fs-title);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
 }
 
 .metricHint {
-  font-size: var(--fs-small);
-  color: var(--text-dim);
+  font-size: var(--mb-fs-small);
+  color: var(--mb-text-dim);
 }
 
 .rows {
   display: grid;
-  gap: var(--gap-2);
+  gap: var(--mb-gap-2);
 }
 
 .row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--gap-4);
+  gap: var(--mb-gap-4);
   padding-block: 0.35rem;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--mb-line);
 }
 
 .row:last-child {
@@ -73,8 +73,8 @@
 }
 
 .rowLabel {
-  color: var(--text-dim);
-  font-size: var(--fs-small);
+  color: var(--mb-text-dim);
+  font-size: var(--mb-fs-small);
 }
 
 .rowValue {
@@ -84,27 +84,27 @@
 }
 
 .mono {
-  font-family: var(--font-mono);
-  font-size: var(--fs-small);
+  font-family: var(--mb-font-mono);
+  font-size: var(--mb-fs-small);
 }
 
 .bar {
   height: 0.5rem;
   border-radius: 999px;
-  background: var(--surface-3);
+  background: var(--mb-surface-3);
   overflow: hidden;
 }
 
 .barFill {
   height: 100%;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--mb-accent);
 }
 
 .barFill[data-tone='warn'] {
-  background: var(--warn);
+  background: var(--mb-warn);
 }
 
 .barFill[data-tone='danger'] {
-  background: var(--danger);
+  background: var(--mb-danger);
 }

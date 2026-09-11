@@ -37,17 +37,18 @@ describe('Mock senaryoları', () => {
     expect((await screen.findAllByText(/Blade Runner 2049/)).length).toBeGreaterThan(0)
   })
 
-  it('serves an idle box', async () => {
+  it('serves an idle box, which shows no now-playing pill at all', async () => {
     renderMock('idle')
 
-    expect(await screen.findByRole('button', { name: 'Oynat' })).toBeDefined()
-    expect(screen.getByText('Oynatılan içerik yok')).toBeDefined()
+    await screen.findByRole('button', { name: 'MediaBox ayarları' })
+    expect(screen.queryByRole('button', { name: "TV'de oynatılanı göster" })).toBeNull()
   })
 
   it('serves a box whose Kodi is down', async () => {
     renderMock('kodi-offline')
 
-    expect(await screen.findByText(/Kodi çalışmıyor/)).toBeDefined()
+    await screen.findByRole('button', { name: 'MediaBox ayarları' })
+    expect(screen.queryByRole('button', { name: "TV'de oynatılanı göster" })).toBeNull()
   })
 
   it('serves an unreachable backend and shows the service error', async () => {

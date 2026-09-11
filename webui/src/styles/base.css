@@ -1,76 +1,61 @@
 @import './tokens.css';
 
-*,
-*::before,
-*::after {
+/*
+ * Base styling for the appliance layer only.
+ *
+ * The media experience owns the document: this file must never style `body`,
+ * `html`, or any bare element outside the shell, or it would reach into an app
+ * it does not own.
+ */
+[data-mediabox-shell],
+[data-mediabox-shell] *,
+[data-mediabox-shell] *::before,
+[data-mediabox-shell] *::after {
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
-  height: 100%;
-}
-
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font);
-  font-size: var(--fs-body);
+[data-mediabox-shell] {
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
 
-h1,
-h2,
-h3,
-p {
-  margin: 0;
-}
-
-button {
-  font: inherit;
-  color: inherit;
-}
-
 /*
- * Focus is never optional on this UI: a remote user has no cursor to fall back
- * on. Pointer users get :focus-visible, remote users get a ring on every move.
+ * Focus is never optional here: a remote has no cursor to fall back on. Pointer
+ * users get :focus-visible; once an arrow key is pressed, every focused control
+ * shows a ring.
  */
-:focus {
+[data-mediabox-shell] :focus {
   outline: none;
 }
 
-:focus-visible,
-:root[data-input='remote'] [data-focusable]:focus {
-  outline: 3px solid var(--focus);
+[data-mediabox-shell] :focus-visible,
+:root[data-input='remote'] [data-mediabox-shell] [data-focusable]:focus {
+  outline: 3px solid var(--mb-focus);
   outline-offset: 2px;
-  border-radius: var(--radius);
+  border-radius: var(--mb-radius);
 }
 
-:root[data-layout='tv'] :focus-visible,
-:root[data-layout='tv'][data-input='remote'] [data-focusable]:focus {
+[data-mediabox-shell][data-layout='tv'] :focus-visible,
+:root[data-input='remote'] [data-mediabox-shell][data-layout='tv'] [data-focusable]:focus {
   outline-width: 4px;
   outline-offset: 3px;
 }
 
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
+/*
+ * The media app marks its own controls the ordinary way. From the sofa there is
+ * one UI, so a remote-driven focus ring has to be visible on those too.
+ */
+:root[data-input='remote'] [tabindex='0']:focus,
+:root[data-input='remote'] a:focus,
+:root[data-input='remote'] button:focus {
+  outline: 3px solid #8fd6ff;
+  outline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  [data-mediabox-shell] *,
+  [data-mediabox-shell] *::before,
+  [data-mediabox-shell] *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }

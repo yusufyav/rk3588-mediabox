@@ -54,7 +54,68 @@ export function stubResponses(kodi: unknown = fx.kodiPlaying): Record<string, un
     [ENDPOINTS.network]: fx.network,
     [ENDPOINTS.display]: fx.display,
     [ENDPOINTS.kodi]: kodi,
+    [ENDPOINTS.stremio]: fx.stremio,
+    [ENDPOINTS.cast]: { session: null },
   }
+}
+
+export interface FakeCoreCall {
+  action: unknown
+  model?: string
+}
+
+/**
+ * Stands in for the transport the Stremio app publishes on `window.core`.
+ *
+ * The shell is only allowed to use that published surface, so a test double of
+ * it is enough to exercise every appliance behaviour without the media app.
+ */
+export class FakeCore {
+  readonly dispatched: FakeCoreCall[] = []
+
+  constructor(
+    private readonly state: Record<string, unknown> = {
+      ctx: { profile: { settings: { streamingServerUrl: 'http://127.0.0.1:11470/' } } },
+      player: {},
+    },
+  ) {}
+
+  getState = async (model: string): Promise<unknown> => this.state[model]
+
+  dispatch = async (action: unknown, model?: string): Promise<void> => {
+    this.dispatched.push({ action, model })
+  }
+
+  install() {
+    ;(window as unknown as { core: unknown }).core = this
+    return this
+  }
+
+  static uninstall() {
+    delete (window as unknown as { core?: unknown }).core
+  }
+
+  /** Every dispatched action of one kind, e.g. `StreamingServer`. */
+  actions(kind: string): Array<Record<string, unknown>> {
+    return this.dispatched
+      .map((call) => call.action as Record<string, unknown>)
+      .filter((action) => action?.action === kind)
+  }
+}
+
+/**
+ * A `<video>` standing in for the preview the media app is running, with the
+ * playhead a test wants it to be at.
+ */
+export function attachPreviewVideo(currentTime: number, src = 'http://box/server/abc/0') {
+  const video = document.createElement('video')
+  Object.defineProperty(video, 'currentTime', { value: currentTime, writable: true })
+  Object.defineProperty(video, 'duration', { value: 7200, writable: true })
+  Object.defineProperty(video, 'currentSrc', { value: src, writable: true })
+  Object.defineProperty(video, 'paused', { value: false, writable: true })
+  video.pause = () => Object.defineProperty(video, 'paused', { value: true, writable: true })
+  document.body.appendChild(video)
+  return video
 }
 
 export function renderApp(transport: Transport) {

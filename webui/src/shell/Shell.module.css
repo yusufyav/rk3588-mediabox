@@ -1,0 +1,94 @@
+/*
+ * The appliance layer sits over the media experience, so it claims no layout of
+ * its own: the root is inert and only its children take pointer events. Nothing
+ * here may push the media app around or paint over its content.
+ */
+.shell {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  pointer-events: none;
+  font-family: var(--mb-font);
+  color: var(--mb-text);
+}
+
+.shell > * {
+  pointer-events: auto;
+}
+
+.cluster {
+  position: absolute;
+  top: var(--mb-edge);
+  right: var(--mb-edge);
+  display: flex;
+  align-items: center;
+  gap: var(--mb-gap-2);
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--mb-touch);
+  height: var(--mb-touch);
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--mb-line);
+  background: var(--mb-scrim-solid);
+  color: var(--mb-text);
+  backdrop-filter: blur(8px);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mb-gap-2);
+  max-width: 22rem;
+  height: var(--mb-touch);
+  padding: 0 var(--mb-gap-4);
+  border-radius: calc(var(--mb-touch) / 2);
+  border: 1px solid var(--mb-line);
+  background: var(--mb-scrim-solid);
+  backdrop-filter: blur(8px);
+}
+
+.pillDot {
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--mb-ok);
+}
+
+.pillDot[data-state='paused'] {
+  background: var(--mb-warn);
+}
+
+.pillText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--mb-fs-small);
+}
+
+.mockMark {
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: var(--mb-warn-soft);
+  color: var(--mb-warn);
+  font-size: var(--mb-fs-caption);
+  font-weight: 600;
+}
+
+.alert {
+  position: absolute;
+  left: var(--mb-edge);
+  bottom: var(--mb-edge);
+  max-width: 28rem;
+}
+
+@media (max-width: 640px) {
+  .pill {
+    max-width: 9rem;
+  }
+}
