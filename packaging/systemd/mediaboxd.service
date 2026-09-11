@@ -14,7 +14,10 @@ TimeoutStopSec=10s
 # restarted, systemd must not kill a Kodi process it launched earlier.
 KillMode=process
 NoNewPrivileges=true
+# Kodi and mediaboxd intentionally share HOME/settings/logs below
+# /var/tmp/kodi-home. Keep PrivateTmp, but expose only that exact runtime path.
 PrivateTmp=true
+BindPaths=/var/tmp/kodi-home
 ProtectSystem=full
 ProtectHome=true
 ProtectKernelTunables=true

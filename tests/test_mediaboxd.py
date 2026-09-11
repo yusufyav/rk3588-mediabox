@@ -448,6 +448,31 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(result["default_route"]["gateway"], "10.0.0.1")
         self.assertTrue(all(isinstance(call, list) for call in calls))
 
+    def test_network_parser_falls_back_without_netlink(self):
+        def runner(argv, **_kwargs):
+            raise PermissionError("AF_NETLINK blocked")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            network = root / "sys/class/net/eth0"
+            route = root / "proc/net"
+            network.mkdir(parents=True)
+            route.mkdir(parents=True)
+            (network / "operstate").write_text("up\n", encoding="utf-8")
+            (network / "address").write_text("00:11:22:33:44:55\n", encoding="utf-8")
+            (network / "speed").write_text("1000\n", encoding="utf-8")
+            (route / "route").write_text(
+                "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+                "eth0 00000000 0100000A 0003 0 0 100 00000000 0 0 0\n",
+                encoding="utf-8",
+            )
+            result = Telemetry(
+                proc_root=root / "proc", sys_root=root / "sys", runner=runner
+            ).network()
+        self.assertEqual(result["default_route"]["interface"], "eth0")
+        self.assertEqual(result["default_route"]["gateway"], "10.0.0.1")
+        self.assertEqual(result["interfaces"][0]["link_speed_mbps"], 1000)
+
     def test_display_parser_uses_vendor_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             sys = Path(directory)

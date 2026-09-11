@@ -144,7 +144,10 @@ olduktan sonra başarılı döner.
   browse, komut veya path parametresi sunan endpoint yoktur.
 - URL şeması ve seek/resume değerleri RPC'den önce doğrulanır.
 - systemd unit `NoNewPrivileges`, filesystem/kernel/control-group korumaları,
-  dar address-family listesi ve restart policy uygular.
+  dar address-family listesi ve restart policy uygular. Kodi endpoint keşfi ve
+  lifecycle için `/var/tmp/kodi-home` iki süreç arasında bilinçli olarak paylaşılır;
+  unit genel `PrivateTmp=true` izolasyonunu koruyup yalnız bu exact yolu `BindPaths`
+  ile görünür kılar.
 
 ## Test
 

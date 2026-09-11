@@ -9,6 +9,8 @@ import re
 import shutil
 import socket
 import subprocess
+import fcntl
+import struct
 from pathlib import Path
 from typing import Any, Callable
 
@@ -136,6 +138,9 @@ class Telemetry:
         routes = self._run_json(["/usr/sbin/ip", "-j", "route", "show", "default"])
         if not routes:
             routes = self._run_json(["/usr/bin/ip", "-j", "route", "show", "default"])
+        if not routes:
+            fallback_route = self._proc_default_route()
+            routes = [fallback_route] if fallback_route else []
         by_name = {
             item.get("ifname"): item for item in addresses if isinstance(item.get("ifname"), str)
         }
@@ -154,6 +159,10 @@ class Telemetry:
                 for info in document.get("addr_info", [])
                 if info.get("family") == "inet" and isinstance(info.get("local"), str)
             ]
+            if not ipv4:
+                fallback_ipv4 = self._ioctl_ipv4(name)
+                if fallback_ipv4:
+                    ipv4 = [fallback_ipv4]
             operstate = (_read(network_root / name / "operstate") or "unknown").strip()
             is_wireless = (network_root / name / "wireless").exists()
             if is_wireless and wifi_ssid is None:
@@ -172,7 +181,7 @@ class Telemetry:
         if routes:
             route = routes[0]
             default_route = {
-                "interface": route.get("dev"),
+                "interface": route.get("dev") or route.get("interface"),
                 "gateway": route.get("gateway"),
                 "source": route.get("prefsrc"),
                 "metric": route.get("metric"),
@@ -190,6 +199,45 @@ class Telemetry:
         except ValueError:
             return None
         return value if value > 0 else None
+
+    @staticmethod
+    def _ioctl_ipv4(interface: str) -> str | None:
+        if len(interface.encode()) > 15:
+            return None
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as handle:
+                request = struct.pack("256s", interface.encode())
+                response = fcntl.ioctl(handle.fileno(), 0x8915, request)
+            return socket.inet_ntoa(response[20:24])
+        except OSError:
+            return None
+
+    def _proc_default_route(self) -> dict[str, Any] | None:
+        routes = (_read(self.proc_root / "net/route") or "").splitlines()
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        for line in routes[1:]:
+            fields = line.split()
+            if len(fields) < 8 or fields[1] != "00000000":
+                continue
+            try:
+                flags = int(fields[3], 16)
+                metric = int(fields[6])
+                gateway = socket.inet_ntoa(bytes.fromhex(fields[2])[::-1])
+            except (ValueError, OSError):
+                continue
+            if flags & 0x1:
+                candidates.append(
+                    (
+                        metric,
+                        {
+                            "interface": fields[0],
+                            "gateway": gateway,
+                            "source": self._ioctl_ipv4(fields[0]),
+                            "metric": metric,
+                        },
+                    )
+                )
+        return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
     def _wifi_ssid(self, interface: str) -> str | None:
         executable = shutil.which("iwgetid")
