@@ -1,0 +1,30 @@
+[Unit]
+Description=RK3588 MediaBox control plane
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/rk3588-mediabox
+ExecStart=/usr/bin/python3 -m mediaboxd --config /etc/mediaboxd.toml
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+# Kodi is an independently managed direct-KMS process. If this daemon is
+# restarted, systemd must not kill a Kodi process it launched earlier.
+KillMode=process
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0027
+ReadWritePaths=/var/tmp/kodi-home /run
+
+[Install]
+WantedBy=multi-user.target

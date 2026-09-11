@@ -1,0 +1,33 @@
+# Secure default: loopback only. A reverse proxy can provide the same-origin UI.
+bind_address = "127.0.0.1"
+port = 8787
+allow_lan = false
+log_level = "INFO"
+event_poll_seconds = 2.0
+
+# Disabled unless an operator explicitly enables it. Even then, the caller's
+# source address must match one of these networks.
+system_actions_enabled = false
+system_actions_allow_cidrs = ["127.0.0.0/8", "::1/128"]
+
+[kodi]
+# Empty means: discover the port/TLS/auth settings from the running Kodi HOME,
+# then from settings_paths. An override must be a complete http(s) URL.
+endpoint = ""
+settings_paths = ["/var/tmp/kodi-home/.kodi/userdata/guisettings.xml"]
+request_timeout_seconds = 2.0
+
+# Accepted production lifecycle from the S0/S1 evidence. mediaboxd invokes the
+# executable directly with an argv vector; these values are never a shell line.
+executable = "/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm"
+arguments = ["--standalone", "--debug"]
+working_directory = "/var/tmp/kodi-home"
+home = "/var/tmp/kodi-home"
+stdout_path = "/var/tmp/kodi-home/kodi-stdout.log"
+start_timeout_seconds = 20.0
+stop_timeout_seconds = 12.0
+
+[kodi.environment]
+AE_SINK = "ALSA"
+MEDIABOX_GPU = "mali"
+LD_LIBRARY_PATH = "/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib"
