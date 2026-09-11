@@ -1,0 +1,32 @@
+field	android_G1	android_G2	android_G3	linux_video_only	linux_0009_osd	linux_gui_nonpq	linux_sentinel	interpretation
+topology	Cluster0-win0(video)+Esmart0-win0(gui)	same as G1	same as G1	Esmart0-win0(video) only	Esmart0-win0(video)+Cluster0-win0(gui)	Esmart0-win0(video)+Cluster0-win0(gui)	Esmart0-win0(video)+Cluster0-win0(gui)+4x4 sentinel	Android and Linux put video and GUI on swapped plane classes
+video_plane	Cluster0-win0	Cluster0-win0	Cluster0-win0	Esmart0-win0	Esmart0-win0	Esmart0-win0	Esmart0-win0	Android video is on a Cluster window, Linux video is on an Esmart window
+gui_plane	Esmart0-win0	Esmart0-win0	Esmart0-win0	(none)	Cluster0-win0	Cluster0-win0	Cluster0-win0	mirror image of the row above
+video_format	YU10 AFBC	YU10 AFBC	YU10 AFBC	NV15 linear	NV15 linear	NV15 linear	NV15 linear	Android scans out AFBC-compressed 10-bit YUV, Linux scans out linear NV15
+gui_format	AB24 linear	AB24 linear	AB24 linear	(none)	AR24 linear	AR24 linear	AR24 linear	equivalent 8-bit RGBA in both
+video_plane_eotf	HDR[2] ST2084	HDR[2] ST2084	HDR[2] ST2084	HDR10[2] ST2084	HDR10[2] ST2084	HDR10[2] ST2084	HDR10[2] ST2084	identical - not a difference
+gui_plane_eotf	SDR[0]	SDR[0]	SDR[0]	(none)	HDR10[2] ST2084	GAMMA HDR[1]	HDR10[2] ST2084	PRIMARY DIFFERENCE: Android leaves the GUI plane SDR, Linux 0009 tags it PQ
+gui_buffer_encoding	plain sRGB (SurfaceFlinger, no PQ encode)	plain sRGB	plain sRGB	(none)	PQ-encoded by Kodi GUI compositor	PQ-encoded by Kodi GUI compositor	PQ-encoded by Kodi GUI compositor	PRIMARY DIFFERENCE: only Android hands the hardware genuinely SDR pixels
+video_plane_csc	y2r[1] mode[3]	y2r[1] mode[3]	y2r[1] mode[3]	y2r[0] mode[0]	y2r[0] mode[0]	y2r[1] mode[3]	y2r[0] mode[0]	follows from plane class and overlay domain
+gui_plane_csc	y2r[0] r2y[0] mode[0]	same	same	(none)	r2y[1] mode[3]	r2y[0] mode[0]	r2y[1] mode[3]	Linux 0009 runs an RGB-to-YUV conversion on the GUI plane
+gui_plane_zpos	1	1	1	(none)	11	11	11	both keep video at the bottom, so vop2_zpos[0] is the video plane in both
+vp_eotf	2 (PQ)	2	2	HDR10[2]	HDR10[2]	HDR10[2]	HDR10[2]	identical - not a difference
+vp_colorspace	10 (BT2020)	10	10	BT.2020 Limited	BT.2020 Limited	BT.2020 Limited	BT.2020 Limited	identical - not a difference
+overlay_mode	0 (RGB mixing)	0	0	1 (YUV mixing)	1 (YUV mixing)	0	0	consequence of sdr2hdr_en, not an independent cause (falsified by rejected kernel fix 2)
+SDR2HDR_CTRL_0x2010	0x0000000b	0x0000000b	0x0000000b	0x00000100	0x00000100	not measured (inferred ON)	not measured (inferred ON)	DECISIVE: Android runs hardware SDR2HDR, accepted Linux 0009 has it bypassed
+sdr2hdr_eotf_en	1	1	1	0	0	inferred 1	inferred 1	bit0 of 0x2010
+sdr2hdr_r2r_en	1	1	1	0	0	inferred 1	inferred 1	bit1 of 0x2010, r2r_mode = BT709_TO_BT2020
+sdr2hdr_oetf_en	1	1	1	0	0	inferred 1	inferred 1	bit3 of 0x2010
+sdr2hdr_bypass_en	0	0	0	1	1	inferred 0	inferred 0	bit8 of 0x2010
+hdr2sdr_en	0	0	0	0	0	0	0	no HDR-to-SDR anywhere - hdr_out is PQ in every arm
+hdr_lut_loaded	yes (sdr2hdr curve, SDR2HDR_FOR_HDR)	yes	yes	no	no	inferred yes	inferred yes	kernel loads the curve only when sdr2hdr_en
+win_dly_cluster0	0x11 (17)	0x11	0x11	0x04 (4)	0x04 (4)	not measured	not measured	Android Cluster0 carries the HDR video, so it uses HIHO_H(29) - bg_ovl_dly(12)
+win_dly_esmart0	0x17 (23)	0x17	0x17	0x24 (36)	0x24 (36)	not measured	not measured	Linux Esmart0 carries the HDR video, so it uses HIHO_H(48) - bg_ovl_dly(12)
+pre_scan_htiming	0x03f4002c	0x03f4002c	0x03f4002c	0x07b40058	0x07b40058	not measured	0x07b60058	scan start differs only by hdisplay and hsync_len; bg_dly is 53 in both
+bg_dly	53	53	53	53	53	not measured	55	identical - already retired as a cause by the previous gate
+bus_format	YUYV10_1X20	YUYV10_1X20	YUYV10_1X20	YUYV10_1X20	YUYV10_1X20	YUYV10_1X20	YUYV10_1X20	identical - not a difference
+display_mode	1920x1080p60	1920x1080p60	1920x1080p60	3840x2160p24	3840x2160p24	3840x2160p24	3840x2160p24	Android downscales 4K to 1080p in VOP2; not related to the fault (fault reproduces at 1080p on Linux too)
+hwc_composition_video	DEVICE	DEVICE	DEVICE	n/a (no HWC)	n/a	n/a	n/a	Android keeps the video on a hardware plane in every state
+hwc_composition_gui	CLIENT (SF client target)	CLIENT	CLIENT	n/a	n/a	n/a	n/a	Android GPU-composites the GUI into one SDR buffer, then scans it out
+physical_horizontal_shift	NO	NO	NO	NO	YES (displaced)	NO	NO (0 of 20)	the fault appears only in the all-PQ multilayer arm
+osd_colour_correct	YES	YES	YES	n/a	YES	NO (washed-out blue)	NO (washed-out blue)	only Android achieves correct colour AND no shift at the same time

@@ -1,0 +1,3 @@
+             command   pid dev master a   uid      magic
+     composer@2.1-se   325   0   y    y  1000          0
+      HwBinder:380_2   427   0   n    n  1000          0

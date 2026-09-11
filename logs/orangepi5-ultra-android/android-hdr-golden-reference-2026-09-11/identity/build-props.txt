@@ -1,0 +1,12 @@
+ro.build.fingerprint=rockchip/rk3588_t/rk3588_t:13/TQ3C.230805.001.B2/eng.yu.20250802.104257:userdebug/release-keys
+ro.vendor.build.fingerprint=rockchip/rk3588_t/rk3588_t:13/TQ3C.230805.001.B2/yu08021041:userdebug/release-keys
+ro.build.version.release=13
+ro.build.version.incremental=eng.yu.20250802.104257
+ro.build.version.security_patch=2023-08-05
+ro.product.board=rk30sdk
+ro.board.platform=rk3588
+ro.hardware=rk30board
+ro.build.display.id=rk3588_t-userdebug 13 TQ3C.230805.001.B2 eng.yu.20250802.104257 release-keys
+ro.build.date=Sat Aug  2 10:41:46 UTC 2025
+ro.build.type=userdebug
+ro.build.tags=release-keys

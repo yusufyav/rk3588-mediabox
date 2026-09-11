@@ -1,0 +1,3 @@
+-rw-rw---- 1 u0_a94 media_rw 12081238172 2026-09-11 12:24 /data/media/0/Download/Past.Lives.2023.2160p.4K.WEB.x265.10bit.AAC5.1-[YTS.MX]/past.lives.2023.hdr.2160p.web.h265-huzzah.mkv
+f4e32b8d3feb7efdebaaefaf7338a25bcc86ee144bf82bd4b93da6b80906f96a  /data/media/0/Download/Past.Lives.2023.2160p.4K.WEB.x265.10bit.AAC5.1-[YTS.MX]/past.lives.2023.hdr.2160p.web.h265-huzzah.mkv
+    3m18.52s real     0m17.44s user     0m17.43s system

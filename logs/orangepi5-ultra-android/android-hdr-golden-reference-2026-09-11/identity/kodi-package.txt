@@ -1,0 +1,12 @@
+### pm path
+package:/data/app/~~aZZT37kHh5gXNAjqgc0Ohg==/org.xbmc.kodi-lZozgatdDMNeVrHads6TAQ==/base.apk
+
+### dumpsys package version
+    codePath=/data/app/~~aZZT37kHh5gXNAjqgc0Ohg==/org.xbmc.kodi-lZozgatdDMNeVrHads6TAQ==
+    primaryCpuAbi=arm64-v8a
+    versionCode=2103000 minSdk=21 targetSdk=34
+    versionName=21.3
+    lastUpdateTime=2026-09-11 12:13:35
+      firstInstallTime=2026-09-11 12:13:35
+-rw-r--r-- 1 system system 68167494 2026-09-11 12:13 /data/app/~~aZZT37kHh5gXNAjqgc0Ohg==/org.xbmc.kodi-lZozgatdDMNeVrHads6TAQ==/base.apk
+34e7526705a038fa12f70161d0c1cc38f10deb0fee305b46fbd46ff015d05b44  /data/app/~~aZZT37kHh5gXNAjqgc0Ohg==/org.xbmc.kodi-lZozgatdDMNeVrHads6TAQ==/base.apk

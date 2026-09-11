@@ -1,0 +1,7 @@
+== /sys/class/drm/card0-HDMI-A-1/dpms
+On
+== /sys/class/drm/card0-HDMI-A-1/enabled
+enabled
+== /sys/class/drm/card0-HDMI-A-1/status
+connected
+== /sys/class/drm/card0-HDMI-A-1/uevent

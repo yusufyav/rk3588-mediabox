@@ -1,0 +1,5 @@
+### pm list kodi
+package:org.xbmc.kodi
+
+### pm list media/video
+package:org.xbmc.kodi

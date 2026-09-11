@@ -1,0 +1,18 @@
+=== /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ===
+-rwxr-xr-x 1 root shell 83880 2025-08-02 14:22 /vendor/bin/hw/android.hardware.graphics.composer@2.1-service
+2dff63aee42249e61826d2d9bfe384d1d1d8ca67138d679a69cc034147c78e60  /vendor/bin/hw/android.hardware.graphics.composer@2.1-service
+=== /vendor/lib64/hw/hwcomposer.rk30board.so ===
+-rw-r--r-- 1 root root 879968 2025-08-02 14:23 /vendor/lib64/hw/hwcomposer.rk30board.so
+1a639074181aadc1d850c1d48db082aebc2bf292a3c9f610f573414d4d4ea09a  /vendor/lib64/hw/hwcomposer.rk30board.so
+=== /vendor/lib64/librkvt.so ===
+-rw-r--r-- 1 root root 14760 2025-08-02 14:22 /vendor/lib64/librkvt.so
+518a6932597a0c7dd1afe507725bcfd6e893097c339fc0e7e77dc8c0c9ca4c6c  /vendor/lib64/librkvt.so
+=== /vendor/lib64/libbaseparameter.so ===
+-rw-r--r-- 1 root root 27384 2025-08-02 14:22 /vendor/lib64/libbaseparameter.so
+43dfc1c5fbd7dd9dff98f23fe9391011ccf07a53615e671b5d373e0ebac7b759  /vendor/lib64/libbaseparameter.so
+=== /vendor/lib64/librga.so ===
+-rw-r--r-- 1 root root 188696 2025-08-02 14:22 /vendor/lib64/librga.so
+7777fa74cbcb8df81f05d30226e4a4fa580380d32019213f3f7b36a851db74e5  /vendor/lib64/librga.so
+=== /vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-bifrost.so ===
+-rw-r--r-- 1 root root 134392 2025-08-02 14:29 /vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-bifrost.so
+1cd0116ee2f09fa05c2b9d3e71038b468ed4324c25690bba9f214275f59d169e  /vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-bifrost.so

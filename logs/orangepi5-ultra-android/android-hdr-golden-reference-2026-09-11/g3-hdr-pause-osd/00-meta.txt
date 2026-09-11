@@ -1,0 +1,3 @@
+# state: G3 = HDR10 PAUSED, OSD visible
+# host_utc: 2026-09-11T10:59:54Z
+# device_uptime: 766.08 5112.32
