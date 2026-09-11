@@ -1,0 +1,90 @@
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -73,6 +73,11 @@
+   // does not apply a second SDR-to-HDR conversion.
+   void SetGuiPlaneEotf(bool hdrEncoded);
+ 
++  // True when the display can compose an SDR GUI plane over an HDR video plane
++  // itself, so Kodi does not have to transfer-encode the GUI to reach an HDR
++  // output.
++  bool CanDisplayComposeSdrGuiOverHdrVideo();
++
+   // True when a YUV buffer is bound to a video plane for direct scanout, in
+   // which case the composed output reaching the connector is YCbCr rather
+   // than the RGB the GUI plane would produce on its own.
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -977,6 +977,33 @@
+              plane->GetId(), hdrEncoded, static_cast<uint64_t>(eotf));
+ }
+ 
++bool CWinSystemGbm::CanDisplayComposeSdrGuiOverHdrVideo()
++{
++  // Some display controllers convert an SDR layer into the HDR output
++  // themselves when the composition mixes SDR and HDR layers, which is how the
++  // vendor Android stack drives this hardware: the GUI stays plain sRGB on a
++  // plane tagged SDR, the video plane is tagged PQ, and the controller does the
++  // SDR-to-HDR conversion. Kodi's software HDR compositor defeats that path by
++  // PQ-encoding the GUI and tagging its plane PQ as well, leaving the hardware
++  // nothing to recognise as SDR.
++  //
++  // The capability is expressed rather than assumed. Direct-to-plane scanout
++  // must be running with a GUI plane distinct from the video plane, and both
++  // planes must carry the per-plane EOTF property, since that is what lets the
++  // mix be described to the hardware at all. Displays that cannot be told which
++  // layer is SDR keep Kodi's software compositing path.
++  if (!m_DRM)
++    return false;
++
++  CDRMPlane* videoPlane = m_DRM->GetVideoPlane();
++  CDRMPlane* guiPlane = m_DRM->GetGuiPlane();
++
++  if (!videoPlane || !guiPlane || videoPlane == guiPlane)
++    return false;
++
++  return videoPlane->SupportsProperty("EOTF") && guiPlane->SupportsProperty("EOTF");
++}
++
+ bool CWinSystemGbm::IsHDRDisplay()
+ {
+   auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
+diff --git a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
+--- a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
+@@ -196,6 +196,15 @@
+ {
+   m_guiCompositing = (colorTransfer != 0);
+ 
++  // Prefer the display's own SDR-to-HDR composition where it exists: keep the
++  // GUI in the ordinary SDR render path, on a plane tagged SDR, and let the
++  // hardware lift it into the HDR output alongside the video plane.
++  if (m_guiCompositing && CanDisplayComposeSdrGuiOverHdrVideo())
++  {
++    CLog::Log(LOGDEBUG, "CWinSystemGbmGLESContext: GUI left SDR for hardware SDR-to-HDR composition");
++    m_guiCompositing = false;
++  }
++
+   if (m_guiCompositing)
+   {
+     if (!m_compositeShader)
+diff --git a/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp b/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp
+--- a/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbmGLContext.cpp
+@@ -215,6 +215,15 @@
+   // HLG and LUT-based PQ are not yet implemented.
+   m_guiCompositing = (colorTransfer != 0);
+ 
++  // Prefer the display's own SDR-to-HDR composition where it exists: keep the
++  // GUI in the ordinary SDR render path, on a plane tagged SDR, and let the
++  // hardware lift it into the HDR output alongside the video plane.
++  if (m_guiCompositing && CanDisplayComposeSdrGuiOverHdrVideo())
++  {
++    CLog::Log(LOGDEBUG, "CWinSystemGbmGLContext: GUI left SDR for hardware SDR-to-HDR composition");
++    m_guiCompositing = false;
++  }
++
+   if (m_guiCompositing)
+   {
+     if (!m_compositeShader)
