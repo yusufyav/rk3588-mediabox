@@ -211,7 +211,7 @@ class Telemetry:
                 "mode": None,
                 "refresh_hz": None,
                 "colour": None,
-                "depth_bits": None,
+                "depth_bits_per_component": None,
                 "hdr": None,
             }
         card_name = connector.name.split("-HDMI-A-", 1)[0]
@@ -229,7 +229,7 @@ class Telemetry:
             "mode": mode,
             "refresh_hz": refresh,
             "colour": details.get("colour"),
-            "depth_bits": details.get("depth_bits"),
+            "depth_bits_per_component": details.get("depth_bits_per_component"),
             "hdr": details.get("hdr"),
         }
 
@@ -239,22 +239,41 @@ class Telemetry:
         summary = _read(self.sys_root / "kernel/debug/dri" / card_index / "summary") or ""
         text = state + "\n" + summary
         details: dict[str, Any] = {}
-        mode_match = re.search(r"Display mode:\s*([^\s]+)", text)
+        mode_match = re.search(r"Display mode:\s*([^\s]+)", summary)
         if mode_match:
             details["mode"] = mode_match.group(1)
             refresh_match = re.search(r"(?:p|i)(\d+(?:\.\d+)?)$", mode_match.group(1))
             if refresh_match:
                 details["refresh_hz"] = float(refresh_match.group(1))
-        colour_parts = []
-        for label in ("bus_format", "output_mode", "color-encoding", "color-range"):
-            match = re.search(rf"{re.escape(label)}(?:\[[^]]*\])?[:=]\s*([^\s]+)", text, re.I)
-            if match:
-                colour_parts.append(f"{label}={match.group(1)}")
-        details["colour"] = ", ".join(colour_parts) or None
-        depth_match = re.search(r"(?:color_depth|depth)(?:\[[^]]*\])?[:=]\s*(\d+)(?:bit)?", text, re.I)
-        if depth_match:
-            value = int(depth_match.group(1))
-            details["depth_bits"] = 24 if value == 8 else 30 if value == 10 else value
-        hdr_match = re.search(r"(?:HDR_OUTPUT_METADATA|EOTF|HDR10|SDR2HDR)[^\n]*", text, re.I)
-        details["hdr"] = hdr_match.group(0).strip() if hdr_match else None
+        bus_match = re.search(r"bus_format\[[^]]*\]:\s*([A-Z0-9_]+)", summary)
+        port_match = re.search(
+            r"output_mode\[[^]]*\]\s+([A-Z0-9]+)\[(\d+)\]"
+            r"\s+color-encoding\[([^]]+)\]\s+color-range\[([^]]+)\]",
+            summary,
+            re.I,
+        )
+        bus_format = bus_match.group(1) if bus_match else None
+        details["colour"] = {
+            "bus_format": bus_format,
+            "encoding": port_match.group(3) if port_match else None,
+            "range": port_match.group(4) if port_match else None,
+        }
+        if bus_format:
+            if "101010" in bus_format or "10_" in bus_format or "10BIT" in bus_format:
+                details["depth_bits_per_component"] = 10
+            elif "888" in bus_format or "8_" in bus_format or "8BIT" in bus_format:
+                details["depth_bits_per_component"] = 8
+        if port_match:
+            mode = port_match.group(1).upper()
+            eotf_tag = int(port_match.group(2))
+            details["hdr"] = {
+                "active": mode.startswith("HDR") or eotf_tag != 0,
+                "mode": mode,
+                "eotf_tag": eotf_tag,
+            }
+        else:
+            hdr_match = re.search(
+                r"(?:HDR_OUTPUT_METADATA|EOTF|HDR10|SDR2HDR)[^\n]*", text, re.I
+            )
+            details["hdr"] = hdr_match.group(0).strip() if hdr_match else None
         return details

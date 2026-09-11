@@ -282,6 +282,29 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(result["default_route"]["gateway"], "10.0.0.1")
         self.assertTrue(all(isinstance(call, list) for call in calls))
 
+    def test_display_parser_uses_vendor_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sys = Path(directory)
+            connector = sys / "class/drm/card0-HDMI-A-1"
+            debug = sys / "kernel/debug/dri/0"
+            connector.mkdir(parents=True)
+            debug.mkdir(parents=True)
+            (connector / "status").write_text("connected\n", encoding="utf-8")
+            (connector / "modes").write_text("3840x2160\n", encoding="utf-8")
+            (debug / "summary").write_text(
+                "Video Port0: ACTIVE\n"
+                "  bus_format[2025]: YUYV10_1X20\n"
+                "  overlay_mode[0] output_mode[f] HDR10[2] "
+                "color-encoding[BT.2020] color-range[Limited]\n"
+                "  Display mode: 3840x2160p23.98\n",
+                encoding="utf-8",
+            )
+            result = Telemetry(sys_root=sys).display()
+        self.assertEqual(result["mode"], "3840x2160p23.98")
+        self.assertEqual(result["depth_bits_per_component"], 10)
+        self.assertEqual(result["colour"]["encoding"], "BT.2020")
+        self.assertEqual(result["hdr"], {"active": True, "mode": "HDR10", "eotf_tag": 2})
+
 
 class SecurityTest(unittest.TestCase):
     def test_lan_bind_requires_explicit_opt_in(self):
