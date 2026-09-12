@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Developer entry point for the media core. Runs from a checkout or from a
+# staging directory on the appliance; no installation step.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from media.tools.cli import main; sys.exit(main())' "$here" "$@"
