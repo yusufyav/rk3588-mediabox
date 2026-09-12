@@ -268,6 +268,31 @@ acceptance önceki ajan tarafından zaten doğrulanmıştı.
 Kodi direct-KMS bağımsız servis olarak korunmuştur; Rust daemon ona yalnızca
 sabit `systemctl` argv ve JSON-RPC üzerinden dokunur.
 
+### Kapanış sonrası gözlem — Kodi 16:32:30'da durdu (regresyon değil)
+
+Smoke sırasında (16:29) Kodi `active/enabled`, JSON-RPC erişilebilir, `state=idle`
+idi. Kapanış doğrulamasında (16:33) `inactive/enabled` görüldü. Kök neden
+araştırıldı ve **entegrasyonla ilgisi olmadığı** kanıtlandı:
+
+```
+kodi.service: Main process exited, code=exited, status=0/SUCCESS
+kodi.service: Deactivated successfully.   (16:32:30, 2h 25min çalışma sonrası)
+```
+
+- Çıkış **exit 0** — crash değil, temiz kullanıcı çıkışı. `Restart=on-failure`
+  olduğu için (bilinçli politika) servis yeniden başlatılmadı.
+- `journalctl -u mediaboxd-rs --since 16:25` → **"No entries"**. Rust control
+  plane bu pencerede hiçbir işlem yapmadı; Kodi'yi durduran o değil.
+- 16:32:36'da (çıkıştan 6 sn sonra) `ROOT LOGIN ON tty1`; `loginctl` ile
+  doğrulandı: session 104, seat0, tty1, `Active=yes`, `State=active`.
+  `fuser /dev/dri/card*` → DRM master boş.
+
+Sonuç: cihaz başındaki kullanıcı Kodi'den çıkıp fiziksel konsola düşmüştür.
+Servis `enabled` olduğu için sonraki boot'ta veya `systemctl start kodi` ile
+normal döner. tty1'de aktif kullanıcı oturumu bulunduğundan bu kapanış
+sırasında Kodi **bilinçli olarak yeniden başlatılmadı** — başlatmak
+kullanıcının aktif konsol oturumundan DRM/ekranı geri alırdı.
+
 ## 14. Physical input durumu
 
 Regression riski: Rust daemon'ın USB klavyeyi `EVIOCGRAB` ile exclusive alıp
@@ -439,7 +464,7 @@ Hedef: `10.27.27.25` (`orangepi5-ultra`, aarch64), uptime 2s 22dk.
 |---|---|---|---|
 | `mediaboxd-rs.service` | **active** | **enabled** | Rust control plane — HTTP otoritesi |
 | `mediabox-media-worker.service` | **active** | **enabled** | Python media worker (loopback) |
-| `kodi.service` | **active** | **enabled** | Direct-KMS oynatıcı |
+| `kodi.service` | active (smoke 16:29) → inactive (16:32, kullanıcı çıkışı) | **enabled** | Direct-KMS oynatıcı — bkz. Bölüm 13 notu |
 | `mediaboxd.service` | **inactive** | **disabled** | Eski Python control plane (emekli) |
 | `kodi-standalone.service` | inactive | not-found | Kullanılmıyor |
 
