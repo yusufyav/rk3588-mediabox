@@ -8,4 +8,3 @@ license.workspace = true
 libc.workspace = true
 mediabox-core = { path = "../mediabox-core" }
 thiserror.workspace = true
-

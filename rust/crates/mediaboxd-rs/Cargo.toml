@@ -20,4 +20,3 @@ tempfile = "3.27.0"
 [[bin]]
 name = "mediaboxd-rs"
 path = "src/main.rs"
-

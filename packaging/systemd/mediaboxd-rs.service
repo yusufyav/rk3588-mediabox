@@ -35,4 +35,3 @@ ReadWritePaths=/run/mediabox
 
 [Install]
 WantedBy=multi-user.target
-

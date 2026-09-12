@@ -8,4 +8,3 @@ license.workspace = true
 mediabox-core = { path = "../mediabox-core" }
 serde.workspace = true
 tokio.workspace = true
-

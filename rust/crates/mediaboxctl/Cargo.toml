@@ -13,4 +13,3 @@ tokio.workspace = true
 [[bin]]
 name = "mediaboxctl"
 path = "src/main.rs"
-
