@@ -135,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     eprintln!("mediaboxd-rs hazır: {}", args.socket.display());
-    tokio::signal::ctrl_c().await?;
+    shutdown_signal().await?;
     stop.store(true, Ordering::Relaxed);
     unix_task.abort();
     if let Some(task) = http_task {
@@ -146,6 +146,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(state);
     let _ = std::fs::remove_file(&args.socket);
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result?,
+        _ = terminate.recv() => {},
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }
 
