@@ -1,5 +1,6 @@
 use crate::kodi::KodiClient;
 use crate::lifecycle::KodiLifecycle;
+use crate::media::MediaClient;
 use mediabox_cec::Adapter;
 use mediabox_core::{CecStatus, InputSource, Request, Response, ServiceHealth, SystemStatus};
 use mediabox_input::{InputManager, KodiRoute, RouteDecision};
@@ -30,6 +31,7 @@ pub struct AppState {
     pub lifecycle: KodiLifecycle,
     pub cec: CecRuntime,
     pub input: InputManager,
+    pub media: Arc<MediaClient>,
 }
 
 impl AppState {
@@ -65,6 +67,14 @@ impl AppState {
             }
             Request::CecWakeTv => cec_action(&self.cec, |adapter| adapter.wake_tv()).await,
             Request::CecStandbyTv => cec_action(&self.cec, |adapter| adapter.standby_tv()).await,
+            Request::MediaStatus => media_result(self.media.status().await),
+            Request::MediaSearch { query } => media_result(self.media.search(&query).await),
+            Request::MediaInspect { url } => media_result(self.media.inspect(&url).await),
+            Request::MediaStreams { media_type, id } => {
+                media_result(self.media.streams(&media_type, &id).await)
+            }
+            Request::MediaPolicy { url } => media_result(self.media.policy(&url).await),
+            Request::MediaSessions => media_result(self.media.sessions().await),
             Request::InputInject { action } => {
                 let decision = self.input.publish(action, InputSource::Api, true, None);
                 if let Err(error) = apply_kodi_route(&self.kodi, decision).await {
@@ -84,6 +94,12 @@ impl AppState {
         let kodi = self.kodi.status().await;
         let cec = self.cec.status();
         let system = system_snapshot();
+        let media = match self.media.status().await {
+            Ok(value) => value,
+            Err(error) => {
+                json!({"available":false,"error":{"code":"MEDIA_WORKER_UNAVAILABLE","message":error.to_string()}})
+            }
+        };
         let input_devices = mediabox_input::enumerate()
             .into_iter()
             .filter_map(|item| serde_json::to_value(item).ok())
@@ -104,6 +120,14 @@ impl AppState {
                 healthy: cec.available,
                 detail: cec.error.clone(),
             },
+            ServiceHealth {
+                name: "media-worker".into(),
+                healthy: media.get("available").and_then(Value::as_bool) != Some(false),
+                detail: media
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            },
         ];
         SystemStatus {
             version: env!("CARGO_PKG_VERSION").into(),
@@ -119,6 +143,7 @@ impl AppState {
             services,
             kodi,
             cec,
+            media,
         }
     }
 }
@@ -156,6 +181,13 @@ fn result(value: Result<Value, crate::kodi::KodiError>) -> Response {
     match value {
         Ok(value) => Response::success(value),
         Err(error) => Response::failure("KODI_ERROR", error.to_string()),
+    }
+}
+
+fn media_result(value: Result<Value, crate::media::MediaError>) -> Response {
+    match value {
+        Ok(value) => Response::success(value),
+        Err(error) => Response::failure("MEDIA_WORKER_ERROR", error.to_string()),
     }
 }
 
@@ -403,6 +435,9 @@ mod tests {
                 },
             },
             input: InputManager::new(InputMode::Ui),
+            media: Arc::new(
+                MediaClient::new("http://127.0.0.1:9", Duration::from_millis(20)).unwrap(),
+            ),
         });
         let task = tokio::spawn(serve_unix(listener, state));
         let mut stream = UnixStream::connect(&socket).await.unwrap();

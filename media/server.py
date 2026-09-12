@@ -9,7 +9,9 @@ directly and does not use this module.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
+import os
 import signal
 import socket
 import sys
@@ -113,7 +115,21 @@ def main(argv: list[str] | None = None) -> int:
         help="absolute directory a file:// source may live under (repeatable)",
     )
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--idle-timeout", type=float, default=45.0)
+    parser.add_argument(
+        "--torrent-network-status",
+        default=os.environ.get("MEDIABOX_TORRENT_NETWORK_STATUS", "UNKNOWN"),
+    )
     arguments = parser.parse_args(argv)
+
+    try:
+        bind_address = ipaddress.ip_address(arguments.bind)
+    except ValueError:
+        parser.error("--bind must be a literal loopback address")
+    if not bind_address.is_loopback:
+        parser.error("media worker is local-only; --bind must be loopback")
+    if arguments.idle_timeout <= 0:
+        parser.error("--idle-timeout must be positive")
 
     logging.basicConfig(
         level=getattr(logging, arguments.log_level.upper(), logging.INFO),
@@ -129,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
             base_url=base_url,
             loopback_base_url=arguments.loopback_base_url,
             allowed_file_prefixes=tuple(arguments.allow_file_prefix),
+            idle_timeout_seconds=arguments.idle_timeout,
+            torrent_network_status=arguments.torrent_network_status,
         )
     )
 

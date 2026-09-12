@@ -1,0 +1,35 @@
+[Unit]
+Description=RK3588 MediaBox local media worker
+After=network.target stremio-server.service
+Wants=network.target stremio-server.service
+Before=mediaboxd-rs.service
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/rk3588-mediabox
+EnvironmentFile=-/etc/mediabox-media-worker.env
+ExecStart=/usr/bin/python3 -m media.server --bind 127.0.0.1 --port 8790 --streaming-server http://127.0.0.1:11470 --state /var/lib/mediabox-media-worker/stremio-session.json --base-url http://127.0.0.1:8790 --loopback-base-url http://127.0.0.1:8790
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+StateDirectory=mediabox-media-worker
+StateDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/mediabox-media-worker
+
+[Install]
+WantedBy=multi-user.target

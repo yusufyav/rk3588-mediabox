@@ -93,6 +93,7 @@ class MediaCoreConfig:
     ffmpeg: FFmpegConfig = field(default_factory=FFmpegConfig)
     idle_timeout_seconds: float = 45.0
     allowed_file_prefixes: tuple[str, ...] = ()
+    torrent_network_status: str = "UNKNOWN"
 
 
 class MediaCore:
@@ -185,9 +186,14 @@ class MediaCore:
             return json_response(
                 200,
                 {
+                    "available": True,
                     "provider": self.stremio.session_status().as_dict(),
                     "capabilityProfile": self.profile.name,
                     "sessions": len(self.sessions.active()),
+                    "torrentNetwork": {
+                        "status": self.config.torrent_network_status,
+                        "directHttpAvailable": True,
+                    },
                 },
             )
 

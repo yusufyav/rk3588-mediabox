@@ -7,6 +7,7 @@ use mediaboxd_rs::daemon::{
 };
 use mediaboxd_rs::kodi::KodiClient;
 use mediaboxd_rs::lifecycle::KodiLifecycle;
+use mediaboxd_rs::media::MediaClient;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +26,8 @@ struct Args {
     kodi_endpoint: String,
     #[arg(long, default_value = "kodi.service")]
     kodi_unit: String,
+    #[arg(long, default_value = "http://127.0.0.1:8790")]
+    media_endpoint: String,
     #[arg(long)]
     cec_device: Option<PathBuf>,
     #[arg(long)]
@@ -81,6 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             unavailable,
         },
         input: input.clone(),
+        media: Arc::new(MediaClient::new(
+            &args.media_endpoint,
+            Duration::from_secs(30),
+        )?),
     });
 
     let stop = Arc::new(AtomicBool::new(false));

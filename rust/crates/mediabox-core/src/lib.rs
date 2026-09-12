@@ -132,6 +132,7 @@ pub struct SystemStatus {
     pub services: Vec<ServiceHealth>,
     pub kodi: KodiStatus,
     pub cec: CecStatus,
+    pub media: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +151,12 @@ pub enum Request {
     CecActiveSource,
     CecWakeTv,
     CecStandbyTv,
+    MediaStatus,
+    MediaSearch { query: String },
+    MediaInspect { url: String },
+    MediaStreams { media_type: String, id: String },
+    MediaPolicy { url: String },
+    MediaSessions,
     InputInject { action: InputAction },
     InputMonitor,
 }

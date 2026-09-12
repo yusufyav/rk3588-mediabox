@@ -69,6 +69,9 @@ class RoutingTests(unittest.TestCase):
         payload = body_of(self.core.handle("GET", "/media/status"))
         self.assertIn("provider", payload)
         self.assertEqual(payload["capabilityProfile"], "rk3588_orangepi5_production")
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["torrentNetwork"]["status"], "UNKNOWN")
+        self.assertTrue(payload["torrentNetwork"]["directHttpAvailable"])
         self.assertEqual(payload["sessions"], 0)
 
     def test_a_search_without_a_query_is_a_bad_request(self):

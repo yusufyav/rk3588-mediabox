@@ -28,6 +28,10 @@ enum Command {
         #[command(subcommand)]
         command: CecCommand,
     },
+    Media {
+        #[command(subcommand)]
+        command: MediaCommand,
+    },
     Input {
         #[command(subcommand)]
         command: InputCommand,
@@ -62,6 +66,16 @@ enum CecCommand {
 #[derive(Debug, Subcommand)]
 enum InputCommand {
     Monitor,
+}
+
+#[derive(Debug, Subcommand)]
+enum MediaCommand {
+    Status,
+    Search { query: String },
+    Inspect { url: String },
+    Streams { media_type: String, id: String },
+    Policy { url: String },
+    Sessions,
 }
 
 #[tokio::main]
@@ -121,6 +135,19 @@ fn to_request(command: &Command) -> Request {
             CecCommand::ActiveSource => Request::CecActiveSource,
             CecCommand::WakeTv => Request::CecWakeTv,
             CecCommand::StandbyTv => Request::CecStandbyTv,
+        },
+        Command::Media { command } => match command {
+            MediaCommand::Status => Request::MediaStatus,
+            MediaCommand::Search { query } => Request::MediaSearch {
+                query: query.clone(),
+            },
+            MediaCommand::Inspect { url } => Request::MediaInspect { url: url.clone() },
+            MediaCommand::Streams { media_type, id } => Request::MediaStreams {
+                media_type: media_type.clone(),
+                id: id.clone(),
+            },
+            MediaCommand::Policy { url } => Request::MediaPolicy { url: url.clone() },
+            MediaCommand::Sessions => Request::MediaSessions,
         },
         Command::Input {
             command: InputCommand::Monitor,
@@ -204,6 +231,22 @@ fn print_human(value: &Value) -> Result<(), String> {
                         "kullanılamıyor"
                     }
                 );
+            }
+            if let Some(media) = result.get("media") {
+                println!(
+                    "Medya: {}",
+                    if media.get("available").and_then(Value::as_bool) == Some(false) {
+                        "kullanılamıyor"
+                    } else {
+                        "hazır"
+                    }
+                );
+                if let Some(torrent) = media
+                    .pointer("/torrentNetwork/status")
+                    .and_then(Value::as_str)
+                {
+                    println!("Torrent ağı: {torrent}");
+                }
             }
         } else if result.get("available").is_some() {
             println!(
@@ -310,6 +353,16 @@ mod tests {
                 command: KodiCommand::Seek { seconds: 30 }
             }),
             Request::KodiSeek { seconds: 30 }
+        );
+        assert_eq!(
+            to_request(&Command::Media {
+                command: MediaCommand::Search {
+                    query: "Dune".into()
+                }
+            }),
+            Request::MediaSearch {
+                query: "Dune".into()
+            }
         );
     }
 }
