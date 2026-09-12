@@ -5,7 +5,7 @@ Wants=network.target systemd-udev-settle.service mediabox-media-worker.service
 
 [Service]
 Type=simple
-ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs --require-cec --media-endpoint http://127.0.0.1:8790
+ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs --require-cec --http 127.0.0.1:8787 --media-endpoint http://127.0.0.1:8790
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=10s
