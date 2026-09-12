@@ -198,6 +198,28 @@ class SecurityTests(unittest.TestCase):
     def test_a_public_host_is_allowed(self):
         validate_source_url("https://cdn.example.com/a.mkv", POLICY)
 
+    def test_a_resolver_failure_does_not_refuse_the_source(self):
+        """Seen on the appliance: this resolver raises EBUSY, not gaierror.
+
+        Any resolver failure has to leave the source allowed — the probe that
+        follows reports the real reason — rather than become a policy refusal
+        or, worse, a 500.
+        """
+        import socket as socket_module
+        from unittest import mock
+
+        resolving = SourcePolicy(allowed_local_origins=frozenset({UPSTREAM}))
+        for error in (
+            socket_module.gaierror(-2, "Name or service not known"),
+            OSError(16, "Device or resource busy"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch("socket.getaddrinfo", side_effect=error):
+                    self.assertEqual(
+                        validate_source_url("https://cdn.example/a.mkv", resolving),
+                        "https://cdn.example/a.mkv",
+                    )
+
 
 class SessionLifecycleTests(unittest.TestCase):
     def setUp(self):

@@ -76,13 +76,17 @@ def _addresses_for(host: str, policy: SourcePolicy) -> list[ipaddress._BaseAddre
         return []
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
+    except OSError as exc:
         # A name that does not resolve is not a policy violation, and refusing
         # it here would turn a DNS blip into "this source is not allowed". The
         # destination checks below exist to stop a *resolvable* internal
         # address being reached; a name with no address reaches nothing, and
         # the probe that follows fails with the real reason.
-        LOG.info("Source host %r did not resolve during validation", host)
+        #
+        # `OSError` rather than `gaierror`: on the appliance this resolver
+        # raises EBUSY, and every way a resolver can fail has to end here
+        # rather than as a 500 from the media core.
+        LOG.info("Source host %r could not be resolved during validation: %s", host, exc)
         return []
     found: list[ipaddress._BaseAddress] = []
     for info in infos:
