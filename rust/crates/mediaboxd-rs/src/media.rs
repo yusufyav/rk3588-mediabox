@@ -70,6 +70,14 @@ impl MediaClient {
         self.get(&["media", "session"], &[]).await
     }
 
+    pub async fn session_start(&self, url: &str) -> Result<Value, MediaError> {
+        self.post(&["media", "session"], json!({"url": url})).await
+    }
+
+    pub async fn session_stop(&self, id: &str) -> Result<Value, MediaError> {
+        self.delete(&["media", "session", id]).await
+    }
+
     async fn get(&self, path: &[&str], query: &[(&str, &str)]) -> Result<Value, MediaError> {
         let mut url = self.url(path)?;
         url.query_pairs_mut().extend_pairs(query.iter().copied());
@@ -79,6 +87,11 @@ impl MediaClient {
 
     async fn post(&self, path: &[&str], body: Value) -> Result<Value, MediaError> {
         let response = self.client.post(self.url(path)?).json(&body).send().await?;
+        Self::decode(response).await
+    }
+
+    async fn delete(&self, path: &[&str]) -> Result<Value, MediaError> {
+        let response = self.client.delete(self.url(path)?).send().await?;
         Self::decode(response).await
     }
 

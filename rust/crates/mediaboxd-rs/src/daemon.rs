@@ -75,6 +75,10 @@ impl AppState {
             }
             Request::MediaPolicy { url } => media_result(self.media.policy(&url).await),
             Request::MediaSessions => media_result(self.media.sessions().await),
+            Request::MediaSessionStart { url } => {
+                media_result(self.media.session_start(&url).await)
+            }
+            Request::MediaSessionStop { id } => media_result(self.media.session_stop(&id).await),
             Request::InputInject { action } => {
                 let decision = self.input.publish(action, InputSource::Api, true, None);
                 if let Err(error) = apply_kodi_route(&self.kodi, decision).await {

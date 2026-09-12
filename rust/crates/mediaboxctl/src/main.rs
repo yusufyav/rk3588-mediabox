@@ -76,6 +76,8 @@ enum MediaCommand {
     Streams { media_type: String, id: String },
     Policy { url: String },
     Sessions,
+    SessionStart { url: String },
+    SessionStop { id: String },
 }
 
 #[tokio::main]
@@ -148,6 +150,8 @@ fn to_request(command: &Command) -> Request {
             },
             MediaCommand::Policy { url } => Request::MediaPolicy { url: url.clone() },
             MediaCommand::Sessions => Request::MediaSessions,
+            MediaCommand::SessionStart { url } => Request::MediaSessionStart { url: url.clone() },
+            MediaCommand::SessionStop { id } => Request::MediaSessionStop { id: id.clone() },
         },
         Command::Input {
             command: InputCommand::Monitor,

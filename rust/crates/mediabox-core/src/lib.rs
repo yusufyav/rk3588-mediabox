@@ -157,6 +157,8 @@ pub enum Request {
     MediaStreams { media_type: String, id: String },
     MediaPolicy { url: String },
     MediaSessions,
+    MediaSessionStart { url: String },
+    MediaSessionStop { id: String },
     InputInject { action: InputAction },
     InputMonitor,
 }
