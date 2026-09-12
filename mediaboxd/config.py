@@ -82,6 +82,27 @@ def validate_upstream(value: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaCoreConfig:
+    """The V2 media core, mounted at /media/.
+
+    It is a separate surface from the Stremio proxy on purpose: the proxy
+    relays bytes for the streaming server, while the media core decides what
+    this appliance can play and owns the ffmpeg sessions that make a source
+    playable. Nothing above it needs to know that Stremio exists.
+    """
+
+    enabled: bool = True
+    #: Name of a profile in `media.policy.capabilities`; None uses the default.
+    capability_profile: str | None = None
+    #: Where the Stremio auth key is kept, if an account is ever signed in.
+    state_path: str | None = "/var/lib/mediaboxd/media-session.json"
+    #: Absolute directories a `file:` source may be read from. Empty disables
+    #: local files entirely, which is the default.
+    allowed_file_prefixes: tuple[str, ...] = ()
+    idle_timeout_seconds: float = 45.0
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     bind_address: str = "127.0.0.1"
     port: int = 8787
@@ -96,6 +117,7 @@ class Config:
     webui_root: str | None = "/opt/rk3588-mediabox/webui/dist"
     kodi: KodiConfig = field(default_factory=KodiConfig)
     stremio: StremioConfig = field(default_factory=StremioConfig)
+    media: MediaCoreConfig = field(default_factory=MediaCoreConfig)
 
 
 def _number(data: dict[str, Any], key: str, default: float) -> float:
@@ -110,6 +132,18 @@ def _strings(data: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{key} must be an array of strings")
     return tuple(value)
+
+
+def _optional_path(data: dict[str, Any], key: str, default: str | None) -> str | None:
+    """An absent key keeps the default; an empty string turns the feature off."""
+    if key not in data:
+        return default
+    value = data[key]
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or not value.startswith("/"):
+        raise ValueError(f"{key} must be an absolute path or an empty string")
+    return value
 
 
 def _validate_endpoint(endpoint: str | None) -> str | None:
@@ -211,6 +245,29 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
         ),
     )
 
+    media_raw = raw.get("media", {})
+    if not isinstance(media_raw, dict):
+        raise ValueError("media must be a TOML table")
+    media_defaults = MediaCoreConfig()
+    media_enabled = media_raw.get("enabled", media_defaults.enabled)
+    if not isinstance(media_enabled, bool):
+        raise ValueError("media.enabled must be true or false")
+    file_prefixes = _strings(media_raw, "allowed_file_prefixes", media_defaults.allowed_file_prefixes)
+    for prefix in file_prefixes:
+        if not prefix.startswith("/"):
+            raise ValueError("media.allowed_file_prefixes entries must be absolute paths")
+    media = MediaCoreConfig(
+        enabled=media_enabled,
+        capability_profile=(
+            str(media_raw["capability_profile"]) if media_raw.get("capability_profile") else None
+        ),
+        state_path=_optional_path(media_raw, "state_path", media_defaults.state_path),
+        allowed_file_prefixes=file_prefixes,
+        idle_timeout_seconds=_number(
+            media_raw, "idle_timeout_seconds", media_defaults.idle_timeout_seconds
+        ),
+    )
+
     webui_root_value = raw.get("webui_root", Config().webui_root)
     if webui_root_value is not None and not isinstance(webui_root_value, str):
         raise ValueError("webui_root must be a string or omitted")
@@ -227,4 +284,5 @@ def load_config(path: str | os.PathLike[str] | None) -> Config:
         webui_root=webui_root,
         kodi=kodi,
         stremio=stremio,
+        media=media,
     )

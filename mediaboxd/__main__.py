@@ -19,6 +19,36 @@ from .stremio import StremioBridge
 from .telemetry import Telemetry
 
 
+def _media_core(config) -> object | None:
+    """Build the V2 media core, or run without it if it is not installed.
+
+    The media core lives beside mediaboxd rather than inside it, so a control
+    plane that was deployed without it still starts — it simply answers 404 on
+    /media/ instead of refusing to run.
+    """
+    if not config.media.enabled:
+        return None
+    try:
+        from media.api import MediaCore, MediaCoreConfig
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "the media core is not installed; /media/ will not be served"
+        )
+        return None
+    base = f"http://{config.bind_address}:{config.port}"
+    return MediaCore(
+        MediaCoreConfig(
+            streaming_server_url=config.stremio.upstream,
+            capability_profile=config.media.capability_profile,
+            session_state_path=config.media.state_path,
+            base_url=base,
+            loopback_base_url=f"http://127.0.0.1:{config.port}",
+            allowed_file_prefixes=config.media.allowed_file_prefixes,
+            idle_timeout_seconds=config.media.idle_timeout_seconds,
+        )
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="RK3588 MediaBox control daemon")
     result.add_argument("--config", help="TOML config path; built-in secure defaults when omitted")
@@ -52,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         system_actions=SystemActions(config),
         webui_root=Path(config.webui_root) if config.webui_root else None,
         stremio=StremioBridge(config.stremio, kodi, events),
+        media=_media_core(config),
     )
     server_type = MediaBoxHTTPServer
     if ":" in config.bind_address:
@@ -74,18 +105,21 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, stop)
     monitor.start()
     logging.getLogger(__name__).info(
-        "listening on %s:%d (LAN=%s, system_actions=%s, stremio=%s)",
+        "listening on %s:%d (LAN=%s, system_actions=%s, stremio=%s, media_core=%s)",
         config.bind_address,
         config.port,
         config.allow_lan,
         config.system_actions_enabled,
         config.stremio.enabled,
+        context.media is not None,
     )
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
         monitor.stop()
         context.stremio.shutdown()
+        if context.media is not None:
+            context.media.shutdown()
         server.server_close()
     return 0
 

@@ -47,7 +47,8 @@ enabled = true
 upstream = "http://127.0.0.1:11470"
 # The origin root. stremio-video builds its transcoding URLs against the
 # origin, so a streaming server behind a subpath cannot transcode. mediaboxd
-# keeps /api/, /ui/ and / for itself; everything else is the streaming server.
+# keeps /api/, /ui/, /media/ and / for itself; everything else is the
+# streaming server.
 mount = "/"
 # Offered to Stremio as an `external` playback device. `external` is the only
 # device type upstream stremio-web renders in a plain browser.
@@ -56,3 +57,25 @@ cast_device_name = "MediaBox TV (Kodi)"
 request_timeout_seconds = 10.0
 # A cold torrent finds peers and fetches a piece before it can answer at all.
 stream_timeout_seconds = 120.0
+
+# The V2 media core, mounted at /media/.
+#
+# It is what decides whether a source can play on this appliance as it stands,
+# which audio track to use, and whether anything has to be converted first. It
+# never re-encodes video. A source needing more than a stream copy gets a media
+# session, and every session owns its ffmpeg process from start to reap.
+[media]
+enabled = true
+# A profile in media/policy/capabilities.py. Omitted, the production profile
+# for this board is used.
+# capability_profile = "rk3588_orangepi5_production"
+# Where a Stremio auth key is kept if an account is ever signed in. Set to ""
+# to keep nothing on disk; the media core works signed out, on Stremio's
+# default addon collection.
+state_path = "/var/lib/mediaboxd/media-session.json"
+# Absolute directories a file:// source may be read from. Empty — the default —
+# means the media core plays nothing off the local filesystem.
+allowed_file_prefixes = []
+# How long a session with no reader survives before it is ended. A session
+# nobody is watching is a core nobody is using.
+idle_timeout_seconds = 45.0

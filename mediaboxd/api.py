@@ -70,6 +70,9 @@ class APIContext:
     system_actions: Any
     webui_root: Path | None = None
     stremio: Any = None
+    #: The V2 media core, mounted at /media/. Optional so a daemon can run
+    #: without it; when present it owns every /media/ path.
+    media: Any = None
 
 
 def _kodi_time_seconds(value: Any) -> float | None:
@@ -261,6 +264,11 @@ def health_response(context: APIContext) -> dict[str, Any]:
     if stremio is not None:
         media["serverMount"] = stremio.mount
         media["castDeviceId"] = stremio.config.cast_device_id
+    if context.media is not None:
+        media["mediaCore"] = {
+            "mount": "/media",
+            "capabilityProfile": context.media.profile.name,
+        }
     return {
         "status": "ok",
         "version": VERSION,
@@ -308,6 +316,8 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                     self._redirect("/ui/")
                 elif path.startswith("/ui/"):
                     self._static(path)
+                elif context.media is not None and context.media.owns(path):
+                    self._media("GET", path)
                 elif context.stremio is not None and context.stremio.owns(path):
                     self._stremio(path)
                 else:
@@ -362,6 +372,9 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/v1/cast/kodi":
                     self._cast_from_shell()
                     return
+                if context.media is not None and context.media.owns(path):
+                    self._media("POST", path)
+                    return
                 if context.stremio is not None and context.stremio.owns(path):
                     self._stremio(path)
                     return
@@ -381,6 +394,63 @@ def handler_factory(context: APIContext) -> type[BaseHTTPRequestHandler]:
             except Exception:
                 LOG.exception("Unhandled POST failure for %s", path)
                 self._json(500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
+
+        def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            path = urlsplit(self.path).path
+            try:
+                if context.media is not None and context.media.owns(path):
+                    self._media("DELETE", path)
+                else:
+                    raise APIError("NOT_FOUND", "Endpoint not found", 404)
+            except APIError as exc:
+                self._json(exc.status, exc.as_dict())
+            except Exception:
+                LOG.exception("Unhandled DELETE failure for %s", path)
+                self._json(500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}})
+
+        def _media(self, method: str, path: str) -> None:
+            """Hand one request to the media core and relay what it answers.
+
+            The media core decides its own status and headers, including for a
+            live session body, whose length is not known in advance — so that
+            response is written chunk by chunk and the connection is closed at
+            the end rather than being reused.
+            """
+            split = urlsplit(self.path)
+            body: bytes | None = None
+            length_text = self.headers.get("Content-Length")
+            if length_text is not None:
+                try:
+                    length = int(length_text)
+                except ValueError as exc:
+                    raise InvalidRequest("invalid Content-Length") from exc
+                if length < 0 or length > MAX_BODY_BYTES:
+                    raise InvalidRequest("request body is too large")
+                body = self.rfile.read(length) if length else b""
+            response = context.media.handle(method, split.path, split.query, body)
+
+            if response.stream is None:
+                self.send_response(response.status)
+                for name, value in response.headers:
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(response.body or b"")
+                return
+
+            self.send_response(response.status)
+            for name, value in response.headers:
+                self.send_header(name, value)
+            self.end_headers()
+            try:
+                for chunk in response.stream:
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                LOG.info("client disconnected from a media session")
+            finally:
+                self.close_connection = True
+                close = getattr(response.stream, "close", None)
+                if close is not None:
+                    close()
 
         def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             # Deliberately no CORS negotiation. Browsers use the same origin.

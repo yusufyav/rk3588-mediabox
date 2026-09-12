@@ -111,8 +111,13 @@ class CastSession:
 
 #: Paths mediaboxd answers itself. At a root mount everything else belongs to
 #: the streaming server, so this list is what separates the two.
-RESERVED_PREFIXES = ("/api/", "/ui/")
-RESERVED_EXACT = ("/", "/ui", "/api")
+#:
+#: `/media/` is the V2 media core's own surface. It is reserved here rather
+#: than left to the proxy because the media core is not the streaming server:
+#: it decides what this appliance can play and owns the sessions that make it
+#: playable, and a request for one must never be forwarded to the other.
+RESERVED_PREFIXES = ("/api/", "/ui/", "/media/")
+RESERVED_EXACT = ("/", "/ui", "/api", "/media")
 
 
 def _normalise_mount(mount: str) -> str:
