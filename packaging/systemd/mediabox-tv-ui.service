@@ -38,7 +38,10 @@ StandardInput=tty-force
 # The private Mali runtime is the one Kodi uses; wlroots needs it for a
 # GPU-accelerated compositor.
 Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
-Environment=WLR_BACKENDS=drm
+# drm *and* libinput. Naming only the DRM backend gives a compositor that
+# lights up the television and has no input devices at all: no keyboard, no
+# remote, nothing. The list is explicit so the backend set cannot drift.
+Environment=WLR_BACKENDS=drm,libinput
 # Without a GPU the compositor should still come up rather than leave the
 # television black.
 Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
