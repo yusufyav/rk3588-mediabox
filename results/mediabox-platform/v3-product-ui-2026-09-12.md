@@ -439,7 +439,10 @@ kitaplık manifest ayrıştırma ve rota testleri, formatter regresyonları,
 
 ## 16. Final commit
 
-`COMMIT_SHA_PLACEHOLDER`
+`Uygulama commit'i: `4aa81db051ad8b20af3ea4f594428648b8c84c1d`
+
+Bu rapor, o commit'in içinde yer alır; §16'daki SHA'yı kaydeden bu satır tek
+başına bir sonraki commit'tedir.`
 
 ---
 
