@@ -8,7 +8,7 @@ Before=mediaboxd-rs.service
 Type=simple
 Environment=PYTHONPATH=/opt/rk3588-mediabox
 EnvironmentFile=-/etc/mediabox-media-worker.env
-ExecStart=/usr/bin/python3 -m media.server --bind 127.0.0.1 --port 8790 --streaming-server http://127.0.0.1:11470 --state /var/lib/mediabox-media-worker/stremio-session.json --base-url http://127.0.0.1:8790 --loopback-base-url http://127.0.0.1:8790
+ExecStart=/usr/bin/python3 -m media.server --bind 127.0.0.1 --port 8790 --streaming-server http://127.0.0.1:11470 --state /var/lib/mediabox-media-worker/stremio-session.json --base-url http://127.0.0.1:8790 --loopback-base-url http://127.0.0.1:8790 --library /etc/mediabox-library.json --allow-file-prefix /opt/rk3588-mediabox/assets/
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s

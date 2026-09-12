@@ -50,6 +50,88 @@ impl MediaClient {
         self.get(&["media", "status"], &[]).await
     }
 
+    pub async fn capabilities(&self) -> Result<Value, MediaError> {
+        self.get(&["media", "capabilities"], &[]).await
+    }
+
+    pub async fn home(&self) -> Result<Value, MediaError> {
+        self.get(&["media", "home"], &[]).await
+    }
+
+    pub async fn catalog(
+        &self,
+        media_type: &str,
+        id: &str,
+        addon_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Value, MediaError> {
+        let limit = limit.map(|value| value.to_string());
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if let Some(addon) = addon_id {
+            query.push(("addon", addon));
+        }
+        if let Some(limit) = limit.as_deref() {
+            query.push(("limit", limit));
+        }
+        self.get(&["media", "catalog", media_type, id], &query).await
+    }
+
+    pub async fn meta(&self, media_type: &str, id: &str) -> Result<Value, MediaError> {
+        self.get(&["media", "meta", media_type, id], &[]).await
+    }
+
+    pub async fn subtitles(
+        &self,
+        media_type: &str,
+        id: &str,
+        video_id: Option<&str>,
+    ) -> Result<Value, MediaError> {
+        let query: Vec<(&str, &str)> = video_id.map(|v| vec![("videoId", v)]).unwrap_or_default();
+        self.get(&["media", "subtitles", media_type, id], &query)
+            .await
+    }
+
+    pub async fn library(&self) -> Result<Value, MediaError> {
+        self.get(&["media", "library"], &[]).await
+    }
+
+    pub async fn library_item(&self, id: &str) -> Result<Value, MediaError> {
+        self.get(&["media", "library", id], &[]).await
+    }
+
+    pub async fn resolve(&self, stream: Value) -> Result<Value, MediaError> {
+        self.post(&["media", "resolve"], json!({"stream": stream}))
+            .await
+    }
+
+    pub async fn stream_plan(&self, stream: Value) -> Result<Value, MediaError> {
+        self.post(&["media", "plan"], json!({"stream": stream})).await
+    }
+
+    pub async fn session_start_stream(
+        &self,
+        stream: Value,
+        start_seconds: u64,
+    ) -> Result<Value, MediaError> {
+        self.post(
+            &["media", "session"],
+            json!({"stream": stream, "startSeconds": start_seconds}),
+        )
+        .await
+    }
+
+    pub async fn session_start_at(
+        &self,
+        url: &str,
+        start_seconds: u64,
+    ) -> Result<Value, MediaError> {
+        self.post(
+            &["media", "session"],
+            json!({"url": url, "startSeconds": start_seconds}),
+        )
+        .await
+    }
+
     pub async fn search(&self, query: &str) -> Result<Value, MediaError> {
         self.get(&["media", "search"], &[("q", query)]).await
     }
@@ -72,6 +154,12 @@ impl MediaClient {
 
     pub async fn session_start(&self, url: &str) -> Result<Value, MediaError> {
         self.post(&["media", "session"], json!({"url": url})).await
+    }
+
+    /// The live bytes of one session, still as a streaming response so the
+    /// relay above can copy them without buffering a whole film in memory.
+    pub async fn session_stream(&self, id: &str) -> Result<reqwest::Response, MediaError> {
+        Ok(self.client.get(self.url(&["media", "session", id])?).send().await?)
     }
 
     pub async fn session_stop(&self, id: &str) -> Result<Value, MediaError> {

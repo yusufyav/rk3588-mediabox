@@ -1,5 +1,7 @@
-# Generated test assets (scripts/make-test-assets.sh) and media
-assets/
+# Generated test assets (scripts/make-test-assets.sh) and media.
+# Anchored to the repository root: the product UI keeps its page and
+# stylesheet in its own assets/ directory, and those are source.
+/assets/
 *.mp4
 *.hevc
 

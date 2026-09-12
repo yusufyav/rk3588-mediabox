@@ -499,6 +499,7 @@ name = "mediaboxd-rs"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "mediabox-cec",
  "mediabox-core",
  "mediabox-input",

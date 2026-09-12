@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# The television's browser.
+#
+# It lives in its own script rather than on the compositor's exec line because
+# sway's config parser splits commands on "," and ";" — characters that appear
+# inside ordinary Chromium flags — and has no line continuation. A wrapped or
+# comma-bearing command line silently loses its arguments, which is a browser
+# sitting on its default start page instead of the product.
+#
+# When the browser exits the compositor goes with it, so systemd sees one unit
+# that is either showing the interface or not running at all.
+set -eu
+
+URL="${MEDIABOX_UI_URL:-http://127.0.0.1:8787/}"
+PROFILE="${MEDIABOX_UI_PROFILE:-/var/lib/mediabox-ui/chromium}"
+
+/usr/bin/chromium \
+  --kiosk \
+  --no-sandbox \
+  --ozone-platform=wayland \
+  --user-data-dir="$PROFILE" \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-background-networking \
+  --disable-component-update \
+  --disable-sync \
+  --disable-translate \
+  --disable-infobars \
+  --disable-session-crashed-bubble \
+  --overscroll-history-navigation=0 \
+  --autoplay-policy=no-user-gesture-required \
+  --hide-scrollbars \
+  "$URL" || true
+
+exec /usr/bin/swaymsg exit

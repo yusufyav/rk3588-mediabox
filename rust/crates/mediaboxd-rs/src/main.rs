@@ -1,13 +1,12 @@
 use clap::Parser;
 use mediabox_cec::{Adapter, unavailable_status};
-use mediabox_core::{CecStatus, InputMode, InputSource};
+use mediabox_core::{CecStatus, InputAction, InputMode, InputSource, Surface};
 use mediabox_input::InputManager;
-use mediaboxd_rs::daemon::{
-    AppState, CecRuntime, apply_kodi_route, serve_http, serve_unix, socket_is_live,
-};
+use mediaboxd_rs::daemon::{AppState, CecRuntime, apply_kodi_route, serve_unix, socket_is_live};
 use mediaboxd_rs::kodi::KodiClient;
-use mediaboxd_rs::lifecycle::KodiLifecycle;
+use mediaboxd_rs::lifecycle::{KodiLifecycle, SurfaceManager};
 use mediaboxd_rs::media::MediaClient;
+use mediaboxd_rs::web::{PeerPolicy, WebConfig, serve as serve_web};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +25,17 @@ struct Args {
     kodi_endpoint: String,
     #[arg(long, default_value = "kodi.service")]
     kodi_unit: String,
+    /// The unit that puts the product UI on the television. Only ever started
+    /// and stopped; the daemon never becomes a compositor itself.
+    #[arg(long, default_value = "mediabox-tv-ui.service")]
+    ui_unit: String,
+    /// Installed product UI. Without it the daemon serves the API only.
+    #[arg(long)]
+    ui_root: Option<PathBuf>,
+    /// Extra listener for the home network. It serves the same UI and the same
+    /// control endpoint, and admits private-network peers only.
+    #[arg(long)]
+    lan_http: Option<SocketAddr>,
     #[arg(long, default_value = "http://127.0.0.1:8790")]
     media_endpoint: String,
     #[arg(long)]
@@ -76,9 +86,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.kodi_endpoint,
         Duration::from_secs(2),
     )?);
+    let ui_root = match args.ui_root {
+        Some(root) => Some(root.canonicalize().map_err(|error| {
+            format!("--ui-root okunamadı ({}): {error}", root.display())
+        })?),
+        None => None,
+    };
     let state = Arc::new(AppState {
         kodi: kodi.clone(),
         lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
+        surface: SurfaceManager::new(&args.kodi_unit, &args.ui_unit)?,
         cec: CecRuntime {
             adapter: adapter.clone(),
             unavailable,
@@ -95,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stop = stop.clone();
         let input = input.clone();
         let kodi = kodi.clone();
+        let state = state.clone();
         let runtime = tokio::runtime::Handle::current();
         Some(
             std::thread::Builder::new()
@@ -103,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     while !stop.load(Ordering::Relaxed) {
                         match adapter.receive(250) {
                             Ok(Some((parsed, Some((action, pressed))))) => {
+                                let mode = input.mode();
                                 let decision = input.publish(
                                     action,
                                     InputSource::Cec,
@@ -113,6 +132,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let kodi = kodi.clone();
                                     runtime.spawn(async move {
                                         let _ = apply_kodi_route(&kodi, decision).await;
+                                    });
+                                }
+                                // While Kodi is on the television the product
+                                // UI is not running, so Back is the only way
+                                // back to it. Nothing else reclaims the
+                                // display on its own: a viewer who left Kodi
+                                // playing, or somebody working at the console,
+                                // is not interrupted.
+                                if pressed
+                                    && mode == InputMode::KodiPlayback
+                                    && matches!(action, InputAction::Back | InputAction::Home)
+                                {
+                                    let state = state.clone();
+                                    runtime.spawn(async move {
+                                        if let Err(error) =
+                                            state.switch_surface(Surface::Ui).await
+                                        {
+                                            eprintln!("surface -> ui: {error}");
+                                        }
                                     });
                                 }
                             }
@@ -128,17 +166,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let unix = UnixListener::bind(&args.socket)?;
     let unix_task = tokio::spawn(serve_unix(unix, state.clone()));
-    let http_task = if let Some(address) = args.http {
+    let mut web_tasks = Vec::new();
+    if let Some(address) = args.http {
+        let config = Arc::new(WebConfig {
+            ui_root: ui_root.clone(),
+            policy: PeerPolicy::LoopbackOnly,
+        });
         let listener = TcpListener::bind(address).await?;
-        Some(tokio::spawn(serve_http(listener, state.clone())))
-    } else {
-        None
-    };
+        web_tasks.push(tokio::spawn(serve_web(listener, state.clone(), config)));
+    }
+    if let Some(address) = args.lan_http {
+        let config = Arc::new(WebConfig {
+            ui_root: ui_root.clone(),
+            policy: PeerPolicy::LoopbackAndPrivate,
+        });
+        let listener = TcpListener::bind(address).await?;
+        eprintln!("mediaboxd-rs LAN arayüzü: http://{address}/");
+        web_tasks.push(tokio::spawn(serve_web(listener, state.clone(), config)));
+    }
     eprintln!("mediaboxd-rs hazır: {}", args.socket.display());
     shutdown_signal().await?;
     stop.store(true, Ordering::Relaxed);
     unix_task.abort();
-    if let Some(task) = http_task {
+    for task in web_tasks {
         task.abort();
     }
     if let Some(thread) = receiver {

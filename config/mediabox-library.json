@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "The appliance's own library. Operator-declared, read by the media worker,",
+    "and the only place a source URL is trusted because somebody put it here.",
+    "Every entry goes through the same inspection, policy and session path as a",
+    "catalogue source; nothing here bypasses the media core."
+  ],
+  "items": [
+    {
+      "id": "tt0063350",
+      "type": "movie",
+      "name": "Night of the Living Dead",
+      "releaseInfo": "1968",
+      "runtime": "100 dk",
+      "genres": ["Korku", "Gerilim"],
+      "poster": "https://images.metahub.space/poster/small/tt0063350/img",
+      "background": "https://images.metahub.space/background/medium/tt0063350/img",
+      "logo": "https://images.metahub.space/logo/medium/tt0063350/img",
+      "description": "George A. Romero'nun kamu malı olan 1968 klasiği. Bir grup insan, ölüleri dirilten bir salgın sırasında ıssız bir çiftlik evine sığınır. Bu kopya Internet Archive üzerinden doğrudan HTTP ile sunulur.",
+      "sources": [
+        {
+          "name": "720p · Internet Archive",
+          "title": "H.264 High · MP4 · doğrudan HTTP",
+          "url": "https://archive.org/download/night-of-the-living-dead_202311/Night%20of%20the%20Living%20Dead%20Xtended.mp4"
+        }
+      ]
+    },
+    {
+      "id": "mediabox-ref-hdr10",
+      "type": "movie",
+      "name": "HDR10 Referans Klibi",
+      "releaseInfo": "4K · 23.976p",
+      "runtime": "3 sn",
+      "genres": ["Referans"],
+      "description": "MP1b kapısında kabul edilen HDR10 referans klibi: HEVC Main 10, 10-bit, BT.2020, SMPTE ST 2084. Ekranın HDR10 zincirini ve oynatma politikasını gerçek bir kaynak üzerinden doğrulamak için cihazda tutulur.",
+      "sources": [
+        {
+          "name": "HEVC Main 10 · 2160p",
+          "title": "Yerel dosya · BT.2020 / PQ",
+          "url": "file:///opt/rk3588-mediabox/assets/hdr10-4k-2398-main10.mp4"
+        }
+      ]
+    },
+    {
+      "id": "mediabox-ref-sdr",
+      "type": "movie",
+      "name": "SDR Referans Klibi",
+      "releaseInfo": "4K · 23.976p",
+      "runtime": "3 sn",
+      "genres": ["Referans"],
+      "description": "HDR10 klibinin SDR karşılığı: HEVC Main, 8-bit, BT.709. İki klip birlikte, aynı kaynak zincirinde SDR ve HDR kararlarının farkını gösterir.",
+      "sources": [
+        {
+          "name": "HEVC Main · 2160p",
+          "title": "Yerel dosya · BT.709",
+          "url": "file:///opt/rk3588-mediabox/assets/sdr-4k-2398-main.mp4"
+        }
+      ]
+    }
+  ]
+}

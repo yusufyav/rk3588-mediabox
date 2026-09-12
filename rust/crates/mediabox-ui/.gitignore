@@ -1,0 +1,5 @@
+# Build output. The bundle is produced by scripts/build-mediabox-ui.sh and
+# shipped by the deploy script; committing it would put a 700 KB binary in
+# every diff that touches the UI.
+/target
+/dist

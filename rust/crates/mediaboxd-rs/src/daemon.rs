@@ -1,15 +1,17 @@
 use crate::kodi::KodiClient;
-use crate::lifecycle::KodiLifecycle;
+use crate::lifecycle::{KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
 use mediabox_cec::Adapter;
-use mediabox_core::{CecStatus, InputSource, Request, Response, ServiceHealth, SystemStatus};
+use mediabox_core::{
+    CecStatus, InputMode, InputSource, Request, Response, ServiceHealth, Surface, SystemStatus,
+};
 use mediabox_input::{InputManager, KodiRoute, RouteDecision};
 use serde_json::{Value, json};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
@@ -32,6 +34,7 @@ pub struct AppState {
     pub cec: CecRuntime,
     pub input: InputManager,
     pub media: Arc<MediaClient>,
+    pub surface: SurfaceManager,
 }
 
 impl AppState {
@@ -39,6 +42,7 @@ impl AppState {
         match request {
             Request::Status => Response::success(self.status().await),
             Request::System => Response::success(system_snapshot()),
+            Request::Diagnostics => Response::success(crate::system::diagnostics()),
             Request::KodiStatus => Response::success(self.kodi.status().await),
             Request::KodiPlayPause => result(self.kodi.play_pause().await),
             Request::KodiStop => result(self.kodi.stop().await),
@@ -68,6 +72,46 @@ impl AppState {
             Request::CecWakeTv => cec_action(&self.cec, |adapter| adapter.wake_tv()).await,
             Request::CecStandbyTv => cec_action(&self.cec, |adapter| adapter.standby_tv()).await,
             Request::MediaStatus => media_result(self.media.status().await),
+            Request::MediaCapabilities => media_result(self.media.capabilities().await),
+            Request::MediaHome => media_result(self.media.home().await),
+            Request::MediaCatalog {
+                media_type,
+                id,
+                addon_id,
+                limit,
+            } => media_result(
+                self.media
+                    .catalog(&media_type, &id, addon_id.as_deref(), limit)
+                    .await,
+            ),
+            Request::MediaMeta { media_type, id } => {
+                media_result(self.media.meta(&media_type, &id).await)
+            }
+            Request::MediaSubtitles {
+                media_type,
+                id,
+                video_id,
+            } => media_result(
+                self.media
+                    .subtitles(&media_type, &id, video_id.as_deref())
+                    .await,
+            ),
+            Request::MediaLibrary => media_result(self.media.library().await),
+            Request::MediaLibraryItem { id } => media_result(self.media.library_item(&id).await),
+            Request::MediaResolve { stream } => media_result(self.media.resolve(stream).await),
+            Request::MediaStreamPlan { stream } => {
+                media_result(self.media.stream_plan(stream).await)
+            }
+            Request::MediaPlayOnKodi {
+                url,
+                stream,
+                start_seconds,
+            } => self.play_on_kodi(url, stream, start_seconds).await,
+            Request::SurfaceStatus => Response::success(self.surface.status().await),
+            Request::SurfaceSwitch { target } => match self.switch_surface(target).await {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("SURFACE_ERROR", error.to_string()),
+            },
             Request::MediaSearch { query } => media_result(self.media.search(&query).await),
             Request::MediaInspect { url } => media_result(self.media.inspect(&url).await),
             Request::MediaStreams { media_type, id } => {
@@ -92,6 +136,135 @@ impl AppState {
                 Response::failure("PROTOCOL_ERROR", "input.monitor akış komutudur")
             }
         }
+    }
+
+    /// Hand the display to `target`, and point the input bus at whatever now
+    /// owns it.
+    ///
+    /// These two belong together. While Kodi is on the television there is no
+    /// browser to receive a remote press, so CEC has to drive the player
+    /// directly; while the UI is up the opposite is true and the daemon must
+    /// stay out of the way. Letting them drift apart is how a remote ends up
+    /// controlling something nobody can see.
+    pub async fn switch_surface(
+        &self,
+        target: Surface,
+    ) -> Result<mediabox_core::SurfaceStatus, crate::lifecycle::LifecycleError> {
+        let status = self.surface.switch(target).await?;
+        self.input.set_mode(match target {
+            Surface::Kodi => InputMode::KodiPlayback,
+            Surface::Ui | Surface::Idle => InputMode::Ui,
+        });
+        Ok(status)
+    }
+
+    /// Create a media session and put it on the television.
+    ///
+    /// The ordering is the whole point of routing this through the daemon: any
+    /// existing session is torn down first so a preview encoder cannot outlive
+    /// the screen that asked for it, the display is taken back from the UI, and
+    /// only then is Kodi asked to open the URL the media core produced. A
+    /// failure anywhere after the session exists stops that session, so a
+    /// refused `Player.Open` never leaves an ffmpeg running with no reader.
+    async fn play_on_kodi(
+        &self,
+        url: Option<String>,
+        stream: Option<Value>,
+        start_seconds: u64,
+    ) -> Response {
+        if url.is_none() && stream.is_none() {
+            return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
+        }
+        self.stop_all_sessions().await;
+
+        let created = match (url.as_deref(), stream) {
+            (Some(url), _) => self.media.session_start_at(url, start_seconds).await,
+            (None, Some(stream)) => {
+                self.media.session_start_stream(stream, start_seconds).await
+            }
+            (None, None) => unreachable!("guarded above"),
+        };
+        let session = match created {
+            Ok(value) => value,
+            Err(error) => return Response::failure("MEDIA_WORKER_ERROR", error.to_string()),
+        };
+        let session_id = session
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let Some(playback_url) = session
+            .pointer("/handoff/kodiPlaybackUrl")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            self.stop_session(&session_id).await;
+            return Response::failure(
+                "MEDIA_WORKER_ERROR",
+                "medya oturumu Kodi için oynatma URL'si üretmedi",
+            );
+        };
+
+        let surface = match self.switch_surface(Surface::Kodi).await {
+            Ok(status) => status,
+            Err(error) => {
+                self.stop_session(&session_id).await;
+                return Response::failure("SURFACE_ERROR", error.to_string());
+            }
+        };
+        if let Err(error) = self.await_kodi().await {
+            self.stop_session(&session_id).await;
+            return Response::failure("KODI_UNAVAILABLE", error);
+        }
+        match self.kodi.open(&playback_url, start_seconds).await {
+            Ok(_) => Response::success(json!({
+                "session": session,
+                "surface": surface,
+                "playbackUrl": playback_url,
+                "startSeconds": start_seconds,
+            })),
+            Err(error) => {
+                self.stop_session(&session_id).await;
+                Response::failure("KODI_ERROR", error.to_string())
+            }
+        }
+    }
+
+    async fn stop_all_sessions(&self) {
+        let Ok(listing) = self.media.sessions().await else {
+            return;
+        };
+        let Some(sessions) = listing.get("sessions").and_then(Value::as_array) else {
+            return;
+        };
+        for id in sessions
+            .iter()
+            .filter_map(|session| session.get("id").and_then(Value::as_str))
+        {
+            let _ = self.media.session_stop(id).await;
+        }
+    }
+
+    async fn stop_session(&self, id: &str) {
+        if !id.is_empty() {
+            let _ = self.media.session_stop(id).await;
+        }
+    }
+
+    /// Kodi has just been started by systemd; its JSON-RPC listener comes up a
+    /// few seconds after the process does.
+    async fn await_kodi(&self) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut last = "Kodi JSON-RPC yanıt vermedi".to_string();
+        while std::time::Instant::now() < deadline {
+            match self.kodi.ping().await {
+                Ok(true) => return Ok(()),
+                Ok(false) => last = "Kodi JSON-RPC beklenmeyen yanıt verdi".into(),
+                Err(error) => last = error.to_string(),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        }
+        Err(last)
     }
 
     async fn status(&self) -> SystemStatus {
@@ -148,6 +321,7 @@ impl AppState {
             kodi,
             cec,
             media,
+            surface: self.surface.status().await,
         }
     }
 }
@@ -299,100 +473,6 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
         .await
 }
 
-pub async fn serve_http(listener: TcpListener, state: Arc<AppState>) -> io::Result<()> {
-    loop {
-        let (mut stream, peer) = listener.accept().await?;
-        if !peer.ip().is_loopback() {
-            continue;
-        }
-        let state = state.clone();
-        tokio::spawn(async move {
-            let mut data = Vec::with_capacity(4096);
-            let mut chunk = [0u8; 4096];
-            loop {
-                let Ok(n) = stream.read(&mut chunk).await else {
-                    return;
-                };
-                if n == 0 {
-                    return;
-                }
-                data.extend_from_slice(&chunk[..n]);
-                if data.len() > MAX_REQUEST_BYTES {
-                    let _ = http_response(
-                        &mut stream,
-                        413,
-                        &Response::failure("INVALID_REQUEST", "istek çok büyük"),
-                    )
-                    .await;
-                    return;
-                }
-                if let Some(header_end) = find_header_end(&data) {
-                    let headers = String::from_utf8_lossy(&data[..header_end]);
-                    let first = headers.lines().next().unwrap_or_default();
-                    let length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if first != "POST /v1/control HTTP/1.1" {
-                        let _ = http_response(
-                            &mut stream,
-                            404,
-                            &Response::failure("NOT_FOUND", "yalnız POST /v1/control desteklenir"),
-                        )
-                        .await;
-                        return;
-                    }
-                    if data.len() < header_end + 4 + length {
-                        continue;
-                    }
-                    let body = &data[header_end + 4..header_end + 4 + length];
-                    let response = match serde_json::from_slice::<Request>(body) {
-                        Ok(Request::InputMonitor) => {
-                            Response::failure("INVALID_REQUEST", "HTTP streaming desteklenmiyor")
-                        }
-                        Ok(request) => state.handle(request).await,
-                        Err(error) => Response::failure("INVALID_REQUEST", error.to_string()),
-                    };
-                    let status = if response.ok { 200 } else { 400 };
-                    let _ = http_response(&mut stream, status, &response).await;
-                    return;
-                }
-            }
-        });
-    }
-}
-
-fn find_header_end(data: &[u8]) -> Option<usize> {
-    data.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-async fn http_response(
-    stream: &mut tokio::net::TcpStream,
-    status: u16,
-    response: &Response,
-) -> io::Result<()> {
-    let body = serde_json::to_vec(response).expect("response JSON");
-    let reason = if status == 200 {
-        "OK"
-    } else if status == 404 {
-        "Not Found"
-    } else if status == 413 {
-        "Payload Too Large"
-    } else {
-        "Bad Request"
-    };
-    let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(&body).await
-}
-
 pub fn system_snapshot() -> Value {
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .unwrap_or_else(|_| "unknown".into())
@@ -416,7 +496,7 @@ pub fn socket_is_live(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle::KodiLifecycle;
+    use crate::lifecycle::{KodiLifecycle, SurfaceManager};
     use mediabox_core::{CecStatus, InputMode};
     use std::time::Duration;
     use tempfile::tempdir;
@@ -442,6 +522,7 @@ mod tests {
             media: Arc::new(
                 MediaClient::new("http://127.0.0.1:9", Duration::from_millis(20)).unwrap(),
             ),
+            surface: SurfaceManager::new("kodi.service", "mediabox-tv-ui.service").unwrap(),
         });
         let task = tokio::spawn(serve_unix(listener, state));
         let mut stream = UnixStream::connect(&socket).await.unwrap();

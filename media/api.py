@@ -7,6 +7,8 @@ addon transport URL unless it asks for one, and above all never parses a page.
     GET    /media/status                     session, addons, streaming server
     GET    /media/capabilities               the capability profile in force
     GET    /media/home                       catalogue rows
+    GET    /media/library                    the appliance's own titles
+    GET    /media/library/{id}               one of them, with its sources
     GET    /media/search?q=                  every searchable catalogue
     GET    /media/catalog/{type}/{id}        one catalogue
     GET    /media/meta/{type}/{id}           one item
@@ -36,6 +38,7 @@ from urllib.parse import parse_qs, unquote
 
 from .errors import InvalidRequest, MediaError, NotFound
 from .inspector import FFprobeConfig, MediaInfo, inspect
+from .library import Library
 from .policy import (
     CapabilityProfile,
     PlaybackMode,
@@ -94,6 +97,9 @@ class MediaCoreConfig:
     idle_timeout_seconds: float = 45.0
     allowed_file_prefixes: tuple[str, ...] = ()
     torrent_network_status: str = "UNKNOWN"
+    #: Operator-declared library manifest. Absent means this appliance has
+    #: no library of its own, which is a normal configuration.
+    library_path: str | None = None
 
 
 class MediaCore:
@@ -102,6 +108,7 @@ class MediaCore:
     def __init__(self, config: MediaCoreConfig | None = None) -> None:
         self.config = config or MediaCoreConfig()
         self.profile: CapabilityProfile = get_profile(self.config.capability_profile)
+        self.library = Library(self.config.library_path)
         self.stremio = HeadlessStremio(
             streaming_server_url=self.config.streaming_server_url,
             session_path=self.config.session_state_path,
@@ -190,6 +197,10 @@ class MediaCore:
                     "provider": self.stremio.session_status().as_dict(),
                     "capabilityProfile": self.profile.name,
                     "sessions": len(self.sessions.active()),
+                    "library": {
+                        "configured": self.library.configured,
+                        "items": len(self.library.items()),
+                    },
                     "torrentNetwork": {
                         "status": self.config.torrent_network_status,
                         "directHttpAvailable": True,
@@ -202,8 +213,35 @@ class MediaCore:
 
         if head == "home" and len(parts) == 1:
             types = tuple(_split_csv(params.get("type", []))) or ("movie", "series")
-            rows = self.stremio.home(types=types)
-            return json_response(200, {"rows": [row.as_dict() for row in rows]})
+            rows = [row.as_dict() for row in self.stremio.home(types=types)]
+            # The appliance's own titles lead, because they are the ones that
+            # are certain to play.
+            library = self.library.as_row()
+            if library["items"]:
+                rows.insert(0, library)
+            return json_response(200, {"rows": rows})
+
+        if head == "library":
+            if len(parts) == 1:
+                return json_response(
+                    200,
+                    {
+                        "configured": self.library.configured,
+                        "items": [item.as_preview() for item in self.library.items()],
+                    },
+                )
+            if len(parts) == 2:
+                item = self.library.get(parts[1])
+                if item is None:
+                    raise NotFound("no such library item")
+                return json_response(
+                    200,
+                    {
+                        "meta": item.as_meta(),
+                        "streams": [source.as_stream() for source in item.sources],
+                        "playable": len(item.sources),
+                    },
+                )
 
         if head == "search" and len(parts) == 1:
             query = _one(params, "q")

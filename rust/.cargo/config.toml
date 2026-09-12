@@ -1,0 +1,7 @@
+# The appliance is aarch64 and carries no Rust toolchain, so the control plane
+# is cross-compiled here and shipped as binaries. Only the linker needs naming;
+# the daemon's HTTP client is built without TLS (every origin it talks to is
+# loopback), which is what keeps this a plain cross build with no vendored
+# C dependencies.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

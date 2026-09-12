@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
+/// How long `Player.Open` may take. Kodi holds the call open until the stream
+/// is playing, and a remote source has to be fetched and probed first.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(90);
+
 #[derive(Debug, Error)]
 pub enum KodiError {
     #[error("Kodi kullanılamıyor: {0}")]
@@ -45,15 +49,33 @@ impl KodiClient {
     }
 
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, KodiError> {
+        self.call_within(method, params, None).await
+    }
+
+    /// One JSON-RPC call, optionally allowed longer than the client default.
+    ///
+    /// Status polling must fail fast so a wedged player cannot stall a screen.
+    /// `Player.Open` is the opposite: Kodi does not answer it until the stream
+    /// is actually open, and opening a film over the internet routinely takes
+    /// longer than a status poll may. Timing that out would report a failure
+    /// for playback that is in fact starting, so the two get different budgets
+    /// rather than one compromise between them.
+    async fn call_within(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<Duration>,
+    ) -> Result<Value, KodiError> {
         // Method names are internal constants, never copied from the local API.
         let mut body = json!({"jsonrpc":"2.0", "id":self.next_id.fetch_add(1, Ordering::Relaxed), "method":method});
         if let Some(params) = params {
             body["params"] = params;
         }
-        let response = self
-            .http
-            .post(self.endpoint.clone())
-            .json(&body)
+        let mut request = self.http.post(self.endpoint.clone()).json(&body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| KodiError::Unavailable(e.to_string()))?;
@@ -195,9 +217,11 @@ impl KodiClient {
         let current = kodi_time_seconds(properties.get("time"))
             .ok_or_else(|| KodiError::InvalidResponse("Kodi zamanı geçersiz".into()))?;
         let target = (current + delta_seconds).max(0) as u64;
+        // `value` is a union, and an absolute position has to name itself as
+        // one: a bare time object is rejected as matching no member of it.
         self.call(
             "Player.Seek",
-            Some(json!({"playerid":id,"value":seconds_to_kodi_time(target)})),
+            Some(json!({"playerid":id,"value":{"time":seconds_to_kodi_time(target)}})),
         )
         .await
     }
@@ -217,7 +241,14 @@ impl KodiClient {
                 "URL kontrol karakteri içeriyor".into(),
             ));
         }
-        self.call("Player.Open", Some(json!({"item":{"file":url},"options":{"resume":seconds_to_kodi_time(resume_seconds)}}))).await
+        self.call_within(
+            "Player.Open",
+            Some(
+                json!({"item":{"file":url},"options":{"resume":seconds_to_kodi_time(resume_seconds)}}),
+            ),
+            Some(OPEN_TIMEOUT),
+        )
+        .await
     }
 }
 
@@ -255,6 +286,15 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn an_absolute_seek_names_its_union_member() {
+        let value = json!({"value": {"time": seconds_to_kodi_time(3661)}});
+        let time = &value["value"]["time"];
+        assert_eq!(time["hours"], 1);
+        assert_eq!(time["minutes"], 1);
+        assert_eq!(time["seconds"], 1);
+    }
 
     #[tokio::test]
     async fn kodi_mock_client_sends_json_rpc() {

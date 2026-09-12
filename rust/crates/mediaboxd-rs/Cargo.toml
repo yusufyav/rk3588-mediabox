@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 mediabox-cec = { path = "../mediabox-cec" }
+libc.workspace = true
 mediabox-core = { path = "../mediabox-core" }
 mediabox-input = { path = "../mediabox-input" }
 reqwest.workspace = true

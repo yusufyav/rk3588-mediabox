@@ -1,0 +1,91 @@
+[Unit]
+Description=MediaBox product UI on the television (sway + Chromium kiosk)
+Documentation=https://github.com/yusufyav/rk3588-mediabox
+After=mediaboxd-rs.service
+Wants=mediaboxd-rs.service
+# Kodi and this unit both want DRM master and only one may have it. The
+# ordering below is advisory; the real interlock is mediaboxd-rs, which stops
+# one before starting the other. Nothing here is enabled at boot for the same
+# reason: whoever owns the display decides, not systemd's default target, and
+# a console session at tty1 is never taken over on its own.
+Conflicts=kodi.service
+
+[Service]
+Type=simple
+# The compositor acquires DRM master through libseat, which on this appliance means
+# running as root — the same arrangement Kodi already has, and for the same
+# reason. Chromium then refuses its own setuid sandbox, so it is disabled and
+# the loss is made up for by the confinement below plus the fact that this
+# browser has no address bar, no extensions and exactly one page: the
+# appliance's own loopback UI.
+User=root
+RuntimeDirectory=mediabox-ui
+RuntimeDirectoryMode=0700
+StateDirectory=mediabox-ui
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/mediabox-ui
+Environment=HOME=/var/lib/mediabox-ui
+# A real login session, which is what libseat needs to be handed the DRM
+# device: without one it falls back to a seatd session that never becomes
+# active, and the compositor cannot create a GBM device at all.
+PAMName=login
+# Its own virtual terminal, so bringing the UI up does not take the console
+# somebody may be using at tty1 until the display genuinely changes hands.
+TTYPath=/dev/tty7
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty-force
+# The private Mali runtime is the one Kodi uses; wlroots needs it for a
+# GPU-accelerated compositor.
+Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
+Environment=WLR_BACKENDS=drm
+# Without a GPU the compositor should still come up rather than leave the
+# television black.
+Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
+# Direct scanout hands a fullscreen client's own buffer to the display
+# controller. It saves a copy, and it is also how a browser repainting that
+# buffer ends up visible as horizontal tearing partway down the screen: the
+# scanout is reading it while Chromium is still drawing into it. Compositing
+# through wlroots costs one blit per frame and presents whole frames.
+Environment=WLR_SCENE_DISABLE_DIRECT_SCANOUT=1
+# XDG_RUNTIME_DIR is set at exec time rather than with Environment=, because
+# the PAM session above sets its own and would win. Pointing it at this unit's
+# RuntimeDirectory is what lets ProtectHome stay on: ProtectHome also hides
+# /run/user, where the Wayland socket would otherwise have to live.
+ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/mediabox-ui /usr/bin/sway -c /etc/mediabox/sway-kiosk.conf
+# The browser is launched from the sway config, which exits with it. Stopped
+# and started by mediaboxd-rs when the display changes hands, so an ordinary
+# stop is never a failure to recover from.
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+# Confinement. Everything here was checked against a running kiosk: the
+# browser needs a JIT, so W^X is deliberately not enforced, and it needs
+# netlink to notice the network coming and going.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+DevicePolicy=closed
+DeviceAllow=char-drm rw
+DeviceAllow=/dev/mali0 rw
+DeviceAllow=char-input rw
+DeviceAllow=char-alsa rw
+DeviceAllow=char-tty rw
+DeviceAllow=char-vcs rw
+ReadWritePaths=/var/lib/mediabox-ui /run/mediabox-ui
+
+[Install]
+WantedBy=multi-user.target

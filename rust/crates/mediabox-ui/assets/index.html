@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>MediaBox</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="boot" class="boot"><div class="boot-mark">MEDIABOX</div><div class="boot-note">başlatılıyor…</div></div>
+<script type="module">
+  import init from "./mediabox_ui.js";
+  init().catch((error) => {
+    const boot = document.getElementById("boot");
+    if (boot) {
+      boot.querySelector(".boot-note").textContent = "arayüz yüklenemedi: " + error;
+    }
+  });
+</script>
+</body>
+</html>

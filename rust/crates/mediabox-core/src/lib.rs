@@ -113,6 +113,30 @@ pub struct KodiStatus {
     pub error: Option<String>,
 }
 
+/// Which process owns the appliance display. Only one may hold DRM master, so
+/// this is a single authoritative value rather than a set of flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Surface {
+    /// Kodi is on the television.
+    Kodi,
+    /// The MediaBox product UI is on the television.
+    Ui,
+    /// Neither owns the display; the console is free.
+    #[default]
+    Idle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceStatus {
+    pub active: Surface,
+    pub kodi_active: bool,
+    pub ui_active: bool,
+    /// False when the TV-local UI unit is not installed, which is the normal
+    /// state on an appliance driven only from a LAN browser.
+    pub ui_installed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceHealth {
     pub name: String,
@@ -133,6 +157,7 @@ pub struct SystemStatus {
     pub kodi: KodiStatus,
     pub cec: CecStatus,
     pub media: Value,
+    pub surface: SurfaceStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,6 +165,7 @@ pub struct SystemStatus {
 pub enum Request {
     Status,
     System,
+    Diagnostics,
     KodiStatus,
     KodiPlayPause,
     KodiStop,
@@ -152,6 +178,27 @@ pub enum Request {
     CecWakeTv,
     CecStandbyTv,
     MediaStatus,
+    MediaCapabilities,
+    MediaHome,
+    MediaCatalog {
+        media_type: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        addon_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    MediaMeta { media_type: String, id: String },
+    MediaSubtitles {
+        media_type: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_id: Option<String>,
+    },
+    MediaLibrary,
+    MediaLibraryItem { id: String },
+    MediaResolve { stream: Value },
+    MediaStreamPlan { stream: Value },
     MediaSearch { query: String },
     MediaInspect { url: String },
     MediaStreams { media_type: String, id: String },
@@ -159,6 +206,19 @@ pub enum Request {
     MediaSessions,
     MediaSessionStart { url: String },
     MediaSessionStop { id: String },
+    /// The one authoritative "play this on the television" path. The daemon
+    /// creates the media session, takes the display back from the UI and opens
+    /// the result in Kodi; no caller reproduces that ordering itself.
+    MediaPlayOnKodi {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<Value>,
+        #[serde(default)]
+        start_seconds: u64,
+    },
+    SurfaceStatus,
+    SurfaceSwitch { target: Surface },
     InputInject { action: InputAction },
     InputMonitor,
 }

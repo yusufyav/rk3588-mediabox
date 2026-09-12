@@ -5,7 +5,12 @@ Wants=network.target systemd-udev-settle.service mediabox-media-worker.service
 
 [Service]
 Type=simple
-ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs --require-cec --http 127.0.0.1:8787 --media-endpoint http://127.0.0.1:8790
+ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs --require-cec \
+  --http 127.0.0.1:8787 \
+  --lan-http 0.0.0.0:8788 \
+  --ui-root /opt/rk3588-mediabox/ui \
+  --ui-unit mediabox-tv-ui.service \
+  --media-endpoint http://127.0.0.1:8790
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=10s
@@ -13,8 +18,14 @@ RuntimeDirectory=mediabox
 RuntimeDirectoryMode=0750
 UMask=0027
 
-# Kodi remains an independently managed direct-KMS service. This unit only
-# invokes the canonical kodi.service through a fixed systemctl argv.
+# Kodi and the TV-local UI remain independently managed direct-KMS services.
+# This unit only starts and stops them through a fixed systemctl argv, and it
+# is the single place that ordering lives.
+#
+# The LAN listener serves the same UI and the same control endpoint to the
+# home network, and admits private-network peers only. The media worker stays
+# bound to loopback: anything a browser needs from it is relayed by this
+# daemon, so there is never a second authority on the network.
 KillMode=process
 NoNewPrivileges=true
 PrivateTmp=true

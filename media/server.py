@@ -114,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="absolute directory a file:// source may live under (repeatable)",
     )
+    parser.add_argument(
+        "--library",
+        default=None,
+        help="path to the appliance library manifest (JSON)",
+    )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--idle-timeout", type=float, default=45.0)
     parser.add_argument(
@@ -147,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             allowed_file_prefixes=tuple(arguments.allow_file_prefix),
             idle_timeout_seconds=arguments.idle_timeout,
             torrent_network_status=arguments.torrent_network_status,
+            library_path=arguments.library,
         )
     )
 
