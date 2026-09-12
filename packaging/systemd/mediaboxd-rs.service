@@ -1,0 +1,38 @@
+[Unit]
+Description=RK3588 MediaBox Rust control plane
+After=network.target systemd-udev-settle.service
+Wants=network.target systemd-udev-settle.service
+
+[Service]
+Type=simple
+ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs --require-cec
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+RuntimeDirectory=mediabox
+RuntimeDirectoryMode=0750
+UMask=0027
+
+# Kodi remains an independently managed direct-KMS service. This unit only
+# invokes the canonical kodi.service through a fixed systemctl argv.
+KillMode=process
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+DevicePolicy=closed
+DeviceAllow=/dev/cec0 rw
+ReadWritePaths=/run/mediabox
+
+[Install]
+WantedBy=multi-user.target
+

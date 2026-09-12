@@ -1,0 +1,16 @@
+[package]
+name = "mediaboxctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+mediabox-core = { path = "../mediabox-core" }
+serde_json.workspace = true
+tokio.workspace = true
+
+[[bin]]
+name = "mediaboxctl"
+path = "src/main.rs"
+

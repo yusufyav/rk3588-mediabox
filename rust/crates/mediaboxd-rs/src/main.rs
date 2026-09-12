@@ -1,0 +1,156 @@
+use clap::Parser;
+use mediabox_cec::{Adapter, unavailable_status};
+use mediabox_core::{CecStatus, InputMode, InputSource};
+use mediabox_input::InputManager;
+use mediaboxd_rs::daemon::{
+    AppState, CecRuntime, apply_kodi_route, serve_http, serve_unix, socket_is_live,
+};
+use mediaboxd_rs::kodi::KodiClient;
+use mediaboxd_rs::lifecycle::KodiLifecycle;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::net::{TcpListener, UnixListener};
+
+#[derive(Debug, Parser)]
+#[command(version, about = "MediaBox Rust control plane")]
+struct Args {
+    #[arg(long, default_value = "/run/mediabox/mediaboxd.sock")]
+    socket: PathBuf,
+    #[arg(long)]
+    http: Option<SocketAddr>,
+    #[arg(long, default_value = "http://127.0.0.1:8080/jsonrpc")]
+    kodi_endpoint: String,
+    #[arg(long, default_value = "kodi.service")]
+    kodi_unit: String,
+    #[arg(long)]
+    cec_device: Option<PathBuf>,
+    #[arg(long)]
+    disable_cec: bool,
+    #[arg(long)]
+    require_cec: bool,
+    #[arg(long, value_enum, default_value_t = ModeArg::Ui)]
+    input_mode: ModeArg,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ModeArg {
+    Ui,
+    KodiPlayback,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    if let Some(address) = args.http
+        && !address.ip().is_loopback()
+    {
+        return Err("HTTP API güvenlik gereği yalnız loopback adresine bağlanabilir".into());
+    }
+    prepare_socket(&args.socket)?;
+    let input = InputManager::new(match args.input_mode {
+        ModeArg::Ui => InputMode::Ui,
+        ModeArg::KodiPlayback => InputMode::KodiPlayback,
+    });
+    let (adapter, unavailable) = if args.disable_cec {
+        (
+            None,
+            CecStatus {
+                error: Some("CEC komut satırından kapatıldı".into()),
+                ..Default::default()
+            },
+        )
+    } else {
+        match Adapter::discover(args.cec_device.as_deref()) {
+            Ok(adapter) => (Some(adapter), CecStatus::default()),
+            Err(error) if args.require_cec => return Err(error.into()),
+            Err(error) => (None, unavailable_status(args.cec_device.as_deref(), &error)),
+        }
+    };
+    let kodi = Arc::new(KodiClient::new(
+        &args.kodi_endpoint,
+        Duration::from_secs(2),
+    )?);
+    let state = Arc::new(AppState {
+        kodi: kodi.clone(),
+        lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
+        cec: CecRuntime {
+            adapter: adapter.clone(),
+            unavailable,
+        },
+        input: input.clone(),
+    });
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let receiver = if let Some(adapter) = adapter {
+        let stop = stop.clone();
+        let input = input.clone();
+        let kodi = kodi.clone();
+        let runtime = tokio::runtime::Handle::current();
+        Some(
+            std::thread::Builder::new()
+                .name("mediabox-cec-rx".into())
+                .spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        match adapter.receive(250) {
+                            Ok(Some((parsed, Some((action, pressed))))) => {
+                                let decision = input.publish(
+                                    action,
+                                    InputSource::Cec,
+                                    pressed,
+                                    Some(parsed.event.timestamp_ns),
+                                );
+                                if pressed {
+                                    let kodi = kodi.clone();
+                                    runtime.spawn(async move {
+                                        let _ = apply_kodi_route(&kodi, decision).await;
+                                    });
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => eprintln!("CEC receive: {error}"),
+                        }
+                    }
+                })?,
+        )
+    } else {
+        None
+    };
+
+    let unix = UnixListener::bind(&args.socket)?;
+    let unix_task = tokio::spawn(serve_unix(unix, state.clone()));
+    let http_task = if let Some(address) = args.http {
+        let listener = TcpListener::bind(address).await?;
+        Some(tokio::spawn(serve_http(listener, state.clone())))
+    } else {
+        None
+    };
+    eprintln!("mediaboxd-rs hazır: {}", args.socket.display());
+    tokio::signal::ctrl_c().await?;
+    stop.store(true, Ordering::Relaxed);
+    unix_task.abort();
+    if let Some(task) = http_task {
+        task.abort();
+    }
+    if let Some(thread) = receiver {
+        let _ = thread.join();
+    }
+    drop(state);
+    let _ = std::fs::remove_file(&args.socket);
+    Ok(())
+}
+
+fn prepare_socket(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        if socket_is_live(path) {
+            return Err(format!("socket zaten canlı: {}", path.display()).into());
+        }
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}

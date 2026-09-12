@@ -1,0 +1,11 @@
+[package]
+name = "mediabox-cec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+mediabox-core = { path = "../mediabox-core" }
+thiserror.workspace = true
+

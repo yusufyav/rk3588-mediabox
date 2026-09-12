@@ -1,0 +1,23 @@
+[package]
+name = "mediaboxd-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+mediabox-cec = { path = "../mediabox-cec" }
+mediabox-core = { path = "../mediabox-core" }
+mediabox-input = { path = "../mediabox-input" }
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[[bin]]
+name = "mediaboxd-rs"
+path = "src/main.rs"
+
