@@ -61,13 +61,14 @@ say "product UI -> $prefix/ui"
 tar -C "$ui_dist" -cf - . | sh_ "rm -rf $prefix/ui && mkdir -p $prefix/ui && tar -C $prefix/ui -xf -"
 
 say "television kiosk"
-cp_ "$here/packaging/mediabox-kiosk-browser" "root@$host:/var/tmp/"
+cp_ "$here/packaging/mediabox-kiosk-browser" "$here/packaging/mediabox-kiosk-smoke" "root@$host:/var/tmp/"
 cp_ "$here/config/sway-kiosk.conf" "root@$host:/var/tmp/"
 sh_ "set -e
   mkdir -p /etc/mediabox
   install -m 0755 /var/tmp/mediabox-kiosk-browser $prefix/bin/mediabox-kiosk-browser
+  install -m 0755 /var/tmp/mediabox-kiosk-smoke $prefix/bin/mediabox-kiosk-smoke
   install -m 0644 /var/tmp/sway-kiosk.conf /etc/mediabox/sway-kiosk.conf
-  rm -f /var/tmp/mediabox-kiosk-browser /var/tmp/sway-kiosk.conf"
+  rm -f /var/tmp/mediabox-kiosk-browser /var/tmp/mediabox-kiosk-smoke /var/tmp/sway-kiosk.conf"
 
 say "library manifest -> /etc/mediabox-library.json"
 cp_ "$here/config/mediabox-library.json" "root@$host:/etc/mediabox-library.json"
@@ -86,6 +87,12 @@ sh_ "set -e
   systemctl restart mediabox-media-worker.service
   systemctl restart mediaboxd-rs.service
   systemctl enable mediaboxd-rs.service mediabox-media-worker.service >/dev/null"
+
+# The unit reporting "running" says nothing about what is on the television.
+# This puts the interface up and checks that it is genuinely there; a failure
+# here fails the deploy.
+say "television"
+sh_ "$prefix/bin/mediaboxctl surface switch ui >/dev/null && $prefix/bin/mediabox-kiosk-smoke"
 
 say "state"
 sh_ "systemctl is-active mediaboxd-rs mediabox-media-worker stremio-server; \

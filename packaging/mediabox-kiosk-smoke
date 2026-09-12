@@ -1,0 +1,67 @@
+#!/bin/sh
+#
+# Does the television actually show the product?
+#
+# Four things went wrong on this appliance before this check existed, and each
+# one left the unit "active (running)" while the television showed something
+# useless: a compositor with no input devices at all, a browser launched with
+# its URL parsed away, a 1080p interface composited at 4K, and a page that
+# never loaded. systemd cannot see any of that. So the kiosk is restarted and
+# then interrogated: what mode is the display in, how many input devices does
+# the compositor have, what URL is the browser actually on, and did the media
+# core receive the requests that only a loaded page makes.
+#
+# Exits non-zero on the first failure, so a deploy stops rather than reporting
+# success over a blank screen.
+set -eu
+
+UNIT=mediabox-tv-ui.service
+RUNTIME=/run/mediabox-ui
+WORKER=mediabox-media-worker.service
+URL="${MEDIABOX_UI_URL:-http://127.0.0.1:8787/}"
+MODE="${MEDIABOX_UI_MODE:-1920x1080}"
+SETTLE="${MEDIABOX_UI_SETTLE:-25}"
+
+fails=0
+ok()   { printf '  PASS  %-28s %s\n' "$1" "$2"; }
+bad()  { printf '  FAIL  %-28s %s\n' "$1" "$2"; fails=$((fails + 1)); }
+
+printf '== kiosk smoke\n'
+systemctl restart "$UNIT"
+sleep "$SETTLE"
+
+state=$(systemctl show "$UNIT" -p SubState --value)
+[ "$state" = running ] && ok unit "$state" || bad unit "$state"
+
+# 1. The display is in the mode the interface is laid out for.
+mode=$(sed -n 's/.*crtc-pos=\([0-9]*x[0-9]*\).*/\1/p' /sys/kernel/debug/dri/0/state 2>/dev/null | head -1)
+[ "$mode" = "$MODE" ] && ok "output mode" "$mode" || bad "output mode" "${mode:-unknown} (expected $MODE)"
+
+# 2. The compositor has input devices. Naming only the DRM backend produces a
+#    picture nobody can drive.
+sock=$(ls "$RUNTIME"/sway-ipc.*.sock 2>/dev/null | head -1 || true)
+if [ -n "$sock" ]; then
+  keyboards=$(SWAYSOCK="$sock" swaymsg -t get_inputs 2>/dev/null |
+    python3 -c 'import json,sys; print(sum(1 for d in json.load(sys.stdin) if d.get("type")=="keyboard"))' 2>/dev/null || echo 0)
+  [ "${keyboards:-0}" -gt 0 ] && ok "input devices" "$keyboards keyboard(s)" \
+    || bad "input devices" "compositor sees no keyboard"
+else
+  bad "input devices" "no compositor IPC socket in $RUNTIME"
+fi
+
+# 3. The browser is on our page and not on its own start page.
+argv=$(pgrep -a chromium 2>/dev/null | head -1 || true)
+case "$argv" in
+  *"$URL"*) ok "browser url" "$URL" ;;
+  *)        bad "browser url" "kiosk argv does not carry $URL" ;;
+esac
+
+# 4. The page loaded. Only a running UI asks the media core for these.
+window=$((SETTLE + 15))
+seen=$(journalctl -u "$WORKER" --since "-${window}s" --no-pager 2>/dev/null |
+  grep -c -E 'GET /media/(home|library)' || true)
+[ "${seen:-0}" -gt 0 ] && ok "ui loaded" "$seen media-core request(s)" \
+  || bad "ui loaded" "media core saw no request from the television"
+
+printf '== %s\n' "$([ "$fails" -eq 0 ] && echo 'kiosk smoke PASS' || echo "kiosk smoke FAIL ($fails)")"
+[ "$fails" -eq 0 ]
