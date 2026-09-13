@@ -11,13 +11,14 @@
 
 use crate::api;
 use crate::app::Toaster;
-use crate::components::{Action, Failure, Load, Row, human_size, seconds_to_clock};
+use crate::components::{Action, Failure, Field, Keyboard, Load, Row, human_size, seconds_to_clock};
 use crate::model::SystemStatus;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
 
-const TABS: [(&str, &str); 8] = [
+const TABS: [(&str, &str); 9] = [
+    ("account", "Hesap"),
     ("playback", "Oynatma"),
     ("network", "Ağ"),
     ("bluetooth", "Bluetooth"),
@@ -27,6 +28,221 @@ const TABS: [(&str, &str); 8] = [
     ("system", "Sistem"),
     ("diagnostics", "Tanılama"),
 ];
+
+/// The Stremio account, and what it is for.
+///
+/// Without one the box uses Stremio's default addon collection, which supplies
+/// artwork and descriptions and almost no streams: the catalogue looks full
+/// and nearly every title answers "no source". Signing in brings the account's
+/// own addons, which are where streams actually come from. The password is
+/// typed on the remote's keyboard, sent once over loopback to the media core,
+/// and is not stored — what the core keeps is the auth key the login returns.
+#[component]
+fn Account() -> impl IntoView {
+    let toaster = expect_context::<Toaster>();
+    let email = RwSignal::new(String::new());
+    let password = RwSignal::new(String::new());
+    // Which field the keys are building. Two fields and one keyboard, because
+    // a remote has one focus and a second keyboard would just be more to walk
+    // past.
+    let editing = RwSignal::new(0u8);
+    let busy = RwSignal::new(false);
+    let session = RwSignal::new(None::<Value>);
+
+    let refresh = move || {
+        spawn_local(async move {
+            if let Ok(status) = api::control(api::status()).await {
+                session.set(status.pointer("/media/provider").cloned());
+            }
+        });
+    };
+    refresh();
+
+    let signed_in = move || {
+        session.with(|found| {
+            found
+                .as_ref()
+                .and_then(|provider| provider.get("authenticated"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+    };
+    let who = move || {
+        session.with(|found| {
+            found
+                .as_ref()
+                .and_then(|provider| provider.get("email"))
+                .and_then(Value::as_str)
+                .unwrap_or("—")
+                .to_string()
+        })
+    };
+    let addons = move || {
+        session.with(|found| {
+            found
+                .as_ref()
+                .and_then(|provider| provider.get("addonCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        })
+    };
+
+    let sign_in = Callback::new(move |()| {
+        let (address, secret) = (email.get_untracked(), password.get_untracked());
+        if address.trim().is_empty() || secret.is_empty() || busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            match api::control(api::media_login(address.trim(), &secret)).await {
+                Ok(_) => {
+                    // Whatever happens next, the password does not stay in the
+                    // page.
+                    password.set(String::new());
+                    toaster.say("Stremio hesabı bağlandı".to_string());
+                    refresh();
+                }
+                Err(error) => toaster.warn(format!("Giriş başarısız: {}", error.message)),
+            }
+            busy.set(false);
+        });
+    });
+
+    let sign_out = Callback::new(move |()| {
+        busy.set(true);
+        spawn_local(async move {
+            match api::control(api::media_logout()).await {
+                Ok(_) => {
+                    toaster.say("Hesap bağlantısı kesildi".to_string());
+                    refresh();
+                }
+                Err(error) => toaster.warn(format!("Çıkış başarısız: {}", error.message)),
+            }
+            busy.set(false);
+        });
+    });
+
+    view! {
+        <div class="panel">
+            <h2>"Stremio hesabı"</h2>
+            <p class="panel-note">
+                "Hesap bağlı değilken cihaz Stremio'nun varsayılan eklenti koleksiyonunu \
+                 kullanır: afiş ve özet gelir, akış çoğu başlıkta gelmez. Kendi hesabınızı \
+                 bağladığınızda sizin eklentileriniz devreye girer."
+            </p>
+            // `Row` takes plain strings, so the whole block is what re-runs
+            // when the session changes rather than each value on its own.
+            {move || {
+                view! {
+                    <div class="rows">
+                        <Row
+                            label="Durum"
+                            value=if signed_in() { "Bağlı" } else { "Bağlı değil" }
+                            tone=if signed_in() { "ok" } else { "warn" }
+                        />
+                        <Row label="Hesap" value=who() />
+                        <Row label="Eklenti sayısı" value=addons().to_string() />
+                    </div>
+                }
+            }}
+
+            {move || {
+                if signed_in() {
+                    view! {
+                        <div class="actions-row">
+                            <Action
+                                label="Çıkış yap"
+                                variant="ghost"
+                                disabled=Signal::derive(move || busy.get())
+                                on_press=sign_out
+                            />
+                        </div>
+                    }
+                        .into_any()
+                } else {
+                    view! {
+                        <div class="keyboard">
+                            <div class="fields" data-row="1">
+                                <Field
+                                    label="E-posta"
+                                    value=email
+                                    key="field:email"
+                                    autofocus=true
+                                    placeholder="ornek@eposta.com"
+                                    on_focus=Callback::new(move |()| editing.set(0))
+                                    on_enter=sign_in
+                                />
+                                <Field
+                                    label="Parola"
+                                    value=password
+                                    key="field:password"
+                                    secret=true
+                                    on_focus=Callback::new(move |()| editing.set(1))
+                                    on_enter=sign_in
+                                />
+                            </div>
+                            {move || {
+                                if editing.get() == 0 {
+                                    view! { <Keyboard value=email /> }.into_any()
+                                } else {
+                                    view! { <Keyboard value=password /> }.into_any()
+                                }
+                            }}
+                            <div class="keys wide" data-row="1">
+                                <button
+                                    class="key wide"
+                                    data-focus="1"
+                                    data-focus-key="key:back"
+                                    tabindex="-1"
+                                    on:click=move |_| {
+                                        if editing.get() == 0 {
+                                            email.update(|value| { value.pop(); });
+                                        } else {
+                                            password.update(|value| { value.pop(); });
+                                        }
+                                    }
+                                >
+                                    "Sil"
+                                </button>
+                                <button
+                                    class="key wide"
+                                    data-focus="1"
+                                    data-focus-key="key:clear"
+                                    tabindex="-1"
+                                    on:click=move |_| {
+                                        if editing.get() == 0 {
+                                            email.set(String::new());
+                                        } else {
+                                            password.set(String::new());
+                                        }
+                                    }
+                                >
+                                    "Temizle"
+                                </button>
+                                <Action
+                                    label=move || {
+                                        if busy.get() {
+                                            "Bağlanıyor…".to_string()
+                                        } else {
+                                            "Giriş yap".to_string()
+                                        }
+                                    }
+                                    variant="primary"
+                                    disabled=Signal::derive(move || {
+                                        busy.get() || email.get().trim().is_empty()
+                                            || password.get().is_empty()
+                                    })
+                                    on_press=sign_in
+                                />
+                            </div>
+                        </div>
+                    }
+                        .into_any()
+                }
+            }}
+        </div>
+    }
+}
 
 #[component]
 pub fn Settings() -> impl IntoView {
@@ -122,6 +338,7 @@ pub fn Settings() -> impl IntoView {
                             "cec" => view! { <Cec system=system /> }.into_any(),
                             "display" => view! { <Display vitals=vitals /> }.into_any(),
                             "audio" => view! { <Audio caps=caps /> }.into_any(),
+                            "account" => view! { <Account /> }.into_any(),
                             "system" => view! { <SystemPanel system=system /> }.into_any(),
                             _ => {
                                 view! { <Diagnostics system=system vitals=vitals /> }.into_any()
@@ -181,7 +398,13 @@ fn Playback(caps: Option<Value>) -> impl IntoView {
         )
         .into_any();
     }
-    let dv_pipeline = text(&caps, "/video/dolbyVisionPipeline");
+    // The profile answers with a JSON boolean, and printing it raw put the
+    // word "false" on the television in red. A setting says whether it is on.
+    let dv_pipeline = match text(&caps, "/video/dolbyVisionPipeline").as_str() {
+        "true" => "Var".to_string(),
+        "false" => "Yok".to_string(),
+        other => other.to_string(),
+    };
     let max = format!(
         "{}×{} @ {} fps",
         text(&caps, "/video/maxWidth"),

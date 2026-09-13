@@ -1,0 +1,56 @@
+#!/bin/sh
+#
+# Make the television's own description of itself available before anything
+# draws on it.
+#
+# Two faults on this appliance had one cause: the HDMI connector came up
+# "connected" with no EDID at all. Measured: /sys/class/drm/card0-HDMI-A-1/edid
+# was 0 bytes, ALSA published no ELD, and the connector's HDR_PANEL_METADATA
+# blob was empty — so Kodi could not learn that the panel does HDR10 and never
+# set HDR_OUTPUT_METADATA (the set is what makes a Sony enter HDR), and audio
+# passthrough was packed without knowing what the sink accepts, which is
+# silence. Forcing one detect produced a 256-byte EDID with the panel's real
+# audio and HDR blocks.
+#
+# The ELD bypass is the second half: this board carries HDMI audio over I2S,
+# and with no ELD the codec refuses to pack a bitstream. Both are runtime state
+# and are lost on every restart, which is why they are done here rather than by
+# hand.
+set -eu
+
+for c in /sys/class/drm/card*-HDMI-A-*; do
+  [ -e "$c/status" ] || continue
+  [ "$(cat "$c/status")" = connected ] || continue
+  [ -s "$c/edid" ] && continue
+  echo detect > "$c/status" 2>/dev/null || true
+done
+
+# The card name is fixed by the device tree on this board.
+/usr/bin/amixer -c rockchiphdmi1 cset numid=17 on >/dev/null 2>&1 || true
+
+# Put the link back to SDR before an SDR interface is drawn on it.
+#
+# The colour state belongs to the connector, not to whoever set it, so it
+# survives the process that did. Measured after Kodi handed the display back:
+# the interface was on screen at 1920x1080p60 while the video port still read
+# HDR10[2] BT.2020 limited and the wire was still 4:2:2 10-bit — the television
+# stayed in its HDR picture profile and drew an SDR interface through it.
+#
+# This runs before the compositor takes DRM master, which is the only moment
+# nobody holds it: modetest can take master, clear the two properties that
+# carry HDR to the sink, and drop it again. The compositor then sets its own
+# mode on top of an SDR connector. Anything that wants HDR — Kodi — sets it
+# again for itself when it starts.
+if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ]; then
+  for c in /sys/class/drm/card*-HDMI-A-*; do
+    [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
+    id=$(cat "$c/../card*-HDMI-A-*/dev" 2>/dev/null || true)
+    break
+  done
+  conn=$(/usr/bin/modetest -M rockchip -c 2>/dev/null     | awk '$3 == "connected" && $4 ~ /HDMI/ { print $1; exit }')
+  if [ -n "${conn:-}" ]; then
+    /usr/bin/modetest -M rockchip -w "$conn:Colorspace:0" >/dev/null 2>&1 || true
+    /usr/bin/modetest -M rockchip -w "$conn:HDR_OUTPUT_METADATA:0" >/dev/null 2>&1 || true
+  fi
+fi
+exit 0

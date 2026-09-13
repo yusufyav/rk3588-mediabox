@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote
 
-from .errors import InvalidRequest, MediaError, NotFound
+from .errors import InvalidRequest, MediaError, NotFound, UpstreamError
 from .inspector import FFprobeConfig, MediaInfo, inspect
 from .library import Library
 from .policy import (
@@ -223,11 +223,29 @@ class MediaCore:
 
         if head == "library":
             if len(parts) == 1:
+                # Two libraries, kept apart on purpose.
+                #
+                # "items" is this appliance's own manifest: titles the operator
+                # put on the box, certain to play, resolved from disk. "stremio"
+                # is the account's library, the one that follows the operator
+                # between devices and carries how far each title was watched.
+                # Merging them would lose that difference, and with it the only
+                # thing that says which titles are guaranteed.
+                #
+                # The account call reaches out to Stremio's API, so it is
+                # allowed to fail without taking the manifest down with it: a
+                # box with no network still shows what is on it.
+                stremio: list[dict[str, Any]] = []
+                try:
+                    stremio = self.stremio.library_previews()
+                except UpstreamError as exc:
+                    LOG.info("Stremio library unavailable: %s", exc.message)
                 return json_response(
                     200,
                     {
                         "configured": self.library.configured,
                         "items": [item.as_preview() for item in self.library.items()],
+                        "stremio": stremio,
                     },
                 )
             if len(parts) == 2:

@@ -5,7 +5,10 @@ Wants=network.target systemd-udev-settle.service mediabox-media-worker.service
 
 [Service]
 Type=simple
+# The table of applications this box can put on the television. Adding a
+# browser or a screen receiver later is a row in that file, not a change here.
 ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs --require-cec \
+  --applications /etc/mediabox-applications.json \
   --http 127.0.0.1:8787 \
   --lan-http 0.0.0.0:8788 \
   --ui-root /opt/rk3588-mediabox/ui \
@@ -42,7 +45,12 @@ RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 DevicePolicy=closed
 DeviceAllow=/dev/cec0 rw
-ReadWritePaths=/run/mediabox
+# The browser's address drop. This interface chooses a web address and the
+# daemon leaves it here for the browser to read once at start; with
+# ProtectSystem=strict and nothing else named, that write failed with
+# "Read-only file system" and the browser could only ever open its built-in
+# home page.
+ReadWritePaths=/run/mediabox /var/lib/mediabox-browser
 
 [Install]
 WantedBy=multi-user.target

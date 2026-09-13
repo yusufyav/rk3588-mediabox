@@ -8,6 +8,7 @@
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
     fs::read_to_string(path).ok().map(|text| text.trim().to_string())
@@ -25,6 +26,57 @@ fn load_average() -> Value {
             .unwrap_or(0.0)
     };
     json!({"one": parse(0), "five": parse(1), "fifteen": parse(2)})
+}
+
+/// How busy the processors actually are, as a fraction between 0 and 1.
+///
+/// Not the load average, which is what this used to report. Load average is
+/// the number of tasks wanting to run, averaged over a minute: on an eight-core
+/// board a load of two reads as "25%" while the processors are very nearly
+/// idle, which is exactly what the television was showing. Utilisation is the
+/// share of time the processors spent doing anything at all, and the only way
+/// to get it is to compare two readings of /proc/stat.
+///
+/// The previous reading is kept here, so the answer is the work done since the
+/// last time anybody asked. The first call after start has nothing to compare
+/// against and says so rather than guessing.
+fn cpu_usage() -> Value {
+    static LAST: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+
+    let Some(text) = read_trimmed("/proc/stat") else {
+        return Value::Null;
+    };
+    let Some(line) = text.lines().find(|line| line.starts_with("cpu ")) else {
+        return Value::Null;
+    };
+    let fields: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|value| value.parse::<u64>().ok())
+        .collect();
+    // user nice system idle iowait irq softirq steal …
+    if fields.len() < 5 {
+        return Value::Null;
+    }
+    let total: u64 = fields.iter().sum();
+    // Waiting for a disk is not the processor being busy, so iowait counts as
+    // idle here the way every other tool counts it.
+    let idle = fields[3] + fields[4];
+
+    let Ok(mut last) = LAST.lock() else {
+        return Value::Null;
+    };
+    let previous = last.replace((total, idle));
+    let Some((last_total, last_idle)) = previous else {
+        return Value::Null;
+    };
+    let total_delta = total.saturating_sub(last_total);
+    let idle_delta = idle.saturating_sub(last_idle);
+    if total_delta == 0 {
+        return Value::Null;
+    }
+    let busy = total_delta.saturating_sub(idle_delta) as f64 / total_delta as f64;
+    json!(busy.clamp(0.0, 1.0))
 }
 
 fn cpu_count() -> u32 {
@@ -211,7 +263,7 @@ fn ffmpeg_processes() -> Vec<Value> {
 /// Everything the diagnostics screen reads, in one snapshot.
 pub fn diagnostics() -> Value {
     json!({
-        "cpu": {"count": cpu_count(), "load": load_average()},
+        "cpu": {"count": cpu_count(), "load": load_average(), "usage": cpu_usage()},
         "memory": memory(),
         "storage": [storage("/"), storage("/var/tmp")],
         "temperatures": temperatures(),

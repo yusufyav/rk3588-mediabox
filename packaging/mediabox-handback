@@ -1,0 +1,19 @@
+#!/bin/sh
+#
+# Hand the television back to the product interface.
+#
+# Bound to the remote's back and home keys in the browser's compositor config,
+# and to Back on Kodi's home window through a keymap. Kodi's own answer to Back
+# at the top level is to quit, and quitting leaves nobody holding the display:
+# the television drops to a console, which is what "Kodi'den çıkıyor" looks
+# like from the sofa.
+# It does not stop this unit itself: the control plane owns the display and
+# stops whoever is holding it as part of starting the next one, so there is
+# exactly one place that decides, and no window in which nothing owns the
+# screen.
+set -eu
+
+exec curl -fsS -m 5 -o /dev/null \
+  -X POST -H 'Content-Type: application/json' \
+  --data '{"command":"application_launch","id":"mediabox"}' \
+  http://127.0.0.1:8787/v1/control

@@ -2,6 +2,7 @@
 
 use crate::focus::{self, Direction};
 use crate::screens;
+use crate::model::MetaPreview;
 use crate::{api, model};
 use leptos::ev;
 use leptos::prelude::*;
@@ -14,8 +15,20 @@ use web_sys::{EventSource, MessageEvent};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
     Home,
+    /// The catalogue, which is an application of the box rather than its home
+    /// screen. It used to be printed onto the home screen itself.
+    Media,
+    Browser,
     Search,
     Detail { kind: String, id: String },
+    /// One shelf opened out into a grid. `addon` names where the titles come
+    /// from: an addon's id for a catalogue, or one of the library sentinels.
+    Collection {
+        addon: String,
+        kind: String,
+        catalog: String,
+        title: String,
+    },
     NowPlaying,
     Settings,
 }
@@ -23,7 +36,11 @@ pub enum Route {
 impl Route {
     fn tab(&self) -> &'static str {
         match self {
-            Self::Home | Self::Detail { .. } => "home",
+            Self::Home
+            | Self::Media
+            | Self::Browser
+            | Self::Detail { .. }
+            | Self::Collection { .. } => "home",
             Self::Search => "search",
             Self::NowPlaying => "now",
             Self::Settings => "settings",
@@ -32,13 +49,28 @@ impl Route {
 }
 
 /// Navigation, with the back stack a remote's Back button needs.
+///
+/// Each step of the stack carries the name of the element the remote was on
+/// when that screen was left. Coming back without it lands on whatever the
+/// screen autofocuses — the hero's first button — which on a television reads
+/// as having lost your place, because you have.
 #[derive(Clone, Copy)]
 pub struct Nav {
     route: RwSignal<Route>,
-    stack: RwSignal<Vec<Route>>,
+    stack: RwSignal<Vec<(Route, Option<String>)>>,
+    /// Set by Back: the element the next render should put the remote on.
+    restore: RwSignal<Option<String>>,
     /// Bumped by every accepted input. Anything waiting for "the person has
     /// not acted yet" watches this rather than guessing from a timer.
     pulse: RwSignal<u64>,
+    /// What the shelf already knew about the title being opened.
+    ///
+    /// The detail screen used to start from nothing and ask the addon for a
+    /// record it mostly had in its hand, so opening a film showed a black
+    /// screen — for as long as the slowest addon took — where the artwork and
+    /// the title should have been. Handed over, the page is drawn on the first
+    /// frame and the full record fills in the rest when it lands.
+    seed: RwSignal<Option<MetaPreview>>,
 }
 
 impl Nav {
@@ -46,19 +78,33 @@ impl Nav {
         self.route.get()
     }
 
+    /// Hand the next screen what this one already knows about the title.
+    pub fn seed(&self, item: MetaPreview) {
+        self.seed.set(Some(item));
+    }
+
+    /// The handed-over preview, if it is about the title being asked for.
+    pub fn seeded(&self, id: &str) -> Option<MetaPreview> {
+        self.seed
+            .get_untracked()
+            .filter(|item| item.id == id)
+    }
+
     pub fn go(&self, next: Route) {
         let current = self.route.get_untracked();
         if current == next {
             return;
         }
+        let was_on = focus::current_key();
         self.stack.update(|stack| {
-            stack.push(current);
+            stack.push((current, was_on));
             // Deep enough for any real journey, bounded so a long session
             // cannot grow it without limit.
             if stack.len() > 32 {
                 stack.remove(0);
             }
         });
+        self.restore.set(None);
         self.route.set(next);
     }
 
@@ -69,12 +115,39 @@ impl Nav {
 
     pub fn back(&self) {
         let previous = self.stack.try_update(|stack| stack.pop()).flatten();
-        self.route.set(previous.unwrap_or(Route::Home));
+        match previous {
+            Some((route, was_on)) => {
+                self.restore.set(was_on);
+                self.route.set(route);
+            }
+            None => {
+                self.restore.set(None);
+                self.route.set(Route::Home);
+            }
+        }
     }
 
     pub fn home(&self) {
         self.stack.set(Vec::new());
+        self.restore.set(None);
         self.route.set(Route::Home);
+    }
+}
+
+/// The artwork the room takes its colour from.
+///
+/// Held in context and written from an effect rather than from a component's
+/// body. Setting a signal while rendering is what broke navigation here: the
+/// write landed in the middle of building the screen, and coming back from a
+/// title produced a Home with no rails on it at all.
+#[derive(Clone, Copy)]
+pub struct Ambient(pub RwSignal<Option<String>>);
+
+impl Ambient {
+    pub fn show(&self, url: Option<String>) {
+        if self.0.get_untracked() != url {
+            self.0.set(url);
+        }
     }
 }
 
@@ -160,6 +233,9 @@ impl From<Recent> for model::MetaPreview {
             imdb_rating: None,
             genres: Vec::new(),
             addon_id: None,
+            // What this box remembers is that the title was opened, not how
+            // far it was watched; the account is what knows that.
+            state: None,
         }
     }
 }
@@ -219,13 +295,24 @@ fn dispatch_inner(action: &str, nav: Nav) -> bool {
     }
 }
 
-/// Subscribe to the daemon's input bus.
+/// Subscribe to the daemon's input bus — the television's own remote.
 ///
-/// The CEC remote is read by the daemon, not by the browser, so without this
-/// the television's own remote would move nothing on screen. Keyboards are not
-/// grabbed anywhere, so they arrive as ordinary key events and need no relay.
+/// The daemon reads CEC and normalises it; this is how those presses reach the
+/// screen. Only the kiosk asks for them, with `?tv=1`: the stream reaches every
+/// client, and while it carried navigation to all of them a laptop or a phone
+/// on the LAN moved in step with whoever was holding the remote in the living
+/// room.
+///
+/// A press can also arrive as an ordinary key event, because the kernel's CEC
+/// driver registers an input device of its own. Both paths land on the same
+/// rate limit, so a press that comes twice still moves one step.
 fn listen_to_remote(nav: Nav) {
-    let Ok(source) = EventSource::new("/v1/events") else {
+    let url = if focus::television() {
+        "/v1/events?tv=1"
+    } else {
+        "/v1/events"
+    };
+    let Ok(source) = EventSource::new(url) else {
         return;
     };
     let handler = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
@@ -240,6 +327,9 @@ fn listen_to_remote(nav: Nav) {
             return;
         }
         if let Some(action) = payload.get("action").and_then(|v| v.as_str()) {
+            if matches!(action, "up" | "down" | "left" | "right") && !may_step() {
+                return;
+            }
             dispatch(action, nav);
         }
     });
@@ -248,9 +338,86 @@ fn listen_to_remote(nav: Nav) {
     handler.forget();
 }
 
+/// Take the keyboard back whenever the television comes back to this page.
+///
+/// The display changes hands on this appliance — Kodi or the browser takes DRM
+/// master and hands it back — and when it comes back the page is still running
+/// but no longer has keyboard focus, so `keydown` never reaches the window and
+/// the remote is dead: no focus ring, arrows do nothing, Back does nothing. A
+/// reload fixed it, which is what proved it was focus and not a panic. This
+/// asks for the keyboard again on every event that marks a return, and puts
+/// the remote back on something it can see.
+fn install_focus_guard() {
+    let reclaim = || {
+        if let Some(window) = web_sys::window() {
+            let _ = window.focus();
+        }
+        focus::ensure_focus();
+    };
+    let _ = window_event_listener(ev::focus, move |_| reclaim());
+    let _ = window_event_listener(ev::pageshow, move |_| reclaim());
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        let handler = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            // `hidden` rather than the VisibilityState enum: the feature that
+            // carries the enum is not enabled for this build, and the boolean
+            // is the same answer.
+            if web_sys::window()
+                .and_then(|window| window.document())
+                .is_some_and(|document| !document.hidden())
+            {
+                reclaim();
+            }
+        });
+        let _ = document.add_event_listener_with_callback(
+            "visibilitychange",
+            handler.as_ref().unchecked_ref(),
+        );
+        handler.forget();
+    }
+}
+
+/// The shortest gap between two moves the remote is allowed to cause.
+///
+/// A television remote does not send one event per press. Through CEC the
+/// press, the hold and the release each arrive, and a held direction repeats as
+/// fast as the bus will carry it — so one deliberate press of Right walked the
+/// focus three or four tiles along and the screen looked like it was ignoring
+/// the remote rather than outrunning it. Holding a direction still repeats,
+/// just at a rate a person can follow.
+const STEP_INTERVAL_MS: f64 = 110.0;
+
+thread_local! {
+    static LAST_STEP: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::MIN) };
+}
+
+/// True when enough time has passed since the last move for this one to count.
+fn may_step() -> bool {
+    // js_sys rather than web_sys: the Performance binding is behind a feature
+    // this build does not enable, and Date.now() is precise enough for a gap
+    // measured in tens of milliseconds.
+    let now = js_sys::Date::now();
+    LAST_STEP.with(|last| {
+        if now - last.get() < STEP_INTERVAL_MS {
+            return false;
+        }
+        last.set(now);
+        true
+    })
+}
+
 fn install_keyboard(nav: Nav) {
     let _ = window_event_listener(ev::keydown, move |event| {
         let key = event.key();
+        // Directions are rate limited; everything else is one press, one
+        // answer, and a second Enter must never be thrown away.
+        if matches!(
+            key.as_str(),
+            "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"
+        ) && !may_step()
+        {
+            event.prevent_default();
+            return;
+        }
         let editing = focus::editing();
         let handled = match key.as_str() {
             "ArrowUp" => dispatch("up", nav),
@@ -293,34 +460,86 @@ pub fn App() -> impl IntoView {
     let nav = Nav {
         route: RwSignal::new(Route::Home),
         stack: RwSignal::new(Vec::new()),
+        restore: RwSignal::new(None),
         pulse: RwSignal::new(0),
+        seed: RwSignal::new(None),
     };
     let toaster = Toaster(RwSignal::new(None));
+    let ambient = Ambient(RwSignal::new(None));
     provide_context(nav);
     provide_context(toaster);
+    provide_context(ambient);
 
     install_keyboard(nav);
+    install_focus_guard();
     listen_to_remote(nav);
 
     // Focus must survive every screen change, and a screen that has just
-    // rendered has no focused element until this runs. The screen's preferred
-    // element usually arrives with its data a moment later, so the claim is
-    // retried briefly — and abandoned the moment the person presses anything,
-    // because moving focus out from under someone is worse than starting in
-    // the wrong place.
+    // rendered has no focused element until this runs. Coming back from a
+    // title is the case that matters most: the poster it was opened from does
+    // not exist yet at the moment the screen reappears, because its rail is
+    // still being rebuilt, so the claim is retried briefly — and abandoned the
+    // moment the person presses anything, because moving focus out from under
+    // someone is worse than starting in the wrong place.
     Effect::new(move |_| {
         let _ = nav.route.get();
         let since = nav.pulse.get_untracked();
-        request_animation_frame(move || {
-            focus::focus_first();
-            let _ = focus::claim_autofocus();
-        });
+        let wanted = nav.restore.get_untracked();
+        focus::reset_motion();
+
+        // "Landed" has to mean the element we were actually asked for. Coming
+        // back from a title, the poster it was opened from does not exist for
+        // the first few hundred milliseconds — its rail is still being
+        // fetched — and the hero's button does. Treating that button as a
+        // satisfactory landing is what used to cancel the retry and drop the
+        // remote at the top of the page on every Back.
+        let settle = {
+            let wanted = wanted.clone();
+            move || match wanted.as_deref() {
+                Some(key) => {
+                    if focus::focus_key(key) {
+                        return true;
+                    }
+                    // Somewhere sane meanwhile, but keep looking.
+                    let _ = focus::claim_autofocus() || focus::settle_into_screen();
+                    false
+                }
+                None => focus::claim_autofocus() || focus::settle_into_screen(),
+            }
+        };
+
+        {
+            let settle = settle.clone();
+            request_animation_frame(move || {
+                focus::ensure_focus();
+                if settle() {
+                    nav.restore.set(None);
+                }
+            });
+        }
+
         let attempts = std::cell::Cell::new(0u8);
         if let Ok(handle) = set_interval_with_handle(
             move || {
                 attempts.set(attempts.get() + 1);
                 let moved = nav.pulse.get_untracked() != since;
-                if moved || attempts.get() > 24 || focus::claim_autofocus() {
+                let landed = settle();
+                if landed {
+                    nav.restore.set(None);
+                }
+                // Measure while the screen is still settling. The table only
+                // rebuilds when what is on the screen has changed, so this is
+                // a cache hit on most ticks and one rebuild on the tick after
+                // each shelf arrives — paid here, in the seconds before anyone
+                // touches the remote, instead of on the first press.
+                focus::warm();
+                // Long enough to outlast the slowest thing a screen waits for.
+                // A title's sources are fetched from every installed addon and
+                // on this appliance that can take several seconds; the screen
+                // has no focusable element until they land, so giving up at
+                // three seconds left the remote parked on the navigation bar
+                // with the title's own buttons sitting unreachable underneath.
+                if moved || landed || attempts.get() > 90 {
                     AUTOFOCUS_TIMER.with(|slot| {
                         if let Some(handle) = slot.take() {
                             handle.clear();
@@ -328,7 +547,7 @@ pub fn App() -> impl IntoView {
                     });
                 }
             },
-            std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(120),
         ) {
             AUTOFOCUS_TIMER.with(|slot| {
                 if let Some(previous) = slot.replace(Some(handle)) {
@@ -357,17 +576,35 @@ pub fn App() -> impl IntoView {
     view! {
         <div class="app">
             <TopBar />
-            <main class="screen">
-                {move || match nav.route() {
-                    Route::Home => screens::home::Home().into_any(),
-                    Route::Search => screens::search::Search().into_any(),
-                    Route::Detail { kind, id } => screens::detail::Detail(
-                            screens::detail::DetailProps { kind, id },
-                        )
-                        .into_any(),
-                    Route::NowPlaying => screens::now_playing::NowPlaying().into_any(),
-                    Route::Settings => screens::settings::Settings().into_any(),
-                }}
+            // A fixed window with the screen's own column inside it. Nothing
+            // here scrolls: the column is moved by a transform, which the
+            // compositor animates without repainting a single poster.
+            <main class="viewport">
+                <div class="column" data-scroller="1">
+                    {move || match nav.route() {
+                        Route::Home => screens::home::Home().into_any(),
+                        Route::Media => screens::media::Media().into_any(),
+                        Route::Browser => screens::browser::Browser().into_any(),
+                        Route::Search => screens::search::Search().into_any(),
+                        Route::Detail { kind, id } => screens::detail::Detail(
+                                screens::detail::DetailProps { kind, id },
+                            )
+                            .into_any(),
+                        Route::Collection { addon, kind, catalog, title } => {
+                            screens::collection::Collection(
+                                    screens::collection::CollectionProps {
+                                        addon,
+                                        kind,
+                                        catalog,
+                                        title,
+                                    },
+                                )
+                                .into_any()
+                        }
+                        Route::NowPlaying => screens::now_playing::NowPlaying().into_any(),
+                        Route::Settings => screens::settings::Settings().into_any(),
+                    }}
+                </div>
             </main>
             {move || {
                 toast
@@ -382,39 +619,78 @@ pub fn App() -> impl IntoView {
     }
 }
 
+/// The four places the product goes, across the top of the screen.
+///
+/// A bar rather than a rail down the side: the side rail floated over whatever
+/// was underneath it, so its labels landed on the hero's button on one screen
+/// and through the settings list on another. The bar owns a row nothing else
+/// occupies — the screen starts below it — and each entry carries its word
+/// beside its icon, which is what makes navigation readable from a sofa
+/// without having to learn the icons first.
 #[component]
 fn TopBar() -> impl IntoView {
     let nav = expect_context::<Nav>();
-    let tabs = [
-        ("home", "Ana Sayfa", Route::Home),
-        ("search", "Ara", Route::Search),
-        ("now", "Şimdi Oynatılan", Route::NowPlaying),
-        ("settings", "Ayarlar", Route::Settings),
+    let items = [
+        ("home", "Ana Sayfa", Route::Home, Icon::Home),
+        ("search", "Ara", Route::Search, Icon::Search),
+        ("now", "Şimdi Oynatılan", Route::NowPlaying, Icon::Play),
+        ("settings", "Ayarlar", Route::Settings, Icon::Gear),
     ];
     view! {
-        <header class="topbar">
-            <div class="wordmark">"MEDIABOX"</div>
-            <nav class="nav">
-                {tabs
+        <nav class="topbar">
+            <div class="brand">
+                <span class="brand-dot"></span>
+                <span>"MediaBox"</span>
+            </div>
+            <div class="nav-items">
+                {items
                     .into_iter()
-                    .map(|(key, label, target)| {
+                    .map(|(key, label, target, icon)| {
                         let current = move || nav.route().tab() == key;
                         view! {
                             <button
                                 class="nav-item"
                                 data-focus="1"
+                                data-focus-key=format!("nav:{key}")
                                 tabindex="-1"
                                 aria-current=move || current().then_some("true")
                                 on:click=move |_| nav.go(target.clone())
                             >
-                                {label}
+                                <Glyph icon=icon />
+                                <span>{label}</span>
                             </button>
                         }
                     })
                     .collect_view()}
-            </nav>
+            </div>
             <Clock />
-        </header>
+        </nav>
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Icon {
+    Home,
+    Search,
+    Play,
+    Gear,
+}
+
+/// Line art rather than glyphs from a font: an appliance cannot depend on a
+/// particular icon font being installed, and a stroked path stays crisp at
+/// whatever size the root font lands on.
+#[component]
+fn Glyph(icon: Icon) -> impl IntoView {
+    let path = match icon {
+        Icon::Home => "M4 11.2 12 4.5l8 6.7M6.4 9.6V19h11.2V9.6",
+        Icon::Search => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM16.2 16.2 21 21",
+        Icon::Play => "M8 5.5v13l11-6.5-11-6.5Z",
+        Icon::Gear => "M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2ZM12 3.4l1.4 2.2 2.6-.5.6 2.6 2.2 1.3L19.6 12l1.2 2.4-2.2 1.3-.6 2.6-2.6-.5-1.4 2.2-1.4-2.2-2.6.5-.6-2.6-2.2-1.3L8.4 12 7.2 9.6l2.2-1.3.6-2.6 2.6.5L12 3.4Z",
+    };
+    view! {
+        <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d=path />
+        </svg>
     }
 }
 

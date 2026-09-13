@@ -192,6 +192,23 @@ def _video(entry: dict[str, Any]) -> Video | None:
     )
 
 
+def _trailer(entry: dict[str, Any]) -> str | None:
+    """The title's trailer as a YouTube id.
+
+    Addons write it two ways and both carry the same thing: `trailerStreams`
+    as `{"ytId": ...}`, and the older `trailers` as `{"source": ...}`. The
+    newer list is read first because it is the one upstream keeps current.
+    """
+    for key, field_name in (("trailerStreams", "ytId"), ("trailers", "source")):
+        for item in entry.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            found = _text(item.get(field_name))
+            if found:
+                return found
+    return None
+
+
 def parse_meta(entry: dict[str, Any], addon_id: str | None) -> Meta | None:
     item_id = _text(entry.get("id"))
     item_type = _text(entry.get("type"))
@@ -219,6 +236,7 @@ def parse_meta(entry: dict[str, Any], addon_id: str | None) -> Meta | None:
         cast=_strings(entry.get("cast")),
         director=_strings(entry.get("director")),
         writer=_strings(entry.get("writer")),
+        trailer=_trailer(entry),
         videos=videos,
         addon_id=addon_id,
     )

@@ -61,14 +61,43 @@ say "product UI -> $prefix/ui"
 tar -C "$ui_dist" -cf - . | sh_ "rm -rf $prefix/ui && mkdir -p $prefix/ui && tar -C $prefix/ui -xf -"
 
 say "television kiosk"
-cp_ "$here/packaging/mediabox-kiosk-browser" "$here/packaging/mediabox-kiosk-smoke" "root@$host:/var/tmp/"
+cp_ "$here/packaging/mediabox-kiosk-browser" "$here/packaging/mediabox-kiosk-smoke" \
+    "$here/packaging/mediabox-hdmi-prepare" "root@$host:/var/tmp/"
 cp_ "$here/config/sway-kiosk.conf" "root@$host:/var/tmp/"
 sh_ "set -e
   mkdir -p /etc/mediabox
   install -m 0755 /var/tmp/mediabox-kiosk-browser $prefix/bin/mediabox-kiosk-browser
   install -m 0755 /var/tmp/mediabox-kiosk-smoke $prefix/bin/mediabox-kiosk-smoke
+  install -m 0755 /var/tmp/mediabox-hdmi-prepare $prefix/bin/mediabox-hdmi-prepare
   install -m 0644 /var/tmp/sway-kiosk.conf /etc/mediabox/sway-kiosk.conf
-  rm -f /var/tmp/mediabox-kiosk-browser /var/tmp/mediabox-kiosk-smoke /var/tmp/sway-kiosk.conf"
+  rm -f /var/tmp/mediabox-kiosk-browser /var/tmp/mediabox-kiosk-smoke \
+        /var/tmp/mediabox-hdmi-prepare /var/tmp/sway-kiosk.conf"
+
+say "television browser application"
+# The browser is an application of the box in its own right: its own unit, its
+# own compositor config, its own profile. The exit script is what gives the
+# display back, and the address file is where this interface leaves a chosen
+# address for it to open.
+cp_ "$here/packaging/mediabox-browser" "$here/packaging/mediabox-handback" "root@$host:/var/tmp/"
+cp_ "$here/config/sway-browser.conf" "root@$host:/var/tmp/"
+tar -C "$here/packaging" -cf - browser-remote | sh_ "rm -rf $prefix/browser-remote && tar -C $prefix -xf -"
+sh_ "set -e
+  mkdir -p /etc/mediabox /var/lib/mediabox-browser
+  install -m 0755 /var/tmp/mediabox-browser $prefix/bin/mediabox-browser
+  install -m 0755 /var/tmp/mediabox-handback $prefix/bin/mediabox-handback
+  install -m 0644 /var/tmp/sway-browser.conf /etc/mediabox/sway-browser.conf
+  rm -f /var/tmp/mediabox-browser /var/tmp/mediabox-handback /var/tmp/sway-browser.conf"
+
+say "application table -> /etc/mediabox-applications.json"
+cp_ "$here/config/mediabox-applications.json" "root@$host:/etc/mediabox-applications.json"
+
+say "Kodi keymap -> Back hands the display back"
+cp_ "$here/packaging/mediabox-kodi-keymap.xml" "root@$host:/var/tmp/"
+sh_ "set -e
+  mkdir -p /var/tmp/kodi-home/.kodi/userdata/keymaps
+  install -m 0644 /var/tmp/mediabox-kodi-keymap.xml \
+    /var/tmp/kodi-home/.kodi/userdata/keymaps/mediabox.xml
+  rm -f /var/tmp/mediabox-kodi-keymap.xml"
 
 say "library manifest -> /etc/mediabox-library.json"
 cp_ "$here/config/mediabox-library.json" "root@$host:/etc/mediabox-library.json"
@@ -77,6 +106,8 @@ say "units"
 cp_ "$here/packaging/systemd/mediaboxd-rs.service" \
     "$here/packaging/systemd/mediabox-media-worker.service" \
     "$here/packaging/systemd/mediabox-tv-ui.service" \
+    "$here/packaging/systemd/mediabox-browser.service" \
+    "$here/packaging/systemd/kodi.service" \
     "root@$host:/etc/systemd/system/"
 
 # The TV UI unit is installed but never enabled: which process owns the display

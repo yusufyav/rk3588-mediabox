@@ -12,21 +12,44 @@
 # that is either showing the interface or not running at all.
 set -eu
 
-URL="${MEDIABOX_UI_URL:-http://127.0.0.1:8787/}"
+# `?tv=1` is how the interface learns it is on the television. It cannot be
+# worked out from the browser: this kiosk reports the same pointer and hover
+# capabilities as a desktop, measured on this appliance. Without the flag the
+# page behaves as an ordinary scrolling page, which is what a phone needs.
+URL="${MEDIABOX_UI_URL:-http://127.0.0.1:8787/?tv=1}"
 PROFILE="${MEDIABOX_UI_PROFILE:-/var/lib/mediabox-ui/chromium}"
 
+# Measurement, off unless asked for. Performance on a television is a property
+# of the real browser on the real panel, so the instrument has to attach to
+# this process rather than to a headless copy of it. The port is bound to
+# loopback and the variable is unset in production, so shipping behaviour is
+# byte-for-byte what it was without it.
+debug=""
+if [ -n "${MEDIABOX_UI_DEBUG_PORT:-}" ]; then
+  debug="--remote-debugging-port=${MEDIABOX_UI_DEBUG_PORT} --remote-allow-origins=*"
+fi
+
+# --lang=tr is not cosmetic: the browser offers to translate a page whose
+# language differs from its own interface, and this interface is Turkish. The
+# managed policy in /etc/chromium/policies/managed/mediabox.json is what
+# actually forbids the bubble; this makes the question stop being asked.
+#
+# shellcheck disable=SC2086  # $debug is either empty or two known flags.
 /usr/bin/chromium \
+  $debug \
   --kiosk \
   --no-sandbox \
   --ozone-platform=wayland \
+  --force-device-scale-factor=2 \
   --user-data-dir="$PROFILE" \
   --no-first-run \
   --no-default-browser-check \
   --disable-background-networking \
   --disable-component-update \
   --disable-sync \
-  --disable-translate \
   --disable-infobars \
+  --disable-features=Translate,TranslateUI \
+  --lang=tr \
   --disable-session-crashed-bubble \
   --overscroll-history-navigation=0 \
   --autoplay-policy=no-user-gesture-required \

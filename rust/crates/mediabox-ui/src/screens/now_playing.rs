@@ -138,8 +138,20 @@ pub fn NowPlaying() -> impl IntoView {
                             </strong>
                             <p>
                                 {move || {
+                                    // Not the control plane's own words. What
+                                    // stood here was the daemon's error string,
+                                    // JSON-RPC URL and all, which is a thing to
+                                    // put in diagnostics and not on a
+                                    // television: "Kodi kullanılamıyor: error
+                                    // sending request for url
+                                    // (http://127.0.0.1:8080/jsonrpc)" told the
+                                    // person in front of it nothing except that
+                                    // something was unfinished. The reason is
+                                    // still read, and still shown — under
+                                    // Ayarlar › Tanılama, where a reason
+                                    // belongs.
                                     if offline {
-                                        detail.get()
+                                        "Şu anda oynatılan bir şey yok.".to_string()
                                     } else {
                                         "Bir başlık seçip \"Kodi'de Oynat\" deyin.".to_string()
                                     }

@@ -49,6 +49,7 @@ pub fn Search() -> impl IntoView {
         // separates them is provenance: the library entry names the operator's
         // own source, which is the one certain to play, so it must not be
         // resolved through the addons instead.
+        nav.seed(item.clone());
         nav.go(Route::Detail {
             kind: if item.is_library() {
                 "library".to_string()
@@ -74,7 +75,13 @@ pub fn Search() -> impl IntoView {
                     }
                 }
             >
-                <span aria-hidden="true">"⌕"</span>
+                // A drawn path rather than the character U+2315. The appliance
+                // has no font with that glyph at any useful weight, so what the
+                // television showed beside the field was a small malformed mark
+                // that read as a rendering fault.
+                <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM16.2 16.2 21 21" />
+                </svg>
                 <input
                     type="search"
                     placeholder="Film veya dizi ara"

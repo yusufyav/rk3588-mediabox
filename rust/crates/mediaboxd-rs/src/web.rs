@@ -90,6 +90,10 @@ pub async fn serve(
 struct Head {
     method: String,
     path: String,
+    /// The raw query string, if any. The route ignores it; one endpoint does
+    /// not — `/v1/events` needs to know whether it is talking to the
+    /// television.
+    query: String,
     headers: Vec<(String, String)>,
     body_start: usize,
     content_length: usize,
@@ -138,6 +142,7 @@ fn parse_head(data: &[u8]) -> Option<Result<Head, &'static str>> {
     Some(Ok(Head {
         method: method.to_string(),
         path: path.to_string(),
+        query: target.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default(),
         headers,
         body_start: end + 4,
         content_length,
@@ -211,7 +216,9 @@ async fn route(
             let status = if response.ok { 200 } else { 400 };
             send_json(stream, status, &response).await
         }
-        ("GET", "/v1/events") => serve_events(stream, state).await,
+        ("GET", "/v1/events") => {
+            serve_events(stream, state, head.query.split('&').any(|p| p == "tv=1")).await
+        }
         ("GET", path) if path.starts_with("/v1/media/session/") => {
             let id = &path["/v1/media/session/".len()..];
             proxy_session(stream, state, id).await
@@ -236,7 +243,21 @@ async fn route(
 /// the product UI would be navigable by keyboard only. Each normalized action
 /// is forwarded verbatim; the UI decides what "up" means on the screen it is
 /// showing.
-async fn serve_events(stream: &mut TcpStream, state: Arc<AppState>) -> io::Result<()> {
+/// Presses that move a cursor on a screen, as opposed to commands about
+/// playback, which any client may usefully hear.
+fn is_navigation(action: mediabox_core::InputAction) -> bool {
+    use mediabox_core::InputAction as A;
+    matches!(
+        action,
+        A::Up | A::Down | A::Left | A::Right | A::Ok | A::Back | A::Home
+    )
+}
+
+async fn serve_events(
+    stream: &mut TcpStream,
+    state: Arc<AppState>,
+    television: bool,
+) -> io::Result<()> {
     let mut events = state.input.subscribe();
     stream
         .write_all(
@@ -249,6 +270,14 @@ async fn serve_events(stream: &mut TcpStream, state: Arc<AppState>) -> io::Resul
         let payload = match next {
             // A comment frame keeps a browser from deciding the stream died.
             Err(_) => ": keepalive\n\n".to_string(),
+            // Navigation goes to the television and nowhere else.
+            //
+            // This stream reaches every client, so while it carried the
+            // remote's presses a laptop or a phone on the LAN moved in step
+            // with whoever was holding the remote in the living room. Only the
+            // client that says it is the television — the kiosk, which asks
+            // for `?tv=1` — is driven by that remote.
+            Ok(Ok(event)) if !television && is_navigation(event.action) => continue,
             Ok(Ok(event)) => format!(
                 "data: {}\n\n",
                 serde_json::to_string(&event).expect("event JSON")

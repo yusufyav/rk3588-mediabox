@@ -1,0 +1,6 @@
+{
+  "manifest_version": 3,
+  "name": "MediaBox Remote",
+  "version": "1.0",
+  "description": "Dört ok ve bir OK tuşuyla gezilemeyen web uygulamalarını kumandayla gezilebilir yapar."
+}

@@ -13,6 +13,8 @@
 //! the source.
 
 use crate::app::{Nav, Recent, Route, Toaster, remember};
+use std::collections::HashSet;
+use wasm_bindgen::JsCast;
 use crate::components::{
     Action, Chip, Failure, Load, human_bitrate, human_size, resolution_label, seconds_to_clock,
 };
@@ -37,11 +39,20 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
     let nav = expect_context::<Nav>();
     let toaster = expect_context::<Toaster>();
 
-    let meta = RwSignal::new(Load::Loading);
+    // Drawn on the first frame from what the shelf already knew, so the page
+    // is never a black screen waiting on a request. The full record replaces
+    // it when it arrives — same title, same artwork, more of it.
+    let meta = RwSignal::new(match nav.seeded(&id) {
+        Some(item) => Load::Ready(item.as_meta()),
+        None => Load::Loading,
+    });
     let sources = RwSignal::new(Load::<Vec<Source>>::Loading);
     let selected = RwSignal::new(None::<Source>);
     let plan = RwSignal::new(None::<Load<Plan>>);
-    let preview_url = RwSignal::new(None::<String>);
+    let preview_url = RwSignal::new(None::<Preview>);
+    // Which addon's sources are shown. Held here rather than inside the list,
+    // because the control that changes it stands outside the part that scrolls.
+    let tab = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
 
     let is_library = kind == "library" || id.starts_with("library:");
@@ -162,25 +173,34 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
     });
 
     let preview = Callback::new(move |()| {
-        let Some(source) = selected.get_untracked() else {
+        // The trailer first: it belongs to the title rather than to whichever
+        // source happens to be selected, so it works before a source is even
+        // chosen and on every title that has one.
+        if let Load::Ready(found) = meta.get_untracked()
+            && let Some(id) = found.trailer.clone()
+        {
+            preview_url.set(Some(Preview::Trailer(id)));
             return;
-        };
-        let Some(Load::Ready(found)) = plan.get_untracked() else {
-            return;
-        };
-        match previewable_url(&found, &source) {
+        }
+        let previewable = selected
+            .get_untracked()
+            .zip(match plan.get_untracked() {
+                Some(Load::Ready(found)) => Some(found),
+                _ => None,
+            })
+            .and_then(|(source, found)| previewable_url(&found, &source));
+        match previewable {
             Some(url) => {
                 remember_played();
-                preview_url.set(Some(url));
+                preview_url.set(Some(Preview::Source(url)));
             }
-            None => toaster.warn(
-                "Bu kaynak tarayıcıda önizlenemiyor; televizyonda oynatılabilir.",
-            ),
+            None => toaster.warn("Bu başlığın fragmanı yok ve kaynağı tarayıcıda açılamıyor."),
         }
     });
 
     view! {
-        <div class="detail">
+        <div class="detail detail--split">
+            <div class="detail-main">
             {move || match meta.get() {
                 Load::Loading => {
                     view! { <div class="state"><strong>"Yükleniyor…"</strong></div> }.into_any()
@@ -202,18 +222,58 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
                         .into_any()
                 }
             }}
-            <SourceList sources=sources selected=selected on_pick=Callback::new(analyze) />
-            {move || {
-                plan.get()
-                    .map(|state| view! { <Technical state=state /> })
-            }}
+            </div>
+            // The sources, beside the title rather than under it.
+            //
+            // Twenty-six of them stacked full-width is a wall: each row is a
+            // sentence the width of the television, and the differences between
+            // them — the resolution, the size, who is seeding — sit at the end
+            // of it where nothing lines up. In a column of their own the rows
+            // are short, the same field is always in the same place, and a
+            // dozen are on screen instead of four.
+            <aside class="detail-side">
+                // A scroller of its own, which is what keeps the picture still.
+                //
+                // With one scroller for the whole screen, moving down the
+                // sources drags the poster, the synopsis and the backdrop up
+                // and off the television: by the tenth source the title being
+                // chosen for is no longer on screen. The panel scrolls inside
+                // itself instead, so what stays is everything the choice is
+                // about. The focus engine picks the nearest scroller to
+                // whatever the remote is on, so declaring one here is all it
+                // takes.
+                // The filter stands still while the list moves under it.
+                // Scrolled away with the rows it would be unreachable from the
+                // tenth source onwards, which is exactly where wanting to
+                // narrow the list begins.
+                <SourceFilter sources=sources tab=tab />
+                // The window the list is seen through, and it starts *below*
+                // the filter. Clipping at the panel's own edge instead let the
+                // list travel up over the filter and bury it, and it also made
+                // the focus engine measure the travel against a window taller
+                // than the one the list is actually in.
+                <div class="detail-side-window">
+                <div class="detail-side-inner" data-scroller="1">
+                    <SourceList
+                        sources=sources
+                        tab=tab
+                        selected=selected
+                        on_pick=Callback::new(analyze)
+                    />
+                    {move || {
+                        plan.get()
+                            .map(|state| view! { <Technical state=state /> })
+                    }}
+                </div>
+                </div>
+            </aside>
             {move || {
                 preview_url
                     .get()
                     .map(|url| {
                         view! {
                             <PreviewSheet
-                                url=url
+                                preview=url
                                 on_close=Callback::new(move |()| preview_url.set(None))
                             />
                         }
@@ -256,6 +316,183 @@ fn previewable_url(plan: &Plan, source: &Source) -> Option<String> {
     (reachable && !loopback).then_some(url)
 }
 
+/// Who offered this source, as a person would name them.
+///
+/// The addon's own name when it sent one. Failing that the id, which is a
+/// reverse-domain string and ugly, but is at least stable and distinct — and a
+/// tab labelled with it is still better than every source in one heap.
+fn provider_name(stream: &Stream) -> String {
+    stream
+        .addon_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| stream.addon_id.clone())
+        .unwrap_or_else(|| "Bilinmeyen".to_string())
+}
+
+/// The provider filter, above the part of the panel that scrolls.
+///
+/// A control that shows the choice it is on and opens into the rest of them,
+/// rather than a row of every option at once. With three addons installed the
+/// row was already wider than the panel; with a dozen it is a strip that has
+/// to be walked through to reach the sources under it. Closed, this is one
+/// line; open, it is a list with the current choice marked.
+#[component]
+fn SourceFilter(
+    sources: RwSignal<Load<Vec<Source>>>,
+    tab: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let open = RwSignal::new(false);
+    // Addons in the order they first answered, with how many each offered.
+    // Ordered by arrival rather than by count, so the list does not reshuffle
+    // itself between one title and the next.
+    let providers = move || {
+        sources.with(|state| {
+            let mut order: Vec<(String, usize)> = Vec::new();
+            for source in state.ready().map(Vec::as_slice).unwrap_or_default() {
+                let name = provider_name(&source.parsed);
+                match order.iter_mut().find(|(seen, _)| seen == &name) {
+                    Some((_, count)) => *count += 1,
+                    None => order.push((name, 1)),
+                }
+            }
+            order
+        })
+    };
+    let total = move || providers().iter().map(|(_, count)| count).sum::<usize>();
+    let current = move || match tab.get() {
+        Some(name) => {
+            let count = providers()
+                .into_iter()
+                .find(|(seen, _)| seen == &name)
+                .map(|(_, count)| count)
+                .unwrap_or(0);
+            (name, count)
+        }
+        None => ("Tümü".to_string(), total()),
+    };
+
+    view! {
+        {move || {
+            // One provider is not a choice, and a control offering it is
+            // furniture.
+            (providers().len() > 1)
+                .then(|| {
+                    view! {
+                        <div
+                            class="source-select"
+                            class:is-open=move || open.get()
+                            on:keydown=move |event| {
+                                // Back closes the list it opened. Without this
+                                // the key went past it to the screen, and
+                                // changing your mind about the filter left the
+                                // film.
+                                if open.get_untracked()
+                                    && matches!(event.key().as_str(), "Escape" | "Backspace")
+                                {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    open.set(false);
+                                }
+                            }
+                        >
+                            <button
+                                class="source-select-head"
+                                data-focus="1"
+                                tabindex="-1"
+                                aria-expanded=move || open.get().to_string()
+                                on:click=move |_| open.update(|state| *state = !*state)
+                            >
+                                <span class="source-select-name">{move || current().0}</span>
+                                <span class="source-select-count">{move || current().1}</span>
+                                <svg class="source-select-mark" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M7 10l5 5 5-5" />
+                                </svg>
+                            </button>
+                            <Show when=move || open.get()>
+                                // A scope, because the open list is drawn over
+                                // the sources: without it the arrow keys are
+                                // scored on geometry alone, and the row lying
+                                // directly under the second option is nearer
+                                // than the option itself — one press down and
+                                // the remote had left the list it opened.
+                                <div class="source-select-list" data-focus-scope="1">
+                                    <ProviderOption
+                                        tab=tab
+                                        open=open
+                                        value=None
+                                        label="Tümü"
+                                        count=Signal::derive(total)
+                                    />
+                                    {move || {
+                                        providers()
+                                            .into_iter()
+                                            .map(|(name, count)| {
+                                                view! {
+                                                    <ProviderOption
+                                                        tab=tab
+                                                        open=open
+                                                        value=Some(name.clone())
+                                                        label=name
+                                                        count=Signal::derive(move || count)
+                                                    />
+                                                }
+                                            })
+                                            .collect_view()
+                                    }}
+                                </div>
+                            </Show>
+                        </div>
+                    }
+                })
+        }}
+    }
+}
+
+/// One line of the open filter. The green dot marks the one in force, the way
+/// a chosen item is marked anywhere a list stands in for a single answer.
+#[component]
+fn ProviderOption(
+    tab: RwSignal<Option<String>>,
+    open: RwSignal<bool>,
+    value: Option<String>,
+    #[prop(into)] label: String,
+    #[prop(into)] count: Signal<usize>,
+) -> impl IntoView {
+    let chosen = value.clone();
+    let mine = value.clone();
+    let active = move || tab.get() == mine;
+    view! {
+        <button
+            class="source-option"
+            data-focus="1"
+            tabindex="-1"
+            aria-selected=move || active().to_string()
+            on:click=move |_| {
+                tab.set(chosen.clone());
+                open.set(false);
+                // The list the remote was standing in has just gone. Put it
+                // back on the control that opened it; left to itself the
+                // engine re-homes focus on whatever is nearest, which was the
+                // play button in the other column.
+                if let Some(head) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| {
+                        document.query_selector(".source-select-head").ok().flatten()
+                    })
+                    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+                {
+                    crate::focus::focus(&head);
+                }
+            }
+        >
+            <span class="source-option-name">{label}</span>
+            <span class="source-option-count">{move || count.get()}</span>
+            <span class="source-option-mark" aria-hidden="true"></span>
+        </button>
+    }
+}
+
 #[component]
 fn Head(
     meta: Meta,
@@ -265,17 +502,16 @@ fn Head(
     #[prop(into)] on_play: Callback<()>,
     #[prop(into)] on_preview: Callback<()>,
 ) -> impl IntoView {
+    let nav = expect_context::<Nav>();
     let art = meta
         .background
         .clone()
         .or_else(|| meta.poster.clone())
         .map(|url| format!("background-image:url('{url}')"))
         .unwrap_or_default();
-    let poster = meta
-        .poster
-        .clone()
-        .map(|url| format!("background-image:url('{url}')"))
-        .unwrap_or_default();
+    let logo = meta.logo.clone();
+    let title_alt = meta.name.clone();
+    let title_text = meta.name.clone();
     let mut facts: Vec<String> = Vec::new();
     if let Some(year) = meta.release_info.clone() {
         facts.push(year);
@@ -286,58 +522,91 @@ fn Head(
     if let Some(rating) = meta.imdb_rating.clone() {
         facts.push(format!("IMDb {rating}"));
     }
-    facts.extend(meta.genres.iter().take(3).cloned());
-    let director = (!meta.director.is_empty()).then(|| meta.director.join(", "));
-    let cast = (!meta.cast.is_empty()).then(|| meta.cast.iter().take(4).cloned().collect::<Vec<_>>().join(", "));
+    let genres = meta.genres.clone();
+    let cast: Vec<String> = meta.cast.iter().take(5).cloned().collect();
+    let directors = meta.director.clone();
+    let description = meta.description.clone();
 
     let can_play = move || selected.get().is_some_and(|source| source.parsed.playable);
+    // A trailer belongs to the title, so the button is live as soon as the page
+    // is — no source has to be chosen first.
+    let has_trailer = meta.trailer.is_some();
     let preview_ready = move || {
-        match (plan.get(), selected.get()) {
-            (Some(Load::Ready(found)), Some(source)) => {
-                previewable_url(&found, &source).is_some()
+        has_trailer
+            || match (plan.get(), selected.get()) {
+                (Some(Load::Ready(found)), Some(source)) => {
+                    previewable_url(&found, &source).is_some()
+                }
+                _ => false,
             }
-            _ => false,
-        }
     };
 
     view! {
         <div class="detail-art" style=art></div>
         <div class="detail-grid">
-            <div class="detail-poster" style=poster></div>
             <div class="detail-body">
-                <h1 class="detail-title">{meta.name.clone()}</h1>
-                <div class="chips">
+                // The film's own title art when the catalogue has it. It is the
+                // title as the film itself writes it, and it is what tells you
+                // where you are without reading anything.
+                {match logo {
+                    Some(url) => {
+                        view! { <img class="detail-logo" src=url alt=title_alt /> }.into_any()
+                    }
+                    None => view! { <h1 class="detail-title">{title_text}</h1> }.into_any(),
+                }}
+                <p class="detail-facts">
                     {facts
                         .into_iter()
-                        .map(|fact| view! { <Chip text=fact /> })
+                        .map(|fact| view! { <span>{fact}</span> })
                         .collect_view()}
-                </div>
-                {meta
-                    .description
-                    .clone()
-                    .map(|text| view! { <p class="detail-desc">{text}</p> })}
-                {director
-                    .map(|names| {
-                        view! { <p class="detail-desc">{format!("Yönetmen: {names}")}</p> }
+                </p>
+                <MetaGroup label="TÜRÜ" items=genres />
+                <MetaGroup label="OYUNCULAR" items=cast />
+                <MetaGroup label="YÖNETMENLER" items=directors />
+                {description
+                    .map(|text| {
+                        view! {
+                            <div class="meta-group">
+                                <span class="meta-label">"ÖZET"</span>
+                                <p class="detail-desc">{text}</p>
+                            </div>
+                        }
                     })}
-                {cast
-                    .map(|names| {
-                        view! { <p class="detail-desc">{format!("Oyuncular: {names}")}</p> }
-                    })}
-                <div class="hero-actions">
-                    <Action
-                        label=move || if busy.get() { "Gönderiliyor…" } else { "Kodi'de Oynat" }
-                            .to_string()
-                        variant="primary"
+                // The actions, as a strip of marks rather than a row of pills.
+                // Three buttons the width of a sentence each is the loudest
+                // thing on the screen, and none of them is what the screen is
+                // about: the film is, and the choice of source is.
+                <div class="detail-actions" data-row="1">
+                    <IconAction
+                        label=Signal::derive(move || {
+                            if busy.get() { "Gönderiliyor…".to_string() } else { "Kodi'de Oynat".to_string() }
+                        })
+                        glyph="M8 5l11 7-11 7z"
+                        primary=true
                         autofocus=true
                         disabled=Signal::derive(move || busy.get() || !can_play())
                         on_press=on_play
                     />
-                    <Action
-                        label="Ön İzle"
-                        variant="ghost"
+                    <IconAction
+                        label=Signal::derive(move || {
+                            if has_trailer { "Fragman" } else { "Ön İzle" }.to_string()
+                        })
+                        glyph="M12 5c-5 0-9 4.5-9 7s4 7 9 7 9-4.5 9-7-4-7-9-7zm0 10a3 3 0 110-6 3 3 0 010 6z"
                         disabled=Signal::derive(move || !preview_ready())
                         on_press=on_preview
+                    />
+                    // Always reachable, and the reason is not politeness. A
+                    // title whose addons return nothing has a disabled play
+                    // button, a disabled preview and no source rows, so the
+                    // screen had no focusable element at all: the remote was
+                    // left sitting on the navigation bar above a screen it
+                    // could not enter. Every screen owes the remote somewhere
+                    // to stand.
+                    <IconAction
+                        label=Signal::derive(|| "Geri".to_string())
+                        glyph="M15 6l-6 6 6 6"
+                        disabled=Signal::derive(|| false)
+                        on_press=Callback::new(move |()| nav.back())
                     />
                 </div>
             </div>
@@ -345,15 +614,65 @@ fn Head(
     }
 }
 
+/// One labelled group of chips — the shape the metadata takes when it is a set
+/// of names rather than a sentence.
+#[component]
+fn MetaGroup(#[prop(into)] label: String, items: Vec<String>) -> impl IntoView {
+    (!items.is_empty()).then(|| {
+        view! {
+            <div class="meta-group">
+                <span class="meta-label">{label}</span>
+                <div class="chips">
+                    {items.into_iter().map(|text| view! { <Chip text=text /> }).collect_view()}
+                </div>
+            </div>
+        }
+    })
+}
+
+/// An action drawn as a mark with its name under it.
+#[component]
+fn IconAction(
+    #[prop(into)] label: Signal<String>,
+    #[prop(into)] glyph: String,
+    #[prop(optional)] primary: bool,
+    #[prop(optional)] autofocus: bool,
+    #[prop(into)] disabled: Signal<bool>,
+    #[prop(into)] on_press: Callback<()>,
+) -> impl IntoView {
+    let name = label;
+    view! {
+        <button
+            class="icon-action"
+            class:is-primary=primary
+            data-focus="1"
+            data-autofocus=autofocus.then_some("1")
+            tabindex="-1"
+            disabled=move || disabled.get()
+            aria-label=move || name.get()
+            on:click=move |_| {
+                if !disabled.get_untracked() {
+                    on_press.run(());
+                }
+            }
+        >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d=glyph />
+            </svg>
+            <span class="icon-action-name">{move || name.get()}</span>
+        </button>
+    }
+}
+
 #[component]
 fn SourceList(
     sources: RwSignal<Load<Vec<Source>>>,
+    tab: RwSignal<Option<String>>,
     selected: RwSignal<Option<Source>>,
     #[prop(into)] on_pick: Callback<Source>,
 ) -> impl IntoView {
     view! {
         <div class="sources">
-            <h2>"Kaynaklar"</h2>
             {move || match sources.get() {
                 Load::Loading => {
                     view! { <div class="state"><strong>"Kaynaklar aranıyor…"</strong></div> }
@@ -372,6 +691,25 @@ fn SourceList(
                         .into_any()
                 }
                 Load::Ready(found) => {
+                    let chosen = tab.get();
+                    let found: Vec<Source> = found
+                        .into_iter()
+                        .filter(|source| {
+                            chosen
+                                .as_ref()
+                                .is_none_or(|name| &provider_name(&source.parsed) == name)
+                        })
+                        .collect();
+                    // Naming the addon on every row is worth the width only
+                    // when there is more than one to tell apart; with a single
+                    // provider installed it is the same word fifty times.
+                    // The addon's *own* name for itself, not the id the filter
+                    // groups by: two installs of Torrentio are two entries in
+                    // the filter but one word on the row, and printing that
+                    // word fifty times buys nothing.
+                    let providers: HashSet<String> =
+                        found.iter().map(|source| source.parsed.facts().provider).collect();
+                    let name_provider = providers.len() > 1;
                     view! {
                         <div class="source-list">
                             {found
@@ -379,6 +717,15 @@ fn SourceList(
                                 .map(|source| {
                                     let picked = source.clone();
                                     let identity = source.parsed.identity.clone();
+                                    let facts = source.parsed.facts();
+                                    let headline = facts.headline("Kaynak");
+                                    let quality = facts.quality.clone();
+                                    let flag_line = facts.flag_line();
+                                    let cached = facts.cached;
+                                    let provider = name_provider
+                                        .then(|| facts.provider.clone())
+                                        .filter(|name| !name.is_empty());
+                                    let chips = facts.chips();
                                     let is_selected = move || {
                                         selected
                                             .get()
@@ -394,17 +741,77 @@ fn SourceList(
                                             aria-selected=move || is_selected().to_string()
                                             on:click=move |_| on_pick.run(picked.clone())
                                         >
-                                            <span class="source-name">
-                                                {source.parsed.label()}
+                                            // The resolution is what the eye
+                                            // goes to first and it is the same
+                                            // shape on every row, so it gets a
+                                            // column of its own rather than a
+                                            // place in a sentence.
+                                            <span class="source-badge">
+                                                {quality
+                                                    .map(|text| {
+                                                        view! {
+                                                            <span class="source-quality">{text}</span>
+                                                        }
+                                                    })}
+                                                {flag_line
+                                                    .map(|text| {
+                                                        view! {
+                                                            <span class="source-flags">{text}</span>
+                                                        }
+                                                    })}
                                             </span>
-                                            <KindChip stream=source.parsed.clone() />
-                                            {source
-                                                .parsed
-                                                .detail()
-                                                .map(|text| {
-                                                    view! { <span class="source-note">{text}</span> }
-                                                })}
-                                            {availability_note(source.parsed.clone())}
+                                            <span class="source-body">
+                                                <span class="source-release">{headline}</span>
+                                                <span class="source-chips">
+                                                    {cached
+                                                        .then(|| {
+                                                            view! {
+                                                                <span class="chip chip-cached">
+                                                                    "Hazır"
+                                                                </span>
+                                                            }
+                                                        })}
+                                                    {(!source.parsed.playable)
+                                                        .then(|| {
+                                                            view! {
+                                                                <span class="chip bad">
+                                                                    "Oynatılamaz"
+                                                                </span>
+                                                            }
+                                                        })}
+                                                    <KindChip stream=source.parsed.clone() />
+                                                    {chips
+                                                        .into_iter()
+                                                        .map(|text| {
+                                                            view! { <span class="chip">{text}</span> }
+                                                        })
+                                                        .collect_view()}
+                                                    // Last, because it is the
+                                                    // least of them: the filter
+                                                    // above already says which
+                                                    // addons are in the list,
+                                                    // so when the line runs out
+                                                    // of room this is the one
+                                                    // that should go.
+                                                    {provider
+                                                        .map(|name| {
+                                                            view! {
+                                                                <span class="chip chip-provider">
+                                                                    {name}
+                                                                </span>
+                                                            }
+                                                        })}
+                                                </span>
+                                            </span>
+                                            // The one the remote is on is the
+                                            // one that would play; saying so
+                                            // with the shape of the action is
+                                            // quicker to read than a highlight.
+                                            <span class="source-go" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24">
+                                                    <path d="M8 5l11 7-11 7z" />
+                                                </svg>
+                                            </span>
                                         </button>
                                     }
                                 })
@@ -420,36 +827,19 @@ fn SourceList(
 
 #[component]
 fn KindChip(stream: Stream) -> impl IntoView {
+    // "url" is what a debrid link is, and it is what almost every source in a
+    // popular title's list is: a chip saying so on fifty-five consecutive rows
+    // is fifty-five pieces of furniture. The chip is for the ones that differ —
+    // a torrent that has to be fetched, a subscription this box cannot open, a
+    // file already on the appliance.
     let (text, tone) = match stream.kind.as_str() {
         "http" => ("Doğrudan HTTP", "good"),
         "torrent" => ("Torrent", "warn"),
         "external" => ("Harici servis", "bad"),
         "youtube" => ("YouTube", ""),
-        other => (other, ""),
+        _ => return None,
     };
-    view! { <Chip text=text.to_string() tone=tone.to_string() /> }
-}
-
-/// Say plainly when a listed source is not something this appliance can play.
-fn availability_note(stream: Stream) -> Option<impl IntoView> {
-    let message = match stream.kind.as_str() {
-        "external" => Some(
-            "Bu bir abonelik/kiralama bağlantısı. MediaBox bu servisi cihazda oynatamaz."
-                .to_string(),
-        ),
-        "torrent" if !stream.playable => {
-            Some("Bu torrent kaynağı çözümlenemedi.".to_string())
-        }
-        "torrent" => Some(
-            "Torrent kaynağı: oynatma, eş bağlantısı kurulabilmesine bağlıdır. \
-             Ağ engelliyse veri akmaz."
-                .to_string(),
-        ),
-        _ if !stream.playable => Some("Bu kaynak oynatılabilir değil.".to_string()),
-        _ => None,
-    }?;
-    let tone = if stream.playable { "warn" } else { "bad" };
-    Some(view! { <span class=format!("source-note {tone}")>{message}</span> })
+    Some(view! { <Chip text=text.to_string() tone=tone.to_string() /> })
 }
 
 #[component]
@@ -673,7 +1063,10 @@ fn hdr_chip(track: &VideoTrack) -> (String, String) {
 fn audio_note(plan: &Plan) -> Option<(String, &'static str)> {
     let decision = plan.playback.audio.as_ref()?;
     let track = decision.track.as_ref();
-    let object = track.and_then(|t| t.object_audio.clone());
+    // The flag says there is an object layer; the profile is what to call it.
+    let object = track
+        .filter(|t| t.object_audio.unwrap_or(false))
+        .and_then(|t| t.profile.clone());
     match decision.action.as_str() {
         "Passthrough" => Some(("Ses bit-perfect olarak alıcıya iletilir.".into(), "")),
         "DecodeToPCM" => Some((
@@ -697,17 +1090,73 @@ fn audio_note(plan: &Plan) -> Option<(String, &'static str)> {
     }
 }
 
+/// What "Ön İzle" opens.
+///
+/// It used to mean one thing — the chosen source, played in the browser — and
+/// on this appliance that is almost never possible: the sources worth watching
+/// are 4K HEVC, ten-bit, HDR, and no browser will decode them. The button was
+/// therefore disabled on nearly every title, which is not a preview feature.
+///
+/// The trailer is what a person actually wants from a preview, it is already
+/// in the addon's own metadata, and it plays anywhere. The source preview is
+/// kept for the rare title where it works.
+#[derive(Clone, PartialEq)]
+enum Preview {
+    /// A YouTube id, from the title's metadata.
+    Trailer(String),
+    /// The chosen source itself, when the browser can genuinely open it.
+    Source(String),
+}
+
+impl Preview {
+    fn heading(&self) -> &'static str {
+        match self {
+            Self::Trailer(_) => "Fragman",
+            Self::Source(_) => "Ön İzleme",
+        }
+    }
+
+    fn note(&self) -> &'static str {
+        match self {
+            Self::Trailer(_) => {
+                "Filmin fragmanı. Filmin tamamı için kapatıp \"Kodi'de Oynat\" seçeneğini \
+                 kullanın."
+            }
+            Self::Source(_) => {
+                "Bu, tarayıcıda doğrudan açılan kaynağın kendisidir. Televizyon oynatması \
+                 için kapatıp \"Kodi'de Oynat\" seçeneğini kullanın."
+            }
+        }
+    }
+}
+
 #[component]
-fn PreviewSheet(url: String, #[prop(into)] on_close: Callback<()>) -> impl IntoView {
+fn PreviewSheet(preview: Preview, #[prop(into)] on_close: Callback<()>) -> impl IntoView {
     view! {
         <div class="overlay" data-focus-scope="1">
             <div class="sheet">
-                <h2>"Ön İzleme"</h2>
-                <p class="panel-note">
-                    "Bu, tarayıcıda doğrudan açılan kaynağın kendisidir. Televizyon oynatması \
-                     için kapatıp \"Kodi'de Oynat\" seçeneğini kullanın."
-                </p>
-                <video src=url controls autoplay playsinline></video>
+                <h2>{preview.heading()}</h2>
+                <p class="panel-note">{preview.note()}</p>
+                {match preview {
+                    Preview::Trailer(id) => {
+                        view! {
+                            <iframe
+                                class="preview-frame"
+                                src=format!(
+                                    "https://www.youtube.com/embed/{id}\
+                                     ?autoplay=1&rel=0&modestbranding=1&playsinline=1",
+                                )
+                                allow="autoplay; encrypted-media; picture-in-picture"
+                                allowfullscreen
+                                referrerpolicy="strict-origin-when-cross-origin"
+                            ></iframe>
+                        }
+                            .into_any()
+                    }
+                    Preview::Source(url) => {
+                        view! { <video src=url controls autoplay playsinline></video> }.into_any()
+                    }
+                }}
                 <div class="actions-row">
                     <Action
                         label="Kapat"

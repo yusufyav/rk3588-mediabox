@@ -1,5 +1,5 @@
 [Unit]
-Description=MediaBox product UI on the television (sway + Chromium kiosk)
+Description=Web browser on the television (sway + Chromium kiosk)
 Documentation=https://github.com/yusufyav/rk3588-mediabox
 After=mediaboxd-rs.service
 Wants=mediaboxd-rs.service
@@ -8,7 +8,7 @@ Wants=mediaboxd-rs.service
 # one before starting the other. Nothing here is enabled at boot for the same
 # reason: whoever owns the display decides, not systemd's default target, and
 # a console session at tty1 is never taken over on its own.
-Conflicts=kodi.service
+Conflicts=kodi.service mediabox-tv-ui.service
 
 [Service]
 Type=simple
@@ -16,22 +16,23 @@ Type=simple
 # running as root — the same arrangement Kodi already has, and for the same
 # reason. Chromium then refuses its own setuid sandbox, so it is disabled and
 # the loss is made up for by the confinement below plus the fact that this
-# browser has no address bar, no extensions and exactly one page: the
-# appliance's own loopback UI.
+# browser has no address bar and no extensions. Unlike the product UI this one
+# does reach the open web, which is the whole point of it; the confinement
+# below and a profile of its own are what keep that contained.
 User=root
-RuntimeDirectory=mediabox-ui
+RuntimeDirectory=mediabox-browser
 RuntimeDirectoryMode=0700
-StateDirectory=mediabox-ui
+StateDirectory=mediabox-browser
 StateDirectoryMode=0700
-WorkingDirectory=/var/lib/mediabox-ui
-Environment=HOME=/var/lib/mediabox-ui
+WorkingDirectory=/var/lib/mediabox-browser
+Environment=HOME=/var/lib/mediabox-browser
 # A real login session, which is what libseat needs to be handed the DRM
 # device: without one it falls back to a seatd session that never becomes
 # active, and the compositor cannot create a GBM device at all.
 PAMName=login
 # Its own virtual terminal, so bringing the UI up does not take the console
 # somebody may be using at tty1 until the display genuinely changes hands.
-TTYPath=/dev/tty7
+TTYPath=/dev/tty8
 TTYReset=yes
 TTYVHangup=yes
 StandardInput=tty-force
@@ -46,31 +47,11 @@ Environment=WLR_BACKENDS=drm,libinput
 # television black.
 Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
 # Direct scanout hands a fullscreen client's own buffer to the display
-# controller, and the browser is exactly that: one opaque surface covering the
-# panel.
-#
-# It was turned off here first, on the reading that scanning out a buffer the
-# browser is still drawing into is what tears partway down the screen. That
-# reading was wrong for this board: the Mali blob carries
-# EGL_ANDROID_native_fence_sync and EGL_KHR_wait_sync, so the flip waits for
-# the browser's own render fence and a half-drawn buffer is never scanned out.
-#
-# What the detour cost was worse than what it bought. Compositing through
-# wlroots put this board's broken damage bookkeeping in the path — with this
-# Mali GBM the buffer age it is told is not the buffer it gets — and the screen
-# was then assembled out of a region redrawn now and a buffer that had never
-# been written: a title's page arrived with its artwork and no text beside it,
-# the top bar missing its left half, or nothing at all but the one line that
-# happened to fall inside the damaged rectangle. `WLR_SCENE_DEBUG_DAMAGE`
-# below was an attempt to force the whole output to be redrawn anyway; it made
-# it rarer and did not stop it.
-#
-# With scanout direct there is no compositing step to keep books about: the
-# frame the browser finished is the frame the panel is shown, whole. It is
-# confirmed in the display controller's own state — the plane's format is the
-# browser's ABGR8888 (AB24) rather than the compositor's XR24 — and it removes
-# a full 4K blit per frame.
-Environment=WLR_SCENE_DISABLE_DIRECT_SCANOUT=0
+# controller. It saves a copy, and it is also how a browser repainting that
+# buffer ends up visible as horizontal tearing partway down the screen: the
+# scanout is reading it while Chromium is still drawing into it. Compositing
+# through wlroots costs one blit per frame and presents whole frames.
+Environment=WLR_SCENE_DISABLE_DIRECT_SCANOUT=1
 # Damage tracking off: the compositor redraws the whole output every frame
 # rather than only the region the client reports as changed.
 #
@@ -92,8 +73,7 @@ Environment=WLR_SCENE_DEBUG_DAMAGE=rerender
 # the PAM session above sets its own and would win. Pointing it at this unit's
 # RuntimeDirectory is what lets ProtectHome stay on: ProtectHome also hides
 # /run/user, where the Wayland socket would otherwise have to live.
-ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/mediabox-ui /usr/bin/sway -c /etc/mediabox/sway-kiosk.conf
+ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/mediabox-browser /usr/bin/sway -c /etc/mediabox/sway-browser.conf
 # The browser is launched from the sway config, which exits with it. Stopped
 # and started by mediaboxd-rs when the display changes hands, so an ordinary
 # stop is never a failure to recover from.
@@ -101,18 +81,6 @@ Restart=on-failure
 RestartSec=3s
 TimeoutStopSec=15s
 KillMode=mixed
-# Kill what the cgroup cannot reach.
-#
-# PAMName=login above puts everything this unit starts into a PAM *session*
-# scope rather than into the service's own cgroup, so systemd's own kill never
-# reaches the browser: stopping the unit killed the compositor and left
-# Chromium alive with no output to draw on, spinning at half a core forever.
-# It was measured on the appliance — an orphan from an earlier session at 57%
-# while the current one was idle — and every restart added another.
-#
-# Matched on the profile directory, which no other browser on this box uses, so
-# the television's browser application and any other Chromium are untouched.
-ExecStopPost=-/usr/bin/pkill -f -- "--user-data-dir=/var/lib/mediabox-ui/chromium"
 StandardOutput=journal
 StandardError=journal
 
@@ -138,7 +106,7 @@ DeviceAllow=char-input rw
 DeviceAllow=char-alsa rw
 DeviceAllow=char-tty rw
 DeviceAllow=char-vcs rw
-ReadWritePaths=/var/lib/mediabox-ui /run/mediabox-ui
+ReadWritePaths=/var/lib/mediabox-browser /run/mediabox-browser
 
 [Install]
 WantedBy=multi-user.target

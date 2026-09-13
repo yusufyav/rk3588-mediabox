@@ -151,6 +151,12 @@ class Meta:
     director: tuple[str, ...] = ()
     writer: tuple[str, ...] = ()
     videos: tuple[Video, ...] = ()
+    #: The title's trailer, as a YouTube id. Addons already send this and it
+    #: was being dropped here. It matters because it is the one thing on a
+    #: title that can always be previewed on this box: the sources themselves
+    #: are 4K HEVC more often than not, which no browser will open, so an
+    #: appliance whose "preview" means "the file" offers nothing on most films.
+    trailer: str | None = None
     addon_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -169,6 +175,7 @@ class Meta:
             "cast": list(self.cast),
             "director": list(self.director),
             "writer": list(self.writer),
+            "trailer": self.trailer,
             "videos": [video.as_dict() for video in self.videos],
             "addonId": self.addon_id,
         }
@@ -191,6 +198,11 @@ class Stream:
 
     kind: StreamKind
     addon_id: str | None = None
+    # The addon's own display name, carried alongside its id because the id is
+    # a reverse-domain string nobody wants to read on a television. Filled in
+    # by whoever asked the addon, since the stream itself never mentions where
+    # it came from.
+    addon_name: str | None = None
     name: str | None = None
     title: str | None = None
     description: str | None = None
@@ -224,6 +236,7 @@ class Stream:
             "kind": self.kind.value,
             "identity": self.identity,
             "addonId": self.addon_id,
+            "addonName": self.addon_name,
             "name": self.name,
             "title": self.title,
             "description": self.description,

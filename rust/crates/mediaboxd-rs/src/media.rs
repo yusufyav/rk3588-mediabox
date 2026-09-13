@@ -166,6 +166,21 @@ impl MediaClient {
         self.delete(&["media", "session", id]).await
     }
 
+    /// Sign in to a Stremio account, so the box uses that account's addon
+    /// collection instead of the default one.
+    ///
+    /// The credentials are forwarded to the media core over loopback and are
+    /// never stored here: what is kept, by the core, is the auth key the login
+    /// returns.
+    pub async fn login(&self, email: &str, password: &str) -> Result<Value, MediaError> {
+        self.post(&["media", "login"], json!({"email": email, "password": password}))
+            .await
+    }
+
+    pub async fn logout(&self) -> Result<Value, MediaError> {
+        self.post(&["media", "logout"], json!({})).await
+    }
+
     async fn get(&self, path: &[&str], query: &[(&str, &str)]) -> Result<Value, MediaError> {
         let mut url = self.url(path)?;
         url.query_pairs_mut().extend_pairs(query.iter().copied());

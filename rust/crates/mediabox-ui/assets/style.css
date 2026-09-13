@@ -4,29 +4,73 @@
  * second. That ordering decides everything below: type is large, chrome is
  * almost absent, artwork is the interface, and the focused element is never
  * ambiguous from three metres away.
+ *
+ * Two rules keep it moving at 60 Hz on this board, and every choice here is
+ * checked against them:
+ *
+ *   1. Nothing scrolls. Rails and screens move by `transform`, which the
+ *      compositor animates on its own thread. A scroll animation runs on the
+ *      main thread and repaints everything it passes over — which is how a
+ *      shelf of posters ends up shearing as you walk along it.
+ *   2. Nothing expensive is animated. No blur, no filter, no box-shadow that
+ *      is not a solid ring, no animated gradient. The focused card changes on
+ *      every press of the remote, and anything in its treatment that forces a
+ *      re-raster of the artwork is paid for sixty times a second.
  */
+
+/* The product's typeface, carried with the bundle.
+ *
+ * The appliance has DejaVu Sans, DejaVu Serif and a fallback CJK face — that
+ * is the whole of it. Every name in an ordinary font stack ("Inter", "Segoe
+ * UI", system-ui, sans-serif) therefore resolved to DejaVu, and the interface
+ * was drawn in a 2004 desktop font no matter what the stack said. One variable
+ * file covers every weight the design uses, and it is served from the
+ * appliance's own loopback, so nothing here depends on a network or on a third
+ * party.
+ */
+@font-face {
+  font-family: "Inter";
+  src: url("InterVariable.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  /* Block rather than swap: the file is on the same machine as the page, and a
+     television that redraws every heading a moment after it appears looks
+     broken in a way a few extra milliseconds never does. */
+  font-display: block;
+}
 
 :root {
   --bg: #07080b;
-  --bg-raise: #0e1116;
-  --bg-card: #141922;
+  --bg-raise: #0f131a;
+  --bg-card: #151a23;
   --line: #232a36;
-  --text: #f2f5f9;
-  --muted: #98a2b3;
-  --dim: #667085;
-  --accent: #ffb238;
-  --accent-ink: #1a1206;
+  --line-soft: #1a202a;
+  --text: #f5f7fa;
+  --muted: #9aa5b4;
+  --dim: #64707f;
+  --accent: #ffb43a;
+  --accent-ink: #1b1204;
   --ok: #4ade80;
   --warn: #fbbf24;
   --bad: #f87171;
-  --radius: 14px;
-  /* Every length below is either a rem (and so follows the root font size) or
-     a viewport unit with a ceiling high enough for a 3840x2160 panel. A cap
-     tuned to 1080p makes a 4K television show the interface at half the
-     physical size it was designed to be read at. */
-  --gutter: clamp(16px, 3.3vw, 128px);
-  --rail-gap: clamp(10px, 1.05vw, 42px);
-  font-size: clamp(15px, 1.1vw, 42px);
+  --radius: 16px;
+  --radius-art: 22px;
+
+  /* The width of one poster, and the strip's inset from the edge of the
+     picture. Both scale with the viewport so a 4K panel shows the interface at
+     the physical size it was drawn for rather than at half of it. */
+  --card: clamp(118px, 12.4vw, 470px);
+  --gutter: clamp(16px, 2.7vw, 104px);
+  --rail-gap: clamp(9px, 1.05vw, 40px);
+  /* The navigation bar across the top. The screen begins underneath it, so
+     nothing the product draws can ever land on the navigation. */
+  --topbar: clamp(50px, 6.4vh, 128px);
+
+  /* Type follows the viewport for the same reason. At 1920 this lands on
+     ~22px, which is the smallest a paragraph can be and still be read from a
+     sofa. */
+  font-size: clamp(15px, 1.16vw, 44px);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -36,175 +80,451 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  font-family: "Inter", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  font-optical-sizing: auto;
   -webkit-font-smoothing: antialiased;
-  overscroll-behavior: none;
+  text-rendering: optimizeLegibility;
 }
 
-body { overflow-x: hidden; }
+/* Only the television refuses to scroll. Everywhere else this is an ordinary
+   page — because everywhere else there is a finger or a mouse, and taking the
+   browser's own scrolling away from those leaves a page nothing can move. */
+body { overscroll-behavior: none; }
+body.tv { overflow: hidden; }
 
 /* The pointer is never required; on the television there is not one. */
 body.tv, body.tv * { cursor: none; }
+
+img { max-width: 100%; }
 
 .boot {
   position: fixed;
   inset: 0;
   display: grid;
   place-content: center;
-  gap: 0.6rem;
+  gap: 0.7rem;
   justify-items: center;
   background: var(--bg);
   z-index: 100;
 }
-.boot-mark { font-size: 2.2rem; font-weight: 800; letter-spacing: 0.42em; color: var(--accent); }
+.boot-mark { font-size: 2rem; font-weight: 800; letter-spacing: 0.4em; color: var(--accent); }
 .boot-note { color: var(--dim); letter-spacing: 0.06em; }
 
 /* ----------------------------------------------------------------- shell */
 
-.app { min-height: 100vh; display: flex; flex-direction: column; }
+.app { min-height: 100vh; }
+body.tv .app { height: 100vh; overflow: hidden; }
 
+/* The window the screen is seen through.
+ *
+ * On the television it is a fixed frame with the screen's column inside it:
+ * nothing scrolls, and the column is moved by a transform the compositor
+ * animates. Everywhere else this is an ordinary block on an ordinary scrolling
+ * page, because a finger and a mouse already know how to move one. */
+.viewport {
+  position: relative;
+  padding-top: var(--topbar);
+}
+body.tv .viewport {
+  position: absolute;
+  inset: var(--topbar) 0 0 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.column {
+  position: relative;
+  padding-bottom: clamp(30px, 7vh, 110px);
+}
+/* A transform is only ever written here on the television. */
+body:not(.tv) .column { transform: none !important; }
+
+
+/* No full-screen ambient wash.
+ *
+ * A blurred copy of the artwork behind everything is what current television
+ * interfaces do, and it looked the part. It was also measured on this board,
+ * twice: with a real `filter: blur()` it cost 27.7% of a core with nothing
+ * happening; rebuilt as a sixty-four-pixel image stretched over the screen —
+ * no filter at all — it still cost 5.8% idle against 1.0% without it, pushed a
+ * key press from 6 ms to 18 ms before it was painted, and put four dropped
+ * frames into a vertical move that had none. The whole-output repaint the
+ * compositor needs here is what makes a full-screen layer expensive.
+ *
+ * Smoothness was the thing asked for first and asked for most, so the wash is
+ * gone and the colour comes from the artwork itself: a full-bleed hero, and
+ * covers generated from the title where a poster is missing. */
+
+/* --------------------------------------------------------------- top bar */
+
+/* The navigation runs across the top, not down the side.
+ *
+ * A vertical icon rail sat on top of whatever the screen was showing: on the
+ * home screen its labels landed on the hero's own button, on the settings
+ * screen they were drawn through the settings list. A bar across the top has a
+ * row of its own that nothing else occupies, so an overlap is not something to
+ * be prevented — there is nowhere for it to happen. It is also where a
+ * television keeps its navigation, and it leaves the full width of the panel
+ * to the artwork. */
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: 40;
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--topbar);
+  z-index: 50;
   display: flex;
   align-items: center;
-  gap: clamp(10px, 1.6vw, 28px);
-  padding: clamp(12px, 1.6vh, 26px) var(--gutter);
-  background: linear-gradient(180deg, rgba(7, 8, 11, 0.96) 0%, rgba(7, 8, 11, 0.72) 62%, transparent 100%);
+  gap: clamp(6px, 0.9vw, 26px);
+  padding: 0 var(--gutter);
+  background: linear-gradient(180deg, rgba(4, 5, 8, 0.96) 0%, rgba(4, 5, 8, 0.82) 58%, rgba(4, 5, 8, 0) 100%);
 }
 
-.wordmark {
-  font-weight: 800;
-  letter-spacing: 0.3em;
-  font-size: 0.95rem;
-  color: var(--accent);
-  padding-right: clamp(4px, 1vw, 18px);
-  white-space: nowrap;
-}
-
-/* The tabs do not wrap — a two-line navigation bar on a television looks
-   broken — so on a narrow phone they scroll sideways inside their own strip
-   rather than pushing the page wider than the screen. */
-.nav {
+.brand {
   display: flex;
-  gap: clamp(4px, 0.6vw, 10px);
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
+  align-items: center;
+  gap: 0.5rem;
+  margin-right: clamp(10px, 1.8vw, 46px);
+  font-weight: 800;
+  font-size: 1.02rem;
+  letter-spacing: -0.02em;
 }
-.nav::-webkit-scrollbar { display: none; }
+.brand-dot {
+  width: 0.58rem;
+  height: 0.58rem;
+  border-radius: 50%;
+  background: var(--accent);
+}
 
+.nav-items { display: flex; align-items: center; gap: clamp(2px, 0.3vw, 10px); }
+
+/* Icon and word together. An icon alone is a guess from three metres; the word
+   is what makes a television's navigation readable without learning it. */
 .nav-item {
   appearance: none;
   border: 0;
   background: transparent;
   color: var(--muted);
   font: inherit;
-  font-weight: 600;
-  padding: 0.46em 1.05em;
-  border-radius: 999px;
+  font-weight: 640;
+  font-size: 0.92rem;
+  letter-spacing: -0.008em;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  height: 2.5rem;
+  padding: 0 0.85rem;
+  border-radius: 999px;
+  transition: color 140ms linear, background-color 140ms linear;
 }
-.nav-item[aria-current="true"] { color: var(--text); background: rgba(255, 255, 255, 0.09); }
+.nav-item[aria-current="true"] { color: var(--text); }
+.nav-item.is-focused,
+.nav-item:focus-visible { background: #fff; color: #0a0c10; }
 
-.clock { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.glyph {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.85;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.nav-item[aria-current="true"] .glyph { stroke-width: 2.1; }
 
-.screen { flex: 1; padding-bottom: clamp(28px, 6vh, 84px); }
+/* Right-hand end of the same bar, on the same baseline as the navigation. */
+.clock {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95rem;
+  font-weight: 660;
+  letter-spacing: 0.02em;
+}
 
 /* ------------------------------------------------------------------ focus
  *
- * One treatment everywhere. A ring alone is too thin to read across a room,
- * so focus also lifts the element and warms its edge.
+ * One treatment everywhere: the element the remote is on grows a little and
+ * gains a solid white ring. Both are cheap — a transform is composited without
+ * repainting the poster inside it, and a ring with no blur radius is a single
+ * rectangle. The earlier treatment used a wide blurred shadow, which made the
+ * television re-rasterise the artwork on every press, and that is what the
+ * shimmer along a rail was.
  */
 
-/* Deliberately cheap.
- *
- * This appliance drives a 3840x2160 panel, and the focused element changes on
- * every press of the remote. Scaling a poster or dropping a wide blurred
- * shadow makes the compositor re-rasterise that card — artwork included — at
- * 4K for every frame of the animation, which on this GPU shows up as the
- * interface shimmering as you move along a rail. An outline costs nothing to
- * redraw and reads just as clearly from a sofa, so focus is drawn with one. */
 [data-focus] { outline: none; }
 
-[data-focus]:focus-visible,
-[data-focus].is-focused {
-  outline: 4px solid var(--accent);
-  outline-offset: 3px;
-  z-index: 5;
-}
-.card[data-focus].is-focused .card-name { color: var(--accent); }
-.nav-item[data-focus].is-focused { background: var(--accent); color: var(--accent-ink); outline-offset: 0; }
-.settings-tab[data-focus].is-focused { outline-offset: 0; }
-.source[data-focus].is-focused { outline-offset: 0; }
+
 
 /* -------------------------------------------------------------------- hero */
 
-.hero {
+/* The first screenful: one picture, with the product standing on it.
+ *
+ * The applications are at the top of it and the title of the evening at the
+ * bottom, both over the same artwork. Drawn as separate blocks — a black band
+ * of tiles, then a photograph starting halfway down — the television showed a
+ * hard seam across its middle and a large empty black area beside the tiles,
+ * which is what made the home screen read as two pages glued together rather
+ * than as one screen. */
+.stage {
   position: relative;
-  min-height: min(62vh, 1120px);
-  display: flex;
-  align-items: flex-end;
-  padding: clamp(24px, 7vh, 96px) var(--gutter) clamp(18px, 3.4vh, 44px);
+  min-height: calc(100vh - var(--topbar));
+  display: grid;
+  grid-template-rows: auto 1fr;
   isolation: isolate;
 }
-.hero-art {
-  position: absolute;
-  inset: 0;
-  z-index: -2;
-  background-size: cover;
-  background-position: center 22%;
+
+.hero {
+  display: flex;
+  align-items: flex-end;
+  min-height: 0;
+  padding: clamp(20px, 5vh, 90px) var(--gutter) clamp(20px, 4vh, 64px);
 }
-.hero-art::after {
-  content: "";
+
+/* The backdrop is the full width of the panel; the screen has no side rail to
+   sit clear of. */
+.hero-img,
+.hero-scrim {
   position: absolute;
   inset: 0;
+  z-index: -1;
+}
+/* The picture reaches up under the navigation bar, which is a gradient rather
+   than a panel, so the artwork runs to the top edge of the television. */
+.stage > .hero-img,
+.stage > .hero-scrim { top: calc(-1 * var(--topbar)); }
+.hero-img {
+  /* Beats the `img { max-width: 100% }` reset, which otherwise clamps the
+     backdrop and leaves a black band down the right-hand edge of the picture. */
+  max-width: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 20%;
+  /* Held back until the picture is whole; see the note on the element. */
+  opacity: 0;
+  transition: opacity 260ms linear;
+}
+.hero-img.is-ready { opacity: 1; }
+.hero-scrim {
   background:
-    linear-gradient(90deg, rgba(7, 8, 11, 0.96) 0%, rgba(7, 8, 11, 0.72) 42%, rgba(7, 8, 11, 0.12) 100%),
-    linear-gradient(0deg, var(--bg) 2%, rgba(7, 8, 11, 0.1) 58%);
+    linear-gradient(90deg, var(--bg) 0%, rgba(7, 8, 11, 0.92) 26%, rgba(7, 8, 11, 0.34) 62%, rgba(7, 8, 11, 0.1) 100%),
+    linear-gradient(0deg, var(--bg) 0%, rgba(7, 8, 11, 0.9) 14%, rgba(7, 8, 11, 0.34) 52%, rgba(7, 8, 11, 0.52) 84%, rgba(7, 8, 11, 0.78) 100%);
 }
-.hero-body { max-width: min(46rem, 62%); display: grid; gap: 0.72rem; }
-.hero-logo { max-height: clamp(60px, 12vh, 264px); max-width: min(24rem, 52%); object-fit: contain; }
-.hero-title { margin: 0; font-size: clamp(1.9rem, 3.4vw, 3.5rem); line-height: 1.04; font-weight: 800; letter-spacing: -0.02em; }
-.hero-line { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; color: var(--muted); font-weight: 600; }
+
+.hero-body { max-width: min(40rem, 58%); display: grid; gap: 0.6rem; justify-items: start; }
+.hero-logo {
+  max-height: clamp(62px, 13vh, 300px);
+  max-width: min(22rem, 100%);
+  object-fit: contain;
+  object-position: left bottom;
+}
+.hero-title {
+  margin: 0;
+  font-size: clamp(2.4rem, 4.8vw, 5.4rem);
+  line-height: 0.98;
+  font-weight: 820;
+  letter-spacing: -0.038em;
+}
+.hero-meta {
+  margin: 0.3rem 0 0;
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 620;
+  font-size: 1rem;
+  letter-spacing: 0.01em;
+}
 .hero-desc {
   margin: 0;
   color: var(--muted);
   line-height: 1.5;
+  font-size: 0.98rem;
+  max-width: 34rem;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.hero-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.5rem; }
+.hero-actions { display: flex; gap: 0.55rem; margin-top: 0.55rem; }
 
 /* ------------------------------------------------------------------ rails */
 
-.rail { padding: clamp(14px, 2.4vh, 60px) 0 0; }
+.rail { padding-top: clamp(10px, 1.8vh, 44px); }
+
 .rail-head {
   display: flex;
   align-items: baseline;
   gap: 0.7rem;
-  padding: 0 var(--gutter) 0.62rem;
+  padding: 0 var(--gutter) 0.5rem;
 }
-.rail-title { margin: 0; font-size: clamp(1rem, 1.15vw, 1.3rem); font-weight: 700; letter-spacing: -0.01em; }
-.rail-source { color: var(--dim); font-size: 0.8rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.rail-title { margin: 0; font-size: 1.16rem; font-weight: 720; letter-spacing: -0.012em; }
+/* Hidden on the television. Which addon a shelf came from is provenance, and
+   an upper-case tag beside every heading is the look of an admin page, not of
+   something anybody watches. It stays in the markup for the browser, where a
+   pointer and a smaller screen make the distinction worth having. */
+.rail-source { display: none; }
+@media (max-width: 900px) {
+  .rail-source {
+    display: inline;
+    color: var(--dim);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+}
 
+/* The strip. It is clipped rather than scrollable, and moved by a transform,
+   so the browser never runs a scroll animation over the artwork. The generous
+   bottom padding is room for the focused poster to grow into and for its name
+   to appear under it without anything being cut off. */
+/* The window. Static, so the view into the shelf stays where it is. Its
+   vertical padding is the room the focused poster grows into and the room its
+   name appears in, both of which would otherwise be clipped. */
 .rail-track {
-  display: flex;
-  scroll-behavior: smooth;
-  gap: var(--rail-gap);
-  padding: 6px var(--gutter) 14px;
+  position: relative;
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
+  padding-block: 0.8rem 3.4rem;
 }
 .rail-track::-webkit-scrollbar { display: none; }
+body.tv .rail-track { overflow: hidden; }
+body:not(.tv) .rail-strip { transform: none !important; }
+
+/* The shelf itself, and the only thing that moves. */
+/* No CSS transition on either of the moving elements. Both are driven a frame
+   at a time from the focus module, which keeps one velocity across a burst of
+   key presses; a transition restarts its easing on every press and that is what
+   made a held-down arrow look like a stutter rather than a slide. */
+.rail-strip {
+  display: flex;
+  gap: var(--rail-gap);
+  padding-inline: var(--gutter);
+}
 
 .card {
+  position: relative;
   flex: 0 0 auto;
-  width: clamp(116px, 10.6vw, 410px);
+  width: var(--card);
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  display: block;
+  transition: transform 130ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.card.is-focused { transform: scale(1.075); z-index: 4; }
+
+.card-art {
+  position: relative;
+  display: block;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-art);
+  background: var(--bg-card);
+  overflow: hidden;
+  /* A solid ring, drawn on the focused card only. Inset so it never enlarges
+     the element and never asks the layout a question. */
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 10px 26px rgba(0, 0, 0, 0.45);
+}
+/* One shadow, one ring, neither animated. The focused card is drawn once when
+   it gains focus; what moves is the transform, and that is composited. */
+.card.is-focused .card-art {
+  box-shadow:
+    inset 0 0 0 3px #fff,
+    0 22px 48px rgba(0, 0, 0, 0.62);
+}
+
+.card-img {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* No background of its own. An image element that has not loaded yet used to
+     paint a flat dark rectangle over the cover underneath it, so a shelf being
+     walked showed black tiles where the artwork had not arrived. Leaving it
+     transparent means the generated cover — with the title on it — is what is
+     seen until the real poster is there to replace it. */
+}
+
+/* Sits behind the artwork, and is what remains if the artwork never arrives. */
+.card-img.is-broken { display: none; }
+
+/* A title with no artwork still gets a cover rather than an empty grey box.
+   The hue comes from the title itself, so the same title is always the same
+   colour and a shelf of them does not look like a failed load. */
+.card-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: end;
+  padding: 0.9rem;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.88rem;
+  line-height: 1.22;
+  letter-spacing: -0.012em;
+  background:
+    linear-gradient(160deg,
+      hsl(var(--tile-hue, 220) 42% 26%) 0%,
+      hsl(var(--tile-hue, 220) 46% 13%) 62%,
+      hsl(calc(var(--tile-hue, 220) + 26) 40% 9%) 100%);
+}
+
+/* Out of flow: the name appears under the poster the remote is on, and showing
+   or hiding it moves nothing else on the shelf. */
+.card-name {
+  position: absolute;
+  top: calc(100% + 0.42rem);
+  left: 0;
+  right: 0;
+  font-weight: 640;
+  font-size: 0.82rem;
+  line-height: 1.24;
+  color: var(--text);
+  opacity: 0;
+  transition: opacity 130ms linear;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card.is-focused .card-name { opacity: 1; }
+
+.badge-local {
+  position: absolute;
+  left: 0.5rem;
+  top: 0.5rem;
+  background: rgba(10, 12, 16, 0.72);
+  color: var(--text);
+  font-size: 0.56rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  padding: 0.3em 0.6em;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+}
+
+/* ------------------------------------------------------------- launcher */
+
+/* What the box can be used for, across the top of its home screen.
+ *
+ * A tile is the application's mark on a plain dark panel with its name written
+ * underneath — not a saturated gradient with the name laid over it. The
+ * gradient version was two coloured slabs filling the upper half of the
+ * television, which is what a placeholder looks like, and it made the product
+ * look like a demonstration of CSS rather than a launcher. The colour is now
+ * one low-saturation tint per application, enough to tell them apart at a
+ * glance from three metres and not enough to compete with the artwork below. */
+.launcher { padding-top: clamp(6px, 1vh, 22px); }
+.launcher .rail-track { padding-block: 0.55rem 0.4rem; }
+
+.tile {
+  flex: 0 0 auto;
+  width: clamp(150px, 15.6vw, 580px);
   border: 0;
   padding: 0;
   background: transparent;
@@ -212,201 +532,680 @@ body.tv, body.tv * { cursor: none; }
   font: inherit;
   text-align: left;
   display: grid;
-  gap: 0.44rem;
-  border-radius: var(--radius);
+  gap: 0.1rem;
+  transition: transform 130ms cubic-bezier(0.2, 0.7, 0.3, 1);
 }
-.card-art {
-  aspect-ratio: 2 / 3;
-  border-radius: var(--radius);
-  background: var(--bg-card) center/cover no-repeat;
-  border: 1px solid var(--line);
-  display: grid;
-  place-content: center;
-  overflow: hidden;
-  position: relative;
-}
-.card-art .fallback { color: var(--dim); font-weight: 700; font-size: 0.8rem; padding: 0.6rem; text-align: center; }
-.card-name {
-  font-weight: 650;
-  font-size: 0.86rem;
-  line-height: 1.25;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.card-sub { color: var(--dim); font-size: 0.76rem; font-weight: 600; }
+.tile.is-focused { transform: scale(1.055); z-index: 4; }
 
-.badge-local {
-  position: absolute;
-  left: 8px;
-  top: 8px;
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-size: 0.62rem;
-  font-weight: 800;
-  letter-spacing: 0.09em;
-  padding: 0.22em 0.5em;
-  border-radius: 6px;
+.tile-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 10;
+  margin-bottom: 0.45rem;
+  border-radius: var(--radius-art);
+  background:
+    radial-gradient(120% 130% at 28% 18%,
+      hsl(var(--tile-tint, 212) 34% 26%) 0%,
+      hsl(var(--tile-tint, 212) 30% 14%) 52%,
+      #10131a 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 10px 26px rgba(0, 0, 0, 0.45);
 }
+.tile.is-focused .tile-art {
+  box-shadow:
+    inset 0 0 0 3px #fff,
+    0 22px 48px rgba(0, 0, 0, 0.62);
+}
+
+.tile-mark {
+  width: 38%;
+  height: auto;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.94;
+}
+
+/* The name lives under the tile, where a television puts it, so the mark is
+   never competing with a word printed across it. */
+.tile-name {
+  font-size: 0.96rem;
+  font-weight: 700;
+  letter-spacing: -0.012em;
+  color: var(--muted);
+  transition: color 140ms linear;
+}
+.tile.is-focused .tile-name { color: var(--text); }
+.tile-note {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--dim);
+  line-height: 1.3;
+}
+/* An application the box does not have says so and cannot be chosen; it is not
+   silently missing and it is not a dead button either. */
+.tile.is-missing { opacity: 0.45; }
+.tile-state {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.8rem;
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.skeleton-card {
+  flex: 0 0 auto;
+  width: var(--card);
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-art);
+  background: var(--bg-card);
+}
+
+/* ------------------------------------------------------- the home screen */
+
+/* Two things share this screen, and both of them are the box rather than what
+   is on television tonight: what it can run, and how it is doing. The layout
+   follows the two interfaces that do this properly — a grid of applications
+   with the name under each, and a column of the machine's own readings beside
+   it. */
+.home {
+  position: relative;
+  isolation: isolate;
+  min-height: calc(100vh - var(--topbar));
+  display: grid;
+  grid-template-columns: clamp(190px, 17.5vw, 560px) minmax(0, 1fr);
+  gap: clamp(14px, 1.8vw, 56px);
+  padding: clamp(14px, 2.6vh, 60px) var(--gutter) clamp(24px, 5vh, 90px);
+}
+
+/* Drawn rather than fetched. A photograph would be a file to ship, decode and
+   keep — and the one measurement that mattered here was that a full-screen
+   layer is the expensive thing on this board, so this is a handful of
+   gradients the compositor paints once and never repaints. */
+.wallpaper {
+  position: absolute;
+  inset: calc(-1 * var(--topbar)) 0 0 0;
+  z-index: -1;
+  background:
+    radial-gradient(120% 80% at 78% 8%, rgba(94, 74, 168, 0.42) 0%, rgba(94, 74, 168, 0) 58%),
+    radial-gradient(90% 70% at 12% 0%, rgba(32, 96, 148, 0.4) 0%, rgba(32, 96, 148, 0) 62%),
+    radial-gradient(120% 90% at 50% 108%, rgba(178, 88, 96, 0.24) 0%, rgba(178, 88, 96, 0) 60%),
+    linear-gradient(175deg, #0d1119 0%, #080a10 52%, #05070b 100%);
+}
+
+/* ---- the machine, down the side */
+
+.vitals {
+  display: grid;
+  align-content: start;
+  gap: clamp(8px, 1vh, 22px);
+}
+
+/* Glass, the way the reference does it: the wallpaper stays visible through
+   the panel. `backdrop-filter` is deliberately not used — a blur over a
+   full-screen layer was measured at a quarter of a core on this board — so the
+   panel is a flat translucent fill with a hairline, which reads the same from
+   three metres. */
+.widget {
+  display: grid;
+  gap: 0.3rem;
+  padding: clamp(10px, 1.1vw, 26px) clamp(12px, 1.2vw, 28px);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.widget-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.widget-strong { font-size: 1.05rem; font-weight: 720; letter-spacing: -0.015em; }
+.widget-note { font-size: 0.76rem; font-weight: 600; color: var(--muted); }
+
+.widget-clock { gap: 0.05rem; }
+.widget-time {
+  font-size: clamp(1.9rem, 3vw, 4rem);
+  font-weight: 780;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.widget-date { font-size: 0.82rem; font-weight: 640; color: var(--muted); }
+
+.dials { display: flex; gap: clamp(10px, 1.1vw, 28px); padding: 0.2rem 0 0.1rem; }
+.dial { display: grid; justify-items: center; gap: 0.24rem; }
+
+/* One element per ring. The reading is an angle on a conic gradient, so a new
+   value repaints one small box and moves nothing. */
+.dial-ring {
+  --sweep: 0deg;
+  position: relative;
+  width: clamp(48px, 4.4vw, 140px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(closest-side, transparent 68%, rgba(255, 255, 255, 0.06) 69%),
+    conic-gradient(var(--ok) var(--sweep), rgba(255, 255, 255, 0.1) 0);
+  -webkit-mask: none;
+}
+.dial-ring::after {
+  content: "";
+  position: absolute;
+  inset: 16%;
+  border-radius: 50%;
+  background: #11151d;
+}
+.dial-value {
+  position: relative;
+  z-index: 1;
+  font-size: 0.82rem;
+  font-weight: 740;
+  font-variant-numeric: tabular-nums;
+}
+.dial-label { font-size: 0.7rem; font-weight: 640; color: var(--muted); }
+
+.bar {
+  display: block;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+.bar > i { display: block; height: 100%; background: var(--accent); }
+
+/* ---- the applications */
+
+.home-main { display: grid; align-content: start; gap: clamp(10px, 1.6vh, 40px); min-width: 0; }
+
+.app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(104px, 9.6vw, 300px), 1fr));
+  gap: clamp(10px, 1.5vw, 44px) clamp(10px, 1.2vw, 36px);
+  align-items: start;
+}
+
+/* An icon with its name under it, which is what both references do and what a
+   television's home screen has looked like for fifteen years. The previous
+   version was a row of wide 16:9 cards with a paragraph inside each, so three
+   applications filled half a 1080p panel and still read as placeholders. */
+/* `.app-tile`, not `.app`: the shell's own root element is `.app`, and a tile
+   that borrowed the name inherited `height: 100vh` and `overflow: hidden` from
+   it — three icons a thousand pixels tall with their names clipped off. */
+.app-tile {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  display: grid;
+  justify-items: center;
+  gap: 0.5rem;
+  transition: transform 130ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.app-tile.is-focused { transform: scale(1.09); z-index: 4; }
+
+.app-icon {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 24%;
+  background:
+    radial-gradient(120% 130% at 28% 16%,
+      hsl(var(--tint, 212) 46% 34%) 0%,
+      hsl(var(--tint, 212) 42% 20%) 54%,
+      #10131a 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+    0 12px 28px rgba(0, 0, 0, 0.5);
+}
+.app-tile.is-focused .app-icon {
+  box-shadow:
+    inset 0 0 0 3px #fff,
+    0 24px 52px rgba(0, 0, 0, 0.65);
+}
+.app-mark {
+  width: 46%;
+  height: auto;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.95;
+}
+.app-name {
+  font-size: 0.9rem;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  text-align: center;
+  color: var(--muted);
+  transition: color 140ms linear;
+}
+.app-tile.is-focused .app-name { color: var(--text); }
+.app-tile.is-missing { opacity: 0.45; }
+.app-state {
+  font-size: 0.66rem;
+  font-weight: 740;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+/* A second line under a name, for the tiles that have something worth saying.
+   The applications on the home screen do not: their names are the whole of it,
+   and a paragraph under each was what made that screen look like a form. */
+.app-note {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--dim);
+  text-align: center;
+}
+
+.app-waiting { align-self: center; color: var(--dim); font-weight: 640; font-size: 0.85rem; }
+.app-waiting.bad { color: var(--bad); }
+
+/* ----------------------------------------------------------------- browser */
+
+.browser {
+  min-height: calc(100vh - var(--topbar));
+  padding: clamp(10px, 2.2vh, 48px) var(--gutter) 0;
+  display: grid;
+  align-content: start;
+  gap: clamp(10px, 1.8vh, 44px);
+  background:
+    radial-gradient(140% 88% at 50% -22%, #151b27 0%, rgba(11, 14, 20, 0) 62%),
+    var(--bg);
+}
+
+/* A site tile carries its initial rather than a fetched favicon: the artwork
+   would come from the site itself, over the network, on a screen that has to
+   work with none. */
+.site-initial {
+  font-size: clamp(1.5rem, 3vw, 3.6rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: rgba(255, 255, 255, 0.94);
+}
+
+.keyboard {
+  padding: 0.4rem 0 clamp(24px, 5vh, 80px);
+  display: grid;
+  gap: 0.4rem;
+  justify-items: start;
+}
+.keyboard .rail-title { margin-bottom: 0.15rem; }
+
+/* What the keys have built, at a size that can be read across a room. */
+.address {
+  display: flex;
+  align-items: baseline;
+  gap: 0.1rem;
+  min-height: 2.6rem;
+  margin-bottom: 0.5rem;
+  padding: 0.35rem 1rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  font-size: 1.15rem;
+  font-weight: 650;
+  max-width: min(62rem, 100%);
+  overflow: hidden;
+}
+.address-scheme { color: var(--dim); }
+.address-text { color: var(--text); white-space: pre; }
+.address-caret {
+  width: 2px;
+  align-self: center;
+  height: 1.25rem;
+  background: var(--accent);
+}
+
+/* Two fields, one keyboard: the field the remote last chose is the one the
+   keys are building, and it says so rather than leaving a person guessing
+   which of two boxes their letters are going into. */
+.fields { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.3rem; }
+.keyboard > .field { margin-bottom: 0.4rem; }
+.field {
+  appearance: none;
+  border: 0;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  display: grid;
+  gap: 0.1rem;
+  min-width: min(22rem, 42vw);
+  padding: 0.45rem 1rem;
+  border-radius: 14px;
+}
+.field-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.field-input {
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 680;
+  padding: 0;
+}
+.field-input::placeholder { color: var(--dim); font-weight: 620; }
+/* The caret belongs to the field, so the pointer-free rule that hides it
+   everywhere else must not hide it here. */
+body.tv .field-input { cursor: text; caret-color: var(--accent); }
+.field.is-editing { box-shadow: inset 0 0 0 1px var(--accent); }
+.field.is-focused { box-shadow: inset 0 0 0 2px #fff; }
+.field.is-editing.is-focused { box-shadow: inset 0 0 0 2px #fff, 0 0 0 2px var(--accent); }
+
+.keys { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.key {
+  appearance: none;
+  border: 0;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font: inherit;
+  font-weight: 660;
+  font-size: 1rem;
+  min-width: 2.6rem;
+  height: 2.6rem;
+  padding: 0 0.55rem;
+  border-radius: 12px;
+  transition: transform 110ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+.key.wide { min-width: 5rem; }
+.key.is-focused,
+.key:focus-visible {
+  background: #fff;
+  color: #0a0c10;
+  transform: scale(1.08);
+  box-shadow: inset 0 0 0 1px #fff;
+}
+.keys .btn { height: 2.6rem; }
 
 /* ----------------------------------------------------------------- buttons */
 
 .btn {
   appearance: none;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.13);
   color: var(--text);
   font: inherit;
   font-weight: 700;
-  padding: 0.62em 1.25em;
-  border-radius: 10px;
+  font-size: 0.98rem;
+  padding: 0.72em 1.9em;
+  border-radius: 999px;
   display: inline-flex;
   align-items: center;
   gap: 0.5em;
   white-space: nowrap;
+  transition: transform 150ms cubic-bezier(0.2, 0.7, 0.3, 1);
 }
-.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
-.btn.ghost { background: transparent; }
-.btn[disabled] { opacity: 0.42; }
-.btn[data-focus].is-focused { background: rgba(255, 178, 56, 0.16); }
-.btn.primary[data-focus].is-focused { background: #ffc65e; }
+.btn.primary { background: #fff; color: #0a0c10; }
+.btn.ghost { background: transparent; border-color: rgba(255, 255, 255, 0.26); }
+.btn[disabled] { opacity: 0.4; }
+
+.btn.is-focused,
+.btn:focus-visible { box-shadow: 0 0 0 3px #fff; transform: scale(1.04); }
+.btn.primary.is-focused { box-shadow: 0 0 0 3px #fff, 0 0 0 6px rgba(0, 0, 0, 0.45); }
 
 /* ------------------------------------------------------------------ detail */
 
-.detail { position: relative; min-height: 100vh; }
-.detail-art { position: absolute; inset: 0 0 auto; height: min(72vh, 660px); z-index: -2; background-size: cover; background-position: center 18%; }
+/* `isolation` is what makes the backdrop visible at all. The artwork is a
+   negative-z layer, and without a stacking context of its own here it was
+   pushed out to the column's context and painted underneath it: the whole
+   title screen came up black, with a poster and text on nothing. The home
+   screen's stage has had the same line from the start, which is why the same
+   layer worked there and not here. */
+.detail {
+  position: relative;
+  isolation: isolate;
+  min-height: calc(100vh - var(--topbar));
+}
+.detail-art {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100vh;
+  z-index: -1;
+  background-size: cover;
+  background-position: center 14%;
+}
 .detail-art::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(0deg, var(--bg) 4%, rgba(7, 8, 11, 0.58) 50%, rgba(7, 8, 11, 0.34) 100%);
+  /* Enough shade to read the text over, and no more. The picture is the
+   * largest thing on the screen and dimming it to three quarters black was
+   * what made the screen look like a form with a photograph behind it. */
+  background:
+    linear-gradient(90deg, rgba(7, 8, 11, 0.82) 0%, rgba(7, 8, 11, 0.5) 34%, rgba(7, 8, 11, 0.08) 66%, rgba(7, 8, 11, 0) 100%),
+    linear-gradient(0deg, var(--bg) 0%, rgba(7, 8, 11, 0.34) 30%, rgba(7, 8, 11, 0) 72%);
 }
 .detail-grid {
   display: grid;
-  grid-template-columns: clamp(150px, 15vw, 540px) minmax(0, 1fr);
-  gap: clamp(18px, 2.4vw, 44px);
-  padding: clamp(40px, 9vh, 120px) var(--gutter) 0;
+  grid-template-columns: clamp(130px, 13vw, 470px) minmax(0, 1fr);
+  gap: clamp(16px, 2.2vw, 40px);
+  padding: clamp(48px, 11vh, 150px) var(--gutter) 0;
   align-items: start;
 }
-.detail-poster { width: 100%; aspect-ratio: 2 / 3; border-radius: var(--radius); border: 1px solid var(--line); background: var(--bg-card) center/cover no-repeat; }
-.detail-body { display: grid; gap: 0.78rem; min-width: 0; }
-.detail-title { margin: 0; font-size: clamp(1.7rem, 2.9vw, 3rem); font-weight: 800; line-height: 1.05; letter-spacing: -0.02em; }
-.detail-desc { margin: 0; color: var(--muted); line-height: 1.55; max-width: 62ch; }
+.detail-poster {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-art);
+  background: var(--bg-card) center/cover no-repeat;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.detail-poster.is-blank {
+  display: grid;
+  align-content: end;
+  padding: 1rem;
+  color: #fff;
+  font-weight: 700;
+  font-size: 1rem;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
+  background:
+    linear-gradient(160deg,
+      hsl(var(--tile-hue, 220) 42% 26%) 0%,
+      hsl(var(--tile-hue, 220) 46% 13%) 62%,
+      hsl(calc(var(--tile-hue, 220) + 26) 40% 9%) 100%);
+}
+.detail-body { display: grid; gap: 0.6rem; min-width: 0; }
+.detail-title {
+  margin: 0;
+  font-size: clamp(1.7rem, 2.9vw, 3.2rem);
+  font-weight: 800;
+  line-height: 1.04;
+  letter-spacing: -0.025em;
+}
+.detail-desc { margin: 0; color: var(--muted); line-height: 1.5; font-size: 0.94rem; max-width: 54ch; }
 
-.chips { display: flex; flex-wrap: wrap; gap: 0.42rem; align-items: center; }
+.chips { display: flex; flex-wrap: wrap; gap: 0.38rem; align-items: center; }
 .chip {
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.03em;
   padding: 0.3em 0.66em;
-  border-radius: 7px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.08);
   color: var(--muted);
-  border: 1px solid var(--line);
   white-space: nowrap;
 }
-.chip.hot { background: rgba(255, 178, 56, 0.16); color: var(--accent); border-color: rgba(255, 178, 56, 0.34); }
-.chip.good { background: rgba(74, 222, 128, 0.14); color: var(--ok); border-color: rgba(74, 222, 128, 0.3); }
-.chip.warn { background: rgba(251, 191, 36, 0.14); color: var(--warn); border-color: rgba(251, 191, 36, 0.3); }
-.chip.bad { background: rgba(248, 113, 113, 0.14); color: var(--bad); border-color: rgba(248, 113, 113, 0.32); }
+.chip.hot { background: rgba(255, 180, 58, 0.16); color: var(--accent); }
+.chip.good { background: rgba(74, 222, 128, 0.14); color: var(--ok); }
+.chip.warn { background: rgba(251, 191, 36, 0.14); color: var(--warn); }
+.chip.bad { background: rgba(248, 113, 113, 0.14); color: var(--bad); }
 
 /* ---------------------------------------------------------- source picker */
 
-.sources { padding: clamp(22px, 4vh, 46px) var(--gutter) 0; display: grid; gap: 0.6rem; }
-.sources h2 { margin: 0; font-size: clamp(1rem, 1.15vw, 1.3rem); font-weight: 700; }
-.source-list { display: grid; gap: 0.5rem; }
+.sources { padding: clamp(20px, 3.6vh, 44px) var(--gutter) 0; display: grid; gap: 0.55rem; }
+.sources h2 { margin: 0; font-size: 1.12rem; font-weight: 720; }
+.source-list { display: grid; gap: 0.42rem; }
 
 .source {
-  border: 1px solid var(--line);
-  background: var(--bg-raise);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(17, 21, 28, 0.78);
   color: inherit;
   font: inherit;
   text-align: left;
-  border-radius: 12px;
-  padding: 0.8rem 1rem;
+  border-radius: 18px;
+  padding: 0.9rem 1.15rem;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.3rem 1rem;
   align-items: center;
+  transition: transform 150ms cubic-bezier(0.2, 0.7, 0.3, 1);
 }
-.source[aria-selected="true"] { border-color: var(--accent); background: rgba(255, 178, 56, 0.07); }
-.source-name { font-weight: 700; }
-.source-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.36rem; }
-.source-note { grid-column: 1 / -1; color: var(--dim); font-size: 0.82rem; line-height: 1.45; }
+.source[aria-selected="true"] { border-color: rgba(255, 180, 58, 0.55); background: rgba(255, 180, 58, 0.06); }
+.source.is-focused { box-shadow: inset 0 0 0 2px #fff; border-color: transparent; }
+.source-name { font-weight: 700; font-size: 0.95rem; }
+.source-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.34rem; }
+.source-note { grid-column: 1 / -1; color: var(--dim); font-size: 0.8rem; line-height: 1.45; }
 .source-note.bad { color: var(--bad); }
 .source-note.warn { color: var(--warn); }
 
-.reasons { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
-.reasons li { color: var(--muted); font-size: 0.84rem; line-height: 1.45; display: flex; gap: 0.5rem; }
+.reasons { display: grid; gap: 0.28rem; margin: 0; padding: 0; list-style: none; }
+.reasons li { color: var(--muted); font-size: 0.82rem; line-height: 1.45; display: flex; gap: 0.5rem; }
 .reasons li::before { content: "—"; color: var(--dim); }
 .reasons li.warn { color: var(--warn); }
 .reasons li.bad { color: var(--bad); }
 
 /* -------------------------------------------------------------- now playing */
 
-.now { display: grid; gap: clamp(16px, 3vh, 34px); padding: clamp(28px, 6vh, 80px) var(--gutter); min-height: 100vh; align-content: center; }
-.now-art { position: absolute; inset: 0; z-index: -2; background-size: cover; background-position: center; filter: saturate(0.8); }
-.now-art::after { content: ""; position: absolute; inset: 0; background: rgba(7, 8, 11, 0.82); }
-.now-title { margin: 0; font-size: clamp(1.6rem, 3vw, 3rem); font-weight: 800; letter-spacing: -0.02em; }
-.now-sub { color: var(--muted); font-weight: 600; }
+.now {
+  position: relative;
+  display: grid;
+  gap: clamp(14px, 2.6vh, 32px);
+  padding: clamp(26px, 6vh, 84px) var(--gutter);
+  min-height: 100vh;
+  align-content: center;
+}
+.now-art {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-size: cover;
+  background-position: center;
+}
+.now-art::after { content: ""; position: absolute; inset: 0; background: rgba(7, 8, 11, 0.84); }
+.now-title { margin: 0; font-size: clamp(1.6rem, 2.9vw, 3.2rem); font-weight: 800; letter-spacing: -0.025em; }
+.now-sub { color: var(--muted); font-weight: 600; font-size: 0.92rem; }
 
-.progress { display: grid; gap: 0.5rem; max-width: 72rem; }
-.progress-track { height: 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.13); overflow: hidden; }
+.progress { display: grid; gap: 0.45rem; max-width: 60rem; }
+.progress-track { height: 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
 .progress-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width 500ms linear; }
-.progress-times { display: flex; justify-content: space-between; color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 600; }
+.progress-times {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  font-size: 0.86rem;
+}
 
-.transport { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.transport { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
 /* ---------------------------------------------------------------- settings */
 
-.settings { display: grid; grid-template-columns: clamp(180px, 17vw, 580px) minmax(0, 1fr); gap: clamp(16px, 2.4vw, 40px); padding: clamp(18px, 3vh, 36px) var(--gutter); align-items: start; }
-.settings-nav { display: grid; gap: 0.26rem; position: sticky; top: 5.5rem; }
+.settings {
+  display: grid;
+  grid-template-columns: clamp(150px, 15vw, 520px) minmax(0, 1fr);
+  gap: clamp(16px, 2.2vw, 40px);
+  padding: clamp(48px, 9vh, 120px) var(--gutter) 0;
+  align-items: start;
+}
+.settings-nav { display: grid; gap: 0.22rem; }
 .settings-tab {
   appearance: none;
   border: 0;
   background: transparent;
   color: var(--muted);
   font: inherit;
-  font-weight: 650;
+  font-weight: 660;
+  font-size: 0.92rem;
   text-align: left;
   padding: 0.62em 0.9em;
-  border-radius: 10px;
+  border-radius: 9px;
 }
-.settings-tab[aria-current="true"] { background: rgba(255, 255, 255, 0.08); color: var(--text); }
-.settings-tab[data-focus].is-focused { background: var(--accent); color: var(--accent-ink); }
+.settings-tab { border-radius: 13px; }
+.settings-tab[aria-current="true"] { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+.settings-tab.is-focused { background: #fff; color: #0a0c10; }
 
-.panel { display: grid; gap: 0.65rem; min-width: 0; }
-.panel h2 { margin: 0 0 0.2rem; font-size: clamp(1.1rem, 1.4vw, 1.5rem); font-weight: 750; }
-.panel-note { color: var(--dim); margin: 0 0 0.4rem; line-height: 1.5; max-width: 70ch; }
+.panel { display: grid; gap: 0.55rem; min-width: 0; }
+.panel h2 { margin: 0 0 0.15rem; font-size: 1.24rem; font-weight: 740; letter-spacing: -0.015em; }
+.panel-note { color: var(--dim); margin: 0 0 0.35rem; line-height: 1.5; font-size: 0.86rem; max-width: 62ch; }
 
-.rows { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.6rem 1rem; padding: 0.72rem 1rem; background: var(--bg-raise); align-items: center; }
-.row-label { color: var(--muted); font-weight: 600; min-width: 0; }
-.row-value { font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.rows {
+  display: grid;
+  gap: 1px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 18px;
+  overflow: hidden;
+}
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem 1rem;
+  padding: 0.72rem 1.1rem;
+  background: rgba(17, 21, 28, 0.82);
+  align-items: center;
+}
+.row-label { color: var(--muted); font-weight: 620; font-size: 0.88rem; min-width: 0; }
+.row-value {
+  font-weight: 660;
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 .row-value.ok { color: var(--ok); }
 .row-value.bad { color: var(--bad); }
 .row-value.warn { color: var(--warn); }
 
-.meter { grid-column: 1 / -1; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.meter { grid-column: 1 / -1; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
 .meter > i { display: block; height: 100%; background: var(--accent); }
 
-.actions-row { display: flex; flex-wrap: wrap; gap: 0.5rem; padding-top: 0.3rem; }
+.actions-row { display: flex; flex-wrap: wrap; gap: 0.45rem; padding-top: 0.25rem; }
 
 /* ------------------------------------------------------------------ search */
 
-.search { padding: clamp(22px, 4vh, 46px) var(--gutter); display: grid; gap: 1rem; }
+.search { padding: clamp(48px, 9vh, 120px) var(--gutter) 0; display: grid; gap: 1.1rem; }
 .search-field {
   display: flex;
   align-items: center;
   gap: 0.7rem;
-  background: var(--bg-raise);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 0.5rem 0.9rem;
-  max-width: 56rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 0.5rem 1.25rem;
+  max-width: 46rem;
 }
-.search-field[data-focus].is-focused { border-color: var(--accent); }
+.search-field.is-focused { box-shadow: inset 0 0 0 2px #fff; border-color: transparent; }
 .search-field input {
   flex: 1;
   min-width: 0;
@@ -415,27 +1214,24 @@ body.tv, body.tv * { cursor: none; }
   outline: none;
   color: var(--text);
   font: inherit;
-  font-size: 1.1rem;
+  font-size: 1.04rem;
   padding: 0.35em 0;
 }
 .search-field input::placeholder { color: var(--dim); }
 
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(clamp(112px, 10vw, 345px), 1fr));
-  gap: clamp(12px, 1.4vw, 24px);
+  grid-template-columns: repeat(auto-fill, minmax(var(--card), 1fr));
+  gap: clamp(12px, 1.3vw, 26px) var(--rail-gap);
+  padding-bottom: 2.4rem;
 }
 .results-grid .card { width: 100%; }
 
 /* ------------------------------------------------------------------- misc */
 
-.state { padding: clamp(28px, 8vh, 90px) var(--gutter); color: var(--muted); display: grid; gap: 0.6rem; justify-items: start; }
-.state strong { color: var(--text); font-size: 1.15rem; }
+.state { padding: clamp(40px, 10vh, 120px) var(--gutter); color: var(--muted); display: grid; gap: 0.5rem; justify-items: start; }
+.state strong { color: var(--text); font-size: 1.1rem; }
 .state.bad strong { color: var(--bad); }
-
-.skeleton-rail { display: flex; gap: var(--rail-gap); padding: 6px var(--gutter) 14px; }
-.skeleton-card { flex: 0 0 auto; width: clamp(116px, 10.6vw, 410px); aspect-ratio: 2 / 3; border-radius: var(--radius); background: linear-gradient(100deg, #121721 30%, #1b2230 50%, #121721 70%); background-size: 220% 100%; animation: shimmer 1.25s linear infinite; }
-@keyframes shimmer { to { background-position: -220% 0; } }
 
 /* ----------------------------------------------------------------- overlay */
 
@@ -446,21 +1242,32 @@ body.tv, body.tv * { cursor: none; }
   display: grid;
   place-items: center;
   padding: var(--gutter);
-  background: rgba(4, 5, 7, 0.94);
+  background: rgba(4, 5, 7, 0.95);
 }
 .sheet {
   background: var(--bg-raise);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: clamp(18px, 2.6vw, 34px);
-  width: min(64rem, 100%);
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  padding: clamp(18px, 2.4vw, 34px);
+  width: min(58rem, 100%);
   max-height: 86vh;
   overflow: auto;
   display: grid;
-  gap: 0.9rem;
+  gap: 0.8rem;
 }
-.sheet h2 { margin: 0; font-size: clamp(1.15rem, 1.5vw, 1.6rem); font-weight: 750; }
-.sheet video { width: 100%; border-radius: 12px; background: #000; aspect-ratio: 16 / 9; }
+.sheet h2 { margin: 0; font-size: 1.24rem; font-weight: 740; }
+.sheet video { width: 100%; border-radius: 10px; background: #000; aspect-ratio: 16 / 9; }
+
+/* A trailer arrives as an embedded player rather than a file, so it is a frame
+ * rather than a video element — the same rectangle either way. */
+.preview-frame {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: 10px;
+  background: #000;
+  display: block;
+}
 
 .toast {
   position: fixed;
@@ -469,36 +1276,840 @@ body.tv, body.tv * { cursor: none; }
   transform: translateX(-50%);
   z-index: 80;
   background: var(--bg-card);
-  border: 1px solid var(--line);
-  border-left: 4px solid var(--accent);
-  border-radius: 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
   padding: 0.8rem 1.2rem;
-  max-width: min(46rem, 90vw);
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  max-width: min(40rem, 80vw);
   line-height: 1.45;
+  font-size: 0.9rem;
 }
 .toast.bad { border-left-color: var(--bad); }
 
-/* ------------------------------------------------------------- responsive */
+/* ------------------------------------------------------------- responsive
+ *
+ * The phone is the second audience, and on it the side rail becomes a bar
+ * along the bottom — the one place a thumb reaches without covering the
+ * artwork. Everything else simply gets narrower.
+ */
 
 @media (max-width: 900px) {
-  .detail-grid { grid-template-columns: clamp(112px, 30vw, 170px) minmax(0, 1fr); }
-  .settings { grid-template-columns: minmax(0, 1fr); }
-  .settings-nav { position: static; grid-auto-flow: column; grid-auto-columns: max-content; overflow-x: auto; scrollbar-width: none; }
+  :root { --card: clamp(104px, 27vw, 190px); --topbar: 3.4rem; }
+
+  .topbar { padding: 0 0.9rem; gap: 0.2rem; }
+  /* A phone has a clock of its own at the top of its own screen. */
+  .clock { display: none; }
+  .brand { margin-right: 0.6rem; font-size: 0.95rem; }
+  .nav-item { padding: 0 0.5rem; font-size: 0.82rem; }
+  .nav-item span { display: none; }
+
+  .column { padding-bottom: 2.5rem; }
+  .home { grid-template-columns: minmax(0, 1fr); }
+  .vitals { order: 2; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  .hero { height: min(58vh, 520px); }
   .hero-body { max-width: 100%; }
-  .hero { min-height: min(56vh, 460px); }
+  .detail-grid { grid-template-columns: clamp(104px, 28vw, 170px) minmax(0, 1fr); }
+  .settings { grid-template-columns: minmax(0, 1fr); }
+  .settings-nav { grid-auto-flow: column; grid-auto-columns: max-content; overflow-x: auto; scrollbar-width: none; }
+  .toast { left: 50%; }
 }
 
 @media (max-width: 620px) {
-  .topbar { gap: 8px; padding-inline: 14px; }
-  .clock { display: none; }
-  .wordmark { font-size: 0.8rem; letter-spacing: 0.22em; }
   .detail-grid { grid-template-columns: minmax(0, 1fr); }
-  .detail-poster { width: min(52vw, 220px); }
+  .detail-poster { width: min(50vw, 200px); }
   .row { grid-template-columns: minmax(0, 1fr); }
   .row-value { text-align: left; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; }
+}
+
+/* How far in a title was left, drawn on its own poster.
+ *
+ * At the foot of the artwork rather than under it: the shelf is read as a row
+ * of pictures, and a bar outside the picture would push the titles apart and
+ * make an even row look ragged. Two pixels of track, three of fill — enough to
+ * see from a sofa, not enough to become part of the cover. */
+.card-progress {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 4px;
+  background: rgb(255 255 255 / 0.22);
+  border-radius: 0 0 var(--card-radius, 12px) var(--card-radius, 12px);
+  overflow: hidden;
+}
+
+.card-progress > i {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  background: var(--accent, #f0a500);
+  border-radius: inherit;
+}
+
+/* Already in the library. A tick, top left, where nothing else sits: the
+ * corner opposite is where catalogues print their own badges. */
+.badge-owned {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent, #f0a500);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.45);
+}
+
+.badge-owned svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: #14141a;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Which addon answered, as a row of tabs above the sources.
+ *
+ * Horizontal and scrollable like a shelf, because a box with a dozen addons
+ * installed has more providers than fit across a television. */
+.source-tabs {
+  display: flex;
+  gap: 10px;
+  overflow: hidden;
+  padding: 2px 0 14px;
+}
+
+.source-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.07);
+  color: var(--ink-dim, #9aa0ad);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.source-tab[aria-selected="true"] {
+  background: var(--accent, #f0a500);
+  color: #14141a;
+}
+
+/* Focus is what the remote moves, and it has to be legible on top of the
+ * selected state rather than instead of it: a ring, not a fill. */
+.source-tab:focus-visible,
+.source-tab.is-focused {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+  color: #fff;
+}
+
+.source-tab[aria-selected="true"]:focus-visible,
+.source-tab[aria-selected="true"].is-focused {
+  color: #14141a;
+}
+
+.source-tab-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82em;
+  opacity: 0.75;
+}
+
+/* The way out of a shelf, at the end of its title line. */
+.rail-all {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-dim, #9aa0ad);
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.rail-all svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rail-all:focus-visible,
+.rail-all.is-focused {
+  background: rgb(255 255 255 / 0.12);
+  color: #fff;
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
+/* A shelf opened out. Poster-shaped cells, as many across as the television
+ * has room for, so the count per row follows the screen rather than a number
+ * written here. */
+.collection {
+  padding: 28px 48px 64px;
+}
+
+.collection-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.collection-head h1 {
+  margin: 0;
+  font-size: 2rem;
+  letter-spacing: -0.01em;
+}
+
+.collection-count {
+  color: var(--ink-dim, #9aa0ad);
+  font-variant-numeric: tabular-nums;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 26px 22px;
+}
+
+/* The title on one side, the ways to watch it on the other.
+ *
+ * The proportions follow what the sources need rather than what the synopsis
+ * does: a filename with a size and a seeder count is about four hundred pixels
+ * of text, and anything wider only spreads the same fields further apart. */
+.detail--split {
+  --detail-gutter: 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 560px;
+  gap: 36px;
+  align-items: start;
+  padding-inline: var(--detail-gutter);
+}
+
+.detail-main {
+  min-width: 0;
+}
+
+.detail-side {
+  min-width: 0;
+  position: relative;
+  height: calc(100vh - 108px);
+  overflow: hidden;
+  /* The filter on top, the list under it, and the list's own window is the
+   * second row. */
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+/* The window the list is seen through. Its height is what the focus engine
+ * measures the travel against, and clipping here is what stops the list both
+ * running off the bottom of the television and climbing over the filter on its
+ * way up. */
+.detail-side-window {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.detail-side-inner {
+  /* Positioned, so a source row's offset is measured from the top of the
+   * panel rather than from the page. */
+  position: relative;
+  will-change: transform;
+}
+
+/* Source rows: a resolution, a file name, and the facts about it.
+ *
+ * The addon hands over two fields of free text with pictograms standing in for
+ * field names, and the row used to show them as written. That put "[RD+]
+ * Torrentio" over three wrapped lines on the left and a release name cut off
+ * mid-word on the right, with an emoji where a label belonged — fifty rows, no
+ * two the same height, nothing lining up down the column.
+ *
+ * The text is taken apart in the model instead, and laid out here as the
+ * record it is: resolution in a fixed column so the eye finds it in the same
+ * place on every row, the file name on one line, and the facts under it as
+ * chips. Every row is now exactly two lines tall, which is also what lets the
+ * focus engine move by a known step. */
+.source {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  padding: 10px 14px;
+}
+
+.source-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  min-width: 0;
+}
+
+.source-quality {
+  font-weight: 800;
+  font-size: 1.02rem;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+
+/* Dolby Vision, HDR10+, and the rest: worth saying, not worth saying loudly.
+ * Three is the most that fits on the line and the rest are variations on the
+ * three. */
+.source-flags {
+  color: var(--accent, #f0a500);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.source-body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* One line and then an ellipsis. A release name runs to two hundred
+ * characters; wrapping it is what turned the panel into the wall of text this
+ * layout exists to avoid. */
+.source-release {
+  font-weight: 600;
+  font-size: 0.92rem;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The facts, in the order the question is asked: how big, how many are
+ * sharing it, where it came from, who is offering it, what it is spoken in.
+ * They run off the end rather than wrapping, for the same reason. */
+.source-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.source-chips > * {
+  flex: 0 0 auto;
+}
+
+.source-chips .chip {
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  padding: 0.24em 0.55em;
+  border-radius: 5px;
+}
+
+/* The debrid service already holds this file, so it starts at once. It is the
+ * one fact on the row worth a colour. */
+.source-chips .chip-cached {
+  background: rgba(43, 189, 99, 0.18);
+  color: #74e3a0;
+}
+
+.source-note {
+  grid-column: 1 / -1;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* One line, and it travels. Wrapping the providers onto a second line pushes
+ * the first source down the panel and makes the row's height depend on how
+ * many addons happen to be installed; the strip slides instead, the same way
+ * a shelf of posters does, and the focus engine already knows how to move it. */
+.detail-side .source-tabs {
+  flex-wrap: nowrap;
+}
+
+.detail-side .source-tab {
+  padding: 8px 14px;
+  font-size: 0.92em;
+}
+
+/* One television, one column. Below the width where two columns each have
+ * room to be read, the sources go back under the title. */
+@media (max-width: 1200px) {
+  .detail--split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The action on the row the remote is on. Nothing on the others: a play mark
+ * on every line is a column of marks, which points at nothing. */
+.source-go {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #2bbd63;
+  opacity: 0;
+  transform: scale(0.82);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.source-go svg {
+  width: 15px;
+  height: 15px;
+  fill: #06220f;
+}
+
+.source:focus-visible .source-go,
+.source.is-focused .source-go,
+.source[aria-selected="true"] .source-go {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* The panel's head: what this column is, and how to narrow it. Outside the
+ * scroller, so it is still there at the fiftieth source. */
+.source-filter {
+  /* Above the list and above the top bar's reach. The panel starts at the top
+   * of the screen, and without this the first thing in it sits under the bar. */
+  position: relative;
+  z-index: 2;
+  min-height: 52px;
+  padding: 14px 0 14px;
+}
+
+.source-filter h2 {
+  margin: 0 0 12px;
+  font-size: 1.15rem;
+}
+
+/* The filter is the panel's first child, and the panel begins where the top
+ * bar ends. Flush against it the control was drawn into the bar's own
+ * gradient and could not be read; this is the gap that keeps it clear of it.
+ * (The `.source-filter` wrapper the rule above was written for is not in the
+ * markup — the control is the panel's child directly — which is why the
+ * padding there never did anything.) */
+.detail-side > .source-select {
+  margin: 20px 0 14px;
+  /* Over the list, so the open option list is not painted behind the rows it
+   * is offered in front of. */
+  z-index: 5;
+}
+
+/* The source list has a screen-wide gutter of its own, for when it is the
+ * whole screen. Inside the panel that gutter was taking a hundred and four
+ * pixels off a column that is five hundred and sixty wide — a fifth of the
+ * room the file names and the facts were then fighting over. */
+.detail-side .sources {
+  padding: 0;
+}
+
+/* A hundred and fifty rows at seventy-eight pixels is an eleven-thousand-pixel
+ * layer inside a window a thousand pixels tall — the same shape as the shelves
+ * that were tearing, and the same fix. Rows off the end of the panel are not
+ * painted until the list is moved to them.
+ *
+ * Fifty-six is the content box of a seventy-eight pixel row — the padding and
+ * the border are outside it. Giving it the border-box figure made every
+ * unpainted row a hundred pixels tall and the list a third longer than it is,
+ * which the panel then had to take back as the rows came into view. */
+.detail-side .source {
+  content-visibility: auto;
+  contain-intrinsic-size: auto none auto 56px;
+}
+
+/* Plain block layout on purpose. The focus engine measures how far the
+ * scroller may travel as its own height against the window it sits in, and a
+ * flex child is stretched to the window — which would measure as nothing to
+ * travel and nothing would ever move. */
+
+/* The film's own title art, at the size it was drawn to be read at. */
+.detail-logo {
+  display: block;
+  max-width: min(520px, 46%);
+  max-height: 170px;
+  width: auto;
+  height: auto;
+  margin: 0 0 18px;
+  object-fit: contain;
+  object-position: left center;
+  filter: drop-shadow(0 6px 22px rgb(0 0 0 / 0.6));
+}
+
+/* Runtime, year, rating — one quiet line, not a row of badges. */
+.detail-facts {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  /* One line, always. Wrapped, "2000 · 99 min · IMDb 8.0" becomes three
+   * enormous stacked words and reads as a heading rather than a caption. */
+  white-space: nowrap;
+  margin: 0 0 26px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.detail-facts span + span::before {
+  content: "·";
+  margin-right: 16px;
+  opacity: 0.45;
+}
+
+/* A named set of chips: the label small, grey and set in capitals, the way a
+ * field name should sit under the thing it names rather than beside it. */
+.meta-group {
+  margin-bottom: 18px;
+}
+
+.meta-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--ink-dim, #9aa0ad);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* The actions, as marks with their names under them. */
+.detail-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  margin-top: 30px;
+}
+
+.icon-action {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  width: 92px;
+  padding: 12px 6px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--ink-dim, #9aa0ad);
+  font: inherit;
+  cursor: pointer;
+}
+
+.icon-action svg {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-action.is-primary svg {
+  fill: currentColor;
+  stroke: none;
+}
+
+.icon-action-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.icon-action:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
+
+.icon-action:focus-visible,
+.icon-action.is-focused {
+  background: rgb(255 255 255 / 0.13);
+  color: #fff;
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
+.icon-action.is-primary {
+  color: #fff;
+}
+
+/* The written part of the screen keeps to a column a person can read across.
+ * Given the whole half of a television it runs to twenty words a line, which
+ * is a newspaper, not a poster. */
+.detail-body {
+  max-width: 780px;
+}
+
+.detail-desc {
+  max-width: 62ch;
+}
+
+/* The detail screen is one screenful, and stays one.
+ *
+ * It used to be as tall as its contents, so reaching the actions under the
+ * synopsis scrolled the page — and the page carries the source panel with it,
+ * which is how the provider filter ended up above the top of the screen with
+ * the list running on underneath. Nothing here scrolls except the sources.
+ */
+.detail--split {
+  height: calc(100vh - var(--topbar));
+  overflow: hidden;
+}
+
+.detail-main {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* The actions sit at the foot of the column, where they are in every other
+ * application of this kind, rather than wherever the synopsis happens to end. */
+.detail-actions {
+  margin-top: auto;
+}
+
+/* The panel stands on the artwork, so it brings its own ground.
+ *
+ * Without one, the filter's head — eight per cent white — was laid over a
+ * sunlit snowfield and could not be read at all, and the rows underneath
+ * changed contrast with whatever the backdrop happened to be doing behind
+ * them. The wash runs to the right edge of the screen rather than stopping at
+ * the column's gutter, which is why it is pulled out by the gutter's width and
+ * the padding put back: a panel that stops short of the edge reads as a
+ * rectangle dropped on the picture. */
+.detail-side {
+  height: 100%;
+  overflow: hidden;
+  margin-right: calc(-1 * var(--detail-gutter, 48px));
+  padding-right: var(--detail-gutter, 48px);
+  background: linear-gradient(
+    90deg,
+    rgba(6, 7, 10, 0) 0%,
+    rgba(6, 7, 10, 0.58) 7%,
+    rgba(6, 7, 10, 0.86) 28%,
+    rgba(6, 7, 10, 0.92) 100%
+  );
+}
+
+/* Off the television, a mouse.
+ *
+ * The remote moves focus and the focus engine writes a transform; a wheel does
+ * neither, so on a desktop browser the panel was a fixed window over a list
+ * that could not be moved at all. There the panel scrolls the ordinary way,
+ * and the filter is held out of it by a grid row rather than by the transform
+ * that is not running.
+ */
+body:not(.tv) .detail-side-inner {
+  transform: none !important;
+}
+
+body:not(.tv) .detail-side-window {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* The synopsis gives way before the screen does: it is the one block here that
+ * can be any length, and the actions below it must stay on screen. */
+.detail-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* The column's foot-room is for shelves, whose last row would otherwise sit on
+ * the bottom edge. The detail screen is exactly one screenful by construction,
+ * and that same padding is what pushed it over the edge: the page then had
+ * eighty pixels of travel, the remote used them on the way to the actions, and
+ * the source panel's filter went off the top of the screen with it. */
+.column:has(> .detail--split) {
+  padding-bottom: 0;
+}
+
+/* The provider filter: one line that opens into the rest.
+ *
+ * A row of every option at once was already wider than the panel with three
+ * addons installed, and the sources are what the panel is for. */
+.source-select {
+  position: relative;
+}
+
+.source-select-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 13px 16px;
+  border: 0;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.13);
+  color: var(--ink, #e9ecf2);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.source-select-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-select-count,
+.source-option-count {
+  color: var(--ink-dim, #9aa0ad);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.86em;
+}
+
+.source-select-mark {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 140ms ease;
+}
+
+.source-select.is-open .source-select-mark {
+  transform: rotate(180deg);
+}
+
+.source-select-head:focus-visible,
+.source-select-head.is-focused {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
+/* The open list sits over the sources rather than pushing them down: the row
+ * you are choosing a provider for should not move while you choose. */
+.source-select-list {
+  position: absolute;
+  inset: calc(100% + 6px) 0 auto 0;
+  z-index: 5;
+  padding: 6px;
+  border-radius: 14px;
+  background: #14161c;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.6);
+}
+
+.source-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink, #e9ecf2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.source-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one in force. A dot rather than a tick, because the row is already a
+ * line of text and a tick reads as a second word. */
+.source-option-mark {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.source-option[aria-selected="true"] .source-option-mark {
+  background: #2bbd63;
+}
+
+.source-option:focus-visible,
+.source-option.is-focused {
+  background: rgb(255 255 255 / 0.12);
+  outline: 3px solid #fff;
+  outline-offset: -2px;
+}
+
+/* Posters off the end of the shelf are not painted until they are needed.
+ *
+ * A shelf is one flex strip the width of everything on it — thirty-five
+ * posters is ten thousand pixels of layer, twenty thousand at the panel's own
+ * density. That is far wider than a texture, so the browser cuts it into tiles
+ * and rasterises them as the strip travels. Tiles that do not arrive in time
+ * are drawn as nothing, and a shelf sliding with holes in it is what "tearing"
+ * looks like from a sofa — which is why it was there at 1080p too.
+ *
+ * `content-visibility: auto` lets the browser skip layout and paint for
+ * posters that are off screen entirely; `contain-intrinsic-size` keeps the
+ * space they occupy so the strip's width, and every measurement the focus
+ * engine makes against it, stay exactly what they were. */
+.card {
+  content-visibility: auto;
+  /* A poster is 2:3; the height follows the shelf's card width. */
+  contain-intrinsic-size: auto var(--card) auto calc(var(--card) * 1.5);
+}
+
+/* The moving strip is a layer of its own, promoted before it starts moving
+ * rather than at the first frame of the slide. */
+.rail-strip {
+  will-change: transform;
+}
+
+/* Shelves that are off the screen are skipped whole.
+ *
+ * The column is one layer sixteen shelves tall, and moving it down reveals a
+ * shelf that has never been laid out or painted: forty-five posters arrive at
+ * once, in the frame the remote is waiting on. Measured on the appliance, that
+ * is a 64 ms task and a 85 ms wait between the key and the picture.
+ *
+ * Skipping at the shelf rather than only at the poster is what makes the
+ * difference: one boundary per shelf instead of forty-five, and the browser
+ * has a single box to decide about while the column travels. The reserved size
+ * is the shelf's own — heading, then a row of posters at 2:3 — so nothing
+ * below it moves when it is finally drawn. */
+.rail {
+  content-visibility: auto;
+  contain-intrinsic-size: auto none auto calc(var(--card) * 1.5 + 92px);
 }

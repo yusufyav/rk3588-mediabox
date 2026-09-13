@@ -1,0 +1,8 @@
+/* The ring is the whole point: without it nobody can tell where the remote is.
+   Drawn with outline rather than box-shadow so it never changes layout and
+   never forces the page to re-raster artwork underneath it. */
+.mbx-focus {
+  outline: 3px solid #fff !important;
+  outline-offset: 2px !important;
+  border-radius: 6px;
+}

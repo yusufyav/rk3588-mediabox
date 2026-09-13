@@ -121,12 +121,34 @@ pub fn media_home() -> Value {
     json!({"command": "media_home"})
 }
 
+/// One catalogue in full, rather than the handful a shelf shows.
+pub fn media_catalog(kind: &str, id: &str, addon: Option<&str>, limit: Option<u32>) -> Value {
+    let mut request = json!({"command": "media_catalog", "media_type": kind, "id": id});
+    if let Some(addon) = addon {
+        request["addon_id"] = json!(addon);
+    }
+    if let Some(limit) = limit {
+        request["limit"] = json!(limit);
+    }
+    request
+}
+
 pub fn media_library() -> Value {
     json!({"command": "media_library"})
 }
 
 pub fn media_library_item(id: &str) -> Value {
     json!({"command": "media_library_item", "id": id})
+}
+
+/// Sign in to a Stremio account. The password crosses loopback once and is not
+/// stored by anything on the path; what the media core keeps is the auth key.
+pub fn media_login(email: &str, password: &str) -> Value {
+    json!({"command": "media_login", "email": email, "password": password})
+}
+
+pub fn media_logout() -> Value {
+    json!({"command": "media_logout"})
 }
 
 pub fn media_search(query: &str) -> Value {
@@ -206,6 +228,23 @@ pub fn cec_wake_tv() -> Value {
 
 pub fn cec_standby_tv() -> Value {
     json!({"command": "cec_standby_tv"})
+}
+
+/// What this box can run, and what it is running.
+pub fn applications() -> Value {
+    json!({"command": "applications"})
+}
+
+/// Put one application on the television. This interface is itself one of
+/// them, so choosing another ends this page: the display changes hands.
+pub fn application_launch(id: &str) -> Value {
+    json!({"command": "application_launch", "id": id})
+}
+
+/// Put one web address in front of the television's browser and give it the
+/// display. The browser has no address bar, so this is the only way in.
+pub fn browser_open(url: &str) -> Value {
+    json!({"command": "browser_open", "url": url})
 }
 
 pub fn surface_switch(target: &str) -> Value {

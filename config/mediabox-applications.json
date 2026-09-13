@@ -1,0 +1,23 @@
+[
+  {
+    "id": "mediabox",
+    "name": "MediaBox",
+    "summary": "Filmler, diziler ve bu cihazın kitaplığı",
+    "unit": "mediabox-tv-ui.service",
+    "owns_display": true
+  },
+  {
+    "id": "kodi",
+    "name": "Oynatıcı",
+    "summary": "Donanım hızlandırmalı yerel oynatma (Kodi)",
+    "unit": "kodi.service",
+    "owns_display": true
+  },
+  {
+    "id": "browser",
+    "name": "Tarayıcı",
+    "summary": "Kumandayla gezilebilen web",
+    "unit": "mediabox-browser.service",
+    "owns_display": true
+  }
+]

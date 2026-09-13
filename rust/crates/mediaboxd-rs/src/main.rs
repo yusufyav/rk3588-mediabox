@@ -4,7 +4,7 @@ use mediabox_core::{CecStatus, InputAction, InputMode, InputSource, Surface};
 use mediabox_input::InputManager;
 use mediaboxd_rs::daemon::{AppState, CecRuntime, apply_kodi_route, serve_unix, socket_is_live};
 use mediaboxd_rs::kodi::KodiClient;
-use mediaboxd_rs::lifecycle::{KodiLifecycle, SurfaceManager};
+use mediaboxd_rs::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use mediaboxd_rs::media::MediaClient;
 use mediaboxd_rs::web::{PeerPolicy, WebConfig, serve as serve_web};
 use std::net::SocketAddr;
@@ -29,6 +29,11 @@ struct Args {
     /// and stopped; the daemon never becomes a compositor itself.
     #[arg(long, default_value = "mediabox-tv-ui.service")]
     ui_unit: String,
+    /// The table of applications this box can put on the television. Absent,
+    /// the two it has always had — Kodi and the product UI — are used, so an
+    /// appliance that was never configured still works.
+    #[arg(long)]
+    applications: Option<PathBuf>,
     /// Installed product UI. Without it the daemon serves the API only.
     #[arg(long)]
     ui_root: Option<PathBuf>,
@@ -96,6 +101,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         kodi: kodi.clone(),
         lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
         surface: SurfaceManager::new(&args.kodi_unit, &args.ui_unit)?,
+        applications: ApplicationManager::load(
+            args.applications.as_deref(),
+            &args.kodi_unit,
+            &args.ui_unit,
+        )?,
         cec: CecRuntime {
             adapter: adapter.clone(),
             unavailable,
@@ -134,15 +144,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = apply_kodi_route(&kodi, decision).await;
                                     });
                                 }
-                                // While Kodi is on the television the product
-                                // UI is not running, so Back is the only way
-                                // back to it. Nothing else reclaims the
-                                // display on its own: a viewer who left Kodi
-                                // playing, or somebody working at the console,
-                                // is not interrupted.
+                                // Home reclaims the display; Back does not.
+                                //
+                                // Back belongs to whatever is on screen. The
+                                // kernel's CEC driver publishes the remote as
+                                // a real input device, so Kodi receives Back
+                                // itself and answers it the way Kodi does —
+                                // leave full screen, show the menu, keep the
+                                // film running. Taking the display away on
+                                // Back instead is what made a single press
+                                // stop the film and quit Kodi.
                                 if pressed
                                     && mode == InputMode::KodiPlayback
-                                    && matches!(action, InputAction::Back | InputAction::Home)
+                                    && matches!(action, InputAction::Home)
                                 {
                                     let state = state.clone();
                                     runtime.spawn(async move {
@@ -185,6 +199,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_tasks.push(tokio::spawn(serve_web(listener, state.clone(), config)));
     }
     eprintln!("mediaboxd-rs hazır: {}", args.socket.display());
+
+    // The display belongs to the interface until something asks for it.
+    //
+    // Which process owns the panel is this daemon's decision, and it was a
+    // decision it never actually made at startup: it was made by whichever
+    // unit systemd happened to have enabled. Kodi was, so a cold boot came up
+    // in the player — not on the home screen — and stayed there until someone
+    // pressed Home. The claim is made here instead, once the daemon is serving
+    // and can be asked to hand the display over again.
+    //
+    // It is deliberately not fatal. A box with no TV-local interface installed
+    // answers "not installed" and carries on as the control plane for whatever
+    // else is on the screen.
+    match state.switch_surface(Surface::Ui).await {
+        Ok(_) => eprintln!("mediaboxd-rs: ekran arayüze verildi"),
+        Err(error) => eprintln!("mediaboxd-rs: ekran arayüze verilemedi: {error}"),
+    }
+
     shutdown_signal().await?;
     stop.store(true, Ordering::Relaxed);
     unix_task.abort();

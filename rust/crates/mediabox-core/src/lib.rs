@@ -137,6 +137,81 @@ pub struct SurfaceStatus {
     pub ui_installed: bool,
 }
 
+/// One application this appliance can put on the television.
+///
+/// MediaBox is a light environment for an Orange Pi rather than a media player
+/// with a settings page, so what the box can do is a table rather than a fixed
+/// pair of choices. Kodi and the product UI are simply the first two rows; a
+/// browser, a screen receiver or anything else that comes later is a row in a
+/// file, not a new branch in this enum — which is why the display owner stopped
+/// being an enum at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Application {
+    /// Stable name used by the API and remembered by the UI. Lower-case ASCII.
+    pub id: String,
+    /// What a person sees in the launcher.
+    pub name: String,
+    /// One short line under that name. Never a sentence about the product.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// The systemd unit that is this application. mediaboxd starts and stops
+    /// the unit and never spawns the program itself: a child of this daemon
+    /// inherits this daemon's sandbox, and that has already cost this project
+    /// an application with no input devices.
+    pub unit: String,
+    /// True when running it means taking the display from whatever holds it.
+    /// Only one such application may run, because only one process may hold
+    /// DRM master.
+    #[serde(default = "yes")]
+    pub owns_display: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Application {
+    /// A unit name is passed to systemctl, so it is checked before it is ever
+    /// used rather than trusted because it came from a file on this machine.
+    pub fn valid(&self) -> bool {
+        let id_ok = !self.id.is_empty()
+            && self.id.len() <= 32
+            && self
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let unit_ok = self.unit.ends_with(".service")
+            && self.unit.len() <= 64
+            && self
+                .unit
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"@._-".contains(&byte));
+        id_ok && unit_ok && !self.name.is_empty()
+    }
+}
+
+/// An application as it stands right now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationStatus {
+    #[serde(flatten)]
+    pub application: Application,
+    /// False when the unit is not on this machine. A launcher shows what the
+    /// box can actually do, so an entry that is not installed says so rather
+    /// than failing when it is chosen.
+    pub installed: bool,
+    pub active: bool,
+}
+
+/// What the television is showing, and what else it could show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayStatus {
+    /// The id of the application holding the display, or none when the console
+    /// is free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub applications: Vec<ApplicationStatus>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceHealth {
     pub name: String,
@@ -217,8 +292,24 @@ pub enum Request {
         #[serde(default)]
         start_seconds: u64,
     },
+    /// Sign in to a Stremio account. The password is used once, forwarded to
+    /// the media core and never written down; what is kept is the auth key.
+    MediaLogin { email: String, password: String },
+    MediaLogout,
     SurfaceStatus,
     SurfaceSwitch { target: Surface },
+    /// What the box can run, and what it is running.
+    Applications,
+    /// Put one application on the television. The id `idle` releases the
+    /// display without starting anything.
+    ApplicationLaunch { id: String },
+    /// Open one web address in the television's browser.
+    ///
+    /// The browser has no address bar — a remote cannot use one — so the
+    /// address is chosen in this interface and handed over here: the daemon
+    /// leaves it where the browser reads it at start, then gives the browser
+    /// the display.
+    BrowserOpen { url: String },
     InputInject { action: InputAction },
     InputMonitor,
 }

@@ -1,5 +1,5 @@
 use crate::kodi::KodiClient;
-use crate::lifecycle::{KodiLifecycle, SurfaceManager};
+use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
 use mediabox_cec::Adapter;
 use mediabox_core::{
@@ -35,6 +35,8 @@ pub struct AppState {
     pub input: InputManager,
     pub media: Arc<MediaClient>,
     pub surface: SurfaceManager,
+    /// What this box can run. The launcher is driven from here.
+    pub applications: ApplicationManager,
 }
 
 impl AppState {
@@ -108,10 +110,23 @@ impl AppState {
                 start_seconds,
             } => self.play_on_kodi(url, stream, start_seconds).await,
             Request::SurfaceStatus => Response::success(self.surface.status().await),
+            Request::Applications => Response::success(self.applications.status().await),
+            Request::ApplicationLaunch { id } => match self.applications.launch(&id).await {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("APPLICATION_ERROR", error.to_string()),
+            },
+            Request::BrowserOpen { url } => match self.applications.browser_open(&url).await {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("APPLICATION_ERROR", error.to_string()),
+            },
             Request::SurfaceSwitch { target } => match self.switch_surface(target).await {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("SURFACE_ERROR", error.to_string()),
             },
+            Request::MediaLogin { email, password } => {
+                media_result(self.media.login(&email, &password).await)
+            }
+            Request::MediaLogout => media_result(self.media.logout().await),
             Request::MediaSearch { query } => media_result(self.media.search(&query).await),
             Request::MediaInspect { url } => media_result(self.media.inspect(&url).await),
             Request::MediaStreams { media_type, id } => {
@@ -177,16 +192,33 @@ impl AppState {
         }
         self.stop_all_sessions().await;
 
-        let created = match (url.as_deref(), stream) {
-            (Some(url), _) => self.media.session_start_at(url, start_seconds).await,
-            (None, Some(stream)) => {
-                self.media.session_start_stream(stream, start_seconds).await
+        // Resolving the stream and handing Kodi the display are independent
+        // until the moment Kodi is asked to play, so they are done at the same
+        // time rather than one after the other. Measured on the appliance: the
+        // resolve is about six seconds of network — a debrid link and a probe —
+        // and the handover about two and a half of stopping the interface and
+        // starting Kodi. Run in sequence that is the whole eleven seconds
+        // between pressing Play and seeing a picture; overlapped, the handover
+        // is free.
+        let resolve = async {
+            match (url.as_deref(), stream) {
+                (Some(url), _) => self.media.session_start_at(url, start_seconds).await,
+                (None, Some(stream)) => {
+                    self.media.session_start_stream(stream, start_seconds).await
+                }
+                (None, None) => unreachable!("guarded above"),
             }
-            (None, None) => unreachable!("guarded above"),
         };
+        let (created, handover) = tokio::join!(resolve, self.switch_surface(Surface::Kodi));
         let session = match created {
             Ok(value) => value,
-            Err(error) => return Response::failure("MEDIA_WORKER_ERROR", error.to_string()),
+            Err(error) => {
+                // The display is already Kodi's by now, and Kodi with nothing
+                // to play is not an answer: give the interface back so the
+                // failure is read where it can be acted on.
+                let _ = self.switch_surface(Surface::Ui).await;
+                return Response::failure("MEDIA_WORKER_ERROR", error.to_string());
+            }
         };
         let session_id = session
             .get("id")
@@ -205,7 +237,7 @@ impl AppState {
             );
         };
 
-        let surface = match self.switch_surface(Surface::Kodi).await {
+        let surface = match handover {
             Ok(status) => status,
             Err(error) => {
                 self.stop_session(&session_id).await;
@@ -496,7 +528,7 @@ pub fn socket_is_live(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle::{KodiLifecycle, SurfaceManager};
+    use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
     use mediabox_core::{CecStatus, InputMode};
     use std::time::Duration;
     use tempfile::tempdir;
@@ -523,6 +555,8 @@ mod tests {
                 MediaClient::new("http://127.0.0.1:9", Duration::from_millis(20)).unwrap(),
             ),
             surface: SurfaceManager::new("kodi.service", "mediabox-tv-ui.service").unwrap(),
+            applications: ApplicationManager::load(None, "kodi.service", "mediabox-tv-ui.service")
+                .unwrap(),
         });
         let task = tokio::spawn(serve_unix(listener, state));
         let mut stream = UnixStream::connect(&socket).await.unwrap();

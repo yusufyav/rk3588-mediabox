@@ -1,0 +1,89 @@
+#!/bin/sh
+#
+# The television's web browser, as an application of its own.
+#
+# Not a tab inside the MediaBox interface: a separate unit with its own profile
+# that takes the display when it is launched and gives it back when it exits.
+# That is what makes a browser possible at all here — only one process may hold
+# DRM master, so browsing means MediaBox stepping aside, exactly as it does for
+# Kodi.
+#
+# Spatial navigation is the part that makes it usable from a sofa: with it the
+# arrow keys walk between the links and controls on a page, which is the only
+# input a television remote has. A mouse or keyboard plugged in still works,
+# because the compositor reads the input devices directly.
+set -eu
+
+PROFILE="${MEDIABOX_BROWSER_PROFILE:-/var/lib/mediabox-browser/chromium}"
+# The remote-control layer. Most of the web is written for a mouse: its
+# posters and buttons are divs that nothing can focus, so on a television they
+# are unreachable. This content script gives them a focus ring the four arrows
+# can move between, turns OK into a real click and Back into history.back().
+# It currently matches nothing — the site it was written for is gone — and is
+# loaded so that adding a site is a one-line change to its manifest.
+REMOTE_EXTENSION="${MEDIABOX_BROWSER_EXTENSION:-/opt/rk3588-mediabox/browser-remote}"
+HOME_URL="${MEDIABOX_BROWSER_HOME:-https://www.youtube.com/tv}"
+# Where a chosen address is left for the next start. The launcher writes it,
+# this reads it once, and the browser opens there instead of its home page.
+REQUEST="${MEDIABOX_BROWSER_REQUEST:-/var/lib/mediabox-browser/url}"
+
+url="$HOME_URL"
+if [ -s "$REQUEST" ]; then
+  requested=$(head -c 2000 "$REQUEST" | tr -d '\n\r')
+  rm -f "$REQUEST"
+  case "$requested" in
+    https://*|http://*) url="$requested" ;;
+    *) ;;   # anything that is not a plain web address is ignored, not run
+  esac
+fi
+
+# YouTube serves its remote-driven interface only to something that says it is
+# a television. Asked as an ordinary desktop browser it answers with the mouse
+# interface, which has no answer for four arrows and an OK button.
+AGENT="${MEDIABOX_BROWSER_AGENT:-Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 CrKey/1.54.250320}"
+
+# Measurement, off unless asked for, bound to loopback. Playing video in a
+# browser on this board is a claim that has to be checked rather than assumed.
+debug=""
+if [ -n "${MEDIABOX_BROWSER_DEBUG_PORT:-}" ]; then
+  debug="--remote-debugging-port=${MEDIABOX_BROWSER_DEBUG_PORT} --remote-allow-origins=*"
+fi
+
+# Local Network Access, off.
+#
+# A page that talks to a service on this same box trips a Chromium dialog in
+# the middle of the television — "Access other apps and services on this
+# device" — which cannot be dismissed with four arrows and an OK button, so
+# whatever is behind it is unusable. The managed policy for this exists only in
+# later builds than the one here, so the check is disabled for this browser,
+# whose entire job is to talk to this box.
+#
+# The flag lives in the command below and the note lives here on purpose: a
+# comment inside a backslash-continued command is not a comment, it is more
+# arguments.
+
+# shellcheck disable=SC2086  # $debug is either empty or two known flags.
+/usr/bin/chromium \
+  $debug \
+  --kiosk \
+  --no-sandbox \
+  --ozone-platform=wayland \
+  --user-data-dir="$PROFILE" \
+  --user-agent="$AGENT" \
+  --enable-spatial-navigation \
+  --load-extension="$REMOTE_EXTENSION" \
+  --disable-extensions-except="$REMOTE_EXTENSION" \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-component-update \
+  --disable-sync \
+  --disable-infobars \
+  --disable-features=Translate,TranslateUI,LocalNetworkAccessChecks,LocalNetworkAccess \
+  --lang=tr \
+  --disable-session-crashed-bubble \
+  --overscroll-history-navigation=0 \
+  --autoplay-policy=no-user-gesture-required \
+  --hide-scrollbars \
+  "$url" || true
+
+exec /usr/bin/swaymsg exit

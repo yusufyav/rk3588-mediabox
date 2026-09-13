@@ -44,7 +44,16 @@ mkdir -p "$out"
 wasm-bindgen --target web --no-typescript --out-dir "$out" \
   "$crate/target/wasm32-unknown-unknown/release/mediabox_ui.wasm"
 
-install -m 0644 "$crate/assets/index.html" "$crate/assets/style.css" "$out/"
+# The typeface ships with the bundle rather than being asked of the system.
+# The appliance has DejaVu Sans and nothing else, so every name in the CSS font
+# stack resolved to it and the whole product was drawn in a 2004 desktop font.
+# It is served from the appliance's own loopback, so there is no third party in
+# the path and the television works with no network at all.
+install -m 0644 \
+  "$crate/assets/index.html" \
+  "$crate/assets/style.css" \
+  "$crate/assets/InterVariable.woff2" \
+  "$out/"
 
 # The daemon serves only flat, known-safe filenames; anything nested would be
 # refused at request time, so it is refused at build time instead.

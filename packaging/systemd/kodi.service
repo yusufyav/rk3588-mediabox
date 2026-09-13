@@ -4,6 +4,12 @@ After=systemd-udev-settle.service network.target
 Wants=systemd-udev-settle.service
 
 [Service]
+# Stopping Kodi is a normal event here, not a fault: the control plane stops it
+# whenever the display changes hands. Kodi does not always unwind cleanly when
+# it is holding DRM master and is asked to go — measured as
+# `Result=signal, ExecMainStatus=6` — which left the unit in "failed" and made
+# every later status read look like something had broken.
+SuccessExitStatus=6 SIGABRT SIGTERM SIGKILL
 Type=simple
 # Kodi owns the display and reads the physical input devices directly. It is
 # started by systemd, never as a child of another service, so that the context
@@ -21,6 +27,10 @@ Environment=AE_SINK=ALSA
 Environment=MEDIABOX_GPU=mali
 Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
 ExecStartPre=/bin/mkdir -p /var/tmp/kodi-home/.kodi/temp
+# The sink's EDID and the codec's ELD bypass, both of which are runtime state
+# that is lost on every restart. Without them Kodi cannot see that the panel
+# does HDR10 and the HDMI codec will not pack an audio bitstream.
+ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
 ExecStart=/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm --standalone --debug
 # Kodi exits on Application.Quit; that is a normal stop, not a failure.
 Restart=on-failure
@@ -31,5 +41,15 @@ StandardInput=null
 StandardOutput=append:/var/tmp/kodi-home/kodi-stdout.log
 StandardError=inherit
 
-[Install]
-WantedBy=multi-user.target
+# No [Install] section, and that is the point.
+#
+# Being a unit and being started at boot are different things. This unit exists
+# for the reasons above — an unsandboxed context with udev and /dev/input, a
+# stop that does not read as a failure, the HDMI preparation before every
+# start — none of which require systemd to bring it up on its own.
+#
+# Enabled, it was: `WantedBy=multi-user.target` started the player at boot, it
+# took DRM master, and a cold box came up in Kodi instead of on the home
+# screen. Which process owns the panel is mediaboxd-rs's decision; it claims
+# the display for the interface at startup and starts this unit when something
+# is actually asked to play.

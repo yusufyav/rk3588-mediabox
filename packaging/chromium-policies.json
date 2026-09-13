@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "Enterprise policy for the television's browser, installed at",
+    "/etc/chromium/policies/managed/mediabox.json.",
+    "",
+    "Command-line flags are the wrong instrument for this. Several of them are",
+    "advisory, some are quietly retired between releases, and the one that was",
+    "meant to stop the translate bar (--disable-translate) no longer does: on",
+    "this appliance Chromium 152 put a 'Translate this page?' bubble over the",
+    "product, because the interface is Turkish and the browser's own UI is",
+    "English. A managed policy is the only setting a browser cannot decide to",
+    "ignore, so every piece of browser chrome that could ever appear over the",
+    "product is turned off here rather than on the command line.",
+    "",
+    "Nothing here reaches the network or changes what the page can do; it only",
+    "removes the browser's own opinions from a screen that is supposed to be an",
+    "appliance."
+  ],
+  "TranslateEnabled": false,
+  "SpellcheckEnabled": false,
+  "PasswordManagerEnabled": false,
+  "PasswordLeakDetectionEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "PromotionalTabsEnabled": false,
+  "DefaultBrowserSettingEnabled": false,
+  "BookmarkBarEnabled": false,
+  "ShowHomeButton": false,
+  "ShoppingListEnabled": false,
+  "SafeBrowsingEnabled": false,
+  "MetricsReportingEnabled": false,
+  "SearchSuggestEnabled": false,
+  "UrlKeyedAnonymizedDataCollectionEnabled": false,
+  "ComponentUpdatesEnabled": false,
+  "EnableMediaRouter": false,
+  "PrintingEnabled": false,
+  "DefaultNotificationsSetting": 2,
+  "DefaultGeolocationSetting": 2,
+  "DefaultPopupsSetting": 2,
+  "DefaultSensorsSetting": 2,
+  "DefaultWebBluetoothGuardSetting": 2,
+  "DefaultWebUsbGuardSetting": 2,
+  "_comment_local_network": "Stremio'nun kendi arayüzü, bu kutuda çalışan yerel akış sunucusuna (127.0.0.1:11470) konuşur. Chromium bunun için izin kutusu açıyor ve o kutu kumandayla kapatılabilecek bir şey değil: televizyonun ortasında duruyor ve arkasındaki uygulama kullanılamıyor. Üç ad da veriliyor çünkü kısıtlama sürüm sürüm ayrı politikalara bölündü; hangisi varsa o uygular.",
+  "LocalNetworkAccessAllowedForUrls": [
+    "https://web.stremio.com",
+    "https://app.strem.io"
+  ],
+  "LoopbackNetworkAllowedForUrls": [
+    "https://web.stremio.com",
+    "https://app.strem.io"
+  ],
+  "LocalNetworkAllowedForUrls": [
+    "https://web.stremio.com",
+    "https://app.strem.io"
+  ],
+  "LocalNetworkAccessRestrictionsTemporaryOptOut": true
+}

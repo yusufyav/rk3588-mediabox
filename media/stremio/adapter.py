@@ -28,7 +28,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
 from ..errors import InvalidRequest, NotFound, UpstreamError
@@ -47,7 +48,48 @@ from .models import (
 from .server import StreamingServer
 
 
+# The account's own library, as opposed to the appliance's manifest. The two
+# are different sources wearing the same word, and the id is what keeps them
+# apart on the way to the interface.
+STREMIO_LIBRARY_ADDON_ID = "stremio.library"
+
+
+def _text(value: Any) -> str | None:
+    """A string, or nothing. Numbers become strings; everything else is dropped.
+
+    Library records come from whatever wrote them, which over the years has
+    been several different clients: a release year arrives as 1921 from one and
+    "1921" from another, and a missing one as null, "" or absent.
+    """
+    if value is None or isinstance(value, (dict, list, bool)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _as_millis(value: Any) -> int | None:
+    """A playback position in milliseconds, or nothing.
+
+    Stremio stores these as milliseconds. A negative value means the client
+    never wrote one, which is not the same as the beginning of the film.
+    """
+    try:
+        millis = int(value)
+    except (TypeError, ValueError):
+        return None
+    return millis if millis >= 0 else None
+
+
 LOG = logging.getLogger(__name__)
+
+#: How many addons may be asked for streams at the same time.
+STREAM_FAN_OUT = 8
+#: The longest the whole fan-out may take. Past this the reply goes out with
+#: what has arrived; a source list that is nearly complete now beats a complete
+#: one after a dead host's connect timeout.
+STREAM_DEADLINE = 6.0
+#: How long an addon that just failed is left out of the fan-out.
+ADDON_PENALTY_SECONDS = 300.0
 
 #: How long the addon collection is reused before it is fetched again. The
 #: collection changes when somebody installs an addon, which is rare, and
@@ -109,6 +151,10 @@ class HeadlessStremio:
         self._lock = threading.Lock()
         self._addons: tuple[Addon, ...] = ()
         self._addons_fetched_at: float | None = None
+        # Addons that have just failed to answer, and when. An addon whose host
+        # has gone away costs a full connect timeout every time it is asked,
+        # and asking it again thirty seconds later buys nothing.
+        self._addon_failures: dict[str, float] = {}
 
     # ------------------------------------------------------------------ session
 
@@ -326,20 +372,93 @@ class HeadlessStremio:
         about `tt1234:1:2`, not about the series.
         """
         target = video_id or item_id
+        addons = [
+            addon
+            for addon in addons_supporting(self.addons(), "stream", type_name, target)
+            if not self._recently_failed(addon.id)
+        ]
+        answers = self._gather_streams(addons, type_name, target)
+
         found: list[Stream] = []
         seen: set[str] = set()
-        for addon in addons_supporting(self.addons(), "stream", type_name, target):
-            try:
-                streams = self.addons_client.streams(addon, type_name, target)
-            except UpstreamError as exc:
-                LOG.info("Streams from %s unavailable: %s", addon.id, exc.message)
-                continue
+        # Addon order, not answer order: which addon replied first is a network
+        # accident, and a list that reorders itself between two openings of the
+        # same title is a list nobody can learn.
+        for addon, streams in zip(addons, answers):
             for stream in streams:
                 if stream.identity in seen:
                     continue
                 seen.add(stream.identity)
-                found.append(stream)
+                # Which addon answered. Fifty-five sources from two addons look
+                # like one undifferentiated list until they can be separated,
+                # and only the caller knows which addon was asked.
+                found.append(replace(stream, addon_name=addon.name))
         return found
+
+    def _gather_streams(
+        self, addons: list[Addon], type_name: str, target: str
+    ) -> list[list[Stream]]:
+        """Ask every addon at once, and do not let one of them hold the rest.
+
+        Asked one after another, the wait for a title was the *sum* of the
+        addons: a single installed addon whose host had gone away — RARBG, in
+        the case that made this obvious — spent fifteen seconds in a connect
+        timeout, and the sources for the film did not appear until it gave up,
+        however quickly the others had answered. The wait is now the slowest
+        single addon, capped: whatever has not answered by the deadline is left
+        out of this reply rather than delaying all of it, and an addon that
+        failed is not asked again for a while.
+        """
+        if not addons:
+            return []
+
+        results: list[list[Stream]] = [[] for _ in addons]
+
+        def ask(index: int, addon: Addon) -> None:
+            try:
+                results[index] = self.addons_client.streams(addon, type_name, target)
+            except UpstreamError as exc:
+                LOG.info("Streams from %s unavailable: %s", addon.id, exc.message)
+                self._note_failure(addon.id)
+            except Exception as exc:  # a broken addon is not a broken appliance
+                LOG.info("Streams from %s failed: %s", addon.id, exc)
+                self._note_failure(addon.id)
+
+        # Not a context manager: leaving the block would join every thread,
+        # which is exactly the wait the deadline exists to avoid. The stragglers
+        # are daemon threads and finish into a list nobody reads any more.
+        pool = ThreadPoolExecutor(
+            max_workers=min(len(addons), STREAM_FAN_OUT),
+            thread_name_prefix="streams",
+        )
+        try:
+            futures = [pool.submit(ask, index, addon) for index, addon in enumerate(addons)]
+            done, pending = wait(futures, timeout=STREAM_DEADLINE)
+            for index, future in enumerate(futures):
+                if future in pending:
+                    LOG.info(
+                        "Streams from %s did not answer within %.0fs",
+                        addons[index].id,
+                        STREAM_DEADLINE,
+                    )
+                    self._note_failure(addons[index].id)
+        finally:
+            pool.shutdown(wait=False)
+        return results
+
+    def _recently_failed(self, addon_id: str) -> bool:
+        with self._lock:
+            at = self._addon_failures.get(addon_id)
+            if at is None:
+                return False
+            if self._clock() - at >= ADDON_PENALTY_SECONDS:
+                self._addon_failures.pop(addon_id, None)
+                return False
+            return True
+
+    def _note_failure(self, addon_id: str) -> None:
+        with self._lock:
+            self._addon_failures[addon_id] = self._clock()
 
     def resolve(self, stream: Stream) -> ResolvedStream:
         return self.server.resolve(stream)
@@ -380,3 +499,57 @@ class HeadlessStremio:
 
     def library(self) -> list[dict[str, Any]]:
         return self.api.library()
+
+    def library_previews(self) -> list[dict[str, Any]]:
+        """The operator's own Stremio library, in the catalogue preview shape.
+
+        This is the list the account carries between devices: what was added to
+        the library on a phone, and how far a film was watched on the
+        television. It is not the appliance's own manifest, which is a
+        different thing wearing the same word — those titles are the ones the
+        operator put on this box and are marked with the library addon's id so
+        they resolve from disk rather than through an addon. These carry their
+        real type instead, because that is how they resolve.
+
+        Records the account has removed are dropped: Stremio keeps a tombstone
+        rather than deleting, so a removed title comes back on every sync
+        unless it is filtered here. So are the temporary entries Stremio writes
+        while something is merely being previewed, which were never in the
+        library to begin with.
+
+        Ordered by when each was last watched, most recent first, so the rows
+        built from this need no opinion of their own about order.
+        """
+        previews: list[dict[str, Any]] = []
+        for record in self.library():
+            if not isinstance(record, dict):
+                continue
+            if record.get("removed") or record.get("temp"):
+                continue
+            item_id = record.get("_id") or record.get("id")
+            name = record.get("name")
+            if not item_id or not name:
+                continue
+            state = record.get("state") if isinstance(record.get("state"), dict) else {}
+            previews.append(
+                {
+                    "id": str(item_id),
+                    "type": record.get("type") or "movie",
+                    "name": str(name),
+                    "poster": record.get("poster"),
+                    "background": record.get("background"),
+                    "logo": record.get("logo"),
+                    "description": None,
+                    "releaseInfo": _text(record.get("year")),
+                    "imdbRating": None,
+                    "genres": [],
+                    "addonId": STREMIO_LIBRARY_ADDON_ID,
+                    "state": {
+                        "timeOffset": _as_millis(state.get("timeOffset")),
+                        "duration": _as_millis(state.get("duration")),
+                        "lastWatched": _text(state.get("lastWatched")),
+                    },
+                }
+            )
+        previews.sort(key=lambda item: item["state"]["lastWatched"] or "", reverse=True)
+        return previews
