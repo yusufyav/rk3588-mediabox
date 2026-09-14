@@ -74,4 +74,38 @@ export global Metrics {
     // Where the focused band parks, measured from the top of the scrolling
     // area. The web interface calls this TOP_INSET.
     out property <length> top-inset: 92px;
+
+    // ---- the home screen's own frame
+    //
+    // Read off the web interface's stylesheet rather than invented, so the two
+    // screens are the same screen: `.home` is a two-column grid with the
+    // machine's vitals down the left, and `.app-grid` is the launcher beside
+    // them. Every clamp() there is the same arithmetic here.
+
+    // .home  grid-template-columns: clamp(190px, 17.5vw, 560px)
+    out property <length> vitals-w: max(190px, min(560px, vw * 0.175));
+    // .home  gap
+    out property <length> home-gap: max(14px, min(56px, vw * 0.018));
+    // .home  padding-block-start
+    out property <length> home-pad-top: max(14px, min(60px, vh * 0.026));
+    // .home-main  gap
+    out property <length> main-gap: max(10px, min(40px, vh * 0.016));
+
+    // .vitals  gap
+    out property <length> widget-gap: max(8px, min(22px, vh * 0.01));
+    // .widget  padding
+    out property <length> widget-pad-y: max(10px, min(26px, vw * 0.011));
+    out property <length> widget-pad-x: max(12px, min(28px, vw * 0.012));
+    // .widget-time  font-size: clamp(1.9rem, 3vw, 4rem)
+    out property <length> clock-size: max(root-font * 1.9, min(root-font * 4, vw * 0.03));
+    // .dial-ring  width
+    out property <length> dial-d: max(48px, min(140px, vw * 0.044));
+    // .dials  gap
+    out property <length> dial-gap: max(10px, min(28px, vw * 0.011));
+
+    // .app-grid  grid-template-columns: repeat(auto-fill, minmax(clamp(104px, 9.6vw, 300px), 1fr))
+    out property <length> tile-w: max(104px, min(300px, vw * 0.096));
+    // .app-grid  gap: <row> <column>
+    out property <length> tile-gap-y: max(10px, min(44px, vw * 0.015));
+    out property <length> tile-gap-x: max(10px, min(36px, vw * 0.012));
 }

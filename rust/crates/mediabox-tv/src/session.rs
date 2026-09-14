@@ -132,19 +132,58 @@ fn write_atomically(path: &PathBuf, snapshot: &Snapshot) {
     }
 }
 
-/// Blocks the shutdown signals on every thread and waits for one on this thread
-/// alone, so the last position is written by ordinary code rather than from a
-/// signal handler, where almost nothing is safe to call.
-pub fn on_shutdown(then: impl Fn() + Send + 'static) {
-    // SAFETY: the set is initialised before use and only these two signals are
-    // touched. Blocking them here, before any other thread exists, is what
-    // makes them arrive at the sigwait below rather than killing the process.
+/// The two signals the appliance is stopped with.
+///
+/// SAFETY: the set is zeroed and initialised through libc's own calls before
+/// anything reads it.
+unsafe fn exit_signals() -> libc::sigset_t {
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
         libc::sigaddset(&mut set, libc::SIGTERM);
         libc::sigaddset(&mut set, libc::SIGINT);
+        set
+    }
+}
+
+/// Blocks the shutdown signals on this thread, and must be the first thing
+/// `main` does.
+///
+/// A thread inherits the mask of the thread that spawned it, and a
+/// process-directed signal is delivered to any one thread that has it
+/// unblocked. Blocking only at the point [`on_shutdown`] is called is therefore
+/// too late: by then the image workers, the state store, tokio and the Mali
+/// driver's own threads all exist with the signal unblocked, and SIGTERM lands
+/// on one of them and takes the default action.
+///
+/// Measured on the appliance, with the mask taken late: every worker thread in
+/// /proc/<pid>/task/*/status carried SigBlk 0000000000000000 against the main
+/// thread's 0000000000004002, and the process exited 143 — killed — rather than
+/// running the handler below. The television's display was then released only
+/// because the kernel closes the DRM device with the process, which is the
+/// thing the platform's own release path exists to not depend on.
+pub fn block_exit_signals() {
+    // SAFETY: only the two signals above are touched, and only this thread's
+    // mask is changed.
+    unsafe {
+        let set = exit_signals();
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
+}
+
+/// Waits for one of the shutdown signals on a thread of its own, so the last
+/// position is written by ordinary code rather than from a signal handler,
+/// where almost nothing is safe to call.
+///
+/// [`block_exit_signals`] must already have run; it is called again here so the
+/// invariant holds for a caller that uses this alone.
+pub fn on_shutdown(then: impl Fn() + Send + 'static) {
+    block_exit_signals();
+
+    // SAFETY: the set is initialised before use and only these two signals are
+    // touched.
+    unsafe {
+        let set = exit_signals();
 
         std::thread::Builder::new()
             .name("mediabox-tv-exit".into())
@@ -154,10 +193,12 @@ pub fn on_shutdown(then: impl Fn() + Send + 'static) {
                     eprintln!("mediabox-tv.exit signal={signal}");
                 }
                 then();
-                // The interface is not asked to unwind: whatever takes the
-                // display next is already being started, and the reaper is
-                // waiting for this process to be gone.
-                std::process::exit(0);
+                // Ask the platform loop to unwind normally. The split-KMS
+                // platform disables its CRTC, removes imported framebuffers,
+                // closes PRIME handles and drops DRM master before the unit
+                // becomes inactive, so Kodi never races a process that is
+                // still releasing the display.
+                let _ = slint::quit_event_loop();
             })
             .expect("the shutdown thread could not be started");
     }

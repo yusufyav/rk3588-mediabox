@@ -1,0 +1,93 @@
+#!/bin/sh
+#
+# Take the streaming server off whatever address it last saw itself on.
+#
+# The server writes its own settings, and one of the things it writes down is
+# `remoteHttps`: the address it will ask *.strem.io to issue a certificate for
+# and serve HTTPS on. It is recorded once, from whichever address the box had
+# at the time, and never revisited — so an appliance that moves to another
+# network keeps pointing at an address it no longer has.
+#
+# Measured on this appliance: the box was at 192.168.2.46 while the settings
+# still read
+#
+#     "remoteHttps": "10.27.27.25"
+#
+# with a certificate issued for 10-27-27-25.<hash>.stremio.rocks — the address
+# it had been installed on. Nothing on the box notices, because the unit runs
+# the server with NO_HTTPS_SERVER=1: everything reaching it arrives through the
+# mediaboxd proxy, which terminates plain HTTP on the appliance's own origin.
+#
+# That is exactly why the pin is dead state rather than configuration. It is
+# cleared here, before every start, rather than once at install: the address a
+# box has is not a property of the install, and a deploy that fixed it would
+# only be right until the next time the network changed.
+#
+# The certificate goes with it when it names an address this box does not have.
+# It is unusable without the HTTPS server, and it carries a private key for a
+# domain derived from the stale address; the server issues another if it is
+# ever genuinely needed.
+set -eu
+
+SETTINGS="${STREMIO_APP_PATH:-/var/lib/stremio-server}/server-settings.json"
+CERT="${STREMIO_APP_PATH:-/var/lib/stremio-server}/httpsCert.json"
+
+[ -f "$SETTINGS" ] || exit 0
+
+# The addresses this box actually has, one per line, for the certificate check
+# below. Read before the edit so a failure here cannot leave the settings half
+# written.
+addresses="$(ip -4 -o addr show scope global 2>/dev/null |
+  awk '{ split($4, a, "/"); print a[1] }' || true)"
+
+SETTINGS="$SETTINGS" CERT="$CERT" MBX_ADDRESSES="$addresses" python3 <<'PYTHON'
+import json
+import os
+import pathlib
+import tempfile
+
+settings = pathlib.Path(os.environ["SETTINGS"])
+cert = pathlib.Path(os.environ["CERT"])
+addresses = set(os.environ.get("MBX_ADDRESSES", "").split())
+
+try:
+    state = json.loads(settings.read_text())
+except (OSError, ValueError) as error:
+    # A settings file that cannot be read is the server's problem to remake,
+    # not this script's to destroy.
+    raise SystemExit(f"stremio-unpin-address: {settings} okunamadı: {error}")
+
+pinned = state.get("remoteHttps") or ""
+if pinned:
+    state["remoteHttps"] = ""
+    # Atomic, because the server reads this file at startup and a half written
+    # one would lose every other setting on it.
+    handle = tempfile.NamedTemporaryFile(
+        "w", dir=str(settings.parent), delete=False, suffix=".tmp"
+    )
+    try:
+        with handle as out:
+            json.dump(state, out, indent=4)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(handle.name, settings)
+    except BaseException:
+        pathlib.Path(handle.name).unlink(missing_ok=True)
+        raise
+    print(f"stremio-unpin-address: sabit adres temizlendi ({pinned})")
+
+# The certificate's domain carries the address it was issued for, with the dots
+# written as dashes: 10-27-27-25.<hash>.stremio.rocks. It is dropped only when
+# that address is not one of this box's own, so a certificate that still
+# matches is left alone.
+if cert.exists():
+    try:
+        domain = json.loads(cert.read_text()).get("domain") or ""
+    except (OSError, ValueError):
+        domain = ""
+    label = domain.split(".", 1)[0]
+    named = label.replace("-", ".")
+    if named and named not in addresses:
+        cert.unlink(missing_ok=True)
+        print(f"stremio-unpin-address: eski sertifika kaldırıldı ({named})")
+PYTHON

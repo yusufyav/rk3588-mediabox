@@ -17,7 +17,7 @@ name = "mediabox-tv"
 path = "src/main.rs"
 
 [dependencies]
-# Wayland through winit, drawn by femtovg on GLES. Not the default feature set:
+# A custom direct-KMS platform, drawn by FemtoVG on GLES. Not the default feature set:
 # `accessibility` pulls AT-SPI over D-Bus and there is no session bus on the
 # appliance, and there is no tray on a television. The software renderer is left
 # out too — this board has a GPU and a 4K panel, and a CPU rasteriser at that
@@ -25,7 +25,6 @@ path = "src/main.rs"
 slint = { version = "1.17.1", default-features = false, features = [
     "compat-1-2",
     "std",
-    "backend-winit-wayland",
     "renderer-femtovg",
     # So the window system's own complaints reach the journal. A client that
     # cannot get a surface says so through `log`, and without a logger installed
@@ -50,6 +49,11 @@ sha2 = "0.10"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
 libc = "0.2.189"
+drm = "0.14.1"
+gbm = { version = "0.18.0", default-features = false, features = ["drm-support"] }
+glutin = { version = "0.32.3", default-features = false, features = ["egl"] }
+raw-window-handle = "0.6.2"
+input = "0.10.0"
 
 [build-dependencies]
 slint-build = "1.17.1"

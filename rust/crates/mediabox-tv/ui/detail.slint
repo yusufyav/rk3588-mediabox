@@ -153,6 +153,20 @@ component Source inherits Rectangle {
         VerticalLayout {
             alignment: center;
             spacing: Metrics.text-chip * 0.4;
+            // Nothing in this column may insist on a width.
+            //
+            // A Chip is as wide as its own label, so a row of them has a
+            // minimum width that the layout cannot go below — and a release
+            // name with four chips under it is wider than the rail. The column
+            // then took the width it wanted rather than the width it had, which
+            // pushed both lines off the right of the panel: the sizes and the
+            // peer counts were cut in half, and the release name above them
+            // never elided, because a Text given more room than the rail has
+            // has no reason to.
+            //
+            // Measured on the appliance at 3840x2560: the rail is 576 logical
+            // pixels and a four-chip row wants 620.
+            min-width: 0px;
 
             Text {
                 text: entry.release;
@@ -161,16 +175,28 @@ component Source inherits Rectangle {
                 font-weight: 600;
                 overflow: elide;
                 wrap: no-wrap;
+                min-width: 0px;
             }
 
-            HorizontalLayout {
-                spacing: Metrics.text-chip * 0.5;
-                alignment: start;
+            // The chips lay out at their own size inside a window the rail
+            // decides, so a row that does not fit loses its last chip rather
+            // than the whole column losing its bounds.
+            Rectangle {
+                height: chips.preferred-height;
+                min-width: 0px;
+                clip: true;
 
-                if entry.cached: Chip { label: "Hazır"; tone: "good"; }
-                if !entry.playable: Chip { label: "Oynatılamaz"; tone: "bad"; }
-                if entry.kind != "": Chip { label: entry.kind; tone: entry.tone; }
-                for chip in entry.chips: Chip { label: chip; }
+                chips := HorizontalLayout {
+                    x: 0;
+                    width: self.preferred-width;
+                    spacing: Metrics.text-chip * 0.5;
+                    alignment: start;
+
+                    if entry.cached: Chip { label: "Hazır"; tone: "good"; }
+                    if !entry.playable: Chip { label: "Oynatılamaz"; tone: "bad"; }
+                    if entry.kind != "": Chip { label: entry.kind; tone: entry.tone; }
+                    for chip in entry.chips: Chip { label: chip; }
+                }
             }
         }
     }

@@ -61,6 +61,12 @@ say "media surface"
 tar -C "$ui" -cf - . | sh_ "rm -rf $TARGET_WEBUI_DIR && mkdir -p $TARGET_WEBUI_DIR && tar -C $TARGET_WEBUI_DIR -xf -"
 
 say "units"
+# The streaming server's start-up guard goes with its unit: the unit names it
+# as an ExecStartPre, so shipping one without the other leaves the server
+# pinned to whatever address it was installed on.
+cp_ "$here/packaging/stremio-unpin-address" "root@$host:/var/tmp/"
+sh_ "install -m 0755 /var/tmp/stremio-unpin-address $TARGET_PREFIX/bin/stremio-unpin-address && \
+     rm -f /var/tmp/stremio-unpin-address"
 cp_ "$here/packaging/systemd/mediaboxd.service" "$here/packaging/systemd/stremio-server.service" \
     "root@$host:/etc/systemd/system/"
 [ -n "${MEDIABOX_SKIP_CONFIG:-}" ] || cp_ "$here/config/mediaboxd.example.toml" "root@$host:/etc/mediaboxd.toml.new"

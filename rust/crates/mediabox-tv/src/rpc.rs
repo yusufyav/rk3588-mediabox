@@ -183,6 +183,17 @@ impl Client {
         self.call(json!({"command": "status"})).await
     }
 
+    /// What this box can run, and which of them owns the television.
+    pub async fn applications(&self) -> Result<crate::model::DisplayStatus> {
+        self.typed(json!({"command": "applications"})).await
+    }
+
+    /// Put one application on the television. This interface is itself one of
+    /// them, so choosing another ends this process: the display changes hands.
+    pub async fn application_launch(&self, id: &str) -> Result<Value> {
+        self.call(json!({"command": "application_launch", "id": id})).await
+    }
+
     pub async fn diagnostics(&self) -> Result<Value> {
         self.call(json!({"command": "diagnostics"})).await
     }

@@ -1,182 +1,32 @@
 #!/bin/sh
-#
-# Does the television actually show the product?
-#
-# Four things went wrong on this appliance before this check existed, and each
-# one left the unit "active (running)" while the television showed something
-# useless: a compositor with no input devices at all, an interface launched
-# with its arguments parsed away, an interface laid out for the wrong panel, and
-# one that never drew. systemd cannot see any of that. So the kiosk is restarted
-# and then interrogated: is the display controller in the mode the compositor
-# drove, is the interface scaled for that mode, how many input devices does the
-# compositor have, is the interface process there, and does the compositor hold
-# a window that carries the product's title across the whole panel.
-#
-# Nothing here names a resolution. This appliance is plugged into whatever
-# panel the house has, and a check that expects one is a check that fails a
-# working television.
-#
-# Exits non-zero on the first failure, so a deploy stops rather than reporting
-# success over a blank screen.
 set -eu
-
 UNIT=mediabox-tv-ui.service
-RUNTIME=/run/mediabox-ui
 BIN="${MEDIABOX_TV_BIN:-/opt/rk3588-mediabox/bin/mediabox-tv}"
-# No mode is expected by name. The panel decides it and the check is that the
-# display controller ended up in the mode the compositor drove — see below.
-MODE="${MEDIABOX_UI_MODE:-}"
-SETTLE="${MEDIABOX_UI_SETTLE:-25}"
-
+SETTLE="${MEDIABOX_UI_SETTLE:-12}"
 fails=0
-ok()   { printf '  PASS  %-28s %s\n' "$1" "$2"; }
-bad()  { printf '  FAIL  %-28s %s\n' "$1" "$2"; fails=$((fails + 1)); }
-
-printf '== kiosk smoke\n'
+ok()  { printf '  PASS  %-22s %s\n' "$1" "$2"; }
+bad() { printf '  FAIL  %-22s %s\n' "$1" "$2"; fails=$((fails + 1)); }
+echo '== native shell smoke'
+# Anchored to the restart rather than to "now minus the settle time": the
+# platform and GPU lines are printed in the first second the unit is up, and a
+# window measured backwards from the end of the sleep starts after them. It
+# failed a working shell that way -- "split path absent" on a television that
+# was showing the home screen.
+since=$(date '+%Y-%m-%d %H:%M:%S')
 systemctl restart "$UNIT"
 sleep "$SETTLE"
-
 state=$(systemctl show "$UNIT" -p SubState --value)
 [ "$state" = running ] && ok unit "$state" || bad unit "$state"
-
-# 1. The display controller is in the mode the compositor asked for.
-#
-# This used to be compared against the literal 1920x1080, which made the check
-# a statement about one panel: on the 2560x1440 monitor this box is plugged
-# into it failed a working kiosk, and it would have failed every television
-# that is not exactly 1080p. What matters is not which mode was taken but that
-# the panel, the compositor and the display controller agree on it — a
-# disagreement is the failed mode set that leaves the screen black or scaled by
-# the television.
+pid=$(pgrep -f -- "$BIN" | head -1 || true)
+[ -n "$pid" ] && ok interface "pid $pid" || bad interface 'not running'
+log=$(journalctl -u "$UNIT" --since "$since" --no-pager 2>/dev/null || true)
+printf '%s\n' "$log" | grep -q 'split-kms.*gbm=armsoc.*display=/dev/dri/card0' && ok platform 'renderD128 -> card0' || bad platform 'split path absent'
+printf '%s\n' "$log" | grep -q 'EGL_VENDOR=ARM.*GL_RENDERER=Mali-G610' && ok gpu 'ARM / Mali-G610' || bad gpu 'vendor GPU absent'
+printf '%s\n' "$log" | grep -q 'present dma-buf=active' && ok scanout 'PRIME FB active' || bad scanout 'no PRIME FB'
+printf '%s\n' "$log" | grep -q 'first_data_ms=' && ok home 'real data loaded' || bad home 'data absent'
 mode=$(sed -n 's/.*crtc-pos=\([0-9]*x[0-9]*\).*/\1/p' /sys/kernel/debug/dri/0/state 2>/dev/null | head -1)
-if [ -n "$MODE" ]; then
-  want="$MODE"                      # An explicit expectation, when one is given.
-elif [ -n "${sock_early:=$(ls "$RUNTIME"/sway-ipc.*.sock 2>/dev/null | head -1 || true)}" ]; then
-  want=$(SWAYSOCK="$sock_early" swaymsg -t get_outputs 2>/dev/null | python3 -c '
-import json, sys
-for o in json.load(sys.stdin):
-    if o.get("active"):
-        m = o.get("current_mode") or {}
-        w, h = m.get("width"), m.get("height")
-        if w and h:
-            print(str(w) + "x" + str(h))
-        break
-' 2>/dev/null || true)
-else
-  want=""
-fi
-if [ -z "$mode" ]; then
-  bad "output mode" "display controller reports no mode"
-elif [ -z "$want" ]; then
-  bad "output mode" "$mode (compositor reports no output)"
-elif [ "$mode" = "$want" ]; then
-  ok "output mode" "$mode (panel's own)"
-else
-  bad "output mode" "$mode (compositor drove $want)"
-fi
-
-# 1b. The interface is laid out for the mode that was taken, not for a mode
-#     somebody wrote down. A 4K set wants 2, a 1440p monitor wants 2, a 1080p
-#     television wants 1.
-#
-#     The launcher puts the measured factor in the interface's environment, and
-#     that is where it is read back from — the process's own environment is the
-#     only place the answer it is actually using can be seen from outside it.
-#
-#     This is not the same mechanism the browser had. Chromium took a flag that
-#     scaled CSS pixels while its buffer stayed the panel's size; here the scale
-#     divides the logical space and the buffer must still be the panel's. That
-#     the buffer really is is checked at 4 below, by the window's rectangle, and
-#     on the display controller by docs/display-pipeline.md's own command.
-want_scale=$(SWAYSOCK="${sock_early:-}" /opt/rk3588-mediabox/bin/mediabox-display-scale 1920 1080 2>/dev/null || echo "")
-tv_pid=$(pgrep -f -- "$BIN" 2>/dev/null | head -1 || true)
-if [ -n "$tv_pid" ]; then
-  env_scale=$(tr '\0' '\n' < "/proc/$tv_pid/environ" 2>/dev/null |
-    sed -n 's/^SLINT_SCALE_FACTOR=//p' | head -1)
-else
-  env_scale=""
-fi
-if [ -n "$want_scale" ] && [ "$env_scale" = "$want_scale" ]; then
-  ok "ui scale" "$env_scale for $mode"
-else
-  bad "ui scale" "interface at ${env_scale:-none}, panel needs ${want_scale:-unknown}"
-fi
-
-# 2. The compositor has input devices. Naming only the DRM backend produces a
-#    picture nobody can drive.
-sock=$(ls "$RUNTIME"/sway-ipc.*.sock 2>/dev/null | head -1 || true)
-if [ -n "$sock" ]; then
-  keyboards=$(SWAYSOCK="$sock" swaymsg -t get_inputs 2>/dev/null |
-    python3 -c 'import json,sys; print(sum(1 for d in json.load(sys.stdin) if d.get("type")=="keyboard"))' 2>/dev/null || echo 0)
-  [ "${keyboards:-0}" -gt 0 ] && ok "input devices" "$keyboards keyboard(s)" \
-    || bad "input devices" "compositor sees no keyboard"
-else
-  bad "input devices" "no compositor IPC socket in $RUNTIME"
-fi
-
-# 3. The interface itself is running. The compositor coming up without it is
-#    what a mangled launcher looks like from the outside: a lit panel and
-#    nothing on it.
-if [ -n "${tv_pid:-}" ]; then
-  ok "interface" "pid $tv_pid"
-else
-  bad "interface" "no process matching $BIN"
-fi
-
-# 4. The page loaded, and it fills the panel.
-#
-# This used to count requests the browser made to the media core. It counted
-# the wrong thing: the interface talks to the control plane over its socket and
-# never asks the media worker for anything directly, so the check failed a
-# working kiosk — measured, on a television that was showing the product.
-#
-# The compositor is asked instead, because it knows two things nothing else
-# does: the window's title, which the interface sets and which sway's own rule
-# matches on, and the window's rectangle, which is how the "it is up but it
-# covers a quarter of the screen" failure looks — and, with the mode below,
-# is also what says the interface is not being scaled up from a smaller buffer.
-TITLE="${MEDIABOX_UI_TITLE:-MediaBox}"
-# Found by process id rather than by title, so the title is something this
-# check tests rather than something it assumes: a window that is ours but is
-# called the wrong thing is a real failure — sway's fullscreen rule matches on
-# the title, and a renamed window wears a frame.
-if [ -n "${sock_early:-}" ] && [ -n "${tv_pid:-}" ]; then
-  win=$(SWAYSOCK="$sock_early" swaymsg -t get_tree 2>/dev/null | python3 -c '
-import json, sys
-pid = int(sys.argv[1])
-def walk(n):
-    if n.get("pid") == pid and n.get("rect"):
-        r = n["rect"]
-        return n.get("name") or "", r.get("width"), r.get("height")
-    for key in ("nodes", "floating_nodes"):
-        for child in n.get(key, []):
-            found = walk(child)
-            if found:
-                return found
-    return None
-try:
-    found = walk(json.load(sys.stdin))
-except Exception:
-    found = None
-if found:
-    print("%s\t%s\t%s" % found)
-' "$tv_pid" 2>/dev/null || true)
-else
-  win=""
-fi
-win_title=$(printf '%s' "$win" | cut -f1)
-win_w=$(printf '%s' "$win" | cut -f2)
-win_h=$(printf '%s' "$win" | cut -f3)
-
-if [ -z "$win" ]; then
-  bad "ui loaded" "compositor has no window for pid ${tv_pid:-none}"
-elif [ "$win_title" != "$TITLE" ]; then
-  bad "ui loaded" "window titled '${win_title}' (expected '$TITLE')"
-elif [ "${win_w}x${win_h}" != "$mode" ]; then
-  bad "ui loaded" "window is ${win_w}x${win_h} on a $mode panel"
-else
-  ok "ui loaded" "'$win_title' at ${win_w}x${win_h}"
-fi
-
-printf '== %s\n' "$([ "$fails" -eq 0 ] && echo 'kiosk smoke PASS' || echo "kiosk smoke FAIL ($fails)")"
+native=$(printf '%s\n' "$log" | sed -n 's/.*native=\([0-9]*x[0-9]*\).*/\1/p' | tail -1)
+[ -n "$mode" ] && [ "$mode" = "$native" ] && ok 'native mode' "$mode" || bad 'native mode' "KMS=${mode:-none} app=${native:-none}"
+if pgrep -x sway >/dev/null || pgrep -f 'chromium.*mediabox-ui/chromium' >/dev/null; then bad compositor 'still present'; else ok compositor 'none'; fi
+echo "== native shell smoke $([ "$fails" -eq 0 ] && echo PASS || echo FAIL)"
 [ "$fails" -eq 0 ]

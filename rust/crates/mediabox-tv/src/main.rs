@@ -10,9 +10,11 @@ mod images;
 mod input;
 mod metrics;
 mod model;
+mod platform;
 mod rpc;
 mod session;
 mod state;
+mod vitals;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -108,7 +110,11 @@ impl App {
             InputAction::Left => self.home.step(-1, 0),
             InputAction::Right => self.home.step(1, 0),
             InputAction::Ok => {
-                self.open_detail();
+                if self.home.row == 1 {
+                    self.launch();
+                } else {
+                    self.open_detail();
+                }
                 return;
             }
             // Back on the home screen goes up to the bar rather than nowhere.
@@ -184,6 +190,62 @@ impl App {
             detail::ACTION_HERE => self.play(false),
             detail::ACTION_TRAILER => self.trailer(),
             _ => self.close_detail(),
+        }
+    }
+
+    /// OK on the launcher.
+    ///
+    /// Three things a tile can be, and each is answered here rather than in the
+    /// interface: a screen this one already carries, another application, or a
+    /// screen that is not written yet.
+    fn launch(&mut self) {
+        let Some(tile) = self.home.focused_app() else { return };
+        let (action, name, ready) = (tile.action.clone(), tile.name.clone(), tile.ready);
+
+        if !ready {
+            self.say(format!("{name} henüz yok"));
+            return;
+        }
+
+        match action {
+            // The catalogue is on this screen already, so this goes to it.
+            state::AppAction::Shelves => {
+                if let Some(row) = self.home.first_shelf_row() {
+                    self.home.row = row;
+                    self.paint();
+                }
+            }
+            // The control plane stops this unit as part of starting the other
+            // one, so nothing after this call is guaranteed to run.
+            state::AppAction::Launch(id) => {
+                self.say(format!("{name} açılıyor…"));
+                spawn_launch(id, name);
+            }
+            state::AppAction::Absent => self.say(format!("{name} henüz yok")),
+        }
+    }
+
+    /// One line along the bottom of the home screen. The interface has nowhere
+    /// else to say anything, and taking the screen away for a message about a
+    /// tile would be worse than the message.
+    fn say(&mut self, message: String) {
+        if let Some(window) = self.window.upgrade() {
+            window.set_notice(message.into());
+        }
+    }
+
+    /// What the box can run, and how it is doing, on the control plane's word.
+    fn machine_read(&mut self, display: Option<model::DisplayStatus>, diagnostics: Option<serde_json::Value>) {
+        if let Some(display) = display {
+            self.home.set_apps(state::app_tiles_from(&display));
+            if let Some(window) = self.window.upgrade() {
+                window.set_apps(slint::ModelRc::from(self.home.app_tiles.clone()));
+                window.set_focus_col(self.home.column() as i32);
+            }
+        }
+
+        if let Some(window) = self.window.upgrade() {
+            window.set_vitals(vitals::read(diagnostics.as_ref()));
         }
     }
 
@@ -503,12 +565,24 @@ enum DetailAnswer {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before anything that can spawn a thread — the image workers, the state
+    // store, tokio, and the Mali driver's own four. A thread inherits the mask
+    // of whoever spawned it, and a SIGTERM delivered to one that has it
+    // unblocked kills the process where it stands, without the display ever
+    // being released. See session::block_exit_signals.
+    session::block_exit_signals();
+
     let started = Instant::now();
     let trace_input = !std::env::args().any(|a| a == "--quiet-input");
 
     // Errors from winit, glutin and Slint itself go through `log`. Off unless
     // RUST_LOG says otherwise, so the journal is not filled on an ordinary run.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
+    // Install the RK3588 split render/display platform before Slint creates a
+    // component. It renders on the Mali GBM render node and presents the
+    // exported dma-buf on the Rockchip KMS card.
+    platform::install()?;
 
     // The window, and nothing else. When the television showed nothing there
     // was no way to tell a broken interface from a broken window system, and
@@ -602,6 +676,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // injected action — arrives on its event stream.
     spawn_bus_listener();
     spawn_loader();
+    // The launcher and the machine's vitals. Started beside the catalogue
+    // rather than after it: the applications this box can run do not depend on
+    // a third-party addon answering, and the home screen should not look empty
+    // while one is being waited for.
+    spawn_machine_poll();
 
     let reporter = slint::Timer::default();
     reporter.start(slint::TimerMode::Repeated, Duration::from_secs(5), || {
@@ -750,6 +829,43 @@ fn spawn_play(on_kodi: bool, url: Option<String>, raw: serde_json::Value) {
                     });
                 });
             }
+        }
+    });
+}
+
+/// Hands the television to another application. The control plane stops this
+/// unit as part of doing it, so a failure here is as likely to be the handover
+/// as a refusal — which is why it is said on the screen rather than treated as
+/// an error.
+fn spawn_launch(id: String, name: String) {
+    detached("mediabox-tv-launch", async move {
+        let client = rpc::Client::new(socket_path());
+        if let Err(e) = client.application_launch(&id).await {
+            eprintln!("mediabox-tv.launch {id} failed: {e}");
+            let message = format!("{name} açılamadı — {e}");
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.say(message));
+            });
+        } else {
+            eprintln!("mediabox-tv.launch {id} started");
+        }
+    });
+}
+
+/// The machine's own readings, on a slow timer.
+///
+/// One thread for both answers: they are drawn side by side and asking for them
+/// separately would put two round trips a second apart on the same panel.
+fn spawn_machine_poll() {
+    detached("mediabox-tv-vitals", async move {
+        let client = rpc::Client::new(socket_path());
+        loop {
+            let display = client.applications().await.ok();
+            let diagnostics = client.diagnostics().await.ok();
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.machine_read(display, diagnostics));
+            });
+            tokio::time::sleep(vitals::EVERY).await;
         }
     });
 }

@@ -1,5 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
-import { Rail, RailModel, PosterItem } from "components.slint";
+import { Rail, RailModel, PosterItem, AppTile, AppIcon, Vitals, VitalsModel } from "components.slint";
 
 // The bar every screen starts below. It does not scroll with the shelves, so
 // where the viewer is in the product is always on the panel.
@@ -58,7 +58,14 @@ export component Home inherits Rectangle {
     in property <[string]> nav;
     in property <[RailModel]> rails;
 
-    // Row 0 is the bar; 1.. are the shelves.
+    // What this box can be used for, and how it is doing. The two things the
+    // web interface's home screen has that this one did not: without them the
+    // television's front page was a catalogue, and the box's own applications
+    // were reachable from a phone but not from the sofa.
+    in property <[AppTile]> apps;
+    in property <VitalsModel> vitals;
+
+    // Row 0 is the bar, row 1 is the launcher; 2.. are the shelves.
     in property <int> focus-row;
     in property <int> focus-col;
 
@@ -66,18 +73,31 @@ export component Home inherits Rectangle {
 
     property <length> rail-h: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
     property <length> viewport-h: root.height - Metrics.topbar;
-    // The hero takes what is left once the first shelf has its room. That is
-    // the whole shape of the screen: a cinema still, with something to choose
-    // already in reach under it and no scrolling needed to see either.
-    property <length> hero-h: max(rail-h * 0.7, viewport-h - rail-h);
-    property <length> content-h: hero-h + rail-h * rails.length;
+
+    // One launcher tile, and the row it sits on. The note under a tile that is
+    // not installed is part of the tile, so the row is as tall as the tallest
+    // thing on it whether anything is missing or not.
+    property <length> tile-h: Metrics.tile-w + Metrics.root-font * 0.5
+        + Metrics.root-font * 0.9 * 1.3 + Metrics.root-font * 0.76 * 1.4;
+    property <length> launcher-h: tile-h + Metrics.main-gap;
+
+    // The right-hand column: everything that is not the machine's own vitals.
+    property <length> main-x: Metrics.gutter + Metrics.vitals-w + Metrics.home-gap;
+    property <length> main-w: max(Metrics.card-w, root.width - main-x - Metrics.gutter);
+
+    // The hero takes what is left once the launcher and the first shelf have
+    // their room. That is the whole shape of the screen: a cinema still, with
+    // the box's applications and something to choose already in reach under it.
+    property <length> hero-h: max(rail-h * 0.55,
+        viewport-h - rail-h - launcher-h - Metrics.home-pad-top);
+    property <length> content-h: hero-h + launcher-h + rail-h * rails.length;
 
     // The hero is kept until the remote goes past the first shelf. Scrolling it
     // away the moment focus lands would mean the backdrop is never seen: the
-    // first shelf is where every session starts.
-    property <length> scroll: focus-row <= 1
+    // launcher is where every session starts.
+    property <length> scroll: focus-row <= 2
         ? 0px
-        : clamp(hero-h + (focus-row - 1) * rail-h - Metrics.top-inset,
+        : clamp(hero-h + launcher-h + (focus-row - 2) * rail-h - Metrics.top-inset,
                 0px,
                 max(0px, content-h - viewport-h));
 
@@ -124,6 +144,17 @@ export component Home inherits Rectangle {
         }
     }
 
+    // The machine's own vitals, down the left and out of the scroll: they are
+    // read rather than operated, and a gauge that slides away when the remote
+    // moves is a gauge nobody can use.
+    Vitals {
+        x: Metrics.gutter;
+        y: Metrics.topbar + Metrics.home-pad-top;
+        width: Metrics.vitals-w;
+        height: root.height - self.y - Metrics.gutter;
+        vitals: root.vitals;
+    }
+
     // Everything that scrolls.
     column := Rectangle {
         x: 0;
@@ -136,9 +167,9 @@ export component Home inherits Rectangle {
 
         // The hero.
         VerticalLayout {
-            x: Metrics.gutter;
-            y: hero-h * 0.30;
-            width: min(root.width * 0.52, 980px);
+            x: main-x;
+            y: hero-h * 0.22;
+            width: min(main-w * 0.86, 980px);
             spacing: Metrics.root-font * 0.55;
             alignment: start;
 
@@ -170,13 +201,30 @@ export component Home inherits Rectangle {
             }
         }
 
+        // The launcher. One row rather than a wrapping grid: the focus model is
+        // a row and a column, and a grid that reflowed would move a tile out
+        // from under the remote when an application finished installing.
+        HorizontalLayout {
+            x: main-x;
+            y: hero-h;
+            width: main-w;
+            height: tile-h;
+            spacing: Metrics.tile-gap-x;
+            alignment: start;
+
+            for tile[i] in apps: AppIcon {
+                tile: tile;
+                focused: focus-row == 1 && i == focus-col;
+            }
+        }
+
         for rail[r] in rails: Rail {
-            x: 0;
-            y: hero-h + r * rail-h;
-            width: root.width;
+            x: main-x - Metrics.gutter;
+            y: hero-h + launcher-h + r * rail-h;
+            width: main-w + Metrics.gutter;
             rail: rail;
             focus-col: focus-col;
-            active: focus-row == r + 1;
+            active: focus-row == r + 2;
         }
     }
 

@@ -1,22 +1,11 @@
 [Unit]
-Description=MediaBox product UI on the television (sway + native interface)
-Documentation=https://github.com/yusufyav/rk3588-mediabox
+Description=MediaBox native Slint appliance shell (Mali GBM + Rockchip KMS)
 After=mediaboxd-rs.service
 Wants=mediaboxd-rs.service
-# Kodi and this unit both want DRM master and only one may have it. The
-# ordering below is advisory; the real interlock is mediaboxd-rs, which stops
-# one before starting the other. Nothing here is enabled at boot for the same
-# reason: whoever owns the display decides, not systemd's default target, and
-# a console session at tty1 is never taken over on its own.
-Conflicts=kodi.service
+Conflicts=kodi.service mediabox-browser.service
 
 [Service]
 Type=simple
-# The compositor acquires DRM master through libseat, which on this appliance means
-# running as root — the same arrangement Kodi already has, and for the same
-# reason. What it starts is the product's own interface: no address bar, no
-# extensions, no scripting engine, and one socket to the control plane. The
-# confinement below is what stands in for a browser sandbox.
 User=root
 RuntimeDirectory=mediabox-ui
 RuntimeDirectoryMode=0700
@@ -24,102 +13,18 @@ StateDirectory=mediabox-ui
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/mediabox-ui
 Environment=HOME=/var/lib/mediabox-ui
-# A real login session, which is what libseat needs to be handed the DRM
-# device: without one it falls back to a seatd session that never becomes
-# active, and the compositor cannot create a GBM device at all.
-PAMName=login
-# Its own virtual terminal, so bringing the UI up does not take the console
-# somebody may be using at tty1 until the display genuinely changes hands.
-TTYPath=/dev/tty7
-TTYReset=yes
-TTYVHangup=yes
-StandardInput=tty-force
-# The private Mali runtime is the one Kodi uses; wlroots needs it for a
-# GPU-accelerated compositor.
+Environment=MEDIABOX_RENDER_NODE=/dev/dri/renderD128
+Environment=MEDIABOX_KMS_NODE=/dev/dri/card0
 Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
-# drm *and* libinput. Naming only the DRM backend gives a compositor that
-# lights up the television and has no input devices at all: no keyboard, no
-# remote, nothing. The list is explicit so the backend set cannot drift.
-Environment=WLR_BACKENDS=drm,libinput
-# Without a GPU the compositor should still come up rather than leave the
-# television black.
-Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
-# Direct scanout hands a fullscreen client's own buffer to the display
-# controller, and the browser is exactly that: one opaque surface covering the
-# panel.
-#
-# It was turned off here first, on the reading that scanning out a buffer the
-# browser is still drawing into is what tears partway down the screen. That
-# reading was wrong for this board: the Mali blob carries
-# EGL_ANDROID_native_fence_sync and EGL_KHR_wait_sync, so the flip waits for
-# the browser's own render fence and a half-drawn buffer is never scanned out.
-#
-# What the detour cost was worse than what it bought. Compositing through
-# wlroots put this board's broken damage bookkeeping in the path — with this
-# Mali GBM the buffer age it is told is not the buffer it gets — and the screen
-# was then assembled out of a region redrawn now and a buffer that had never
-# been written: a title's page arrived with its artwork and no text beside it,
-# the top bar missing its left half, or nothing at all but the one line that
-# happened to fall inside the damaged rectangle. `WLR_SCENE_DEBUG_DAMAGE`
-# below was an attempt to force the whole output to be redrawn anyway; it made
-# it rarer and did not stop it.
-#
-# With scanout direct there is no compositing step to keep books about: the
-# frame the browser finished is the frame the panel is shown, whole. It is
-# confirmed in the display controller's own state — the plane's format is the
-# browser's ABGR8888 (AB24) rather than the compositor's XR24 — and it removes
-# a full 4K blit per frame.
-Environment=WLR_SCENE_DISABLE_DIRECT_SCANOUT=0
-# Damage tracking off: the compositor redraws the whole output every frame
-# rather than only the region the client reports as changed.
-#
-# Chromium under-reports its damage to the Wayland surface on this board, and
-# what is left behind is the previous frame: after switching screens the
-# television showed the settings panel standing on the home screen's backdrop
-# and poster shelf, both of which had been gone from the page for seconds. It
-# was verified in both directions — with this set the screen is clean, with it
-# unset the remnants come back on an otherwise identical build — and disabling
-# Chromium's own partial swap changes nothing, so it is the compositor's
-# bookkeeping rather than the browser's.
-#
-# It is close to free here, which is why it is acceptable: navigation CPU
-# measured 83.5% of one core out of eight without it and 79.0% with it, idle
-# under 1.5%, and frame time is unchanged at a solid 16.7 ms with no frame over
-# 20 ms in either configuration.
-Environment=WLR_SCENE_DEBUG_DAMAGE=rerender
-# XDG_RUNTIME_DIR is set at exec time rather than with Environment=, because
-# the PAM session above sets its own and would win. Pointing it at this unit's
-# RuntimeDirectory is what lets ProtectHome stay on: ProtectHome also hides
-# /run/user, where the Wayland socket would otherwise have to live.
 ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/mediabox-ui /usr/bin/sway -c /etc/mediabox/sway-kiosk.conf
-# The interface is launched from the sway config, which exits with it. Stopped
-# and started by mediaboxd-rs when the display changes hands, so an ordinary
-# stop is never a failure to recover from.
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-tv
 Restart=on-failure
 RestartSec=3s
 TimeoutStopSec=15s
 KillMode=mixed
-# Kill what the cgroup cannot reach.
-#
-# PAMName=login above puts everything this unit starts into a PAM *session*
-# scope rather than into the service's own cgroup, so systemd's own kill never
-# reaches the browser: stopping the unit killed the compositor and left
-# Chromium alive with no output to draw on, spinning at half a core forever.
-# It was measured on the appliance — an orphan from an earlier session at 57%
-# while the current one was idle — and every restart added another.
-#
-# A bare pkill was the first attempt and it is not enough: it signals and
-# returns, so the unit goes inactive while the browser is still unwinding and
-# whatever takes the display next — Kodi — starts on top of a process that has
-# not yet let go of the GPU. The reaper waits for them to be gone.
 ExecStopPost=-/opt/rk3588-mediabox/bin/mediabox-ui-reap
 StandardOutput=journal
 StandardError=journal
-
-# Confinement. Everything here was checked against a running kiosk: the
-# browser needs a JIT, so W^X is deliberately not enforced, and it needs
-# netlink to notice the network coming and going.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
@@ -133,12 +38,13 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 DevicePolicy=closed
-DeviceAllow=char-drm rw
+DeviceAllow=/dev/dri/card0 rw
+DeviceAllow=/dev/dri/renderD128 rw
 DeviceAllow=/dev/mali0 rw
+DeviceAllow=/dev/dma_heap/system rw
+DeviceAllow=/dev/dma_heap/system-uncached rw
+DeviceAllow=/dev/dma_heap/reserved rw
 DeviceAllow=char-input rw
-DeviceAllow=char-alsa rw
-DeviceAllow=char-tty rw
-DeviceAllow=char-vcs rw
 ReadWritePaths=/var/lib/mediabox-ui /run/mediabox-ui
 
 [Install]

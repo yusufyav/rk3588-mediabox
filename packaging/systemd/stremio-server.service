@@ -25,6 +25,12 @@ Environment=NO_HTTPS_SERVER=1
 # packages, so the exact version is whatever the appliance image carries.
 Environment=FFMPEG_BIN=/usr/bin/ffmpeg
 Environment=FFPROBE_BIN=/usr/bin/ffprobe
+# The server pins itself to whichever address it first saw and never looks
+# again, so an appliance that moves network keeps serving an address it does
+# not have. Cleared before every start rather than once at install: the address
+# a box has is not a property of the install. See the script for the measured
+# case.
+ExecStartPre=-/opt/rk3588-mediabox/bin/stremio-unpin-address
 ExecStart=/opt/rk3588-mediabox/node/bin/node /opt/rk3588-mediabox/stremio-server/server.js
 Restart=on-failure
 RestartSec=5s

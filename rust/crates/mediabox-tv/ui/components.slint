@@ -224,3 +224,370 @@ export component Rail inherits Rectangle {
         }
     }
 }
+
+// ---------------------------------------------------------------- the launcher
+
+// One thing this box can be used for.
+//
+// The screen tiles and the control plane's applications are the same shape on
+// purpose: the web interface's launcher draws them from one list, and a tile
+// that looked different depending on where it came from would be telling the
+// viewer about our plumbing.
+export struct AppTile {
+    // What Rust dispatches on when Ok is pressed. Never shown.
+    id: string,
+    name: string,
+    // An SVG path, stroked rather than filled, in a 24x24 viewbox. Drawn rather
+    // than fetched: an appliance has no icon theme to ask and no network to
+    // depend on.
+    mark: string,
+    // The tile's colour, as a hue. The stylesheet writes this as `--tint`.
+    hue: float,
+    // False for an application the box does not have installed. It is still
+    // drawn — the viewer should be able to see what this box could do — but it
+    // cannot be opened, and says so.
+    ready: bool,
+    // "kurulu değil", or empty.
+    note: string,
+}
+
+// An icon with its name under it, which is what a television's home screen has
+// looked like for fifteen years.
+export component AppIcon inherits Rectangle {
+    in property <AppTile> tile;
+    in property <bool> focused;
+
+    width: Metrics.tile-w;
+    height: self.width + Metrics.root-font * 0.5 + Metrics.root-font * 0.9 * 1.3
+        + (tile.note == "" ? 0px : Metrics.root-font * 0.76 * 1.4);
+    background: transparent;
+    opacity: tile.ready ? 1.0 : 0.45;
+
+    VerticalLayout {
+        spacing: Metrics.root-font * 0.5;
+        alignment: start;
+
+        // The square. Scaled rather than moved when it takes focus, so the grid
+        // around it does not reflow — the stylesheet's `transform: scale(1.09)`.
+        Rectangle {
+            height: Metrics.tile-w;
+
+            square := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: Metrics.tile-w * (focused ? 1.09 : 1.0);
+                height: self.width;
+                border-radius: self.width * 0.24;
+                background: @radial-gradient(circle,
+                    Colors.hsv(tile.hue, 0.63, 0.50) 0%,
+                    Colors.hsv(tile.hue, 0.59, 0.28) 54%,
+                    #10131a 100%);
+                border-width: focused ? 3px : 1px;
+                border-color: focused ? Theme.focus-ring : #ffffff1a;
+
+                animate width { duration: Theme.focus-in; easing: Theme.ease; }
+
+                Path {
+                    x: parent.width * 0.27;
+                    y: parent.height * 0.27;
+                    width: parent.width * 0.46;
+                    height: parent.height * 0.46;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: tile.mark;
+                    // Stroked, not filled: these are line marks, and filling
+                    // them turns a television icon into an inkblot.
+                    fill: transparent;
+                    stroke: #ffffff;
+                    stroke-width: 1.5px;
+                }
+            }
+        }
+
+        Text {
+            text: tile.name;
+            color: focused ? Theme.text : Theme.muted;
+            font-size: Metrics.root-font * 0.9;
+            font-weight: 680;
+            horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+            min-width: 0px;
+        }
+
+        if tile.note != "": Text {
+            text: tile.note;
+            color: Theme.dim;
+            font-size: Metrics.root-font * 0.76;
+            font-weight: 600;
+            horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+            min-width: 0px;
+        }
+    }
+}
+
+// ------------------------------------------------------------------ the machine
+
+// The board's own vital signs, as they are read rather than as they are drawn.
+//
+// Every number arrives as the string it will be shown as, and both rings arrive
+// as the arc that draws them: a home screen that re-renders four times a second
+// is a home screen that is never idle, and formatting a byte count on the
+// television is work the control plane already did.
+export struct VitalsModel {
+    time: string,
+    date: string,
+    // SVG arcs in a 24x24 viewbox, computed in Rust. Empty when the reading is
+    // not in yet, which is what draws an empty ring rather than a full one.
+    cpu-arc: string,
+    cpu-text: string,
+    memory-arc: string,
+    memory-text: string,
+    // "2.1 GB / 7.8 GB  ·  52 °C"
+    performance-note: string,
+    storage-text: string,
+    storage-fraction: float,
+    network: string,
+    machine: string,
+}
+
+// The panel every widget is drawn on. Flat translucent fill with a hairline:
+// the wallpaper stays visible through it, and a blur over a full-screen layer
+// was measured at a quarter of a core on this board.
+export component Widget inherits Rectangle {
+    border-radius: 18px;
+    background: #ffffff0e;
+    border-width: 1px;
+    border-color: #ffffff14;
+}
+
+// One ring. The reading is an arc, so a new value changes one path.
+component Dial inherits Rectangle {
+    in property <string> arc;
+    in property <string> value;
+    in property <string> label;
+
+    width: Metrics.dial-d;
+    height: self.width + Metrics.root-font * 0.24 + Metrics.root-font * 0.7 * 1.3;
+    background: transparent;
+
+    VerticalLayout {
+        spacing: Metrics.root-font * 0.24;
+        alignment: start;
+
+        Rectangle {
+            height: Metrics.dial-d;
+
+            // The track, always whole.
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: "M 12 2 A 10 10 0 1 1 11.99 2";
+                fill: transparent;
+                stroke: #ffffff1a;
+                stroke-width: Metrics.dial-d * 0.085;
+            }
+
+            // The reading.
+            if arc != "": Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: arc;
+                fill: transparent;
+                stroke: Theme.ok;
+                stroke-width: Metrics.dial-d * 0.085;
+            }
+
+            Text {
+                x: 0;
+                y: 0;
+                width: 100%;
+                height: 100%;
+                text: value;
+                color: Theme.text;
+                font-size: Metrics.root-font * 0.82;
+                font-weight: 740;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: label;
+            color: Theme.muted;
+            font-size: Metrics.root-font * 0.7;
+            font-weight: 640;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// The column down the left of the home screen.
+//
+// Nothing here is focusable: it is read, not operated, and a remote should walk
+// applications rather than gauges. This is a single-board computer and the
+// interface is the only thing anybody will ever see of it, so how the machine
+// is doing belongs on its front page rather than three screens deep.
+export component Vitals inherits Rectangle {
+    in property <VitalsModel> vitals;
+
+    background: transparent;
+
+    VerticalLayout {
+        spacing: Metrics.widget-gap;
+        alignment: start;
+
+        Widget {
+            VerticalLayout {
+                padding-top: Metrics.widget-pad-y;
+                padding-bottom: Metrics.widget-pad-y;
+                padding-left: Metrics.widget-pad-x;
+                padding-right: Metrics.widget-pad-x;
+                spacing: Metrics.root-font * 0.05;
+
+                Text {
+                    text: vitals.time;
+                    color: Theme.text;
+                    font-size: Metrics.clock-size;
+                    font-weight: 780;
+                    letter-spacing: -0.03 * Metrics.clock-size;
+                }
+                Text {
+                    text: vitals.date;
+                    color: Theme.muted;
+                    font-size: Metrics.root-font * 0.82;
+                    font-weight: 640;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    min-width: 0px;
+                }
+            }
+        }
+
+        Widget {
+            VerticalLayout {
+                padding-top: Metrics.widget-pad-y;
+                padding-bottom: Metrics.widget-pad-y;
+                padding-left: Metrics.widget-pad-x;
+                padding-right: Metrics.widget-pad-x;
+                spacing: Metrics.root-font * 0.3;
+
+                Text {
+                    text: "PERFORMANS";
+                    color: Theme.dim;
+                    font-size: Metrics.root-font * 0.78;
+                    font-weight: 700;
+                    letter-spacing: 0.06 * Metrics.root-font * 0.78;
+                }
+
+                HorizontalLayout {
+                    spacing: Metrics.dial-gap;
+                    alignment: start;
+
+                    Dial {
+                        arc: vitals.cpu-arc;
+                        value: vitals.cpu-text;
+                        label: "İşlemci";
+                    }
+                    Dial {
+                        arc: vitals.memory-arc;
+                        value: vitals.memory-text;
+                        label: "Bellek";
+                    }
+                }
+
+                Text {
+                    text: vitals.performance-note;
+                    color: Theme.muted;
+                    font-size: Metrics.root-font * 0.76;
+                    font-weight: 600;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    min-width: 0px;
+                }
+            }
+        }
+
+        Widget {
+            VerticalLayout {
+                padding-top: Metrics.widget-pad-y;
+                padding-bottom: Metrics.widget-pad-y;
+                padding-left: Metrics.widget-pad-x;
+                padding-right: Metrics.widget-pad-x;
+                spacing: Metrics.root-font * 0.3;
+
+                Text {
+                    text: "DEPOLAMA";
+                    color: Theme.dim;
+                    font-size: Metrics.root-font * 0.78;
+                    font-weight: 700;
+                    letter-spacing: 0.06 * Metrics.root-font * 0.78;
+                }
+                Text {
+                    text: vitals.storage-text;
+                    color: Theme.text;
+                    font-size: Metrics.root-font * 1.05;
+                    font-weight: 720;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    min-width: 0px;
+                }
+                Rectangle {
+                    height: 5px;
+                    border-radius: 999px;
+                    background: #ffffff1f;
+                    clip: true;
+
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * clamp(vitals.storage-fraction, 0.0, 1.0);
+                        height: 100%;
+                        background: Theme.accent;
+                    }
+                }
+            }
+        }
+
+        Widget {
+            VerticalLayout {
+                padding-top: Metrics.widget-pad-y;
+                padding-bottom: Metrics.widget-pad-y;
+                padding-left: Metrics.widget-pad-x;
+                padding-right: Metrics.widget-pad-x;
+                spacing: Metrics.root-font * 0.3;
+
+                Text {
+                    text: "AĞ";
+                    color: Theme.dim;
+                    font-size: Metrics.root-font * 0.78;
+                    font-weight: 700;
+                    letter-spacing: 0.06 * Metrics.root-font * 0.78;
+                }
+                Text {
+                    text: vitals.network;
+                    color: Theme.text;
+                    font-size: Metrics.root-font * 1.05;
+                    font-weight: 720;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    min-width: 0px;
+                }
+                Text {
+                    text: vitals.machine;
+                    color: Theme.muted;
+                    font-size: Metrics.root-font * 0.76;
+                    font-weight: 600;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    min-width: 0px;
+                }
+            }
+        }
+    }
+}

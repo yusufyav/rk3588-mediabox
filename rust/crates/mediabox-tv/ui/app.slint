@@ -1,9 +1,9 @@
 import { Theme, Metrics } from "theme.slint";
 import { Home } from "home.slint";
 import { Detail, SourceRow, TechRow } from "detail.slint";
-import { RailModel, PosterItem } from "components.slint";
+import { RailModel, PosterItem, AppTile, VitalsModel } from "components.slint";
 
-export { RailModel, PosterItem, SourceRow, TechRow }
+export { RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow }
 
 // What the television shows before there is anything to show.
 //
@@ -73,6 +73,8 @@ export component MediaBoxWindow inherits Window {
     in property <string> hero-summary;
     in property <[string]> nav: ["Ana Sayfa", "Ara", "Şimdi Oynatılan", "Ayarlar"];
     in property <[RailModel]> rails;
+    in property <[AppTile]> apps;
+    in property <VitalsModel> vitals;
     in property <int> focus-row;
     in property <int> focus-col;
     in property <string> notice;
@@ -156,6 +158,8 @@ export component MediaBoxWindow inherits Window {
             hero-summary: root.hero-summary;
             nav: root.nav;
             rails: root.rails;
+            apps: root.apps;
+            vitals: root.vitals;
             focus-row: root.focus-row;
             focus-col: root.focus-col;
             notice: root.notice;
