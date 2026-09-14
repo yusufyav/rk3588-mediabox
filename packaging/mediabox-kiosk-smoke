@@ -81,6 +81,29 @@ reboot_key=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 
   && ok 'ctrl-alt-del' masked \
   || bad 'ctrl-alt-del' "$(systemctl is-enabled ctrl-alt-del.target 2>&1)"
 
+# There is no terminal on the television. Two halves, and both are needed: the
+# framebuffer console must be off the panel, and the framebuffer behind it must
+# be empty — the DRM core restores the fbdev's mode when the last master closes,
+# which is the moment a film ends, and it shows whatever is in that memory.
+fbcon=ok
+for vtcon in /sys/class/vtconsole/vtcon*; do
+  [ -e "$vtcon/name" ] || continue
+  case "$(cat "$vtcon/name")" in
+    *"frame buffer device"*)
+      [ "$(cat "$vtcon/bind")" = 0 ] || fbcon="bound"
+      ;;
+  esac
+done
+[ "$fbcon" = ok ] && ok 'framebuffer console' 'off the panel' \
+  || bad 'framebuffer console' "$fbcon"
+
+if [ -c /dev/fb0 ]; then
+  dirty=$(python3 -c 'print(sum(1 for b in open("/dev/fb0","rb").read() if b))' 2>/dev/null || echo unknown)
+  [ "$dirty" = 0 ] && ok 'framebuffer content' 'empty' || bad 'framebuffer content' "$dirty bytes set"
+else
+  ok 'framebuffer content' 'no fbdev'
+fi
+
 # Nothing left over from a previous film.
 orphans=$(pgrep -c -x mpv 2>/dev/null || true)
 [ "${orphans:-0}" -eq 0 ] && ok 'orphan players' none || bad 'orphan players' "$orphans mpv"

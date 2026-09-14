@@ -80,14 +80,21 @@ say "television shell"
 # mediabox-display-scale stays because the browser application still uses it.
 cp_ "$here/packaging/mediabox-kiosk-smoke" \
     "$here/packaging/mediabox-hdmi-prepare" "$here/packaging/mediabox-display-scale" \
+    "$here/packaging/mediabox-console-off" "$here/packaging/mediabox-tv-drive" \
     "root@$host:/var/tmp/"
+cp_ "$here/packaging/systemd/mediabox-console-off.service" "root@$host:/etc/systemd/system/"
 sh_ "set -e
   mkdir -p /etc/mediabox
   install -m 0755 /var/tmp/mediabox-kiosk-smoke $prefix/bin/mediabox-kiosk-smoke
   install -m 0755 /var/tmp/mediabox-hdmi-prepare $prefix/bin/mediabox-hdmi-prepare
   install -m 0755 /var/tmp/mediabox-display-scale $prefix/bin/mediabox-display-scale
+  install -m 0755 /var/tmp/mediabox-console-off $prefix/bin/mediabox-console-off
+  install -m 0755 /var/tmp/mediabox-tv-drive $prefix/bin/mediabox-tv-drive
   rm -f /var/tmp/mediabox-kiosk-smoke /var/tmp/mediabox-hdmi-prepare \
-        /var/tmp/mediabox-display-scale"
+        /var/tmp/mediabox-display-scale /var/tmp/mediabox-console-off \
+        /var/tmp/mediabox-tv-drive
+  systemctl daemon-reload
+  systemctl enable --now mediabox-console-off.service >/dev/null"
 
 # What the compositor-based shell left behind. Removed rather than left in
 # place: a launcher script that still exists is a launcher script somebody will

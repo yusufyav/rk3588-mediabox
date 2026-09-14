@@ -27,22 +27,12 @@ done
 
 # There is no terminal on a television.
 #
-# The framebuffer console draws tty1 onto the same panel the product uses. It
-# is invisible while something holds DRM master — and then Kodi hands the
-# display back, and for the moment before the mode is set again the panel shows
-# a login prompt with whatever the remote has been pressing typed into it.
-# Reported from the appliance exactly that way.
-#
-# Unbinding fbcon takes the console off the panel for good. It does not stop
-# the console existing: the serial console and SSH are untouched, and binding
-# it back is one echo away. This runs on every start of the interface, which is
-# the moment nobody is drawing, so it is also the moment it is safe.
-for vtcon in /sys/class/vtconsole/vtcon*; do
-  [ -e "$vtcon/name" ] || continue
-  case "$(cat "$vtcon/name")" in
-    *"frame buffer device"*) echo 0 > "$vtcon/bind" 2>/dev/null || true ;;
-  esac
-done
+# Run here as well as at boot: this is the moment immediately before the
+# interface takes DRM master, and therefore immediately after the DRM core has
+# restored the fbdev's mode on the last master's close. See the script for what
+# that looks like on the panel.
+[ -x /opt/rk3588-mediabox/bin/mediabox-console-off ] \
+  && /opt/rk3588-mediabox/bin/mediabox-console-off || true
 
 # The card name is fixed by the device tree on this board.
 /usr/bin/amixer -c rockchiphdmi1 cset numid=17 on >/dev/null 2>&1 || true

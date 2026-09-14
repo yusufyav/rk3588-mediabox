@@ -1,0 +1,14 @@
+[Unit]
+Description=Take the console off the television
+DefaultDependencies=no
+After=systemd-udev-settle.service local-fs.target
+Wants=systemd-udev-settle.service
+Before=getty.target multi-user.target mediabox-tv-ui.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-console-off
+
+[Install]
+WantedBy=sysinit.target

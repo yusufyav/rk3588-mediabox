@@ -52,13 +52,27 @@ libinput üzerinden daha hızlı — yani **Ok iki kez işleniyordu** (bir liste
 aynı basışta seçiliyordu). Platform artık rc-core aygıtlarını `/sys` yoluna
 bakarak atlıyor, tekilleştirme de hangi yol önce gelirse gelsin çalışıyor.
 
-### Terminal sızıntısı
+### Terminal sızıntısı — iki ayrı sebep
 
-Kullanıcı bildirimi: Kodi dönüşünde panelde konsol ve birikmiş karakterler.
-Sebep: kabuk giriş aygıtlarını kilitlemiyordu, tuşlar aynı anda VT'ye de
-yazılıyordu. İki düzeltme: `EVIOCGRAB` (girdi çekirdeği düzeyinde kilit, konsol
-dahil diğer tüm işleyiciler aygıtı görmez) ve framebuffer konsolunun panelden
-çözülmesi. Doğrulama: `(M) frame buffer device bind=0`.
+Kullanıcı bildirimi: Kodi'den çıkar çıkmaz panelin üstünde iki beyaz satır.
+
+**Sebep 1 — tuşlar VT'ye yazılıyordu.** Kabuk giriş aygıtlarını kilitlemiyordu.
+Düzeltme: `EVIOCGRAB` (girdi çekirdeği düzeyinde kilit; konsol dahil diğer tüm
+işleyiciler aygıtı görmez, `/dev/cec0`'a dokunmaz).
+
+**Sebep 2 — framebuffer'ın içinde açılış metni duruyordu.** fbcon'u çözmek
+belleği temizlemiyor, ve DRM çekirdeği **son master kapandığında** (yani filmin
+bittiği an) fbdev modunu geri yüklüyor. Ölçüm: `/dev/fb0`'ın ilk 40 satırında
+1095 sıfır-olmayan bayt — fotoğraftaki iki çizgi tam olarak bu.
+
+Düzeltme: `mediabox-console-off` fbcon'u çözüyor **ve** `/dev/fb0`'ı sıfırlıyor;
+açılışta `mediabox-console-off.service` (sysinit) ve her kabuk başlangıcında
+`mediabox-hdmi-prepare` içinden çalışıyor — ikincisi, fbdev geri yüklemesinden
+hemen sonraki an.
+
+Doğrulama, tam Kodi gidiş-dönüşü boyunca: `fb0 non-zero: 0` (Kodi ekrandayken,
+dönüşün ilk saniyesinde ve yerleştikten sonra), `(M) frame buffer device
+bind=0`. Smoke'a iki kontrol eklendi.
 
 ## Render başarımı
 
@@ -144,8 +158,9 @@ Güvenlik modeli değişmedi: `DevicePolicy=closed`, dar `DeviceAllow` listesi,
   PASS scanout (PRIME FB active) / home / native mode 2560x1440 / compositor none
   PASS scanout buffers (3 imported once)
   PASS cec power tag (event0 untagged) / logind buttons / logind keys / ctrl-alt-del
+  PASS framebuffer console (off the panel) / framebuffer content (empty)
   PASS orphan players
-== native shell smoke PASS            (14/14)
+== native shell smoke PASS            (16/16)
 ```
 
 ## Kanıt

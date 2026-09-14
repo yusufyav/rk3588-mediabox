@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# There is no terminal on a television.
+#
+# Two separate things put one there, and only doing both takes it away.
+#
+# The first is the framebuffer console, which draws a getty onto the same panel
+# the product uses. Unbinding it stops anything new being drawn.
+#
+# The second is what is already in the framebuffer. Unbinding the console does
+# not clear the memory behind it, and the DRM core restores the fbdev's mode on
+# lastclose — the moment the final DRM master closes its device. On this
+# appliance that moment is the end of a film: Kodi exits, the display is
+# restored to the fbdev, and the panel shows whatever the console last wrote
+# until the interface takes master and sets its own buffer.
+#
+# Measured on the appliance after a photograph taken "the instant Kodi exited":
+# the first forty rows of /dev/fb0 still held 1095 non-zero bytes of boot
+# messages. Two white bars across the top of the television, exactly there.
+#
+# So the memory is zeroed as well. Binding the console back is one echo away,
+# and the serial console and SSH are untouched.
+set -eu
+
+for vtcon in /sys/class/vtconsole/vtcon*; do
+  [ -e "$vtcon/name" ] || continue
+  case "$(cat "$vtcon/name")" in
+    *"frame buffer device"*) echo 0 > "$vtcon/bind" 2>/dev/null || true ;;
+  esac
+done
+
+# After the unbind, so the console cannot write over the zeroes on its way out.
+[ -c /dev/fb0 ] && dd if=/dev/zero of=/dev/fb0 bs=1M status=none 2>/dev/null || true
+
+exit 0
