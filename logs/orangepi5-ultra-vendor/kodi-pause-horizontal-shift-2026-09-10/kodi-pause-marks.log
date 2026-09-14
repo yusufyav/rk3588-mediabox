@@ -1,6 +1,0 @@
-t=3.057 PAUSE speed=0 reply={"id":1,"jsonrpc":"2.0","result":{"speed":0}}
-t=15.099 RESUME speed=1 reply={"id":1,"jsonrpc":"2.0","result":{"speed":1}}
-t=21.141 PAUSE speed=0 reply={"id":1,"jsonrpc":"2.0","result":{"speed":0}}
-t=33.093 RESUME speed=1 reply={"id":1,"jsonrpc":"2.0","result":{"speed":1}}
-t=39.051 PAUSE speed=0 reply={"id":1,"jsonrpc":"2.0","result":{"speed":0}}
-t=51.139 RESUME speed=1 reply={"id":1,"jsonrpc":"2.0","result":{"speed":1}}

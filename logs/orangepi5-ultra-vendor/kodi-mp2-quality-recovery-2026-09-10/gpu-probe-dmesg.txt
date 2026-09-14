@@ -1,7 +1,0 @@
-dmesg delta across the probe sequence (A, B, B x3)
-date: 2026-09-10T09:13:15+03:00
-
-(nothing above = the kernel logged nothing new)
-
--- abort conditions --
-NONE of: oops panic reset hang iommu fault underflow atomic BUG

@@ -1,8 +1,0 @@
-package	version	decision	reason	evidence
-(none)	-	NO_PACKAGE_REMOVED	every candidate is blocked by a Phase 6 rule; see below	apt-simulation.txt
-build-essential cmake meson ninja-build nasm gperf swig	-	KEPT	Phase 6 rule 4: gate MA1 is a Kodi-side compressed-audio change and rebuilds on the target via scripts/build-kodi.sh	apt-simulation.txt simulation 1
-libgl1-mesa-dri mesa-utils-bin	-	KEPT	Phase 6 rule 5: removal chain also takes libegl-dev/libgles-dev/libgl-dev and default-jre, which are Kodi build dependencies, and Mesa is the documented MEDIABOX_GPU=mesa llvmpipe fallback	apt-simulation.txt simulation 2
-libdrm-tests	2.4.124-2	KEPT	provides modetest, used by tools/vop2-sdr2hdr-capture/capture-state.sh (the accepted-gate and MA1 regression instrument), scripts/capture-color-state.sh and scripts/monitor-cadence-probe.sh	grep modetest in repo
-kodi build-dep set (apt-get build-dep kodi, 2026-09-10)	-	KEPT	same as rule 4; removing it would make the MA1 rebuild impossible on the target	apt-history-full.txt
-vim btop fastfetch tree pciutils lm-sensors cmatrix	-	KEPT	operator tools, not experiment artefacts; removing them is outside this gate's mandate	apt-history-full.txt
-/var/cache/apt/archives (567 .deb, 546994724 bytes)	-	CACHE_CLEARED	apt-get clean removes downloaded archives only; no installed package is affected	apt-get clean output

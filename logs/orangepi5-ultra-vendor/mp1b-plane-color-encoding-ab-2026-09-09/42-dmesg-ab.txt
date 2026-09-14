@@ -1,5 +1,0 @@
-A delta lines: 36
-B delta lines: 36
-structural diff (timestamps stripped):
-  IDENTICAL
-error/underflow/timeout matches: A=0 B=0

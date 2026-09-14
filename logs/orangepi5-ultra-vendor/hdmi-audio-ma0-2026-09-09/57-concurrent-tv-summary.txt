@@ -1,7 +1,0 @@
-TV during concurrent video+audio:
-  pictureMode           = cinemaHome
-  xtendedDynamicRange   = high
-  brightness            = 50
-  hdrMode               = auto
-  colorSpace            = auto
-  lightSensor           = UNAVAILABLE (HDR active)

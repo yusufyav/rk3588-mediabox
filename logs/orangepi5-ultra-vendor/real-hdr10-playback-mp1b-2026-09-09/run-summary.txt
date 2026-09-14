@@ -1,3 +1,0 @@
-emmc PASS 0
-emmc-cinema PASS 0
-usb PARTIAL 1

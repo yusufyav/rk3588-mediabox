@@ -18,3 +18,7 @@ __pycache__/
 
 # Cross-compilation sysroot copied from the appliance (scripts/build-mediabox-tv.sh).
 /.sysroot/
+
+# Cihaz çıktıları kaynak kodu değil. Bir oturumun kanıtı commit mesajında ve
+# results/DURUM.md içinde yaşar; ham dökümler repo dışında arşivlenir.
+logs/

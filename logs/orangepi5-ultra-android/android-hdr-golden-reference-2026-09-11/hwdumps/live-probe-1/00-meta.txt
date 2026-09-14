@@ -1,3 +1,0 @@
-# state: LIVE probe during HDR playback (G-unknown)
-# host_utc: 2026-09-11T10:58:21Z
-# device_uptime: 673.01 4677.51

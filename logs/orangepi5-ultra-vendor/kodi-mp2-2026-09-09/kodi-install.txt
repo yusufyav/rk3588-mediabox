@@ -1,8 +1,0 @@
--- Installing: /opt/rk3588-mediabox/kodi/lib/kodi/cmake/KodiConfig.cmake
--- Installing: /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/media/Textures.xbt
--- Installing: /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/media/curial.xbt
--- Installing: /opt/rk3588-mediabox/kodi/share/kodi/addons/skin.estuary/media/flat.xbt
-total 156552
-drwxr-xr-x 2 root root      4096 Sep 10 00:46 cmake
--rwxr-xr-x 1 root root 160299984 Sep 10 00:46 kodi-gbm
-drwxr-xr-x 3 root root      4096 Sep 10 00:46 system

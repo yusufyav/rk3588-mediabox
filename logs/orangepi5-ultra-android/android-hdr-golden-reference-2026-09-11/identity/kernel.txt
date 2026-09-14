@@ -1,9 +1,0 @@
-### uname -a
-Linux localhost 5.10.157 #2 SMP PREEMPT Fri Aug 1 16:53:55 UTC 2025 aarch64 Toybox
-
-### /proc/version
-Linux version 5.10.157 (yu@yu-server) (Android (8490178, based on r450784d) clang version 14.0.6 (https://android.googlesource.com/toolchain/llvm-project 4c603efb0cca074e9238af8b4106c30add4418f6), LLD 14.0.6) #2 SMP PREEMPT Fri Aug 1 16:53:55 UTC 2025
-
-### /proc/cmdline
-cat: /proc/cmdline: Permission denied
-storagemedia=sd androidboot.storagemedia=sd androidboot.mode=normal  androidboot.dtb_idx=0 androidboot.dtbo_idx=0  androidboot.verifiedbootstate=orange androidboot.serialno=6f0b138b31286370 console=ttyFIQ0 firmware_class.path=/vendor/etc/firmware init=/init rootwait ro loop.max_part=7 androidboot.console=ttyFIQ0 androidboot.wificountrycode=CN androidboot.hardware=rk30board androidboot.boot_devices=fe2e0000.mmc,fe2c0000.mmc,fe190000.pcie,fe150000.pcie,fe180000.pcie,fe210000.sata,fe230000.sata androidboot.selinux=permissive buildvariant=userdebug earlycon=uart8250,mmio32,0xfeb50000 irqchip.gicv3_pseudo_nmi=0 loglevel=2

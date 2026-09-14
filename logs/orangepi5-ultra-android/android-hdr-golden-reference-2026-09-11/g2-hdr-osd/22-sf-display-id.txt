@@ -1,1 +1,0 @@
-Display 0 (HWC display 0): no identification data

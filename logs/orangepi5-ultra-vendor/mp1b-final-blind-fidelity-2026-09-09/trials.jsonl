@@ -1,6 +1,0 @@
-{"trial": "pair1-trial1", "result": "PASS", "sdr_reset_verified": true, "dmesg_delta_lines": 36}
-{"trial": "pair1-trial2", "result": "PASS", "sdr_reset_verified": true, "dmesg_delta_lines": 36}
-{"trial": "pair2-trial1", "result": "PASS", "sdr_reset_verified": true, "dmesg_delta_lines": 36}
-{"trial": "pair2-trial2", "result": "PASS", "sdr_reset_verified": true, "dmesg_delta_lines": 36}
-{"trial": "pair3-trial1", "result": "PASS", "sdr_reset_verified": true, "dmesg_delta_lines": 36}
-{"trial": "pair3-trial2", "result": "PASS", "sdr_reset_verified": true, "dmesg_delta_lines": 36}

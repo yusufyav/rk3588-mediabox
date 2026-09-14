@@ -1,3 +1,0 @@
-smoke-b PASS 0
-a-default PASS 0
-b-bt2020 PASS 0
