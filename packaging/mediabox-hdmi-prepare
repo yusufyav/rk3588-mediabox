@@ -45,21 +45,32 @@ done
 # HDR10[2] BT.2020 limited and the wire was still 4:2:2 10-bit — the television
 # stayed in its HDR picture profile and drew an SDR interface through it.
 #
-# This runs before the compositor takes DRM master, which is the only moment
-# nobody holds it: modetest can take master, clear the two properties that
-# carry HDR to the sink, and drop it again. The compositor then sets its own
-# mode on top of an SDR connector. Anything that wants HDR — Kodi — sets it
-# again for itself when it starts.
+# This runs before the interface takes DRM master, which is the only moment
+# nobody holds it: modetest can take master, clear the properties that carry
+# HDR and a YUV wire to the sink, and drop it again. The interface then sets its
+# own mode on top of an SDR, RGB connector. Anything that wants something else —
+# Kodi — sets it again for itself when it starts.
+#
+# `color_format` is the third property and was the one missing. Photographed on
+# the appliance after a film: the whole interface washed out to pastel blue and
+# pink. Measured at that moment:
+#
+#   bus_format[2025]: YUV8_1X24           <- the wire was carrying YUV
+#   Cluster0-win0 color: BT.601 Limited
+#   csc: y2r[0] r2y[1] csc mode[1]        <- RGB->YUV conversion was on
+#   connector 203 color_format: value: 1  <- ycbcr444, left behind by Kodi
+#
+# against RGB888_1X24 and `r2y[0] csc mode[0]` on a clean start. VOP2 was
+# converting an RGB interface to YUV in BT.601 while telling the sink BT.709
+# limited — two mismatches at once, which is exactly that colour shift.
 if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ]; then
-  for c in /sys/class/drm/card*-HDMI-A-*; do
-    [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
-    id=$(cat "$c/../card*-HDMI-A-*/dev" 2>/dev/null || true)
-    break
-  done
   conn=$(/usr/bin/modetest -M rockchip -c 2>/dev/null     | awk '$3 == "connected" && $4 ~ /HDMI/ { print $1; exit }')
   if [ -n "${conn:-}" ]; then
     /usr/bin/modetest -M rockchip -w "$conn:Colorspace:0" >/dev/null 2>&1 || true
     /usr/bin/modetest -M rockchip -w "$conn:HDR_OUTPUT_METADATA:0" >/dev/null 2>&1 || true
+    # rgb=0 in this driver's enum. Set last, so a refusal of either of the two
+    # above does not stop the wire going back to RGB.
+    /usr/bin/modetest -M rockchip -w "$conn:color_format:0" >/dev/null 2>&1 || true
   fi
 fi
 exit 0

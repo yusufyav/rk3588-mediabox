@@ -115,11 +115,18 @@ sh_ "rm -f $prefix/bin/mediabox-tv-native $prefix/bin/mediabox-kiosk-browser \
 # of reboot.target, reached by a SIGINT to PID 1 from the console keyboard — is
 # masked. Restarting is a request to mediaboxd-rs now, confirmed twice.
 say "power keys -> the appliance, not systemd-logind"
-cp_ "$here/packaging/udev/80-mediabox-no-power-switch.rules" "root@$host:/var/tmp/"
+cp_ "$here/packaging/udev/80-mediabox-no-power-switch.rules" \
+    "$here/packaging/udev/81-mediabox-display-hotplug.rules" \
+    "$here/packaging/mediabox-display-changed" "root@$host:/var/tmp/"
+cp_ "$here/packaging/systemd/mediabox-display-changed.service" "root@$host:/etc/systemd/system/"
 cp_ "$here/packaging/systemd/logind.conf.d/10-mediabox.conf" "root@$host:/var/tmp/logind-mediabox.conf"
 sh_ "set -e
   install -m 0644 /var/tmp/80-mediabox-no-power-switch.rules \
     /etc/udev/rules.d/80-mediabox-no-power-switch.rules
+  install -m 0644 /var/tmp/81-mediabox-display-hotplug.rules \
+    /etc/udev/rules.d/81-mediabox-display-hotplug.rules
+  install -m 0755 /var/tmp/mediabox-display-changed $prefix/bin/mediabox-display-changed
+  rm -f /var/tmp/81-mediabox-display-hotplug.rules /var/tmp/mediabox-display-changed
   mkdir -p /etc/systemd/logind.conf.d
   install -m 0644 /var/tmp/logind-mediabox.conf /etc/systemd/logind.conf.d/10-mediabox.conf
   rm -f /var/tmp/80-mediabox-no-power-switch.rules /var/tmp/logind-mediabox.conf

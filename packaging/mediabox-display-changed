@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# The television changed. Put the interface on the new one.
+#
+# The shell chooses its connector, its mode and its scale once, when it starts:
+# the GBM surface is created at that mode and the EGL surface with it. Nothing
+# reads DRM hotplug events, so unplugging the panel and plugging in another one
+# leaves the interface scanning out a mode the new display does not have —
+# reported from the appliance as "ekran değiştirince görüntü gelmiyor".
+#
+# Re-modesetting in place is the right answer and is a rebuild of the platform's
+# surface, context and framebuffers. This is the appliance's answer in the
+# meantime, and on this box it is a good one: the shell keeps its position on
+# disk, systemd restarts it, and it is drawing again in under half a second —
+# measured first_frame_ms 413-486 across today's starts.
+#
+# Guarded three ways, because a restart loop on a television is worse than a
+# television that needs one restart:
+#
+#   * only when the interface is the thing on the display — if Kodi or the
+#     browser owns it, the change is theirs to handle;
+#   * only when the connector's state or its preferred mode actually differs
+#     from what was recorded, so the driver's own change events (a DPMS cycle,
+#     a modeset by whoever holds master) do not trigger anything;
+#   * and after a settle, because one plug produces several events.
+set -eu
+
+STAMP=/run/mediabox-display.stamp
+UNIT=mediabox-tv-ui.service
+
+# One plug, several uevents. Let them land before reading anything.
+sleep 1
+
+now=""
+for c in /sys/class/drm/card*-HDMI-A-*; do
+  [ -e "$c/status" ] || continue
+  name=$(basename "$c")
+  status=$(cat "$c/status" 2>/dev/null || echo unknown)
+  mode=$(head -1 "$c/modes" 2>/dev/null || true)
+  now="$now$name=$status:$mode
+"
+done
+
+was=$(cat "$STAMP" 2>/dev/null || true)
+printf '%s' "$now" > "$STAMP"
+
+[ "$now" = "$was" ] && exit 0
+[ -n "$was" ] || exit 0          # first run after boot records, changes nothing
+
+systemctl is-active --quiet "$UNIT" || exit 0
+
+echo "mediabox-display-changed: restarting $UNIT for a new display" >&2
+printf 'was:\n%s\nnow:\n%s\n' "$was" "$now" >&2
+systemctl restart --no-block "$UNIT"

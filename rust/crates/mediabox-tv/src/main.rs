@@ -799,16 +799,24 @@ impl App {
         self.paint();
     }
 
-    /// Both answers, or whichever of them arrived.
-    fn loaded(&mut self, home: Option<model::HomeRows>, library: Option<model::LibraryListing>) {
-        self.meter.data_arrived();
-
+    /// Both answers, or whichever of them arrived. False when there was nothing
+    /// in either, which is the loader's signal to ask again.
+    fn loaded(
+        &mut self,
+        home: Option<model::HomeRows>,
+        library: Option<model::LibraryListing>,
+    ) -> bool {
         let rows = home.unwrap_or(model::HomeRows { rows: Vec::new() });
         let shelves = state::shelves_from(&rows, library.as_ref());
 
         if shelves.is_empty() {
-            self.fail("Hiçbir raf getirilemedi.");
-            return;
+            return false;
+        }
+        self.meter.data_arrived();
+
+        // Whatever the last attempt said, there is a catalogue now.
+        if let Some(window) = self.window.upgrade() {
+            window.set_failed(false);
         }
 
         self.home.set_shelves(shelves);
@@ -829,6 +837,29 @@ impl App {
         }
         self.paint();
         self.restore();
+        true
+    }
+
+    /// The catalogue has not arrived yet, and the loader is going to ask again.
+    ///
+    /// Said plainly on the boot screen rather than as a failure: on a cold boot
+    /// this is the network coming up, and a television that says "nothing could
+    /// be fetched" and then quietly fixes itself has told the viewer a lie
+    /// either way.
+    fn still_waiting(&mut self, attempt: u32) {
+        let Some(window) = self.window.upgrade() else { return };
+        if self.route() != Route::Boot {
+            return;
+        }
+        window.set_failed(false);
+        window.set_status(
+            if attempt <= 2 {
+                "Raflar getiriliyor…".to_string()
+            } else {
+                format!("Raflar getiriliyor… ({attempt}. deneme)")
+            }
+            .into(),
+        );
     }
 
     /// Puts the remote back where it was before the display changed hands.
@@ -1679,12 +1710,28 @@ fn spawn_open(url: String) {
     });
 }
 
-/// Asks the control plane for the home surface.
+/// Asks the control plane for the home surface, until it answers with one.
 ///
 /// The two calls go out together on purpose: the library is this appliance's
 /// own and answers in milliseconds, while the catalogues are a fan-out over
 /// third-party hosts. Waiting for the second before drawing the first is time
 /// the viewer spends looking at a name and a spinner.
+///
+/// It asks again if nothing came back, and that is not defensive
+/// programming — it is the difference between a working television and a broken
+/// one after a power cut. Measured on the appliance, one second into a cold
+/// boot:
+///
+///   mediabox-tv.load media_home+library_ms=16
+///   mediabox-tv.load home failed: media worker HTTP 502 Bad Gateway:
+///     UPSTREAM_FAILED api.strem.io is unreachable (urlopen error [Errno 16])
+///
+/// The daemon was up; its upstreams were not, because the network was still
+/// coming up. The interface asked sixteen milliseconds after it started, took
+/// the refusal as the answer, and showed an empty catalogue until somebody
+/// restarted the unit — which, on this box, is what starting a film and coming
+/// back happens to do. Hence the retry, and hence the unit now waiting for the
+/// network as well as for the daemon.
 fn spawn_loader() {
     std::thread::Builder::new()
         .name("mediabox-tv-data".into())
@@ -1697,28 +1744,61 @@ fn spawn_loader() {
             runtime.block_on(async {
                 let client = rpc::Client::new(socket_path());
 
-                let at = Instant::now();
-                let (home, library) = tokio::join!(client.home(), client.library());
-                eprintln!("mediabox-tv.load media_home+library_ms={}", at.elapsed().as_millis());
+                for attempt in 1u32.. {
+                    let at = Instant::now();
+                    let (home, library) = tokio::join!(client.home(), client.library());
+                    eprintln!(
+                        "mediabox-tv.load attempt={attempt} media_home+library_ms={}",
+                        at.elapsed().as_millis()
+                    );
 
-                let home = match home {
-                    Ok(home) => Some(home),
-                    Err(e) => {
-                        eprintln!("mediabox-tv.load home failed: {e}");
-                        None
-                    }
-                };
-                let library = match library {
-                    Ok(library) => Some(library),
-                    Err(e) => {
-                        eprintln!("mediabox-tv.load library failed: {e}");
-                        None
-                    }
-                };
+                    let home = match home {
+                        Ok(home) => Some(home),
+                        Err(e) => {
+                            eprintln!("mediabox-tv.load home failed: {e}");
+                            None
+                        }
+                    };
+                    let library = match library {
+                        Ok(library) => Some(library),
+                        Err(e) => {
+                            eprintln!("mediabox-tv.load library failed: {e}");
+                            None
+                        }
+                    };
 
-                let _ = slint::invoke_from_event_loop(move || {
-                    with_app(|app| app.loaded(home, library));
-                });
+                    // Whether this answer is worth drawing is the home model's
+                    // decision, not this thread's, so it is asked.
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    let posted = slint::invoke_from_event_loop(move || {
+                        with_app(|app| {
+                            let landed = app.loaded(home, library);
+                            let _ = sender.send(landed);
+                        });
+                    });
+                    if posted.is_err() {
+                        return;
+                    }
+                    if receiver.await.unwrap_or(false) {
+                        return;
+                    }
+
+                    // One second, two, four, eight, then every fifteen. A
+                    // television left on overnight with no network should be
+                    // showing its catalogue the moment there is one, without
+                    // having asked for it four thousand times.
+                    let wait = match attempt {
+                        1 => 1,
+                        2 => 2,
+                        3 => 4,
+                        4 => 8,
+                        _ => 15,
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_app(|app| app.still_waiting(attempt));
+                    });
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                }
             });
         })
         .expect("the loader thread could not be started");

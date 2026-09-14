@@ -1,7 +1,12 @@
 [Unit]
 Description=MediaBox native Slint appliance shell (Mali GBM + Rockchip KMS)
-After=mediaboxd-rs.service
-Wants=mediaboxd-rs.service
+# The daemon, the media worker and the network. The catalogue is a fan-out over
+# third-party hosts through the worker, and on a cold boot this unit used to ask
+# for it sixteen milliseconds after starting — before the network was up — take
+# the refusal as the answer, and show an empty television until something
+# restarted it. The interface retries now; this is so it rarely has to.
+After=mediaboxd-rs.service mediabox-media-worker.service network-online.target
+Wants=mediaboxd-rs.service network-online.target
 Conflicts=kodi.service mediabox-browser.service
 
 [Service]

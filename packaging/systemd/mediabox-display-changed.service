@@ -1,0 +1,8 @@
+[Unit]
+Description=Put the interface on the display that was just plugged in
+# Triggered by udev on a DRM connector change; see
+# packaging/udev/81-mediabox-display-hotplug.rules.
+
+[Service]
+Type=oneshot
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-display-changed

@@ -1,0 +1,9 @@
+# A display was plugged in or taken away.
+#
+# The DRM subsystem emits a `change` event with HOTPLUG=1 when a connector's
+# state changes. Handing it to a systemd unit rather than running anything from
+# udev itself: a RUN+= that restarts a service blocks the udev worker, and the
+# service being restarted is the one drawing on the display udev is telling us
+# about.
+ACTION=="change", SUBSYSTEM=="drm", ENV{HOTPLUG}=="1", \
+  TAG+="systemd", ENV{SYSTEMD_WANTS}+="mediabox-display-changed.service"
