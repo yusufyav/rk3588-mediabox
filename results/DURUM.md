@@ -143,43 +143,69 @@ yerel 4K NV15  mpv %6-9 CPU · arayüz ~%0 · 1845 kare · 0 düşük · 23.96 f
 | Denetim düzlemi, TV arayüzü, Web UI | `scripts/deploy-mediabox-v3.sh` (çapraz derleme) |
 | Birimler, udev, config, smoke | `packaging/` |
 
-### Bu repoda **olmayan** iki temel
+### İki temel: bu repoda yok, **yan repoda var**
 
-1. **Çekirdek.** Çalışan çekirdek `/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio`
-   (46 MB, 4 Eylül, `#3`) ve `/boot/Image` ona bağlı — **açılışta bu çalışıyor.**
-   Hiçbir dpkg paketi sahiplenmiyor (`dpkg -S` → eşleşme yok); `/boot`'taki
-   `config-` ve `System.map-` dosyaları apt'ın *stok* çekirdeğine ait, bu
-   derlemeye değil. Modülleri
-   `/lib/modules/6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio` altında.
-   Kaynağı ve config'i **bu repoda yok** — `yusufyav/rk3588-screenbridge`'den
-   geliyor.
-2. **`/opt/rk3588-screenbridge`** — RKMPP'li FFmpeg (`librockchip_mpp`,
-   `librga`, ffmpeg `d90e3a1`). Donanım kod çözmenin ve Kodi'nin bağlandığı yer.
-   Burada onu **kuran betik yok**; README ve `docs/architecture.md` bağımlılığı
-   anlatıyor, kurulumu değil.
+`~/Projeler/rk3588-screenbridge` (main, `582e1d3`) — ikisi de orada, sabitlenmiş:
 
-Yani bu repo tek başına boş bir karttan çalışan bir cihaz üretemez. Bu ikisi
-önkoşul ve ikisi de o ayrı projede.
+| Önkoşul | Tarifi |
+|---|---|
+| `/opt/rk3588-screenbridge` (RKMPP FFmpeg) | `scripts/build-media-stack.sh` — `rockchip-linux/mpp`, `airockchip/librga`, `nyanmisaka/ffmpeg-rockchip` klonlar, derler, prefix'e kurar ve `rkmpp` kodlayıcılarını doğrular |
+| Çekirdek | `armbian/linux-rockchip` `fd9f82366e235b8afbdf516765210e97d24dce93` + `patches/kernel/0001-hdmirx-enable-i2s-capture.patch`; release adı ve `Image` SHA-256 `474eb0a3…` kayıtlı, cihazda `rollback-stock-kernel.sh` var |
 
-### Plus'a taşımadan önce değişmesi gerekenler
+**Ama MediaBox o çekirdeğe muhtemelen ihtiyaç duymuyor.** Yama okundu: yaptığı
+tek şey HDMI **alıcısının** I2S capture DAI'sini açmak; verici (TX) tarafı
+değişmeden çıkış-only kalıyor. MediaBox HDMI TX kullanıyor — yani stok Armbian
+vendor çekirdeği yetmeli. **Bu bir çıkarım, ölçüm değil**: MediaBox stok
+çekirdekle hiç açılmadı.
 
-Ultra'da ölçülen, karta özgü sabitler:
+### Plus'a taşımak — yan repo bunu zaten ölçmüş
+
+`results/orangepi5-plus-vendor/ultra-plus-hdmirx-4k60-differential-2026-09-05.md`
+(Gate 2E) iki kartı yan yana koymuş:
+
+| | Ultra | Plus |
+|---|---|---|
+| Önyükleme | DDR init → BL31 → Armbian U-Boot | **EDK II v2.70 → EFI GRUB** |
+| DTB seçimi | `armbianEnv.txt` içindeki `fdtfile` | GRUB girdisinde açık `devicetree` |
+| DTB | `rk3588-orangepi-5-ultra.dtb` | `rk3588-orangepi-5-plus-screenbridge.dtb` |
+| Kök | eMMC `/dev/mmcblk0p1` | **NVMe `/dev/nvme0n1p2`** |
+| Çekirdek | `…-screenbridge-hdmirx-audio` `#3` | **stok** `6.1.115-vendor-rk35xx` `#1` |
+| HDMI RX denetleyici DT'si | kayıt penceresi, IRQ, saat, reset, güç alanı | **birebir aynı** |
+| HDMI-IN ses kartı indeksi | 1 | 3 |
+
+Yani önyükleme zinciri ve kök aygıtı tamamen farklı; SoC çevre birimleri aynı.
+
+MediaBox tarafında değişmesi gereken, Ultra'ya sabitlenmiş dört yer:
 
 ```
 packaging/mediabox-hdmi-prepare:38   amixer -c rockchiphdmi1     ← kart adı sabit
-packaging/systemd/*.service          /dev/cec0                   ← Plus'ta iki HDMI, iki cec olabilir
+packaging/systemd/*.service          /dev/cec0                   ← Plus'ta iki HDMI
 scripts/capture-*.sh, run-mp1*.sh    card0-HDMI-A-1              ← Plus'ta iki çıkış
-/boot/armbianEnv.txt                 rk3588-orangepi-5-ultra.dtb ← Plus'un kendi DTB'si
+/boot/armbianEnv.txt                 rk3588-orangepi-5-ultra.dtb ← Plus'ta GRUB + kendi DTB
 ```
 
-Ultra'da tek HDMI çıkışı (`card0-HDMI-A-1`), tek `/dev/cec0`, ses kartları
-`rockchiphdmi1` / `rockchiphdmiin` / `rockchipes8388`. Plus'ta iki HDMI çıkışı
-var; bağlayıcı, CEC ve ses kartı adlandırması farklı olacak.
+Kart indeksini isimden çözme sorunu yan repoda zaten çözülmüş —
+`scripts/hdmirx-audio-loopback.sh` bunu yapıyor; aynı yaklaşım buraya alınmalı.
 
-**İyi haber:** TV arayüzünün kendisi uyarlanabilir yazıldı — `find_output` ilk
-bağlı `HDMI-A` konektörünü seçiyor, video düzlemi ise isimle değil `SetPlane`
-ile deneyerek bulunuyor. Yani VOP2 düzlem haritası farklı olsa da kabuk kendi
-bulur. Sabit olanlar yukarıdaki dört satır.
+**TV arayüzünün kendisi bu listede değil:** `find_output` ilk bağlı `HDMI-A`
+konektörünü seçiyor, video düzlemini isimle değil `SetPlane` deneyerek buluyor.
+VOP2 düzlem haritası farklı olsa bile kendi bulur.
+
+### Temiz imajın masrafı
+
+| Adım | Nerede | Tahmin |
+|---|---|---|
+| Armbian vendor imajı + önyükleme zinciri (Plus'ta EFI/GRUB + NVMe) | screenbridge | saatler, tek seferlik |
+| `build-media-stack.sh` (MPP + RGA + ffmpeg, kartta) | screenbridge | ~1 saat |
+| Özel çekirdek — **yalnızca HDMI RX sesi gerekiyorsa** | screenbridge | ~2 saat |
+| Mali kullanıcı alanı | bu repo | ~5 dk |
+| Kodi (kartta, 8 çekirdek) | bu repo | saatler |
+| mpv oynatıcı | bu repo | ~10 dk |
+| node + Stremio web/sunucu | bu repo | 15-30 dk |
+| Rust çapraz derleme + `deploy-mediabox-v3.sh` | bu repo | ~5 dk |
+
+Kabaca **bir iş günü**, ve belirsizliğin tamamı önyükleme zincirinde — Plus'un
+EFI/GRUB + NVMe düzeni Ultra'nınkinden farklı, MediaBox'ın hiç görmediği bir yol.
 
 ### Kapatılması gereken işler
 
