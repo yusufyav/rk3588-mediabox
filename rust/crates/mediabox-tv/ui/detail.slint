@@ -1,0 +1,439 @@
+import { Theme, Metrics } from "theme.slint";
+
+// One source the viewer can choose. Every field is already decided in Rust:
+// the addon's free-text name and title are parsed once into facts, and this
+// only lays them out.
+export struct SourceRow {
+    identity: string,
+    quality: string,
+    flags: string,
+    release: string,
+    chips: [string],
+    kind: string,
+    // "good" | "warn" | "bad" | "" — what the kind chip is worth.
+    tone: string,
+    cached: bool,
+    playable: bool,
+    provider: string,
+}
+
+// A line of the technical panel. `tone` carries the verdict's colour so the
+// panel does not have to know what any of it means.
+export struct TechRow {
+    label: string,
+    value: string,
+    tone: string,
+}
+
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <string> tone;
+
+    height: Metrics.text-chip * 2.0;
+    width: inner.preferred-width + Metrics.text-chip * 1.4;
+    border-radius: self.height / 2;
+    background: tone == "good" ? #16351f
+        : tone == "warn" ? #3a2f12
+        : tone == "bad" ? #3a1b1b
+        : #ffffff14;
+
+    inner := Text {
+        text: label;
+        color: tone == "good" ? Theme.ok
+            : tone == "warn" ? Theme.warn
+            : tone == "bad" ? Theme.bad
+            : Theme.muted;
+        font-size: Metrics.text-chip;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+}
+
+// The four things a title can be done with. Drawn rather than lettered: at
+// three metres a mark is read faster than a word, and the word is under it
+// anyway.
+component IconAction inherits Rectangle {
+    in property <string> label;
+    in property <string> mark;
+    // Drawn over the mark in the button's own colour, which is how a shape
+    // gets a hole in it without a second element knowing the theme.
+    in property <string> cut;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+
+    // Square unless the word under the mark needs more, which "Kodi'de Oynat"
+    // does. An elided label on a button is a button nobody is sure about.
+    width: max(Metrics.card-w * 0.42, caption.preferred-width + Metrics.root-font * 1.2);
+    height: Metrics.card-w * 0.42;
+    border-radius: Theme.radius;
+    opacity: enabled ? 1.0 : 0.38;
+    background: focused ? Theme.focus-ring
+        : primary ? Theme.accent
+        : #ffffff12;
+
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: Metrics.text-chip * 0.5;
+
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: Metrics.root-font * 1.5;
+                height: Metrics.root-font * 1.5;
+
+                Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: mark;
+                    fill: focused || primary ? #0a0c10 : Theme.text;
+                }
+                if cut != "": Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: cut;
+                    fill: root.background;
+                }
+            }
+        }
+
+        caption := Text {
+            text: label;
+            color: focused || primary ? #0a0c10 : Theme.text;
+            font-size: Metrics.text-chip;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+component Source inherits Rectangle {
+    in property <SourceRow> entry;
+    in property <bool> focused;
+
+    height: Metrics.root-font * 3.4;
+    border-radius: Theme.radius * 0.7;
+    background: focused ? #ffffff14 : transparent;
+    border-width: focused ? 2px : 0px;
+    border-color: Theme.focus-ring;
+    opacity: entry.playable ? 1.0 : 0.55;
+
+    HorizontalLayout {
+        padding-left: Metrics.root-font * 0.7;
+        padding-right: Metrics.root-font * 0.7;
+        padding-top: Metrics.root-font * 0.4;
+        padding-bottom: Metrics.root-font * 0.4;
+        spacing: Metrics.root-font * 0.7;
+
+        // The badge: what the source is worth at a glance.
+        VerticalLayout {
+            width: Metrics.root-font * 3.4;
+            alignment: center;
+            Text {
+                text: entry.quality == "" ? "—" : entry.quality;
+                color: Theme.text;
+                font-size: Metrics.root-font;
+                font-weight: 800;
+            }
+            if entry.flags != "": Text {
+                text: entry.flags;
+                color: Theme.accent;
+                font-size: Metrics.text-chip * 0.94;
+                font-weight: 700;
+                overflow: elide;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Metrics.text-chip * 0.4;
+
+            Text {
+                text: entry.release;
+                color: Theme.text;
+                font-size: Metrics.root-font * 0.92;
+                font-weight: 600;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: Metrics.text-chip * 0.5;
+                alignment: start;
+
+                if entry.cached: Chip { label: "Hazır"; tone: "good"; }
+                if !entry.playable: Chip { label: "Oynatılamaz"; tone: "bad"; }
+                if entry.kind != "": Chip { label: entry.kind; tone: entry.tone; }
+                for chip in entry.chips: Chip { label: chip; }
+            }
+        }
+    }
+}
+
+export component Detail inherits Rectangle {
+    in property <image> art-a;
+    in property <image> art-b;
+    in property <float> fade;
+    in property <image> poster;
+
+    in property <string> title;
+    in property <string> facts;
+    in property <string> summary;
+    in property <[string]> genres;
+    in property <[string]> people;
+
+    in property <[string]> actions;
+    in property <[string]> marks;
+    in property <[string]> cuts;
+    in property <[bool]> enabled;
+
+    in property <[SourceRow]> sources;
+    in property <string> sources-note;
+    in property <[TechRow]> technical;
+    in property <string> verdict;
+    in property <string> verdict-tone;
+
+    // Row 0 is the action strip; 1.. are the sources.
+    in property <int> focus-row;
+    in property <int> focus-col;
+
+    property <length> side-w: max(420px, min(620px, root.width * 0.30));
+    property <length> source-h: Metrics.root-font * 3.9;
+    property <length> list-h: root.height - Metrics.topbar * 2.4;
+    property <length> list-scroll: focus-row <= 1
+        ? 0px
+        : clamp((focus-row - 1) * source-h - list-h * 0.35, 0px,
+                max(0px, source-h * sources.length - list-h));
+
+    background: Theme.bg;
+    clip: true;
+
+    // The backdrop, as on the home screen and for the same reason: the title
+    // should look like the film before a word of it is read.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        clip: true;
+
+        Image {
+            width: 100%;
+            height: 100%;
+            source: art-a;
+            image-fit: cover;
+            opacity: 1.0 - fade;
+            animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
+        }
+        Image {
+            width: 100%;
+            height: 100%;
+            source: art-b;
+            image-fit: cover;
+            opacity: fade;
+            animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
+        }
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @linear-gradient(90deg,
+                #07080bd1 0%, #07080b80 34%, #07080b14 66%, transparent 100%);
+        }
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @linear-gradient(180deg,
+                #07080b 0%, #07080b57 30%, transparent 72%, #07080b 100%);
+        }
+    }
+
+    // What the title is.
+    VerticalLayout {
+        x: Metrics.gutter;
+        y: Metrics.topbar;
+        width: root.width - side-w - Metrics.gutter * 2.4;
+        height: root.height - Metrics.topbar * 2;
+        spacing: Metrics.root-font * 0.8;
+        alignment: center;
+
+        HorizontalLayout {
+            height: Metrics.card-h * 0.62;
+            spacing: Metrics.gutter * 0.7;
+            alignment: start;
+
+            Rectangle {
+                width: Metrics.card-h * 0.62 / 1.5;
+                height: Metrics.card-h * 0.62;
+                border-radius: Theme.radius-art * 0.7;
+                clip: true;
+                background: Theme.bg-card;
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: poster;
+                    image-fit: cover;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: Metrics.root-font * 0.4;
+
+                Text {
+                    text: title;
+                    color: Theme.text;
+                    font-size: Metrics.title-detail;
+                    font-weight: 800;
+                    letter-spacing: -0.025 * Metrics.title-detail;
+                    wrap: word-wrap;
+                    overflow: elide;
+                }
+
+                if facts != "": Text {
+                    text: facts;
+                    color: Theme.muted;
+                    font-size: Metrics.root-font * 1.05;
+                    font-weight: 600;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+
+                if genres.length > 0: HorizontalLayout {
+                    spacing: Metrics.text-chip * 0.5;
+                    alignment: start;
+                    for genre in genres: Chip { label: genre; }
+                }
+            }
+        }
+
+        if summary != "": Text {
+            text: summary;
+            color: Theme.muted;
+            font-size: Metrics.root-font * 0.98;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: Metrics.root-font * 7.2;
+        }
+
+        if people.length > 0: HorizontalLayout {
+            spacing: Metrics.text-chip * 0.5;
+            alignment: start;
+            for person in people: Chip { label: person; }
+        }
+
+        HorizontalLayout {
+            height: Metrics.card-w * 0.42;
+            spacing: Metrics.root-font * 0.7;
+            alignment: start;
+
+            for label[i] in actions: IconAction {
+                label: label;
+                mark: marks[i];
+                cut: cuts[i];
+                enabled: enabled[i];
+                primary: i == 0;
+                focused: focus-row == 0 && focus-col == i;
+            }
+        }
+    }
+
+    // Where it comes from, and what this box will do with it.
+    Rectangle {
+        x: root.width - side-w;
+        y: 0;
+        width: side-w;
+        height: 100%;
+        // Its own ground, bled to the edge of the panel: a list of sources over
+        // a film still is a list nobody can read.
+        background: @linear-gradient(90deg,
+            transparent 0%, #06070a94 7%, #06070adb 28%, #06070aeb 100%);
+
+        VerticalLayout {
+            padding-left: Metrics.root-font;
+            padding-right: Metrics.gutter * 0.6;
+            padding-top: Metrics.topbar * 0.7;
+            padding-bottom: Metrics.root-font;
+            spacing: Metrics.root-font * 0.5;
+
+            HorizontalLayout {
+                height: Metrics.root-font * 1.8;
+                spacing: Metrics.text-chip * 0.6;
+                alignment: start;
+
+                Text {
+                    text: "KAYNAKLAR";
+                    color: Theme.dim;
+                    font-size: Metrics.text-label;
+                    font-weight: 700;
+                    letter-spacing: 0.14 * Metrics.text-label;
+                    vertical-alignment: center;
+                }
+                if sources-note != "": Text {
+                    text: sources-note;
+                    color: Theme.muted;
+                    font-size: Metrics.text-chip;
+                    vertical-alignment: center;
+                }
+            }
+
+            // The list moves behind its own window, the way a shelf does.
+            Rectangle {
+                height: list-h;
+                clip: true;
+
+                strip := Rectangle {
+                    y: -list-scroll;
+                    width: 100%;
+                    height: source-h * sources.length + Metrics.root-font * 12;
+                    animate y { duration: Theme.glide; easing: Theme.ease; }
+
+                    for entry[i] in sources: Source {
+                        y: i * source-h;
+                        width: 100%;
+                        entry: entry;
+                        focused: focus-row == i + 1;
+                    }
+
+                    // What this appliance will do with the chosen source, in
+                    // the media core's own words rather than a guess from the
+                    // file name.
+                    VerticalLayout {
+                        y: source-h * sources.length + Metrics.root-font * 0.8;
+                        width: 100%;
+                        spacing: Metrics.text-chip * 0.7;
+                        alignment: start;
+
+                        if verdict != "": Chip { label: verdict; tone: verdict-tone; }
+
+                        for line in technical: HorizontalLayout {
+                            height: Metrics.text-chip * 2.0;
+                            spacing: Metrics.text-chip;
+                            Text {
+                                width: Metrics.root-font * 6;
+                                text: line.label;
+                                color: Theme.dim;
+                                font-size: Metrics.text-chip;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: line.value;
+                                color: line.tone == "bad" ? Theme.bad
+                                    : line.tone == "warn" ? Theme.warn
+                                    : Theme.text;
+                                font-size: Metrics.text-chip;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -32,10 +32,10 @@ const RAIL_LIMIT: usize = 20;
 
 /// The width posters are decoded at. The card is about 238 logical pixels wide
 /// at the 1920-pixel design, and twice that on a 4K panel at integer scale two.
-const POSTER_WIDTH: u32 = 480;
+pub const POSTER_WIDTH: u32 = 480;
 /// Backdrops are decoded once and drawn across the panel. The hosts serve about
 /// a thousand pixels; nothing is upscaled past what arrives.
-const BACKDROP_WIDTH: u32 = 1920;
+pub const BACKDROP_WIDTH: u32 = 1920;
 
 pub struct Item {
     pub id: String,

@@ -168,6 +168,13 @@ impl Client {
         self.call(request).await
     }
 
+    /// Opens an address in the box's browser application. The control plane
+    /// whitelists the scheme and starts the unit; this interface does not get
+    /// to run a browser, and does not want to.
+    pub async fn browser_open(&self, url: &str) -> Result<Value> {
+        self.call(json!({"command": "browser_open", "url": url})).await
+    }
+
     pub async fn kodi_status(&self) -> Result<Value> {
         self.call(json!({"command": "kodi_status"})).await
     }

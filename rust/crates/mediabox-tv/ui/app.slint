@@ -1,8 +1,9 @@
 import { Theme, Metrics } from "theme.slint";
 import { Home } from "home.slint";
+import { Detail, SourceRow, TechRow } from "detail.slint";
 import { RailModel, PosterItem } from "components.slint";
 
-export { RailModel, PosterItem }
+export { RailModel, PosterItem, SourceRow, TechRow }
 
 // What the television shows before there is anything to show.
 //
@@ -76,6 +77,29 @@ export component MediaBoxWindow inherits Window {
     in property <int> focus-col;
     in property <string> notice;
 
+    // The detail screen. Its own artwork layers, because the home screen's keep
+    // their own crossfade going behind it and coming back should not restart.
+    in property <image> detail-art-a;
+    in property <image> detail-art-b;
+    in property <float> detail-fade;
+    in property <image> detail-poster;
+    in property <string> detail-title;
+    in property <string> detail-facts;
+    in property <string> detail-summary;
+    in property <[string]> detail-genres;
+    in property <[string]> detail-people;
+    in property <[string]> detail-actions;
+    in property <[string]> detail-marks;
+    in property <[string]> detail-cuts;
+    in property <[bool]> detail-enabled;
+    in property <[SourceRow]> detail-sources;
+    in property <string> detail-note;
+    in property <[TechRow]> detail-technical;
+    in property <string> detail-verdict;
+    in property <string> detail-verdict-tone;
+    in property <int> detail-row;
+    in property <int> detail-col;
+
     // Every key the television can send arrives here and is answered in Rust:
     // the focus model is deterministic and structural, and splitting it between
     // two languages is how it stops being either.
@@ -94,6 +118,31 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             status: root.status;
             failed: root.failed;
+        }
+
+        if screen == "detail": Detail {
+            width: 100%;
+            height: 100%;
+            art-a: root.detail-art-a;
+            art-b: root.detail-art-b;
+            fade: root.detail-fade;
+            poster: root.detail-poster;
+            title: root.detail-title;
+            facts: root.detail-facts;
+            summary: root.detail-summary;
+            genres: root.detail-genres;
+            people: root.detail-people;
+            actions: root.detail-actions;
+            marks: root.detail-marks;
+            cuts: root.detail-cuts;
+            enabled: root.detail-enabled;
+            sources: root.detail-sources;
+            sources-note: root.detail-note;
+            technical: root.detail-technical;
+            verdict: root.detail-verdict;
+            verdict-tone: root.detail-verdict-tone;
+            focus-row: root.detail-row;
+            focus-col: root.detail-col;
         }
 
         if screen == "home": Home {
