@@ -275,7 +275,63 @@ Display mode: 1920x1080p24
 Esmart0-win0: format NV15, color HDR10[2] BT.2020 Limited, src 3840x2160 -> dst 1920x1080
 ```
 
-That capture is on a 1080p monitor, which is what was attached: this panel
-offers no 4K mode at all, so the accepted 3840x2160 baseline in the README
-cannot be reproduced on it. The colour chain is the same one; the scanout size
-is not.
+That capture was taken while the compositor was driving 1920x1080, which is
+what it had chosen — not what the panel offers. The attached monitor lists 59
+modes including 3840x2160, and prefers 3840x2560:
+
+```sh
+sort -u /sys/class/drm/card0-HDMI-A-1/modes | sort -t x -k1 -rn | head -3
+```
+
+So the colour chain above is the accepted one and the scanout size is not, but
+the reason is the compositor's mode choice rather than the panel's capability.
+Why wlroots settled on 1080p with no mode written down anywhere is a separate
+question from this one and has not been chased.
+
+### Where exactly the Wayland path fails
+
+`tools/egl-wayland-probe.c` answers it without a toolkit in the way: Wayland,
+EGL, and nothing else. Built for the appliance and run there against the
+wayland-gbm build, it gets the same driver to answer twice in one process:
+
+```text
+== control: the same driver on the GBM platform
+  display: 0xaaaafd525ae0  error: EGL_SUCCESS
+  arm_release_ver: g24p0-00eac0, rk_so_ver: 10
+  eglInitialize returned 1  error: EGL_SUCCESS
+  EGL_VERSION = 1.5 Valhall-"g24p0-00eac0"
+  EGL_VENDOR  = ARM
+  configs: 27
+
+== eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_KHR)
+  display: 0xaaaafd6899b0  error: EGL_SUCCESS
+
+== eglInitialize
+  arm_release_ver: g24p0-00eac0, rk_so_ver: 10
+  returned 0  error: EGL_NOT_INITIALIZED
+```
+
+So the driver is usable from an ordinary process — it is not a compositor-only
+library, and the GBM platform initialises and offers 27 configs. The Wayland
+platform is advertised, hands back a valid display, and then refuses to
+initialise it.
+
+mpv, pointed at the same runtime, fails at the same place with the same
+signature — the driver banner prints, and no `EGL_VERSION` line ever follows:
+
+```text
+[vo/gpu/opengl] Initializing GPU context 'wayland'
+arm_release_ver: g24p0-00eac0, rk_so_ver: 10
+[vo/gpu] Failed initializing any suitable GPU context!
+```
+
+Three things were ruled out along the way, so they do not need ruling out
+again. `libEGL.so.1` resolves to `libmali.so.1` and not to Mesa. The client
+extension string really does carry `EGL_EXT_platform_wayland` and
+`EGL_KHR_platform_wayland` at run time. And the `libwayland-egl.so.1` the
+package ships under `mali/` — which `install-mali-runtime.sh` does not link
+into the runtime directory — makes no difference: adding it changes nothing,
+the failure is identical either way.
+
+The conclusion is the driver's own Wayland backend, and there is nothing left
+in this repository's configuration to change about it.
