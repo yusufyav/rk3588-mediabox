@@ -25,6 +25,7 @@ The contract:
 
 from __future__ import annotations
 
+import itertools
 import logging
 import threading
 import time
@@ -100,6 +101,19 @@ ADDON_CACHE_SECONDS = 300.0
 #: catalogues cannot fill the screen by itself.
 HOME_CATALOGS_PER_ADDON = 4
 HOME_ITEMS_PER_CATALOG = 20
+#: How many catalogues may be fetched at the same time, and how long the whole
+#: home surface may take. The same shape as the stream fan-out above and for
+#: the same reason: asked one after another, the wait was the sum of every
+#: catalogue rather than the slowest one. Measured on the appliance, fourteen
+#: shelves: 5.15 s serial, 1.31 s here.
+#:
+#: Widening it was tried and does not help. This box has fourteen catalogues
+#: and eight workers, so the last six are fetched as the first eight finish —
+#: but the floor is one catalogue that takes 1.0-1.3 s on its own, and at
+#: sixteen the median was 1.33 s against 1.31 s. The remaining second is a
+#: third-party host, not the shape of this loop.
+HOME_FAN_OUT = 8
+HOME_DEADLINE = 6.0
 
 SEARCH_RESULTS_PER_CATALOG = 20
 
@@ -154,6 +168,12 @@ class HeadlessStremio:
         # has gone away costs a full connect timeout every time it is asked,
         # and asking it again thirty seconds later buys nothing.
         self._addon_failures: dict[str, float] = {}
+        # Home keeps its own record rather than sharing the one above. An addon
+        # that is slow to answer for streams is not necessarily slow for a
+        # catalogue — they are different endpoints and often different hosts —
+        # and one table would mean each surface penalising the other's addons
+        # for failures it never saw.
+        self._home_failures: dict[str, float] = {}
 
     # ------------------------------------------------------------------ session
 
@@ -282,10 +302,25 @@ class HeadlessStremio:
         A failing addon costs its own rows and nothing else. An appliance whose
         home screen is empty because one third-party service is down is not an
         appliance.
+
+        Asked one catalogue after another, the home screen cost the *sum* of
+        every catalogue on every installed addon: measured on the appliance at a
+        median of 5.1 s across ten calls, for fourteen rows — about 370 ms each,
+        every time the television was turned on. The wait is now the slowest
+        single catalogue, capped, which is the same arrangement `_gather_streams`
+        already had and for the same reason.
+
+        The order is the serial loop's order, not the order the answers arrive
+        in. Shelves that rearranged themselves on every start would be worse
+        than shelves that are slow.
         """
         wanted = set(types)
-        rows: list[CatalogRow] = []
+
+        # The work list, in the order the rows will appear.
+        jobs: list[tuple[Addon, Any]] = []
         for addon in self.addons():
+            if self._recently_failed(addon.id, self._home_failures):
+                continue
             taken = 0
             for catalog in addon.catalogs:
                 if taken >= HOME_CATALOGS_PER_ADDON:
@@ -294,24 +329,94 @@ class HeadlessStremio:
                     continue
                 if catalog.extra_required:
                     continue  # a catalogue that needs a genre is not a home row
-                try:
-                    items = self.addons_client.catalog(addon, catalog.type, catalog.id)
-                except UpstreamError as exc:
-                    LOG.info("Home row %s/%s unavailable: %s", addon.id, catalog.id, exc.message)
-                    continue
-                if not items:
-                    continue
-                rows.append(
-                    CatalogRow(
-                        addon_id=addon.id,
-                        addon_name=addon.name,
-                        catalog_id=catalog.id,
-                        type=catalog.type,
-                        name=catalog.name or f"{addon.name} {catalog.type}",
-                        items=tuple(items[:HOME_ITEMS_PER_CATALOG]),
-                    )
-                )
+                jobs.append((addon, catalog))
                 taken += 1
+
+        results: list[list[MetaPreview] | None] = [None] * len(jobs)
+        answered = [False] * len(jobs)
+
+        def ask(index: int, addon: Addon, catalog: Any) -> None:
+            began = self._clock()
+            try:
+                results[index] = self.addons_client.catalog(addon, catalog.type, catalog.id)
+            except UpstreamError as exc:
+                LOG.info("Home row %s/%s unavailable: %s", addon.id, catalog.id, exc.message)
+            except Exception as exc:  # a broken addon is not a broken appliance
+                LOG.info("Home row %s/%s failed: %s", addon.id, catalog.id, exc)
+            finally:
+                # Answered, even if the answer was "no". A refusal that came
+                # back in eighty milliseconds is not a reason to stop asking —
+                # only a host that hangs is, and that is caught at the deadline
+                # below. Penalising a fast error took thirteen shelves down to
+                # twelve for five minutes because one catalogue 404ed once.
+                answered[index] = True
+                LOG.info(
+                    "Home row %s/%s took %.0f ms",
+                    addon.id,
+                    catalog.id,
+                    (self._clock() - began) * 1000.0,
+                )
+
+        # A fixed number of daemon threads taking work off a shared counter,
+        # rather than one thread per catalogue. There are more catalogues than
+        # there are addons — fourteen on this box — and threading only the first
+        # eight would leave the rest to be fetched one after another on this
+        # thread, which is the wait being removed.
+        #
+        # They are joined with a deadline and never shut down: a pool's shutdown
+        # joins every worker, and a straggler must not be able to hold the home
+        # screen.
+        next_job = itertools.count()
+
+        def work() -> None:
+            for index in next_job:
+                if index >= len(jobs):
+                    return
+                addon, catalog = jobs[index]
+                ask(index, addon, catalog)
+
+        deadline = self._clock() + HOME_DEADLINE
+        threads = []
+        for slot in range(min(HOME_FAN_OUT, len(jobs))):
+            thread = threading.Thread(target=work, name=f"home-{slot}", daemon=True)
+            thread.start()
+            threads.append(thread)
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - self._clock()))
+
+        # Read once, so a straggler answering during the walk below cannot make
+        # two calls with the same answers produce different screens.
+        collected = list(results)
+
+        # Whoever was still hanging when the deadline came is the one worth not
+        # asking again for a while: it is the addon that costs the home screen
+        # a full wait every time the television is turned on.
+        for index, done in enumerate(answered):
+            if not done:
+                addon, catalog = jobs[index]
+                LOG.info(
+                    "Home row %s/%s did not answer within %.0fs",
+                    addon.id,
+                    catalog.id,
+                    HOME_DEADLINE,
+                )
+                self._note_failure(addon.id, self._home_failures)
+
+        rows: list[CatalogRow] = []
+        for (addon, catalog), items in zip(jobs, collected):
+            if not items:
+                continue
+            rows.append(
+                CatalogRow(
+                    addon_id=addon.id,
+                    addon_name=addon.name,
+                    catalog_id=catalog.id,
+                    type=catalog.type,
+                    name=catalog.name or f"{addon.name} {catalog.type}",
+                    items=tuple(items[:HOME_ITEMS_PER_CATALOG]),
+                )
+            )
         return rows
 
     def search(self, query: str, *, types: Iterable[str] | None = None) -> list[CatalogRow]:
@@ -450,19 +555,21 @@ class HeadlessStremio:
                 self._note_failure(addons[index].id)
         return results
 
-    def _recently_failed(self, addon_id: str) -> bool:
+    def _recently_failed(self, addon_id: str, table: dict[str, float] | None = None) -> bool:
+        table = self._addon_failures if table is None else table
         with self._lock:
-            at = self._addon_failures.get(addon_id)
+            at = table.get(addon_id)
             if at is None:
                 return False
             if self._clock() - at >= ADDON_PENALTY_SECONDS:
-                self._addon_failures.pop(addon_id, None)
+                table.pop(addon_id, None)
                 return False
             return True
 
-    def _note_failure(self, addon_id: str) -> None:
+    def _note_failure(self, addon_id: str, table: dict[str, float] | None = None) -> None:
+        table = self._addon_failures if table is None else table
         with self._lock:
-            self._addon_failures[addon_id] = self._clock()
+            table[addon_id] = self._clock()
 
     def resolve(self, stream: Stream) -> ResolvedStream:
         return self.server.resolve(stream)

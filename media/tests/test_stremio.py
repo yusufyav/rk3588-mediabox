@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 from typing import Any
 
@@ -322,6 +323,124 @@ class AdapterTests(unittest.TestCase):
         adapter = self._adapter([manifest], {("catalog", "a", "movie", "top"): [object()]})
         rows = adapter.home()
         self.assertEqual([row.catalog_id for row in rows], ["top"])
+
+    def test_home_keeps_the_order_the_shelves_are_declared_in(self):
+        """The order is the manifest's, never the order the answers arrive in.
+
+        The catalogues are fetched at the same time now, and a home screen whose
+        shelves rearranged themselves depending on which host was quickest that
+        morning would be worse than one that was slow.
+        """
+        manifests = [
+            {
+                "id": chr(ord("a") + i),
+                "name": chr(ord("A") + i),
+                "resources": ["catalog"],
+                "types": ["movie"],
+                "catalogs": [{"type": "movie", "id": f"c{i}", "name": f"Row {i}"}],
+            }
+            for i in range(4)
+        ]
+        table = {
+            ("catalog", chr(ord("a") + i), "movie", f"c{i}"): [object()] for i in range(4)
+        }
+        adapter = self._adapter(manifests, table)
+
+        # The last addon answers first and the first answers last.
+        delays = {"a": 0.08, "b": 0.06, "c": 0.04, "d": 0.02}
+        plain = adapter.addons_client.catalog
+
+        def slow(addon, type_name, catalog_id, extra=None):
+            time.sleep(delays[addon.id])
+            return plain(addon, type_name, catalog_id, extra)
+
+        adapter.addons_client.catalog = slow
+
+        began = time.monotonic()
+        rows = adapter.home()
+        took = time.monotonic() - began
+
+        self.assertEqual([row.catalog_id for row in rows], ["c0", "c1", "c2", "c3"])
+        # And they really were asked at the same time: run one after another
+        # this is 0.20s, and the slowest single one is 0.08s.
+        self.assertLess(took, 0.18)
+
+    def test_home_loses_only_the_shelf_of_an_addon_that_is_down(self):
+        a = {
+            "id": "a",
+            "name": "A",
+            "resources": ["catalog"],
+            "types": ["movie"],
+            "catalogs": [{"type": "movie", "id": "top", "name": "Popular"}],
+        }
+        b = {
+            "id": "b",
+            "name": "B",
+            "resources": ["catalog"],
+            "types": ["movie"],
+            "catalogs": [{"type": "movie", "id": "new", "name": "New"}],
+        }
+        adapter = self._adapter(
+            [a, b],
+            {("catalog", "b", "movie", "new"): [object()]},
+            failing={"a"},
+        )
+        rows = adapter.home()
+        self.assertEqual([row.catalog_id for row in rows], ["new"])
+
+    def test_a_catalogue_that_refuses_quickly_is_asked_again(self):
+        """An error is not a reason to stop asking; hanging is.
+
+        Penalising a fast refusal took a shelf off the home screen for five
+        minutes because one catalogue answered 404 once. What costs the home
+        screen is a host that does not answer at all, and that is caught at the
+        deadline rather than here.
+        """
+        a = {
+            "id": "a",
+            "name": "A",
+            "resources": ["catalog", "stream"],
+            "types": ["movie"],
+            "catalogs": [{"type": "movie", "id": "top", "name": "Popular"}],
+        }
+        adapter = self._adapter([a], {}, failing={"a"})
+        adapter.home()
+        self.assertFalse(adapter._recently_failed("a", adapter._home_failures))
+
+    def test_a_hanging_catalogue_is_penalised_only_on_the_home_surface(self):
+        """The two surfaces keep their own record of who is down.
+
+        They are different endpoints and often different hosts. One table would
+        mean a catalogue that hangs costing the same addon its sources, for a
+        failure the stream path never saw.
+        """
+        a = {
+            "id": "a",
+            "name": "A",
+            "resources": ["catalog", "stream"],
+            "types": ["movie"],
+            "catalogs": [{"type": "movie", "id": "top", "name": "Popular"}],
+        }
+        adapter = self._adapter([a], {})
+
+        def hangs(addon, type_name, catalog_id, extra=None):
+            time.sleep(0.3)
+            return []
+
+        adapter.addons_client.catalog = hangs
+
+        from ..stremio import adapter as adapter_module
+
+        previous = adapter_module.HOME_DEADLINE
+        adapter_module.HOME_DEADLINE = 0.05
+        try:
+            rows = adapter.home()
+        finally:
+            adapter_module.HOME_DEADLINE = previous
+
+        self.assertEqual(rows, [])
+        self.assertTrue(adapter._recently_failed("a", adapter._home_failures))
+        self.assertFalse(adapter._recently_failed("a"))
 
     def test_resolving_a_descriptor_refuses_an_unplayable_one(self):
         adapter = self._adapter([], {})
