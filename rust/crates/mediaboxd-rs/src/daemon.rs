@@ -120,6 +120,7 @@ impl AppState {
                 start_seconds,
             } => self.play_here(url, stream, start_seconds).await,
             Request::MediaHandoffToKodi => self.handoff_to_kodi().await,
+            Request::MediaStatusHere => Response::success(self.player.status().await),
             Request::MediaTransportHere { action } => {
                 let moved = self.player.transport(action).await;
                 Response::success(json!({"moved": moved}))

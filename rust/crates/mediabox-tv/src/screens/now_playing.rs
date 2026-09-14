@@ -81,7 +81,10 @@ pub struct NowPlaying {
 
 impl NowPlaying {
     pub fn new() -> Self {
-        Self { note: "Şu anda bir şey oynatılmıyor".into(), ..Self::default() }
+        Self {
+            note: "Şu anda bir şey oynatılmıyor".into(),
+            ..Self::default()
+        }
     }
 
     pub fn playing(&self) -> bool {
@@ -89,7 +92,10 @@ impl NowPlaying {
     }
 
     pub fn active(&self) -> bool {
-        matches!(self.state, Some(PlaybackState::Playing) | Some(PlaybackState::Paused))
+        matches!(
+            self.state,
+            Some(PlaybackState::Playing) | Some(PlaybackState::Paused)
+        )
     }
 
     pub fn progress(&self) -> f32 {
@@ -115,6 +121,54 @@ impl NowPlaying {
         true
     }
 
+    /// One `media_status_here` answer: the interface's own player, not Kodi.
+    ///
+    /// Shorter than the Kodi one on purpose. The film's name, its artwork and
+    /// its technical rows were carried here from the detail screen when it was
+    /// opened, and asking the decoder for them again would only be able to
+    /// answer worse.
+    pub fn take_here(&mut self, status: &Value) {
+        let seconds = |key: &str| -> u64 {
+            status
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value as u64)
+                .unwrap_or(0)
+        };
+        // A film opened from this interface carried its name here; one opened
+        // from the web interface did not, and "MediaBox" over somebody's film
+        // is worse than the file's own name.
+        if self.title.is_empty()
+            && let Some(source) = status.get("source").and_then(Value::as_str)
+        {
+            let tail = source.rsplit('/').next().unwrap_or(source);
+            let name = tail.split('?').next().unwrap_or(tail);
+            let name = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
+            if !name.is_empty() {
+                self.title = name.replace(['.', '_'], " ");
+            }
+        }
+        self.elapsed_seconds = seconds("position");
+        self.duration_seconds = seconds("duration");
+        self.surface = "MediaBox".into();
+        self.state = Some(
+            if status
+                .get("paused")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                PlaybackState::Paused
+            } else {
+                PlaybackState::Playing
+            },
+        );
+        self.note = match self.state {
+            Some(PlaybackState::Paused) => "Duraklatıldı".into(),
+            _ => String::new(),
+        };
+    }
+
     /// One `kodi_status` answer. Everything optional, because a player between
     /// two files answers with almost nothing.
     pub fn take(&mut self, status: &Value) {
@@ -132,8 +186,12 @@ impl NowPlaying {
             self.title = title;
         }
 
-        let year = item.and_then(|item| item.get("year")).and_then(Value::as_u64);
-        let kind = item.and_then(|item| item.get("type")).and_then(Value::as_str);
+        let year = item
+            .and_then(|item| item.get("year"))
+            .and_then(Value::as_u64);
+        let kind = item
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str);
         let mut facts: Vec<String> = Vec::new();
         if let Some(year) = year.filter(|y| *y > 0) {
             facts.push(year.to_string());
@@ -148,7 +206,10 @@ impl NowPlaying {
         self.subtitle = facts.join("  ·  ");
 
         if let Some(art) = item
-            .and_then(|item| item.pointer("/art/poster").or_else(|| item.pointer("/art/thumb")))
+            .and_then(|item| {
+                item.pointer("/art/poster")
+                    .or_else(|| item.pointer("/art/thumb"))
+            })
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
@@ -165,8 +226,15 @@ impl NowPlaying {
         self.elapsed_seconds = clock_seconds(status.get("time"));
         self.duration_seconds = clock_seconds(status.get("total_time"));
 
-        let running = status.get("running").and_then(Value::as_bool).unwrap_or(false);
-        self.surface = if running { "Kodi".into() } else { String::new() };
+        let running = status
+            .get("running")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.surface = if running {
+            "Kodi".into()
+        } else {
+            String::new()
+        };
 
         self.note = match self.state {
             Some(PlaybackState::Playing) => String::new(),
@@ -266,6 +334,9 @@ mod tests {
     fn play_and_pause_are_the_same_button_with_two_faces() {
         assert_eq!(Control::PlayPause.label(true), "Duraklat");
         assert_eq!(Control::PlayPause.label(false), "Devam Et");
-        assert_ne!(Control::PlayPause.mark(true), Control::PlayPause.mark(false));
+        assert_ne!(
+            Control::PlayPause.mark(true),
+            Control::PlayPause.mark(false)
+        );
     }
 }

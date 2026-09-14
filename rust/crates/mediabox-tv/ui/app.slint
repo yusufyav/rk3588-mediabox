@@ -5,6 +5,7 @@ import { Search } from "search.slint";
 import { Library } from "library.slint";
 import { Detail, SourceRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
+import { Player } from "player.slint";
 import { Settings } from "settings.slint";
 import { Diagnostics } from "diagnostics.slint";
 import {
@@ -60,7 +61,7 @@ export component MediaBoxWindow inherits Window {
     // desktop to look at a layout. It is the design's own size for that reason.
     preferred-width: 1920px;
     preferred-height: 1080px;
-    background: Theme.bg;
+    background: screen == "film" ? #00000000 : Theme.bg;
     default-font-size: Metrics.root-font;
     // Installed on the appliance from Debian's own archive rather than carried
     // in this repository: Slint reads the system's fonts, and a typeface is not
@@ -71,6 +72,10 @@ export component MediaBoxWindow inherits Window {
     // Which screen is on the panel. Rust owns this; the interface never decides
     // where it is on its own.
     in property <string> screen: "boot";
+    /// Whether the film's own controls are up. They come up on a key and go
+    /// down by themselves; a film with a control bar permanently across it is
+    /// not a television.
+    in property <bool> film-controls;
 
     in property <string> status: "Başlatılıyor…";
     in property <bool> failed: false;
@@ -319,7 +324,7 @@ export component MediaBoxWindow inherits Window {
         // The bar. One component for every screen, so where the viewer is in
         // the product, what time it is and whether the box is on the network
         // are answered the same way everywhere.
-        if screen != "boot": TopBar {
+        if screen != "boot" && screen != "film": TopBar {
             x: 0;
             y: 0;
             width: 100%;
@@ -365,6 +370,23 @@ export component MediaBoxWindow inherits Window {
             kind: root.sheet-kind;
             rows: root.sheet-rows;
             index: root.sheet-index;
+        }
+
+        // On top of the film. `screen` is "film" while one is playing and no
+        // other screen matches that, so nothing else is drawn and the panel is
+        // the film, black where the film does not reach, and this.
+        if screen == "film": Player {
+            width: 100%;
+            height: 100%;
+            title: root.np-title;
+            subtitle: root.np-subtitle;
+            note: root.np-note;
+            elapsed: root.np-elapsed;
+            duration: root.np-duration;
+            progress: root.np-progress;
+            controls: root.np-controls;
+            focus-index: root.np-focus;
+            open: root.film-controls;
         }
     }
 

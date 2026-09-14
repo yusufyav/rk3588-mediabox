@@ -121,12 +121,17 @@ struct App {
     diag: Option<Value>,
     display: Option<model::DisplayStatus>,
 
-    /// Whether the film on the panel is on this interface's own video plane.
+    /// Whether the film's controls were up when the key being acted on was
+    /// pressed. Read only by Back; see there.
+    controls_were_open: bool,
+
+    /// The film this interface started on its own video plane, if there is
+    /// one.
     ///
     /// Which player a transport key reaches is decided by this and nothing
-    /// else: the two are never both running, and asking the control plane
-    /// what is playing would answer a frame too late.
-    here: bool,
+    /// else: the two are never both running, and asking the control plane what
+    /// is playing would answer a frame too late.
+    here: Option<Playing>,
 
     detail_backdrop: Option<String>,
     detail_fade: f32,
@@ -153,6 +158,16 @@ impl App {
     fn act(&mut self, action: InputAction) {
         self.meter.key_accepted();
         let intent = actions::intent_for(self.route(), self.modal(), action);
+
+        // A film is watched, not operated: the controls are down until somebody
+        // presses something, and then they are up for a few seconds. Any key
+        // does it, including the one that is about to be acted on — pressing
+        // Right on a film that shows nothing must both reveal the controls and
+        // move the focus, or the second press is the one that appears to work.
+        self.controls_were_open = self.controls_open();
+        if self.here.is_some() && !matches!(intent, Intent::Ignore) {
+            self.open_controls();
+        }
 
         if self.sheet.is_some() {
             self.act_on_sheet(intent);
@@ -337,14 +352,7 @@ impl App {
                     self.open_detail_for(&item);
                 }
             }
-            Intent::Dismiss => {
-                // The film is on the window above this one, so there is no
-                // "leave it running and go back": going back is stopping.
-                if self.here {
-                    self.transport(Transport::Stop);
-                }
-                self.back()
-            }
+            Intent::Dismiss => self.back(),
             _ => {}
         }
     }
@@ -650,7 +658,7 @@ impl App {
 
         self.remember();
         self.store.flush();
-        self.here = true;
+        self.here = Some(Playing::new());
 
         if let Some(window) = self.window.upgrade() {
             window.set_detail_note("Oynatılıyor…".into());
@@ -660,6 +668,108 @@ impl App {
         // so the screen behind it is the one a remote should already be on when
         // it comes back.
         self.open(Route::NowPlaying);
+    }
+
+    fn controls_open(&self) -> bool {
+        self.here
+            .as_ref()
+            .and_then(|playing| playing.controls_until)
+            .is_some_and(|until| until > std::time::Instant::now())
+    }
+
+    fn open_controls(&mut self) {
+        let Some(playing) = self.here.as_mut() else {
+            return;
+        };
+        playing.controls_until = Some(std::time::Instant::now() + CONTROLS_LINGER);
+        self.paint();
+    }
+
+    fn close_controls(&mut self) {
+        let Some(playing) = self.here.as_mut() else {
+            return;
+        };
+        playing.controls_until = None;
+        self.paint();
+    }
+
+    /// Where the film has got to, as the player itself answers it.
+    fn film_moved(&mut self, status: Value) {
+        if self.here.is_none() {
+            return;
+        }
+        self.now.take_here(&status);
+        if self.controls_open() {
+            self.paint();
+        }
+    }
+
+    /// Whether the film this interface started is still on the panel.
+    ///
+    /// Called four times a second, and it is the only thing that clears the
+    /// film state: a film that ends by itself, a player that dies, and a source
+    /// that never opens all look the same from here — no picture — and are told
+    /// apart by whether there ever was one.
+    fn watch_the_film(&mut self) {
+        // A film this interface did not start is still a film on this
+        // interface's plane: the web interface can open one, and a viewer in
+        // front of the television should be able to pause it without being
+        // told which device asked for it.
+        if self.here.is_none() {
+            if !platform::video_showing() {
+                return;
+            }
+            eprintln!("mediabox-tv.play adopted a film this interface did not start");
+            self.here = Some(Playing {
+                seen: true,
+                ..Playing::new()
+            });
+            if self.route() != Route::NowPlaying {
+                self.open(Route::NowPlaying);
+            }
+            self.paint();
+        }
+
+        let Some(playing) = self.here.as_mut() else {
+            return;
+        };
+        let showing = platform::video_showing();
+
+        if showing {
+            playing.seen = true;
+            // The position and whether it is paused are the player's to answer,
+            // and it is asked only while it is up.
+            let due = playing
+                .polled
+                .is_none_or(|last| last.elapsed() >= POSITION_INTERVAL);
+            if due {
+                playing.polled = Some(std::time::Instant::now());
+                spawn_here_status();
+            }
+            if playing
+                .controls_until
+                .is_some_and(|until| until <= std::time::Instant::now())
+            {
+                self.close_controls();
+            }
+            return;
+        }
+        if !playing.seen && playing.asked.elapsed() < FIRST_FRAME_GRACE {
+            return;
+        }
+
+        if !playing.seen {
+            eprintln!("mediabox-tv.play here gave up: no frame in {FIRST_FRAME_GRACE:?}");
+            if let Some(window) = self.window.upgrade() {
+                window.set_notice("Kaynak açılamadı".into());
+            }
+            spawn_here(HereCommand::Stop);
+        }
+        self.here = None;
+        if self.route() == Route::NowPlaying {
+            self.back();
+        }
+        self.paint();
     }
 
     fn trailer(&mut self) {
@@ -691,7 +801,21 @@ impl App {
                     Control::Stop => self.transport(Transport::Stop),
                 }
             }
-            Intent::Dismiss => self.back(),
+            Intent::Dismiss => {
+                // A film is on the window above this one, so there is no
+                // "leave it running and go back": going back is stopping. But
+                // Back is also a key, and every key on a bare film brings the
+                // controls up first — so the question is whether they were
+                // already up when this one was pressed, not whether they are up
+                // now, which they always are by the time this runs.
+                if self.here.is_some() {
+                    if !self.controls_were_open {
+                        return;
+                    }
+                    self.transport(Transport::Stop);
+                }
+                self.back()
+            }
             _ => {}
         }
     }
@@ -704,12 +828,12 @@ impl App {
         // by which one this interface started, not by asking: a remote pressed
         // while a film is on our own plane must never reach Kodi, which is not
         // running and whose start would take the television.
-        if self.here {
+        if self.here.is_some() {
             match transport {
                 Transport::PlayPause => spawn_here(HereCommand::PlayPause),
                 Transport::Seek(seconds) => spawn_here(HereCommand::Seek(seconds)),
                 Transport::Stop => {
-                    self.here = false;
+                    self.here = None;
                     spawn_here(HereCommand::Stop);
                 }
                 Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
@@ -1025,6 +1149,21 @@ impl App {
             return;
         };
         let route = self.route();
+        // A film is drawn by the display controller on the window under this
+        // one, so while one is playing this surface is transparent and carries
+        // the film's own controls and nothing else. No screen answers to
+        // "film", which is how the rest of the interface is kept off the panel.
+        if self.here.is_some() {
+            window.set_screen("film".into());
+            let open = self.controls_open();
+            window.set_film_controls(open);
+            if std::env::var_os("MEDIABOX_TV_TRACE_INPUT").is_some() {
+                eprintln!("mediabox-tv.film paint controls={open}");
+            }
+            self.paint_now_playing(&window);
+            self.paint_sheet(&window);
+            return;
+        }
         window.set_screen(route.name().into());
 
         self.paint_sheet(&window);
@@ -1489,7 +1628,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: None,
         diag: None,
         display: None,
-        here: false,
+        controls_were_open: false,
+        here: None,
         detail_backdrop: None,
         detail_fade: 0.0,
         epoch: 0,
@@ -1592,22 +1732,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A film ends by itself as often as it is stopped, and when it does the
     // player exits and the video window goes dark — this process is the one
-    // holding it, so it knows without asking anybody. Without this the
-    // interface would still believe a film was playing and send the next
-    // transport key to a player that is no longer there.
+    // holding it, so it knows without asking anybody.
     let ended = slint::Timer::default();
     ended.start(
         slint::TimerMode::Repeated,
-        Duration::from_millis(500),
+        Duration::from_millis(250),
         || {
-            with_app(|app| {
-                if app.here && !platform::video_showing() {
-                    app.here = false;
-                    if app.route() == Route::NowPlaying {
-                        app.back();
-                    }
-                }
-            });
+            with_app(|app| app.watch_the_film());
         },
     );
 
@@ -1785,12 +1916,69 @@ fn spawn_play(url: Option<String>, raw: serde_json::Value) {
     });
 }
 
+/// A film this interface started on its own video plane.
+struct Playing {
+    /// When the player was asked to start. A source takes a second or two to
+    /// open and the plane is dark until it has.
+    asked: std::time::Instant,
+    /// Until when the controls stay up. None is a film with nothing over it,
+    /// which is the ordinary state of watching one.
+    controls_until: Option<std::time::Instant>,
+    /// When the player was last asked where it had got to.
+    polled: Option<std::time::Instant>,
+    /// Whether a frame has actually reached the plane.
+    ///
+    /// This is the whole reason this is a struct rather than a flag. The
+    /// watcher below reads "no picture" as "the film has ended", and for the
+    /// first seconds of every film that is exactly wrong: the interface
+    /// believed the film was already over before its first frame arrived, went
+    /// back to the home screen, and sent every transport key from then on to
+    /// Kodi — so a film played with no way to pause, seek or stop it, over a
+    /// home screen showing through its own letterbox.
+    seen: bool,
+}
+
+impl Playing {
+    fn new() -> Self {
+        Self {
+            asked: std::time::Instant::now(),
+            controls_until: None,
+            polled: None,
+            seen: false,
+        }
+    }
+}
+
+/// How long a film may take to put its first frame on the plane before the
+/// interface stops waiting for it. Measured on the appliance: a local file is
+/// on screen in under a second, a stream over the network in two to four.
+const FIRST_FRAME_GRACE: Duration = Duration::from_secs(25);
+
+/// How long the controls stay up after the last press.
+const CONTROLS_LINGER: Duration = Duration::from_secs(5);
+
+/// How often the player is asked where it has got to, while it is up.
+const POSITION_INTERVAL: Duration = Duration::from_millis(900);
+
 /// What the remote can do to a film playing on this interface's own video
 /// plane. Closed for the same reason `KodiCommand` is.
 enum HereCommand {
     PlayPause,
     Stop,
     Seek(i64),
+}
+
+/// Asks the interface's own player where it has got to.
+fn spawn_here_status() {
+    detached("mediabox-tv-here-status", async move {
+        let client = rpc::Client::new(socket_path());
+        let Ok(status) = client.status_here().await else {
+            return;
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.film_moved(status));
+        });
+    });
 }
 
 fn spawn_here(command: HereCommand) {
@@ -1823,7 +2011,7 @@ fn spawn_play_here(url: Option<String>, raw: serde_json::Value) {
                 let message = e.to_string();
                 let _ = slint::invoke_from_event_loop(move || {
                     with_app(|app| {
-                        app.here = false;
+                        app.here = None;
                         if let Some(window) = app.window.upgrade() {
                             window.set_detail_note(format!("Oynatılamadı — {message}").into());
                         }

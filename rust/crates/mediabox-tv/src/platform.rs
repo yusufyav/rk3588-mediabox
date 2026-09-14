@@ -66,7 +66,7 @@ impl Buffer for ImportedPlane {
         self.size
     }
     fn format(&self) -> DrmFourcc {
-        DrmFourcc::Xrgb8888
+        DrmFourcc::Argb8888
     }
     fn pitch(&self) -> u32 {
         self.pitch
@@ -81,7 +81,7 @@ impl PlanarBuffer for ImportedPlane {
         self.size
     }
     fn format(&self) -> DrmFourcc {
-        DrmFourcc::Xrgb8888
+        DrmFourcc::Argb8888
     }
     fn modifier(&self) -> Option<DrmModifier> {
         (!matches!(self.modifier, DrmModifier::Invalid)).then_some(self.modifier)
@@ -351,7 +351,7 @@ impl SplitDisplay {
             .create_surface::<Scanout>(
                 width.into(),
                 height.into(),
-                gbm::Format::Xrgb8888,
+                gbm::Format::Argb8888,
                 gbm::BufferObjectFlags::RENDERING
                     | gbm::BufferObjectFlags::SCANOUT
                     | gbm::BufferObjectFlags::LINEAR,
@@ -375,6 +375,17 @@ impl SplitDisplay {
         // The other windows of this video port. The interface keeps the primary
         // and keeps DRM master; a film goes on one of these, scaled and
         // converted by the display controller rather than by anything of ours.
+        // The interface's own window goes on top of the film's, and its
+        // surface carries alpha, so what this process draws is an overlay on a
+        // film rather than a thing hidden behind one.
+        match crate::video::raise_interface(&kms, crtc) {
+            Some(raised) => eprintln!("mediabox-tv.video interface raised {raised}"),
+            None => eprintln!(
+                "mediabox-tv.video could not raise the interface above the film; \
+                 player controls will not be visible"
+            ),
+        }
+
         let video = crate::video::VideoPlane::candidates(&kms, crtc, None);
         eprintln!(
             "mediabox-tv.video overlay candidates={} [{}]",
@@ -479,7 +490,7 @@ impl SplitDisplay {
     ) -> Result<PresentedFrame, Box<dyn std::error::Error + Send + Sync>> {
         let mut bo = unsafe { self.gbm_surface.lock_front_buffer() }
             .map_err(|e| format!("lock Mali GBM front buffer: {e}"))?;
-        if bo.format() != gbm::Format::Xrgb8888 {
+        if bo.format() != gbm::Format::Argb8888 {
             return Err(format!("unexpected GBM format: {:?}", bo.format()).into());
         }
 
@@ -650,6 +661,10 @@ impl SplitDisplay {
         self.sink
             .borrow_mut()
             .clear(&self.kms, self.crtc, &self.video);
+        // And the stacking order, which belongs to the connector rather than to
+        // whoever set it: Kodi assigns this port's windows for itself and must
+        // not inherit a primary this process raised.
+        crate::video::lower_interface(&self.kms, self.crtc);
         let _ = self.wait_for_page_flip();
         let _ = self.kms.set_crtc(self.crtc, None, (0, 0), &[], None);
         let (pending, current) = {
@@ -772,14 +787,14 @@ impl GlContext {
         }
         .map_err(|e| format!("create EGL display on Mali GBM: {e}"))?;
         let template = ConfigTemplateBuilder::new()
-            .with_transparency(false)
-            .with_alpha_size(0)
+            .with_transparency(true)
+            .with_alpha_size(8)
             .build();
         let config = unsafe { gl_display.find_configs(template) }
             .map_err(|e| format!("enumerate EGL configs: {e}"))?
-            .filter(|config| matches!(config, glutin::config::Config::Egl(egl) if egl.native_visual() as u32 == gbm::Format::Xrgb8888 as u32))
+            .filter(|config| matches!(config, glutin::config::Config::Egl(egl) if egl.native_visual() as u32 == gbm::Format::Argb8888 as u32))
             .min_by_key(|config| config.num_samples())
-            .ok_or_else(|| PlatformError::from("no EGL XRGB8888 window config".to_string()))?;
+            .ok_or_else(|| PlatformError::from("no EGL ARGB8888 window config".to_string()))?;
         let attrs = ContextAttributesBuilder::new()
             .with_context_api(ContextApi::Gles(Some(glutin::context::Version {
                 major: 2,

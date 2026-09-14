@@ -188,6 +188,10 @@ impl Client {
         self.call(json!({"command": "media_stop_here"})).await
     }
 
+    pub async fn status_here(&self) -> Result<Value> {
+        self.call(json!({"command": "media_status_here"})).await
+    }
+
     pub async fn transport_here(&self, action: Value) -> Result<Value> {
         self.call(json!({"command": "media_transport_here", "action": action}))
             .await

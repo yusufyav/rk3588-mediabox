@@ -115,6 +115,38 @@ impl PlayerManager {
             .map(|seconds| seconds as u64)
     }
 
+    /// Where the film is and whether it is moving.
+    ///
+    /// Three questions rather than one because mpv answers one property per
+    /// request; the alternative is a command language on this side, and the
+    /// point of this module is that there is not one.
+    pub async fn status(&self) -> Value {
+        let playing = self.playing().await;
+        let number = |answer: Option<Value>| -> Option<f64> {
+            answer?.get("data")?.as_f64().filter(|value| value.is_finite())
+        };
+        let position = number(
+            self.ask(json!({"command": ["get_property", "time-pos"], "request_id": 1}))
+                .await,
+        );
+        let duration = number(
+            self.ask(json!({"command": ["get_property", "duration"], "request_id": 2}))
+                .await,
+        );
+        let paused = self
+            .ask(json!({"command": ["get_property", "pause"], "request_id": 3}))
+            .await
+            .and_then(|answer| answer.get("data").and_then(Value::as_bool));
+
+        json!({
+            "playing": playing.is_some() && position.is_some(),
+            "source": playing.as_ref().map(|playing| playing.source.clone()),
+            "position": position.unwrap_or(0.0),
+            "duration": duration.unwrap_or(0.0),
+            "paused": paused.unwrap_or(false),
+        })
+    }
+
     /// Pause or resume, or jump, without stopping. Quiet if nothing is
     /// playing: a remote pressed at the wrong moment is not an error.
     pub async fn transport(&self, action: mediabox_core::TransportAction) -> bool {

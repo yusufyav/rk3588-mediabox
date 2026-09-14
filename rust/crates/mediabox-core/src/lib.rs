@@ -342,6 +342,10 @@ pub enum Request {
     MediaHandoffToKodi,
     /// Stop the interface's own player, if one is running.
     MediaStopHere,
+    /// How far into the film the interface's own player has got, and whether
+    /// it is paused. Answered by the player itself rather than remembered,
+    /// because the person watching may have moved it.
+    MediaStatusHere,
     /// Move what is playing here, without stopping it.
     ///
     /// A closed set rather than a pass-through to the player's own command

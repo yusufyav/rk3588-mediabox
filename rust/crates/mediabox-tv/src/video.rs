@@ -122,6 +122,112 @@ impl PlanarBuffer for Planar {
     }
 }
 
+/// Put the interface's own window above the film's.
+///
+/// The display controller composites the video port's windows by `zpos`, and
+/// on this board both windows carry that property as a range of 0 to 11: the
+/// primary starts at 0 and Esmart0 at 11, so a film covers the interface
+/// completely. That is right for the picture and wrong for everything else —
+/// there is then nowhere to draw what is playing, how far in it is, or which
+/// button the remote is on, and a film plays with no way to see that it can be
+/// controlled at all.
+///
+/// Swapping them is only half of it: the interface's surface has to carry alpha
+/// for the film to show through the parts it does not draw, which is why the
+/// scanout buffers are ARGB8888 rather than XRGB8888. With both, the interface
+/// is an overlay on the film exactly the way it is an overlay on its own
+/// wallpaper.
+///
+/// Returns the plane it raised, for the journal.
+pub fn raise_interface<D: ControlDevice>(
+    device: &D,
+    crtc: control::crtc::Handle,
+) -> Option<String> {
+    stack_interface(device, crtc, true)
+}
+
+/// Put it back where it was found.
+///
+/// The stacking order belongs to the connector's own state and outlives the
+/// process that set it — the same property that left an HDR colourspace on this
+/// panel after a film. Kodi assigns this port's windows for itself and must not
+/// inherit a primary somebody else raised.
+pub fn lower_interface<D: ControlDevice>(device: &D, crtc: control::crtc::Handle) {
+    stack_interface(device, crtc, false);
+}
+
+fn stack_interface<D: ControlDevice>(
+    device: &D,
+    crtc: control::crtc::Handle,
+    above: bool,
+) -> Option<String> {
+    let planes = device.plane_handles().ok()?;
+    let resources = device.resource_handles().ok()?;
+    for handle in planes {
+        let Ok(info) = device.get_plane(handle) else {
+            continue;
+        };
+        if !resources
+            .filter_crtcs(info.possible_crtcs())
+            .contains(&crtc)
+        {
+            continue;
+        }
+        // The primary is the one the interface's own page flips land on, and
+        // unlike `NAME` its type is an ordinary enum this crate keeps.
+        if !is_primary(device, handle) {
+            continue;
+        }
+        let (property, top) = zpos(device, handle)?;
+        let depth = if above { top } else { 0 };
+        if device.set_property(handle, property, depth).is_err() {
+            return None;
+        }
+        return Some(format!("{handle:?}@{depth}"));
+    }
+    None
+}
+
+fn is_primary<D: ControlDevice>(device: &D, plane: control::plane::Handle) -> bool {
+    let Ok(properties) = device.get_properties(plane) else {
+        return false;
+    };
+    let (handles, values) = properties.as_props_and_values();
+    for (handle, value) in handles.iter().zip(values.iter()) {
+        let Ok(info) = device.get_property(*handle) else {
+            continue;
+        };
+        if info.name().to_str() == Ok("type") {
+            // DRM_PLANE_TYPE_PRIMARY.
+            return *value == 1;
+        }
+    }
+    false
+}
+
+/// A plane's `zpos` property and the top of its range.
+fn zpos<D: ControlDevice>(
+    device: &D,
+    plane: control::plane::Handle,
+) -> Option<(control::property::Handle, u64)> {
+    let properties = device.get_properties(plane).ok()?;
+    for handle in properties.as_props_and_values().0.iter().copied() {
+        let Ok(info) = device.get_property(handle) else {
+            continue;
+        };
+        if info.name().to_str() != Ok("zpos") {
+            continue;
+        }
+        let top = match info.value_type() {
+            control::property::ValueType::UnsignedRange(_, high) => high,
+            control::property::ValueType::SignedRange(_, high) => high.max(0) as u64,
+            _ => continue,
+        };
+        return Some((handle, top));
+    }
+    None
+}
+
 /// `COLOR_ENCODING` and `COLOR_RANGE` on one plane, by name.
 ///
 /// By name because these are the two DRM properties whose identifiers differ
@@ -172,6 +278,9 @@ pub struct VideoPlane {
     /// limited/full — and both start on the first of each.
     encoding: Option<control::property::Handle>,
     range: Option<control::property::Handle>,
+    /// `zpos`, so the film can be put under the interface rather than over it.
+    depth: Option<control::property::Handle>,
+    sunk: std::cell::Cell<bool>,
     /// What was last set, so a property is not written on every frame.
     applied: std::cell::Cell<Option<Colour>>,
     pub name: String,
@@ -230,11 +339,14 @@ impl VideoPlane {
                 continue;
             }
             let (encoding, range) = colour_properties(device, handle);
+            let depth = zpos(device, handle).map(|(property, _)| property);
             found.push(Self {
                 plane: handle,
                 formats,
                 encoding,
                 range,
+                depth,
+                sunk: std::cell::Cell::new(false),
                 applied: std::cell::Cell::new(None),
                 name: format!("{handle:?}"),
             });
@@ -338,6 +450,7 @@ impl VideoPlane {
         dst: Rect,
     ) -> Result<(), String> {
         self.apply_colour(device, frame.colour);
+        self.sink_below_the_interface(device);
         device
             .set_plane(
                 self.plane,
@@ -348,6 +461,21 @@ impl VideoPlane {
                 (0, 0, frame.width << 16, frame.height << 16),
             )
             .map_err(|e| format!("DRM_IOCTL_MODE_SETPLANE(video): {e}"))
+    }
+
+    /// The bottom of the stack, so the interface is drawn over the film.
+    ///
+    /// The other half of `raise_interface`; done here because a plane only has
+    /// a stacking order while it is being used.
+    fn sink_below_the_interface<D: ControlDevice>(&self, device: &D) {
+        if self.sunk.get() {
+            return;
+        }
+        let Some(property) = self.depth else { return };
+        match device.set_property(self.plane, property, 0) {
+            Ok(()) => self.sunk.set(true),
+            Err(e) => eprintln!("mediabox-tv.video zpos: {e}"),
+        }
     }
 
     /// Tell the plane which matrix and which range the frame uses.
@@ -382,6 +510,7 @@ impl VideoPlane {
     /// and does not need to be told.
     pub fn hide<D: ControlDevice>(&self, device: &D, crtc: control::crtc::Handle) {
         self.applied.set(None);
+        self.sunk.set(false);
         // A null framebuffer is what turns a plane off; the CRTC is named only
         // because the ioctl has a field for it.
         if let Err(e) = device.set_plane(self.plane, crtc, None, 0, (0, 0, 0, 0), (0, 0, 0, 0)) {
