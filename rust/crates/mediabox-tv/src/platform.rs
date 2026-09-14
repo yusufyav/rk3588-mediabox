@@ -248,6 +248,11 @@ pub fn active_mode() -> (u32, u32, u32) {
 
 struct SplitDisplay {
     kms: SharedKms,
+    /// The overlays the appliance's own player can draw into, best first.
+    /// Enumerated at startup and held for the life of the process: asking the
+    /// display controller for a window while a film is waiting to start is a
+    /// question with a worse moment to ask it.
+    video: Vec<crate::video::VideoPlane>,
     connector: control::connector::Info,
     crtc: control::crtc::Handle,
     mode: control::Mode,
@@ -272,6 +277,18 @@ impl SplitDisplay {
         kms.acquire_master_lock().or_else(|e| {
             if e.raw_os_error() == Some(libc::EINVAL) { Ok(()) } else { Err(e) }
         }).map_err(|e| format!("acquire DRM master on {kms_path}: {e}"))?;
+
+        // Ask to be shown every plane, not only the overlays.
+        //
+        // Without this the kernel hides the primary and cursor planes from
+        // `drmModeGetPlaneResources`, and on this display controller the window
+        // that carries video — Esmart0, plane 73 — reports its type as Cursor.
+        // So the interface enumerated three planes, none of them the one its
+        // own video port actually drives, and the best candidate for a film was
+        // invisible to the process that needed it.
+        if let Err(e) = kms.set_client_capability(drm::ClientCapability::UniversalPlanes, true) {
+            eprintln!("mediabox-tv.platform universal planes unavailable: {e}");
+        }
 
         let (connector, crtc, mode) = find_output(&kms)?;
         let gbm_device = gbm::Device::new(OwnedFd::from(render_file))
@@ -298,8 +315,26 @@ impl SplitDisplay {
 
         MODE.with(|cell| cell.set((width.into(), height.into(), mode.vrefresh())));
 
+        // The other windows of this video port. The interface keeps the primary
+        // and keeps DRM master; a film goes on one of these, scaled and
+        // converted by the display controller rather than by anything of ours.
+        let video = crate::video::VideoPlane::candidates(&kms, crtc, None);
+        eprintln!(
+            "mediabox-tv.video overlay candidates={} [{}]",
+            video.len(),
+            video
+                .iter()
+                .map(|plane| format!(
+                    "{}:nv15={}",
+                    plane.name,
+                    plane.accepts(DrmFourcc::Nv15)
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
         let display = Rc::new(Self {
-            kms, connector, crtc, mode, gbm_device, gbm_surface,
+            kms, connector, crtc, mode, gbm_device, gbm_surface, video,
             presentation: RefCell::new(Presentation::default()),
             released: Cell::new(false),
         });

@@ -22,6 +22,7 @@ mod rpc;
 mod screens;
 mod session;
 mod state;
+mod video;
 mod vitals;
 
 use std::cell::RefCell;
