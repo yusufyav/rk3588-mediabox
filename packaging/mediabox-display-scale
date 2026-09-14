@@ -59,19 +59,43 @@ sys.exit(1)
 }
 
 if geo=$(geometry); then
-  echo "$geo" | python3 -c '
-import sys
-w, h = (int(v) for v in sys.stdin.read().split()[:2])
-dw, dh = '"$DESIGN_W"', '"$DESIGN_H"'
+  # Fed through the environment and run from a quoted heredoc, so the comments
+  # below may contain apostrophes without ending the shell quoting.
+  MBX_GEO="$geo" MBX_DW="$DESIGN_W" MBX_DH="$DESIGN_H" python3 <<'PYTHON'
+import math, os
+
+w, h = (int(v) for v in os.environ["MBX_GEO"].split()[:2])
+dw = int(os.environ["MBX_DW"])
+dh = int(os.environ["MBX_DH"])
+
 # The smaller of the two ratios: whichever axis is tightest decides, so the
-# design always fits and a panel that is wider or taller than 16:9 gets the
-# extra room as room rather than as a cropped edge.
+# design always fits and a panel wider or taller than 16:9 gets the extra room
+# as room rather than as a cropped edge.
 s = min(w / dw, h / dh)
-# A sane range. Outside it something has been read wrong and a broken scale is
+
+# Whole numbers only, and this is not tidiness.
+#
+# A fractional scale costs this appliance direct scanout. Measured on the
+# 2560x1440 monitor, changing nothing but this number:
+#
+#   scale 1.33  ->  Cluster0-win0 format XR24   (composited by wlroots)
+#   scale 2     ->  Cluster0-win0 format AB24   (the browser's buffer, scanned out)
+#
+# XR24 means wlroots composited the frame instead of handing the browser's
+# buffer straight to the display controller, which puts this board's damage
+# bookkeeping back in the path -- and that is the tearing this product spent
+# weeks getting rid of. Chromium cannot present a buffer that matches the
+# output exactly at 1.33, so the flip is refused and every frame goes the slow,
+# torn way round.
+#
+# Rounded up rather than down: on a panel between two whole scales the tighter
+# one is the television-shaped answer, and it is the one this box shipped with.
+s = max(1, math.ceil(s - 1e-9))
+
+# A sane ceiling. Above it something has been read wrong, and a broken scale is
 # worse than a plain one.
-s = max(0.5, min(4.0, s))
-print(f"{s:.2f}".rstrip("0").rstrip("."))
-'
+print(min(s, 4))
+PYTHON
 else
   # Nothing could be read. 1 is the only honest default: the page is then laid
   # out in the panel's own pixels, which is wrong for a 4K set but is never
