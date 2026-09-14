@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# MediaBox's own player.
+#
+# It is a client of the interface's own compositor, not a replacement for it:
+# the film appears inside the application rather than taking the television
+# away from it, which is the whole point of having a player of our own. Kodi
+# stays for what Kodi is good at; opening a source from the catalogue no longer
+# needs it.
+#
+# Usage: mediabox-player <url> [start-seconds]
+set -eu
+
+URL="${1:?usage: mediabox-player <url> [start-seconds]}"
+START="${2:-0}"
+
+# Started by the control plane, which keeps no terminal: without somewhere to
+# write, a player that refuses to start refuses silently.
+if [ -w /run/mediabox ] || mkdir -p /run/mediabox 2>/dev/null; then
+    exec >>/run/mediabox/player.log 2>&1
+fi
+
+# The appliance's own ffmpeg. It is the only build on this box with the
+# Rockchip decoder, and it is not on the default library path because the
+# system ffmpeg must stay the system ffmpeg.
+LD_LIBRARY_PATH="/opt/rk3588-screenbridge/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH
+
+# The compositor the interface is running on. Without these the player has
+# nowhere to draw and would try to take the display for itself.
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/mediabox-ui}"
+export XDG_RUNTIME_DIR
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    for socket in "$XDG_RUNTIME_DIR"/wayland-*; do
+        case "$socket" in *.lock) continue ;; esac
+        [ -S "$socket" ] || continue
+        WAYLAND_DISPLAY="$(basename "$socket")"
+        export WAYLAND_DISPLAY
+        break
+    done
+fi
+
+# A socket the control plane can ask "where have you got to" on, which is what
+# makes handing the film to Kodi land on the same second rather than the start.
+ipc=""
+if [ -n "${MEDIABOX_PLAYER_IPC:-}" ]; then
+    ipc="--input-ipc-server=$MEDIABOX_PLAYER_IPC"
+fi
+
+# shellcheck disable=SC2086  # $ipc is either empty or one known flag.
+exec /opt/rk3588-mediabox/player/bin/mpv \
+    $ipc \
+    --no-config \
+    --input-conf=/opt/rk3588-mediabox/player/share/mediabox-input.conf \
+    --scripts=/opt/rk3588-mediabox/player/share/mediabox.lua \
+    --fullscreen \
+    --vo=dmabuf-wayland \
+    --hwdec=rkmpp \
+    --start="$START" \
+    --keep-open=no \
+    --osc=no \
+    --input-default-bindings=yes \
+    --no-ytdl \
+    --msg-level=all=warn \
+    -- "$URL"

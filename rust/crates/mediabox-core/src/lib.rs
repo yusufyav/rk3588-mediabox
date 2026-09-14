@@ -292,6 +292,29 @@ pub enum Request {
         #[serde(default)]
         start_seconds: u64,
     },
+    /// Play it here, in the interface's own player.
+    ///
+    /// The film opens as a window of the interface rather than as another
+    /// application taking the television: the catalogue stays behind it and
+    /// Back returns to it. The daemon creates the media session and points the
+    /// player at the loopback address the worker serves it on, because the
+    /// player is built against the appliance's Rockchip ffmpeg and that build
+    /// has no TLS.
+    MediaPlayHere {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<Value>,
+        #[serde(default)]
+        start_seconds: u64,
+    },
+    /// Hand what is playing here to Kodi, at the position it had reached.
+    ///
+    /// The equivalent of "send to an external player": the same film, the same
+    /// second, in the application that is better at the rest of the evening.
+    MediaHandoffToKodi,
+    /// Stop the interface's own player, if one is running.
+    MediaStopHere,
     /// Sign in to a Stremio account. The password is used once, forwarded to
     /// the media core and never written down; what is kept is the auth key.
     MediaLogin { email: String, password: String },

@@ -37,6 +37,7 @@ from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote
 
 from .errors import InvalidRequest, MediaError, NotFound, UpstreamError
+from .proxy.relay import relay
 from .inspector import FFprobeConfig, MediaInfo, inspect
 from .library import Library
 from .policy import (
@@ -155,9 +156,10 @@ class MediaCore:
         path: str,
         query: str = "",
         body: bytes | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Response:
         try:
-            return self._route(method, path, query, body)
+            return self._route(method, path, query, body, headers or {})
         except MediaError as exc:
             return json_response(exc.status, exc.as_dict())
         except Exception:
@@ -166,7 +168,14 @@ class MediaCore:
                 500, {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}}
             )
 
-    def _route(self, method: str, path: str, query: str, body: bytes | None) -> Response:
+    def _route(
+        self,
+        method: str,
+        path: str,
+        query: str,
+        body: bytes | None,
+        headers: dict[str, str] | None = None,
+    ) -> Response:
         if not self.owns(path):
             raise NotFound("not a media-core path")
         relative = path[len(MOUNT) :].strip("/")
@@ -174,7 +183,7 @@ class MediaCore:
         params = parse_qs(query, keep_blank_values=True)
 
         if method == "GET":
-            return self._get(parts, params)
+            return self._get(parts, params, headers or {})
         if method == "POST":
             return self._post(parts, self._json_body(body))
         if method == "DELETE":
@@ -183,7 +192,12 @@ class MediaCore:
 
     # --------------------------------------------------------------------- GET
 
-    def _get(self, parts: list[str], params: dict[str, list[str]]) -> Response:
+    def _get(
+        self,
+        parts: list[str],
+        params: dict[str, list[str]],
+        headers: dict[str, str] | None = None,
+    ) -> Response:
         if not parts:
             return json_response(200, {"mount": MOUNT, "profile": self.profile.name})
 
@@ -310,27 +324,30 @@ class MediaCore:
             if len(parts) == 1:
                 return json_response(200, {"sessions": self.sessions.list()})
             if len(parts) == 2:
-                return self._serve_session(parts[1])
+                return self._serve_session(parts[1], (headers or {}).get("range"))
             if len(parts) == 3 and parts[2] == "status":
                 return json_response(200, self.sessions.get(parts[1]).as_dict())
 
         raise NotFound("no such media-core endpoint")
 
-    def _serve_session(self, session_id: str) -> Response:
+    def _serve_session(self, session_id: str, range_header: str | None = None) -> Response:
         session = self.sessions.get(session_id)
         if session.mode.value == "Direct":
-            # Nothing to relay: the player opens the source itself. Saying so
-            # is better than a redirect the caller may not have expected.
-            return json_response(
-                409,
-                {
-                    "error": {
-                        "code": "SESSION_IS_DIRECT",
-                        "message": "this session plays directly from the source",
-                        "details": {"playbackUrl": session.playback_url},
-                    }
-                },
-            )
+            # A direct session has nothing to transcode, but it still has
+            # somewhere to be read from.
+            #
+            # This used to answer 409 and name the source, on the reasoning
+            # that the player should open it itself. Kodi can: it carries its
+            # own TLS. The player MediaBox owns is built against the
+            # appliance's Rockchip ffmpeg, which has no TLS at all and cannot
+            # open an HTTPS link — and every source worth playing is one.
+            #
+            # So the bytes come through here instead, over the loopback, with
+            # ranges passed both ways so seeking still works. It costs one
+            # copy through this process and buys a player that can open
+            # anything the worker can.
+            status, headers, chunks = relay(session.playback_url, range_header)
+            return Response(status, headers, stream=chunks)
         stream = self.sessions.attach(session_id)
         content_type = (
             "video/x-matroska" if "matroska" in " ".join(session.argv) else "video/mp4"

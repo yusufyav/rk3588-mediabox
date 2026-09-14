@@ -1,18 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Back, on this appliance, means "give the television back".
+  Back means what it means in Kodi: one step back, and nothing more.
 
-  Kodi's own answer to Back on its home window is to quit. On a desktop that
-  returns you to a desktop; here it returns the display to nobody — the unit
-  stops, no other application takes DRM master, and the panel drops to a Linux
-  console. That is the "Kodi exits" fault as it is seen from the sofa.
+  This file used to rebind Back on Kodi's home window to hand the television
+  over to the interface. That made Back close Kodi, which it does on no other
+  box, and it made leaving a menu one press away from leaving the application.
+  Getting back to the interface belongs to the remote's Home key, which the
+  control plane already answers, not to Back.
 
-  So Back at the top level hands the display to the product interface through
-  the control plane, which stops Kodi as part of starting the interface. One
-  owner at a time, and the handover is the same one the launcher performs.
-
-  Only the home window is rebound. Inside a list, a dialog or playback, Back
-  keeps Kodi's own meaning: go back one step.
+  What is rebound here is Back during playback, and only that.
 -->
 <keymap>
   <!--
@@ -35,17 +31,4 @@
     </gamepad>
   </FullscreenVideo>
 
-  <Home>
-    <keyboard>
-      <escape>System.Exec(/opt/rk3588-mediabox/bin/mediabox-handback)</escape>
-      <backspace>System.Exec(/opt/rk3588-mediabox/bin/mediabox-handback)</backspace>
-    </keyboard>
-    <remote>
-      <back>System.Exec(/opt/rk3588-mediabox/bin/mediabox-handback)</back>
-      <menu>System.Exec(/opt/rk3588-mediabox/bin/mediabox-handback)</menu>
-    </remote>
-    <gamepad>
-      <b>System.Exec(/opt/rk3588-mediabox/bin/mediabox-handback)</b>
-    </gamepad>
-  </Home>
 </keymap>

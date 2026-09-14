@@ -1,0 +1,56 @@
+#!/bin/sh
+#
+# The panel can change while the box is running.
+#
+# A cable moves from the television to a monitor, the set is swapped, an AV
+# receiver in between renegotiates and hands back a different EDID. The
+# compositor copes with that on its own — it takes the new preferred mode — but
+# the browser does not: its scale factor is fixed at launch, so after the swap
+# the interface is laid out for a panel that is no longer there.
+#
+# This watches the compositor's own output events and restarts the interface
+# when the geometry it is laid out for actually changes. Nothing happens on the
+# events that do not change it, which is most of them: a restart is a second of
+# black screen and is not spent on a DPMS blink.
+set -eu
+
+UNIT="${MEDIABOX_UI_UNIT:-mediabox-tv-ui.service}"
+# Long enough that a panel waking up in stages cannot start a restart loop.
+COOLDOWN="${MEDIABOX_UI_RESCALE_COOLDOWN:-15}"
+
+geometry() {
+  swaymsg -t get_outputs 2>/dev/null | python3 -c '
+import json, sys
+try:
+    outputs = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for o in outputs:
+    if o.get("active"):
+        m = o.get("current_mode") or {}
+        print(o.get("name"), m.get("width"), m.get("height"))
+' 2>/dev/null || true
+}
+
+known=$(geometry)
+last=0
+
+# -m keeps the subscription open and prints one JSON document per event.
+swaymsg -t subscribe -m '["output"]' 2>/dev/null | while read -r _event; do
+  now=$(geometry)
+  [ "$now" = "$known" ] && continue
+  known="$now"
+
+  # An output going away entirely is a cable pulled, not a new panel. Wait for
+  # whatever comes back rather than restarting into nothing.
+  [ -n "$now" ] || continue
+
+  seconds=$(cut -d. -f1 /proc/uptime)
+  [ $((seconds - last)) -lt "$COOLDOWN" ] && continue
+  last=$seconds
+
+  echo "mediabox-display-watch: ekran değişti -> $now; arayüz yeniden ölçekleniyor" >&2
+  # --no-block: this process is inside the unit being restarted, and waiting
+  # for a job that kills the waiter is how a stop times out.
+  systemctl --no-block restart "$UNIT" || true
+done

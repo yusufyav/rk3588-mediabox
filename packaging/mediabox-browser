@@ -44,6 +44,11 @@ AGENT="${MEDIABOX_BROWSER_AGENT:-Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/53
 
 # Measurement, off unless asked for, bound to loopback. Playing video in a
 # browser on this board is a claim that has to be checked rather than assumed.
+# This used to need no scale because the compositor was pinned to 1080p for it.
+# That pin is gone — it was a statement about one panel — so the scale is
+# measured here the same way the product interface measures it.
+SCALE="$(/opt/rk3588-mediabox/bin/mediabox-display-scale 1920 1080 2>/dev/null || echo 1)"
+
 debug=""
 if [ -n "${MEDIABOX_BROWSER_DEBUG_PORT:-}" ]; then
   debug="--remote-debugging-port=${MEDIABOX_BROWSER_DEBUG_PORT} --remote-allow-origins=*"
@@ -66,6 +71,7 @@ fi
 /usr/bin/chromium \
   $debug \
   --kiosk \
+  --force-device-scale-factor="$SCALE" \
   --no-sandbox \
   --ozone-platform=wayland \
   --user-data-dir="$PROFILE" \

@@ -32,6 +32,11 @@ ExecStartPre=/bin/mkdir -p /var/tmp/kodi-home/.kodi/temp
 # does HDR10 and the HDMI codec will not pack an audio bitstream.
 ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
 ExecStart=/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm --standalone --debug
+# Whatever ends Kodi, the television does not end with it: if nothing else has
+# taken the display by then, the interface is brought back. Without this the
+# panel drops to a console, which is how a person reads "it crashed".
+ExecStopPost=-/opt/rk3588-mediabox/bin/mediabox-display-guard
+
 # Kodi exits on Application.Quit; that is a normal stop, not a failure.
 Restart=on-failure
 RestartSec=3s

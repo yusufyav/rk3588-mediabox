@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 from typing import Any
 
 from ..api import MediaCore, MediaCoreConfig
@@ -251,11 +252,34 @@ class PlanAndRankTests(unittest.TestCase):
         self.assertTrue(first["stopped"])
         self.assertFalse(second["stopped"])
 
-    def test_reading_a_direct_session_says_so_instead_of_relaying(self):
+    def test_reading_a_direct_session_relays_the_source_over_loopback(self):
+        """A direct session used to answer 409 and name the source.
+
+        That was right while Kodi was the only player: it carries its own TLS
+        and opens an HTTPS link itself. The player MediaBox owns is built
+        against the appliance's Rockchip ffmpeg, which has none and cannot open
+        one, so the bytes come through here instead. The range goes upstream
+        with the request, because a player that cannot seek is not a player.
+        """
         created = self._post("/media/session", {"url": "https://cdn.example/hdr10.mkv"})
-        response = self.core.handle("GET", f"/media/session/{created['sessionId']}")
-        self.assertEqual(response.status, 409)
-        self.assertEqual(body_of(response)["error"]["code"], "SESSION_IS_DIRECT")
+        asked = {}
+
+        def fake_relay(url, range_header, timeout=30.0):
+            asked["url"] = url
+            asked["range"] = range_header
+            return 206, [("Content-Type", "video/x-matroska")], iter([b"bytes"])
+
+        with mock.patch("media.api.relay", fake_relay):
+            response = self.core.handle(
+                "GET",
+                f"/media/session/{created['sessionId']}",
+                headers={"range": "bytes=100-"},
+            )
+
+        self.assertEqual(response.status, 206)
+        self.assertEqual(asked["url"], "https://cdn.example/hdr10.mkv")
+        self.assertEqual(asked["range"], "bytes=100-")
+        self.assertEqual(b"".join(response.stream), b"bytes")
 
 
 if __name__ == "__main__":

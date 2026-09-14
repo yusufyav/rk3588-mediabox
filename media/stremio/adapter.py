@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
@@ -424,26 +423,31 @@ class HeadlessStremio:
                 LOG.info("Streams from %s failed: %s", addon.id, exc)
                 self._note_failure(addon.id)
 
-        # Not a context manager: leaving the block would join every thread,
-        # which is exactly the wait the deadline exists to avoid. The stragglers
-        # are daemon threads and finish into a list nobody reads any more.
-        pool = ThreadPoolExecutor(
-            max_workers=min(len(addons), STREAM_FAN_OUT),
-            thread_name_prefix="streams",
-        )
-        try:
-            futures = [pool.submit(ask, index, addon) for index, addon in enumerate(addons)]
-            done, pending = wait(futures, timeout=STREAM_DEADLINE)
-            for index, future in enumerate(futures):
-                if future in pending:
-                    LOG.info(
-                        "Streams from %s did not answer within %.0fs",
-                        addons[index].id,
-                        STREAM_DEADLINE,
-                    )
-                    self._note_failure(addons[index].id)
-        finally:
-            pool.shutdown(wait=False)
+        # Plain daemon threads, joined with a deadline. A pool would have to be
+        # shut down, and shutting one down joins every worker — which is
+        # exactly the wait this exists to avoid. A straggler finishes into a
+        # list nobody reads any more and the process does not wait for it.
+        threads = []
+        for index, addon in enumerate(addons[:STREAM_FAN_OUT]):
+            thread = threading.Thread(
+                target=ask, args=(index, addon), name=f"streams-{addon.id}", daemon=True
+            )
+            thread.start()
+            threads.append((index, thread))
+        # Anything past the fan-out width is asked in line, on this thread.
+        for index, addon in enumerate(addons[STREAM_FAN_OUT:], start=STREAM_FAN_OUT):
+            ask(index, addon)
+
+        deadline = self._clock() + STREAM_DEADLINE
+        for index, thread in threads:
+            thread.join(timeout=max(0.0, deadline - self._clock()))
+            if thread.is_alive():
+                LOG.info(
+                    "Streams from %s did not answer within %.0fs",
+                    addons[index].id,
+                    STREAM_DEADLINE,
+                )
+                self._note_failure(addons[index].id)
         return results
 
     def _recently_failed(self, addon_id: str) -> bool:

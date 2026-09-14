@@ -53,7 +53,9 @@ def handler_factory(core: MediaCore) -> type[BaseHTTPRequestHandler]:
                     self._send(413, [("Content-Type", "application/json")], b'{"error":{"code":"BODY_TOO_LARGE"}}')
                     return
                 body = self.rfile.read(max(0, size))
-            response = core.handle(method, split.path, split.query, body)
+            # Range, above all: a player that cannot seek is not a player.
+            request_headers = {name.lower(): value for name, value in self.headers.items()}
+            response = core.handle(method, split.path, split.query, body, request_headers)
             if response.stream is None:
                 self._send(response.status, response.headers, response.body or b"")
                 return

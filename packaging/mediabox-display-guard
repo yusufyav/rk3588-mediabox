@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# Nobody leaves the television to a blank console.
+#
+# Kodi can end for reasons this box did not ask for: the person chose Exit, a
+# playback fault brought it down, the unit was restarted. When it does, DRM
+# master is released and nothing takes it — the panel falls to a Linux login
+# prompt, which is what a person sees as "the box crashed".
+#
+# This runs after Kodi stops, whatever stopped it, and gives the display back
+# to the interface. It does nothing when the display already has an owner,
+# which is the normal case: the control plane stops Kodi precisely in order to
+# start something else, and that something else is already on its way up.
+set -eu
+
+# Let whoever asked for the handover get there first, and let Kodi finish
+# letting go of the display before anything else asks for it.
+#
+# This used to be a flat `sleep 2`, which was measured short: Kodi's stop took
+# 4.9 s (02:54:00.300 "Stopping kodi" to 02:54:05.200 "Deactivated"), the
+# interface was started at 02:54:02.2 and its compositor came up 800 ms later
+# to "Requested backend configuration failed, searching for valid fallbacks" —
+# a mode set against a connector that was still changing hands. What a person
+# sees at that moment is the television going dark twice.
+#
+# So wait for the player itself to be gone rather than for a number.
+i=0
+while [ "$i" -lt 100 ]; do
+  pgrep -x kodi-gbm >/dev/null 2>&1 || break
+  sleep 0.1
+  i=$((i + 1))
+done
+# The last file descriptor is closed by the kernel after the process is reaped,
+# and the connector needs a moment after that.
+sleep 0.5
+
+# Leave a mark for the interface: it is coming up after Kodi held the panel,
+# and that is the handover the monitor has twice come back from green. Reading
+# it is mediabox-display-settle's job; nothing deletes it, so it is the
+# timestamp that carries the meaning.
+mkdir -p /run/mediabox 2>/dev/null || true
+: > /run/mediabox/display-handback 2>/dev/null || true
+
+systemctl is-active --quiet kodi.service && exit 0
+systemctl is-active --quiet mediabox-tv-ui.service && exit 0
+
+exec /opt/rk3588-mediabox/bin/mediaboxctl surface switch ui

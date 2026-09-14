@@ -35,9 +35,9 @@ say "product UI (wasm32)"
   || { echo "UI bundle is incomplete at $ui_dist" >&2; exit 1; }
 
 say "TV-local browser packages"
-# sway rather than a plain kiosk compositor for one reason: it can choose the
-# output mode. This panel prefers 3840x2160, and compositing a 1080p interface
-# at 4K costs four times the bandwidth for nothing anyone can see.
+# sway rather than a plain kiosk compositor: it can make a window fullscreen
+# without the browser asking for it, and it reports output changes, which is
+# how the interface survives being moved to a different panel.
 sh_ "command -v sway >/dev/null && command -v chromium >/dev/null && fc-list | grep -qi emoji" || {
   echo "installing sway, chromium and an emoji font"
   sh_ "DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
@@ -62,16 +62,23 @@ tar -C "$ui_dist" -cf - . | sh_ "rm -rf $prefix/ui && mkdir -p $prefix/ui && tar
 
 say "television kiosk"
 cp_ "$here/packaging/mediabox-kiosk-browser" "$here/packaging/mediabox-kiosk-smoke" \
-    "$here/packaging/mediabox-hdmi-prepare" "root@$host:/var/tmp/"
+    "$here/packaging/mediabox-hdmi-prepare" "$here/packaging/mediabox-display-scale" \
+    "$here/packaging/mediabox-display-watch" \
+    "$here/packaging/mediabox-display-settle" "root@$host:/var/tmp/"
 cp_ "$here/config/sway-kiosk.conf" "root@$host:/var/tmp/"
 sh_ "set -e
   mkdir -p /etc/mediabox
   install -m 0755 /var/tmp/mediabox-kiosk-browser $prefix/bin/mediabox-kiosk-browser
   install -m 0755 /var/tmp/mediabox-kiosk-smoke $prefix/bin/mediabox-kiosk-smoke
   install -m 0755 /var/tmp/mediabox-hdmi-prepare $prefix/bin/mediabox-hdmi-prepare
+  install -m 0755 /var/tmp/mediabox-display-scale $prefix/bin/mediabox-display-scale
+  install -m 0755 /var/tmp/mediabox-display-watch $prefix/bin/mediabox-display-watch
+  install -m 0755 /var/tmp/mediabox-display-settle $prefix/bin/mediabox-display-settle
   install -m 0644 /var/tmp/sway-kiosk.conf /etc/mediabox/sway-kiosk.conf
   rm -f /var/tmp/mediabox-kiosk-browser /var/tmp/mediabox-kiosk-smoke \
-        /var/tmp/mediabox-hdmi-prepare /var/tmp/sway-kiosk.conf"
+        /var/tmp/mediabox-hdmi-prepare /var/tmp/mediabox-display-scale \
+        /var/tmp/mediabox-display-watch /var/tmp/mediabox-display-settle \
+        /var/tmp/sway-kiosk.conf"
 
 say "television browser application"
 # The browser is an application of the box in its own right: its own unit, its
@@ -88,11 +95,34 @@ sh_ "set -e
   install -m 0644 /var/tmp/sway-browser.conf /etc/mediabox/sway-browser.conf
   rm -f /var/tmp/mediabox-browser /var/tmp/mediabox-handback /var/tmp/sway-browser.conf"
 
+say "the player MediaBox owns"
+# The player itself is built on the appliance by scripts/build-mediabox-player.sh:
+# it links against the Rockchip ffmpeg that lives there and cannot be
+# cross-compiled here. This step installs the launcher that gives it the right
+# library path and points it at the interface's own compositor, so a film opens
+# inside the application instead of taking the television away from it.
+cp_ "$here/packaging/mediabox-player" "root@$host:/var/tmp/"
+cp_ "$here/packaging/mediabox-player-input.conf" "root@$host:/var/tmp/"
+cp_ "$here/packaging/mediabox-player-scripts/mediabox.lua" "root@$host:/var/tmp/"
+sh_ "set -e
+  mkdir -p $prefix/player/share
+  install -m 0755 /var/tmp/mediabox-player $prefix/bin/mediabox-player
+  install -m 0644 /var/tmp/mediabox-player-input.conf $prefix/player/share/mediabox-input.conf
+  install -m 0644 /var/tmp/mediabox.lua $prefix/player/share/mediabox.lua
+  rm -f /var/tmp/mediabox-player /var/tmp/mediabox-player-input.conf /var/tmp/mediabox.lua"
+
 say "application table -> /etc/mediabox-applications.json"
 cp_ "$here/config/mediabox-applications.json" "root@$host:/etc/mediabox-applications.json"
 
 say "Kodi keymap -> Back hands the display back"
 cp_ "$here/packaging/mediabox-kodi-keymap.xml" "root@$host:/var/tmp/"
+cp_ "$here/packaging/mediabox-display-guard" "root@$host:/var/tmp/"
+sh_ "install -m 0755 /var/tmp/mediabox-display-guard $prefix/bin/mediabox-display-guard && \
+     rm -f /var/tmp/mediabox-display-guard"
+
+cp_ "$here/packaging/mediabox-ui-reap" "root@$host:/var/tmp/"
+sh_ "install -m 0755 /var/tmp/mediabox-ui-reap $prefix/bin/mediabox-ui-reap && \
+     rm -f /var/tmp/mediabox-ui-reap"
 sh_ "set -e
   mkdir -p /var/tmp/kodi-home/.kodi/userdata/keymaps
   install -m 0644 /var/tmp/mediabox-kodi-keymap.xml \

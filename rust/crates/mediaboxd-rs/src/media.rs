@@ -148,6 +148,18 @@ impl MediaClient {
         self.post(&["media", "plan"], json!({"url": url})).await
     }
 
+    /// Where the worker serves this session's bytes.
+    ///
+    /// The player opens this rather than the source itself: it is built
+    /// against the appliance's Rockchip ffmpeg, which carries no TLS and
+    /// cannot open the HTTPS link the source actually lives at. The worker
+    /// speaks HTTPS and relays, ranges and all.
+    pub fn session_url(&self, id: &str) -> String {
+        let mut url = self.endpoint.clone();
+        url.set_path(&format!("media/session/{id}"));
+        url.to_string()
+    }
+
     pub async fn sessions(&self) -> Result<Value, MediaError> {
         self.get(&["media", "session"], &[]).await
     }

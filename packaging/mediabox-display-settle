@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# Shake the HDMI link after Kodi has had the display.
+#
+# Twice now the monitor has come back from a Kodi session showing nothing but
+# green, while everything measurable on this side was correct: RGB888_1X24,
+# SDR BT.709 full range, 2560x1440p60, the plane active and the interface
+# drawing into it. The fault is on the other end of the cable — the panel
+# latched onto something during the handover and did not let go.
+#
+# Turning the monitor off and on cleared it. So does telling the compositor to
+# blank and unblank the output, which renegotiates the link without anybody
+# reaching behind the television — measured on this appliance, with the user
+# watching the panel.
+#
+# It runs only on the way back from Kodi, not on every start of the interface:
+# a blank and unblank is a second of black screen, and paying that on a cold
+# boot buys nothing.
+set -eu
+
+FLAG="${MEDIABOX_HANDBACK_FLAG:-/run/mediabox/display-handback}"
+OUTPUT="${MEDIABOX_HANDBACK_OUTPUT:-*}"
+# How recent the handover has to be for this to be the one we are coming back
+# from. The flag is not deleted — this unit cannot write to /run/mediabox — so
+# age is what distinguishes a handover from one that happened yesterday.
+FRESH="${MEDIABOX_HANDBACK_FRESH:-60}"
+
+[ -e "$FLAG" ] || exit 0
+
+age=$(( $(date +%s) - $(stat -c %Y "$FLAG" 2>/dev/null || echo 0) ))
+[ "$age" -ge 0 ] && [ "$age" -le "$FRESH" ] || exit 0
+
+# The interface has to be on screen before it is worth blanking: blanking an
+# output that is still coming up is how the compositor is left with no mode.
+i=0
+while [ "$i" -lt 100 ]; do
+  swaymsg -t get_outputs >/dev/null 2>&1 && break
+  sleep 0.1
+  i=$((i + 1))
+done
+
+sleep 1
+swaymsg "output $OUTPUT dpms off" >/dev/null 2>&1 || exit 0
+sleep 2
+swaymsg "output $OUTPUT dpms on" >/dev/null 2>&1 || true

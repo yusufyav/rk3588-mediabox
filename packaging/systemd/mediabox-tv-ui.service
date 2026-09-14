@@ -110,9 +110,11 @@ KillMode=mixed
 # It was measured on the appliance — an orphan from an earlier session at 57%
 # while the current one was idle — and every restart added another.
 #
-# Matched on the profile directory, which no other browser on this box uses, so
-# the television's browser application and any other Chromium are untouched.
-ExecStopPost=-/usr/bin/pkill -f -- "--user-data-dir=/var/lib/mediabox-ui/chromium"
+# A bare pkill was the first attempt and it is not enough: it signals and
+# returns, so the unit goes inactive while the browser is still unwinding and
+# whatever takes the display next — Kodi — starts on top of a process that has
+# not yet let go of the GPU. The reaper waits for them to be gone.
+ExecStopPost=-/opt/rk3588-mediabox/bin/mediabox-ui-reap
 StandardOutput=journal
 StandardError=journal
 

@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# What scale factor does this panel need?
+#
+# The interface is laid out for 1920x1080 logical pixels seen from a sofa. The
+# panel it lands on is not ours to choose: this appliance is plugged into a 4K
+# television at one house, a 1440p monitor at another, an old 1080p set at a
+# third. The browser rasterises at the panel's real resolution either way — the
+# scale factor only decides how many physical pixels one CSS pixel is worth.
+#
+# It used to be written down as `--force-device-scale-factor=2`, which is the
+# right answer for exactly one panel. On the 2560x1440 monitor this box is
+# plugged into today it made the interface 1280x720 logical: the same design
+# blown up by a third, with a third of the shelf missing off the right.
+#
+# So it is measured. Print the scale for the output the compositor is actually
+# driving, on stdout, and nothing else.
+set -eu
+
+# The design the layout was built against.
+DESIGN_W="${1:-1920}"
+DESIGN_H="${2:-1080}"
+
+geometry() {
+  # The compositor knows what it drove, including the fallback it picked when
+  # the panel refused the preferred mode.
+  sock="${SWAYSOCK:-}"
+  [ -n "$sock" ] || sock=$(ls /run/mediabox-ui/sway-ipc.*.sock 2>/dev/null | head -1 || true)
+  if [ -n "$sock" ]; then
+    SWAYSOCK="$sock" swaymsg -t get_outputs 2>/dev/null | python3 -c '
+import json, sys
+try:
+    outputs = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for o in outputs:
+    if not o.get("active"):
+        continue
+    m = o.get("current_mode") or {}
+    w, h = m.get("width"), m.get("height")
+    if w and h:
+        print(w, h)
+        sys.exit(0)
+sys.exit(1)
+' 2>/dev/null && return 0
+  fi
+
+  # No compositor yet — the first launch races it. Fall back to what the
+  # connected panel says it prefers, which is the mode wlroots will take.
+  for c in /sys/class/drm/card*-*; do
+    [ -e "$c/status" ] || continue
+    [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
+    line=$(head -1 "$c/modes" 2>/dev/null || true)
+    case "$line" in
+      [0-9]*x[0-9]*) echo "${line%x*} ${line#*x}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+if geo=$(geometry); then
+  echo "$geo" | python3 -c '
+import sys
+w, h = (int(v) for v in sys.stdin.read().split()[:2])
+dw, dh = '"$DESIGN_W"', '"$DESIGN_H"'
+# The smaller of the two ratios: whichever axis is tightest decides, so the
+# design always fits and a panel that is wider or taller than 16:9 gets the
+# extra room as room rather than as a cropped edge.
+s = min(w / dw, h / dh)
+# A sane range. Outside it something has been read wrong and a broken scale is
+# worse than a plain one.
+s = max(0.5, min(4.0, s))
+print(f"{s:.2f}".rstrip("0").rstrip("."))
+'
+else
+  # Nothing could be read. 1 is the only honest default: the page is then laid
+  # out in the panel's own pixels, which is wrong for a 4K set but is never
+  # unreadable.
+  echo 1
+fi

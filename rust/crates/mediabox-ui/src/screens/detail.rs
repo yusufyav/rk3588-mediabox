@@ -148,13 +148,52 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
         }
     };
 
-    let play = Callback::new(move |()| {
+    // Playing is what this screen is for, and it happens here: the film opens
+    // in the interface's own player, in front of the page it was chosen from.
+    // Handing it to Kodi is a separate, deliberate act — the equivalent of
+    // "send to an external player" — not the only way to watch something.
+    let play_source = move |source: Source| {
+        busy.set(true);
+        toaster.say("Açılıyor…");
+        spawn_local(async move {
+            let request = match source.parsed.url.as_deref() {
+                Some(url) => api::play_here(Some(url), None, 0),
+                None => api::play_here(None, Some(&source.raw), 0),
+            };
+            match api::control(request).await {
+                Ok(_) => {
+                    remember_played();
+                    nav.go(Route::NowPlaying);
+                }
+                Err(error) => toaster.warn(format!("Oynatılamadı — {}", error.message)),
+            }
+            busy.set(false);
+        });
+    };
+
+    // Choosing a source is choosing to watch it.
+    //
+    // It used to only select: the remote then had to travel back up the page
+    // to a Play button and press again, for a decision already made. Pressing
+    // OK on a source now starts it, which is what pressing OK on a source
+    // means everywhere else.
+    let pick = Callback::new(move |source: Source| {
+        analyze(source.clone());
+        play_source(source);
+    });
+
+    let play = Callback::new(move |()| match selected.get_untracked() {
+        Some(source) => play_source(source),
+        None => toaster.warn("Önce bir kaynak seçin."),
+    });
+
+    let play_on_kodi = Callback::new(move |()| {
         let Some(source) = selected.get_untracked() else {
             toaster.warn("Önce bir kaynak seçin.");
             return;
         };
         busy.set(true);
-        toaster.say("Televizyona gönderiliyor…");
+        toaster.say("Kodi'ye aktarılıyor…");
         spawn_local(async move {
             let request = match source.parsed.url.as_deref() {
                 Some(url) => api::play_on_kodi(Some(url), None, 0),
@@ -166,7 +205,7 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
                     toaster.say("Kodi'de oynatılıyor.");
                     nav.go(Route::NowPlaying);
                 }
-                Err(error) => toaster.warn(format!("Oynatılamadı — {}", error.message)),
+                Err(error) => toaster.warn(format!("Aktarılamadı — {}", error.message)),
             }
             busy.set(false);
         });
@@ -216,6 +255,7 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
                             selected=selected
                             busy=busy
                             on_play=play
+                            on_play_on_kodi=play_on_kodi
                             on_preview=preview
                         />
                     }
@@ -258,7 +298,7 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
                         sources=sources
                         tab=tab
                         selected=selected
-                        on_pick=Callback::new(analyze)
+                        on_pick=pick
                     />
                     {move || {
                         plan.get()
@@ -500,6 +540,7 @@ fn Head(
     selected: RwSignal<Option<Source>>,
     busy: RwSignal<bool>,
     #[prop(into)] on_play: Callback<()>,
+    #[prop(into)] on_play_on_kodi: Callback<()>,
     #[prop(into)] on_preview: Callback<()>,
 ) -> impl IntoView {
     let nav = expect_context::<Nav>();
@@ -579,13 +620,20 @@ fn Head(
                 <div class="detail-actions" data-row="1">
                     <IconAction
                         label=Signal::derive(move || {
-                            if busy.get() { "Gönderiliyor…".to_string() } else { "Kodi'de Oynat".to_string() }
+                            if busy.get() { "Açılıyor…".to_string() } else { "Oynat".to_string() }
                         })
                         glyph="M8 5l11 7-11 7z"
                         primary=true
                         autofocus=true
                         disabled=Signal::derive(move || busy.get() || !can_play())
                         on_press=on_play
+                    />
+                    // Watching here is the default; Kodi is a place to send it.
+                    <IconAction
+                        label=Signal::derive(|| "Kodi'ye Aktar".to_string())
+                        glyph="M4 5h16v10H4zm7 12h2v2h3v2H8v-2h3z"
+                        disabled=Signal::derive(move || busy.get() || !can_play())
+                        on_press=on_play_on_kodi
                     />
                     <IconAction
                         label=Signal::derive(move || {

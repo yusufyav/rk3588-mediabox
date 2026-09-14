@@ -6,6 +6,7 @@ use mediaboxd_rs::daemon::{AppState, CecRuntime, apply_kodi_route, serve_unix, s
 use mediaboxd_rs::kodi::KodiClient;
 use mediaboxd_rs::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use mediaboxd_rs::media::MediaClient;
+use mediaboxd_rs::player::PlayerManager;
 use mediaboxd_rs::web::{PeerPolicy, WebConfig, serve as serve_web};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -101,6 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         kodi: kodi.clone(),
         lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
         surface: SurfaceManager::new(&args.kodi_unit, &args.ui_unit)?,
+        player: Arc::new(PlayerManager::new(
+            "/opt/rk3588-mediabox/bin/mediabox-player",
+            "/run/mediabox/player.sock",
+        )),
         applications: ApplicationManager::load(
             args.applications.as_deref(),
             &args.kodi_unit,

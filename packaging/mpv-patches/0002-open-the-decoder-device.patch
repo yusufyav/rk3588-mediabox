@@ -1,0 +1,43 @@
+From: MediaBox
+Subject: vd_lavc: let zero-copy decoding open its own device
+
+This is what kept hardware decoding out of reach on this board.
+
+The copy path creates the decoder's hardware device itself. The zero-copy
+path instead demands one from the video output -- and the output has no
+reason to own it: the frames come out as DRM PRIME, so the output provides
+a DRM device, while the decoder is driven through an MPP device. The types
+did not match, mpv said 'Could not create device' at verbose level only,
+and fell back to software: 33% of eight cores instead of 1%.
+
+Create it here when the output has none. The frames are still handed over
+without a copy; only the handle the decoder is driven through is ours.
+--- /var/tmp/vd_lavc.c.orig	2026-09-14 01:42:56.212523307 +0300
++++ video/decode/vd_lavc.c	2026-09-14 01:42:56.245856270 +0300
+@@ -489,6 +489,27 @@
+             return av_buffer_ref(hw_ctx->av_device_ref);
+     }
+ 
++    /*
++     * The video output has no device of the type this decoder wants.
++     *
++     * That is the normal case when the decoder and the display speak
++     * different languages about the same buffer: Rockchip MPP decodes into a
++     * DRM PRIME frame, so the output provides a DRM device, while the decoder
++     * itself is driven through an MPP device. Requiring the output to hand
++     * over a device it has no reason to own is what made zero-copy decoding
++     * unreachable on this board -- the copy path worked only because it
++     * creates the device itself, a few lines above.
++     *
++     * Create it here too. The frames still come out as DRM PRIME and are
++     * still handed to the display without a copy; only the handle the decoder
++     * is driven through is opened by us rather than by the output.
++     */
++    {
++        AVBufferRef *ref = NULL;
++        if (av_hwdevice_ctx_create(&ref, hwdec->lavc_device, NULL, NULL, 0) >= 0)
++            return ref;
++    }
++
+     return NULL;
+ }

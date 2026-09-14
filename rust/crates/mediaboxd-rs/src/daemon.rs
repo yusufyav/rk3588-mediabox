@@ -1,6 +1,7 @@
 use crate::kodi::KodiClient;
 use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
+use crate::player::{PlayerManager, Playing};
 use mediabox_cec::Adapter;
 use mediabox_core::{
     CecStatus, InputMode, InputSource, Request, Response, ServiceHealth, Surface, SystemStatus,
@@ -37,6 +38,9 @@ pub struct AppState {
     pub surface: SurfaceManager,
     /// What this box can run. The launcher is driven from here.
     pub applications: ApplicationManager,
+    /// The interface's own player: a film inside the application rather than
+    /// another application in front of it.
+    pub player: Arc<PlayerManager>,
 }
 
 impl AppState {
@@ -109,6 +113,19 @@ impl AppState {
                 stream,
                 start_seconds,
             } => self.play_on_kodi(url, stream, start_seconds).await,
+            Request::MediaPlayHere {
+                url,
+                stream,
+                start_seconds,
+            } => self.play_here(url, stream, start_seconds).await,
+            Request::MediaHandoffToKodi => self.handoff_to_kodi().await,
+            Request::MediaStopHere => {
+                let stopped = self.player.stop().await;
+                if let Some(playing) = &stopped {
+                    self.stop_session(&playing.session_id).await;
+                }
+                Response::success(json!({"stopped": stopped.is_some()}))
+            }
             Request::SurfaceStatus => Response::success(self.surface.status().await),
             Request::Applications => Response::success(self.applications.status().await),
             Request::ApplicationLaunch { id } => match self.applications.launch(&id).await {
@@ -181,6 +198,84 @@ impl AppState {
     /// only then is Kodi asked to open the URL the media core produced. A
     /// failure anywhere after the session exists stops that session, so a
     /// refused `Player.Open` never leaves an ffmpeg running with no reader.
+    /// Open it in the interface's own player.
+    ///
+    /// No display changes hands: the player is a window of the same
+    /// compositor the catalogue is drawn on, so the film appears in front of
+    /// the page it was chosen from and Back puts the page back.
+    async fn play_here(
+        &self,
+        url: Option<String>,
+        stream: Option<Value>,
+        start_seconds: u64,
+    ) -> Response {
+        if url.is_none() && stream.is_none() {
+            return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
+        }
+        // Whatever was playing is over, here or on Kodi.
+        if let Some(previous) = self.player.stop().await {
+            self.stop_session(&previous.session_id).await;
+        }
+        self.stop_all_sessions().await;
+
+        let created = match (url.as_deref(), stream) {
+            (Some(url), _) => self.media.session_start_at(url, start_seconds).await,
+            (None, Some(stream)) => self.media.session_start_stream(stream, start_seconds).await,
+            (None, None) => unreachable!("guarded above"),
+        };
+        let session = match created {
+            Ok(value) => value,
+            Err(error) => return Response::failure("MEDIA_WORKER_ERROR", error.to_string()),
+        };
+        let session_id = session
+            .get("sessionId")
+            .or_else(|| session.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if session_id.is_empty() {
+            return Response::failure("MEDIA_WORKER_ERROR", "medya oturumu kimlik üretmedi");
+        }
+        // What Kodi would be given if the film is handed over later.
+        let source = session
+            .pointer("/handoff/kodiPlaybackUrl")
+            .or_else(|| session.get("playbackUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        let local = self.media.session_url(&session_id);
+        let playing = Playing {
+            session_id: session_id.clone(),
+            source: source.clone(),
+        };
+        if let Err(error) = self.player.start(&local, start_seconds, playing).await {
+            self.stop_session(&session_id).await;
+            return Response::failure("PLAYER_FAILED", error);
+        }
+        Response::success(json!({
+            "playing": "here",
+            "sessionId": session_id,
+            "startSeconds": start_seconds,
+        }))
+    }
+
+    /// Hand what is playing here to Kodi, at the second it had reached.
+    async fn handoff_to_kodi(&self) -> Response {
+        let Some(playing) = self.player.playing().await else {
+            return Response::failure("NOTHING_PLAYING", "burada oynayan bir şey yok");
+        };
+        // Asked before the player is stopped, because afterwards there is
+        // nobody to ask.
+        let at = self.player.position().await.unwrap_or(0);
+        self.player.stop().await;
+        self.stop_session(&playing.session_id).await;
+        if playing.source.is_empty() {
+            return Response::failure("NO_SOURCE", "bu kaynağın Kodi için adresi yok");
+        }
+        self.play_on_kodi(Some(playing.source), None, at).await
+    }
+
     async fn play_on_kodi(
         &self,
         url: Option<String>,
@@ -555,6 +650,8 @@ mod tests {
                 MediaClient::new("http://127.0.0.1:9", Duration::from_millis(20)).unwrap(),
             ),
             surface: SurfaceManager::new("kodi.service", "mediabox-tv-ui.service").unwrap(),
+            // Never started in the tests; it exists so the state is whole.
+            player: Arc::new(PlayerManager::new("/bin/true", "/run/mediabox/player.sock")),
             applications: ApplicationManager::load(None, "kodi.service", "mediabox-tv-ui.service")
                 .unwrap(),
         });

@@ -243,6 +243,23 @@ pub fn application_launch(id: &str) -> Value {
 
 /// Put one web address in front of the television's browser and give it the
 /// display. The browser has no address bar, so this is the only way in.
+/// Play it here, in the interface's own player.
+pub fn play_here(url: Option<&str>, stream: Option<&Value>, start_seconds: u64) -> Value {
+    let mut request = json!({"command": "media_play_here", "start_seconds": start_seconds});
+    if let Some(url) = url {
+        request["url"] = json!(url);
+    }
+    if let Some(stream) = stream {
+        request["stream"] = stream.clone();
+    }
+    request
+}
+
+/// Send what is playing here to Kodi, at the second it had reached.
+pub fn handoff_to_kodi() -> Value {
+    json!({"command": "media_handoff_to_kodi"})
+}
+
 pub fn browser_open(url: &str) -> Value {
     json!({"command": "browser_open", "url": url})
 }
