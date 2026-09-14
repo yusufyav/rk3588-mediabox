@@ -244,8 +244,13 @@ pub enum Request {
     KodiStatus,
     KodiPlayPause,
     KodiStop,
-    KodiSeek { seconds: i64 },
-    KodiOpen { url: String, resume_seconds: u64 },
+    KodiSeek {
+        seconds: i64,
+    },
+    KodiOpen {
+        url: String,
+        resume_seconds: u64,
+    },
     KodiRestart,
     CecStatus,
     CecDevices,
@@ -263,7 +268,10 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
     },
-    MediaMeta { media_type: String, id: String },
+    MediaMeta {
+        media_type: String,
+        id: String,
+    },
     MediaSubtitles {
         media_type: String,
         id: String,
@@ -271,16 +279,35 @@ pub enum Request {
         video_id: Option<String>,
     },
     MediaLibrary,
-    MediaLibraryItem { id: String },
-    MediaResolve { stream: Value },
-    MediaStreamPlan { stream: Value },
-    MediaSearch { query: String },
-    MediaInspect { url: String },
-    MediaStreams { media_type: String, id: String },
-    MediaPolicy { url: String },
+    MediaLibraryItem {
+        id: String,
+    },
+    MediaResolve {
+        stream: Value,
+    },
+    MediaStreamPlan {
+        stream: Value,
+    },
+    MediaSearch {
+        query: String,
+    },
+    MediaInspect {
+        url: String,
+    },
+    MediaStreams {
+        media_type: String,
+        id: String,
+    },
+    MediaPolicy {
+        url: String,
+    },
     MediaSessions,
-    MediaSessionStart { url: String },
-    MediaSessionStop { id: String },
+    MediaSessionStart {
+        url: String,
+    },
+    MediaSessionStop {
+        id: String,
+    },
     /// The one authoritative "play this on the television" path. The daemon
     /// creates the media session, takes the display back from the UI and opens
     /// the result in Kodi; no caller reproduces that ordering itself.
@@ -315,25 +342,44 @@ pub enum Request {
     MediaHandoffToKodi,
     /// Stop the interface's own player, if one is running.
     MediaStopHere,
+    /// Move what is playing here, without stopping it.
+    ///
+    /// A closed set rather than a pass-through to the player's own command
+    /// language: the interface asks for a pause or a jump, and what that means
+    /// to whatever is decoding is the daemon's business.
+    MediaTransportHere {
+        action: TransportAction,
+    },
     /// Sign in to a Stremio account. The password is used once, forwarded to
     /// the media core and never written down; what is kept is the auth key.
-    MediaLogin { email: String, password: String },
+    MediaLogin {
+        email: String,
+        password: String,
+    },
     MediaLogout,
     SurfaceStatus,
-    SurfaceSwitch { target: Surface },
+    SurfaceSwitch {
+        target: Surface,
+    },
     /// What the box can run, and what it is running.
     Applications,
     /// Put one application on the television. The id `idle` releases the
     /// display without starting anything.
-    ApplicationLaunch { id: String },
+    ApplicationLaunch {
+        id: String,
+    },
     /// Open one web address in the television's browser.
     ///
     /// The browser has no address bar — a remote cannot use one — so the
     /// address is chosen in this interface and handed over here: the daemon
     /// leaves it where the browser reads it at start, then gives the browser
     /// the display.
-    BrowserOpen { url: String },
-    InputInject { action: InputAction },
+    BrowserOpen {
+        url: String,
+    },
+    InputInject {
+        action: InputAction,
+    },
     InputMonitor,
     /// Restart or shut the appliance down.
     ///
@@ -346,7 +392,20 @@ pub enum Request {
     /// the machine with no application involved. That is switched off now, and
     /// this is the deliberate path in its place: the interface asks twice
     /// before sending it.
-    SystemPower { action: PowerAction },
+    SystemPower {
+        action: PowerAction,
+    },
+}
+
+/// What a remote can do to a film that is already playing here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportAction {
+    PlayPause,
+    /// Forwards on a positive number, back on a negative one, in seconds.
+    Seek {
+        seconds: i64,
+    },
 }
 
 /// The only two things this appliance will do to its own power state on
@@ -446,7 +505,12 @@ mod tests {
     fn power_is_a_closed_pair_of_verbs() {
         let restart: Request =
             serde_json::from_str(r#"{"command":"system_power","action":"restart"}"#).unwrap();
-        assert_eq!(restart, Request::SystemPower { action: PowerAction::Restart });
+        assert_eq!(
+            restart,
+            Request::SystemPower {
+                action: PowerAction::Restart
+            }
+        );
         assert_eq!(PowerAction::Restart.verb(), "reboot");
         assert_eq!(PowerAction::Shutdown.verb(), "poweroff");
         // Anything that is not one of the two is not a power request.

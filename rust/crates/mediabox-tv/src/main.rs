@@ -121,6 +121,13 @@ struct App {
     diag: Option<Value>,
     display: Option<model::DisplayStatus>,
 
+    /// Whether the film on the panel is on this interface's own video plane.
+    ///
+    /// Which player a transport key reaches is decided by this and nothing
+    /// else: the two are never both running, and asking the control plane
+    /// what is playing would answer a frame too late.
+    here: bool,
+
     detail_backdrop: Option<String>,
     detail_fade: f32,
     /// Bumped every time a detail screen is opened, so an answer for a title
@@ -194,7 +201,9 @@ impl App {
     }
 
     fn act_on_sheet(&mut self, intent: Intent) {
-        let Some(sheet) = self.sheet.as_mut() else { return };
+        let Some(sheet) = self.sheet.as_mut() else {
+            return;
+        };
         match intent {
             Intent::Move(dx, dy) => {
                 if sheet.step(dx, dy) {
@@ -268,7 +277,9 @@ impl App {
 
     /// Ok on the launcher.
     fn launch(&mut self) {
-        let Some(tile) = self.home.focused_app() else { return };
+        let Some(tile) = self.home.focused_app() else {
+            return;
+        };
         let (action, name, ready) = (tile.action.clone(), tile.name.clone(), tile.ready);
 
         if !ready {
@@ -326,7 +337,14 @@ impl App {
                     self.open_detail_for(&item);
                 }
             }
-            Intent::Dismiss => self.back(),
+            Intent::Dismiss => {
+                // The film is on the window above this one, so there is no
+                // "leave it running and go back": going back is stopping.
+                if self.here {
+                    self.transport(Transport::Stop);
+                }
+                self.back()
+            }
             _ => {}
         }
     }
@@ -432,7 +450,9 @@ impl App {
     // ------------------------------------------------------------- the detail
 
     fn open_detail(&mut self) {
-        let Some(item) = self.home.focused().cloned() else { return };
+        let Some(item) = self.home.focused().cloned() else {
+            return;
+        };
         self.open_detail_for(&item);
     }
 
@@ -494,7 +514,9 @@ impl App {
     }
 
     fn choose_on_detail(&mut self) {
-        let Some(detail) = self.detail.as_mut() else { return };
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
 
         // In the source column, Ok is "play this one". The reference plays on
         // the click rather than selecting and waiting for a second decision,
@@ -508,13 +530,14 @@ impl App {
             }
             if detail.choose_source().is_some() {
                 self.analyse();
-                self.play();
+                self.play_here();
                 self.paint();
             }
             return;
         }
 
         match detail.action {
+            detail::ACTION_PLAY => self.play_here(),
             detail::ACTION_KODI => self.play(),
             detail::ACTION_TRAILER => self.trailer(),
             _ => self.back(),
@@ -525,7 +548,9 @@ impl App {
         if epoch != self.epoch {
             return;
         }
-        let Some(detail) = self.detail.as_mut() else { return };
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
 
         match answer {
             Ok(DetailAnswer::Library(envelope)) => detail.take_library(*envelope),
@@ -542,8 +567,12 @@ impl App {
 
     /// Asks the media core what it would do with the chosen source.
     fn analyse(&mut self) {
-        let Some(detail) = self.detail.as_ref() else { return };
-        let Some(source) = detail.selected_source() else { return };
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(source) = detail.selected_source() else {
+            return;
+        };
         if !source.parsed.playable {
             return;
         }
@@ -566,8 +595,12 @@ impl App {
     /// the interface's unit as part of handing the display over, so the
     /// position is written to disk before the call rather than after it.
     fn play(&mut self) {
-        let Some(detail) = self.detail.as_ref() else { return };
-        let Some(source) = detail.selected_source() else { return };
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(source) = detail.selected_source() else {
+            return;
+        };
         if !source.parsed.playable {
             return;
         }
@@ -591,9 +624,51 @@ impl App {
         spawn_play(url, raw);
     }
 
+    /// Starts the film here, in this interface's own player.
+    ///
+    /// Nothing is handed over: the decoder puts its frames on the video port's
+    /// second window and this process keeps DRM master and keeps drawing
+    /// underneath. Back stops it and the catalogue is still where it was.
+    fn play_here(&mut self) {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(source) = detail.selected_source() else {
+            return;
+        };
+        if !source.parsed.playable {
+            return;
+        }
+
+        let url = source.parsed.url.clone();
+        let raw = source.raw.clone();
+
+        self.now.title = detail.meta.name.clone();
+        self.now.artwork = detail.meta.poster.clone();
+        self.now.backdrop = detail.meta.background.clone();
+        self.now.set_technical(detail.technical_pairs());
+
+        self.remember();
+        self.store.flush();
+        self.here = true;
+
+        if let Some(window) = self.window.upgrade() {
+            window.set_detail_note("Oynatılıyor…".into());
+        }
+        spawn_play_here(url, raw);
+        // The film covers the panel — the video window sits above the primary —
+        // so the screen behind it is the one a remote should already be on when
+        // it comes back.
+        self.open(Route::NowPlaying);
+    }
+
     fn trailer(&mut self) {
-        let Some(detail) = self.detail.as_ref() else { return };
-        let Some(id) = detail.meta.trailer.clone().filter(|id| !id.is_empty()) else { return };
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(id) = detail.meta.trailer.clone().filter(|id| !id.is_empty()) else {
+            return;
+        };
         let url = format!("https://www.youtube.com/tv#/watch?v={id}");
         spawn_open(url);
     }
@@ -625,6 +700,25 @@ impl App {
     /// so they are forwarded and the screen follows the answer rather than
     /// guessing at it.
     fn transport(&mut self, transport: Transport) {
+        // Two players, one set of buttons. Which one a press reaches is decided
+        // by which one this interface started, not by asking: a remote pressed
+        // while a film is on our own plane must never reach Kodi, which is not
+        // running and whose start would take the television.
+        if self.here {
+            match transport {
+                Transport::PlayPause => spawn_here(HereCommand::PlayPause),
+                Transport::Seek(seconds) => spawn_here(HereCommand::Seek(seconds)),
+                Transport::Stop => {
+                    self.here = false;
+                    spawn_here(HereCommand::Stop);
+                }
+                Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
+            }
+            if self.now.active() && self.route() != Route::NowPlaying {
+                self.open(Route::NowPlaying);
+            }
+            return;
+        }
         match transport {
             Transport::PlayPause => spawn_kodi(KodiCommand::PlayPause),
             Transport::Stop => spawn_kodi(KodiCommand::Stop),
@@ -719,8 +813,12 @@ impl App {
                     PowerAction::Shutdown
                 };
                 self.say(
-                    if power == PowerAction::Restart { "Yeniden başlatılıyor…" } else { "Kapatılıyor…" }
-                        .into(),
+                    if power == PowerAction::Restart {
+                        "Yeniden başlatılıyor…"
+                    } else {
+                        "Kapatılıyor…"
+                    }
+                    .into(),
                 );
                 self.remember();
                 self.store.flush();
@@ -754,8 +852,16 @@ impl App {
             screen: self.route().name().into(),
             home_row: self.home.row,
             home_col: self.home.column(),
-            detail_kind: self.detail.as_ref().map(|d| d.kind.clone()).unwrap_or_default(),
-            detail_id: self.detail.as_ref().map(|d| d.id.clone()).unwrap_or_default(),
+            detail_kind: self
+                .detail
+                .as_ref()
+                .map(|d| d.kind.clone())
+                .unwrap_or_default(),
+            detail_id: self
+                .detail
+                .as_ref()
+                .map(|d| d.id.clone())
+                .unwrap_or_default(),
         };
         self.store.put(snapshot);
     }
@@ -785,7 +891,11 @@ impl App {
             self.now.take(kodi);
         }
 
-        self.settings.compose(self.status.as_ref(), self.diag.as_ref(), self.display.as_ref());
+        self.settings.compose(
+            self.status.as_ref(),
+            self.diag.as_ref(),
+            self.display.as_ref(),
+        );
         if self.route() == Route::Diagnostics {
             self.diagnostics.compose(
                 self.status.as_ref(),
@@ -848,7 +958,9 @@ impl App {
     /// be fetched" and then quietly fixes itself has told the viewer a lie
     /// either way.
     fn still_waiting(&mut self, attempt: u32) {
-        let Some(window) = self.window.upgrade() else { return };
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
         if self.route() != Route::Boot {
             return;
         }
@@ -865,13 +977,14 @@ impl App {
 
     /// Puts the remote back where it was before the display changed hands.
     fn restore(&mut self) {
-        let Some(snapshot) = self.resume.take() else { return };
+        let Some(snapshot) = self.resume.take() else {
+            return;
+        };
 
         if snapshot.home_row > 0 && snapshot.home_row < self.home.rows() {
             self.home.row = snapshot.home_row;
             self.home.step(snapshot.home_col as isize, 0);
         }
-
 
         if snapshot.screen == "detail" && !snapshot.detail_id.is_empty() {
             // Re-opened from the shelf item if it is still there, so the seed
@@ -887,7 +1000,10 @@ impl App {
                 return;
             }
         } else if let Some(route) = route::Route::from_name(&snapshot.screen) {
-            if matches!(route, Route::Settings | Route::Diagnostics | Route::NowPlaying) {
+            if matches!(
+                route,
+                Route::Settings | Route::Diagnostics | Route::NowPlaying
+            ) {
                 self.stack.push(route);
             }
         }
@@ -905,7 +1021,9 @@ impl App {
     // ------------------------------------------------------------- the drawing
 
     fn paint(&mut self) {
-        let Some(window) = self.window.upgrade() else { return };
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
         let route = self.route();
         window.set_screen(route.name().into());
 
@@ -942,7 +1060,11 @@ impl App {
                         .map(|choice| SheetRow {
                             label: choice.label().into(),
                             hint: choice.hint().into(),
-                            tone: if choice.destructive() { "bad".into() } else { "".into() },
+                            tone: if choice.destructive() {
+                                "bad".into()
+                            } else {
+                                "".into()
+                            },
                         })
                         .collect::<Vec<_>>(),
                 )));
@@ -951,8 +1073,16 @@ impl App {
                 window.set_sheet_kind("confirm".into());
                 window.set_sheet_index(i32::from(*yes));
                 window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(vec![
-                    SheetRow { label: "Vazgeç".into(), hint: "".into(), tone: "".into() },
-                    SheetRow { label: "Evet".into(), hint: "".into(), tone: "bad".into() },
+                    SheetRow {
+                        label: "Vazgeç".into(),
+                        hint: "".into(),
+                        tone: "".into(),
+                    },
+                    SheetRow {
+                        label: "Evet".into(),
+                        hint: "".into(),
+                        tone: "bad".into(),
+                    },
                 ])));
             }
         }
@@ -998,10 +1128,16 @@ impl App {
 
     fn paint_library(&mut self, window: &MediaBoxWindow) {
         window.set_library_tabs(strings(
-            self.library.sections.iter().map(|section| section.title.clone()),
+            self.library
+                .sections
+                .iter()
+                .map(|section| section.title.clone()),
         ));
         window.set_library_notes(strings(
-            self.library.sections.iter().map(|section| section.note.clone()),
+            self.library
+                .sections
+                .iter()
+                .map(|section| section.note.clone()),
         ));
         window.set_library_tab(self.library.tab as i32);
         window.set_library_on_tabs(self.library.on_tabs);
@@ -1013,7 +1149,10 @@ impl App {
         window.set_library_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
 
         let focused = self.library.focused().cloned();
-        if let Some(url) = focused.as_ref().and_then(|item| item.background.clone().or_else(|| item.poster.clone())) {
+        if let Some(url) = focused
+            .as_ref()
+            .and_then(|item| item.background.clone().or_else(|| item.poster.clone()))
+        {
             let key = images::Key::new(&url, state::BACKDROP_WIDTH);
             self.images.want(&key);
             if let Some(art) = self.images.get(&key) {
@@ -1025,9 +1164,7 @@ impl App {
             Some(item) => {
                 window.set_library_title(item.title.clone().into());
                 window.set_library_facts(hero_facts(item).into());
-                window.set_library_summary(
-                    item.summary.clone().unwrap_or_default().into(),
-                );
+                window.set_library_summary(item.summary.clone().unwrap_or_default().into());
                 window.set_library_genres(strings(item.genres.iter().take(4).cloned()));
             }
             None => {
@@ -1040,7 +1177,9 @@ impl App {
     }
 
     fn paint_detail(&mut self, window: &MediaBoxWindow) {
-        let Some(detail) = self.detail.as_ref() else { return };
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
 
         window.set_detail_title(detail.meta.name.clone().into());
         window.set_detail_facts(detail.facts_line().into());
@@ -1060,7 +1199,9 @@ impl App {
             detail.rows_for_display(),
         )));
         window.set_detail_note(detail.note.clone().into());
-        window.set_detail_technical(slint::ModelRc::new(slint::VecModel::from(detail.technical())));
+        window.set_detail_technical(slint::ModelRc::new(slint::VecModel::from(
+            detail.technical(),
+        )));
 
         match detail.plan.as_ref().map(|plan| plan.verdict()) {
             Some((text, tone)) => {
@@ -1108,7 +1249,12 @@ impl App {
             }
         }
 
-        if let Some(url) = detail.meta.background.clone().or_else(|| detail.meta.poster.clone()) {
+        if let Some(url) = detail
+            .meta
+            .background
+            .clone()
+            .or_else(|| detail.meta.poster.clone())
+        {
             if self.detail_backdrop.as_deref() != Some(url.as_str()) {
                 self.detail_backdrop = Some(url.clone());
                 self.detail_fade = if self.detail_fade > 0.5 { 0.0 } else { 1.0 };
@@ -1343,6 +1489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: None,
         diag: None,
         display: None,
+        here: false,
         detail_backdrop: None,
         detail_fade: 0.0,
         epoch: 0,
@@ -1410,7 +1557,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // does not come this way — the daemon is the authority for it — and the
     // dispatcher drops a press that arrives on both roads.
     window.on_key_pressed(move |text| {
-        let Some(first) = text.chars().next() else { return };
+        let Some(first) = text.chars().next() else {
+            return;
+        };
         match input::action_for_key(text.as_str()) {
             Some(action) => with_app(|app| {
                 if let Some(action) = app.dispatcher.accept(action, input::Origin::Keyboard) {
@@ -1440,6 +1589,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     });
+
+    // A film ends by itself as often as it is stopped, and when it does the
+    // player exits and the video window goes dark — this process is the one
+    // holding it, so it knows without asking anybody. Without this the
+    // interface would still believe a film was playing and send the next
+    // transport key to a player that is no longer there.
+    let ended = slint::Timer::default();
+    ended.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(500),
+        || {
+            with_app(|app| {
+                if app.here && !platform::video_showing() {
+                    app.here = false;
+                    if app.route() == Route::NowPlaying {
+                        app.back();
+                    }
+                }
+            });
+        },
+    );
 
     window.set_status("Raflar getiriliyor…".into());
     window.run()?;
@@ -1471,7 +1641,9 @@ fn detached(name: &str, work: impl std::future::Future<Output = ()> + Send + 'st
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
             else {
                 return;
             };
@@ -1613,6 +1785,55 @@ fn spawn_play(url: Option<String>, raw: serde_json::Value) {
     });
 }
 
+/// What the remote can do to a film playing on this interface's own video
+/// plane. Closed for the same reason `KodiCommand` is.
+enum HereCommand {
+    PlayPause,
+    Stop,
+    Seek(i64),
+}
+
+fn spawn_here(command: HereCommand) {
+    detached("mediabox-tv-here", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match command {
+            HereCommand::PlayPause => client.transport_here(serde_json::json!("play_pause")).await,
+            HereCommand::Seek(seconds) => {
+                client
+                    .transport_here(serde_json::json!({"seek": {"seconds": seconds}}))
+                    .await
+            }
+            HereCommand::Stop => client.stop_here().await,
+        };
+        if let Err(e) = answer {
+            eprintln!("mediabox-tv.here failed: {e}");
+        }
+    });
+}
+
+/// Starts the film on this interface's own video plane.
+fn spawn_play_here(url: Option<String>, raw: serde_json::Value) {
+    detached("mediabox-tv-play-here", async move {
+        let client = rpc::Client::new(socket_path());
+        let stream = url.is_none().then_some(&raw);
+        match client.play_here(url.as_deref(), stream, 0).await {
+            Ok(_) => eprintln!("mediabox-tv.play started here=true"),
+            Err(e) => {
+                eprintln!("mediabox-tv.play here failed: {e}");
+                let message = e.to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    with_app(|app| {
+                        app.here = false;
+                        if let Some(window) = app.window.upgrade() {
+                            window.set_detail_note(format!("Oynatılamadı — {message}").into());
+                        }
+                    });
+                });
+            }
+        }
+    });
+}
+
 /// The few things this interface asks the control plane to do that are not
 /// about the catalogue. Each is one closed variant rather than a command, for
 /// the same reason the daemon's own request type is an enum.
@@ -1737,7 +1958,9 @@ fn spawn_loader() {
     std::thread::Builder::new()
         .name("mediabox-tv-data".into())
         .spawn(|| {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
             else {
                 return;
             };
@@ -1811,7 +2034,10 @@ fn spawn_bus_listener() {
     std::thread::Builder::new()
         .name("mediabox-tv-bus".into())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(runtime) => runtime,
                 Err(e) => {
                     eprintln!("mediabox-tv.bus no runtime: {e}");
@@ -1832,7 +2058,11 @@ fn spawn_bus_listener() {
 }
 
 async fn read_events() -> Result<(), Box<dyn std::error::Error>> {
-    let mut response = reqwest::Client::new().get(events_url()).send().await?.error_for_status()?;
+    let mut response = reqwest::Client::new()
+        .get(events_url())
+        .send()
+        .await?
+        .error_for_status()?;
 
     // Frames are newline-delimited and small; assembling them here avoids
     // pulling a stream adapter crate in for four lines of work.
@@ -1851,8 +2081,12 @@ async fn read_events() -> Result<(), Box<dyn std::error::Error>> {
 
 fn deliver(line: &str) {
     // Keepalives arrive as comment frames and carry no payload.
-    let Some(payload) = line.strip_prefix("data: ") else { return };
-    let Ok(event) = serde_json::from_str::<InputEvent>(payload) else { return };
+    let Some(payload) = line.strip_prefix("data: ") else {
+        return;
+    };
+    let Ok(event) = serde_json::from_str::<InputEvent>(payload) else {
+        return;
+    };
 
     // Only the press edge. Through CEC the press, the hold and the release each
     // arrive as their own event.

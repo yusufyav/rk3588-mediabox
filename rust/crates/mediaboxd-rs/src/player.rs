@@ -76,7 +76,10 @@ impl PlayerManager {
             // The compositor the interface is drawn on. The player is its
             // client; without this it would look for a display of its own.
             .arg("--setenv=XDG_RUNTIME_DIR=/run/mediabox-ui")
-            .arg(format!("--setenv=MEDIABOX_PLAYER_IPC={}", self.socket.display()))
+            .arg(format!(
+                "--setenv=MEDIABOX_PLAYER_IPC={}",
+                self.socket.display()
+            ))
             .arg(self.launcher.as_os_str())
             .arg(url)
             .arg(start_seconds.to_string())
@@ -110,6 +113,19 @@ impl PlayerManager {
             .and_then(Value::as_f64)
             .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
             .map(|seconds| seconds as u64)
+    }
+
+    /// Pause or resume, or jump, without stopping. Quiet if nothing is
+    /// playing: a remote pressed at the wrong moment is not an error.
+    pub async fn transport(&self, action: mediabox_core::TransportAction) -> bool {
+        use mediabox_core::TransportAction;
+        let request = match action {
+            TransportAction::PlayPause => json!({"command": ["cycle", "pause"]}),
+            TransportAction::Seek { seconds } => {
+                json!({"command": ["seek", seconds, "relative"]})
+            }
+        };
+        self.ask(request).await.is_some()
     }
 
     /// Stop the player and forget it. Quiet if nothing is playing.

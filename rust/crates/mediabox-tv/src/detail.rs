@@ -13,12 +13,12 @@ use crate::{SourceRow, TechRow};
 
 /// What the marks are drawn from. SVG path data in a 24x24 box, in two layers:
 /// the shape, and what is cut out of it in the button's own colour.
-pub const MARKS: [(&str, &str); 3] = [
-    // Play on the television.
-    (
-        "M1 4h22v13H1zM8 19h8v2H8z",
-        "M10 8l6 3.5-6 3.5z",
-    ),
+pub const MARKS: [(&str, &str); 4] = [
+    // Play, here, in this interface's own player. A plain triangle: this is the
+    // ordinary thing to do with a film and it should not look like a handover.
+    ("M4 2l18 10-18 10z", ""),
+    // Play on the television — hand it to Kodi.
+    ("M1 4h22v13H1zM8 19h8v2H8z", "M10 8l6 3.5-6 3.5z"),
     // The trailer.
     (
         "M3 5h18v14H3z",
@@ -28,11 +28,15 @@ pub const MARKS: [(&str, &str); 3] = [
     ("M11 4l-8 8 8 8v-5h9v-6h-9z", ""),
 ];
 
-pub const ACTIONS: [&str; 3] = ["Kodi'de Oynat", "Fragman", "Geri"];
+/// Playing here is first because it is what opening a film should do: the
+/// catalogue stays behind it, Back returns to it, and the television never
+/// changes hands. Kodi is the second button, for the evening that wants Kodi.
+pub const ACTIONS: [&str; 4] = ["Oynat", "Kodi'de Oynat", "Fragman", "Geri"];
 
-pub const ACTION_KODI: usize = 0;
-pub const ACTION_TRAILER: usize = 1;
-pub const ACTION_BACK: usize = 2;
+pub const ACTION_PLAY: usize = 0;
+pub const ACTION_KODI: usize = 1;
+pub const ACTION_TRAILER: usize = 2;
+pub const ACTION_BACK: usize = 3;
 
 /// Which half of the screen the remote is in.
 ///
@@ -87,7 +91,11 @@ impl Detail {
     /// Opened from a shelf, so everything the shelf knew is already here.
     pub fn seeded(item: &Item) -> Self {
         Self {
-            kind: if item.local { "library".into() } else { item.kind.clone() },
+            kind: if item.local {
+                "library".into()
+            } else {
+                item.kind.clone()
+            },
             id: item.id.clone(),
             meta: Meta {
                 id: item.id.clone(),
@@ -108,7 +116,7 @@ impl Detail {
             sources: Vec::new(),
             plan: None,
             pane: Pane::Record,
-            action: ACTION_KODI,
+            action: ACTION_PLAY,
             selected: None,
             source_focus: 0,
             provider: 0,
@@ -138,7 +146,10 @@ impl Detail {
     /// The sources the column is showing, as indices into `sources`.
     pub fn shown(&self) -> Vec<usize> {
         let providers = self.providers();
-        let wanted = self.provider.checked_sub(1).and_then(|i| providers.get(i).cloned());
+        let wanted = self
+            .provider
+            .checked_sub(1)
+            .and_then(|i| providers.get(i).cloned());
         self.sources
             .iter()
             .enumerate()
@@ -286,8 +297,15 @@ impl Detail {
         // record with empty artwork fields overwrite it is how a detail screen
         // blinks to black a second after it opens.
         let poster = meta.poster.clone().or_else(|| self.meta.poster.clone());
-        let background = meta.background.clone().or_else(|| self.meta.background.clone());
-        self.meta = Meta { poster, background, ..meta };
+        let background = meta
+            .background
+            .clone()
+            .or_else(|| self.meta.background.clone());
+        self.meta = Meta {
+            poster,
+            background,
+            ..meta
+        };
     }
 
     pub fn take_streams(&mut self, listing: StreamListing, raw: Vec<Value>) {
@@ -304,7 +322,10 @@ impl Detail {
         };
         // The first that can actually play, so the buttons mean something
         // before the viewer has chosen anything.
-        self.selected = self.sources.iter().position(|source| source.parsed.playable);
+        self.selected = self
+            .sources
+            .iter()
+            .position(|source| source.parsed.playable);
         self.provider = 0;
         self.on_filter = false;
         self.source_focus = self
@@ -332,7 +353,13 @@ impl Detail {
             })
             .collect();
         let count = envelope.streams.len() as u32;
-        self.take_streams(StreamListing { streams: envelope.streams, playable: count }, raw);
+        self.take_streams(
+            StreamListing {
+                streams: envelope.streams,
+                playable: count,
+            },
+            raw,
+        );
     }
 
     pub fn fail(&mut self, why: &str) {
@@ -361,12 +388,17 @@ impl Detail {
 
     /// Which actions can be pressed. Back is always one of them: a title with
     /// no sources would otherwise leave the screen with nothing to focus.
-    pub fn enabled(&self) -> [bool; 3] {
+    pub fn enabled(&self) -> [bool; 4] {
         let playable = self
             .selected_source()
             .map(|source| source.parsed.playable)
             .unwrap_or(false);
-        [playable, non_empty(&self.meta.trailer).is_some(), true]
+        [
+            playable,
+            playable,
+            non_empty(&self.meta.trailer).is_some(),
+            true,
+        ]
     }
 
     /// The technical rows, as pairs, for whatever screen wants them next — the
@@ -422,7 +454,9 @@ impl Detail {
     /// The technical panel: what the media core found and decided, never what a
     /// file name claimed.
     pub fn technical(&self) -> Vec<TechRow> {
-        let Some(plan) = &self.plan else { return Vec::new() };
+        let Some(plan) = &self.plan else {
+            return Vec::new();
+        };
         let mut rows = Vec::new();
 
         if let Some(video) = plan.video() {
@@ -487,7 +521,11 @@ impl Detail {
             if reason.message.is_empty() || severity_tone(&reason.severity).is_empty() {
                 continue;
             }
-            rows.push(tech("Not", &reason.message, severity_tone(&reason.severity)));
+            rows.push(tech(
+                "Not",
+                &reason.message,
+                severity_tone(&reason.severity),
+            ));
         }
 
         // Four is what the column has room for and about as much as anybody
@@ -498,11 +536,19 @@ impl Detail {
 }
 
 fn tech(label: &str, value: &str, tone: &str) -> TechRow {
-    TechRow { label: label.into(), value: value.into(), tone: tone.into() }
+    TechRow {
+        label: label.into(),
+        value: value.into(),
+        tone: tone.into(),
+    }
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {
-    value.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn severity_tone(severity: &str) -> &'static str {
@@ -528,7 +574,10 @@ fn kind_chip(kind: &str) -> (&'static str, &'static str) {
 /// picture that will come out wrong, and the panel should say so.
 fn hdr_chip(video: &crate::model::VideoTrack) -> (String, &'static str) {
     if let Some(dv) = &video.dolby_vision {
-        let profile = dv.profile.map(|p| format!("Dolby Vision {p}")).unwrap_or("Dolby Vision".into());
+        let profile = dv
+            .profile
+            .map(|p| format!("Dolby Vision {p}"))
+            .unwrap_or("Dolby Vision".into());
         return match dv.bl_signal_compatibility_id {
             Some(id) if id != 0 => (format!("{profile} · DV katmanı yok sayılır"), "warn"),
             _ => (format!("{profile} · desteklenmiyor"), "bad"),
@@ -546,7 +595,11 @@ fn audio_note(plan: &Plan) -> Option<String> {
         "Passthrough" => "Olduğu gibi aktarılır".into(),
         "DecodeToPCM" => "PCM'e çözülür".into(),
         "TranscodeToAC3" => {
-            let object = audio.track.as_ref().and_then(|t| t.object_audio).unwrap_or(false);
+            let object = audio
+                .track
+                .as_ref()
+                .and_then(|t| t.object_audio)
+                .unwrap_or(false);
             if object {
                 "AC-3'e çevrilir — nesne tabanlı ses katmanı kaybolur".into()
             } else {

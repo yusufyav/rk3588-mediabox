@@ -29,7 +29,10 @@ pub enum Error {
     Io(std::io::Error),
     Malformed(serde_json::Error),
     /// The daemon answered, and the answer was no.
-    Refused { code: String, message: String },
+    Refused {
+        code: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -63,7 +66,9 @@ pub struct Client {
 
 impl Client {
     pub fn new(socket: impl AsRef<Path>) -> Self {
-        Self { socket: socket.as_ref().to_path_buf() }
+        Self {
+            socket: socket.as_ref().to_path_buf(),
+        }
     }
 
     /// One request, one connection. The daemon closes after answering anything
@@ -90,7 +95,10 @@ impl Client {
                 code: "UNKNOWN".into(),
                 message: "denetim düzlemi bir neden bildirmedi".into(),
             });
-            Err(Error::Refused { code: error.code, message: error.message })
+            Err(Error::Refused {
+                code: error.code,
+                message: error.message,
+            })
         }
     }
 
@@ -108,11 +116,13 @@ impl Client {
     }
 
     pub async fn meta(&self, kind: &str, id: &str) -> Result<crate::model::MetaEnvelope> {
-        self.typed(json!({"command": "media_meta", "media_type": kind, "id": id})).await
+        self.typed(json!({"command": "media_meta", "media_type": kind, "id": id}))
+            .await
     }
 
     pub async fn library_item(&self, id: &str) -> Result<crate::model::LibraryItemEnvelope> {
-        self.typed(json!({"command": "media_library_item", "id": id})).await
+        self.typed(json!({"command": "media_library_item", "id": id}))
+            .await
     }
 
     /// Kept as a raw value as well as a parsed one: the exact stream descriptor
@@ -120,19 +130,23 @@ impl Client {
     /// and a round trip through our own struct would drop the fields we do not
     /// model.
     pub async fn streams(&self, kind: &str, id: &str) -> Result<Value> {
-        self.call(json!({"command": "media_streams", "media_type": kind, "id": id})).await
+        self.call(json!({"command": "media_streams", "media_type": kind, "id": id}))
+            .await
     }
 
     pub async fn search(&self, query: &str) -> Result<crate::model::SearchResults> {
-        self.typed(json!({"command": "media_search", "query": query})).await
+        self.typed(json!({"command": "media_search", "query": query}))
+            .await
     }
 
     pub async fn plan_for_stream(&self, stream: &Value) -> Result<crate::model::Plan> {
-        self.typed(json!({"command": "media_stream_plan", "stream": stream})).await
+        self.typed(json!({"command": "media_stream_plan", "stream": stream}))
+            .await
     }
 
     pub async fn plan_for_url(&self, url: &str) -> Result<crate::model::Plan> {
-        self.typed(json!({"command": "media_policy", "url": url})).await
+        self.typed(json!({"command": "media_policy", "url": url}))
+            .await
     }
 
     /// Hands the television to Kodi and starts the film. The daemon stops this
@@ -168,11 +182,23 @@ impl Client {
         self.call(request).await
     }
 
+    /// The interface's own player, while it is running. Stop first, because
+    /// it is the one a remote reaches by pressing Back.
+    pub async fn stop_here(&self) -> Result<Value> {
+        self.call(json!({"command": "media_stop_here"})).await
+    }
+
+    pub async fn transport_here(&self, action: Value) -> Result<Value> {
+        self.call(json!({"command": "media_transport_here", "action": action}))
+            .await
+    }
+
     /// Opens an address in the box's browser application. The control plane
     /// whitelists the scheme and starts the unit; this interface does not get
     /// to run a browser, and does not want to.
     pub async fn browser_open(&self, url: &str) -> Result<Value> {
-        self.call(json!({"command": "browser_open", "url": url})).await
+        self.call(json!({"command": "browser_open", "url": url}))
+            .await
     }
 
     pub async fn kodi_status(&self) -> Result<Value> {
@@ -188,7 +214,8 @@ impl Client {
     }
 
     pub async fn kodi_seek(&self, seconds: i64) -> Result<Value> {
-        self.call(json!({"command": "kodi_seek", "seconds": seconds})).await
+        self.call(json!({"command": "kodi_seek", "seconds": seconds}))
+            .await
     }
 
     pub async fn kodi_restart(&self) -> Result<Value> {
@@ -209,7 +236,8 @@ impl Client {
     /// confirmation the viewer moved the focus onto and pressed — and the
     /// request body is a two-valued enum on both sides of the socket.
     pub async fn system_power(&self, action: mediabox_core::PowerAction) -> Result<Value> {
-        self.call(json!({"command": "system_power", "action": action})).await
+        self.call(json!({"command": "system_power", "action": action}))
+            .await
     }
 
     pub async fn status(&self) -> Result<Value> {
@@ -224,7 +252,8 @@ impl Client {
     /// Put one application on the television. This interface is itself one of
     /// them, so choosing another ends this process: the display changes hands.
     pub async fn application_launch(&self, id: &str) -> Result<Value> {
-        self.call(json!({"command": "application_launch", "id": id})).await
+        self.call(json!({"command": "application_launch", "id": id}))
+            .await
     }
 
     pub async fn diagnostics(&self) -> Result<Value> {

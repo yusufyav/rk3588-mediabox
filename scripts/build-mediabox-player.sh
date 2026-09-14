@@ -12,6 +12,14 @@
 # Two patches are applied, both small, both explained in their own headers:
 # without them mpv decodes this board's films in software at a third of the
 # machine instead of one per cent of it.
+#
+# One video output is added, as a whole file rather than as a diff because it
+# is one: packaging/mpv/vo_mediabox.c, which hands a decoded frame's dma-buf
+# descriptors to the interface instead of drawing anywhere. The interface holds
+# DRM master on this appliance and there is no compositor under it, so that is
+# the only way a film reaches the panel without taking the television away from
+# the interface. The third patch is the two lines that put the file in the
+# build.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,8 +32,9 @@ sh_() { ssh "${ssh_opts[@]}" "root@$host" "$@"; }
 cp_() { scp "${ssh_opts[@]}" -q "$@"; }
 
 echo "== patches -> appliance"
-sh_ "mkdir -p /var/tmp/mpv-build/patches"
+sh_ "mkdir -p /var/tmp/mpv-build/patches /var/tmp/mpv-build/sources"
 cp_ "$here"/packaging/mpv-patches/*.patch "root@$host:/var/tmp/mpv-build/patches/"
+cp_ "$here"/packaging/mpv/*.c "root@$host:/var/tmp/mpv-build/sources/"
 
 echo "== building mpv $version on the appliance"
 sh_ "bash -s" <<REMOTE
@@ -45,6 +54,11 @@ rm -rf mpv
 wget -q -O mpv.tar.gz "https://github.com/mpv-player/mpv/archive/refs/tags/$version.tar.gz"
 mkdir mpv && tar -C mpv --strip-components=1 -xzf mpv.tar.gz
 cd mpv
+# Our own sources first: the registration patch below names one of them, and a
+# build that applied the patch without the file would fail at link time with a
+# missing symbol rather than here with a missing file.
+cp /var/tmp/mpv-build/sources/vo_mediabox.c video/out/vo_mediabox.c
+
 for p in /var/tmp/mpv-build/patches/*.patch; do
   echo "  applying \$(basename \$p)"
   patch -p0 --forward < "\$p"

@@ -1,0 +1,47 @@
+From: MediaBox
+Subject: register the MediaBox video plane output
+
+The appliance's interface is one process that holds DRM master and scans its
+own surface out on Cluster0, the primary window of video port 0. There is no
+compositor under it any more, so mpv's dmabuf-wayland output has nothing to
+draw on -- it is what this player used before, and it exits 2 without one --
+and vo_drm would have to take the television away from the interface to get a
+picture, which is the thing having our own player was supposed to stop.
+
+video/out/vo_mediabox.c is the third answer: the decoded frame's dma-buf
+descriptors go to the interface over a unix socket, and the interface puts them
+on the same video port's second window (Esmart0, which takes NV12 and NV15 and
+has its own scaler). This is the two lines that make the build know about it.
+--- /var/tmp/vo.c.orig
++++ video/out/vo.c
+@@ -66,6 +66,7 @@
+ extern const struct vo_driver video_out_tct;
+ extern const struct vo_driver video_out_sixel;
+ extern const struct vo_driver video_out_kitty;
++extern const struct vo_driver video_out_mediabox;
+ 
+ static const struct vo_driver *const video_out_drivers[] =
+ {
+@@ -94,6 +95,12 @@
+ #if HAVE_DMABUF_WAYLAND
+     &video_out_dmabuf_wayland,
+ #endif
++    /* MediaBox's own: hand the decoded frame to the interface that holds DRM
++     * master and let the display controller's second window show it. This
++     * appliance has no compositor, so dmabuf-wayland above has nothing to draw
++     * on and vo_drm below would have to take the television away from the
++     * interface to get it. */
++    &video_out_mediabox,
+ #if HAVE_VAAPI_X11 && HAVE_GPL
+     &video_out_vaapi,
+ #endif
+--- /var/tmp/meson.build.orig
++++ meson.build
+@@ -243,6 +243,7 @@
+     'video/out/vo_image.c',
+     'video/out/vo_lavc.c',
+     'video/out/vo_libmpv.c',
++    'video/out/vo_mediabox.c',
+     'video/out/vo_null.c',
+     'video/out/vo_tct.c',
+     'video/out/vo_kitty.c',
