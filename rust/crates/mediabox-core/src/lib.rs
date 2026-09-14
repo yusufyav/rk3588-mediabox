@@ -334,6 +334,22 @@ pub enum Request {
         stream: Option<Value>,
         #[serde(default)]
         start_seconds: u64,
+        /// What the catalogue calls it.
+        ///
+        /// The player cannot work this out and must not try: a film opened
+        /// from the catalogue is played through a session whose address is a
+        /// hexadecimal identifier, and taking a name from that address put
+        /// `73c91b7f7242ab69a92b3654aebb344f` across somebody's film.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// How long the film is, as the catalogue knows it.
+        ///
+        /// Also not the player's to answer. A session the worker proxies does
+        /// not carry the container's duration, and mpv then estimates one from
+        /// what it has: a ninety-nine minute film read as three minutes and
+        /// forty-five seconds, with a progress bar nearly full at 3:15.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_seconds: Option<u64>,
     },
     /// Hand what is playing here to Kodi, at the position it had reached.
     ///
@@ -409,6 +425,12 @@ pub enum TransportAction {
     /// Forwards on a positive number, back on a negative one, in seconds.
     Seek {
         seconds: i64,
+    },
+    /// Straight to a point in the film. What a scrub asks for: ten seconds at a
+    /// time cannot reach the middle of a two hour film, and a relative jump
+    /// computed from a position that has moved since is not the same place.
+    SeekTo {
+        seconds: u64,
     },
 }
 

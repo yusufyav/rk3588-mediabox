@@ -52,6 +52,9 @@ pub enum Transport {
     PlayPause,
     Stop,
     Seek(i64),
+    /// Straight to a second of the film. Only a scrub produces one: the keys
+    /// on a remote cannot.
+    SeekTo(u64),
     VolumeUp,
     VolumeDown,
     Mute,

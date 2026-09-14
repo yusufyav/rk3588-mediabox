@@ -401,6 +401,17 @@ impl Detail {
         ]
     }
 
+    /// How long the film is, in seconds, if the catalogue said.
+    ///
+    /// The catalogue writes it for a person to read rather than for a machine,
+    /// and not always the same way, so every shape seen from these addons is
+    /// handled and anything else is refused rather than guessed at. Nothing
+    /// here is allowed to produce a number from a string it did not
+    /// understand: a wrong runtime is a progress bar that lies.
+    pub fn runtime_seconds(&self) -> Option<u64> {
+        runtime_seconds(self.meta.runtime.as_deref()?)
+    }
+
     /// The technical rows, as pairs, for whatever screen wants them next — the
     /// now-playing screen carries them over when a film starts.
     pub fn technical_pairs(&self) -> Vec<(String, String)> {
@@ -618,5 +629,103 @@ fn gigabytes(bytes: f64) -> String {
         format!("{gb:.2} GB")
     } else {
         format!("{:.0} MB", bytes / 1_000_000.0)
+    }
+}
+
+/// How long a film is, from what the catalogue wrote for a reader.
+///
+/// "99 min", "1h 39min", "1 h 39 m", "99" — hours and minutes, spelt several
+/// ways by several addons. Anything this does not recognise returns None and
+/// the interface draws an unknown length as unknown: a guessed runtime is a
+/// progress bar that is wrong and looks right, which is how a ninety-nine
+/// minute film came up as three minutes and forty-five seconds.
+fn runtime_seconds(text: &str) -> Option<u64> {
+    let text = text.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut hours = 0u64;
+    let mut minutes = 0u64;
+    let mut understood = false;
+    let mut bare: Option<u64> = None;
+
+    let add = |unit: &str, value: u64, hours: &mut u64, minutes: &mut u64| -> bool {
+        match unit {
+            "h" | "hr" | "hrs" | "hour" | "hours" | "sa" | "saat" => *hours += value,
+            "m" | "min" | "mins" | "minute" | "minutes" | "dk" | "dakika" => *minutes += value,
+            _ => return false,
+        }
+        true
+    };
+
+    for part in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if part.is_empty() {
+            continue;
+        }
+        // "39min" and "1h" arrive glued together as often as not.
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        let unit: String = part.chars().skip(digits.len()).collect();
+
+        if !digits.is_empty() {
+            let value = digits.parse::<u64>().ok()?;
+            if unit.is_empty() {
+                // A number on its own: its unit may be the next word.
+                if let Some(previous) = bare.replace(value) {
+                    minutes += previous;
+                    understood = true;
+                }
+            } else if add(&unit, value, &mut hours, &mut minutes) {
+                understood = true;
+            } else {
+                return None;
+            }
+            continue;
+        }
+
+        let Some(value) = bare.take() else {
+            return None;
+        };
+        if !add(&unit, value, &mut hours, &mut minutes) {
+            return None;
+        }
+        understood = true;
+    }
+
+    // A trailing number with nothing after it is minutes, which is how every
+    // one of these addons writes a film's length.
+    if let Some(value) = bare {
+        minutes += value;
+        understood = true;
+    }
+
+    let total = hours * 3600 + minutes * 60;
+    (understood && total > 0).then_some(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The progress bar is only as honest as this function.
+    #[test]
+    fn a_runtime_written_for_a_reader_becomes_seconds() {
+        assert_eq!(runtime_seconds("99 min"), Some(99 * 60));
+        assert_eq!(runtime_seconds("99"), Some(99 * 60));
+        assert_eq!(runtime_seconds("105 minutes"), Some(105 * 60));
+        assert_eq!(runtime_seconds("1h 39min"), Some(3600 + 39 * 60));
+        assert_eq!(runtime_seconds("1 h 39 m"), Some(3600 + 39 * 60));
+        assert_eq!(runtime_seconds("2h"), Some(7200));
+        assert_eq!(runtime_seconds("118 dk"), Some(118 * 60));
+    }
+
+    /// Anything unrecognised is refused rather than guessed at.
+    #[test]
+    fn an_unrecognised_runtime_is_not_guessed_at() {
+        assert_eq!(runtime_seconds(""), None);
+        assert_eq!(runtime_seconds("   "), None);
+        assert_eq!(runtime_seconds("bilinmiyor"), None);
+        assert_eq!(runtime_seconds("0 min"), None);
+        assert_eq!(runtime_seconds("S01E04"), None);
     }
 }

@@ -36,6 +36,10 @@ pub struct Playing {
     /// The source as the catalogue knows it. This is what Kodi is given when
     /// the film is handed over, because Kodi can open it directly.
     pub source: String,
+    /// What to call it, and how long it is, as the caller knew them. Neither
+    /// is derivable here; see `Request::MediaPlayHere`.
+    pub title: Option<String>,
+    pub duration: Option<u64>,
 }
 
 pub struct PlayerManager {
@@ -123,7 +127,10 @@ impl PlayerManager {
     pub async fn status(&self) -> Value {
         let playing = self.playing().await;
         let number = |answer: Option<Value>| -> Option<f64> {
-            answer?.get("data")?.as_f64().filter(|value| value.is_finite())
+            answer?
+                .get("data")?
+                .as_f64()
+                .filter(|value| value.is_finite())
         };
         let position = number(
             self.ask(json!({"command": ["get_property", "time-pos"], "request_id": 1}))
@@ -138,11 +145,22 @@ impl PlayerManager {
             .await
             .and_then(|answer| answer.get("data").and_then(Value::as_bool));
 
+        // What the caller said, over what the decoder guessed. A proxied
+        // session has no duration in it and mpv's estimate from a partial
+        // transfer is not one either; zero means "unknown", which an interface
+        // can draw honestly, and a wrong number is one it cannot.
+        let known = playing.as_ref().and_then(|playing| playing.duration);
+        let duration = known
+            .map(|seconds| seconds as f64)
+            .or(duration.filter(|seconds| *seconds > 0.0))
+            .unwrap_or(0.0);
+
         json!({
             "playing": playing.is_some() && position.is_some(),
             "source": playing.as_ref().map(|playing| playing.source.clone()),
+            "title": playing.as_ref().and_then(|playing| playing.title.clone()),
             "position": position.unwrap_or(0.0),
-            "duration": duration.unwrap_or(0.0),
+            "duration": duration,
             "paused": paused.unwrap_or(false),
         })
     }
@@ -155,6 +173,9 @@ impl PlayerManager {
             TransportAction::PlayPause => json!({"command": ["cycle", "pause"]}),
             TransportAction::Seek { seconds } => {
                 json!({"command": ["seek", seconds, "relative"]})
+            }
+            TransportAction::SeekTo { seconds } => {
+                json!({"command": ["seek", seconds, "absolute"]})
             }
         };
         self.ask(request).await.is_some()

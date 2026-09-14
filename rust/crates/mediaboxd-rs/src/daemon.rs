@@ -118,7 +118,12 @@ impl AppState {
                 url,
                 stream,
                 start_seconds,
-            } => self.play_here(url, stream, start_seconds).await,
+                title,
+                duration_seconds,
+            } => {
+                self.play_here(url, stream, start_seconds, title, duration_seconds)
+                    .await
+            }
             Request::MediaHandoffToKodi => self.handoff_to_kodi().await,
             Request::MediaStatusHere => Response::success(self.player.status().await),
             Request::MediaTransportHere { action } => {
@@ -249,6 +254,8 @@ impl AppState {
         url: Option<String>,
         stream: Option<Value>,
         start_seconds: u64,
+        title: Option<String>,
+        duration_seconds: Option<u64>,
     ) -> Response {
         if url.is_none() && stream.is_none() {
             return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
@@ -289,6 +296,8 @@ impl AppState {
         let playing = Playing {
             session_id: session_id.clone(),
             source: source.clone(),
+            title: title.filter(|title| !title.trim().is_empty()),
+            duration: duration_seconds.filter(|seconds| *seconds > 0),
         };
         if let Err(error) = self.player.start(&local, start_seconds, playing).await {
             self.stop_session(&session_id).await;

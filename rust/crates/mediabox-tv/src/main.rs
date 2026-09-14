@@ -650,6 +650,10 @@ impl App {
 
         let url = source.parsed.url.clone();
         let raw = source.raw.clone();
+        // Everything read off the detail screen, before anything borrows self
+        // mutably: the film's name and its length go to the player with it.
+        let name = detail.meta.name.clone();
+        let runtime = detail.runtime_seconds();
 
         self.now.title = detail.meta.name.clone();
         self.now.artwork = detail.meta.poster.clone();
@@ -663,7 +667,7 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_detail_note("Oynatılıyor…".into());
         }
-        spawn_play_here(url, raw);
+        spawn_play_here(url, raw, name, runtime);
         // The film covers the panel — the video window sits above the primary —
         // so the screen behind it is the one a remote should already be on when
         // it comes back.
@@ -793,7 +797,17 @@ impl App {
                 }
             }
             Intent::Select => {
-                use screens::now_playing::Control;
+                use screens::now_playing::{Control, Row};
+                if self.now.row == Row::Bar {
+                    // Ok on the bar goes where the scrub got to. Ok on a bar
+                    // nobody has moved is the ordinary thing a remote does to a
+                    // film: stop it for a moment, or start it again.
+                    match self.now.take_scrub() {
+                        Some(seconds) => self.transport(Transport::SeekTo(seconds)),
+                        None => self.transport(Transport::PlayPause),
+                    }
+                    return;
+                }
                 match self.now.focused() {
                     Control::SeekBack => self.transport(Transport::Seek(-10)),
                     Control::PlayPause => self.transport(Transport::PlayPause),
@@ -810,6 +824,12 @@ impl App {
                 // now, which they always are by the time this runs.
                 if self.here.is_some() {
                     if !self.controls_were_open {
+                        return;
+                    }
+                    // A scrub in progress is what Back is about first: it
+                    // abandons the move rather than the film.
+                    if self.now.cancel_scrub() {
+                        self.paint();
                         return;
                     }
                     self.transport(Transport::Stop);
@@ -832,6 +852,13 @@ impl App {
             match transport {
                 Transport::PlayPause => spawn_here(HereCommand::PlayPause),
                 Transport::Seek(seconds) => spawn_here(HereCommand::Seek(seconds)),
+                Transport::SeekTo(seconds) => {
+                    // Drawn immediately rather than when the player answers:
+                    // a bar that snaps back to where it was for a moment is
+                    // what makes a scrub feel like it did not work.
+                    self.now.elapsed_seconds = seconds;
+                    spawn_here(HereCommand::SeekTo(seconds));
+                }
                 Transport::Stop => {
                     self.here = None;
                     spawn_here(HereCommand::Stop);
@@ -847,6 +874,13 @@ impl App {
             Transport::PlayPause => spawn_kodi(KodiCommand::PlayPause),
             Transport::Stop => spawn_kodi(KodiCommand::Stop),
             Transport::Seek(seconds) => spawn_kodi(KodiCommand::Seek(seconds)),
+            // Kodi is asked in the only terms this interface has for it: the
+            // distance from where it says it is to where the scrub landed.
+            Transport::SeekTo(seconds) => {
+                let from = self.now.elapsed_seconds as i64;
+                self.now.elapsed_seconds = seconds;
+                spawn_kodi(KodiCommand::Seek(seconds as i64 - from));
+            }
             // Volume is the television's, over CEC, and the daemon owns that
             // adapter. Nothing to do here until there is a mixer to move.
             Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
@@ -1420,11 +1454,32 @@ impl App {
         window.set_np_note(now.note.clone().into());
         window.set_np_surface(now.surface.clone().into());
         window.set_np_elapsed(screens::now_playing::timecode(now.elapsed_seconds).into());
-        window.set_np_duration(screens::now_playing::timecode(now.duration_seconds).into());
+        // An unknown length is drawn as unknown. The bar stays empty with it:
+        // `progress` is zero without a duration, which is the truth.
+        window.set_np_duration(if now.duration_known() {
+            screens::now_playing::timecode(now.duration_seconds).into()
+        } else {
+            slint::SharedString::from("—")
+        });
         window.set_np_progress(now.progress());
         window.set_np_focus(now.focus as i32);
+        window.set_np_row(match now.row {
+            screens::now_playing::Row::Bar => 0,
+            screens::now_playing::Row::Controls => 1,
+        });
+        // The tick's own time, while it is being moved. Empty the rest of the
+        // time, which is how the line knows to show the film's.
+        window.set_np_scrub(match now.scrub {
+            Some(seconds) => screens::now_playing::timecode(seconds).into(),
+            None => slint::SharedString::new(),
+        });
 
         let playing = now.playing();
+        window.set_np_actions(strings(
+            screens::now_playing::CONTROLS
+                .iter()
+                .map(|control| control.label(playing).to_string()),
+        ));
         window.set_np_controls(slint::ModelRc::new(slint::VecModel::from(
             screens::now_playing::CONTROLS
                 .iter()
@@ -1966,6 +2021,7 @@ enum HereCommand {
     PlayPause,
     Stop,
     Seek(i64),
+    SeekTo(u64),
 }
 
 /// Asks the interface's own player where it has got to.
@@ -1991,6 +2047,11 @@ fn spawn_here(command: HereCommand) {
                     .transport_here(serde_json::json!({"seek": {"seconds": seconds}}))
                     .await
             }
+            HereCommand::SeekTo(seconds) => {
+                client
+                    .transport_here(serde_json::json!({"seek_to": {"seconds": seconds}}))
+                    .await
+            }
             HereCommand::Stop => client.stop_here().await,
         };
         if let Err(e) = answer {
@@ -2000,11 +2061,24 @@ fn spawn_here(command: HereCommand) {
 }
 
 /// Starts the film on this interface's own video plane.
-fn spawn_play_here(url: Option<String>, raw: serde_json::Value) {
+///
+/// The name and the length go with it. Neither is the player's to work out —
+/// a film opened from the catalogue is played through a session whose address
+/// is a hexadecimal identifier with no duration in it — and this is the one
+/// moment both are known.
+fn spawn_play_here(
+    url: Option<String>,
+    raw: serde_json::Value,
+    title: String,
+    runtime: Option<u64>,
+) {
     detached("mediabox-tv-play-here", async move {
         let client = rpc::Client::new(socket_path());
         let stream = url.is_none().then_some(&raw);
-        match client.play_here(url.as_deref(), stream, 0).await {
+        match client
+            .play_here(url.as_deref(), stream, 0, Some(title.as_str()), runtime)
+            .await
+        {
             Ok(_) => eprintln!("mediabox-tv.play started here=true"),
             Err(e) => {
                 eprintln!("mediabox-tv.play here failed: {e}");

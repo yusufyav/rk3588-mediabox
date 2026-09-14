@@ -77,6 +77,59 @@ pub struct NowPlaying {
     pub technical: Vec<(String, String)>,
     pub focus: usize,
     pub note: String,
+
+    /// Which row the remote is on: the bar, or the buttons.
+    ///
+    /// The four buttons move a film ten and thirty seconds at a time, which is
+    /// the right size for finding the line you missed and a useless one for
+    /// finding a scene in a two hour film. So the bar is somewhere the remote
+    /// can go, and Left and Right on it are a scrub that accelerates.
+    pub row: Row,
+    /// Where the scrub has got to, in seconds, while one is in progress. The
+    /// film keeps playing behind it; nothing is asked of the player until the
+    /// scrub is confirmed.
+    pub scrub: Option<u64>,
+    /// How many scrub presses have arrived in a row, which is what decides how
+    /// far the next one moves.
+    run: u32,
+    last_scrub: Option<std::time::Instant>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Row {
+    /// The bar. Left and Right scrub, Ok goes there.
+    #[default]
+    Bar,
+    /// The four buttons.
+    Controls,
+}
+
+/// Two presses of the same direction inside this belong to one movement.
+const SCRUB_RUN: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// How far one press moves the scrub, by how many came before it.
+///
+/// A remote repeats about nine times a second, so this reaches ten minutes a
+/// second after roughly a second and a half of holding the key down: the far
+/// end of a three hour film is a few seconds away, and the first press is still
+/// ten seconds, so a small correction stays small.
+/// How close to the end a scrub may get.
+///
+/// Not one second. The length comes from the catalogue and the file is not
+/// obliged to agree with it — measured on the appliance, a scrub held to the
+/// right end of an eighty-five minute film reached the last second of what the
+/// catalogue claimed, ran out of file, and the player exited. Nobody scrubbing
+/// wants the film to end; they want to be near the end of it.
+const SCRUB_TAIL: u64 = 15;
+
+fn scrub_step(run: u32) -> u64 {
+    match run {
+        0..=2 => 10,
+        3..=5 => 30,
+        6..=9 => 60,
+        10..=14 => 180,
+        _ => 600,
+    }
 }
 
 impl NowPlaying {
@@ -98,27 +151,105 @@ impl NowPlaying {
         )
     }
 
+    /// Whether the length of the film is known at all.
+    ///
+    /// A session the worker proxies does not carry one. An interface that
+    /// invents a number here draws a bar that is wrong and looks right — which
+    /// is how ninety-nine minutes became three minutes and forty-five seconds
+    /// on the television.
+    pub fn duration_known(&self) -> bool {
+        self.duration_seconds > 0
+    }
+
     pub fn progress(&self) -> f32 {
         if self.duration_seconds == 0 {
             return 0.0;
         }
-        (self.elapsed_seconds as f32 / self.duration_seconds as f32).clamp(0.0, 1.0)
+        (self.shown_seconds() as f32 / self.duration_seconds as f32).clamp(0.0, 1.0)
     }
 
     pub fn focused(&self) -> Control {
         CONTROLS[self.focus.min(CONTROLS.len() - 1)]
     }
 
-    pub fn step(&mut self, dx: i32, _dy: i32) -> bool {
+    pub fn step(&mut self, dx: i32, dy: i32) -> bool {
+        if dy != 0 {
+            let next = if dy < 0 { Row::Bar } else { Row::Controls };
+            if next == self.row {
+                return false;
+            }
+            // Leaving the bar abandons an unconfirmed scrub rather than
+            // carrying it somewhere it cannot be seen.
+            if next == Row::Controls {
+                self.scrub = None;
+            }
+            self.row = next;
+            return true;
+        }
         if dx == 0 {
             return false;
         }
-        let next = (self.focus as i32 + dx).clamp(0, CONTROLS.len() as i32 - 1) as usize;
-        if next == self.focus {
+        match self.row {
+            Row::Bar => self.scrub_by(dx),
+            Row::Controls => {
+                let next = (self.focus as i32 + dx).clamp(0, CONTROLS.len() as i32 - 1) as usize;
+                if next == self.focus {
+                    return false;
+                }
+                self.focus = next;
+                true
+            }
+        }
+    }
+
+    /// One press of Left or Right on the bar.
+    fn scrub_by(&mut self, dx: i32) -> bool {
+        let now = std::time::Instant::now();
+        self.run = match self.last_scrub {
+            Some(last) if now.duration_since(last) < SCRUB_RUN => self.run.saturating_add(1),
+            _ => 0,
+        };
+        self.last_scrub = Some(now);
+
+        let from = self.scrub.unwrap_or(self.elapsed_seconds) as i64;
+        let step = scrub_step(self.run) as i64 * dx.signum() as i64;
+        let mut target = from + step;
+        if target < 0 {
+            target = 0;
+        }
+        // One whose length is known stops short of the end; see SCRUB_TAIL.
+        // A film whose length is unknown is not clamped at all, because there
+        // is nothing honest to clamp it to.
+        if self.duration_seconds > 0 {
+            let last = self.duration_seconds.saturating_sub(SCRUB_TAIL);
+            target = target.min(last as i64);
+        }
+        let target = target as u64;
+        if self.scrub == Some(target) {
             return false;
         }
-        self.focus = next;
+        self.scrub = Some(target);
         true
+    }
+
+    /// Where the bar should be drawn: the scrub if there is one, else the film.
+    pub fn shown_seconds(&self) -> u64 {
+        self.scrub.unwrap_or(self.elapsed_seconds)
+    }
+
+    /// Confirms a scrub and says where to go. None when there was not one.
+    pub fn take_scrub(&mut self) -> Option<u64> {
+        let target = self.scrub.take()?;
+        self.run = 0;
+        self.last_scrub = None;
+        Some(target)
+    }
+
+    /// Abandons one. Returns whether there was anything to abandon.
+    pub fn cancel_scrub(&mut self) -> bool {
+        self.run = 0;
+        self.last_scrub = None;
+        self.scrub.take().is_some()
     }
 
     /// One `media_status_here` answer: the interface's own player, not Kodi.
@@ -136,18 +267,17 @@ impl NowPlaying {
                 .map(|value| value as u64)
                 .unwrap_or(0)
         };
-        // A film opened from this interface carried its name here; one opened
-        // from the web interface did not, and "MediaBox" over somebody's film
-        // is worse than the file's own name.
-        if self.title.is_empty()
-            && let Some(source) = status.get("source").and_then(Value::as_str)
+        // Whoever started the film said what it was called. Never the address
+        // it is being read from: a catalogue film is played through a session
+        // whose address is a hexadecimal identifier, and taking a name from
+        // that put `73c91b7f7242ab69a92b3654aebb344f` across somebody's film.
+        if let Some(title) = status
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
         {
-            let tail = source.rsplit('/').next().unwrap_or(source);
-            let name = tail.split('?').next().unwrap_or(tail);
-            let name = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name);
-            if !name.is_empty() {
-                self.title = name.replace(['.', '_'], " ");
-            }
+            self.title = title.to_string();
         }
         self.elapsed_seconds = seconds("position");
         self.duration_seconds = seconds("duration");
@@ -320,6 +450,8 @@ mod tests {
     #[test]
     fn the_controls_never_step_off_the_end() {
         let mut now = NowPlaying::new();
+        now.step(0, 1);
+        assert_eq!(now.row, Row::Controls);
         for _ in 0..10 {
             now.step(1, 0);
         }
@@ -328,6 +460,117 @@ mod tests {
             now.step(-1, 0);
         }
         assert_eq!(now.focused(), Control::SeekBack);
+    }
+
+    /// The remote starts on the rule, because moving a film is the first thing
+    /// a key press during one is for.
+    #[test]
+    fn the_remote_starts_on_the_rule() {
+        let now = NowPlaying::new();
+        assert_eq!(now.row, Row::Bar);
+        assert_eq!(now.scrub, None);
+    }
+
+    /// The fault this exists for: four buttons that move a film ten and thirty
+    /// seconds at a time cannot reach the middle of a two hour one. Holding a
+    /// direction has to cross it.
+    #[test]
+    fn holding_a_direction_crosses_a_long_film() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 2 * 3600;
+        for _ in 0..40 {
+            now.step(1, 0);
+        }
+        let reached = now.scrub.expect("a scrub");
+        assert!(
+            reached > 3600,
+            "forty presses reached only {reached} seconds of a two hour film"
+        );
+    }
+
+    /// And the first press stays small, so a correction is a correction.
+    #[test]
+    fn the_first_press_is_ten_seconds() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 3600;
+        now.elapsed_seconds = 600;
+        now.step(1, 0);
+        assert_eq!(now.scrub, Some(610));
+        now.step(-1, 0);
+        assert_eq!(now.scrub, Some(600));
+    }
+
+    /// A scrub never leaves the film.
+    #[test]
+    fn a_scrub_stays_inside_the_film() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 100;
+        now.elapsed_seconds = 50;
+        for _ in 0..30 {
+            now.step(-1, 0);
+        }
+        assert_eq!(now.scrub, Some(0));
+        for _ in 0..60 {
+            now.step(1, 0);
+        }
+        assert_eq!(now.scrub, Some(100 - SCRUB_TAIL));
+    }
+
+    /// The fault that ended a film instead of moving it: a scrub held to the
+    /// right reached the last second the catalogue claimed, the file was
+    /// shorter than that, and the player exited.
+    #[test]
+    fn a_scrub_never_reaches_the_end_of_the_film() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 85 * 60;
+        for _ in 0..200 {
+            now.step(1, 0);
+        }
+        let reached = now.scrub.expect("a scrub");
+        assert!(
+            reached + SCRUB_TAIL <= now.duration_seconds,
+            "a scrub reached {reached} of {}",
+            now.duration_seconds
+        );
+    }
+
+    /// Confirming hands the target over once; abandoning gives nothing back.
+    #[test]
+    fn a_scrub_is_taken_once_or_abandoned() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 3600;
+        now.step(1, 0);
+        assert_eq!(now.take_scrub(), Some(10));
+        assert_eq!(now.take_scrub(), None);
+
+        now.step(1, 0);
+        assert!(now.cancel_scrub());
+        assert_eq!(now.scrub, None);
+        assert!(!now.cancel_scrub());
+    }
+
+    /// Leaving the rule abandons an unconfirmed move rather than carrying it
+    /// somewhere it cannot be seen.
+    #[test]
+    fn walking_to_the_words_drops_the_scrub() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 3600;
+        now.step(1, 0);
+        assert!(now.scrub.is_some());
+        now.step(0, 1);
+        assert_eq!(now.scrub, None);
+    }
+
+    /// The bar follows the tick while it is being moved, not the film.
+    #[test]
+    fn the_bar_follows_the_tick() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 1000;
+        now.elapsed_seconds = 100;
+        assert!((now.progress() - 0.1).abs() < 0.001);
+        now.step(1, 0);
+        assert_eq!(now.shown_seconds(), 110);
+        assert!((now.progress() - 0.11).abs() < 0.001);
     }
 
     #[test]

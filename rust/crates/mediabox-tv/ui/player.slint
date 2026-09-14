@@ -1,16 +1,20 @@
 import { Theme, Metrics } from "theme.slint";
-import { NpControl } from "components.slint";
 
-// What is drawn on top of a film.
+// The line along the bottom of a film.
 //
-// Not a screen. The display controller puts the film's window under this one
-// and this surface carries alpha, so everything here is an overlay on a moving
-// picture: the parts that are not drawn are the film. That is why there is no
-// background, no wallpaper and no bar — a film with a home screen behind its
-// letterbox is what this replaced.
+// Not a panel and not a card. The display controller puts the film's window
+// under this one and this surface carries alpha, so anything drawn here sits on
+// a moving picture — and the less of it there is, the more of the film there
+// is. So: one hairline rule across the width, the position set large above its
+// left end, the film's name above that, and the actions as words underneath.
+// No box, no buttons, no transport glyphs. What marks the focus is a filled
+// block in front of the word, the way the rest of this interface marks a row.
 //
-// It appears when a key is pressed and goes away by itself, the way it does on
-// every other television: a viewer who is watching should be watching.
+// The rule is also the control. Left and Right on it move a tick that
+// accelerates the longer they are held — ten seconds a press at first, ten
+// minutes a press after a second and a half — and Ok goes there. Four buttons
+// that move a film thirty seconds at a time cannot reach the middle of a two
+// hour one, which is what this replaced.
 export component Player inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
@@ -18,142 +22,158 @@ export component Player inherits Rectangle {
     in property <string> elapsed;
     in property <string> duration;
     in property <float> progress;
-    in property <[NpControl]> controls;
+    in property <[string]> actions;
     in property <int> focus-index;
-    /// Whether the controls are up. False is the ordinary state of a film.
+    /// 0 = the rule, 1 = the words. Named `lane` because a Rectangle
+    /// already has a `row`, which belongs to a grid.
+    in property <int> lane;
+    /// The time the tick is sitting on, while it is being moved.
+    in property <string> scrub;
+    /// Whether the controls are up at all.
     in property <bool> open;
 
     background: transparent;
 
-    // The film is bright and white text on it is unreadable without something
-    // between. Only under the controls, and only while they are up.
+    property <length> pad: Metrics.gutter;
+    property <bool> on-rule: lane == 0;
+
+    // Enough shadow under the words to read them on a bright frame, and not a
+    // pixel more. It stops well above the rule so the picture is not boxed in.
     Rectangle {
         y: root.height - self.height;
         width: 100%;
-        height: root.height * 0.42;
+        height: root.height * 0.34;
         opacity: open ? 1.0 : 0.0;
-        background: @linear-gradient(180deg,
-            #00000000 0%, #0000007a 42%, #000000d6 78%, #000000ee 100%);
+        background: @linear-gradient(180deg, #00000000 0%, #000000b0 62%, #000000e6 100%);
         animate opacity { duration: Theme.glide; easing: Theme.ease; }
     }
 
-    // Every side named against the root rather than against itself: a
-    // geometry binding that reads its own preferred size is a cycle, and Slint
-    // resolves a cycle to zero — which is a control bar that is drawn, is
-    // reported as drawn, and has no height.
-    VerticalLayout {
-        x: Metrics.gutter;
-        width: root.width - Metrics.gutter * 2;
-        y: root.height * 0.60;
-        height: root.height * 0.40 - Metrics.gutter;
-        spacing: Metrics.root-font * 0.55;
-        alignment: end;
-        opacity: open ? 1.0 : 0.0;
-        // Out of the way when it is down, so a stray focus ring cannot sit on
-        // a film for an hour.
-        visible: open;
+    if open: Rectangle {
+        x: root.pad;
+        y: root.height * 0.70;
+        width: root.width - root.pad * 2;
+        height: root.height * 0.30 - root.pad * 0.6;
 
-        animate opacity { duration: Theme.glide; easing: Theme.ease; }
+        // ---------------------------------------------------------- the name
+        Text {
+            x: 0;
+            y: 0;
+            text: title;
+            color: Theme.muted;
+            font-size: Metrics.text-label;
+            font-weight: 760;
+            letter-spacing: 0.14 * Metrics.text-label;
+            wrap: no-wrap;
+            overflow: elide;
+            width: parent.width * 0.7;
+        }
+
+        if note != "" || subtitle != "": Text {
+            x: parent.width - self.width;
+            y: 0;
+            text: note != "" ? note : subtitle;
+            color: note != "" ? Theme.accent : Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 760;
+            letter-spacing: 0.14 * Metrics.text-label;
+            horizontal-alignment: right;
+            wrap: no-wrap;
+            width: parent.width * 0.3;
+        }
+
+        // ------------------------------------------------------- the reading
+        //
+        // The position is the biggest thing on the screen after the film. It is
+        // what somebody looks at when they press a key, and it is also what the
+        // tick is being moved towards, so while a scrub is running this is the
+        // scrub's own time and the film's time goes small beside it.
+        clock := Text {
+            x: 0;
+            y: parent.height * 0.20;
+            text: scrub != "" ? scrub : elapsed;
+            color: scrub != "" ? Theme.accent : Theme.text;
+            font-size: Metrics.title-screen * 0.82;
+            font-weight: 840;
+            letter-spacing: -0.035 * Metrics.title-screen;
+        }
+
+        if scrub != "": Text {
+            x: clock.width + Metrics.root-font * 0.7;
+            y: parent.height * 0.20 + Metrics.title-screen * 0.36;
+            text: elapsed;
+            color: Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 700;
+        }
 
         Text {
-            text: title == "" ? "MediaBox" : title;
-            color: Theme.text;
-            font-size: Metrics.title-screen * 0.72;
-            font-weight: 820;
-            letter-spacing: -0.03 * Metrics.title-screen;
-            wrap: no-wrap;
-            overflow: elide;
+            x: parent.width - self.width;
+            y: parent.height * 0.20 + Metrics.title-screen * 0.36;
+            text: duration;
+            color: Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 700;
+            horizontal-alignment: right;
         }
 
-        if subtitle != "" || note != "": Text {
-            text: note != "" ? note : subtitle;
-            color: note != "" ? Theme.accent : Theme.muted;
-            font-size: Metrics.text-meta * 0.9;
-            font-weight: 680;
-            wrap: no-wrap;
-            overflow: elide;
-        }
-
-        HorizontalLayout {
-            spacing: Metrics.root-font * 0.8;
-            height: Metrics.root-font * 1.6;
-
-            Text {
-                text: elapsed;
-                color: Theme.text;
-                font-size: Metrics.text-label;
-                font-weight: 700;
-                vertical-alignment: center;
-                width: Metrics.root-font * 4.2;
-            }
+        // ---------------------------------------------------------- the rule
+        rule := Rectangle {
+            x: 0;
+            y: parent.height * 0.62;
+            width: parent.width;
+            height: 2px;
+            background: #ffffff2b;
 
             Rectangle {
-                y: (parent.height - self.height) / 2;
-                height: 6px;
-                border-radius: 3px;
-                background: #ffffff33;
-                clip: true;
-                horizontal-stretch: 1;
-
-                Rectangle {
-                    x: 0;
-                    width: parent.width * clamp(progress, 0.0, 1.0);
-                    height: 100%;
-                    background: Theme.accent;
-                    animate width { duration: Theme.glide; easing: Theme.ease; }
-                }
-            }
-
-            Text {
-                text: duration;
-                color: Theme.muted;
-                font-size: Metrics.text-label;
-                font-weight: 700;
-                vertical-alignment: center;
-                horizontal-alignment: right;
-                width: Metrics.root-font * 4.2;
+                x: 0;
+                width: parent.width * clamp(progress, 0.0, 1.0);
+                height: 100%;
+                background: root.on-rule ? Theme.accent : #ffffff7a;
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
             }
         }
 
+        // The tick. It rises out of the rule rather than sitting on it, and it
+        // is a straight edge: everything else in this interface is rounded, so
+        // the one thing that has to be read as a position is not.
+        Rectangle {
+            x: rule.x + rule.width * clamp(progress, 0.0, 1.0) - self.width / 2;
+            y: rule.y - (root.on-rule ? Metrics.root-font * 0.62 : Metrics.root-font * 0.30);
+            width: root.on-rule ? 4px : 2px;
+            height: root.on-rule ? Metrics.root-font * 1.5 : Metrics.root-font * 0.8;
+            background: root.on-rule ? Theme.accent : #ffffffb0;
+            animate height, width, y { duration: Theme.focus-in; easing: Theme.ease; }
+        }
+
+        // --------------------------------------------------------- the words
         HorizontalLayout {
-            spacing: Metrics.root-font * 0.7;
+            x: 0;
+            y: parent.height * 0.62 + Metrics.root-font * 1.1;
+            height: Metrics.root-font * 1.7;
+            spacing: Metrics.root-font * 1.6;
             alignment: start;
 
-            for control[i] in controls: Rectangle {
-                property <bool> focused: i == focus-index;
-                width: max(Metrics.card-w * 0.5, caption.preferred-width + Metrics.root-font * 1.4);
-                height: Metrics.card-w * 0.36;
-                border-radius: Theme.radius;
-                background: focused ? Theme.focus-fill : #00000099;
-                border-width: focused ? 2px : 1px;
-                border-color: focused ? Theme.focus-ring : #ffffff2e;
+            for label[i] in actions: HorizontalLayout {
+                property <bool> focused: !root.on-rule && i == focus-index;
+                spacing: Metrics.text-chip * 0.6;
 
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                // The mark is the interface's own: a filled block, the same one
+                // that runs down the left of a focused row elsewhere.
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: Metrics.text-chip * 0.34;
+                    height: focused ? Metrics.text-chip * 1.05 : 0px;
+                    background: Theme.accent;
+                    animate height { duration: Theme.focus-in; easing: Theme.ease; }
+                }
 
-                VerticalLayout {
-                    alignment: center;
-                    spacing: Metrics.text-chip * 0.4;
-
-                    Rectangle {
-                        height: Metrics.root-font * 1.3;
-                        Path {
-                            x: (parent.width - self.width) / 2;
-                            width: Metrics.root-font * 1.3;
-                            height: 100%;
-                            viewbox-width: 24;
-                            viewbox-height: 24;
-                            commands: control.mark;
-                            fill: focused ? #0a0c10 : Theme.text;
-                        }
-                    }
-                    caption := Text {
-                        text: control.label;
-                        color: focused ? #0a0c10 : Theme.text;
-                        font-size: Metrics.text-chip;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        wrap: no-wrap;
-                    }
+                Text {
+                    text: label;
+                    color: focused ? Theme.text : Theme.muted;
+                    font-size: Metrics.text-chip * 1.15;
+                    font-weight: focused ? 820 : 680;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
                 }
             }
         }

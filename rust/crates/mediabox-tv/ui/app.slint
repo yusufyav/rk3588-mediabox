@@ -162,7 +162,14 @@ export component MediaBoxWindow inherits Window {
     in property <string> np-duration;
     in property <float> np-progress;
     in property <[NpControl]> np-controls;
+    /// The same four, as words. The film's own line has no buttons on it.
+    in property <[string]> np-actions;
     in property <int> np-focus;
+    /// Which row the remote is on while a film is playing: 0 the rule, 1 the
+    /// words.
+    in property <int> np-row;
+    /// The time the scrub tick is sitting on, empty when nothing is moving.
+    in property <string> np-scrub;
     in property <[TechRow]> np-technical;
 
     // ---- settings
@@ -384,8 +391,10 @@ export component MediaBoxWindow inherits Window {
             elapsed: root.np-elapsed;
             duration: root.np-duration;
             progress: root.np-progress;
-            controls: root.np-controls;
+            actions: root.np-actions;
             focus-index: root.np-focus;
+            lane: root.np-row;
+            scrub: root.np-scrub;
             open: root.film-controls;
         }
     }

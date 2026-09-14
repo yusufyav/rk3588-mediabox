@@ -172,8 +172,19 @@ impl Client {
         url: Option<&str>,
         stream: Option<&Value>,
         start_seconds: u64,
+        title: Option<&str>,
+        duration_seconds: Option<u64>,
     ) -> Result<Value> {
         let mut request = json!({"command": "media_play_here", "start_seconds": start_seconds});
+        // What the catalogue knows and the player cannot: see the request's own
+        // documentation. Sent at the start rather than asked for later, because
+        // by the time anything is playing the answer is already needed.
+        if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
+            request["title"] = json!(title);
+        }
+        if let Some(seconds) = duration_seconds.filter(|seconds| *seconds > 0) {
+            request["duration_seconds"] = json!(seconds);
+        }
         if let Some(url) = url {
             request["url"] = json!(url);
         } else if let Some(stream) = stream {
