@@ -1,0 +1,214 @@
+import { Theme, Metrics } from "theme.slint";
+import { Rail, RailModel, PosterItem } from "components.slint";
+
+// The bar every screen starts below. It does not scroll with the shelves, so
+// where the viewer is in the product is always on the panel.
+component TopBar inherits Rectangle {
+    in property <[string]> items;
+    in property <int> selected;
+    in property <int> focus-col;
+    in property <bool> active;
+
+    // Taller than the bar itself, and transparent past it. A panel would cut
+    // the backdrop off with a straight edge; a gradient only as tall as the
+    // text left the shelf that scrolls underneath showing through the words.
+    height: Metrics.topbar * 1.9;
+    background: @linear-gradient(180deg,
+        #040508 0%, #040508fa 42%, #040508c4 68%, #04050861 86%, transparent 100%);
+
+    HorizontalLayout {
+        y: 0;
+        height: Metrics.topbar;
+        padding-left: Metrics.gutter;
+        padding-right: Metrics.gutter;
+        spacing: Metrics.gutter * 0.5;
+        alignment: start;
+
+        for label[i] in items: Rectangle {
+            property <bool> focused: active && i == focus-col;
+            width: text.preferred-width + Metrics.root-font * 1.6;
+            border-radius: Theme.radius * 0.7;
+            background: focused ? Theme.focus-ring : transparent;
+
+            text := Text {
+                text: label;
+                color: focused ? #0a0c10 : (i == selected ? Theme.text : Theme.muted);
+                font-size: Metrics.root-font * 0.92;
+                font-weight: 640;
+                vertical-alignment: center;
+            }
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+        }
+    }
+}
+
+export component Home inherits Rectangle {
+    // Two layers and a mix, so a new backdrop arrives by fading rather than by
+    // replacing. The image manager only ever swaps the layer that is fading in,
+    // and the fade is the only thing animated: no blur, no filter.
+    in property <image> art-a;
+    in property <image> art-b;
+    in property <float> fade;
+
+    in property <string> hero-title;
+    in property <string> hero-meta;
+    in property <string> hero-summary;
+
+    in property <[string]> nav;
+    in property <[RailModel]> rails;
+
+    // Row 0 is the bar; 1.. are the shelves.
+    in property <int> focus-row;
+    in property <int> focus-col;
+
+    in property <string> notice;
+
+    property <length> rail-h: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
+    property <length> viewport-h: root.height - Metrics.topbar;
+    // The hero takes what is left once the first shelf has its room. That is
+    // the whole shape of the screen: a cinema still, with something to choose
+    // already in reach under it and no scrolling needed to see either.
+    property <length> hero-h: max(rail-h * 0.7, viewport-h - rail-h);
+    property <length> content-h: hero-h + rail-h * rails.length;
+
+    // The hero is kept until the remote goes past the first shelf. Scrolling it
+    // away the moment focus lands would mean the backdrop is never seen: the
+    // first shelf is where every session starts.
+    property <length> scroll: focus-row <= 1
+        ? 0px
+        : clamp(hero-h + (focus-row - 1) * rail-h - Metrics.top-inset,
+                0px,
+                max(0px, content-h - viewport-h));
+
+    background: Theme.bg;
+    clip: true;
+
+    // The backdrop reaches under the bar, which is why it is drawn first and
+    // full height rather than inside the scrolling column.
+    Rectangle {
+        width: 100%;
+        height: root.height * 0.78;
+        clip: true;
+
+        Image {
+            width: 100%;
+            height: 100%;
+            source: art-a;
+            image-fit: cover;
+            opacity: 1.0 - fade;
+            animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
+        }
+        Image {
+            width: 100%;
+            height: 100%;
+            source: art-b;
+            image-fit: cover;
+            opacity: fade;
+            animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
+        }
+
+        // Two scrims, across and down. The picture has to survive being read
+        // over, and a single flat wash either kills the image or loses the text.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @linear-gradient(90deg,
+                #07080b 0%, #07080beb 26%, #07080b57 62%, #07080b1a 100%);
+        }
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @linear-gradient(180deg,
+                #07080b 0%, #07080be6 14%, #07080b57 52%, #07080b85 84%, #07080b 100%);
+        }
+    }
+
+    // Everything that scrolls.
+    column := Rectangle {
+        x: 0;
+        y: Metrics.topbar - scroll;
+        width: 100%;
+        height: content-h;
+        background: transparent;
+
+        animate y { duration: Theme.glide; easing: Theme.ease; }
+
+        // The hero.
+        VerticalLayout {
+            x: Metrics.gutter;
+            y: hero-h * 0.30;
+            width: min(root.width * 0.52, 980px);
+            spacing: Metrics.root-font * 0.55;
+            alignment: start;
+
+            Text {
+                text: hero-title;
+                color: Theme.text;
+                font-size: Metrics.title-hero;
+                font-weight: 820;
+                letter-spacing: -0.038 * Metrics.title-hero;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+
+            if hero-meta != "": Text {
+                text: hero-meta;
+                color: Theme.muted;
+                font-size: Metrics.text-meta;
+                font-weight: 620;
+                overflow: elide;
+            }
+
+            if hero-summary != "": Text {
+                text: hero-summary;
+                color: Theme.muted;
+                font-size: Metrics.text-meta * 0.98;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: Metrics.text-meta * 3.2;
+            }
+        }
+
+        for rail[r] in rails: Rail {
+            x: 0;
+            y: hero-h + r * rail-h;
+            width: root.width;
+            rail: rail;
+            focus-col: focus-col;
+            active: focus-row == r + 1;
+        }
+    }
+
+    TopBar {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: Metrics.topbar * 1.9;
+        items: nav;
+        selected: 0;
+        focus-col: focus-col;
+        active: focus-row == 0;
+    }
+
+    // What went wrong, if anything did, without taking the screen away from
+    // shelves that are working.
+    if notice != "": Rectangle {
+        x: Metrics.gutter;
+        y: root.height - self.height - Metrics.gutter * 0.6;
+        width: label.preferred-width + Metrics.root-font * 2;
+        height: Metrics.root-font * 2.4;
+        border-radius: Theme.radius * 0.7;
+        background: #151a23e0;
+        border-width: 1px;
+        border-color: Theme.line;
+
+        label := Text {
+            text: notice;
+            color: Theme.warn;
+            font-size: Metrics.text-chip;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}

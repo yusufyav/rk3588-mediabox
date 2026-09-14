@@ -5,10 +5,12 @@
 //! and how, and Kodi owns playback; this process draws, listens to the remote,
 //! and asks.
 
+mod images;
 mod input;
 mod metrics;
 mod model;
 mod rpc;
+mod state;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -25,12 +27,121 @@ slint::include_modules!();
 /// with whoever holds the remote.
 const EVENTS_URL: &str = "http://127.0.0.1:8787/v1/events?tv=1";
 
+const CACHE_DIR: &str = "/var/lib/mediabox-ui/tv-imgcache";
+
+/// The appliance is the only place this runs in earnest, and there the defaults
+/// above are right. The overrides exist so the interface can be driven against
+/// a forwarded socket from a developer's machine — which is how a shelf layout
+/// gets looked at without a deploy.
+fn socket_path() -> String {
+    std::env::var("MEDIABOX_TV_SOCKET").unwrap_or_else(|_| rpc::DEFAULT_SOCKET.to_string())
+}
+
+fn events_url() -> String {
+    std::env::var("MEDIABOX_TV_EVENTS").unwrap_or_else(|_| EVENTS_URL.to_string())
+}
+
+fn cache_dir() -> String {
+    std::env::var("MEDIABOX_TV_CACHE").unwrap_or_else(|_| CACHE_DIR.to_string())
+}
+
 thread_local! {
-    /// How the input thread reaches the interface. It posts a closure to the
-    /// event loop, and the closure finds the handler here rather than carrying
-    /// it: everything the handler touches lives on this thread and is not Send.
-    static HANDLER: RefCell<Option<Rc<dyn Fn(InputAction, input::Origin)>>> =
-        const { RefCell::new(None) };
+    /// How the background threads reach the interface. They post a closure to
+    /// the event loop and it finds everything here, because nothing the
+    /// interface owns is safe to send across a thread.
+    static APP: RefCell<Option<Rc<RefCell<App>>>> = const { RefCell::new(None) };
+}
+
+fn with_app(f: impl FnOnce(&mut App)) {
+    let app = APP.with(|slot| slot.borrow().clone());
+    if let Some(app) = app {
+        f(&mut app.borrow_mut());
+    }
+}
+
+struct App {
+    window: slint::Weak<MediaBoxWindow>,
+    home: state::Home,
+    images: images::ImageManager,
+    meter: metrics::Metrics,
+    dispatcher: input::Dispatcher,
+}
+
+impl App {
+    /// A press that survived the dispatcher.
+    fn act(&mut self, action: InputAction) {
+        let moved = match action {
+            InputAction::Up => self.home.step(0, -1),
+            InputAction::Down => self.home.step(0, 1),
+            InputAction::Left => self.home.step(-1, 0),
+            InputAction::Right => self.home.step(1, 0),
+            _ => false,
+        };
+
+        if moved {
+            self.meter.key_accepted();
+            self.paint();
+        }
+    }
+
+    /// Both answers, or whichever of them arrived.
+    ///
+    /// The library is the appliance's own and is quick; the catalogues are a
+    /// fan-out across third-party hosts. They are asked for together and
+    /// whichever lands first is drawn, because a home screen that waits for the
+    /// slowest addon is a home screen nobody sees.
+    fn loaded(&mut self, home: Option<model::HomeRows>, library: Option<model::LibraryListing>) {
+        self.meter.data_arrived();
+
+        let rows = home.unwrap_or(model::HomeRows { rows: Vec::new() });
+        let shelves = state::shelves_from(&rows, library.as_ref());
+
+        if shelves.is_empty() {
+            self.fail("Hiçbir raf getirilemedi.");
+            return;
+        }
+
+        self.home.set_shelves(shelves);
+
+        if let Some(window) = self.window.upgrade() {
+            window.set_rails(slint::ModelRc::from(self.home.rails.clone()));
+            window.set_screen("home".into());
+        }
+        self.paint();
+    }
+
+    fn fail(&mut self, why: &str) {
+        if let Some(window) = self.window.upgrade() {
+            window.set_failed(true);
+            window.set_status(why.into());
+        }
+    }
+
+    /// Everything the focus decides: which tiles carry a picture, what the hero
+    /// says, and where the shelves sit. The Slint side animates between the
+    /// values this writes; it does not decide any of them.
+    fn paint(&mut self) {
+        let Some(window) = self.window.upgrade() else { return };
+
+        self.home.sync_artwork(&mut self.images);
+
+        if let Some((art, second_layer)) = self.home.backdrop(&mut self.images) {
+            if second_layer {
+                window.set_art_b(art);
+            } else {
+                window.set_art_a(art);
+            }
+        }
+        window.set_fade(self.home.fade);
+
+        let (title, facts, summary) = self.home.hero();
+        window.set_hero_title(title.into());
+        window.set_hero_meta(facts.into());
+        window.set_hero_summary(summary.into());
+
+        window.set_focus_row(self.home.row as i32);
+        window.set_focus_col(self.home.column() as i32);
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,15 +150,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let window = MediaBoxWindow::new()?;
 
-    let meter = Rc::new(RefCell::new(metrics::Metrics::new(started)));
-    let dispatcher = Rc::new(RefCell::new(input::Dispatcher::new(trace_input)));
+    let app = Rc::new(RefCell::new(App {
+        window: window.as_weak(),
+        home: state::Home::new(),
+        images: images::ImageManager::new(cache_dir(), || {
+            let _ = slint::invoke_from_event_loop(|| {
+                with_app(|app| {
+                    if app.images.collect() {
+                        app.paint();
+                    }
+                })
+            });
+        }),
+        meter: metrics::Metrics::new(started),
+        dispatcher: input::Dispatcher::new(trace_input),
+    }));
+    APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
 
     // Frames are counted from the renderer rather than from a timer, so the
     // number is what was actually presented and not what we hoped for. It also
     // means the idle CPU figure this reports is not inflated by the thing
     // reporting it.
     {
-        let meter = meter.clone();
         let handle = window.as_weak();
         let reported = std::cell::Cell::new(false);
         window
@@ -56,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !matches!(state, slint::RenderingState::AfterRendering) {
                     return;
                 }
-                meter.borrow_mut().frame();
+                with_app(|app| app.meter.frame());
                 if !reported.replace(true) {
                     if let Some(window) = handle.upgrade() {
                         report_surface(&window);
@@ -66,55 +190,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("this renderer cannot report when it has drawn");
     }
 
-    // One handler, two roads into it.
-    let handler: Rc<dyn Fn(InputAction, input::Origin)> = {
-        let handle = window.as_weak();
-        let dispatcher = dispatcher.clone();
-        let meter = meter.clone();
-        Rc::new(move |action, origin| {
-            let Some(window) = handle.upgrade() else { return };
-            if let Some(action) = dispatcher.borrow_mut().accept(action, origin) {
-                meter.borrow_mut().key_accepted();
-                apply(&window, action);
-            }
-        })
-    };
-    HANDLER.with(|slot| *slot.borrow_mut() = Some(handler.clone()));
-
     // Keys from the compositor: USB and Bluetooth keyboards. The remote does
     // not come this way — its input device is switched off in the compositor's
     // config, because the daemon is the authority for it.
     window.on_key_pressed(move |text| {
-        if let Some(action) = input::action_for_key(text.as_str()) {
-            handler(action, input::Origin::Keyboard);
-        }
+        let Some(action) = input::action_for_key(text.as_str()) else { return };
+        with_app(|app| {
+            if let Some(action) = app.dispatcher.accept(action, input::Origin::Keyboard) {
+                app.act(action);
+            }
+        });
     });
 
     // Everything the daemon normalises — the CEC remote, the phone remote, an
     // injected action — arrives on its event stream.
     spawn_bus_listener();
+    spawn_loader();
 
-    // The only periodic work in the process.
     let reporter = slint::Timer::default();
-    {
-        let meter = meter.clone();
-        reporter.start(slint::TimerMode::Repeated, Duration::from_secs(5), move || {
-            if let Some(line) = meter.borrow_mut().report_due() {
-                eprintln!("{line}");
+    reporter.start(slint::TimerMode::Repeated, Duration::from_secs(5), || {
+        with_app(|app| {
+            let held = app.images.held_mb();
+            if let Some(line) = app.meter.report_due() {
+                eprintln!("{line} art_cpu_mb={held}");
             }
         });
-    }
+    });
 
-    window.set_status("Denetim düzlemine bağlanılıyor…".into());
+    window.set_status("Raflar getiriliyor…".into());
     window.run()?;
     Ok(())
-}
-
-/// What a press does. In phase one there is one screen and nothing to move
-/// between; the dispatcher above is what is being proven, so the screen reports
-/// what reached it.
-fn apply(window: &MediaBoxWindow, action: InputAction) {
-    window.set_status(format!("{action:?}").into());
 }
 
 /// The panel, the buffer and the scale, as this process sees them.
@@ -138,6 +243,51 @@ fn report_surface(window: &MediaBoxWindow) {
         physical.height as f32 / scale,
         std::env::var("SLINT_SCALE_FACTOR").unwrap_or_else(|_| "unset".into()),
     );
+}
+
+/// Asks the control plane for the home surface.
+///
+/// The two calls go out together on purpose: the library is this appliance's
+/// own and answers in milliseconds, while the catalogues are a fan-out over
+/// third-party hosts. Waiting for the second before drawing the first is time
+/// the viewer spends looking at a name and a spinner.
+fn spawn_loader() {
+    std::thread::Builder::new()
+        .name("mediabox-tv-data".into())
+        .spawn(|| {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            else {
+                return;
+            };
+
+            runtime.block_on(async {
+                let client = rpc::Client::new(socket_path());
+
+                let at = Instant::now();
+                let (home, library) = tokio::join!(client.home(), client.library());
+                eprintln!("mediabox-tv.load media_home+library_ms={}", at.elapsed().as_millis());
+
+                let home = match home {
+                    Ok(home) => Some(home),
+                    Err(e) => {
+                        eprintln!("mediabox-tv.load home failed: {e}");
+                        None
+                    }
+                };
+                let library = match library {
+                    Ok(library) => Some(library),
+                    Err(e) => {
+                        eprintln!("mediabox-tv.load library failed: {e}");
+                        None
+                    }
+                };
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    with_app(|app| app.loaded(home, library));
+                });
+            });
+        })
+        .expect("the loader thread could not be started");
 }
 
 /// Reads the daemon's event stream for as long as the process lives,
@@ -168,7 +318,7 @@ fn spawn_bus_listener() {
 }
 
 async fn read_events() -> Result<(), Box<dyn std::error::Error>> {
-    let mut response = reqwest::Client::new().get(EVENTS_URL).send().await?.error_for_status()?;
+    let mut response = reqwest::Client::new().get(events_url()).send().await?.error_for_status()?;
 
     // Frames are newline-delimited and small; assembling them here avoids
     // pulling a stream adapter crate in for four lines of work.
@@ -198,9 +348,10 @@ fn deliver(line: &str) {
 
     let action = event.action;
     let _ = slint::invoke_from_event_loop(move || {
-        let handler = HANDLER.with(|slot| slot.borrow().clone());
-        if let Some(handler) = handler {
-            handler(action, input::Origin::Bus);
-        }
+        with_app(|app| {
+            if let Some(action) = app.dispatcher.accept(action, input::Origin::Bus) {
+                app.act(action);
+            }
+        });
     });
 }

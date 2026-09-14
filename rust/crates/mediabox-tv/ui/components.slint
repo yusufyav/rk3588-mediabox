@@ -1,0 +1,226 @@
+import { Theme, Metrics } from "theme.slint";
+
+// One shelf item, as the interface needs it. Everything expensive — the
+// artwork, the progress, the fallback's hue — is decided in Rust and arrives
+// already settled, so a redraw never computes anything.
+export struct PosterItem {
+    id: string,
+    kind: string,
+    title: string,
+    // Empty until the image manager has something. The fallback below is drawn
+    // underneath either way, so a poster that never arrives is a designed tile
+    // rather than a hole.
+    art: image,
+    // A stable hue derived from the title, so the same film is the same colour
+    // on every screen it appears on.
+    hue: float,
+    // 0 when the title has not been started, or is not the operator's.
+    progress: float,
+    // Held by this appliance rather than fetched over the network.
+    local: bool,
+}
+
+export struct RailModel {
+    title: string,
+    source: string,
+    items: [PosterItem],
+}
+
+// The tile drawn when there is no artwork, and drawn behind it when there is.
+//
+// Addon posters 404 in practice — often enough that an empty frame would be a
+// regular sight — so the name is always painted on a ground of its own and the
+// picture covers it when it arrives.
+component Fallback inherits Rectangle {
+    in property <string> title;
+    in property <float> hue;
+
+    border-radius: Theme.radius-art;
+    background: @linear-gradient(160deg,
+        Colors.hsv(hue, 0.42, 0.30) 0%,
+        Colors.hsv(hue, 0.55, 0.13) 100%);
+
+    Text {
+        x: parent.width * 0.10;
+        y: parent.height * 0.10;
+        width: parent.width * 0.80;
+        text: title;
+        color: #ffffffcc;
+        font-size: Metrics.text-card * 1.07;
+        font-weight: 700;
+        wrap: word-wrap;
+        overflow: elide;
+    }
+}
+
+export component Poster inherits Rectangle {
+    in property <PosterItem> item;
+    in property <bool> focused;
+
+    width: Metrics.card-w;
+    // The artwork plus the room the name appears in when focused. Reserved
+    // whether or not it is used, so nothing below moves as the remote travels.
+    height: Metrics.card-h + Metrics.text-card * 2.6;
+
+    art := Rectangle {
+        // Grown about its own centre rather than laid out larger, so the
+        // neighbours do not shuffle when focus lands.
+        width: Metrics.card-w * (focused ? 1.075 : 1.0);
+        height: Metrics.card-h * (focused ? 1.075 : 1.0);
+        x: (parent.width - self.width) / 2;
+        y: (Metrics.card-h - self.height) / 2;
+        border-radius: Theme.radius-art;
+        clip: true;
+
+        animate width, height, x, y {
+            duration: Theme.focus-in;
+            easing: Theme.ease;
+        }
+
+        Fallback {
+            width: 100%;
+            height: 100%;
+            title: item.title;
+            hue: item.hue;
+        }
+
+        Image {
+            width: 100%;
+            height: 100%;
+            source: item.art;
+            image-fit: cover;
+        }
+
+        // The appliance's own copy, which is certain to play.
+        if item.local: Rectangle {
+            x: Metrics.card-w * 0.045;
+            y: Metrics.card-w * 0.045;
+            width: Metrics.text-chip * 2.6;
+            height: Metrics.text-chip * 1.5;
+            border-radius: self.height / 3;
+            background: Theme.accent;
+            Text {
+                text: "YEREL";
+                color: Theme.accent-ink;
+                font-size: Metrics.text-chip * 0.72;
+                font-weight: 750;
+                letter-spacing: 0.12 * Metrics.text-chip * 0.72;
+            }
+        }
+
+        if item.progress > 0.0: Rectangle {
+            x: 0;
+            y: parent.height - self.height;
+            width: 100%;
+            height: 4px;
+            background: #ffffff38;
+            Rectangle {
+                x: 0;
+                width: max(3px, parent.width * item.progress);
+                height: 100%;
+                background: Theme.accent;
+            }
+        }
+
+        // The focus ring, drawn rather than shadowed: one rectangle is cheaper
+        // than a blur this board would pay for on every frame.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: parent.border-radius;
+            border-width: focused ? 3px : 1px;
+            border-color: focused ? Theme.focus-ring : #ffffff14;
+            background: transparent;
+            animate border-width { duration: Theme.focus-in; easing: Theme.ease; }
+        }
+    }
+
+    // Only the focused title is named. A shelf with every name under it reads
+    // as a list; a shelf with one reads as a choice.
+    Text {
+        x: 0;
+        y: Metrics.card-h + Metrics.text-card * 0.7;
+        width: 100%;
+        text: item.title;
+        color: Theme.text;
+        font-size: Metrics.text-card;
+        font-weight: 640;
+        horizontal-alignment: center;
+        overflow: elide;
+        opacity: focused ? 1.0 : 0.0;
+        animate opacity { duration: Theme.focus-in; easing: Theme.ease; }
+    }
+}
+
+export component Rail inherits Rectangle {
+    in property <RailModel> rail;
+    in property <int> focus-col;
+    in property <bool> active;
+
+    // Head plus artwork plus the room a focused poster grows into. Fixed, so
+    // the vertical arithmetic above has nothing to measure.
+    height: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
+
+    HorizontalLayout {
+        y: 0;
+        height: Metrics.title-rail * 2.0;
+        padding-left: Metrics.gutter;
+        padding-right: Metrics.gutter;
+        spacing: Metrics.rail-gap;
+        alignment: start;
+
+        Text {
+            text: rail.title;
+            color: Theme.text;
+            font-size: Metrics.title-rail;
+            font-weight: 720;
+            vertical-alignment: center;
+        }
+
+        if rail.source != "": Text {
+            text: rail.source;
+            color: Theme.dim;
+            font-size: Metrics.text-chip;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    // The window the strip moves behind. It never moves itself.
+    track := Rectangle {
+        y: Metrics.title-rail * 2.0;
+        width: 100%;
+        height: parent.height - self.y;
+        clip: true;
+        background: transparent;
+
+        strip := Rectangle {
+            property <length> step: Metrics.card-w + Metrics.rail-gap;
+            property <length> span: step * rail.items.length;
+            // The focused poster parks at the left gutter and the shelf slides
+            // under it, which is what makes a long shelf feel like one row
+            // rather than a page.
+            property <length> wanted: active
+                ? clamp(focus-col * step, 0px, max(0px, span - track.width + Metrics.gutter * 2))
+                : 0px;
+
+            x: Metrics.gutter - wanted;
+            y: 0;
+            width: span;
+            height: 100%;
+            background: transparent;
+
+            animate x {
+                duration: Theme.glide;
+                easing: Theme.ease;
+            }
+
+            for item[i] in rail.items: Poster {
+                x: i * parent.step;
+                y: 0;
+                item: item;
+                focused: active && i == focus-col;
+            }
+        }
+    }
+}

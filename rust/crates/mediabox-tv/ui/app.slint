@@ -1,11 +1,14 @@
 import { Theme, Metrics } from "theme.slint";
+import { Home } from "home.slint";
+import { RailModel, PosterItem } from "components.slint";
+
+export { RailModel, PosterItem }
 
 // What the television shows before there is anything to show.
 //
-// This is not a splash screen for its own sake: the appliance's home surface is
-// assembled from third-party catalogues over the network, and the honest thing
-// to put on the panel in the meantime is the product's name and what it is
-// waiting for.
+// Not a splash screen for its own sake: the home surface is assembled from
+// third-party catalogues over the network, and the honest thing to put on the
+// panel in the meantime is the product's name and what it is waiting for.
 component Boot inherits Rectangle {
     in property <string> status;
     in property <bool> failed;
@@ -41,6 +44,11 @@ export component MediaBoxWindow inherits Window {
     // sway is told to make this fullscreen and frameless by title, so the title
     // is part of the contract with the compositor, not decoration.
     title: "MediaBox";
+    // The compositor makes this fullscreen on the appliance, so this only
+    // decides the shape of the window when the interface is run on a desktop
+    // to look at a layout. It is the design's own size for the same reason.
+    preferred-width: 1920px;
+    preferred-height: 1080px;
     background: Theme.bg;
     default-font-size: Metrics.root-font;
     // Installed on the appliance from Debian's own archive rather than carried
@@ -49,16 +57,29 @@ export component MediaBoxWindow inherits Window {
     // interface still comes up in DejaVu — wrong, but visible and reportable.
     default-font-family: "Inter";
 
+    // Which screen is on the panel. Rust owns this; the interface never decides
+    // where it is on its own.
+    in property <string> screen: "boot";
+
     in property <string> status: "Başlatılıyor…";
     in property <bool> failed: false;
+
+    in property <image> art-a;
+    in property <image> art-b;
+    in property <float> fade;
+    in property <string> hero-title;
+    in property <string> hero-meta;
+    in property <string> hero-summary;
+    in property <[string]> nav: ["Ana Sayfa", "Ara", "Şimdi Oynatılan", "Ayarlar"];
+    in property <[RailModel]> rails;
+    in property <int> focus-row;
+    in property <int> focus-col;
+    in property <string> notice;
 
     // Every key the television can send arrives here and is answered in Rust:
     // the focus model is deterministic and structural, and splitting it between
     // two languages is how it stops being either.
     callback key-pressed(string);
-    // Reported once per painted frame so the metrics line can talk about frame
-    // pacing and key-to-render without guessing.
-    callback frame-rendered();
 
     forward-focus: scope;
 
@@ -68,11 +89,27 @@ export component MediaBoxWindow inherits Window {
             accept
         }
 
-        Boot {
+        if screen == "boot": Boot {
             width: 100%;
             height: 100%;
             status: root.status;
             failed: root.failed;
+        }
+
+        if screen == "home": Home {
+            width: 100%;
+            height: 100%;
+            art-a: root.art-a;
+            art-b: root.art-b;
+            fade: root.fade;
+            hero-title: root.hero-title;
+            hero-meta: root.hero-meta;
+            hero-summary: root.hero-summary;
+            nav: root.nav;
+            rails: root.rails;
+            focus-row: root.focus-row;
+            focus-col: root.focus-col;
+            notice: root.notice;
         }
     }
 
