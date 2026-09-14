@@ -27,6 +27,11 @@ slint = { version = "1.17.1", default-features = false, features = [
     "std",
     "backend-winit-wayland",
     "renderer-femtovg",
+    # So the window system's own complaints reach the journal. A client that
+    # cannot get a surface says so through `log`, and without a logger installed
+    # it says it into nothing — which is how a blank television looked like a
+    # working process for an afternoon.
+    "log",
 ] }
 
 mediabox-core = { path = "../mediabox-core" }
@@ -42,6 +47,8 @@ tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream", "http2"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 sha2 = "0.10"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }
 libc = "0.2.189"
 
 [build-dependencies]

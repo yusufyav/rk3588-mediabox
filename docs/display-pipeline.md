@@ -187,50 +187,95 @@ PASS  ui loaded     'MediaBox' at 2560x1440      # window title is the page's ow
 
 Nothing in it names a resolution, and nothing in it should.
 
-## The GPU user space is GBM-only, and a Wayland client cannot use it
+## No Wayland client gets a GPU on this board
+
+Every accelerated thing on this appliance is a *compositor* or a DRM client:
+sway renders through GBM, Kodi runs GBM/DRM standalone. Nothing had ever asked
+for GL as an ordinary Wayland client, and it turns out nothing can.
 
 `scripts/install-mali-runtime.sh` pins
 `libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb`. That build advertises exactly
-two EGL platform extensions:
-
-```text
-EGL_EXT_platform_base
-EGL_KHR_platform_gbm
-```
-
-There is no `EGL_EXT_platform_wayland`, and `libmali.so.1` references no
-`wl_egl_*` symbol at all. That is enough for the compositor, which renders
-through GBM, and it is nothing for a client, which needs the Wayland platform to
-get an EGL display at all.
-
-What that costs is not obvious from the outside, because nothing fails loudly.
-A native Wayland client asked for a window, got as far as `wl_compositor`
-`create_surface`, and stopped: no `xdg_surface`, no `xdg_toplevel`, no buffer
-ever attached. The process stayed up, answered the control plane, logged its
-metrics and drew nothing, and the television showed the compositor's background
-colour. The same interface run with the Mali path removed from
-`LD_LIBRARY_PATH` came up immediately — on llvmpipe, because the vendor kernel
-has no DRI driver for Mesa to use:
-
-```text
-libEGL warning: egl: failed to create dri2 screen
-mediabox-tv.startup first_frame_ms=459
-```
-
-That is a working picture and the wrong one: the plane's format was `XR24`
-rather than the client's own buffer, which is the direct scanout this pipeline
-spent weeks earning, and one first paint cost 38% of a core.
-
-**Check**, before assuming a client can be accelerated here:
+two EGL platform extensions, which is the whole story for a client:
 
 ```sh
 strings /opt/rk3588-mediabox/mali-g24p0-runtime/lib/libmali.so.1 \
   | grep -oE 'EGL_[A-Z]+_platform_[a-z_]+' | sort -u
 ```
 
-The same upstream release carries `…-wayland-gbm_1.9-1_arm64.deb`, which is the
-same driver with the Wayland platform added alongside GBM. Swapping to it is not
-a free change: Kodi and the compositor take their GL from the same directory,
-and the accepted display baseline in this repository was measured against the
-GBM build. It is a decision to make deliberately, with the before-and-after this
-document asks of every other rule in it.
+```text
+EGL_EXT_platform_base
+EGL_KHR_platform_gbm
+```
+
+What that costs is not obvious from outside, because nothing fails loudly. A
+native Wayland client asked for a window, got as far as `wl_compositor`
+`create_surface`, and stopped: no `xdg_surface`, no `xdg_toplevel`, no buffer
+ever attached. The process stayed up, answered the control plane, logged its
+metrics and drew nothing, and the television showed the compositor's background
+colour.
+
+### The Wayland build of the same driver does not fix it
+
+The same pinned upstream release carries
+`libmali-valhall-g610-g24p0-wayland-gbm_1.9-1_arm64.deb` — the same driver
+version with the Wayland platform alongside GBM. It was installed, measured and
+rolled back. It does advertise what it should:
+
+```text
+EGL_EXT_platform_base
+EGL_EXT_platform_wayland
+EGL_KHR_platform_gbm
+EGL_KHR_platform_wayland
+```
+
+and it genuinely initialises: the client opened `/dev/mali0`, got its
+`dma_heap` fds and its `mali-cpu-command` / `mali-event-handler` threads, and
+made its own Wayland connection. The window was still never mapped.
+
+It is not the toolkit. `mpv`, built with Wayland and EGL and entirely unrelated
+to the interface, fails the same way on the same library:
+
+```sh
+LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib \
+  mpv --vo=gpu --gpu-context=wayland --msg-level=vo/gpu=debug <file>
+```
+
+```text
+[vo/gpu/opengl] Initializing GPU context 'wayland'
+[vo/gpu] Failed initializing any suitable GPU context!
+```
+
+No `EGL_VERSION` line: the display never initialises. The same command with the
+Mali path removed reaches `EGL_VERSION=1.5`, `EGL_VENDOR=Mesa Project` — and
+`libEGL warning: egl: failed to create dri2 screen`, because the vendor kernel
+offers Mesa no DRI driver, so that path is llvmpipe.
+
+So a Wayland client here has two options and both are wrong: no picture at all,
+or a software-rasterised one. Measured, the software one costs the property
+this whole document exists to protect — the plane's format was `XR24` rather
+than the client's own buffer, which is direct scanout gone, and one first paint
+took 38% of a core.
+
+**Rolled back.** The GBM build is authoritative, and the check above is how to
+tell which one is installed:
+
+| | |
+| --- | --- |
+| package | `libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb` |
+| deb sha256 | `32ffe853e8d56295284637252f1da15dd868a8f7c6b8da6b9f77616ba285eb1a` |
+| `libmali.so.1.9.0` sha256 | `fc17c1c2b4a2dea84df0811ae574e288bf10ae97dc4ef8911d0c75d335339a57` |
+
+Before and after the swap, Kodi's chain was identical and is the thing any
+future attempt has to leave alone — captured in `results/mali-wayland-gbm/`:
+
+```text
+bus_format[200d]: YUYV10_1X20
+overlay_mode[0] output_mode[9] HDR10[2] color-encoding[BT.2020] color-range[Limited]
+Display mode: 1920x1080p24
+Esmart0-win0: format NV15, color HDR10[2] BT.2020 Limited, src 3840x2160 -> dst 1920x1080
+```
+
+That capture is on a 1080p monitor, which is what was attached: this panel
+offers no 4K mode at all, so the accepted 3840x2160 baseline in the README
+cannot be reproduced on it. The colour chain is the same one; the scanout size
+is not.

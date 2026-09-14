@@ -506,6 +506,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let trace_input = !std::env::args().any(|a| a == "--quiet-input");
 
+    // Errors from winit, glutin and Slint itself go through `log`. Off unless
+    // RUST_LOG says otherwise, so the journal is not filled on an ordinary run.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
+    // The window, and nothing else. When the television showed nothing there
+    // was no way to tell a broken interface from a broken window system, and
+    // guessing at that cost an afternoon. This answers it in one run.
+    if std::env::var_os("MEDIABOX_TV_SELFTEST").is_some() {
+        let window = MediaBoxWindow::new()?;
+        window.set_status("selftest".into());
+        window.window().set_rendering_notifier(|state, _| {
+            eprintln!("mediabox-tv.selftest rendering-state {state:?}");
+        })?;
+        eprintln!("mediabox-tv.selftest showing");
+        window.run()?;
+        return Ok(());
+    }
+
     let window = MediaBoxWindow::new()?;
 
     let app = Rc::new(RefCell::new(App {
