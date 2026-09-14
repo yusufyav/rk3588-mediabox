@@ -130,6 +130,69 @@ yerel 4K NV15  mpv %6-9 CPU · arayüz ~%0 · 1845 kare · 0 düşük · 23.96 f
   göndermiyor.
 * Kodi'nin "Şimdi Oynatılan" ekranı hâlâ eski simge setini kullanıyor.
 
+## 7. Temiz imaj ve ikinci cihaz (Plus)
+
+### Bu repodan yeniden üretilebilenler
+
+| Ne | Nasıl |
+|---|---|
+| Mali G610 kullanıcı alanı | `scripts/install-mali-runtime.sh` — sürüm sabitli .deb, URL ile |
+| Kodi 22.0-BETA2 | `scripts/build-kodi.sh` — kartta derler |
+| Oynatıcı (mpv 0.41) | `scripts/build-mediabox-player.sh` + `packaging/mpv-patches/` + `packaging/mpv/vo_mediabox.c` |
+| node 22.23.1, Stremio web, akış sunucusu | `packaging/upstream.env` — revizyon ve SHA256 ile sabitli |
+| Denetim düzlemi, TV arayüzü, Web UI | `scripts/deploy-mediabox-v3.sh` (çapraz derleme) |
+| Birimler, udev, config, smoke | `packaging/` |
+
+### Bu repoda **olmayan** iki temel
+
+1. **Çekirdek.** Çalışan çekirdek `/boot/vmlinuz-6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio`
+   (46 MB, 4 Eylül, `#3`) ve `/boot/Image` ona bağlı — **açılışta bu çalışıyor.**
+   Hiçbir dpkg paketi sahiplenmiyor (`dpkg -S` → eşleşme yok); `/boot`'taki
+   `config-` ve `System.map-` dosyaları apt'ın *stok* çekirdeğine ait, bu
+   derlemeye değil. Modülleri
+   `/lib/modules/6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio` altında.
+   Kaynağı ve config'i **bu repoda yok** — `yusufyav/rk3588-screenbridge`'den
+   geliyor.
+2. **`/opt/rk3588-screenbridge`** — RKMPP'li FFmpeg (`librockchip_mpp`,
+   `librga`, ffmpeg `d90e3a1`). Donanım kod çözmenin ve Kodi'nin bağlandığı yer.
+   Burada onu **kuran betik yok**; README ve `docs/architecture.md` bağımlılığı
+   anlatıyor, kurulumu değil.
+
+Yani bu repo tek başına boş bir karttan çalışan bir cihaz üretemez. Bu ikisi
+önkoşul ve ikisi de o ayrı projede.
+
+### Plus'a taşımadan önce değişmesi gerekenler
+
+Ultra'da ölçülen, karta özgü sabitler:
+
+```
+packaging/mediabox-hdmi-prepare:38   amixer -c rockchiphdmi1     ← kart adı sabit
+packaging/systemd/*.service          /dev/cec0                   ← Plus'ta iki HDMI, iki cec olabilir
+scripts/capture-*.sh, run-mp1*.sh    card0-HDMI-A-1              ← Plus'ta iki çıkış
+/boot/armbianEnv.txt                 rk3588-orangepi-5-ultra.dtb ← Plus'un kendi DTB'si
+```
+
+Ultra'da tek HDMI çıkışı (`card0-HDMI-A-1`), tek `/dev/cec0`, ses kartları
+`rockchiphdmi1` / `rockchiphdmiin` / `rockchipes8388`. Plus'ta iki HDMI çıkışı
+var; bağlayıcı, CEC ve ses kartı adlandırması farklı olacak.
+
+**İyi haber:** TV arayüzünün kendisi uyarlanabilir yazıldı — `find_output` ilk
+bağlı `HDMI-A` konektörünü seçiyor, video düzlemi ise isimle değil `SetPlane`
+ile deneyerek bulunuyor. Yani VOP2 düzlem haritası farklı olsa da kabuk kendi
+bulur. Sabit olanlar yukarıdaki dört satır.
+
+### Kapatılması gereken işler
+
+1. `scripts/bootstrap-appliance.sh` — boş Armbian'dan çalışan cihaza tek yol;
+   mevcut betikleri sırayla çağırır, iki önkoşul yoksa **yüksek sesle** durur.
+2. Çekirdek ve FFmpeg'i yol olarak değil, `rk3588-screenbridge` reposunun
+   **sabit commit'i** olarak kaydet; `packaging/upstream.env` bunun için zaten
+   doğru yer.
+3. HDMI ses kartı adını sabit yazmak yerine keşfet
+   (`/proc/asound/cards` içinden `rockchiphdmi*`).
+4. Kabuk dışındaki betiklerdeki `card0-HDMI-A-1` sabitlerini bağlı konektörü
+   bulacak şekilde değiştir.
+
 ## 7. Nerede ne var
 
 ```

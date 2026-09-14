@@ -166,17 +166,20 @@ on a path, not on the ScreenBridge daemon; see
 
 ## Results
 
-| Gate | Report |
-| --- | --- |
-| MP1a — HDR signalling isolation | [`hdr-signaling-mp1a-2026-09-09.md`](results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md) |
-| MP1b — real HDR10 playback fidelity | [`real-hdr10-playback-mp1b-2026-09-09.md`](results/orangepi5-ultra-vendor/real-hdr10-playback-mp1b-2026-09-09.md) |
-| MP1b-CSC — plane colour encoding A/B | [`mp1b-plane-color-encoding-ab-2026-09-09.md`](results/orangepi5-ultra-vendor/mp1b-plane-color-encoding-ab-2026-09-09.md) |
-| MP1b-FINAL — blind fidelity comparison | [`mp1b-final-blind-fidelity-2026-09-09.md`](results/orangepi5-ultra-vendor/mp1b-final-blind-fidelity-2026-09-09.md) |
-| MA0 — HDMI PCM audio | [`hdmi-audio-ma0-2026-09-09.md`](results/orangepi5-ultra-vendor/hdmi-audio-ma0-2026-09-09.md) |
-| MP2 — Kodi quality recovery | [`kodi-mp2-quality-recovery-2026-09-10.md`](results/orangepi5-ultra-vendor/kodi-mp2-quality-recovery-2026-09-10.md) |
-| MP2 — pause horizontal shift, three rejected fixes | [`kodi-pause-horizontal-shift-2026-09-10.md`](results/orangepi5-ultra-vendor/kodi-pause-horizontal-shift-2026-09-10.md) |
-| Android golden oracle | [`android-hdr-golden-reference-2026-09-11.md`](results/orangepi5-ultra-android/android-hdr-golden-reference-2026-09-11.md) |
-| MP2-display — Android-parity composition | [`kodi-android-parity-sdr2hdr-2026-09-11.md`](results/orangepi5-ultra-vendor/kodi-android-parity-sdr2hdr-2026-09-11.md) |
+The state of the product, what each gate established and what is still open live
+in one document: [`results/DURUM.md`](results/DURUM.md). It is updated rather
+than added to.
 
-Raw evidence for each run is kept under `logs/`, one directory per gate, each
+The per-gate reports below it — MP1a, MP1b, MP1b-CSC, MP1b-FINAL, MA0, MA1, MP2,
+the Android oracle, the platform and native-shell gates — and every raw device
+capture under `logs/` were taken out of the tree at `d757d17`; carrying a
+thousand files of receipts made it expensive to find the twelve that are the
+product. They are not lost:
+
+```sh
+git show 710181b:results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md
+git show 710181b --stat -- results logs      # everything that was there
+```
+
+Raw captures are also kept outside the repository, one directory per gate, each
 with a `SHA256SUMS` covering every file in it.
