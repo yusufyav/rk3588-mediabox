@@ -1,0 +1,203 @@
+import { Theme, Metrics } from "theme.slint";
+import { Reading, TechRow, NpControl } from "components.slint";
+
+// What is on the television right now.
+//
+// Not a second player: the position and the state are read from Kodi through
+// the control plane, and every button here is a request back to it. What this
+// screen adds is somewhere to see the film's name, how far in it is, and four
+// controls that work with five keys.
+export component NowPlaying inherits Rectangle {
+    in property <image> art;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> note;
+    in property <string> surface;
+    in property <string> elapsed;
+    in property <string> duration;
+    in property <float> progress;
+    in property <[NpControl]> controls;
+    in property <int> focus-index;
+    in property <[TechRow]> technical;
+
+    background: Theme.bg;
+    clip: true;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        clip: true;
+
+        if art.width > 0: Image {
+            width: 100%;
+            height: 100%;
+            source: art;
+            image-fit: cover;
+            opacity: 0.55;
+        }
+        Rectangle {
+            y: parent.height * 0.28;
+            width: 100%;
+            height: parent.height * 0.72;
+            background: @linear-gradient(180deg,
+                transparent 0%, #07080bb8 34%, #07080bf2 70%, #07080b 100%);
+        }
+    }
+
+    VerticalLayout {
+        x: Metrics.gutter;
+        y: root.height * 0.42;
+        width: min(root.width * 0.6, 1200px);
+        spacing: Metrics.root-font * 0.5;
+        alignment: start;
+
+        if surface != "": Text {
+            text: surface;
+            color: Theme.accent;
+            font-size: Metrics.text-label;
+            font-weight: 760;
+            letter-spacing: 0.12 * Metrics.text-label;
+        }
+
+        Text {
+            text: title == "" ? "MediaBox" : title;
+            color: Theme.text;
+            font-size: Metrics.title-screen;
+            font-weight: 820;
+            letter-spacing: -0.03 * Metrics.title-screen;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: Metrics.title-screen * 2.2;
+        }
+
+        if subtitle != "": Text {
+            text: subtitle;
+            color: Theme.muted;
+            font-size: Metrics.text-meta * 0.94;
+            font-weight: 660;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+
+        if note != "": Text {
+            text: note;
+            color: Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 640;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+
+        // The bar, and the two times either side of it.
+        Rectangle { height: Metrics.root-font * 0.4; }
+
+        HorizontalLayout {
+            spacing: Metrics.root-font * 0.8;
+            height: Metrics.root-font * 1.6;
+
+            Text {
+                text: elapsed;
+                color: Theme.text;
+                font-size: Metrics.text-label;
+                font-weight: 700;
+                vertical-alignment: center;
+                width: Metrics.root-font * 4.0;
+            }
+
+            Rectangle {
+                vertical-stretch: 0;
+                y: (parent.height - self.height) / 2;
+                height: 6px;
+                border-radius: 3px;
+                background: #ffffff26;
+                clip: true;
+                horizontal-stretch: 1;
+
+                Rectangle {
+                    x: 0;
+                    width: parent.width * clamp(progress, 0.0, 1.0);
+                    height: 100%;
+                    background: Theme.accent;
+                    animate width { duration: Theme.glide; easing: Theme.ease; }
+                }
+            }
+
+            Text {
+                text: duration;
+                color: Theme.muted;
+                font-size: Metrics.text-label;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                width: Metrics.root-font * 4.0;
+            }
+        }
+
+        Rectangle { height: Metrics.root-font * 0.4; }
+
+        HorizontalLayout {
+            spacing: Metrics.root-font * 0.7;
+            alignment: start;
+
+            for control[i] in controls: Rectangle {
+                property <bool> focused: i == focus-index;
+                width: max(Metrics.card-w * 0.5, caption.preferred-width + Metrics.root-font * 1.4);
+                height: Metrics.card-w * 0.4;
+                border-radius: Theme.radius;
+                background: focused ? Theme.focus-fill : #ffffff12;
+                border-width: focused ? 2px : 1px;
+                border-color: focused ? Theme.focus-ring : #ffffff1c;
+
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Metrics.text-chip * 0.45;
+
+                    Rectangle {
+                        height: Metrics.root-font * 1.4;
+                        Path {
+                            x: (parent.width - self.width) / 2;
+                            width: Metrics.root-font * 1.4;
+                            height: 100%;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: control.mark;
+                            fill: focused ? #0a0c10 : Theme.text;
+                        }
+                    }
+                    caption := Text {
+                        text: control.label;
+                        color: focused ? #0a0c10 : Theme.text;
+                        font-size: Metrics.text-chip;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        wrap: no-wrap;
+                    }
+                }
+            }
+        }
+    }
+
+    // Codec, HDR and audio, as the media core decided them. Down the right and
+    // small: secondary by instruction and by taste.
+    if technical.length > 0: VerticalLayout {
+        x: root.width - Metrics.card-w * 1.3 - Metrics.gutter;
+        y: Metrics.topbar + Metrics.block-gap;
+        width: Metrics.card-w * 1.3;
+        spacing: 0px;
+        alignment: start;
+
+        Text {
+            text: "KAYNAK";
+            color: Theme.dim;
+            font-size: Metrics.text-label * 0.9;
+            font-weight: 760;
+            letter-spacing: 0.1 * Metrics.text-label;
+        }
+        for entry in technical: Reading {
+            entry: entry;
+            label-w: Metrics.card-w * 0.5;
+        }
+    }
+}

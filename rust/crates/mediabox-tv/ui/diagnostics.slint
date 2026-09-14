@@ -1,0 +1,80 @@
+import { Theme, Metrics } from "theme.slint";
+import { Reading, TechRow, DiagGroup } from "components.slint";
+
+// What the machine is doing, in one place and out of the way.
+//
+// The same two-pane shape as the settings screen, and for the same reason: a
+// grid of cards sized by guesswork clipped its own contents — the temperature
+// readings fell off the bottom of the first card in the first run of this
+// screen. A list on the left and its readings on the right always fits,
+// whatever the panel is and however many readings a group turns out to have.
+//
+// Nothing here is operated. The remote moves between groups and that is all.
+export component Diagnostics inherits Rectangle {
+    in property <[DiagGroup]> groups;
+    in property <int> group;
+
+    property <length> list-w: max(220px, min(520px, root.width * 0.22));
+    property <length> rows-x: Metrics.gutter + list-w + Metrics.gutter * 0.8;
+    property <length> top: Metrics.topbar + Metrics.block-gap;
+    property <length> row-h: Metrics.root-font * 3.2;
+
+    background: Theme.bg;
+    clip: true;
+
+    Rectangle {
+        x: Metrics.gutter;
+        y: top;
+        width: list-w;
+        height: root.height - top - Metrics.gutter * 0.6;
+        border-radius: Theme.radius;
+        background: #ffffff08;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+    }
+
+    VerticalLayout {
+        x: Metrics.gutter + Metrics.root-font * 0.4;
+        y: top + Metrics.root-font * 0.4;
+        width: list-w - Metrics.root-font * 0.8;
+        spacing: Metrics.root-font * 0.15;
+        alignment: start;
+
+        for entry[i] in groups: Rectangle {
+            property <bool> focused: i == group;
+            height: row-h;
+            border-radius: Theme.radius * 0.7;
+            background: focused ? Theme.focus-fill : transparent;
+            border-width: focused ? 2px : 0px;
+            border-color: Theme.focus-ring;
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            Text {
+                x: Metrics.root-font * 0.8;
+                width: parent.width - Metrics.root-font * 1.6;
+                height: 100%;
+                text: entry.title;
+                color: focused ? #0a0c10 : Theme.muted;
+                font-size: Metrics.root-font * 1.0;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+    }
+
+    VerticalLayout {
+        x: rows-x;
+        y: top;
+        width: min(root.width - rows-x - Metrics.gutter, Metrics.vw * 0.46);
+        spacing: 0px;
+        alignment: start;
+
+        for reading in groups[group].rows: Reading {
+            entry: reading;
+            label-w: parent.width * 0.44;
+        }
+    }
+}

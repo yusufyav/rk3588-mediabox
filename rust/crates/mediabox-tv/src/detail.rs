@@ -11,18 +11,13 @@ use crate::model::{LibraryItemEnvelope, Meta, Plan, Stream, StreamListing};
 use crate::state::Item;
 use crate::{SourceRow, TechRow};
 
-/// What the four marks are drawn from. SVG path data in a 24x24 box, in two
-/// layers: the shape, and what is cut out of it in the button's own colour.
-pub const MARKS: [(&str, &str); 4] = [
+/// What the marks are drawn from. SVG path data in a 24x24 box, in two layers:
+/// the shape, and what is cut out of it in the button's own colour.
+pub const MARKS: [(&str, &str); 3] = [
     // Play on the television.
     (
         "M1 4h22v13H1zM8 19h8v2H8z",
         "M10 8l6 3.5-6 3.5z",
-    ),
-    // Play here, in the interface's own player.
-    (
-        "M12 2a10 10 0 100 20 10 10 0 000-20z",
-        "M10 8l6 4-6 4z",
     ),
     // The trailer.
     (
@@ -33,12 +28,23 @@ pub const MARKS: [(&str, &str); 4] = [
     ("M11 4l-8 8 8 8v-5h9v-6h-9z", ""),
 ];
 
-pub const ACTIONS: [&str; 4] = ["Kodi'de Oynat", "Bu Cihazda", "Fragman", "Geri"];
+pub const ACTIONS: [&str; 3] = ["Kodi'de Oynat", "Fragman", "Geri"];
 
 pub const ACTION_KODI: usize = 0;
-pub const ACTION_HERE: usize = 1;
-pub const ACTION_TRAILER: usize = 2;
-pub const ACTION_BACK: usize = 3;
+pub const ACTION_TRAILER: usize = 1;
+pub const ACTION_BACK: usize = 2;
+
+/// Which half of the screen the remote is in.
+///
+/// The sources are a column of this screen rather than a sheet behind a button.
+/// The reference does it that way and it is right: choosing where a film comes
+/// from is most of what this screen is for, and putting forty releases behind
+/// "Kaynak Seç" made the page look like a record with nothing to play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    Record,
+    Sources,
+}
 
 /// A source, kept both ways round.
 ///
@@ -58,11 +64,20 @@ pub struct Detail {
     pub sources: Vec<Source>,
     pub plan: Option<Plan>,
 
-    /// Row 0 is the action strip; 1.. are the sources.
-    pub row: usize,
+    /// Which half of the screen the remote is in.
+    pub pane: Pane,
+    /// Which button on the action row the remote is on.
     pub action: usize,
-    /// Which source the technical panel and the play buttons are about.
+    /// Which source the play button and the technical panel are about, as an
+    /// index into `sources`.
     pub selected: Option<usize>,
+    /// Where the remote is in the source column, as a position in the *shown*
+    /// list — which is the filtered one.
+    pub source_focus: usize,
+    /// 0 is "Tümü"; 1.. are the providers in `providers()`.
+    pub provider: usize,
+    /// True while the remote is on the provider filter rather than on a source.
+    pub on_filter: bool,
 
     pub loading: bool,
     pub note: String,
@@ -92,47 +107,173 @@ impl Detail {
             },
             sources: Vec::new(),
             plan: None,
-            row: 0,
+            pane: Pane::Record,
             action: ACTION_KODI,
             selected: None,
+            source_focus: 0,
+            provider: 0,
+            on_filter: false,
             loading: true,
             note: "Kaynaklar aranıyor…".into(),
         }
     }
 
-    pub fn rows(&self) -> usize {
-        1 + self.sources.len()
+    /// Who is offering the sources, in the order they first appear.
+    ///
+    /// The reference's own filter: "Tümü", then one entry per addon. A title
+    /// with forty releases usually has them from two or three places, and being
+    /// able to say "only this one" is the difference between a list and a
+    /// choice.
+    pub fn providers(&self) -> Vec<String> {
+        let mut providers: Vec<String> = Vec::new();
+        for source in &self.sources {
+            let name = source.parsed.facts().provider;
+            if !name.is_empty() && !providers.contains(&name) {
+                providers.push(name);
+            }
+        }
+        providers
+    }
+
+    /// The sources the column is showing, as indices into `sources`.
+    pub fn shown(&self) -> Vec<usize> {
+        let providers = self.providers();
+        let wanted = self.provider.checked_sub(1).and_then(|i| providers.get(i).cloned());
+        self.sources
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| match &wanted {
+                Some(name) => source.parsed.facts().provider == *name,
+                None => true,
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The source the remote is on, as an index into `sources`.
+    pub fn focused_source(&self) -> Option<usize> {
+        self.shown().get(self.source_focus).copied()
     }
 
     /// Moves the remote. Returns whether anything changed.
-    pub fn step(&mut self, dx: isize, dy: isize) -> bool {
-        let mut moved = false;
-
-        if dy != 0 {
-            let next = (self.row as isize + dy).clamp(0, self.rows() as isize - 1);
-            if next != self.row as isize {
-                self.row = next as usize;
-                moved = true;
-            }
+    ///
+    /// Left and right cross between the record and the source column, and only
+    /// there: inside the record they walk the action row, and inside the column
+    /// they change the provider filter when the remote is on it.
+    pub fn step(&mut self, dx: i32, dy: i32) -> bool {
+        match self.pane {
+            Pane::Record => self.step_record(dx, dy),
+            Pane::Sources => self.step_sources(dx, dy),
         }
+    }
 
-        // Left and right only mean anything on the action strip; the sources
-        // are a column. Left from a source goes back to the actions, which is
-        // the one thing a viewer tries when a list has taken the remote.
-        if dx != 0 {
-            if self.row == 0 {
-                let next = (self.action as isize + dx).clamp(0, ACTIONS.len() as isize - 1);
-                if next != self.action as isize {
-                    self.action = next as usize;
-                    moved = true;
+    fn step_record(&mut self, dx: i32, dy: i32) -> bool {
+        if dx > 0 {
+            let enabled = self.enabled();
+            let last = enabled.iter().rposition(|ok| *ok).unwrap_or(0);
+            if self.action >= last {
+                if self.sources.is_empty() {
+                    return false;
                 }
-            } else if dx < 0 {
-                self.row = 0;
-                moved = true;
+                self.pane = Pane::Sources;
+                self.on_filter = false;
+                return true;
             }
         }
+        if dy != 0 {
+            return false;
+        }
+        if dx == 0 {
+            return false;
+        }
+        let mut next = self.action as i32 + dx;
+        // A button that cannot be pressed — no trailer, no playable source —
+        // is stepped over rather than landed on.
+        let enabled = self.enabled();
+        while next >= 0 && (next as usize) < ACTIONS.len() && !enabled[next as usize] {
+            next += dx.signum();
+        }
+        if next < 0 || next as usize >= ACTIONS.len() || next as usize == self.action {
+            return false;
+        }
+        self.action = next as usize;
+        true
+    }
 
-        moved
+    fn step_sources(&mut self, dx: i32, dy: i32) -> bool {
+        if dx < 0 {
+            self.pane = Pane::Record;
+            self.settle();
+            return true;
+        }
+        if dx > 0 {
+            // Right, on the filter, walks the providers.
+            if !self.on_filter {
+                return false;
+            }
+            let count = self.providers().len() + 1;
+            let next = (self.provider + 1).min(count.saturating_sub(1));
+            if next == self.provider {
+                return false;
+            }
+            self.provider = next;
+            self.source_focus = 0;
+            return true;
+        }
+        if dy < 0 {
+            if self.on_filter {
+                return false;
+            }
+            if self.source_focus == 0 {
+                // Up off the top of the list is the filter above it.
+                self.on_filter = true;
+                return true;
+            }
+            self.source_focus -= 1;
+            return true;
+        }
+        if dy > 0 {
+            if self.on_filter {
+                self.on_filter = false;
+                return true;
+            }
+            let shown = self.shown().len();
+            if self.source_focus + 1 >= shown {
+                return false;
+            }
+            self.source_focus += 1;
+            return true;
+        }
+        false
+    }
+
+    /// The provider filter, stepped left. Kept separate because Left inside the
+    /// column means "leave", and a filter that swallowed it would trap the
+    /// remote in a list.
+    pub fn previous_provider(&mut self) -> bool {
+        if self.provider == 0 {
+            return false;
+        }
+        self.provider -= 1;
+        self.source_focus = 0;
+        true
+    }
+
+    /// Puts the remote on the first button that can actually be pressed. Called
+    /// when the sources land, because until then only Back is live.
+    pub fn settle(&mut self) {
+        let enabled = self.enabled();
+        if enabled.get(self.action).copied().unwrap_or(false) {
+            return;
+        }
+        self.action = enabled.iter().position(|ok| *ok).unwrap_or(ACTION_BACK);
+    }
+
+    /// Ok in the source column: this is the one it plays from now.
+    pub fn choose_source(&mut self) -> Option<usize> {
+        let index = self.focused_source()?;
+        self.selected = Some(index);
+        Some(index)
     }
 
     pub fn selected_source(&self) -> Option<&Source> {
@@ -164,6 +305,13 @@ impl Detail {
         // The first that can actually play, so the buttons mean something
         // before the viewer has chosen anything.
         self.selected = self.sources.iter().position(|source| source.parsed.playable);
+        self.provider = 0;
+        self.on_filter = false;
+        self.source_focus = self
+            .selected
+            .and_then(|index| self.shown().iter().position(|shown| *shown == index))
+            .unwrap_or(0);
+        self.settle();
     }
 
     /// The appliance's own library answers with the record and the sources in
@@ -190,7 +338,9 @@ impl Detail {
     pub fn fail(&mut self, why: &str) {
         self.loading = false;
         self.sources.clear();
+        self.selected = None;
         self.note = why.to_string();
+        self.settle();
     }
 
     // ------------------------------------------------------------- rendering
@@ -209,29 +359,26 @@ impl Detail {
         facts.join("  ·  ")
     }
 
-    /// Cast and directors, in one strip. Five names is what fits and is also
-    /// about as many as anybody reads.
-    pub fn people(&self) -> Vec<String> {
-        let mut people: Vec<String> = self.meta.director.iter().take(2).cloned().collect();
-        people.extend(self.meta.cast.iter().take(5).cloned());
-        people
-    }
-
     /// Which actions can be pressed. Back is always one of them: a title with
     /// no sources would otherwise leave the screen with nothing to focus.
-    pub fn enabled(&self) -> [bool; 4] {
+    pub fn enabled(&self) -> [bool; 3] {
         let playable = self
             .selected_source()
             .map(|source| source.parsed.playable)
             .unwrap_or(false);
-        [
-            playable,
-            playable,
-            non_empty(&self.meta.trailer).is_some(),
-            true,
-        ]
+        [playable, non_empty(&self.meta.trailer).is_some(), true]
     }
 
+    /// The technical rows, as pairs, for whatever screen wants them next — the
+    /// now-playing screen carries them over when a film starts.
+    pub fn technical_pairs(&self) -> Vec<(String, String)> {
+        self.technical()
+            .into_iter()
+            .map(|row| (row.label.to_string(), row.value.to_string()))
+            .collect()
+    }
+
+    /// The rows the column draws: the filtered list, in order.
     pub fn rows_for_display(&self) -> Vec<SourceRow> {
         // The provider is on every row only when there is more than one to tell
         // apart. Otherwise it is the same word repeated down the panel, taking
@@ -243,12 +390,13 @@ impl Detail {
             .collect();
         let many = providers.len() > 1;
 
-        self.sources
-            .iter()
+        self.shown()
+            .into_iter()
+            .filter_map(|index| self.sources.get(index))
             .map(|source| {
                 let facts = source.parsed.facts();
                 let mut chips: Vec<slint::SharedString> =
-                    facts.chips().into_iter().map(Into::into).collect();
+                    facts.chips().into_iter().take(4).map(Into::into).collect();
                 if many && !facts.provider.is_empty() {
                     chips.push(facts.provider.clone().into());
                 }
@@ -324,8 +472,10 @@ impl Detail {
             rows.push(tech("Ses kararı", &note, ""));
         }
 
-        // Everything the core had a reason to say, at the bottom, in its own
-        // words.
+        // Only what the core had a *blocking* reason to say. The full list of
+        // notes is the media core's own report and belongs on the diagnostics
+        // screen; a title's page carrying six lines of "hevc Main 10 is hardware
+        // decodable" is a page about the appliance rather than about the film.
         let reasons = plan
             .playback
             .reasons
@@ -334,12 +484,15 @@ impl Detail {
             .chain(plan.playback.audio.iter().flat_map(|a| a.reasons.iter()))
             .chain(plan.media.warnings.iter());
         for reason in reasons {
-            if reason.message.is_empty() {
+            if reason.message.is_empty() || severity_tone(&reason.severity).is_empty() {
                 continue;
             }
             rows.push(tech("Not", &reason.message, severity_tone(&reason.severity)));
         }
 
+        // Four is what the column has room for and about as much as anybody
+        // reads from a sofa.
+        rows.truncate(4);
         rows
     }
 }

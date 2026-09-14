@@ -4,14 +4,22 @@
 //! which application holds the display, the media core owns what is playable
 //! and how, and Kodi owns playback; this process draws, listens to the remote,
 //! and asks.
+//!
+//! Everything a press can mean is in `actions.rs`, everything a screen's focus
+//! can do is in `screens/`, and both are plain data with tests. What is left
+//! here is the wiring: which screen is on the panel, what a chosen intent does
+//! about it, and how an answer from the control plane reaches the right one.
 
+mod actions;
 mod detail;
 mod images;
 mod input;
 mod metrics;
 mod model;
 mod platform;
+mod route;
 mod rpc;
+mod screens;
 mod session;
 mod state;
 mod vitals;
@@ -20,8 +28,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use mediabox_core::{InputAction, InputEvent};
+use mediabox_core::{InputAction, InputEvent, PowerAction};
+use serde_json::Value;
 use slint::ComponentHandle;
+
+use actions::{Intent, Transport};
+use route::Route;
+use screens::power::{Press, Sheet};
+use screens::settings::Action;
 
 slint::include_modules!();
 
@@ -33,6 +47,13 @@ const EVENTS_URL: &str = "http://127.0.0.1:8787/v1/events?tv=1";
 
 const CACHE_DIR: &str = "/var/lib/mediabox-ui/tv-imgcache";
 const STATE_FILE: &str = "/var/lib/mediabox-ui/tv-state.json";
+const SNAPSHOT_DIR: &str = "/var/lib/mediabox-ui/snapshots";
+
+/// How long after the last keystroke a search is actually sent. A remote types
+/// one letter at a time and the media core fans a search out over every addon;
+/// asking on each letter would put four searches in flight for a four-letter
+/// word and draw the answer to the shortest one last.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
 
 /// The appliance is the only place this runs in earnest, and there the defaults
 /// above are right. The overrides exist so the interface can be driven against
@@ -54,6 +75,10 @@ fn state_file() -> String {
     std::env::var("MEDIABOX_TV_STATE").unwrap_or_else(|_| STATE_FILE.to_string())
 }
 
+fn snapshot_dir() -> String {
+    std::env::var("MEDIABOX_TV_SNAPSHOTS").unwrap_or_else(|_| SNAPSHOT_DIR.to_string())
+}
+
 thread_local! {
     /// How the background threads reach the interface. They post a closure to
     /// the event loop and it finds everything here, because nothing the
@@ -70,13 +95,31 @@ fn with_app(f: impl FnOnce(&mut App)) {
 
 struct App {
     window: slint::Weak<MediaBoxWindow>,
+    stack: route::Stack,
+
     home: state::Home,
+    media: screens::media::Media,
+    search: screens::search::Search,
+    library: screens::library::Library,
+    settings: screens::settings::Settings,
+    diagnostics: screens::diagnostics::Diagnostics,
+    now: screens::now_playing::NowPlaying,
+
+    detail: Option<detail::Detail>,
+    /// The power sheet, or a confirmation, over anything.
+    sheet: Option<Sheet>,
+
     images: images::ImageManager,
     meter: metrics::Metrics,
     dispatcher: input::Dispatcher,
     store: session::Store,
 
-    detail: Option<detail::Detail>,
+    /// The last answers from the control plane, kept so the settings and
+    /// diagnostics screens can be composed without asking again.
+    status: Option<Value>,
+    diag: Option<Value>,
+    display: Option<model::DisplayStatus>,
+
     detail_backdrop: Option<String>,
     detail_fade: f32,
     /// Bumped every time a detail screen is opened, so an answer for a title
@@ -88,116 +131,141 @@ struct App {
 }
 
 impl App {
-    fn on_detail(&self) -> bool {
-        self.detail.is_some()
+    fn route(&self) -> Route {
+        self.stack.current()
     }
+
+    fn modal(&self) -> bool {
+        self.sheet.is_some()
+    }
+
+    // ------------------------------------------------------------------ input
 
     /// A press that survived the dispatcher.
     fn act(&mut self, action: InputAction) {
         self.meter.key_accepted();
+        let intent = actions::intent_for(self.route(), self.modal(), action);
 
-        if self.on_detail() {
-            self.act_on_detail(action);
-        } else {
-            self.act_on_home(action);
+        if self.sheet.is_some() {
+            self.act_on_sheet(intent);
+            return;
+        }
+        match intent {
+            Intent::GoHome => self.go_home(),
+            Intent::OfferPower => self.open_sheet(Sheet::power()),
+            Intent::Transport(transport) => self.transport(transport),
+            Intent::Ignore => {}
+            _ => match self.route() {
+                Route::Home | Route::Boot => self.act_on_home(intent),
+                Route::Media => self.act_on_media(intent),
+                Route::Search => self.act_on_search(intent),
+                Route::Library => self.act_on_library(intent),
+                Route::Detail => self.act_on_detail(intent),
+                Route::NowPlaying => self.act_on_now_playing(intent),
+                Route::Settings => self.act_on_settings(intent),
+                Route::Diagnostics => self.act_on_diagnostics(intent),
+            },
         }
     }
 
-    fn act_on_home(&mut self, action: InputAction) {
-        let moved = match action {
-            InputAction::Up => self.home.step(0, -1),
-            InputAction::Down => self.home.step(0, 1),
-            InputAction::Left => self.home.step(-1, 0),
-            InputAction::Right => self.home.step(1, 0),
-            InputAction::Ok => {
-                if self.home.row == 1 {
-                    self.launch();
-                } else {
-                    self.open_detail();
-                }
-                return;
-            }
-            // Back on the home screen goes up to the bar rather than nowhere.
-            // There is no screen behind this one; the television was turned on
-            // here.
-            InputAction::Back | InputAction::Home => {
-                let moved = self.home.row != 0;
-                self.home.row = 0;
-                moved
-            }
-            _ => false,
-        };
-
-        if moved {
+    /// Text from a real keyboard. Only the search screen has anywhere to put
+    /// it; everywhere else a letter is not a command and is dropped.
+    fn typed(&mut self, c: char) {
+        if self.modal() || self.route() != Route::Search {
+            return;
+        }
+        if self.search.typed(c) {
+            self.search_soon();
             self.paint();
         }
     }
 
-    fn act_on_detail(&mut self, action: InputAction) {
-        let Some(detail) = self.detail.as_mut() else { return };
+    // ----------------------------------------------------------------- sheets
 
-        match action {
-            InputAction::Up => {
-                if detail.step(0, -1) {
-                    self.paint_detail();
+    fn open_sheet(&mut self, sheet: Sheet) {
+        self.sheet = Some(sheet);
+        self.paint();
+    }
+
+    fn close_sheet(&mut self) {
+        self.sheet = None;
+        self.paint();
+    }
+
+    fn act_on_sheet(&mut self, intent: Intent) {
+        let Some(sheet) = self.sheet.as_mut() else { return };
+        match intent {
+            Intent::Move(dx, dy) => {
+                if sheet.step(dx, dy) {
+                    self.paint();
                 }
             }
-            InputAction::Down => {
-                if detail.step(0, 1) {
-                    self.paint_detail();
+            Intent::Dismiss => self.close_sheet(),
+            Intent::Select => match sheet.press() {
+                Press::Close => self.close_sheet(),
+                Press::Ask(action, question) => {
+                    self.sheet = Some(Sheet::confirm(action, &question));
+                    self.paint();
                 }
-            }
-            InputAction::Left => {
-                if detail.step(-1, 0) {
-                    self.paint_detail();
+                Press::Do(action) => {
+                    self.close_sheet();
+                    self.run(action);
                 }
-            }
-            InputAction::Right => {
-                if detail.step(1, 0) {
-                    self.paint_detail();
-                }
-            }
-            InputAction::Ok => self.choose(),
-            InputAction::Back => self.close_detail(),
-            InputAction::Home => self.close_detail(),
+            },
             _ => {}
         }
     }
 
-    /// OK on the detail screen.
-    ///
-    /// On a source it selects it and puts the remote back on the play button:
-    /// choosing where a film comes from and starting it are two decisions, and
-    /// a television that starts playing because somebody was reading down a
-    /// list is a television nobody trusts.
-    fn choose(&mut self) {
-        let Some(detail) = self.detail.as_mut() else { return };
+    // --------------------------------------------------------------- the home
 
-        if detail.row > 0 {
-            let index = detail.row - 1;
-            if detail.sources.get(index).is_some() {
-                detail.selected = Some(index);
-                detail.row = 0;
-                detail.action = detail::ACTION_KODI;
-                self.analyse();
-                self.paint_detail();
+    fn go_home(&mut self) {
+        self.stack.reset(Route::Home);
+        self.detail = None;
+        self.paint();
+        self.remember();
+    }
+
+    fn act_on_home(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.home.step(dx as isize, dy as isize) {
+                    self.paint();
+                }
             }
-            return;
-        }
-
-        match detail.action {
-            detail::ACTION_KODI => self.play(true),
-            detail::ACTION_HERE => self.play(false),
-            detail::ACTION_TRAILER => self.trailer(),
-            _ => self.close_detail(),
+            Intent::Select => self.choose_on_home(),
+            // There is no screen behind this one — the television was turned on
+            // here — so Back goes back up to the launcher, which is the top of
+            // it. From the launcher itself Back does nothing, on purpose: a
+            // home screen that reacts to Back by changing is a home screen
+            // nobody can tell they have reached.
+            Intent::Dismiss => {
+                if self.home.row != 0 {
+                    self.home.row = 0;
+                    self.paint();
+                }
+            }
+            _ => {}
         }
     }
 
-    /// OK on the launcher.
-    ///
-    /// Three things a tile can be, and each is answered here rather than in the
-    /// interface: a screen this one already carries, another application, or a
-    /// screen that is not written yet.
+    fn choose_on_home(&mut self) {
+        if self.home.focused_app().is_some() {
+            self.launch();
+            return;
+        }
+        self.open_detail();
+    }
+
+    /// One of this interface's own screens, from wherever it was chosen.
+    fn open_screen(&mut self, nav: state::Nav) {
+        match nav {
+            state::Nav::Search => self.open(Route::Search),
+            state::Nav::Library => self.open_library(),
+            state::Nav::Settings => self.open(Route::Settings),
+        }
+    }
+
+    /// Ok on the launcher.
     fn launch(&mut self) {
         let Some(tile) = self.home.focused_app() else { return };
         let (action, name, ready) = (tile.action.clone(), tile.name.clone(), tile.ready);
@@ -208,17 +276,16 @@ impl App {
         }
 
         match action {
-            // The catalogue is on this screen already, so this goes to it.
-            state::AppAction::Shelves => {
-                if let Some(row) = self.home.first_shelf_row() {
-                    self.home.row = row;
-                    self.paint();
-                }
-            }
+            // The catalogue is not on this screen. It is what this tile is
+            // for.
+            state::AppAction::Shelves => self.open_media(),
+            state::AppAction::Screen(nav) => self.open_screen(nav),
             // The control plane stops this unit as part of starting the other
             // one, so nothing after this call is guaranteed to run.
             state::AppAction::Launch(id) => {
                 self.say(format!("{name} açılıyor…"));
+                self.remember();
+                self.store.flush();
                 spawn_launch(id, name);
             }
             state::AppAction::Absent => self.say(format!("{name} henüz yok")),
@@ -234,60 +301,226 @@ impl App {
         }
     }
 
-    /// What the box can run, and how it is doing, on the control plane's word.
-    fn machine_read(&mut self, display: Option<model::DisplayStatus>, diagnostics: Option<serde_json::Value>) {
-        if let Some(display) = display {
-            self.home.set_apps(state::app_tiles_from(&display));
-            if let Some(window) = self.window.upgrade() {
-                window.set_apps(slint::ModelRc::from(self.home.app_tiles.clone()));
-                window.set_focus_col(self.home.column() as i32);
-            }
-        }
+    // ---------------------------------------------------------- the catalogue
 
-        if let Some(window) = self.window.upgrade() {
-            window.set_vitals(vitals::read(diagnostics.as_ref()));
+    fn open_media(&mut self) {
+        self.media.set_shelves(self.home.shelves.clone());
+        self.open(Route::Media);
+    }
+
+    fn act_on_media(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.media.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Select => {
+                if let Some(nav) = self.media.focused_nav() {
+                    self.open_screen(nav);
+                    return;
+                }
+                let item = self.media.focused().cloned();
+                if let Some(item) = item {
+                    self.open_detail_for(&item);
+                }
+            }
+            Intent::Dismiss => self.back(),
+            _ => {}
         }
     }
 
-    fn open_detail(&mut self) {
-        // The bar is not built yet; pressing OK there should do nothing rather
-        // than something surprising.
-        if self.home.row == 0 {
+    fn paint_media(&mut self, window: &MediaBoxWindow) {
+        self.media.sync_artwork(&mut self.images);
+        window.set_media_row(self.media.row as i32);
+        window.set_media_col(self.media.column() as i32);
+
+        let (title, facts, summary) = match self.media.focused() {
+            Some(item) => (
+                item.title.clone(),
+                hero_facts(item),
+                item.summary.clone().unwrap_or_default(),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        };
+        window.set_media_title(title.into());
+        window.set_media_facts(facts.into());
+        window.set_media_summary(summary.into());
+    }
+
+    // ------------------------------------------------------------- the search
+
+    fn act_on_search(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.search.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Select => {
+                if self.search.pane == screens::search::Pane::Results {
+                    let item = self.search.focused_result().cloned();
+                    if let Some(item) = item {
+                        self.open_detail_for(&item);
+                    }
+                } else if self.search.press() {
+                    self.search_soon();
+                    self.paint();
+                }
+            }
+            Intent::Dismiss => self.back(),
+            _ => {}
+        }
+    }
+
+    fn search_soon(&mut self) {
+        if self.search.query.trim().is_empty() {
             return;
         }
-        let Some(item) = self.home.focused() else { return };
+        spawn_search(self.search.generation, self.search.query.clone());
+    }
 
+    fn searched(&mut self, generation: u64, answer: Result<Vec<state::Item>, String>) {
+        match answer {
+            Ok(items) => self.search.take(generation, items),
+            Err(why) => self.search.fail(generation, &why),
+        }
+        if self.route() == Route::Search {
+            self.paint();
+        }
+    }
+
+    // ------------------------------------------------------------ the library
+
+    fn open_library(&mut self) {
+        self.library.build(&self.home.shelves);
+        self.open(Route::Library);
+    }
+
+    fn act_on_library(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.library.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Select => {
+                if self.library.on_tabs {
+                    if self.library.step(0, 1) {
+                        self.paint();
+                    }
+                    return;
+                }
+                let item = self.library.focused().cloned();
+                if let Some(item) = item {
+                    self.open_detail_for(&item);
+                }
+            }
+            Intent::Dismiss => {
+                if !self.library.on_tabs {
+                    self.library.on_tabs = true;
+                    self.paint();
+                } else {
+                    self.back();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ------------------------------------------------------------- the detail
+
+    fn open_detail(&mut self) {
+        let Some(item) = self.home.focused().cloned() else { return };
+        self.open_detail_for(&item);
+    }
+
+    fn open_detail_for(&mut self, item: &state::Item) {
         let detail = detail::Detail::seeded(item);
         let (kind, id) = (detail.kind.clone(), detail.id.clone());
         self.detail = Some(detail);
         self.detail_backdrop = None;
         self.epoch += 1;
-
-        if let Some(window) = self.window.upgrade() {
-            window.set_screen("detail".into());
-        }
-        self.paint_detail();
+        self.open(Route::Detail);
         spawn_detail_load(self.epoch, kind, id);
-        self.remember();
     }
 
-    fn close_detail(&mut self) {
-        self.detail = None;
-        self.epoch += 1;
-        if let Some(window) = self.window.upgrade() {
-            window.set_screen("home".into());
+    fn act_on_detail(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                // Left, on the provider filter, is "the previous provider"
+                // rather than "leave the column" — but only when there is a
+                // previous one, so the remote can always get back out.
+                let moved = match self.detail.as_mut() {
+                    Some(detail) => {
+                        if dx < 0
+                            && detail.pane == detail::Pane::Sources
+                            && detail.on_filter
+                            && detail.provider > 0
+                        {
+                            detail.previous_provider()
+                        } else {
+                            detail.step(dx, dy)
+                        }
+                    }
+                    None => false,
+                };
+                if moved {
+                    self.paint();
+                }
+            }
+            Intent::Select => self.choose_on_detail(),
+            Intent::Dismiss => {
+                // Back out of the source column before backing out of the
+                // screen: one press, one step, and never two things at once.
+                let left = self
+                    .detail
+                    .as_mut()
+                    .filter(|detail| detail.pane == detail::Pane::Sources)
+                    .map(|detail| {
+                        detail.pane = detail::Pane::Record;
+                        detail.settle();
+                    })
+                    .is_some();
+                if left {
+                    self.paint();
+                } else {
+                    self.back();
+                }
+            }
+            _ => {}
         }
-        // The home screen never forgot where it was, so there is nothing to
-        // restore: the shelf and the poster are still the ones that were left.
-        self.paint();
-        self.remember();
     }
 
-    fn detail_loaded(
-        &mut self,
-        epoch: u64,
-        answer: Result<DetailAnswer, String>,
-    ) {
+    fn choose_on_detail(&mut self) {
+        let Some(detail) = self.detail.as_mut() else { return };
+
+        // In the source column, Ok is "play this one". The reference plays on
+        // the click rather than selecting and waiting for a second decision,
+        // and a viewer who has just read a release name does not want to be
+        // told to now press the other button.
+        if detail.pane == detail::Pane::Sources {
+            if detail.on_filter {
+                // The filter is walked with Left and Right; Ok on it does
+                // nothing rather than something surprising.
+                return;
+            }
+            if detail.choose_source().is_some() {
+                self.analyse();
+                self.play();
+                self.paint();
+            }
+            return;
+        }
+
+        match detail.action {
+            detail::ACTION_KODI => self.play(),
+            detail::ACTION_TRAILER => self.trailer(),
+            _ => self.back(),
+        }
+    }
+
+    fn detail_loaded(&mut self, epoch: u64, answer: Result<DetailAnswer, String>) {
         if epoch != self.epoch {
             return;
         }
@@ -303,7 +536,7 @@ impl App {
         }
 
         self.analyse();
-        self.paint_detail();
+        self.paint();
     }
 
     /// Asks the media core what it would do with the chosen source.
@@ -322,16 +555,16 @@ impl App {
         }
         if let Some(detail) = self.detail.as_mut() {
             detail.plan = plan;
-            self.paint_detail();
+            self.paint();
         }
     }
 
     /// Starts the film.
     ///
-    /// On Kodi this is the end of this process's involvement: the control plane
-    /// stops the interface's unit as part of handing the display over, so the
+    /// This is the end of this process's involvement: the control plane stops
+    /// the interface's unit as part of handing the display over, so the
     /// position is written to disk before the call rather than after it.
-    fn play(&mut self, on_kodi: bool) {
+    fn play(&mut self) {
         let Some(detail) = self.detail.as_ref() else { return };
         let Some(source) = detail.selected_source() else { return };
         if !source.parsed.playable {
@@ -340,16 +573,21 @@ impl App {
 
         let url = source.parsed.url.clone();
         let raw = source.raw.clone();
+
+        // What the film is, carried to the now-playing screen so it has
+        // something to show the moment the display comes back.
+        self.now.title = detail.meta.name.clone();
+        self.now.artwork = detail.meta.poster.clone();
+        self.now.backdrop = detail.meta.background.clone();
+        self.now.set_technical(detail.technical_pairs());
+
         self.remember();
         self.store.flush();
 
         if let Some(window) = self.window.upgrade() {
-            window.set_detail_note(
-                if on_kodi { "Kodi'ye aktarılıyor…" } else { "Oynatılıyor…" }.into(),
-            );
+            window.set_detail_note("Kodi'ye aktarılıyor…".into());
         }
-
-        spawn_play(on_kodi, url, raw);
+        spawn_play(url, raw);
     }
 
     fn trailer(&mut self) {
@@ -359,32 +597,209 @@ impl App {
         spawn_open(url);
     }
 
+    // -------------------------------------------------------- what is playing
+
+    fn act_on_now_playing(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.now.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Select => {
+                use screens::now_playing::Control;
+                match self.now.focused() {
+                    Control::SeekBack => self.transport(Transport::Seek(-10)),
+                    Control::PlayPause => self.transport(Transport::PlayPause),
+                    Control::SeekForward => self.transport(Transport::Seek(30)),
+                    Control::Stop => self.transport(Transport::Stop),
+                }
+            }
+            Intent::Dismiss => self.back(),
+            _ => {}
+        }
+    }
+
+    /// The transport keys. They belong to whatever is playing, which is Kodi,
+    /// so they are forwarded and the screen follows the answer rather than
+    /// guessing at it.
+    fn transport(&mut self, transport: Transport) {
+        match transport {
+            Transport::PlayPause => spawn_kodi(KodiCommand::PlayPause),
+            Transport::Stop => spawn_kodi(KodiCommand::Stop),
+            Transport::Seek(seconds) => spawn_kodi(KodiCommand::Seek(seconds)),
+            // Volume is the television's, over CEC, and the daemon owns that
+            // adapter. Nothing to do here until there is a mixer to move.
+            Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
+        }
+        // A transport key pressed anywhere opens the screen it belongs to. It
+        // is the one place the position and the state are visible.
+        if self.now.active() && self.route() != Route::NowPlaying {
+            self.open(Route::NowPlaying);
+        }
+    }
+
+    // ------------------------------------------------------------- the settings
+
+    fn act_on_settings(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.settings.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Select => {
+                if self.settings.pane == screens::settings::Pane::Sections {
+                    if self.settings.step(1, 0) {
+                        self.paint();
+                    }
+                    return;
+                }
+                let Some(action) = self.settings.focused().and_then(|row| row.action) else {
+                    return;
+                };
+                if action.confirms() {
+                    self.open_sheet(Sheet::confirm(action, action.question()));
+                } else {
+                    self.run(action);
+                }
+            }
+            Intent::Dismiss => {
+                if self.settings.pane == screens::settings::Pane::Rows {
+                    self.settings.pane = screens::settings::Pane::Sections;
+                    self.paint();
+                } else {
+                    self.back();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn act_on_diagnostics(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.diagnostics.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Dismiss => self.back(),
+            _ => {}
+        }
+    }
+
+    /// The one place a settings decision leaves this process.
+    fn run(&mut self, action: Action) {
+        match action {
+            Action::OpenDiagnostics => {
+                self.diagnostics.compose(
+                    self.status.as_ref(),
+                    self.diag.as_ref(),
+                    self.display.as_ref(),
+                );
+                self.open(Route::Diagnostics);
+            }
+            Action::WakeTelevision => {
+                self.say("Televizyon uyandırılıyor…".into());
+                spawn_kodi(KodiCommand::WakeTelevision);
+            }
+            Action::StandbyTelevision => {
+                self.say("Televizyon beklemeye alınıyor…".into());
+                spawn_kodi(KodiCommand::StandbyTelevision);
+            }
+            Action::RestartPlayer => {
+                self.say("Oynatıcı yeniden başlatılıyor…".into());
+                spawn_kodi(KodiCommand::RestartPlayer);
+            }
+            Action::Restart | Action::Shutdown => {
+                let power = if action == Action::Restart {
+                    PowerAction::Restart
+                } else {
+                    PowerAction::Shutdown
+                };
+                self.say(
+                    if power == PowerAction::Restart { "Yeniden başlatılıyor…" } else { "Kapatılıyor…" }
+                        .into(),
+                );
+                self.remember();
+                self.store.flush();
+                spawn_power(power);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- navigation
+
+    fn open(&mut self, route: Route) {
+        self.stack.push(route);
+        self.paint();
+        self.remember();
+    }
+
+    fn back(&mut self) {
+        if self.stack.pop() {
+            if self.route() != Route::Detail {
+                self.detail = None;
+            }
+            self.paint();
+            self.remember();
+        }
+    }
+
+    // -------------------------------------------------------------- the data
+
     fn remember(&mut self) {
-        let snapshot = match self.detail.as_ref() {
-            Some(detail) => session::Snapshot {
-                screen: "detail".into(),
-                home_row: self.home.row,
-                home_col: self.home.column(),
-                detail_kind: detail.kind.clone(),
-                detail_id: detail.id.clone(),
-            },
-            None => session::Snapshot {
-                screen: "home".into(),
-                home_row: self.home.row,
-                home_col: self.home.column(),
-                detail_kind: String::new(),
-                detail_id: String::new(),
-            },
+        let snapshot = session::Snapshot {
+            screen: self.route().name().into(),
+            home_row: self.home.row,
+            home_col: self.home.column(),
+            detail_kind: self.detail.as_ref().map(|d| d.kind.clone()).unwrap_or_default(),
+            detail_id: self.detail.as_ref().map(|d| d.id.clone()).unwrap_or_default(),
         };
         self.store.put(snapshot);
     }
 
+    /// What the box can run, and how it is doing, on the control plane's word.
+    fn machine_read(
+        &mut self,
+        display: Option<model::DisplayStatus>,
+        status: Option<Value>,
+        diagnostics: Option<Value>,
+        kodi: Option<Value>,
+    ) {
+        if let Some(display) = display {
+            self.home.set_apps(state::app_tiles_from(&display));
+            self.display = Some(display);
+            if let Some(window) = self.window.upgrade() {
+                window.set_apps(slint::ModelRc::from(self.home.app_tiles.clone()));
+            }
+        }
+        if status.is_some() {
+            self.status = status;
+        }
+        if diagnostics.is_some() {
+            self.diag = diagnostics;
+        }
+        if let Some(kodi) = kodi.as_ref() {
+            self.now.take(kodi);
+        }
+
+        self.settings.compose(self.status.as_ref(), self.diag.as_ref(), self.display.as_ref());
+        if self.route() == Route::Diagnostics {
+            self.diagnostics.compose(
+                self.status.as_ref(),
+                self.diag.as_ref(),
+                self.display.as_ref(),
+            );
+        }
+
+        if let Some(window) = self.window.upgrade() {
+            window.set_vitals(vitals::read(self.diag.as_ref()));
+        }
+        self.paint();
+    }
+
     /// Both answers, or whichever of them arrived.
-    ///
-    /// The library is the appliance's own and is quick; the catalogues are a
-    /// fan-out across third-party hosts. They are asked for together and
-    /// whichever lands first is drawn, because a home screen that waits for the
-    /// slowest addon is a home screen nobody sees.
     fn loaded(&mut self, home: Option<model::HomeRows>, library: Option<model::LibraryListing>) {
         self.meter.data_arrived();
 
@@ -397,20 +812,26 @@ impl App {
         }
 
         self.home.set_shelves(shelves);
+        self.library.build(&self.home.shelves);
+
+        self.media.set_shelves(self.home.shelves.clone());
 
         if let Some(window) = self.window.upgrade() {
-            window.set_rails(slint::ModelRc::from(self.home.rails.clone()));
-            window.set_screen("home".into());
+            window.set_media_rails(slint::ModelRc::from(self.media.rails.clone()));
+            window.set_recent(RailModel {
+                title: "Devam Et".into(),
+                source: String::new().into(),
+                items: slint::ModelRc::from(self.home.recent_tiles()),
+            });
+        }
+        if self.route() == Route::Boot {
+            self.stack.reset(Route::Home);
         }
         self.paint();
         self.restore();
     }
 
     /// Puts the remote back where it was before the display changed hands.
-    ///
-    /// Done once, and only if the position still exists: shelves are third
-    /// party and a title that was there an hour ago may not be now. A restore
-    /// that cannot find its place is not an error, it is a home screen.
     fn restore(&mut self) {
         let Some(snapshot) = self.resume.take() else { return };
 
@@ -419,6 +840,7 @@ impl App {
             self.home.step(snapshot.home_col as isize, 0);
         }
 
+
         if snapshot.screen == "detail" && !snapshot.detail_id.is_empty() {
             // Re-opened from the shelf item if it is still there, so the seed
             // is a real one and the first frame carries artwork.
@@ -426,19 +848,15 @@ impl App {
                 .home
                 .focused()
                 .filter(|item| item.id == snapshot.detail_id)
-                .map(detail::Detail::seeded);
+                .cloned();
 
-            if let Some(detail) = seeded {
-                let (kind, id) = (detail.kind.clone(), detail.id.clone());
-                self.detail = Some(detail);
-                self.detail_backdrop = None;
-                self.epoch += 1;
-                if let Some(window) = self.window.upgrade() {
-                    window.set_screen("detail".into());
-                }
-                self.paint_detail();
-                spawn_detail_load(self.epoch, kind, id);
+            if let Some(item) = seeded {
+                self.open_detail_for(&item);
                 return;
+            }
+        } else if let Some(route) = route::Route::from_name(&snapshot.screen) {
+            if matches!(route, Route::Settings | Route::Diagnostics | Route::NowPlaying) {
+                self.stack.push(route);
             }
         }
 
@@ -452,43 +870,152 @@ impl App {
         }
     }
 
-    /// Everything the focus decides: which tiles carry a picture, what the hero
-    /// says, and where the shelves sit. The Slint side animates between the
-    /// values this writes; it does not decide any of them.
+    // ------------------------------------------------------------- the drawing
+
     fn paint(&mut self) {
         let Some(window) = self.window.upgrade() else { return };
+        let route = self.route();
+        window.set_screen(route.name().into());
 
-        self.home.sync_artwork(&mut self.images);
+        self.paint_sheet(&window);
 
-        if let Some((art, second_layer)) = self.home.backdrop(&mut self.images) {
-            if second_layer {
-                window.set_art_b(art);
-            } else {
-                window.set_art_a(art);
+        match route {
+            Route::Boot => {}
+            Route::Home => self.paint_home(&window),
+            Route::Media => self.paint_media(&window),
+            Route::Search => self.paint_search(&window),
+            Route::Library => self.paint_library(&window),
+            Route::Detail => self.paint_detail(&window),
+            Route::NowPlaying => self.paint_now_playing(&window),
+            Route::Settings => self.paint_settings(&window),
+            Route::Diagnostics => self.paint_diagnostics(&window),
+        }
+    }
+
+    fn paint_sheet(&mut self, window: &MediaBoxWindow) {
+        let Some(sheet) = self.sheet.as_ref() else {
+            window.set_sheet_open(false);
+            return;
+        };
+        window.set_sheet_open(true);
+        window.set_sheet_title(sheet.title().into());
+
+        match sheet {
+            Sheet::Power { index } => {
+                window.set_sheet_kind("power".into());
+                window.set_sheet_index(*index as i32);
+                window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(
+                    screens::power::CHOICES
+                        .iter()
+                        .map(|choice| SheetRow {
+                            label: choice.label().into(),
+                            hint: choice.hint().into(),
+                            tone: if choice.destructive() { "bad".into() } else { "".into() },
+                        })
+                        .collect::<Vec<_>>(),
+                )));
+            }
+            Sheet::Confirm { yes, .. } => {
+                window.set_sheet_kind("confirm".into());
+                window.set_sheet_index(i32::from(*yes));
+                window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+                    SheetRow { label: "Vazgeç".into(), hint: "".into(), tone: "".into() },
+                    SheetRow { label: "Evet".into(), hint: "".into(), tone: "bad".into() },
+                ])));
             }
         }
-        window.set_fade(self.home.fade);
+    }
 
-        let (title, facts, summary) = self.home.hero();
-        window.set_hero_title(title.into());
-        window.set_hero_meta(facts.into());
-        window.set_hero_summary(summary.into());
-
+    fn paint_home(&mut self, window: &MediaBoxWindow) {
+        self.home.sync_artwork(&mut self.images);
         window.set_focus_row(self.home.row as i32);
         window.set_focus_col(self.home.column() as i32);
-
+        window.set_recent_row(self.home.recent_row().map(|r| r as i32).unwrap_or(-1));
         self.remember();
     }
 
-    fn paint_detail(&mut self) {
-        let Some(window) = self.window.upgrade() else { return };
+    fn paint_search(&mut self, window: &MediaBoxWindow) {
+        window.set_search_query(self.search.query.clone().into());
+        window.set_search_note(self.search.note.clone().into());
+        window.set_search_on_keys(self.search.pane == screens::search::Pane::Keys);
+        window.set_search_key_row(self.search.key_row as i32);
+        window.set_search_key_col(self.search.key_col as i32);
+        window.set_search_index(self.search.index as i32);
+        window.set_search_columns(screens::search::COLUMNS as i32);
+
+        let keys: Vec<KeyRow> = self
+            .search
+            .keys()
+            .iter()
+            .map(|row| KeyRow {
+                keys: slint::ModelRc::new(slint::VecModel::from(
+                    row.iter()
+                        .map(|cap| KeyCap {
+                            label: cap.label().into(),
+                            span: cap.span() as i32,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect();
+        window.set_search_keys(slint::ModelRc::new(slint::VecModel::from(keys)));
+
+        let tiles = posters(&mut self.images, &self.search.results);
+        window.set_search_results(slint::ModelRc::new(slint::VecModel::from(tiles)));
+    }
+
+    fn paint_library(&mut self, window: &MediaBoxWindow) {
+        window.set_library_tabs(strings(
+            self.library.sections.iter().map(|section| section.title.clone()),
+        ));
+        window.set_library_notes(strings(
+            self.library.sections.iter().map(|section| section.note.clone()),
+        ));
+        window.set_library_tab(self.library.tab as i32);
+        window.set_library_on_tabs(self.library.on_tabs);
+        window.set_library_index(self.library.index() as i32);
+        window.set_library_columns(screens::library::COLUMNS as i32);
+
+        let items = self.library.items().to_vec();
+        let tiles = posters(&mut self.images, &items);
+        window.set_library_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
+
+        let focused = self.library.focused().cloned();
+        if let Some(url) = focused.as_ref().and_then(|item| item.background.clone().or_else(|| item.poster.clone())) {
+            let key = images::Key::new(&url, state::BACKDROP_WIDTH);
+            self.images.want(&key);
+            if let Some(art) = self.images.get(&key) {
+                window.set_library_art(art);
+            }
+        }
+
+        match self.library.focused() {
+            Some(item) => {
+                window.set_library_title(item.title.clone().into());
+                window.set_library_facts(hero_facts(item).into());
+                window.set_library_summary(
+                    item.summary.clone().unwrap_or_default().into(),
+                );
+                window.set_library_genres(strings(item.genres.iter().take(4).cloned()));
+            }
+            None => {
+                window.set_library_title("".into());
+                window.set_library_facts("".into());
+                window.set_library_summary("".into());
+                window.set_library_genres(strings(std::iter::empty()));
+            }
+        }
+    }
+
+    fn paint_detail(&mut self, window: &MediaBoxWindow) {
         let Some(detail) = self.detail.as_ref() else { return };
 
         window.set_detail_title(detail.meta.name.clone().into());
         window.set_detail_facts(detail.facts_line().into());
         window.set_detail_summary(detail.meta.description.clone().unwrap_or_default().into());
         window.set_detail_genres(strings(detail.meta.genres.iter().take(4).cloned()));
-        window.set_detail_people(strings(detail.people().into_iter()));
+        window.set_detail_cast(strings(detail.meta.cast.iter().take(4).cloned()));
+        window.set_detail_directors(strings(detail.meta.director.iter().take(3).cloned()));
 
         window.set_detail_actions(strings(detail::ACTIONS.iter().map(|a| a.to_string())));
         window.set_detail_marks(strings(detail::MARKS.iter().map(|m| m.0.to_string())));
@@ -514,8 +1041,30 @@ impl App {
             }
         }
 
-        window.set_detail_row(detail.row as i32);
         window.set_detail_col(detail.action as i32);
+        window.set_detail_on_sources(detail.pane == detail::Pane::Sources);
+        window.set_detail_on_filter(detail.on_filter);
+        window.set_detail_source_focus(detail.source_focus as i32);
+        window.set_detail_selected(
+            detail
+                .selected
+                .and_then(|index| detail.shown().iter().position(|shown| *shown == index))
+                .map(|index| index as i32)
+                .unwrap_or(-1),
+        );
+
+        let mut providers: Vec<String> = vec!["Tümü".into()];
+        providers.extend(detail.providers());
+        window.set_detail_providers(strings(providers.into_iter()));
+        window.set_detail_provider(detail.provider as i32);
+
+        if let Some(url) = detail.meta.logo.clone().filter(|url| !url.is_empty()) {
+            let key = images::Key::new(&url, state::POSTER_WIDTH);
+            self.images.want(&key);
+            if let Some(art) = self.images.get(&key) {
+                window.set_detail_logo(art);
+            }
+        }
 
         // The poster is almost always a cache hit: the shelf this screen was
         // opened from decoded it at the same width a moment ago.
@@ -546,6 +1095,141 @@ impl App {
 
         self.remember();
     }
+
+    fn paint_now_playing(&mut self, window: &MediaBoxWindow) {
+        let now = &self.now;
+        window.set_np_title(now.title.clone().into());
+        window.set_np_subtitle(now.subtitle.clone().into());
+        window.set_np_note(now.note.clone().into());
+        window.set_np_surface(now.surface.clone().into());
+        window.set_np_elapsed(screens::now_playing::timecode(now.elapsed_seconds).into());
+        window.set_np_duration(screens::now_playing::timecode(now.duration_seconds).into());
+        window.set_np_progress(now.progress());
+        window.set_np_focus(now.focus as i32);
+
+        let playing = now.playing();
+        window.set_np_controls(slint::ModelRc::new(slint::VecModel::from(
+            screens::now_playing::CONTROLS
+                .iter()
+                .map(|control| NpControl {
+                    label: control.label(playing).into(),
+                    mark: control.mark(playing).into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        window.set_np_technical(slint::ModelRc::new(slint::VecModel::from(
+            now.technical
+                .iter()
+                .map(|(label, value)| TechRow {
+                    label: label.clone().into(),
+                    value: value.clone().into(),
+                    tone: "".into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+
+        let art = now.backdrop.clone().or_else(|| now.artwork.clone());
+        if let Some(url) = art {
+            let key = images::Key::new(&url, state::BACKDROP_WIDTH);
+            self.images.want(&key);
+            if let Some(art) = self.images.get(&key) {
+                window.set_np_art(art);
+            }
+        }
+    }
+
+    fn paint_settings(&mut self, window: &MediaBoxWindow) {
+        window.set_settings_sections(strings(
+            self.settings.groups.iter().map(|group| group.title.clone()),
+        ));
+        window.set_settings_section(self.settings.section as i32);
+        window.set_settings_on_sections(self.settings.pane == screens::settings::Pane::Sections);
+        window.set_settings_row(self.settings.row_index() as i32);
+        window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(
+            self.settings
+                .rows()
+                .iter()
+                .map(|row| SettingRow {
+                    label: row.label.clone().into(),
+                    value: row.value.clone().into(),
+                    hint: row.hint.clone().into(),
+                    tone: row.tone.clone().into(),
+                    selectable: row.selectable(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+
+    fn paint_diagnostics(&mut self, window: &MediaBoxWindow) {
+        window.set_diag_group(self.diagnostics.group as i32);
+        window.set_diag_groups(slint::ModelRc::new(slint::VecModel::from(
+            self.diagnostics
+                .groups
+                .iter()
+                .map(|group| DiagGroup {
+                    title: group.title.clone().into(),
+                    rows: slint::ModelRc::new(slint::VecModel::from(
+                        group
+                            .rows
+                            .iter()
+                            .map(|row| TechRow {
+                                label: row.label.clone().into(),
+                                value: row.value.clone().into(),
+                                tone: row.tone.clone().into(),
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+}
+
+/// Poster tiles with whatever artwork is already decoded, and a request for
+/// what is not.
+///
+/// The grid screens ask for everything they draw, because a grid is a page and
+/// all of it is on the panel. The shelves have their own window instead — a
+/// shelf is longer than the television, and decoding the whole catalogue to
+/// draw eight of it is how an image cache becomes the resident size.
+fn posters(images: &mut images::ImageManager, items: &[state::Item]) -> Vec<PosterItem> {
+    items
+        .iter()
+        .map(|item| {
+            let art = match item.poster.as_deref() {
+                Some(url) => {
+                    let key = images::Key::new(url, state::POSTER_WIDTH);
+                    images.want(&key);
+                    images.get(&key).unwrap_or_default()
+                }
+                None => slint::Image::default(),
+            };
+            PosterItem {
+                id: item.id.clone().into(),
+                kind: item.kind.clone().into(),
+                title: item.title.clone().into(),
+                subtitle: item.year.clone().unwrap_or_default().into(),
+                art,
+                hue: item.hue,
+                progress: item.progress,
+                local: item.local,
+            }
+        })
+        .collect()
+}
+
+/// Year, rating and a genre or two, as one line. The same shape the detail
+/// screen's own facts line has, so a title reads the same wherever it is shown.
+fn hero_facts(item: &state::Item) -> String {
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(year) = &item.year {
+        facts.push(year.clone());
+    }
+    if let Some(rating) = &item.rating {
+        facts.push(format!("IMDb {rating}"));
+    }
+    facts.extend(item.genres.iter().take(2).cloned());
+    facts.join("  ·  ")
 }
 
 fn strings(values: impl Iterator<Item = String>) -> slint::ModelRc<slint::SharedString> {
@@ -602,7 +1286,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Rc::new(RefCell::new(App {
         window: window.as_weak(),
+        stack: route::Stack::new(),
         home: state::Home::new(),
+        media: screens::media::Media::new(),
+        search: screens::search::Search::new(),
+        library: screens::library::Library::new(),
+        settings: screens::settings::Settings::new(),
+        diagnostics: screens::diagnostics::Diagnostics::new(),
+        now: screens::now_playing::NowPlaying::new(),
+        detail: None,
+        sheet: None,
         images: images::ImageManager::new(cache_dir(), || {
             let _ = slint::invoke_from_event_loop(|| {
                 with_app(|app| {
@@ -615,14 +1308,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         meter: metrics::Metrics::new(started),
         dispatcher: input::Dispatcher::new(trace_input),
         store: session::Store::new(state_file()),
-
-        detail: None,
+        status: None,
+        diag: None,
+        display: None,
         detail_backdrop: None,
         detail_fade: 0.0,
         epoch: 0,
         resume: session::read(state_file()),
     }));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
+
+    window.set_nav(strings(state::NAV.iter().map(|n| n.label().to_string())));
 
     // The last position, written the moment the display changed hands. Coming
     // back from a film should not mean starting again at the top of the home
@@ -635,6 +1331,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The store writes on its own thread; give it the moment it needs
         // rather than racing the exit below.
         std::thread::sleep(Duration::from_millis(200));
+    });
+
+    // A picture of what is on the television, on request. `kill -USR1` from the
+    // appliance, and the next frame lands under /var/lib/mediabox-ui/snapshots
+    // named after the screen it is of. It is a real scanout frame at the
+    // panel's own resolution, which is the only kind of screenshot worth having
+    // from a process that holds DRM master.
+    session::on_snapshot_request(|| {
+        let _ = slint::invoke_from_event_loop(|| {
+            with_app(|app| {
+                let name = app.route().name().to_string();
+                let path = std::path::PathBuf::from(snapshot_dir()).join(format!("{name}.png"));
+                platform::snapshot_to(path);
+                if let Some(window) = app.window.upgrade() {
+                    window.window().request_redraw();
+                }
+            });
+        });
     });
 
     // Frames are counted from the renderer rather than from a timer, so the
@@ -660,16 +1374,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("this renderer cannot report when it has drawn");
     }
 
-    // Keys from the compositor: USB and Bluetooth keyboards. The remote does
-    // not come this way — its input device is switched off in the compositor's
-    // config, because the daemon is the authority for it.
+    // Keys from the appliance's own keyboards, through libinput. The remote
+    // does not come this way — the daemon is the authority for it — and the
+    // dispatcher drops a press that arrives on both roads.
     window.on_key_pressed(move |text| {
-        let Some(action) = input::action_for_key(text.as_str()) else { return };
-        with_app(|app| {
-            if let Some(action) = app.dispatcher.accept(action, input::Origin::Keyboard) {
-                app.act(action);
-            }
-        });
+        let Some(first) = text.chars().next() else { return };
+        match input::action_for_key(text.as_str()) {
+            Some(action) => with_app(|app| {
+                if let Some(action) = app.dispatcher.accept(action, input::Origin::Keyboard) {
+                    app.act(action);
+                }
+            }),
+            None => with_app(|app| app.typed(first)),
+        }
     });
 
     // Everything the daemon normalises — the CEC remote, the phone remote, an
@@ -698,13 +1415,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The panel, the buffer and the scale, as this process sees them.
-///
-/// This is half of the evidence that the interface is not being scaled twice:
-/// the other half is the display controller's own state, which is read on the
-/// appliance. A logical size smaller than the physical one is expected and
-/// correct — that is the whole point of the integer scale — but a *buffer*
-/// smaller than the panel's mode would mean wlroots is stretching us, and the
-/// picture would be soft and the direct flip refused.
 fn report_surface(window: &MediaBoxWindow) {
     let w = window.window();
     let physical = w.size();
@@ -782,6 +1492,49 @@ fn spawn_detail_load(epoch: u64, kind: String, id: String) {
     });
 }
 
+/// One search, after the typing has stopped.
+///
+/// The debounce is here rather than on a timer in the interface: the thread is
+/// cheap, and a search that is already stale when it is sent costs the media
+/// core a fan-out over every addon for an answer nobody will see.
+fn spawn_search(generation: u64, query: String) {
+    // What the box is currently typing, readable from a thread that has no
+    // access to the interface. The screen's own generation counter is the
+    // authority; this is a copy of it kept where the debounce can see it.
+    static TYPING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    TYPING.store(generation, std::sync::atomic::Ordering::Relaxed);
+
+    detached("mediabox-tv-search", async move {
+        tokio::time::sleep(SEARCH_DEBOUNCE).await;
+        if TYPING.load(std::sync::atomic::Ordering::Relaxed) != generation {
+            // A later keystroke already owns the screen; this query was never
+            // what the viewer was asking for.
+            return;
+        }
+
+        let client = rpc::Client::new(socket_path());
+        let answer = client
+            .search(&query)
+            .await
+            .map(|results| {
+                let mut seen = std::collections::HashSet::new();
+                results
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.items.iter())
+                    .filter(|preview| seen.insert(preview.id.clone()))
+                    .map(state::Item::from_preview)
+                    .take(60)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|e| e.to_string());
+
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.searched(generation, answer));
+        });
+    });
+}
+
 fn spawn_plan(epoch: u64, url: Option<String>, raw: serde_json::Value) {
     detached("mediabox-tv-plan", async move {
         let client = rpc::Client::new(socket_path());
@@ -802,22 +1555,17 @@ fn spawn_plan(epoch: u64, url: Option<String>, raw: serde_json::Value) {
     });
 }
 
-fn spawn_play(on_kodi: bool, url: Option<String>, raw: serde_json::Value) {
+fn spawn_play(url: Option<String>, raw: serde_json::Value) {
     detached("mediabox-tv-play", async move {
         let client = rpc::Client::new(socket_path());
         let stream = url.is_none().then_some(&raw);
 
-        let answer = if on_kodi {
-            client.play_on_kodi(url.as_deref(), stream, 0).await
-        } else {
-            client.play_here(url.as_deref(), stream, 0).await
-        };
-
-        // On the Kodi path this process is being stopped while the call is in
-        // flight, so an error here is as likely to be the handover as a
-        // failure. It is logged and not turned into a message nobody will see.
-        match answer {
-            Ok(_) => eprintln!("mediabox-tv.play started on_kodi={on_kodi}"),
+        // This process is being stopped while the call is in flight — the
+        // control plane stops the unit as part of handing the display over — so
+        // an error here is as likely to be the handover as a failure. It is
+        // logged and not turned into a message nobody will see.
+        match client.play_on_kodi(url.as_deref(), stream, 0).await {
+            Ok(_) => eprintln!("mediabox-tv.play started on_kodi=true"),
             Err(e) => {
                 eprintln!("mediabox-tv.play failed: {e}");
                 let message = e.to_string();
@@ -833,10 +1581,53 @@ fn spawn_play(on_kodi: bool, url: Option<String>, raw: serde_json::Value) {
     });
 }
 
-/// Hands the television to another application. The control plane stops this
-/// unit as part of doing it, so a failure here is as likely to be the handover
-/// as a refusal — which is why it is said on the screen rather than treated as
-/// an error.
+/// The few things this interface asks the control plane to do that are not
+/// about the catalogue. Each is one closed variant rather than a command, for
+/// the same reason the daemon's own request type is an enum.
+enum KodiCommand {
+    PlayPause,
+    Stop,
+    Seek(i64),
+    RestartPlayer,
+    WakeTelevision,
+    StandbyTelevision,
+}
+
+fn spawn_kodi(command: KodiCommand) {
+    detached("mediabox-tv-control", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match command {
+            KodiCommand::PlayPause => client.kodi_play_pause().await,
+            KodiCommand::Stop => client.kodi_stop().await,
+            KodiCommand::Seek(seconds) => client.kodi_seek(seconds).await,
+            KodiCommand::RestartPlayer => client.kodi_restart().await,
+            KodiCommand::WakeTelevision => client.cec_wake_tv().await,
+            KodiCommand::StandbyTelevision => client.cec_standby_tv().await,
+        };
+        if let Err(e) = answer {
+            eprintln!("mediabox-tv.control failed: {e}");
+        }
+    });
+}
+
+/// The appliance's own power state, and the only call in this process that can
+/// change it. Reached from one place: a confirmation whose focus started on
+/// "Vazgeç" and was deliberately moved.
+fn spawn_power(action: PowerAction) {
+    detached("mediabox-tv-power", async move {
+        eprintln!("mediabox-tv.power confirmed action={action:?}");
+        let client = rpc::Client::new(socket_path());
+        if let Err(e) = client.system_power(action).await {
+            eprintln!("mediabox-tv.power failed: {e}");
+            let message = e.to_string();
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.say(format!("Yapılamadı — {message}")));
+            });
+        }
+    });
+}
+
+/// Hands the television to another application.
 fn spawn_launch(id: String, name: String) {
     detached("mediabox-tv-launch", async move {
         let client = rpc::Client::new(socket_path());
@@ -854,16 +1645,25 @@ fn spawn_launch(id: String, name: String) {
 
 /// The machine's own readings, on a slow timer.
 ///
-/// One thread for both answers: they are drawn side by side and asking for them
-/// separately would put two round trips a second apart on the same panel.
+/// One thread for all four answers: they are drawn on the same screens and
+/// asking for them separately would put four round trips a second apart on the
+/// same panel.
 fn spawn_machine_poll() {
     detached("mediabox-tv-vitals", async move {
         let client = rpc::Client::new(socket_path());
         loop {
-            let display = client.applications().await.ok();
-            let diagnostics = client.diagnostics().await.ok();
+            let (display, status, diagnostics, kodi) = tokio::join!(
+                client.applications(),
+                client.status(),
+                client.diagnostics(),
+                client.kodi_status(),
+            );
+            let display = display.ok();
+            let status = status.ok();
+            let diagnostics = diagnostics.ok();
+            let kodi = kodi.ok();
             let _ = slint::invoke_from_event_loop(move || {
-                with_app(|app| app.machine_read(display, diagnostics));
+                with_app(|app| app.machine_read(display, status, diagnostics, kodi));
             });
             tokio::time::sleep(vitals::EVERY).await;
         }
@@ -925,8 +1725,7 @@ fn spawn_loader() {
 }
 
 /// Reads the daemon's event stream for as long as the process lives,
-/// reconnecting when it ends. The daemon is restarted independently of this
-/// interface, so a dropped stream is ordinary rather than fatal.
+/// reconnecting when it ends.
 fn spawn_bus_listener() {
     std::thread::Builder::new()
         .name("mediabox-tv-bus".into())

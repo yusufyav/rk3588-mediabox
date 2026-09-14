@@ -1,0 +1,39 @@
+# The television remote is not a power button.
+#
+# The HDMI block registers a remote-control input device (rc0, "dw_hdmi_qp")
+# that decodes CEC user-control codes into ordinary key events. udev's default
+# input rules tag any device carrying KEY_POWER with "power-switch", and
+# systemd-logind watches every tagged device: with HandlePowerKey=poweroff and
+# HandleRebootKey=reboot, one code from a television remote turns the appliance
+# off or restarts it, with no application involved.
+#
+# Measured on the appliance, journal of boot -5:
+#   systemd-logind: Watching system buttons on /dev/input/event0 (dw_hdmi_qp)
+#   systemd-logind: Power key pressed short.
+#   systemd-logind: Powering off...
+#
+# CEC power semantics belong to mediaboxd-rs, which owns /dev/cec0 and answers
+# a standby request by putting the *television* into standby. So the tag is
+# taken off the CEC device, and logind stops watching it. The board's own
+# buttons (rk805 pwrkey, bt-powerkey) keep their tag: a finger on the physical
+# button should still work.
+#
+# The file is numbered 80 and not 70 for a reason that cost a deploy: udev runs
+# rule files in filename order, systemd's own is 70-power-switch.rules, and
+# "70-mediabox..." sorts *before* "70-power-switch..." — the tag was removed and
+# then added straight back.
+ACTION=="remove", GOTO="mediabox_power_end"
+SUBSYSTEM!="input", GOTO="mediabox_power_end"
+
+# The HDMI-CEC remote-control device, by the platform path of the HDMI block
+# and by the rc-core path, so a driver that renames it is still covered.
+# `TAG=""` and not `TAG-="power-switch"`. udev accepts the second without
+# complaint and does nothing with it — measured on the appliance at udev 257,
+# where the rule matched (checked by having it set a marker variable instead)
+# and the tag survived anyway. The assignment clears the list, which on these
+# two devices is exactly the one tag: the CEC remote carries `power-switch` and
+# nothing else. The board's own buttons match neither line and keep theirs.
+KERNEL=="event*", ATTRS{name}=="dw_hdmi_qp", TAG=""
+DEVPATH=="*/rc/rc[0-9]*/input[0-9]*/event[0-9]*", TAG=""
+
+LABEL="mediabox_power_end"

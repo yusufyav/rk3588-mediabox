@@ -40,7 +40,20 @@ rustup target list --installed | grep -qx "$triple" || {
 # appliance is upgraded.
 if [ ! -e "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ]; then
   say "sysroot <- $user@$host"
-  mkdir -p "$sysroot"
+  # Every directory rsync will be pointed at, made first. rsync creates the
+  # last component of a destination and no more, so the fallback below — which
+  # names the architecture directory explicitly — fails with "mkdir ... No such
+  # file or directory" on a machine that has never built this before.
+  mkdir -p "$sysroot/usr/lib/aarch64-linux-gnu" \
+           "$sysroot/usr/include" \
+           "$sysroot/usr/share/pkgconfig"
+  # The appliance has merged /usr, and the sysroot has to have it too. glibc's
+  # linker scripts name absolute paths — libm.so is a script that reads
+  # GROUP ( /lib/aarch64-linux-gnu/libm.so.6 ... ) — and the cross linker
+  # resolves those inside the sysroot. With /lib a real, empty directory the
+  # link ends in "cannot find /lib/aarch64-linux-gnu/libm.so.6 inside <sysroot>"
+  # even though the library is right there under /usr/lib.
+  [ -L "$sysroot/lib" ] || { rmdir "$sysroot/lib" 2>/dev/null || true; ln -sfn usr/lib "$sysroot/lib"; }
   rsync -a --delete-after \
     -e "ssh ${ssh_opts[*]}" \
     --exclude '*.ko' --exclude 'firmware' \
@@ -49,6 +62,8 @@ if [ ! -e "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ]; then
     "$sysroot/usr/lib/" 2>/dev/null || {
       # rsync cannot take two remote sources in one call on every version.
       rsync -a -e "ssh ${ssh_opts[*]}" "$user@$host":/usr/lib/aarch64-linux-gnu/ "$sysroot/usr/lib/aarch64-linux-gnu/"
+      # /lib is the symlink made above, so this lands beside the first copy
+      # rather than in a second tree.
       rsync -a -e "ssh ${ssh_opts[*]}" "$user@$host":/lib/aarch64-linux-gnu/     "$sysroot/lib/aarch64-linux-gnu/"
     }
   rsync -a -e "ssh ${ssh_opts[*]}" "$user@$host":/usr/include/ "$sysroot/usr/include/"

@@ -7,6 +7,8 @@ export struct PosterItem {
     id: string,
     kind: string,
     title: string,
+    // The year, usually. Drawn under the name on a grid, where there is room.
+    subtitle: string,
     // Empty until the image manager has something. The fallback below is drawn
     // underneath either way, so a poster that never arrives is a designed tile
     // rather than a hole.
@@ -26,12 +28,89 @@ export struct RailModel {
     items: [PosterItem],
 }
 
+// One thing this box can be used for.
+export struct AppTile {
+    // What Rust dispatches on when Ok is pressed. Never shown.
+    id: string,
+    name: string,
+    // An SVG path, stroked rather than filled, in a 24x24 viewbox. Drawn rather
+    // than fetched: an appliance has no icon theme to ask and no network to
+    // depend on.
+    mark: string,
+    hue: float,
+    ready: bool,
+    note: string,
+}
+
+// A label and a reading, with an optional verdict. Used by the technical panel,
+// the diagnostics screen and the now-playing strip — the same shape in all
+// three because it is the same idea in all three.
+export struct TechRow {
+    label: string,
+    value: string,
+    tone: string,
+}
+
+export struct SettingRow {
+    label: string,
+    value: string,
+    hint: string,
+    tone: string,
+    // False for a reading. Focus never lands on one.
+    selectable: bool,
+}
+
+export struct DiagGroup {
+    title: string,
+    rows: [TechRow],
+}
+
+export struct SheetRow {
+    label: string,
+    hint: string,
+    tone: string,
+}
+
+export struct KeyCap {
+    label: string,
+    // How many grid columns this key is wide.
+    span: int,
+}
+
+export struct KeyRow {
+    keys: [KeyCap],
+}
+
+export struct NpControl {
+    label: string,
+    mark: string,
+}
+
+// The board's own vital signs. They are not on the home screen any more — they
+// are the diagnostics screen's — but the clock and the network state are still
+// read off this, because the bar shows them.
+export struct VitalsModel {
+    time: string,
+    date: string,
+    cpu-arc: string,
+    cpu-text: string,
+    memory-arc: string,
+    memory-text: string,
+    performance-note: string,
+    storage-text: string,
+    storage-fraction: float,
+    network: string,
+    machine: string,
+}
+
+// ------------------------------------------------------------------ the pieces
+
 // The tile drawn when there is no artwork, and drawn behind it when there is.
 //
 // Addon posters 404 in practice — often enough that an empty frame would be a
 // regular sight — so the name is always painted on a ground of its own and the
 // picture covers it when it arrives.
-component Fallback inherits Rectangle {
+export component Fallback inherits Rectangle {
     in property <string> title;
     in property <float> hue;
 
@@ -53,6 +132,81 @@ component Fallback inherits Rectangle {
     }
 }
 
+// The artwork of one title, with its focus ring. Shared by the shelves and by
+// both grids, so a poster is the same object everywhere in the product.
+export component Art inherits Rectangle {
+    in property <PosterItem> item;
+    in property <bool> focused;
+    in property <length> art-w: Metrics.card-w;
+    in property <length> art-h: Metrics.card-h;
+
+    // Grown about its own centre rather than laid out larger, so the
+    // neighbours do not shuffle when focus lands.
+    width: art-w * (focused ? 1.075 : 1.0);
+    height: art-h * (focused ? 1.075 : 1.0);
+    border-radius: Theme.radius-art;
+    clip: true;
+
+    animate width, height { duration: Theme.focus-in; easing: Theme.ease; }
+
+    Fallback {
+        width: 100%;
+        height: 100%;
+        title: item.title;
+        hue: item.hue;
+    }
+
+    if item.art.width > 0: Image {
+        width: 100%;
+        height: 100%;
+        source: item.art;
+        image-fit: cover;
+    }
+
+    // The appliance's own copy, which is certain to play.
+    if item.local: Rectangle {
+        x: parent.width * 0.045;
+        y: parent.width * 0.045;
+        width: Metrics.text-chip * 2.6;
+        height: Metrics.text-chip * 1.5;
+        border-radius: self.height / 3;
+        background: Theme.accent;
+        Text {
+            text: "YEREL";
+            color: Theme.accent-ink;
+            font-size: Metrics.text-chip * 0.72;
+            font-weight: 750;
+            letter-spacing: 0.12 * Metrics.text-chip * 0.72;
+        }
+    }
+
+    if item.progress > 0.0: Rectangle {
+        x: 0;
+        y: parent.height - self.height;
+        width: 100%;
+        height: 4px;
+        background: #ffffff38;
+        Rectangle {
+            x: 0;
+            width: max(3px, parent.width * item.progress);
+            height: 100%;
+            background: Theme.accent;
+        }
+    }
+
+    // The focus ring, drawn rather than shadowed: one rectangle is cheaper
+    // than a blur this board would pay for on every frame.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        border-width: focused ? 3px : 1px;
+        border-color: focused ? Theme.focus-ring : #ffffff14;
+        background: transparent;
+        animate border-width { duration: Theme.focus-in; easing: Theme.ease; }
+    }
+}
+
 export component Poster inherits Rectangle {
     in property <PosterItem> item;
     in property <bool> focused;
@@ -62,93 +216,73 @@ export component Poster inherits Rectangle {
     // whether or not it is used, so nothing below moves as the remote travels.
     height: Metrics.card-h + Metrics.text-card * 2.6;
 
-    art := Rectangle {
-        // Grown about its own centre rather than laid out larger, so the
-        // neighbours do not shuffle when focus lands.
-        width: Metrics.card-w * (focused ? 1.075 : 1.0);
-        height: Metrics.card-h * (focused ? 1.075 : 1.0);
+    Art {
         x: (parent.width - self.width) / 2;
         y: (Metrics.card-h - self.height) / 2;
-        border-radius: Theme.radius-art;
-        clip: true;
-
-        animate width, height, x, y {
-            duration: Theme.focus-in;
-            easing: Theme.ease;
-        }
-
-        Fallback {
-            width: 100%;
-            height: 100%;
-            title: item.title;
-            hue: item.hue;
-        }
-
-        Image {
-            width: 100%;
-            height: 100%;
-            source: item.art;
-            image-fit: cover;
-        }
-
-        // The appliance's own copy, which is certain to play.
-        if item.local: Rectangle {
-            x: Metrics.card-w * 0.045;
-            y: Metrics.card-w * 0.045;
-            width: Metrics.text-chip * 2.6;
-            height: Metrics.text-chip * 1.5;
-            border-radius: self.height / 3;
-            background: Theme.accent;
-            Text {
-                text: "YEREL";
-                color: Theme.accent-ink;
-                font-size: Metrics.text-chip * 0.72;
-                font-weight: 750;
-                letter-spacing: 0.12 * Metrics.text-chip * 0.72;
-            }
-        }
-
-        if item.progress > 0.0: Rectangle {
-            x: 0;
-            y: parent.height - self.height;
-            width: 100%;
-            height: 4px;
-            background: #ffffff38;
-            Rectangle {
-                x: 0;
-                width: max(3px, parent.width * item.progress);
-                height: 100%;
-                background: Theme.accent;
-            }
-        }
-
-        // The focus ring, drawn rather than shadowed: one rectangle is cheaper
-        // than a blur this board would pay for on every frame.
-        Rectangle {
-            width: 100%;
-            height: 100%;
-            border-radius: parent.border-radius;
-            border-width: focused ? 3px : 1px;
-            border-color: focused ? Theme.focus-ring : #ffffff14;
-            background: transparent;
-            animate border-width { duration: Theme.focus-in; easing: Theme.ease; }
-        }
+        item: item;
+        focused: focused;
     }
 
-    // Only the focused title is named. A shelf with every name under it reads
-    // as a list; a shelf with one reads as a choice.
+    // Every title is named, on two lines. The first version named only the
+    // focused one, which reads well on a screen somebody is walking along and
+    // badly on a catalogue somebody is scanning — and the catalogue is what
+    // this is. The reference names them all.
     Text {
-        x: 0;
+        x: Metrics.card-w * 0.04;
         y: Metrics.card-h + Metrics.text-card * 0.7;
-        width: 100%;
+        width: Metrics.card-w * 0.92;
+        height: Metrics.text-card * 2.6;
         text: item.title;
-        color: Theme.text;
+        color: focused ? Theme.text : Theme.muted;
         font-size: Metrics.text-card;
         font-weight: 640;
         horizontal-alignment: center;
+        wrap: word-wrap;
         overflow: elide;
-        opacity: focused ? 1.0 : 0.0;
-        animate opacity { duration: Theme.focus-in; easing: Theme.ease; }
+        animate color { duration: Theme.focus-in; easing: Theme.ease; }
+    }
+}
+
+// The same artwork in a grid, where every title is named: a grid is scanned
+// rather than walked, and a page of unlabelled pictures cannot be scanned.
+export component GridPoster inherits Rectangle {
+    in property <PosterItem> item;
+    in property <bool> focused;
+
+    width: Metrics.card-w;
+    height: Metrics.card-h + Metrics.text-card * 3.4;
+
+    Art {
+        x: (parent.width - self.width) / 2;
+        y: (Metrics.card-h - self.height) / 2;
+        item: item;
+        focused: focused;
+    }
+
+    VerticalLayout {
+        x: 0;
+        y: Metrics.card-h + Metrics.text-card * 0.6;
+        width: 100%;
+        spacing: Metrics.text-card * 0.15;
+
+        Text {
+            text: item.title;
+            color: focused ? Theme.text : Theme.muted;
+            font-size: Metrics.text-card;
+            font-weight: 640;
+            horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        Text {
+            text: item.subtitle;
+            color: Theme.dim;
+            font-size: Metrics.text-card * 0.84;
+            font-weight: 600;
+            horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
     }
 }
 
@@ -171,10 +305,11 @@ export component Rail inherits Rectangle {
 
         Text {
             text: rail.title;
-            color: Theme.text;
+            color: active ? Theme.text : Theme.muted;
             font-size: Metrics.title-rail;
             font-weight: 720;
             vertical-alignment: center;
+            animate color { duration: Theme.focus-in; easing: Theme.ease; }
         }
 
         if rail.source != "": Text {
@@ -210,10 +345,7 @@ export component Rail inherits Rectangle {
             height: 100%;
             background: transparent;
 
-            animate x {
-                duration: Theme.glide;
-                easing: Theme.ease;
-            }
+            animate x { duration: Theme.glide; easing: Theme.ease; }
 
             for item[i] in rail.items: Poster {
                 x: i * parent.step;
@@ -225,59 +357,35 @@ export component Rail inherits Rectangle {
     }
 }
 
-// ---------------------------------------------------------------- the launcher
-
-// One thing this box can be used for.
-//
-// The screen tiles and the control plane's applications are the same shape on
-// purpose: the web interface's launcher draws them from one list, and a tile
-// that looked different depending on where it came from would be telling the
-// viewer about our plumbing.
-export struct AppTile {
-    // What Rust dispatches on when Ok is pressed. Never shown.
-    id: string,
-    name: string,
-    // An SVG path, stroked rather than filled, in a 24x24 viewbox. Drawn rather
-    // than fetched: an appliance has no icon theme to ask and no network to
-    // depend on.
-    mark: string,
-    // The tile's colour, as a hue. The stylesheet writes this as `--tint`.
-    hue: float,
-    // False for an application the box does not have installed. It is still
-    // drawn — the viewer should be able to see what this box could do — but it
-    // cannot be opened, and says so.
-    ready: bool,
-    // "kurulu değil", or empty.
-    note: string,
-}
-
 // An icon with its name under it, which is what a television's home screen has
-// looked like for fifteen years.
+// looked like for fifteen years. Smaller than it used to be: this is a shelf at
+// the bottom of the home screen now, not the row the product opens on.
 export component AppIcon inherits Rectangle {
     in property <AppTile> tile;
     in property <bool> focused;
 
+    // Two lines of room for the name, always. "Filmler ve Diziler" does not fit
+    // on one at any width this tile is drawn at, and an elided application name
+    // on a launcher — "Filmler ve Di…" — is a tile nobody can read from a sofa.
     width: Metrics.tile-w;
-    height: self.width + Metrics.root-font * 0.5 + Metrics.root-font * 0.9 * 1.3
-        + (tile.note == "" ? 0px : Metrics.root-font * 0.76 * 1.4);
+    height: self.width + Metrics.root-font * 0.4 + Metrics.root-font * 0.84 * 2.6
+        + (tile.note == "" ? 0px : Metrics.root-font * 0.72 * 1.4);
     background: transparent;
     opacity: tile.ready ? 1.0 : 0.45;
 
     VerticalLayout {
-        spacing: Metrics.root-font * 0.5;
+        spacing: Metrics.root-font * 0.4;
         alignment: start;
 
-        // The square. Scaled rather than moved when it takes focus, so the grid
-        // around it does not reflow — the stylesheet's `transform: scale(1.09)`.
         Rectangle {
             height: Metrics.tile-w;
 
-            square := Rectangle {
+            Rectangle {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 width: Metrics.tile-w * (focused ? 1.09 : 1.0);
                 height: self.width;
-                border-radius: self.width * 0.24;
+                border-radius: self.width * 0.26;
                 background: @radial-gradient(circle,
                     Colors.hsv(tile.hue, 0.63, 0.50) 0%,
                     Colors.hsv(tile.hue, 0.59, 0.28) 54%,
@@ -307,18 +415,19 @@ export component AppIcon inherits Rectangle {
         Text {
             text: tile.name;
             color: focused ? Theme.text : Theme.muted;
-            font-size: Metrics.root-font * 0.9;
+            font-size: Metrics.root-font * 0.84;
             font-weight: 680;
             horizontal-alignment: center;
+            wrap: word-wrap;
             overflow: elide;
-            wrap: no-wrap;
+            height: Metrics.root-font * 0.84 * 2.6;
             min-width: 0px;
         }
 
         if tile.note != "": Text {
             text: tile.note;
             color: Theme.dim;
-            font-size: Metrics.root-font * 0.76;
+            font-size: Metrics.root-font * 0.72;
             font-weight: 600;
             horizontal-alignment: center;
             overflow: elide;
@@ -328,29 +437,43 @@ export component AppIcon inherits Rectangle {
     }
 }
 
-// ------------------------------------------------------------------ the machine
+// The launcher, as a shelf. The same head as a catalogue rail so it reads as
+// one more row of the home screen rather than as a control panel bolted on.
+export component AppRail inherits Rectangle {
+    in property <[AppTile]> apps;
+    in property <int> focus-col;
+    in property <bool> active;
 
-// The board's own vital signs, as they are read rather than as they are drawn.
-//
-// Every number arrives as the string it will be shown as, and both rings arrive
-// as the arc that draws them: a home screen that re-renders four times a second
-// is a home screen that is never idle, and formatting a byte count on the
-// television is work the control plane already did.
-export struct VitalsModel {
-    time: string,
-    date: string,
-    // SVG arcs in a 24x24 viewbox, computed in Rust. Empty when the reading is
-    // not in yet, which is what draws an empty ring rather than a full one.
-    cpu-arc: string,
-    cpu-text: string,
-    memory-arc: string,
-    memory-text: string,
-    // "2.1 GB / 7.8 GB  ·  52 °C"
-    performance-note: string,
-    storage-text: string,
-    storage-fraction: float,
-    network: string,
-    machine: string,
+    property <length> tile-h: Metrics.tile-w + Metrics.root-font * 0.4
+        + Metrics.root-font * 0.84 * 1.3 + Metrics.root-font * 0.72 * 1.4;
+
+    height: tile-h + Metrics.title-rail * 2.0;
+
+    Text {
+        x: Metrics.gutter;
+        y: 0;
+        height: Metrics.title-rail * 2.0;
+        text: "Uygulamalar";
+        color: active ? Theme.text : Theme.muted;
+        font-size: Metrics.title-rail;
+        font-weight: 720;
+        vertical-alignment: center;
+        animate color { duration: Theme.focus-in; easing: Theme.ease; }
+    }
+
+    HorizontalLayout {
+        x: Metrics.gutter;
+        y: Metrics.title-rail * 2.0;
+        width: parent.width - Metrics.gutter * 2;
+        height: tile-h;
+        spacing: Metrics.tile-gap;
+        alignment: start;
+
+        for tile[i] in apps: AppIcon {
+            tile: tile;
+            focused: active && i == focus-col;
+        }
+    }
 }
 
 // The panel every widget is drawn on. Flat translucent fill with a hairline:
@@ -586,6 +709,274 @@ export component Vitals inherits Rectangle {
                     overflow: elide;
                     wrap: no-wrap;
                     min-width: 0px;
+                }
+            }
+        }
+    }
+}
+
+// The bar every screen starts below.
+//
+// Minimal by instruction and by taste: three places to go, the clock, and
+// whether the box is on the network. The machine's readings are on the
+// diagnostics screen, where somebody who wants them will look.
+export component TopBar inherits Rectangle {
+    in property <[string]> items;
+    in property <int> focus-col;
+    in property <bool> active;
+    in property <VitalsModel> vitals;
+    // The screen's own name, for everything that is not the home screen.
+    in property <string> heading;
+
+    height: Metrics.topbar * 1.9;
+    // Taller than the bar itself and transparent past it: a panel would cut the
+    // backdrop off with a straight edge.
+    background: @linear-gradient(180deg,
+        #040508 0%, #040508e0 46%, #04050870 74%, transparent 100%);
+
+    // Two groups, placed rather than laid out. A single HorizontalLayout with a
+    // stretching spacer does not stretch when its alignment is `start`, and
+    // `start` is what keeps the nav chips together — so the clock ended up
+    // beside them instead of at the other end of the panel.
+    HorizontalLayout {
+        x: Metrics.gutter;
+        y: 0;
+        width: parent.width * 0.7;
+        height: Metrics.topbar;
+        spacing: Metrics.gutter * 0.4;
+        alignment: start;
+
+        if heading != "": Text {
+            text: heading;
+            color: Theme.text;
+            font-size: Metrics.root-font * 1.16;
+            font-weight: 780;
+            vertical-alignment: center;
+        }
+
+        if heading == "": Text {
+            text: "MediaBox";
+            color: Theme.text;
+            font-size: Metrics.root-font * 1.16;
+            font-weight: 820;
+            letter-spacing: -0.02 * Metrics.root-font;
+            vertical-alignment: center;
+        }
+
+        Rectangle { width: Metrics.gutter * 0.5; }
+
+        for label[i] in items: Rectangle {
+            property <bool> focused: active && i == focus-col;
+            width: caption.preferred-width + Metrics.root-font * 1.5;
+            border-radius: Theme.radius * 0.7;
+            background: focused ? Theme.focus-fill : transparent;
+
+            caption := Text {
+                text: label;
+                color: focused ? #0a0c10 : Theme.muted;
+                font-size: Metrics.root-font * 0.9;
+                font-weight: 660;
+                vertical-alignment: center;
+            }
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+        }
+
+    }
+
+    HorizontalLayout {
+        x: parent.width - self.width - Metrics.gutter;
+        y: 0;
+        width: network.preferred-width + clock.preferred-width + Metrics.gutter * 0.5;
+        height: Metrics.topbar;
+        spacing: Metrics.gutter * 0.5;
+        alignment: end;
+
+        network := Text {
+            text: vitals.network;
+            color: Theme.dim;
+            font-size: Metrics.root-font * 0.8;
+            font-weight: 620;
+            vertical-alignment: center;
+        }
+
+        clock := Text {
+            text: vitals.time;
+            color: Theme.text;
+            font-size: Metrics.root-font * 1.02;
+            font-weight: 760;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A row of two words with a verdict colour. The technical panel, the
+// diagnostics groups and the now-playing strip all draw one of these.
+export component Reading inherits Rectangle {
+    // Named `entry` rather than `row`: `row` is a layout property every
+    // Rectangle already has, and shadowing it is a compile error.
+    in property <TechRow> entry;
+    in property <length> label-w: Metrics.card-w * 0.45;
+
+    height: Metrics.root-font * 1.9;
+
+    Text {
+        x: 0;
+        width: label-w;
+        height: 100%;
+        text: entry.label;
+        color: Theme.dim;
+        font-size: Metrics.text-label;
+        font-weight: 640;
+        vertical-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    Text {
+        x: label-w + Metrics.root-font * 0.5;
+        width: parent.width - self.x;
+        height: 100%;
+        text: entry.value;
+        color: entry.tone == "" ? Theme.text : Theme.tone(entry.tone);
+        font-size: Metrics.text-label;
+        font-weight: 660;
+        vertical-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// A small rounded label. Everything the product says about a source, a codec or
+// a decision is one of these.
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <string> tone;
+    in property <bool> solid: false;
+
+    height: Metrics.text-chip * 2.0;
+    width: caption.preferred-width + Metrics.text-chip * 1.5;
+    border-radius: self.height / 2;
+    background: solid ? Theme.tone(tone) : #ffffff12;
+    border-width: solid ? 0px : 1px;
+    border-color: #ffffff1c;
+
+    caption := Text {
+        text: root.text;
+        color: solid ? #0a0c10 : (tone == "" ? Theme.muted : Theme.tone(tone));
+        font-size: Metrics.text-chip;
+        font-weight: 680;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+}
+
+// A sheet over whatever is on the panel: the power menu, a confirmation.
+//
+// It has its own focus scope in Rust and the screen behind it does not move,
+// which is the whole reason it is a sheet and not a screen.
+export component Sheet inherits Rectangle {
+    in property <string> title;
+    in property <string> kind;
+    in property <[SheetRow]> rows;
+    in property <int> index;
+
+    width: 100%;
+    height: 100%;
+    // A flat scrim rather than a blur: a full-screen blur on this board was
+    // measured at a quarter of a core, every frame, for a rectangle.
+    background: #04050ac7;
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: Metrics.sheet-w;
+        height: body.preferred-height + Metrics.sheet-pad * 2;
+        border-radius: Theme.radius * 1.2;
+        background: Theme.bg-sheet;
+        border-width: 1px;
+        border-color: Theme.line;
+
+        body := VerticalLayout {
+            padding: Metrics.sheet-pad;
+            spacing: Metrics.root-font * 0.6;
+            alignment: start;
+
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Metrics.root-font * 1.28;
+                font-weight: 760;
+                wrap: word-wrap;
+            }
+
+            if kind == "confirm": HorizontalLayout {
+                spacing: Metrics.root-font * 0.8;
+                alignment: start;
+
+                for row[i] in rows: Rectangle {
+                    property <bool> focused: i == index;
+                    width: Metrics.sheet-w * 0.4;
+                    height: Metrics.root-font * 3.0;
+                    border-radius: Theme.radius * 0.8;
+                    background: focused
+                        ? (row.tone == "bad" ? Theme.bad : Theme.focus-fill)
+                        : #ffffff0f;
+                    border-width: focused ? 2px : 1px;
+                    border-color: focused ? Theme.focus-ring : Theme.line;
+
+                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: row.label;
+                        color: focused ? #0a0c10 : Theme.text;
+                        font-size: Metrics.root-font;
+                        font-weight: 720;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if kind != "confirm": VerticalLayout {
+                spacing: Metrics.root-font * 0.35;
+
+                for row[i] in rows: Rectangle {
+                    property <bool> focused: i == index;
+                    height: Metrics.root-font * 3.4;
+                    border-radius: Theme.radius * 0.8;
+                    background: focused ? #ffffff16 : transparent;
+                    border-width: focused ? 2px : 1px;
+                    border-color: focused ? Theme.focus-ring : Theme.line-soft;
+
+                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                    VerticalLayout {
+                        padding-left: Metrics.root-font;
+                        padding-right: Metrics.root-font;
+                        alignment: center;
+                        spacing: 0px;
+
+                        Text {
+                            text: row.label;
+                            color: row.tone == "bad" ? Theme.bad : Theme.text;
+                            font-size: Metrics.root-font * 1.02;
+                            font-weight: 700;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+                        if row.hint != "": Text {
+                            text: row.hint;
+                            color: Theme.dim;
+                            font-size: Metrics.text-chip;
+                            font-weight: 600;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+                    }
                 }
             }
         }

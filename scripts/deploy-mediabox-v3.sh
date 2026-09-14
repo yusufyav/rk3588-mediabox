@@ -45,14 +45,14 @@ say "product UI (wasm32)"
 [ -f "$ui_dist/index.html" ] && [ -f "$ui_dist/mediabox_ui_bg.wasm" ] \
   || { echo "UI bundle is incomplete at $ui_dist" >&2; exit 1; }
 
-say "TV-local browser packages"
-# sway rather than a plain kiosk compositor: it can make a window fullscreen
-# without the browser asking for it, and it reports output changes, which is
-# how the interface survives being moved to a different panel.
-sh_ "command -v sway >/dev/null && command -v chromium >/dev/null && fc-list | grep -qi emoji && fc-list | grep -qi inter" || {
-  echo "installing sway, chromium, an emoji font and the product's typeface"
+say "typefaces"
+# The native shell reads the system's fonts. It needs the product's typeface and
+# an emoji face, and nothing else: there is no compositor under it and no
+# browser engine in it.
+sh_ "fc-list | grep -qi emoji && fc-list | grep -qi inter" || {
+  echo "installing an emoji font and the product's typeface"
   sh_ "DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sway chromium fonts-noto-color-emoji fonts-inter"
+       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fonts-noto-color-emoji fonts-inter"
 }
 
 say "binaries -> $prefix/bin"
@@ -71,34 +71,71 @@ cp_ "$here"/assets/*.mp4 "root@$host:$prefix/assets/"
 say "product UI -> $prefix/ui"
 tar -C "$ui_dist" -cf - . | sh_ "rm -rf $prefix/ui && mkdir -p $prefix/ui && tar -C $prefix/ui -xf -"
 
-say "television kiosk"
-cp_ "$here/packaging/mediabox-tv-native" \
-    "$here/packaging/mediabox-kiosk-browser" "$here/packaging/mediabox-kiosk-smoke" \
+say "television shell"
+# The shell is one binary on the bare display controller. There is no
+# compositor under it, no browser engine in it and no launcher script in front
+# of it: the unit runs $prefix/bin/mediabox-tv, and the interface works its own
+# scale out from the mode the panel reports.
+#
+# mediabox-display-scale stays because the browser application still uses it.
+cp_ "$here/packaging/mediabox-kiosk-smoke" \
     "$here/packaging/mediabox-hdmi-prepare" "$here/packaging/mediabox-display-scale" \
-    "$here/packaging/mediabox-display-watch" \
-    "$here/packaging/mediabox-display-settle" "root@$host:/var/tmp/"
-cp_ "$here/config/sway-kiosk.conf" "root@$host:/var/tmp/"
+    "root@$host:/var/tmp/"
 sh_ "set -e
   mkdir -p /etc/mediabox
-  install -m 0755 /var/tmp/mediabox-tv-native $prefix/bin/mediabox-tv-native
-  install -m 0755 /var/tmp/mediabox-kiosk-browser $prefix/bin/mediabox-kiosk-browser
   install -m 0755 /var/tmp/mediabox-kiosk-smoke $prefix/bin/mediabox-kiosk-smoke
   install -m 0755 /var/tmp/mediabox-hdmi-prepare $prefix/bin/mediabox-hdmi-prepare
   install -m 0755 /var/tmp/mediabox-display-scale $prefix/bin/mediabox-display-scale
-  install -m 0755 /var/tmp/mediabox-display-watch $prefix/bin/mediabox-display-watch
-  install -m 0755 /var/tmp/mediabox-display-settle $prefix/bin/mediabox-display-settle
-  install -m 0644 /var/tmp/sway-kiosk.conf /etc/mediabox/sway-kiosk.conf
-  rm -f /var/tmp/mediabox-tv-native \
-        /var/tmp/mediabox-kiosk-browser /var/tmp/mediabox-kiosk-smoke \
-        /var/tmp/mediabox-hdmi-prepare /var/tmp/mediabox-display-scale \
-        /var/tmp/mediabox-display-watch /var/tmp/mediabox-display-settle \
-        /var/tmp/sway-kiosk.conf"
+  rm -f /var/tmp/mediabox-kiosk-smoke /var/tmp/mediabox-hdmi-prepare \
+        /var/tmp/mediabox-display-scale"
+
+# What the compositor-based shell left behind. Removed rather than left in
+# place: a launcher script that still exists is a launcher script somebody will
+# run, and it would start sway on top of a television that already has a shell.
+say "removing the compositor-based shell"
+sh_ "rm -f $prefix/bin/mediabox-tv-native $prefix/bin/mediabox-kiosk-browser \
+           $prefix/bin/mediabox-display-watch $prefix/bin/mediabox-display-settle \
+           /etc/mediabox/sway-kiosk.conf"
+
+# The television remote is not a power button.
+#
+# The HDMI block registers a CEC remote-control input device and udev tags it
+# `power-switch`; systemd-logind watches every tagged device and its defaults
+# are HandlePowerKey=poweroff and HandleRebootKey=reboot. A code from the
+# television's own remote therefore reached init, and the appliance restarted
+# with no application involved. The rule takes the tag off, the drop-in makes
+# logind ignore those keys anyway, and ctrl-alt-del.target — which is an alias
+# of reboot.target, reached by a SIGINT to PID 1 from the console keyboard — is
+# masked. Restarting is a request to mediaboxd-rs now, confirmed twice.
+say "power keys -> the appliance, not systemd-logind"
+cp_ "$here/packaging/udev/80-mediabox-no-power-switch.rules" "root@$host:/var/tmp/"
+cp_ "$here/packaging/systemd/logind.conf.d/10-mediabox.conf" "root@$host:/var/tmp/logind-mediabox.conf"
+sh_ "set -e
+  install -m 0644 /var/tmp/80-mediabox-no-power-switch.rules \
+    /etc/udev/rules.d/80-mediabox-no-power-switch.rules
+  mkdir -p /etc/systemd/logind.conf.d
+  install -m 0644 /var/tmp/logind-mediabox.conf /etc/systemd/logind.conf.d/10-mediabox.conf
+  rm -f /var/tmp/80-mediabox-no-power-switch.rules /var/tmp/logind-mediabox.conf
+  systemctl mask ctrl-alt-del.target >/dev/null 2>&1 || true
+  udevadm control --reload-rules
+  udevadm trigger --subsystem-match=input --action=change
+  systemctl daemon-reload
+  # logind rereads its configuration on reload; the watched-button set is
+  # rebuilt from udev's tags at the same time.
+  systemctl kill -s HUP systemd-logind.service 2>/dev/null || systemctl restart systemd-logind.service"
 
 say "television browser application"
 # The browser is an application of the box in its own right: its own unit, its
 # own compositor config, its own profile. The exit script is what gives the
 # display back, and the address file is where this interface leaves a chosen
 # address for it to open.
+# sway and Chromium are the browser application's, and only the browser
+# application's. The television's own shell has neither.
+sh_ "command -v sway >/dev/null && command -v chromium >/dev/null" || {
+  echo "installing sway and chromium for the browser application"
+  sh_ "DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
+       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sway chromium"
+}
 cp_ "$here/packaging/mediabox-browser" "$here/packaging/mediabox-handback" "root@$host:/var/tmp/"
 cp_ "$here/config/sway-browser.conf" "root@$host:/var/tmp/"
 tar -C "$here/packaging" -cf - browser-remote | sh_ "rm -rf $prefix/browser-remote && tar -C $prefix -xf -"

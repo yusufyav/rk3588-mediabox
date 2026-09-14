@@ -1,0 +1,142 @@
+import { Theme, Metrics } from "theme.slint";
+import { SettingRow } from "components.slint";
+
+// What the box can be told, from the sofa.
+//
+// Sections down the left, rows down the right. Most rows are readings: this is
+// an appliance and the things worth changing from a remote are few. The ones
+// that are not readings are marked, and focus only ever lands on those.
+export component Settings inherits Rectangle {
+    in property <[string]> sections;
+    in property <int> section;
+    in property <bool> on-sections;
+    in property <[SettingRow]> rows;
+    in property <int> row-index;
+
+    property <length> sections-w: max(220px, min(520px, root.width * 0.22));
+    property <length> rows-x: Metrics.gutter + sections-w + Metrics.gutter * 0.8;
+    property <length> top: Metrics.topbar + Metrics.block-gap;
+    property <length> row-h: Metrics.root-font * 3.6;
+
+    background: Theme.bg;
+    clip: true;
+
+    // A quiet ground behind the two columns, so the screen reads as a panel
+    // rather than as text floating on black.
+    Rectangle {
+        x: Metrics.gutter;
+        y: top;
+        width: sections-w;
+        height: root.height - top - Metrics.gutter * 0.6;
+        border-radius: Theme.radius;
+        background: #ffffff08;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+    }
+
+    VerticalLayout {
+        x: Metrics.gutter + Metrics.root-font * 0.4;
+        y: top + Metrics.root-font * 0.4;
+        width: sections-w - Metrics.root-font * 0.8;
+        spacing: Metrics.root-font * 0.15;
+        alignment: start;
+
+        for label[i] in sections: Rectangle {
+            property <bool> chosen: i == section;
+            property <bool> focused: on-sections && chosen;
+            height: row-h;
+            border-radius: Theme.radius * 0.7;
+            background: focused ? Theme.focus-fill : (chosen ? #ffffff14 : transparent);
+            border-width: focused ? 2px : 0px;
+            border-color: Theme.focus-ring;
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            Text {
+                x: Metrics.root-font * 0.8;
+                width: parent.width - Metrics.root-font * 1.6;
+                height: 100%;
+                text: label;
+                color: focused ? #0a0c10 : (chosen ? Theme.text : Theme.muted);
+                font-size: Metrics.root-font * 1.0;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+    }
+
+    VerticalLayout {
+        x: rows-x;
+        y: top;
+        // Capped rather than run to the far edge. A label on the left of a
+        // 2560-pixel panel and its reading on the right is two things nobody
+        // can read as one line from a sofa.
+        width: min(root.width - rows-x - Metrics.gutter, Metrics.vw * 0.46);
+        spacing: Metrics.root-font * 0.15;
+        alignment: start;
+
+        for entry[i] in rows: Rectangle {
+            property <bool> focused: !on-sections && i == row-index;
+            height: entry.hint == "" ? row-h : row-h * 1.16;
+            border-radius: Theme.radius * 0.7;
+            background: focused ? #ffffff16 : transparent;
+            border-width: focused ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : transparent;
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            HorizontalLayout {
+                x: Metrics.root-font * 0.8;
+                width: parent.width - Metrics.root-font * 1.6;
+                height: 100%;
+                spacing: Metrics.root-font;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 0px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: entry.label;
+                        color: entry.selectable ? Theme.text : Theme.muted;
+                        font-size: Metrics.root-font * 0.98;
+                        font-weight: entry.selectable ? 700 : 620;
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
+                    if entry.hint != "": Text {
+                        text: entry.hint;
+                        color: Theme.dim;
+                        font-size: Metrics.text-chip;
+                        font-weight: 600;
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
+                }
+
+                Text {
+                    text: entry.value;
+                    color: entry.tone == "" ? Theme.text : Theme.tone(entry.tone);
+                    font-size: Metrics.root-font * 0.96;
+                    font-weight: 680;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+
+                // A chevron, for a row that goes somewhere or does something.
+                if entry.selectable: Text {
+                    text: "›";
+                    color: Theme.dim;
+                    font-size: Metrics.root-font * 1.3;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    width: Metrics.root-font;
+                }
+            }
+        }
+    }
+}

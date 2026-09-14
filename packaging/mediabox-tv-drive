@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Drive the television's interface from the appliance, and photograph it.
+
+The shell owns DRM master, so nothing else on the box can take a screenshot of
+what is on the panel. It photographs itself instead: SIGUSR1 makes it write the
+next scanout frame to /var/lib/mediabox-ui/snapshots, at the panel's own
+resolution, named after the screen it is of.
+
+Navigation goes the same way a remote does — `input_inject` on the control
+plane's socket, which publishes on the normalised bus the interface listens to —
+so an acceptance run is the same path a person's thumb takes and not a private
+back door into the process.
+
+    mediabox-tv-drive down down right ok . back          # '.' is a snapshot
+    mediabox-tv-drive --list                             # what can be sent
+"""
+
+import argparse
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+SOCKET = os.environ.get("MEDIABOX_SOCKET", "/run/mediabox/mediaboxd.sock")
+SNAPSHOTS = os.environ.get("MEDIABOX_TV_SNAPSHOTS", "/var/lib/mediabox-ui/snapshots")
+
+ACTIONS = [
+    "up", "down", "left", "right", "ok", "back", "home",
+    "play", "pause", "play_pause", "stop",
+    "seek_forward", "seek_backward",
+    "volume_up", "volume_down", "mute", "power",
+]
+
+
+def call(request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(10)
+        sock.connect(SOCKET)
+        sock.sendall((json.dumps(request) + "\n").encode())
+        answer = b""
+        while not answer.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            answer += chunk
+    return json.loads(answer.decode().strip() or "{}")
+
+
+def shell_pid():
+    out = subprocess.run(
+        ["pgrep", "-f", "/opt/rk3588-mediabox/bin/mediabox-tv"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    return int(out[0]) if out else None
+
+
+def snapshot(settle):
+    pid = shell_pid()
+    if pid is None:
+        print("  snapshot: the interface is not running", file=sys.stderr)
+        return False
+    before = set(os.listdir(SNAPSHOTS)) if os.path.isdir(SNAPSHOTS) else set()
+    marks = {name: os.path.getmtime(os.path.join(SNAPSHOTS, name)) for name in before}
+    os.kill(pid, signal.SIGUSR1)
+    # The frame is written by the next draw, which the request itself asks for.
+    for _ in range(40):
+        time.sleep(0.1)
+        if not os.path.isdir(SNAPSHOTS):
+            continue
+        for name in os.listdir(SNAPSHOTS):
+            path = os.path.join(SNAPSHOTS, name)
+            if name not in before or os.path.getmtime(path) > marks.get(name, 0):
+                print(f"  snapshot -> {path}")
+                return True
+    print("  snapshot: nothing was written", file=sys.stderr)
+    return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("steps", nargs="*", help="actions, or '.' for a snapshot")
+    parser.add_argument("--list", action="store_true", help="print the vocabulary")
+    parser.add_argument("--settle", type=float, default=0.45,
+                        help="seconds to wait after each action")
+    args = parser.parse_args()
+
+    if args.list:
+        print(" ".join(ACTIONS))
+        return 0
+
+    for step in args.steps:
+        if step == ".":
+            snapshot(args.settle)
+            continue
+        if step not in ACTIONS:
+            print(f"not an action: {step}", file=sys.stderr)
+            return 2
+        answer = call({"command": "input_inject", "action": step})
+        ok = answer.get("ok")
+        print(f"  {step:<14} {'ok' if ok else answer.get('error')}")
+        if not ok:
+            return 1
+        time.sleep(args.settle)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

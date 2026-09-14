@@ -179,6 +179,39 @@ impl Client {
         self.call(json!({"command": "kodi_status"})).await
     }
 
+    pub async fn kodi_play_pause(&self) -> Result<Value> {
+        self.call(json!({"command": "kodi_play_pause"})).await
+    }
+
+    pub async fn kodi_stop(&self) -> Result<Value> {
+        self.call(json!({"command": "kodi_stop"})).await
+    }
+
+    pub async fn kodi_seek(&self, seconds: i64) -> Result<Value> {
+        self.call(json!({"command": "kodi_seek", "seconds": seconds})).await
+    }
+
+    pub async fn kodi_restart(&self) -> Result<Value> {
+        self.call(json!({"command": "kodi_restart"})).await
+    }
+
+    /// CEC, which the daemon owns. This interface never opens /dev/cec0: one
+    /// process may hold that adapter and it is not this one.
+    pub async fn cec_wake_tv(&self) -> Result<Value> {
+        self.call(json!({"command": "cec_wake_tv"})).await
+    }
+
+    pub async fn cec_standby_tv(&self) -> Result<Value> {
+        self.call(json!({"command": "cec_standby_tv"})).await
+    }
+
+    /// Restart or shut the appliance down. Called from exactly one place — a
+    /// confirmation the viewer moved the focus onto and pressed — and the
+    /// request body is a two-valued enum on both sides of the socket.
+    pub async fn system_power(&self, action: mediabox_core::PowerAction) -> Result<Value> {
+        self.call(json!({"command": "system_power", "action": action})).await
+    }
+
     pub async fn status(&self) -> Result<Value> {
         self.call(json!({"command": "status"})).await
     }

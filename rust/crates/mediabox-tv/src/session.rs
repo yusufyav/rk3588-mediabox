@@ -132,6 +132,36 @@ fn write_atomically(path: &PathBuf, snapshot: &Snapshot) {
     }
 }
 
+/// Asks for a picture of what is on the television.
+///
+/// SIGUSR1, because the appliance has no other way to say "now" to a process
+/// that owns the display: a screenshot tool would need DRM master, and there is
+/// only one of those. The handler writes the next drawn frame to a file, which
+/// is what the acceptance evidence is made of.
+pub fn on_snapshot_request(then: impl Fn() + Send + 'static) {
+    // SAFETY: one signal, this process's own, and the set is initialised by
+    // libc's own calls before it is read.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGUSR1);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+
+        std::thread::Builder::new()
+            .name("mediabox-tv-snap".into())
+            .spawn(move || {
+                loop {
+                    let mut signal: libc::c_int = 0;
+                    if libc::sigwait(&set, &mut signal) != 0 {
+                        return;
+                    }
+                    then();
+                }
+            })
+            .expect("the snapshot thread could not be started");
+    }
+}
+
 /// The two signals the appliance is stopped with.
 ///
 /// SAFETY: the set is zeroed and initialised through libc's own calls before
@@ -142,6 +172,10 @@ unsafe fn exit_signals() -> libc::sigset_t {
         libc::sigemptyset(&mut set);
         libc::sigaddset(&mut set, libc::SIGTERM);
         libc::sigaddset(&mut set, libc::SIGINT);
+        // Blocked here as well as in on_snapshot_request, and for the same
+        // reason the other two are: a thread inherits the mask of whoever
+        // spawned it, and SIGUSR1's default action is to kill the process.
+        libc::sigaddset(&mut set, libc::SIGUSR1);
         set
     }
 }
@@ -180,10 +214,13 @@ pub fn block_exit_signals() {
 pub fn on_shutdown(then: impl Fn() + Send + 'static) {
     block_exit_signals();
 
-    // SAFETY: the set is initialised before use and only these two signals are
+    // SAFETY: the set is initialised before use and only these signals are
     // touched.
     unsafe {
-        let set = exit_signals();
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
 
         std::thread::Builder::new()
             .name("mediabox-tv-exit".into())

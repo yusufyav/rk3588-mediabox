@@ -30,12 +30,13 @@ const AHEAD: usize = 8;
 /// the same thing about its own memory.
 const RAIL_LIMIT: usize = 20;
 
-/// The rows above the shelves: the bar, and then the launcher.
+/// The one row above the shelves: the bar.
 ///
-/// Named rather than written as `- 1` in six places, because it changed once —
-/// the launcher was added between them — and every one of those places had to
-/// be found by hand.
-const SHELF_ROW: usize = 2;
+/// The launcher used to be the second, between the hero and the catalogue,
+/// which made the box's applications the first thing a viewer met and the
+/// films the second. It is a shelf of its own at the bottom now — still in
+/// reach from the sofa, no longer in front of the product.
+const SHELF_ROW: usize = 1;
 
 /// The width posters are decoded at. The card is about 238 logical pixels wide
 /// at the 1920-pixel design, and twice that on a 4K panel at integer scale two.
@@ -43,6 +44,35 @@ pub const POSTER_WIDTH: u32 = 480;
 /// Backdrops are decoded once and drawn across the panel. The hosts serve about
 /// a thousand pixels; nothing is upscaled past what arrives.
 pub const BACKDROP_WIDTH: u32 = 1920;
+
+/// What is on the bar at the top of the *catalogue*, not of the home screen.
+///
+/// Searching for a film and browsing a library are things one does inside the
+/// catalogue application, the way the reference does them: its own bar, its own
+/// screens, behind its own tile. They were on the home screen's bar for one
+/// build and that was wrong — the home screen is a launcher, and a launcher
+/// with a film search box on it is a launcher pretending to be a video shop.
+///
+/// The home screen's bar carries the product's name, whether the box is on the
+/// network, and the time. None of those is focusable: they are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    Search,
+    Library,
+    Settings,
+}
+
+pub const NAV: [Nav; 2] = [Nav::Search, Nav::Library];
+
+impl Nav {
+    pub fn label(self) -> &'static str {
+        match self {
+            Nav::Search => "Ara",
+            Nav::Library => "Kitaplık",
+            Nav::Settings => "Ayarlar",
+        }
+    }
+}
 
 /// What pressing Ok on a launcher tile does.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +84,8 @@ pub enum AppAction {
     /// Hand the television to another application. This interface is one of
     /// them, so doing it ends this process.
     Launch(String),
+    /// One of this interface's own screens.
+    Screen(Nav),
     /// The screen this tile would open has not been built yet. The tile is
     /// still drawn — what the box can do should be visible from the sofa — but
     /// it says so rather than doing nothing when it is pressed.
@@ -146,10 +178,7 @@ pub fn app_tiles_from(display: &crate::model::DisplayStatus) -> Vec<AppEntryTile
             "",
             AppAction::Launch("browser".to_string()),
         ),
-        // The settings screen is not written yet. Shown and marked rather than
-        // left out: a launcher that silently lacks a screen the other interface
-        // has is a launcher nobody can trust.
-        tile("settings", "Ayarlar", false, "yakında", AppAction::Absent),
+        tile("settings", "Ayarlar", true, "", AppAction::Screen(Nav::Settings)),
     ];
 
     tiles.extend(
@@ -180,6 +209,7 @@ pub fn app_tiles_from(display: &crate::model::DisplayStatus) -> Vec<AppEntryTile
     tiles
 }
 
+#[derive(Clone)]
 pub struct Item {
     pub id: String,
     pub kind: String,
@@ -203,7 +233,27 @@ fn some(value: &Option<String>) -> Option<String> {
 }
 
 impl Item {
-    fn from_preview(preview: &MetaPreview) -> Self {
+    /// A title with nothing but a name. Only the focus-model tests use it:
+    /// where the remote goes must not depend on what an addon sent.
+    #[cfg(test)]
+    pub fn stub(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            kind: "movie".into(),
+            title: id.to_string(),
+            poster: None,
+            background: None,
+            summary: None,
+            year: None,
+            rating: None,
+            genres: Vec::new(),
+            progress: 0.0,
+            local: false,
+            hue: 0.0,
+        }
+    }
+
+    pub fn from_preview(preview: &MetaPreview) -> Self {
         let progress = preview.state.as_ref().map(|s| s.progress()).unwrap_or(0.0) as f32;
         Self {
             hue: hue_of(&preview.name),
@@ -222,6 +272,7 @@ impl Item {
     }
 }
 
+#[derive(Clone)]
 pub struct Shelf {
     pub title: String,
     pub source: String,
@@ -229,85 +280,92 @@ pub struct Shelf {
 }
 
 /// The whole home surface, and the remote's place in it.
+/// The home surface, and the remote's place in it.
+///
+/// Two rows, and the order is the product's argument about what this box is:
+/// what the box can be used for, and then the one shelf that belongs on an
+/// appliance's front page — what somebody had not finished watching.
+///
+/// The catalogue is not here. It is behind the "Filmler ve Diziler" tile, on
+/// the library screen, which is where a catalogue belongs: MediaBox is an
+/// environment for this board rather than a player with a menu, and a home
+/// screen printed full of posters is a video shop's front page with an
+/// operating system behind it.
 pub struct Home {
+    /// Everything the media core answered with. Not drawn here — the library
+    /// screen is built from it — but held here because this is where it lands.
     pub shelves: Vec<Shelf>,
-    /// What this box can be used for. The control plane's applications and the
-    /// interface's own screens, in the order they are drawn.
+    /// The one shelf this screen draws: titles left part-way through.
+    pub recent: Vec<Item>,
+    /// What this box can be used for.
     pub apps: Vec<AppEntryTile>,
-    /// Row 0 is the bar, row 1 is the launcher; 2.. are the shelves.
+
+    /// Row 0 is the launcher, row 1 the unfinished shelf.
     pub row: usize,
-    /// One remembered column per row, including the bar.
+    /// One remembered column per row.
     columns: Vec<usize>,
 
-    /// The Slint side of the same thing. Kept beside the data rather than
-    /// rebuilt from it, so a picture arriving changes one item rather than
-    /// every shelf on the screen.
-    pub rails: Rc<VecModel<RailModel>>,
-    tiles: Vec<Rc<VecModel<PosterItem>>>,
-    /// The launcher's Slint side, kept beside `apps` for the same reason the
-    /// rails are: an application changing state redraws one tile.
+    /// The Slint side of the same thing, kept beside the data rather than
+    /// rebuilt from it, so a picture arriving changes one tile rather than the
+    /// whole shelf.
+    tiles: Rc<VecModel<PosterItem>>,
     pub app_tiles: Rc<VecModel<AppTile>>,
-
-    /// Which backdrop layer is showing, so a new one fades in over the old.
-    pub fade: f32,
-    backdrop: Option<String>,
 }
+
+/// The row the unfinished shelf is on, when there is one.
+const RECENT_ROW: usize = 1;
 
 impl Home {
     pub fn new() -> Self {
         Self {
             shelves: Vec::new(),
+            recent: Vec::new(),
             apps: Vec::new(),
-            // The launcher, because that is what this screen is for: the web
-            // interface autofocuses its first application tile and so does
-            // this.
-            row: 1,
-            columns: vec![0; SHELF_ROW],
-            rails: Rc::new(VecModel::default()),
-            tiles: Vec::new(),
+            // The launcher. The web interface autofocuses its first application
+            // tile and so does this: the first thing a person meets is what the
+            // box can do.
+            row: 0,
+            columns: vec![0; 2],
+            tiles: Rc::new(VecModel::default()),
             app_tiles: Rc::new(VecModel::default()),
-            fade: 0.0,
-            backdrop: None,
         }
-    }
-
-    pub fn nav_len(&self) -> usize {
-        4
     }
 
     pub fn column(&self) -> usize {
         self.columns.get(self.row).copied().unwrap_or(0)
     }
 
+    /// The shelf's Slint model, for the window to hold.
+    pub fn recent_tiles(&self) -> Rc<VecModel<PosterItem>> {
+        self.tiles.clone()
+    }
+
+    /// The row the unfinished shelf is on, or none when nothing is unfinished.
+    pub fn recent_row(&self) -> Option<usize> {
+        (!self.recent.is_empty()).then_some(RECENT_ROW)
+    }
+
     fn row_len(&self, row: usize) -> usize {
         match row {
-            0 => self.nav_len(),
-            1 => self.apps.len(),
-            _ => self.shelves.get(row - SHELF_ROW).map(|s| s.items.len()).unwrap_or(0),
+            0 => self.apps.len(),
+            _ if Some(row) == self.recent_row() => self.recent.len(),
+            _ => 0,
         }
     }
 
     pub fn rows(&self) -> usize {
-        SHELF_ROW + self.shelves.len()
+        RECENT_ROW + usize::from(!self.recent.is_empty())
     }
 
-    /// The focused title, which is what the hero shows.
+    /// The focused title, when the remote is on the shelf.
     pub fn focused(&self) -> Option<&Item> {
-        let shelf = self.shelves.get(self.row.checked_sub(SHELF_ROW)?)?;
-        shelf.items.get(self.column())
-    }
-
-    /// The first shelf that has anything on it, as a row number.
-    ///
-    /// Shelves that arrived empty are not drawn, so "the catalogue" is the
-    /// first one that is.
-    pub fn first_shelf_row(&self) -> Option<usize> {
-        (SHELF_ROW..self.rows()).find(|row| self.row_len(*row) > 0)
+        (Some(self.row) == self.recent_row())
+            .then(|| self.recent.get(self.column()))?
     }
 
     /// The focused application, when the remote is on the launcher.
     pub fn focused_app(&self) -> Option<&AppEntryTile> {
-        (self.row == 1).then(|| self.apps.get(self.column()))?
+        (self.row == 0).then(|| self.apps.get(self.column()))?
     }
 
     /// Replaces the launcher's tiles, keeping the remote on the same
@@ -331,11 +389,11 @@ impl Home {
                 .collect::<Vec<_>>(),
         );
 
-        if self.row == 1 {
+        if self.row == 0 {
             let landed = holding
                 .and_then(|id| self.apps.iter().position(|tile| tile.id == id))
                 .unwrap_or_else(|| self.column().min(self.apps.len().saturating_sub(1)));
-            self.columns[1] = landed;
+            self.columns[0] = landed;
         }
     }
 
@@ -344,9 +402,7 @@ impl Home {
 
         if dy != 0 {
             let mut row = self.row as isize + dy;
-            // Rows that arrived empty are stepped over rather than landed on:
-            // a shelf with nothing in it is not drawn, and focus on a thing
-            // that is not on the panel is focus nobody can see.
+            // A row with nothing on it is stepped over rather than landed on.
             while row >= 0 && (row as usize) < self.rows() && self.row_len(row as usize) == 0 {
                 row += dy;
             }
@@ -378,155 +434,82 @@ impl Home {
         moved
     }
 
-    /// Rebuilds the shelves and the models behind them, keeping the remote
-    /// where it was if that position still exists.
+    /// Takes the whole catalogue, and keeps the part of it this screen draws.
     pub fn set_shelves(&mut self, shelves: Vec<Shelf>) {
         self.shelves = shelves;
-        self.columns.resize(self.rows(), 0);
-        self.columns.truncate(self.rows());
 
-        self.tiles.clear();
-        let mut rails: Vec<RailModel> = Vec::with_capacity(self.shelves.len());
+        // Unfinished titles, wherever they came from. The media core labels a
+        // shelf "Devam Et", but the property that matters is the watch state,
+        // not the shelf's name.
+        let mut seen = std::collections::HashSet::new();
+        self.recent = self
+            .shelves
+            .iter()
+            .flat_map(|shelf| shelf.items.iter())
+            .filter(|item| item.progress > 0.0 && item.progress < 0.95)
+            .filter(|item| seen.insert(item.id.clone()))
+            .take(RAIL_LIMIT)
+            .cloned()
+            .collect();
 
-        for shelf in &self.shelves {
-            let tiles: Vec<PosterItem> = shelf
-                .items
+        self.tiles.set_vec(
+            self.recent
                 .iter()
                 .map(|item| PosterItem {
                     id: item.id.clone().into(),
                     kind: item.kind.clone().into(),
                     title: item.title.clone().into(),
+                    subtitle: item.year.clone().unwrap_or_default().into(),
                     art: slint::Image::default(),
                     hue: item.hue,
                     progress: item.progress,
                     local: item.local,
                 })
-                .collect();
-            let model = Rc::new(VecModel::from(tiles));
-            rails.push(RailModel {
-                title: shelf.title.clone().into(),
-                source: shelf.source.clone().into(),
-                items: ModelRc::from(model.clone()),
-            });
-            self.tiles.push(model);
-        }
+                .collect::<Vec<_>>(),
+        );
 
-        self.rails.set_vec(rails);
-
-        // Land on the first row that has anything in it.
+        self.columns.resize(2, 0);
         if self.row_len(self.row) == 0 {
-            self.row = (1..self.rows()).find(|r| self.row_len(*r) > 0).unwrap_or(0);
-        }
-
-        // Something for the hero to stand on from the first frame.
-        if self.backdrop.is_none() {
-            self.backdrop = self
-                .shelves
-                .iter()
-                .flat_map(|shelf| shelf.items.iter())
-                .find_map(|item| item.background.clone());
+            self.row = 0;
         }
     }
 
-    /// Asks for what the panel is showing and what it is about to, and hands
-    /// over whatever has arrived. Everything outside the window is given an
-    /// empty image, which is what keeps the whole catalogue off the GPU.
+    /// Asks for the pictures this screen is showing and about to show, and
+    /// hands over whatever has arrived. Everything outside the window is given
+    /// an empty image, which is what keeps the catalogue off the GPU.
     pub fn sync_artwork(&mut self, images: &mut ImageManager) {
-        // Which shelf the remote is on, as an index into `shelves`. Rows 0 and
-        // 1 are the bar and the launcher, so above the shelves there is no
-        // focused one and the first is treated as the centre — that is what the
-        // panel is showing.
-        let focus_shelf = self.row.saturating_sub(SHELF_ROW) as isize;
+        if self.recent.is_empty() {
+            return;
+        }
+        let centre = self.columns.get(RECENT_ROW).copied().unwrap_or(0);
+        let last = self.recent.len() - 1;
+        let from = centre.saturating_sub(BEHIND);
+        let to = (centre + AHEAD).min(last);
 
-        for (index, shelf) in self.shelves.iter().enumerate() {
-            if shelf.items.is_empty() {
-                continue;
-            }
-            // This shelf and its two neighbours. Further than that is not about
-            // to be on the panel, and holding it would be holding the catalogue.
-            let nearby = (index as isize - focus_shelf).abs() <= 1;
-            let centre = self.columns.get(index + 1).copied().unwrap_or(0);
-            let last = shelf.items.len() - 1;
-            let from = centre.saturating_sub(BEHIND);
-            let to = (centre + AHEAD).min(last);
+        for (column, item) in self.recent.iter().enumerate() {
+            let Some(mut tile) = self.tiles.row_data(column) else { continue };
 
-            let Some(tiles) = self.tiles.get(index) else { continue };
+            let wanted = (column >= from && column <= to)
+                .then(|| item.poster.as_deref().map(|url| Key::new(url, POSTER_WIDTH)))
+                .flatten();
 
-            for (column, item) in shelf.items.iter().enumerate() {
-                let inside = nearby && column >= from && column <= to;
-                let Some(mut tile) = tiles.row_data(column) else { continue };
-
-                let wanted = if inside {
-                    item.poster.as_deref().map(|url| Key::new(url, POSTER_WIDTH))
-                } else {
-                    None
-                };
-
-                let art = match &wanted {
-                    Some(key) => {
-                        images.want(key);
-                        images.get(key).unwrap_or_default()
-                    }
-                    None => slint::Image::default(),
-                };
-
-                // Only write back when it actually changed: set_row_data is what
-                // makes Slint redraw the tile.
-                let had = tile.art.size().width > 0;
-                let has = art.size().width > 0;
-                if had != has {
-                    tile.art = art;
-                    tiles.set_row_data(column, tile);
+            let art = match &wanted {
+                Some(key) => {
+                    images.want(key);
+                    images.get(key).unwrap_or_default()
                 }
+                None => slint::Image::default(),
+            };
+
+            // Only write back when it actually changed: set_row_data is what
+            // makes Slint redraw the tile.
+            let had = tile.art.size().width > 0;
+            let has = art.size().width > 0;
+            if had != has {
+                tile.art = art;
+                self.tiles.set_row_data(column, tile);
             }
         }
-    }
-
-    /// The backdrop, and which layer to draw it in so the change is a fade.
-    ///
-    /// It follows the focused title when that title has one, and otherwise
-    /// keeps whatever is already on the panel. The operator's own library is
-    /// artwork-poor — the account sends a poster and nothing else — so a
-    /// backdrop that strictly followed focus would mean a black hero for the
-    /// two shelves every session starts on. A poster stretched across the panel
-    /// is not the answer either: it is three hundred pixels wide at the source.
-    pub fn backdrop(&mut self, images: &mut ImageManager) -> Option<(slint::Image, bool)> {
-        let url = self
-            .focused()
-            .and_then(|item| item.background.clone())
-            .or_else(|| self.backdrop.clone())?;
-
-        if self.backdrop.as_deref() != Some(url.as_str()) {
-            self.backdrop = Some(url.clone());
-            self.fade = if self.fade > 0.5 { 0.0 } else { 1.0 };
-        }
-
-        let key = Key::new(&url, BACKDROP_WIDTH);
-        images.want(&key);
-        let art = images.get(&key)?;
-        Some((art, self.fade > 0.5))
-    }
-
-    /// Title, the facts line, and the summary — for whatever is focused.
-    pub fn hero(&self) -> (String, String, String) {
-        let Some(item) = self.focused() else {
-            return (String::new(), String::new(), String::new());
-        };
-
-        let mut facts: Vec<String> = Vec::new();
-        if let Some(year) = &item.year {
-            facts.push(year.clone());
-        }
-        if let Some(rating) = &item.rating {
-            facts.push(format!("IMDb {rating}"));
-        }
-        facts.extend(item.genres.iter().take(2).cloned());
-
-        (
-            item.title.clone(),
-            facts.join("  ·  "),
-            item.summary.clone().unwrap_or_default(),
-        )
     }
 }
 
@@ -614,4 +597,167 @@ fn rail_title(name: &str, kind: &str) -> String {
 fn hue_of(name: &str) -> f32 {
     let hash = name.bytes().fold(17u32, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as u32));
     (hash % 360) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shelf(name: &str, count: usize, progress: f32) -> Shelf {
+        Shelf {
+            title: name.into(),
+            source: String::new(),
+            items: (0..count)
+                .map(|i| {
+                    let mut item = Item::stub(&format!("{name}-{i}"));
+                    item.progress = progress;
+                    item
+                })
+                .collect(),
+        }
+    }
+
+    fn launcher() -> Vec<AppEntryTile> {
+        vec![
+            tile("media", "Filmler ve Diziler", true, "", AppAction::Shelves),
+            tile("browser", "Tarayıcı", true, "", AppAction::Launch("browser".into())),
+            tile("settings", "Ayarlar", true, "", AppAction::Screen(Nav::Settings)),
+        ]
+    }
+
+    /// The home screen opens on the launcher. MediaBox is an environment for
+    /// this board rather than a player with a menu.
+    #[test]
+    fn focus_starts_on_the_launcher() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        home.set_shelves(vec![shelf("a", 5, 0.4)]);
+        assert_eq!(home.row, 0);
+        assert!(home.focused_app().is_some());
+        assert!(home.focused().is_none());
+    }
+
+    /// The catalogue is not printed onto the home screen. It is behind a tile.
+    #[test]
+    fn the_catalogue_is_not_on_the_home_screen() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        home.set_shelves(vec![
+            shelf("finished", 4, 0.0),
+            shelf("popular", 20, 0.0),
+            shelf("half", 3, 0.5),
+        ]);
+        // Two rows at most: the launcher, and what was left unfinished.
+        // Twenty-seven titles arrived; three are on this screen.
+        assert_eq!(home.rows(), 2);
+        assert_eq!(home.recent.len(), 3);
+        assert_eq!(home.shelves.len(), 3, "the catalogue is still held for the library");
+
+        let media = home.apps.iter().find(|t| t.id == "media").expect("the tile");
+        assert_eq!(media.action, AppAction::Shelves);
+    }
+
+    #[test]
+    fn nothing_unfinished_means_one_row() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        home.set_shelves(vec![shelf("popular", 6, 0.0)]);
+        assert_eq!(home.rows(), 1);
+        assert_eq!(home.recent_row(), None);
+        for _ in 0..5 {
+            home.step(0, 1);
+        }
+        assert_eq!(home.row, 0, "there is nowhere below the launcher to go");
+    }
+
+    #[test]
+    fn a_finished_title_is_not_unfinished() {
+        let mut home = Home::new();
+        home.set_shelves(vec![shelf("credits", 3, 0.98)]);
+        assert!(home.recent.is_empty());
+    }
+
+    #[test]
+    fn the_same_title_on_two_shelves_is_one_tile() {
+        let mut home = Home::new();
+        let mut one = shelf("a", 1, 0.5);
+        let two = Shelf { title: "b".into(), source: String::new(), items: one.items.clone() };
+        one.items[0].progress = 0.5;
+        home.set_shelves(vec![one, two]);
+        assert_eq!(home.recent.len(), 1);
+    }
+
+    /// The launcher is the top of this screen and there is nothing above it.
+    /// Searching for a film is not a thing one does on a launcher; it is a
+    /// thing one does inside the catalogue.
+    #[test]
+    fn the_launcher_is_the_top_and_the_shelf_is_the_bottom() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        home.set_shelves(vec![shelf("a", 3, 0.3)]);
+        for _ in 0..8 {
+            home.step(0, -1);
+        }
+        assert_eq!(home.row, 0);
+        assert!(home.focused_app().is_some());
+        for _ in 0..8 {
+            home.step(0, 1);
+        }
+        assert_eq!(home.row, RECENT_ROW);
+        assert!(home.focused().is_some());
+    }
+
+    #[test]
+    fn each_row_remembers_its_own_column() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        home.set_shelves(vec![shelf("a", 8, 0.4)]);
+        home.step(1, 0);
+        home.step(1, 0);
+        assert_eq!(home.column(), 2);
+        home.step(0, 1);
+        assert_eq!(home.column(), 0);
+        home.step(0, -1);
+        assert_eq!(home.column(), 2);
+    }
+
+    #[test]
+    fn a_relaunched_list_keeps_the_remote_on_the_same_application() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        home.step(1, 0);
+        let id = home.focused_app().unwrap().id.clone();
+        let mut shuffled = launcher();
+        shuffled.insert(0, tile("kodi", "Oynatıcı", true, "", AppAction::Launch("kodi".into())));
+        home.set_apps(shuffled);
+        assert_eq!(home.focused_app().unwrap().id, id);
+    }
+
+    #[test]
+    fn the_column_never_points_past_a_shorter_row() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        home.set_shelves(vec![shelf("a", 2, 0.4)]);
+        home.row = 0;
+        for _ in 0..8 {
+            home.step(1, 0);
+        }
+        home.step(0, 1);
+        assert!(home.column() < 2);
+        assert!(home.focused().is_some());
+    }
+
+    /// Settings has a screen now; the launcher must not still say "yakında".
+    #[test]
+    fn the_launcher_offers_the_screens_this_interface_has() {
+        let display = crate::model::DisplayStatus { owner: None, applications: Vec::new() };
+        let tiles = app_tiles_from(&display);
+        let settings = tiles.iter().find(|t| t.id == "settings").expect("settings tile");
+        assert!(settings.ready);
+        assert_eq!(settings.action, AppAction::Screen(Nav::Settings));
+
+        let media = tiles.iter().find(|t| t.id == "media").expect("catalogue tile");
+        assert_eq!(media.name, "Filmler ve Diziler");
+        assert!(media.ready);
+    }
 }

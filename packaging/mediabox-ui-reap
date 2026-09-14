@@ -1,50 +1,69 @@
 #!/bin/sh
 #
-# What this unit starts is not in its cgroup, so somebody has to wait for it.
+# What this unit starts is not always in its cgroup, so somebody has to wait for
+# it.
 #
-# PAMName=login puts the compositor and everything it starts into a PAM session
-# scope instead of into mediabox-tv-ui.service's own cgroup. Measured on the
-# appliance: `systemd-cgls -u mediabox-tv-ui.service` is empty while sway and
-# nine Chromium processes sit in /user.slice/user-0.slice/session-N.scope. That
-# means KillMode= never reaches them — systemd signals the main PID and its own
-# cgroup, and the cgroup has nothing in it.
+# The unit ran a compositor before it ran the product's own interface, and
+# `PAMName=login` put that compositor and everything under it into a PAM session
+# scope rather than into mediabox-tv-ui.service's own cgroup. Measured on the
+# appliance: `systemd-cgls -u mediabox-tv-ui.service` was empty while sway and
+# nine Chromium processes sat in /user.slice/user-0.slice/session-N.scope, where
+# KillMode= never reached them. The native shell has no compositor and does sit
+# in the unit's cgroup, so this is now a net rather than the mechanism — but a
+# browser left over from a box part-way through an upgrade still holds the GPU
+# and the DRM device, and Kodi must not be started on top of one.
 #
-# A bare `pkill` was not enough either. It delivers SIGTERM and returns
-# immediately, so the unit reports "Deactivated successfully" while a browser
-# that still holds the GPU and the DRM device is only beginning to unwind, and
-# Kodi is started on top of it. This waits for them to actually be gone, and
-# insists if they are not.
+# Processes are found by what they *are*, never by what their command line
+# mentions.
+#
+#   pkill -f -- /opt/rk3588-mediabox/bin/mediabox-tv
+#
+# is a pattern against every process's full command line, and during a deploy
+# the command line that matches it is the administrator's own shell:
+#
+#   install -m 0755 /var/tmp/mediabox-tv /opt/rk3588-mediabox/bin/mediabox-tv
+#
+# That is not a hypothetical. It killed the SSH session of every deploy that
+# restarted this unit in the same command it installed the binary — which read
+# as the appliance dropping off the network. So the shell is matched on
+# /proc/<pid>/exe, which is the file a process is actually running, and the
+# browser additionally on its own profile directory.
 set -eu
 
-# Two patterns, because this unit ran a browser before it ran the product's own
-# interface, and a box part-way through an upgrade may still have one.
-#
-# The first is the native interface's own path. The second is the kiosk
-# browser's profile directory, which no other browser on this box uses: the
-# television's browser application and any other Chromium are untouched.
-#
-# Named separately rather than as one word-split list: a pattern with a space in
-# it would silently become two, and the thing this script exists to prevent is a
-# process nobody noticed was still running.
 NATIVE='/opt/rk3588-mediabox/bin/mediabox-tv'
 BROWSER='--user-data-dir=/var/lib/mediabox-ui/chromium'
 
-# Written out rather than looped over a list, for the same reason the patterns
-# are named separately: two lines that say what they check beat one that has to
-# be reasoned about.
+# Every pid that is one of the two, one per line.
+matching() {
+  self=$$
+  for entry in /proc/[0-9]*; do
+    pid="${entry#/proc/}"
+    [ "$pid" = "$self" ] && continue
+    exe="$(readlink "$entry/exe" 2>/dev/null)" || continue
+    case "$exe" in
+      "$NATIVE") echo "$pid"; continue ;;
+    esac
+    # A browser, and this appliance's kiosk profile. Both halves are required:
+    # the television's own browser application and any other Chromium on the
+    # box are none of this script's business.
+    case "$exe" in
+      *chrome|*chromium|*chromium-browser) ;;
+      *) continue ;;
+    esac
+    if tr '\0' ' ' < "$entry/cmdline" 2>/dev/null | grep -qF -- "$BROWSER"; then
+      echo "$pid"
+    fi
+  done
+}
+
 gone() {
-  if pgrep -f -- "$NATIVE" >/dev/null 2>&1; then
-    return 1
-  fi
-  if pgrep -f -- "$BROWSER" >/dev/null 2>&1; then
-    return 1
-  fi
-  return 0
+  [ -z "$(matching)" ]
 }
 
 signal() {
-  pkill "$1" -f -- "$NATIVE" 2>/dev/null || true
-  pkill "$1" -f -- "$BROWSER" 2>/dev/null || true
+  for pid in $(matching); do
+    kill "$1" "$pid" 2>/dev/null || true
+  done
 }
 
 signal -TERM
@@ -66,6 +85,6 @@ while [ "$i" -lt 20 ]; do
   i=$((i + 1))
 done
 
-still="$(pgrep -f -- "$NATIVE" 2>/dev/null | tr '\n' ' ')$(pgrep -f -- "$BROWSER" 2>/dev/null | tr '\n' ' ')"
+still="$(matching | tr '\n' ' ')"
 echo "mediabox-ui-reap: arayüz hâlâ ayakta: $still" >&2
 exit 0

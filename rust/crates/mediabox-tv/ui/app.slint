@@ -1,9 +1,21 @@
 import { Theme, Metrics } from "theme.slint";
 import { Home } from "home.slint";
-import { Detail, SourceRow, TechRow } from "detail.slint";
-import { RailModel, PosterItem, AppTile, VitalsModel } from "components.slint";
+import { Media } from "media.slint";
+import { Search } from "search.slint";
+import { Library } from "library.slint";
+import { Detail, SourceRow } from "detail.slint";
+import { NowPlaying } from "now_playing.slint";
+import { Settings } from "settings.slint";
+import { Diagnostics } from "diagnostics.slint";
+import {
+    RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup,
+    SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
+} from "components.slint";
 
-export { RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow }
+export {
+    RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
+    DiagGroup, SheetRow, KeyCap, KeyRow, NpControl,
+}
 
 // What the television shows before there is anything to show.
 //
@@ -42,20 +54,18 @@ component Boot inherits Rectangle {
 }
 
 export component MediaBoxWindow inherits Window {
-    // sway is told to make this fullscreen and frameless by title, so the title
-    // is part of the contract with the compositor, not decoration.
     title: "MediaBox";
-    // The compositor makes this fullscreen on the appliance, so this only
-    // decides the shape of the window when the interface is run on a desktop
-    // to look at a layout. It is the design's own size for the same reason.
+    // The appliance's own platform makes this the size of the panel's mode, so
+    // this only decides the shape of the window when the interface is run on a
+    // desktop to look at a layout. It is the design's own size for that reason.
     preferred-width: 1920px;
     preferred-height: 1080px;
     background: Theme.bg;
     default-font-size: Metrics.root-font;
     // Installed on the appliance from Debian's own archive rather than carried
-    // in this repository or registered at run time: Slint 1.17 reads the
-    // system's fonts, and a typeface is not source code. If it is missing the
-    // interface still comes up in DejaVu — wrong, but visible and reportable.
+    // in this repository: Slint reads the system's fonts, and a typeface is not
+    // source code. If it is missing the interface still comes up in DejaVu —
+    // wrong, but visible and reportable.
     default-font-family: "Inter";
 
     // Which screen is on the panel. Rust owns this; the interface never decides
@@ -64,23 +74,51 @@ export component MediaBoxWindow inherits Window {
 
     in property <string> status: "Başlatılıyor…";
     in property <bool> failed: false;
-
-    in property <image> art-a;
-    in property <image> art-b;
-    in property <float> fade;
-    in property <string> hero-title;
-    in property <string> hero-meta;
-    in property <string> hero-summary;
-    in property <[string]> nav: ["Ana Sayfa", "Ara", "Şimdi Oynatılan", "Ayarlar"];
-    in property <[RailModel]> rails;
-    in property <[AppTile]> apps;
+    in property <string> notice;
+    in property <[string]> nav;
     in property <VitalsModel> vitals;
+
+    // ---- home
+    in property <[AppTile]> apps;
+    in property <RailModel> recent;
+    in property <int> recent-row: -1;
     in property <int> focus-row;
     in property <int> focus-col;
-    in property <string> notice;
 
-    // The detail screen. Its own artwork layers, because the home screen's keep
-    // their own crossfade going behind it and coming back should not restart.
+    // ---- the catalogue
+    in property <[RailModel]> media-rails;
+    in property <int> media-row;
+    in property <int> media-col;
+    in property <string> media-title;
+    in property <string> media-facts;
+    in property <string> media-summary;
+
+    // ---- search
+    in property <string> search-query;
+    in property <string> search-note;
+    in property <[KeyRow]> search-keys;
+    in property <int> search-key-row;
+    in property <int> search-key-col;
+    in property <bool> search-on-keys: true;
+    in property <[PosterItem]> search-results;
+    in property <int> search-index;
+    in property <int> search-columns: 5;
+
+    // ---- library
+    in property <[string]> library-tabs;
+    in property <[string]> library-notes;
+    in property <int> library-tab;
+    in property <bool> library-on-tabs: true;
+    in property <[PosterItem]> library-items;
+    in property <int> library-index;
+    in property <int> library-columns: 4;
+    in property <image> library-art;
+    in property <string> library-title;
+    in property <string> library-facts;
+    in property <string> library-summary;
+    in property <[string]> library-genres;
+
+    // ---- detail
     in property <image> detail-art-a;
     in property <image> detail-art-b;
     in property <float> detail-fade;
@@ -89,18 +127,56 @@ export component MediaBoxWindow inherits Window {
     in property <string> detail-facts;
     in property <string> detail-summary;
     in property <[string]> detail-genres;
-    in property <[string]> detail-people;
+    in property <[string]> detail-cast;
+    in property <[string]> detail-directors;
     in property <[string]> detail-actions;
     in property <[string]> detail-marks;
     in property <[string]> detail-cuts;
     in property <[bool]> detail-enabled;
+    in property <image> detail-logo;
     in property <[SourceRow]> detail-sources;
     in property <string> detail-note;
+    in property <bool> detail-on-sources;
+    in property <bool> detail-on-filter;
+    in property <[string]> detail-providers;
+    in property <int> detail-provider;
+    in property <int> detail-source-focus;
+    in property <int> detail-selected: -1;
     in property <[TechRow]> detail-technical;
     in property <string> detail-verdict;
     in property <string> detail-verdict-tone;
-    in property <int> detail-row;
     in property <int> detail-col;
+
+    // ---- now playing
+    in property <image> np-art;
+    in property <string> np-title;
+    in property <string> np-subtitle;
+    in property <string> np-note;
+    in property <string> np-surface;
+    in property <string> np-elapsed;
+    in property <string> np-duration;
+    in property <float> np-progress;
+    in property <[NpControl]> np-controls;
+    in property <int> np-focus;
+    in property <[TechRow]> np-technical;
+
+    // ---- settings
+    in property <[string]> settings-sections;
+    in property <int> settings-section;
+    in property <bool> settings-on-sections: true;
+    in property <[SettingRow]> settings-rows;
+    in property <int> settings-row;
+
+    // ---- diagnostics
+    in property <[DiagGroup]> diag-groups;
+    in property <int> diag-group;
+
+    // ---- the sheet over everything
+    in property <bool> sheet-open: false;
+    in property <string> sheet-kind: "power";
+    in property <string> sheet-title;
+    in property <[SheetRow]> sheet-rows;
+    in property <int> sheet-index;
 
     // Every key the television can send arrives here and is answered in Rust:
     // the focus model is deterministic and structural, and splitting it between
@@ -122,6 +198,59 @@ export component MediaBoxWindow inherits Window {
             failed: root.failed;
         }
 
+        if screen == "home": Home {
+            width: 100%;
+            height: 100%;
+            apps: root.apps;
+            vitals: root.vitals;
+            recent: root.recent;
+            recent-row: root.recent-row;
+            focus-row: root.focus-row;
+            focus-col: root.focus-col;
+        }
+
+        if screen == "media": Media {
+            width: 100%;
+            height: 100%;
+            rails: root.media-rails;
+            focus-row: root.media-row;
+            focus-col: root.media-col;
+            title: root.media-title;
+            facts: root.media-facts;
+            summary: root.media-summary;
+        }
+
+        if screen == "search": Search {
+            width: 100%;
+            height: 100%;
+            query: root.search-query;
+            note: root.search-note;
+            keys: root.search-keys;
+            key-row: root.search-key-row;
+            key-col: root.search-key-col;
+            on-keys: root.search-on-keys;
+            results: root.search-results;
+            index: root.search-index;
+            columns: root.search-columns;
+        }
+
+        if screen == "library": Library {
+            width: 100%;
+            height: 100%;
+            tabs: root.library-tabs;
+            notes: root.library-notes;
+            tab: root.library-tab;
+            on-tabs: root.library-on-tabs;
+            items: root.library-items;
+            index: root.library-index;
+            columns: root.library-columns;
+            art: root.library-art;
+            title: root.library-title;
+            facts: root.library-facts;
+            summary: root.library-summary;
+            genres: root.library-genres;
+        }
+
         if screen == "detail": Detail {
             width: 100%;
             height: 100%;
@@ -132,37 +261,110 @@ export component MediaBoxWindow inherits Window {
             title: root.detail-title;
             facts: root.detail-facts;
             summary: root.detail-summary;
+            logo: root.detail-logo;
             genres: root.detail-genres;
-            people: root.detail-people;
+            cast: root.detail-cast;
+            directors: root.detail-directors;
             actions: root.detail-actions;
             marks: root.detail-marks;
             cuts: root.detail-cuts;
             enabled: root.detail-enabled;
+            on-sources: root.detail-on-sources;
             sources: root.detail-sources;
             sources-note: root.detail-note;
+            providers: root.detail-providers;
+            provider: root.detail-provider;
+            on-filter: root.detail-on-filter;
+            source-focus: root.detail-source-focus;
+            selected: root.detail-selected;
             technical: root.detail-technical;
             verdict: root.detail-verdict;
             verdict-tone: root.detail-verdict-tone;
-            focus-row: root.detail-row;
             focus-col: root.detail-col;
         }
 
-        if screen == "home": Home {
+        if screen == "now-playing": NowPlaying {
             width: 100%;
             height: 100%;
-            art-a: root.art-a;
-            art-b: root.art-b;
-            fade: root.fade;
-            hero-title: root.hero-title;
-            hero-meta: root.hero-meta;
-            hero-summary: root.hero-summary;
-            nav: root.nav;
-            rails: root.rails;
-            apps: root.apps;
+            art: root.np-art;
+            title: root.np-title;
+            subtitle: root.np-subtitle;
+            note: root.np-note;
+            surface: root.np-surface;
+            elapsed: root.np-elapsed;
+            duration: root.np-duration;
+            progress: root.np-progress;
+            controls: root.np-controls;
+            focus-index: root.np-focus;
+            technical: root.np-technical;
+        }
+
+        if screen == "settings": Settings {
+            width: 100%;
+            height: 100%;
+            sections: root.settings-sections;
+            section: root.settings-section;
+            on-sections: root.settings-on-sections;
+            rows: root.settings-rows;
+            row-index: root.settings-row;
+        }
+
+        if screen == "diagnostics": Diagnostics {
+            width: 100%;
+            height: 100%;
+            groups: root.diag-groups;
+            group: root.diag-group;
+        }
+
+        // The bar. One component for every screen, so where the viewer is in
+        // the product, what time it is and whether the box is on the network
+        // are answered the same way everywhere.
+        if screen != "boot": TopBar {
+            x: 0;
+            y: 0;
+            width: 100%;
+            items: screen == "media" ? root.nav : [];
+            focus-col: root.media-col;
+            active: screen == "media" && root.media-row == 0;
             vitals: root.vitals;
-            focus-row: root.focus-row;
-            focus-col: root.focus-col;
-            notice: root.notice;
+            heading: screen == "media" ? "Filmler ve Diziler"
+                : screen == "search" ? "Ara"
+                : screen == "library" ? "Kitaplık"
+                : screen == "settings" ? "Ayarlar"
+                : screen == "diagnostics" ? "Tanılama"
+                : screen == "now-playing" ? "Şimdi Oynatılan"
+                : "";
+        }
+
+        // What went wrong, if anything did, without taking the screen away from
+        // what is working.
+        if notice != "": Rectangle {
+            x: Metrics.gutter;
+            y: root.height - self.height - Metrics.gutter * 0.6;
+            width: label.preferred-width + Metrics.root-font * 2;
+            height: Metrics.root-font * 2.4;
+            border-radius: Theme.radius * 0.7;
+            background: #151a23e0;
+            border-width: 1px;
+            border-color: Theme.line;
+
+            label := Text {
+                text: notice;
+                color: Theme.warn;
+                font-size: Metrics.text-chip;
+                font-weight: 600;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+            }
+        }
+
+        if sheet-open: Sheet {
+            title: root.sheet-title;
+            kind: root.sheet-kind;
+            rows: root.sheet-rows;
+            index: root.sheet-index;
         }
     }
 

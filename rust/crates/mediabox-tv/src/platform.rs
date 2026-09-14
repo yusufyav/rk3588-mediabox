@@ -79,15 +79,30 @@ impl PlanarBuffer for ImportedPlane {
     fn offsets(&self) -> [u32; 4] { [self.offset, 0, 0, 0] }
 }
 
-struct PresentedFrame {
+/// What it costs to make one GBM buffer scannable by the display controller,
+/// kept for as long as that buffer exists.
+///
+/// A GBM surface cycles through a small fixed set of buffer objects — two or
+/// three — and hands the same ones back round. The first version of this
+/// platform exported a dma-buf, imported it over PRIME and created a
+/// framebuffer *every frame*, then destroyed both on the next one: four ioctls
+/// per frame on the display device, each with its own cache maintenance, for a
+/// result that was identical to the one thrown away sixteen milliseconds
+/// earlier.
+///
+/// This is attached to the buffer object as GBM user data instead, so it is
+/// built once per buffer and destroyed exactly when the buffer is — which is
+/// when the surface itself goes, at shutdown. Releasing a locked front buffer
+/// back to the surface does not destroy it, so the next time that buffer comes
+/// round its framebuffer is already there.
+struct Scanout {
     kms: SharedKms,
     framebuffer: control::framebuffer::Handle,
     imported_handle: BufferHandle,
     _dma_buf: OwnedFd,
-    _bo: gbm::BufferObject<()>,
 }
 
-impl Drop for PresentedFrame {
+impl Drop for Scanout {
     fn drop(&mut self) {
         if let Err(e) = self.kms.destroy_framebuffer(self.framebuffer) {
             eprintln!("mediabox-tv.kms cleanup rmfb failed: {e}");
@@ -98,12 +113,137 @@ impl Drop for PresentedFrame {
     }
 }
 
+/// A buffer that is on the panel, or about to be.
+///
+/// Holding the locked `BufferObject` is what keeps GBM from handing it back to
+/// the renderer while the display controller is still reading it; it is
+/// released only once a later page flip has reported that the panel has moved
+/// on.
+struct PresentedFrame {
+    framebuffer: control::framebuffer::Handle,
+    _bo: gbm::BufferObject<Scanout>,
+    /// Only ever `Some` under `MEDIABOX_TV_NO_FB_CACHE`, where the framebuffer
+    /// belongs to the frame rather than to the buffer and is destroyed with it.
+    _uncached: Option<Scanout>,
+}
+
 #[derive(Default)]
 struct Presentation {
     current: Option<PresentedFrame>,
     pending_previous: Option<PresentedFrame>,
     waiting_for_flip: bool,
     first_frame_logged: bool,
+    /// How many buffers have needed a framebuffer built for them. On a healthy
+    /// run this stops at the surface's buffer count — two or three — and the
+    /// per-frame import work is gone. A number that keeps climbing means the
+    /// cache is not working and is worth seeing in the journal.
+    imports: u32,
+}
+
+/// Where a frame's time actually goes, split at the three boundaries this
+/// platform owns.
+///
+/// The brief for this work said to measure before optimising, and there was
+/// nothing to measure with: the interface reported frames per second and
+/// nothing about what a frame was spent on. These four numbers separate the
+/// scene (Slint laying out and FemtoVG drawing it) from the display pipeline
+/// (waiting for the panel, handing the buffer to EGL, and the KMS calls), which
+/// is the difference between a renderer problem and a scanout problem.
+#[derive(Clone, Copy, Default)]
+pub struct Phases {
+    pub frames: u32,
+    /// Everything `FemtoVGRenderer::render` did, including the three below.
+    pub total_us: u64,
+    /// Blocked on the previous page flip — the panel's own pace, not ours.
+    pub flip_wait_us: u64,
+    /// `eglSwapBuffers` on the Mali GBM surface.
+    pub swap_us: u64,
+    /// Locking the front buffer, and the page flip ioctl.
+    pub present_us: u64,
+}
+
+impl Phases {
+    /// Scene time: what is left once the display pipeline is taken out.
+    pub fn draw_us(&self) -> u64 {
+        self.total_us
+            .saturating_sub(self.flip_wait_us)
+            .saturating_sub(self.swap_us)
+            .saturating_sub(self.present_us)
+    }
+}
+
+thread_local! {
+    static PHASES: Cell<Phases> = const { Cell::new(Phases {
+        frames: 0, total_us: 0, flip_wait_us: 0, swap_us: 0, present_us: 0,
+    }) };
+    /// The panel's own mode, so the interface can state its frame budget in
+    /// terms of what the television actually asked for rather than a constant.
+    static MODE: Cell<(u32, u32, u32)> = const { Cell::new((0, 0, 0)) };
+}
+
+/// Where to write the next frame, when something has asked for one.
+///
+/// Taken by the swap that follows, so a snapshot is a real frame off the panel
+/// rather than a re-render into a different surface: what lands in the file is
+/// the image the display controller is about to scan out, at the panel's own
+/// resolution.
+thread_local! {
+    static SNAPSHOT: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Asks for the next drawn frame to be written to `path` as a PNG. Must be
+/// called on the event loop's thread.
+pub fn snapshot_to(path: std::path::PathBuf) {
+    SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(path));
+}
+
+/// Whether to rebuild each frame's framebuffer instead of keeping it with the
+/// buffer. Off in production; the measurement path, and nothing else.
+fn no_fb_cache() -> bool {
+    static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ANSWER.get_or_init(|| std::env::var_os("MEDIABOX_TV_NO_FB_CACHE").is_some())
+}
+
+fn add_phase(f: impl FnOnce(&mut Phases)) {
+    PHASES.with(|cell| {
+        let mut phases = cell.get();
+        f(&mut phases);
+        cell.set(phases);
+    });
+}
+
+/// The last reporting window, kept so the diagnostics screen can show what the
+/// renderer is doing without running a benchmark of its own.
+#[derive(Clone, Copy, Default)]
+pub struct Report {
+    pub frames: u32,
+    pub fps: f64,
+    pub draw_ms: f64,
+    pub flip_ms: f64,
+}
+
+thread_local! {
+    static LAST: Cell<Report> = const { Cell::new(Report {
+        frames: 0, fps: 0.0, draw_ms: 0.0, flip_ms: 0.0,
+    }) };
+}
+
+pub fn set_last_report(report: Report) {
+    LAST.with(|cell| cell.set(report));
+}
+
+pub fn last_report() -> Report {
+    LAST.with(|cell| cell.get())
+}
+
+/// Takes the accumulated timings and starts a new window.
+pub fn drain_phases() -> Phases {
+    PHASES.with(|cell| cell.replace(Phases::default()))
+}
+
+/// Width, height and refresh of the mode the display controller is driving.
+pub fn active_mode() -> (u32, u32, u32) {
+    MODE.with(|cell| cell.get())
 }
 
 struct SplitDisplay {
@@ -112,7 +252,7 @@ struct SplitDisplay {
     crtc: control::crtc::Handle,
     mode: control::Mode,
     gbm_device: gbm::Device<OwnedFd>,
-    gbm_surface: gbm::Surface<()>,
+    gbm_surface: gbm::Surface<Scanout>,
     presentation: RefCell<Presentation>,
     released: Cell<bool>,
 }
@@ -142,7 +282,7 @@ impl SplitDisplay {
             ).into());
         }
         let (width, height) = mode.size();
-        let gbm_surface = gbm_device.create_surface::<()>(
+        let gbm_surface = gbm_device.create_surface::<Scanout>(
             width.into(), height.into(), gbm::Format::Xrgb8888,
             gbm::BufferObjectFlags::RENDERING
                 | gbm::BufferObjectFlags::SCANOUT
@@ -155,6 +295,8 @@ impl SplitDisplay {
             connector.interface().as_str(), connector.interface_id(),
             width, height, mode.vrefresh()
         );
+
+        MODE.with(|cell| cell.set((width.into(), height.into(), mode.vrefresh())));
 
         let display = Rc::new(Self {
             kms, connector, crtc, mode, gbm_device, gbm_surface,
@@ -220,12 +362,25 @@ impl SplitDisplay {
         }
     }
 
+    /// Locks whatever the renderer just finished and returns it ready to flip.
+    ///
+    /// The expensive half — dma-buf export, PRIME import, ADDFB2 — happens only
+    /// the first time each of the surface's buffers is seen. After that this is
+    /// one `gbm_surface_lock_front_buffer` and a handle read.
     fn import_front_buffer(&self) -> Result<PresentedFrame, Box<dyn std::error::Error + Send + Sync>> {
-        let bo = unsafe { self.gbm_surface.lock_front_buffer() }
+        let mut bo = unsafe { self.gbm_surface.lock_front_buffer() }
             .map_err(|e| format!("lock Mali GBM front buffer: {e}"))?;
         if bo.format() != gbm::Format::Xrgb8888 {
             return Err(format!("unexpected GBM format: {:?}", bo.format()).into());
         }
+
+        if !no_fb_cache() {
+            if let Some(scanout) = bo.userdata() {
+                let framebuffer = scanout.framebuffer;
+                return Ok(PresentedFrame { framebuffer, _bo: bo, _uncached: None });
+            }
+        }
+
         let dma_buf = bo.fd_for_plane(0)
             .map_err(|e| format!("export GBM BO as dma-buf: {e}"))?;
         let imported_handle = self.kms.prime_fd_to_buffer(dma_buf.as_fd())
@@ -249,10 +404,49 @@ impl SplitDisplay {
                 return Err(format!("DRM_IOCTL_MODE_ADDFB2(card0 PRIME buffer): {e}").into());
             }
         };
-        Ok(PresentedFrame {
-            kms: self.kms.clone(), framebuffer, imported_handle,
-            _dma_buf: dma_buf, _bo: bo,
-        })
+
+        let imports = {
+            let mut state = self.presentation.borrow_mut();
+            state.imports += 1;
+            state.imports
+        };
+        // A healthy run prints this two or three times and never again — once
+        // per buffer the GBM surface owns. The cap is for the measurement path
+        // below, where every frame imports: a line per frame would be the
+        // journal measuring itself.
+        if imports <= 8 {
+            eprintln!(
+                "mediabox-tv.kms scanout-buffer n={} fb={} modifier={:?} pitch={}",
+                imports, u32::from(framebuffer), bo.modifier(), bo.stride_for_plane(0)
+            );
+        }
+
+        if no_fb_cache() {
+            // The measurement path: the framebuffer and the PRIME handle are
+            // torn down as soon as the frame is off the panel, so the next
+            // frame pays for them again. This is what the platform used to do
+            // on every frame, kept behind a variable so the cost of it can be
+            // measured on the appliance rather than argued about.
+            return Ok(PresentedFrame {
+                framebuffer,
+                _bo: bo,
+                _uncached: Some(Scanout {
+                    kms: self.kms.clone(),
+                    framebuffer,
+                    imported_handle,
+                    _dma_buf: dma_buf,
+                }),
+            });
+        }
+
+        bo.set_userdata(Scanout {
+            kms: self.kms.clone(),
+            framebuffer,
+            imported_handle,
+            _dma_buf: dma_buf,
+        });
+
+        Ok(PresentedFrame { framebuffer, _bo: bo, _uncached: None })
     }
 
     fn present(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -265,6 +459,14 @@ impl SplitDisplay {
             ).map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
             state.current = Some(frame);
         } else {
+            // Only one flip may be outstanding on a CRTC. When the wait in
+            // `swap_buffers` was skipped because a free buffer was available,
+            // this is where the pace is kept.
+            if state.waiting_for_flip {
+                drop(state);
+                self.wait_for_page_flip()?;
+                state = self.presentation.borrow_mut();
+            }
             self.kms.page_flip(
                 self.crtc, frame.framebuffer, control::PageFlipFlags::EVENT, None,
             ).map_err(|e| format!("DRM_IOCTL_MODE_PAGE_FLIP: {e}"))?;
@@ -431,6 +633,63 @@ fn gl_string(display: &glutin::display::Display, name: u32) -> Option<String> {
     (!value.is_null()).then(|| unsafe { CStr::from_ptr(value.cast()) }.to_string_lossy().into_owned())
 }
 
+impl GlContext {
+    /// Reads the frame back off the GPU and writes it as a PNG.
+    ///
+    /// Slow and deliberately so — a 4K readback is tens of megabytes — which is
+    /// why it happens once, when asked, and never on an ordinary frame.
+    fn capture(&self, path: &Path) {
+        const GL_RGBA: u32 = 0x1908;
+        const GL_UNSIGNED_BYTE: u32 = 0x1401;
+        type ReadPixels = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut u8);
+
+        let symbol = CString::new("glReadPixels").expect("literal");
+        let address = self.context.display().get_proc_address(&symbol);
+        if address.is_null() {
+            eprintln!("mediabox-tv.snapshot glReadPixels unavailable");
+            return;
+        }
+        let read: ReadPixels = unsafe { std::mem::transmute(address) };
+
+        let size = self.display.size();
+        let (width, height) = (size.width, size.height);
+        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        unsafe {
+            read(0, 0, width as i32, height as i32, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_mut_ptr());
+        }
+
+        // GL's origin is the bottom-left corner and a PNG's is the top-left, so
+        // the rows come back upside down. The surface is XRGB, so whatever the
+        // driver left in the fourth channel is not alpha and is overwritten.
+        let stride = (width as usize) * 4;
+        let mut image = vec![0u8; pixels.len()];
+        for row in 0..height as usize {
+            let from = (height as usize - 1 - row) * stride;
+            let to = row * stride;
+            image[to..to + stride].copy_from_slice(&pixels[from..from + stride]);
+            for pixel in image[to..to + stride].chunks_exact_mut(4) {
+                pixel[3] = 0xff;
+            }
+        }
+
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match image::RgbaImage::from_raw(width, height, image) {
+            Some(buffer) => match buffer.save(path) {
+                Ok(()) => eprintln!(
+                    "mediabox-tv.snapshot wrote {} {}x{}",
+                    path.display(),
+                    width,
+                    height
+                ),
+                Err(e) => eprintln!("mediabox-tv.snapshot {} failed: {e}", path.display()),
+            },
+            None => eprintln!("mediabox-tv.snapshot buffer did not fit the frame"),
+        }
+    }
+}
+
 unsafe impl OpenGLInterface for GlContext {
     fn ensure_current(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !self.context.is_current() {
@@ -440,9 +699,36 @@ unsafe impl OpenGLInterface for GlContext {
     }
 
     fn swap_buffers(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.display.wait_for_page_flip()?;
+        // Only wait when there is nothing left to draw into. With a surface
+        // that allocates a third buffer this lets the GPU start the next frame
+        // while the panel is still showing the last one; with two it is the
+        // same wait as before, in the same place.
+        let at = std::time::Instant::now();
+        if !self.display.gbm_surface.has_free_buffers() {
+            self.display.wait_for_page_flip()?;
+        }
+        let waited = at.elapsed();
+
+        // Before the swap, while the finished frame is still the one the
+        // context will read from.
+        if let Some(path) = SNAPSHOT.with(|cell| cell.borrow_mut().take()) {
+            self.capture(&path);
+        }
+
+        let at = std::time::Instant::now();
         self.surface.swap_buffers(&self.context)?;
-        self.display.present()
+        let swapped = at.elapsed();
+
+        let at = std::time::Instant::now();
+        let answer = self.display.present();
+        let presented = at.elapsed();
+
+        add_phase(|phases| {
+            phases.flip_wait_us += waited.as_micros() as u64;
+            phases.swap_us += swapped.as_micros() as u64;
+            phases.present_us += presented.as_micros() as u64;
+        });
+        answer
     }
 
     fn resize(&self, _width: NonZeroU32, _height: NonZeroU32)
@@ -458,6 +744,14 @@ struct SplitWindow {
     renderer: FemtoVGRenderer,
     display: Rc<SplitDisplay>,
     redraw: Cell<bool>,
+    /// Draws every frame the panel will take, whether anything changed or not.
+    ///
+    /// The interface is event-driven and idles at nothing, which is right for a
+    /// television and useless for measuring throughput: a run that is asleep
+    /// reports the frame rate of the last thing that moved. Set
+    /// `MEDIABOX_TV_BENCH=1` to make the loop draw continuously, which is what
+    /// the frame-pacing figures in the acceptance report are taken from.
+    bench: bool,
 }
 
 impl SplitWindow {
@@ -468,13 +762,20 @@ impl SplitWindow {
             renderer,
             display,
             redraw: Cell::new(true),
+            bench: std::env::var_os("MEDIABOX_TV_BENCH").is_some(),
         }))
     }
 
     fn render_if_needed(&self) -> Result<(), PlatformError> {
         if self.redraw.replace(false) {
+            let at = std::time::Instant::now();
             self.renderer.render()?;
-            if self.window.has_active_animations() { self.redraw.set(true); }
+            let total = at.elapsed();
+            add_phase(|phases| {
+                phases.frames += 1;
+                phases.total_us += total.as_micros() as u64;
+            });
+            if self.bench || self.window.has_active_animations() { self.redraw.set(true); }
         }
         Ok(())
     }
@@ -528,23 +829,70 @@ impl EventLoopProxy for Proxy {
 
 struct DirectInput;
 
+/// `EVIOCGRAB`, which is `_IOW('E', 0x90, int)`.
+const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
+
 impl LibinputInterface for DirectInput {
     fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
         let access = flags & libc::O_ACCMODE;
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .read(access == libc::O_RDONLY || access == libc::O_RDWR)
             .write(access == libc::O_WRONLY || access == libc::O_RDWR)
             .custom_flags(flags & !libc::O_ACCMODE)
-            .open(path).map(Into::into)
-            .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+            .open(path)
+            .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))?;
+
+        // Take the device exclusively, so the kernel's own console handler
+        // stops seeing it.
+        //
+        // Without this every press also went to the virtual terminal, which is
+        // still sitting behind the television with a login prompt on it. It is
+        // invisible while this process holds DRM master — and then Kodi hands
+        // the display back, there is a moment before the mode is set again, and
+        // the panel shows a console with an evening's worth of remote presses
+        // typed into it. Reported from the appliance, exactly that way.
+        //
+        // EVIOCGRAB is an input-core grab rather than an evdev one: every other
+        // handler of the device, the console's included, stops receiving from
+        // it. It does not touch /dev/cec0, which the daemon owns and reads by
+        // another road entirely, so the normalised remote is unaffected.
+        //
+        // A refusal is not fatal. Another process holding the grab means keys
+        // reach the console again, which is untidy rather than broken, and a
+        // television with no input at all would be worse.
+        // SAFETY: one ioctl on a file descriptor this function owns.
+        if unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB, 1) } != 0 {
+            eprintln!(
+                "mediabox-tv.input could not take {} exclusively: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+
+        Ok(file.into())
     }
-    fn close_restricted(&mut self, fd: OwnedFd) { drop(File::from(fd)); }
+
+    fn close_restricted(&mut self, fd: OwnedFd) {
+        // Released explicitly rather than left to the close: the appliance
+        // hands the display and the remote to Kodi, and a device still grabbed
+        // by a process that is going away is a remote that does nothing.
+        // SAFETY: one ioctl on a descriptor this call owns.
+        unsafe {
+            libc::ioctl(fd.as_raw_fd(), EVIOCGRAB, 0);
+        }
+        drop(File::from(fd));
+    }
 }
 
 struct SplitPlatform {
     window: Rc<SplitWindow>,
     receiver: RefCell<mpsc::Receiver<LoopMessage>>,
     proxy: Proxy,
+    /// Which of the seat's devices are remote controls, decided once each.
+    ///
+    /// Keyed by the kernel's own name for the device ("event3"), because that
+    /// is what libinput hands back and what /sys is organised by.
+    remotes: RefCell<std::collections::HashMap<String, bool>>,
 }
 
 impl SplitPlatform {
@@ -555,7 +903,50 @@ impl SplitPlatform {
         let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if raw < 0 { return Err(format!("create event-loop eventfd: {}", std::io::Error::last_os_error()).into()); }
         let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(raw) });
-        Ok(Self { window, receiver: RefCell::new(receiver), proxy: Proxy { sender, wake } })
+        Ok(Self {
+            window,
+            receiver: RefCell::new(receiver),
+            proxy: Proxy { sender, wake },
+            remotes: RefCell::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// Whether a device is a remote control rather than a keyboard.
+    ///
+    /// The daemon owns the remote: it holds /dev/cec0, decodes the user-control
+    /// codes and publishes them as normalised actions, and this interface
+    /// listens to that. The kernel *also* registers the same remote as an
+    /// rc-core input device, so without this every press of the television
+    /// remote reaches the interface twice — once here as an ordinary key and
+    /// once as an action. A compositor used to switch that device off; there is
+    /// no compositor any more.
+    ///
+    /// Decided on what the device is attached to rather than on its name. The
+    /// CEC remote on this board is called "dw_hdmi_qp", which contains neither
+    /// "cec" nor "remote", and the name check that came before this let every
+    /// press through.
+    fn remote_control(&self, device: &input::Device) -> bool {
+        let sysname = device.sysname().to_string();
+        if let Some(answer) = self.remotes.borrow().get(&sysname) {
+            return *answer;
+        }
+
+        // /sys/class/input/event0 -> ../../devices/platform/fdea0000.hdmi/rc/rc0/input0/event0
+        let path = std::fs::canonicalize(format!("/sys/class/input/{sysname}"))
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let answer = path.contains("/rc/rc")
+            || device.name().to_ascii_lowercase().contains("cec")
+            || device.name() == "dw_hdmi_qp";
+
+        eprintln!(
+            "mediabox-tv.input device {} name={:?} remote={}",
+            sysname,
+            device.name(),
+            answer
+        );
+        self.remotes.borrow_mut().insert(sysname, answer);
+        answer
     }
 
     fn drain_messages(&self) -> bool {
@@ -573,7 +964,9 @@ impl SplitPlatform {
         libinput.dispatch().map_err(|e| format!("libinput dispatch: {e}"))?;
         for event in libinput {
             let input::Event::Keyboard(input::event::KeyboardEvent::Key(key)) = event else { continue };
-            if key.device().name().to_ascii_lowercase().contains("cec") { continue; }
+            if self.remote_control(&key.device()) {
+                continue;
+            }
             let Some(text) = key_text(key.key()) else { continue };
             let event = match key.key_state() {
                 KeyState::Pressed => WindowEvent::KeyPressed { text },
@@ -629,6 +1022,19 @@ impl Platform for SplitPlatform {
     }
 }
 
+/// What a USB or Bluetooth keyboard's key code means to this interface.
+///
+/// Two vocabularies, deliberately separate. The named keys are navigation and
+/// are answered by the focus model; the printable ones are text, and exist so
+/// the search screen can be typed into by somebody who would rather not spell
+/// a film out on a grid with a remote.
+///
+/// Nothing here maps to power. KEY_POWER (116), KEY_POWER2 (356), KEY_RESTART
+/// (408) and KEY_SLEEP (142) are not in either table and never will be: this
+/// interface has no business restarting the appliance because a key was
+/// pressed, and a television remote that emits one of those through a HID
+/// endpoint must reach a dead end here. See `actions.rs`, and the udev rule
+/// that stops systemd-logind from acting on them first.
 fn key_text(code: u32) -> Option<slint::SharedString> {
     use slint::platform::Key;
     let key = match code {
@@ -640,9 +1046,53 @@ fn key_text(code: u32) -> Option<slint::SharedString> {
         105 => Key::LeftArrow,
         106 => Key::RightArrow,
         108 => Key::DownArrow,
-        _ => return None,
+        111 => Key::Delete,
+        _ => return printable(code).map(|c| c.to_string().into()),
     };
     Some(char::from(key).to_string().into())
+}
+
+/// The letters, digits and the few marks a title can contain, in the US layout
+/// the appliance assumes. There is no xkb here and no compose: a keyboard on a
+/// television is for typing a film's name into a search box, and anything more
+/// belongs to the browser application.
+fn printable(code: u32) -> Option<char> {
+    const ROW_NUMBERS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    const ROW_Q: [char; 10] = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
+    const ROW_A: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
+    const ROW_Z: [char; 7] = ['z', 'x', 'c', 'v', 'b', 'n', 'm'];
+
+    Some(match code {
+        2..=11 => ROW_NUMBERS[(code - 2) as usize],
+        16..=25 => ROW_Q[(code - 16) as usize],
+        30..=38 => ROW_A[(code - 30) as usize],
+        44..=50 => ROW_Z[(code - 44) as usize],
+        12 => '-',
+        57 => ' ',
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The keyboard must not have a key that can turn the appliance off.
+    #[test]
+    fn no_key_code_maps_to_power() {
+        for code in [116u32, 142, 356, 408, 0x198, 0x1ae] {
+            assert!(key_text(code).is_none(), "key code {code} reached the interface");
+        }
+    }
+
+    #[test]
+    fn a_film_can_be_typed() {
+        let word: String = [30u32, 18, 19, 20, 57, 50, 50]
+            .into_iter()
+            .filter_map(|code| printable(code))
+            .collect();
+        assert_eq!(word, "aert mm");
+    }
 }
 
 pub fn install() -> Result<(), PlatformError> {

@@ -335,6 +335,39 @@ pub enum Request {
     BrowserOpen { url: String },
     InputInject { action: InputAction },
     InputMonitor,
+    /// Restart or shut the appliance down.
+    ///
+    /// A closed enum rather than a command line, and one of exactly two
+    /// answers. It exists because the alternative was worse: with no way to
+    /// restart the box from the television, the appliance kept
+    /// `HandlePowerKey`/`HandleRebootKey` doing it in systemd-logind, where a
+    /// code from the *television's own remote* — the HDMI block registers a CEC
+    /// remote-control input device, and udev tags it `power-switch` — restarted
+    /// the machine with no application involved. That is switched off now, and
+    /// this is the deliberate path in its place: the interface asks twice
+    /// before sending it.
+    SystemPower { action: PowerAction },
+}
+
+/// The only two things this appliance will do to its own power state on
+/// request. Not a superset "and also suspend, and also kexec": a television box
+/// that can be told to do something no remote can undo is a television box that
+/// needs a keyboard to recover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerAction {
+    Restart,
+    Shutdown,
+}
+
+impl PowerAction {
+    /// The systemctl verb. Fixed strings, never interpolated from a request.
+    pub fn verb(self) -> &'static str {
+        match self {
+            PowerAction::Restart => "reboot",
+            PowerAction::Shutdown => "poweroff",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -407,5 +440,23 @@ mod tests {
     #[test]
     fn unknown_commands_are_rejected() {
         assert!(serde_json::from_str::<Request>(r#"{"command":"shell","argv":["id"]}"#).is_err());
+    }
+
+    #[test]
+    fn power_is_a_closed_pair_of_verbs() {
+        let restart: Request =
+            serde_json::from_str(r#"{"command":"system_power","action":"restart"}"#).unwrap();
+        assert_eq!(restart, Request::SystemPower { action: PowerAction::Restart });
+        assert_eq!(PowerAction::Restart.verb(), "reboot");
+        assert_eq!(PowerAction::Shutdown.verb(), "poweroff");
+        // Anything that is not one of the two is not a power request.
+        assert!(
+            serde_json::from_str::<Request>(r#"{"command":"system_power","action":"kexec"}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<Request>(r#"{"command":"system_power","action":"reboot"}"#)
+                .is_err()
+        );
     }
 }

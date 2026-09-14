@@ -161,7 +161,7 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         performance_note: "—".into(),
         storage_text: "—".into(),
         storage_fraction: 0.0,
-        network: "—".into(),
+        network: "Ağ yok".into(),
         machine: "Orange Pi 5 Ultra · RK3588".into(),
     };
 
@@ -220,13 +220,15 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         }
     }
 
-    if let Some(interface) = root
+    // The bar says whether the box is on the network, not which kernel device
+    // it is on: "enP3p49s0" beside the clock on a television is the appliance
+    // talking to itself. The interface's name is on the diagnostics screen,
+    // where somebody who wants it will look.
+    let online = root
         .pointer("/network/default/interface")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    {
-        model.network = interface.into();
-    }
+        .is_some_and(|value| !value.is_empty());
+    model.network = if online { "Bağlı".into() } else { "Ağ yok".into() };
 
     model
 }

@@ -1,20 +1,23 @@
 // The product's visual language, in Slint's own terms.
 //
-// The web interface's stylesheet is the reference for what this should look
-// like, not for how it is written: `clamp()`, `vw` and `rem` are statements of
-// intent — "as big as the panel allows, between these two bounds" — and they
-// are expressed here as ordinary arithmetic over the viewport, which is what
-// they always meant.
-//
 // Everything derives from the viewport rather than from a fixed pixel grid,
 // because the panel is not ours to choose: a 4K television in one house, a
-// 1440p monitor in another.
+// 1440p monitor in another. The `min()` bounds are written against a 1920-wide
+// design and the platform's integer scale is what keeps a 3840-wide panel
+// inside them.
+//
+// Two rules run through all of it. Content first: artwork is as large as the
+// panel affords and chrome is as small as it can be while still being readable
+// from a sofa. And one focus language: a white ring, a small growth, 130 ms.
 
 export global Theme {
-    // Ground and surfaces.
+    // Ground and surfaces. Near-black rather than black — a television's own
+    // letterboxing is blacker than any panel can draw, and matching it makes
+    // the interface look like a fault.
     out property <brush> bg: #07080b;
     out property <brush> bg-raise: #0f131a;
     out property <brush> bg-card: #151a23;
+    out property <brush> bg-sheet: #0d1118;
     out property <brush> line: #232a36;
     out property <brush> line-soft: #1a202a;
 
@@ -31,16 +34,26 @@ export global Theme {
     out property <brush> bad: #f87171;
 
     out property <brush> focus-ring: #ffffff;
+    out property <brush> focus-fill: #ffffff;
 
     out property <length> radius: 16px;
-    out property <length> radius-art: 22px;
+    out property <length> radius-art: 20px;
 
-    // One focus language everywhere. The duration is the web interface's
-    // measured 130 ms; the easing is the same curve.
+    // One focus language everywhere. 130 ms is the measured figure from the
+    // web interface; the easing is the same curve.
     out property <duration> focus-in: 130ms;
-    out property <duration> glide: 150ms;
-    out property <duration> crossfade: 260ms;
+    out property <duration> glide: 160ms;
+    out property <duration> crossfade: 280ms;
     out property <easing> ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+
+    // A verdict word to a colour, in one place. Rust sends "good"/"warn"/"bad"
+    // or an empty string, and no screen decides what those look like.
+    public pure function tone(name: string) -> brush {
+        return name == "good" ? ok
+             : name == "warn" ? warn
+             : name == "bad"  ? bad
+             : muted;
+    }
 }
 
 export global Metrics {
@@ -48,8 +61,7 @@ export global Metrics {
     in property <length> vw: 1920px;
     in property <length> vh: 1080px;
 
-    // A poster is 2:3 and as wide as the panel affords, within bounds. The
-    // stylesheet writes this as clamp(118px, 12.4vw, 470px).
+    // A poster is 2:3 and as wide as the panel affords, within bounds.
     out property <length> card-w: max(118px, min(470px, vw * 0.124));
     out property <length> card-h: card-w * 1.5;
 
@@ -59,11 +71,11 @@ export global Metrics {
     out property <length> rail-gap: max(9px, min(40px, vw * 0.0105));
     out property <length> topbar: max(50px, min(128px, vh * 0.064));
 
-    // The type scale's root. Everything else is a multiple of it, which is what
-    // `rem` meant in the stylesheet.
+    // The type scale's root. Everything else is a multiple of it.
     out property <length> root-font: max(15px, min(44px, vw * 0.0116));
 
     out property <length> title-hero: max(38px, min(86px, vw * 0.048));
+    out property <length> title-screen: max(30px, min(62px, vw * 0.034));
     out property <length> title-detail: max(27px, min(51px, vw * 0.029));
     out property <length> title-rail: root-font * 1.16;
     out property <length> text-card: root-font * 0.82;
@@ -72,24 +84,33 @@ export global Metrics {
     out property <length> text-label: root-font * 0.74;
 
     // Where the focused band parks, measured from the top of the scrolling
-    // area. The web interface calls this TOP_INSET.
-    out property <length> top-inset: 92px;
+    // area.
+    out property <length> top-inset: max(60px, vh * 0.08);
+
+    // Vertical rhythm between blocks on a screen.
+    out property <length> block-gap: max(10px, min(40px, vh * 0.016));
+
+    // The launcher's tiles. The web interface's own `.app-grid` measurement:
+    // minmax(clamp(104px, 9.6vw, 300px), 1fr), with its row gap.
+    out property <length> tile-w: max(104px, min(300px, vw * 0.096));
+    out property <length> tile-gap: max(10px, min(36px, vw * 0.012));
+
+    // A poster grid — search and the library. Slightly tighter than a shelf,
+    // because a grid is read in two directions.
+    out property <length> grid-gap: max(10px, min(34px, vw * 0.0115));
+
+    // The letter grid on the search screen.
+    out property <length> key-w: max(46px, min(104px, vw * 0.031));
+    out property <length> key-h: key-w * 0.78;
+    out property <length> key-gap: max(5px, min(14px, vw * 0.005));
 
     // ---- the home screen's own frame
     //
     // Read off the web interface's stylesheet rather than invented, so the two
-    // screens are the same screen: `.home` is a two-column grid with the
-    // machine's vitals down the left, and `.app-grid` is the launcher beside
-    // them. Every clamp() there is the same arithmetic here.
-
-    // .home  grid-template-columns: clamp(190px, 17.5vw, 560px)
-    out property <length> vitals-w: max(190px, min(560px, vw * 0.175));
-    // .home  gap
-    out property <length> home-gap: max(14px, min(56px, vw * 0.018));
-    // .home  padding-block-start
-    out property <length> home-pad-top: max(14px, min(60px, vh * 0.026));
-    // .home-main  gap
-    out property <length> main-gap: max(10px, min(40px, vh * 0.016));
+    // surfaces are the same product seen from two rooms: `.home` is a
+    // two-column grid with the machine's readings down the left and the
+    // launcher beside them, and every clamp() there is the same arithmetic
+    // here.
 
     // .vitals  gap
     out property <length> widget-gap: max(8px, min(22px, vh * 0.01));
@@ -103,9 +124,7 @@ export global Metrics {
     // .dials  gap
     out property <length> dial-gap: max(10px, min(28px, vw * 0.011));
 
-    // .app-grid  grid-template-columns: repeat(auto-fill, minmax(clamp(104px, 9.6vw, 300px), 1fr))
-    out property <length> tile-w: max(104px, min(300px, vw * 0.096));
-    // .app-grid  gap: <row> <column>
-    out property <length> tile-gap-y: max(10px, min(44px, vw * 0.015));
-    out property <length> tile-gap-x: max(10px, min(36px, vw * 0.012));
+    // A sheet over the screen: the sources, the power menu, a confirmation.
+    out property <length> sheet-w: max(320px, min(900px, vw * 0.44));
+    out property <length> sheet-pad: max(14px, min(44px, vw * 0.016));
 }

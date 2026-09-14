@@ -4,7 +4,8 @@ use crate::media::MediaClient;
 use crate::player::{PlayerManager, Playing};
 use mediabox_cec::Adapter;
 use mediabox_core::{
-    CecStatus, InputMode, InputSource, Request, Response, ServiceHealth, Surface, SystemStatus,
+    CecStatus, InputMode, InputSource, PowerAction, Request, Response, ServiceHealth, Surface,
+    SystemStatus,
 };
 use mediabox_input::{InputManager, KodiRoute, RouteDecision};
 use serde_json::{Value, json};
@@ -167,10 +168,43 @@ impl AppState {
             Request::InputMonitor => {
                 Response::failure("PROTOCOL_ERROR", "input.monitor akış komutudur")
             }
+            Request::SystemPower { action } => Self::system_power(action).await,
         }
     }
 
-    /// Hand the display to `target`, and point the input bus at whatever now
+    /// Restart or shut the appliance down.
+///
+/// The only place in this daemon that does either. `systemctl` is spelled out
+/// and the verb comes from a two-valued enum, so there is no path from a
+/// request body to an arbitrary command — the request cannot even name one.
+///
+/// systemd-logind used to do this by itself, on a key event from the HDMI
+/// block's CEC remote-control device. That is switched off on the appliance
+/// now (a udev rule drops the `power-switch` tag, and a logind drop-in ignores
+/// the power and reboot keys), which is what makes this the only route and
+/// makes it worth having.
+async fn system_power(action: PowerAction) -> Response {
+    let verb = action.verb();
+    eprintln!("mediaboxd.power request verb={verb}");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::process::Command::new("/usr/bin/systemctl").arg(verb).output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) if output.status.success() => {
+            Response::success(json!({"action": action, "accepted": true}))
+        }
+        Ok(Ok(output)) => Response::failure(
+            "POWER_ERROR",
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ),
+        Ok(Err(error)) => Response::failure("POWER_ERROR", error.to_string()),
+        Err(_) => Response::failure("POWER_ERROR", "systemctl zaman aşımı"),
+    }
+}
+
+/// Hand the display to `target`, and point the input bus at whatever now
     /// owns it.
     ///
     /// These two belong together. While Kodi is on the television there is no

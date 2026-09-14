@@ -97,27 +97,50 @@ impl Metrics {
     }
 
     /// Emits a line if the reporting window has elapsed, and starts a new one.
+    ///
+    /// The line is the appliance's own evidence, so it carries the budget as
+    /// well as the reading: the target is the panel's refresh rate as the
+    /// display controller reports it, not a number written here, because a
+    /// 50 Hz television and a 60 Hz monitor are two different passes.
     pub fn report_due(&mut self) -> Option<String> {
         let elapsed = self.window_start.elapsed();
         if elapsed < REPORT_EVERY {
             return None;
         }
 
-        let fps = if elapsed.as_secs_f64() > 0.0 {
-            self.frames as f64 / elapsed.as_secs_f64()
-        } else {
-            0.0
+        let seconds = elapsed.as_secs_f64();
+        let fps = if seconds > 0.0 { self.frames as f64 / seconds } else { 0.0 };
+
+        let (_, _, refresh) = crate::platform::active_mode();
+        let phases = crate::platform::drain_phases();
+        let per_frame = |total: u64| -> f64 {
+            if phases.frames == 0 { 0.0 } else { total as f64 / phases.frames as f64 / 1000.0 }
         };
+        let draw_ms = per_frame(phases.draw_us());
+        let flip_ms = per_frame(phases.flip_wait_us);
+
+        let p95 = percentile_ms(&mut self.frame_times, 0.95);
+        let p99 = percentile_ms(&mut self.frame_times, 0.99);
+
+        crate::platform::set_last_report(crate::platform::Report {
+            frames: self.frames,
+            fps,
+            draw_ms,
+            flip_ms,
+        });
 
         let line = format!(
-            "mediabox-tv.metrics {{\"fps\":{:.1},\"long_frames\":{},\"p99_frame_ms\":{:.1},\
-             \"key_to_render_p95_ms\":{},\"rss_kb\":{},\"cpu_pct\":{:.1}}}",
-            fps,
-            self.long_frames,
-            percentile_ms(&mut self.frame_times, 0.99),
-            percentile_ms(&mut self.key_to_render, 0.95) as u64,
-            rss_kb().unwrap_or(0),
-            self.cpu.advance(),
+            "mediabox-tv.metrics {{\"fps\":{fps:.1},\"target_fps\":{refresh},\
+             \"p95_frame_ms\":{p95:.1},\"p99_frame_ms\":{p99:.1},\"long_frames\":{long},\
+             \"draw_ms\":{draw_ms:.2},\"flip_wait_ms\":{flip_ms:.2},\
+             \"swap_ms\":{swap:.2},\"present_ms\":{present:.2},\
+             \"key_to_render_p95_ms\":{key},\"rss_kb\":{rss},\"cpu_pct\":{cpu:.1}}}",
+            long = self.long_frames,
+            swap = per_frame(phases.swap_us),
+            present = per_frame(phases.present_us),
+            key = percentile_ms(&mut self.key_to_render, 0.95) as u64,
+            rss = rss_kb().unwrap_or(0),
+            cpu = self.cpu.advance(),
         );
 
         self.window_start = Instant::now();

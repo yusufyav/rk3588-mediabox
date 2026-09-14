@@ -1,262 +1,111 @@
 import { Theme, Metrics } from "theme.slint";
-import { Rail, RailModel, PosterItem, AppTile, AppIcon, Vitals, VitalsModel } from "components.slint";
+import { Rail, RailModel, AppIcon, AppTile, Vitals, VitalsModel } from "components.slint";
 
-// The bar every screen starts below. It does not scroll with the shelves, so
-// where the viewer is in the product is always on the panel.
-component TopBar inherits Rectangle {
-    in property <[string]> items;
-    in property <int> selected;
-    in property <int> focus-col;
-    in property <bool> active;
-
-    // Taller than the bar itself, and transparent past it. A panel would cut
-    // the backdrop off with a straight edge; a gradient only as tall as the
-    // text left the shelf that scrolls underneath showing through the words.
-    height: Metrics.topbar * 1.9;
-    background: @linear-gradient(180deg,
-        #040508 0%, #040508fa 42%, #040508c4 68%, #04050861 86%, transparent 100%);
-
-    HorizontalLayout {
-        y: 0;
-        height: Metrics.topbar;
-        padding-left: Metrics.gutter;
-        padding-right: Metrics.gutter;
-        spacing: Metrics.gutter * 0.5;
-        alignment: start;
-
-        for label[i] in items: Rectangle {
-            property <bool> focused: active && i == focus-col;
-            width: text.preferred-width + Metrics.root-font * 1.6;
-            border-radius: Theme.radius * 0.7;
-            background: focused ? Theme.focus-ring : transparent;
-
-            text := Text {
-                text: label;
-                color: focused ? #0a0c10 : (i == selected ? Theme.text : Theme.muted);
-                font-size: Metrics.root-font * 0.92;
-                font-weight: 640;
-                vertical-alignment: center;
-            }
-
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
-        }
-    }
-}
-
+// The home screen of the appliance, which is not a media screen.
+//
+// MediaBox is an environment for this board rather than a player with a menu,
+// so the first screen is what the box can be used for and how the box itself is
+// doing: a grid of applications, and a column of the machine's own vital signs.
+// The film and series catalogue is one of those applications and lives behind
+// its own tile.
+//
+// This was got wrong once, in this very milestone: the catalogue was printed
+// straight onto this screen and the operating system's home became a video
+// shop's front page. The web interface's own source carries that warning in a
+// comment above the same layout, and the two surfaces are meant to be the same
+// product seen from two rooms.
+//
+// Row 0 is the bar, row 1 is the launcher, row 2 is the one shelf that belongs
+// here: what the viewer had not finished.
 export component Home inherits Rectangle {
-    // Two layers and a mix, so a new backdrop arrives by fading rather than by
-    // replacing. The image manager only ever swaps the layer that is fading in,
-    // and the fade is the only thing animated: no blur, no filter.
-    in property <image> art-a;
-    in property <image> art-b;
-    in property <float> fade;
-
-    in property <string> hero-title;
-    in property <string> hero-meta;
-    in property <string> hero-summary;
-
-    in property <[string]> nav;
-    in property <[RailModel]> rails;
-
-    // What this box can be used for, and how it is doing. The two things the
-    // web interface's home screen has that this one did not: without them the
-    // television's front page was a catalogue, and the box's own applications
-    // were reachable from a phone but not from the sofa.
     in property <[AppTile]> apps;
     in property <VitalsModel> vitals;
+    in property <RailModel> recent;
+    // -1 when there is nothing half-watched, which is a box nobody has used
+    // yet rather than an error.
+    in property <int> recent-row: -1;
 
-    // Row 0 is the bar, row 1 is the launcher; 2.. are the shelves.
     in property <int> focus-row;
     in property <int> focus-col;
 
-    in property <string> notice;
-
-    property <length> rail-h: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
-    property <length> viewport-h: root.height - Metrics.topbar;
-
-    // One launcher tile, and the row it sits on. The note under a tile that is
-    // not installed is part of the tile, so the row is as tall as the tallest
-    // thing on it whether anything is missing or not.
-    property <length> tile-h: Metrics.tile-w + Metrics.root-font * 0.5
-        + Metrics.root-font * 0.9 * 1.3 + Metrics.root-font * 0.76 * 1.4;
-    property <length> launcher-h: tile-h + Metrics.main-gap;
-
-    // The right-hand column: everything that is not the machine's own vitals.
-    property <length> main-x: Metrics.gutter + Metrics.vitals-w + Metrics.home-gap;
+    property <length> pad-top: max(14px, min(60px, Metrics.vh * 0.026));
+    property <length> home-gap: max(14px, min(56px, Metrics.vw * 0.018));
+    property <length> main-gap: max(10px, min(40px, Metrics.vh * 0.016));
+    property <length> vitals-w: max(190px, min(560px, Metrics.vw * 0.175));
+    property <length> main-x: Metrics.gutter + vitals-w + home-gap;
     property <length> main-w: max(Metrics.card-w, root.width - main-x - Metrics.gutter);
 
-    // The hero takes what is left once the launcher and the first shelf have
-    // their room. That is the whole shape of the screen: a cinema still, with
-    // the box's applications and something to choose already in reach under it.
-    property <length> hero-h: max(rail-h * 0.55,
-        viewport-h - rail-h - launcher-h - Metrics.home-pad-top);
-    property <length> content-h: hero-h + launcher-h + rail-h * rails.length;
-
-    // The hero is kept until the remote goes past the first shelf. Scrolling it
-    // away the moment focus lands would mean the backdrop is never seen: the
-    // launcher is where every session starts.
-    property <length> scroll: focus-row <= 2
-        ? 0px
-        : clamp(hero-h + launcher-h + (focus-row - 2) * rail-h - Metrics.top-inset,
-                0px,
-                max(0px, content-h - viewport-h));
+    property <length> tile-h: Metrics.tile-w + Metrics.root-font * 0.4
+        + Metrics.root-font * 0.84 * 2.6 + Metrics.root-font * 0.72 * 1.4;
 
     background: Theme.bg;
     clip: true;
 
-    // The backdrop reaches under the bar, which is why it is drawn first and
-    // full height rather than inside the scrolling column.
+    // Drawn rather than fetched. A photograph would be a file to ship, decode
+    // and keep, and the one measurement that matters here is that a
+    // full-screen layer is the expensive thing on this board — so this is four
+    // gradients the renderer paints and never thinks about again. The same
+    // three tints, in the same places, as the web interface's own wallpaper.
     Rectangle {
         width: 100%;
-        height: root.height * 0.78;
-        clip: true;
-
-        Image {
-            width: 100%;
-            height: 100%;
-            source: art-a;
-            image-fit: cover;
-            opacity: 1.0 - fade;
-            animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
-        }
-        Image {
-            width: 100%;
-            height: 100%;
-            source: art-b;
-            image-fit: cover;
-            opacity: fade;
-            animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
-        }
-
-        // Two scrims, across and down. The picture has to survive being read
-        // over, and a single flat wash either kills the image or loses the text.
-        Rectangle {
-            width: 100%;
-            height: 100%;
-            background: @linear-gradient(90deg,
-                #07080b 0%, #07080beb 26%, #07080b57 62%, #07080b1a 100%);
-        }
-        Rectangle {
-            width: 100%;
-            height: 100%;
-            background: @linear-gradient(180deg,
-                #07080b 0%, #07080be6 14%, #07080b57 52%, #07080b85 84%, #07080b 100%);
-        }
+        height: 100%;
+        background: @linear-gradient(175deg, #0d1119 0%, #080a10 52%, #05070b 100%);
+    }
+    Rectangle {
+        x: root.width * 0.18;
+        y: -root.height * 0.32;
+        width: root.width * 1.2;
+        height: root.height * 0.8;
+        background: @radial-gradient(circle, #5e4aa86b 0%, #5e4aa800 62%);
+    }
+    Rectangle {
+        x: -root.width * 0.33;
+        y: -root.height * 0.35;
+        width: root.width * 0.9;
+        height: root.height * 0.7;
+        background: @radial-gradient(circle, #20609466 0%, #20609400 64%);
+    }
+    Rectangle {
+        x: -root.width * 0.1;
+        y: root.height * 0.58;
+        width: root.width * 1.2;
+        height: root.height * 0.9;
+        background: @radial-gradient(circle, #b258603d 0%, #b2586000 62%);
     }
 
-    // The machine's own vitals, down the left and out of the scroll: they are
-    // read rather than operated, and a gauge that slides away when the remote
-    // moves is a gauge nobody can use.
+    // The machine, down the side. Nothing here is focusable: it is read, not
+    // operated, and a remote should walk applications rather than gauges.
     Vitals {
         x: Metrics.gutter;
-        y: Metrics.topbar + Metrics.home-pad-top;
-        width: Metrics.vitals-w;
+        y: Metrics.topbar + pad-top;
+        width: vitals-w;
         height: root.height - self.y - Metrics.gutter;
         vitals: root.vitals;
     }
 
-    // Everything that scrolls.
-    column := Rectangle {
-        x: 0;
-        y: Metrics.topbar - scroll;
-        width: 100%;
-        height: content-h;
-        background: transparent;
+    // The applications.
+    HorizontalLayout {
+        x: main-x;
+        y: Metrics.topbar + pad-top;
+        width: main-w;
+        height: tile-h;
+        spacing: Metrics.tile-gap;
+        alignment: start;
 
-        animate y { duration: Theme.glide; easing: Theme.ease; }
-
-        // The hero.
-        VerticalLayout {
-            x: main-x;
-            y: hero-h * 0.22;
-            width: min(main-w * 0.86, 980px);
-            spacing: Metrics.root-font * 0.55;
-            alignment: start;
-
-            Text {
-                text: hero-title;
-                color: Theme.text;
-                font-size: Metrics.title-hero;
-                font-weight: 820;
-                letter-spacing: -0.038 * Metrics.title-hero;
-                wrap: word-wrap;
-                overflow: elide;
-            }
-
-            if hero-meta != "": Text {
-                text: hero-meta;
-                color: Theme.muted;
-                font-size: Metrics.text-meta;
-                font-weight: 620;
-                overflow: elide;
-            }
-
-            if hero-summary != "": Text {
-                text: hero-summary;
-                color: Theme.muted;
-                font-size: Metrics.text-meta * 0.98;
-                wrap: word-wrap;
-                overflow: elide;
-                max-height: Metrics.text-meta * 3.2;
-            }
-        }
-
-        // The launcher. One row rather than a wrapping grid: the focus model is
-        // a row and a column, and a grid that reflowed would move a tile out
-        // from under the remote when an application finished installing.
-        HorizontalLayout {
-            x: main-x;
-            y: hero-h;
-            width: main-w;
-            height: tile-h;
-            spacing: Metrics.tile-gap-x;
-            alignment: start;
-
-            for tile[i] in apps: AppIcon {
-                tile: tile;
-                focused: focus-row == 1 && i == focus-col;
-            }
-        }
-
-        for rail[r] in rails: Rail {
-            x: main-x - Metrics.gutter;
-            y: hero-h + launcher-h + r * rail-h;
-            width: main-w + Metrics.gutter;
-            rail: rail;
-            focus-col: focus-col;
-            active: focus-row == r + 2;
+        for tile[i] in apps: AppIcon {
+            tile: tile;
+            focused: focus-row == 0 && i == focus-col;
         }
     }
 
-    TopBar {
-        x: 0;
-        y: 0;
-        width: 100%;
-        height: Metrics.topbar * 1.9;
-        items: nav;
-        selected: 0;
+    // What was left half-watched, and nothing else. The rest of the catalogue
+    // is behind the "Filmler ve Diziler" tile above.
+    if recent-row > 0: Rail {
+        x: main-x - Metrics.gutter;
+        y: Metrics.topbar + pad-top + tile-h + main-gap;
+        width: main-w + Metrics.gutter;
+        rail: recent;
         focus-col: focus-col;
-        active: focus-row == 0;
-    }
-
-    // What went wrong, if anything did, without taking the screen away from
-    // shelves that are working.
-    if notice != "": Rectangle {
-        x: Metrics.gutter;
-        y: root.height - self.height - Metrics.gutter * 0.6;
-        width: label.preferred-width + Metrics.root-font * 2;
-        height: Metrics.root-font * 2.4;
-        border-radius: Theme.radius * 0.7;
-        background: #151a23e0;
-        border-width: 1px;
-        border-color: Theme.line;
-
-        label := Text {
-            text: notice;
-            color: Theme.warn;
-            font-size: Metrics.text-chip;
-            font-weight: 600;
-            vertical-alignment: center;
-        }
+        active: focus-row == recent-row;
     }
 }

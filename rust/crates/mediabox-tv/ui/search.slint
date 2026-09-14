@@ -1,0 +1,157 @@
+import { Theme, Metrics } from "theme.slint";
+import { GridPoster, PosterItem, KeyRow, KeyCap } from "components.slint";
+
+// Searching from the sofa.
+//
+// The letters on the left, the results on the right, and one rule for crossing
+// between them: Right off the edge of the grid goes to the posters, Left from
+// the first column comes back. A keyboard, if there is one, types into the same
+// box without moving the focus.
+export component Search inherits Rectangle {
+    in property <string> query;
+    in property <string> note;
+    in property <[KeyRow]> keys;
+    in property <int> key-row;
+    in property <int> key-col;
+    in property <bool> on-keys;
+
+    in property <[PosterItem]> results;
+    in property <int> index;
+    in property <int> columns;
+
+    property <length> keys-w: Metrics.key-w * 7 + Metrics.key-gap * 6;
+    property <length> pane-x: Metrics.gutter + keys-w + Metrics.gutter;
+    property <length> cell-w: Metrics.card-w + Metrics.grid-gap;
+    property <length> cell-h: Metrics.card-h + Metrics.text-card * 3.4 + Metrics.grid-gap;
+    property <length> grid-top: Metrics.topbar + Metrics.block-gap * 1.8;
+    property <length> viewport-h: root.height - grid-top - Metrics.gutter;
+    // The focused row is kept on the panel and the grid slides under it.
+    property <length> scroll: clamp(
+        Math.floor(index / columns) * cell-h - Metrics.top-inset,
+        0px,
+        max(0px, Math.ceil(results.length / columns) * cell-h - viewport-h));
+
+    background: Theme.bg;
+    clip: true;
+
+    // ------------------------------------------------------------- the letters
+    VerticalLayout {
+        x: Metrics.gutter;
+        y: Metrics.topbar;
+        width: keys-w;
+        spacing: Metrics.block-gap * 0.7;
+        alignment: start;
+
+        // What has been typed, as a box rather than as a heading: a viewer
+        // should be able to see that the remote is going somewhere.
+        Rectangle {
+            height: Metrics.root-font * 3.0;
+            border-radius: Theme.radius * 0.8;
+            background: #ffffff0d;
+            border-width: 1px;
+            border-color: on-keys ? #ffffff2e : Theme.line;
+
+            Text {
+                x: Metrics.root-font * 0.8;
+                width: parent.width - Metrics.root-font * 1.6;
+                height: 100%;
+                text: query == "" ? "Film veya dizi ara" : query;
+                color: query == "" ? Theme.dim : Theme.text;
+                font-size: Metrics.root-font * 1.06;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+
+            // A caret, so an empty box still reads as one that is listening.
+            if query != "": Rectangle {
+                x: parent.width - Metrics.root-font * 0.8;
+                y: parent.height * 0.26;
+                width: 2px;
+                height: parent.height * 0.48;
+                background: Theme.accent;
+            }
+        }
+
+        for row[r] in keys: HorizontalLayout {
+            spacing: Metrics.key-gap;
+            alignment: start;
+            height: Metrics.key-h;
+
+            for cap[c] in row.keys: Rectangle {
+                property <bool> focused: on-keys && r == key-row && c == key-col;
+                width: Metrics.key-w * cap.span + Metrics.key-gap * (cap.span - 1);
+                border-radius: Theme.radius * 0.55;
+                background: focused ? Theme.focus-fill : #ffffff0f;
+                border-width: focused ? 2px : 1px;
+                border-color: focused ? Theme.focus-ring : Theme.line-soft;
+
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: cap.label;
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: cap.span > 1 ? Metrics.text-chip : Metrics.root-font * 1.1;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- the results
+    Text {
+        x: pane-x;
+        y: Metrics.topbar + Metrics.block-gap * 0.3;
+        text: note;
+        color: Theme.muted;
+        font-size: Metrics.text-label;
+        font-weight: 660;
+    }
+
+    // Before there is anything to show, the pane says what it is for rather
+    // than standing empty: half a television of black beside a letter grid
+    // reads as a screen that has failed.
+    if results.length == 0: Text {
+        x: pane-x;
+        y: root.height * 0.4;
+        width: root.width - pane-x - Metrics.gutter;
+        text: query == ""
+            ? "Kumandayla harfleri seçin ya da klavyeden yazın"
+            : "";
+        color: Theme.dim;
+        font-size: Metrics.text-meta;
+        font-weight: 620;
+        wrap: word-wrap;
+    }
+
+    Rectangle {
+        x: pane-x;
+        y: grid-top;
+        width: root.width - pane-x - Metrics.gutter;
+        height: viewport-h;
+        clip: true;
+        background: transparent;
+
+        Rectangle {
+            x: 0;
+            y: -scroll;
+            width: 100%;
+            height: max(1px, Math.ceil(results.length / columns) * cell-h);
+            background: transparent;
+
+            animate y { duration: Theme.glide; easing: Theme.ease; }
+
+            for item[i] in results: GridPoster {
+                x: Math.mod(i, columns) * cell-w;
+                y: Math.floor(i / columns) * cell-h;
+                item: item;
+                focused: !on-keys && i == index;
+            }
+        }
+    }
+}

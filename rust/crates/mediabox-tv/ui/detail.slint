@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { Chip, Reading, TechRow } from "components.slint";
 
 // One source the viewer can choose. Every field is already decided in Rust:
 // the addon's free-text name and title are parsed once into facts, and this
@@ -17,42 +18,10 @@ export struct SourceRow {
     provider: string,
 }
 
-// A line of the technical panel. `tone` carries the verdict's colour so the
-// panel does not have to know what any of it means.
-export struct TechRow {
-    label: string,
-    value: string,
-    tone: string,
-}
-
-component Chip inherits Rectangle {
-    in property <string> label;
-    in property <string> tone;
-
-    height: Metrics.text-chip * 2.0;
-    width: inner.preferred-width + Metrics.text-chip * 1.4;
-    border-radius: self.height / 2;
-    background: tone == "good" ? #16351f
-        : tone == "warn" ? #3a2f12
-        : tone == "bad" ? #3a1b1b
-        : #ffffff14;
-
-    inner := Text {
-        text: label;
-        color: tone == "good" ? Theme.ok
-            : tone == "warn" ? Theme.warn
-            : tone == "bad" ? Theme.bad
-            : Theme.muted;
-        font-size: Metrics.text-chip;
-        font-weight: 700;
-        vertical-alignment: center;
-    }
-}
-
-// The four things a title can be done with. Drawn rather than lettered: at
-// three metres a mark is read faster than a word, and the word is under it
-// anyway.
-component IconAction inherits Rectangle {
+// One thing that can be done with the title. Round, marked and named, in a row
+// along the bottom of the record — the shape the reference uses, and the shape
+// that survives being read from a sofa.
+component Action inherits Rectangle {
     in property <string> label;
     in property <string> mark;
     // Drawn over the mark in the button's own colour, which is how a shape
@@ -62,192 +31,227 @@ component IconAction inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> primary;
 
-    // Square unless the word under the mark needs more, which "Kodi'de Oynat"
-    // does. An elided label on a button is a button nobody is sure about.
-    width: max(Metrics.card-w * 0.42, caption.preferred-width + Metrics.root-font * 1.2);
-    height: Metrics.card-w * 0.42;
-    border-radius: Theme.radius;
+    height: Metrics.root-font * 3.4;
+    width: caption.preferred-width + self.height + Metrics.root-font * 1.4;
+    border-radius: self.height / 2;
     opacity: enabled ? 1.0 : 0.38;
-    background: focused ? Theme.focus-ring
-        : primary ? Theme.accent
-        : #ffffff12;
+    background: focused ? Theme.focus-fill : (primary ? Theme.accent : #ffffff14);
+    border-width: focused ? 2px : 1px;
+    border-color: focused ? Theme.focus-ring : #ffffff1f;
 
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-    VerticalLayout {
+    HorizontalLayout {
+        padding-left: Metrics.root-font * 0.8;
+        padding-right: Metrics.root-font * 0.9;
+        spacing: Metrics.root-font * 0.45;
         alignment: center;
-        spacing: Metrics.text-chip * 0.5;
 
-        HorizontalLayout {
-            alignment: center;
-            Rectangle {
-                width: Metrics.root-font * 1.5;
-                height: Metrics.root-font * 1.5;
+        Rectangle {
+            width: Metrics.root-font * 1.35;
 
-                Path {
-                    width: 100%;
-                    height: 100%;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: mark;
-                    fill: focused || primary ? #0a0c10 : Theme.text;
-                }
-                if cut != "": Path {
-                    width: 100%;
-                    height: 100%;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: cut;
-                    fill: root.background;
-                }
+            Path {
+                width: 100%;
+                height: Metrics.root-font * 1.35;
+                y: (parent.height - self.height) / 2;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: mark;
+                fill: (focused || primary) ? #0a0c10 : Theme.text;
+            }
+            if cut != "": Path {
+                width: 100%;
+                height: Metrics.root-font * 1.35;
+                y: (parent.height - self.height) / 2;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: cut;
+                fill: focused ? Theme.focus-fill : (primary ? Theme.accent : #1b2029);
             }
         }
 
         caption := Text {
             text: label;
-            color: focused || primary ? #0a0c10 : Theme.text;
+            color: (focused || primary) ? #0a0c10 : Theme.text;
             font-size: Metrics.text-chip;
-            font-weight: 700;
-            horizontal-alignment: center;
+            font-weight: 720;
+            vertical-alignment: center;
+            wrap: no-wrap;
         }
     }
 }
 
-component Source inherits Rectangle {
+// One row of the source column, in the product's own words.
+//
+// No enum names and no debug shapes: what a viewer needs in order to choose
+// between two releases is the resolution, what the picture and sound are,
+// whether it is already sitting on a cache or has to be pulled off a swarm, and
+// who is offering it.
+component SourceLine inherits Rectangle {
+    // `entry` rather than `row`: every Rectangle already has a `row`, for grid
+    // layout, and a property cannot shadow it.
     in property <SourceRow> entry;
     in property <bool> focused;
+    in property <bool> chosen;
 
-    height: Metrics.root-font * 3.4;
+    height: Metrics.root-font * 4.4;
     border-radius: Theme.radius * 0.7;
-    background: focused ? #ffffff14 : transparent;
-    border-width: focused ? 2px : 0px;
-    border-color: Theme.focus-ring;
-    opacity: entry.playable ? 1.0 : 0.55;
+    background: focused ? #ffffff1c : (chosen ? #ffffff0d : transparent);
+    border-width: focused ? 2px : 1px;
+    border-color: focused ? Theme.focus-ring : (chosen ? Theme.line : #ffffff0f);
+    opacity: entry.playable ? 1.0 : 0.45;
 
-    HorizontalLayout {
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    VerticalLayout {
         padding-left: Metrics.root-font * 0.7;
         padding-right: Metrics.root-font * 0.7;
-        padding-top: Metrics.root-font * 0.4;
-        padding-bottom: Metrics.root-font * 0.4;
-        spacing: Metrics.root-font * 0.7;
+        alignment: center;
+        spacing: Metrics.text-chip * 0.4;
 
-        // The badge: what the source is worth at a glance.
-        VerticalLayout {
-            width: Metrics.root-font * 3.4;
-            alignment: center;
-            Text {
-                text: entry.quality == "" ? "—" : entry.quality;
-                color: Theme.text;
-                font-size: Metrics.root-font;
-                font-weight: 800;
+        HorizontalLayout {
+            spacing: Metrics.text-chip * 0.6;
+            alignment: start;
+
+            if entry.quality != "": Chip {
+                text: entry.quality;
+                tone: "";
+                solid: true;
             }
-            if entry.flags != "": Text {
-                text: entry.flags;
-                color: Theme.accent;
-                font-size: Metrics.text-chip * 0.94;
-                font-weight: 700;
-                overflow: elide;
-            }
-        }
-
-        VerticalLayout {
-            alignment: center;
-            spacing: Metrics.text-chip * 0.4;
-            // Nothing in this column may insist on a width.
-            //
-            // A Chip is as wide as its own label, so a row of them has a
-            // minimum width that the layout cannot go below — and a release
-            // name with four chips under it is wider than the rail. The column
-            // then took the width it wanted rather than the width it had, which
-            // pushed both lines off the right of the panel: the sizes and the
-            // peer counts were cut in half, and the release name above them
-            // never elided, because a Text given more room than the rail has
-            // has no reason to.
-            //
-            // Measured on the appliance at 3840x2560: the rail is 576 logical
-            // pixels and a four-chip row wants 620.
-            min-width: 0px;
-
             Text {
                 text: entry.release;
                 color: Theme.text;
                 font-size: Metrics.root-font * 0.92;
-                font-weight: 600;
+                font-weight: 700;
+                vertical-alignment: center;
                 overflow: elide;
                 wrap: no-wrap;
-                min-width: 0px;
+                horizontal-stretch: 1;
             }
+            if chosen: Text {
+                text: "seçili";
+                color: Theme.accent;
+                font-size: Metrics.text-chip;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
 
-            // The chips lay out at their own size inside a window the rail
-            // decides, so a row that does not fit loses its last chip rather
-            // than the whole column losing its bounds.
-            Rectangle {
-                height: chips.preferred-height;
-                min-width: 0px;
-                clip: true;
+        // Clipped rather than allowed to run past the column: an addon can
+        // attach a dozen facts to one release, and the ones that matter are the
+        // first few.
+        Rectangle {
+            height: Metrics.text-chip * 2.0;
+            clip: true;
+            background: transparent;
 
-                chips := HorizontalLayout {
-                    x: 0;
-                    width: self.preferred-width;
-                    spacing: Metrics.text-chip * 0.5;
-                    alignment: start;
+            HorizontalLayout {
+                width: 100%;
+                height: 100%;
+                spacing: Metrics.text-chip * 0.45;
+                alignment: start;
 
-                    if entry.cached: Chip { label: "Hazır"; tone: "good"; }
-                    if !entry.playable: Chip { label: "Oynatılamaz"; tone: "bad"; }
-                    if entry.kind != "": Chip { label: entry.kind; tone: entry.tone; }
-                    for chip in entry.chips: Chip { label: chip; }
-                }
+                if entry.kind != "": Chip { text: entry.kind; tone: entry.tone; }
+                if entry.cached: Chip { text: "Hazır"; tone: "good"; }
+                for chip in entry.chips: Chip { text: chip; tone: ""; }
+                Rectangle { horizontal-stretch: 1; }
             }
         }
     }
 }
 
+// A named row of chips — TÜRÜ, OYUNCULAR, YÖNETMENLER.
+//
+// Placed rather than laid out. A HorizontalLayout of chips inside a column has
+// no preferred height of its own here, and the first version drew every heading
+// underneath the chips that belonged to it.
+component ChipSection inherits Rectangle {
+    in property <string> label;
+    in property <[string]> items;
+
+    property <length> label-h: Metrics.text-label * 1.7;
+    height: label-h + Metrics.text-chip * 2.0;
+    background: transparent;
+
+    Text {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: label-h;
+        text: label;
+        color: Theme.dim;
+        font-size: Metrics.text-label * 0.86;
+        font-weight: 780;
+        letter-spacing: 0.1 * Metrics.text-label;
+        vertical-alignment: center;
+    }
+
+    HorizontalLayout {
+        x: 0;
+        y: label-h;
+        width: 100%;
+        height: Metrics.text-chip * 2.0;
+        spacing: Metrics.text-chip * 0.5;
+        alignment: start;
+
+        for item in items: Chip { text: item; tone: ""; }
+    }
+}
+
+// The title's page.
+//
+// Two columns, the way the reference lays it out: the record down the left over
+// the backdrop, and the sources down the right as a column of this screen
+// rather than behind a button. Choosing where a film comes from is most of what
+// this screen is for.
 export component Detail inherits Rectangle {
     in property <image> art-a;
     in property <image> art-b;
     in property <float> fade;
     in property <image> poster;
+    in property <image> logo;
 
     in property <string> title;
     in property <string> facts;
     in property <string> summary;
     in property <[string]> genres;
-    in property <[string]> people;
+    in property <[string]> cast;
+    in property <[string]> directors;
 
     in property <[string]> actions;
     in property <[string]> marks;
     in property <[string]> cuts;
     in property <[bool]> enabled;
+    in property <int> focus-col;
+    in property <bool> on-sources;
 
     in property <[SourceRow]> sources;
     in property <string> sources-note;
+    in property <[string]> providers;
+    in property <int> provider;
+    in property <bool> on-filter;
+    in property <int> source-focus;
+    in property <int> selected;
+
     in property <[TechRow]> technical;
     in property <string> verdict;
     in property <string> verdict-tone;
 
-    // Row 0 is the action strip; 1.. are the sources.
-    in property <int> focus-row;
-    in property <int> focus-col;
-
-    property <length> side-w: max(420px, min(620px, root.width * 0.30));
-    property <length> source-h: Metrics.root-font * 3.9;
-    property <length> list-h: root.height - Metrics.topbar * 2.4;
-    property <length> list-scroll: focus-row <= 1
-        ? 0px
-        : clamp((focus-row - 1) * source-h - list-h * 0.35, 0px,
-                max(0px, source-h * sources.length - list-h));
+    property <length> column-w: max(300px, min(760px, root.width * 0.33));
+    property <length> column-x: root.width - column-w;
+    property <length> record-w: column-x - Metrics.gutter * 2;
 
     background: Theme.bg;
     clip: true;
 
-    // The backdrop, as on the home screen and for the same reason: the title
-    // should look like the film before a word of it is read.
+    // The backdrop. Only the visible layer is painted: a fully transparent
+    // full-screen image still costs a pass over every column of the panel.
     Rectangle {
         width: 100%;
         height: 100%;
         clip: true;
 
-        Image {
+        if fade < 0.999: Image {
             width: 100%;
             height: 100%;
             source: art-a;
@@ -255,7 +259,7 @@ export component Detail inherits Rectangle {
             opacity: 1.0 - fade;
             animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
         }
-        Image {
+        if fade > 0.001: Image {
             width: 100%;
             height: 100%;
             source: art-b;
@@ -265,201 +269,223 @@ export component Detail inherits Rectangle {
         }
 
         Rectangle {
-            width: 100%;
+            width: parent.width * 0.72;
             height: 100%;
             background: @linear-gradient(90deg,
-                #07080bd1 0%, #07080b80 34%, #07080b14 66%, transparent 100%);
+                #07080bf2 0%, #07080be6 34%, #07080b9c 72%, transparent 100%);
         }
         Rectangle {
+            y: parent.height * 0.45;
             width: 100%;
-            height: 100%;
-            background: @linear-gradient(180deg,
-                #07080b 0%, #07080b57 30%, transparent 72%, #07080b 100%);
+            height: parent.height * 0.55;
+            background: @linear-gradient(180deg, transparent 0%, #07080bcc 58%, #07080bf2 100%);
         }
     }
 
-    // What the title is.
+    // ------------------------------------------------------------ the record
     VerticalLayout {
         x: Metrics.gutter;
-        y: Metrics.topbar;
-        width: root.width - side-w - Metrics.gutter * 2.4;
-        height: root.height - Metrics.topbar * 2;
-        spacing: Metrics.root-font * 0.8;
-        alignment: center;
+        y: Metrics.topbar + Metrics.block-gap * 0.6;
+        width: record-w;
+        spacing: Metrics.root-font * 0.55;
+        alignment: start;
 
-        HorizontalLayout {
-            height: Metrics.card-h * 0.62;
-            spacing: Metrics.gutter * 0.7;
-            alignment: start;
+        // The title's own logo when the catalogue has one, and its name set
+        // large when it does not. The reference leads with the logo and it is
+        // the single thing that makes a page look like the film rather than
+        // like a database row.
+        if logo.width > 0: Image {
+            source: logo;
+            image-fit: contain;
+            horizontal-alignment: left;
+            height: Metrics.title-detail * 2.4;
+        }
+        if logo.width == 0: Text {
+            text: title;
+            color: Theme.text;
+            font-size: Metrics.title-detail;
+            font-weight: 800;
+            letter-spacing: -0.03 * Metrics.title-detail;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: Metrics.title-detail * 2.4;
+        }
 
-            Rectangle {
-                width: Metrics.card-h * 0.62 / 1.5;
-                height: Metrics.card-h * 0.62;
-                border-radius: Theme.radius-art * 0.7;
-                clip: true;
-                background: Theme.bg-card;
-                Image {
-                    width: 100%;
-                    height: 100%;
-                    source: poster;
-                    image-fit: cover;
-                }
-            }
+        if facts != "": Text {
+            text: facts;
+            color: Theme.text;
+            font-size: Metrics.text-meta * 1.05;
+            font-weight: 760;
+            wrap: no-wrap;
+            overflow: elide;
+        }
 
-            VerticalLayout {
-                alignment: center;
-                spacing: Metrics.root-font * 0.4;
-
-                Text {
-                    text: title;
-                    color: Theme.text;
-                    font-size: Metrics.title-detail;
-                    font-weight: 800;
-                    letter-spacing: -0.025 * Metrics.title-detail;
-                    wrap: word-wrap;
-                    overflow: elide;
-                }
-
-                if facts != "": Text {
-                    text: facts;
-                    color: Theme.muted;
-                    font-size: Metrics.root-font * 1.05;
-                    font-weight: 600;
-                    wrap: no-wrap;
-                    overflow: elide;
-                }
-
-                if genres.length > 0: HorizontalLayout {
-                    spacing: Metrics.text-chip * 0.5;
-                    alignment: start;
-                    for genre in genres: Chip { label: genre; }
-                }
-            }
+        if genres.length > 0: ChipSection {
+            label: "TÜRÜ";
+            items: genres;
+        }
+        if cast.length > 0: ChipSection {
+            label: "OYUNCULAR";
+            items: cast;
+        }
+        if directors.length > 0: ChipSection {
+            label: "YÖNETMENLER";
+            items: directors;
         }
 
         if summary != "": Text {
+            text: "ÖZET";
+            color: Theme.dim;
+            font-size: Metrics.text-label * 0.86;
+            font-weight: 780;
+            letter-spacing: 0.1 * Metrics.text-label;
+            height: Metrics.text-label * 1.7;
+            vertical-alignment: center;
+        }
+        if summary != "": Text {
             text: summary;
             color: Theme.muted;
-            font-size: Metrics.root-font * 0.98;
+            font-size: Metrics.text-meta * 0.94;
             wrap: word-wrap;
             overflow: elide;
-            max-height: Metrics.root-font * 7.2;
+            max-height: Metrics.text-meta * 4.4;
         }
 
-        if people.length > 0: HorizontalLayout {
-            spacing: Metrics.text-chip * 0.5;
-            alignment: start;
-            for person in people: Chip { label: person; }
+        if verdict != "": Text {
+            text: verdict;
+            color: Theme.tone(verdict-tone);
+            font-size: Metrics.text-label;
+            font-weight: 680;
+            wrap: word-wrap;
+            overflow: elide;
+            height: Metrics.text-label * 1.8;
         }
 
-        HorizontalLayout {
-            height: Metrics.card-w * 0.42;
-            spacing: Metrics.root-font * 0.7;
+        // What the media core found and decided about the chosen source: the
+        // only thing on this screen that is measured rather than claimed by a
+        // file name. Quiet and short — four readings, not the whole report, and
+        // set as a block rather than as four more items in a column whose
+        // spacing is meant for paragraphs.
+        if technical.length > 0: VerticalLayout {
+            spacing: 0px;
             alignment: start;
-
-            for label[i] in actions: IconAction {
-                label: label;
-                mark: marks[i];
-                cut: cuts[i];
-                enabled: enabled[i];
-                primary: i == 0;
-                focused: focus-row == 0 && focus-col == i;
+            for entry in technical: Reading {
+                entry: entry;
+                label-w: record-w * 0.18;
+                height: Metrics.root-font * 1.55;
             }
         }
     }
 
-    // Where it comes from, and what this box will do with it.
-    Rectangle {
-        x: root.width - side-w;
-        y: 0;
-        width: side-w;
-        height: 100%;
-        // Its own ground, bled to the edge of the panel: a list of sources over
-        // a film still is a list nobody can read.
-        background: @linear-gradient(90deg,
-            transparent 0%, #06070a94 7%, #06070adb 28%, #06070aeb 100%);
+    // The actions, along the bottom of the record.
+    HorizontalLayout {
+        x: Metrics.gutter;
+        y: root.height - Metrics.root-font * 3.4 - Metrics.gutter * 0.8;
+        width: record-w;
+        height: Metrics.root-font * 3.4;
+        spacing: Metrics.root-font * 0.6;
+        alignment: start;
 
-        VerticalLayout {
-            padding-left: Metrics.root-font;
-            padding-right: Metrics.gutter * 0.6;
-            padding-top: Metrics.topbar * 0.7;
-            padding-bottom: Metrics.root-font;
-            spacing: Metrics.root-font * 0.5;
+        for label[i] in actions: Action {
+            label: label;
+            mark: marks[i];
+            cut: cuts[i];
+            enabled: enabled[i];
+            focused: !on-sources && i == focus-col;
+            primary: i == 0;
+        }
+    }
+
+    // ----------------------------------------------------------- the sources
+    Rectangle {
+        x: column-x;
+        y: 0;
+        width: column-w;
+        height: 100%;
+        background: #080a10e8;
+        border-width: 1px;
+        border-color: #ffffff12;
+        clip: true;
+
+        // The provider filter. Walked with Left and Right, the way the
+        // reference's dropdown is opened and picked through.
+        Rectangle {
+            x: Metrics.root-font * 0.7;
+            y: Metrics.topbar + Metrics.block-gap * 0.4;
+            width: parent.width - Metrics.root-font * 1.4;
+            height: Metrics.root-font * 2.9;
+            border-radius: Theme.radius * 0.7;
+            background: (on-sources && on-filter) ? Theme.focus-fill : #ffffff10;
+            border-width: (on-sources && on-filter) ? 2px : 1px;
+            border-color: (on-sources && on-filter) ? Theme.focus-ring : Theme.line-soft;
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
             HorizontalLayout {
-                height: Metrics.root-font * 1.8;
-                spacing: Metrics.text-chip * 0.6;
-                alignment: start;
+                padding-left: Metrics.root-font * 0.8;
+                padding-right: Metrics.root-font * 0.8;
+                spacing: Metrics.root-font * 0.4;
 
                 Text {
-                    text: "KAYNAKLAR";
-                    color: Theme.dim;
-                    font-size: Metrics.text-label;
+                    text: providers[provider];
+                    color: (on-sources && on-filter) ? #0a0c10 : Theme.text;
+                    font-size: Metrics.root-font * 0.94;
                     font-weight: 700;
-                    letter-spacing: 0.14 * Metrics.text-label;
                     vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    horizontal-stretch: 1;
                 }
-                if sources-note != "": Text {
-                    text: sources-note;
-                    color: Theme.muted;
-                    font-size: Metrics.text-chip;
+                Text {
+                    text: providers.length > 1 ? "‹ ›" : "";
+                    color: (on-sources && on-filter) ? #0a0c10 : Theme.dim;
+                    font-size: Metrics.root-font * 0.94;
+                    font-weight: 700;
                     vertical-alignment: center;
                 }
             }
+        }
 
-            // The list moves behind its own window, the way a shelf does.
-            Rectangle {
-                height: list-h;
-                clip: true;
+        Text {
+            x: Metrics.root-font * 0.9;
+            y: Metrics.topbar + Metrics.block-gap * 0.4 + Metrics.root-font * 3.2;
+            text: sources-note;
+            color: Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 640;
+        }
 
-                strip := Rectangle {
-                    y: -list-scroll;
-                    width: 100%;
-                    height: source-h * sources.length + Metrics.root-font * 12;
-                    animate y { duration: Theme.glide; easing: Theme.ease; }
+        list := Rectangle {
+            property <length> row-h: Metrics.root-font * 4.4 + Metrics.root-font * 0.3;
+            x: Metrics.root-font * 0.7;
+            y: Metrics.topbar + Metrics.block-gap * 0.4 + Metrics.root-font * 5.0;
+            width: parent.width - Metrics.root-font * 1.4;
+            height: parent.height - self.y - Metrics.gutter * 0.5;
+            clip: true;
+            background: transparent;
 
-                    for entry[i] in sources: Source {
-                        y: i * source-h;
-                        width: 100%;
-                        entry: entry;
-                        focused: focus-row == i + 1;
-                    }
+            VerticalLayout {
+                x: 0;
+                // The focused row is kept on the panel and the list slides
+                // under it, which is what makes forty releases usable with
+                // five keys.
+                y: -clamp(source-focus * list.row-h - list.height * 0.4,
+                          0px,
+                          max(0px, sources.length * list.row-h - list.height));
+                width: 100%;
+                height: max(1px, sources.length * list.row-h);
+                spacing: Metrics.root-font * 0.3;
+                alignment: start;
 
-                    // What this appliance will do with the chosen source, in
-                    // the media core's own words rather than a guess from the
-                    // file name.
-                    VerticalLayout {
-                        y: source-h * sources.length + Metrics.root-font * 0.8;
-                        width: 100%;
-                        spacing: Metrics.text-chip * 0.7;
-                        alignment: start;
+                animate y { duration: Theme.glide; easing: Theme.ease; }
 
-                        if verdict != "": Chip { label: verdict; tone: verdict-tone; }
-
-                        for line in technical: HorizontalLayout {
-                            height: Metrics.text-chip * 2.0;
-                            spacing: Metrics.text-chip;
-                            Text {
-                                width: Metrics.root-font * 6;
-                                text: line.label;
-                                color: Theme.dim;
-                                font-size: Metrics.text-chip;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: line.value;
-                                color: line.tone == "bad" ? Theme.bad
-                                    : line.tone == "warn" ? Theme.warn
-                                    : Theme.text;
-                                font-size: Metrics.text-chip;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                        }
-                    }
+                for source[i] in sources: SourceLine {
+                    entry: source;
+                    focused: on-sources && !on-filter && i == source-focus;
+                    chosen: i == selected;
                 }
             }
         }
     }
+
 }

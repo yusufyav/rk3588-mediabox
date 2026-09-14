@@ -1,0 +1,189 @@
+import { Theme, Metrics } from "theme.slint";
+import { GridPoster, PosterItem, Chip } from "components.slint";
+
+// Everything the box can show, as a grid.
+//
+// The home screen is for browsing and this screen is for finding: four
+// sections across the top and a poster grid under them, every title named.
+export component Library inherits Rectangle {
+    in property <[string]> tabs;
+    in property <[string]> notes;
+    in property <int> tab;
+    in property <bool> on-tabs;
+
+    in property <[PosterItem]> items;
+    in property <int> index;
+    in property <int> columns;
+
+    // What the remote is on, beside the grid. The reference puts the record of
+    // the focused title down the right of the same screen, and it is the thing
+    // that makes a wall of posters navigable: a year, a rating and two lines of
+    // what it is, without opening anything.
+    in property <image> art;
+    in property <string> title;
+    in property <string> facts;
+    in property <string> summary;
+    in property <[string]> genres;
+
+    property <length> tabs-h: Metrics.root-font * 3.4;
+    property <length> grid-top: Metrics.topbar + tabs-h + Metrics.block-gap;
+    property <length> cell-w: Metrics.card-w + Metrics.grid-gap;
+    property <length> cell-h: Metrics.card-h + Metrics.text-card * 3.4 + Metrics.grid-gap;
+    property <length> viewport-h: root.height - grid-top - Metrics.gutter * 0.5;
+    property <length> panel-w: max(240px, min(620px, root.width * 0.3));
+    property <length> grid-w: root.width - Metrics.gutter * 2 - panel-w - Metrics.block-gap;
+    property <length> scroll: on-tabs
+        ? 0px
+        : clamp(Math.floor(index / columns) * cell-h - Metrics.top-inset * 0.4,
+                0px,
+                max(0px, Math.ceil(items.length / columns) * cell-h - viewport-h));
+
+    background: Theme.bg;
+    clip: true;
+
+    // The sections.
+    HorizontalLayout {
+        x: Metrics.gutter;
+        y: Metrics.topbar;
+        width: root.width - Metrics.gutter * 2;
+        height: tabs-h;
+        spacing: Metrics.root-font * 0.5;
+        alignment: start;
+
+        for label[i] in tabs: Rectangle {
+            property <bool> chosen: i == tab;
+            property <bool> focused: on-tabs && chosen;
+            width: caption.preferred-width + Metrics.root-font * 2.0;
+            border-radius: Theme.radius * 0.8;
+            background: focused ? Theme.focus-fill : (chosen ? #ffffff16 : transparent);
+            border-width: focused ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : (chosen ? Theme.line : transparent);
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            caption := Text {
+                text: label;
+                color: focused ? #0a0c10 : (chosen ? Theme.text : Theme.muted);
+                font-size: Metrics.root-font * 1.02;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Text {
+            text: notes[tab];
+            color: Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 640;
+            vertical-alignment: center;
+        }
+    }
+
+    // The grid.
+    Rectangle {
+        x: Metrics.gutter;
+        y: grid-top;
+        width: grid-w;
+        height: viewport-h;
+        clip: true;
+        background: transparent;
+
+        if items.length == 0: Text {
+            x: 0;
+            y: Metrics.root-font * 2;
+            text: "Bu bölümde henüz bir şey yok";
+            color: Theme.dim;
+            font-size: Metrics.text-meta;
+            font-weight: 640;
+        }
+
+        Rectangle {
+            x: 0;
+            y: -scroll;
+            width: 100%;
+            height: max(1px, Math.ceil(items.length / columns) * cell-h);
+            background: transparent;
+
+            animate y { duration: Theme.glide; easing: Theme.ease; }
+
+            for item[i] in items: GridPoster {
+                x: Math.mod(i, columns) * cell-w;
+                y: Math.floor(i / columns) * cell-h;
+                item: item;
+                focused: !on-tabs && i == index;
+            }
+        }
+    }
+
+    // The record of whatever the remote is on.
+    if title != "": VerticalLayout {
+        x: root.width - Metrics.gutter - panel-w;
+        y: grid-top;
+        width: panel-w;
+        spacing: Metrics.root-font * 0.5;
+        alignment: start;
+
+        // The artwork, large. The operator's own library is metadata-poor —
+        // often a name and a poster and nothing else — and a panel that had
+        // only the name in it was a third of the screen saying one thing.
+        if art.width > 0: Rectangle {
+            height: panel-w * 0.62;
+            clip: true;
+            border-radius: Theme.radius-art;
+
+            Image {
+                width: 100%;
+                height: 100%;
+                source: art;
+                image-fit: cover;
+            }
+        }
+
+        Text {
+            text: title;
+            color: Theme.text;
+            font-size: Metrics.title-detail * 0.78;
+            font-weight: 800;
+            letter-spacing: -0.025 * Metrics.title-detail;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: Metrics.title-detail * 1.9;
+        }
+
+        if facts != "": Text {
+            text: facts;
+            color: Theme.accent;
+            font-size: Metrics.text-meta * 0.88;
+            font-weight: 700;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+
+        if summary != "": Text {
+            text: summary;
+            color: Theme.muted;
+            font-size: Metrics.text-meta * 0.88;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: Metrics.text-meta * 7.0;
+        }
+
+        if genres.length > 0: Text {
+            text: "TÜRÜ";
+            color: Theme.dim;
+            font-size: Metrics.text-label * 0.9;
+            font-weight: 760;
+            letter-spacing: 0.1 * Metrics.text-label;
+        }
+        if genres.length > 0: HorizontalLayout {
+            spacing: Metrics.text-chip * 0.5;
+            alignment: start;
+            for genre in genres: Chip { text: genre; tone: ""; }
+        }
+    }
+}
