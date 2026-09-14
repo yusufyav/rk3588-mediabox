@@ -4,13 +4,13 @@
 #
 # Four things went wrong on this appliance before this check existed, and each
 # one left the unit "active (running)" while the television showed something
-# useless: a compositor with no input devices at all, a browser launched with
-# its URL parsed away, an interface laid out for the wrong panel, and a page
-# that never loaded. systemd cannot see any of that. So the kiosk is restarted
+# useless: a compositor with no input devices at all, an interface launched
+# with its arguments parsed away, an interface laid out for the wrong panel, and
+# one that never drew. systemd cannot see any of that. So the kiosk is restarted
 # and then interrogated: is the display controller in the mode the compositor
 # drove, is the interface scaled for that mode, how many input devices does the
-# compositor have, what URL is the browser on, and does the compositor hold a
-# window that carries the page's own title across the whole panel.
+# compositor have, is the interface process there, and does the compositor hold
+# a window that carries the product's title across the whole panel.
 #
 # Nothing here names a resolution. This appliance is plugged into whatever
 # panel the house has, and a check that expects one is a check that fails a
@@ -22,7 +22,7 @@ set -eu
 
 UNIT=mediabox-tv-ui.service
 RUNTIME=/run/mediabox-ui
-URL="${MEDIABOX_UI_URL:-http://127.0.0.1:8787/}"
+BIN="${MEDIABOX_TV_BIN:-/opt/rk3588-mediabox/bin/mediabox-tv}"
 # No mode is expected by name. The panel decides it and the check is that the
 # display controller ended up in the mode the compositor drove — see below.
 MODE="${MEDIABOX_UI_MODE:-}"
@@ -76,13 +76,30 @@ else
 fi
 
 # 1b. The interface is laid out for the mode that was taken, not for a mode
-#     somebody wrote down. A 4K set wants 2, this monitor wants 1.33.
+#     somebody wrote down. A 4K set wants 2, a 1440p monitor wants 2, a 1080p
+#     television wants 1.
+#
+#     The launcher puts the measured factor in the interface's environment, and
+#     that is where it is read back from — the process's own environment is the
+#     only place the answer it is actually using can be seen from outside it.
+#
+#     This is not the same mechanism the browser had. Chromium took a flag that
+#     scaled CSS pixels while its buffer stayed the panel's size; here the scale
+#     divides the logical space and the buffer must still be the panel's. That
+#     the buffer really is is checked at 4 below, by the window's rectangle, and
+#     on the display controller by docs/display-pipeline.md's own command.
 want_scale=$(SWAYSOCK="${sock_early:-}" /opt/rk3588-mediabox/bin/mediabox-display-scale 1920 1080 2>/dev/null || echo "")
-argv_scale=$(pgrep -a chromium 2>/dev/null | sed -n 's/.*--force-device-scale-factor=\([0-9.]*\).*/\1/p' | head -1)
-if [ -n "$want_scale" ] && [ "$argv_scale" = "$want_scale" ]; then
-  ok "ui scale" "$argv_scale for $mode"
+tv_pid=$(pgrep -f -- "$BIN" 2>/dev/null | head -1 || true)
+if [ -n "$tv_pid" ]; then
+  env_scale=$(tr '\0' '\n' < "/proc/$tv_pid/environ" 2>/dev/null |
+    sed -n 's/^SLINT_SCALE_FACTOR=//p' | head -1)
 else
-  bad "ui scale" "browser at ${argv_scale:-none}, panel needs ${want_scale:-unknown}"
+  env_scale=""
+fi
+if [ -n "$want_scale" ] && [ "$env_scale" = "$want_scale" ]; then
+  ok "ui scale" "$env_scale for $mode"
+else
+  bad "ui scale" "interface at ${env_scale:-none}, panel needs ${want_scale:-unknown}"
 fi
 
 # 2. The compositor has input devices. Naming only the DRM backend produces a
@@ -97,31 +114,39 @@ else
   bad "input devices" "no compositor IPC socket in $RUNTIME"
 fi
 
-# 3. The browser is on our page and not on its own start page.
-argv=$(pgrep -a chromium 2>/dev/null | head -1 || true)
-case "$argv" in
-  *"$URL"*) ok "browser url" "$URL" ;;
-  *)        bad "browser url" "kiosk argv does not carry $URL" ;;
-esac
+# 3. The interface itself is running. The compositor coming up without it is
+#    what a mangled launcher looks like from the outside: a lit panel and
+#    nothing on it.
+if [ -n "${tv_pid:-}" ]; then
+  ok "interface" "pid $tv_pid"
+else
+  bad "interface" "no process matching $BIN"
+fi
 
 # 4. The page loaded, and it fills the panel.
 #
 # This used to count requests the browser made to the media core. It counted
-# the wrong thing: the interface talks to the control plane over /v1/control
-# and never asks the media worker for anything directly, so the check failed a
+# the wrong thing: the interface talks to the control plane over its socket and
+# never asks the media worker for anything directly, so the check failed a
 # working kiosk — measured, on a television that was showing the product.
 #
 # The compositor is asked instead, because it knows two things nothing else
-# does: the window's title, which is the page's own <title> and is only that
-# once the document has parsed, and the window's rectangle, which is how the
-# "browser is up but the page is a quarter of the screen" failure looks.
+# does: the window's title, which the interface sets and which sway's own rule
+# matches on, and the window's rectangle, which is how the "it is up but it
+# covers a quarter of the screen" failure looks — and, with the mode below,
+# is also what says the interface is not being scaled up from a smaller buffer.
 TITLE="${MEDIABOX_UI_TITLE:-MediaBox}"
-if [ -n "${sock_early:-}" ]; then
+# Found by process id rather than by title, so the title is something this
+# check tests rather than something it assumes: a window that is ours but is
+# called the wrong thing is a real failure — sway's fullscreen rule matches on
+# the title, and a renamed window wears a frame.
+if [ -n "${sock_early:-}" ] && [ -n "${tv_pid:-}" ]; then
   win=$(SWAYSOCK="$sock_early" swaymsg -t get_tree 2>/dev/null | python3 -c '
 import json, sys
+pid = int(sys.argv[1])
 def walk(n):
-    if n.get("app_id", "").startswith("chrome-"):
-        r = n.get("rect") or {}
+    if n.get("pid") == pid and n.get("rect"):
+        r = n["rect"]
         return n.get("name") or "", r.get("width"), r.get("height")
     for key in ("nodes", "floating_nodes"):
         for child in n.get(key, []):
@@ -135,7 +160,7 @@ except Exception:
     found = None
 if found:
     print("%s\t%s\t%s" % found)
-' 2>/dev/null || true)
+' "$tv_pid" 2>/dev/null || true)
 else
   win=""
 fi
@@ -144,7 +169,7 @@ win_w=$(printf '%s' "$win" | cut -f2)
 win_h=$(printf '%s' "$win" | cut -f3)
 
 if [ -z "$win" ]; then
-  bad "ui loaded" "compositor has no browser window"
+  bad "ui loaded" "compositor has no window for pid ${tv_pid:-none}"
 elif [ "$win_title" != "$TITLE" ]; then
   bad "ui loaded" "window titled '${win_title}' (expected '$TITLE')"
 elif [ "${win_w}x${win_h}" != "$mode" ]; then

@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# The browser is not in this unit's cgroup, so somebody has to wait for it.
+# What this unit starts is not in its cgroup, so somebody has to wait for it.
 #
 # PAMName=login puts the compositor and everything it starts into a PAM session
 # scope instead of into mediabox-tv-ui.service's own cgroup. Measured on the
@@ -16,17 +16,40 @@
 # insists if they are not.
 set -eu
 
-# The profile directory, which no other browser on this box uses: the
+# Two patterns, because this unit ran a browser before it ran the product's own
+# interface, and a box part-way through an upgrade may still have one.
+#
+# The first is the native interface's own path. The second is the kiosk
+# browser's profile directory, which no other browser on this box uses: the
 # television's browser application and any other Chromium are untouched.
-PATTERN='--user-data-dir=/var/lib/mediabox-ui/chromium'
+#
+# Named separately rather than as one word-split list: a pattern with a space in
+# it would silently become two, and the thing this script exists to prevent is a
+# process nobody noticed was still running.
+NATIVE='/opt/rk3588-mediabox/bin/mediabox-tv'
+BROWSER='--user-data-dir=/var/lib/mediabox-ui/chromium'
 
+# Written out rather than looped over a list, for the same reason the patterns
+# are named separately: two lines that say what they check beat one that has to
+# be reasoned about.
 gone() {
-  ! pgrep -f -- "$PATTERN" >/dev/null 2>&1
+  if pgrep -f -- "$NATIVE" >/dev/null 2>&1; then
+    return 1
+  fi
+  if pgrep -f -- "$BROWSER" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
 }
 
-pkill -TERM -f -- "$PATTERN" 2>/dev/null || true
+signal() {
+  pkill "$1" -f -- "$NATIVE" 2>/dev/null || true
+  pkill "$1" -f -- "$BROWSER" 2>/dev/null || true
+}
 
-# Five seconds is generous for a browser with one page and no unsaved state;
+signal -TERM
+
+# Five seconds is generous for an interface with no unsaved state;
 # the unit's own TimeoutStopSec is 15.
 i=0
 while [ "$i" -lt 50 ]; do
@@ -35,7 +58,7 @@ while [ "$i" -lt 50 ]; do
   i=$((i + 1))
 done
 
-pkill -KILL -f -- "$PATTERN" 2>/dev/null || true
+signal -KILL
 i=0
 while [ "$i" -lt 20 ]; do
   gone && exit 0
@@ -43,5 +66,6 @@ while [ "$i" -lt 20 ]; do
   i=$((i + 1))
 done
 
-echo "mediabox-ui-reap: chromium hâlâ ayakta: $(pgrep -f -- "$PATTERN" | tr '\n' ' ')" >&2
+still="$(pgrep -f -- "$NATIVE" 2>/dev/null | tr '\n' ' ')$(pgrep -f -- "$BROWSER" 2>/dev/null | tr '\n' ' ')"
+echo "mediabox-ui-reap: arayüz hâlâ ayakta: $still" >&2
 exit 0

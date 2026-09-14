@@ -1,0 +1,88 @@
+import { Theme, Metrics } from "theme.slint";
+
+// What the television shows before there is anything to show.
+//
+// This is not a splash screen for its own sake: the appliance's home surface is
+// assembled from third-party catalogues over the network, and the honest thing
+// to put on the panel in the meantime is the product's name and what it is
+// waiting for.
+component Boot inherits Rectangle {
+    in property <string> status;
+    in property <bool> failed;
+
+    background: Theme.bg;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: Metrics.root-font;
+        padding-left: Metrics.gutter;
+        padding-right: Metrics.gutter;
+
+        Text {
+            text: "MediaBox";
+            color: Theme.text;
+            font-size: Metrics.title-hero;
+            font-weight: 820;
+            letter-spacing: -0.038 * Metrics.title-hero;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: root.status;
+            color: root.failed ? Theme.bad : Theme.muted;
+            font-size: Metrics.text-meta;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component MediaBoxWindow inherits Window {
+    // sway is told to make this fullscreen and frameless by title, so the title
+    // is part of the contract with the compositor, not decoration.
+    title: "MediaBox";
+    background: Theme.bg;
+    default-font-size: Metrics.root-font;
+    // Installed on the appliance from Debian's own archive rather than carried
+    // in this repository or registered at run time: Slint 1.17 reads the
+    // system's fonts, and a typeface is not source code. If it is missing the
+    // interface still comes up in DejaVu — wrong, but visible and reportable.
+    default-font-family: "Inter";
+
+    in property <string> status: "Başlatılıyor…";
+    in property <bool> failed: false;
+
+    // Every key the television can send arrives here and is answered in Rust:
+    // the focus model is deterministic and structural, and splitting it between
+    // two languages is how it stops being either.
+    callback key-pressed(string);
+    // Reported once per painted frame so the metrics line can talk about frame
+    // pacing and key-to-render without guessing.
+    callback frame-rendered();
+
+    forward-focus: scope;
+
+    scope := FocusScope {
+        key-pressed(event) => {
+            root.key-pressed(event.text);
+            accept
+        }
+
+        Boot {
+            width: 100%;
+            height: 100%;
+            status: root.status;
+            failed: root.failed;
+        }
+    }
+
+    // The viewport drives every size in the theme. It is set here rather than
+    // from Rust so a panel swapped while the box is running is followed without
+    // a round trip.
+    init => {
+        Metrics.vw = root.width;
+        Metrics.vh = root.height;
+    }
+    changed width => { Metrics.vw = self.width; }
+    changed height => { Metrics.vh = self.height; }
+}

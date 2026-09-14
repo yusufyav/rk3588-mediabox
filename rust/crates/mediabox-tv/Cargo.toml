@@ -1,0 +1,55 @@
+# The television's own interface.
+#
+# Its own workspace, for the reason mediabox-ui has one: a UI framework's
+# dependency tree is several times the size of the control plane's, and a
+# dependency of this crate must never be able to move a lockfile entry under
+# mediaboxd-rs. `cargo test` in rust/ stays the appliance's own tree.
+[workspace]
+
+[package]
+name = "mediabox-tv"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "mediabox-tv"
+path = "src/main.rs"
+
+[dependencies]
+# Wayland through winit, drawn by femtovg on GLES. Not the default feature set:
+# `accessibility` pulls AT-SPI over D-Bus and there is no session bus on the
+# appliance, and there is no tray on a television. The software renderer is left
+# out too — this board has a GPU and a 4K panel, and a CPU rasteriser at that
+# size is not a fallback, it is a slideshow.
+slint = { version = "1.17.1", default-features = false, features = [
+    "compat-1-2",
+    "std",
+    "backend-winit-wayland",
+    "renderer-femtovg",
+] }
+
+mediabox-core = { path = "../mediabox-core" }
+
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+# Artwork comes from third-party hosts over TLS. The daemon's HTTP client is
+# deliberately built without TLS because every origin it talks to is loopback;
+# that property is worth keeping, so the television fetches its own pictures.
+# webpki-roots rather than the system store: the appliance need not carry one.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream", "http2"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+sha2 = "0.10"
+libc = "0.2.189"
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

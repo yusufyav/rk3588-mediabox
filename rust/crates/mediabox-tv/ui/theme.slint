@@ -1,0 +1,77 @@
+// The product's visual language, in Slint's own terms.
+//
+// The web interface's stylesheet is the reference for what this should look
+// like, not for how it is written: `clamp()`, `vw` and `rem` are statements of
+// intent — "as big as the panel allows, between these two bounds" — and they
+// are expressed here as ordinary arithmetic over the viewport, which is what
+// they always meant.
+//
+// Everything derives from the viewport rather than from a fixed pixel grid,
+// because the panel is not ours to choose: a 4K television in one house, a
+// 1440p monitor in another.
+
+export global Theme {
+    // Ground and surfaces.
+    out property <brush> bg: #07080b;
+    out property <brush> bg-raise: #0f131a;
+    out property <brush> bg-card: #151a23;
+    out property <brush> line: #232a36;
+    out property <brush> line-soft: #1a202a;
+
+    // Type.
+    out property <brush> text: #f5f7fa;
+    out property <brush> muted: #9aa5b4;
+    out property <brush> dim: #64707f;
+
+    // Accents and verdicts.
+    out property <brush> accent: #ffb43a;
+    out property <brush> accent-ink: #1b1204;
+    out property <brush> ok: #4ade80;
+    out property <brush> warn: #fbbf24;
+    out property <brush> bad: #f87171;
+
+    out property <brush> focus-ring: #ffffff;
+
+    out property <length> radius: 16px;
+    out property <length> radius-art: 22px;
+
+    // One focus language everywhere. The duration is the web interface's
+    // measured 130 ms; the easing is the same curve.
+    out property <duration> focus-in: 130ms;
+    out property <duration> glide: 150ms;
+    out property <duration> crossfade: 260ms;
+    out property <easing> ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+export global Metrics {
+    // Set by the root window, and again whenever the panel changes under us.
+    in property <length> vw: 1920px;
+    in property <length> vh: 1080px;
+
+    // A poster is 2:3 and as wide as the panel affords, within bounds. The
+    // stylesheet writes this as clamp(118px, 12.4vw, 470px).
+    out property <length> card-w: max(118px, min(470px, vw * 0.124));
+    out property <length> card-h: card-w * 1.5;
+
+    // The screen's inset, the gap between posters, and the height of the bar
+    // every screen starts below.
+    out property <length> gutter: max(16px, min(104px, vw * 0.027));
+    out property <length> rail-gap: max(9px, min(40px, vw * 0.0105));
+    out property <length> topbar: max(50px, min(128px, vh * 0.064));
+
+    // The type scale's root. Everything else is a multiple of it, which is what
+    // `rem` meant in the stylesheet.
+    out property <length> root-font: max(15px, min(44px, vw * 0.0116));
+
+    out property <length> title-hero: max(38px, min(86px, vw * 0.048));
+    out property <length> title-detail: max(27px, min(51px, vw * 0.029));
+    out property <length> title-rail: root-font * 1.16;
+    out property <length> text-card: root-font * 0.82;
+    out property <length> text-meta: root-font;
+    out property <length> text-chip: root-font * 0.72;
+    out property <length> text-label: root-font * 0.74;
+
+    // Where the focused band parks, measured from the top of the scrolling
+    // area. The web interface calls this TOP_INSET.
+    out property <length> top-inset: 92px;
+}

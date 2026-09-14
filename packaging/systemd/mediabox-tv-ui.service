@@ -1,5 +1,5 @@
 [Unit]
-Description=MediaBox product UI on the television (sway + Chromium kiosk)
+Description=MediaBox product UI on the television (sway + native interface)
 Documentation=https://github.com/yusufyav/rk3588-mediabox
 After=mediaboxd-rs.service
 Wants=mediaboxd-rs.service
@@ -14,10 +14,9 @@ Conflicts=kodi.service
 Type=simple
 # The compositor acquires DRM master through libseat, which on this appliance means
 # running as root — the same arrangement Kodi already has, and for the same
-# reason. Chromium then refuses its own setuid sandbox, so it is disabled and
-# the loss is made up for by the confinement below plus the fact that this
-# browser has no address bar, no extensions and exactly one page: the
-# appliance's own loopback UI.
+# reason. What it starts is the product's own interface: no address bar, no
+# extensions, no scripting engine, and one socket to the control plane. The
+# confinement below is what stands in for a browser sandbox.
 User=root
 RuntimeDirectory=mediabox-ui
 RuntimeDirectoryMode=0700
@@ -94,7 +93,7 @@ Environment=WLR_SCENE_DEBUG_DAMAGE=rerender
 # /run/user, where the Wayland socket would otherwise have to live.
 ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
 ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/mediabox-ui /usr/bin/sway -c /etc/mediabox/sway-kiosk.conf
-# The browser is launched from the sway config, which exits with it. Stopped
+# The interface is launched from the sway config, which exits with it. Stopped
 # and started by mediaboxd-rs when the display changes hands, so an ordinary
 # stop is never a failure to recover from.
 Restart=on-failure

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# Install the MediaBox V3 product UI and the control plane that serves it.
+# Install the MediaBox V3 product and the control plane behind it.
 #
-# Everything shipped here is built on the developer's machine: the control
-# plane is cross-compiled for aarch64 and the UI is WebAssembly, which is
-# architecture independent. The appliance carries no Rust toolchain and none is
-# installed by this script.
+# There are two interfaces and they are not the same thing. The television has a
+# native one, cross-compiled for aarch64; a phone or a laptop on the network
+# opens the WebAssembly one the daemon serves. Both are built on the developer's
+# machine — the appliance carries no Rust toolchain and none is installed by
+# this script.
 #
 # The order matters and is deliberate. Binaries and the UI land first, then the
 # media worker gains its library, then the control plane is restarted — so at
@@ -29,7 +30,17 @@ say "control plane (cross-compile, $target_triple)"
 ( cd "$here/rust" && cargo build --release --target "$target_triple" )
 bin="$here/rust/target/$target_triple/release"
 
+say "television interface (native, $target_triple)"
+# Cross-compiled against the appliance's own sysroot; see the script for why the
+# host's cross glibc is not good enough.
+"$here/scripts/build-mediabox-tv.sh"
+tv_bin="$here/rust/crates/mediabox-tv/target/$target_triple/release/mediabox-tv"
+[ -x "$tv_bin" ] || { echo "the television interface did not build" >&2; exit 1; }
+
 say "product UI (wasm32)"
+# Still built and still shipped: this is the surface a phone or a laptop on the
+# network opens, and the television having its own interface does not take that
+# away.
 "$here/scripts/build-mediabox-ui.sh"
 [ -f "$ui_dist/index.html" ] && [ -f "$ui_dist/mediabox_ui_bg.wasm" ] \
   || { echo "UI bundle is incomplete at $ui_dist" >&2; exit 1; }
@@ -38,17 +49,17 @@ say "TV-local browser packages"
 # sway rather than a plain kiosk compositor: it can make a window fullscreen
 # without the browser asking for it, and it reports output changes, which is
 # how the interface survives being moved to a different panel.
-sh_ "command -v sway >/dev/null && command -v chromium >/dev/null && fc-list | grep -qi emoji" || {
-  echo "installing sway, chromium and an emoji font"
+sh_ "command -v sway >/dev/null && command -v chromium >/dev/null && fc-list | grep -qi emoji && fc-list | grep -qi inter" || {
+  echo "installing sway, chromium, an emoji font and the product's typeface"
   sh_ "DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sway chromium fonts-noto-color-emoji"
+       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sway chromium fonts-noto-color-emoji fonts-inter"
 }
 
 say "binaries -> $prefix/bin"
 sh_ "mkdir -p $prefix/bin $prefix/ui $prefix/assets"
-cp_ "$bin/mediaboxd-rs" "$bin/mediaboxctl" "root@$host:/var/tmp/"
-sh_ "install -m 0755 /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl $prefix/bin/ && \
-     rm -f /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl && \
+cp_ "$bin/mediaboxd-rs" "$bin/mediaboxctl" "$tv_bin" "root@$host:/var/tmp/"
+sh_ "install -m 0755 /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabox-tv $prefix/bin/ && \
+     rm -f /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabox-tv && \
      ln -sfn $prefix/bin/mediaboxctl /usr/local/bin/mediaboxctl"
 
 say "media core -> $prefix"
@@ -61,13 +72,15 @@ say "product UI -> $prefix/ui"
 tar -C "$ui_dist" -cf - . | sh_ "rm -rf $prefix/ui && mkdir -p $prefix/ui && tar -C $prefix/ui -xf -"
 
 say "television kiosk"
-cp_ "$here/packaging/mediabox-kiosk-browser" "$here/packaging/mediabox-kiosk-smoke" \
+cp_ "$here/packaging/mediabox-tv-native" \
+    "$here/packaging/mediabox-kiosk-browser" "$here/packaging/mediabox-kiosk-smoke" \
     "$here/packaging/mediabox-hdmi-prepare" "$here/packaging/mediabox-display-scale" \
     "$here/packaging/mediabox-display-watch" \
     "$here/packaging/mediabox-display-settle" "root@$host:/var/tmp/"
 cp_ "$here/config/sway-kiosk.conf" "root@$host:/var/tmp/"
 sh_ "set -e
   mkdir -p /etc/mediabox
+  install -m 0755 /var/tmp/mediabox-tv-native $prefix/bin/mediabox-tv-native
   install -m 0755 /var/tmp/mediabox-kiosk-browser $prefix/bin/mediabox-kiosk-browser
   install -m 0755 /var/tmp/mediabox-kiosk-smoke $prefix/bin/mediabox-kiosk-smoke
   install -m 0755 /var/tmp/mediabox-hdmi-prepare $prefix/bin/mediabox-hdmi-prepare
@@ -75,7 +88,8 @@ sh_ "set -e
   install -m 0755 /var/tmp/mediabox-display-watch $prefix/bin/mediabox-display-watch
   install -m 0755 /var/tmp/mediabox-display-settle $prefix/bin/mediabox-display-settle
   install -m 0644 /var/tmp/sway-kiosk.conf /etc/mediabox/sway-kiosk.conf
-  rm -f /var/tmp/mediabox-kiosk-browser /var/tmp/mediabox-kiosk-smoke \
+  rm -f /var/tmp/mediabox-tv-native \
+        /var/tmp/mediabox-kiosk-browser /var/tmp/mediabox-kiosk-smoke \
         /var/tmp/mediabox-hdmi-prepare /var/tmp/mediabox-display-scale \
         /var/tmp/mediabox-display-watch /var/tmp/mediabox-display-settle \
         /var/tmp/sway-kiosk.conf"

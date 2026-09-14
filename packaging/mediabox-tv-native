@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# Start the television's interface inside the kiosk compositor.
+#
+# It is a script rather than a line in sway's config for the reason the browser
+# launcher is one: sway's parser splits commands on "," and ";" and has no line
+# continuation, so anything with arguments cannot be written there without being
+# quietly mangled.
+#
+# `exec` is deliberately not used. The compositor must exit when the interface
+# does — systemd restarts the unit, and a bare compositor on the television is
+# worse than a restart — and `exec` would replace this shell, leaving nothing to
+# do the exiting.
+set -eu
+
+BIN="${MEDIABOX_TV_BIN:-/opt/rk3588-mediabox/bin/mediabox-tv}"
+
+# Wayland through winit, drawn on the GPU. Named rather than left to the
+# backend selector so the chain cannot silently fall back to something else on
+# a television nobody is watching.
+export SLINT_BACKEND=winit-wayland
+
+# The interface is laid out for 1920x1080 logical pixels seen from a sofa, and
+# rasterised at whatever the panel actually is. The factor is measured rather
+# than written down — see mediabox-display-scale, and docs/display-pipeline.md
+# for what a fractional one costs this board.
+#
+# Chromium's --force-device-scale-factor and this are not the same mechanism and
+# are not assumed to be: what matters is proven on the appliance, by the buffer
+# the compositor receives and the format the display controller reports. The
+# interface logs its own buffer size at startup for the first half of that.
+SCALE="$(/opt/rk3588-mediabox/bin/mediabox-display-scale 1920 1080 2>/dev/null || echo 1)"
+case "$SCALE" in
+  [1-4]) export SLINT_SCALE_FACTOR="$SCALE" ;;
+  *)     export SLINT_SCALE_FACTOR=1 ;;
+esac
+
+"$BIN" "$@"
+rc=$?
+
+# Whatever happened, the compositor goes with it.
+swaymsg exit >/dev/null 2>&1 || true
+exit $rc
