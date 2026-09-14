@@ -52,6 +52,11 @@ if [ ! -e "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ]; then
       rsync -a -e "ssh ${ssh_opts[*]}" "$user@$host":/lib/aarch64-linux-gnu/     "$sysroot/lib/aarch64-linux-gnu/"
     }
   rsync -a -e "ssh ${ssh_opts[*]}" "$user@$host":/usr/include/ "$sysroot/usr/include/"
+  # Architecture-independent pkg-config metadata. Small, and freetype2.pc does
+  # not resolve without it.
+  mkdir -p "$sysroot/usr/share/pkgconfig"
+  rsync -a -e "ssh ${ssh_opts[*]}" \
+    "$user@$host":/usr/share/pkgconfig/ "$sysroot/usr/share/pkgconfig/"
   # Absolute symlinks inside the copied tree point at this host's own /lib.
   # Rewritten to be relative to the sysroot, or the cross linker follows them out.
   find "$sysroot" -type l | while read -r link; do
@@ -60,9 +65,35 @@ if [ ! -e "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ]; then
       /*) ln -sfn "$sysroot$dest" "$link" ;;
     esac
   done
+
+  # The dynamic loader, where the linker looks for it.
+  #
+  # The appliance has merged /usr — /lib is a symlink to usr/lib — and the
+  # loader is reached through /lib/ld-linux-aarch64.so.1, a symlink into
+  # /lib/aarch64-linux-gnu/. Copying the directories does not bring the symlink
+  # that sits beside them, and without it every link ends in
+  # "cannot find /lib/ld-linux-aarch64.so.1 inside <sysroot>".
+  ln -sfn aarch64-linux-gnu/ld-linux-aarch64.so.1 "$sysroot/lib/ld-linux-aarch64.so.1"
+  ln -sfn aarch64-linux-gnu/ld-linux-aarch64.so.1 "$sysroot/usr/lib/ld-linux-aarch64.so.1"
 fi
 
 say "mediabox-tv ($triple, release)"
+
+# Slint's font handling links fontconfig, and its -sys crate asks pkg-config
+# where that is. Pointed at the appliance's own .pc files rather than this
+# host's: LIBDIR replaces the search path entirely, so a host library cannot
+# leak into an aarch64 link, and SYSROOT_DIR prefixes the paths they hand back.
+#
+# Both directories are named because Debian splits them: the architecture's own
+# metadata lives under /usr/lib/<triple>/pkgconfig, but anything
+# architecture-independent — bzip2.pc, which freetype2.pc requires — is in
+# /usr/share/pkgconfig. Copying only the first is what made this fail with
+# "Package bzip2 was not found", on a box that has libbz2 and its development
+# files installed.
+export PKG_CONFIG_ALLOW_CROSS=1
+export PKG_CONFIG_SYSROOT_DIR="$sysroot"
+export PKG_CONFIG_LIBDIR="$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig:$sysroot/usr/share/pkgconfig"
+
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
 export CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"

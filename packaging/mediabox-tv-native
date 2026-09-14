@@ -18,7 +18,12 @@ BIN="${MEDIABOX_TV_BIN:-/opt/rk3588-mediabox/bin/mediabox-tv}"
 # Wayland through winit, drawn on the GPU. Named rather than left to the
 # backend selector so the chain cannot silently fall back to something else on
 # a television nobody is watching.
-export SLINT_BACKEND=winit-wayland
+#
+# The value is read as backend-renderer, so "winit-wayland" asks for a renderer
+# called wayland, which does not exist: the interface then printed "unrecognized
+# renderer wayland, falling back to FemtoVG" and carried on. The backend's name
+# is "winit"; which display protocol it uses is decided by what is compiled in.
+export SLINT_BACKEND=winit
 
 # The interface is laid out for 1920x1080 logical pixels seen from a sofa, and
 # rasterised at whatever the panel actually is. The factor is measured rather

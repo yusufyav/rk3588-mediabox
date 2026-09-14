@@ -186,3 +186,51 @@ PASS  ui loaded     'MediaBox' at 2560x1440      # window title is the page's ow
 ```
 
 Nothing in it names a resolution, and nothing in it should.
+
+## The GPU user space is GBM-only, and a Wayland client cannot use it
+
+`scripts/install-mali-runtime.sh` pins
+`libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb`. That build advertises exactly
+two EGL platform extensions:
+
+```text
+EGL_EXT_platform_base
+EGL_KHR_platform_gbm
+```
+
+There is no `EGL_EXT_platform_wayland`, and `libmali.so.1` references no
+`wl_egl_*` symbol at all. That is enough for the compositor, which renders
+through GBM, and it is nothing for a client, which needs the Wayland platform to
+get an EGL display at all.
+
+What that costs is not obvious from the outside, because nothing fails loudly.
+A native Wayland client asked for a window, got as far as `wl_compositor`
+`create_surface`, and stopped: no `xdg_surface`, no `xdg_toplevel`, no buffer
+ever attached. The process stayed up, answered the control plane, logged its
+metrics and drew nothing, and the television showed the compositor's background
+colour. The same interface run with the Mali path removed from
+`LD_LIBRARY_PATH` came up immediately — on llvmpipe, because the vendor kernel
+has no DRI driver for Mesa to use:
+
+```text
+libEGL warning: egl: failed to create dri2 screen
+mediabox-tv.startup first_frame_ms=459
+```
+
+That is a working picture and the wrong one: the plane's format was `XR24`
+rather than the client's own buffer, which is the direct scanout this pipeline
+spent weeks earning, and one first paint cost 38% of a core.
+
+**Check**, before assuming a client can be accelerated here:
+
+```sh
+strings /opt/rk3588-mediabox/mali-g24p0-runtime/lib/libmali.so.1 \
+  | grep -oE 'EGL_[A-Z]+_platform_[a-z_]+' | sort -u
+```
+
+The same upstream release carries `…-wayland-gbm_1.9-1_arm64.deb`, which is the
+same driver with the Wayland platform added alongside GBM. Swapping to it is not
+a free change: Kodi and the compositor take their GL from the same directory,
+and the accepted display baseline in this repository was measured against the
+GBM build. It is a decision to make deliberately, with the before-and-after this
+document asks of every other rule in it.
