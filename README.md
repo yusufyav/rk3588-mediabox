@@ -87,6 +87,12 @@ See [`docs/gates.md`](docs/gates.md) for what each gate asked and answered, and
 [`docs/architecture.md`](docs/architecture.md) for why the pipeline is shaped
 this way.
 
+Before touching anything that reaches the panel — the compositor config, the
+browser's flags, the units that hand the display between the interface and
+Kodi — read [`docs/display-pipeline.md`](docs/display-pipeline.md). Every rule
+in it was learned by breaking it on the appliance, and each one names the
+command that says whether it still holds.
+
 ## Target
 
 | Item | Value |
