@@ -37,6 +37,40 @@ Daemon Kodi süreci spawn etmez. `kodi restart`, doğrulanmış sabit unit adıy
 `/usr/bin/systemctl restart kodi.service` çağırır. Böylece Kodi her zaman kendi
 canonical unit'i içinde aynı DRM, udev ve input bağlamıyla başlar.
 
+## Gösterge ışıkları
+
+`leds_status` ve `leds_set` komutları kartın iki GPIO ışığını (`blue_led`,
+`green_led`) yönetir; modlar `off`, `on`, `heartbeat`'tir. `SystemStatus` içinde
+`leds` alanı aynı durumu taşır, böylece arayüz ayrı bir çağrı yapmadan satırı
+çizebilir.
+
+Bu iş daemon'un sahipliğindedir: `/sys/class/leds` root'a aittir ve televizyonu
+çizen birim `/sys`'i salt-okunur bağlar. Arayüz yazmaz, ister.
+
+Kalıcılık `/var/lib/mediabox/leds` dosyasıyla sağlanır. Çekirdek her boot'ta
+device tree'nin `heartbeat` trigger'ını geri koyar, daemon da her başlayışta bu
+dosyayı okuyup modu yeniden uygular. Dosya yoksa mod karttan okunur — hatırlanan
+bir seçim yokken durum uydurulmaz. Birim iki satırla bunu mümkün kılar:
+`StateDirectory=mediabox` dizini oluşturur, `ReadWritePaths=-/sys/devices/platform/gpio-leds`
+ise `ProtectKernelTunables=true` altındaki salt-okunur `/sys` içinde yalnız bu
+platform aygıtını yazılabilir bırakır. Baştaki tire, `gpio-leds` aygıtı olmayan
+bir kartta birimin yine açılmasını sağlar.
+
+İki davranış koda gömülüdür ve testleri vardır: ışıklar aygıt yolu `gpio-leds`
+üzerinden geçtiği için seçilir (dizin taranmaz — `/sys/class/leds` altında USB
+klavye kilit ışıkları ve `mmc0::` de listelenir), ve her yazma önce `trigger`
+sonra `brightness` uygular.
+
+Kırmızı ışık device tree'de yoktur, besleme hattına bağlıdır ve yazılımdan
+kapatılamaz; bkz. [`architecture.md`](architecture.md) § G.
+
+Televizyon arayüzünde bu ayar **Ayarlar > Işıklar** bölümündedir. Satır basış
+anında güncellenir: makine yoklaması on saniyelik olduğu için yalnız ona
+dayanan bir satır basıştan sonra on saniyeye kadar eski değeri gösterirdi.
+Basış satırı aynı karede değiştirir, daemon'un yanıtı onun yerini alır
+(reddedilen bir istek satırı geri alır), ve basıştan önce yola çıkmış bir
+yoklama bu alan için yoksayılır. Cihazda ölçülen tuş-çizim süresi 3–7 ms'dir.
+
 ## Input routing
 
 `Ui` modunda tüm aksiyonlar yalnız event bus'a yayınlanır. `KodiPlayback`

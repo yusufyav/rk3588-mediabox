@@ -14,6 +14,7 @@
 //! The destructive rows are the reason [`Action::confirms`] exists. Nothing on
 //! this screen restarts or shuts down the appliance on one press.
 
+use mediabox_core::LedMode;
 use serde_json::Value;
 
 use crate::model::DisplayStatus;
@@ -22,6 +23,11 @@ use crate::model::DisplayStatus;
 pub enum Action {
     /// Opens the diagnostics screen.
     OpenDiagnostics,
+    /// Set the board's indicator lights to this mode. The row carries the mode
+    /// it would move to rather than a "cycle" instruction, so what a press
+    /// does is decided while the screen is composed and is visible in the row
+    /// itself.
+    SetLeds(LedMode),
     /// CEC: wake the television, or send it to standby. Neither touches this
     /// appliance's own power state — the daemon owns /dev/cec0 and this is a
     /// message to the panel.
@@ -253,6 +259,49 @@ fn duration(seconds: u64) -> String {
     }
 }
 
+/// The board's indicator lights.
+///
+/// Three lights, and only two of them are anybody's to change. The red one is
+/// wired to the supply and appears nowhere in the device tree, so it is a
+/// reading here that says as much — a person who has just turned the other two
+/// off and can still see a light needs to be told why, on the screen, rather
+/// than left to wonder whether the setting worked.
+///
+/// The choosable row carries the *next* mode rather than a cycle: the value on
+/// the right is where the lights are now, and pressing Ok moves to the mode
+/// named in the hint. A remote has three buttons that matter and no text
+/// field, so stepping round a ring of three is the whole interaction.
+fn leds(status: Option<&Value>) -> Vec<Row> {
+    let red = Row::reading("Kırmızı ışık", "Donanımdan yanar — kapatılamaz");
+
+    if flag(status, "/leds/available") != Some(true) {
+        // Either the daemon has not answered yet, or this is not a board whose
+        // lights are on gpio-leds. Either way there is nothing to press.
+        let reason = text(status, "/leds/error")
+            .unwrap_or_else(|| "Denetlenebilir ışık bulunamadı".into());
+        return vec![Row::reading("Yeşil ve mavi ışık", reason), red];
+    }
+
+    let mode = match text(status, "/leds/mode").as_deref() {
+        Some("off") => LedMode::Off,
+        Some("on") => LedMode::On,
+        _ => LedMode::Heartbeat,
+    };
+    let next = mode.next();
+
+    vec![
+        Row {
+            label: "Yeşil ve mavi ışık".into(),
+            value: mode.label().into(),
+            hint: format!("Ok: {}", next.label()),
+            tone: if mode == LedMode::Off { "good".into() } else { String::new() },
+            action: Some(Action::SetLeds(next)),
+        },
+        red,
+        Row::reading("Kalıcılık", "Seçim yeniden başlatmadan sonra korunur"),
+    ]
+}
+
 fn compose(
     status: Option<&Value>,
     diagnostics: Option<&Value>,
@@ -361,6 +410,10 @@ fn compose(
                 Row::reading("Geçirgen kodekler", "AC-3 · E-AC-3 · DTS"),
                 Row::reading("Nesne tabanlı ses", "AC-3'e çevrilir"),
             ],
+        },
+        Group {
+            title: "Işıklar".into(),
+            rows: leds(status),
         },
         Group {
             title: "Sistem".into(),
@@ -475,5 +528,87 @@ mod tests {
         assert!(!Action::OpenDiagnostics.confirms());
         assert!(!Action::WakeTelevision.confirms());
         assert!(!Action::StandbyTelevision.confirms());
+        // An indicator light is not somebody's evening.
+        for mode in LedMode::ALL {
+            assert!(!Action::SetLeds(mode).confirms());
+            assert!(Action::SetLeds(mode).question().is_empty());
+        }
+    }
+
+    // ------------------------------------------------------------- the lights
+
+    fn answered(available: bool, mode: &str) -> serde_json::Value {
+        serde_json::json!({
+            "leds": {
+                "available": available,
+                "mode": mode,
+                "leds": ["blue_led", "green_led"],
+                "error": if available { serde_json::Value::Null } else { "test".into() },
+            }
+        })
+    }
+
+    fn lights(available: bool, mode: &str) -> Vec<Row> {
+        let status = answered(available, mode);
+        compose(Some(&status), None, None)
+            .into_iter()
+            .find(|group| group.title == "Işıklar")
+            .expect("lights section")
+            .rows
+    }
+
+    /// One press moves one step, and the ring closes. Off leads, because that
+    /// is the mode this setting exists to reach.
+    #[test]
+    fn the_lights_row_steps_round_the_ring() {
+        for (now, next) in
+            [("off", LedMode::On), ("on", LedMode::Heartbeat), ("heartbeat", LedMode::Off)]
+        {
+            let rows = lights(true, now);
+            let row = rows.first().expect("a row");
+            assert!(row.selectable(), "{now} is not selectable");
+            assert_eq!(row.action, Some(Action::SetLeds(next)), "from {now}");
+            // The value is where the lights are, not where they are going.
+            assert_eq!(row.value, LedMode::ALL[LedMode::ALL
+                .iter()
+                .position(|m| m.next() == next)
+                .expect("a predecessor")]
+            .label());
+        }
+    }
+
+    /// The question that started this: the lights were turned off and one was
+    /// still lit. The screen has to answer it without anybody measuring a pin.
+    #[test]
+    fn the_red_light_is_explained_rather_than_offered() {
+        for available in [true, false] {
+            let rows = lights(available, "off");
+            let red = rows
+                .iter()
+                .find(|row| row.label.contains("Kırmızı"))
+                .unwrap_or_else(|| panic!("no red row, available={available}"));
+            assert!(!red.selectable(), "the red light must not look changeable");
+            assert!(red.value.contains("kapatılamaz"));
+        }
+    }
+
+    /// Every board that is not this one. A row that would do nothing is worse
+    /// than a reading that says why.
+    #[test]
+    fn a_board_with_no_controllable_lights_offers_nothing_to_press() {
+        let rows = lights(false, "off");
+        assert!(rows.iter().all(|row| !row.selectable()));
+    }
+
+    /// Before the daemon has answered, the screen must not claim a mode.
+    #[test]
+    fn an_unanswered_status_does_not_invent_a_mode() {
+        let rows = compose(None, None, None)
+            .into_iter()
+            .find(|group| group.title == "Işıklar")
+            .expect("lights section")
+            .rows;
+        assert!(rows.iter().all(|row| !row.selectable()));
+        assert!(!rows.is_empty());
     }
 }

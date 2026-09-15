@@ -71,7 +71,7 @@ file is the way in.
 | Unit | Source | What it is |
 | --- | --- | --- |
 | `mediabox-tv-ui.service` | `rust/crates/mediabox-tv` | The television's own interface. Slint on FemtoVG/GLES, Mali G610 on `renderD128`, scanout on Rockchip `card0`. No compositor, no Wayland; it holds DRM master itself. |
-| `mediaboxd-rs.service` | `rust/crates/mediaboxd-rs` | The control plane. Typed Unix socket at `/run/mediabox/mediaboxd.sock`, loopback HTTP on `8787`, LAN HTTP on `8788` for private peers only. Decides which application owns the display. Serves the product UI from `/opt/rk3588-mediabox/ui`. |
+| `mediaboxd-rs.service` | `rust/crates/mediaboxd-rs` | The control plane. Typed Unix socket at `/run/mediabox/mediaboxd.sock`, loopback HTTP on `8787`, LAN HTTP on `8788` for private peers only. Decides which application owns the display. Owns the board's two GPIO indicator lights, because `/sys/class/leds` is root's. Serves the product UI from `/opt/rk3588-mediabox/ui`. |
 | — | `rust/crates/mediabox-ui` | The production web UI: Rust compiled to `wasm32`, served by the daemon above. There is no other web interface. |
 | `mediabox-media-worker.service` | `media/` | The media core: catalogue, Stremio bridge, `ffprobe` policy, session proxy. Python, bound to loopback; a browser reaches it only through the daemon's relay. |
 | `stremio-server.service` | node, pinned in `packaging/upstream.env` | Torrent and stream resolution. |

@@ -19,6 +19,11 @@ RestartSec=2s
 TimeoutStopSec=10s
 RuntimeDirectory=mediabox
 RuntimeDirectoryMode=0750
+# /var/lib/mediabox, where the chosen indicator-light mode is remembered. The
+# kernel puts the device tree's heartbeat back on every boot; this file is how
+# the daemon knows to take it off again.
+StateDirectory=mediabox
+StateDirectoryMode=0750
 UMask=0027
 
 # Kodi and the TV-local UI remain independently managed direct-KMS services.
@@ -51,6 +56,13 @@ DeviceAllow=/dev/cec0 rw
 # "Read-only file system" and the browser could only ever open its built-in
 # home page.
 ReadWritePaths=/run/mediabox /var/lib/mediabox-browser
+# The board's two indicator lights. ProtectKernelTunables mounts /sys
+# read-only, which is right for everything else under it, so the one platform
+# device whose brightness this daemon is allowed to write is named here and
+# nothing else under /sys is opened up. The leading dash keeps the unit
+# startable on a board that has no gpio-leds device at all, where the daemon
+# simply reports that there is nothing to control.
+ReadWritePaths=-/sys/devices/platform/gpio-leds
 
 [Install]
 WantedBy=multi-user.target

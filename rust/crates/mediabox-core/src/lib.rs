@@ -137,6 +137,90 @@ pub struct SurfaceStatus {
     pub ui_installed: bool,
 }
 
+/// What the two indicator lights on the board are doing.
+///
+/// The board carries three lights. Two of them hang off GPIO — `blue_led` on
+/// gpio-21 and `green_led` on gpio-22, both active low — and the kernel gives
+/// them a `heartbeat` trigger from the device tree, so out of the box they
+/// pulse for as long as the appliance is on. The third is red, appears nowhere
+/// in the device tree, and is wired to the supply rather than to any pin of the
+/// SoC: no amount of software reaches it. This type therefore describes the two
+/// that can be told what to do, and nothing pretends otherwise.
+///
+/// A person watching a film in a dark room is the reason this is a setting at
+/// all: a pulsing light beside the television is the one part of an appliance
+/// that draws the eye away from it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedMode {
+    /// Dark. Writes `none` to the trigger, then 0 to the brightness — the
+    /// trigger first, because a trigger left in place simply overwrites any
+    /// brightness written under it.
+    #[default]
+    Off,
+    /// Lit and still.
+    On,
+    /// The kernel's own pulse, which is what the device tree asks for.
+    Heartbeat,
+}
+
+impl LedMode {
+    /// The order the settings row steps through. Off leads, because it is the
+    /// mode this setting exists to reach.
+    pub const ALL: [LedMode; 3] = [LedMode::Off, LedMode::On, LedMode::Heartbeat];
+
+    /// The next mode round the ring, for a row that is chosen rather than
+    /// typed into. A television remote has no text field.
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+
+    /// What goes in `/sys/class/leds/<led>/trigger`.
+    pub fn trigger(self) -> &'static str {
+        match self {
+            LedMode::Off | LedMode::On => "none",
+            LedMode::Heartbeat => "heartbeat",
+        }
+    }
+
+    /// What goes in `brightness`, for the two modes that hold a level. The
+    /// kernel owns the level under `heartbeat`, so that mode writes none.
+    pub fn brightness(self) -> Option<u8> {
+        match self {
+            LedMode::Off => Some(0),
+            LedMode::On => Some(1),
+            LedMode::Heartbeat => None,
+        }
+    }
+
+    /// As it reads on the television, from the sofa.
+    pub fn label(self) -> &'static str {
+        match self {
+            LedMode::Off => "Kapalı",
+            LedMode::On => "Açık",
+            LedMode::Heartbeat => "Nabız",
+        }
+    }
+}
+
+/// Defaults to "no lights, none of them on": what a board that is not this one
+/// answers, and what the settings screen shows before the daemon has replied.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedStatus {
+    /// False on a board whose lights are not where this expects them, which is
+    /// every board that is not this one. The setting then shows why rather
+    /// than offering a choice that would do nothing.
+    pub available: bool,
+    pub mode: LedMode,
+    /// The lights this actually found, in sysfs order. Shown in diagnostics;
+    /// empty when `available` is false.
+    pub leds: Vec<String>,
+    /// Why there is nothing to control, when there is nothing to control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// One application this appliance can put on the television.
 ///
 /// MediaBox is a light environment for an Orange Pi rather than a media player
@@ -233,6 +317,8 @@ pub struct SystemStatus {
     pub cec: CecStatus,
     pub media: Value,
     pub surface: SurfaceStatus,
+    #[serde(default)]
+    pub leds: LedStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -257,6 +343,13 @@ pub enum Request {
     CecActiveSource,
     CecWakeTv,
     CecStandbyTv,
+    LedsStatus,
+    /// Set the indicator lights and remember the choice across boots. The
+    /// daemon owns this because `/sys/class/leds` is root-only and the
+    /// interface runs under a unit that mounts /sys read-only.
+    LedsSet {
+        mode: LedMode,
+    },
     MediaStatus,
     MediaCapabilities,
     MediaHome,
