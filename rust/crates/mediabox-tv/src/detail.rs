@@ -13,30 +13,20 @@ use crate::{SourceRow, TechRow};
 
 /// What the marks are drawn from. SVG path data in a 24x24 box, in two layers:
 /// the shape, and what is cut out of it in the button's own colour.
-pub const MARKS: [(&str, &str); 4] = [
-    // Play, here, in this interface's own player. A plain triangle: this is the
-    // ordinary thing to do with a film and it should not look like a handover.
-    ("M4 2l18 10-18 10z", ""),
-    // Play on the television — hand it to Kodi.
-    ("M1 4h22v13H1zM8 19h8v2H8z", "M10 8l6 3.5-6 3.5z"),
+///
+/// One mark, because there is one button. The reference's record carries the
+/// trailer and nothing else: a film is played by choosing where it comes from,
+/// in the column on the right, and Back is a key on the remote rather than a
+/// word taking up the row.
+pub const MARKS: [(&str, &str); 1] = [(
     // The trailer.
-    (
-        "M3 5h18v14H3z",
-        "M5 7h2v2H5zM5 11h2v2H5zM5 15h2v2H5zM17 7h2v2h-2zM17 11h2v2h-2zM17 15h2v2h-2zM10 9l5 3-5 3z",
-    ),
-    // Back.
-    ("M11 4l-8 8 8 8v-5h9v-6h-9z", ""),
-];
+    "M3 5h18v14H3z",
+    "M5 7h2v2H5zM5 11h2v2H5zM5 15h2v2H5zM17 7h2v2h-2zM17 11h2v2h-2zM17 15h2v2h-2zM10 9l5 3-5 3z",
+)];
 
-/// Playing here is first because it is what opening a film should do: the
-/// catalogue stays behind it, Back returns to it, and the television never
-/// changes hands. Kodi is the second button, for the evening that wants Kodi.
-pub const ACTIONS: [&str; 4] = ["Oynat", "Kodi'de Oynat", "Fragman", "Geri"];
+pub const ACTIONS: [&str; 1] = ["Fragman"];
 
-pub const ACTION_PLAY: usize = 0;
-pub const ACTION_KODI: usize = 1;
-pub const ACTION_TRAILER: usize = 2;
-pub const ACTION_BACK: usize = 3;
+pub const ACTION_TRAILER: usize = 0;
 
 /// Which half of the screen the remote is in.
 ///
@@ -82,6 +72,15 @@ pub struct Detail {
     pub provider: usize,
     /// True while the remote is on the provider filter rather than on a source.
     pub on_filter: bool,
+    /// True while the filter's list is down over the column.
+    ///
+    /// The reference's filter is a dropdown: it opens onto the providers, one
+    /// is picked, and it closes. The first version here walked them with Left
+    /// and Right on a closed row, which is not the same control and did not
+    /// look like one.
+    pub filter_open: bool,
+    /// Where the remote is inside the open list. 0 is "Tümü".
+    pub filter_focus: usize,
 
     pub loading: bool,
     pub note: String,
@@ -116,11 +115,13 @@ impl Detail {
             sources: Vec::new(),
             plan: None,
             pane: Pane::Record,
-            action: ACTION_PLAY,
+            action: ACTION_TRAILER,
             selected: None,
             source_focus: 0,
             provider: 0,
             on_filter: false,
+            filter_open: false,
+            filter_focus: 0,
             loading: true,
             note: "Kaynaklar aranıyor…".into(),
         }
@@ -212,24 +213,33 @@ impl Detail {
     }
 
     fn step_sources(&mut self, dx: i32, dy: i32) -> bool {
+        if self.filter_open {
+            // The list is down: Up and Down walk it and nothing else moves.
+            // Left and Right belong to the screen behind it and would take the
+            // remote somewhere it cannot see.
+            if dy < 0 && self.filter_focus > 0 {
+                self.filter_focus -= 1;
+                return true;
+            }
+            if dy > 0 && self.filter_focus + 1 < self.providers().len() + 1 {
+                self.filter_focus += 1;
+                return true;
+            }
+            return false;
+        }
         if dx < 0 {
+            // Left out of the column is the record — but only when there is
+            // something there to land on. A title with no trailer has an empty
+            // action row, and moving the remote onto it would strand it.
+            if !self.enabled().iter().any(|ok| *ok) {
+                return false;
+            }
             self.pane = Pane::Record;
             self.settle();
             return true;
         }
         if dx > 0 {
-            // Right, on the filter, walks the providers.
-            if !self.on_filter {
-                return false;
-            }
-            let count = self.providers().len() + 1;
-            let next = (self.provider + 1).min(count.saturating_sub(1));
-            if next == self.provider {
-                return false;
-            }
-            self.provider = next;
-            self.source_focus = 0;
-            return true;
+            return false;
         }
         if dy < 0 {
             if self.on_filter {
@@ -258,15 +268,37 @@ impl Detail {
         false
     }
 
-    /// The provider filter, stepped left. Kept separate because Left inside the
-    /// column means "leave", and a filter that swallowed it would trap the
-    /// remote in a list.
-    pub fn previous_provider(&mut self) -> bool {
-        if self.provider == 0 {
+    /// Ok on the closed filter: the list comes down on the provider it is
+    /// already showing.
+    pub fn open_filter(&mut self) -> bool {
+        if self.filter_open || self.providers().is_empty() {
             return false;
         }
-        self.provider -= 1;
+        self.filter_open = true;
+        self.filter_focus = self.provider;
+        true
+    }
+
+    /// Ok inside the list: this is the provider now, and the list goes up.
+    pub fn choose_provider(&mut self) -> bool {
+        if !self.filter_open {
+            return false;
+        }
+        self.filter_open = false;
+        if self.filter_focus == self.provider {
+            return true;
+        }
+        self.provider = self.filter_focus;
         self.source_focus = 0;
+        true
+    }
+
+    /// Back inside the list: it goes up and nothing has changed.
+    pub fn close_filter(&mut self) -> bool {
+        if !self.filter_open {
+            return false;
+        }
+        self.filter_open = false;
         true
     }
 
@@ -277,7 +309,7 @@ impl Detail {
         if enabled.get(self.action).copied().unwrap_or(false) {
             return;
         }
-        self.action = enabled.iter().position(|ok| *ok).unwrap_or(ACTION_BACK);
+        self.action = enabled.iter().position(|ok| *ok).unwrap_or(ACTION_TRAILER);
     }
 
     /// Ok in the source column: this is the one it plays from now.
@@ -318,7 +350,9 @@ impl Detail {
         self.loading = false;
         self.note = match self.sources.len() {
             0 => "Bu başlık için kaynak yok".into(),
-            n => format!("{n} kaynak"),
+            // A count is not something a viewer has to be told: the column is
+            // right there and the reference says nothing above it.
+            _ => String::new(),
         };
         // The first that can actually play, so the buttons mean something
         // before the viewer has chosen anything.
@@ -328,6 +362,8 @@ impl Detail {
             .position(|source| source.parsed.playable);
         self.provider = 0;
         self.on_filter = false;
+        self.filter_open = false;
+        self.filter_focus = 0;
         self.source_focus = self
             .selected
             .and_then(|index| self.shown().iter().position(|shown| *shown == index))
@@ -372,33 +408,51 @@ impl Detail {
 
     // ------------------------------------------------------------- rendering
 
-    pub fn facts_line(&self) -> String {
+    /// How long, when, and what it scored — in the reference's order, and as
+    /// separate words because the last of them wears IMDb's badge rather than
+    /// their name.
+    pub fn facts(&self) -> Vec<String> {
         let mut facts: Vec<String> = Vec::new();
-        if let Some(year) = non_empty(&self.meta.release_info) {
-            facts.push(year);
-        }
         if let Some(runtime) = non_empty(&self.meta.runtime) {
             facts.push(runtime);
         }
-        if let Some(rating) = non_empty(&self.meta.imdb_rating) {
-            facts.push(format!("IMDb {rating}"));
+        if let Some(year) = non_empty(&self.meta.release_info) {
+            facts.push(year);
         }
-        facts.join("  ·  ")
+        if let Some(rating) = non_empty(&self.meta.imdb_rating) {
+            facts.push(rating);
+        }
+        facts
     }
 
-    /// Which actions can be pressed. Back is always one of them: a title with
-    /// no sources would otherwise leave the screen with nothing to focus.
-    pub fn enabled(&self) -> [bool; 4] {
-        let playable = self
-            .selected_source()
-            .map(|source| source.parsed.playable)
-            .unwrap_or(false);
-        [
-            playable,
-            playable,
-            non_empty(&self.meta.trailer).is_some(),
-            true,
-        ]
+    /// Whether the last of the facts is a rating, and so whether the badge is
+    /// drawn after it.
+    pub fn has_rating(&self) -> bool {
+        non_empty(&self.meta.imdb_rating).is_some()
+    }
+
+    /// The genres, in the language the rest of the screen is in.
+    ///
+    /// The catalogue answers in English whatever the interface asks in, and a
+    /// Turkish page that says "Comedy" is a page that has not been translated.
+    /// The list is Cinemeta's own and it is closed: anything outside it is left
+    /// as the catalogue wrote it rather than guessed at.
+    pub fn genres(&self) -> Vec<String> {
+        self.meta
+            .genres
+            .iter()
+            .take(4)
+            .map(|genre| genre_in_turkish(genre))
+            .collect()
+    }
+
+    /// Which actions can be pressed.
+    ///
+    /// A title with no trailer has none, and the record then has nothing to
+    /// focus — which is why Left out of the source column checks this before
+    /// it moves the remote anywhere.
+    pub fn enabled(&self) -> [bool; 1] {
+        [non_empty(&self.meta.trailer).is_some()]
     }
 
     /// How long the film is, in seconds, if the catalogue said.
@@ -422,41 +476,22 @@ impl Detail {
     }
 
     /// The rows the column draws: the filtered list, in order.
+    ///
+    /// Both strings are the addon's own, untouched. The reference draws the
+    /// stream's name down the left of the row and its title down the right,
+    /// with the line breaks and the pictograms the addon put there, and that is
+    /// what a viewer choosing between two releases is reading.
     pub fn rows_for_display(&self) -> Vec<SourceRow> {
-        // The provider is on every row only when there is more than one to tell
-        // apart. Otherwise it is the same word repeated down the panel, taking
-        // the width the release name needs.
-        let providers: std::collections::HashSet<String> = self
-            .sources
-            .iter()
-            .map(|source| source.parsed.facts().provider)
-            .collect();
-        let many = providers.len() > 1;
-
         self.shown()
             .into_iter()
             .filter_map(|index| self.sources.get(index))
             .map(|source| {
-                let facts = source.parsed.facts();
-                let mut chips: Vec<slint::SharedString> =
-                    facts.chips().into_iter().take(4).map(Into::into).collect();
-                if many && !facts.provider.is_empty() {
-                    chips.push(facts.provider.clone().into());
-                }
-
-                let (kind, tone) = kind_chip(&source.parsed.kind);
-
+                let (title, meta) = source.parsed.file_lines();
                 SourceRow {
-                    identity: source.parsed.identity.clone().into(),
-                    quality: facts.quality.clone().unwrap_or_default().into(),
-                    flags: facts.flag_line().unwrap_or_default().into(),
-                    release: facts.headline(&source.parsed.label()).into(),
-                    chips: slint::ModelRc::new(slint::VecModel::from(chips)),
-                    kind: kind.into(),
-                    tone: tone.into(),
-                    cached: facts.cached,
+                    name: source.parsed.addon_label().into(),
+                    title: title.into(),
+                    meta: meta.into(),
                     playable: source.parsed.playable,
-                    provider: facts.provider.into(),
                 }
             })
             .collect()
@@ -567,16 +602,6 @@ fn severity_tone(severity: &str) -> &'static str {
         "blocking" | "error" => "bad",
         "warning" => "warn",
         _ => "",
-    }
-}
-
-fn kind_chip(kind: &str) -> (&'static str, &'static str) {
-    match kind {
-        "url" => ("Doğrudan HTTP", "good"),
-        "torrent" => ("Torrent", "warn"),
-        "external" => ("Harici servis", "bad"),
-        "youtube" => ("YouTube", ""),
-        _ => ("", ""),
     }
 }
 
@@ -728,4 +753,40 @@ mod tests {
         assert_eq!(runtime_seconds("0 min"), None);
         assert_eq!(runtime_seconds("S01E04"), None);
     }
+}
+
+/// Cinemeta's genre list, in Turkish. Closed on purpose: a genre outside it is
+/// drawn as the catalogue wrote it rather than mistranslated.
+fn genre_in_turkish(genre: &str) -> String {
+    let turkish = match genre.trim() {
+        "Action" => "Aksiyon",
+        "Adventure" => "Macera",
+        "Animation" => "Animasyon",
+        "Biography" => "Biyografi",
+        "Comedy" => "Komedi",
+        "Crime" => "Suç",
+        "Documentary" => "Belgesel",
+        "Drama" => "Dram",
+        "Family" => "Aile",
+        "Fantasy" => "Fantastik",
+        "Film-Noir" => "Kara Film",
+        "Game-Show" => "Yarışma",
+        "History" => "Tarih",
+        "Horror" => "Korku",
+        "Music" => "Müzik",
+        "Musical" => "Müzikal",
+        "Mystery" => "Gizem",
+        "News" => "Haber",
+        "Reality-TV" => "Realite",
+        "Romance" => "Romantik",
+        "Sci-Fi" => "Bilim Kurgu",
+        "Short" => "Kısa Film",
+        "Sport" => "Spor",
+        "Talk-Show" => "Talk Show",
+        "Thriller" => "Gerilim",
+        "War" => "Savaş",
+        "Western" => "Western",
+        other => return other.to_string(),
+    };
+    turkish.to_string()
 }

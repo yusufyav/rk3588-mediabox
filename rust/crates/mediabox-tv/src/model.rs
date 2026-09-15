@@ -252,41 +252,43 @@ impl Stream {
             .replace('\n', " ")
     }
 
-    /// The first line of the addon's own label — who is offering this, as they
-    /// write it: "[RD+] Torrentio".
+    /// The addon's own label, verbatim — "[RD+]\nTorrentio\n1080p".
     ///
-    /// Addons put the provider on the first line and what the file is on the
-    /// ones after, and joining them into one string is what turned a column of
-    /// distinct sources into a column of near-identical sentences.
-    pub fn lead(&self) -> String {
+    /// The reference draws this down the left of the row exactly as the addon
+    /// wrote it, line breaks included, and so does this. What an addon chooses
+    /// to call itself is how a viewer tells two of them apart.
+    pub fn addon_label(&self) -> String {
         self.name
             .as_deref()
-            .and_then(|value| value.lines().next())
             .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or(self.addon_name.as_deref())
             .filter(|value| !value.is_empty())
             .unwrap_or("Kaynak")
             .to_string()
     }
 
-    /// What the addon said about the file itself — "4k DV | HDR" — from the
-    /// lines after the first.
-    pub fn tag(&self) -> Option<String> {
-        let rest: Vec<&str> = self
-            .name
-            .as_deref()?
-            .lines()
-            .skip(1)
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        (!rest.is_empty()).then(|| rest.join(" · "))
-    }
-
-    pub fn detail(&self) -> Option<String> {
-        self.title
+    /// What the addon said about the file, in the two parts the row draws it
+    /// in: the release on the first line, and everything the addon wrote under
+    /// it — the pictogram line, the languages — as the rest.
+    ///
+    /// The variation selectors go. They belong to the pictograms in front of
+    /// them and the appliance's font has no glyph for them on their own, so
+    /// left in they draw as a box beside every fact on the row.
+    pub fn file_lines(&self) -> (String, String) {
+        let text = self
+            .title
             .as_deref()
-            .map(|value| value.replace('\n', " · "))
+            .map(str::trim)
             .filter(|value| !value.is_empty())
+            .or(self.description.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .replace('\u{fe0f}', "");
+        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+        let release = lines.next().unwrap_or_default().to_string();
+        (release, lines.collect::<Vec<_>>().join("\n"))
     }
 }
 
@@ -345,12 +347,6 @@ fn split_marks(line: &str) -> (Vec<String>, String) {
         rest = open[end + 1..].trim_start();
     }
     (marks, rest.to_string())
-}
-
-/// A regional indicator pair is a flag, and a flag is the shortest a language
-/// can be written.
-fn is_flag(text: &str) -> bool {
-    text.chars().any(|c| ('\u{1f1e6}'..='\u{1f1ff}').contains(&c))
 }
 
 fn quality_of(word: &str) -> Option<String> {
@@ -426,64 +422,6 @@ impl Stream {
         }
 
         facts
-    }
-}
-
-impl SourceFacts {
-    /// The one line that names the file. Falls back to the provider, because a
-    /// row with no title at all is a row that cannot be told from its
-    /// neighbours.
-    pub fn headline(&self, fallback: &str) -> String {
-        self.release
-            .clone()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| {
-                if self.provider.is_empty() {
-                    fallback.to_string()
-                } else {
-                    self.provider.clone()
-                }
-            })
-    }
-
-    /// The second line: size, how many are sharing it, where it came from, and
-    /// what it is spoken in — in that order, because that is the order the
-    /// question is asked in.
-    pub fn chips(&self) -> Vec<String> {
-        let mut chips = Vec::new();
-        if let Some(size) = &self.size {
-            chips.push(size.clone());
-        }
-        if let Some(seeders) = &self.seeders {
-            chips.push(format!("{seeders} eş"));
-        }
-        if let Some(tracker) = &self.tracker {
-            chips.push(tracker.clone());
-        }
-        // One language, and a flag before a word: "Multi Audio" takes the
-        // width of three chips to say less than "🇫🇷" does. The word is kept
-        // only when the addon gave no flag at all.
-        let flag = self.languages.iter().find(|text| is_flag(text));
-        if let Some(text) = flag.or_else(|| self.languages.first()) {
-            chips.push(text.clone());
-        }
-        // The provider is not here on purpose — the panel is filtered by
-        // provider and the filter says which, so repeating it on every row
-        // costs the width the facts need. The caller puts it back, last, when
-        // more than one is in the list.
-        chips
-    }
-
-    /// The small line under the resolution badge — "DV · HDR".
-    pub fn flag_line(&self) -> Option<String> {
-        (!self.flags.is_empty()).then(|| {
-            self.flags
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" · ")
-        })
     }
 }
 

@@ -137,6 +137,14 @@ struct App {
     /// pressed. Read only by Back; see there.
     controls_were_open: bool,
 
+    /// Whether a handover to Kodi is in flight.
+    ///
+    /// The player takes a moment to let go of the plane, and for that moment
+    /// the watcher below sees a picture with no film state behind it and
+    /// adopts it — which would put the interface back on the now-playing
+    /// screen in the middle of handing the television to Kodi.
+    handing_over: bool,
+
     /// The film this interface started on its own video plane, if there is
     /// one.
     ///
@@ -558,21 +566,8 @@ impl App {
     fn act_on_detail(&mut self, intent: Intent) {
         match intent {
             Intent::Move(dx, dy) => {
-                // Left, on the provider filter, is "the previous provider"
-                // rather than "leave the column" — but only when there is a
-                // previous one, so the remote can always get back out.
                 let moved = match self.detail.as_mut() {
-                    Some(detail) => {
-                        if dx < 0
-                            && detail.pane == detail::Pane::Sources
-                            && detail.on_filter
-                            && detail.provider > 0
-                        {
-                            detail.previous_provider()
-                        } else {
-                            detail.step(dx, dy)
-                        }
-                    }
+                    Some(detail) => detail.step(dx, dy),
                     None => false,
                 };
                 if moved {
@@ -581,6 +576,12 @@ impl App {
             }
             Intent::Select => self.choose_on_detail(),
             Intent::Dismiss => {
+                // Back closes the filter's list before it does anything else:
+                // one press, one step.
+                if self.detail.as_mut().is_some_and(detail::Detail::close_filter) {
+                    self.paint();
+                    return;
+                }
                 // Back out of the source column before backing out of the
                 // screen: one press, one step, and never two things at once.
                 let left = self
@@ -612,9 +613,16 @@ impl App {
         // and a viewer who has just read a release name does not want to be
         // told to now press the other button.
         if detail.pane == detail::Pane::Sources {
+            if detail.filter_open {
+                if detail.choose_provider() {
+                    self.paint();
+                }
+                return;
+            }
             if detail.on_filter {
-                // The filter is walked with Left and Right; Ok on it does
-                // nothing rather than something surprising.
+                if detail.open_filter() {
+                    self.paint();
+                }
                 return;
             }
             if detail.choose_source().is_some() {
@@ -625,11 +633,10 @@ impl App {
             return;
         }
 
-        match detail.action {
-            detail::ACTION_PLAY => self.play_here(),
-            detail::ACTION_KODI => self.play(),
-            detail::ACTION_TRAILER => self.trailer(),
-            _ => self.back(),
+        // The record carries one button, and it is the trailer. A film is
+        // played by choosing where it comes from, which is Ok in the column.
+        if detail.action == detail::ACTION_TRAILER {
+            self.trailer();
         }
     }
 
@@ -676,41 +683,6 @@ impl App {
             detail.plan = plan;
             self.paint();
         }
-    }
-
-    /// Starts the film.
-    ///
-    /// This is the end of this process's involvement: the control plane stops
-    /// the interface's unit as part of handing the display over, so the
-    /// position is written to disk before the call rather than after it.
-    fn play(&mut self) {
-        let Some(detail) = self.detail.as_ref() else {
-            return;
-        };
-        let Some(source) = detail.selected_source() else {
-            return;
-        };
-        if !source.parsed.playable {
-            return;
-        }
-
-        let url = source.parsed.url.clone();
-        let raw = source.raw.clone();
-
-        // What the film is, carried to the now-playing screen so it has
-        // something to show the moment the display comes back.
-        self.now.title = detail.meta.name.clone();
-        self.now.artwork = detail.meta.poster.clone();
-        self.now.backdrop = detail.meta.background.clone();
-        self.now.set_technical(detail.technical_pairs());
-
-        self.remember();
-        self.store.flush();
-
-        if let Some(window) = self.window.upgrade() {
-            window.set_detail_note("Kodi'ye aktarılıyor…".into());
-        }
-        spawn_play(url, raw);
     }
 
     /// Starts the film here, in this interface's own player.
@@ -801,7 +773,7 @@ impl App {
         // front of the television should be able to pause it without being
         // told which device asked for it.
         if self.here.is_none() {
-            if !platform::video_showing() {
+            if self.handing_over || !platform::video_showing() {
                 return;
             }
             eprintln!("mediabox-tv.play adopted a film this interface did not start");
@@ -857,6 +829,43 @@ impl App {
         self.paint();
     }
 
+    /// Hands the film playing here to Kodi, where it has got to.
+    ///
+    /// The position, the clean stop and the start on Kodi are the control
+    /// plane's to sequence — it is the one holding the player's socket — so
+    /// this asks for the handover as one call rather than stopping the player
+    /// from here and hoping the plane is free by the time Kodi wants it.
+    ///
+    /// What is left behind matters as much: the remote goes back to the film's
+    /// page and that is what is written to the session file, so when Kodi is
+    /// closed the interface comes back up where the viewer left it rather than
+    /// on a now-playing screen with nothing playing.
+    fn hand_to_kodi(&mut self) {
+        if self.here.is_none() || self.handing_over {
+            return;
+        }
+        self.handing_over = true;
+        self.here = None;
+        if self.route() == Route::NowPlaying {
+            self.stack.pop();
+        }
+        self.now.note = "Kodi'ye aktarılıyor…".into();
+        self.remember();
+        self.store.flush();
+        self.paint();
+        spawn_handoff();
+    }
+
+    /// The handover did not happen, and the television is still this
+    /// interface's. Said where it can be read, and the watcher let go of.
+    fn handoff_failed(&mut self, why: String) {
+        self.handing_over = false;
+        if let Some(window) = self.window.upgrade() {
+            window.set_notice(format!("Kodi'ye aktarılamadı — {why}").into());
+        }
+        self.paint();
+    }
+
     fn trailer(&mut self) {
         let Some(detail) = self.detail.as_ref() else {
             return;
@@ -893,6 +902,7 @@ impl App {
                     Control::SeekBack => self.transport(Transport::Seek(-10)),
                     Control::PlayPause => self.transport(Transport::PlayPause),
                     Control::SeekForward => self.transport(Transport::Seek(30)),
+                    Control::ToKodi => self.hand_to_kodi(),
                     Control::Stop => self.transport(Transport::Stop),
                 }
             }
@@ -1460,9 +1470,10 @@ impl App {
         };
 
         window.set_detail_title(detail.meta.name.clone().into());
-        window.set_detail_facts(detail.facts_line().into());
+        window.set_detail_facts(strings(detail.facts().into_iter()));
+        window.set_detail_imdb(detail.has_rating());
         window.set_detail_summary(detail.meta.description.clone().unwrap_or_default().into());
-        window.set_detail_genres(strings(detail.meta.genres.iter().take(4).cloned()));
+        window.set_detail_genres(strings(detail.genres().into_iter()));
         window.set_detail_cast(strings(detail.meta.cast.iter().take(4).cloned()));
         window.set_detail_directors(strings(detail.meta.director.iter().take(3).cloned()));
 
@@ -1477,33 +1488,12 @@ impl App {
             detail.rows_for_display(),
         )));
         window.set_detail_note(detail.note.clone().into());
-        window.set_detail_technical(slint::ModelRc::new(slint::VecModel::from(
-            detail.technical(),
-        )));
-
-        match detail.plan.as_ref().map(|plan| plan.verdict()) {
-            Some((text, tone)) => {
-                window.set_detail_verdict(text.into());
-                window.set_detail_verdict_tone(tone.into());
-            }
-            None => {
-                window.set_detail_verdict("".into());
-                window.set_detail_verdict_tone("".into());
-            }
-        }
-
         window.set_detail_col(detail.action as i32);
         window.set_detail_on_sources(detail.pane == detail::Pane::Sources);
         window.set_detail_on_filter(detail.on_filter);
+        window.set_detail_filter_open(detail.filter_open);
+        window.set_detail_filter_focus(detail.filter_focus as i32);
         window.set_detail_source_focus(detail.source_focus as i32);
-        window.set_detail_selected(
-            detail
-                .selected
-                .and_then(|index| detail.shown().iter().position(|shown| *shown == index))
-                .map(|index| index as i32)
-                .unwrap_or(-1),
-        );
-
         let mut providers: Vec<String> = vec!["Tümü".into()];
         providers.extend(detail.providers());
         window.set_detail_providers(strings(providers.into_iter()));
@@ -1790,6 +1780,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         leds_pending: None,
         display: None,
         controls_were_open: false,
+        handing_over: false,
         here: None,
         detail_backdrop: None,
         detail_fade: 0.0,
@@ -2051,26 +2042,22 @@ fn spawn_plan(epoch: u64, url: Option<String>, raw: serde_json::Value) {
     });
 }
 
-fn spawn_play(url: Option<String>, raw: serde_json::Value) {
-    detached("mediabox-tv-play", async move {
+/// Asks the control plane to hand the film over to Kodi.
+fn spawn_handoff() {
+    detached("mediabox-tv-handoff", async move {
         let client = rpc::Client::new(socket_path());
-        let stream = url.is_none().then_some(&raw);
-
         // This process is being stopped while the call is in flight — the
-        // control plane stops the unit as part of handing the display over — so
-        // an error here is as likely to be the handover as a failure. It is
-        // logged and not turned into a message nobody will see.
-        match client.play_on_kodi(url.as_deref(), stream, 0).await {
-            Ok(_) => eprintln!("mediabox-tv.play started on_kodi=true"),
+        // control plane stops the unit as part of handing the display over —
+        // so a transport error here is as likely to be the handover working as
+        // it is to be a failure, and only a refusal the daemon actually
+        // answered with is reported.
+        match client.handoff_to_kodi().await {
+            Ok(_) => eprintln!("mediabox-tv.play handed over to kodi"),
             Err(e) => {
-                eprintln!("mediabox-tv.play failed: {e}");
+                eprintln!("mediabox-tv.handoff failed: {e}");
                 let message = e.to_string();
                 let _ = slint::invoke_from_event_loop(move || {
-                    with_app(|app| {
-                        if let Some(window) = app.window.upgrade() {
-                            window.set_detail_note(format!("Oynatılamadı — {message}").into());
-                        }
-                    });
+                    with_app(|app| app.handoff_failed(message));
                 });
             }
         }

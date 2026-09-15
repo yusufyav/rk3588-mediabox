@@ -17,13 +17,21 @@ pub enum Control {
     SeekBack,
     PlayPause,
     SeekForward,
+    /// Hand the film over to Kodi, where it has got to.
+    ///
+    /// This is where the handover lives now, and not on the film's page: a
+    /// viewer does not know before starting a film that they will want Kodi's
+    /// player for it, and asking them to choose a player before they have seen
+    /// a frame is asking the wrong question at the wrong time.
+    ToKodi,
     Stop,
 }
 
-pub const CONTROLS: [Control; 4] = [
+pub const CONTROLS: [Control; 5] = [
     Control::SeekBack,
     Control::PlayPause,
     Control::SeekForward,
+    Control::ToKodi,
     Control::Stop,
 ];
 
@@ -39,6 +47,7 @@ impl Control {
                 }
             }
             Control::SeekForward => "30 sn ileri",
+            Control::ToKodi => "Kodi'ye Aktar",
             Control::Stop => "Durdur",
         }
     }
@@ -55,6 +64,8 @@ impl Control {
                 }
             }
             Control::SeekForward => "M13 6l6 6-6 6V6zM5 6l6 6-6 6V6z",
+            // A television with a picture on it.
+            Control::ToKodi => "M2 4h20v13H2zM9 19h6v2H9zM10.5 8.2l5 3.3-5 3.3z",
             Control::Stop => "M6 6h12v12H6z",
         }
     }

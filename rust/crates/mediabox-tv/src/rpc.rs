@@ -149,24 +149,6 @@ impl Client {
             .await
     }
 
-    /// Hands the television to Kodi and starts the film. The daemon stops this
-    /// process as part of doing it, so nothing after this call is guaranteed to
-    /// run.
-    pub async fn play_on_kodi(
-        &self,
-        url: Option<&str>,
-        stream: Option<&Value>,
-        start_seconds: u64,
-    ) -> Result<Value> {
-        let mut request = json!({"command": "media_play_on_kodi", "start_seconds": start_seconds});
-        if let Some(url) = url {
-            request["url"] = json!(url);
-        } else if let Some(stream) = stream {
-            request["stream"] = stream.clone();
-        }
-        self.call(request).await
-    }
-
     pub async fn play_here(
         &self,
         url: Option<&str>,
@@ -195,6 +177,15 @@ impl Client {
 
     /// The interface's own player, while it is running. Stop first, because
     /// it is the one a remote reaches by pressing Back.
+    /// Hands a film that is playing here over to Kodi, at the second it had
+    /// reached. The daemon reads the position off the player, stops it
+    /// cleanly, and only then starts Kodi — and it stops this process as part
+    /// of handing the display over, so nothing after this call is guaranteed
+    /// to run.
+    pub async fn handoff_to_kodi(&self) -> Result<Value> {
+        self.call(json!({"command": "media_handoff_to_kodi"})).await
+    }
+
     pub async fn stop_here(&self) -> Result<Value> {
         self.call(json!({"command": "media_stop_here"})).await
     }

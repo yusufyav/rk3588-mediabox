@@ -1,26 +1,91 @@
 import { Theme, Metrics } from "theme.slint";
-import { Chip, Reading, TechRow } from "components.slint";
 
-// One source the viewer can choose. Every field is already decided in Rust:
-// the addon's free-text name and title are parsed once into facts, and this
-// only lays them out.
+// One source the viewer can choose.
+//
+// Two strings, and both of them the addon's own: the reference draws the
+// stream's `name` down the left of the row and its `title` down the right,
+// verbatim, line breaks and pictograms included. Every attempt to improve on
+// that here — parsing the name into chips, promoting the release, hiding the
+// provider — produced a column that said less than the addon did and looked
+// nothing like the product it is meant to be the same as.
 export struct SourceRow {
-    identity: string,
-    quality: string,
-    flags: string,
-    release: string,
-    chips: [string],
-    kind: string,
-    // "good" | "warn" | "bad" | "" — what the kind chip is worth.
-    tone: string,
-    cached: bool,
+    name: string,
+    title: string,
+    meta: string,
     playable: bool,
-    provider: string,
 }
 
-// One thing that can be done with the title. Round, marked and named, in a row
-// along the bottom of the record — the shape the reference uses, and the shape
-// that survives being read from a sofa.
+// A rounded label: a genre, a name, a director. The reference's own shape —
+// white text on a faint white fill, ends fully rounded.
+component Pill inherits Rectangle {
+    in property <string> text;
+
+    height: Metrics.vh * 0.037;
+    width: caption.preferred-width + self.height * 0.9;
+    border-radius: self.height / 2;
+    background: #ffffff1c;
+
+    caption := Text {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        color: Theme.text;
+        font-size: Metrics.vh * 0.0155;
+        font-weight: 500;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        wrap: no-wrap;
+    }
+}
+
+// A heading over a row of pills or a paragraph: TÜRÜ, OYUNCULAR, ÖZET.
+component SectionLabel inherits Text {
+    color: #ffffff8c;
+    font-size: Metrics.vh * 0.0125;
+    font-weight: 500;
+    letter-spacing: Metrics.vh * 0.0012;
+    height: Metrics.vh * 0.028;
+    vertical-alignment: center;
+}
+
+// A named row of pills.
+//
+// Placed rather than laid out. A HorizontalLayout of pills inside a column has
+// no preferred height of its own here, and the first version drew every
+// heading underneath the pills that belonged to it.
+component ChipSection inherits Rectangle {
+    in property <string> label;
+    in property <[string]> items;
+
+    property <length> label-h: Metrics.vh * 0.032;
+    height: label-h + Metrics.vh * 0.037;
+    background: transparent;
+
+    SectionLabel {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: label-h;
+        text: label;
+    }
+
+    HorizontalLayout {
+        x: 0;
+        y: label-h;
+        width: 100%;
+        height: Metrics.vh * 0.037;
+        spacing: Metrics.vw * 0.008;
+        alignment: start;
+
+        for item in items: Pill { text: item; }
+    }
+}
+
+// One thing that can be done with the title, along the bottom of the record.
+// Round, marked and named — the reference's shape, and the shape that survives
+// being read from a sofa.
 component Action inherits Rectangle {
     in property <string> label;
     in property <string> mark;
@@ -29,172 +94,126 @@ component Action inherits Rectangle {
     in property <string> cut;
     in property <bool> focused;
     in property <bool> enabled: true;
-    in property <bool> primary;
 
-    height: Metrics.root-font * 3.4;
-    width: caption.preferred-width + self.height + Metrics.root-font * 1.4;
+    height: Metrics.vh * 0.056;
+    width: caption.preferred-width + self.height * 1.9;
     border-radius: self.height / 2;
     opacity: enabled ? 1.0 : 0.38;
-    background: focused ? Theme.focus-fill : (primary ? Theme.accent : #ffffff14);
+    background: focused ? Theme.focus-fill : #ffffff14;
     border-width: focused ? 2px : 1px;
-    border-color: focused ? Theme.focus-ring : #ffffff1f;
+    border-color: focused ? Theme.focus-ring : #ffffff33;
 
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
     HorizontalLayout {
-        padding-left: Metrics.root-font * 0.8;
-        padding-right: Metrics.root-font * 0.9;
-        spacing: Metrics.root-font * 0.45;
+        padding-left: root.height * 0.42;
+        padding-right: root.height * 0.5;
+        spacing: root.height * 0.24;
         alignment: center;
 
         Rectangle {
-            width: Metrics.root-font * 1.35;
+            width: Metrics.vh * 0.026;
 
             Path {
+                x: 0;
                 width: 100%;
-                height: Metrics.root-font * 1.35;
+                height: Metrics.vh * 0.026;
                 y: (parent.height - self.height) / 2;
                 viewbox-width: 24;
                 viewbox-height: 24;
                 commands: mark;
-                fill: (focused || primary) ? #0a0c10 : Theme.text;
+                fill: focused ? #0a0c10 : Theme.text;
             }
             if cut != "": Path {
+                x: 0;
                 width: 100%;
-                height: Metrics.root-font * 1.35;
+                height: Metrics.vh * 0.026;
                 y: (parent.height - self.height) / 2;
                 viewbox-width: 24;
                 viewbox-height: 24;
                 commands: cut;
-                fill: focused ? Theme.focus-fill : (primary ? Theme.accent : #1b2029);
+                fill: focused ? Theme.focus-fill : #1b2029;
             }
         }
 
         caption := Text {
             text: label;
-            color: (focused || primary) ? #0a0c10 : Theme.text;
-            font-size: Metrics.text-chip;
-            font-weight: 720;
+            color: focused ? #0a0c10 : Theme.text;
+            font-size: Metrics.vh * 0.0165;
+            font-weight: 500;
             vertical-alignment: center;
             wrap: no-wrap;
         }
     }
 }
 
-// One row of the source column, in the product's own words.
-//
-// No enum names and no debug shapes: what a viewer needs in order to choose
-// between two releases is the resolution, what the picture and sound are,
-// whether it is already sitting on a cache or has to be pulled off a swarm, and
-// who is offering it.
+// One row of the source column: what the addon calls itself down the left, and
+// what it says about the file down the right.
 component SourceLine inherits Rectangle {
     // `entry` rather than `row`: every Rectangle already has a `row`, for grid
     // layout, and a property cannot shadow it.
     in property <SourceRow> entry;
     in property <bool> focused;
-    in property <bool> chosen;
+    in property <length> name-w;
 
-    height: Metrics.root-font * 4.4;
-    border-radius: Theme.radius * 0.7;
-    background: focused ? #ffffff1c : (chosen ? #ffffff0d : transparent);
-    border-width: focused ? 2px : 1px;
-    border-color: focused ? Theme.focus-ring : (chosen ? Theme.line : #ffffff0f);
-    opacity: entry.playable ? 1.0 : 0.45;
+    border-radius: Metrics.vh * 0.008;
+    background: focused ? #ffffff26 : transparent;
+    border-width: focused ? 2px : 0px;
+    border-color: Theme.focus-ring;
+    clip: true;
 
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-    VerticalLayout {
-        padding-left: Metrics.root-font * 0.7;
-        padding-right: Metrics.root-font * 0.7;
-        alignment: center;
-        spacing: Metrics.text-chip * 0.4;
-
-        HorizontalLayout {
-            spacing: Metrics.text-chip * 0.6;
-            alignment: start;
-
-            if entry.quality != "": Chip {
-                text: entry.quality;
-                tone: "";
-                solid: true;
-            }
-            Text {
-                text: entry.release;
-                color: Theme.text;
-                font-size: Metrics.root-font * 0.92;
-                font-weight: 700;
-                vertical-alignment: center;
-                overflow: elide;
-                wrap: no-wrap;
-                horizontal-stretch: 1;
-            }
-            if chosen: Text {
-                text: "seçili";
-                color: Theme.accent;
-                font-size: Metrics.text-chip;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-        }
-
-        // Clipped rather than allowed to run past the column: an addon can
-        // attach a dozen facts to one release, and the ones that matter are the
-        // first few.
-        Rectangle {
-            height: Metrics.text-chip * 2.0;
-            clip: true;
-            background: transparent;
-
-            HorizontalLayout {
-                width: 100%;
-                height: 100%;
-                spacing: Metrics.text-chip * 0.45;
-                alignment: start;
-
-                if entry.kind != "": Chip { text: entry.kind; tone: entry.tone; }
-                if entry.cached: Chip { text: "Hazır"; tone: "good"; }
-                for chip in entry.chips: Chip { text: chip; tone: ""; }
-                Rectangle { horizontal-stretch: 1; }
-            }
-        }
-    }
-}
-
-// A named row of chips — TÜRÜ, OYUNCULAR, YÖNETMENLER.
-//
-// Placed rather than laid out. A HorizontalLayout of chips inside a column has
-// no preferred height of its own here, and the first version drew every heading
-// underneath the chips that belonged to it.
-component ChipSection inherits Rectangle {
-    in property <string> label;
-    in property <[string]> items;
-
-    property <length> label-h: Metrics.text-label * 1.7;
-    height: label-h + Metrics.text-chip * 2.0;
-    background: transparent;
-
-    Text {
+    HorizontalLayout {
         x: 0;
         y: 0;
         width: 100%;
-        height: label-h;
-        text: label;
-        color: Theme.dim;
-        font-size: Metrics.text-label * 0.86;
-        font-weight: 780;
-        letter-spacing: 0.1 * Metrics.text-label;
-        vertical-alignment: center;
-    }
+        height: 100%;
+        padding-left: Metrics.vh * 0.018;
+        padding-right: Metrics.vh * 0.018;
+        padding-top: Metrics.vh * 0.014;
+        padding-bottom: Metrics.vh * 0.014;
+        spacing: Metrics.vh * 0.016;
 
-    HorizontalLayout {
-        x: 0;
-        y: label-h;
-        width: 100%;
-        height: Metrics.text-chip * 2.0;
-        spacing: Metrics.text-chip * 0.5;
-        alignment: start;
+        Text {
+            width: name-w;
+            text: entry.name;
+            color: Theme.text;
+            font-size: Metrics.vh * 0.0155;
+            font-weight: 400;
+            wrap: word-wrap;
+            overflow: elide;
+            vertical-alignment: top;
+        }
+        // The release on one line and what the addon says about it under it,
+        // which is the reference's own arrangement: a release name is long and
+        // the same for pages at a time, and the line that tells two of them
+        // apart — how big, how many are sharing it, where it came from — is
+        // the one that must not be pushed off the row.
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: start;
+            spacing: 0px;
 
-        for item in items: Chip { text: item; tone: ""; }
+            Text {
+                text: entry.title;
+                color: Theme.text;
+                font-size: Metrics.vh * 0.0155;
+                font-weight: 400;
+                wrap: no-wrap;
+                overflow: elide;
+                vertical-alignment: top;
+            }
+            if entry.meta != "": Text {
+                text: entry.meta;
+                color: Theme.text;
+                font-size: Metrics.vh * 0.0155;
+                font-weight: 400;
+                wrap: word-wrap;
+                overflow: elide;
+                vertical-alignment: top;
+            }
+        }
     }
 }
 
@@ -212,7 +231,10 @@ export component Detail inherits Rectangle {
     in property <image> logo;
 
     in property <string> title;
-    in property <string> facts;
+    in property <[string]> facts;
+    // Whether the rating on the end of `facts` is IMDb's, which is drawn as
+    // their badge rather than as a fourth word.
+    in property <bool> imdb;
     in property <string> summary;
     in property <[string]> genres;
     in property <[string]> cast;
@@ -230,28 +252,41 @@ export component Detail inherits Rectangle {
     in property <[string]> providers;
     in property <int> provider;
     in property <bool> on-filter;
+    in property <bool> filter-open;
+    in property <int> filter-focus;
     in property <int> source-focus;
-    in property <int> selected;
 
-    in property <[TechRow]> technical;
-    in property <string> verdict;
-    in property <string> verdict-tone;
-
-    property <length> column-w: max(300px, min(760px, root.width * 0.33));
-    property <length> column-x: root.width - column-w;
-    property <length> record-w: column-x - Metrics.gutter * 2;
+    // The measurements are the reference's own, read off it and kept as
+    // fractions of the panel: the source column is 23% of the width, the record
+    // starts 13.8% down and is inset 4.8% from the left.
+    property <length> column-w: max(300px, min(980px, root.width * 0.232));
+    property <length> column-x: root.width - column-w - Metrics.gutter * 0.6;
+    property <length> record-x: max(Metrics.gutter, root.width * 0.048);
+    property <length> record-w: column-x - record-x - Metrics.gutter * 0.6;
+    property <length> panel-pad: Metrics.vh * 0.018;
 
     background: Theme.bg;
     clip: true;
 
-    // The backdrop. Only the visible layer is painted: a fully transparent
-    // full-screen image still costs a pass over every column of the panel.
+    // ---------------------------------------------------------- the backdrop
+    //
+    // One veil over the whole frame and nothing else. Measured off the
+    // reference: its backdrop comes out at #5a5a64 where the wall behind the
+    // actors is white, which is a flat blue-black at 57% over the picture. The
+    // version this replaced darkened a band in the middle of the screen to 4%
+    // and left the column the text sits in completely unveiled, because the
+    // rectangle carrying the gradient had no x of its own and Slint centres a
+    // child that does not give one.
     Rectangle {
+        x: 0;
+        y: 0;
         width: 100%;
         height: 100%;
         clip: true;
 
         if fade < 0.999: Image {
+            x: 0;
+            y: 0;
             width: 100%;
             height: 100%;
             source: art-a;
@@ -260,6 +295,8 @@ export component Detail inherits Rectangle {
             animate opacity { duration: Theme.crossfade; easing: Theme.ease; }
         }
         if fade > 0.001: Image {
+            x: 0;
+            y: 0;
             width: 100%;
             height: 100%;
             source: art-b;
@@ -269,25 +306,43 @@ export component Detail inherits Rectangle {
         }
 
         Rectangle {
-            width: parent.width * 0.72;
-            height: 100%;
-            background: @linear-gradient(90deg,
-                #07080bf2 0%, #07080be6 34%, #07080b9c 72%, transparent 100%);
-        }
-        Rectangle {
-            y: parent.height * 0.45;
+            x: 0;
+            y: 0;
             width: 100%;
-            height: parent.height * 0.55;
-            background: @linear-gradient(180deg, transparent 0%, #07080bcc 58%, #07080bf2 100%);
+            height: 100%;
+            background: #070a1a9d;
         }
+        // Enough under the action row to keep it off a bright frame, and no
+        // more: the reference's own footer shading.
+        Rectangle {
+            x: 0;
+            y: parent.height * 0.72;
+            width: 100%;
+            height: parent.height * 0.28;
+            background: @linear-gradient(180deg, #05070e00 0%, #05070e8c 100%);
+        }
+    }
+
+    // The way back. The reference puts a chevron here and nothing else — no
+    // brand, no clock — and this screen is the film's, not the box's.
+    Path {
+        x: record-x;
+        y: Metrics.vh * 0.055;
+        width: Metrics.vh * 0.03;
+        height: Metrics.vh * 0.03;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M15.5 3.2L6.7 12l8.8 8.8";
+        stroke: Theme.text;
+        stroke-width: 2.1px;
     }
 
     // ------------------------------------------------------------ the record
     VerticalLayout {
-        x: Metrics.gutter;
-        y: Metrics.topbar + Metrics.block-gap * 0.6;
-        width: record-w;
-        spacing: Metrics.root-font * 0.55;
+        x: record-x;
+        y: root.height * 0.138;
+        width: record-w * 0.75;
+        spacing: Metrics.vh * 0.019;
         alignment: start;
 
         // The title's own logo when the catalogue has one, and its name set
@@ -298,26 +353,54 @@ export component Detail inherits Rectangle {
             source: logo;
             image-fit: contain;
             horizontal-alignment: left;
-            height: Metrics.title-detail * 2.4;
+            height: Metrics.vh * 0.12;
         }
         if logo.width == 0: Text {
             text: title;
             color: Theme.text;
-            font-size: Metrics.title-detail;
+            font-size: Metrics.vh * 0.052;
             font-weight: 800;
-            letter-spacing: -0.03 * Metrics.title-detail;
+            letter-spacing: -0.03 * Metrics.vh * 0.052;
             wrap: word-wrap;
             overflow: elide;
-            max-height: Metrics.title-detail * 2.4;
+            max-height: Metrics.vh * 0.12;
         }
 
-        if facts != "": Text {
-            text: facts;
-            color: Theme.text;
-            font-size: Metrics.text-meta * 1.05;
-            font-weight: 760;
-            wrap: no-wrap;
-            overflow: elide;
+        // How long, when, and what it scored — in the reference's order, with
+        // the rating wearing IMDb's badge rather than their name.
+        if facts.length > 0: HorizontalLayout {
+            height: Metrics.vh * 0.04;
+            spacing: Metrics.vw * 0.013;
+            alignment: start;
+
+            for fact in facts: Text {
+                text: fact;
+                color: Theme.text;
+                font-size: Metrics.vh * 0.023;
+                font-weight: 600;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+            if imdb: Rectangle {
+                width: badge.preferred-width + Metrics.vh * 0.018;
+                height: Metrics.vh * 0.028;
+                y: (parent.height - self.height) / 2;
+                border-radius: Metrics.vh * 0.005;
+                background: #f5c518;
+
+                badge := Text {
+                    x: 0;
+                    y: 0;
+                    width: 100%;
+                    height: 100%;
+                    text: "IMDb";
+                    color: #0a0c10;
+                    font-size: Metrics.vh * 0.016;
+                    font-weight: 800;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
         }
 
         if genres.length > 0: ChipSection {
@@ -333,57 +416,27 @@ export component Detail inherits Rectangle {
             items: directors;
         }
 
-        if summary != "": Text {
+        if summary != "": SectionLabel {
             text: "ÖZET";
-            color: Theme.dim;
-            font-size: Metrics.text-label * 0.86;
-            font-weight: 780;
-            letter-spacing: 0.1 * Metrics.text-label;
-            height: Metrics.text-label * 1.7;
-            vertical-alignment: center;
         }
         if summary != "": Text {
             text: summary;
-            color: Theme.muted;
-            font-size: Metrics.text-meta * 0.94;
+            color: Theme.text;
+            font-size: Metrics.vh * 0.0165;
+            font-weight: 400;
             wrap: word-wrap;
             overflow: elide;
-            max-height: Metrics.text-meta * 4.4;
-        }
-
-        if verdict != "": Text {
-            text: verdict;
-            color: Theme.tone(verdict-tone);
-            font-size: Metrics.text-label;
-            font-weight: 680;
-            wrap: word-wrap;
-            overflow: elide;
-            height: Metrics.text-label * 1.8;
-        }
-
-        // What the media core found and decided about the chosen source: the
-        // only thing on this screen that is measured rather than claimed by a
-        // file name. Quiet and short — four readings, not the whole report, and
-        // set as a block rather than as four more items in a column whose
-        // spacing is meant for paragraphs.
-        if technical.length > 0: VerticalLayout {
-            spacing: 0px;
-            alignment: start;
-            for entry in technical: Reading {
-                entry: entry;
-                label-w: record-w * 0.18;
-                height: Metrics.root-font * 1.55;
-            }
+            max-height: Metrics.vh * 0.1;
         }
     }
 
     // The actions, along the bottom of the record.
     HorizontalLayout {
-        x: Metrics.gutter;
-        y: root.height - Metrics.root-font * 3.4 - Metrics.gutter * 0.8;
+        x: record-x;
+        y: root.height - self.height - Metrics.vh * 0.05;
         width: record-w;
-        height: Metrics.root-font * 3.4;
-        spacing: Metrics.root-font * 0.6;
+        height: Metrics.vh * 0.056;
+        spacing: Metrics.vw * 0.011;
         alignment: start;
 
         for label[i] in actions: Action {
@@ -392,75 +445,81 @@ export component Detail inherits Rectangle {
             cut: cuts[i];
             enabled: enabled[i];
             focused: !on-sources && i == focus-col;
-            primary: i == 0;
         }
     }
 
     // ----------------------------------------------------------- the sources
     Rectangle {
         x: column-x;
-        y: 0;
+        y: root.height * 0.138;
         width: column-w;
-        height: 100%;
-        background: #080a10e8;
-        border-width: 1px;
-        border-color: #ffffff12;
+        height: root.height - self.y - Metrics.gutter * 0.5;
+        border-radius: Theme.radius;
+        background: #21242ed4;
         clip: true;
 
         // The provider filter. Walked with Left and Right, the way the
         // reference's dropdown is opened and picked through.
         Rectangle {
-            x: Metrics.root-font * 0.7;
-            y: Metrics.topbar + Metrics.block-gap * 0.4;
-            width: parent.width - Metrics.root-font * 1.4;
-            height: Metrics.root-font * 2.9;
-            border-radius: Theme.radius * 0.7;
-            background: (on-sources && on-filter) ? Theme.focus-fill : #ffffff10;
-            border-width: (on-sources && on-filter) ? 2px : 1px;
-            border-color: (on-sources && on-filter) ? Theme.focus-ring : Theme.line-soft;
+            x: panel-pad;
+            y: panel-pad;
+            width: parent.width - panel-pad * 2;
+            height: Metrics.vh * 0.052;
+            border-radius: Metrics.vh * 0.008;
+            background: (on-sources && on-filter) ? Theme.focus-fill : #ffffff0f;
+            border-width: (on-sources && on-filter) ? 2px : 0px;
+            border-color: Theme.focus-ring;
 
             animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
             HorizontalLayout {
-                padding-left: Metrics.root-font * 0.8;
-                padding-right: Metrics.root-font * 0.8;
-                spacing: Metrics.root-font * 0.4;
+                x: 0;
+                y: 0;
+                width: 100%;
+                height: 100%;
+                padding-left: Metrics.vh * 0.016;
+                padding-right: Metrics.vh * 0.016;
+                spacing: Metrics.vh * 0.01;
 
                 Text {
                     text: providers[provider];
                     color: (on-sources && on-filter) ? #0a0c10 : Theme.text;
-                    font-size: Metrics.root-font * 0.94;
-                    font-weight: 700;
+                    font-size: Metrics.vh * 0.018;
+                    font-weight: 500;
                     vertical-alignment: center;
                     overflow: elide;
                     wrap: no-wrap;
                     horizontal-stretch: 1;
                 }
-                Text {
-                    text: providers.length > 1 ? "‹ ›" : "";
-                    color: (on-sources && on-filter) ? #0a0c10 : Theme.dim;
-                    font-size: Metrics.root-font * 0.94;
-                    font-weight: 700;
-                    vertical-alignment: center;
+                // The reference's dropdown caret, and it points the way the
+                // remote moves: Left and Right walk the providers.
+                Path {
+                    width: Metrics.vh * 0.014;
+                    height: 100%;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: providers.length <= 1 ? ""
+                        : (filter-open ? "M4 16l8-9 8 9z" : "M4 8l8 9 8-9z");
+                    fill: (on-sources && on-filter) ? #0a0c10 : #ffffffb0;
                 }
             }
         }
 
-        Text {
-            x: Metrics.root-font * 0.9;
-            y: Metrics.topbar + Metrics.block-gap * 0.4 + Metrics.root-font * 3.2;
+        if sources-note != "": Text {
+            x: panel-pad;
+            y: panel-pad + Metrics.vh * 0.052 + Metrics.vh * 0.008;
             text: sources-note;
-            color: Theme.dim;
-            font-size: Metrics.text-label;
-            font-weight: 640;
+            color: #ffffff8c;
+            font-size: Metrics.vh * 0.0135;
+            font-weight: 500;
         }
 
         list := Rectangle {
-            property <length> row-h: Metrics.root-font * 4.4 + Metrics.root-font * 0.3;
-            x: Metrics.root-font * 0.7;
-            y: Metrics.topbar + Metrics.block-gap * 0.4 + Metrics.root-font * 5.0;
-            width: parent.width - Metrics.root-font * 1.4;
-            height: parent.height - self.y - Metrics.gutter * 0.5;
+            property <length> row-h: Metrics.vh * 0.096;
+            x: panel-pad;
+            y: panel-pad + Metrics.vh * (sources-note == "" ? 0.064 : 0.082);
+            width: parent.width - panel-pad * 2;
+            height: parent.height - self.y;
             clip: true;
             background: transparent;
 
@@ -469,23 +528,83 @@ export component Detail inherits Rectangle {
                 // The focused row is kept on the panel and the list slides
                 // under it, which is what makes forty releases usable with
                 // five keys.
-                y: -clamp(source-focus * list.row-h - list.height * 0.4,
+                y: -clamp(source-focus * (list.row-h + Metrics.vh * 0.004)
+                            - list.height * 0.4,
                           0px,
-                          max(0px, sources.length * list.row-h - list.height));
+                          max(0px, sources.length * (list.row-h + Metrics.vh * 0.004)
+                                     - list.height));
                 width: 100%;
-                height: max(1px, sources.length * list.row-h);
-                spacing: Metrics.root-font * 0.3;
+                height: max(1px, sources.length * (list.row-h + Metrics.vh * 0.004));
+                spacing: Metrics.vh * 0.004;
                 alignment: start;
 
                 animate y { duration: Theme.glide; easing: Theme.ease; }
 
                 for source[i] in sources: SourceLine {
                     entry: source;
-                    focused: on-sources && !on-filter && i == source-focus;
-                    chosen: i == selected;
+                    height: list.row-h;
+                    name-w: (list.width - Metrics.vh * 0.052) * 0.38;
+                    focused: on-sources && !on-filter && !filter-open && i == source-focus;
+                }
+            }
+        }
+
+        if filter-open: Rectangle {
+            x: panel-pad;
+            y: panel-pad + Metrics.vh * 0.052 + Metrics.vh * 0.006;
+            width: parent.width - panel-pad * 2;
+            height: providers.length * Metrics.vh * 0.052 + Metrics.vh * 0.012;
+            border-radius: Metrics.vh * 0.008;
+            background: #141a29;
+            border-width: 1px;
+            border-color: #ffffff1f;
+
+            VerticalLayout {
+                x: 0;
+                y: Metrics.vh * 0.006;
+                width: 100%;
+                spacing: 0px;
+                alignment: start;
+
+                for name[i] in providers: Rectangle {
+                    height: Metrics.vh * 0.052;
+                    background: i == filter-focus ? #ffffff1f : transparent;
+
+                    HorizontalLayout {
+                        x: 0;
+                        y: 0;
+                        width: 100%;
+                        height: 100%;
+                        padding-left: Metrics.vh * 0.016;
+                        padding-right: Metrics.vh * 0.016;
+
+                        Text {
+                            text: name;
+                            color: Theme.text;
+                            font-size: Metrics.vh * 0.018;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            wrap: no-wrap;
+                            horizontal-stretch: 1;
+                        }
+                        // Which one the column is showing.
+                        Rectangle {
+                            width: Metrics.vh * 0.01;
+                            height: 100%;
+
+                            if i == provider: Rectangle {
+                                x: 0;
+                                y: (parent.height - self.height) / 2;
+                                width: Metrics.vh * 0.01;
+                                height: Metrics.vh * 0.01;
+                                border-radius: self.height / 2;
+                                background: #6fd97f;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-
 }

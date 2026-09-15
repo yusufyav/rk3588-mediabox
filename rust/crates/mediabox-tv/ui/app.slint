@@ -129,7 +129,8 @@ export component MediaBoxWindow inherits Window {
     in property <float> detail-fade;
     in property <image> detail-poster;
     in property <string> detail-title;
-    in property <string> detail-facts;
+    in property <[string]> detail-facts;
+    in property <bool> detail-imdb;
     in property <string> detail-summary;
     in property <[string]> detail-genres;
     in property <[string]> detail-cast;
@@ -145,11 +146,9 @@ export component MediaBoxWindow inherits Window {
     in property <bool> detail-on-filter;
     in property <[string]> detail-providers;
     in property <int> detail-provider;
+    in property <bool> detail-filter-open;
+    in property <int> detail-filter-focus;
     in property <int> detail-source-focus;
-    in property <int> detail-selected: -1;
-    in property <[TechRow]> detail-technical;
-    in property <string> detail-verdict;
-    in property <string> detail-verdict-tone;
     in property <int> detail-col;
 
     // ---- now playing
@@ -272,6 +271,7 @@ export component MediaBoxWindow inherits Window {
             poster: root.detail-poster;
             title: root.detail-title;
             facts: root.detail-facts;
+            imdb: root.detail-imdb;
             summary: root.detail-summary;
             logo: root.detail-logo;
             genres: root.detail-genres;
@@ -287,11 +287,9 @@ export component MediaBoxWindow inherits Window {
             providers: root.detail-providers;
             provider: root.detail-provider;
             on-filter: root.detail-on-filter;
+            filter-open: root.detail-filter-open;
+            filter-focus: root.detail-filter-focus;
             source-focus: root.detail-source-focus;
-            selected: root.detail-selected;
-            technical: root.detail-technical;
-            verdict: root.detail-verdict;
-            verdict-tone: root.detail-verdict-tone;
             focus-col: root.detail-col;
         }
 
@@ -331,7 +329,7 @@ export component MediaBoxWindow inherits Window {
         // The bar. One component for every screen, so where the viewer is in
         // the product, what time it is and whether the box is on the network
         // are answered the same way everywhere.
-        if screen != "boot" && screen != "film": TopBar {
+        if screen != "boot" && screen != "film" && screen != "detail": TopBar {
             x: 0;
             y: 0;
             width: 100%;
