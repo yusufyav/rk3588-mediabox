@@ -65,6 +65,11 @@ Bunlar ölçülüp kapatıldı. **Yeniden kampanya olarak koşturulmaz.**
 * Panelde konsol metni yok: fbcon unbind **ve** `/dev/fb0` sıfırlama.
 * Film sonrası pastel renk düzeltildi: bağlayıcıda `color_format:0`.
 * Soğuk açılışta boş katalog düzeltildi: yeniden deneme + `network-online.target`.
+* Kartın gösterge ışıkları ayar oldu: **Ayarlar > Işıklar**, üç mod
+  (Kapalı/Açık/Nabız), seçim `/var/lib/mediabox/leds`'te saklanıp her boot'ta
+  yeniden uygulanıyor. Kırmızı ışık beslemeye bağlı, yazılımdan kapatılamaz.
+  Satır basış anında güncelleniyor (ölçülen tuş-çizim 3–7 ms); on saniyelik
+  makine yoklaması beklenmiyor.
 * `mediabox-kiosk-smoke` 16/16.
 
 ## 5. Gömülü oynatıcı (15 Eylül 2026)

@@ -121,6 +121,18 @@ struct App {
     diag: Option<Value>,
     display: Option<model::DisplayStatus>,
 
+    /// The indicator-light mode the viewer just chose, until the daemon has
+    /// confirmed it.
+    ///
+    /// The machine poll runs every ten seconds, so a row drawn only from its
+    /// answer sits on the old value for up to ten seconds after a press. That
+    /// is not a slow daemon — it writes sysfs in about a millisecond — it is a
+    /// row waiting for a timer it has no reason to wait for. So the press
+    /// changes the row on the same frame, the daemon's answer replaces it, and
+    /// a poll that was already in flight when the press happened is ignored
+    /// for this one field: it cannot know about a choice made after it left.
+    leds_pending: Option<mediabox_core::LedMode>,
+
     /// Whether the film's controls were up when the key being acted on was
     /// pressed. Read only by Back; see there.
     controls_were_open: bool,
@@ -326,6 +338,75 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_notice(message.into());
         }
+    }
+
+    /// Takes that line away again.
+    ///
+    /// Nothing else in this interface does: a notice is set and stays set
+    /// until something replaces it. That is tolerable for a message about a
+    /// tile that could not open, and wrong for a screen a viewer is working
+    /// in, so a setting that acts immediately clears it rather than adding to
+    /// it.
+    fn clear_notice(&mut self) {
+        if let Some(window) = self.window.upgrade() {
+            window.set_notice(Default::default());
+        }
+    }
+
+    // --------------------------------------------------------- the lights
+
+    /// Puts a mode on the settings row and draws it.
+    ///
+    /// Writes into the kept status rather than beside it, so there is one
+    /// answer the screen is composed from and not two that can disagree.
+    fn show_leds(&mut self, mode: mediabox_core::LedMode) {
+        let text = Value::String(
+            serde_json::to_value(mode)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "off".into()),
+        );
+        match self.status.as_mut().and_then(Value::as_object_mut) {
+            Some(status) => {
+                let leds = status
+                    .entry("leds")
+                    .or_insert_with(|| serde_json::json!({"available": true, "leds": []}));
+                if let Some(leds) = leds.as_object_mut() {
+                    leds.insert("mode".into(), text);
+                }
+            }
+            // No status yet: the daemon has not answered once. The row is a
+            // reading until it does, and its answer will carry the mode.
+            None => return,
+        }
+        self.recompose_settings();
+    }
+
+    /// The daemon's answer to a light being set.
+    ///
+    /// Whatever it says is what the row shows, including a refusal: a board
+    /// that would not take the write must not be left displaying the mode
+    /// somebody asked for.
+    fn leds_answered(&mut self, answer: Option<Value>) {
+        self.leds_pending = None;
+        if let Some(leds) = answer {
+            if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                status.insert("leds".into(), leds);
+            }
+        }
+        self.recompose_settings();
+    }
+
+    /// Re-composes the settings screen from the kept answers and paints it, on
+    /// its own — the machine poll does this for every screen at once, and a
+    /// press must not wait for the poll.
+    fn recompose_settings(&mut self) {
+        self.settings.compose(
+            self.status.as_ref(),
+            self.diag.as_ref(),
+            self.display.as_ref(),
+        );
+        self.paint();
     }
 
     // ---------------------------------------------------------- the catalogue
@@ -952,6 +1033,17 @@ impl App {
                 );
                 self.open(Route::Diagnostics);
             }
+            Action::SetLeds(mode) => {
+                // No message along the bottom. A setting whose own row shows
+                // the new value has already said it, and this interface's
+                // notice line has nothing that clears it — a line about a
+                // light would sit there over whatever came next.
+                self.clear_notice();
+                // Drawn now, on this frame.
+                self.leds_pending = Some(mode);
+                self.show_leds(mode);
+                spawn_leds(mode);
+            }
             Action::WakeTelevision => {
                 self.say("Televizyon uyandırılıyor…".into());
                 spawn_kodi(KodiCommand::WakeTelevision);
@@ -1039,8 +1131,21 @@ impl App {
                 window.set_apps(slint::ModelRc::from(self.home.app_tiles.clone()));
             }
         }
-        if status.is_some() {
-            self.status = status;
+        if let Some(mut fresh) = status {
+            // A poll that left before the viewer pressed Ok cannot know what
+            // was pressed. Keep the chosen mode until the daemon answers, or
+            // the row would show the old value again for one frame.
+            if self.leds_pending.is_some() {
+                let kept = self
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.get("leds"))
+                    .cloned();
+                if let (Some(kept), Some(fresh)) = (kept, fresh.as_object_mut()) {
+                    fresh.insert("leds".into(), kept);
+                }
+            }
+            self.status = Some(fresh);
         }
         if diagnostics.is_some() {
             self.diag = diagnostics;
@@ -1682,6 +1787,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         store: session::Store::new(state_file()),
         status: None,
         diag: None,
+        leds_pending: None,
         display: None,
         controls_were_open: false,
         here: None,
@@ -2122,6 +2228,30 @@ fn spawn_kodi(command: KodiCommand) {
         if let Err(e) = answer {
             eprintln!("mediabox-tv.control failed: {e}");
         }
+    });
+}
+
+/// The board's indicator lights.
+///
+/// Unlike the fire-and-forget calls above, this one carries its answer back to
+/// the event loop. The daemon replies with the light status it actually
+/// reached, and that is what the row must show: a press that was refused —
+/// a board with no controllable lights, an unwritable sysfs — has to put the
+/// row back rather than leave the chosen mode sitting there as though it had
+/// worked.
+fn spawn_leds(mode: mediabox_core::LedMode) {
+    detached("mediabox-tv-leds", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match client.leds_set(mode).await {
+            Ok(status) => Some(status),
+            Err(error) => {
+                eprintln!("mediabox-tv.leds failed: {error}");
+                None
+            }
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.leds_answered(answer));
+        });
     });
 }
 

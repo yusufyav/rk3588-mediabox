@@ -325,6 +325,26 @@ through `LD_LIBRARY_PATH`. Nothing under `/usr/lib`, `/etc/ld.so.conf.d` or the
 glvnd vendor directory is touched, so llvmpipe stays available as a comparison
 and as a fallback.
 
+**Three indicator lights, two of them reachable.** `blue_led` (gpio-21) and
+`green_led` (gpio-22) hang off the `gpio-leds` platform device, are active low,
+and carry `linux,default-trigger = "heartbeat"` from the device tree, so both
+pulse for as long as the board is powered. The third light is red, appears
+nowhere in the device tree, and is wired to the supply rather than to any pin of
+the SoC: no software reaches it. Measured on the appliance — every claimed GPIO
+across gpiochip0–5 and the PMIC's own pins carry no third light — so the
+settings screen states that it cannot be turned off rather than offering a
+switch that would do nothing. Two consequences live in the code:
+
+* `/sys/class/leds` lists more than this board. It also carries the lock lights
+  of whatever USB keyboard is attached (`input*::capslock` and its family) and
+  an `mmc0::` entry with no light behind it. The board's own lights are
+  therefore identified by their device path going through `gpio-leds`, never by
+  walking that directory — which would darken somebody's keyboard.
+* A trigger overrides a brightness. While `heartbeat` is in place the kernel
+  rewrites `brightness` several times a second, so writing 0 under it changes
+  the value for about as long as it takes to read back. Every write clears the
+  trigger first.
+
 **Second board (Orange Pi 5 Plus).** The differences are measured and they are
 all in the boot chain and the peripheral indices — EFI/GRUB and NVMe rather than
 U-Boot and eMMC, a different DTB, two HDMI outputs, a different HDMI-IN card

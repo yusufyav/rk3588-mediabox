@@ -1,4 +1,5 @@
 use crate::kodi::KodiClient;
+use crate::leds::LedController;
 use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
 use crate::player::{PlayerManager, Playing};
@@ -42,6 +43,10 @@ pub struct AppState {
     /// The interface's own player: a film inside the application rather than
     /// another application in front of it.
     pub player: Arc<PlayerManager>,
+    /// The board's two indicator lights. Here rather than in the interface
+    /// because `/sys/class/leds` is root's, and the unit that draws the
+    /// television mounts /sys read-only.
+    pub leds: LedController,
 }
 
 impl AppState {
@@ -78,6 +83,11 @@ impl AppState {
             }
             Request::CecWakeTv => cec_action(&self.cec, |adapter| adapter.wake_tv()).await,
             Request::CecStandbyTv => cec_action(&self.cec, |adapter| adapter.standby_tv()).await,
+            Request::LedsStatus => Response::success(self.leds.status()),
+            Request::LedsSet { mode } => match self.leds.set(mode) {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("LED_ERROR", error),
+            },
             Request::MediaStatus => media_result(self.media.status().await),
             Request::MediaCapabilities => media_result(self.media.capabilities().await),
             Request::MediaHome => media_result(self.media.home().await),
@@ -499,6 +509,7 @@ impl AppState {
             cec,
             media,
             surface: self.surface.status().await,
+            leds: self.leds.status(),
         }
     }
 }
@@ -702,6 +713,9 @@ mod tests {
             surface: SurfaceManager::new("kodi.service", "mediabox-tv-ui.service").unwrap(),
             // Never started in the tests; it exists so the state is whole.
             player: Arc::new(PlayerManager::new("/bin/true", "/run/mediabox/player.sock")),
+            // Pointed at the empty temporary directory, so the test never
+            // reaches the machine's own sysfs and reports no lights.
+            leds: LedController::new(dir.path(), dir.path().join("leds")),
             applications: ApplicationManager::load(None, "kodi.service", "mediabox-tv-ui.service")
                 .unwrap(),
         });

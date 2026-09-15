@@ -4,6 +4,7 @@ use mediabox_core::{CecStatus, InputAction, InputMode, InputSource, Surface};
 use mediabox_input::InputManager;
 use mediaboxd_rs::daemon::{AppState, CecRuntime, apply_kodi_route, serve_unix, socket_is_live};
 use mediaboxd_rs::kodi::KodiClient;
+use mediaboxd_rs::leds::LedController;
 use mediaboxd_rs::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use mediaboxd_rs::media::MediaClient;
 use mediaboxd_rs::player::PlayerManager;
@@ -120,6 +121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &args.media_endpoint,
             Duration::from_secs(30),
         )?),
+        // Constructed here rather than lazily, because constructing it is what
+        // re-applies the remembered mode: the kernel puts the device tree's
+        // heartbeat back on every boot, and this is the earliest the daemon can
+        // take it off again.
+        leds: LedController::system(),
     });
 
     let stop = Arc::new(AtomicBool::new(false));

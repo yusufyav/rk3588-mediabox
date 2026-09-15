@@ -247,6 +247,15 @@ impl Client {
         self.call(json!({"command": "cec_standby_tv"})).await
     }
 
+    /// The board's indicator lights, which the daemon owns for the same reason
+    /// it owns the CEC adapter: `/sys/class/leds` is root's, and this process
+    /// runs under a unit that mounts /sys read-only. The daemon also remembers
+    /// the choice, so this is a request and not a write.
+    pub async fn leds_set(&self, mode: mediabox_core::LedMode) -> Result<Value> {
+        self.call(json!({"command": "leds_set", "mode": mode}))
+            .await
+    }
+
     /// Restart or shut the appliance down. Called from exactly one place — a
     /// confirmation the viewer moved the focus onto and pressed — and the
     /// request body is a two-valued enum on both sides of the socket.
