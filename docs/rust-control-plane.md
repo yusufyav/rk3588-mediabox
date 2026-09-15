@@ -1,8 +1,10 @@
 # Rust control plane
 
-`rust/` çalışma alanı, mevcut Python `mediaboxd` servisini değiştirmeden yanında
-doğrulanabilen V2 kontrol düzlemidir. Üretim medya yolu, Kodi build'i ve Stremio
-alanları bu çalışma alanının dışında kalır.
+`rust/` çalışma alanı cihazın **üretim kontrol düzlemidir**. Yanında doğrulanan
+bir V2 olarak başladı; yerini aldığı Python `mediaboxd` servisi `d757d17` ile
+ağaçtan çıkarıldı ve `mediaboxd-rs` tek yetkili durumundadır. Kodi build'i,
+Stremio alanları ve Python medya çekirdeği (`media/`) bu çalışma alanının
+dışında kalır — medya çekirdeği hâlâ çalışan bir bileşendir, kalıntı değil.
 
 ## Bileşenler
 
@@ -60,5 +62,7 @@ mediaboxd-rs --socket /tmp/mediaboxd-rs.sock --cec-device /dev/cec0
 mediaboxctl --socket /tmp/mediaboxd-rs.sock status
 ```
 
-`packaging/systemd/mediaboxd-rs.service` production geçişi içindir; bu görevde
-mevcut Python unit'i disable edilmez.
+`packaging/systemd/mediaboxd-rs.service` üretim birimidir ve
+`scripts/deploy-mediabox-v3.sh` tarafından kurulup enable edilir.
+`packaging/systemd/mediaboxd.service` eski Python birimidir; başlattığı modül
+artık repoda yok, dosyanın kendisi henüz silinmedi.

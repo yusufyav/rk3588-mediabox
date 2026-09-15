@@ -7,6 +7,15 @@ before the next begins.
 Success is never "a picture appeared". Every gate names what physical or
 kernel-visible evidence counts.
 
+> **The reports this page links to are in history, not in the tree.** They were
+> taken out at `d757d17`; the links below still name them, and every one is
+> readable at the commit before that:
+>
+> ```sh
+> git show 710181b:results/orangepi5-ultra-vendor/<report>.md
+> git show 710181b --stat -- results logs
+> ```
+
 ## MP0 — Linux playback platform preflight (done, in the reference repository)
 
 Read-only inventory of the board's display and media capabilities.
@@ -223,20 +232,53 @@ gone and the best OSD colour of the project so far. See the
 path; never let a plane's `EOTF` tag disagree with its pixels; the Android model
 is SDR GUI plus hardware SDR-to-HDR, not a PQ GUI.
 
-## MA1 — compressed HDMI audio passthrough (next, not started)
+## MA1 — compressed HDMI audio passthrough (done)
 
 AC-3, E-AC-3, DTS, TrueHD, DTS-HD MA, Atmos and IEC61937/HBR. MA0 established
 that the vendor driver publishes a populated 128-byte ELD control advertising
 AC-3 640 kbps, DTS 1504 kbps and 8-channel E-AC-3, so Kodi's passthrough
 capability detection has what it needs.
 
+Result: `PARTIAL`, and accepted. AC-3 and E-AC-3 pass through bit-exact, Kodi
+never falls back to PCM decode, `xrun` was zero on every run, and the 4K23.976
+HDR10 baseline is unregressed. It is not `PASS` for one reason and it is not the
+appliance's: the ELD declares DTS and this sink does not reproduce it. TrueHD
+and DTS-HD MA are absent from the ELD and stay off.
+
+Nothing below Kodi was wrong — a raw AC-3 burst reached the sink through
+`ffmpeg -c:a copy -f spdif | aplay` before anything was changed. What was
+missing was a name: Kodi decides passthrough capability from the ALSA PCM name
+alone, this card advertised none beginning with `hdmi`, and the HDMI sink was
+therefore enumerated as `AE_DEVTYPE_PCM`. The fix is one ALSA configuration
+file; no kernel, DT, Mali, RKMPP, DRM PRIME or VOP2 change, and Kodi is not
+patched for it.
+
+```sh
+git show 710181b:results/orangepi5-ultra-vendor/ma1-hdmi-passthrough-2026-09-11.md
+```
+
+**Product decision carried forward:** `audiooutput.ac3transcode` stays `false`.
+Kodi's own AC-3 encoder produces silence on this sink under the identical
+configuration a real AC-3 file plays under, so the conversion happens upstream
+of Kodi instead — see [`audio-transcode.md`](audio-transcode.md).
+
+## Since the display and audio gates
+
+The gate ladder above established the platform. What was built on top of it is
+not gate-named, and its state lives in [`../results/DURUM.md`](../results/DURUM.md)
+rather than here:
+
+- the native appliance shell (`rust/crates/mediabox-tv`), the Rust control
+  plane, the wasm product UI and the media core
+- CEC, which is built and required by the control plane's unit
+- the Stremio bridge and the stream-resolution path
+- the embedded player, and the handoff from it to Kodi
+
 ## Not yet authorised
 
 Everything below waits for its own gate, and none of it is started as a side
 effect of another gate:
 
-- Stremio integration and the control bridge
-- CEC
 - frame-rate matching policy across 23.976/24/25/50/59.94/60
 - HDR10+ and Dolby Vision
 - any kernel, device-tree or boot configuration change
