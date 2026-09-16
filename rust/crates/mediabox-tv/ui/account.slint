@@ -44,7 +44,7 @@ export component Account inherits Rectangle {
         x: col-x;
         y: Metrics.topbar + Metrics.block-gap * 0.6;
         width: col-w;
-        spacing: Metrics.block-gap * 0.55;
+        spacing: Metrics.block-gap * 0.45;
         alignment: start;
 
         Text {
@@ -186,7 +186,7 @@ export component Account inherits Rectangle {
         }
 
         // ------------------------------------------------------------- button
-        Rectangle { height: Metrics.block-gap * 0.4; }
+        Rectangle { height: Metrics.block-gap * 0.25; }
 
         Rectangle {
             property <bool> focused: focus-at == "submit";
@@ -212,14 +212,21 @@ export component Account inherits Rectangle {
             }
         }
 
+        // One line, and it has to stay one line: the column already reaches
+        // most of the way down the panel, and a message that wrapped ran off
+        // the bottom edge where nobody could read it. `short_reason` in
+        // screens/account.rs is what keeps it short enough to say something.
         if notice != "": Text {
             width: 100%;
+            height: Metrics.root-font * 1.6;
             text: notice;
             color: busy ? Theme.muted : Theme.tone("warn");
             font-size: Metrics.text-chip;
             font-weight: 660;
             horizontal-alignment: center;
-            wrap: word-wrap;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
         }
     }
 }

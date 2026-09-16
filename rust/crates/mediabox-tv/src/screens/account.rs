@@ -298,7 +298,7 @@ impl Account {
         self.forget_password();
         // Whatever went wrong, the thing that was typed is not part of the
         // explanation.
-        self.notice = format!("Giriş başarısız: {why}");
+        self.notice = format!("Giriş başarısız: {}", short_reason(why));
         self.focus = Focus::Field(Field::Email);
         self.field = Field::Email;
     }
@@ -316,6 +316,96 @@ impl Account {
         self.session = session;
         true
     }
+}
+
+/// One line a person can act on, out of whatever the machinery said.
+///
+/// A refused sign-in arrives as a daemon message wrapping a worker message
+/// wrapping the provider's own, and the provider's is the only part that
+/// answers the question. Measured on the appliance, a wrong password reads:
+///
+///     media worker HTTP 502 Bad Gateway: {"error": {"code": "UPSTREAM_FAILED",
+///     "message": "login failed: Wrong passphrase", "details": {...}}}
+///
+/// Put on a television that is a wall of JSON running off the bottom of the
+/// panel, which tells a viewer nothing and hides the two words that would.
+fn short_reason(raw: &str) -> String {
+    // The innermost "message" is the provider's own.
+    let deepest = raw
+        .rmatch_indices("\"message\"")
+        .next()
+        .and_then(|(at, _)| json_string_after(&raw[at..]))
+        .unwrap_or_default();
+    let detail = if deepest.is_empty() { raw } else { &deepest };
+    let lowered = detail.to_lowercase();
+
+    for (needle, say) in [
+        ("wrong passphrase", "e-posta veya parola hatalı"),
+        ("wrong password", "e-posta veya parola hatalı"),
+        ("user not found", "bu e-postayla bir hesap yok"),
+        ("unauthorized", "e-posta veya parola hatalı"),
+        ("urlopen", "Stremio'ya ulaşılamadı"),
+        ("unreachable", "Stremio'ya ulaşılamadı"),
+        ("temporary failure", "ağ şu an kullanılamıyor"),
+        ("timed out", "Stremio zamanında yanıt vermedi"),
+        ("timeout", "Stremio zamanında yanıt vermedi"),
+        ("zaman aşımı", "Stremio zamanında yanıt vermedi"),
+        (
+            "media_worker_unavailable",
+            "cihazın medya servisi çalışmıyor",
+        ),
+        (
+            "denetim düzlemine ulaşılamadı",
+            "cihazın denetim servisi yanıt vermiyor",
+        ),
+    ] {
+        if lowered.contains(needle) {
+            return say.to_string();
+        }
+    }
+
+    // Nothing recognised. Take the prose before the machinery starts and cap
+    // it, so an unknown fault is still one readable line.
+    let prose = detail.split(['{', '\n']).next().unwrap_or("").trim();
+    let prose = prose.trim_end_matches([':', ' ']);
+    if prose.is_empty() {
+        return "beklenmeyen bir hata".into();
+    }
+    let mut out: String = prose.chars().take(60).collect();
+    if prose.chars().count() > 60 {
+        out.push('…');
+    }
+    out
+}
+
+/// The value of a `"message": "..."` at the start of this slice, unescaped
+/// just enough to read.
+fn json_string_after(slice: &str) -> Option<String> {
+    let colon = slice.find(':')?;
+    let rest = slice[colon + 1..].trim_start();
+    let mut chars = rest.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut escaped = false;
+    for c in chars {
+        if escaped {
+            out.push(match c {
+                'n' => '\n',
+                't' => ' ',
+                other => other,
+            });
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            return Some(out);
+        } else {
+            out.push(c);
+        }
+    }
+    None
 }
 
 /// What Ok meant.
@@ -418,6 +508,57 @@ mod tests {
             assert!(account.password_mask().is_empty());
             assert!(!account.busy);
         }
+    }
+
+    /// Measured on the appliance: this is exactly what a wrong password looks
+    /// like by the time it reaches the television.
+    #[test]
+    fn a_refusal_is_one_line_a_person_can_act_on() {
+        let raw = concat!(
+            r#"media worker HTTP 502 Bad Gateway: {"error": {"code": "UPSTREAM_FAILED", "#,
+            r#""message": "login failed: Wrong passphrase", "details": {"call": "login"}}}"#
+        );
+        let mut account = Account::new();
+        account.failed(raw);
+        assert_eq!(
+            account.notice,
+            "Giriş başarısız: e-posta veya parola hatalı"
+        );
+        // None of the machinery reaches the panel.
+        for leak in ["{", "502", "UPSTREAM_FAILED", "Bad Gateway", "details"] {
+            assert!(
+                !account.notice.contains(leak),
+                "{leak} leaked: {}",
+                account.notice
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreachable_provider_says_so() {
+        assert_eq!(
+            short_reason("UPSTREAM_FAILED api.strem.io is unreachable"),
+            "Stremio'ya ulaşılamadı"
+        );
+        assert_eq!(
+            short_reason("MEDIA_WORKER_UNAVAILABLE"),
+            "cihazın medya servisi çalışmıyor"
+        );
+        assert_eq!(
+            short_reason("denetim düzlemine ulaşılamadı: connection refused"),
+            "cihazın denetim servisi yanıt vermiyor"
+        );
+    }
+
+    /// An unknown fault is still one readable line, not a wall of JSON.
+    #[test]
+    fn an_unrecognised_fault_is_still_one_short_line() {
+        let out = short_reason(r#"something new went wrong: {"error": {"deep": "detail"}}"#);
+        assert_eq!(out, "something new went wrong");
+        let long = "x".repeat(200);
+        let capped = short_reason(&long);
+        assert!(capped.chars().count() <= 61, "{}", capped.chars().count());
+        assert_eq!(short_reason("{}"), "beklenmeyen bir hata");
     }
 
     #[test]

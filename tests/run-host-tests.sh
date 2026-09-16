@@ -388,16 +388,14 @@ contains "and offers the way out"            "$(cat "$tv/screens/settings.rs")" 
 # of what an account is.
 contains "login goes to the daemon"   "$(cat "$tv/rpc.rs")" '"command": "media_login"'
 contains "logout goes to the daemon"  "$(cat "$tv/rpc.rs")" '"command": "media_logout"'
-# Comments are stripped first: main.rs quotes an upstream error message that
-# names the host, and a quoted error is not a call.
-for f in $(cd "$here" && git ls-files rust/crates/mediabox-tv); do
-  case "$(sed -e 's|//.*$||' "$here/$f")" in
-    *strem.io*|*stremio.com*)
-      printf 'FAIL %s reaches the account provider directly\n' "$f"
-      failures=$((failures + 1))
-      ;;
-  esac
-done
+# A URL is a call; the bare hostname is not. main.rs quotes an upstream error
+# that names the host and account.rs parses one, and neither dials anything --
+# so this looks, line by line, for what dialling would actually need.
+if (cd "$here" && git grep -nE '(https?://|"//)[a-z0-9.-]*(strem\.io|stremio\.com)' \
+      -- rust/crates/mediabox-tv >/dev/null 2>&1); then
+  printf 'FAIL the television reaches the account provider directly\n'
+  failures=$((failures + 1))
+fi
 printf 'ok   the television never calls the provider itself\n'
 
 # The password. It is read out of the screen in exactly one place -- the login
