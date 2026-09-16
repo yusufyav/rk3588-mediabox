@@ -105,9 +105,18 @@ if [ -n "$alsa_card" ] && [ -n "$alsa_driver" ] && [ -f "$profile" ]; then
   # ends the s/// expression early and makes sed fail silently under the `||
   # true` below. The symptom was a profile that still named whichever card the
   # box was installed against.
+  # `[^>]*>` and not `">`: when Kodi cannot resolve the device it has been
+  # given -- which happens whenever the sound cards are re-enumerated while it
+  # is running -- it rewrites the setting to its own default *and adds*
+  # `default="true"` to it. A pattern anchored on `">` then no longer matches,
+  # so the correction here silently stopped correcting and the appliance was
+  # left playing PCM into ALSA's "default" device: passthrough still worked,
+  # because that is a separate setting, and everything Kodi had to decode went
+  # somewhere nobody was listening. That reads as "sound only works on some
+  # films", which is exactly how it was reported.
   sed -i \
-    -e "s#\(<setting id=\"audiooutput.audiodevice\">\)[^<]*\(</setting>\)#\1$device\2#" \
-    -e "s#\(<setting id=\"audiooutput.passthroughdevice\">\)[^<]*\(</setting>\)#\1$device\2#" \
+    -e "s#\(<setting id=\"audiooutput.audiodevice\"\)[^>]*>[^<]*\(</setting>\)#\1>$device\2#" \
+    -e "s#\(<setting id=\"audiooutput.passthroughdevice\"\)[^>]*>[^<]*\(</setting>\)#\1>$device\2#" \
     "$profile" || kodi_profile=failed
 fi
 
