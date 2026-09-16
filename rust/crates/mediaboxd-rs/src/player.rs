@@ -5,10 +5,9 @@
 //! difference between this and handing Kodi the display: the catalogue is
 //! still behind it, Back returns to it, and nothing has to be handed back.
 //!
-//! The player is mpv, built on the appliance against its Rockchip ffmpeg and
-//! started by `mediabox-player`, which knows where that ffmpeg lives and which
-//! compositor to draw on. This module only starts it, asks it where it has got
-//! to, and stops it.
+//! The player is mpv, built on the appliance against MediaBox's own Rockchip
+//! media runtime and started by `mediabox-player`. This module only starts it,
+//! asks it where it has got to, and stops it.
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -23,8 +22,8 @@ use tokio::sync::Mutex;
 /// Not a child of this daemon, and the reason is the same one written on
 /// kodi.service: a player needs the GPU, the DMA heaps and the input devices,
 /// and this daemon is sandboxed away from all three. Started as a child it
-/// inherited that sandbox and MPP could not open `/dev/dri/renderD128` at all,
-/// so every film fell back to software or failed outright. systemd starts it
+/// inherited that sandbox and MPP could not open the render device at all, so
+/// every film fell back to software or failed outright. systemd starts it
 /// in its own context instead — the same context every time.
 const UNIT: &str = "mediabox-player.service";
 
@@ -77,8 +76,10 @@ impl PlayerManager {
             .arg("--collect")
             .arg(format!("--unit={UNIT}"))
             .arg("--property=Type=exec")
-            // The compositor the interface is drawn on. The player is its
-            // client; without this it would look for a display of its own.
+            // The interface's own runtime directory, which is where it puts
+            // the socket it listens for frames on. Not a compositor: this
+            // product has not had one since the television interface became a
+            // process that holds DRM master itself.
             .arg("--setenv=XDG_RUNTIME_DIR=/run/mediabox-ui")
             .arg(format!(
                 "--setenv=MEDIABOX_PLAYER_IPC={}",

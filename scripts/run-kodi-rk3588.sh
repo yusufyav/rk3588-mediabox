@@ -38,15 +38,18 @@ source "$here/scripts/env.sh"
 userdata="$KODI_RUN_HOME/.kodi/userdata"
 kodi_log="$KODI_RUN_HOME/.kodi/temp/kodi.log"
 
-# The FFmpeg this build links is static, but it pulls in the Rockchip MPP and
-# RGA shared libraries, which live under the ScreenBridge prefix and are not on
-# the default search path. Mali, when selected, goes in FRONT of it: kodi-gbm's
-# DT_NEEDED entries are the generic sonames (libEGL.so.1, libGLESv2.so.2,
-# libgbm.so.1), so first match on LD_LIBRARY_PATH decides the whole GL stack
-# with no rebuild and no change under /usr/lib.
+# Only the GL stack is chosen here. The Rockchip MPP and RGA libraries this
+# build needs are found through the RPATH the build put in it, naming MediaBox's
+# own media runtime, so they are not on this line and cannot be swapped by an
+# environment that drifted.
+#
+# Mali, when selected, goes in front of everything: kodi-gbm's DT_NEEDED entries
+# are the generic sonames (libEGL.so.1, libGLESv2.so.2, libgbm.so.1), so first
+# match on LD_LIBRARY_PATH decides the whole GL stack with no rebuild and no
+# change under /usr/lib. Mesa is what is left when nothing is prepended.
 case "$MEDIABOX_GPU" in
-  mali) ld_path="$MALI_RUNTIME/lib:$MEDIABOX_FFMPEG_PREFIX/lib" ;;
-  mesa) ld_path="$MEDIABOX_FFMPEG_PREFIX/lib" ;;
+  mali) ld_path="$MALI_RUNTIME/lib" ;;
+  mesa) ld_path="" ;;
   *)    echo "MEDIABOX_GPU must be 'mali' or 'mesa', not '$MEDIABOX_GPU'" >&2; exit 2 ;;
 esac
 
@@ -73,18 +76,20 @@ case "${1:-}" in
       mediabox_ssh "rm -rf '$KODI_RUN_HOME'"
     fi
     mediabox_ssh "mkdir -p '$userdata' '$KODI_RUN_HOME/.kodi/temp'"
-    # The "hdmi" ALSA PCM this card would otherwise not have. Kodi reads
-    # passthrough capability off the PCM *name* -- only a name starting with
-    # "hdmi" becomes AE_DEVTYPE_HDMI and gets AE_FMT_RAW -- so without this file
-    # the sink enumerates as AE_DEVTYPE_PCM and compressed output is impossible
-    # to select, which is exactly how Gate MA1 found the machine. It is copied
-    # on every start rather than installed once: guisettings.xml above names
-    # this PCM, and a profile pointing at a device that does not exist is the
-    # one failure that looks like a Kodi bug instead of a missing config file.
-    mediabox_scp "$here/config/alsa/rockchip-hdmi1.conf" \
-      "$MEDIABOX_TARGET:/usr/share/alsa/cards/rockchip-hdmi1.conf" >/dev/null
+    # The appliance profile, and then the two things in it that are not the
+    # same on every board: the ALSA device the audio settings name, and the
+    # card config that makes that device exist.
+    #
+    # Kodi reads passthrough capability off the PCM *name* -- only a name
+    # starting with "hdmi" becomes AE_DEVTYPE_HDMI and gets AE_FMT_RAW -- so
+    # without the card config the sink enumerates as AE_DEVTYPE_PCM and
+    # compressed output is impossible to select, which is exactly how Gate MA1
+    # found the machine. Both are rendered by mediabox-hdmi-prepare for the
+    # sound card that belongs to the output this box is on, because on a board
+    # with two HDMI sockets that is not the same card in both.
     mediabox_scp "$here/config/kodi/guisettings-appliance.xml" \
       "$MEDIABOX_TARGET:$userdata/guisettings.xml" >/dev/null
+    mediabox_ssh "/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare" || true
     echo "== starting Kodi (GBM/DRM standalone, GPU=$MEDIABOX_GPU)"
     # AE_SINK pins the audio engine to ALSA. The build already has
     # ENABLE_PULSEAUDIO=OFF, so this cannot silently pick PulseAudio; setting it
@@ -181,7 +186,7 @@ print(json.dumps(chosen))
       pid=\$(pgrep -f kodi-gbm | head -1)
       if [ -n \"\$pid\" ]; then
         tr '\0' '\n' < /proc/\$pid/maps 2>/dev/null | true
-        awk '{print \$6}' /proc/\$pid/maps | grep -E 'libmali|libEGL|libGLES|libgbm|gallium|swrast|dri' | sort -u
+        awk '{print \$6}' /proc/\$pid/maps | grep -E 'libmali|libEGL|libGLES|libgbm|librga|librockchip|gallium|swrast|dri' | sort -u
       else
         echo '(kodi not running)'
       fi"

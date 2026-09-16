@@ -5,8 +5,8 @@ Rockchip MPP decodes ten-bit HEVC into NV15, a packed format upstream
 ffmpeg does not define and the appliance's ffmpeg fork does. mpv already
 has a mechanism for exactly this -- it looks fork-specific pixel formats
 up by name -- and the list simply did not have these two in it.
---- /var/tmp/hwdec_drmprime.c.orig	2026-09-14 01:40:48.687278827 +0300
-+++ video/out/hwdec/hwdec_drmprime.c	2026-09-14 01:40:48.723945083 +0300
+--- a/video/out/hwdec/hwdec_drmprime.c
++++ b/video/out/hwdec/hwdec_drmprime.c
 @@ -75,6 +75,12 @@
  static const char *forked_pix_fmt_names[] = {
      "rpi4_8",

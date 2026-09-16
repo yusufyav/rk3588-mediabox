@@ -12,8 +12,8 @@ and fell back to software: 33% of eight cores instead of 1%.
 
 Create it here when the output has none. The frames are still handed over
 without a copy; only the handle the decoder is driven through is ours.
---- /var/tmp/vd_lavc.c.orig	2026-09-14 01:42:56.212523307 +0300
-+++ video/decode/vd_lavc.c	2026-09-14 01:42:56.245856270 +0300
+--- a/video/decode/vd_lavc.c
++++ b/video/decode/vd_lavc.c
 @@ -489,6 +489,27 @@
              return av_buffer_ref(hw_ctx->av_device_ref);
      }

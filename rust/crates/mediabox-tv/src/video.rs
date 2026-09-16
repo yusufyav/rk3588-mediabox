@@ -529,9 +529,9 @@ impl<D: ControlDevice + AsFd> Imported<D> {
 // ---------------------------------------------------------------------------
 // Where the frames come from.
 //
-// The decoder is a separate process, and it has to be: it is mpv, linked
-// against the Rockchip ffmpeg that lives under /opt/rk3588-screenbridge, and
-// the interface is a cross-compiled Rust binary that must not be. What the two
+// The decoder is a separate process, and it has to be: it is mpv, built on the
+// appliance against MediaBox's own Rockchip media runtime, and the interface is
+// a cross-compiled Rust binary that must not be. What the two
 // share is one unix socket and the kernel's own buffer sharing — the decoder
 // sends the dma-buf file descriptors of a frame it has already decoded, the
 // interface imports them on the card it holds master on, and nothing between

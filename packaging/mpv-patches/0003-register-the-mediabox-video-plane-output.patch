@@ -12,8 +12,8 @@ video/out/vo_mediabox.c is the third answer: the decoded frame's dma-buf
 descriptors go to the interface over a unix socket, and the interface puts them
 on the same video port's second window (Esmart0, which takes NV12 and NV15 and
 has its own scaler). This is the two lines that make the build know about it.
---- /var/tmp/vo.c.orig
-+++ video/out/vo.c
+--- a/video/out/vo.c
++++ b/video/out/vo.c
 @@ -66,6 +66,7 @@
  extern const struct vo_driver video_out_tct;
  extern const struct vo_driver video_out_sixel;
@@ -35,8 +35,8 @@ has its own scaler). This is the two lines that make the build know about it.
  #if HAVE_VAAPI_X11 && HAVE_GPL
      &video_out_vaapi,
  #endif
---- /var/tmp/meson.build.orig
-+++ meson.build
+--- a/meson.build
++++ b/meson.build
 @@ -243,6 +243,7 @@
      'video/out/vo_image.c',
      'video/out/vo_lavc.c',

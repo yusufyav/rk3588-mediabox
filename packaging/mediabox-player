@@ -33,16 +33,26 @@ if [ -w /run/mediabox ] || mkdir -p /run/mediabox 2>/dev/null; then
     exec >>/run/mediabox/player.log 2>&1
 fi
 
-# The appliance's own ffmpeg. It is the only build on this box with the
-# Rockchip decoder, and it is not on the default library path because the
-# system ffmpeg must stay the system ffmpeg.
-LD_LIBRARY_PATH="/opt/rk3588-screenbridge/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export LD_LIBRARY_PATH
+# No LD_LIBRARY_PATH, and that is the change worth noticing.
+#
+# The player needs MediaBox's own Rockchip MPP and RGA — the system ffmpeg must
+# stay the system ffmpeg — and it used to be handed them here, by pointing this
+# process at a directory. That works exactly as long as everyone who ever starts
+# the player remembers to do it, and it silently binds whatever is in that
+# directory: on a board that also carries rk3588-screenbridge, the line that
+# used to be here named *that* product's prefix, and whichever of the two built
+# last decided which decoder MediaBox got.
+#
+# scripts/build-mediabox-player.sh links the binary with an RPATH naming
+# $MEDIABOX_MEDIA_PREFIX instead, so the player says where its decoder is and
+# nothing out here has to. If it ever cannot find one, the failure is a loud
+# missing-library error rather than a silent fall back to software.
 
 # Where the interface listens for frames. It creates this with its own runtime
 # directory, so a player that cannot find it is a player started while nothing
 # owns the television — which is a refusal to start, not a reason to take the
-# display.
+# display. Nothing here is a compositor: the socket carries dma-buf descriptors
+# to the process that already holds DRM master.
 MEDIABOX_VIDEO_SOCKET="${MEDIABOX_VIDEO_SOCKET:-/run/mediabox-ui/video.sock}"
 export MEDIABOX_VIDEO_SOCKET
 if [ ! -S "$MEDIABOX_VIDEO_SOCKET" ]; then
