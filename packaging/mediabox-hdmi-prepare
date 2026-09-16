@@ -69,12 +69,24 @@ fi
 # and without it Kodi enumerates the sink as PCM-only and compressed output
 # cannot be selected at all. The template is rendered for whichever card this
 # output actually has rather than installed once under one board's name.
+#
+# This runs from two units, and only one of them can do it. kodi.service is
+# deliberately unsandboxed and writes the file; mediabox-tv-ui.service has
+# ProtectSystem=strict, so /usr is read-only under it and the write is refused.
+# That division is right — the file is Kodi's, and Kodi's unit is where it gets
+# written — but it must not be silent, so the outcome is reported below rather
+# than swallowed.
+alsa_conf=skipped
 template=/opt/rk3588-mediabox/share/alsa/mediabox-hdmi.conf.in
 if [ -n "$alsa_driver" ] && [ -f "$template" ]; then
   target="/usr/share/alsa/cards/$alsa_driver.conf"
   rendered="$(sed "s/@ALSA_DRIVER@/$alsa_driver/g" "$template")"
-  if [ ! -f "$target" ] || [ "$rendered" != "$(cat "$target")" ]; then
-    printf '%s\n' "$rendered" > "$target" 2>/dev/null || true
+  if [ -f "$target" ] && [ "$rendered" = "$(cat "$target")" ]; then
+    alsa_conf=current
+  elif printf '%s\n' "$rendered" > "$target" 2>/dev/null; then
+    alsa_conf=written
+  else
+    alsa_conf=unwritable
   fi
 fi
 
@@ -84,8 +96,10 @@ fi
 # with "hdmi" becomes AE_DEVTYPE_HDMI — so the profile has to name the PCM the
 # file above defines. A profile pointing at a device that does not exist is the
 # one failure that looks like a Kodi bug instead of a missing config file.
+kodi_profile=absent
 profile=/var/tmp/kodi-home/.kodi/userdata/guisettings.xml
 if [ -n "$alsa_card" ] && [ -n "$alsa_driver" ] && [ -f "$profile" ]; then
+  kodi_profile=written
   device="ALSA:hdmi:CARD=$alsa_card,DEV=0|$alsa_driver"
   # `#` as the delimiter, not `|`: an ALSA device string has a `|` in it, which
   # ends the s/// expression early and makes sed fail silently under the `||
@@ -94,8 +108,14 @@ if [ -n "$alsa_card" ] && [ -n "$alsa_driver" ] && [ -f "$profile" ]; then
   sed -i \
     -e "s#\(<setting id=\"audiooutput.audiodevice\">\)[^<]*\(</setting>\)#\1$device\2#" \
     -e "s#\(<setting id=\"audiooutput.passthroughdevice\">\)[^<]*\(</setting>\)#\1$device\2#" \
-    "$profile" || echo "mediabox-hdmi-prepare: Kodi profilindeki ses aygıtı güncellenemedi" >&2
+    "$profile" || kodi_profile=failed
 fi
+
+# One line in the journal saying what this board is and what was done to it.
+# Anything that did not happen says so by name; a silent preparation step is
+# how a wrong sound card survives a deploy.
+echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-none}" \
+     "driver=${alsa_driver:-none} alsa-conf=$alsa_conf kodi-profile=$kodi_profile" >&2
 
 # Put the link back to SDR before an SDR interface is drawn on it.
 #
