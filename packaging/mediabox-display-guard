@@ -41,7 +41,55 @@ sleep 0.5
 mkdir -p /run/mediabox 2>/dev/null || true
 : > /run/mediabox/display-handback 2>/dev/null || true
 
-systemctl is-active --quiet kodi.service && exit 0
-systemctl is-active --quiet mediabox-tv-ui.service && exit 0
+# Somebody already has it, or is about to: nothing to do.
+for unit in kodi.service mediabox-tv-ui.service mediabox-browser.service; do
+  systemctl is-active --quiet "$unit" && exit 0
+done
 
-exec /opt/rk3588-mediabox/bin/mediaboxctl surface switch ui
+# And the asking happens *outside* this process, which is the fix for a
+# deadlock rather than a style preference.
+#
+# This runs as kodi.service's ExecStopPost. When the control plane is what
+# stopped Kodi -- the ordinary case, "hand the display to the interface" --
+# mediaboxd-rs is at that moment inside its own switch, holding the one lock
+# that serialises switches, waiting for `systemctl stop kodi` to return.
+# `systemctl stop` does not return until ExecStopPost has finished. So asking
+# the control plane for a switch from in here waits for a lock held by
+# something waiting for this. Nothing breaks it but the unit's own
+# TimeoutStopSec, and then only by killing this script:
+#
+#     Stopping kodi.service...
+#     kodi.service: State 'stop-post' timed out. Terminating.
+#     kodi.service: Failed with result 'timeout'.
+#
+# Measured on the appliance: 23.1 s from the stop to the timeout, the
+# interface started 0.6 s after that and was up 17.6 s later -- 41 s of
+# nothing on the television, and a failed unit left behind after every
+# ordinary exit from Kodi.
+#
+# Detached, this process returns at once, the stop completes, and whoever
+# asked gets their lock back. The detached half then waits to see whether a
+# display owner turns up. One does when the handover was deliberate, and it
+# does nothing. None does when Kodi fell over by itself, and that is exactly
+# when the interface should be put back.
+#
+# systemd-run and not `setsid ... &`, because a background child is still in
+# kodi.service's cgroup and KillMode=mixed takes the cgroup down with the unit:
+# measured, the detached half was killed before it could look, and a Kodi that
+# had been killed outright left the television on nothing. A transient unit has
+# a cgroup of its own and outlives the stop. --no-block is what keeps this from
+# being the same deadlock in a different shape.
+systemd-run --no-block --quiet --collect --unit=mediabox-display-recover \
+  /bin/sh -c '
+  i=0
+  while [ "$i" -lt 150 ]; do
+    for unit in mediabox-tv-ui.service mediabox-browser.service kodi.service; do
+      systemctl is-active --quiet "$unit" && exit 0
+    done
+    sleep 0.1
+    i=$((i + 1))
+  done
+  exec /opt/rk3588-mediabox/bin/mediaboxctl surface switch ui
+' || true
+
+exit 0
