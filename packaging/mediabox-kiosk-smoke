@@ -57,7 +57,18 @@ fi
 printf '%s\n' "$log" | grep -q 'EGL_VENDOR=ARM.*GL_RENDERER=Mali-G610' && ok gpu 'ARM / Mali-G610' || bad gpu 'vendor GPU absent'
 printf '%s\n' "$log" | grep -q 'present dma-buf=active' && ok scanout 'PRIME FB active' || bad scanout 'no PRIME FB'
 printf '%s\n' "$log" | grep -q 'first_data_ms=' && ok home 'real data loaded' || bad home 'data absent'
-mode=$(sed -n 's/.*crtc-pos=\([0-9]*x[0-9]*\).*/\1/p' /sys/kernel/debug/dri/0/state 2>/dev/null | head -1)
+# The plane that is actually scanning out, not whichever one the file happens
+# to list first. A board with one connector puts the live plane at the top and
+# `head -1` reads it by luck; a board with three does not, and every idle plane
+# reads crtc-pos=0x0 with crtc=(null). Ask for a plane that is attached to a
+# CRTC instead of trusting the order.
+mode=$(awk '
+  /^[^\t]/ { inplane = ($0 ~ /^plane\[/); attached = 0 }
+  inplane && /^\tcrtc=/ { attached = ($0 !~ /\(null\)/) }
+  inplane && attached && /^\tcrtc-pos=/ {
+    if (match($0, /[0-9]+x[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
+  }
+' /sys/kernel/debug/dri/0/state 2>/dev/null)
 native=$(printf '%s\n' "$log" | sed -n 's/.*native=\([0-9]*x[0-9]*\).*/\1/p' | tail -1)
 [ -n "$mode" ] && [ "$mode" = "$native" ] && ok 'native mode' "$mode" || bad 'native mode' "KMS=${mode:-none} app=${native:-none}"
 if pgrep -x sway >/dev/null || pgrep -f 'chromium.*mediabox-ui/chromium' >/dev/null; then bad compositor 'still present'; else ok compositor 'none'; fi
@@ -74,25 +85,38 @@ buffers=$(printf '%s\n' "$log" | grep -c 'scanout-buffer n=' || true)
 # The remote is not a power button. This is the fault that opened this
 # milestone: the HDMI block's CEC input device carried udev's power-switch tag,
 # systemd-logind watched it, and a code from the television restarted the
-# appliance. Three locks, each checked.
-cec_event=$(grep -l 'dw_hdmi_qp' /sys/class/input/event*/device/name 2>/dev/null | head -1 | sed 's#/sys/class/input/\(event[0-9]*\)/.*#\1#')
-if [ -n "$cec_event" ]; then
-  tags=$(udevadm info "/dev/input/$cec_event" 2>/dev/null | sed -n 's/^E: CURRENT_TAGS=//p')
-  case "$tags" in
-    *power-switch*) bad 'cec power tag' "$cec_event still tagged$tags" ;;
-    *)              ok  'cec power tag' "$cec_event untagged" ;;
-  esac
-  # Since logind's own last start, not since boot: the rule is applied while
-  # the appliance is running, and what logind was watching before it was
-  # applied is history rather than a fault.
-  logind_since=$(systemctl show systemd-logind.service -p ActiveEnterTimestamp --value)
-  if journalctl --no-pager -u systemd-logind.service \
-      ${logind_since:+--since "$logind_since"} 2>/dev/null \
-      | grep -q "Watching system buttons on /dev/input/$cec_event"; then
-    bad 'logind buttons' "watching $cec_event"
-  else
-    ok 'logind buttons' "not watching $cec_event"
-  fi
+# appliance. Three locks, each checked -- and checked on every one of these
+# devices, because a board with two HDMI transmitters registers two of them and
+# the one that is not driving the panel carries the same KEY_POWER as the one
+# that is. Checking only the first passes a board whose second remote can still
+# turn the appliance off.
+cec_events=$(grep -l 'dw_hdmi_qp' /sys/class/input/event*/device/name 2>/dev/null \
+  | sed 's#/sys/class/input/\(event[0-9]*\)/.*#\1#')
+if [ -n "$cec_events" ]; then
+  found=$(printf '%s\n' $cec_events | wc -w | tr -d ' ')
+  tagged=""
+  for cec_event in $cec_events; do
+    case "$(udevadm info "/dev/input/$cec_event" 2>/dev/null | sed -n 's/^E: CURRENT_TAGS=//p')" in
+      *power-switch*) tagged="$tagged $cec_event" ;;
+    esac
+  done
+  [ -z "$tagged" ] && ok 'cec power tag' "$found untagged" \
+                   || bad 'cec power tag' "still tagged:$tagged"
+  # What logind is holding open, not what it once said. logind watches a button
+  # by opening the evdev node, and taking the tag away does not make it let go
+  # of one it already opened — so the open descriptor is the fact, and it needs
+  # no guess about which slice of the journal counts as current.
+  logind_pid=$(systemctl show systemd-logind.service -p MainPID --value)
+  held=""
+  for cec_event in $cec_events; do
+    for fd in /proc/${logind_pid:-0}/fd/*; do
+      [ "$(readlink "$fd" 2>/dev/null)" = "/dev/input/$cec_event" ] || continue
+      held="$held $cec_event"
+      break
+    done
+  done
+  [ -z "$held" ] && ok 'logind buttons' "none of $found held" \
+                 || bad 'logind buttons' "holding:$held"
 else
   bad 'cec power tag' 'no dw_hdmi_qp input device'
 fi
