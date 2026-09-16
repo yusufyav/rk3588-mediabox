@@ -716,6 +716,10 @@ impl App {
         self.remember();
         self.store.flush();
         self.here = Some(Playing::new());
+        self.now.film = true;
+        self.now.focus = 0;
+        self.now.row = screens::now_playing::Row::Bar;
+        self.now.close_menu();
 
         if let Some(window) = self.window.upgrade() {
             window.set_detail_note("Oynatılıyor…".into());
@@ -781,6 +785,9 @@ impl App {
                 seen: true,
                 ..Playing::new()
             });
+            // An adopted film is still this interface's own player, and it
+            // carries the same row as one this interface started.
+            self.now.film = true;
             if self.route() != Route::NowPlaying {
                 self.open(Route::NowPlaying);
             }
@@ -803,9 +810,17 @@ impl App {
                 playing.polled = Some(std::time::Instant::now());
                 spawn_here_status();
             }
-            if playing
-                .controls_until
-                .is_some_and(|until| until <= std::time::Instant::now())
+            if self.now.pill_expired() {
+                self.paint();
+            }
+            // A panel that is down holds the row up with it: the reference's
+            // controls do not time out from under an open menu.
+            if self.now.menu == screens::now_playing::Menu::None
+                && self
+                    .here
+                    .as_ref()
+                    .and_then(|playing| playing.controls_until)
+                    .is_some_and(|until| until <= std::time::Instant::now())
             {
                 self.close_controls();
             }
@@ -823,6 +838,8 @@ impl App {
             spawn_here(HereCommand::Stop);
         }
         self.here = None;
+        self.now.film = false;
+        self.now.close_menu();
         if self.route() == Route::NowPlaying {
             self.back();
         }
@@ -846,6 +863,8 @@ impl App {
         }
         self.handing_over = true;
         self.here = None;
+        self.now.film = false;
+        self.now.close_menu();
         if self.route() == Route::NowPlaying {
             self.stack.pop();
         }
@@ -880,6 +899,34 @@ impl App {
     // -------------------------------------------------------- what is playing
 
     fn act_on_now_playing(&mut self, intent: Intent) {
+        use screens::now_playing::{Control, Film, Menu, Row};
+
+        // A panel down over the film owns every key while it is down.
+        if self.now.menu != Menu::None {
+            match intent {
+                Intent::Move(dx, dy) => {
+                    // On the delay, Up and Down are the value: a tenth of a
+                    // second a press, the way the reference's own stepper
+                    // moves it. Left and Right stay what they are everywhere
+                    // else on the panel — the way between its two columns.
+                    if self.now.menu_column == 2 && dy != 0 {
+                        self.nudge_delay(if dy < 0 { 0.1 } else { -0.1 });
+                        return;
+                    }
+                    if self.now.step_menu(dx, dy) {
+                        self.paint();
+                    }
+                }
+                Intent::Select => self.choose_in_menu(),
+                Intent::Dismiss => {
+                    self.now.close_menu();
+                    self.paint();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match intent {
             Intent::Move(dx, dy) => {
                 if self.now.step(dx, dy) {
@@ -887,7 +934,6 @@ impl App {
                 }
             }
             Intent::Select => {
-                use screens::now_playing::{Control, Row};
                 if self.now.row == Row::Bar {
                     // Ok on the bar goes where the scrub got to. Ok on a bar
                     // nobody has moved is the ordinary thing a remote does to a
@@ -898,11 +944,30 @@ impl App {
                     }
                     return;
                 }
+                // Two rows of buttons, for two players. The film this
+                // interface is playing carries the reference's own row; Kodi
+                // carries the four a remote needs for a player it does not
+                // own.
+                if self.here.is_some() {
+                    match self.now.focused_film() {
+                        Film::PlayPause => self.transport(Transport::PlayPause),
+                        Film::Restart => self.transport(Transport::SeekTo(0)),
+                        Film::Subtitles => self.open_menu(Menu::Subtitles),
+                        Film::Audio => self.open_menu(Menu::Audio),
+                        Film::Speed => self.open_menu(Menu::Speed),
+                        Film::Scale => {
+                            let (mode, _) = self.now.next_scale();
+                            spawn_here(HereCommand::Scale(mode));
+                            self.paint();
+                        }
+                        Film::Player => self.open_menu(Menu::Player),
+                    }
+                    return;
+                }
                 match self.now.focused() {
                     Control::SeekBack => self.transport(Transport::Seek(-10)),
                     Control::PlayPause => self.transport(Transport::PlayPause),
                     Control::SeekForward => self.transport(Transport::Seek(30)),
-                    Control::ToKodi => self.hand_to_kodi(),
                     Control::Stop => self.transport(Transport::Stop),
                 }
             }
@@ -914,13 +979,19 @@ impl App {
                 // already up when this one was pressed, not whether they are up
                 // now, which they always are by the time this runs.
                 if self.here.is_some() {
-                    if !self.controls_were_open {
-                        return;
-                    }
                     // A scrub in progress is what Back is about first: it
                     // abandons the move rather than the film.
                     if self.now.cancel_scrub() {
                         self.paint();
+                        return;
+                    }
+                    // Back takes away what is on the film, one layer a press:
+                    // the controls if they are up, and the film itself only
+                    // when there is nothing left over it. Every key brings the
+                    // controls up, this one included, so the question is
+                    // whether they were up when it was pressed.
+                    if self.controls_were_open {
+                        self.close_controls();
                         return;
                     }
                     self.transport(Transport::Stop);
@@ -929,6 +1000,100 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn open_menu(&mut self, menu: screens::now_playing::Menu) {
+        if self.now.open_menu(menu) {
+            self.open_controls();
+            self.paint();
+        }
+    }
+
+    /// Ok on a row of the open panel. Every one of them closes it: the
+    /// reference applies the choice and gets out of the way.
+    ///
+    /// Two columns can be chosen from. A language on the left takes that
+    /// language's first track, which is what a viewer who does not care which
+    /// English track it is means by pressing it; a row on the right takes that
+    /// exact one.
+    fn choose_in_menu(&mut self) {
+        use screens::now_playing::{Menu, SPEEDS};
+        let focus = self.now.menu_focus;
+        match self.now.menu {
+            Menu::Subtitles | Menu::Audio => {
+                let subtitles = self.now.menu == Menu::Subtitles;
+                // The subtitle panel's first row is "off" and belongs to no
+                // language.
+                if subtitles && self.now.menu_column == 0 && focus == 0 {
+                    for track in self.now.subtitles.iter_mut() {
+                        track.selected = false;
+                    }
+                    spawn_here(HereCommand::Subtitle(-1));
+                } else {
+                    let of_language = self.now.tracks_of_language();
+                    let wanted = if self.now.menu_column == 1 {
+                        of_language.get(self.now.menu_track_focus).copied()
+                    } else {
+                        of_language.first().copied()
+                    };
+                    let Some(index) = wanted else {
+                        return;
+                    };
+                    let tracks = if subtitles {
+                        &mut self.now.subtitles
+                    } else {
+                        &mut self.now.audio
+                    };
+                    let Some(id) = tracks.get(index).map(|track| track.id) else {
+                        return;
+                    };
+                    for (at, track) in tracks.iter_mut().enumerate() {
+                        track.selected = at == index;
+                    }
+                    spawn_here(if subtitles {
+                        HereCommand::Subtitle(id)
+                    } else {
+                        HereCommand::Audio(id)
+                    });
+                }
+            }
+            Menu::Speed => {
+                let value = SPEEDS[focus.min(SPEEDS.len() - 1)];
+                self.now.speed = value;
+                spawn_here(HereCommand::Speed(value));
+            }
+            Menu::Player => {
+                self.now.close_menu();
+                if focus == 1 {
+                    self.hand_to_kodi();
+                    return;
+                }
+                self.paint();
+                return;
+            }
+            Menu::None => return,
+        }
+        self.now.close_menu();
+        self.open_controls();
+        self.paint();
+    }
+
+    /// One press on the delay beside a panel's list.
+    fn nudge_delay(&mut self, by: f64) {
+        use screens::now_playing::Menu;
+        match self.now.menu {
+            Menu::Subtitles => {
+                self.now.sub_delay = (self.now.sub_delay + by).clamp(-60.0, 60.0);
+                spawn_here(HereCommand::SubtitleDelay(self.now.sub_delay));
+            }
+            Menu::Audio => {
+                self.now.audio_delay = (self.now.audio_delay + by).clamp(-60.0, 60.0);
+                spawn_here(HereCommand::AudioDelay(self.now.audio_delay));
+            }
+            _ => return,
+        }
+        self.open_controls();
+        self.paint();
     }
 
     /// The transport keys. They belong to whatever is playing, which is Kodi,
@@ -1160,7 +1325,7 @@ impl App {
         if diagnostics.is_some() {
             self.diag = diagnostics;
         }
-        if let Some(kodi) = kodi.as_ref() {
+        if let Some(kodi) = kodi.as_ref().filter(|_| self.here.is_none()) {
             self.now.take(kodi);
         }
 
@@ -1584,6 +1749,123 @@ impl App {
                 })
                 .collect::<Vec<_>>(),
         )));
+        // The film's own row: two layers a mark, and the hairlines between the
+        // groups. Drawn for the film screen; the Kodi screen reads the four
+        // controls above.
+        use screens::now_playing::{Menu, FILM_CONTROLS, FILM_RULES, SPEEDS};
+        window.set_np_marks(strings(
+            FILM_CONTROLS
+                .iter()
+                .map(|control| control.fill(playing).to_string()),
+        ));
+        window.set_np_lines(strings(
+            FILM_CONTROLS.iter().map(|control| control.line().to_string()),
+        ));
+        window.set_np_rules(slint::ModelRc::new(slint::VecModel::from(
+            FILM_RULES.iter().map(|at| *at as i32).collect::<Vec<_>>(),
+        )));
+        window.set_np_pill(now.pill.clone().into());
+
+        // The panels, grouped the way the reference groups them: the languages
+        // in the first column and that language's own tracks in the second.
+        // Four English audio tracks are one row saying "English" and four rows
+        // beside it, not four rows all saying the same word.
+        let tracks_shown: Vec<MenuRow> = now
+            .tracks_of_language()
+            .into_iter()
+            .filter_map(|index| now.tracks().get(index))
+            .map(|track| MenuRow {
+                label: track.detail.clone().into(),
+                detail: "".into(),
+                active: track.selected,
+            })
+            .collect();
+
+        let languages = |tracks: &[screens::now_playing::Track], lead: Option<&str>| {
+            let names = now.languages_of(tracks);
+            let mut rows: Vec<MenuRow> = Vec::new();
+            if let Some(lead) = lead {
+                rows.push(MenuRow {
+                    label: lead.into(),
+                    detail: "".into(),
+                    active: !tracks.iter().any(|track| track.selected),
+                });
+            }
+            rows.extend(names.iter().map(|name| MenuRow {
+                label: name.clone().into(),
+                detail: "".into(),
+                active: tracks
+                    .iter()
+                    .any(|track| track.selected && track.label == *name),
+            }));
+            rows
+        };
+
+        let (name, rows, side): (&str, Vec<MenuRow>, Option<(String, String)>) = match now.menu {
+            Menu::None => ("", Vec::new(), None),
+            Menu::Subtitles => (
+                "subtitles",
+                languages(&now.subtitles, Some("Etkisizleştirildi")),
+                Some(("Gecikme".into(), seconds_shown(now.sub_delay))),
+            ),
+            Menu::Audio => (
+                "audio",
+                languages(&now.audio, None),
+                Some(("Ses gecikmesi".into(), seconds_shown(now.audio_delay))),
+            ),
+            Menu::Speed => (
+                "speed",
+                SPEEDS
+                    .iter()
+                    .map(|value| MenuRow {
+                        // The reference's own spelling: a quarter step keeps
+                        // its second digit, a half step does not.
+                        label: if (value * 100.0).round() as i64 % 10 == 0 {
+                            format!("{value:.1}x")
+                        } else {
+                            format!("{value:.2}x")
+                        }
+                        .into(),
+                        detail: "".into(),
+                        active: (value - now.speed).abs() < 0.01,
+                    })
+                    .collect(),
+                None,
+            ),
+            Menu::Player => (
+                "player",
+                ["MediaBox", "Kodi"]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| MenuRow {
+                        label: (*label).into(),
+                        detail: "".into(),
+                        active: index == 0,
+                    })
+                    .collect(),
+                None,
+            ),
+        };
+        window.set_np_menu_tracks(slint::ModelRc::new(slint::VecModel::from(tracks_shown)));
+        window.set_np_menu_track_focus(now.menu_track_focus as i32);
+        window.set_np_menu(name.into());
+        window.set_np_menu_title(
+            match now.menu {
+                Menu::Subtitles => "Altyazılar",
+                Menu::Audio => "Ses",
+                Menu::Speed => "Oynatma Hızı",
+                Menu::Player => "Oynatıcı",
+                Menu::None => "",
+            }
+            .into(),
+        );
+        window.set_np_menu_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+        window.set_np_menu_focus(now.menu_focus as i32);
+        window.set_np_menu_column(now.menu_column as i32);
+        let (side_label, side_value) = side.unwrap_or_default();
+        window.set_np_menu_side_label(side_label.into());
+        window.set_np_menu_side_value(side_value.into());
+
         window.set_np_technical(slint::ModelRc::new(slint::VecModel::from(
             now.technical
                 .iter()
@@ -2043,6 +2325,11 @@ fn spawn_plan(epoch: u64, url: Option<String>, raw: serde_json::Value) {
 }
 
 /// Asks the control plane to hand the film over to Kodi.
+/// A delay, as the reference writes one: a tenth of a second, with a comma.
+fn seconds_shown(seconds: f64) -> String {
+    format!("{seconds:.1}s").replace('.', ",")
+}
+
 fn spawn_handoff() {
     detached("mediabox-tv-handoff", async move {
         let client = rpc::Client::new(socket_path());
@@ -2115,6 +2402,12 @@ enum HereCommand {
     Stop,
     Seek(i64),
     SeekTo(u64),
+    Subtitle(i64),
+    Audio(i64),
+    SubtitleDelay(f64),
+    AudioDelay(f64),
+    Speed(f64),
+    Scale(mediabox_core::ScaleMode),
 }
 
 /// Asks the interface's own player where it has got to.
@@ -2143,6 +2436,36 @@ fn spawn_here(command: HereCommand) {
             HereCommand::SeekTo(seconds) => {
                 client
                     .transport_here(serde_json::json!({"seek_to": {"seconds": seconds}}))
+                    .await
+            }
+            HereCommand::Subtitle(id) => {
+                client
+                    .transport_here(serde_json::json!({"subtitle": {"id": id}}))
+                    .await
+            }
+            HereCommand::Audio(id) => {
+                client
+                    .transport_here(serde_json::json!({"audio": {"id": id}}))
+                    .await
+            }
+            HereCommand::SubtitleDelay(seconds) => {
+                client
+                    .transport_here(serde_json::json!({"subtitle_delay": {"seconds": seconds}}))
+                    .await
+            }
+            HereCommand::AudioDelay(seconds) => {
+                client
+                    .transport_here(serde_json::json!({"audio_delay": {"seconds": seconds}}))
+                    .await
+            }
+            HereCommand::Speed(value) => {
+                client
+                    .transport_here(serde_json::json!({"speed": {"value": value}}))
+                    .await
+            }
+            HereCommand::Scale(mode) => {
+                client
+                    .transport_here(serde_json::json!({"scale": {"mode": mode}}))
                     .await
             }
             HereCommand::Stop => client.stop_here().await,

@@ -155,6 +155,30 @@ impl PlayerManager {
             .or(duration.filter(|seconds| *seconds > 0.0))
             .unwrap_or(0.0);
 
+        // What the film is made of, for the subtitle and audio menus. Asked
+        // for with the position rather than on its own call: a menu that opens
+        // on a list fetched when it opened is a menu that opens empty.
+        let tracks = self
+            .ask(json!({"command": ["get_property", "track-list"], "request_id": 4}))
+            .await
+            .and_then(|answer| answer.get("data").cloned())
+            .unwrap_or_else(|| json!([]));
+        let speed = number(
+            self.ask(json!({"command": ["get_property", "speed"], "request_id": 5}))
+                .await,
+        )
+        .unwrap_or(1.0);
+        let sub_delay = number(
+            self.ask(json!({"command": ["get_property", "sub-delay"], "request_id": 6}))
+                .await,
+        )
+        .unwrap_or(0.0);
+        let audio_delay = number(
+            self.ask(json!({"command": ["get_property", "audio-delay"], "request_id": 7}))
+                .await,
+        )
+        .unwrap_or(0.0);
+
         json!({
             "playing": playing.is_some() && position.is_some(),
             "source": playing.as_ref().map(|playing| playing.source.clone()),
@@ -162,6 +186,10 @@ impl PlayerManager {
             "position": position.unwrap_or(0.0),
             "duration": duration,
             "paused": paused.unwrap_or(false),
+            "tracks": tracks,
+            "speed": speed,
+            "sub_delay": sub_delay,
+            "audio_delay": audio_delay,
         })
     }
 
@@ -176,6 +204,38 @@ impl PlayerManager {
             }
             TransportAction::SeekTo { seconds } => {
                 json!({"command": ["seek", seconds, "absolute"]})
+            }
+            // mpv takes "no" for a subtitle track that is off, and the list's
+            // first row sends a negative id to mean exactly that.
+            TransportAction::Subtitle { id } => {
+                let value = if id < 0 { json!("no") } else { json!(id) };
+                json!({"command": ["set_property", "sid", value]})
+            }
+            TransportAction::Audio { id } => {
+                json!({"command": ["set_property", "aid", id]})
+            }
+            TransportAction::SubtitleDelay { seconds } => {
+                json!({"command": ["set_property", "sub-delay", seconds.clamp(-60.0, 60.0)]})
+            }
+            TransportAction::AudioDelay { seconds } => {
+                json!({"command": ["set_property", "audio-delay", seconds.clamp(-60.0, 60.0)]})
+            }
+            TransportAction::Speed { value } => {
+                json!({"command": ["set_property", "speed", value.clamp(0.25, 4.0)]})
+            }
+            // Two properties, not one: panscan fills the panel by cropping the
+            // edges and keepaspect is what lets the shapes bend. Both are set
+            // every time so the modes cannot half-apply over each other.
+            TransportAction::Scale { mode } => {
+                let (keep, panscan) = match mode {
+                    mediabox_core::ScaleMode::Fit => (true, 0.0),
+                    mediabox_core::ScaleMode::Crop => (true, 1.0),
+                    mediabox_core::ScaleMode::Stretch => (false, 0.0),
+                };
+                let _ = self
+                    .ask(json!({"command": ["set_property", "keepaspect", keep]}))
+                    .await;
+                json!({"command": ["set_property", "panscan", panscan]})
             }
         };
         self.ask(request).await.is_some()

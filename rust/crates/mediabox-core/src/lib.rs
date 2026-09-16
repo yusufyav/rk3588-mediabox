@@ -511,7 +511,7 @@ pub enum Request {
 }
 
 /// What a remote can do to a film that is already playing here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportAction {
     PlayPause,
@@ -525,6 +525,43 @@ pub enum TransportAction {
     SeekTo {
         seconds: u64,
     },
+    /// Which subtitle track is on. A negative id turns them off, which is what
+    /// the list's first row is.
+    Subtitle {
+        id: i64,
+    },
+    /// Which audio track is on.
+    Audio {
+        id: i64,
+    },
+    /// How far the subtitles are moved against the picture, in seconds.
+    SubtitleDelay {
+        seconds: f64,
+    },
+    /// How far the sound is moved against the picture, in seconds.
+    AudioDelay {
+        seconds: f64,
+    },
+    /// How fast, as a multiple of the film's own rate.
+    Speed {
+        value: f64,
+    },
+    /// How the picture meets the panel: "fit" keeps the whole frame and the
+    /// bars with it, "crop" fills the panel and loses the edges, "stretch"
+    /// fills it and bends the shapes.
+    Scale {
+        mode: ScaleMode,
+    },
+}
+
+/// What "fit", "crop" and "stretch" mean to a player, kept as a type so the
+/// interface and the control plane cannot disagree about the words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleMode {
+    Fit,
+    Crop,
+    Stretch,
 }
 
 /// The only two things this appliance will do to its own power state on

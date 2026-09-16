@@ -5,7 +5,7 @@ import { Search } from "search.slint";
 import { Library } from "library.slint";
 import { Detail, SourceRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
-import { Player } from "player.slint";
+import { Player, MenuRow } from "player.slint";
 import { Settings } from "settings.slint";
 import { Diagnostics } from "diagnostics.slint";
 import {
@@ -163,6 +163,19 @@ export component MediaBoxWindow inherits Window {
     in property <[NpControl]> np-controls;
     /// The same four, as words. The film's own line has no buttons on it.
     in property <[string]> np-actions;
+    in property <[string]> np-marks;
+    in property <[string]> np-lines;
+    in property <[int]> np-rules;
+    in property <string> np-menu;
+    in property <string> np-menu-title;
+    in property <[MenuRow]> np-menu-rows;
+    in property <[MenuRow]> np-menu-tracks;
+    in property <int> np-menu-focus;
+    in property <int> np-menu-track-focus;
+    in property <int> np-menu-column;
+    in property <string> np-menu-side-label;
+    in property <string> np-menu-side-value;
+    in property <string> np-pill;
     in property <int> np-focus;
     /// Which row the remote is on while a film is playing: 0 the rule, 1 the
     /// words.
@@ -384,16 +397,27 @@ export component MediaBoxWindow inherits Window {
             width: 100%;
             height: 100%;
             title: root.np-title;
-            subtitle: root.np-subtitle;
             note: root.np-note;
             elapsed: root.np-elapsed;
             duration: root.np-duration;
             progress: root.np-progress;
-            actions: root.np-actions;
+            marks: root.np-marks;
+            lines: root.np-lines;
+            rules: root.np-rules;
             focus-index: root.np-focus;
             lane: root.np-row;
             scrub: root.np-scrub;
             open: root.film-controls;
+            menu: root.np-menu;
+            menu-title: root.np-menu-title;
+            menu-rows: root.np-menu-rows;
+            menu-tracks: root.np-menu-tracks;
+            menu-focus: root.np-menu-focus;
+            menu-track-focus: root.np-menu-track-focus;
+            menu-column: root.np-menu-column;
+            menu-side-label: root.np-menu-side-label;
+            menu-side-value: root.np-menu-side-value;
+            pill: root.np-pill;
         }
     }
 

@@ -1,178 +1,425 @@
 import { Theme, Metrics } from "theme.slint";
 
+// One row of an open panel: what it is, what else is known about it, and
+// whether it is the one in use.
+export struct MenuRow {
+    label: string,
+    detail: string,
+    active: bool,
+}
+
+// One button of the row along the bottom of a film.
+//
+// Two layers, because the reference's marks are two: a filled shape and a
+// drawn line. Either may be empty — a play triangle is only a fill, an expand
+// arrow is only a line, a television with a picture in it is both.
+component FilmButton inherits Rectangle {
+    in property <string> fill;
+    in property <string> line;
+    in property <bool> focused;
+
+    property <length> size: Metrics.vh * 0.030;
+
+    width: size * 2.1;
+    height: size * 2.1;
+    border-radius: Metrics.vh * 0.012;
+    // The focus is the reference's own: a white rounded square under the mark,
+    // and the mark itself turns to the ground colour inside it.
+    background: focused ? #ffffff : transparent;
+
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    if fill != "": Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: size;
+        height: size;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: fill;
+        fill: focused ? #05070c : #ffffff;
+    }
+    if line != "": Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: size;
+        height: size;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: line;
+        fill: transparent;
+        stroke: focused ? #05070c : #ffffff;
+        stroke-width: size / 11;
+    }
+}
+
 // The line along the bottom of a film.
 //
-// Not a panel and not a card. The display controller puts the film's window
-// under this one and this surface carries alpha, so anything drawn here sits on
-// a moving picture — and the less of it there is, the more of the film there
-// is. So: one hairline rule across the width, the position set large above its
-// left end, the film's name above that, and the actions as words underneath.
-// No box, no buttons, no transport glyphs. What marks the focus is a filled
-// block in front of the word, the way the rest of this interface marks a row.
+// Measured off the reference this appliance is held to — Stremio's own Android
+// player, photographed on the television and read off at 3840x2160: the film's
+// name at 81.5% of the height, the position line at 87.2%, the row of marks at
+// 93.7%, and the two times on the right of it. Nothing here is invented and
+// nothing is a box: the film is underneath and the less of this there is, the
+// more of the film there is.
 //
-// The rule is also the control. Left and Right on it move a tick that
+// The line is also the control. Left and Right on it move a tick that
 // accelerates the longer they are held — ten seconds a press at first, ten
-// minutes a press after a second and a half — and Ok goes there. Four buttons
-// that move a film thirty seconds at a time cannot reach the middle of a two
-// hour one, which is what this replaced.
+// minutes a press after a second and a half — and Ok goes there.
 export component Player inherits Rectangle {
     in property <string> title;
-    in property <string> subtitle;
     in property <string> note;
     in property <string> elapsed;
     in property <string> duration;
     in property <float> progress;
-    in property <[string]> actions;
+    /// The row's marks, as two layers each; see FilmButton.
+    in property <[string]> marks;
+    in property <[string]> lines;
+    /// Where a hairline goes, as an index in `marks` to draw one after.
+    in property <[int]> rules;
     in property <int> focus-index;
-    /// 0 = the rule, 1 = the words. Named `lane` because a Rectangle
-    /// already has a `row`, which belongs to a grid.
+    /// 0 = the line, 1 = the marks. Named `lane` because a Rectangle already
+    /// has a `row`, which belongs to a grid.
     in property <int> lane;
     /// The time the tick is sitting on, while it is being moved.
     in property <string> scrub;
     /// Whether the controls are up at all.
     in property <bool> open;
 
+    /// "" | "subtitles" | "audio" | "speed" | "player"
+    in property <string> menu;
+    in property <string> menu-title;
+    in property <[MenuRow]> menu-rows;
+    /// The tracks the highlighted language has, as the reference's second
+    /// column.
+    in property <[MenuRow]> menu-tracks;
+    in property <int> menu-focus;
+    in property <int> menu-track-focus;
+    in property <int> menu-column;
+    in property <string> menu-side-label;
+    in property <string> menu-side-value;
+    /// What the scale button last did, named under the picture for a moment.
+    in property <string> pill;
+
     background: transparent;
 
-    property <length> pad: Metrics.gutter;
-    property <bool> on-rule: lane == 0;
+    property <length> pad: max(Metrics.gutter, root.width * 0.036);
+    property <bool> on-line: lane == 0;
+    property <length> mark-gap: root.width * 0.0443;
 
-    // Enough shadow under the words to read them on a bright frame, and not a
-    // pixel more. It stops well above the rule so the picture is not boxed in.
+    // Enough shadow under the row to read it on a bright frame, and not a
+    // pixel more.
     Rectangle {
+        x: 0;
         y: root.height - self.height;
         width: 100%;
-        height: root.height * 0.34;
+        height: root.height * 0.30;
         opacity: open ? 1.0 : 0.0;
-        background: @linear-gradient(180deg, #00000000 0%, #000000b0 62%, #000000e6 100%);
+        background: @linear-gradient(180deg, #00000000 0%, #000000bf 58%, #000000f2 100%);
         animate opacity { duration: Theme.glide; easing: Theme.ease; }
     }
 
     if open: Rectangle {
-        x: root.pad;
-        y: root.height * 0.70;
-        width: root.width - root.pad * 2;
-        height: root.height * 0.30 - root.pad * 0.6;
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
 
         // ---------------------------------------------------------- the name
         Text {
-            x: 0;
-            y: 0;
-            text: title;
-            color: Theme.muted;
-            font-size: Metrics.text-label;
-            font-weight: 760;
-            letter-spacing: 0.14 * Metrics.text-label;
+            x: pad;
+            y: root.height * 0.805;
+            text: note != "" ? note : title;
+            color: note != "" ? Theme.film : #ffffffde;
+            font-size: Metrics.vh * 0.021;
+            font-weight: 600;
             wrap: no-wrap;
             overflow: elide;
-            width: parent.width * 0.7;
+            width: root.width * 0.6;
         }
 
-        if note != "" || subtitle != "": Text {
-            x: parent.width - self.width;
-            y: 0;
-            text: note != "" ? note : subtitle;
-            color: note != "" ? Theme.accent : Theme.dim;
-            font-size: Metrics.text-label;
-            font-weight: 760;
-            letter-spacing: 0.14 * Metrics.text-label;
-            horizontal-alignment: right;
-            wrap: no-wrap;
-            width: parent.width * 0.3;
-        }
-
-        // ------------------------------------------------------- the reading
-        //
-        // The position is the biggest thing on the screen after the film. It is
-        // what somebody looks at when they press a key, and it is also what the
-        // tick is being moved towards, so while a scrub is running this is the
-        // scrub's own time and the film's time goes small beside it.
-        clock := Text {
-            x: 0;
-            y: parent.height * 0.20;
-            text: scrub != "" ? scrub : elapsed;
-            color: scrub != "" ? Theme.accent : Theme.text;
-            font-size: Metrics.title-screen * 0.82;
-            font-weight: 840;
-            letter-spacing: -0.035 * Metrics.title-screen;
-        }
-
-        if scrub != "": Text {
-            x: clock.width + Metrics.root-font * 0.7;
-            y: parent.height * 0.20 + Metrics.title-screen * 0.36;
-            text: elapsed;
-            color: Theme.dim;
-            font-size: Metrics.text-label;
-            font-weight: 700;
-        }
-
-        Text {
-            x: parent.width - self.width;
-            y: parent.height * 0.20 + Metrics.title-screen * 0.36;
-            text: duration;
-            color: Theme.dim;
-            font-size: Metrics.text-label;
-            font-weight: 700;
-            horizontal-alignment: right;
-        }
-
-        // ---------------------------------------------------------- the rule
-        rule := Rectangle {
-            x: 0;
-            y: parent.height * 0.62;
-            width: parent.width;
-            height: 2px;
-            background: #ffffff2b;
+        // ---------------------------------------------------------- the line
+        line := Rectangle {
+            x: pad;
+            y: root.height * 0.872;
+            width: root.width - pad * 2;
+            height: Metrics.vh * 0.004;
+            border-radius: self.height / 2;
+            background: #ffffff3d;
 
             Rectangle {
                 x: 0;
+                y: 0;
                 width: parent.width * clamp(progress, 0.0, 1.0);
                 height: 100%;
-                background: root.on-rule ? Theme.accent : #ffffff7a;
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                border-radius: self.height / 2;
+                background: Theme.film;
             }
         }
 
-        // The tick. It rises out of the rule rather than sitting on it, and it
-        // is a straight edge: everything else in this interface is rounded, so
-        // the one thing that has to be read as a position is not.
+        // The knob. The reference carries one and it is how a position is read
+        // at a glance from across a room; it grows when the line has the
+        // remote, because then it is a control and not a reading.
         Rectangle {
-            x: rule.x + rule.width * clamp(progress, 0.0, 1.0) - self.width / 2;
-            y: rule.y - (root.on-rule ? Metrics.root-font * 0.62 : Metrics.root-font * 0.30);
-            width: root.on-rule ? 4px : 2px;
-            height: root.on-rule ? Metrics.root-font * 1.5 : Metrics.root-font * 0.8;
-            background: root.on-rule ? Theme.accent : #ffffffb0;
-            animate height, width, y { duration: Theme.focus-in; easing: Theme.ease; }
+            x: line.x + line.width * clamp(progress, 0.0, 1.0) - self.width / 2;
+            y: line.y + line.height / 2 - self.height / 2;
+            width: root.on-line ? Metrics.vh * 0.028 : Metrics.vh * 0.019;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Theme.film;
+            animate width { duration: Theme.focus-in; easing: Theme.ease; }
         }
 
-        // --------------------------------------------------------- the words
-        HorizontalLayout {
-            x: 0;
-            y: parent.height * 0.62 + Metrics.root-font * 1.1;
-            height: Metrics.root-font * 1.7;
-            spacing: Metrics.root-font * 1.6;
+        // --------------------------------------------------------- the marks
+        for mark[i] in marks: FilmButton {
+            x: pad - self.width / 2 + i * mark-gap;
+            y: root.height * 0.937 - self.height / 2;
+            fill: mark;
+            line: lines[i];
+            focused: !root.on-line && i == focus-index;
+        }
+
+        // The hairlines between the groups.
+        for at[r] in rules: Rectangle {
+            x: pad - self.width / 2 + at * mark-gap + mark-gap / 2;
+            y: root.height * 0.937 - self.height / 2;
+            width: 2px;
+            height: Metrics.vh * 0.026;
+            background: #ffffff4d;
+        }
+
+        // ---------------------------------------------------------- the time
+        //
+        // One reading, the reference's own: where the film is and how long it
+        // is, with a slash between them. While a scrub is running the first of
+        // the two is the scrub's time, because that is what the viewer is
+        // moving and what they are looking at.
+        Text {
+            x: root.width - pad - self.width;
+            y: root.height * 0.937 - self.height / 2;
+            text: (scrub != "" ? scrub : elapsed) + "  /  " + duration;
+            color: scrub != "" ? Theme.film : #ffffffde;
+            font-size: Metrics.vh * 0.021;
+            font-weight: 600;
+            vertical-alignment: center;
+            height: Metrics.vh * 0.08;
+            wrap: no-wrap;
+        }
+
+        // What the scale button last did.
+        if pill != "": Rectangle {
+            x: (root.width - self.width) / 2;
+            y: root.height * 0.937 - self.height / 2;
+            width: pill-text.preferred-width + Metrics.vh * 0.06;
+            height: Metrics.vh * 0.05;
+            border-radius: self.height / 2;
+            background: #1c1f28e6;
+
+            HorizontalLayout {
+                x: 0;
+                y: 0;
+                width: 100%;
+                height: 100%;
+                padding-left: Metrics.vh * 0.012;
+                padding-right: Metrics.vh * 0.02;
+                spacing: Metrics.vh * 0.01;
+                alignment: center;
+
+                Rectangle {
+                    width: Metrics.vh * 0.028;
+                    height: Metrics.vh * 0.028;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Metrics.vh * 0.006;
+                    background: Theme.film;
+
+                    Path {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: Metrics.vh * 0.016;
+                        height: Metrics.vh * 0.016;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M8 5l11.5 7L8 19z";
+                        fill: #ffffff;
+                    }
+                }
+                pill-text := Text {
+                    text: pill;
+                    color: #ffffff;
+                    font-size: Metrics.vh * 0.019;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------- the panels
+    //
+    // One shape for all four, the reference's own: a dark rounded sheet over
+    // the picture with its name in the corner, the list down it, and — on the
+    // two panels that have one — the delay beside the list.
+    if menu != "": Rectangle {
+        x: menu == "speed" ? (root.width - self.width) / 2 : root.width * 0.15;
+        y: (root.height - self.height) / 2;
+        width: menu == "speed" ? root.width * 0.25 : root.width * 0.7;
+        height: min(root.height * 0.74,
+                    Metrics.vh * 0.1
+                        + max(menu-rows.length, menu-tracks.length) * Metrics.vh * 0.058);
+        border-radius: Metrics.vh * 0.016;
+        background: #10121be8;
+        clip: true;
+
+        Text {
+            x: Metrics.vh * 0.03;
+            y: Metrics.vh * 0.028;
+            text: menu-title;
+            color: #ffffff;
+            font-size: Metrics.vh * 0.024;
+            font-weight: 700;
+        }
+
+        property <bool> grouped: menu == "subtitles" || menu == "audio";
+
+        // The languages.
+        VerticalLayout {
+            x: Metrics.vh * 0.03;
+            y: Metrics.vh * 0.085;
+            width: grouped ? parent.width * 0.28 : parent.width - Metrics.vh * 0.06;
+            spacing: 0px;
             alignment: start;
 
-            for label[i] in actions: HorizontalLayout {
-                property <bool> focused: !root.on-rule && i == focus-index;
-                spacing: Metrics.text-chip * 0.6;
+            for entry[i] in menu-rows: Rectangle {
+                height: Metrics.vh * 0.058;
+                border-radius: Metrics.vh * 0.008;
+                background: (menu-column == 0 && i == menu-focus) ? #ffffff1f : transparent;
 
-                // The mark is the interface's own: a filled block, the same one
-                // that runs down the left of a focused row elsewhere.
-                Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    width: Metrics.text-chip * 0.34;
-                    height: focused ? Metrics.text-chip * 1.05 : 0px;
-                    background: Theme.accent;
-                    animate height { duration: Theme.focus-in; easing: Theme.ease; }
+                HorizontalLayout {
+                    x: 0;
+                    y: 0;
+                    width: 100%;
+                    height: 100%;
+                    padding-left: Metrics.vh * 0.014;
+                    padding-right: Metrics.vh * 0.014;
+
+                    Text {
+                        text: entry.label;
+                        color: entry.active ? Theme.film : #ffffff;
+                        font-size: Metrics.vh * 0.019;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    Rectangle {
+                        width: Metrics.vh * 0.028;
+                        height: 100%;
+
+                        if entry.active: Path {
+                            x: 0;
+                            y: (parent.height - self.height) / 2;
+                            width: Metrics.vh * 0.024;
+                            height: Metrics.vh * 0.024;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: "M4.6 12.4l4.8 4.8 10-10";
+                            fill: transparent;
+                            stroke: Theme.film;
+                            stroke-width: 2.2px;
+                        }
+                    }
                 }
+            }
+        }
+
+        // What that language is carried by: one row a track, the reference's
+        // own second column.
+        if grouped: VerticalLayout {
+            x: parent.width * 0.32;
+            y: Metrics.vh * 0.085;
+            width: parent.width * 0.32;
+            spacing: 0px;
+            alignment: start;
+
+            for entry[i] in menu-tracks: Rectangle {
+                height: Metrics.vh * 0.058;
+                border-radius: Metrics.vh * 0.008;
+                background: (menu-column == 1 && i == menu-track-focus) ? #ffffff1f : transparent;
+
+                HorizontalLayout {
+                    x: 0;
+                    y: 0;
+                    width: 100%;
+                    height: 100%;
+                    padding-left: Metrics.vh * 0.014;
+                    padding-right: Metrics.vh * 0.014;
+
+                    Text {
+                        text: entry.label;
+                        color: entry.active ? Theme.film : #ffffffde;
+                        font-size: Metrics.vh * 0.019;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    Rectangle {
+                        width: Metrics.vh * 0.028;
+                        height: 100%;
+
+                        if entry.active: Path {
+                            x: 0;
+                            y: (parent.height - self.height) / 2;
+                            width: Metrics.vh * 0.024;
+                            height: Metrics.vh * 0.024;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: "M4.6 12.4l4.8 4.8 10-10";
+                            fill: transparent;
+                            stroke: Theme.film;
+                            stroke-width: 2.2px;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The delay, beside the list, on the panels that have one.
+        if menu-side-label != "": Rectangle {
+            x: parent.width * 0.66;
+            y: Metrics.vh * 0.085;
+            width: parent.width * 0.3;
+            height: Metrics.vh * 0.058;
+            border-radius: Metrics.vh * 0.008;
+            background: menu-column == 2 ? #ffffff1f : transparent;
+
+            HorizontalLayout {
+                x: 0;
+                y: 0;
+                width: 100%;
+                height: 100%;
+                padding-left: Metrics.vh * 0.014;
+                padding-right: Metrics.vh * 0.014;
 
                 Text {
-                    text: label;
-                    color: focused ? Theme.text : Theme.muted;
-                    font-size: Metrics.text-chip * 1.15;
-                    font-weight: focused ? 820 : 680;
+                    text: menu-side-label;
+                    color: #ffffff;
+                    font-size: Metrics.vh * 0.019;
+                    font-weight: 500;
                     vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    wrap: no-wrap;
+                }
+                Text {
+                    text: menu-side-value;
+                    color: menu-column == 2 ? Theme.film : #ffffffde;
+                    font-size: Metrics.vh * 0.019;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
                     wrap: no-wrap;
                 }
             }
