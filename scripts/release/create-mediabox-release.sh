@@ -89,6 +89,39 @@ EOF
 # Installed on the board and nowhere else.
 golden_integration="etc/mediaboxd.toml etc/mediabox-media-worker.env"
 
+# Kodi's own profile is configuration, not state, and it does not live under
+# /etc or /opt -- it sits in Kodi's home under /var/tmp, which every rule about
+# not capturing mutable state says to skip. Skipping it cost a release: the
+# clean install it produced could not show a Dolby Vision title and played
+# anything that was not plain AC-3 as silence, because Kodi came up on its own
+# defaults. The file is not captured into the archive (it is the appliance's
+# working copy, with that box's own uuid in it); what happens here is narrower
+# and more useful -- the values the product depends on are compared against the
+# seed this repository ships, and a difference is reported rather than lost.
+kodi_live_profile=/var/tmp/kodi-home/.kodi/userdata/guisettings.xml
+kodi_seed="$here/config/kodi/guisettings-appliance.xml"
+say "Kodi profile"
+if mediabox_ssh "test -f $kodi_live_profile" </dev/null; then
+  kodi_drift=0
+  for key in videoplayer.useprimerenderer videoscreen.whitelist videoscreen.resolution \
+             audiooutput.ac3transcode audiooutput.eac3passthrough audiooutput.dtspassthrough \
+             audiooutput.truehdpassthrough audiooutput.dtshdpassthrough audiooutput.passthrough; do
+    live="$(mediabox_ssh "sed -n 's|.*<setting id=\"$key\"[^>]*>\([^<]*\)</setting>.*|\1|p' $kodi_live_profile | head -1" </dev/null)"
+    seed="$(sed -n "s|.*<setting id="$key"[^>]*>\([^<]*\)</setting>.*|\1|p" "$kodi_seed" | head -1)"
+    if [ "$live" = "$seed" ]; then
+      printf '  same   %-34s %s\n' "$key" "$(printf '%s' "$live" | cut -c1-40)"
+    else
+      kodi_drift=$((kodi_drift + 1))
+      printf '  DIFFER %-34s board=%s seed=%s\n' "$key" \
+        "$(printf '%s' "${live:-<unset>}" | cut -c1-30)" "$(printf '%s' "${seed:-<unset>}" | cut -c1-30)"
+    fi
+  done
+  echo "  settings differing from config/kodi/guisettings-appliance.xml: $kodi_drift"
+  [ "$kodi_drift" -eq 0 ] || echo "  (the board is the truth here; fold these back into the seed before releasing)"
+else
+  echo "  no Kodi profile on the board yet"
+fi
+
 drift=0
 integration_manifest="$(mktemp)"
 while IFS=$'\t' read -r src dst; do

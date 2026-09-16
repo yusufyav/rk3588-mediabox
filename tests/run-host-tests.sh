@@ -533,6 +533,27 @@ contains "and only when there is none"      "$kodi_unit" 'test -f /var/tmp/kodi-
 contains "the installer puts it in place"   "$installer" 'share/kodi/guisettings-appliance.xml'
 profile="$(cat "$here/config/kodi/guisettings-appliance.xml")"
 contains "and that profile opens the control endpoint" "$profile" '<setting id="services.webserver">true'
+
+echo "-- the Kodi seed carries what was measured on the board, not defaults"
+# Each of these was absent once, and each absence broke something that still
+# let Kodi start: the mode list (picture came back blue and magenta on a Dolby
+# Vision title), the renderer (10-bit went through the GUI plane), and the
+# transcode pair (anything not plain AC-3 played as silence).
+contains "the display mode whitelist" "$profile" '<setting id="videoscreen.whitelist">'
+contains "the screen resolution"      "$profile" '<setting id="videoscreen.resolution">'
+contains "direct-to-plane rendering"  "$profile" '<setting id="videoplayer.useprimerenderer">0'
+contains "AC-3 transcoding on"        "$profile" '<setting id="audiooutput.ac3transcode">true'
+contains "E-AC-3 passthrough off"     "$profile" '<setting id="audiooutput.eac3passthrough">false'
+contains "DTS passthrough off"        "$profile" '<setting id="audiooutput.dtspassthrough">false'
+contains "the sink is named per board" "$profile" '@ALSA_DEVICE@'
+if grep -q 'services.deviceuuid' "$here/config/kodi/guisettings-appliance.xml" | grep -q '<setting'; then
+  echo "FAIL the seed carries a box's own identity"
+  failures=$((failures + 1))
+else
+  echo "ok   the seed carries no per-box identity"
+fi
+contains "the capture reports Kodi drift" "$capture" 'settings differing from config/kodi/guisettings-appliance.xml'
+contains "the verifier requires them"     "$verifier" 'Kodi picture and sound settings'
 contains "and the fonts are a declared dependency" "$capture" 'fc-list ":charset=$ch" file'
 
 echo "-- the relay serves a local file without dying on its status"

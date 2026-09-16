@@ -318,10 +318,21 @@ if [ "$STATIC" != 1 ]; then
     fail "Kodi appliance profile" "MISSING $seed; a first run would get Kodi's own defaults"
   elif [ ! -f "$profile" ]; then
     pass "Kodi appliance profile" "will be seeded on the first run"
-  elif grep -q '"services.webserver"[^>]*>true' "$profile"; then
-    pass "Kodi control endpoint" enabled
-  else
+  elif ! grep -q '"services.webserver"[^>]*>true' "$profile"; then
     fail "Kodi control endpoint" "switched off in $profile; a film cannot be handed to Kodi"
+  else
+    pass "Kodi control endpoint" enabled
+    # The settings whose absence does not stop Kodi starting and does stop it
+    # showing a film correctly. Each of these was found the hard way.
+    missing=""
+    for key in videoscreen.whitelist videoplayer.useprimerenderer audiooutput.ac3transcode; do
+      grep -q "\"$key\"" "$profile" || missing="$missing $key"
+    done
+    if [ -z "$missing" ]; then
+      pass "Kodi picture and sound settings" present
+    else
+      fail "Kodi picture and sound settings" "Kodi is running on its own defaults for:$missing"
+    fi
   fi
 
   asset="$P/assets/sdr-4k-2398-main.mp4"

@@ -1,70 +1,66 @@
 <!--
-  What Kodi needs to be part of this appliance, and nothing more.
+  Kodi's settings for this appliance, taken from the board that works.
 
-  This file is a *seed*: kodi.service installs it the first time Kodi runs on a
-  box and never touches it again, so anything written here becomes a setting
-  the owner then has to undo by hand. That is the reason the list is short.
+  This file is not a set of opinions. It is the profile read off the appliance
+  that had been running for months, with one line removed: services.deviceuuid,
+  which is that box's identity rather than the product's. Two more are turned
+  back into @ALSA_DEVICE@, which mediabox-hdmi-prepare renders per board.
 
-  The longer profile this replaced was measured on the board this product was
-  first built on, against its kernel and its sound path. Carried onto a clean
-  install on vendor 6.1.172 it took the television with it: the film came up
-  cyan with the picture folded into a corner, and AC-3 played back wrong. Those
-  settings may well be right again once each one is measured on this kernel;
-  until then they are not seeded, because Kodi's own defaults were what worked
-  here before anything was seeded at all.
+  It is here because it was once NOT here, and the cost of that was a clean
+  install that looked complete and could not show a Dolby Vision film or play
+  anything that was not plain AC-3. The capture takes /opt; Kodi's profile
+  lives under /var/tmp/kodi-home, which the capture treated as mutable state
+  and dropped. It was never state -- it is configuration, and every value in it
+  was arrived at by measurement against this television.
 
-  What stays, and why each one is not a matter of taste:
+  So: do not "clean this up". A setting removed from here is a setting Kodi
+  fills from its own defaults, and Kodi's defaults are what broke each of the
+  three things above. If one of these turns out to be wrong on a new kernel,
+  change that one, measure it, and say so in a comment next to it.
+
+  The two that are easy to get wrong:
+
+    * videoscreen.whitelist + videoscreen.resolution - the mode list this
+      display actually accepts. With these missing, Kodi builds its own list
+      and the picture came back blue and magenta on a DV profile 7 title.
+    * audiooutput.ac3transcode + audiooutput.channels - one decision, not two.
+      Kodi only transcodes while the output is configured as 2.0; set the
+      output to 5.1 and it stops transcoding and sends six-channel LPCM, which
+      this television declares and does not reproduce. "2.0" here does not mean
+      stereo: it means Kodi builds a 5.1 AC-3 stream and sends the whole thing.
 -->
 <settings version="2">
-  <!-- Hardware decode to DRM PRIME. Without it Kodi software-decodes HEVC on a
-       board that has a dedicated decoder, which is a different failure: not a
-       broken picture, a slideshow. The second switch gates the first - while it
-       is false the one above reads true and does nothing. -->
-  <setting id="videoplayer.useprimedecoderforhw">true</setting>
   <setting id="videoplayer.useprimedecoder">true</setting>
+  <setting id="videoplayer.useprimerenderer">0</setting>
 
-  <!-- The HDMI sink, named rather than left on "Default": this board also has
-       an ES8323 analogue codec that would happily take the stream and play it
-       into nothing anyone is listening to. Rendered on every start by
-       packaging/mediabox-hdmi-prepare for whichever output the box is on - on
-       a board with two HDMI sockets that is not the same card in both. -->
+  <setting id="videoscreen.resolution">17</setting>
+  <setting id="videoscreen.whitelist">0409602160060.00000pstd,0409602160059.94010pstd,0409602160050.00000pstd,0409602160024.00000pstd,0409602160023.97600pstd,0384002160060.00000pstd,0384002160059.94010pstd,0384002160050.00000pstd,0384002160030.00000pstd,0384002160029.97000pstd,0384002160025.00000pstd,0384002160024.00000pstd,0384002160023.97600pstd,0192001080060.00000pstd,0192001080059.94020pstd,0192001080050.00000pstd,0192001080030.00000pstd,0192001080029.97010pstd,0192001080024.00000pstd,0192001080023.97608pstd,0168001050059.88325pstd,0160000900060.00000pstd,0128001024060.01974pstd,0128000720060.00000pstd,0128000720059.94020pstd,0128000720050.00000pstd,0128000720030.00000pstd,0128000720029.97010pstd,0128000720024.00000pstd,0128000720023.97616pstd,0115200864075.00000pstd,0102400768060.00384pstd</setting>
+
+  <setting id="audiooutput.ac3transcode">true</setting>
   <setting id="audiooutput.audiodevice">@ALSA_DEVICE@</setting>
-  <setting id="audiooutput.passthroughdevice">@ALSA_DEVICE@</setting>
-
-  <!-- Which compressed formats go to the television untouched, and which are
-       decoded here first. This is a property of the sink, not of the kernel:
-       it was measured at the television, and what that television reproduces
-       is AC-3. Everything else it declares - DTS, TrueHD, DTS-HD - is
-       announced and then played as silence, so those are decoded into PCM
-       instead of being sent as something that plays as nothing.
-       CAESinkALSA pushes every type it can do onto an HDMI device on purpose
-       ("we don't trust ELD information"), so Kodi will offer all of them in
-       its own settings screen regardless of what is written here. -->
-  <setting id="audiooutput.passthrough">true</setting>
-  <setting id="audiooutput.ac3passthrough">true</setting>
-  <setting id="audiooutput.eac3passthrough">false</setting>
-  <setting id="audiooutput.dtspassthrough">false</setting>
-  <setting id="audiooutput.truehdpassthrough">false</setting>
+  <setting id="audiooutput.dtshdcorefallback">false</setting>
   <setting id="audiooutput.dtshdpassthrough">false</setting>
+  <setting id="audiooutput.dtspassthrough">false</setting>
+  <setting id="audiooutput.eac3passthrough">false</setting>
+  <setting id="audiooutput.passthrough">true</setting>
+  <setting id="audiooutput.passthroughdevice">@ALSA_DEVICE@</setting>
+  <setting id="audiooutput.truehdpassthrough">false</setting>
 
-  <!-- Re-encoding a stream this sink cannot take into one it can sounds like
-       the obvious answer and is not: with it on, a DTS source is re-encoded to
-       AC-3 and this sink produces silence or noise from the result, while the
-       stream Kodi builds is clean at every layer a machine can see - same
-       48 kHz S16_LE carrier and same AES0=0x06 as the AC-3 passthrough that
-       does work. Off, the same source is decoded and comes out as sound. -->
-  <setting id="audiooutput.ac3transcode">false</setting>
+  <setting id="subtitles.fontsize">28</setting>
+  <setting id="subtitles.languages">Turkish</setting>
 
-  <!-- Two channels on the PCM path. Six-channel LPCM is declared by the
-       television and is silent on it, which is the same failure again with a
-       different name. -->
-  <setting id="audiooutput.channels">1</setting>
+  <setting id="locale.country">Türkiye</setting>
+  <setting id="locale.language">resource.language.tr_tr</setting>
 
-  <!-- JSON-RPC over HTTP. This is how the control plane hands a film to Kodi;
-       with it off - Kodi's own default - a handover starts Kodi on an empty
-       library and the film stays behind. -->
-  <setting id="services.webserver">true</setting>
-  <setting id="services.webserverport">8080</setting>
-  <setting id="services.webserverauthentication">false</setting>
   <setting id="services.esenabled">true</setting>
+  <setting id="services.webserver">true</setting>
+  <setting id="services.webserverauthentication">false</setting>
+  <setting id="services.webserverport">8080</setting>
+  <setting id="services.wsdiscovery">false</setting>
+
+  <setting id="filecache.memorysize">512</setting>
+
+  <setting id="debug.screenshotpath">/var/tmp/kodi-shots/</setting>
+
+  <setting id="system.playlistspath">special://profile/playlists/</setting>
 </settings>
