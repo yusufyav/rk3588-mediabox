@@ -161,7 +161,26 @@ fi
 # appliance depends on has come undone -- and on a board carrying both products
 # that means one of them decides what the other decodes with.
 foreign=0
-for p in /opt/rk3588-mediabox/player/bin/mpv /opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm; do
+# MediaBox's own player is not optional here.
+#
+# This loop used to skip a binary it could not find, which meant an appliance
+# with no player at all reported "MediaBox owns it" -- the one thing the check
+# exists to disprove. The player is product: absent, it fails, and so does a
+# player that cannot reach the video plane or the hardware decoder.
+MPV=/opt/rk3588-mediabox/player/bin/mpv
+if [ -x "$MPV" ]; then
+  ok 'player present' "$MPV"
+  mpvld=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-mediabox/media-runtime/lib
+  LD_LIBRARY_PATH="$mpvld" "$MPV" --vo=help 2>/dev/null | grep -qw mediabox \
+    && ok 'player video output' vo_mediabox || bad 'player video output' 'vo_mediabox absent'
+  LD_LIBRARY_PATH="$mpvld" "$MPV" --hwdec=help 2>/dev/null | grep -q rkmpp \
+    && ok 'player hardware decode' rkmpp || bad 'player hardware decode' 'rkmpp absent'
+else
+  bad 'player present' "MISSING $MPV"
+  bad 'player video output' 'no player to ask'
+  bad 'player hardware decode' 'no player to ask'
+fi
+for p in "$MPV" /opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm; do
   [ -x "$p" ] || continue
   ldd "$p" 2>/dev/null | grep -q '/opt/rk3588-screenbridge' && foreign=$((foreign + 1))
 done
