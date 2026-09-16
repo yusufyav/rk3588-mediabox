@@ -169,6 +169,127 @@ else
   echo "-- skipping CLI parser checks (set MEDIABOX_PROBE_BIN to a built probe)"
 fi
 
+# -- Runtime isolation -----------------------------------------------------
+# MediaBox has its own Rockchip media runtime and does not share the other
+# product's prefix. That is a property of this repository, so it is checked
+# here rather than discovered on a board that carries both products.
+echo "-- MediaBox owns its media runtime"
+
+# Where the prefix is defined, and that it is not the other product's.
+media_prefix="$(sed -n 's/^: "${MEDIABOX_MEDIA_PREFIX:=\(.*\)}"$/\1/p' "$here/scripts/env.sh")"
+contains "the media prefix is MediaBox's own" "$media_prefix" 'MEDIABOX_PREFIX/media-runtime'
+
+# Anything that names the other prefix in a way that would *use* it: a library
+# path, a pkg-config path, an install prefix or an rpath. Naming it in order to
+# check it — a guard, an ldd, a diff — is the whole point of some of these
+# files, so the rule is about what the line does, not about the word.
+uses_foreign_prefix() {
+  grep -rnE '(LD_LIBRARY_PATH|PKG_CONFIG_PATH|--prefix|-rpath|Environment)[^#]*/opt/rk3588-screenbridge' \
+    "$here/scripts" "$here/packaging" "$here/config" "$here/rust/crates" 2>/dev/null \
+    | grep -v '^.*:#' || true
+}
+offenders="$(uses_foreign_prefix)"
+if [ -z "$offenders" ]; then
+  printf 'ok   nothing builds or links against the ScreenBridge prefix\n'
+else
+  printf 'FAIL something still uses the ScreenBridge prefix:\n%s\n' "$offenders"
+  failures=$((failures + 1))
+fi
+
+# The units are absolute about it: a service file has no reason to mention the
+# other product except to declare the interlock, which names a unit and not a
+# path.
+if grep -rn '/opt/rk3588-screenbridge' "$here/packaging/systemd" >/dev/null 2>&1; then
+  printf 'FAIL a unit file names the ScreenBridge prefix\n'
+  failures=$((failures + 1))
+else
+  printf 'ok   no unit file names the ScreenBridge prefix\n'
+fi
+
+# And the runtime builder cannot be pointed at it.
+contains "the runtime builder refuses that prefix" \
+  "$(cat "$here/scripts/build-media-runtime.sh")" 'refusing to build into the ScreenBridge prefix'
+contains "the deploy checks the prefix before and after" \
+  "$(cat "$here/scripts/deploy-mediabox-v3.sh")" 'screenbridge_manifest'
+
+# -- No board-specific production hardcodes --------------------------------
+# The numbers the kernel hands out on one board on one boot: card names, render
+# node names, connector names, CEC device names, ALSA card names. None of them
+# belongs in a unit file or a launcher — they are what platform discovery is
+# for. Diagnostic scripts and probes may still take them as arguments or print
+# them; what is checked here is the production path.
+echo "-- production paths name no board-specific device"
+production=(
+  "$here"/packaging/systemd/*.service
+  "$here"/packaging/mediabox-hdmi-prepare
+  "$here"/packaging/mediabox-player
+  "$here"/packaging/mediabox-display-changed
+  "$here"/packaging/mediabox-display-scale
+  "$here"/packaging/mediabox-kiosk-smoke
+  "$here"/config/mediabox-applications.json
+)
+pattern='/dev/dri/card[0-9]|/dev/dri/renderD[0-9]|/dev/cec[0-9]|rockchiphdmi[0-9]|rockchip-hdmi[0-9]|card[0-9]-HDMI|HDMI-A-[0-9]|\bDP-1\b'
+hardcodes=""
+for file in "${production[@]}"; do
+  [ -f "$file" ] || continue
+  # Comments explain why a name is *not* used any more; they are not the
+  # product doing anything.
+  while IFS= read -r line; do
+    hardcodes="$hardcodes${file#"$here/"}: $line"$'\n'
+  done < <(grep -nE "$pattern" "$file" | grep -vE '^[0-9]+: *#' || true)
+done
+if [ -z "$hardcodes" ]; then
+  printf 'ok   no production file names a board-specific device\n'
+else
+  printf 'FAIL board-specific devices in production files:\n%s' "$hardcodes"
+  failures=$((failures + 1))
+fi
+
+# -- The coexistence contract ----------------------------------------------
+# Every unit that takes DRM master declares the interlock with the other
+# product, and only those units do: the control plane and the media worker
+# touch no display hardware and must stay able to run beside it.
+echo "-- display owners declare the ScreenBridge interlock"
+for unit in mediabox-tv-ui kodi mediabox-browser; do
+  file="$here/packaging/systemd/$unit.service"
+  if grep -q '^Conflicts=screenbridge-daemon.service$' "$file" \
+     && grep -q '^After=screenbridge-daemon.service$' "$file"; then
+    printf 'ok   %s conflicts with and is ordered after screenbridge-daemon\n' "$unit"
+  else
+    printf 'FAIL %s does not declare the interlock\n' "$unit"
+    failures=$((failures + 1))
+  fi
+done
+for unit in mediaboxd-rs mediabox-media-worker stremio-server; do
+  file="$here/packaging/systemd/$unit.service"
+  if grep -q 'screenbridge-daemon' "$file"; then
+    printf 'FAIL %s declares an interlock it does not need\n' "$unit"
+    failures=$((failures + 1))
+  else
+    printf 'ok   %s may run beside the other product\n' "$unit"
+  fi
+done
+
+# -- The browser application survived the compositor cleanup ---------------
+# The television shell stopped being Chromium inside sway. The *browser* is
+# still Chromium inside sway, and is a product feature; the two were one thing
+# once, which is exactly why this is checked.
+echo "-- the browser application is intact"
+contains "the browser is in the application table" \
+  "$(cat "$here/config/mediabox-applications.json")" '"unit": "mediabox-browser.service"'
+for f in packaging/systemd/mediabox-browser.service packaging/mediabox-browser \
+         config/sway-browser.conf packaging/mediabox-handback \
+         packaging/mediabox-display-scale; do
+  if [ -f "$here/$f" ]; then
+    printf 'ok   %s\n' "$f"
+  else
+    printf 'FAIL the browser application is missing %s\n' "$f"
+    failures=$((failures + 1))
+  fi
+done
+contains "the deploy installs it" "$(cat "$here/scripts/deploy-mediabox-v3.sh")" \
+  'television browser application'
+
 assets="${MEDIABOX_ASSET_DIR:-$here/assets}"
 hdr="$assets/hdr10-4k-2398-main10.mp4"
 if [ -f "$hdr" ] && command -v ffprobe >/dev/null; then

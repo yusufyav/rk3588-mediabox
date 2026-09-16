@@ -72,7 +72,8 @@ tail -1 "$out/98-reset.txt"
 
 echo "== post-run state"
 mediabox_ssh "cat /sys/kernel/debug/dri/0/summary" > "$out/99-summary-after.txt" 2>&1
-mediabox_ssh "cat /sys/class/drm/card0-HDMI-A-1/status /sys/class/drm/card0-HDMI-A-1/enabled" \
+mediabox_ssh "conn=\$(/opt/rk3588-mediabox/bin/mediabox-platform connector-path 2>/dev/null || true)
+  echo \"\$conn\"; cat \"\$conn/status\" \"\$conn/enabled\" 2>/dev/null" \
   > "$out/99-connector-state.txt" 2>&1
 
 ( cd "$out" && sha256sum -- *.txt *.json > SHA256SUMS )

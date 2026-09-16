@@ -2755,6 +2755,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediabox-platform"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mediabox-tv"
 version = "0.1.0"
 dependencies = [
@@ -2767,6 +2775,7 @@ dependencies = [
  "libc",
  "log",
  "mediabox-core",
+ "mediabox-platform",
  "raw-window-handle",
  "reqwest",
  "serde",

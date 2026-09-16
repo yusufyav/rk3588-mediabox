@@ -9,6 +9,25 @@ Wants=mediaboxd-rs.service
 # reason: whoever owns the display decides, not systemd's default target, and
 # a console session at tty1 is never taken over on its own.
 Conflicts=kodi.service mediabox-tv-ui.service
+# Hardware this box does not own alone.
+#
+# rk3588-screenbridge is a second product for this silicon and may be installed
+# on the same board. Its daemon owns DRM master, the HDMI TX PCM and the RGA and
+# MPP devices while it is capturing, and DRM master cannot be held twice: two
+# processes reaching for it is not a degraded picture, it is whichever one lost
+# failing in a way that reads as a broken appliance.
+#
+# So the two are declared incompatible and ordered. `Conflicts=` alone would let
+# systemd start this unit while the other was still letting go; the `After=`
+# beside it is what makes the stop happen first, which is the documented way to
+# get a transition rather than a race. Neither line does anything on a board
+# where that product is not installed.
+#
+# This is deliberately not a role manager. Which application owns the television
+# is mediaboxd-rs's decision and stays there; this is only the interlock that
+# makes the decision land safely when the other product is on the board too.
+Conflicts=screenbridge-daemon.service
+After=screenbridge-daemon.service
 
 [Service]
 Type=simple
@@ -37,8 +56,9 @@ TTYReset=yes
 TTYVHangup=yes
 StandardInput=tty-force
 # The private Mali runtime is the one Kodi uses; wlroots needs it for a
-# GPU-accelerated compositor.
-Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
+# GPU-accelerated compositor. Nothing here decodes video through the Rockchip
+# stack, so the media runtime is not on this line.
+Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib
 # drm *and* libinput. Naming only the DRM backend gives a compositor that
 # lights up the television and has no input devices at all: no keyboard, no
 # remote, nothing. The list is explicit so the backend set cannot drift.

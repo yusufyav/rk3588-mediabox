@@ -45,6 +45,9 @@ struct Args {
     lan_http: Option<SocketAddr>,
     #[arg(long, default_value = "http://127.0.0.1:8790")]
     media_endpoint: String,
+    /// Which CEC adapter to hold. Left out — which is how the product runs —
+    /// the adapter belonging to the display output the box is actually on is
+    /// used. Naming one is for a board being debugged, not for an install.
     #[arg(long)]
     cec_device: Option<PathBuf>,
     #[arg(long)]
@@ -53,6 +56,28 @@ struct Args {
     require_cec: bool,
     #[arg(long, value_enum, default_value_t = ModeArg::Ui)]
     input_mode: ModeArg,
+}
+
+/// The CEC adapter on the selected display output, if this board has one
+/// there.
+///
+/// `None` is a normal answer and not a fault: DisplayPort carries no CEC, and
+/// a box with nothing plugged in has no selected output to ask about. The
+/// caller falls back to plain adapter discovery, and the daemon reports CEC as
+/// unavailable if that finds nothing either.
+fn discovered_cec_adapter() -> Option<PathBuf> {
+    let platform = mediabox_platform::Platform::discover();
+    for warning in &platform.warnings {
+        eprintln!("mediaboxd-rs.platform {warning}");
+    }
+    let output = platform.selected_output()?;
+    let adapter = output.cec.as_ref()?;
+    eprintln!(
+        "mediaboxd-rs: CEC {} ({} üzerinden)",
+        adapter.device.display(),
+        output.connector.name
+    );
+    Some(adapter.device.clone())
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -83,10 +108,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
     } else {
-        match Adapter::discover(args.cec_device.as_deref()) {
+        // Which adapter is this television's is a topology question, not a
+        // numbering one. A board with two HDMI transmitters has two adapters,
+        // and the lowest-numbered one is the socket nothing is plugged into as
+        // often as it is the right one. So the adapter is the one that belongs
+        // to the output the display stage selected — the same choice the
+        // television interface makes, from the same resolver.
+        let wanted = args.cec_device.clone().or_else(discovered_cec_adapter);
+        match Adapter::discover(wanted.as_deref()) {
             Ok(adapter) => (Some(adapter), CecStatus::default()),
             Err(error) if args.require_cec => return Err(error.into()),
-            Err(error) => (None, unavailable_status(args.cec_device.as_deref(), &error)),
+            Err(error) => (None, unavailable_status(wanted.as_deref(), &error)),
         }
     };
     let kodi = Arc::new(KodiClient::new(

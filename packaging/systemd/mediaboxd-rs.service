@@ -7,7 +7,16 @@ Wants=network.target systemd-udev-settle.service mediabox-media-worker.service
 Type=simple
 # The table of applications this box can put on the television. Adding a
 # browser or a screen receiver later is a row in that file, not a change here.
-ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs --require-cec \
+# No --require-cec.
+#
+# CEC is a capability of the output this box is on, not a property of the
+# product. DisplayPort carries none at all, and a board with two HDMI sockets
+# has an adapter per socket — so an appliance on a DisplayPort monitor, or one
+# with nothing plugged in yet, would be an appliance whose control plane refuses
+# to start. It reports CEC as unavailable instead, which `mediaboxctl status`
+# shows and the interface draws honestly. Which adapter it holds is resolved
+# from the selected output; see docs/platform/runtime-discovery.md.
+ExecStart=/opt/rk3588-mediabox/bin/mediaboxd-rs \
   --applications /etc/mediabox-applications.json \
   --http 127.0.0.1:8787 \
   --lan-http 0.0.0.0:8788 \
@@ -49,7 +58,10 @@ LockPersonality=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 DevicePolicy=closed
-DeviceAllow=/dev/cec0 rw
+# The CEC subsystem rather than one adapter by number: a board with two HDMI
+# transmitters has two, and which one is the television's depends on which
+# socket the television is in.
+DeviceAllow=char-cec rw
 # The browser's address drop. This interface chooses a web address and the
 # daemon leaves it here for the browser to read once at start; with
 # ProtectSystem=strict and nothing else named, that write failed with

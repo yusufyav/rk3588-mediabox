@@ -76,7 +76,8 @@ echo "== returning the connector to its neutral SDR state"
 mediabox_ssh "'$probe' --reset" > "$out/$label-30-reset.txt" 2>&1
 "$here/scripts/tv-state.sh" mp1b-after > "$out/$label-31-tv-state-after.json" 2>&1
 mediabox_ssh "cat /sys/kernel/debug/dri/0/summary" > "$out/$label-31-summary-after.txt" 2>&1
-mediabox_ssh "cat /sys/class/drm/card0-HDMI-A-1/status /sys/class/drm/card0-HDMI-A-1/enabled" \
+mediabox_ssh "conn=\$(/opt/rk3588-mediabox/bin/mediabox-platform connector-path 2>/dev/null || true)
+  echo \"\$conn\"; cat \"\$conn/status\" \"\$conn/enabled\" 2>/dev/null" \
   > "$out/$label-31-connector-state.txt" 2>&1
 
 result="$(sed -n 's/^PLAYBACK RESULT: //p' "$out/$label-10-playback.txt" | tail -1)"

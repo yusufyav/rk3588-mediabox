@@ -34,6 +34,9 @@ slint = { version = "1.17.1", default-features = false, features = [
 ] }
 
 mediabox-core = { path = "../mediabox-core" }
+# What board this is, asked of the board. The same crate the control plane and
+# the shell scripts use, so there is one answer rather than three.
+mediabox-platform = { path = "../mediabox-platform" }
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

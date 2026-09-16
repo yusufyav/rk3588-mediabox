@@ -1,0 +1,22 @@
+# What this board actually is, asked of the board.
+#
+# One crate, because the alternative is the same three questions answered
+# slightly differently in the television interface, in the control plane and in
+# four shell scripts — which is how an appliance ends up working on the board it
+# was written on and nowhere else.
+[package]
+name = "mediabox-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "mediabox-platform"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3.27.0"

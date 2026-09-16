@@ -10,6 +10,7 @@ mediabox-cec = { path = "../mediabox-cec" }
 libc.workspace = true
 mediabox-core = { path = "../mediabox-core" }
 mediabox-input = { path = "../mediabox-input" }
+mediabox-platform = { path = "../mediabox-platform" }
 reqwest.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

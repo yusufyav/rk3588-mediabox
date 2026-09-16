@@ -8,6 +8,25 @@ Description=MediaBox native Slint appliance shell (Mali GBM + Rockchip KMS)
 After=mediaboxd-rs.service mediabox-media-worker.service network-online.target
 Wants=mediaboxd-rs.service network-online.target
 Conflicts=kodi.service mediabox-browser.service
+# Hardware this box does not own alone.
+#
+# rk3588-screenbridge is a second product for this silicon and may be installed
+# on the same board. Its daemon owns DRM master, the HDMI TX PCM and the RGA and
+# MPP devices while it is capturing, and DRM master cannot be held twice: two
+# processes reaching for it is not a degraded picture, it is whichever one lost
+# failing in a way that reads as a broken appliance.
+#
+# So the two are declared incompatible and ordered. `Conflicts=` alone would let
+# systemd start this unit while the other was still letting go; the `After=`
+# beside it is what makes the stop happen first, which is the documented way to
+# get a transition rather than a race. Neither line does anything on a board
+# where that product is not installed.
+#
+# This is deliberately not a role manager. Which application owns the television
+# is mediaboxd-rs's decision and stays there; this is only the interlock that
+# makes the decision land safely when the other product is on the board too.
+Conflicts=screenbridge-daemon.service
+After=screenbridge-daemon.service
 
 [Service]
 Type=simple
@@ -18,9 +37,17 @@ StateDirectory=mediabox-ui
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/mediabox-ui
 Environment=HOME=/var/lib/mediabox-ui
-Environment=MEDIABOX_RENDER_NODE=/dev/dri/renderD128
-Environment=MEDIABOX_KMS_NODE=/dev/dri/card0
-Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib:/opt/rk3588-screenbridge/lib
+# No display device is named here, and that is the change worth noticing. Which
+# DRM device sets modes, which one renders, and which connector the television
+# is on are discovered at start — see docs/platform/runtime-discovery.md. The
+# two variables that used to be on these lines named this board's numbers, and
+# on a board whose NPU probes first they name the NPU.
+#
+# Only the vendor GL user space is on the library path. The interface links
+# libEGL and libgbm by their generic sonames, so first match decides the whole
+# GL stack; it does not link the media runtime at all, which is the player's
+# and Kodi's business and reached through their own RPATHs.
+Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib
 ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
 ExecStart=/opt/rk3588-mediabox/bin/mediabox-tv
 Restart=on-failure
@@ -43,8 +70,10 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 DevicePolicy=closed
-DeviceAllow=/dev/dri/card0 rw
-DeviceAllow=/dev/dri/renderD128 rw
+# The DRM subsystem rather than two device nodes by name: the numbers differ
+# between boards and between boots, and a unit that names them confines the
+# interface away from the very devices discovery just chose.
+DeviceAllow=char-drm rw
 DeviceAllow=/dev/mali0 rw
 DeviceAllow=/dev/dma_heap/system rw
 DeviceAllow=/dev/dma_heap/system-uncached rw

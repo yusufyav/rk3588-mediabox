@@ -168,7 +168,9 @@ fn drm() -> Vec<Value> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            // Connectors are `card0-HDMI-A-1`; the bare `card0` is the device.
+            // A connector's directory name carries the card's own, e.g.
+            // `<card>-HDMI-A-1`; the bare card name is the device itself. Every
+            // connector this board has is reported, whichever one is in use.
             if !name.contains('-') {
                 return None;
             }

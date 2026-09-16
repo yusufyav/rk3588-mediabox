@@ -485,6 +485,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediabox-platform"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mediaboxctl"
 version = "0.1.0"
 dependencies = [
@@ -503,6 +512,7 @@ dependencies = [
  "mediabox-cec",
  "mediabox-core",
  "mediabox-input",
+ "mediabox-platform",
  "reqwest",
  "serde_json",
  "tempfile",

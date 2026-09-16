@@ -4,26 +4,47 @@
 # draws on it.
 #
 # Two faults on this appliance had one cause: the HDMI connector came up
-# "connected" with no EDID at all. Measured: /sys/class/drm/card0-HDMI-A-1/edid
-# was 0 bytes, ALSA published no ELD, and the connector's HDR_PANEL_METADATA
-# blob was empty — so Kodi could not learn that the panel does HDR10 and never
-# set HDR_OUTPUT_METADATA (the set is what makes a Sony enter HDR), and audio
-# passthrough was packed without knowing what the sink accepts, which is
-# silence. Forcing one detect produced a 256-byte EDID with the panel's real
-# audio and HDR blocks.
+# "connected" with no EDID at all. Measured: the connector's `edid` was 0 bytes,
+# ALSA published no ELD, and the HDR_PANEL_METADATA blob was empty — so Kodi
+# could not learn that the panel does HDR10 and never set HDR_OUTPUT_METADATA
+# (the set is what makes a Sony enter HDR), and audio passthrough was packed
+# without knowing what the sink accepts, which is silence. Forcing one detect
+# produced a 256-byte EDID with the panel's real audio and HDR blocks.
 #
-# The ELD bypass is the second half: this board carries HDMI audio over I2S,
-# and with no ELD the codec refuses to pack a bitstream. Both are runtime state
-# and are lost on every restart, which is why they are done here rather than by
+# The ELD bypass is the second half: this board carries HDMI audio over I2S, and
+# with no ELD the codec refuses to pack a bitstream. Both are runtime state and
+# are lost on every restart, which is why they are done here rather than by
 # hand.
+#
+# Everything below acts on *the output this box is on*, which is not a constant.
+# This script used to say `card*-HDMI-A-*` and `amixer -c rockchiphdmi1`, and
+# both are answers for a board with one HDMI socket. On a board with two, the
+# first is every socket including the empty one and the second is the other
+# socket's sound card — so the EDID would be forced on a connector nothing is
+# attached to while the bitstream went to a television that is not there.
+# mediabox-platform resolves the output, and the sound card and CEC adapter that
+# belong to it, from the topology; see docs/platform/runtime-discovery.md.
 set -eu
 
-for c in /sys/class/drm/card*-HDMI-A-*; do
-  [ -e "$c/status" ] || continue
-  [ "$(cat "$c/status")" = connected ] || continue
-  [ -s "$c/edid" ] && continue
-  echo detect > "$c/status" 2>/dev/null || true
-done
+PLATFORM="${MEDIABOX_PLATFORM:-/opt/rk3588-mediabox/bin/mediabox-platform}"
+
+connector_path="$("$PLATFORM" connector-path 2>/dev/null || true)"
+connector="$("$PLATFORM" output 2>/dev/null || true)"
+alsa_card="$("$PLATFORM" alsa-card 2>/dev/null || true)"
+alsa_driver="$("$PLATFORM" alsa-driver 2>/dev/null || true)"
+
+if [ -z "$connector" ]; then
+  # Nothing is plugged in, or discovery could not decide. Neither is this
+  # script's to fix, and neither is a reason to fail the unit that runs it:
+  # whoever takes the display next reports it properly.
+  echo "mediabox-hdmi-prepare: seçili bir ekran çıkışı yok" >&2
+  exit 0
+fi
+
+# One forced detect, on the output that is in use.
+if [ -n "$connector_path" ] && [ -e "$connector_path/status" ] && [ ! -s "$connector_path/edid" ]; then
+  echo detect > "$connector_path/status" 2>/dev/null || true
+fi
 
 # There is no terminal on a television.
 #
@@ -34,8 +55,47 @@ done
 [ -x /opt/rk3588-mediabox/bin/mediabox-console-off ] \
   && /opt/rk3588-mediabox/bin/mediabox-console-off || true
 
-# The card name is fixed by the device tree on this board.
-/usr/bin/amixer -c rockchiphdmi1 cset numid=17 on >/dev/null 2>&1 || true
+# The ELD bypass, on the sound card that belongs to this output. Addressed by
+# card *id*, never by index: the index is probe order and moves between boots.
+if [ -n "$alsa_card" ]; then
+  /usr/bin/amixer -c "$alsa_card" cset numid=17 on >/dev/null 2>&1 || true
+fi
+
+# The compressed-audio PCM definition, for this output's card.
+#
+# alsa-lib looks for /usr/share/alsa/cards/<driver>.conf and exposes what it
+# finds as `cards.<driver>`, which is what the stock hdmi.conf resolves its
+# slave through — so this one file is what makes `hdmi:CARD=<id>,DEV=0` exist,
+# and without it Kodi enumerates the sink as PCM-only and compressed output
+# cannot be selected at all. The template is rendered for whichever card this
+# output actually has rather than installed once under one board's name.
+template=/opt/rk3588-mediabox/share/alsa/mediabox-hdmi.conf.in
+if [ -n "$alsa_driver" ] && [ -f "$template" ]; then
+  target="/usr/share/alsa/cards/$alsa_driver.conf"
+  rendered="$(sed "s/@ALSA_DRIVER@/$alsa_driver/g" "$template")"
+  if [ ! -f "$target" ] || [ "$rendered" != "$(cat "$target")" ]; then
+    printf '%s\n' "$rendered" > "$target" 2>/dev/null || true
+  fi
+fi
+
+# And the two settings in Kodi's own profile that name the device.
+#
+# Kodi reads passthrough capability off the PCM *name* — only a name starting
+# with "hdmi" becomes AE_DEVTYPE_HDMI — so the profile has to name the PCM the
+# file above defines. A profile pointing at a device that does not exist is the
+# one failure that looks like a Kodi bug instead of a missing config file.
+profile=/var/tmp/kodi-home/.kodi/userdata/guisettings.xml
+if [ -n "$alsa_card" ] && [ -n "$alsa_driver" ] && [ -f "$profile" ]; then
+  device="ALSA:hdmi:CARD=$alsa_card,DEV=0|$alsa_driver"
+  # `#` as the delimiter, not `|`: an ALSA device string has a `|` in it, which
+  # ends the s/// expression early and makes sed fail silently under the `||
+  # true` below. The symptom was a profile that still named whichever card the
+  # box was installed against.
+  sed -i \
+    -e "s#\(<setting id=\"audiooutput.audiodevice\">\)[^<]*\(</setting>\)#\1$device\2#" \
+    -e "s#\(<setting id=\"audiooutput.passthroughdevice\">\)[^<]*\(</setting>\)#\1$device\2#" \
+    "$profile" || echo "mediabox-hdmi-prepare: Kodi profilindeki ses aygıtı güncellenemedi" >&2
+fi
 
 # Put the link back to SDR before an SDR interface is drawn on it.
 #
@@ -63,8 +123,13 @@ done
 # against RGB888_1X24 and `r2y[0] csc mode[0]` on a clean start. VOP2 was
 # converting an RGB interface to YUV in BT.601 while telling the sink BT.709
 # limited — two mismatches at once, which is exactly that colour shift.
+#
+# The connector is matched by name and not by "the first one that says HDMI":
+# modetest's object ids are allocated per boot and the first connected HDMI is
+# not necessarily the one this box is drawing on.
 if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ]; then
-  conn=$(/usr/bin/modetest -M rockchip -c 2>/dev/null     | awk '$3 == "connected" && $4 ~ /HDMI/ { print $1; exit }')
+  conn=$(/usr/bin/modetest -M rockchip -c 2>/dev/null \
+    | awk -v want="$connector" '$3 == "connected" && $4 == want { print $1; exit }')
   if [ -n "${conn:-}" ]; then
     /usr/bin/modetest -M rockchip -w "$conn:Colorspace:0" >/dev/null 2>&1 || true
     /usr/bin/modetest -M rockchip -w "$conn:HDR_OUTPUT_METADATA:0" >/dev/null 2>&1 || true

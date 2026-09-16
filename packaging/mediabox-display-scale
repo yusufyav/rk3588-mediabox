@@ -45,16 +45,15 @@ sys.exit(1)
 ' 2>/dev/null && return 0
   fi
 
-  # No compositor yet — the first launch races it. Fall back to what the
-  # connected panel says it prefers, which is the mode wlroots will take.
-  for c in /sys/class/drm/card*-*; do
-    [ -e "$c/status" ] || continue
-    [ "$(cat "$c/status" 2>/dev/null)" = connected ] || continue
-    line=$(head -1 "$c/modes" 2>/dev/null || true)
-    case "$line" in
-      [0-9]*x[0-9]*) echo "${line%x*} ${line#*x}"; return 0 ;;
-    esac
-  done
+  # No compositor yet -- the first launch races it. Fall back to the preferred
+  # mode of the output the product selected, which is the one wlroots will take.
+  # Asked of mediabox-platform rather than swept out of sysfs: on a board with
+  # several connected outputs, "the first connected one" and "the one this box
+  # is on" are not the same panel.
+  line=$(/opt/rk3588-mediabox/bin/mediabox-platform mode 2>/dev/null || true)
+  case "$line" in
+    [0-9]*x[0-9]*) echo "${line%x*} ${line#*x}"; return 0 ;;
+  esac
   return 1
 }
 

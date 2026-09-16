@@ -4,6 +4,7 @@ members = [
     "crates/mediabox-core",
     "crates/mediabox-cec",
     "crates/mediabox-input",
+    "crates/mediabox-platform",
     "crates/mediaboxd-rs",
     "crates/mediaboxctl",
 ]

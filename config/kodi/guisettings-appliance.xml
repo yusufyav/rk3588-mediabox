@@ -64,8 +64,11 @@
        0x06 (non-audio) for a compressed burst. Pointing the PCM device at it
        too keeps one device for both jobs, so switching between a GUI sound and
        a film does not re-open a different endpoint mid-playback. -->
-  <setting id="audiooutput.audiodevice">ALSA:hdmi:CARD=rockchiphdmi1,DEV=0|rockchip-hdmi1</setting>
-  <setting id="audiooutput.passthroughdevice">ALSA:hdmi:CARD=rockchiphdmi1,DEV=0|rockchip-hdmi1</setting>
+  <!-- Rendered on every start by packaging/mediabox-hdmi-prepare, for the
+       sound card that belongs to the display output this box is on. On a board
+       with two HDMI sockets that is not the same card in both. -->
+  <setting id="audiooutput.audiodevice">@ALSA_DEVICE@</setting>
+  <setting id="audiooutput.passthroughdevice">@ALSA_DEVICE@</setting>
 
   <!-- Compressed passthrough, validated in Gate MA1 against this sink's ELD
        rather than against what Kodi is willing to offer. CAESinkALSA pushes

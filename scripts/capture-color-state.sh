@@ -98,8 +98,11 @@ echo "----- SINK: what the display advertises -----"
 echo "  (there is no IP-control API on this sink, so its HDR state is not"
 echo "   machine-readable; the connector's view of the panel is recorded"
 echo "   instead and the physical check is the operator's)"
-for f in /sys/class/drm/card0-HDMI-A-1/status /sys/class/drm/card0-HDMI-A-1/enabled; do
-  printf '  %s: ' "\$f"; cat "\$f" 2>/dev/null
+# The connector this box is on, not a fixed one: a board with two HDMI sockets
+# has an empty one, and reading its state says nothing about the panel.
+conn=\$(/opt/rk3588-mediabox/bin/mediabox-platform connector-path 2>/dev/null || true)
+for f in status enabled; do
+  printf '  %s/%s: ' "\${conn:-<unresolved>}" "\$f"; cat "\$conn/\$f" 2>/dev/null; echo
 done
 REMOTE
 echo "captured $label -> $out/$label.txt"

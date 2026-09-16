@@ -1,9 +1,17 @@
 //! RK3588 split render/display Slint platform.
 //!
-//! The vendor Mali GBM implementation works on `renderD128`; HDMI modesetting
-//! belongs to `card0`. Every frame is therefore rendered into a GBM BO on the
-//! former, exported as dma-buf, PRIME-imported on the latter and kept alive
-//! until its KMS page-flip event arrives.
+//! Rendering and scanning out are two DRM devices here. Every frame is rendered
+//! into a GBM buffer object on the render device, exported as a dma-buf,
+//! PRIME-imported on the display device and kept alive until its KMS page-flip
+//! event arrives.
+//!
+//! Which two devices those are is not written down. `mediabox-platform` finds
+//! the display device by asking which DRM device owns connectors, and the
+//! render device by asking which one belongs to the same hardware — because on
+//! a board whose NPU probes first, the numbers this was first written against
+//! (`card0`, `renderD128`) name the NPU instead. The connector is chosen the
+//! same way, and the audio endpoint and CEC adapter follow from that choice
+//! rather than being picked separately.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString};
@@ -31,9 +39,6 @@ use input::event::keyboard::{KeyState, KeyboardEventTrait};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use slint::platform::femtovg_renderer::{FemtoVGRenderer, OpenGLInterface};
 use slint::platform::{EventLoopProxy, Platform, PlatformError, WindowAdapter, WindowEvent};
-
-const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
-const DEFAULT_KMS_NODE: &str = "/dev/dri/card0";
 
 /// The size the interface is laid out for, seen from a sofa. Every metric in
 /// the theme derives from the viewport, and its `min()` bounds are written
@@ -298,10 +303,30 @@ struct SplitDisplay {
 
 impl SplitDisplay {
     fn new() -> Result<Rc<Self>, PlatformError> {
-        let render_path =
-            std::env::var("MEDIABOX_RENDER_NODE").unwrap_or_else(|_| DEFAULT_RENDER_NODE.into());
-        let kms_path =
-            std::env::var("MEDIABOX_KMS_NODE").unwrap_or_else(|_| DEFAULT_KMS_NODE.into());
+        let discovered = mediabox_platform::Platform::discover();
+        for warning in &discovered.warnings {
+            eprintln!("mediabox-tv.platform {warning}");
+        }
+        let kms_path = discovered
+            .kms
+            .as_ref()
+            .map(|node| node.device.display().to_string())
+            .ok_or_else(|| {
+                PlatformError::from("no DRM device on this board owns a connector".to_string())
+            })?;
+        let render_path = discovered
+            .render
+            .as_ref()
+            .map(|node| node.device.display().to_string())
+            .ok_or_else(|| {
+                PlatformError::from(format!("no render device shares hardware with {kms_path}"))
+            })?;
+        let wanted = discovered
+            .selected_output()
+            .ok_or_else(|| PlatformError::from("no connected display output".to_string()))?
+            .connector
+            .name
+            .clone();
 
         let render_file = OpenOptions::new()
             .read(true)
@@ -336,7 +361,7 @@ impl SplitDisplay {
             eprintln!("mediabox-tv.platform universal planes unavailable: {e}");
         }
 
-        let (connector, crtc, mode) = find_output(&kms)?;
+        let (connector, crtc, mode) = find_output(&kms, &wanted)?;
         let gbm_device = gbm::Device::new(OwnedFd::from(render_file))
             .map_err(|e| format!("create GBM device on {render_path}: {e}"))?;
         if gbm_device.backend_name() != "armsoc" {
@@ -359,12 +384,23 @@ impl SplitDisplay {
             .map_err(|e| format!("create Mali GBM XRGB8888 surface: {e}"))?;
 
         eprintln!(
-            "mediabox-tv.platform split-kms render={} gbm={} display={} output={}-{} mode={}x{}@{}",
+            "mediabox-tv.platform split-kms render={} gbm={} display={} output={}-{} \
+             audio={} cec={} mode={}x{}@{}",
             render_path,
             gbm_device.backend_name(),
             kms_path,
             connector.interface().as_str(),
             connector.interface_id(),
+            discovered
+                .selected_output()
+                .and_then(|output| output.audio.as_ref())
+                .map(|audio| audio.card_id.as_str())
+                .unwrap_or("-"),
+            discovered
+                .selected_output()
+                .and_then(|output| output.cec.as_ref())
+                .map(|cec| cec.device.display().to_string())
+                .unwrap_or_else(|| "-".into()),
             width,
             height,
             mode.vrefresh()
@@ -511,7 +547,7 @@ impl SplitDisplay {
         let imported_handle = self
             .kms
             .prime_fd_to_buffer(dma_buf.as_fd())
-            .map_err(|e| format!("DRM_IOCTL_PRIME_FD_TO_HANDLE(card0): {e}"))?;
+            .map_err(|e| format!("DRM_IOCTL_PRIME_FD_TO_HANDLE(display device): {e}"))?;
         let plane = ImportedPlane {
             handle: imported_handle,
             size: (bo.width(), bo.height()),
@@ -528,7 +564,7 @@ impl SplitDisplay {
             Ok(fb) => fb,
             Err(e) => {
                 let _ = self.kms.close_buffer(imported_handle);
-                return Err(format!("DRM_IOCTL_MODE_ADDFB2(card0 PRIME buffer): {e}").into());
+                return Err(format!("DRM_IOCTL_MODE_ADDFB2(PRIME buffer): {e}").into());
             }
         };
 
@@ -620,7 +656,7 @@ impl SplitDisplay {
         if !state.first_frame_logged {
             let current = state.current.as_ref().unwrap();
             eprintln!(
-                "mediabox-tv.present dma-buf=active card0_fb={} native={}x{}",
+                "mediabox-tv.present dma-buf=active scanout_fb={} native={}x{}",
                 u32::from(current.framebuffer),
                 self.size().width,
                 self.size().height
@@ -684,8 +720,15 @@ impl Drop for SplitDisplay {
     }
 }
 
+/// The connector discovery chose, found again through the open KMS device.
+///
+/// Discovery works from sysfs and names an output; this needs the DRM objects
+/// behind that name. They are matched by connector *name* — type plus type
+/// index, which is what sysfs publishes — and never by DRM object id: object
+/// ids are allocated per boot and a different kernel hands out different ones.
 fn find_output(
     kms: &SharedKms,
+    wanted: &str,
 ) -> Result<
     (
         control::connector::Info,
@@ -702,12 +745,21 @@ fn find_output(
         .iter()
         .find_map(|handle| {
             let connector = kms.get_connector(*handle, false).ok()?;
-            (connector.state() == control::connector::State::Connected
-                && connector.interface().as_str() == "HDMI-A"
+            let name = format!(
+                "{}-{}",
+                connector.interface().as_str(),
+                connector.interface_id()
+            );
+            (name == wanted
+                && connector.state() == control::connector::State::Connected
                 && !connector.modes().is_empty())
             .then_some(connector)
         })
-        .ok_or_else(|| PlatformError::from("no connected HDMI-A output".to_string()))?;
+        .ok_or_else(|| {
+            PlatformError::from(format!(
+                "{wanted} was discovered but the display device does not offer it"
+            ))
+        })?;
 
     let mode = connector
         .modes()
@@ -718,7 +770,7 @@ fn find_output(
             (preferred, u32::from(w) * u32::from(h), mode.vrefresh())
         })
         .copied()
-        .ok_or_else(|| PlatformError::from("HDMI output has no mode".to_string()))?;
+        .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
 
     let current = connector
         .current_encoder()
@@ -734,7 +786,7 @@ fn find_output(
                 .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
                 .next()
         })
-        .ok_or_else(|| PlatformError::from("HDMI output has no compatible CRTC".to_string()))?;
+        .ok_or_else(|| PlatformError::from(format!("{wanted} has no compatible CRTC")))?;
     Ok((connector, crtc, mode))
 }
 
@@ -1132,7 +1184,7 @@ impl LibinputInterface for DirectInput {
         //
         // EVIOCGRAB is an input-core grab rather than an evdev one: every other
         // handler of the device, the console's included, stops receiving from
-        // it. It does not touch /dev/cec0, which the daemon owns and reads by
+        // it. It does not touch the CEC adapter, which the daemon owns and reads by
         // another road entirely, so the normalised remote is unaffected.
         //
         // A refusal is not fatal. Another process holding the grab means keys
@@ -1197,7 +1249,7 @@ impl SplitPlatform {
 
     /// Whether a device is a remote control rather than a keyboard.
     ///
-    /// The daemon owns the remote: it holds /dev/cec0, decodes the user-control
+    /// The daemon owns the remote: it holds the CEC adapter, decodes the user-control
     /// codes and publishes them as normalised actions, and this interface
     /// listens to that. The kernel *also* registers the same remote as an
     /// rc-core input device, so without this every press of the television

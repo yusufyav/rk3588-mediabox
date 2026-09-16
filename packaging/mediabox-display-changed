@@ -31,15 +31,14 @@ UNIT=mediabox-tv-ui.service
 # One plug, several uevents. Let them land before reading anything.
 sleep 1
 
-now=""
-for c in /sys/class/drm/card*-HDMI-A-*; do
-  [ -e "$c/status" ] || continue
-  name=$(basename "$c")
-  status=$(cat "$c/status" 2>/dev/null || echo unknown)
-  mode=$(head -1 "$c/modes" 2>/dev/null || true)
-  now="$now$name=$status:$mode
-"
-done
+# Every display output this board has, not every HDMI one: a box on
+# DisplayPort has to notice its screen changing too, and a board with two HDMI
+# sockets has to notice which of them it happened on. The list comes from
+# mediabox-platform so that this script and the interface agree about what the
+# outputs are; the sysfs sweep it replaced named `card*-HDMI-A-*`, which is one
+# board's answer to both questions.
+now=$(/opt/rk3588-mediabox/bin/mediabox-platform outputs 2>/dev/null || true)
+[ -n "$now" ] || exit 0
 
 was=$(cat "$STAMP" 2>/dev/null || true)
 printf '%s' "$now" > "$STAMP"

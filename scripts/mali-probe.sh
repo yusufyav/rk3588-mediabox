@@ -20,7 +20,9 @@ source "$here/scripts/env.sh"
 
 : "${MALI_RUNTIME:=/opt/rk3588-mediabox/mali-g24p0-runtime}"
 : "${MALI_STAGE:=/var/tmp/mali-stage}"
-: "${DRM_NODE:=/dev/dri/card0}"
+# The render device the vendor GBM implementation drives, asked of the board
+# rather than written down. Override it to probe a specific node.
+: "${DRM_NODE:=$(mediabox_ssh '/opt/rk3588-mediabox/bin/mediabox-platform render-node' 2>/dev/null || echo /dev/dri/renderD128)}"
 outdir="${1:-}"
 
 echo "== uploading probe source"

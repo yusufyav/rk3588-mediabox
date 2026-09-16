@@ -93,8 +93,9 @@ modetest -M rockchip -c 2>/dev/null |
   sed 's/^/  /'
 echo
 echo "----- connector sysfs -----"
+conn=\$(/opt/rk3588-mediabox/bin/mediabox-platform connector-path 2>/dev/null || true)
 for f in status enabled; do
-  printf '  %s: ' "\$f"; cat /sys/class/drm/card0-HDMI-A-1/\$f 2>/dev/null
+  printf '  %s: ' "\$f"; cat "\$conn/\$f" 2>/dev/null; echo
 done
 REMOTE
 

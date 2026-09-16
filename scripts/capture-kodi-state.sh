@@ -26,8 +26,9 @@ mediabox_ssh "cat /sys/kernel/debug/dri/0/summary" > "$out/$label-debugfs.txt" 2
 # and it prints property RANGES -- which matters here, because Kodi decides
 # whether it may use a cursor-typed plane by whether INPUT_WIDTH/INPUT_HEIGHT
 # exist as range properties, not by their current values.
-mediabox_ssh "for c in /sys/class/drm/card0-HDMI-A-1/status /sys/class/drm/card0-HDMI-A-1/enabled; do
-    printf '%s: ' \"\$c\"; cat \$c 2>/dev/null; done
+mediabox_ssh "conn=\$(/opt/rk3588-mediabox/bin/mediabox-platform connector-path 2>/dev/null || true)
+  for c in \"\$conn/status\" \"\$conn/enabled\"; do
+    printf '%s: ' \"\$c\"; cat \"\$c\" 2>/dev/null; done
   echo
   echo '===== connectors ====='
   modetest -M rockchip -c 2>/dev/null
@@ -35,8 +36,17 @@ mediabox_ssh "for c in /sys/class/drm/card0-HDMI-A-1/status /sys/class/drm/card0
   echo '===== planes ====='
   modetest -M rockchip -p 2>/dev/null" > "$out/$label-drm.txt" 2>&1
 
-mediabox_ssh "cat /proc/asound/card0/pcm0p/sub0/hw_params 2>/dev/null; echo '--- status'; \
-  cat /proc/asound/card0/pcm0p/sub0/status 2>/dev/null" > "$out/$label-alsa.txt" 2>&1
+# The sound card of the selected output.
+#
+# /proc/asound is indexed by card number and offers nothing else, so the number
+# is what has to be used here -- but it is resolved from the stable card id
+# rather than assumed, which is the whole difference: a card that probes in a
+# different order changes its number and not its id.
+mediabox_ssh "card=\$(/opt/rk3588-mediabox/bin/mediabox-platform alsa-card 2>/dev/null || true)
+  n=\$(/opt/rk3588-mediabox/bin/mediabox-platform alsa-index 2>/dev/null || true)
+  echo \"card \$card (index \$n this boot)\"
+  cat /proc/asound/card\$n/pcm0p/sub0/hw_params 2>/dev/null; echo '--- status'; \
+  cat /proc/asound/card\$n/pcm0p/sub0/status 2>/dev/null" > "$out/$label-alsa.txt" 2>&1
 
 "$here/scripts/tv-state.sh" "$label" > "$out/$label-tv.json" 2>&1
 echo "captured $label -> $out"

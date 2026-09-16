@@ -27,7 +27,33 @@ state=$(systemctl show "$UNIT" -p SubState --value)
 pid=$(pgrep -f -- "$BIN" | head -1 || true)
 [ -n "$pid" ] && ok interface "pid $pid" || bad interface 'not running'
 log=$(journalctl -u "$UNIT" --since "$since" --no-pager 2>/dev/null || true)
-printf '%s\n' "$log" | grep -q 'split-kms.*gbm=armsoc.*display=/dev/dri/card0' && ok platform 'renderD128 -> card0' || bad platform 'split path absent'
+# The split render/scanout path, without naming either device. What matters is
+# that the interface found *a* render node with the vendor GBM backend behind it
+# and *a* display device to scan out on -- the numbers differ between boards and
+# between boots, and a check that spells them out fails a working appliance.
+split=$(printf '%s\n' "$log" | sed -n 's/.*split-kms \(.*\)/\1/p' | tail -1)
+case "$split" in
+  *gbm=armsoc*display=*) ok platform "${split%% audio=*}" ;;
+  *)                     bad platform 'split path absent' ;;
+esac
+# And that the three things that follow from the chosen output resolved. The
+# audio endpoint and the CEC adapter belong to the connector the display stage
+# picked; a board with two HDMI sockets has a different answer for each.
+PLATFORM=/opt/rk3588-mediabox/bin/mediabox-platform
+selected=$("$PLATFORM" output 2>/dev/null || true)
+[ -n "$selected" ] && ok output "$selected" || bad output 'no output selected'
+card=$("$PLATFORM" alsa-card 2>/dev/null || true)
+[ -n "$card" ] && ok audio "$card" || bad audio 'no sound card for this output'
+adapter=$("$PLATFORM" cec-device 2>/dev/null || true)
+if [ -n "$adapter" ]; then
+  ok cec "$adapter"
+elif "$PLATFORM" inspect 2>/dev/null | grep -q 'cec *unavailable'; then
+  # DisplayPort carries no CEC. A capability this output does not have is not a
+  # fault of the appliance.
+  ok cec 'none on this output'
+else
+  bad cec 'no adapter for this output'
+fi
 printf '%s\n' "$log" | grep -q 'EGL_VENDOR=ARM.*GL_RENDERER=Mali-G610' && ok gpu 'ARM / Mali-G610' || bad gpu 'vendor GPU absent'
 printf '%s\n' "$log" | grep -q 'present dma-buf=active' && ok scanout 'PRIME FB active' || bad scanout 'no PRIME FB'
 printf '%s\n' "$log" | grep -q 'first_data_ms=' && ok home 'real data loaded' || bad home 'data absent'
@@ -103,6 +129,20 @@ if [ -c /dev/fb0 ]; then
 else
   ok 'framebuffer content' 'no fbdev'
 fi
+
+# The other product's prefix is not in this product's binaries.
+#
+# MediaBox has its own Rockchip media runtime. If a playback binary still
+# resolves libraries out of /opt/rk3588-screenbridge, the isolation this
+# appliance depends on has come undone -- and on a board carrying both products
+# that means one of them decides what the other decodes with.
+foreign=0
+for p in /opt/rk3588-mediabox/player/bin/mpv /opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm; do
+  [ -x "$p" ] || continue
+  ldd "$p" 2>/dev/null | grep -q '/opt/rk3588-screenbridge' && foreign=$((foreign + 1))
+done
+[ "$foreign" -eq 0 ] && ok 'media runtime' 'MediaBox owns it' \
+  || bad 'media runtime' "$foreign binaries resolve the ScreenBridge prefix"
 
 # Nothing left over from a previous film.
 orphans=$(pgrep -c -x mpv 2>/dev/null || true)

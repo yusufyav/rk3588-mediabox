@@ -1,11 +1,18 @@
 #
-# HDMI compressed-audio (IEC61937) PCM for the RK3588 "rockchip-hdmi1" card.
+# HDMI compressed-audio (IEC61937) PCM for an RK3588 HDMI sound card.
 #
-# Installed as /usr/share/alsa/cards/rockchip-hdmi1.conf, where alsa-lib's
-# `load_for_all_cards` hook picks it up by the card's *driver* name and exposes
-# it as `cards.rockchip-hdmi1` (and, by card index, `cards.0`). That is what the
-# stock /usr/share/alsa/pcm/hdmi.conf resolves its slave through, so adding this
-# one file is what makes `hdmi:CARD=rockchiphdmi1,DEV=0` exist at all.
+# A template, and `@ALSA_DRIVER@` is why. alsa-lib's `load_for_all_cards` hook
+# picks a card config up out of /usr/share/alsa/cards/ **by the card's driver
+# name** and exposes it as `cards.<driver>`, which is what the stock
+# /usr/share/alsa/pcm/hdmi.conf resolves its slave through — so adding one file
+# is what makes `hdmi:CARD=<id>,DEV=0` exist at all, and the file has to be
+# named after the card of the output this box is actually on.
+#
+# On a board with one HDMI socket that card is always `rockchip-hdmi1`, which is
+# how this started life as a file with that name in it. On a board with two it
+# is `rockchip-hdmi0` for the first socket and `rockchip-hdmi1` for the second,
+# and DisplayPort has a third. packaging/mediabox-hdmi-prepare renders this for
+# whichever one mediabox-platform resolved.
 #
 # Why this is needed (Gate MA1, fault domain B):
 # Kodi decides whether a device can do passthrough in
@@ -37,7 +44,7 @@
 # resolving to the same PCM chain it did before this file existed.
 #
 
-rockchip-hdmi1.pcm.hdmi.0 {
+@ALSA_DRIVER@.pcm.hdmi.0 {
 	@args [ CARD AES0 AES1 AES2 AES3 ]
 	@args.CARD {
 		type string
