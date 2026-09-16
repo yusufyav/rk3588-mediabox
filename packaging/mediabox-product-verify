@@ -28,6 +28,33 @@ P="$ROOT/opt/rk3588-mediabox"
 ETC="$ROOT/etc"
 fails=0
 
+MEDIABOXD_SOCK="${MEDIABOXD_SOCK:-/run/mediabox/mediaboxd.sock}"
+
+# One line of JSON to the daemon's own socket, one line back. python3 is a
+# runtime dependency of the product already -- the media worker is written in
+# it -- so this adds nothing the appliance does not have.
+mediabox_rpc() {
+  python3 - "$MEDIABOXD_SOCK" "$1" <<'PYEOF'
+import socket, sys
+sock, payload = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(30)
+try:
+    s.connect(sock)
+    s.sendall(payload.encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+except OSError as exc:
+    print(f'{{"ok":false,"error":{{"code":"NO_DAEMON","message":"{exc}"}}}}')
+else:
+    sys.stdout.write(buf.decode("utf-8", "replace").strip())
+PYEOF
+}
+
 pass() { printf '  PASS  %-40s %s\n' "$1" "${2:-}"; }
 fail() { printf '  FAIL  %-40s %s\n' "$1" "${2:-}"; fails=$((fails + 1)); }
 req_exec() { [ -x "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
@@ -196,8 +223,42 @@ if [ "$STATIC" != 1 ]; then
     st="$(systemctl is-active "$u.service" 2>/dev/null || true)"
     [ "$st" = active ] && pass "$u running" "$st" || fail "$u running" "${st:-unknown}"
   done
-  [ -S /run/mediabox-ui/video.sock ] && pass "interface video socket" present \
-    || fail "interface video socket" "MISSING /run/mediabox-ui/video.sock"
+  # A socket file is not a listener.
+  #
+  # This used to be `[ -S ... ]`, which a stale socket left behind by a dead
+  # interface passes just as well as a live one. What the player needs is
+  # something accepting on the other end, so that is what is asked.
+  sock=/run/mediabox-ui/video.sock
+  if [ ! -S "$sock" ]; then
+    fail "interface video socket" "MISSING $sock"
+  elif ss -xlnp 2>/dev/null | grep -q "$sock"; then
+    pass "interface video socket" listening
+  elif [ -n "$(ss -xln 2>/dev/null | grep -F "$sock")" ]; then
+    pass "interface video socket" listening
+  else
+    fail "interface video socket" "$sock exists but nothing is listening on it"
+  fi
+
+  # The probe the whole player path hangs off.
+  #
+  # Everything above this line passed on a clean board whose own player could
+  # not start a single film: the worker probes every source before anything
+  # plays, it finds ffprobe on PATH, and on that board PATH did not contain
+  # this appliance. A verifier that only looks at files says PASS to that. So
+  # the daemon is asked to plan a source that ships with the product -- the
+  # same call the television makes -- and the answer has to come back.
+  asset="$P/assets/sdr-4k-2398-main.mp4"
+  if [ ! -f "$asset" ]; then
+    fail "source probe" "MISSING $asset"
+  else
+    plan="$(mediabox_rpc "{\"command\":\"media_policy\",\"url\":\"file://$asset\"}" 2>/dev/null || true)"
+    case "$plan" in
+      *'"ok":true'*'"playback"'*) pass "source probe" "the worker planned a packaged source" ;;
+      *PROBE_FAILED*) fail "source probe" "the worker cannot run ffprobe: ${plan#*\"message\": \"}" ;;
+      "") fail "source probe" "the daemon did not answer on $MEDIABOXD_SOCK" ;;
+      *) fail "source probe" "$(printf '%s' "$plan" | cut -c1-160)" ;;
+    esac
+  fi
 fi
 
 echo

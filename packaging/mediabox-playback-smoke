@@ -1,0 +1,169 @@
+#!/bin/sh
+#
+# Does the television's own player actually play a film?
+#
+# Not "is mpv on the disk", not "does it list vo_mediabox" -- a clean install
+# answered yes to both while the appliance could not start a single film. This
+# starts one, through the same path a remote does: the daemon is asked to play
+# here, and then the process table, the decoder the player reports and the
+# display controller's own state are read back.
+#
+# It plays a three-second clip that ships with the product, so it needs no
+# network, no account and no media on the box, and it costs about fifteen
+# seconds.
+#
+set -eu
+P="${MEDIABOX_PREFIX:-/opt/rk3588-mediabox}"
+SOCK="${MEDIABOXD_SOCK:-/run/mediabox/mediaboxd.sock}"
+ASSET="${MEDIABOX_SMOKE_ASSET:-$P/assets/sdr-4k-2398-main.mp4}"
+fails=0
+ok()  { printf '  PASS  %-28s %s\n' "$1" "${2:-}"; }
+bad() { printf '  FAIL  %-28s %s\n' "$1" "${2:-}"; fails=$((fails + 1)); }
+
+rpc() {
+  python3 - "$SOCK" "$1" <<'PYEOF'
+import socket, sys
+sock, payload = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(30)
+try:
+    s.connect(sock)
+    s.sendall(payload.encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+except OSError as exc:
+    print(f'{{"ok":false,"error":{{"code":"NO_DAEMON","message":"{exc}"}}}}')
+else:
+    sys.stdout.write(buf.decode("utf-8", "replace").strip())
+PYEOF
+}
+
+# One field out of a daemon reply. The document is the first argument and the
+# key path follows it, so the document is shifted off before argv is passed on
+# -- it was not, and every lookup read the whole JSON as its first key.
+field() {
+  document="$1"; shift
+  printf '%s' "$document" | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+r = d.get("result") or {}
+for key in sys.argv[1:]:
+    r = r.get(key) if isinstance(r, dict) else None
+print("" if r is None else r)' "$@" 2>/dev/null || true
+}
+
+echo '== own-player smoke'
+
+[ -f "$ASSET" ] || { bad 'packaged clip' "MISSING $ASSET"; echo '== own-player smoke FAIL'; exit 1; }
+ok 'packaged clip' "$(basename "$ASSET")"
+
+# Whatever was playing before this is not this test's business, but it is in the
+# way of it. Stop first and start from a known display owner.
+rpc '{"command":"media_stop_here"}' >/dev/null 2>&1 || true
+
+answer="$(rpc "{\"command\":\"media_play_here\",\"url\":\"file://$ASSET\",\"start_seconds\":0,\"title\":\"playback smoke\"}")"
+case "$answer" in
+  *'"ok":true'*) ok 'daemon accepted play' "$(printf '%s' "$answer" | sed -n 's/.*"sessionId":"\([0-9a-f]*\)".*/session \1/p')" ;;
+  *) bad 'daemon accepted play' "$(printf '%s' "$answer" | cut -c1-200)"; echo '== own-player smoke FAIL'; exit 1 ;;
+esac
+
+# A player that exits immediately is the failure this exists to catch, so the
+# state is read a second in and again after it has had time to die.
+sleep 2
+state="$(systemctl show mediabox-player.service -p SubState --value 2>/dev/null || true)"
+[ "$state" = running ] && ok 'player unit' running || bad 'player unit' "${state:-absent}"
+
+pid="$(systemctl show mediabox-player.service -p MainPID --value 2>/dev/null || echo 0)"
+if [ "${pid:-0}" -gt 0 ] && [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$P/player/bin/mpv" ]; then
+  ok 'player process' "pid $pid"
+  # The decoder and the buffer allocator, from the process's own descriptors.
+  fds="$(ls -l "/proc/$pid/fd" 2>/dev/null || true)"
+  printf '%s' "$fds" | grep -q '/dev/mpp_service' \
+    && ok 'hardware decoder open' /dev/mpp_service || bad 'hardware decoder open' '/dev/mpp_service not open'
+  printf '%s' "$fds" | grep -q '/dev/dma_heap/' \
+    && ok 'dma-buf heap open' /dev/dma_heap || bad 'dma-buf heap open' 'no dma-buf heap open'
+else
+  bad 'player process' "no mpv at pid ${pid:-0}"
+  bad 'hardware decoder open' 'no player to ask'
+  bad 'dma-buf heap open' 'no player to ask'
+fi
+
+status="$(rpc '{"command":"media_status_here"}')"
+decoder="$(printf '%s' "$status" | python3 -c 'import json,sys
+try:
+    tracks = (json.load(sys.stdin).get("result") or {}).get("tracks") or []
+except Exception:
+    tracks = []
+print(next((t.get("decoder","") for t in tracks if t.get("type")=="video"), ""))' 2>/dev/null || true)"
+case "$decoder" in
+  *rkmpp*) ok 'decoder in use' "$decoder" ;;
+  '')      bad 'decoder in use' 'the player reported no video track' ;;
+  *)       bad 'decoder in use' "$decoder is not the hardware decoder" ;;
+esac
+
+playing="$(field "$status" playing)"
+case "$playing" in
+  True|true) ok 'reported playing' yes ;;
+  *)         bad 'reported playing' "${playing:-no}" ;;
+esac
+
+# And what the display controller is actually scanning out. A film that decodes
+# into a buffer nothing puts on a plane is a black television.
+state_file=
+for d in /sys/kernel/debug/dri/*/state; do [ -r "$d" ] && state_file="$d" && break; done
+if [ -n "$state_file" ]; then
+  plane="$(awk '
+    /^plane\[/ { name = $0; crtc = ""; fmt = ""; owner = "" }
+    /crtc=video_port/ { crtc = $0 }
+    /format=(NV12|NV15|NA12|NA15)/ { fmt = $0 }
+    /allocated by/ { owner = $0 }
+    /^$/ { if (crtc != "" && fmt != "") { print name; exit } }
+  ' "$state_file")"
+  if [ -n "$plane" ]; then
+    ok 'video plane scanning out' "$(printf '%s' "$plane" | tr -d '\t')"
+  else
+    # The format line and the owner line are not always in the same block on
+    # every kernel; fall back to asking whether any plane carries NV12/NV15.
+    if grep -qE 'format=(NV12|NV15|NA12|NA15)' "$state_file"; then
+      ok 'video plane scanning out' 'NV12/NV15 plane active'
+    else
+      bad 'video plane scanning out' 'no NV12/NV15 plane on the display'
+    fi
+  fi
+else
+  bad 'video plane scanning out' 'the display controller state is not readable'
+fi
+
+# Transport, on the film that is playing: a player that cannot be paused is not
+# under the control plane's control.
+pause="$(rpc '{"command":"media_transport_here","action":"play_pause"}')"
+case "$pause" in *'"ok":true'*) ok 'transport play/pause' accepted ;; *) bad 'transport play/pause' "$(printf '%s' "$pause" | cut -c1-140)" ;; esac
+rpc '{"command":"media_transport_here","action":"play_pause"}' >/dev/null 2>&1 || true
+
+# And it gives the television back.
+rpc '{"command":"media_stop_here"}' >/dev/null 2>&1 || true
+sleep 3
+state="$(systemctl show mediabox-player.service -p SubState --value 2>/dev/null || true)"
+case "$state" in
+  dead|'') ok 'player stopped' "${state:-gone}" ;;
+  *)       bad 'player stopped' "$state" ;;
+esac
+ui="$(systemctl is-active mediabox-tv-ui.service 2>/dev/null || true)"
+case "$ui" in
+  active) ok 'interface has the display' active ;;
+  *)      bad 'interface has the display' "${ui:-unknown}" ;;
+esac
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo '== own-player smoke PASS'
+else
+  echo "== own-player smoke FAIL ($fails)"
+fi
+[ "$fails" -eq 0 ]

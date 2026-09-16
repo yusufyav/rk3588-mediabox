@@ -20,6 +20,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 targets=(
   scripts/install/install-mediabox.sh
   packaging/mediabox-product-verify
+  packaging/mediabox-playback-smoke
   releases/current.env
 )
 

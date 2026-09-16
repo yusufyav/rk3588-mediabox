@@ -275,13 +275,51 @@ else
 fi
 
 # ------------------------------------------------ 11. /etc integration files
+#
+# Each integration file comes from where the capture recorded it coming from.
+# The unit files, the udev rules and the JSON tables are packaging: this
+# repository holds them and is ahead of any archive as soon as one of them is
+# fixed. The daemon's own configuration exists only on the appliance, so for
+# those the archive is the only source.
+#
+# Taking them all from the archive instead would mean re-cutting a 350 MB
+# release to change one line of a unit file -- and it would have re-installed
+# the very unit whose missing PATH stopped the player from ever starting.
 step "system integration"
-( cd "$staging/rootfs" && find etc -type f -print0 ) |
-  while IFS= read -r -d '' rel; do
-    mode="$(stat -c %a "$staging/rootfs/$rel")"
-    install -D -m "$mode" "$staging/rootfs/$rel" "/$rel"
-    printf '  ok    /%s (%s)\n' "$rel" "$mode"
-  done
+manifest="$staging/meta/integration-manifest.tsv"
+install_one() {
+  rel="$1"; src="$2"; origin="$3"
+  mode="$(stat -c %a "$staging/rootfs/$rel" 2>/dev/null || echo 0644)"
+  install -D -m "$mode" "$src" "/$rel"
+  printf '  ok    /%-52s %s (%s)\n' "$rel" "$origin" "$mode"
+}
+if [ -f "$manifest" ]; then
+  while IFS="$(printf '\t')" read -r rel source _state; do
+    [ -n "${rel:-}" ] || continue
+    case "$source" in
+      repo:*)
+        repo_path="$here/${source#repo:}"
+        if [ -f "$repo_path" ]; then
+          install_one "$rel" "$repo_path" repo
+        else
+          install_one "$rel" "$staging/rootfs/$rel" "archive (not in this tree)"
+        fi
+        ;;
+      *) install_one "$rel" "$staging/rootfs/$rel" archive ;;
+    esac
+  done <"$manifest"
+else
+  ( cd "$staging/rootfs" && find etc -type f -print0 ) |
+    while IFS= read -r -d '' rel; do
+      install_one "$rel" "$staging/rootfs/$rel" archive
+    done
+fi
+
+# The product's own checks live beside the product, so the appliance can be
+# asked whether it is whole without this repository being present.
+install -m 0755 "$here/packaging/mediabox-product-verify" "$prefix/bin/mediabox-product-verify"
+install -m 0755 "$here/packaging/mediabox-playback-smoke" "$prefix/bin/mediabox-playback-smoke"
+ok "product checks installed"
 
 # ------------------------------------ 12-14. reload, udev, platform discovery
 step "activating"
@@ -328,9 +366,24 @@ ok "mediabox-tv-ui.service"
 step "product verifier"
 "$verifier" || die "the installed product did not verify"
 
+# ------------------------------------------- 19. and it has to play a film
+#
+# A verifier that only reads files signed off on a clean board whose own player
+# could not start anything. So the last gate is a film: the daemon is asked to
+# play a clip that ships with the product, and the decoder, the buffers and the
+# display plane are read back off the running player. Fifteen seconds, no
+# network, no account, and no way to reach the final PASS without it.
+step "own-player playback"
+"$here/packaging/mediabox-playback-smoke" \
+  || die "the appliance's own player did not play.
+     Everything is installed, but the default player is not operational --
+     which is the state this installer used to call PASS."
+
 step "PASS"
 cat <<EOF
   MediaBox ${MEDIABOX_RELEASE_TAG} is installed at $prefix
   from $MEDIABOX_RELEASE_ASSET
+  the default player is operational: it decoded a film with rkmpp and put it
+  on the display's own video plane
   nothing was compiled on this board
 EOF

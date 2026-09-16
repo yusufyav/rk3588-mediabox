@@ -491,6 +491,36 @@ else
   failures=$((failures + 1))
 fi
 
+echo "-- the installer will not report PASS without a film having played"
+installer="$(cat "$here/scripts/install/install-mediabox.sh")"
+contains "the playback smoke is a gate"   "$installer" 'packaging/mediabox-playback-smoke'
+contains "and failing it stops the install" "$installer" "the appliance's own player did not play"
+contains "PASS says the player works"     "$installer" 'the default player is operational'
+
+echo "-- the media worker can find the product's own ffprobe"
+worker="$(cat "$here/packaging/systemd/mediabox-media-worker.service")"
+contains "the unit names a PATH"          "$worker" 'Environment=PATH='
+contains "with the product's runtime first" "$worker" 'PATH=/opt/rk3588-mediabox/media-runtime/bin:'
+
+echo "-- the playback smoke measures the things that were broken"
+smoke="$(cat "$here/packaging/mediabox-playback-smoke")"
+contains "it asks the daemon to play"     "$smoke" 'media_play_here'
+contains "it checks the hardware decoder" "$smoke" '/dev/mpp_service'
+contains "it checks the dma-buf heap"     "$smoke" '/dev/dma_heap/'
+contains "it checks the video plane"      "$smoke" 'NV12|NV15'
+contains "and that the interface comes back" "$smoke" 'interface has the display'
+
+echo "-- the verifier probes a real source, not just files"
+verifier="$(cat "$here/packaging/mediabox-product-verify")"
+contains "it plans a packaged source"     "$verifier" 'media_policy'
+contains "it names the probe failure"     "$verifier" 'cannot run ffprobe'
+contains "and the socket must be listening" "$verifier" 'nothing is listening on it'
+
+echo "-- the relay serves a local file without dying on its status"
+relay="$(cat "$here/media/proxy/relay.py")"
+contains "file URLs have their own path"  "$relay" 'if urllib.parse.urlsplit(url).scheme == "file"'
+contains "and ranges are honoured"        "$relay" 'Content-Range'
+
 echo "-- the kiosk smoke treats the product's own player as required"
 smoke="$(cat "$here/packaging/mediabox-kiosk-smoke")"
 contains "the player is checked for existence" "$smoke" "bad 'player present'"

@@ -16,7 +16,11 @@ film and never seek in it, which is not a film player.
 from __future__ import annotations
 
 import logging
+import mimetypes
+import os
+import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Iterator
 
@@ -34,6 +38,74 @@ CHUNK_BYTES = 256 * 1024
 PASSED_BACK = ("content-type", "content-length", "content-range", "accept-ranges")
 
 
+#: `bytes=START-END`, either end allowed to be absent.
+RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _relay_file(url: str, range_header: str | None):
+    """Serve a `file://` source the way an HTTP one is served.
+
+    urllib answers a file:// URL through its own file handler, and that reply
+    has no status line: `response.status` is None. That None went straight into
+    `send_response()`, which wants a number, and the worker died mid-reply with
+    a TypeError -- the player saw "Error reading HTTP response: End of file"
+    and the film did not start. The same handler also ignores Range, so a seek
+    would have silently replayed from the beginning.
+
+    Whether this path may be read at all is decided before a session exists,
+    against the worker's --allow-file-prefix list. By the time a session has a
+    playback URL the question has been answered.
+    """
+    path = urllib.parse.unquote(urllib.parse.urlsplit(url).path)
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise MediaError("SOURCE_UNREACHABLE", f"{url} is unreachable", 502) from exc
+
+    start, end = 0, size - 1
+    partial = False
+    if range_header:
+        match = RANGE.match(range_header.strip())
+        if not match:
+            raise MediaError("SOURCE_REFUSED", "the range is not one this source takes", 416)
+        first, last = match.group(1), match.group(2)
+        if first:
+            start = int(first)
+            if last:
+                end = min(int(last), size - 1)
+        elif last:
+            # A suffix range: the last N bytes.
+            start = max(0, size - int(last))
+        if start >= size or start > end:
+            raise MediaError("SOURCE_REFUSED", f"the source refused the request (416)", 416)
+        partial = True
+
+    length = end - start + 1
+    content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    headers = [
+        ("Content-Type", content_type),
+        ("Content-Length", str(length)),
+        ("Accept-Ranges", "bytes"),
+        ("Cache-Control", "no-store"),
+        ("Connection", "close"),
+    ]
+    if partial:
+        headers.append(("Content-Range", f"bytes {start}-{end}/{size}"))
+
+    def chunks() -> Iterator[bytes]:
+        remaining = length
+        with open(path, "rb") as handle:
+            handle.seek(start)
+            while remaining > 0:
+                block = handle.read(min(CHUNK_BYTES, remaining))
+                if not block:
+                    return
+                remaining -= len(block)
+                yield block
+
+    return (206 if partial else 200), headers, chunks()
+
+
 def relay(url: str, range_header: str | None, timeout: float = 30.0):
     """Open `url` and return `(status, headers, chunks)` for a local reply.
 
@@ -41,6 +113,9 @@ def relay(url: str, range_header: str | None, timeout: float = 30.0):
     stops reading — which is what happens on every seek, because the player
     abandons the response and asks for a new range.
     """
+    if urllib.parse.urlsplit(url).scheme == "file":
+        return _relay_file(url, range_header)
+
     request = urllib.request.Request(url, method="GET")
     if range_header:
         request.add_header("Range", range_header)
