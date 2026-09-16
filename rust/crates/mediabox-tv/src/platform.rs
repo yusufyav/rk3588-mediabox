@@ -1223,6 +1223,13 @@ struct SplitPlatform {
     /// Keyed by the kernel's own name for the device ("event3"), because that
     /// is what libinput hands back and what /sys is organised by.
     remotes: RefCell<std::collections::HashMap<String, bool>>,
+    /// Whether a shift key is down.
+    ///
+    /// libinput hands over key codes, not characters: there is no xkb here and
+    /// nothing else is tracking the modifiers, so without this every letter
+    /// arrived lower case and half of ASCII could not be typed at all. A film
+    /// title did not care. A password does.
+    shift: std::cell::Cell<bool>,
 }
 
 impl SplitPlatform {
@@ -1244,6 +1251,7 @@ impl SplitPlatform {
             receiver: RefCell::new(receiver),
             proxy: Proxy { sender, wake },
             remotes: RefCell::new(std::collections::HashMap::new()),
+            shift: std::cell::Cell::new(false),
         })
     }
 
@@ -1307,7 +1315,14 @@ impl SplitPlatform {
             if self.remote_control(&key.device()) {
                 continue;
             }
-            let Some(text) = key_text(key.key()) else {
+            // Either shift, held. Tracked before anything else looks at the
+            // code, and not forwarded: a modifier on its own is not a press
+            // this interface has anything to do with.
+            if matches!(key.key(), KEY_LEFTSHIFT | KEY_RIGHTSHIFT) {
+                self.shift.set(matches!(key.key_state(), KeyState::Pressed));
+                continue;
+            }
+            let Some(text) = key_text(key.key(), self.shift.get()) else {
                 continue;
             };
             let event = match key.key_state() {
@@ -1409,7 +1424,11 @@ impl Platform for SplitPlatform {
 /// pressed, and a television remote that emits one of those through a HID
 /// endpoint must reach a dead end here. See `actions.rs`, and the udev rule
 /// that stops systemd-logind from acting on them first.
-fn key_text(code: u32) -> Option<slint::SharedString> {
+/// The two shift keys, by the kernel's code.
+const KEY_LEFTSHIFT: u32 = 42;
+const KEY_RIGHTSHIFT: u32 = 54;
+
+fn key_text(code: u32, shift: bool) -> Option<slint::SharedString> {
     use slint::platform::Key;
     let key = match code {
         1 => Key::Escape,
@@ -1421,7 +1440,7 @@ fn key_text(code: u32) -> Option<slint::SharedString> {
         106 => Key::RightArrow,
         108 => Key::DownArrow,
         111 => Key::Delete,
-        _ => return printable(code).map(|c| c.to_string().into()),
+        _ => return printable(code, shift).map(|c| c.to_string().into()),
     };
     Some(char::from(key).to_string().into())
 }
@@ -1430,18 +1449,45 @@ fn key_text(code: u32) -> Option<slint::SharedString> {
 /// the appliance assumes. There is no xkb here and no compose: a keyboard on a
 /// television is for typing a film's name into a search box, and anything more
 /// belongs to the browser application.
-fn printable(code: u32) -> Option<char> {
+fn printable(code: u32, shift: bool) -> Option<char> {
     const ROW_NUMBERS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    const ROW_NUMBERS_SHIFTED: [char; 10] = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'];
     const ROW_Q: [char; 10] = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
     const ROW_A: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
     const ROW_Z: [char; 7] = ['z', 'x', 'c', 'v', 'b', 'n', 'm'];
 
+    let letter = |c: char| {
+        if shift { c.to_ascii_uppercase() } else { c }
+    };
+    // The marks, in the order the kernel numbers them: unshifted, shifted.
+    let mark = |plain: char, shifted: char| if shift { shifted } else { plain };
+
     Some(match code {
-        2..=11 => ROW_NUMBERS[(code - 2) as usize],
-        16..=25 => ROW_Q[(code - 16) as usize],
-        30..=38 => ROW_A[(code - 30) as usize],
-        44..=50 => ROW_Z[(code - 44) as usize],
-        12 => '-',
+        2..=11 => {
+            let at = (code - 2) as usize;
+            if shift {
+                ROW_NUMBERS_SHIFTED[at]
+            } else {
+                ROW_NUMBERS[at]
+            }
+        }
+        16..=25 => letter(ROW_Q[(code - 16) as usize]),
+        30..=38 => letter(ROW_A[(code - 30) as usize]),
+        44..=50 => letter(ROW_Z[(code - 44) as usize]),
+        // The rest of the US layout's printable keys. They were missing, and
+        // with them so were the full stop and the underscore — which is to say
+        // most e-mail addresses could not be typed on a keyboard at all.
+        12 => mark('-', '_'),
+        13 => mark('=', '+'),
+        26 => mark('[', '{'),
+        27 => mark(']', '}'),
+        39 => mark(';', ':'),
+        40 => mark('\'', '"'),
+        41 => mark('`', '~'),
+        43 => mark('\\', '|'),
+        51 => mark(',', '<'),
+        52 => mark('.', '>'),
+        53 => mark('/', '?'),
         57 => ' ',
         _ => return None,
     })
@@ -1455,10 +1501,12 @@ mod tests {
     #[test]
     fn no_key_code_maps_to_power() {
         for code in [116u32, 142, 356, 408, 0x198, 0x1ae] {
-            assert!(
-                key_text(code).is_none(),
-                "key code {code} reached the interface"
-            );
+            for shift in [false, true] {
+                assert!(
+                    key_text(code, shift).is_none(),
+                    "key code {code} reached the interface"
+                );
+            }
         }
     }
 
@@ -1466,9 +1514,58 @@ mod tests {
     fn a_film_can_be_typed() {
         let word: String = [30u32, 18, 19, 20, 57, 50, 50]
             .into_iter()
-            .filter_map(|code| printable(code))
+            .filter_map(|code| printable(code, false))
             .collect();
         assert_eq!(word, "aert mm");
+    }
+
+    /// There is no xkb here, so the modifier is this table's business. Without
+    /// it every letter arrived lower case and half of ASCII could not be
+    /// entered — which a film title survives and a password does not.
+    #[test]
+    fn shift_reaches_the_other_half_of_the_keyboard() {
+        let typed = |codes: &[u32], shift: bool| -> String {
+            codes
+                .iter()
+                .filter_map(|code| printable(*code, shift))
+                .collect()
+        };
+        assert_eq!(typed(&[30, 31, 32], false), "asd");
+        assert_eq!(typed(&[30, 31, 32], true), "ASD");
+        // The number row carries the marks a password is made of.
+        assert_eq!(
+            typed(&[2, 3, 4, 5, 6, 7, 8, 9, 10, 11], false),
+            "1234567890"
+        );
+        assert_eq!(typed(&[2, 3, 4, 5, 6, 7, 8, 9, 10, 11], true), "!@#$%^&*()");
+    }
+
+    /// The fault this was found by: an address could not be typed on a
+    /// keyboard. The full stop and the underscore were not in the table at
+    /// all, and the at sign needed a modifier nothing was tracking.
+    #[test]
+    fn an_address_can_be_typed_on_a_keyboard() {
+        //          a      .      b      @      c      _      d
+        let keys = [
+            (30u32, false),
+            (52, false),
+            (48, false),
+            (3, true),
+            (46, false),
+            (12, true),
+            (32, false),
+            (12, false),
+            (18, false),
+            (52, false),
+            (46, false),
+            (24, false),
+            (50, false),
+        ];
+        let typed: String = keys
+            .into_iter()
+            .map(|(code, shift)| printable(code, shift).unwrap_or('?'))
+            .collect();
+        assert_eq!(typed, "a.b@c_d-e.com");
     }
 }
 

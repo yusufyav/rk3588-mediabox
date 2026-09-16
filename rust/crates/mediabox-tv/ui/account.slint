@@ -120,14 +120,19 @@ export component Account inherits Rectangle {
                     vertical-alignment: center;
                     wrap: no-wrap;
                 }
+                // The caret: a thin bar the height of a letter, not of the
+                // box. The outer rectangle is only the slot it stands in and
+                // must stay transparent — given a background of its own it
+                // draws floor to ceiling, which is a rule, not a caret.
                 Rectangle {
                     width: active ? 2px : 0px;
-                    background: focused ? #0a0c10 : Theme.accent;
+                    background: transparent;
                     Rectangle {
-                        y: parent.height * 0.26;
+                        y: (parent.height - Metrics.root-font * 1.15) / 2;
                         width: 100%;
-                        height: parent.height * 0.48;
-                        background: parent.background;
+                        height: Metrics.root-font * 1.15;
+                        border-radius: 1px;
+                        background: focused ? #0a0c10 : Theme.accent;
                     }
                 }
                 Text {
@@ -189,14 +194,19 @@ export component Account inherits Rectangle {
                     vertical-alignment: center;
                     wrap: no-wrap;
                 }
+                // The caret: a thin bar the height of a letter, not of the
+                // box. The outer rectangle is only the slot it stands in and
+                // must stay transparent — given a background of its own it
+                // draws floor to ceiling, which is a rule, not a caret.
                 Rectangle {
                     width: active ? 2px : 0px;
-                    background: focused ? #0a0c10 : Theme.accent;
+                    background: transparent;
                     Rectangle {
-                        y: parent.height * 0.26;
+                        y: (parent.height - Metrics.root-font * 1.15) / 2;
                         width: 100%;
-                        height: parent.height * 0.48;
-                        background: parent.background;
+                        height: Metrics.root-font * 1.15;
+                        border-radius: 1px;
+                        background: focused ? #0a0c10 : Theme.accent;
                     }
                 }
                 Text {
