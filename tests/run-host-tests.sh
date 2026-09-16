@@ -497,10 +497,16 @@ contains "the playback smoke is a gate"   "$installer" 'packaging/mediabox-playb
 contains "and failing it stops the install" "$installer" "the appliance's own player did not play"
 contains "PASS says the player works"     "$installer" 'the default player is operational'
 
-echo "-- the media worker can find the product's own ffprobe"
+echo "-- the media worker can find an ffprobe, and one that speaks TLS"
 worker="$(cat "$here/packaging/systemd/mediabox-media-worker.service")"
-contains "the unit names a PATH"          "$worker" 'Environment=PATH='
-contains "with the product's runtime first" "$worker" 'PATH=/opt/rk3588-mediabox/media-runtime/bin:'
+contains "the unit names a PATH"           "$worker" 'Environment=PATH='
+# The order is the whole point: the appliance's own FFmpeg has no TLS and
+# answers "Protocol not found" to every catalogue source, so the system one
+# has to win and the product's own build is only the fallback.
+contains "the system path comes first"     "$worker" 'Environment=PATH=/usr/local/sbin:'
+contains "the product's build is the tail" "$worker" ':/opt/rk3588-mediabox/media-runtime/bin'
+capture="$(cat "$here/scripts/release/create-mediabox-release.sh")"
+contains "and ffmpeg is a declared runtime dependency" "$capture" 'for c in python3 ffprobe ffmpeg'
 
 echo "-- the playback smoke measures the things that were broken"
 smoke="$(cat "$here/packaging/mediabox-playback-smoke")"
@@ -515,6 +521,7 @@ verifier="$(cat "$here/packaging/mediabox-product-verify")"
 contains "it plans a packaged source"     "$verifier" 'media_policy'
 contains "it names the probe failure"     "$verifier" 'cannot run ffprobe'
 contains "and the socket must be listening" "$verifier" 'nothing is listening on it'
+contains "and the probe must speak https"  "$verifier" 'probe speaks https'
 
 echo "-- the relay serves a local file without dying on its status"
 relay="$(cat "$here/media/proxy/relay.py")"

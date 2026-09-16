@@ -222,7 +222,13 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
     sed 's|^/lib/|/usr/lib/|' | sort -u |
     while read -r l; do dpkg-query -S "$l" 2>/dev/null | cut -d: -f1; done |
     tr ',' '\n' | tr -d ' '
-  for c in python3 sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode; do
+  # ffprobe is not linked into anything, so no ELF closure finds it -- and it is
+  # the first thing the worker runs on every source. The board this was first
+  # captured from happened to have Debian's ffmpeg installed; the clean board
+  # did not, and the television's own player never started. It is named here so
+  # a clean install gets it, and gets a probe that can open https, which the
+  # appliance's own Rockchip build cannot.
+  for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode; do
     p="$(command -v "$c" 2>/dev/null)" || continue
     dpkg-query -S "$(readlink -f "$p")" 2>/dev/null | cut -d: -f1
   done | tr ',' '\n' | tr -d ' '

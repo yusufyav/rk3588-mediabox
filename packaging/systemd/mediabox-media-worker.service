@@ -7,21 +7,22 @@ Before=mediaboxd-rs.service
 [Service]
 Type=simple
 Environment=PYTHONPATH=/opt/rk3588-mediabox
-# The product's own FFmpeg comes first, and the reason is not preference.
+# ffprobe has to be on PATH, and it has to be one that speaks TLS.
 #
-# The worker probes every source with ffprobe before anything can play, and it
-# finds it the way any program does: on PATH. Without this line the unit gets
-# systemd's default PATH, which does not contain this appliance, so on a clean
-# board the probe fails with "ffprobe binary not found" -- and because the probe
-# is upstream of everything, the television's own player never gets as far as
-# being started. It reads as "the player is broken"; nothing was ever launched.
+# The worker probes every source before anything can play, and it finds ffprobe
+# the way any program does: on PATH. The unit had no PATH at all, so it got
+# systemd's default and a clean board answered "ffprobe binary not found" -- and
+# because the probe is upstream of everything, the television's own player was
+# never started. It read as a broken player; nothing had been launched.
 #
-# It worked on the board this release was captured from only because Debian's
-# ffmpeg package happened to be installed there, which also meant the appliance
-# was probing with a stock FFmpeg instead of the one it ships -- the one built
-# against Rockchip MPP and RGA. Naming the prefix fixes the clean install and
-# stops the product depending on a package it never asked for.
-Environment=PATH=/opt/rk3588-mediabox/media-runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The appliance ships its own FFmpeg, but that one is built for the Rockchip
+# decoder and carries no TLS: it answers "Protocol not found" to an https URL,
+# which is every real source. So the system ffmpeg comes first and is a declared
+# runtime dependency, and the product's own build stands behind it for file://
+# and http:// if the package is ever missing. mediabox-product-verify fails if
+# whichever one wins cannot open https, because that failure is otherwise
+# invisible until someone tries to watch something.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/rk3588-mediabox/media-runtime/bin
 EnvironmentFile=-/etc/mediabox-media-worker.env
 ExecStart=/usr/bin/python3 -m media.server --bind 127.0.0.1 --port 8790 --streaming-server http://127.0.0.1:11470 --state /var/lib/mediabox-media-worker/stremio-session.json --base-url http://127.0.0.1:8790 --loopback-base-url http://127.0.0.1:8790 --library /etc/mediabox-library.json --allow-file-prefix /opt/rk3588-mediabox/assets/
 Restart=on-failure

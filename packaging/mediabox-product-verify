@@ -247,6 +247,26 @@ if [ "$STATIC" != 1 ]; then
   # this appliance. A verifier that only looks at files says PASS to that. So
   # the daemon is asked to plan a source that ships with the product -- the
   # same call the television makes -- and the answer has to come back.
+  # And that the ffprobe the worker will actually use speaks TLS.
+  #
+  # The probe below uses a file:// source, which every ffprobe can open. Real
+  # sources are https, and the FFmpeg this appliance ships is built for the
+  # Rockchip decoder with no TLS at all -- it answers "Protocol not found" to
+  # every real link. Pointing the worker's PATH at it fixed a clean install and
+  # broke every film on it, and nothing here noticed, because a packaged clip
+  # plays perfectly either way. So the winner of the PATH is asked what
+  # protocols it has.
+  worker_path="$(systemctl show mediabox-media-worker.service -p Environment --value 2>/dev/null |
+                 tr ' ' '\n' | sed -n 's/^PATH=//p' | head -1)"
+  probe_bin="$(PATH="${worker_path:-$PATH}" command -v ffprobe 2>/dev/null || true)"
+  if [ -z "$probe_bin" ]; then
+    fail "probe binary" "no ffprobe on the media worker's PATH"
+  elif "$probe_bin" -hide_banner -protocols 2>/dev/null | tr ',' '\n' | grep -qx ' *https'; then
+    pass "probe speaks https" "$probe_bin"
+  else
+    fail "probe speaks https" "$probe_bin cannot open https; every catalogue source is https"
+  fi
+
   asset="$P/assets/sdr-4k-2398-main.mp4"
   if [ ! -f "$asset" ]; then
     fail "source probe" "MISSING $asset"
