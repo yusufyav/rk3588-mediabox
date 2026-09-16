@@ -459,6 +459,44 @@ else
   echo "-- skipping asset checks (no $hdr)"
 fi
 
+echo "-- the production installer compiles nothing"
+if "$here/tests/check-build-free.sh" >/dev/null 2>&1; then
+  echo "ok   build-free installer"
+else
+  echo "FAIL build-free installer:"
+  "$here/tests/check-build-free.sh" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
+
+echo "-- the release is pinned to an exact tag and digest"
+pin="$here/releases/current.env"
+if [ -f "$pin" ]; then
+  # shellcheck source=/dev/null
+  ( set -a; . "$pin"
+    [ -n "${MEDIABOX_RELEASE_TAG:-}" ] &&
+    [ -n "${MEDIABOX_RELEASE_ASSET:-}" ] &&
+    [ -n "${MEDIABOX_RELEASE_SIZE:-}" ] &&
+    [[ "${MEDIABOX_RELEASE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] ) &&
+    echo "ok   releases/current.env carries a tag, an asset, a size and a digest" || {
+      echo "FAIL releases/current.env is not fully pinned"
+      failures=$((failures + 1)); }
+  if grep -q 'releases/latest\|/latest/download' "$pin"; then
+    echo "FAIL releases/current.env points at a moving target"
+    failures=$((failures + 1))
+  else
+    echo "ok   releases/current.env names no moving target"
+  fi
+else
+  echo "FAIL releases/current.env is missing"
+  failures=$((failures + 1))
+fi
+
+echo "-- the kiosk smoke treats the product's own player as required"
+smoke="$(cat "$here/packaging/mediabox-kiosk-smoke")"
+contains "the player is checked for existence" "$smoke" "bad 'player present'"
+contains "vo_mediabox is required"             "$smoke" 'vo_mediabox absent'
+contains "rkmpp is required"                   "$smoke" 'rkmpp absent'
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all host tests passed"
