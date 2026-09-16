@@ -251,6 +251,11 @@ cp_ "$here/packaging/mediabox-display-guard" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "install -m 0755 /var/tmp/mediabox-display-guard $prefix/bin/mediabox-display-guard && \
      rm -f /var/tmp/mediabox-display-guard"
 
+# The half of the handback that must not run inside kodi.service's stop.
+cp_ "$here/packaging/mediabox-display-recover" "$MEDIABOX_TARGET:/var/tmp/"
+sh_ "install -m 0755 /var/tmp/mediabox-display-recover $prefix/bin/mediabox-display-recover && \
+     rm -f /var/tmp/mediabox-display-recover"
+
 cp_ "$here/packaging/mediabox-ui-reap" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "install -m 0755 /var/tmp/mediabox-ui-reap $prefix/bin/mediabox-ui-reap && \
      rm -f /var/tmp/mediabox-ui-reap"

@@ -8,6 +8,7 @@ use mediaboxd_rs::leds::LedController;
 use mediaboxd_rs::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use mediaboxd_rs::media::MediaClient;
 use mediaboxd_rs::player::PlayerManager;
+use mediaboxd_rs::transition::DisplayTransition;
 use mediaboxd_rs::web::{PeerPolicy, WebConfig, serve as serve_web};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -132,10 +133,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => None,
     };
+    // One gate for every change of display ownership, shared by both managers
+    // and readable from outside the daemon by `mediabox-display-guard`. Two
+    // of these would be two gates, which is the bug it exists to prevent.
+    let handovers = DisplayTransition::new();
     let state = Arc::new(AppState {
         kodi: kodi.clone(),
         lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
-        surface: SurfaceManager::new(&args.kodi_unit, &args.ui_unit)?,
+        surface: SurfaceManager::new(&args.kodi_unit, &args.ui_unit, handovers.clone())?,
         player: Arc::new(PlayerManager::new(
             "/opt/rk3588-mediabox/bin/mediabox-player",
             "/run/mediabox/player.sock",
@@ -144,6 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.applications.as_deref(),
             &args.kodi_unit,
             &args.ui_unit,
+            handovers,
         )?,
         cec: CecRuntime {
             adapter: adapter.clone(),

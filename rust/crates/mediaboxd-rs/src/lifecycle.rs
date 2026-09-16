@@ -1,9 +1,9 @@
+use crate::transition::DisplayTransition;
 use mediabox_core::{Application, ApplicationStatus, DisplayStatus, Surface, SurfaceStatus};
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::process::Command;
-use tokio::sync::Mutex;
 
 #[derive(Debug, Error)]
 pub enum LifecycleError {
@@ -92,25 +92,34 @@ async fn unit_exists(unit: &str) -> bool {
 ///
 /// Kodi and the TV-local product UI both want DRM master, so exactly one of
 /// them may run. Every transition goes through here: stop the incumbent, wait
-/// for it to actually be gone, then start the successor. The mutex makes two
-/// concurrent switches impossible, which is what would otherwise leave both
-/// units down or both fighting for the same CRTC.
+/// for it to actually be gone, then start the successor.
+///
+/// The gate that serialises those transitions is shared with
+/// `ApplicationManager` rather than private to this one, and is observable
+/// from outside the process -- see `crate::transition`. Both properties are
+/// load-bearing: privately, a switch and a launch could otherwise stop each
+/// other's target, and from outside, `mediabox-display-guard` reads the same
+/// gate to tell a handover somebody asked for from a Kodi that simply ended.
 #[derive(Clone)]
 pub struct SurfaceManager {
     kodi_unit: String,
     ui_unit: String,
-    gate: std::sync::Arc<Mutex<()>>,
+    transition: DisplayTransition,
 }
 
 impl SurfaceManager {
-    pub fn new(kodi_unit: &str, ui_unit: &str) -> Result<Self, LifecycleError> {
+    pub fn new(
+        kodi_unit: &str,
+        ui_unit: &str,
+        transition: DisplayTransition,
+    ) -> Result<Self, LifecycleError> {
         if !valid_unit(kodi_unit) || !valid_unit(ui_unit) {
             return Err(LifecycleError::InvalidUnit);
         }
         Ok(Self {
             kodi_unit: kodi_unit.to_string(),
             ui_unit: ui_unit.to_string(),
-            gate: std::sync::Arc::new(Mutex::new(())),
+            transition,
         })
     }
 
@@ -137,7 +146,7 @@ impl SurfaceManager {
     }
 
     pub async fn switch(&self, target: Surface) -> Result<SurfaceStatus, LifecycleError> {
-        let _guard = self.gate.lock().await;
+        let _handover = self.transition.begin().await;
         let (stop, start) = match target {
             Surface::Kodi => (self.ui_unit.clone(), Some(self.kodi_unit.clone())),
             Surface::Ui => (self.kodi_unit.clone(), Some(self.ui_unit.clone())),
@@ -195,9 +204,12 @@ mod tests {
 
     #[test]
     fn surface_manager_validates_both_units() {
-        assert!(SurfaceManager::new("kodi.service", "mediabox-tv-ui.service").is_ok());
-        assert!(SurfaceManager::new("kodi.service", "rm -rf /").is_err());
-        assert!(SurfaceManager::new("kodi.service; reboot", "mediabox-tv-ui.service").is_err());
+        let gate = || DisplayTransition::new();
+        assert!(SurfaceManager::new("kodi.service", "mediabox-tv-ui.service", gate()).is_ok());
+        assert!(SurfaceManager::new("kodi.service", "rm -rf /", gate()).is_err());
+        assert!(
+            SurfaceManager::new("kodi.service; reboot", "mediabox-tv-ui.service", gate()).is_err()
+        );
     }
 }
 
@@ -230,17 +242,20 @@ const BROWSER_REQUEST: &str = "/var/lib/mediabox-browser/url";
 #[derive(Clone)]
 pub struct ApplicationManager {
     applications: std::sync::Arc<Vec<Application>>,
-    gate: std::sync::Arc<Mutex<()>>,
+    transition: DisplayTransition,
 }
 
 impl ApplicationManager {
-    pub fn new(applications: Vec<Application>) -> Result<Self, LifecycleError> {
+    pub fn new(
+        applications: Vec<Application>,
+        transition: DisplayTransition,
+    ) -> Result<Self, LifecycleError> {
         if applications.iter().any(|application| !application.valid()) {
             return Err(LifecycleError::InvalidUnit);
         }
         Ok(Self {
             applications: std::sync::Arc::new(applications),
-            gate: std::sync::Arc::new(Mutex::new(())),
+            transition,
         })
     }
 
@@ -254,18 +269,19 @@ impl ApplicationManager {
         path: Option<&Path>,
         kodi_unit: &str,
         ui_unit: &str,
+        transition: DisplayTransition,
     ) -> Result<Self, LifecycleError> {
         let Some(path) = path else {
-            return Self::new(Self::builtin(kodi_unit, ui_unit));
+            return Self::new(Self::builtin(kodi_unit, ui_unit), transition);
         };
         match std::fs::read_to_string(path) {
             Ok(raw) => {
                 let applications: Vec<Application> = serde_json::from_str(&raw)
                     .map_err(|error| LifecycleError::Registry(error.to_string()))?;
-                Self::new(applications)
+                Self::new(applications, transition)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Self::new(Self::builtin(kodi_unit, ui_unit))
+                Self::new(Self::builtin(kodi_unit, ui_unit), transition)
             }
             Err(error) => Err(LifecycleError::Registry(error.to_string())),
         }
@@ -351,7 +367,7 @@ impl ApplicationManager {
     }
 
     pub async fn launch(&self, id: &str) -> Result<DisplayStatus, LifecycleError> {
-        let _guard = self.gate.lock().await;
+        let _handover = self.transition.begin().await;
         let target = if id == IDLE {
             None
         } else {
@@ -431,16 +447,26 @@ mod application_tests {
 
     #[test]
     fn a_registry_cannot_smuggle_a_command_into_systemctl() {
-        assert!(ApplicationManager::new(vec![app("kodi", "kodi.service")]).is_ok());
-        assert!(ApplicationManager::new(vec![app("kodi", "kodi.service; reboot")]).is_err());
-        assert!(ApplicationManager::new(vec![app("kodi", "../../bin/sh.service")]).is_err());
-        assert!(ApplicationManager::new(vec![app("Kodi Ana", "kodi.service")]).is_err());
+        let gate = || DisplayTransition::new();
+        assert!(ApplicationManager::new(vec![app("kodi", "kodi.service")], gate()).is_ok());
+        assert!(
+            ApplicationManager::new(vec![app("kodi", "kodi.service; reboot")], gate()).is_err()
+        );
+        assert!(
+            ApplicationManager::new(vec![app("kodi", "../../bin/sh.service")], gate()).is_err()
+        );
+        assert!(ApplicationManager::new(vec![app("Kodi Ana", "kodi.service")], gate()).is_err());
     }
 
     #[test]
     fn a_missing_registry_still_has_the_two_the_box_has_always_had() {
-        let manager =
-            ApplicationManager::load(None, "kodi.service", "mediabox-tv-ui.service").unwrap();
+        let manager = ApplicationManager::load(
+            None,
+            "kodi.service",
+            "mediabox-tv-ui.service",
+            DisplayTransition::new(),
+        )
+        .unwrap();
         let ids: Vec<&str> = manager
             .applications()
             .iter()
@@ -459,9 +485,13 @@ mod application_tests {
             r#"[{"id":"browser","name":"Tarayıcı","unit":"mediabox-browser.service"}]"#,
         )
         .unwrap();
-        let manager =
-            ApplicationManager::load(Some(&path), "kodi.service", "mediabox-tv-ui.service")
-                .unwrap();
+        let manager = ApplicationManager::load(
+            Some(&path),
+            "kodi.service",
+            "mediabox-tv-ui.service",
+            DisplayTransition::new(),
+        )
+        .unwrap();
         assert_eq!(manager.applications().len(), 1);
         assert_eq!(manager.applications()[0].id, "browser");
         // Absent from the file, so it takes the default: it owns the display.

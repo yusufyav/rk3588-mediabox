@@ -120,8 +120,12 @@ Measured: `Stopping kodi.service` at 02:54:00.300, `Deactivated successfully` at
 
 `mediabox-display-guard` used to wait a flat `sleep 2` before giving the display
 back, so the compositor was started while Kodi still had the connector and came
-up to the failed mode set from rule 2. It now waits for `kodi-gbm` to be gone,
-with a timeout, and then half a second more for the kernel to close the last fd.
+up to the failed mode set from rule 2. Waiting for `kodi-gbm` to be gone and
+then half a second more replaced it, and that in turn is now done by systemd:
+the guard queues `mediabox-display-recover` as a transient unit with
+`After=kodi.service`, so the start job cannot run until kodi.service's stop job
+has finished and its processes have been reaped -- which is when the kernel
+releases the master handle.
 
 Do not replace that with a number.
 
@@ -148,13 +152,18 @@ SWAYSOCK=$(ls /run/mediabox-ui/sway-ipc.*.sock | head -1) \
   swaymsg 'output HDMI-A-1 dpms on'
 ```
 
-This was automated once, by a `mediabox-display-settle` script that acted on the
-timestamp `mediabox-display-guard` leaves at `/run/mediabox/display-handback`
-when it is less than 60 s old. That script belonged to the compositor-based
-shell and went with it; the guard and its timestamp are still there. If the
-green cast comes back on the native shell, that is the shape the fix took and
-the timestamp is still the signal — but it must not run on a cold boot, where a
-blank and unblank is a second of black screen that buys nothing.
+This was automated once, by a `mediabox-display-settle` script that acted on a
+timestamp `mediabox-display-guard` left at `/run/mediabox/display-handback` when
+it was less than 60 s old. Both are gone, and the `swaymsg` above is why: the
+script could only ever speak to a compositor, so it went when the compositor
+did, and the timestamp outlived it by two releases with a writer and no reader
+at all. Removed rather than kept, because a marker nothing reads is a contract
+the next person will believe.
+
+The symptom has not been seen on the native shell. If the green cast comes back
+there, this is the shape the fix took and it needs rebuilding against KMS —
+blank and unblank the connector directly — but it must not run on a cold boot,
+where that is a second of black screen that buys nothing.
 
 Note also that `EDID` reading 0 on this kernel is normal and is **not**
 evidence of a fault. Do not chase it.

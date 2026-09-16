@@ -30,6 +30,15 @@ contains() {
   fi
 }
 
+lacks() {
+  if [[ "$2" != *"$3"* ]]; then
+    printf 'ok   %s\n' "$1"
+  else
+    printf 'FAIL %s: %s is still there\n' "$1" "$3"
+    failures=$((failures + 1))
+  fi
+}
+
 src="$here/tools/hdr-signaling-probe.cpp"
 
 echo "-- step table matches the documented ladder"
@@ -289,6 +298,80 @@ for f in packaging/systemd/mediabox-browser.service packaging/mediabox-browser \
 done
 contains "the deploy installs it" "$(cat "$here/scripts/deploy-mediabox-v3.sh")" \
   'television browser application'
+
+echo
+echo "-- leaving Kodi gives the display back at once, and never deadlocks"
+
+# The comments in these two carry the measurements that justify the shape, and
+# they name the things that must not come back. So the assertions below read
+# the code and not the prose.
+code() { sed -e 's/[[:space:]]*#.*$//' "$here/$1"; }
+guard="$(code packaging/mediabox-display-guard)"
+recover="$(code packaging/mediabox-display-recover)"
+
+# The 15 s grace period. It was correct only for a handover the control plane
+# had asked for, and that is exactly the case the guard now recognises instead
+# of waiting for; on a Kodi that ended by itself it was measured at 20.758 s of
+# black screen between the player going inactive and the interface being asked
+# for. Nothing about it may come back: not the turn count, not the sleep, and
+# not the hundreds of systemctl invocations the turns cost.
+lacks "no recovery poll loop"            "$guard$recover" 'while'
+lacks "no grace period before recovery"  "$guard$recover" 'sleep'
+lacks "recovery does not poll units"     "$guard$recover" 'is-active'
+
+# The decision is a state, read without waiting for it. Waiting is the b34a48a
+# deadlock: the control plane is inside `systemctl stop kodi`, and the stop is
+# waiting for this script.
+contains "the guard reads the transition gate" "$guard" 'flock -n'
+contains "and never blocks on it"              "$guard" '-E 9'
+contains "the recovery re-reads it"            "$recover" 'flock -n'
+contains "the guard detaches the recovery"     "$guard" 'systemd-run --no-block'
+contains "into a cgroup of its own"            "$guard" '--collect'
+contains "ordered after the player's own stop" "$guard" '--property=After=kodi.service'
+
+# One gate, shared. Two private mutexes meant a surface switch and an
+# application launch could stop each other's target, and neither was visible
+# from outside the process.
+lifecycle="$(cat "$here/rust/crates/mediaboxd-rs/src/lifecycle.rs")"
+contains "both managers take the shared gate" "$lifecycle" 'transition: DisplayTransition'
+lacks   "and neither keeps a private one"     "$lifecycle" 'gate: std::sync::Arc<Mutex<()>>'
+contains "the daemon wires exactly one"       "$(cat "$here/rust/crates/mediaboxd-rs/src/main.rs")" \
+  'let handovers = DisplayTransition::new();'
+
+# The marker had a writer and no reader for two releases, and the script that
+# was meant to read it could only ever speak to a compositor. Neither may
+# appear in anything that reaches an appliance. `docs/` is deliberately not in
+# this list: the history is worth keeping, and it now says "obsolete".
+for name in display-handback display-settle; do
+  if (cd "$here" && git grep -qI -- "$name" packaging rust config); then
+    printf 'FAIL %s is still in the shipped tree\n' "$name"
+    failures=$((failures + 1))
+  else
+    printf 'ok   no %s contract in the shipped tree\n' "$name"
+  fi
+done
+
+# The deploy is the one exception, and only because it deletes the stale copy
+# from appliances installed before the compositor went.
+cleanup="$(grep -A3 'removing the compositor-based shell' "$here/scripts/deploy-mediabox-v3.sh")"
+contains "the deploy still removes a stale display-settle" "$cleanup" 'mediabox-display-settle'
+contains "and only ever removes it"                        "$cleanup" 'rm -f'
+check "the deploy names it exactly once, in that cleanup" \
+  "$(grep -c display-settle "$here/scripts/deploy-mediabox-v3.sh")" "1"
+contains "the docs mark it obsolete" \
+  "$(cat "$here/docs/display-pipeline.md")" 'Both are gone'
+
+contains "the deploy installs the recovery helper" \
+  "$(cat "$here/scripts/deploy-mediabox-v3.sh")" 'bin/mediabox-display-recover'
+
+for f in packaging/mediabox-display-guard packaging/mediabox-display-recover; do
+  if sh -n "$here/$f" 2>/dev/null; then
+    printf 'ok   %s parses\n' "$f"
+  else
+    printf 'FAIL %s does not parse\n' "$f"
+    failures=$((failures + 1))
+  fi
+done
 
 assets="${MEDIABOX_ASSET_DIR:-$here/assets}"
 hdr="$assets/hdr10-4k-2398-main10.mp4"

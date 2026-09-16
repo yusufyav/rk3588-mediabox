@@ -784,14 +784,24 @@ mod tests {
             media: Arc::new(
                 MediaClient::new("http://127.0.0.1:9", Duration::from_millis(20)).unwrap(),
             ),
-            surface: SurfaceManager::new("kodi.service", "mediabox-tv-ui.service").unwrap(),
+            surface: SurfaceManager::new(
+                "kodi.service",
+                "mediabox-tv-ui.service",
+                crate::transition::DisplayTransition::new(),
+            )
+            .unwrap(),
             // Never started in the tests; it exists so the state is whole.
             player: Arc::new(PlayerManager::new("/bin/true", "/run/mediabox/player.sock")),
             // Pointed at the empty temporary directory, so the test never
             // reaches the machine's own sysfs and reports no lights.
             leds: LedController::new(dir.path(), dir.path().join("leds")),
-            applications: ApplicationManager::load(None, "kodi.service", "mediabox-tv-ui.service")
-                .unwrap(),
+            applications: ApplicationManager::load(
+                None,
+                "kodi.service",
+                "mediabox-tv-ui.service",
+                crate::transition::DisplayTransition::new(),
+            )
+            .unwrap(),
         });
         let task = tokio::spawn(serve_unix(listener, state));
         let mut stream = UnixStream::connect(&socket).await.unwrap();

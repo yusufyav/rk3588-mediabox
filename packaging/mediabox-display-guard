@@ -4,74 +4,50 @@
 #
 # Kodi can end for reasons this box did not ask for: the person chose Exit, a
 # playback fault brought it down, the unit was restarted. When it does, DRM
-# master is released and nothing takes it — the panel falls to a Linux login
+# master is released and nothing takes it -- the panel falls to a Linux login
 # prompt, which is what a person sees as "the box crashed".
 #
-# This runs after Kodi stops, whatever stopped it, and gives the display back
-# to the interface. It does nothing when the display already has an owner,
-# which is the normal case: the control plane stops Kodi precisely in order to
-# start something else, and that something else is already on its way up.
+# This runs as kodi.service's ExecStopPost, and it has exactly one decision to
+# make: did somebody ask for this, or did Kodi just end?
+#
+#   asked for -- the control plane stopped Kodi in order to start something
+#                else, and that something is already on its way up. Nothing to
+#                do, and doing something would be worse than nothing.
+#
+#   just ended -- nobody is coming. Put the interface back, now.
+#
+# `systemctl stop` does not return until this script has, so whatever it does
+# it has to do in milliseconds.
 set -eu
 
-# Let whoever asked for the handover get there first, and let Kodi finish
-# letting go of the display before anything else asks for it.
-#
-# This used to be a flat `sleep 2`, which was measured short: Kodi's stop took
-# 4.9 s (02:54:00.300 "Stopping kodi" to 02:54:05.200 "Deactivated"), the
-# interface was started at 02:54:02.2 and its compositor came up 800 ms later
-# to "Requested backend configuration failed, searching for valid fallbacks" —
-# a mode set against a connector that was still changing hands. What a person
-# sees at that moment is the television going dark twice.
-#
-# So wait for the player itself to be gone rather than for a number.
-i=0
-while [ "$i" -lt 100 ]; do
-  pgrep -x kodi-gbm >/dev/null 2>&1 || break
-  sleep 0.1
-  i=$((i + 1))
-done
-# The last file descriptor is closed by the kernel after the process is reaped,
-# and the connector needs a moment after that.
-sleep 0.5
+LOCK="${MEDIABOX_TRANSITION_LOCK:-/run/mediabox/display-transition.lock}"
+RECOVER="${MEDIABOX_DISPLAY_RECOVER:-/opt/rk3588-mediabox/bin/mediabox-display-recover}"
 
-# Leave a mark for the interface: it is coming up after Kodi held the panel,
-# and that is the handover the monitor has twice come back from green. Reading
-# it is mediabox-display-settle's job; nothing deletes it, so it is the
-# timestamp that carries the meaning.
-mkdir -p /run/mediabox 2>/dev/null || true
-: > /run/mediabox/display-handback 2>/dev/null || true
+# The question, asked of the control plane's own gate.
+#
+# mediaboxd-rs holds an advisory lock on that file for exactly as long as a
+# display handover runs -- see rust/crates/mediaboxd-rs/src/transition.rs. So
+# "is a transition running" is one non-blocking flock away, with no round trip
+# to the daemon, no second guess about what it is doing, and no way to hang on
+# a daemon that is busy or gone.
+#
+# It has to be non-blocking and it has to stay that way. Waiting for the lock
+# here is precisely the deadlock b34a48a fixed: the control plane is inside
+# `systemctl stop kodi`, and `systemctl stop` is waiting for this script.
+#
+# Reading it wrong is safe in one direction only, and that is the direction it
+# fails in: a lock we cannot test reads as "nobody asked", which queues a
+# recovery that the daemon serialises behind any real transition anyway.
+busy=0
+flock -n -E 9 "$LOCK" true >/dev/null 2>&1 || busy=$?
+[ "$busy" -eq 9 ] && exit 0
 
-# Somebody already has it, or is about to: nothing to do.
-for unit in kodi.service mediabox-tv-ui.service mediabox-browser.service; do
-  systemctl is-active --quiet "$unit" && exit 0
-done
-
-# And the asking happens *outside* this process, which is the fix for a
-# deadlock rather than a style preference.
-#
-# This runs as kodi.service's ExecStopPost. When the control plane is what
-# stopped Kodi -- the ordinary case, "hand the display to the interface" --
-# mediaboxd-rs is at that moment inside its own switch, holding the one lock
-# that serialises switches, waiting for `systemctl stop kodi` to return.
-# `systemctl stop` does not return until ExecStopPost has finished. So asking
-# the control plane for a switch from in here waits for a lock held by
-# something waiting for this. Nothing breaks it but the unit's own
-# TimeoutStopSec, and then only by killing this script:
-#
-#     Stopping kodi.service...
-#     kodi.service: State 'stop-post' timed out. Terminating.
-#     kodi.service: Failed with result 'timeout'.
-#
-# Measured on the appliance: 23.1 s from the stop to the timeout, the
-# interface started 0.6 s after that and was up 17.6 s later -- 41 s of
-# nothing on the television, and a failed unit left behind after every
-# ordinary exit from Kodi.
-#
-# Detached, this process returns at once, the stop completes, and whoever
-# asked gets their lock back. The detached half then waits to see whether a
-# display owner turns up. One does when the handover was deliberate, and it
-# does nothing. None does when Kodi fell over by itself, and that is exactly
-# when the interface should be put back.
+# Nobody asked. The interface goes back, and it does not wait for a clock to
+# say so: there is no grace period here because there is nothing to be graceful
+# about -- the display has no owner and every millisecond of that is black
+# screen. This replaced a 150-turn poll that cost a flat 15 s of sleep plus
+# ~450 systemctl invocations, measured on the appliance at 20.758 s of nothing
+# between Kodi going inactive and the interface being asked for.
 #
 # systemd-run and not `setsid ... &`, because a background child is still in
 # kodi.service's cgroup and KillMode=mixed takes the cgroup down with the unit:
@@ -79,17 +55,15 @@ done
 # had been killed outright left the television on nothing. A transient unit has
 # a cgroup of its own and outlives the stop. --no-block is what keeps this from
 # being the same deadlock in a different shape.
-systemd-run --no-block --quiet --collect --unit=mediabox-display-recover \
-  /bin/sh -c '
-  i=0
-  while [ "$i" -lt 150 ]; do
-    for unit in mediabox-tv-ui.service mediabox-browser.service kodi.service; do
-      systemctl is-active --quiet "$unit" && exit 0
-    done
-    sleep 0.1
-    i=$((i + 1))
-  done
-  exec /opt/rk3588-mediabox/bin/mediaboxctl surface switch ui
-' || true
+#
+# After=kodi.service is what keeps the successor from racing the teardown. The
+# kernel releases DRM master when the last descriptor closes, which is when the
+# unit's processes are reaped and not when this script returns; ordering the
+# transient start after kodi.service's own stop job is the real state condition
+# that a sleep used to approximate.
+systemd-run --no-block --quiet --collect \
+  --unit=mediabox-display-recover \
+  --property=After=kodi.service \
+  "$RECOVER" || true
 
 exit 0

@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# Put the interface back on a television Kodi left with no owner.
+#
+# Queued by `mediabox-display-guard` as a transient unit, and only when the
+# control plane was not already handing the display to somebody. It runs in a
+# cgroup of its own, ordered after kodi.service, so by the time it starts the
+# player's processes have been reaped and the kernel has released DRM master.
+#
+# It is a separate unit and not the tail of the guard for one reason: the guard
+# is kodi.service's ExecStopPost and everything it does is time `systemctl stop`
+# spends not returning.
+set -eu
+
+LOCK="${MEDIABOX_TRANSITION_LOCK:-/run/mediabox/display-transition.lock}"
+MEDIABOXCTL="${MEDIABOXCTL:-/opt/rk3588-mediabox/bin/mediaboxctl}"
+
+# Ask once more, because the answer can have changed since the guard asked.
+#
+# The guard tests the gate while Kodi is still stopping; a person can press a
+# button in the moment between that test and this unit being started, and then
+# the control plane is mid-handover and owns the outcome. One flock is the
+# whole check -- not a poll, and not a wait: this must not hold the display
+# hostage while a real transition runs.
+#
+# Losing the race in the other direction is harmless rather than merely
+# unlikely: `surface switch ui` takes the same gate inside the daemon, so a
+# transition that starts after this test serialises against it instead of
+# racing it, and a switch to a surface that is already up is a no-op.
+busy=0
+flock -n -E 9 "$LOCK" true >/dev/null 2>&1 || busy=$?
+[ "$busy" -eq 9 ] && exit 0
+
+exec "$MEDIABOXCTL" surface switch ui
