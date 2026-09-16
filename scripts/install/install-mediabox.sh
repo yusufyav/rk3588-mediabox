@@ -138,11 +138,41 @@ else
   fi
   # An exact tag and an exact digest. Never "latest": a moving target is a
   # product that differs between two boards installed on two afternoons.
-  url="https://github.com/$MEDIABOX_RELEASE_REPO/releases/download/$MEDIABOX_RELEASE_TAG/$MEDIABOX_RELEASE_ASSET"
+  #
+  # The repository is private, so the plain releases/download URL answers 404 to
+  # anyone without a credential -- including the board that has just cloned this
+  # tree with one. Whatever credential got the clone here is used to get the
+  # asset: the gh CLI if it is signed in, otherwise a token in the environment.
+  # If the repository is made public, the last branch works with neither.
   archive="$work/$MEDIABOX_RELEASE_ASSET"
-  note "$url"
-  curl -fSL --retry 3 --retry-delay 2 -o "$archive" "$url" \
-    || die "could not download the release asset"
+  url="https://github.com/$MEDIABOX_RELEASE_REPO/releases/download/$MEDIABOX_RELEASE_TAG/$MEDIABOX_RELEASE_ASSET"
+  token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  got=0
+  if [ "$got" -eq 0 ] && command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+    note "gh release download $MEDIABOX_RELEASE_TAG"
+    gh release download "$MEDIABOX_RELEASE_TAG" --repo "$MEDIABOX_RELEASE_REPO" \
+       --pattern "$MEDIABOX_RELEASE_ASSET" --dir "$work" --clobber && got=1 || true
+  fi
+  if [ "$got" -eq 0 ] && [ -n "$token" ]; then
+    note "GitHub API, authenticated"
+    api="https://api.github.com/repos/$MEDIABOX_RELEASE_REPO/releases/tags/$MEDIABOX_RELEASE_TAG"
+    asset_url="$(curl -fsSL -H "Authorization: Bearer $token" \
+        -H 'Accept: application/vnd.github+json' "$api" |
+      python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print(next((a["url"] for a in d.get("assets", []) if a["name"] == sys.argv[1]), ""))' \
+        "$MEDIABOX_RELEASE_ASSET")" || asset_url=""
+    [ -n "$asset_url" ] || die "the release does not carry $MEDIABOX_RELEASE_ASSET"
+    curl -fSL --retry 3 --retry-delay 2 -H "Authorization: Bearer $token" \
+      -H 'Accept: application/octet-stream' -o "$archive" "$asset_url" && got=1 || true
+  fi
+  if [ "$got" -eq 0 ]; then
+    note "$url"
+    curl -fSL --retry 3 --retry-delay 2 -o "$archive" "$url" && got=1 || true
+  fi
+  [ "$got" -eq 1 ] || die "could not download the release asset.
+     The repository is private: sign in with \`gh auth login\`, or set GH_TOKEN,
+     or install from a local copy with --bundle <file>."
 fi
 
 size="$(stat -c %s "$archive")"
