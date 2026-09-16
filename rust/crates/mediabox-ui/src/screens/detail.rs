@@ -13,18 +13,18 @@
 //! the source.
 
 use crate::app::{Nav, Recent, Route, Toaster, remember};
-use std::collections::HashSet;
-use wasm_bindgen::JsCast;
 use crate::components::{
     Action, Chip, Failure, Load, human_bitrate, human_size, resolution_label, seconds_to_clock,
 };
 use crate::model::{
     LibraryItemEnvelope, Meta, MetaEnvelope, Plan, Reason, Stream, StreamListing, VideoTrack,
 };
-use crate::{api, LIBRARY_ADDON_ID};
+use crate::{LIBRARY_ADDON_ID, api};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
+use std::collections::HashSet;
+use wasm_bindgen::JsCast;
 
 /// A stream as the UI holds it: the parsed view for drawing, and the exact
 /// descriptor the media core handed over, which is what must be sent back.
@@ -949,13 +949,20 @@ fn TechnicalPlan(plan: Plan) -> impl IntoView {
         chips.push((container_label(&format), String::new()));
     }
     if let Some(track) = audio.as_ref() {
-        let codec = track.codec.clone().unwrap_or_else(|| "ses".into()).to_uppercase();
+        let codec = track
+            .codec
+            .clone()
+            .unwrap_or_else(|| "ses".into())
+            .to_uppercase();
         let layout = track
             .channel_layout
             .clone()
             .or_else(|| track.channels.map(|count| format!("{count} kanal")))
             .unwrap_or_default();
-        chips.push((format!("{codec} {layout}").trim().to_string(), String::new()));
+        chips.push((
+            format!("{codec} {layout}").trim().to_string(),
+            String::new(),
+        ));
     }
 
     let audio_note = audio_note(&plan);
@@ -1083,7 +1090,10 @@ fn container_label(format: &str) -> String {
 /// never receive, so it is labelled for what it is.
 fn hdr_chip(track: &VideoTrack) -> (String, String) {
     if let Some(dv) = track.dolby_vision.as_ref() {
-        let profile = dv.profile.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+        let profile = dv
+            .profile
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "?".into());
         let cross_compatible = dv.bl_signal_compatibility_id.is_some_and(|id| id != 0);
         return if cross_compatible {
             (
@@ -1131,7 +1141,10 @@ fn audio_note(plan: &Plan) -> Option<(String, &'static str)> {
                 .unwrap_or_else(|| {
                     "Ses AC-3 5.1'e dönüştürülür; özgün kayıpsız akış korunmaz.".into()
                 });
-            Some((format!("{lost} Video kopyalanır, yeniden kodlanmaz."), "warn"))
+            Some((
+                format!("{lost} Video kopyalanır, yeniden kodlanmaz."),
+                "warn",
+            ))
         }
         "Unsupported" => Some(("Bu ses akışı bu cihazda oynatılamaz.".into(), "bad")),
         _ => None,

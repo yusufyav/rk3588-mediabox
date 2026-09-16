@@ -11,7 +11,9 @@
 
 use crate::api;
 use crate::app::Toaster;
-use crate::components::{Action, Failure, Field, Keyboard, Load, Row, human_size, seconds_to_clock};
+use crate::components::{
+    Action, Failure, Field, Keyboard, Load, Row, human_size, seconds_to_clock,
+};
 use crate::model::SystemStatus;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -447,14 +449,21 @@ fn Network(system: SystemStatus, vitals: Option<Value>) -> impl IntoView {
         .and_then(Value::as_str)
         .unwrap_or("UNKNOWN")
         .to_string();
-    let torrent_tone = if torrent == "TORRENT_NETWORK_BLOCKED" { "bad" } else { "ok" };
+    let torrent_tone = if torrent == "TORRENT_NETWORK_BLOCKED" {
+        "bad"
+    } else {
+        "ok"
+    };
     let server_ok = system
         .media
         .pointer("/provider/streamingServer/reachable")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let (server_text, server_tone) = yes_no(server_ok);
-    let server_version = text(&Some(system.media.clone()), "/provider/streamingServer/version");
+    let server_version = text(
+        &Some(system.media.clone()),
+        "/provider/streamingServer/version",
+    );
     let interfaces = vitals
         .as_ref()
         .and_then(|root| root.pointer("/network/interfaces"))
@@ -507,9 +516,7 @@ fn Bluetooth(system: SystemStatus) -> impl IntoView {
     let devices: Vec<Value> = system
         .input_devices
         .iter()
-        .filter(|device| {
-            device.get("source").and_then(Value::as_str) == Some("bluetooth_hid")
-        })
+        .filter(|device| device.get("source").and_then(Value::as_str) == Some("bluetooth_hid"))
         .cloned()
         .collect();
     view! {
@@ -664,11 +671,7 @@ fn Display(vitals: Option<Value>) -> impl IntoView {
 #[component]
 fn Audio(caps: Option<Value>) -> impl IntoView {
     if caps.is_none() {
-        return missing(
-            "Ses profili okunamadı",
-            "Medya çekirdeği yanıt vermedi.",
-        )
-        .into_any();
+        return missing("Ses profili okunamadı", "Medya çekirdeği yanıt vermedi.").into_any();
     }
     view! {
         <h2>"Ses"</h2>
@@ -806,7 +809,11 @@ fn Diagnostics(system: SystemStatus, vitals: Option<Value>) -> impl IntoView {
     let load_meter = load_one / cpu_count;
     let load_text = format!("{load_one:.2}");
     let cpu_label = format!("İşlemci yükü ({} çekirdek)", cpu_count as u64);
-    let ffmpeg_tone = if ffmpeg > sessions as usize { "warn" } else { "ok" };
+    let ffmpeg_tone = if ffmpeg > sessions as usize {
+        "warn"
+    } else {
+        "ok"
+    };
     let (kodi_text, kodi_tone) = yes_no(system.kodi.jsonrpc_reachable);
     let (cec_text, cec_tone) = yes_no(system.cec.available);
     let media_ok = system.media.get("available").and_then(Value::as_bool) != Some(false);

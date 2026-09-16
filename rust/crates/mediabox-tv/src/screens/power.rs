@@ -54,8 +54,12 @@ impl Choice {
     }
 }
 
-pub const CHOICES: [Choice; 4] =
-    [Choice::Cancel, Choice::StandbyTelevision, Choice::Restart, Choice::Shutdown];
+pub const CHOICES: [Choice; 4] = [
+    Choice::Cancel,
+    Choice::StandbyTelevision,
+    Choice::Restart,
+    Choice::Shutdown,
+];
 
 /// A sheet on the panel. Either the power menu, or a yes/no over one decision.
 pub enum Sheet {
@@ -76,7 +80,11 @@ impl Sheet {
     }
 
     pub fn confirm(action: Action, question: &str) -> Self {
-        Sheet::Confirm { question: question.to_string(), action, yes: false }
+        Sheet::Confirm {
+            question: question.to_string(),
+            action,
+            yes: false,
+        }
     }
 
     pub fn title(&self) -> String {

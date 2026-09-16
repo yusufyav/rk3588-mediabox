@@ -126,9 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(2),
     )?);
     let ui_root = match args.ui_root {
-        Some(root) => Some(root.canonicalize().map_err(|error| {
-            format!("--ui-root okunamadı ({}): {error}", root.display())
-        })?),
+        Some(root) => Some(
+            root.canonicalize()
+                .map_err(|error| format!("--ui-root okunamadı ({}): {error}", root.display()))?,
+        ),
         None => None,
     };
     let state = Arc::new(AppState {
@@ -203,8 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 {
                                     let state = state.clone();
                                     runtime.spawn(async move {
-                                        if let Err(error) =
-                                            state.switch_surface(Surface::Ui).await
+                                        if let Err(error) = state.switch_surface(Surface::Ui).await
                                         {
                                             eprintln!("surface -> ui: {error}");
                                         }

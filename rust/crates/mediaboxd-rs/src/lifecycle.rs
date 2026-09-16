@@ -1,7 +1,7 @@
 use mediabox_core::{Application, ApplicationStatus, DisplayStatus, Surface, SurfaceStatus};
+use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
-use std::path::Path;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -201,7 +201,6 @@ mod tests {
     }
 }
 
-
 // ------------------------------------------------------------- applications
 
 /// The id that means "nobody": release the display and start nothing.
@@ -251,7 +250,11 @@ impl ApplicationManager {
     /// A missing file is not an error: an appliance that has never been
     /// configured still has Kodi and its own interface, and refusing to start
     /// over a file nobody wrote would be a worse answer than the obvious one.
-    pub fn load(path: Option<&Path>, kodi_unit: &str, ui_unit: &str) -> Result<Self, LifecycleError> {
+    pub fn load(
+        path: Option<&Path>,
+        kodi_unit: &str,
+        ui_unit: &str,
+    ) -> Result<Self, LifecycleError> {
         let Some(path) = path else {
             return Self::new(Self::builtin(kodi_unit, ui_unit));
         };
@@ -334,9 +337,7 @@ impl ApplicationManager {
             && !url.contains(char::is_whitespace)
             && !url.contains(['\'', '"', '\\', '\0']);
         if !ok {
-            return Err(LifecycleError::Failed(format!(
-                "geçersiz adres: {url}"
-            )));
+            return Err(LifecycleError::Failed(format!("geçersiz adres: {url}")));
         }
         if let Some(parent) = std::path::Path::new(BROWSER_REQUEST).parent() {
             tokio::fs::create_dir_all(parent)
@@ -459,7 +460,8 @@ mod application_tests {
         )
         .unwrap();
         let manager =
-            ApplicationManager::load(Some(&path), "kodi.service", "mediabox-tv-ui.service").unwrap();
+            ApplicationManager::load(Some(&path), "kodi.service", "mediabox-tv-ui.service")
+                .unwrap();
         assert_eq!(manager.applications().len(), 1);
         assert_eq!(manager.applications()[0].id, "browser");
         // Absent from the file, so it takes the default: it owns the display.

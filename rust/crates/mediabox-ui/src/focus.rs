@@ -782,7 +782,9 @@ pub fn step(direction: Direction) -> bool {
     // costs nothing to the vertical travel through the page, which putting it
     // in the Up path would have doubled.
     match direction {
-        Direction::Right => rail_action(&current).inspect(|button| focus(button)).is_some(),
+        Direction::Right => rail_action(&current)
+            .inspect(|button| focus(button))
+            .is_some(),
         // And back again, because a button you can enter and not leave is a
         // trap on a remote with no pointer.
         Direction::Left => current

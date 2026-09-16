@@ -24,18 +24,8 @@ const DAYS: [&str; 7] = [
 ];
 
 const MONTHS: [&str; 12] = [
-    "Ocak",
-    "Şubat",
-    "Mart",
-    "Nisan",
-    "Mayıs",
-    "Haziran",
-    "Temmuz",
-    "Ağustos",
-    "Eylül",
-    "Ekim",
-    "Kasım",
-    "Aralık",
+    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim",
+    "Kasım", "Aralık",
 ];
 
 fn human_size(bytes: f64) -> String {
@@ -174,7 +164,11 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         .pointer("/cpu/usage")
         .and_then(Value::as_f64)
         .or_else(|| {
-            let count = root.pointer("/cpu/count").and_then(Value::as_f64).unwrap_or(1.0).max(1.0);
+            let count = root
+                .pointer("/cpu/count")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0)
+                .max(1.0);
             let load = root.pointer("/cpu/load/one").and_then(Value::as_f64)?;
             Some(load / count)
         })
@@ -205,17 +199,22 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
     let used = memory
         .map(|(_, used, total)| format!("{} / {}", human_size(used), human_size(total)))
         .unwrap_or_else(|| "—".into());
-    let heat = hottest.map(|c| format!("{c:.0} °C")).unwrap_or_else(|| "—".into());
+    let heat = hottest
+        .map(|c| format!("{c:.0} °C"))
+        .unwrap_or_else(|| "—".into());
     model.performance_note = format!("{used}  ·  {heat}").into();
 
-    if let Some(volume) = root.get("storage").and_then(Value::as_array).and_then(|v| v.first()) {
+    if let Some(volume) = root
+        .get("storage")
+        .and_then(Value::as_array)
+        .and_then(|v| v.first())
+    {
         let used = volume.get("usedBytes").and_then(Value::as_f64);
         let total = volume.get("totalBytes").and_then(Value::as_f64);
         if let (Some(used), Some(total)) = (used, total) {
             if total > 0.0 {
                 model.storage_fraction = (used / total) as f32;
-                model.storage_text =
-                    format!("{} / {}", human_size(used), human_size(total)).into();
+                model.storage_text = format!("{} / {}", human_size(used), human_size(total)).into();
             }
         }
     }
@@ -228,7 +227,11 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         .pointer("/network/default/interface")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.is_empty());
-    model.network = if online { "Bağlı".into() } else { "Ağ yok".into() };
+    model.network = if online {
+        "Bağlı".into()
+    } else {
+        "Ağ yok".into()
+    };
 
     model
 }

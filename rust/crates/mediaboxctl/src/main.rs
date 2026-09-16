@@ -130,20 +130,35 @@ enum MediaCommand {
         video_id: Option<String>,
     },
     Library,
-    LibraryItem { id: String },
+    LibraryItem {
+        id: String,
+    },
     /// Create a media session and put it on the television.
     Play {
         url: String,
         #[arg(long, default_value_t = 0)]
         start: u64,
     },
-    Search { query: String },
-    Inspect { url: String },
-    Streams { media_type: String, id: String },
-    Policy { url: String },
+    Search {
+        query: String,
+    },
+    Inspect {
+        url: String,
+    },
+    Streams {
+        media_type: String,
+        id: String,
+    },
+    Policy {
+        url: String,
+    },
     Sessions,
-    SessionStart { url: String },
-    SessionStop { id: String },
+    SessionStart {
+        url: String,
+    },
+    SessionStop {
+        id: String,
+    },
 }
 
 #[tokio::main]
@@ -533,7 +548,10 @@ fn render_media_status(
     if let Some(sessions) = media.get("sessions").and_then(Value::as_u64) {
         write(out, format!("Etkin oturum: {sessions}"))?;
     }
-    if let Some(torrent) = media.pointer("/torrentNetwork/status").and_then(Value::as_str) {
+    if let Some(torrent) = media
+        .pointer("/torrentNetwork/status")
+        .and_then(Value::as_str)
+    {
         write(out, format!("Torrent ağı: {torrent}"))?;
     }
     if let Some(error) = media.pointer("/error/message").and_then(Value::as_str) {

@@ -31,7 +31,12 @@ pub struct Library {
 
 impl Library {
     pub fn new() -> Self {
-        Self { sections: Vec::new(), tab: 0, on_tabs: true, positions: Vec::new() }
+        Self {
+            sections: Vec::new(),
+            tab: 0,
+            on_tabs: true,
+            positions: Vec::new(),
+        }
     }
 
     /// Built from what the home screen already has, so opening this screen
@@ -42,10 +47,26 @@ impl Library {
         let holding = self.focused().map(|item| item.id.clone());
 
         let mut sections = vec![
-            Section { title: "Devam Et".into(), note: "Yarım kalanlar".into(), items: Vec::new() },
-            Section { title: "Filmler".into(), note: String::new(), items: Vec::new() },
-            Section { title: "Diziler".into(), note: String::new(), items: Vec::new() },
-            Section { title: "Kitaplık".into(), note: "Bu cihazda".into(), items: Vec::new() },
+            Section {
+                title: "Devam Et".into(),
+                note: "Yarım kalanlar".into(),
+                items: Vec::new(),
+            },
+            Section {
+                title: "Filmler".into(),
+                note: String::new(),
+                items: Vec::new(),
+            },
+            Section {
+                title: "Diziler".into(),
+                note: String::new(),
+                items: Vec::new(),
+            },
+            Section {
+                title: "Kitaplık".into(),
+                note: "Bu cihazda".into(),
+                items: Vec::new(),
+            },
         ];
 
         let mut seen: Vec<std::collections::HashSet<String>> =
@@ -88,7 +109,8 @@ impl Library {
         // Empty sections are not landed on, and the remote keeps the title it
         // was on when this was rebuilt behind a refresh.
         if self.items().is_empty() {
-            if let Some(next) = (0..self.sections.len()).find(|i| !self.sections[*i].items.is_empty())
+            if let Some(next) =
+                (0..self.sections.len()).find(|i| !self.sections[*i].items.is_empty())
             {
                 self.tab = next;
             }
@@ -102,7 +124,10 @@ impl Library {
     }
 
     pub fn items(&self) -> &[Item] {
-        self.sections.get(self.tab).map(|s| s.items.as_slice()).unwrap_or(&[])
+        self.sections
+            .get(self.tab)
+            .map(|s| s.items.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn index(&self) -> usize {
@@ -191,7 +216,11 @@ mod tests {
     use crate::state::{Item, Shelf};
 
     fn shelf(items: Vec<Item>) -> Shelf {
-        Shelf { title: "x".into(), source: String::new(), items }
+        Shelf {
+            title: "x".into(),
+            source: String::new(),
+            items,
+        }
     }
 
     fn film(id: &str) -> Item {

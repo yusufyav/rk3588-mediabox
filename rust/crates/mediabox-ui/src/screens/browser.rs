@@ -25,7 +25,11 @@ const SITES: [(&str, &str, &str); 7] = [
         "https://web.stremio.com/#/?streamingServer=http%3A%2F%2F127.0.0.1%3A11470",
         "Kendi arayüzü, yerel sunucu",
     ),
-    ("YouTube", "https://www.youtube.com/tv", "Televizyon arayüzü"),
+    (
+        "YouTube",
+        "https://www.youtube.com/tv",
+        "Televizyon arayüzü",
+    ),
     ("Twitch", "https://www.twitch.tv", "Canlı yayın"),
     ("Vikipedi", "https://tr.wikipedia.org", "Ansiklopedi"),
     ("Google", "https://www.google.com", "Arama"),

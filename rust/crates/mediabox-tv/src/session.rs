@@ -92,7 +92,10 @@ impl Store {
             })
             .expect("the state thread could not be started");
 
-        Self { tx, last: Snapshot::default() }
+        Self {
+            tx,
+            last: Snapshot::default(),
+        }
     }
 
     /// Records a position. Identical positions cost nothing, which matters
@@ -116,7 +119,9 @@ pub fn read(path: impl AsRef<Path>) -> Option<Snapshot> {
 }
 
 fn write_atomically(path: &PathBuf, snapshot: &Snapshot) {
-    let Ok(text) = serde_json::to_vec(snapshot) else { return };
+    let Ok(text) = serde_json::to_vec(snapshot) else {
+        return;
+    };
     let temporary = path.with_extension("tmp");
 
     let written = (|| -> std::io::Result<()> {

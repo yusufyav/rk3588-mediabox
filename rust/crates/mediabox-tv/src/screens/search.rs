@@ -148,7 +148,11 @@ impl Search {
         // the only way in, and Left from the first column is the only way back,
         // so crossing is never ambiguous.
         if dx > 0 {
-            let width = self.keys.get(self.key_row).map(|row| row.len()).unwrap_or(0);
+            let width = self
+                .keys
+                .get(self.key_row)
+                .map(|row| row.len())
+                .unwrap_or(0);
             if self.key_col + 1 >= width {
                 if self.results.is_empty() {
                     return false;
@@ -237,7 +241,9 @@ impl Search {
     /// Pressing Ok on the letter grid. Returns true when the query changed and
     /// a fresh search is owed.
     pub fn press(&mut self) -> bool {
-        let Some(cap) = self.focused_cap() else { return false };
+        let Some(cap) = self.focused_cap() else {
+            return false;
+        };
         match cap {
             Cap::Letter(c) => self.push(c),
             Cap::Space => self.push(' '),
@@ -325,7 +331,9 @@ mod tests {
 
     fn with_results(n: usize) -> Search {
         let mut search = Search::new();
-        search.results = (0..n).map(|i| crate::state::Item::stub(&format!("t{i}"))).collect();
+        search.results = (0..n)
+            .map(|i| crate::state::Item::stub(&format!("t{i}")))
+            .collect();
         search
     }
 
@@ -336,7 +344,12 @@ mod tests {
         let search = Search::new();
         for row in search.keys() {
             let span: u32 = row.iter().map(|cap| cap.span()).sum();
-            assert_eq!(span as usize, KEY_COLUMNS, "{:?}", row.iter().map(|c| c.label()).collect::<Vec<_>>());
+            assert_eq!(
+                span as usize,
+                KEY_COLUMNS,
+                "{:?}",
+                row.iter().map(|c| c.label()).collect::<Vec<_>>()
+            );
         }
     }
 

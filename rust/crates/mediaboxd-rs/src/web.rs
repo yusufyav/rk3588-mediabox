@@ -142,7 +142,10 @@ fn parse_head(data: &[u8]) -> Option<Result<Head, &'static str>> {
     Some(Ok(Head {
         method: method.to_string(),
         path: path.to_string(),
-        query: target.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default(),
+        query: target
+            .split_once('?')
+            .map(|(_, q)| q.to_string())
+            .unwrap_or_default(),
         headers,
         body_start: end + 4,
         content_length,
@@ -164,7 +167,12 @@ async fn handle(
         }
         data.extend_from_slice(&chunk[..count]);
         if data.len() > MAX_REQUEST_BYTES {
-            return send_json(&mut stream, 413, &Response::failure("INVALID_REQUEST", "istek çok büyük")).await;
+            return send_json(
+                &mut stream,
+                413,
+                &Response::failure("INVALID_REQUEST", "istek çok büyük"),
+            )
+            .await;
         }
         match parse_head(&data) {
             None => continue,
@@ -182,7 +190,12 @@ async fn handle(
 
     while data.len() < head.body_start + head.content_length {
         if head.content_length > MAX_REQUEST_BYTES {
-            return send_json(&mut stream, 413, &Response::failure("INVALID_REQUEST", "gövde çok büyük")).await;
+            return send_json(
+                &mut stream,
+                413,
+                &Response::failure("INVALID_REQUEST", "gövde çok büyük"),
+            )
+            .await;
         }
         let read = tokio::time::timeout(Duration::from_secs(15), stream.read(&mut chunk)).await;
         let Ok(Ok(count)) = read else { return Ok(()) };
@@ -368,7 +381,11 @@ fn content_type_for(path: &Path) -> &'static str {
 /// of the installed UI.
 fn resolve_static(root: &Path, request_path: &str) -> Option<PathBuf> {
     let trimmed = request_path.trim_start_matches('/');
-    let relative = if trimmed.is_empty() { "index.html" } else { trimmed };
+    let relative = if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    };
     if relative.split('/').any(|segment| {
         segment.is_empty()
             || segment == "."
@@ -399,8 +416,7 @@ async fn serve_static(
         .await;
     };
     // The UI keeps its own screen state; every non-file path is the same page.
-    let path = resolve_static(root, &head.path)
-        .or_else(|| resolve_static(root, "/index.html"));
+    let path = resolve_static(root, &head.path).or_else(|| resolve_static(root, "/index.html"));
     let Some(path) = path else {
         return send_json(stream, 404, &Response::failure("NOT_FOUND", "dosya yok")).await;
     };

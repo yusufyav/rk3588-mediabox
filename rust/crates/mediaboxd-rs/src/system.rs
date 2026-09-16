@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
-    fs::read_to_string(path).ok().map(|text| text.trim().to_string())
+    fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_string())
 }
 
 fn load_average() -> Value {
@@ -139,7 +141,12 @@ fn temperatures() -> Vec<Value> {
     };
     let mut found: Vec<Value> = entries
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("thermal_zone"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("thermal_zone")
+        })
         .filter_map(|entry| {
             let millidegrees = read_trimmed(entry.path().join("temp"))?
                 .parse::<i64>()
@@ -282,7 +289,15 @@ mod tests {
     #[test]
     fn a_snapshot_carries_every_section() {
         let snapshot = diagnostics();
-        for key in ["cpu", "memory", "storage", "temperatures", "drm", "network", "ffmpeg"] {
+        for key in [
+            "cpu",
+            "memory",
+            "storage",
+            "temperatures",
+            "drm",
+            "network",
+            "ffmpeg",
+        ] {
             assert!(snapshot.get(key).is_some(), "missing {key}");
         }
     }

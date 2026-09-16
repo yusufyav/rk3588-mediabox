@@ -51,7 +51,11 @@ struct WireError {
 fn js_message(error: &JsValue) -> String {
     error
         .as_string()
-        .or_else(|| js_sys::Reflect::get(error, &JsValue::from_str("message")).ok()?.as_string())
+        .or_else(|| {
+            js_sys::Reflect::get(error, &JsValue::from_str("message"))
+                .ok()?
+                .as_string()
+        })
         .unwrap_or_else(|| "ağ hatası".into())
 }
 
@@ -71,7 +75,9 @@ pub async fn control(request: Value) -> Result<Value, ApiError> {
         .map_err(|e| ApiError::local(js_message(&e)))?;
     let response = JsFuture::from(window.fetch_with_request(&request))
         .await
-        .map_err(|e| ApiError::local(format!("denetim düzlemine ulaşılamadı: {}", js_message(&e))))?;
+        .map_err(|e| {
+            ApiError::local(format!("denetim düzlemine ulaşılamadı: {}", js_message(&e)))
+        })?;
     let response: Response = response
         .dyn_into()
         .map_err(|_| ApiError::local("beklenmeyen yanıt türü"))?;

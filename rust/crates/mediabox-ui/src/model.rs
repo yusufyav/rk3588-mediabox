@@ -358,7 +358,8 @@ fn split_marks(line: &str) -> (Vec<String>, String) {
 /// A regional indicator pair is a flag, and a flag is the shortest a language
 /// can be written.
 fn is_flag(text: &str) -> bool {
-    text.chars().any(|c| ('\u{1f1e6}'..='\u{1f1ff}').contains(&c))
+    text.chars()
+        .any(|c| ('\u{1f1e6}'..='\u{1f1ff}').contains(&c))
 }
 
 fn quality_of(word: &str) -> Option<String> {

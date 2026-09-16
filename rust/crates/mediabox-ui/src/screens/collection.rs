@@ -18,7 +18,7 @@ use leptos::task::spawn_local;
 use crate::app::{Nav, Route};
 use crate::components::{Failure, Load};
 use crate::model::{CatalogItems, LibraryListing, MetaPreview, WatchState};
-use crate::{api, LIBRARY_ADDON_ID};
+use crate::{LIBRARY_ADDON_ID, api};
 
 /// The shelves that are not catalogues, named where a catalogue's addon id
 /// would be. They are answered from the library rather than from an addon.
@@ -43,16 +43,12 @@ pub fn Collection(addon: String, kind: String, catalog: String, title: String) -
                         CONTINUE_SOURCE => listing
                             .stremio
                             .into_iter()
-                            .filter(|item| {
-                                item.state.as_ref().is_some_and(WatchState::unfinished)
-                            })
+                            .filter(|item| item.state.as_ref().is_some_and(WatchState::unfinished))
                             .collect(),
                         _ => listing
                             .stremio
                             .into_iter()
-                            .filter(|item| {
-                                !item.state.as_ref().is_some_and(WatchState::unfinished)
-                            })
+                            .filter(|item| !item.state.as_ref().is_some_and(WatchState::unfinished))
                             .collect(),
                     })
             }

@@ -52,7 +52,10 @@ pub struct Key {
 
 impl Key {
     pub fn new(url: impl Into<String>, width: u32) -> Self {
-        Self { url: url.into(), width }
+        Self {
+            url: url.into(),
+            width,
+        }
     }
 }
 
@@ -147,7 +150,14 @@ impl ImageManager {
                     let bytes = buffer.width() as usize * buffer.height() as usize * 4;
                     self.tick += 1;
                     self.bytes += bytes;
-                    self.cache.insert(key, Entry { buffer, bytes, used: self.tick });
+                    self.cache.insert(
+                        key,
+                        Entry {
+                            buffer,
+                            bytes,
+                            used: self.tick,
+                        },
+                    );
                     changed = true;
                 }
                 Done::Failed(key) => {
@@ -241,7 +251,9 @@ fn worker(dir: PathBuf, wanted: Receiver<Key>, done: Sender<Done>, poke: Poke) {
             let poke = poke.clone();
 
             tokio::spawn(async move {
-                let Ok(_permit) = gate.acquire().await else { return };
+                let Ok(_permit) = gate.acquire().await else {
+                    return;
+                };
                 let answer = match fetch_and_decode(&client, &dir, &key).await {
                     Some(buffer) => Done::Ready(key, buffer),
                     None => Done::Failed(key),
@@ -288,7 +300,9 @@ async fn fetch_and_decode(
     };
 
     let width = key.width;
-    tokio::task::spawn_blocking(move || decode(&bytes, width)).await.ok()?
+    tokio::task::spawn_blocking(move || decode(&bytes, width))
+        .await
+        .ok()?
 }
 
 fn decode(bytes: &[u8], target_width: u32) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
@@ -314,7 +328,11 @@ fn decode(bytes: &[u8], target_width: u32) -> Option<SharedPixelBuffer<Rgba8Pixe
         )
     };
 
-    Some(SharedPixelBuffer::clone_from_slice(rgba.as_raw(), width, height))
+    Some(SharedPixelBuffer::clone_from_slice(
+        rgba.as_raw(),
+        width,
+        height,
+    ))
 }
 
 fn digest(url: &str) -> String {
@@ -327,7 +345,9 @@ fn digest(url: &str) -> String {
 /// startup: the cache grows by a few megabytes a session and a sweep per
 /// request would cost more than it reclaims.
 async fn prune_disk(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
 
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
         .flatten()

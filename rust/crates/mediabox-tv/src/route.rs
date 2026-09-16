@@ -65,7 +65,9 @@ const DEPTH: usize = 6;
 
 impl Stack {
     pub fn new() -> Self {
-        Self { entries: vec![Route::Boot] }
+        Self {
+            entries: vec![Route::Boot],
+        }
     }
 
     pub fn current(&self) -> Route {

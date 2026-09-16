@@ -71,7 +71,11 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     pub fn new(trace: bool) -> Self {
-        Self { last_step: None, last: None, trace }
+        Self {
+            last_step: None,
+            last: None,
+            trace,
+        }
     }
 
     /// Returns the action to act on, or None if this press should be ignored.
@@ -83,10 +87,7 @@ impl Dispatcher {
         // origins — two presses of Ok from the same keyboard are two presses,
         // however fast somebody is.
         if let Some((previous, from, at)) = self.last {
-            if previous == action
-                && from != origin
-                && now.duration_since(at) < DEDUP_WINDOW
-            {
+            if previous == action && from != origin && now.duration_since(at) < DEDUP_WINDOW {
                 self.log("drop-duplicate", action, origin);
                 return None;
             }
@@ -167,7 +168,10 @@ mod tests {
             (Origin::Bus, Origin::Keyboard),
         ] {
             let mut dispatcher = Dispatcher::new(false);
-            assert_eq!(dispatcher.accept(InputAction::Ok, first), Some(InputAction::Ok));
+            assert_eq!(
+                dispatcher.accept(InputAction::Ok, first),
+                Some(InputAction::Ok)
+            );
             assert_eq!(dispatcher.accept(InputAction::Ok, second), None);
         }
     }
@@ -175,7 +179,11 @@ mod tests {
     #[test]
     fn back_is_deduplicated_the_same_way() {
         let mut dispatcher = Dispatcher::new(false);
-        assert!(dispatcher.accept(InputAction::Back, Origin::Keyboard).is_some());
+        assert!(
+            dispatcher
+                .accept(InputAction::Back, Origin::Keyboard)
+                .is_some()
+        );
         assert!(dispatcher.accept(InputAction::Back, Origin::Bus).is_none());
     }
 
@@ -184,14 +192,26 @@ mod tests {
     #[test]
     fn two_presses_from_one_keyboard_are_two_presses() {
         let mut dispatcher = Dispatcher::new(false);
-        assert!(dispatcher.accept(InputAction::Ok, Origin::Keyboard).is_some());
-        assert!(dispatcher.accept(InputAction::Ok, Origin::Keyboard).is_some());
+        assert!(
+            dispatcher
+                .accept(InputAction::Ok, Origin::Keyboard)
+                .is_some()
+        );
+        assert!(
+            dispatcher
+                .accept(InputAction::Ok, Origin::Keyboard)
+                .is_some()
+        );
     }
 
     #[test]
     fn a_different_action_is_never_a_duplicate() {
         let mut dispatcher = Dispatcher::new(false);
-        assert!(dispatcher.accept(InputAction::Ok, Origin::Keyboard).is_some());
+        assert!(
+            dispatcher
+                .accept(InputAction::Ok, Origin::Keyboard)
+                .is_some()
+        );
         assert!(dispatcher.accept(InputAction::Back, Origin::Bus).is_some());
     }
 

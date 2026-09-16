@@ -178,7 +178,13 @@ pub fn app_tiles_from(display: &crate::model::DisplayStatus) -> Vec<AppEntryTile
             "",
             AppAction::Launch("browser".to_string()),
         ),
-        tile("settings", "Ayarlar", true, "", AppAction::Screen(Nav::Settings)),
+        tile(
+            "settings",
+            "Ayarlar",
+            true,
+            "",
+            AppAction::Screen(Nav::Settings),
+        ),
     ];
 
     tiles.extend(
@@ -186,9 +192,7 @@ pub fn app_tiles_from(display: &crate::model::DisplayStatus) -> Vec<AppEntryTile
             .applications
             .iter()
             .filter(|entry| {
-                entry.id != "mediabox"
-                    && entry.id != "browser"
-                    && here != Some(entry.id.as_str())
+                entry.id != "mediabox" && entry.id != "browser" && here != Some(entry.id.as_str())
             })
             .map(|entry| {
                 let name = if entry.name.is_empty() {
@@ -229,7 +233,11 @@ pub struct Item {
 /// field. Treating the two differently means a hero with a backdrop URL of ""
 /// and nothing behind it.
 fn some(value: &Option<String>) -> Option<String> {
-    value.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 impl Item {
@@ -359,8 +367,7 @@ impl Home {
 
     /// The focused title, when the remote is on the shelf.
     pub fn focused(&self) -> Option<&Item> {
-        (Some(self.row) == self.recent_row())
-            .then(|| self.recent.get(self.column()))?
+        (Some(self.row) == self.recent_row()).then(|| self.recent.get(self.column()))?
     }
 
     /// The focused application, when the remote is on the launcher.
@@ -487,10 +494,16 @@ impl Home {
         let to = (centre + AHEAD).min(last);
 
         for (column, item) in self.recent.iter().enumerate() {
-            let Some(mut tile) = self.tiles.row_data(column) else { continue };
+            let Some(mut tile) = self.tiles.row_data(column) else {
+                continue;
+            };
 
             let wanted = (column >= from && column <= to)
-                .then(|| item.poster.as_deref().map(|url| Key::new(url, POSTER_WIDTH)))
+                .then(|| {
+                    item.poster
+                        .as_deref()
+                        .map(|url| Key::new(url, POSTER_WIDTH))
+                })
                 .flatten();
 
             let art = match &wanted {
@@ -552,7 +565,12 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
             });
         }
 
-        let local: Vec<Item> = library.items.iter().take(RAIL_LIMIT).map(Item::from_preview).collect();
+        let local: Vec<Item> = library
+            .items
+            .iter()
+            .take(RAIL_LIMIT)
+            .map(Item::from_preview)
+            .collect();
         if !local.is_empty() {
             shelves.push(Shelf {
                 title: "Kitaplık".into(),
@@ -569,7 +587,12 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
         shelves.push(Shelf {
             title: rail_title(&row.name, &row.kind),
             source: row.addon_name.clone(),
-            items: row.items.iter().take(RAIL_LIMIT).map(Item::from_preview).collect(),
+            items: row
+                .items
+                .iter()
+                .take(RAIL_LIMIT)
+                .map(Item::from_preview)
+                .collect(),
         });
     }
 
@@ -580,7 +603,11 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
 /// the product is Turkish. Anything not recognised keeps its own name with the
 /// provider's word in front of it.
 fn rail_title(name: &str, kind: &str) -> String {
-    let noun = if kind == "series" { "Diziler" } else { "Filmler" };
+    let noun = if kind == "series" {
+        "Diziler"
+    } else {
+        "Filmler"
+    };
     match name.trim() {
         "Popular" => format!("Popüler {noun}"),
         "Featured" => format!("Öne Çıkan {noun}"),
@@ -595,7 +622,9 @@ fn rail_title(name: &str, kind: &str) -> String {
 /// means the two surfaces agree about what a film looks like before its poster
 /// arrives.
 fn hue_of(name: &str) -> f32 {
-    let hash = name.bytes().fold(17u32, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as u32));
+    let hash = name.bytes().fold(17u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(byte as u32)
+    });
     (hash % 360) as f32
 }
 
@@ -620,8 +649,20 @@ mod tests {
     fn launcher() -> Vec<AppEntryTile> {
         vec![
             tile("media", "Filmler ve Diziler", true, "", AppAction::Shelves),
-            tile("browser", "Tarayıcı", true, "", AppAction::Launch("browser".into())),
-            tile("settings", "Ayarlar", true, "", AppAction::Screen(Nav::Settings)),
+            tile(
+                "browser",
+                "Tarayıcı",
+                true,
+                "",
+                AppAction::Launch("browser".into()),
+            ),
+            tile(
+                "settings",
+                "Ayarlar",
+                true,
+                "",
+                AppAction::Screen(Nav::Settings),
+            ),
         ]
     }
 
@@ -651,9 +692,17 @@ mod tests {
         // Twenty-seven titles arrived; three are on this screen.
         assert_eq!(home.rows(), 2);
         assert_eq!(home.recent.len(), 3);
-        assert_eq!(home.shelves.len(), 3, "the catalogue is still held for the library");
+        assert_eq!(
+            home.shelves.len(),
+            3,
+            "the catalogue is still held for the library"
+        );
 
-        let media = home.apps.iter().find(|t| t.id == "media").expect("the tile");
+        let media = home
+            .apps
+            .iter()
+            .find(|t| t.id == "media")
+            .expect("the tile");
         assert_eq!(media.action, AppAction::Shelves);
     }
 
@@ -681,7 +730,11 @@ mod tests {
     fn the_same_title_on_two_shelves_is_one_tile() {
         let mut home = Home::new();
         let mut one = shelf("a", 1, 0.5);
-        let two = Shelf { title: "b".into(), source: String::new(), items: one.items.clone() };
+        let two = Shelf {
+            title: "b".into(),
+            source: String::new(),
+            items: one.items.clone(),
+        };
         one.items[0].progress = 0.5;
         home.set_shelves(vec![one, two]);
         assert_eq!(home.recent.len(), 1);
@@ -728,7 +781,16 @@ mod tests {
         home.step(1, 0);
         let id = home.focused_app().unwrap().id.clone();
         let mut shuffled = launcher();
-        shuffled.insert(0, tile("kodi", "Oynatıcı", true, "", AppAction::Launch("kodi".into())));
+        shuffled.insert(
+            0,
+            tile(
+                "kodi",
+                "Oynatıcı",
+                true,
+                "",
+                AppAction::Launch("kodi".into()),
+            ),
+        );
         home.set_apps(shuffled);
         assert_eq!(home.focused_app().unwrap().id, id);
     }
@@ -750,13 +812,22 @@ mod tests {
     /// Settings has a screen now; the launcher must not still say "yakında".
     #[test]
     fn the_launcher_offers_the_screens_this_interface_has() {
-        let display = crate::model::DisplayStatus { owner: None, applications: Vec::new() };
+        let display = crate::model::DisplayStatus {
+            owner: None,
+            applications: Vec::new(),
+        };
         let tiles = app_tiles_from(&display);
-        let settings = tiles.iter().find(|t| t.id == "settings").expect("settings tile");
+        let settings = tiles
+            .iter()
+            .find(|t| t.id == "settings")
+            .expect("settings tile");
         assert!(settings.ready);
         assert_eq!(settings.action, AppAction::Screen(Nav::Settings));
 
-        let media = tiles.iter().find(|t| t.id == "media").expect("catalogue tile");
+        let media = tiles
+            .iter()
+            .find(|t| t.id == "media")
+            .expect("catalogue tile");
         assert_eq!(media.name, "Filmler ve Diziler");
         assert!(media.ready);
     }

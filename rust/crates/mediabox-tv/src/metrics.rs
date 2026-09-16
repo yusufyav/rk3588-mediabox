@@ -109,12 +109,20 @@ impl Metrics {
         }
 
         let seconds = elapsed.as_secs_f64();
-        let fps = if seconds > 0.0 { self.frames as f64 / seconds } else { 0.0 };
+        let fps = if seconds > 0.0 {
+            self.frames as f64 / seconds
+        } else {
+            0.0
+        };
 
         let (_, _, refresh) = crate::platform::active_mode();
         let phases = crate::platform::drain_phases();
         let per_frame = |total: u64| -> f64 {
-            if phases.frames == 0 { 0.0 } else { total as f64 / phases.frames as f64 / 1000.0 }
+            if phases.frames == 0 {
+                0.0
+            } else {
+                total as f64 / phases.frames as f64 / 1000.0
+            }
         };
         let draw_ms = per_frame(phases.draw_us());
         let flip_ms = per_frame(phases.flip_wait_us);

@@ -578,7 +578,11 @@ impl App {
             Intent::Dismiss => {
                 // Back closes the filter's list before it does anything else:
                 // one press, one step.
-                if self.detail.as_mut().is_some_and(detail::Detail::close_filter) {
+                if self
+                    .detail
+                    .as_mut()
+                    .is_some_and(detail::Detail::close_filter)
+                {
                     self.paint();
                     return;
                 }
@@ -1752,14 +1756,16 @@ impl App {
         // The film's own row: two layers a mark, and the hairlines between the
         // groups. Drawn for the film screen; the Kodi screen reads the four
         // controls above.
-        use screens::now_playing::{Menu, FILM_CONTROLS, FILM_RULES, SPEEDS};
+        use screens::now_playing::{FILM_CONTROLS, FILM_RULES, Menu, SPEEDS};
         window.set_np_marks(strings(
             FILM_CONTROLS
                 .iter()
                 .map(|control| control.fill(playing).to_string()),
         ));
         window.set_np_lines(strings(
-            FILM_CONTROLS.iter().map(|control| control.line().to_string()),
+            FILM_CONTROLS
+                .iter()
+                .map(|control| control.line().to_string()),
         ));
         window.set_np_rules(slint::ModelRc::new(slint::VecModel::from(
             FILM_RULES.iter().map(|at| *at as i32).collect::<Vec<_>>(),
@@ -1791,12 +1797,14 @@ impl App {
                     active: !tracks.iter().any(|track| track.selected),
                 });
             }
-            rows.extend(names.iter().map(|name| MenuRow {
-                label: name.clone().into(),
-                detail: "".into(),
-                active: tracks
-                    .iter()
-                    .any(|track| track.selected && track.label == *name),
+            rows.extend(names.iter().map(|name| {
+                MenuRow {
+                    label: name.clone().into(),
+                    detail: "".into(),
+                    active: tracks
+                        .iter()
+                        .any(|track| track.selected && track.label == *name),
+                }
             }));
             rows
         };

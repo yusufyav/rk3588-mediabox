@@ -102,8 +102,12 @@ impl Film {
                 }
             }
             Film::Restart => "M11.2 6v12L4 12zM20 6v12l-7.2-6z",
-            Film::Subtitles => "M6.2 14.4h7.2v1.7H6.2zM15.1 14.4h2.7v1.7h-2.7zM6.2 11h2.7v1.7H6.2zM10.6 11h7.2v1.7h-7.2z",
-            Film::Audio => "M2.6 10.4h1.5v3.2H2.6zM5.6 8.4h1.5v7.2H5.6zM8.6 5.6h1.5v12.8H8.6zM11.6 7.6h1.5v8.8h-1.5zM14.6 4.4h1.5v15.2h-1.5zM17.6 8.4h1.5v7.2h-1.5zM20.6 10.4h1.5v3.2h-1.5z",
+            Film::Subtitles => {
+                "M6.2 14.4h7.2v1.7H6.2zM15.1 14.4h2.7v1.7h-2.7zM6.2 11h2.7v1.7H6.2zM10.6 11h7.2v1.7h-7.2z"
+            }
+            Film::Audio => {
+                "M2.6 10.4h1.5v3.2H2.6zM5.6 8.4h1.5v7.2H5.6zM8.6 5.6h1.5v12.8H8.6zM11.6 7.6h1.5v8.8h-1.5zM14.6 4.4h1.5v15.2h-1.5zM17.6 8.4h1.5v7.2h-1.5zM20.6 10.4h1.5v3.2h-1.5z"
+            }
             Film::Speed => "M11.1 13.6l4.3-4.9 1.2 1-3.6 5.3z",
             Film::Scale => "",
             Film::Player => "M10.9 8.6l4.6 3.1-4.6 3.1z",
@@ -115,7 +119,9 @@ impl Film {
         match self {
             Film::Subtitles => "M3.6 6.2h16.8v11.2h-5.6l-3.4 3.4-1-3.4H3.6z",
             Film::Speed => "M3.4 17.6a8.6 8.6 0 1 1 17.2 0z",
-            Film::Scale => "M13.4 10.6l6.4-6.4M14.6 3.6h5.6v5.6M10.6 13.4l-6.4 6.4M9.4 20.4H3.8v-5.6",
+            Film::Scale => {
+                "M13.4 10.6l6.4-6.4M14.6 3.6h5.6v5.6M10.6 13.4l-6.4 6.4M9.4 20.4H3.8v-5.6"
+            }
             Film::Player => "M3.6 6.4h16.8v11.2H3.6z",
             _ => "",
         }
@@ -742,7 +748,7 @@ fn clock_seconds(value: Option<&Value>) -> u64 {
     part("hours") * 3600 + part("minutes") * 60 + part("seconds")
 }
 
-/// `1:23:45`, or `23:45` for anything under an hour.
+/// `01:23:45`, or `23:45` for anything under an hour.
 pub fn timecode(seconds: u64) -> String {
     let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
     if hours > 0 {
@@ -785,7 +791,7 @@ mod tests {
         assert_eq!(now.elapsed_seconds, 1800);
         assert!((now.progress() - 0.25).abs() < 0.001);
         assert_eq!(timecode(now.elapsed_seconds), "30:00");
-        assert_eq!(timecode(now.duration_seconds), "2:00:00");
+        assert_eq!(timecode(now.duration_seconds), "02:00:00");
     }
 
     #[test]

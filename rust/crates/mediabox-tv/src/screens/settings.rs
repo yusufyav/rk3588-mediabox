@@ -47,7 +47,10 @@ impl Action {
     /// that ends the session, is behind a second press on a sheet whose focus
     /// starts on "Vazgeç".
     pub fn confirms(self) -> bool {
-        matches!(self, Action::RestartPlayer | Action::Restart | Action::Shutdown)
+        matches!(
+            self,
+            Action::RestartPlayer | Action::Restart | Action::Shutdown
+        )
     }
 
     pub fn question(self) -> &'static str {
@@ -82,7 +85,10 @@ impl Row {
     }
 
     fn toned(label: &str, value: impl Into<String>, tone: &str) -> Self {
-        Self { tone: tone.into(), ..Row::reading(label, value) }
+        Self {
+            tone: tone.into(),
+            ..Row::reading(label, value)
+        }
     }
 
     fn act(label: &str, hint: &str, action: Action) -> Self {
@@ -120,8 +126,12 @@ pub struct Settings {
 
 impl Settings {
     pub fn new() -> Self {
-        let mut settings =
-            Self { groups: Vec::new(), section: 0, pane: Pane::Sections, positions: Vec::new() };
+        let mut settings = Self {
+            groups: Vec::new(),
+            section: 0,
+            pane: Pane::Sections,
+            positions: Vec::new(),
+        };
         settings.compose(None, None, None);
         settings
     }
@@ -131,7 +141,10 @@ impl Settings {
     }
 
     pub fn rows(&self) -> &[Row] {
-        self.groups.get(self.section).map(|g| g.rows.as_slice()).unwrap_or(&[])
+        self.groups
+            .get(self.section)
+            .map(|g| g.rows.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn focused(&self) -> Option<&Row> {
@@ -152,7 +165,8 @@ impl Settings {
                 if dx < 0 || dy == 0 {
                     return false;
                 }
-                let next = (self.section as i32 + dy).clamp(0, self.groups.len() as i32 - 1) as usize;
+                let next =
+                    (self.section as i32 + dy).clamp(0, self.groups.len() as i32 - 1) as usize;
                 if next == self.section {
                     return false;
                 }
@@ -189,7 +203,11 @@ impl Settings {
         if rows == 0 {
             return;
         }
-        let direction = if direction == 0 { 1 } else { direction.signum() };
+        let direction = if direction == 0 {
+            1
+        } else {
+            direction.signum()
+        };
         let mut at = start;
         while at >= 0 && at < rows {
             if self.rows()[at as usize].selectable() {
@@ -277,8 +295,8 @@ fn leds(status: Option<&Value>) -> Vec<Row> {
     if flag(status, "/leds/available") != Some(true) {
         // Either the daemon has not answered yet, or this is not a board whose
         // lights are on gpio-leds. Either way there is nothing to press.
-        let reason = text(status, "/leds/error")
-            .unwrap_or_else(|| "Denetlenebilir ışık bulunamadı".into());
+        let reason =
+            text(status, "/leds/error").unwrap_or_else(|| "Denetlenebilir ışık bulunamadı".into());
         return vec![Row::reading("Yeşil ve mavi ışık", reason), red];
     }
 
@@ -294,7 +312,11 @@ fn leds(status: Option<&Value>) -> Vec<Row> {
             label: "Yeşil ve mavi ışık".into(),
             value: mode.label().into(),
             hint: format!("Ok: {}", next.label()),
-            tone: if mode == LedMode::Off { "good".into() } else { String::new() },
+            tone: if mode == LedMode::Off {
+                "good".into()
+            } else {
+                String::new()
+            },
             action: Some(Action::SetLeds(next)),
         },
         red,
@@ -329,16 +351,21 @@ fn compose(
             rows: vec![
                 Row::toned(
                     "Oynatıcı",
-                    if kodi_running { "Çalışıyor" } else { "Kapalı" },
+                    if kodi_running {
+                        "Çalışıyor"
+                    } else {
+                        "Kapalı"
+                    },
                     if kodi_running { "good" } else { "" },
                 ),
                 Row::reading("Ekranı tutan", owner),
-                Row::reading(
-                    "Görüntü",
-                    "Kopyalanır — yeniden kodlanmaz",
-                ),
+                Row::reading("Görüntü", "Kopyalanır — yeniden kodlanmaz"),
                 Row::reading("Ses", "Gerekirse AC-3'e çevrilir"),
-                Row::act("Oynatıcıyı yeniden başlat", "Kodi'yi kapatıp açar", Action::RestartPlayer),
+                Row::act(
+                    "Oynatıcıyı yeniden başlat",
+                    "Kodi'yi kapatıp açar",
+                    Action::RestartPlayer,
+                ),
             ],
         },
         Group {
@@ -380,8 +407,16 @@ fn compose(
                     "Fiziksel adres",
                     text(status, "/cec/physical_address").unwrap_or_else(dash),
                 ),
-                Row::act("Televizyonu uyandır", "CEC ile açılış isteği", Action::WakeTelevision),
-                Row::act("Televizyonu beklemeye al", "CEC ile standby", Action::StandbyTelevision),
+                Row::act(
+                    "Televizyonu uyandır",
+                    "CEC ile açılış isteği",
+                    Action::WakeTelevision,
+                ),
+                Row::act(
+                    "Televizyonu beklemeye al",
+                    "CEC ile standby",
+                    Action::StandbyTelevision,
+                ),
             ],
         },
         Group {
@@ -451,7 +486,12 @@ mod tests {
     #[test]
     fn focus_lands_on_something_that_can_be_pressed() {
         let settings = Settings::new();
-        assert!(settings.focused().map(|row| row.selectable()).unwrap_or(false));
+        assert!(
+            settings
+                .focused()
+                .map(|row| row.selectable())
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -503,9 +543,15 @@ mod tests {
             .expect("system section");
         settings.pane = Pane::Rows;
         settings.settle(1);
-        assert_eq!(settings.focused().and_then(|r| r.action), Some(Action::Restart));
+        assert_eq!(
+            settings.focused().and_then(|r| r.action),
+            Some(Action::Restart)
+        );
         settings.step(0, 1);
-        assert_eq!(settings.focused().and_then(|r| r.action), Some(Action::Shutdown));
+        assert_eq!(
+            settings.focused().and_then(|r| r.action),
+            Some(Action::Shutdown)
+        );
     }
 
     /// The whole point of the settings screen's power rows.
@@ -515,7 +561,10 @@ mod tests {
         for group in &settings.groups {
             for row in &group.rows {
                 let Some(action) = row.action else { continue };
-                if matches!(action, Action::Restart | Action::Shutdown | Action::RestartPlayer) {
+                if matches!(
+                    action,
+                    Action::Restart | Action::Shutdown | Action::RestartPlayer
+                ) {
                     assert!(action.confirms(), "{:?} does not confirm", action);
                     assert!(!action.question().is_empty());
                 }
@@ -561,19 +610,24 @@ mod tests {
     /// is the mode this setting exists to reach.
     #[test]
     fn the_lights_row_steps_round_the_ring() {
-        for (now, next) in
-            [("off", LedMode::On), ("on", LedMode::Heartbeat), ("heartbeat", LedMode::Off)]
-        {
+        for (now, next) in [
+            ("off", LedMode::On),
+            ("on", LedMode::Heartbeat),
+            ("heartbeat", LedMode::Off),
+        ] {
             let rows = lights(true, now);
             let row = rows.first().expect("a row");
             assert!(row.selectable(), "{now} is not selectable");
             assert_eq!(row.action, Some(Action::SetLeds(next)), "from {now}");
             // The value is where the lights are, not where they are going.
-            assert_eq!(row.value, LedMode::ALL[LedMode::ALL
-                .iter()
-                .position(|m| m.next() == next)
-                .expect("a predecessor")]
-            .label());
+            assert_eq!(
+                row.value,
+                LedMode::ALL[LedMode::ALL
+                    .iter()
+                    .position(|m| m.next() == next)
+                    .expect("a predecessor")]
+                .label()
+            );
         }
     }
 

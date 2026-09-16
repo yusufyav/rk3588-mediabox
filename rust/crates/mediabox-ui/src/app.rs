@@ -1,15 +1,15 @@
 //! The shell: which screen is showing, and how a remote reaches it.
 
 use crate::focus::{self, Direction};
-use crate::screens;
 use crate::model::MetaPreview;
+use crate::screens;
 use crate::{api, model};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{EventSource, MessageEvent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,7 +20,10 @@ pub enum Route {
     Media,
     Browser,
     Search,
-    Detail { kind: String, id: String },
+    Detail {
+        kind: String,
+        id: String,
+    },
     /// One shelf opened out into a grid. `addon` names where the titles come
     /// from: an addon's id for a catalogue, or one of the library sentinels.
     Collection {
@@ -85,9 +88,7 @@ impl Nav {
 
     /// The handed-over preview, if it is about the title being asked for.
     pub fn seeded(&self, id: &str) -> Option<MetaPreview> {
-        self.seed
-            .get_untracked()
-            .filter(|item| item.id == id)
+        self.seed.get_untracked().filter(|item| item.id == id)
     }
 
     pub fn go(&self, next: Route) {
@@ -368,10 +369,8 @@ fn install_focus_guard() {
                 reclaim();
             }
         });
-        let _ = document.add_event_listener_with_callback(
-            "visibilitychange",
-            handler.as_ref().unchecked_ref(),
-        );
+        let _ = document
+            .add_event_listener_with_callback("visibilitychange", handler.as_ref().unchecked_ref());
         handler.forget();
     }
 }
@@ -685,7 +684,9 @@ fn Glyph(icon: Icon) -> impl IntoView {
         Icon::Home => "M4 11.2 12 4.5l8 6.7M6.4 9.6V19h11.2V9.6",
         Icon::Search => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM16.2 16.2 21 21",
         Icon::Play => "M8 5.5v13l11-6.5-11-6.5Z",
-        Icon::Gear => "M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2ZM12 3.4l1.4 2.2 2.6-.5.6 2.6 2.2 1.3L19.6 12l1.2 2.4-2.2 1.3-.6 2.6-2.6-.5-1.4 2.2-1.4-2.2-2.6.5-.6-2.6-2.2-1.3L8.4 12 7.2 9.6l2.2-1.3.6-2.6 2.6.5L12 3.4Z",
+        Icon::Gear => {
+            "M12 9.4a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2ZM12 3.4l1.4 2.2 2.6-.5.6 2.6 2.2 1.3L19.6 12l1.2 2.4-2.2 1.3-.6 2.6-2.6-.5-1.4 2.2-1.4-2.2-2.6.5-.6-2.6-2.2-1.3L8.4 12 7.2 9.6l2.2-1.3.6-2.6 2.6.5L12 3.4Z"
+        }
     };
     view! {
         <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">

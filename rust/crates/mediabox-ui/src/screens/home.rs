@@ -147,7 +147,11 @@ fn Vitals() -> impl IntoView {
             if let Some(usage) = root.pointer("/cpu/usage").and_then(Value::as_f64) {
                 return Some(usage.clamp(0.0, 1.0));
             }
-            let count = root.pointer("/cpu/count").and_then(Value::as_f64).unwrap_or(1.0).max(1.0);
+            let count = root
+                .pointer("/cpu/count")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0)
+                .max(1.0);
             let load = root.pointer("/cpu/load/one").and_then(Value::as_f64)?;
             Some((load / count).clamp(0.0, 1.0))
         })
@@ -293,18 +297,8 @@ fn now() -> (String, String) {
         "Cumartesi",
     ];
     const MONTHS: [&str; 12] = [
-        "Ocak",
-        "Şubat",
-        "Mart",
-        "Nisan",
-        "Mayıs",
-        "Haziran",
-        "Temmuz",
-        "Ağustos",
-        "Eylül",
-        "Ekim",
-        "Kasım",
-        "Aralık",
+        "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim",
+        "Kasım", "Aralık",
     ];
     let date = js_sys::Date::new_0();
     let day = DAYS[(date.get_day() as usize).min(6)];

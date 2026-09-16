@@ -73,7 +73,10 @@ impl Media {
         if row == 0 {
             return NAV.len();
         }
-        self.shelves.get(row - BAR_ROW).map(|shelf| shelf.items.len()).unwrap_or(0)
+        self.shelves
+            .get(row - BAR_ROW)
+            .map(|shelf| shelf.items.len())
+            .unwrap_or(0)
     }
 
     /// Rebuilds the shelves, keeping the remote on the same title if it is
@@ -188,14 +191,20 @@ impl Media {
             let from = centre.saturating_sub(BEHIND);
             let to = (centre + AHEAD).min(last);
 
-            let Some(tiles) = self.tiles.get(index) else { continue };
+            let Some(tiles) = self.tiles.get(index) else {
+                continue;
+            };
 
             for (column, item) in shelf.items.iter().enumerate() {
                 let inside = nearby && column >= from && column <= to;
-                let Some(mut tile) = tiles.row_data(column) else { continue };
+                let Some(mut tile) = tiles.row_data(column) else {
+                    continue;
+                };
 
                 let wanted = if inside {
-                    item.poster.as_deref().map(|url| Key::new(url, POSTER_WIDTH))
+                    item.poster
+                        .as_deref()
+                        .map(|url| Key::new(url, POSTER_WIDTH))
                 } else {
                     None
                 };
@@ -229,7 +238,9 @@ mod tests {
         Shelf {
             title: name.into(),
             source: String::new(),
-            items: (0..count).map(|i| Item::stub(&format!("{name}-{i}"))).collect(),
+            items: (0..count)
+                .map(|i| Item::stub(&format!("{name}-{i}")))
+                .collect(),
         }
     }
 

@@ -109,7 +109,8 @@ pub fn Card(
     /// Those are fetched straight away; everything past the edge of the picture
     /// stays lazy, so a home screen still does not ask for a hundred pictures
     /// at once.
-    #[prop(optional)] eager: bool,
+    #[prop(optional)]
+    eager: bool,
 ) -> impl IntoView {
     let poster = item.poster.clone();
     let has_art = poster.is_some();
@@ -121,11 +122,9 @@ pub fn Card(
     // A stable colour per title, so a shelf of artless entries reads as a set
     // of covers rather than as a row of failures. Any spread over the circle
     // will do; this one just has to give the same answer every time.
-    let hue = item
-        .name
-        .bytes()
-        .fold(17u32, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as u32))
-        % 360;
+    let hue = item.name.bytes().fold(17u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(byte as u32)
+    }) % 360;
     let picked = item.clone();
     let label = format!("{} aç", item.name);
     // How far in this title was left, when the account knows. Zero is not a
@@ -230,7 +229,8 @@ pub fn Rail(
     /// sideways with an arrow key is not browsing. The button lives in the
     /// head, at the end of the line the title starts, which is where the eye
     /// already goes when a row runs off the screen.
-    #[prop(optional)] on_all: Option<Callback<()>>,
+    #[prop(optional)]
+    on_all: Option<Callback<()>>,
 ) -> impl IntoView {
     if items.is_empty() {
         return None;
@@ -368,15 +368,18 @@ pub fn Field(
     #[prop(into)] key: String,
     /// A password: shown as dots, and never in the clear on a television that
     /// a room full of people is looking at.
-    #[prop(optional)] secret: bool,
+    #[prop(optional)]
+    secret: bool,
     #[prop(optional)] autofocus: bool,
     #[prop(into, optional)] placeholder: String,
     /// Called when the field has focus and Enter is pressed, so a keyboard can
     /// finish the job without walking to the button.
-    #[prop(optional)] on_enter: Option<Callback<()>>,
+    #[prop(optional)]
+    on_enter: Option<Callback<()>>,
     /// Told when this field takes focus, so an on-screen keyboard beside it
     /// knows which field it is building.
-    #[prop(optional)] on_focus: Option<Callback<()>>,
+    #[prop(optional)]
+    on_focus: Option<Callback<()>>,
 ) -> impl IntoView {
     view! {
         <div
@@ -433,12 +436,7 @@ pub fn Field(
 /// either of them knowing about the other.
 #[component]
 pub fn Keyboard(value: RwSignal<String>) -> impl IntoView {
-    const ROWS: [&str; 4] = [
-        "1234567890",
-        "qwertyuıopğü",
-        "asdfghjklşi",
-        "zxcvbnmöç.@-_",
-    ];
+    const ROWS: [&str; 4] = ["1234567890", "qwertyuıopğü", "asdfghjklşi", "zxcvbnmöç.@-_"];
     let press = move |key: char| {
         value.update(|text| {
             if text.chars().count() < 200 {

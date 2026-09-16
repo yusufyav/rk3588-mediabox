@@ -73,7 +73,8 @@ impl MediaClient {
         if let Some(limit) = limit.as_deref() {
             query.push(("limit", limit));
         }
-        self.get(&["media", "catalog", media_type, id], &query).await
+        self.get(&["media", "catalog", media_type, id], &query)
+            .await
     }
 
     pub async fn meta(&self, media_type: &str, id: &str) -> Result<Value, MediaError> {
@@ -105,7 +106,8 @@ impl MediaClient {
     }
 
     pub async fn stream_plan(&self, stream: Value) -> Result<Value, MediaError> {
-        self.post(&["media", "plan"], json!({"stream": stream})).await
+        self.post(&["media", "plan"], json!({"stream": stream}))
+            .await
     }
 
     pub async fn session_start_stream(
@@ -171,7 +173,11 @@ impl MediaClient {
     /// The live bytes of one session, still as a streaming response so the
     /// relay above can copy them without buffering a whole film in memory.
     pub async fn session_stream(&self, id: &str) -> Result<reqwest::Response, MediaError> {
-        Ok(self.client.get(self.url(&["media", "session", id])?).send().await?)
+        Ok(self
+            .client
+            .get(self.url(&["media", "session", id])?)
+            .send()
+            .await?)
     }
 
     pub async fn session_stop(&self, id: &str) -> Result<Value, MediaError> {
@@ -185,8 +191,11 @@ impl MediaClient {
     /// never stored here: what is kept, by the core, is the auth key the login
     /// returns.
     pub async fn login(&self, email: &str, password: &str) -> Result<Value, MediaError> {
-        self.post(&["media", "login"], json!({"email": email, "password": password}))
-            .await
+        self.post(
+            &["media", "login"],
+            json!({"email": email, "password": password}),
+        )
+        .await
     }
 
     pub async fn logout(&self) -> Result<Value, MediaError> {
