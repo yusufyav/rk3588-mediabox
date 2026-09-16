@@ -261,6 +261,51 @@ impl Account {
         }
     }
 
+    /// A character from a real keyboard.
+    ///
+    /// The letter grid is for a remote; a person with a keyboard plugged in
+    /// should not have to walk to the letters, and an address is exactly the
+    /// thing nobody wants to spell out with five buttons. It types into the
+    /// field the remote is on -- or, while the remote is down on the grid, the
+    /// field the grid is serving -- and does not move the focus, so somebody
+    /// who starts typing and then reaches for the remote finds it where they
+    /// left it.
+    pub fn typed(&mut self, c: char) -> bool {
+        if self.busy {
+            return false;
+        }
+        if c == '\u{8}' || c == '\u{7f}' {
+            return self.text_mut().pop().is_some();
+        }
+        if c == '\r' || c == '\n' {
+            // Enter is the button, wherever the focus happens to be.
+            return false;
+        }
+        if c.is_control() {
+            return false;
+        }
+        let text = self.text_mut();
+        if text.chars().count() >= 128 {
+            return false;
+        }
+        text.push(c);
+        self.notice.clear();
+        true
+    }
+
+    /// Enter, from a real keyboard: submit if it can, say why if it cannot.
+    pub fn typed_enter(&mut self) -> Press {
+        if self.busy {
+            return Press::Nothing;
+        }
+        let reason = self.blocked_because();
+        if !reason.is_empty() {
+            self.notice = reason.to_string();
+            return Press::Changed;
+        }
+        Press::SignIn
+    }
+
     /// Back, from inside the screen. False means there is nothing left to back
     /// out of and the route should pop — which is how the settings screen is
     /// reached again, and why this is never a trap.
@@ -559,6 +604,73 @@ mod tests {
         let capped = short_reason(&long);
         assert!(capped.chars().count() <= 61, "{}", capped.chars().count());
         assert_eq!(short_reason("{}"), "beklenmeyen bir hata");
+    }
+
+    /// A person with a keyboard plugged in should not have to walk to the
+    /// letters to spell out an address.
+    #[test]
+    fn a_real_keyboard_types_into_the_field_the_remote_is_on() {
+        let mut account = Account::new();
+        for c in "someone@example.com".chars() {
+            assert!(account.typed(c));
+        }
+        assert_eq!(account.email, "someone@example.com");
+        assert!(account.password().is_empty());
+
+        // And it does not move the remote.
+        assert_eq!(account.focus, Focus::Field(Field::Email));
+
+        account.step(0, 1);
+        for c in "Secret1".chars() {
+            assert!(account.typed(c));
+        }
+        assert_eq!(account.password(), "Secret1");
+        assert_eq!(account.password_mask(), "•••••••");
+        assert_eq!(account.email, "someone@example.com");
+    }
+
+    /// While the remote is down on the grid, typing still goes to the field
+    /// the grid is serving rather than nowhere.
+    #[test]
+    fn typing_follows_the_field_the_grid_is_serving() {
+        let mut account = Account::new();
+        account.field = Field::Password;
+        account.focus = Focus::Keys;
+        assert!(account.typed('x'));
+        assert_eq!(account.password(), "x");
+        assert_eq!(
+            account.focus,
+            Focus::Keys,
+            "typing must not move the remote"
+        );
+    }
+
+    #[test]
+    fn backspace_and_enter_behave() {
+        let mut account = Account::new();
+        assert!(!account.typed('\u{8}'), "nothing to delete");
+        account.typed('a');
+        assert!(account.typed('\u{8}'));
+        assert!(account.email.is_empty());
+        // Control characters are not letters.
+        assert!(!account.typed('\t'));
+
+        assert_eq!(account.typed_enter(), Press::Changed);
+        assert_eq!(account.notice, "E-posta girin");
+        for c in "a@b.co".chars() {
+            account.typed(c);
+        }
+        account.field = Field::Password;
+        account.typed('x');
+        assert_eq!(account.typed_enter(), Press::SignIn);
+    }
+
+    #[test]
+    fn a_keyboard_cannot_send_a_second_login_while_one_is_in_flight() {
+        let mut account = Account::new();
+        account.begin("Bağlanıyor…");
+        assert!(!account.typed('a'));
+        assert_eq!(account.typed_enter(), Press::Nothing);
     }
 
     #[test]

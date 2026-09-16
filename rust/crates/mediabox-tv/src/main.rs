@@ -214,15 +214,35 @@ impl App {
         }
     }
 
-    /// Text from a real keyboard. Only the search screen has anywhere to put
-    /// it; everywhere else a letter is not a command and is dropped.
+    /// Text from a real keyboard.
+    ///
+    /// Two screens have somewhere to put it — the search box and the account
+    /// form — and on both it types without moving the focus, so a person who
+    /// starts on the keyboard and then reaches for the remote finds it where
+    /// they left it. Everywhere else a letter is not a command and is dropped.
     fn typed(&mut self, c: char) {
-        if self.modal() || self.route() != Route::Search {
+        if self.modal() {
             return;
         }
-        if self.search.typed(c) {
-            self.search_soon();
-            self.paint();
+        match self.route() {
+            Route::Search => {
+                if self.search.typed(c) {
+                    self.search_soon();
+                    self.paint();
+                }
+            }
+            Route::Account => {
+                if c == '\r' || c == '\n' {
+                    match self.account.typed_enter() {
+                        screens::account::Press::SignIn => self.sign_in(),
+                        screens::account::Press::Changed => self.paint(),
+                        screens::account::Press::Nothing => {}
+                    }
+                } else if self.account.typed(c) {
+                    self.paint();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1202,16 +1222,7 @@ impl App {
                 }
             }
             Intent::Select => match self.account.press() {
-                screens::account::Press::SignIn => {
-                    // The one place the password leaves the screen. It is moved
-                    // out here and wiped as soon as the answer lands, either
-                    // way -- see `account_answered`.
-                    let email = self.account.email.trim().to_string();
-                    let password = self.account.password().to_string();
-                    self.account.begin("Bağlanıyor…");
-                    self.paint();
-                    spawn_media_login(email, password);
-                }
+                screens::account::Press::SignIn => self.sign_in(),
                 screens::account::Press::Changed => self.paint(),
                 screens::account::Press::Nothing => {}
             },
@@ -1224,6 +1235,16 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The one place the password leaves the screen. It is moved out here and
+    /// wiped as soon as the answer lands, either way — see `account_answered`.
+    fn sign_in(&mut self) {
+        let email = self.account.email.trim().to_string();
+        let password = self.account.password().to_string();
+        self.account.begin("Bağlanıyor…");
+        self.paint();
+        spawn_media_login(email, password);
     }
 
     /// The answer to a sign-in or a sign-out.
