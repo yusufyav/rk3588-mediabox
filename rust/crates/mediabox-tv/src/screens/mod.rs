@@ -5,6 +5,7 @@
 //! plane, opens a socket or touches Slint, which is what makes the focus model
 //! testable — and the focus model is the product on a television.
 
+pub mod account;
 pub mod diagnostics;
 pub mod library;
 pub mod media;

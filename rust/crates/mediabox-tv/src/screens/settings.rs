@@ -23,6 +23,13 @@ use crate::model::DisplayStatus;
 pub enum Action {
     /// Opens the diagnostics screen.
     OpenDiagnostics,
+    /// Opens the Stremio sign-in screen. The form lives on its own route
+    /// because it needs a letter grid, and a letter grid does not fit in the
+    /// right-hand column of a two-pane settings screen.
+    OpenAccount,
+    /// Disconnect the Stremio account. Somebody's add-ons stop being the ones
+    /// this box uses, so it asks first.
+    SignOut,
     /// Set the board's indicator lights to this mode. The row carries the mode
     /// it would move to rather than a "cycle" instruction, so what a press
     /// does is decided while the screen is composed and is visible in the row
@@ -49,13 +56,14 @@ impl Action {
     pub fn confirms(self) -> bool {
         matches!(
             self,
-            Action::RestartPlayer | Action::Restart | Action::Shutdown
+            Action::RestartPlayer | Action::Restart | Action::Shutdown | Action::SignOut
         )
     }
 
     pub fn question(self) -> &'static str {
         match self {
             Action::RestartPlayer => "Oynatıcı yeniden başlatılsın mı?",
+            Action::SignOut => "Stremio hesabının bağlantısı kesilsin mi?",
             Action::Restart => "Cihaz yeniden başlatılsın mı?",
             Action::Shutdown => "Cihaz kapatılsın mı?",
             _ => "",
@@ -324,6 +332,55 @@ fn leds(status: Option<&Value>) -> Vec<Row> {
     ]
 }
 
+/// The Stremio account.
+///
+/// The same three readings the web interface shows, from the same place in the
+/// status, and one row to press. Connected, it offers the way out; not
+/// connected, it offers the way in — there is never both, because a screen that
+/// shows a sign-out button to somebody who is not signed in is a screen that
+/// has not read its own state.
+fn account(status: Option<&Value>) -> Vec<Row> {
+    let signed_in = flag(status, "/media/provider/authenticated").unwrap_or(false);
+    let note = Row::reading(
+        "Eklentiler",
+        if signed_in {
+            "Hesabınızın eklentileri kullanılıyor"
+        } else {
+            "Varsayılan koleksiyon — çoğu başlıkta akış gelmez"
+        },
+    );
+
+    if !signed_in {
+        return vec![
+            Row::toned("Durum", "Bağlı değil", "warn"),
+            note,
+            Row::act(
+                "Giriş yap",
+                "E-posta ve parolanızı kumandayla girin",
+                Action::OpenAccount,
+            ),
+        ];
+    }
+
+    vec![
+        Row::toned("Durum", "Bağlı", "good"),
+        Row::reading(
+            "Hesap",
+            text(status, "/media/provider/email").unwrap_or_else(|| "—".into()),
+        ),
+        Row::reading(
+            "Eklenti sayısı",
+            status
+                .and_then(|value| value.pointer("/media/provider/addonCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .to_string(),
+        ),
+        note,
+        Row::act("Çıkış yap", "Hesabın bağlantısını keser", Action::SignOut),
+    ]
+}
+
 fn compose(
     status: Option<&Value>,
     diagnostics: Option<&Value>,
@@ -367,6 +424,10 @@ fn compose(
                     Action::RestartPlayer,
                 ),
             ],
+        },
+        Group {
+            title: "Hesap".into(),
+            rows: account(status),
         },
         Group {
             title: "Ağ".into(),
@@ -581,6 +642,93 @@ mod tests {
         for mode in LedMode::ALL {
             assert!(!Action::SetLeds(mode).confirms());
             assert!(Action::SetLeds(mode).question().is_empty());
+        }
+    }
+
+    // ------------------------------------------------------------ the account
+
+    fn provider(authenticated: bool) -> serde_json::Value {
+        serde_json::json!({"media": {"provider": {
+            "authenticated": authenticated,
+            "email": "someone@example.com",
+            "addonCount": 7,
+        }}})
+    }
+
+    fn account_rows(status: Option<&Value>) -> Vec<Row> {
+        compose(status, None, None)
+            .into_iter()
+            .find(|group| group.title == "Hesap")
+            .expect("account section")
+            .rows
+    }
+
+    /// The web interface has had this since the beginning; the native shell is
+    /// where a person actually sits.
+    #[test]
+    fn the_settings_screen_has_an_account_section() {
+        let settings = Settings::new();
+        let titles: Vec<&str> = settings.groups.iter().map(|g| g.title.as_str()).collect();
+        assert!(titles.contains(&"Hesap"), "{titles:?}");
+    }
+
+    #[test]
+    fn a_box_with_no_account_offers_the_way_in() {
+        let status = provider(false);
+        let rows = account_rows(Some(&status));
+        assert_eq!(rows[0].value, "Bağlı değil");
+        let actions: Vec<Action> = rows.iter().filter_map(|row| row.action).collect();
+        assert_eq!(actions, [Action::OpenAccount]);
+        // A sign-out button in front of somebody who is not signed in is a
+        // screen that has not read its own state.
+        assert!(!actions.contains(&Action::SignOut));
+    }
+
+    #[test]
+    fn a_connected_box_shows_the_account_and_offers_the_way_out() {
+        let status = provider(true);
+        let rows = account_rows(Some(&status));
+        assert_eq!(rows[0].value, "Bağlı");
+        assert!(rows.iter().any(|row| row.value == "someone@example.com"));
+        assert!(rows.iter().any(|row| row.value == "7"));
+        let actions: Vec<Action> = rows.iter().filter_map(|row| row.action).collect();
+        assert_eq!(actions, [Action::SignOut]);
+    }
+
+    /// An unanswered status is a box that is not signed in, which is also what
+    /// a box that has never been asked looks like.
+    #[test]
+    fn an_unanswered_status_does_not_claim_an_account() {
+        let rows = account_rows(None);
+        assert_eq!(rows[0].value, "Bağlı değil");
+        assert_eq!(
+            rows.iter().filter_map(|row| row.action).collect::<Vec<_>>(),
+            [Action::OpenAccount]
+        );
+    }
+
+    /// Somebody's add-ons stop being the ones this box uses, so it asks first.
+    #[test]
+    fn signing_out_asks_first_and_signing_in_does_not() {
+        assert!(Action::SignOut.confirms());
+        assert!(!Action::SignOut.question().is_empty());
+        assert!(!Action::OpenAccount.confirms());
+        assert!(Action::OpenAccount.question().is_empty());
+    }
+
+    /// Nothing about the account section may put a secret on the panel. The
+    /// rows are built from the status, and the status has no password in it —
+    /// this holds the screen to that even if one ever appeared.
+    #[test]
+    fn no_account_row_can_carry_a_secret() {
+        let mut status = provider(true);
+        status["media"]["provider"]["password"] = "hunter2".into();
+        status["media"]["provider"]["authKey"] = "sekritkey".into();
+        for row in account_rows(Some(&status)) {
+            for field in [&row.label, &row.value, &row.hint] {
+                assert!(!field.contains("hunter2"), "{field}");
+                assert!(!field.contains("sekritkey"), "{field}");
+            }
         }
     }
 

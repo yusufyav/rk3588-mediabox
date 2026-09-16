@@ -7,6 +7,7 @@ import { Detail, SourceRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
 import { Player, MenuRow } from "player.slint";
 import { Settings } from "settings.slint";
+import { Account } from "account.slint";
 import { Diagnostics } from "diagnostics.slint";
 import {
     RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup,
@@ -191,6 +192,23 @@ export component MediaBoxWindow inherits Window {
     in property <[SettingRow]> settings-rows;
     in property <int> settings-row;
 
+    // ---- the Stremio account
+    in property <string> account-email;
+    in property <string> account-password-mask;
+    in property <string> account-focus: "email";
+    in property <string> account-editing: "email";
+    in property <[KeyRow]> account-keys;
+    in property <int> account-key-row;
+    in property <int> account-key-col;
+    in property <bool> account-shifted;
+    in property <bool> account-signed-in;
+    in property <string> account-who;
+    in property <int> account-addons;
+    in property <bool> account-busy;
+    in property <string> account-notice;
+    in property <string> account-submit-label: "Giriş yap";
+    in property <bool> account-submit-ready;
+
     // ---- diagnostics
     in property <[DiagGroup]> diag-groups;
     in property <int> diag-group;
@@ -332,6 +350,26 @@ export component MediaBoxWindow inherits Window {
             row-index: root.settings-row;
         }
 
+        if screen == "account": Account {
+            width: 100%;
+            height: 100%;
+            email: root.account-email;
+            password-mask: root.account-password-mask;
+            focus-at: root.account-focus;
+            editing: root.account-editing;
+            keys: root.account-keys;
+            key-row: root.account-key-row;
+            key-col: root.account-key-col;
+            shifted: root.account-shifted;
+            signed-in: root.account-signed-in;
+            account-email: root.account-who;
+            addons: root.account-addons;
+            busy: root.account-busy;
+            notice: root.account-notice;
+            submit-label: root.account-submit-label;
+            submit-ready: root.account-submit-ready;
+        }
+
         if screen == "diagnostics": Diagnostics {
             width: 100%;
             height: 100%;
@@ -354,6 +392,7 @@ export component MediaBoxWindow inherits Window {
                 : screen == "search" ? "Ara"
                 : screen == "library" ? "Kitaplık"
                 : screen == "settings" ? "Ayarlar"
+                : screen == "account" ? "Hesap"
                 : screen == "diagnostics" ? "Tanılama"
                 : screen == "now-playing" ? "Şimdi Oynatılan"
                 : "";

@@ -19,6 +19,8 @@ pub enum Route {
     Detail,
     NowPlaying,
     Settings,
+    /// The Stremio sign-in form, opened from the settings screen.
+    Account,
     Diagnostics,
 }
 
@@ -36,6 +38,7 @@ impl Route {
             Route::Detail => "detail",
             Route::NowPlaying => "now-playing",
             Route::Settings => "settings",
+            Route::Account => "account",
             Route::Diagnostics => "diagnostics",
         }
     }
@@ -49,6 +52,7 @@ impl Route {
             "detail" => Route::Detail,
             "now-playing" => Route::NowPlaying,
             "settings" => Route::Settings,
+            "account" => Route::Account,
             "diagnostics" => Route::Diagnostics,
             _ => return None,
         })
@@ -175,6 +179,7 @@ mod tests {
             Route::Detail,
             Route::NowPlaying,
             Route::Settings,
+            Route::Account,
             Route::Diagnostics,
         ] {
             assert_eq!(Route::from_name(route.name()), Some(route));

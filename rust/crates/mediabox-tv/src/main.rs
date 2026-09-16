@@ -14,6 +14,7 @@ mod actions;
 mod detail;
 mod images;
 mod input;
+mod keyboard;
 mod metrics;
 mod model;
 mod platform;
@@ -103,6 +104,7 @@ struct App {
     search: screens::search::Search,
     library: screens::library::Library,
     settings: screens::settings::Settings,
+    account: screens::account::Account,
     diagnostics: screens::diagnostics::Diagnostics,
     now: screens::now_playing::NowPlaying,
 
@@ -206,6 +208,7 @@ impl App {
                 Route::Detail => self.act_on_detail(intent),
                 Route::NowPlaying => self.act_on_now_playing(intent),
                 Route::Settings => self.act_on_settings(intent),
+                Route::Account => self.act_on_account(intent),
                 Route::Diagnostics => self.act_on_diagnostics(intent),
             },
         }
@@ -1189,6 +1192,60 @@ impl App {
         }
     }
 
+    // -------------------------------------------------------------- the account
+
+    fn act_on_account(&mut self, intent: Intent) {
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.account.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Select => match self.account.press() {
+                screens::account::Press::SignIn => {
+                    // The one place the password leaves the screen. It is moved
+                    // out here and wiped as soon as the answer lands, either
+                    // way -- see `account_answered`.
+                    let email = self.account.email.trim().to_string();
+                    let password = self.account.password().to_string();
+                    self.account.begin("Bağlanıyor…");
+                    self.paint();
+                    spawn_media_login(email, password);
+                }
+                screens::account::Press::Changed => self.paint(),
+                screens::account::Press::Nothing => {}
+            },
+            Intent::Dismiss => {
+                if self.account.dismiss() {
+                    self.paint();
+                } else {
+                    self.back();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The answer to a sign-in or a sign-out.
+    ///
+    /// `status` is a fresh control-plane status rather than the login's own
+    /// reply, so what the screen shows afterwards is what the box will say to
+    /// anybody else who asks.
+    fn account_answered(&mut self, answer: Result<Value, String>) {
+        match answer {
+            Ok(status) => {
+                self.status = Some(status);
+                self.account.signed_in(self.status.as_ref());
+                self.recompose_settings();
+                // The catalogue is assembled from whatever add-ons the account
+                // brings, so it is stale the moment the account changes.
+                spawn_home_reload();
+            }
+            Err(why) => self.account.failed(&why),
+        }
+        self.paint();
+    }
+
     fn act_on_diagnostics(&mut self, intent: Intent) {
         match intent {
             Intent::Move(dx, dy) => {
@@ -1204,6 +1261,14 @@ impl App {
     /// The one place a settings decision leaves this process.
     fn run(&mut self, action: Action) {
         match action {
+            Action::OpenAccount => {
+                self.account.open(self.status.as_ref());
+                self.open(Route::Account);
+            }
+            Action::SignOut => {
+                self.say("Hesap bağlantısı kesiliyor…".into());
+                spawn_media_logout();
+            }
             Action::OpenDiagnostics => {
                 self.diagnostics.compose(
                     self.status.as_ref(),
@@ -1344,6 +1409,12 @@ impl App {
                 self.diag.as_ref(),
                 self.display.as_ref(),
             );
+        }
+        // The account screen reads the same status. It takes the new session
+        // and nothing else: the poll must not move the remote or throw away
+        // half a typed address.
+        if self.route() == Route::Account {
+            self.account.refresh(self.status.as_ref());
         }
 
         if let Some(window) = self.window.upgrade() {
@@ -1495,6 +1566,7 @@ impl App {
             Route::Detail => self.paint_detail(&window),
             Route::NowPlaying => self.paint_now_playing(&window),
             Route::Settings => self.paint_settings(&window),
+            Route::Account => self.paint_account(&window),
             Route::Diagnostics => self.paint_diagnostics(&window),
         }
     }
@@ -1570,7 +1642,7 @@ impl App {
                 keys: slint::ModelRc::new(slint::VecModel::from(
                     row.iter()
                         .map(|cap| KeyCap {
-                            label: cap.label().into(),
+                            label: cap.label(false).into(),
                             span: cap.span() as i32,
                         })
                         .collect::<Vec<_>>(),
@@ -1917,6 +1989,66 @@ impl App {
         )));
     }
 
+    fn paint_account(&mut self, window: &MediaBoxWindow) {
+        use screens::account::{Field, Focus};
+
+        let account = &self.account;
+        window.set_account_email(account.email.clone().into());
+        // Bullets and a length. The panel is never handed the password.
+        window.set_account_password_mask(account.password_mask().into());
+        window.set_account_focus(
+            match account.focus {
+                Focus::Field(Field::Email) => "email",
+                Focus::Field(Field::Password) => "password",
+                Focus::Keys => "keys",
+                Focus::Submit => "submit",
+            }
+            .into(),
+        );
+        window.set_account_editing(
+            match account.field {
+                Field::Email => "email",
+                Field::Password => "password",
+            }
+            .into(),
+        );
+        window.set_account_key_row(account.keys.row() as i32);
+        window.set_account_key_col(account.keys.col() as i32);
+        window.set_account_shifted(account.keys.shifted());
+        window.set_account_signed_in(account.session.authenticated);
+        window.set_account_who(account.session.email.clone().into());
+        window.set_account_addons(account.session.addons as i32);
+        window.set_account_busy(account.busy);
+        window.set_account_notice(account.notice.clone().into());
+        window.set_account_submit_label(
+            if account.busy {
+                "Bağlanıyor…"
+            } else {
+                "Giriş yap"
+            }
+            .into(),
+        );
+        window.set_account_submit_ready(account.can_submit());
+
+        let shifted = account.keys.shifted();
+        let keys: Vec<KeyRow> = account
+            .keys
+            .rows()
+            .iter()
+            .map(|row| KeyRow {
+                keys: slint::ModelRc::new(slint::VecModel::from(
+                    row.iter()
+                        .map(|cap| KeyCap {
+                            label: cap.label(shifted).into(),
+                            span: cap.span() as i32,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect();
+        window.set_account_keys(slint::ModelRc::new(slint::VecModel::from(keys)));
+    }
+
     fn paint_diagnostics(&mut self, window: &MediaBoxWindow) {
         window.set_diag_group(self.diagnostics.group as i32);
         window.set_diag_groups(slint::ModelRc::new(slint::VecModel::from(
@@ -2049,6 +2181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         search: screens::search::Search::new(),
         library: screens::library::Library::new(),
         settings: screens::settings::Settings::new(),
+        account: screens::account::Account::new(),
         diagnostics: screens::diagnostics::Diagnostics::new(),
         now: screens::now_playing::NowPlaying::new(),
         detail: None,
@@ -2546,6 +2679,70 @@ fn spawn_kodi(command: KodiCommand) {
         if let Err(e) = answer {
             eprintln!("mediabox-tv.control failed: {e}");
         }
+    });
+}
+
+/// Sign in to a Stremio account.
+///
+/// The password is moved in here, used once, and dropped when this future
+/// ends. It is a field in a JSON body over the daemon's socket: never a process
+/// argument, never a shell word, and never printed — the error path below
+/// reports the daemon's message and nothing of what was typed.
+fn spawn_media_login(email: String, password: String) {
+    detached("mediabox-tv-account", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match client.media_login(&email, &password).await {
+            // The login's own reply is not what the screen shows: a fresh
+            // status is, so that what is drawn is what the box would tell
+            // anybody else who asked.
+            Ok(_) => match client.status().await {
+                Ok(status) => Ok(status),
+                Err(error) => Err(error.to_string()),
+            },
+            Err(error) => Err(error.to_string()),
+        };
+        drop(password);
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.account_answered(answer));
+        });
+    });
+}
+
+fn spawn_media_logout() {
+    detached("mediabox-tv-account", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match client.media_logout().await {
+            Ok(_) => match client.status().await {
+                Ok(status) => Ok(status),
+                Err(error) => Err(error.to_string()),
+            },
+            Err(error) => Err(error.to_string()),
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.account_answered(answer));
+        });
+    });
+}
+
+/// Fetch the catalogue again, because the account behind it changed.
+///
+/// The loader thread runs until it has something and then stops, which is
+/// right for a box that has just been turned on and wrong for one whose
+/// add-ons have just been replaced.
+fn spawn_home_reload() {
+    detached("mediabox-tv-reload", async move {
+        let client = rpc::Client::new(socket_path());
+        let (home, library) = tokio::join!(client.home(), client.library());
+        let home = home.ok();
+        let library = library.ok();
+        if home.is_none() && library.is_none() {
+            return;
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| {
+                app.loaded(home, library);
+            });
+        });
     });
 }
 

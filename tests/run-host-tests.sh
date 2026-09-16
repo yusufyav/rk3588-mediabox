@@ -373,6 +373,74 @@ for f in packaging/mediabox-display-guard packaging/mediabox-display-recover; do
   fi
 done
 
+echo
+echo "-- the television can sign in to a Stremio account, and cannot leak the password"
+
+tv="$here/rust/crates/mediabox-tv/src"
+
+# The screen exists at all, on the route the settings screen opens.
+contains "the account screen is a route"     "$(cat "$tv/route.rs")" 'Route::Account'
+contains "the settings screen opens it"      "$(cat "$tv/screens/settings.rs")" 'Action::OpenAccount'
+contains "and offers the way out"            "$(cat "$tv/screens/settings.rs")" 'Action::SignOut'
+
+# It goes through the control plane, like everything else this shell does.
+# api.strem.io from the television would be a second client with its own idea
+# of what an account is.
+contains "login goes to the daemon"   "$(cat "$tv/rpc.rs")" '"command": "media_login"'
+contains "logout goes to the daemon"  "$(cat "$tv/rpc.rs")" '"command": "media_logout"'
+# Comments are stripped first: main.rs quotes an upstream error message that
+# names the host, and a quoted error is not a call.
+for f in $(cd "$here" && git ls-files rust/crates/mediabox-tv); do
+  case "$(sed -e 's|//.*$||' "$here/$f")" in
+    *strem.io*|*stremio.com*)
+      printf 'FAIL %s reaches the account provider directly\n' "$f"
+      failures=$((failures + 1))
+      ;;
+  esac
+done
+printf 'ok   the television never calls the provider itself\n'
+
+# The password. It is read out of the screen in exactly one place -- the login
+# request -- and it is wiped whichever way the attempt went.
+account="$(cat "$tv/screens/account.rs")"
+contains "the password is private to the screen" "$account" '    password: String,'
+contains "and drawn only as a length"            "$account" 'fn password_mask'
+contains "wiped after an attempt"                "$account" 'fn forget_password'
+check "read out of the screen exactly once" \
+  "$(grep -c 'account.password()' "$tv/main.rs")" "1"
+
+# Nothing prints it. `password` appearing next to a print macro in this crate
+# is the failure this guards, whatever the surrounding code looks like.
+for f in $(cd "$here" && git ls-files rust/crates/mediabox-tv); do
+  if grep -nE '(eprintln|println|dbg)!.*password' "$here/$f" >/dev/null 2>&1; then
+    printf 'FAIL %s prints a password\n' "$f"
+    failures=$((failures + 1))
+  fi
+done
+printf 'ok   no print in the television carries a password\n'
+
+# The panel is handed the mask, never the text.
+slint="$(cat "$here/rust/crates/mediabox-tv/ui/account.slint")"
+contains "the panel takes a mask"  "$slint" 'password-mask'
+lacks "and never the password"     "$slint" 'in property <string> password;'
+contains "the paint sends the mask" "$(cat "$tv/main.rs")" 'set_account_password_mask(account.password_mask()'
+
+# The auth key is the media core's, and it stays there. What reaches the
+# television is `authenticated`, an address and a count -- so there is no key
+# for a screen or a log to show even by accident, and this is the contract that
+# makes that true.
+provider="$(sed -n '/def as_dict/,/^$/p' "$here/media/stremio/models.py")"
+contains "the provider block says whether it is signed in" "$provider" '"authenticated"'
+contains "and who"                                         "$provider" '"email"'
+contains "and how many add-ons"                            "$provider" '"addonCount"'
+lacks "and never the auth key"                             "$provider" 'authKey'
+lacks "and never the password"                             "$provider" 'password'
+
+# One grid, three callers eventually. Two copies of a letter grid is two places
+# for the Turkish dotted I to be wrong.
+contains "the letter grid is shared"     "$(cat "$tv/screens/search.rs")" 'use crate::keyboard::Cap'
+contains "and the account screen uses it" "$account" 'use crate::keyboard::{Edit, Grid}'
+
 assets="${MEDIABOX_ASSET_DIR:-$here/assets}"
 hdr="$assets/hdr10-4k-2398-main10.mp4"
 if [ -f "$hdr" ] && command -v ffprobe >/dev/null; then

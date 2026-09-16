@@ -274,6 +274,26 @@ impl Client {
     pub async fn diagnostics(&self) -> Result<Value> {
         self.call(json!({"command": "diagnostics"})).await
     }
+
+    /// Sign in to a Stremio account.
+    ///
+    /// The password crosses this socket once and is not kept on either side:
+    /// the media core exchanges it for an auth key, stores the key, and the
+    /// interface forgets the password as soon as this returns. It is a field in
+    /// a JSON body and never a process argument — nothing here builds a command
+    /// line, so there is no `ps` output and no shell history to leak into.
+    pub async fn media_login(&self, email: &str, password: &str) -> Result<Value> {
+        self.call(json!({
+            "command": "media_login",
+            "email": email,
+            "password": password,
+        }))
+        .await
+    }
+
+    pub async fn media_logout(&self) -> Result<Value> {
+        self.call(json!({"command": "media_logout"})).await
+    }
 }
 
 #[derive(serde::Deserialize)]

@@ -6,57 +6,13 @@
 //! `text` below — and does not change where the focus is, so a person who
 //! starts typing and then reaches for the remote finds it where they left it.
 
+use crate::keyboard::Cap;
 use crate::state::Item;
 
 /// How many posters fit across the results pane at the design width. Fixed
 /// rather than measured: the focus model is a grid and a grid that reflowed
 /// would move a title out from under the remote when a row wrapped.
 pub const COLUMNS: usize = 5;
-
-/// What a key on the grid does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cap {
-    Letter(char),
-    Space,
-    Backspace,
-    Clear,
-}
-
-impl Cap {
-    pub fn label(self) -> String {
-        match self {
-            Cap::Letter(c) => upper(c),
-            Cap::Space => "Boşluk".into(),
-            Cap::Backspace => "Sil".into(),
-            Cap::Clear => "Temizle".into(),
-        }
-    }
-
-    /// Wide keys are drawn wide. The grid's columns are uniform, so a key that
-    /// needs two of them says so here rather than in the interface.
-    pub fn span(self) -> u32 {
-        match self {
-            Cap::Letter(_) => 1,
-            Cap::Space => 3,
-            Cap::Backspace => 2,
-            Cap::Clear => 2,
-        }
-    }
-}
-
-/// Turkish uppercase, which is not Unicode's default.
-///
-/// The dotted and dotless i are different letters here, and `char::to_uppercase`
-/// maps both to "I". On the letter grid that produced two keys that looked
-/// identical and did different things — visible in the first snapshot of the
-/// search screen, and unusable.
-fn upper(c: char) -> String {
-    match c {
-        'i' => "İ".into(),
-        'ı' => "I".into(),
-        other => other.to_uppercase().to_string(),
-    }
-}
 
 /// The alphabet in its own order, then the digits, then the three wide keys.
 ///
@@ -77,9 +33,6 @@ fn layout() -> Vec<Vec<Cap>> {
         vec![Cap::Space, Cap::Backspace, Cap::Clear],
     ]
 }
-
-/// How many columns the grid is laid out at. Every row is this wide.
-pub const KEY_COLUMNS: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -247,6 +200,11 @@ impl Search {
         match cap {
             Cap::Letter(c) => self.push(c),
             Cap::Space => self.push(' '),
+            // The search grid has no Shift: a catalogue lookup is
+            // case-insensitive and a key that changed nothing would be one
+            // more thing to walk past. `every_key_here_does_something` holds
+            // this to it.
+            Cap::Shift => return false,
             Cap::Backspace => {
                 if self.query.pop().is_none() {
                     return false;
@@ -346,9 +304,9 @@ mod tests {
             let span: u32 = row.iter().map(|cap| cap.span()).sum();
             assert_eq!(
                 span as usize,
-                KEY_COLUMNS,
+                crate::keyboard::COLUMNS,
                 "{:?}",
-                row.iter().map(|c| c.label()).collect::<Vec<_>>()
+                row.iter().map(|c| c.label(false)).collect::<Vec<_>>()
             );
         }
     }
@@ -361,15 +319,13 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for row in search.keys() {
             for cap in row {
-                assert!(seen.insert(cap.label()), "{} appears twice", cap.label());
+                assert!(
+                    seen.insert(cap.label(false)),
+                    "{} appears twice",
+                    cap.label(false)
+                );
             }
         }
-    }
-
-    #[test]
-    fn the_turkish_i_is_two_letters() {
-        assert_eq!(upper('i'), "İ");
-        assert_eq!(upper('ı'), "I");
     }
 
     #[test]

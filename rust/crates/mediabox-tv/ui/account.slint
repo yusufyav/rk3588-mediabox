@@ -1,0 +1,225 @@
+import { Theme, Metrics } from "theme.slint";
+import { KeyRow, KeyCap } from "components.slint";
+
+// Signing in to a Stremio account from the sofa.
+//
+// One column, top to bottom: the address, the password, the letters, the
+// button. A remote has Up and Down and that is the whole navigation model here
+// — nothing is reachable only sideways, and nothing is reachable only by going
+// back.
+//
+// The password is drawn from `password-mask`, which is bullets and a length.
+// The real text never reaches this file.
+export component Account inherits Rectangle {
+    in property <string> email;
+    in property <string> password-mask;
+    // "email" | "password" | "keys" | "submit"
+    in property <string> focus-at;
+    // Which field the letters are going into, so the one being edited is marked
+    // even while the remote is down on the grid.
+    in property <string> editing;
+
+    in property <[KeyRow]> keys;
+    in property <int> key-row;
+    in property <int> key-col;
+    in property <bool> shifted;
+
+    in property <bool> signed-in;
+    in property <string> account-email;
+    in property <int> addons;
+    in property <bool> busy;
+    in property <string> notice;
+    in property <string> submit-label;
+    in property <bool> submit-ready;
+
+    property <length> keys-w: Metrics.key-w * 7 + Metrics.key-gap * 6;
+    property <length> col-w: max(keys-w, Metrics.vw * 0.30);
+    property <length> col-x: (root.width - col-w) / 2;
+    property <length> field-h: Metrics.root-font * 2.9;
+
+    background: Theme.bg;
+    clip: true;
+
+    VerticalLayout {
+        x: col-x;
+        y: Metrics.topbar + Metrics.block-gap * 0.6;
+        width: col-w;
+        spacing: Metrics.block-gap * 0.55;
+        alignment: start;
+
+        Text {
+            text: "Stremio hesabı";
+            color: Theme.text;
+            font-size: Metrics.title-screen * 0.62;
+            font-weight: 760;
+        }
+
+        Text {
+            width: 100%;
+            text: signed-in
+                ? "Bu cihaz " + account-email + " hesabının " + addons + " eklentisini kullanıyor."
+                : "Hesap bağlı değilken cihaz Stremio'nun varsayılan koleksiyonunu kullanır: afiş ve özet gelir, akış çoğu başlıkta gelmez.";
+            color: Theme.muted;
+            font-size: Metrics.text-meta * 0.94;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+
+        // ------------------------------------------------------------ e-posta
+        Text {
+            text: "E-posta";
+            color: focus-at == "email" ? Theme.text : Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 700;
+        }
+
+        Rectangle {
+            property <bool> focused: focus-at == "email";
+            property <bool> active: editing == "email";
+            height: field-h;
+            border-radius: Theme.radius * 0.7;
+            background: focused ? Theme.focus-fill : #ffffff0d;
+            border-width: focused || active ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : (active ? #ffffff40 : Theme.line);
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            Text {
+                x: Metrics.root-font * 0.7;
+                width: parent.width - Metrics.root-font * 2.0;
+                height: 100%;
+                text: email == "" ? "ornek@eposta.com" : email;
+                color: email == ""
+                    ? (focused ? #0a0c1099 : Theme.dim)
+                    : (focused ? #0a0c10 : Theme.text);
+                font-size: Metrics.root-font * 1.0;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+
+            // A caret on the field the letters are landing in, so a viewer down
+            // on the grid can still see where the typing goes.
+            if active && email != "": Rectangle {
+                x: parent.width - Metrics.root-font * 0.8;
+                y: parent.height * 0.26;
+                width: 2px;
+                height: parent.height * 0.48;
+                background: focused ? #0a0c10 : Theme.accent;
+            }
+        }
+
+        // ------------------------------------------------------------- parola
+        Text {
+            text: "Parola";
+            color: focus-at == "password" ? Theme.text : Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 700;
+        }
+
+        Rectangle {
+            property <bool> focused: focus-at == "password";
+            property <bool> active: editing == "password";
+            height: field-h;
+            border-radius: Theme.radius * 0.7;
+            background: focused ? Theme.focus-fill : #ffffff0d;
+            border-width: focused || active ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : (active ? #ffffff40 : Theme.line);
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            Text {
+                x: Metrics.root-font * 0.7;
+                width: parent.width - Metrics.root-font * 2.0;
+                height: 100%;
+                // Bullets and a length. Whatever was typed is not in this file.
+                text: password-mask == "" ? "••••••••" : password-mask;
+                color: password-mask == ""
+                    ? (focused ? #0a0c1099 : Theme.dim)
+                    : (focused ? #0a0c10 : Theme.text);
+                font-size: Metrics.root-font * 1.0;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+
+            if active && password-mask != "": Rectangle {
+                x: parent.width - Metrics.root-font * 0.8;
+                y: parent.height * 0.26;
+                width: 2px;
+                height: parent.height * 0.48;
+                background: focused ? #0a0c10 : Theme.accent;
+            }
+        }
+
+        // ------------------------------------------------------------ letters
+        Rectangle { height: Metrics.block-gap * 0.3; }
+
+        for row[r] in keys: HorizontalLayout {
+            spacing: Metrics.key-gap;
+            alignment: start;
+            height: Metrics.key-h;
+
+            for cap[c] in row.keys: Rectangle {
+                property <bool> focused: focus-at == "keys" && r == key-row && c == key-col;
+                width: Metrics.key-w * cap.span + Metrics.key-gap * (cap.span - 1);
+                border-radius: Theme.radius * 0.55;
+                background: focused ? Theme.focus-fill : #ffffff0f;
+                border-width: focused ? 2px : 1px;
+                border-color: focused ? Theme.focus-ring : Theme.line-soft;
+
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: cap.label;
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: cap.span > 1 ? Metrics.text-chip : Metrics.root-font * 1.05;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ------------------------------------------------------------- button
+        Rectangle { height: Metrics.block-gap * 0.4; }
+
+        Rectangle {
+            property <bool> focused: focus-at == "submit";
+            height: field-h;
+            border-radius: Theme.radius * 0.7;
+            background: focused
+                ? (submit-ready ? Theme.accent : Theme.focus-fill)
+                : #ffffff12;
+            border-width: focused ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : Theme.line-soft;
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: submit-label;
+                color: focused ? #0a0c10 : (submit-ready ? Theme.text : Theme.muted);
+                font-size: Metrics.root-font * 1.02;
+                font-weight: 760;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        if notice != "": Text {
+            width: 100%;
+            text: notice;
+            color: busy ? Theme.muted : Theme.tone("warn");
+            font-size: Metrics.text-chip;
+            font-weight: 660;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
