@@ -553,6 +553,9 @@ else
   echo "ok   the seed carries no per-box identity"
 fi
 contains "the capture reports Kodi drift" "$capture" 'settings differing from config/kodi/guisettings-appliance.xml'
+# The browser's enterprise policy is product, it lives under /etc, and it was
+# on the working board while no script in this repository installed it.
+contains "the browser policy is installed" "$capture" 'etc/chromium/policies/managed/mediabox.json'
 contains "the verifier requires them"     "$verifier" 'Kodi picture and sound settings'
 contains "and the fonts are a declared dependency" "$capture" 'fc-list ":charset=$ch" file'
 

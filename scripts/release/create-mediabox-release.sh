@@ -66,7 +66,7 @@ trap cleanup EXIT
 say "system integration"
 mediabox_ssh "mkdir -p '$stage/rootfs/etc/systemd/system' \
   '$stage/rootfs/etc/systemd/logind.conf.d' '$stage/rootfs/etc/udev/rules.d' \
-  '$stage/rootfs/etc/mediabox' '$stage/meta'"
+  '$stage/rootfs/etc/mediabox' '$stage/rootfs/etc/chromium/policies/managed' '$stage/meta'"
 
 # repo path <TAB> installed path
 repo_integration=$(cat <<'EOF'
@@ -84,6 +84,7 @@ packaging/udev/81-mediabox-display-hotplug.rules	etc/udev/rules.d/81-mediabox-di
 config/sway-browser.conf	etc/mediabox/sway-browser.conf
 config/mediabox-applications.json	etc/mediabox-applications.json
 config/mediabox-library.json	etc/mediabox-library.json
+packaging/chromium-policies.json	etc/chromium/policies/managed/mediabox.json
 EOF
 )
 # Installed on the board and nowhere else.
