@@ -45,9 +45,16 @@ VARIANTS = {
     "B": "bt2020-ycc",
 }
 
-SSH = ["ssh", "-F", "/dev/null", "-i", os.path.expanduser("~/.ssh/id_ed25519"),
+# The appliance, from the environment. There is no default: a diagnostic that
+# silently talks to yesterday's address is a diagnostic that measures the wrong
+# machine.
+HOST = os.environ.get("MEDIABOX_HOST")
+if not HOST:
+    raise SystemExit("MEDIABOX_HOST is not set; export it and run again")
+SSH = ["ssh", "-F", "/dev/null",
+       "-i", os.path.expanduser(os.environ.get("MEDIABOX_SSH_KEY", "~/.ssh/id_ed25519")),
        "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-       "root@10.27.27.25"]
+       f"{os.environ.get('MEDIABOX_USER', 'root')}@{HOST}"]
 PROBE = "/tmp/rk3588-mediabox/build/hdr-playback-probe"
 SUMMARY = "/sys/kernel/debug/dri/0/summary"
 

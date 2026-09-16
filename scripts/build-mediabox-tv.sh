@@ -15,14 +15,16 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=env.sh
+source "$here/scripts/env.sh"
 crate="$here/rust/crates/mediabox-tv"
 triple="aarch64-unknown-linux-gnu"
 sysroot="${MEDIABOX_SYSROOT:-$here/.sysroot/aarch64-trixie}"
 
-host="${MEDIABOX_HOST:-10.27.27.25}"
-user="${MEDIABOX_USER:-root}"
-key="${MEDIABOX_SSH_KEY:-$HOME/.ssh/id_ed25519}"
-ssh_opts=(-F /dev/null -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
+host="$MEDIABOX_HOST"
+user="$MEDIABOX_USER"
+key="$MEDIABOX_SSH_KEY"
+ssh_opts=(-F /dev/null -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10)
 
 say() { printf '\n== %s\n' "$*"; }
 
