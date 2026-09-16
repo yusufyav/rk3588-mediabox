@@ -55,6 +55,27 @@ TTYPath=/dev/tty8
 TTYReset=yes
 TTYVHangup=yes
 StandardInput=tty-force
+# And bring that terminal forward, which is the half that was missing.
+#
+# libseat hands over the DRM device only once the session is *active*, and a
+# session is active only while its VT is the foreground one. The unit gets
+# tty8, tty1 keeps the getty, and nothing was moving the console between them:
+# sway sat waiting and gave up, every time, with
+#
+#     [wlr] Timeout waiting session to become active
+#     [wlr] failed to add backend 'drm'
+#     [sway] Unable to create backend
+#
+# measured on the Plus, where the session was formed correctly throughout —
+# VTNr=8, Seat=seat0, Type=wayland, State=online — and only Active stayed "no".
+# Switching to tty8 by hand at that moment let the backend come up and Chromium
+# start, which is what pinned it down. This is not a property of one board: the
+# unit asks for a terminal of its own, so it has to ask for it to be shown.
+ExecStartPre=/usr/bin/chvt 8
+# And back to tty1 on the way out, so stopping the browser does not leave the
+# console parked on an empty terminal. Tolerant: a failure here must not turn
+# an ordinary stop into a failed unit.
+ExecStopPost=-/usr/bin/chvt 1
 # The private Mali runtime is the one Kodi uses; wlroots needs it for a
 # GPU-accelerated compositor. Nothing here decodes video through the Rockchip
 # stack, so the media runtime is not on this line.

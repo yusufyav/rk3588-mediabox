@@ -194,10 +194,12 @@ say "television browser application"
 # address for it to open.
 # sway and Chromium are the browser application's, and only the browser
 # application's. The television's own shell has neither.
-sh_ "command -v sway >/dev/null && command -v chromium >/dev/null" || {
-  echo "installing sway and chromium for the browser application"
+# kbd is in the list for chvt: the unit brings its own virtual terminal
+# forward, and neither sway nor chromium pulls that package in.
+sh_ "command -v sway >/dev/null && command -v chromium >/dev/null && command -v chvt >/dev/null" || {
+  echo "installing sway, chromium and kbd for the browser application"
   sh_ "DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
-       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sway chromium"
+       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sway chromium kbd"
 }
 cp_ "$here/packaging/mediabox-browser" "$here/packaging/mediabox-handback" "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/config/sway-browser.conf" "$MEDIABOX_TARGET:/var/tmp/"
