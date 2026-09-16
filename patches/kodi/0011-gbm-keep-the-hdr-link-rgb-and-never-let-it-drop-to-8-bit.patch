@@ -1,0 +1,34 @@
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index 657658ca00..5c7eaea779 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -487,7 +487,14 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+   // this runs before the video plane is released, so the plane still reports a
+   // YUV format and the GUI would be left on the YCbCr link it no longer needs.
+   const bool yuvVideo = videoPicture && IsDirectToPlaneYuvScanout();
+-  const std::optional<bool> rgbOutput = RequestRgbOutput(!yuvVideo);
++  // Ask for RGB whatever the video plane carries. This driver answers a
++  // ten-bit BT.2020 request by dropping the link to YCbCr 4:2:2, and the
++  // picture then arrives with its colours collapsed to red and blue. Asking
++  // for RGB costs nothing measurable -- the display engine converts the plane
++  // either way -- and keeps full chroma. Bisected against a 4K HDR10 clip on
++  // 6.1.172; docs/platform/custom-runtime.md has the chain of eliminations and
++  // why the original line is right on the golden kernel.
++  const std::optional<bool> rgbOutput = RequestRgbOutput(true);
+ 
+   // What the link will carry. Prefer what was just asked for; fall back to
+   // observing the driver, and only then to guessing from the plane.
+@@ -852,7 +859,12 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+       m_hdrBlob.Reset();
+     }
+ 
+-    SetDeepColor(false);
++    // Hold ten bits here too, rather than descending to eight when HDR ends.
++    // The driver prefers YCbCr 4:2:2 for ten-bit BT.2020, but only when the
++    // previously committed link was 8 bit or already 4:2:2 -- so a link that
++    // never drops to 8 bit never trips the rule, and HDR arrives as RGB at
++    // full chroma and full depth.
++    SetDeepColor(true);
+     m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
+     LogColorState("SetHDR:exit:cleared");
+     return false;
