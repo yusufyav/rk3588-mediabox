@@ -11,7 +11,7 @@ intention rather than a measured property, it says so.
             v                                        v
    mediabox-ui  Rust -> wasm32             mediabox-tv  Rust + Slint
    served by the daemon below              FemtoVG/GLES on Mali G610
-            |                              DRM master on card0
+            |                              DRM master, discovered device
             |                                        |
             +----------> mediaboxd-rs <--------------+
                     Rust control plane               |
@@ -51,21 +51,29 @@ front of it.
 
 ```text
 Slint -> FemtoVG -> GLES on the private libmali G610 runtime
-    render on /dev/dri/renderD128, GBM backend "armsoc"
+    render on the discovered render device, GBM backend "armsoc"
     ARGB8888 scanout buffer, exported as dma-buf
-      -> PRIME import on /dev/dri/card0
+      -> PRIME import on the discovered display device
       -> ADDFB2
-      -> atomic page flip on VOP2 video_port0
-      -> HDMI-A-1
+      -> atomic page flip on the connector's VOP2 video port
+      -> the selected output
 ```
 
 Three properties of this are load-bearing:
 
 * **Split render/display.** The vendor Mali GBM implementation works on the
-  render node; modesetting belongs to `card0`. Every frame crosses between them
-  as a dma-buf and is kept alive until its page-flip event arrives. The platform
-  refuses to start if GBM does not report the `armsoc` backend — a software
-  fallback on a 4K panel is a slideshow, not a fallback.
+  render node; modesetting belongs to the device that owns connectors. Every
+  frame crosses between them as a dma-buf and is kept alive until its page-flip
+  event arrives. The platform refuses to start if GBM does not report the
+  `armsoc` backend — a software fallback on a 4K panel is a slideshow, not a
+  fallback.
+
+  Which two devices those are is not written down. They are discovered, along
+  with the connector, its sound card and its CEC adapter, by
+  `rust/crates/mediabox-platform`; see
+  [`platform/runtime-discovery.md`](platform/runtime-discovery.md). The numbers
+  this was first written against — `card0`, `renderD128`, `HDMI-A-1` — name the
+  NPU and an empty socket on a board that enumerates differently.
 * **ARGB8888, not XRGB8888.** The interface has to carry alpha for the film on
   the plane beneath it to show through the parts it does not draw.
 * **It holds DRM master itself.** Handing the display to Kodi or to the browser
@@ -82,11 +90,12 @@ first connected `HDMI-A` connector, and the video plane is found by trying
 mediabox-player (launcher)
   -> mpv 0.41, built on the appliance, three patches + one added output
      --hwdec=rkmpp --vo=mediabox
-     links /opt/rk3588-screenbridge/lib for the Rockchip ffmpeg
+     RPATH /opt/rk3588-mediabox/media-runtime/lib, no LD_LIBRARY_PATH
        -> RKMPP hardware decode, NV12 / NV15
        -> packaging/mpv/vo_mediabox.c draws nowhere: it sends each frame's
           dma-buf descriptors over /run/mediabox-ui/video.sock with SCM_RIGHTS
-            -> rust/crates/mediabox-tv/src/video.rs imports them on card0,
+            -> rust/crates/mediabox-tv/src/video.rs imports them on the
+               display device it already holds master on,
                gives them a framebuffer and calls SetPlane
             -> the buffer is released only once a later frame has replaced it
                on the wire, which is what stops MPP handing it back to the
@@ -122,8 +131,8 @@ Two things this path does not do, and they are deliberate:
 `mediabox-player.service` is transient. It exists while a film is playing and
 not otherwise, and it is started by systemd rather than as a child of the
 daemon: the daemon is sandboxed away from the GPU, the DMA heaps and the input
-devices, and a player that inherited that sandbox could not open `renderD128` at
-all.
+devices, and a player that inherited that sandbox could not open the render
+device at all.
 
 ## C. The Kodi handoff path
 
@@ -208,7 +217,8 @@ mediaboxd-rs          Rust. The only authority.
   -> mediabox-media-worker        the only client of it
   -> kodi JSON-RPC
   -> mediabox-player              through a transient systemd unit
-  -> mediabox-cec                 /dev/cec0, directly over the Linux CEC UAPI
+  -> mediabox-cec                 the selected output's CEC adapter,
+                                  directly over the Linux CEC UAPI
 
 mediabox-media-worker  Python, 127.0.0.1:8790, loopback only.
   catalogue and library, Stremio add-on bridge, ffprobe-driven policy,
@@ -232,28 +242,47 @@ The earlier Python control plane has been removed from the tree; what remains
 in Python is the media worker, and that is a current component rather than a
 leftover.
 
-## F. The ScreenBridge media-stack dependency
+## F. The media runtime, and living beside rk3588-screenbridge
 
-There is **no runtime dependency on the `rk3588-screenbridge` daemon**. There is
-a dependency on a prefix: `/opt/rk3588-screenbridge`, which carries the
-RKMPP-enabled FFmpeg, `librockchip_mpp` and `librga`.
+MediaBox builds its own hardware media runtime — Rockchip MPP, librga and
+ffmpeg-rockchip — from pinned revisions, into its own prefix:
 
-Both players link against it. Kodi is configured with
-`-DENABLE_INTERNAL_FFMPEG=OFF` and selects the prefix through
-`MEDIABOX_FFMPEG_PREFIX`; `mediabox-player` and the television interface reach
-it through `LD_LIBRARY_PATH`. Kodi 22 bundles FFmpeg 9.0.1, which has no
-Rockchip MPP decoder; the ScreenBridge build is the exact RKMPP FFmpeg that
-Gates MP1a and MP1b proved end to end.
+```text
+/opt/rk3588-mediabox/media-runtime
+```
 
-It is meant to end in one of two ways, to be decided in a later gate:
+`scripts/build-media-runtime.sh` produces it on the appliance; the pins, where
+each one was read from and what the appliance loses without it are in
+[`platform/custom-runtime.md`](platform/custom-runtime.md). Kodi is configured
+with `-DENABLE_INTERNAL_FFMPEG=OFF` against that prefix, because Kodi 22 bundles
+FFmpeg 9.0.1, which has no Rockchip MPP decoder.
 
-1. this project builds and ships its own pinned RKMPP FFmpeg under its own
-   prefix, or
-2. the decode path drops libav\* entirely and drives `librockchip_mpp` directly.
+Both players find it again at run time through an **RPATH naming that prefix**,
+not through `LD_LIBRARY_PATH`. Measured on the appliance with no library path
+set at all:
 
-Until then that prefix is the single point where the dependency is expressed.
-`docs/temiz-imaj.md` records how the stack is produced — it is built by
-`scripts/build-media-stack.sh` in the ScreenBridge repository, not here.
+```text
+mpv  RUNPATH /opt/rk3588-mediabox/media-runtime/lib
+     librga.so         => /opt/rk3588-mediabox/media-runtime/lib/librga.so
+     librockchip_mpp.so.1 => /opt/rk3588-mediabox/media-runtime/lib/librockchip_mpp.so.1
+```
+
+That used to be `/opt/rk3588-screenbridge` — the other product's prefix, shared
+because the board this was developed on had only one of the two products
+installed. It is not shared any more, and the reason is not tidiness: both
+products are for RK3588 and can be on the same board, and a shared prefix means
+whichever was built last owns the other's decoder.
+
+There is still **no runtime dependency on the `rk3588-screenbridge` daemon**, and
+now no dependency on its prefix either. What remains is a hardware-ownership
+contract: DRM master cannot be held twice, so every MediaBox unit that takes it
+declares `Conflicts=screenbridge-daemon.service` and `After=` the same unit —
+a deterministic transition rather than a race. The control plane, the media
+worker and the streaming server touch no display hardware and declare nothing.
+See [`platform/runtime-discovery.md`](platform/runtime-discovery.md).
+
+`scripts/deploy-mediabox-v3.sh` hashes every file under
+`/opt/rk3588-screenbridge` before and after a deploy and fails if one moves.
 
 ### Kernel
 
@@ -372,8 +401,5 @@ rather than cosmetic:
   measurement instruments, not product, and are kept because the gates they
   closed have to stay reproducible — the writeback probe is the only thing here
   that can measure a horizontal displacement objectively.
-* **`packaging/systemd/mediaboxd.service` is a leftover.** The Python control
-  plane it starts was removed from the tree at `d757d17`; the unit file has not
-  been.
 * **The HDR baseline has not been re-measured through the embedded player**
   (section D), and the appliance currently has an SDR panel attached.

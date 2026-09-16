@@ -92,11 +92,14 @@ cargo test --workspace
 Side-by-side doğrulama için production socket yerine `/tmp` kullanın:
 
 ```sh
-mediaboxd-rs --socket /tmp/mediaboxd-rs.sock --cec-device /dev/cec0
+mediaboxd-rs --socket /tmp/mediaboxd-rs.sock --cec-device "$(mediabox-platform cec-device)"
 mediaboxctl --socket /tmp/mediaboxd-rs.sock status
 ```
 
 `packaging/systemd/mediaboxd-rs.service` üretim birimidir ve
-`scripts/deploy-mediabox-v3.sh` tarafından kurulup enable edilir.
-`packaging/systemd/mediaboxd.service` eski Python birimidir; başlattığı modül
-artık repoda yok, dosyanın kendisi henüz silinmedi.
+`scripts/deploy-mediabox-v3.sh` tarafından kurulup enable edilir. Eski Python
+birimi `packaging/systemd/mediaboxd.service` ile başlattığı modül artık yok.
+
+Üretimde `--cec-device` verilmez: adaptör, ekranın seçildiği çıkışın topolojisinden
+çözülür (bkz. [`docs/platform/runtime-discovery.md`](platform/runtime-discovery.md)).
+Yukarıdaki elle çalıştırma biçimi yalnızca teşhis içindir.

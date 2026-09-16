@@ -3,40 +3,58 @@
 Boş bir karttan MediaBox'a giden tek yol. İki karta göre ayrılmış yerler
 işaretli: **[Ultra]** / **[Plus]**.
 
-İki repo gerekiyor ve sıraları önemli:
+Artık **tek repo yetiyor**. MediaBox kendi donanım medya çalışma zamanını
+(`Rockchip MPP`, `librga`, `ffmpeg-rockchip`) kendisi derliyor ve kendi
+prefix'ine kuruyor; `rk3588-screenbridge` yalnızca mühendislik referansı ve
+(yalnızca HDMI **RX** gerekiyorsa) çekirdek kaynağı olarak devrede.
 
 | Repo | Ne verir |
 |---|---|
-| `rk3588-screenbridge` | Önyükleme zinciri denetimi, RKMPP FFmpeg, (gerekirse) özel çekirdek |
-| `rk3588-mediabox` | Mali kullanıcı alanı, Kodi, oynatıcı, denetim düzlemi, arayüzler, birimler |
+| `rk3588-mediabox` | Medya çalışma zamanı, Mali kullanıcı alanı, Kodi, oynatıcı, denetim düzlemi, arayüzler, birimler |
+| `rk3588-screenbridge` | (isteğe bağlı) HDMI RX için özel çekirdek; ayrıca platform referans ölçümleri |
 
-> **Durum.** Ultra bu yoldan **çalışıyor** ve ölçüldü. Plus için önyükleme
-> zinciri farkı ölçüldü ama **temiz imaj hiç koşulmadı** — ScreenBridge'teki
-> `clean-vendor-reimage-bringup-2026-09-05.md` raporu
-> `PARTIAL (not started: target SSH unreachable)` diye kapanıyor. Plus adımları
-> bu yüzden "doğrulanmış" değil, "türetilmiş" sayılmalıdır.
+> **Durum.** Ultra bu yoldan **çalışıyor** ve ölçüldü. Plus için platform
+> keşfi **canlı olarak salt-okunur doğrulandı** (bkz. bölüm 6) ama temiz imaj
+> hiç koşulmadı ve MediaBox Plus'a **kurulmadı**. Plus adımları bu yüzden
+> "doğrulanmış" değil, "türetilmiş" sayılmalıdır.
 
 ---
 
 ## 0. Önce bilinmesi gerekenler
 
-```
-Ultra : DDR init → BL31 → Armbian U-Boot → boot.scr → armbianEnv.txt:fdtfile
-        kök: eMMC /dev/mmcblk0p1
-        DTB: rockchip/rk3588-orangepi-5-ultra.dtb
-        HDMI: tek çıkış (card0-HDMI-A-1), tek /dev/cec0
-        ALSA: 0 rockchiphdmi1 · 1 rockchiphdmiin · 2 rockchipes8388
+Her iki kartın da **canlı ölçülmüş** hâli (2026-09-16):
 
-Plus  : EDK II v2.70 → EFI GRUB → GRUB girdisinde açık `devicetree`
-        kök: NVMe /dev/nvme0n1p2
-        DTB: rk3588-orangepi-5-plus-screenbridge.dtb
-        HDMI: iki çıkış → konektör ve CEC indeksleri farklı
-        ALSA: HDMI-IN kartı 3 (Ultra'da 1)
 ```
+Ultra : Rockchip DDR init → BL31 → Armbian U-Boot → boot.scr → armbianEnv.txt
+        kök: eMMC /dev/mmcblk0p1 (ext4)
+        DTB: rockchip/rk3588-orangepi-5-ultra.dtb, overlay yok
+        extraargs: cma=256M
+        HDMI TX: tek verici (hdmi1 @ fdea0000) → tek konektör, tek CEC
+        ALSA: rockchiphdmi1 · rockchiphdmiin · rockchipes8388
+
+Plus  : Rockchip DDR init → BL31 → Armbian U-Boot → boot.scr → armbianEnv.txt
+        kök: NVMe /dev/nvme0n1p1 (ext4)
+        DTB: rockchip/rk3588-orangepi-5-plus.dtb — **stok**
+             + kullanıcı overlay'i: orangepi5-plus-screenbridge-hdmirx
+        extraargs: cma=512M
+        HDMI TX: iki verici (hdmi0 @ fde80000, hdmi1 @ fdea0000) + DP (dp0)
+                 → üç konektör, iki CEC, DP'de CEC yok
+        ALSA: rockchipdp0 · rockchiphdmi0 · rockchiphdmi1 · rockchiphdmiin ·
+              rockchipes8388
+```
+
+> **EDK II / EFI GRUB yolu geçmişte kaldı.** Bu belgenin daha eski bir sürümü
+> Plus'ı EDK II v2.70 → EFI GRUB üzerinden ve kökü `/dev/nvme0n1p2`'de tarif
+> ediyordu. Bugün ölçülen hâli yukarıdaki: her iki kartta da `/boot/efi` yok ve
+> `efibootmgr` kurulu değil; ikisi de Armbian U-Boot ile açılıyor. O yol
+> ScreenBridge'in 2026-09-05 tarihli raporlarında **tarihsel kanıt** olarak
+> duruyor ve güncel dağıtım yolu değildir.
 
 SoC çevre birimleri (HDMI RX kayıt penceresi, IRQ'lar, saatler, resetler, güç
-alanı) iki kartta **birebir aynı**. Farkın tamamı önyükleme zinciri, kök aygıtı
-ve çevre birimi indekslerinde.
+alanı) iki kartta **birebir aynı**. Farkın tamamı kök aygıtı, etkin HDMI verici
+sayısı ve çevre birimi indekslerinde — ve **hiçbiri ürün mantığına girmiyor**:
+çalışma zamanı keşfi bunları topolojiden çözüyor (bkz.
+[`platform/runtime-discovery.md`](platform/runtime-discovery.md)).
 
 ## 1. İmaj ve önyükleme — `rk3588-screenbridge`
 
@@ -62,26 +80,40 @@ SPI/NVMe arşivleri **seçilmez** (eşleşen U-Boot/BL31 zinciri kurmazlar).
 Hedefte:
 
 ```
-git g++ cmake meson ninja-build pkg-config nasm libdrm-dev
-libsrt-openssl-dev          # SRT, build-media-stack.sh şart koşuyor
+git g++ cmake meson ninja-build pkg-config nasm yasm libdrm-dev
+libsrt-openssl-dev          # SRT protokolü; ffmpeg yapılandırmasında açık
 ```
 
-## 3. Donanım medya yığını — `rk3588-screenbridge`
+Bunları `scripts/build-media-runtime.sh` eksikse kendisi kurar; liste, ne
+gerektiğini görmek için burada.
+
+## 3. Donanım medya çalışma zamanı — MediaBox'ın kendisi
 
 ```bash
-# hedefte çalışır; /opt/rk3588-screenbridge altına kurar
-SCREENBRIDGE_INSTALL_PREFIX=/opt/rk3588-screenbridge scripts/build-media-stack.sh
+export MEDIABOX_HOST=<cihazın adresi>
+./scripts/build-media-runtime.sh        # kartta derler; ~30-45 dk
 ```
 
 `rockchip-linux/mpp`, `airockchip/librga` ve `nyanmisaka/ffmpeg-rockchip`
-klonlanır, derlenir, kurulur; betik sonunda `rkmpp` kodlayıcılarını, `rkrga`
-filtrelerini ve `srt` protokolünü kendisi doğrular.
+**sabitlenmiş revizyonlardan** klonlanır, derlenir ve
+`/opt/rk3588-mediabox/media-runtime` altına kurulur. Betik sonunda pinleri
+artefaktın kendisinden okuyarak doğrular: MPP kendi commit'ini kütüphaneye
+damgalar, FFmpeg sürüm dizesinde taşır.
 
-**Doğrulama:**
-`/opt/rk3588-screenbridge/bin/ffmpeg -hide_banner -decoders | grep rkmpp`
+Revizyonların nereden geldiği ve neden stok Debian'ın yetmediği:
+[`platform/custom-runtime.md`](platform/custom-runtime.md).
 
-Bu adım MediaBox'ın **donanım kod çözmesinin tamamı** buna bağlı: oynatıcı da,
-Kodi de bu prefix'e linklenir.
+**Doğrulama:** betiğin kendi `verify` adımı —
+
+```bash
+./scripts/build-media-runtime.sh verify
+```
+
+> **Bu prefix `/opt/rk3588-screenbridge` değildir ve olmamalıdır.** İki ürün de
+> aynı karta kurulabilir; ortak prefix, en son derlenenin diğerinin kod
+> çözücüsünü değiştirmesi demekti. `deploy-mediabox-v3.sh` her deploy'da o
+> dizinin her dosyasını öncesi/sonrası hash'ler ve bir tanesi bile oynarsa
+> başarısız olur.
 
 ## 4. Çekirdek — çoğu zaman **gerekmez**
 
@@ -92,9 +124,12 @@ Ultra'da çalışan `6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio`, stok Armb
 kaynak : armbian/linux-rockchip  fd9f82366e235b8afbdf516765210e97d24dce93
 yama   : patches/kernel/0001-hdmirx-enable-i2s-capture.patch
 release: 6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio
-Image SHA-256: 474eb0a3d045b1ec031b657d7294c32beccef83e6e90a2734becb0635ecf5512
 geri alma: /root/screenbridge-backup/rollback-stock-kernel.sh
 ```
+
+> İki kart aynı **sürüm dizesini** taşıyor ama aynı çekirdeği çalıştırmıyor:
+> farklı derleme makineleri, derleyiciler, boyutlar ve hash'ler. O dizeyi kimlik
+> değil, aile adı say.
 
 Yama yalnız HDMI **alıcısının** I2S capture DAI'sini açar; verici (TX) tarafı
 değişmeden çıkış-only kalır. **MediaBox HDMI TX kullanır** — yani bu yamaya
@@ -115,41 +150,50 @@ export MEDIABOX_HOST=<cihazın adresi>
 Sırayla:
 
 ```bash
+./scripts/build-media-runtime.sh      # MPP + RGA + ffmpeg-rockchip (bölüm 3); ~30-45 dk
 ./scripts/install-mali-runtime.sh     # özel Mali G610 kullanıcı alanı (sürüm sabitli .deb)
-./scripts/build-kodi.sh               # kartta derler; saatler sürer
 ./scripts/build-mediabox-player.sh    # mpv 0.41 + 3 yama + vo_mediabox.c; ~10 dk
-./scripts/deploy-mediabox-v3.sh       # denetim düzlemi, TV arayüzü, Web UI, node,
-                                      # Stremio, birimler, udev, config — hepsi
+./scripts/install-stremio-server.sh   # node + akış sunucusu (upstream.env'de sabitli)
+./scripts/deploy-mediabox-v3.sh       # denetim düzlemi, TV arayüzü, Web UI,
+                                      # birimler, udev, config — hepsi
+./scripts/build-kodi.sh               # devir hedefi; kartta derler, saatler sürer
 ```
+
+Kodi son sırada, çünkü çalışan bir arayüze giden yolda değil: ilk dördü ürünün
+kendisi, beşincisi HDMI devir yolunu ve HDR referansını getirir.
 
 `deploy-mediabox-v3.sh` gerektiğinde `fonts-inter`, `fonts-noto-color-emoji`,
 tarayıcı uygulaması için `sway` ve `chromium` paketlerini kendisi kurar.
-node, Stremio web ve akış sunucusu `packaging/upstream.env` içinde revizyon ve
-SHA-256 ile sabitlidir.
 
 **Doğrulama:**
 
 ```bash
 ssh root@$MEDIABOX_HOST /opt/rk3588-mediabox/bin/mediabox-kiosk-smoke
+ssh root@$MEDIABOX_HOST /opt/rk3588-mediabox/bin/mediabox-platform inspect
 ```
 
-16/16 PASS beklenir. Ayrıca `systemctl is-active mediabox-tv-ui mediaboxd-rs
+20/20 PASS beklenir. Ayrıca `systemctl is-active mediabox-tv-ui mediaboxd-rs
 mediabox-media-worker stremio-server` ve Web UI'nin `200` dönmesi.
 
-## 6. **[Plus]** MediaBox tarafında değiştirilmesi gerekenler
+## 6. **[Plus]** MediaBox tarafında ne kaldı
 
-Ultra'ya sabitlenmiş dört yer var. Plus'a geçmeden önce bunlar çözülmeli:
+Bu belgenin önceki sürümünde dört sabit listeleniyordu. **Dördü de kalktı**;
+yerlerine ne geldiği:
 
-| Yer | Sabit | Yapılacak |
-|---|---|---|
-| `packaging/mediabox-hdmi-prepare:38` | `amixer -c rockchiphdmi1` | Kart adını `/proc/asound/cards` içinden çöz. ScreenBridge'te `scripts/hdmirx-audio-loopback.sh` bunu zaten yapıyor, aynı yaklaşım alınmalı |
-| `packaging/systemd/*.service` | `/dev/cec0` | Plus'ta iki HDMI → doğru CEC aygıtı seçilmeli |
-| `scripts/capture-*.sh`, `run-mp1*.sh` | `card0-HDMI-A-1` | Bağlı konektörü bul, isim sabitleme |
-| Önyükleme | `armbianEnv.txt` / `fdtfile` | Plus'ta GRUB girdisi + kendi DTB'si |
+| Eski sabit | Şimdi |
+|---|---|
+| `amixer -c rockchiphdmi1` | Seçili çıkışın ses kartı, cihaz ağacındaki codec phandle'ı üzerinden çözülüyor — Plus'ta `HDMI-A-1` → `rockchiphdmi0` |
+| Birimlerde `/dev/cec0` | CEC adaptörü verici platform aygıtının çocuğu olarak bulunuyor; birim `DeviceAllow=char-cec` diyor, numara demiyor. `--require-cec` kalktı: DP'de CEC yok, bu bir yetenek eksikliği, ürün arızası değil |
+| `card0-HDMI-A-1` | `mediabox-platform connector-path`; konektör, adıyla eşleşiyor, DRM nesne numarasıyla değil |
+| Önyükleme farkı | Yok: her iki kart da Armbian U-Boot + `armbianEnv.txt`. Plus'ta tek fark `user_overlays` satırı |
 
-**TV arayüzünün kendisi bu listede değildir.** `find_output` ilk bağlı `HDMI-A`
-konektörünü seçer, video düzlemini isimle değil `SetPlane` deneyerek bulur — VOP2
-düzlem haritası farklı olsa da kendi bulur.
+**Canlı doğrulama (salt-okunur, 2026-09-16).** Yeni keşif ikilisi Plus'a
+`/tmp` altından geçici olarak kopyalandı, çalıştırıldı ve silindi. Üç konektörü,
+her birinin ALSA ucunu ve CEC adaptörünü doğru çözdü; sonuç ScreenBridge'in
+bağımsız ölçtüğü platform matrisiyle birebir tuttu. Tek çözemediği "hangi
+konektör bağlı" oldu — çünkü o karta hiçbir ekran takılı değil.
+
+MediaBox Plus'a **kurulmadı**. Kurulum bir sonraki kapının işi.
 
 ## 7. Süre tahmini
 
@@ -157,12 +201,13 @@ düzlem haritası farklı olsa da kendi bulur.
 |---|---|
 | İmaj + önyükleme zinciri **[Plus]** | saatler, tek seferlik, belirsizliğin tamamı burada |
 | İmaj + önyükleme zinciri **[Ultra]** | ~30 dk, ölçülmüş yol |
-| `build-media-stack.sh` | ~1 saat |
+| `build-media-runtime.sh` | ~30-45 dk (ölçüldü: Ultra, 8 çekirdek) |
 | Özel çekirdek (yalnız HDMI RX gerekiyorsa) | ~2 saat |
 | Mali | ~5 dk |
-| Kodi | saatler |
 | Oynatıcı (mpv) | ~10 dk |
-| `deploy-mediabox-v3.sh` (node + Stremio dahil) | 20-40 dk |
+| `install-stremio-server.sh` | ~10 dk |
+| `deploy-mediabox-v3.sh` | ~5 dk |
+| Kodi | saatler |
 
 Ultra için **yarım gün**, Plus için **bir gün** — Plus'taki farkın tamamı 1.
 adımda.
@@ -171,9 +216,13 @@ adımda.
 
 Cihaz şunları yapıyorsa temiz imaj kabul edilmiştir:
 
-1. `mediabox-kiosk-smoke` 16/16 PASS
+1. `mediabox-kiosk-smoke` 20/20 PASS
 2. Dört servis `active`, Web UI `200`
 3. Katalogdan bir film **gömülü oynatıcıda** açılıyor; VOP2 özetinde
    `Cluster0-win0 AR24 zpos 11` ve `Esmart0-win0 NV12/NV15 zpos 0` görünüyor
 4. Kumandada Sol/Sağ sarma, Ok onay, iki Geri durdurma çalışıyor
 5. Kodi'ye devir ve geri dönüş: renk SDR'a dönüyor, panelde konsol metni yok
+6. `mediabox-platform inspect` seçili çıkışı, onun ALSA kartını ve CEC
+   adaptörünü raporluyor; uyarı listesi boş
+7. Oynatıcı ve Kodi ikilileri `/opt/rk3588-screenbridge` altından **hiçbir**
+   kütüphane çözmüyor (`ldd`, `/proc/<pid>/maps`)

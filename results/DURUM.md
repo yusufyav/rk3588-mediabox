@@ -3,8 +3,10 @@
 Bu dosya **tek yaşayan belge**. Oturum başına yeni bir tarihli rapor yazılmaz;
 burası güncellenir.
 
-Cihaz: Orange Pi 5 Ultra (RK3588), `6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio`.
-Panel: HDMI-A-1. Adres repoda sabit değil — `MEDIABOX_HOST` / `scripts/env.sh`.
+Geliştirme cihazı: Orange Pi 5 Ultra (RK3588),
+`6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio`. İkinci hedef: Orange Pi 5
+Plus — hazırlandı, **kurulmadı**. Ne panel ne adres repoda sabit:
+`MEDIABOX_HOST` / `scripts/env.sh`, çıkış `mediabox-platform` ile keşfediliyor.
 
 > **Eski tarihli raporlar.** 27 oturum raporu ve bütün ham kanıt `710181b`
 > commit'ine kadar `results/` ve `logs/` altındaydı. Silinmediler, geçmişte
@@ -20,10 +22,13 @@ RK3588 için bir televizyon kutusu işletim deneyimi — oynatıcı değil, OS.
 Salondan kumandayla, ağdan tarayıcıyla kullanılır.
 
 ```
-Rust + Slint → FemtoVG/GLES → Mali-G610 (/dev/dri/renderD128)
-     → GBM armsoc → DMA-BUF/PRIME → Rockchip /dev/dri/card0
-     → DRM/KMS/VOP2 → HDMI
+Rust + Slint → FemtoVG/GLES → Mali-G610 (keşfedilen render aygıtı)
+     → GBM armsoc → DMA-BUF/PRIME → keşfedilen Rockchip ekran aygıtı
+     → DRM/KMS/VOP2 → seçilen çıkış
 ```
+
+Aygıt numaraları yazılı değil; `mediabox-platform` topolojiden çözüyor
+(bkz. `docs/platform/runtime-discovery.md`).
 
 ## 2. Cihazda çalışan
 
@@ -56,8 +61,9 @@ Bunlar ölçülüp kapatıldı. **Yeniden kampanya olarak koşturulmaz.**
 
 `results/` içindeki eski `native-shell-v1` raporunun özü:
 
-* Split render/display: Mali GBM `renderD128`'de, KMS `card0`'da, dma-buf export
-  → PRIME import → ADDFB2 → page flip. Compositor yok, Wayland yok, llvmpipe yok.
+* Split render/display: Mali GBM render aygıtında, KMS konektör sahibi aygıtta,
+  dma-buf export → PRIME import → ADDFB2 → page flip. Compositor yok, Wayland
+  yok, llvmpipe yok.
 * Kumandanın kutuyu yeniden başlatması kapatıldı — dört bağımsız kilit
   (udev `TAG=""`, logind drop-in, `ctrl-alt-del` mask, `actions.rs` yönlendirme
   tablosu ve testleri).
@@ -70,7 +76,7 @@ Bunlar ölçülüp kapatıldı. **Yeniden kampanya olarak koşturulmaz.**
   yeniden uygulanıyor. Kırmızı ışık beslemeye bağlı, yazılımdan kapatılamaz.
   Satır basış anında güncelleniyor (ölçülen tuş-çizim 3–7 ms); on saniyelik
   makine yoklaması beklenmiyor.
-* `mediabox-kiosk-smoke` 16/16.
+* `mediabox-kiosk-smoke` 20/20.
 
 ## 5. Gömülü oynatıcı (15 Eylül 2026)
 
@@ -82,7 +88,8 @@ Cluster0-win0  AR24  zpos 11   ← arayüz, üstte, alfalı
 Esmart0-win0   NV15  zpos 0    ← film, altta, donanımda ölçekli
 ```
 
-* Çözücü: mpv 0.41, cihazda Rockchip ffmpeg'e karşı derli, üç yama.
+* Çözücü: mpv 0.41, cihazda MediaBox'ın kendi Rockchip ffmpeg'ine karşı derli,
+  üç yama, RPATH `/opt/rk3588-mediabox/media-runtime/lib`.
   `packaging/mpv/vo_mediabox.c` kareleri `SCM_RIGHTS` ile arayüze veriyor;
   `rust/crates/mediabox-tv/src/video.rs` import edip düzleme koyuyor.
 * İki tuzak: `DRM_CLIENT_CAP_UNIVERSAL_PLANES` istenmedikçe Esmart0 görünmüyor
@@ -135,94 +142,92 @@ yerel 4K NV15  mpv %6-9 CPU · arayüz ~%0 · 1845 kare · 0 düşük · 23.96 f
   göndermiyor.
 * Kodi'nin "Şimdi Oynatılan" ekranı hâlâ eski simge setini kullanıyor.
 
-## 7. Temiz imaj ve ikinci cihaz (Plus)
+## 7. Taşınabilirlik ve ikinci cihaz (Plus)
 
-### Bu repodan yeniden üretilebilenler
+**Durum: hazır, kurulmadı.** Bu bölümün önceki hâli dört sabit ve ayrı bir
+önyükleme zinciri sayıyordu; hepsi kapandı ya da yanlış çıktı.
 
-| Ne | Nasıl |
-|---|---|
-| Mali G610 kullanıcı alanı | `scripts/install-mali-runtime.sh` — sürüm sabitli .deb, URL ile |
-| Kodi 22.0-BETA2 | `scripts/build-kodi.sh` — kartta derler |
-| Oynatıcı (mpv 0.41) | `scripts/build-mediabox-player.sh` + `packaging/mpv-patches/` + `packaging/mpv/vo_mediabox.c` |
-| node 22.23.1, Stremio web, akış sunucusu | `packaging/upstream.env` — revizyon ve SHA256 ile sabitli |
-| Denetim düzlemi, TV arayüzü, Web UI | `scripts/deploy-mediabox-v3.sh` (çapraz derleme) |
-| Birimler, udev, config, smoke | `packaging/` |
+### Kendi medya çalışma zamanı
 
-### İki temel: bu repoda yok, **yan repoda var**
+MediaBox artık `/opt/rk3588-screenbridge` prefix'ini **ne okuyor ne yazıyor**.
+MPP, librga ve ffmpeg-rockchip sabitlenmiş revizyonlardan
+`/opt/rk3588-mediabox/media-runtime` altına derleniyor
+(`scripts/build-media-runtime.sh`); iki oynatıcı da o prefix'i adlandıran bir
+RPATH taşıyor, yani hiçbir ortam değişkeni hangi kod çözücüyü aldıklarını
+belirlemiyor. Ultra'da ölçüldü — hiçbir kütüphane yolu ayarlanmadan:
 
-`~/Projeler/rk3588-screenbridge` (main, `582e1d3`) — ikisi de orada, sabitlenmiş:
+```
+mpv  RUNPATH /opt/rk3588-mediabox/media-runtime/lib
+     librga.so, librockchip_mpp.so.1 → media-runtime/lib
+     /opt/rk3588-screenbridge eşlemesi: 0   (önce: 8)
+```
 
-| Önkoşul | Tarifi |
-|---|---|
-| `/opt/rk3588-screenbridge` (RKMPP FFmpeg) | `scripts/build-media-stack.sh` — `rockchip-linux/mpp`, `airockchip/librga`, `nyanmisaka/ffmpeg-rockchip` klonlar, derler, prefix'e kurar ve `rkmpp` kodlayıcılarını doğrular |
-| Çekirdek | `armbian/linux-rockchip` `fd9f82366e235b8afbdf516765210e97d24dce93` + `patches/kernel/0001-hdmirx-enable-i2s-capture.patch`; release adı ve `Image` SHA-256 `474eb0a3…` kayıtlı, cihazda `rollback-stock-kernel.sh` var |
+Pinler ve nereden okundukları: `docs/platform/custom-runtime.md`.
 
-**Ama MediaBox o çekirdeğe muhtemelen ihtiyaç duymuyor.** Yama okundu: yaptığı
-tek şey HDMI **alıcısının** I2S capture DAI'sini açmak; verici (TX) tarafı
-değişmeden çıkış-only kalıyor. MediaBox HDMI TX kullanıyor — yani stok Armbian
-vendor çekirdeği yetmeli. **Bu bir çıkarım, ölçüm değil**: MediaBox stok
-çekirdekle hiç açılmadı.
+### Donanım sahipliği sözleşmesi
 
-### Plus'a taşımak — yan repo bunu zaten ölçmüş
+DRM master iki kez tutulamaz. Ekranı alan her MediaBox birimi
+(`mediabox-tv-ui`, `kodi`, `mediabox-browser`)
+`Conflicts=screenbridge-daemon.service` + `After=` aynı birim diyor — yarış
+değil, belirlenmiş geçiş. Denetim düzlemi, medya işçisi ve akış sunucusu ekran
+donanımına dokunmuyor ve hiçbir kilit ilan etmiyor.
 
-`results/orangepi5-plus-vendor/ultra-plus-hdmirx-4k60-differential-2026-09-05.md`
-(Gate 2E) iki kartı yan yana koymuş:
+### Önyükleme: iki kart artık aynı
+
+Eski kayıt Plus'ı EDK II → EFI GRUB → `/dev/nvme0n1p2` diye tarif ediyordu.
+**Canlı ölçüm (2026-09-16) bunun geçmişte kaldığını gösteriyor:**
 
 | | Ultra | Plus |
 |---|---|---|
-| Önyükleme | DDR init → BL31 → Armbian U-Boot | **EDK II v2.70 → EFI GRUB** |
-| DTB seçimi | `armbianEnv.txt` içindeki `fdtfile` | GRUB girdisinde açık `devicetree` |
-| DTB | `rk3588-orangepi-5-ultra.dtb` | `rk3588-orangepi-5-plus-screenbridge.dtb` |
-| Kök | eMMC `/dev/mmcblk0p1` | **NVMe `/dev/nvme0n1p2`** |
-| Çekirdek | `…-screenbridge-hdmirx-audio` `#3` | **stok** `6.1.115-vendor-rk35xx` `#1` |
-| HDMI RX denetleyici DT'si | kayıt penceresi, IRQ, saat, reset, güç alanı | **birebir aynı** |
-| HDMI-IN ses kartı indeksi | 1 | 3 |
+| Önyükleme | Rockchip DDR init → BL31 → Armbian U-Boot | **aynı** |
+| Önyükleme yöneticisi | `boot.scr` + `armbianEnv.txt` | **aynı** |
+| EFI/GRUB | yok (`/boot/efi` yok, `efibootmgr` yok) | **yok** |
+| Kök | eMMC `/dev/mmcblk0p1` | NVMe `/dev/nvme0n1p1` |
+| DTB | `rk3588-orangepi-5-ultra.dtb` | **stok** `rk3588-orangepi-5-plus.dtb` |
+| Overlay | yok | `user_overlays=orangepi5-plus-screenbridge-hdmirx` |
+| CMA | 256M | 512M |
 
-Yani önyükleme zinciri ve kök aygıtı tamamen farklı; SoC çevre birimleri aynı.
+### Plus'ta salt-okunur platform probu
 
-MediaBox tarafında değişmesi gereken, Ultra'ya sabitlenmiş dört yer:
+Yeni keşif ikilisi `/tmp` altına geçici kopyalandı, çalıştırıldı ve silindi.
+MediaBox **kurulmadı**, hiçbir paket kurulmadı, hiçbir servis değişmedi,
+ScreenBridge'e dokunulmadı.
 
-```
-packaging/mediabox-hdmi-prepare:38   amixer -c rockchiphdmi1     ← kart adı sabit
-packaging/systemd/*.service          /dev/cec0                   ← Plus'ta iki HDMI
-scripts/capture-*.sh, run-mp1*.sh    card0-HDMI-A-1              ← Plus'ta iki çıkış
-/boot/armbianEnv.txt                 rk3588-orangepi-5-ultra.dtb ← Plus'ta GRUB + kendi DTB
-```
+| | Plus'ta bulunan |
+|---|---|
+| KMS aygıtı | `card0` (rockchip-drm), konektör sahibi olduğu için |
+| Render aygıtı | `renderD128`, aynı ana aygıt |
+| Konektörler | `HDMI-A-1`, `HDMI-A-2`, `DP-1` |
+| Verici eşlemesi | `fde80000.hdmi`, `fdea0000.hdmi`, `fde50000.dp` |
+| Ses ucu | `rockchiphdmi0`, `rockchiphdmi1`, `rockchipdp0` |
+| CEC | `/dev/cec0`, `/dev/cec1`, DP'de yok |
+| Bağlı çıkış | **hiçbiri** — o karta ekran takılı değil |
 
-Kart indeksini isimden çözme sorunu yan repoda zaten çözülmüş —
-`scripts/hdmirx-audio-loopback.sh` bunu yapıyor; aynı yaklaşım buraya alınmalı.
+Ses eşlemesi ScreenBridge'in bağımsız ölçtüğü platform matrisiyle birebir
+tuttu. Dikkat: Plus'ta `HDMI-A-1` → `rockchiphdmi0`, Ultra'da tek konektör →
+`rockchiphdmi1`. Aynı konektör adı, farklı kart — `amixer -c rockchiphdmi1`
+yazan her şey kartlardan birinde yanlış televizyona sesleniyordu.
 
-**TV arayüzünün kendisi bu listede değil:** `find_output` ilk bağlı `HDMI-A`
-konektörünü seçiyor, video düzlemini isimle değil `SetPlane` deneyerek buluyor.
-VOP2 düzlem haritası farklı olsa bile kendi bulur.
+### Kapanan sabitler
 
-### Temiz imajın masrafı
+| Eski | Şimdi |
+|---|---|
+| `amixer -c rockchiphdmi1` | Seçili çıkışın kartı, DT codec phandle'ı üzerinden |
+| Birimlerde `/dev/cec0` | `DeviceAllow=char-cec`; adaptör verici aygıtın çocuğu |
+| `MEDIABOX_KMS_NODE=/dev/dri/card0` (birim dosyasında) | Keşif; değişken yalnız teşhis için kaldı |
+| `card0-HDMI-A-1` (betikler) | `mediabox-platform connector-path` |
+| `--require-cec` | Kalktı — DP'de CEC yok, bu yetenek eksikliği |
+| `MEDIABOX_HOST=10.27.27.25` varsayılanı | Varsayılan yok; verilmezse betik durur |
 
-| Adım | Nerede | Tahmin |
-|---|---|---|
-| Armbian vendor imajı + önyükleme zinciri (Plus'ta EFI/GRUB + NVMe) | screenbridge | saatler, tek seferlik |
-| `build-media-stack.sh` (MPP + RGA + ffmpeg, kartta) | screenbridge | ~1 saat |
-| Özel çekirdek — **yalnızca HDMI RX sesi gerekiyorsa** | screenbridge | ~2 saat |
-| Mali kullanıcı alanı | bu repo | ~5 dk |
-| Kodi (kartta, 8 çekirdek) | bu repo | saatler |
-| mpv oynatıcı | bu repo | ~10 dk |
-| node + Stremio web/sunucu | bu repo | 15-30 dk |
-| Rust çapraz derleme + `deploy-mediabox-v3.sh` | bu repo | ~5 dk |
+### Sonraki kapı için kalanlar
 
-Kabaca **bir iş günü**, ve belirsizliğin tamamı önyükleme zincirinde — Plus'un
-EFI/GRUB + NVMe düzeni Ultra'nınkinden farklı, MediaBox'ın hiç görmediği bir yol.
-
-### Kapatılması gereken işler
-
-1. `scripts/bootstrap-appliance.sh` — boş Armbian'dan çalışan cihaza tek yol;
-   mevcut betikleri sırayla çağırır, iki önkoşul yoksa **yüksek sesle** durur.
-2. Çekirdek ve FFmpeg'i yol olarak değil, `rk3588-screenbridge` reposunun
-   **sabit commit'i** olarak kaydet; `packaging/upstream.env` bunun için zaten
-   doğru yer.
-3. HDMI ses kartı adını sabit yazmak yerine keşfet
-   (`/proc/asound/cards` içinden `rockchiphdmi*`).
-4. Kabuk dışındaki betiklerdeki `card0-HDMI-A-1` sabitlerini bağlı konektörü
-   bulacak şekilde değiştir.
+1. Plus'a bir ekran tak ve `mediabox-platform inspect` ile bağlı konektörün
+   `measured` bağlandığını doğrula.
+2. Plus'ta ScreenBridge daemon'ı çalışırken MediaBox ekran sahibi bir birimi
+   başlat; geçişin belirlenmiş olduğunu (yarış değil) gözle.
+3. Medya çalışma zamanını Plus'ta derle — Ultra'daki aynı pinlerle.
+4. Stok çekirdekle MediaBox'ı açmayı dene: HDMI RX yaması TX'i ilgilendirmiyor,
+   ama bu hâlâ çıkarım.
 
 ## 7. Nerede ne var
 
@@ -231,6 +236,7 @@ rust/crates/mediabox-tv      TV arayüzü (Slint + kendi DRM/GBM platformu)
 rust/crates/mediaboxd-rs     denetim düzlemi, HTTP + unix soket
 rust/crates/mediabox-ui      ÜRETİM Web UI (wasm)
 rust/crates/mediabox-core    iki tarafın paylaştığı kapalı istek/yanıt tipleri
+rust/crates/mediabox-platform  bu kartın ne olduğu: DRM/ALSA/CEC keşfi + ikili
 media/                       medya çekirdeği (Python), cihazda çalışır
 packaging/                   systemd birimleri, udev kuralları, kabuk betikleri,
                              packaging/mpv/vo_mediabox.c
@@ -238,4 +244,5 @@ scripts/                     çapraz derleme ve dağıtım (deploy-mediabox-v3.s
 src/ + tools/ + tests/       C++ HDR probları ve bekçileri — KABUL EDİLMİŞ TEMEL
 config/                      cihaza kurulan JSON'lar
 docs/                        mimari notları
+docs/platform/               pinlenmiş özel yığın, çalışma zamanı keşfi
 ```

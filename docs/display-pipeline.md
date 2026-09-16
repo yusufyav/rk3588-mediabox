@@ -52,9 +52,9 @@ Removed, and must not come back:
 
 | file | what it used to say |
 |------|---------------------|
-| `config/sway-kiosk.conf` | `output HDMI-A-1 mode 3840x2160@60Hz` |
+| `config/sway-kiosk.conf` (file since removed with the shell) | `output HDMI-A-1 mode 3840x2160@60Hz` |
 | `config/sway-browser.conf` | `output HDMI-A-1 mode 1920x1080@60Hz` |
-| `packaging/mediabox-kiosk-browser` | `--force-device-scale-factor=2` |
+| `packaging/mediabox-kiosk-browser` (file since removed with the shell) | `--force-device-scale-factor=2` |
 | `packaging/mediabox-kiosk-smoke` | `MODE=1920x1080` |
 
 A pinned mode the panel cannot do produces, on every start:
@@ -67,10 +67,13 @@ A pinned mode the panel cannot do produces, on every start:
 — a failed mode set followed by a fallback, which a person sees as the
 television going dark twice on its way to the home screen.
 
-wlroots takes the panel's preferred mode when nothing is written down. The
-layout survives the change because the scale is measured from the mode that was
-actually taken (rule 1), and `mediabox-display-watch` restarts the interface if
-the panel is swapped while the box is running.
+wlroots takes the panel's preferred mode when nothing is written down — that is
+the browser application's compositor. The television's own interface asks
+`mediabox-platform` for the selected output and takes that connector's preferred
+mode. The layout survives the change because the scale is measured from the mode
+that was actually taken (rule 1), and `mediabox-display-changed`, triggered by
+udev on a DRM hotplug, restarts the interface if the panel is swapped while the
+box is running.
 
 **Check:**
 
@@ -145,11 +148,13 @@ SWAYSOCK=$(ls /run/mediabox-ui/sway-ipc.*.sock | head -1) \
   swaymsg 'output HDMI-A-1 dpms on'
 ```
 
-`mediabox-display-settle` does this automatically, and **only** on the way back
-from Kodi: `mediabox-display-guard` leaves a timestamp at
-`/run/mediabox/display-handback` and the settle script acts on it if it is less
-than 60 s old. It must not run on a cold boot — a blank and unblank is a second
-of black screen that buys nothing there.
+This was automated once, by a `mediabox-display-settle` script that acted on the
+timestamp `mediabox-display-guard` leaves at `/run/mediabox/display-handback`
+when it is less than 60 s old. That script belonged to the compositor-based
+shell and went with it; the guard and its timestamp are still there. If the
+green cast comes back on the native shell, that is the shape the fix took and
+the timestamp is still the signal — but it must not run on a cold boot, where a
+blank and unblank is a second of black screen that buys nothing.
 
 Note also that `EDID` reading 0 on this kernel is normal and is **not**
 evidence of a fault. Do not chase it.
@@ -280,7 +285,7 @@ what it had chosen — not what the panel offers. The attached monitor lists 59
 modes including 3840x2160, and prefers 3840x2560:
 
 ```sh
-sort -u /sys/class/drm/card0-HDMI-A-1/modes | sort -t x -k1 -rn | head -3
+sort -u "$(mediabox-platform connector-path)/modes" | sort -t x -k1 -rn | head -3
 ```
 
 So the colour chain above is the accepted one and the scanout size is not, but

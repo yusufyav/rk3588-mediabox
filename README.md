@@ -1,17 +1,25 @@
 # rk3588-mediabox
 
-A television appliance for the Orange Pi 5 Ultra (RK3588). Not a player: the box
-boots into an interface of its own, resolves what to watch, plays it on the
-display controller's own video plane, and hands the evening to Kodi when Kodi is
-the better answer. 4K, HEVC Main 10, HDR10, hardware decode throughout, and no
-desktop compositor anywhere in it.
+A television appliance for RK3588. Not a player: the box boots into an interface
+of its own, resolves what to watch, plays it on the display controller's own
+video plane, and hands the evening to Kodi when Kodi is the better answer. 4K,
+HEVC Main 10, HDR10, hardware decode throughout, and no desktop compositor
+anywhere in it.
+
+It runs on the Orange Pi 5 Ultra today and is built to run on the Orange Pi 5
+Plus, which has two HDMI transmitters and DisplayPort where the Ultra has one
+socket. Those are two hardware realizations of one product, not two products:
+nothing in it asks which board it is on. Which DRM device sets modes, which one
+renders, which connector the television is on, and which sound card and CEC
+adapter belong to that connector are all discovered from the board's own
+topology — see [`docs/platform/runtime-discovery.md`](docs/platform/runtime-discovery.md).
 
 ```text
   Phone / laptop on the LAN                 Television + remote
             |                                        |
             v                                        v
    mediabox-ui (Rust -> wasm)              mediabox-tv (Rust + Slint)
-            |                                 holds DRM master on card0
+            |                            holds DRM master, discovered device
             |                                        |
             +----------> mediaboxd-rs <--------------+
                         (control plane)              |
@@ -70,7 +78,7 @@ file is the way in.
 
 | Unit | Source | What it is |
 | --- | --- | --- |
-| `mediabox-tv-ui.service` | `rust/crates/mediabox-tv` | The television's own interface. Slint on FemtoVG/GLES, Mali G610 on `renderD128`, scanout on Rockchip `card0`. No compositor, no Wayland; it holds DRM master itself. |
+| `mediabox-tv-ui.service` | `rust/crates/mediabox-tv` | The television's own interface. Slint on FemtoVG/GLES, Mali G610 on the discovered render device, scanout on the discovered Rockchip display device. No compositor, no Wayland; it holds DRM master itself. |
 | `mediaboxd-rs.service` | `rust/crates/mediaboxd-rs` | The control plane. Typed Unix socket at `/run/mediabox/mediaboxd.sock`, loopback HTTP on `8787`, LAN HTTP on `8788` for private peers only. Decides which application owns the display. Owns the board's two GPIO indicator lights, because `/sys/class/leds` is root's. Serves the product UI from `/opt/rk3588-mediabox/ui`. |
 | — | `rust/crates/mediabox-ui` | The production web UI: Rust compiled to `wasm32`, served by the daemon above. There is no other web interface. |
 | `mediabox-media-worker.service` | `media/` | The media core: catalogue, Stremio bridge, `ffprobe` policy, session proxy. Python, bound to loopback; a browser reaches it only through the daemon's relay. |
@@ -78,11 +86,12 @@ file is the way in.
 | `mediabox-player.service` | `packaging/mediabox-player` | Transient. It exists while a film is playing and not otherwise. |
 | `kodi.service` | `packaging/systemd`, `patches/kodi/` | The handoff target. Installed but deliberately not enabled at boot: who owns the panel is `mediaboxd-rs`'s decision at run time, not systemd's. |
 | `mediaboxctl` | `rust/crates/mediaboxctl` | The operator CLI. It speaks the daemon's protocol and nothing else. |
+| `mediabox-platform` | `rust/crates/mediabox-platform` | What this board is, asked of the board: the display and render devices, the outputs, and the sound card and CEC adapter that belong to the selected one. One resolver, used by the interface, the control plane and every script that needs a device. |
 
 ## The two playback paths
 
-**Embedded.** `mpv 0.41`, built on the appliance against the Rockchip
-FFmpeg/RKMPP stack, with three patches and one added video output —
+**Embedded.** `mpv 0.41`, built on the appliance against MediaBox's own
+Rockchip FFmpeg/RKMPP runtime, with three patches and one added video output —
 [`packaging/mpv/vo_mediabox.c`](packaging/mpv/vo_mediabox.c). It decodes through
 MPP and then draws nowhere: the decoded frame's DMA-BUF descriptors go to the
 interface over a Unix socket with `SCM_RIGHTS`, and the interface — which
@@ -171,19 +180,20 @@ the command that says whether it still holds.
 
 | Item | Value |
 | --- | --- |
-| Board | Orange Pi 5 Ultra / RK3588 |
+| Boards | Orange Pi 5 Ultra (running), Orange Pi 5 Plus (prepared, not installed) |
 | OS | Armbian trixie |
 | Kernel | `6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio` |
-| HDMI connector | `HDMI-A-1`, DRM connector id 201, single CRTC `video_port0` |
+| Display output | discovered; the Ultra has one HDMI socket, the Plus has two plus DisplayPort |
 | Product prefix | `/opt/rk3588-mediabox` |
+| Media runtime | `/opt/rk3588-mediabox/media-runtime` (MPP, librga, ffmpeg-rockchip) |
 | Kodi prefix | `/opt/rk3588-mediabox/kodi` |
 | Player prefix | `/opt/rk3588-mediabox/player` |
 | GPU user space | `/opt/rk3588-mediabox/mali-g24p0-runtime` (private libmali G610) |
-| RKMPP / FFmpeg | `/opt/rk3588-screenbridge` |
 
-The address is not fixed in the repository. Connection settings live in
-[`scripts/env.sh`](scripts/env.sh) and are overridden from the environment
-(`MEDIABOX_HOST`, `MEDIABOX_SSH_KEY`, …).
+Neither the address nor the connector is fixed in the repository. Connection
+settings live in [`scripts/env.sh`](scripts/env.sh) and come from the
+environment; `MEDIABOX_HOST` has no default, because a script with a baked-in
+address is a script that quietly deploys to yesterday's machine.
 
 ## Build, deploy, run
 
@@ -195,32 +205,44 @@ script.
 ```bash
 export MEDIABOX_HOST=<the appliance's address>
 
-# 1. the private Mali G610 user space (nothing is installed system-wide)
+# 1. the hardware media runtime: Rockchip MPP, librga and ffmpeg-rockchip at
+#    pinned revisions, into MediaBox's own prefix          (~30-45 min)
+./scripts/build-media-runtime.sh
+
+# 2. the private Mali G610 user space (nothing is installed system-wide)
 ./scripts/install-mali-runtime.sh
 
-# 2. the embedded player: mpv 0.41 + packaging/mpv-patches/ + vo_mediabox.c,
-#    built on the board against its Rockchip ffmpeg        (~10 min)
+# 3. the embedded player: mpv 0.41 + packaging/mpv-patches/ + vo_mediabox.c,
+#    built on the board against the runtime from step 1    (~10 min)
 ./scripts/build-mediabox-player.sh
 
-# 3. the product: control plane, television interface, web UI, media core,
+# 4. torrent and stream resolution: node and the streaming server, pinned
+./scripts/install-stremio-server.sh
+
+# 5. the product: control plane, television interface, web UI, media core,
 #    units, udev rules, config — and a kiosk smoke that fails the deploy
 ./scripts/deploy-mediabox-v3.sh
 
-# 4. Kodi, for the handoff path: deps, fetch, patch, configure, build, install
+# 6. Kodi, for the handoff path: deps, fetch, patch, configure, build, install
 #    on the board                                          (hours)
 ./scripts/build-kodi.sh
 ```
 
-Steps 1–3 are the product. Step 4 is needed for the Kodi handoff and for
+Steps 1–5 are the product. Step 6 is needed for the Kodi handoff and for
 reproducing the HDR baseline above; it is the slowest thing in the repository
 and it is not on the path to a working interface.
+
+What each pinned revision is, where the pin was read from and why the
+distribution's build will not do is in
+[`docs/platform/custom-runtime.md`](docs/platform/custom-runtime.md).
 
 Driving it afterwards:
 
 ```bash
 mediaboxctl status                     # on the appliance
 mediaboxctl surface switch ui          # who owns the panel
-mediabox-kiosk-smoke                   # 16 checks against the running box
+mediabox-platform inspect              # what this board is, and what was chosen
+mediabox-kiosk-smoke                   # 20 checks against the running box
 ```
 
 Kodi can also be driven directly, which is what the display gates did:
@@ -256,15 +278,21 @@ byte-for-byte untouched because the MP1a report publishes its source hash.
 ./scripts/run-mp1b.sh --input /path/on/target/movie.mkv --duration 90 --start 1200
 ```
 
-## The ScreenBridge dependency
+## Living beside ScreenBridge
 
-There is **no runtime dependency on the `rk3588-screenbridge` daemon**. There
-is a dependency on a path: the RKMPP-enabled FFmpeg, `librockchip_mpp` and
-`librga` installed at `/opt/rk3588-screenbridge`. Both players link against it —
-Kodi through `MEDIABOX_FFMPEG_PREFIX`, `mediabox-player` through
-`LD_LIBRARY_PATH` — because it is the only build on the box that can drive the
-hardware decoder. [`docs/architecture.md`](docs/architecture.md) records how
-that dependency is meant to end.
+MediaBox and `rk3588-screenbridge` are two products for the same silicon and can
+be installed on the same board. There is **no runtime dependency on the
+ScreenBridge daemon**, and since this gate **no dependency on its prefix**
+either: MediaBox builds its own Rockchip MPP, librga and FFmpeg into
+`/opt/rk3588-mediabox/media-runtime` and both players carry an RPATH naming it,
+so no environment variable decides which decoder they get.
+`scripts/deploy-mediabox-v3.sh` hashes every file under
+`/opt/rk3588-screenbridge` before and after a deploy and fails if one moves.
+
+What is left is a hardware-ownership contract: DRM master cannot be held twice,
+so every MediaBox unit that takes it declares `Conflicts=` and `After=` the
+ScreenBridge daemon — a deterministic transition rather than a race. See
+[`docs/platform/runtime-discovery.md`](docs/platform/runtime-discovery.md).
 
 The custom kernel is a separate question and a softer dependency. The patch that
 distinguishes it opens the HDMI **receiver's** I2S capture DAI; MediaBox uses
@@ -285,6 +313,8 @@ repository is a read-only engineering reference for this one.
 | --- | --- |
 | [`results/DURUM.md`](results/DURUM.md) | The living state of the product: what runs, what is open, what is known-broken. Updated, never added to. |
 | [`docs/temiz-imaj.md`](docs/temiz-imaj.md) | Blank card to working appliance, in order, for the Ultra and — derived, not yet measured — the Plus. |
+| [`docs/platform/custom-runtime.md`](docs/platform/custom-runtime.md) | Every non-stock component, its pin, where the pin was read from, and what is lost without it. |
+| [`docs/platform/runtime-discovery.md`](docs/platform/runtime-discovery.md) | How the board is discovered rather than assumed, and how MediaBox and ScreenBridge share one. |
 | [`docs/architecture.md`](docs/architecture.md) | Why the pipeline is shaped this way, and the board constraints it has to respect. |
 | [`docs/gates.md`](docs/gates.md) | What each gate asked, and what the evidence said. |
 | [`docs/display-pipeline.md`](docs/display-pipeline.md) | The rules about the panel, each with the command that checks it. |

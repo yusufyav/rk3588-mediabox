@@ -7,9 +7,9 @@ before the next begins.
 Success is never "a picture appeared". Every gate names what physical or
 kernel-visible evidence counts.
 
-> **The reports this page links to are in history, not in the tree.** They were
-> taken out at `d757d17`; the links below still name them, and every one is
-> readable at the commit before that:
+> **The reports this page names are in history, not in the tree.** They were
+> taken out at `d757d17`; the names below are not links for that reason, and
+> every one is readable at the commit before that:
 >
 > ```sh
 > git show 710181b:results/orangepi5-ultra-vendor/<report>.md
@@ -66,7 +66,7 @@ The differential the gate is designed to produce:
 Result: `PASS`. All five rungs passed; the sink enters HDR10 at a4 and at no
 earlier rung, and the link is byte-identical between a3 and a4, which isolates
 the transition to the Dynamic Range and Mastering InfoFrame alone.
-Report: [`../results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md`](../results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md).
+Report: `results/orangepi5-ultra-vendor/hdr-signaling-mp1a-2026-09-09.md`.
 
 ## MP1b — real HDR10 content and picture fidelity (done)
 
@@ -112,7 +112,7 @@ repeated or late steady-state frames, but the physical picture was not
 visually confirmed correct, so the gate first closed as `PARTIAL_FIDELITY`
 with one hypothesis: the scanout plane's default BT.601 input encoding while
 the content and output are BT.2020. See the
-[`MP1b report`](../results/orangepi5-ultra-vendor/real-hdr10-playback-mp1b-2026-09-09.md).
+`MP1b report`.
 
 `MP1b-CSC` then settled the mechanical half of that hypothesis. Requesting
 `COLOR_ENCODING = ITU-R BT.2020 YCbCr` on the plane is accepted, reads back,
@@ -120,7 +120,7 @@ and makes VOP2 load a different matrix (`csc mode[0]` to `csc mode[3]`), with
 HDMI state, cadence and TV HDR entry all unchanged. The perceptual half did
 not resolve: two 120 s legs four minutes apart is not an instrument that can
 detect a matrix error on muted material. See the
-[`MP1b-CSC report`](../results/orangepi5-ultra-vendor/mp1b-plane-color-encoding-ab-2026-09-09.md).
+`MP1b-CSC report`.
 
 `MP1b-FINAL` rebuilt the perceptual half as a double-blind, interleaved,
 counterbalanced comparison on the highest-chroma sustained scene in the asset
@@ -129,7 +129,7 @@ legs identical in every completed pair, in both presentation orders. The CSC
 visual hypothesis is therefore `NOT_MATERIALLY_VISIBLE`, and BT.2020 — the
 semantically correct matrix — is adopted as the product behaviour while the
 probe default stays "untouched" so earlier gates remain reproducible. See the
-[`MP1b-FINAL report`](../results/orangepi5-ultra-vendor/mp1b-final-blind-fidelity-2026-09-09.md).
+`MP1b-FINAL report`.
 
 **Product decision carried forward: any player driving this pipeline sets the
 scanout plane's `COLOR_ENCODING` to `ITU-R BT.2020 YCbCr` and leaves
@@ -164,7 +164,7 @@ Two findings carry forward:
 
 The default ALSA buffer is 131072 frames — about 2.7 s at 48 kHz — so a player
 must set its own buffer before lip sync is possible at all. See the
-[`MA0 report`](../results/orangepi5-ultra-vendor/hdmi-audio-ma0-2026-09-09.md).
+`MA0 report`.
 
 ## MP2 — Kodi bring-up and display quality (done)
 
@@ -175,7 +175,10 @@ screen?**
 Kodi 22.0b2-Piers is pinned (`e513e0ff4331fc25fd2454659a9dd3e6b7670146`) and
 built on the target by [`../scripts/build-kodi.sh`](../scripts/build-kodi.sh)
 from the patch series in [`../patches/kodi`](../patches/kodi), against the
-RKMPP FFmpeg at `/opt/rk3588-screenbridge`. Nothing is vendored.
+RKMPP FFmpeg the appliance carries. Nothing is vendored. (At the time of this
+gate that FFmpeg was at `/opt/rk3588-screenbridge`; MediaBox builds its own into
+`/opt/rk3588-mediabox/media-runtime` now, from the same pinned revision — see
+[`platform/custom-runtime.md`](platform/custom-runtime.md).)
 
 Bring-up reached the MP1b video state — RKMPP decode, `CRendererDRMPRIME`
 direct to plane, `NV15` on plane 73, `3840x2160p24`, `YUYV10_1X20`, `30bit`,
@@ -193,7 +196,7 @@ seen, because those probes scan out no GUI and play no audio:
   `snd_pcm_writei -77`; patch `0007` recovers the PCM.
 
 Result: `PASS`. See the
-[`MP2 quality recovery report`](../results/orangepi5-ultra-vendor/kodi-mp2-quality-recovery-2026-09-10.md).
+`MP2 quality recovery report`.
 
 Two runtime settings are required and are not patches — both are now in
 [`../config/kodi/guisettings-appliance.xml`](../config/kodi/guisettings-appliance.xml):
@@ -208,14 +211,14 @@ horizontally, and every attempt to fix it traded the displacement against
 washed-out OSD colour. **Three fixes were built, physically tested and
 rejected** — tagging the GUI plane traditional-HDR, forcing RGB mixing in the
 VOP2 driver with a custom kernel, and an invisible non-PQ sentinel layer. See
-the [`horizontal shift report`](../results/orangepi5-ultra-vendor/kodi-pause-horizontal-shift-2026-09-10.md).
+the `horizontal shift report`.
 
 The gate was then reopened against an oracle rather than against a hypothesis:
 Android on the same silicon does not have this fault, so its composition state
 was captured with
 [`../tools/android-hdr-oracle/capture-state.sh`](../tools/android-hdr-oracle/capture-state.sh)
 and read as the specification. See the
-[`Android golden reference`](../results/orangepi5-ultra-android/android-hdr-golden-reference-2026-09-11.md).
+`Android golden reference`.
 
 Android keeps its GUI genuinely SDR — plain sRGB pixels on a plane tagged
 `EOTF=0` — and lets VOP2's hardware SDR-to-HDR block lift it into the HDR10
@@ -226,7 +229,7 @@ Result: `PASS`, `ROOT_CAUSE_CONFIRMED`. `SDR2HDR_CTRL` came up `0x0000000b`,
 byte-identical to Android; the composition state no longer changes when the OSD
 appears or when playback pauses; and the operator reported both the displacement
 gone and the best OSD colour of the project so far. See the
-[`Android-parity report`](../results/orangepi5-ultra-vendor/kodi-android-parity-sdr2hdr-2026-09-11.md).
+`Android-parity report`.
 
 **Product decisions carried forward:** do not software-PQ encode the GUI on this
 path; never let a plane's `EOTF` tag disagree with its pixels; the Android model
@@ -265,7 +268,7 @@ of Kodi instead — see [`audio-transcode.md`](audio-transcode.md).
 ## Since the display and audio gates
 
 The gate ladder above established the platform. What was built on top of it is
-not gate-named, and its state lives in [`../results/DURUM.md`](../results/DURUM.md)
+not gate-named, and its state lives in `../results/DURUM.md`
 rather than here:
 
 - the native appliance shell (`rust/crates/mediabox-tv`), the Rust control
