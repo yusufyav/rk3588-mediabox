@@ -401,7 +401,7 @@ printf 'ok   the television never calls the provider itself\n'
 # The password. It is read out of the screen in exactly one place -- the login
 # request -- and it is wiped whichever way the attempt went.
 account="$(cat "$tv/screens/account.rs")"
-contains "the password is private to the screen" "$account" '    password: String,'
+contains "the password is private to the screen" "$account" '    password: Entry,'
 contains "and drawn only as a length"            "$account" 'fn password_mask'
 contains "wiped after an attempt"                "$account" 'fn forget_password'
 check "read out of the screen exactly once" \

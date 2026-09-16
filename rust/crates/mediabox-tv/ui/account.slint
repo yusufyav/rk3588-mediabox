@@ -13,6 +13,12 @@ import { KeyRow, KeyCap } from "components.slint";
 export component Account inherits Rectangle {
     in property <string> email;
     in property <string> password-mask;
+    // The two halves of each field, split where the caret is. Drawn either
+    // side of it, which is how a caret can sit in the middle of a word.
+    in property <string> email-before;
+    in property <string> email-after;
+    in property <string> secret-before;
+    in property <string> secret-after;
     // "email" | "password" | "keys" | "submit"
     in property <string> focus-at;
     // Which field the letters are going into, so the one being edited is marked
@@ -84,14 +90,12 @@ export component Account inherits Rectangle {
 
             animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-            Text {
+            if email == "": Text {
                 x: Metrics.root-font * 0.7;
                 width: parent.width - Metrics.root-font * 2.0;
                 height: 100%;
-                text: email == "" ? "ornek@eposta.com" : email;
-                color: email == ""
-                    ? (focused ? #0a0c1099 : Theme.dim)
-                    : (focused ? #0a0c10 : Theme.text);
+                text: "ornek@eposta.com";
+                color: focused ? #0a0c1099 : Theme.dim;
                 font-size: Metrics.root-font * 1.0;
                 font-weight: 700;
                 vertical-alignment: center;
@@ -99,14 +103,41 @@ export component Account inherits Rectangle {
                 wrap: no-wrap;
             }
 
-            // A caret on the field the letters are landing in, so a viewer down
-            // on the grid can still see where the typing goes.
-            if active && email != "": Rectangle {
-                x: parent.width - Metrics.root-font * 0.8;
-                y: parent.height * 0.26;
-                width: 2px;
-                height: parent.height * 0.48;
-                background: focused ? #0a0c10 : Theme.accent;
+            // The text, with the caret standing between its two halves, so it
+            // can sit in the middle of a word rather than only at the end.
+            if email != "": HorizontalLayout {
+                x: Metrics.root-font * 0.7;
+                width: parent.width - Metrics.root-font * 1.4;
+                height: 100%;
+                alignment: start;
+                spacing: 0px;
+
+                Text {
+                    text: email-before;
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: Metrics.root-font * 1.0;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
+                Rectangle {
+                    width: active ? 2px : 0px;
+                    background: focused ? #0a0c10 : Theme.accent;
+                    Rectangle {
+                        y: parent.height * 0.26;
+                        width: 100%;
+                        height: parent.height * 0.48;
+                        background: parent.background;
+                    }
+                }
+                Text {
+                    text: email-after;
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: Metrics.root-font * 1.0;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
             }
         }
 
@@ -129,15 +160,13 @@ export component Account inherits Rectangle {
 
             animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-            Text {
+            // Bullets and a length. Whatever was typed is not in this file.
+            if password-mask == "": Text {
                 x: Metrics.root-font * 0.7;
                 width: parent.width - Metrics.root-font * 2.0;
                 height: 100%;
-                // Bullets and a length. Whatever was typed is not in this file.
-                text: password-mask == "" ? "••••••••" : password-mask;
-                color: password-mask == ""
-                    ? (focused ? #0a0c1099 : Theme.dim)
-                    : (focused ? #0a0c10 : Theme.text);
+                text: "••••••••";
+                color: focused ? #0a0c1099 : Theme.dim;
                 font-size: Metrics.root-font * 1.0;
                 font-weight: 700;
                 vertical-alignment: center;
@@ -145,12 +174,39 @@ export component Account inherits Rectangle {
                 wrap: no-wrap;
             }
 
-            if active && password-mask != "": Rectangle {
-                x: parent.width - Metrics.root-font * 0.8;
-                y: parent.height * 0.26;
-                width: 2px;
-                height: parent.height * 0.48;
-                background: focused ? #0a0c10 : Theme.accent;
+            if password-mask != "": HorizontalLayout {
+                x: Metrics.root-font * 0.7;
+                width: parent.width - Metrics.root-font * 1.4;
+                height: 100%;
+                alignment: start;
+                spacing: 0px;
+
+                Text {
+                    text: secret-before;
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: Metrics.root-font * 1.0;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
+                Rectangle {
+                    width: active ? 2px : 0px;
+                    background: focused ? #0a0c10 : Theme.accent;
+                    Rectangle {
+                        y: parent.height * 0.26;
+                        width: 100%;
+                        height: parent.height * 0.48;
+                        background: parent.background;
+                    }
+                }
+                Text {
+                    text: secret-after;
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: Metrics.root-font * 1.0;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
             }
         }
 

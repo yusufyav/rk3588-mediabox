@@ -214,6 +214,29 @@ impl App {
         }
     }
 
+    /// Backspace, which is a deletion on a screen that holds text and the way
+    /// out everywhere else.
+    fn backspace(&mut self) {
+        if self.modal() {
+            self.act(InputAction::Back);
+            return;
+        }
+        match self.route() {
+            Route::Search => {
+                if self.search.typed('\u{8}') {
+                    self.search_soon();
+                    self.paint();
+                }
+            }
+            Route::Account => {
+                if self.account.typed('\u{8}') {
+                    self.paint();
+                }
+            }
+            _ => self.act(InputAction::Back),
+        }
+    }
+
     /// Text from a real keyboard.
     ///
     /// Two screens have somewhere to put it — the search box and the account
@@ -1240,7 +1263,7 @@ impl App {
     /// The one place the password leaves the screen. It is moved out here and
     /// wiped as soon as the answer lands, either way — see `account_answered`.
     fn sign_in(&mut self) {
-        let email = self.account.email.trim().to_string();
+        let email = self.account.email().trim().to_string();
         let password = self.account.password().to_string();
         self.account.begin("Bağlanıyor…");
         self.paint();
@@ -2014,7 +2037,13 @@ impl App {
         use screens::account::{Field, Focus};
 
         let account = &self.account;
-        window.set_account_email(account.email.clone().into());
+        let (email_before, email_after) = account.split(Field::Email);
+        let (secret_before, secret_after) = account.split(Field::Password);
+        window.set_account_email(account.email().into());
+        window.set_account_email_before(email_before.into());
+        window.set_account_email_after(email_after.into());
+        window.set_account_secret_before(secret_before.into());
+        window.set_account_secret_after(secret_after.into());
         // Bullets and a length. The panel is never handed the password.
         window.set_account_password_mask(account.password_mask().into());
         window.set_account_focus(
@@ -2296,6 +2325,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(first) = text.chars().next() else {
             return;
         };
+        // Backspace is a deletion where there is text and Back where there is
+        // not; only the screen knows which, so it is not routed as an action.
+        if input::is_backspace(text.as_str()) {
+            with_app(|app| app.backspace());
+            return;
+        }
         match input::action_for_key(text.as_str()) {
             Some(action) => with_app(|app| {
                 if let Some(action) = app.dispatcher.accept(action, input::Origin::Keyboard) {

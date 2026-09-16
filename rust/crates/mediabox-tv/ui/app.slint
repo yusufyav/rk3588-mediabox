@@ -195,6 +195,10 @@ export component MediaBoxWindow inherits Window {
     // ---- the Stremio account
     in property <string> account-email;
     in property <string> account-password-mask;
+    in property <string> account-email-before;
+    in property <string> account-email-after;
+    in property <string> account-secret-before;
+    in property <string> account-secret-after;
     in property <string> account-focus: "email";
     in property <string> account-editing: "email";
     in property <[KeyRow]> account-keys;
@@ -355,6 +359,10 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             email: root.account-email;
             password-mask: root.account-password-mask;
+            email-before: root.account-email-before;
+            email-after: root.account-email-after;
+            secret-before: root.account-secret-before;
+            secret-after: root.account-secret-after;
             focus-at: root.account-focus;
             editing: root.account-editing;
             keys: root.account-keys;

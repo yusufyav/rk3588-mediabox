@@ -130,6 +130,16 @@ fn is_step(action: InputAction) -> bool {
 /// What the compositor sends us, in Slint's encoding, mapped onto the same
 /// vocabulary the daemon uses. Anything not listed is not a navigation key and
 /// is left to whatever has focus.
+///
+/// Backspace is deliberately not here. It used to be Back, which on a screen
+/// with a text field meant that deleting a mistyped character left the screen
+/// — reported from the account form, where it threw away the address as well.
+/// It is a deletion where there is something to delete and Back where there is
+/// not, and only the screen knows which; `App::backspace` decides.
+pub fn is_backspace(text: &str) -> bool {
+    text.starts_with(char::from(slint::platform::Key::Backspace))
+}
+
 pub fn action_for_key(text: &str) -> Option<InputAction> {
     use slint::platform::Key;
 
@@ -148,7 +158,6 @@ pub fn action_for_key(text: &str) -> Option<InputAction> {
         c if c == named(Key::Return) => InputAction::Ok,
         '\n' | '\r' => InputAction::Ok,
         c if c == named(Key::Escape) => InputAction::Back,
-        c if c == named(Key::Backspace) => InputAction::Back,
         c if c == named(Key::Home) => InputAction::Home,
         _ => return None,
     })
@@ -157,6 +166,23 @@ pub fn action_for_key(text: &str) -> Option<InputAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reported from the account form: a mistyped character could not be
+    /// deleted, because Backspace left the screen and took the address with it.
+    #[test]
+    fn backspace_is_not_a_navigation_key() {
+        let backspace = char::from(slint::platform::Key::Backspace).to_string();
+        assert!(is_backspace(&backspace));
+        assert_eq!(action_for_key(&backspace), None);
+        // Escape is still the way out, and the arrows still move.
+        let escape = char::from(slint::platform::Key::Escape).to_string();
+        assert!(!is_backspace(&escape));
+        assert_eq!(action_for_key(&escape), Some(InputAction::Back));
+        assert_eq!(
+            action_for_key(&char::from(slint::platform::Key::LeftArrow).to_string()),
+            Some(InputAction::Left)
+        );
+    }
 
     /// The fault this dispatcher was rewritten for: one press of Ok on the
     /// television remote reached the interface twice, and the second one chose

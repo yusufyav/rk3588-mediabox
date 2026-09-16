@@ -73,14 +73,93 @@ impl Session {
     }
 }
 
+/// One text field: what is in it, and where the next character goes.
+///
+/// The caret is counted in characters rather than bytes — an address can carry
+/// anything a keyboard can produce, and a byte index into the middle of a
+/// multi-byte character is a panic waiting for the first person who types one.
+#[derive(Default)]
+struct Entry {
+    value: String,
+    caret: usize,
+}
+
+impl Entry {
+    fn len(&self) -> usize {
+        self.value.chars().count()
+    }
+
+    fn byte_at(&self, caret: usize) -> usize {
+        self.value
+            .char_indices()
+            .nth(caret)
+            .map(|(at, _)| at)
+            .unwrap_or(self.value.len())
+    }
+
+    fn insert(&mut self, c: char) -> bool {
+        if self.len() >= 128 {
+            return false;
+        }
+        let at = self.byte_at(self.caret);
+        self.value.insert(at, c);
+        self.caret += 1;
+        true
+    }
+
+    fn backspace(&mut self) -> bool {
+        if self.caret == 0 {
+            return false;
+        }
+        let at = self.byte_at(self.caret - 1);
+        self.value.remove(at);
+        self.caret -= 1;
+        true
+    }
+
+    fn clear(&mut self) -> bool {
+        if self.value.is_empty() {
+            return false;
+        }
+        self.value.clear();
+        self.caret = 0;
+        true
+    }
+
+    /// Left and right inside the text. Stops at the ends: a caret that wrapped
+    /// from the end to the start is a caret nobody can follow.
+    fn step(&mut self, dx: i32) -> bool {
+        let next = (self.caret as i32 + dx).clamp(0, self.len() as i32) as usize;
+        if next == self.caret {
+            return false;
+        }
+        self.caret = next;
+        true
+    }
+
+    fn before(&self) -> &str {
+        &self.value[..self.byte_at(self.caret)]
+    }
+
+    fn after(&self) -> &str {
+        &self.value[self.byte_at(self.caret)..]
+    }
+
+    fn wipe(&mut self) {
+        self.value.clear();
+        self.value.shrink_to_fit();
+        self.caret = 0;
+    }
+}
+
 pub struct Account {
     pub session: Session,
     pub focus: Focus,
     /// Which field the grid types into. Kept across a trip to the letters so
     /// that Back from the grid comes home to the field it was serving.
     pub field: Field,
-    pub email: String,
-    password: String,
+    email: Entry,
+    password: Entry,
     pub keys: Grid,
     /// True while a login or a logout is in flight. A second press must not
     /// send a second one.
@@ -96,8 +175,8 @@ impl Account {
             session: Session::default(),
             focus: Focus::Field(Field::Email),
             field: Field::Email,
-            email: String::new(),
-            password: String::new(),
+            email: Entry::default(),
+            password: Entry::default(),
             keys: Grid::text(),
             busy: false,
             notice: String::new(),
@@ -110,7 +189,7 @@ impl Account {
         self.session = Session::from_status(status);
         self.focus = Focus::Field(Field::Email);
         self.field = Field::Email;
-        self.email.clear();
+        self.email.wipe();
         self.forget_password();
         self.busy = false;
         self.notice.clear();
@@ -119,39 +198,63 @@ impl Account {
     /// The only way the password leaves this struct, and the only caller is the
     /// login request itself.
     pub fn password(&self) -> &str {
-        &self.password
+        &self.password.value
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email.value
     }
 
     /// Wipe it. Called after every attempt, successful or not.
     pub fn forget_password(&mut self) {
-        self.password.clear();
-        self.password.shrink_to_fit();
+        self.password.wipe();
     }
 
-    /// What the panel is allowed to draw for the password: its length, and
-    /// nothing else.
+    /// What the panel is allowed to draw for the password: bullets, a length,
+    /// and where the caret sits in them. Never the text.
     pub fn password_mask(&self) -> String {
-        "•".repeat(self.password.chars().count())
+        "•".repeat(self.password.len())
+    }
+
+    /// The two halves of what the panel draws, split at the caret.
+    pub fn split(&self, field: Field) -> (String, String) {
+        let entry = self.entry(field);
+        match field {
+            Field::Email => (entry.before().to_string(), entry.after().to_string()),
+            // The mask is split by count, so the caret lands between the same
+            // two bullets it would land between letters.
+            Field::Password => (
+                "•".repeat(entry.caret),
+                "•".repeat(entry.len().saturating_sub(entry.caret)),
+            ),
+        }
+    }
+
+    fn entry(&self, field: Field) -> &Entry {
+        match field {
+            Field::Email => &self.email,
+            Field::Password => &self.password,
+        }
     }
 
     pub fn can_submit(&self) -> bool {
-        !self.busy && !self.email.trim().is_empty() && !self.password.is_empty()
+        !self.busy && !self.email.value.trim().is_empty() && !self.password.value.is_empty()
     }
 
     /// Why the button is not available, for the line under it. Empty when it is.
     pub fn blocked_because(&self) -> &'static str {
         if self.busy {
             ""
-        } else if self.email.trim().is_empty() {
+        } else if self.email.value.trim().is_empty() {
             "E-posta girin"
-        } else if self.password.is_empty() {
+        } else if self.password.value.is_empty() {
             "Parola girin"
         } else {
             ""
         }
     }
 
-    fn text_mut(&mut self) -> &mut String {
+    fn text_mut(&mut self) -> &mut Entry {
         match self.field {
             Field::Email => &mut self.email,
             Field::Password => &mut self.password,
@@ -161,10 +264,14 @@ impl Account {
     /// Moves the remote. Returns whether anything changed.
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
         match self.focus {
-            // Left and right do nothing on a field: there is one column here,
-            // and a press that silently does nothing is better than one that
-            // teleports.
+            // Left and right move the caret inside the text. There is one
+            // column of fields, so sideways has nothing else to mean here, and
+            // a person who mistypes the middle of an address should not have to
+            // delete the end of it to reach the mistake.
             Focus::Field(Field::Email) => {
+                if dx != 0 {
+                    return self.email.step(dx);
+                }
                 if dy > 0 {
                     self.focus = Focus::Field(Field::Password);
                     self.field = Field::Password;
@@ -173,6 +280,9 @@ impl Account {
                 false
             }
             Focus::Field(Field::Password) => {
+                if dx != 0 {
+                    return self.password.step(dx);
+                }
                 if dy < 0 {
                     self.focus = Focus::Field(Field::Email);
                     self.field = Field::Email;
@@ -230,19 +340,18 @@ impl Account {
                 };
                 match edit {
                     Edit::Handled => {}
+                    // The cap inside `Entry::insert` is what stops a stuck
+                    // remote growing a string without end, and bounds what goes
+                    // over the socket.
                     Edit::Insert(c) => {
-                        let text = self.text_mut();
-                        // A cap, so that a stuck remote cannot grow a string
-                        // without end and so that what goes over the socket is
-                        // bounded.
-                        if text.chars().count() < 128 {
-                            text.push(c);
-                        }
+                        self.text_mut().insert(c);
                     }
                     Edit::Backspace => {
-                        self.text_mut().pop();
+                        self.text_mut().backspace();
                     }
-                    Edit::Clear => self.text_mut().clear(),
+                    Edit::Clear => {
+                        self.text_mut().clear();
+                    }
                 }
                 self.notice.clear();
                 Press::Changed
@@ -275,7 +384,7 @@ impl Account {
             return false;
         }
         if c == '\u{8}' || c == '\u{7f}' {
-            return self.text_mut().pop().is_some();
+            return self.text_mut().backspace();
         }
         if c == '\r' || c == '\n' {
             // Enter is the button, wherever the focus happens to be.
@@ -284,11 +393,9 @@ impl Account {
         if c.is_control() {
             return false;
         }
-        let text = self.text_mut();
-        if text.chars().count() >= 128 {
+        if !self.text_mut().insert(c) {
             return false;
         }
-        text.push(c);
         self.notice.clear();
         true
     }
@@ -522,7 +629,7 @@ mod tests {
     fn an_address_can_be_typed_with_the_remote() {
         let mut account = Account::new();
         typed(&mut account, "a@b.c");
-        assert_eq!(account.email, "a@b.c");
+        assert_eq!(account.email(), "a@b.c");
     }
 
     #[test]
@@ -614,7 +721,7 @@ mod tests {
         for c in "someone@example.com".chars() {
             assert!(account.typed(c));
         }
-        assert_eq!(account.email, "someone@example.com");
+        assert_eq!(account.email(), "someone@example.com");
         assert!(account.password().is_empty());
 
         // And it does not move the remote.
@@ -626,7 +733,7 @@ mod tests {
         }
         assert_eq!(account.password(), "Secret1");
         assert_eq!(account.password_mask(), "•••••••");
-        assert_eq!(account.email, "someone@example.com");
+        assert_eq!(account.email(), "someone@example.com");
     }
 
     /// While the remote is down on the grid, typing still goes to the field
@@ -651,7 +758,7 @@ mod tests {
         assert!(!account.typed('\u{8}'), "nothing to delete");
         account.typed('a');
         assert!(account.typed('\u{8}'));
-        assert!(account.email.is_empty());
+        assert!(account.email().is_empty());
         // Control characters are not letters.
         assert!(!account.typed('\t'));
 
@@ -671,6 +778,86 @@ mod tests {
         account.begin("Bağlanıyor…");
         assert!(!account.typed('a'));
         assert_eq!(account.typed_enter(), Press::Nothing);
+    }
+
+    /// Reported from the television: a mistake in the middle of an address
+    /// could only be reached by deleting everything after it.
+    #[test]
+    fn the_caret_walks_into_the_middle_of_the_text() {
+        let mut account = Account::new();
+        for c in "aXb@c.co".chars() {
+            account.typed(c);
+        }
+        // Six left presses put the caret just after the X.
+        for _ in 0..6 {
+            assert!(account.step(-1, 0));
+        }
+        assert!(account.typed('\u{8}'), "delete the X where it is");
+        assert_eq!(account.email(), "ab@c.co");
+
+        // And typing lands where the caret is, not at the end.
+        assert!(account.typed('!'));
+        assert_eq!(account.email(), "a!b@c.co");
+
+        // The ends hold.
+        for _ in 0..20 {
+            account.step(-1, 0);
+        }
+        assert!(!account.step(-1, 0));
+        assert!(!account.typed('\u{8}'), "nothing before the start");
+        for _ in 0..20 {
+            account.step(1, 0);
+        }
+        assert!(!account.step(1, 0));
+    }
+
+    /// The panel draws the caret between two halves, and for the password both
+    /// halves are bullets — the letters still never leave this file.
+    #[test]
+    fn the_panel_gets_the_text_split_at_the_caret() {
+        let mut account = Account::new();
+        for c in "ab@c".chars() {
+            account.typed(c);
+        }
+        account.step(-1, 0);
+        assert_eq!(account.split(Field::Email), ("ab@".into(), "c".into()));
+
+        // Down to the password field, the way the remote gets there, so the
+        // caret that moves is the one being edited.
+        account.step(0, 1);
+        assert_eq!(account.focus, Focus::Field(Field::Password));
+        for c in "hunter2".chars() {
+            account.typed(c);
+        }
+        account.step(-1, 0);
+        account.step(-1, 0);
+        let (before, after) = account.split(Field::Password);
+        assert_eq!((before.as_str(), after.as_str()), ("•••••", "••"));
+        for half in [&before, &after] {
+            assert!(half.chars().all(|c| c == '•'), "{half}");
+        }
+    }
+
+    /// Each field keeps its own caret, so moving between them does not drag
+    /// one along.
+    #[test]
+    fn the_two_fields_keep_their_own_carets() {
+        let mut account = Account::new();
+        for c in "abcd".chars() {
+            account.typed(c);
+        }
+        account.step(-1, 0);
+        account.step(-1, 0);
+        account.step(0, 1);
+        assert_eq!(account.focus, Focus::Field(Field::Password));
+        for c in "xy".chars() {
+            account.typed(c);
+        }
+        assert_eq!(account.password(), "xy");
+        assert!(account.step(0, -1));
+        assert_eq!(account.focus, Focus::Field(Field::Email));
+        assert!(account.typed('Z'));
+        assert_eq!(account.email(), "abZcd", "the e-mail caret stayed put");
     }
 
     #[test]
@@ -768,7 +955,7 @@ mod tests {
         typed(&mut account, "z");
         assert_eq!(account.password(), "z");
         assert!(
-            account.email.is_empty(),
+            account.email().is_empty(),
             "the letters went to one field only"
         );
     }
@@ -781,7 +968,7 @@ mod tests {
         typed(&mut account, "a@b.c");
         account.focus = Focus::Submit;
         assert!(account.refresh(Some(&connected())));
-        assert_eq!(account.email, "a@b.c");
+        assert_eq!(account.email(), "a@b.c");
         assert_eq!(account.focus, Focus::Submit);
         assert!(
             !account.refresh(Some(&connected())),
@@ -804,7 +991,7 @@ mod tests {
         account.field = Field::Password;
         typed(&mut account, "secret");
         account.open(Some(&connected()));
-        assert!(account.email.is_empty());
+        assert!(account.email().is_empty());
         assert!(account.password().is_empty());
         assert_eq!(account.focus, Focus::Field(Field::Email));
         assert!(account.session.authenticated);
