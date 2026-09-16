@@ -321,6 +321,11 @@ install -m 0755 "$here/packaging/mediabox-product-verify" "$prefix/bin/mediabox-
 install -m 0755 "$here/packaging/mediabox-playback-smoke" "$prefix/bin/mediabox-playback-smoke"
 ok "product checks installed"
 
+# Kodi's settings for this appliance, which kodi.service seeds on a first run.
+install -D -m 0644 "$here/config/kodi/guisettings-appliance.xml" \
+  "$prefix/share/kodi/guisettings-appliance.xml"
+ok "Kodi appliance profile"
+
 # ------------------------------------ 12-14. reload, udev, platform discovery
 step "activating"
 systemctl daemon-reload

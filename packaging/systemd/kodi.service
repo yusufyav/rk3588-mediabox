@@ -50,7 +50,20 @@ Environment=MEDIABOX_GPU=mali
 # the decoder somewhere else by accident, which is what it used to be able to do
 # when it named the other product's prefix.
 Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib
-ExecStartPre=/bin/mkdir -p /var/tmp/kodi-home/.kodi/temp
+ExecStartPre=/bin/mkdir -p /var/tmp/kodi-home/.kodi/temp /var/tmp/kodi-home/.kodi/userdata
+# Give Kodi this appliance's settings the first time it runs, and only then.
+#
+# Without them Kodi comes up with its own defaults, and its own defaults have
+# the control endpoint switched off -- which is how the control plane hands a
+# film over. A clean install therefore started Kodi perfectly and could not
+# move anything into it: the television showed an empty library while the
+# daemon's Player.Open went to a port nobody was listening on. The old deploy
+# script seeded this file; the installer did not, and nothing noticed.
+#
+# `test -f` and not an overwrite: after the first run the file is the user's,
+# with whatever they changed in Kodi's own settings screens.
+ExecStartPre=/bin/sh -c 'test -f /var/tmp/kodi-home/.kodi/userdata/guisettings.xml || install -m 0644 /opt/rk3588-mediabox/share/kodi/guisettings-appliance.xml /var/tmp/kodi-home/.kodi/userdata/guisettings.xml'
+
 # The sink's EDID and the codec's ELD bypass, both of which are runtime state
 # that is lost on every restart. Without them Kodi cannot see that the panel
 # does HDR10 and the HDMI codec will not pack an audio bitstream.

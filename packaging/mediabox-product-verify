@@ -219,17 +219,34 @@ if [ "$STATIC" != 1 ]; then
   done
   [ -n "$out" ] && pass "connected output" "${out# }" || fail "connected output" none
 
-  for u in mediaboxd-rs mediabox-media-worker stremio-server mediabox-tv-ui; do
+  for u in mediaboxd-rs mediabox-media-worker stremio-server; do
     st="$(systemctl is-active "$u.service" 2>/dev/null || true)"
     [ "$st" = active ] && pass "$u running" "$st" || fail "$u running" "${st:-unknown}"
   done
+
+  # The interface and Kodi are declared incompatible: exactly one of them holds
+  # the television, and while Kodi has it the interface is *supposed* to be
+  # stopped. Requiring mediabox-tv-ui to be active failed a perfectly healthy
+  # appliance that happened to be showing Kodi when it was asked.
+  ui_state="$(systemctl is-active mediabox-tv-ui.service 2>/dev/null || true)"
+  kodi_state="$(systemctl is-active kodi.service 2>/dev/null || true)"
+  case "$ui_state:$kodi_state" in
+    active:*)   pass "the television has an owner" "the interface" ;;
+    *:active)   pass "the television has an owner" "Kodi (the interface stands down for it)" ;;
+    *)          fail "the television has an owner" "neither the interface nor Kodi is running" ;;
+  esac
   # A socket file is not a listener.
   #
   # This used to be `[ -S ... ]`, which a stale socket left behind by a dead
   # interface passes just as well as a live one. What the player needs is
   # something accepting on the other end, so that is what is asked.
   sock=/run/mediabox-ui/video.sock
-  if [ ! -S "$sock" ]; then
+  if [ "$ui_state" != active ]; then
+    # Nothing to listen: the socket belongs to the interface's runtime
+    # directory and goes away with it. Checked whenever the interface is up,
+    # which is every case that matters -- including the end of an install.
+    pass "interface video socket" "not applicable while Kodi holds the display"
+  elif [ ! -S "$sock" ]; then
     fail "interface video socket" "MISSING $sock"
   elif ss -xlnp 2>/dev/null | grep -q "$sock"; then
     pass "interface video socket" listening
@@ -265,6 +282,46 @@ if [ "$STATIC" != 1 ]; then
     pass "probe speaks https" "$probe_bin"
   else
     fail "probe speaks https" "$probe_bin cannot open https; every catalogue source is https"
+  fi
+
+  # The glyphs the catalogue is written in.
+  #
+  # A clean board came up with DejaVu and nothing else. Turkish rendered
+  # perfectly, and every stream row drew its seeder count, its size and its
+  # language flags as empty boxes, because nothing installed covered emoji.
+  # Nothing in a file listing or an ELF closure can see that -- the interface
+  # asks fontconfig at run time -- so it is asked here.
+  if ! command -v fc-list >/dev/null 2>&1; then
+    fail "catalogue glyphs" "fontconfig is not installed; the interface's fonts cannot be checked"
+  else
+    missing=""
+    for ch in 0041 1F4BE 1F464; do
+      fc-list ":charset=$ch" family 2>/dev/null | grep -q . || missing="$missing U+$ch"
+    done
+    if [ -z "$missing" ]; then
+      pass "catalogue glyphs" "$(fc-list ":charset=1F4BE" family 2>/dev/null | head -1 | cut -d, -f1)"
+    else
+      fail "catalogue glyphs" "no installed font covers$missing; catalogue rows will draw empty boxes"
+    fi
+  fi
+
+  # Kodi has to be reachable, or a handover has nowhere to go.
+  #
+  # The control plane moves a film into Kodi over its HTTP control endpoint,
+  # and Kodi ships with that endpoint switched off. On a clean install Kodi
+  # started, took the television and showed an empty library, because
+  # Player.Open went to a port nothing was listening on. Checked against the
+  # settings file, so it holds whether or not Kodi is running right now.
+  profile=/var/tmp/kodi-home/.kodi/userdata/guisettings.xml
+  seed="$P/share/kodi/guisettings-appliance.xml"
+  if [ ! -f "$seed" ]; then
+    fail "Kodi appliance profile" "MISSING $seed; a first run would get Kodi's own defaults"
+  elif [ ! -f "$profile" ]; then
+    pass "Kodi appliance profile" "will be seeded on the first run"
+  elif grep -q '"services.webserver"[^>]*>true' "$profile"; then
+    pass "Kodi control endpoint" enabled
+  else
+    fail "Kodi control endpoint" "switched off in $profile; a film cannot be handed to Kodi"
   fi
 
   asset="$P/assets/sdr-4k-2398-main.mp4"

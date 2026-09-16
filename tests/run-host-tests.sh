@@ -522,6 +522,18 @@ contains "it plans a packaged source"     "$verifier" 'media_policy'
 contains "it names the probe failure"     "$verifier" 'cannot run ffprobe'
 contains "and the socket must be listening" "$verifier" 'nothing is listening on it'
 contains "and the probe must speak https"  "$verifier" 'probe speaks https'
+contains "and a font must cover the catalogue" "$verifier" 'catalogue glyphs'
+contains "Kodi counts as an owner"          "$verifier" 'the television has an owner'
+contains "and Kodi must be reachable"       "$verifier" 'Kodi control endpoint'
+
+echo "-- Kodi is given this appliance's settings on a first run"
+kodi_unit="$(cat "$here/packaging/systemd/kodi.service")"
+contains "the unit seeds the profile"       "$kodi_unit" 'guisettings-appliance.xml'
+contains "and only when there is none"      "$kodi_unit" 'test -f /var/tmp/kodi-home/.kodi/userdata/guisettings.xml ||'
+contains "the installer puts it in place"   "$installer" 'share/kodi/guisettings-appliance.xml'
+profile="$(cat "$here/config/kodi/guisettings-appliance.xml")"
+contains "and that profile opens the control endpoint" "$profile" '<setting id="services.webserver">true'
+contains "and the fonts are a declared dependency" "$capture" 'fc-list ":charset=$ch" file'
 
 echo "-- the relay serves a local file without dying on its status"
 relay="$(cat "$here/media/proxy/relay.py")"

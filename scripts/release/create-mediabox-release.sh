@@ -228,10 +228,25 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   # did not, and the television's own player never started. It is named here so
   # a clean install gets it, and gets a probe that can open https, which the
   # appliance's own Rockchip build cannot.
-  for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode; do
+  for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode fc-list fc-match; do
     p="$(command -v "$c" 2>/dev/null)" || continue
     dpkg-query -S "$(readlink -f "$p")" 2>/dev/null | cut -d: -f1
   done | tr ',' '\n' | tr -d ' '
+
+  # The fonts the interface actually draws with.
+  #
+  # No ELF closure finds these: the interface asks fontconfig at run time and
+  # takes what the board has. A clean board had DejaVu and nothing else, which
+  # covers Turkish perfectly and covers none of the emoji a catalogue is full
+  # of -- every stream row drew its seeders and its size and its language flags
+  # as empty boxes. So the packages behind the body face and behind the emoji
+  # coverage are read off this board and named, rather than assumed to be part
+  # of a base image.
+  for ch in 0041 1F4BE 1F464 1F1F9; do
+    fc-list ":charset=$ch" file 2>/dev/null | head -1 | cut -d: -f1
+  done | sed '/^$/d' | sort -u |
+    while read -r f; do dpkg-query -S "$f" 2>/dev/null | cut -d: -f1; done |
+    tr ',' '\n' | tr -d ' '
 } | sed '/^$/d' | sort -u >"$M/runtime-packages.txt"
 
 # capability-baseline.txt: what the kernel underneath the golden binaries
