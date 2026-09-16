@@ -199,6 +199,26 @@ family name, not an identity.
   means moving `MP2PcmStateName()` into `0007` and taking it out of `0005`,
   which is patch-series surgery on an audio path a gate closed. Worth doing;
   not worth doing without re-running that gate.
-* RGA is built and linked and no MediaBox playback path uses it. It is there
-  because the FFmpeg configuration the gates were measured with asks for it.
-  Whether that flag can go is a measurement nobody has taken.
+* RGA is built and linked and no MediaBox playback path uses it. Measured
+  during playback: all three RGA schedulers at 0% load with no sessions, and
+  the player's open device handles are `/dev/mpp_service` and the DMA heaps and
+  nothing else. It is there because the FFmpeg configuration the gates were
+  measured with asks for it. Whether that flag can go is a measurement nobody
+  has taken.
+
+* **Kodi is built on the appliance and does not have to be.** It takes hours on
+  eight Cortex cores, and the sysroot a cross build needs is already fetched —
+  `scripts/build-mediabox-tv.sh` rsyncs the appliance's own `/usr/lib` and
+  `/usr/include` into `.sysroot/aarch64-trixie` and cross-compiles the
+  television interface against it. What stands in the way is not the libraries
+  but Kodi's own build: it produces host tools during the build (TexturePacker,
+  JsonSchemaBuilder, the SWIG wrappers), so a cross build needs a second, native
+  build tree for those. Kodi supports that; nobody here has set it up.
+
+  The same is true of mpv and the media runtime, where it matters much less: 45
+  minutes and 10 minutes respectively, against hours.
+
+  The argument *for* building on the appliance is real but weaker than it looks:
+  the binary links exactly the libraries the appliance has, with no question
+  about whether a copied sysroot has drifted. That is worth something. It is
+  probably not worth hours per Kodi change.
