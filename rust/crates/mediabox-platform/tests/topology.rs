@@ -180,6 +180,39 @@ fn two_connected_outputs_resolve_deterministically_to_the_television() {
 }
 
 #[test]
+fn two_cables_of_the_same_kind_fall_back_to_order_rather_than_guessing() {
+    // Extcon says "a cable is in me" and nothing more, so with two HDMI
+    // transmitters both reporting one it cannot say which connector is which.
+    // The binding falls back to order and says so, instead of picking one of
+    // the two measurements and calling it measured.
+    let platform = inspect(&three_outputs(&["HDMI-A-1", "HDMI-A-2"]));
+    let by_name = |name: &str| {
+        platform
+            .outputs
+            .iter()
+            .find(|output| output.connector.name == name)
+            .expect("the connector")
+    };
+    assert_eq!(by_name("HDMI-A-1").binding, Binding::Ordered);
+    assert_eq!(by_name("HDMI-A-2").binding, Binding::Ordered);
+    assert_eq!(
+        by_name("HDMI-A-1")
+            .audio
+            .as_ref()
+            .map(|a| a.card_id.as_str()),
+        Some("rockchiphdmi0")
+    );
+    assert_eq!(
+        by_name("HDMI-A-2")
+            .audio
+            .as_ref()
+            .map(|a| a.card_id.as_str()),
+        Some("rockchiphdmi1")
+    );
+    assert!(platform.warnings.is_empty(), "{:?}", platform.warnings);
+}
+
+#[test]
 fn a_remembered_choice_wins_while_it_is_plugged_in() {
     let board = three_outputs(&["HDMI-A-1", "HDMI-A-2"]);
     board.remember_output("HDMI-A-2");

@@ -283,7 +283,14 @@ pub fn find_render(roots: &Roots, kms: &DrmNode, forced: Option<&str>) -> Option
     nodes
         .iter()
         .find(|node| node.parent.is_some() && node.parent == kms.parent)
-        .or_else(|| nodes.iter().find(|node| node.driver == kms.driver))
+        // A board that does not publish the parent link at all: fall back to
+        // the same driver. Both sides must actually name one — two nodes that
+        // each report no driver are not thereby the same hardware.
+        .or_else(|| {
+            nodes
+                .iter()
+                .find(|node| node.driver.is_some() && node.driver == kms.driver)
+        })
         .cloned()
 }
 
