@@ -1,0 +1,209 @@
+#!/bin/sh
+#
+# Is this a whole MediaBox?
+#
+# Fail-closed, and deliberately dull: every required thing is named, and a
+# required thing that is absent is a failure rather than a line that says it was
+# skipped. A verifier that skips what it cannot find passes an empty disk.
+#
+# Two modes:
+#
+#   mediabox-product-verify
+#       the installed product: files, linkage, units, and the services running.
+#
+#   MEDIABOX_VERIFY_ROOT=<dir> MEDIABOX_VERIFY_META=<dir> \
+#   MEDIABOX_VERIFY_STATIC_ONLY=1 mediabox-product-verify
+#       an unpacked release, before anything is installed. The binaries are for
+#       another architecture than the machine checking them, so what the capture
+#       measured on the golden board is read out of meta/ instead of re-running
+#       it here. Nothing is waived: the capture refuses to write a meta/ that
+#       says otherwise.
+#
+set -eu
+
+ROOT="${MEDIABOX_VERIFY_ROOT:-}"
+META="${MEDIABOX_VERIFY_META:-}"
+STATIC="${MEDIABOX_VERIFY_STATIC_ONLY:-0}"
+P="$ROOT/opt/rk3588-mediabox"
+ETC="$ROOT/etc"
+fails=0
+
+pass() { printf '  PASS  %-40s %s\n' "$1" "${2:-}"; }
+fail() { printf '  FAIL  %-40s %s\n' "$1" "${2:-}"; fails=$((fails + 1)); }
+req_exec() { [ -x "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
+req_dir()  { [ -d "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
+req_file() { [ -f "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
+
+echo "== MediaBox product verify${ROOT:+ (archive at $ROOT)}"
+
+# ------------------------------------------------------------ the binaries
+req_exec bin/mediaboxd-rs        "control plane"
+req_exec bin/mediaboxctl          "control client"
+req_exec bin/mediabox-platform    "platform discovery"
+req_exec bin/mediabox-tv          "television interface"
+req_exec bin/mediabox-player      "player launcher"
+req_dir  media-runtime            "media runtime"
+req_dir  media-runtime/lib        "media runtime libraries"
+req_exec player/bin/mpv           "player"
+req_dir  player/share             "player data"
+req_dir  mali-g24p0-root          "Mali user space"
+req_dir  mali-g24p0-runtime       "Mali runtime links"
+req_exec node/bin/node            "Node"
+req_file stremio-server/server.js "Stremio server"
+req_exec kodi/lib/kodi/kodi-gbm   "Kodi"
+req_dir  media                    "media worker package"
+req_dir  ui                       "interface assets"
+
+# ------------------------------------------------- what the player can do
+#
+# On the installed product these are measured. On an unpacked archive they are
+# read back from the capture, which measured them on the board the binaries came
+# off; a missing or negative line is a failure either way.
+capability() {
+  name="$1"; key="$2"; probe="$3"
+  if [ "$STATIC" = 1 ]; then
+    [ -n "$META" ] && [ -f "$META/capability-baseline.txt" ] \
+      || { fail "$name" "no capability baseline in the archive"; return; }
+    if grep -q "^$key$(printf '\t')present$" "$META/capability-baseline.txt"
+    then pass "$name" "recorded by the capture"
+    else fail "$name" "the capture did not record it"; fi
+  else
+    if eval "$probe" >/dev/null 2>&1
+    then pass "$name" measured
+    else fail "$name" "not offered by $P/player/bin/mpv"; fi
+  fi
+}
+MPVLD="$P/mali-g24p0-runtime/lib:$P/media-runtime/lib"
+capability "vo_mediabox" mpv-vo-mediabox \
+  "LD_LIBRARY_PATH=$MPVLD '$P/player/bin/mpv' --vo=help | grep -qw mediabox"
+capability "hwdec rkmpp" mpv-hwdec-rkmpp \
+  "LD_LIBRARY_PATH=$MPVLD '$P/player/bin/mpv' --hwdec=help | grep -q rkmpp"
+
+# ------------------------------------------------------------ the linkage
+#
+# The runpath is read out of the binary itself, which works for a foreign
+# architecture as well as for this one. Resolution -- what a library actually
+# loads at run time -- only means anything on the board, so on an archive the
+# capture's own closure is consulted instead of guessing.
+runpath() {
+  if command -v readelf >/dev/null 2>&1; then
+    readelf -d "$1" 2>/dev/null | sed -n 's/.*R\(UN\)\?PATH).*\[\(.*\)\]/\2/p'
+  else
+    echo "__no_readelf__"
+  fi
+}
+for b in player/bin/mpv kodi/lib/kodi/kodi-gbm; do
+  [ -x "$P/$b" ] || continue
+  rp="$(runpath "$P/$b")"
+  case "$rp" in
+    __no_readelf__) fail "runpath $b" "readelf is not installed; cannot check" ;;
+    */opt/rk3588-mediabox/media-runtime/lib*) pass "runpath $b" "$rp" ;;
+    *) fail "runpath $b" "expected the MediaBox media runtime, got '${rp:-none}'" ;;
+  esac
+  case "$rp" in
+    *rk3588-screenbridge*) fail "screenbridge runpath $b" "$rp" ;;
+    *) pass "screenbridge runpath $b" none ;;
+  esac
+done
+
+if [ "$STATIC" = 1 ]; then
+  if [ -n "$META" ] && [ -f "$META/elf-closure.txt" ]; then
+    n="$(awk -F'\t' '$4=="SCREENBRIDGE"' "$META/elf-closure.txt" | wc -l)"
+    [ "$n" -eq 0 ] && pass "ScreenBridge linkage" "0 of $(($(wc -l <"$META/elf-closure.txt") - 1))" \
+      || fail "ScreenBridge linkage" "$n resolutions"
+    n="$(awk -F'\t' '$4=="INVALID"' "$META/elf-closure.txt" | wc -l)"
+    [ "$n" -eq 0 ] && pass "unresolved libraries" 0 || fail "unresolved libraries" "$n"
+  else
+    fail "ScreenBridge linkage" "no ELF closure in the archive"
+  fi
+else
+  foreign=0; unres=0
+  for b in player/bin/mpv kodi/lib/kodi/kodi-gbm bin/mediabox-tv bin/mediaboxd-rs \
+           bin/mediabox-platform node/bin/node media-runtime/bin/ffmpeg; do
+    [ -x "$P/$b" ] || continue
+    out="$(LD_LIBRARY_PATH="$MPVLD" ldd "$P/$b" 2>/dev/null || true)"
+    foreign=$((foreign + $(printf '%s\n' "$out" | grep -c 'rk3588-screenbridge' || true)))
+    unres=$((unres + $(printf '%s\n' "$out" | grep -c 'not found' || true)))
+  done
+  [ "$foreign" -eq 0 ] && pass "ScreenBridge linkage" 0 || fail "ScreenBridge linkage" "$foreign"
+  [ "$unres" -eq 0 ] && pass "unresolved libraries" 0 || fail "unresolved libraries" "$unres"
+fi
+
+# ------------------------------------------------------------- the symlinks
+#
+# The Mali links inside the prefix are absolute -- they name /opt/rk3588-mediabox
+# because that is where they will live. Under an unpacked archive that path does
+# not exist yet, so `test -e` calls every one of them broken and a verifier that
+# believed it would reject every correct release. Links are resolved against the
+# root being checked, which is "/" on the installed product and the staging
+# directory on an archive.
+resolves() {
+  cur="$1"; hops=0
+  # Walked rather than tested in one step, because the Mali links are a chain:
+  # libmali.so -> libmali.so.1 -> libmali.so.1.9.0 -> /opt/... and only the last
+  # hop is absolute. Testing the first hop asks whether a link that is itself
+  # unresolved-under-this-root exists, and gets "no" for a chain that is fine.
+  while [ -L "$cur" ] && [ "$hops" -lt 16 ]; do
+    t="$(readlink "$cur")"
+    case "$t" in
+      /*) cur="$ROOT$t" ;;
+      *)  cur="$(dirname "$cur")/$t" ;;
+    esac
+    hops=$((hops + 1))
+  done
+  [ -e "$cur" ]
+}
+broken=0
+for l in $(find "$P" -xdev -type l 2>/dev/null); do
+  resolves "$l" || { broken=$((broken + 1)); printf '        %s -> %s\n' "$l" "$(readlink "$l")"; }
+done
+[ "$broken" -eq 0 ] && pass "broken symlinks" 0 || fail "broken symlinks" "$broken"
+for l in libmali.so.1 libEGL.so.1 libGLESv2.so.2 libgbm.so.1 libmali-hook.so.1; do
+  f="$P/mali-g24p0-runtime/lib/$l"
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    resolves "$f" && pass "Mali $l" resolved || fail "Mali $l" "does not resolve"
+  else fail "Mali $l" "MISSING"; fi
+done
+
+# ---------------------------------------------------------------- the units
+for u in mediaboxd-rs mediabox-tv-ui mediabox-media-worker stremio-server \
+         mediabox-console-off mediabox-display-changed mediabox-browser kodi; do
+  f="$ETC/systemd/system/$u.service"
+  [ -f "$f" ] && pass "unit $u.service" installed || fail "unit $u.service" "MISSING $f"
+done
+for f in etc/mediaboxd.toml etc/mediabox-library.json etc/mediabox-applications.json \
+         etc/mediabox-media-worker.env etc/mediabox/sway-browser.conf \
+         etc/udev/rules.d/80-mediabox-no-power-switch.rules \
+         etc/udev/rules.d/81-mediabox-display-hotplug.rules \
+         etc/systemd/logind.conf.d/10-mediabox.conf; do
+  [ -f "$ROOT/$f" ] && pass "integration $(basename "$f")" ok || fail "integration $f" "MISSING"
+done
+
+# -------------------------------------------------- and, on the board itself
+if [ "$STATIC" != 1 ]; then
+  if "$P/bin/mediabox-platform" inspect >/dev/null 2>&1
+  then pass "platform inspect" succeeds
+  else fail "platform inspect" "the platform cannot be described"; fi
+
+  out=""
+  for s in /sys/class/drm/card*-*/status; do
+    [ -e "$s" ] || continue
+    [ "$(cat "$s")" = connected ] && out="$out $(basename "$(dirname "$s")")"
+  done
+  [ -n "$out" ] && pass "connected output" "${out# }" || fail "connected output" none
+
+  for u in mediaboxd-rs mediabox-media-worker stremio-server mediabox-tv-ui; do
+    st="$(systemctl is-active "$u.service" 2>/dev/null || true)"
+    [ "$st" = active ] && pass "$u running" "$st" || fail "$u running" "${st:-unknown}"
+  done
+  [ -S /run/mediabox-ui/video.sock ] && pass "interface video socket" present \
+    || fail "interface video socket" "MISSING /run/mediabox-ui/video.sock"
+fi
+
+echo
+if [ "$fails" -eq 0 ]; then
+  echo "== product verify PASS"
+else
+  echo "== product verify FAIL ($fails required item(s) missing or wrong)"
+fi
+[ "$fails" -eq 0 ]
