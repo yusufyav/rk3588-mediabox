@@ -98,20 +98,44 @@ fn write_to(file: &Path, owner: DisplayOwner) -> std::io::Result<()> {
         let mut handle = std::fs::File::create(&temporary)?;
         handle.write_all(owner.as_str().as_bytes())?;
         handle.write_all(b"\n")?;
+        // The mode goes on before the sync rather than after it, so the one
+        // sync covers it. Set afterwards it is a metadata change nothing has
+        // committed, and a file that came back from a power cut carrying the
+        // umask's mode instead of this one would be a file this product had
+        // never actually written the way it says it writes it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            handle.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        }
         handle.sync_all()?;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o644))?;
-    }
     match std::fs::rename(&temporary, file) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_directory(directory),
         Err(error) => {
             let _ = std::fs::remove_file(&temporary);
             Err(error)
         }
     }
+}
+
+/// Commit the rename, not just what was renamed.
+///
+/// `sync_all` on the temporary file makes its contents durable. It says
+/// nothing about the directory entry that the rename then created: the name
+/// `display-owner` pointing at that inode lives in the parent directory, and
+/// until the parent is synced a power cut can take the rename away and leave
+/// the previous answer — or, on a first write, no answer at all — while the
+/// content it was pointing at survives perfectly. Which product this board
+/// comes up as is exactly the thing that must not be lost by pulling the plug,
+/// so the directory is synced too.
+///
+/// The error is passed on rather than swallowed. By this point the new value
+/// is already visible to any reader, so nothing is broken by reporting it; a
+/// directory fsync failing on the appliance's own ext4 root is a real fault
+/// and saying "recorded" about it would be a claim this cannot make.
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    std::fs::File::open(directory)?.sync_all()
 }
 
 #[cfg(test)]
@@ -178,6 +202,16 @@ mod tests {
             .filter(|name| name != "display-owner")
             .collect();
         assert!(strays.is_empty(), "left behind: {strays:?}");
+    }
+
+    #[test]
+    fn a_directory_can_be_synced_on_this_platform() {
+        // The fifth step of the write is an fsync of a directory handle, which
+        // is well defined on Linux and not everywhere. If that ever stops
+        // working the writes stop being durable silently, so it is asserted
+        // rather than assumed.
+        let directory = temporary_dir();
+        sync_directory(&directory).expect("the parent directory could not be synced");
     }
 
     #[test]
