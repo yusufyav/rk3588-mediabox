@@ -35,7 +35,12 @@ source "$here/scripts/env.sh"
 : "${KODI_TAG:=22.0b2-Piers}"
 : "${KODI_SRC:=/var/tmp/kodi-src}"
 : "${KODI_PREFIX:=/opt/rk3588-mediabox/kodi}"
-: "${KODI_JOBS:=$(nproc 2>/dev/null || echo 4)}"
+# Left empty on purpose; the build step asks the appliance. This used to be
+# $(nproc) evaluated here, on the workstation, and the number was then handed
+# to a compiler running over there: a 24-core workstation started 24 compilers
+# on an 8-core board. The other build scripts already escape it so it is
+# evaluated on the appliance; this one did not.
+: "${KODI_JOBS:=}"
 # `production` or `diagnostic`. The second adds the instrumentation patches on
 # top of the first; it is for a measurement run, not for an appliance.
 : "${KODI_PATCH_PROFILE:=production}"
@@ -70,7 +75,8 @@ SRC
     mediabox_ssh "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential nasm gperf swig default-jre-headless \
         libgbm-dev libegl-dev libgles-dev libdrm-dev libinput-dev libxkbcommon-dev \
-        libudev-dev libasound2-dev libpulse-dev 2>&1 | tail -5"
+        libudev-dev libasound2-dev libpulse-dev \
+        nlohmann-json3-dev 2>&1 | tail -5"
     ;;
 
   fetch)
@@ -161,8 +167,9 @@ SRC
     ;;
 
   build)
-    echo "== building with $KODI_JOBS jobs"
-    mediabox_ssh "cd '$KODI_SRC' && cmake --build build -j$KODI_JOBS"
+    jobs="${KODI_JOBS:-$(mediabox_ssh nproc 2>/dev/null || echo 4)}"
+    echo "== building with $jobs jobs"
+    mediabox_ssh "cd '$KODI_SRC' && cmake --build build -j$jobs"
     ;;
 
   install)
