@@ -244,8 +244,14 @@ is a connector name or an EDID identity.
 
 All four are for debugging. Nothing in the product sets them: an appliance that
 needs `MEDIABOX_KMS_NODE` to come up is an appliance whose discovery is broken,
-and putting that in a unit file is how it stays broken. An override naming a
-device that is not there falls back to discovery rather than failing.
+and putting that in a unit file is how it stays broken.
+
+An override naming a device that is not present falls back to discovery. One
+that names a device which *is* present but owns no connectors — the NPU, say —
+is honoured, because that is what an override is for, and the resulting failure
+names itself: `MEDIABOX_KMS_NODE named card1, which owns no connectors and
+cannot set a mode`. Without that line the symptom is "no connected output",
+which sends whoever reads it to look at the cable.
 
 `MEDIABOX_PLATFORM_ROOT` is what makes the tests possible. The crate's fixtures
 build boards out of directories — a single-HDMI board, a three-output board, a

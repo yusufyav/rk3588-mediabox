@@ -417,6 +417,31 @@ fn an_override_naming_a_device_that_is_not_there_falls_back_to_discovery() {
 }
 
 #[test]
+fn forcing_a_device_that_owns_no_connectors_says_which_one() {
+    // The override is honoured — that is what an override is for — but the
+    // failure it causes must name itself. Without this the symptom is "no
+    // connected output", which sends whoever reads it to look at the cable.
+    let board = one_hdmi();
+    let platform = inspect_with(
+        &board,
+        Overrides {
+            kms: Some("/dev/dri/card1".into()), // the NPU on this fixture
+            ..Overrides::default()
+        },
+    );
+    assert_eq!(platform.kms.as_ref().unwrap().name, "card1");
+    assert!(platform.selected.is_none());
+    assert!(
+        platform
+            .warnings
+            .iter()
+            .any(|w| w.contains("MEDIABOX_KMS_NODE") && w.contains("card1")),
+        "{:?}",
+        platform.warnings
+    );
+}
+
+#[test]
 fn a_machine_with_no_display_hardware_at_all_is_an_answer_not_a_panic() {
     let board = Board::new();
     let platform = inspect(&board);

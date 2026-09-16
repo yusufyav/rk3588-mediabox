@@ -182,6 +182,16 @@ impl Platform {
                 warnings,
             };
         };
+        if connectors.is_empty() {
+            // Only reachable through the override: discovery picks the device
+            // that owns connectors, so a device with none was asked for by
+            // name. Say which, because the symptom further down is "no
+            // connected output" and that would point at the cable.
+            warnings.push(format!(
+                "MEDIABOX_KMS_NODE named {}, which owns no connectors and cannot set a mode",
+                kms.name
+            ));
+        }
         let render = drm::find_render(roots, &kms, overrides.render.as_deref());
         if render.is_none() {
             warnings.push(format!(
