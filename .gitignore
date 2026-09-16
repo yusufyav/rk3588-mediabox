@@ -22,3 +22,7 @@ __pycache__/
 # Cihaz çıktıları kaynak kodu değil. Bir oturumun kanıtı commit mesajında ve
 # results/DURUM.md içinde yaşar; ham dökümler repo dışında arşivlenir.
 logs/
+
+# Release bundles. The appliance archive is a GitHub Release asset, not a blob
+# in the tree; releases/current.env pins the one this repository installs.
+/dist/
