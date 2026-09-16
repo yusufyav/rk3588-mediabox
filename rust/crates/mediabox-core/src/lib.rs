@@ -474,6 +474,16 @@ pub enum Request {
     SurfaceSwitch {
         target: Surface,
     },
+    /// Which product owns the television at boot, and what is on it now.
+    ///
+    /// This board can carry rk3588-screenbridge beside this product, and the
+    /// two cannot both hold the display. The answer is a recorded preference
+    /// rather than whoever started last; see mediaboxd-rs's owner module.
+    DisplayOwner,
+    /// Give the television to one product and remember the choice.
+    DisplayOwnerSet {
+        owner: String,
+    },
     /// What the box can run, and what it is running.
     Applications,
     /// Put one application on the television. The id `idle` releases the

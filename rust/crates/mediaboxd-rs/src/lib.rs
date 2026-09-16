@@ -3,6 +3,7 @@ pub mod kodi;
 pub mod leds;
 pub mod lifecycle;
 pub mod media;
+pub mod owner;
 pub mod player;
 pub mod system;
 pub mod web;

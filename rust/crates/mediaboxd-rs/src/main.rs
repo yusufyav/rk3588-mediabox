@@ -243,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("mediaboxd-rs hazır: {}", args.socket.display());
 
-    // The display belongs to the interface until something asks for it.
+    // The display goes to whoever this board is set to come up as.
     //
     // Which process owns the panel is this daemon's decision, and it was a
     // decision it never actually made at startup: it was made by whichever
@@ -252,12 +252,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pressed Home. The claim is made here instead, once the daemon is serving
     // and can be asked to hand the display over again.
     //
+    // But the claim used to be unconditional, and on a board that also carries
+    // rk3588-screenbridge that was a second wrong answer in the other
+    // direction: a capture appliance that had been doing its job for months
+    // became a media appliance the moment MediaBox was installed on it, and
+    // then again at every boot, with nobody having chosen that. So the answer
+    // is read from the recorded preference, which defaults to the other
+    // product — see mediaboxd_rs::owner for why that is the safe way round.
+    //
     // It is deliberately not fatal. A box with no TV-local interface installed
     // answers "not installed" and carries on as the control plane for whatever
     // else is on the screen.
-    match state.switch_surface(Surface::Ui).await {
-        Ok(_) => eprintln!("mediaboxd-rs: ekran arayüze verildi"),
-        Err(error) => eprintln!("mediaboxd-rs: ekran arayüze verilemedi: {error}"),
+    match mediaboxd_rs::owner::read() {
+        mediaboxd_rs::owner::DisplayOwner::MediaBox => {
+            match state.switch_surface(Surface::Ui).await {
+                Ok(_) => eprintln!("mediaboxd-rs: ekran arayüze verildi (tercih: mediabox)"),
+                Err(error) => eprintln!("mediaboxd-rs: ekran arayüze verilemedi: {error}"),
+            }
+        }
+        mediaboxd_rs::owner::DisplayOwner::ScreenBridge => {
+            eprintln!(
+                "mediaboxd-rs: ekran bu kartta screenbridge'in (tercih: screenbridge, {}); \
+                 değiştirmek için: mediaboxctl display-owner set mediabox",
+                mediaboxd_rs::owner::OWNER_FILE
+            );
+        }
     }
 
     shutdown_signal().await?;

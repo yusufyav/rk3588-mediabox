@@ -150,7 +150,12 @@ impl AppState {
             Request::SurfaceStatus => Response::success(self.surface.status().await),
             Request::Applications => Response::success(self.applications.status().await),
             Request::ApplicationLaunch { id } => match self.applications.launch(&id).await {
-                Ok(status) => Response::success(status),
+                Ok(status) => {
+                    if id != crate::lifecycle::IDLE {
+                        remember(crate::owner::DisplayOwner::MediaBox);
+                    }
+                    Response::success(status)
+                }
                 Err(error) => Response::failure("APPLICATION_ERROR", error.to_string()),
             },
             Request::BrowserOpen { url } => match self.applications.browser_open(&url).await {
@@ -160,6 +165,17 @@ impl AppState {
             Request::SurfaceSwitch { target } => match self.switch_surface(target).await {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("SURFACE_ERROR", error.to_string()),
+            },
+            Request::DisplayOwner => Response::success(self.display_owner_status().await),
+            Request::DisplayOwnerSet { owner } => match crate::owner::DisplayOwner::parse(&owner) {
+                Some(wanted) => match self.set_display_owner(wanted).await {
+                    Ok(status) => Response::success(status),
+                    Err(error) => Response::failure("DISPLAY_OWNER_ERROR", error.to_string()),
+                },
+                None => Response::failure(
+                    "DISPLAY_OWNER_ERROR",
+                    format!("bilinmeyen sahip '{owner}'; mediabox veya screenbridge"),
+                ),
             },
             Request::MediaLogin { email, password } => {
                 media_result(self.media.login(&email, &password).await)
@@ -239,11 +255,69 @@ impl AppState {
         target: Surface,
     ) -> Result<mediabox_core::SurfaceStatus, crate::lifecycle::LifecycleError> {
         let status = self.surface.switch(target).await?;
+        // Taking the panel is choosing to be the board's display owner, so it
+        // is recorded. Idle is not that choice: it puts nothing on the screen
+        // and leaves the recorded answer alone for whoever comes back to it.
+        if target != Surface::Idle {
+            remember(crate::owner::DisplayOwner::MediaBox);
+        }
         self.input.set_mode(match target {
             Surface::Kodi => InputMode::KodiPlayback,
             Surface::Ui | Surface::Idle => InputMode::Ui,
         });
         Ok(status)
+    }
+
+    /// What the board is set to come up as, and what is on it now.
+    pub async fn display_owner_status(&self) -> Value {
+        let recorded = crate::owner::read();
+        let surface = self.surface.status().await;
+        json!({
+            "owner": recorded.as_str(),
+            "file": crate::owner::OWNER_FILE,
+            "mediabox_on_display": surface.kodi_active || surface.ui_active,
+            "screenbridge_active": unit_active(crate::owner::SCREENBRIDGE_UNIT).await,
+        })
+    }
+
+    /// Hand the television to one product and remember that it was asked for.
+    ///
+    /// The order is the point, in both directions: whoever is holding the
+    /// display lets go before the other one reaches for it, because DRM master
+    /// cannot be held twice and the loser of a race does not degrade, it fails.
+    /// Handing it to MediaBox goes through the ordinary surface switch, whose
+    /// units already declare the interlock; handing it back stops every
+    /// MediaBox surface first and only then starts the other product.
+    ///
+    /// The preference is written before the move rather than after, so a box
+    /// that loses power midway comes back as the thing that was asked for.
+    pub async fn set_display_owner(
+        &self,
+        wanted: crate::owner::DisplayOwner,
+    ) -> Result<Value, crate::lifecycle::LifecycleError> {
+        crate::owner::write(wanted).map_err(|error| {
+            crate::lifecycle::LifecycleError::Failed(format!(
+                "{} yazılamadı: {error}",
+                crate::owner::OWNER_FILE
+            ))
+        })?;
+        match wanted {
+            crate::owner::DisplayOwner::MediaBox => {
+                self.switch_surface(Surface::Ui).await?;
+            }
+            crate::owner::DisplayOwner::ScreenBridge => {
+                self.surface.switch(Surface::Idle).await?;
+                let output =
+                    crate::lifecycle::systemctl(&["start", crate::owner::SCREENBRIDGE_UNIT])
+                        .await?;
+                if !output.status.success() {
+                    return Err(crate::lifecycle::LifecycleError::Failed(
+                        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(self.display_owner_status().await)
     }
 
     /// Create a media session and put it on the television.
@@ -738,4 +812,26 @@ mod tests {
             serde_json::from_str::<Request>(r#"{"command":"exec","command_line":"reboot"}"#);
         assert!(parsed.is_err());
     }
+}
+
+/// Record the display owner, and say so if it cannot be recorded.
+///
+/// Never fatal. Failing to write a preference must not fail the switch a
+/// person just asked for; it means the next boot falls back to the safe
+/// default, which is a worse answer than the right one but not a broken box.
+fn remember(owner: crate::owner::DisplayOwner) {
+    if let Err(error) = crate::owner::write(owner) {
+        eprintln!(
+            "mediaboxd-rs: {} yazılamadı ({error}); açılış tercihi değişmedi",
+            crate::owner::OWNER_FILE
+        );
+    }
+}
+
+/// Whether a unit this product does not own is running.
+async fn unit_active(unit: &str) -> bool {
+    crate::lifecycle::systemctl(&["is-active", "--quiet", unit])
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }

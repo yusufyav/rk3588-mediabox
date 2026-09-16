@@ -65,7 +65,7 @@ fn valid_unit(unit: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"@._-".contains(&b))
 }
 
-async fn systemctl(args: &[&str]) -> Result<std::process::Output, LifecycleError> {
+pub(crate) async fn systemctl(args: &[&str]) -> Result<std::process::Output, LifecycleError> {
     Ok(tokio::time::timeout(
         Duration::from_secs(40),
         Command::new("/usr/bin/systemctl").args(args).output(),

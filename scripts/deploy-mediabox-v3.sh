@@ -283,8 +283,32 @@ sh_ "set -e
 # The unit reporting "running" says nothing about what is on the television.
 # This puts the interface up and checks that it is genuinely there; a failure
 # here fails the deploy.
+#
+# And then it puts the board's role back exactly as it found it. Installing
+# this product must not decide that a board belongs to it: a Plus that has been
+# a rk3588-screenbridge appliance stays one until somebody says otherwise, with
+# `mediaboxctl display-owner set mediabox`. The smoke needs the display for
+# twelve seconds, so it borrows it and gives it back -- including the absence of
+# the preference file, which is itself the answer "nobody has chosen yet".
 say "television"
-sh_ "$prefix/bin/mediaboxctl surface switch ui >/dev/null && $prefix/bin/mediabox-kiosk-smoke"
+sh_ "set -e
+  owner_file=/var/lib/mediabox/display-owner
+  if [ -f \"\$owner_file\" ]; then before=\"\$(cat \"\$owner_file\")\"; else before=absent; fi
+  $prefix/bin/mediaboxctl surface switch ui >/dev/null
+  smoke=0; $prefix/bin/mediabox-kiosk-smoke || smoke=\$?
+  case \"\$before\" in
+    mediabox) : ;;
+    absent)
+      $prefix/bin/mediaboxctl surface switch idle >/dev/null || true
+      rm -f \"\$owner_file\"
+      echo '   display owner left unchosen; this board is not claimed by MediaBox'
+      ;;
+    *)
+      $prefix/bin/mediaboxctl display-owner set screenbridge >/dev/null || true
+      echo \"   display owner put back to \$before\"
+      ;;
+  esac
+  exit \$smoke"
 
 say "the other product's prefix is untouched"
 # The whole point of MediaBox owning its own media runtime. A difference here

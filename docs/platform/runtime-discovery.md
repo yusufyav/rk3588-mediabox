@@ -297,6 +297,60 @@ This is deliberately not a role manager. Which application owns the television
 stays `mediaboxd-rs`'s decision at run time; this is only the interlock that
 makes that decision land safely when the other product is on the board too.
 
+**Which product the board comes up as.** One file:
+
+```
+/var/lib/mediabox/display-owner      mediabox | screenbridge
+```
+
+`mediaboxd-rs` reads it once, when it has finished starting, and that is the
+only thing that decides whether MediaBox claims the panel. Anything that is not
+one of those two words — no file, an empty one, half a word left by a power cut,
+a value from a newer version — reads as `screenbridge`.
+
+That default is the point of the default. The claim used to be unconditional:
+this daemon put the interface on the display at every start, which is right for
+a board that only has MediaBox on it and wrong for a board that does not.
+Measured on the Plus before this existed: `screenbridge-daemon` started at 6.997
+s into the boot and was being stopped 0.56 s later, every boot, because MediaBox
+had been installed on it — a capture appliance quietly became a media appliance
+and nobody had chosen that. Guessing the other way round is the worse failure:
+it would put a second display owner beside a running one. Refusing to start
+MediaBox's shell is recoverable with one command.
+
+So a board becomes a MediaBox board when somebody says so:
+
+```
+mediaboxctl display-owner status
+mediaboxctl display-owner set mediabox
+mediaboxctl display-owner set screenbridge
+```
+
+`set` writes the preference first and moves the display second, so a box that
+loses power halfway comes back as the thing that was asked for. The write is a
+temporary file in the same directory renamed over the top, so a reader never
+sees half a word. The file is `0644 root:root`: it decides which product owns
+the hardware, so it is root's to write.
+
+Both directions go through the same interlock as everything else. Handing the
+display to MediaBox is an ordinary surface switch, and the units above stop
+ScreenBridge first. Handing it back stops every MediaBox surface and only then
+starts `screenbridge-daemon`. Measured on the Plus: `mediabox-tv-ui` deactivated
+at monotonic 1016.68 and `screenbridge-daemon` started at 1017.32, and the other
+way at 1029.63 and 1029.64 — ordered, in both directions, with `/dev/dri/card0`
+open in exactly one process throughout.
+
+Taking the display also records it. A `surface switch` to the interface or to
+Kodi, or launching one of the display-owning applications, writes `mediabox`:
+choosing to be on the panel is choosing to be the board's display owner, and a
+person should not have to say it twice. `idle` does not, because putting nothing
+on the screen is not a choice about which product the board is.
+
+Installing MediaBox does not make that choice either. `deploy-mediabox-v3.sh`
+needs the display for the twelve seconds its smoke takes, so it borrows it and
+puts the board's role back exactly as it found it — including the absence of the
+file, which is itself the answer "nobody has chosen yet".
+
 ---
 
 ## Validation status

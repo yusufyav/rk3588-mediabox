@@ -44,6 +44,36 @@ enum Command {
         #[command(subcommand)]
         command: SurfaceCommand,
     },
+    /// Which product owns the television, including after a reboot
+    DisplayOwner {
+        #[command(subcommand)]
+        command: DisplayOwnerCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DisplayOwnerCommand {
+    Status,
+    /// Hand the television over and remember the choice
+    Set {
+        #[arg(value_enum)]
+        owner: DisplayOwnerArg,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DisplayOwnerArg {
+    Mediabox,
+    Screenbridge,
+}
+
+impl DisplayOwnerArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            DisplayOwnerArg::Mediabox => "mediabox",
+            DisplayOwnerArg::Screenbridge => "screenbridge",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -224,6 +254,12 @@ fn to_request(command: &Command) -> Request {
             SurfaceCommand::Status => Request::SurfaceStatus,
             SurfaceCommand::Switch { target } => Request::SurfaceSwitch {
                 target: (*target).into(),
+            },
+        },
+        Command::DisplayOwner { command } => match command {
+            DisplayOwnerCommand::Status => Request::DisplayOwner,
+            DisplayOwnerCommand::Set { owner } => Request::DisplayOwnerSet {
+                owner: owner.as_str().to_string(),
             },
         },
         Command::Media { command } => match command {
@@ -420,6 +456,43 @@ fn render(value: &Value, out: &mut impl Write) -> Result<(), String> {
 
     if result.get("active").is_some() && result.get("kodi_active").is_some() {
         return render_surface(&result, out, &write);
+    }
+
+    // Which product the board comes up as. `owner` beside the file it was read
+    // from is the shape nothing else has.
+    if let (Some(owner), Some(file)) = (
+        result.get("owner").and_then(Value::as_str),
+        result.get("file").and_then(Value::as_str),
+    ) {
+        write(
+            out,
+            format!(
+                "Ekran sahibi: {}",
+                match owner {
+                    "mediabox" => "MediaBox",
+                    "screenbridge" => "ScreenBridge",
+                    other => other,
+                }
+            ),
+        )?;
+        write(out, format!("  tercih: {file}"))?;
+        write(
+            out,
+            format!(
+                "  şu an: MediaBox {}, ScreenBridge {}",
+                if result.get("mediabox_on_display").and_then(Value::as_bool) == Some(true) {
+                    "ekranda"
+                } else {
+                    "ekranda değil"
+                },
+                if result.get("screenbridge_active").and_then(Value::as_bool) == Some(true) {
+                    "çalışıyor"
+                } else {
+                    "durmuş"
+                }
+            ),
+        )?;
+        return Ok(());
     }
 
     // The CEC adapter: `logical_addresses` is the field nothing else carries.
