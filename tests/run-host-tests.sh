@@ -30,6 +30,12 @@ contains() {
   fi
 }
 
+# Comments and quoted text removed, so a word the script only talks about is
+# not mistaken for a command it runs.
+strip_sh() {
+  sed -E -e 's/(^|[[:space:]])#.*$/\1/' -e "s/'[^']*'/''/g" -e 's/"[^"]*"/""/g' "$1"
+}
+
 lacks() {
   if [[ "$2" != *"$3"* ]]; then
     printf 'ok   %s\n' "$1"
@@ -584,6 +590,31 @@ contains "and gates staging leftovers"         "$capture"  'staging leftovers'
 # `strings` is binutils and this appliance does not carry it; a verifier that
 # needs it is a verifier that cannot run on a clean board.
 lacks "the verifier needs no binutils"         "$verifier" 'strings -a'
+
+echo "-- the archive can be checked on the image the product is installed on"
+# A clean Armbian Minimal carries no binutils, and the archive is verified
+# before the runtime packages are installed, so the verifier had better not
+# need any. This used to be `readelf` and it stopped every clean install.
+if "$here/tests/check-static-verify.sh" >/dev/null 2>&1; then
+  echo "ok   STATIC_VERIFY_WITHOUT_READELF=PASS"
+else
+  echo "FAIL STATIC_VERIFY_WITHOUT_READELF:"
+  "$here/tests/check-static-verify.sh" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
+# The text, too, so a verifier that grows a readelf back is caught even if the
+# fixture ever stops exercising the line that would use it.
+if strip_sh "$here/packaging/mediabox-product-verify" |
+   grep -qE '(^|[;&|(){]|&&|\|\||\$\()[[:space:]]*readelf([[:space:]]|$)'; then
+  echo "FAIL the verifier invokes readelf"
+  failures=$((failures + 1))
+else
+  echo "ok   the verifier invokes no readelf"
+fi
+contains "it reads the dynamic section itself" "$verifier" 'elf_runpath()'
+contains "and cross-checks the capture's reading" "$verifier" 'recorded_runpath'
+contains "the capture records the runpath" "$capture" 'runpath.tsv'
+contains "and gates what it recorded"      "$capture" 'mpv RUNPATH recorded'
 
 echo
 if [ "$failures" -eq 0 ]; then

@@ -224,6 +224,23 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   done <"$elf_list"
 } >"$M/elf-closure.txt"
 
+# runpath.tsv: the linkage the two players carry, as the golden board reads it.
+#
+# The verifier reads the same thing out of the archived binaries itself -- it
+# has to, since a release cut before this file existed does not carry it -- and
+# this is the second opinion it checks that reading against. It is written here
+# because the capture runs on a development machine where readelf exists; the
+# target is a clean Minimal image where it does not, and the archive is checked
+# there before a single package is installed.
+{
+  echo "# binary<TAB>runpath"
+  for b in player/bin/mpv kodi/lib/kodi/kodi-gbm; do
+    [ -f "$PREFIX/$b" ] || continue
+    printf '%s\t%s\n' "$b" "$(readelf -d "$PREFIX/$b" 2>/dev/null |
+      sed -n 's/.*R\(UN\)\?PATH).*\[\(.*\)\]/\2/p' | head -1)"
+  done
+} >"$M/runpath.tsv"
+
 # systemd-closure.txt: every absolute path a unit names, classified. A unit
 # that starts something the release does not carry is a release that does not
 # start.
@@ -364,6 +381,11 @@ readelf -d "$PREFIX/player/bin/mpv" 2>/dev/null | grep -q "$PREFIX/media-runtime
 test -x "$PREFIX/kodi/lib/kodi/kodi-gbm" && g "kodi present" PASS || g "kodi present" FAIL
 readelf -d "$PREFIX/kodi/lib/kodi/kodi-gbm" 2>/dev/null | grep -q "$PREFIX/media-runtime/lib" \
   && g "kodi RUNPATH" PASS || g "kodi RUNPATH" FAIL
+
+grep -q "^player/bin/mpv	.*$PREFIX/media-runtime/lib" "$M/runpath.tsv" \
+  && g "mpv RUNPATH recorded" PASS || g "mpv RUNPATH recorded" FAIL
+grep -q "^kodi/lib/kodi/kodi-gbm	.*$PREFIX/media-runtime/lib" "$M/runpath.tsv" \
+  && g "kodi RUNPATH recorded" PASS || g "kodi RUNPATH recorded" FAIL
 
 n="$(awk -F'\t' '$4=="SCREENBRIDGE"' "$M/elf-closure.txt" | wc -l)"
 [ "$n" -eq 0 ] && g "ScreenBridge linkage ($n)" PASS || g "ScreenBridge linkage ($n)" FAIL

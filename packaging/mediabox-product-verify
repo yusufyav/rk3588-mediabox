@@ -14,10 +14,12 @@
 #   MEDIABOX_VERIFY_ROOT=<dir> MEDIABOX_VERIFY_META=<dir> \
 #   MEDIABOX_VERIFY_STATIC_ONLY=1 mediabox-product-verify
 #       an unpacked release, before anything is installed. The binaries are for
-#       another architecture than the machine checking them, so what the capture
-#       measured on the golden board is read out of meta/ instead of re-running
-#       it here. Nothing is waived: the capture refuses to write a meta/ that
-#       says otherwise.
+#       another architecture than the machine checking them, so whatever has to
+#       be *run* to be known -- the decoder the player offers, the libraries it
+#       resolves -- is read out of meta/, where the capture recorded what the
+#       golden board answered. Nothing is waived: the capture refuses to write a
+#       meta/ that says otherwise. Whatever can be read out of a file instead is
+#       read here, from the archive, with no tool a clean image does not have.
 #
 set -eu
 
@@ -112,18 +114,115 @@ capability "hwdec rkmpp" mpv-hwdec-rkmpp \
 # architecture as well as for this one. Resolution -- what a library actually
 # loads at run time -- only means anything on the board, so on an archive the
 # capture's own closure is consulted instead of guessing.
-runpath() {
-  if command -v readelf >/dev/null 2>&1; then
-    readelf -d "$1" 2>/dev/null | sed -n 's/.*R\(UN\)\?PATH).*\[\(.*\)\]/\2/p'
-  else
-    echo "__no_readelf__"
-  fi
+#
+# It used to be read with `readelf`, and that was a dependency on binutils that
+# a clean Armbian Minimal image does not satisfy. The archive is verified
+# *before* the runtime packages are installed -- it has to be, the package list
+# comes out of the archive -- so on every fresh board the install stopped at:
+#
+#   FAIL  runpath player/bin/mpv   readelf is not installed; cannot check
+#
+# Making binutils a prerequisite would have put a toolchain in front of a
+# product that compiles nothing, and weakening the check to a `grep` for the
+# path would have accepted any binary that merely mentions it. So the dynamic
+# section is read here instead, with od and awk, which this script already
+# needs. The format is fixed and documented: the program header table names
+# PT_DYNAMIC, the dynamic array names DT_RUNPATH (or the older DT_RPATH) as an
+# index into the string table that DT_STRTAB names by virtual address, and the
+# PT_LOAD segment covering that address turns it back into a file offset.
+#
+# Three outcomes, and only one of them is silent: the runpath, an empty string
+# for a binary that carries none, and __unreadable__ for anything that is not a
+# little-endian ELF64 or whose dynamic section does not parse. Both of the last
+# two fail below.
+elf_runpath() {
+  _f="$1"
+  _hdr="$(od -An -tu1 -v -N 64 "$_f" 2>/dev/null | awk '
+    { for (i = 1; i <= NF; i++) b[n++] = $i }
+    function u(o, l,   v, i) { v = 0; for (i = l - 1; i >= 0; i--) v = v * 256 + b[o + i]; return v }
+    END {
+      if (n < 64) exit 1
+      if (b[0] != 127 || b[1] != 69 || b[2] != 76 || b[3] != 70) exit 1
+      if (b[4] != 2 || b[5] != 1) exit 1          # ELF64, little-endian
+      printf "%.0f %.0f %.0f\n", u(32, 8), u(54, 2), u(56, 2)
+    }' 2>/dev/null)" || { echo __unreadable__; return 0; }
+  [ -n "$_hdr" ] || { echo __unreadable__; return 0; }
+  # shellcheck disable=SC2086
+  set -- $_hdr                                     # e_phoff e_phentsize e_phnum
+  [ "$3" -gt 0 ] && [ "$2" -ge 56 ] || { echo __unreadable__; return 0; }
+
+  # Every PT_LOAD (for the address arithmetic) and the one PT_DYNAMIC.
+  _ph="$(od -An -tu1 -v -j "$1" -N "$(($2 * $3))" "$_f" 2>/dev/null |
+    awk -v ent="$2" -v num="$3" '
+    { for (i = 1; i <= NF; i++) b[n++] = $i }
+    function u(o, l,   v, i) { v = 0; for (i = l - 1; i >= 0; i--) v = v * 256 + b[o + i]; return v }
+    END {
+      for (k = 0; k < num; k++) {
+        o = k * ent
+        if (o + 56 > n) break
+        t = u(o, 4)                                # p_type
+        if (t == 2)      printf "DYN %.0f %.0f\n",       u(o + 8, 8), u(o + 32, 8)
+        else if (t == 1) printf "LOAD %.0f %.0f %.0f\n", u(o + 8, 8), u(o + 16, 8), u(o + 32, 8)
+      }
+    }' 2>/dev/null)" || _ph=""
+  _off="$(printf '%s\n' "$_ph" | awk '$1=="DYN"{print $2; exit}')"
+  _len="$(printf '%s\n' "$_ph" | awk '$1=="DYN"{print $3; exit}')"
+  [ -n "$_off" ] && [ -n "$_len" ] && [ "$_len" -gt 0 ] || { echo __unreadable__; return 0; }
+
+  _dyn="$(od -An -tu1 -v -j "$_off" -N "$_len" "$_f" 2>/dev/null | awk '
+    { for (i = 1; i <= NF; i++) b[n++] = $i }
+    function u(o, l,   v, i) { v = 0; for (i = l - 1; i >= 0; i--) v = v * 256 + b[o + i]; return v }
+    END {
+      for (o = 0; o + 16 <= n; o += 16) {
+        t = u(o, 8); v = u(o + 8, 8)
+        if (t == 0) break                          # DT_NULL
+        if (t == 5)       printf "STRTAB %.0f\n", v
+        else if (t == 29) printf "RUNPATH %.0f\n", v
+        else if (t == 15) printf "RPATH %.0f\n", v
+      }
+    }' 2>/dev/null)" || _dyn=""
+  _idx="$(printf '%s\n' "$_dyn" | awk '$1=="RUNPATH"{print $2; exit}')"
+  [ -n "$_idx" ] || _idx="$(printf '%s\n' "$_dyn" | awk '$1=="RPATH"{print $2; exit}')"
+  [ -n "$_idx" ] || { echo ""; return 0; }         # linked with no runpath at all
+  _str="$(printf '%s\n' "$_dyn" | awk '$1=="STRTAB"{print $2; exit}')"
+  [ -n "$_str" ] || { echo __unreadable__; return 0; }
+  _str="$(printf '%s\n' "$_ph" |
+    awk -v v="$_str" '$1=="LOAD" && v >= $3 && v < $3 + $4 { printf "%.0f\n", v - $3 + $2; exit }')"
+  [ -n "$_str" ] || { echo __unreadable__; return 0; }
+
+  od -An -tu1 -v -j "$((_str + _idx))" -N 4096 "$_f" 2>/dev/null | awk '
+    { for (i = 1; i <= NF; i++) { if ($i == 0) exit; s = s sprintf("%c", $i) } }
+    END { print s }' 2>/dev/null || echo __unreadable__
 }
+
+# What the capture measured, for the same two binaries, on the golden board.
+#
+# An archive cut before meta/runpath.tsv existed does not carry it, and the
+# already published release is one of those. That is not a reason to skip the
+# check: the binaries are in the archive and elf_runpath reads them directly,
+# so the archive is checked either way. When the file *is* there the two
+# readings have to agree -- the capture read the binary on the board it came
+# off, and a disagreement means the archive is not carrying what was captured.
+recorded_runpath() {
+  [ -n "$META" ] && [ -f "$META/runpath.tsv" ] || return 1
+  awk -F'\t' -v want="$1" '$1 == want { print $2; found = 1 } END { exit !found }' \
+    "$META/runpath.tsv"
+}
+
 for b in player/bin/mpv kodi/lib/kodi/kodi-gbm; do
   [ -x "$P/$b" ] || continue
-  rp="$(runpath "$P/$b")"
+  rp="$(elf_runpath "$P/$b")"
+  if [ "$rp" = __unreadable__ ]; then
+    fail "runpath $b" "the dynamic section of $P/$b could not be read"
+    continue
+  fi
+  if [ "$STATIC" = 1 ] && rec="$(recorded_runpath "$b")"; then
+    if [ "$rec" != "$rp" ]; then
+      fail "runpath $b" "the capture recorded '$rec', the archived binary says '${rp:-none}'"
+      continue
+    fi
+  fi
   case "$rp" in
-    __no_readelf__) fail "runpath $b" "readelf is not installed; cannot check" ;;
     */opt/rk3588-mediabox/media-runtime/lib*) pass "runpath $b" "$rp" ;;
     *) fail "runpath $b" "expected the MediaBox media runtime, got '${rp:-none}'" ;;
   esac
