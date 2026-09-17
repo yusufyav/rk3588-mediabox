@@ -335,6 +335,23 @@ udevadm trigger --subsystem-match=input --action=change
 udevadm trigger --subsystem-match=drm --action=change
 ok "udev rules reloaded"
 
+# The third way to reboot a television by leaning on it.
+#
+# The udev rule in the archive takes the power-switch tag off the CEC remote and
+# the logind drop-in beside it ignores the power and reboot keys, and both are
+# files, so a clean install gets them. ctrl-alt-del.target is neither: it is an
+# alias of reboot.target that init reaches on a SIGINT from a console keyboard,
+# and masking it is a state change rather than a file to unpack. The deploy
+# script did it and the installer did not, so every board installed from a
+# release kept that path open and the kiosk smoke said so:
+#
+#   FAIL  ctrl-alt-del  alias
+#
+# Restarting stays possible; it is a request to mediaboxd-rs, confirmed twice.
+systemctl mask ctrl-alt-del.target >/dev/null 2>&1 || true
+[ "$(systemctl is-enabled ctrl-alt-del.target 2>&1)" = masked ] \
+  && ok "ctrl-alt-del masked" || note "ctrl-alt-del.target could not be masked"
+
 if "$prefix/bin/mediabox-platform" inspect >/dev/null 2>&1; then
   ok "platform discovery"
 else
