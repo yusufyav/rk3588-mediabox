@@ -404,6 +404,31 @@ leak="$( { grep -rIlE 'authKey|"password"|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
 bad="$(grep -cE '^(build-essential|gcc|g\+\+|rustc|cargo|cmake|meson|ninja-build|.*-dev)$' "$M/runtime-packages.txt" || true)"
 [ "$bad" -eq 0 ] && g "build packages in manifest ($bad)" PASS || g "build packages in manifest ($bad)" FAIL
 
+# And nothing staged, in a prefix that is supposed to be only what was installed.
+#
+# An accepted A/B candidate of Kodi was once copied over the production binary
+# while its data tree stayed behind under .../kodi-candidate. It ran for as long
+# as that tree was on the disk and died one second into every start once the
+# tree was tidied away. A capture taken in between would have shipped a release
+# that breaks the first time anybody cleans up, so the check is on the prefix
+# the binary was configured with rather than on whether the tree is there today.
+leftovers="$(
+  { find "$PREFIX" -xdev -mindepth 1 \
+      \( -name '*.orig' -o -name '*.bak' -o -name '*candidate*' \
+         -o -name 'staging' -o -name 'kodi-src' \) -printf '%P\n' 2>/dev/null
+    find "$PREFIX" -xdev -mindepth 1 -maxdepth 2 -name 'build' -printf '%P\n' 2>/dev/null
+  } | sort -u)"
+n="$(printf '%s' "$leftovers" | grep -c . || true)"
+[ "$n" -eq 0 ] && g "staging leftovers ($n)" PASS \
+  || { printf '%s\n' "$leftovers" | sed 's/^/    /'; g "staging leftovers ($n)" FAIL; }
+
+baked="$(LC_ALL=C grep -aoE '/opt/rk3588-mediabox/[A-Za-z0-9._+-]+/share/kodi' \
+  "$PREFIX/kodi/lib/kodi/kodi-gbm" 2>/dev/null | sort -u || true)"
+[ "$baked" = "/opt/rk3588-mediabox/kodi/share/kodi" ] \
+  && g "Kodi data prefix" PASS || g "Kodi data prefix (${baked:-none})" FAIL
+test -f "$PREFIX/kodi/share/kodi/system/settings/settings.xml" \
+  && g "Kodi data files" PASS || g "Kodi data files" FAIL
+
 echo "GATE_FAILURES=$fail"
 REMOTE_EOF
 )" || gate_rc=$?

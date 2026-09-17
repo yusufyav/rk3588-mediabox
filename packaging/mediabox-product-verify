@@ -156,6 +156,77 @@ else
   [ "$unres" -eq 0 ] && pass "unresolved libraries" 0 || fail "unresolved libraries" "$unres"
 fi
 
+# -------------------------------------------------- nothing staged, nothing left over
+#
+# A product prefix is what was installed, not what it was built from.
+#
+# An A/B candidate of Kodi was once accepted by copying its binary over the
+# production one. A Kodi binary carries the prefix it was configured with, so
+# special://xbmc/ still resolved to /opt/rk3588-mediabox/kodi-candidate/share/kodi
+# -- and it kept working, because that tree was still on the disk. When the
+# staging tree was tidied away the player died one second into every start with
+# "Unable to find path to Kodi data files!", and ExecStopPost put the interface
+# back, so each failed launch looked exactly like a clean exit. Five of them went
+# by unnoticed.
+#
+# The lesson is what this section checks, and it is deliberately not "does the
+# data tree exist": that is the check that passed the whole time the candidate
+# was installed. What is checked is where the binary will *look*, which is a
+# property of the binary and survives whatever is or is not on the disk.
+
+# Leftovers first: the backup beside the real thing, and the build tree that was
+# never meant to ship.
+#
+# `build` is bounded to the top two levels because npm vendors directories of
+# that name inside node_modules and those are package contents, not staging. A
+# build tree that shipped by accident would be at $P/build or $P/<component>/build.
+leftovers="$(
+  { find "$P" -xdev -mindepth 1 \
+      \( -name '*.orig' -o -name '*.bak' -o -name '*candidate*' \
+         -o -name 'staging' -o -name 'kodi-src' \) -printf '%P\n' 2>/dev/null
+    find "$P" -xdev -mindepth 1 -maxdepth 2 -name 'build' -printf '%P\n' 2>/dev/null
+  } | sort -u
+)"
+if [ -z "$leftovers" ]; then
+  pass "no staging leftovers" "0 under $P"
+else
+  fail "no staging leftovers" "$(printf '%s' "$leftovers" | tr '\n' ' ')"
+fi
+
+# And the mapping itself, read out of the binary.
+#
+# Kodi resolves special://xbmc/ from the prefix it was configured with unless
+# KODI_HOME overrides it. kodi.service does set KODI_HOME, and that stays --
+# it is the defence in depth -- but a release must not need it: the binary in
+# the archive has to be one that finds its own data. So every
+# /opt/rk3588-mediabox/<something>/share/kodi baked into the executable is read
+# out and the set has to be exactly the canonical one.
+#
+# `grep -a` and not `strings`, because binutils is not a runtime dependency of
+# this appliance and a verifier that cannot run on a clean board verifies
+# nothing.
+kodi_bin="$P/kodi/lib/kodi/kodi-gbm"
+if [ -f "$kodi_bin" ]; then
+  baked="$(LC_ALL=C grep -aoE '/opt/rk3588-mediabox/[A-Za-z0-9._+-]+/share/kodi' "$kodi_bin" 2>/dev/null | sort -u || true)"
+  if [ "$baked" = "/opt/rk3588-mediabox/kodi/share/kodi" ]; then
+    pass "Kodi data prefix" "$baked"
+  elif [ -z "$baked" ]; then
+    fail "Kodi data prefix" "the binary names no data prefix at all"
+  else
+    fail "Kodi data prefix" "$(printf '%s' "$baked" | tr '\n' ' ')"
+  fi
+  if LC_ALL=C grep -aq 'rk3588-mediabox/kodi-candidate' "$kodi_bin" 2>/dev/null; then
+    fail "Kodi staging reference" "the binary still names kodi-candidate"
+  else
+    pass "Kodi staging reference" none
+  fi
+  # The tree that prefix points at has to be here too. This is the weaker of the
+  # two checks and it is second on purpose.
+  req_file kodi/share/kodi/system/settings/settings.xml "Kodi data files"
+else
+  fail "Kodi data prefix" "MISSING $kodi_bin"
+fi
+
 # ------------------------------------------------------------- the symlinks
 #
 # The Mali links inside the prefix are absolute -- they name /opt/rk3588-mediabox

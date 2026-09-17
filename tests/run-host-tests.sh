@@ -570,6 +570,21 @@ contains "the player is checked for existence" "$smoke" "bad 'player present'"
 contains "vo_mediabox is required"             "$smoke" 'vo_mediabox absent'
 contains "rkmpp is required"                   "$smoke" 'rkmpp absent'
 
+echo "-- a staged build cannot be shipped as the product"
+# The failure this guards is specific: an accepted A/B candidate of Kodi copied
+# over the production binary, still configured for the staging prefix, passing
+# every check for as long as the staging tree was on the disk. So both the
+# verifier and the capture have to look at the prefix baked into the binary --
+# not at whether the data tree happens to exist right now.
+contains "the verifier reads the baked prefix" "$verifier" "grep -aoE '/opt/rk3588-mediabox/[A-Za-z0-9._+-]+/share/kodi'"
+contains "and rejects a candidate binary"      "$verifier" 'rk3588-mediabox/kodi-candidate'
+contains "and sweeps staging leftovers"        "$verifier" 'no staging leftovers'
+contains "the capture gates the baked prefix"  "$capture"  'Kodi data prefix'
+contains "and gates staging leftovers"         "$capture"  'staging leftovers'
+# `strings` is binutils and this appliance does not carry it; a verifier that
+# needs it is a verifier that cannot run on a clean board.
+lacks "the verifier needs no binutils"         "$verifier" 'strings -a'
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all host tests passed"
