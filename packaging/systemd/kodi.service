@@ -50,6 +50,24 @@ Environment=MEDIABOX_GPU=mali
 # the decoder somewhere else by accident, which is what it used to be able to do
 # when it named the other product's prefix.
 Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib
+# Where Kodi's data files are, said out loud rather than left to the prefix the
+# binary happens to have been configured with.
+#
+# Kodi resolves special://xbmc/ from its compiled-in INSTALL_PATH unless
+# KODI_HOME says otherwise, and a build staged for comparison carries the
+# staging prefix inside it for good. One such build was accepted and copied over
+# the production binary while its data tree stayed behind under
+# /opt/rk3588-mediabox/kodi-candidate; when that directory was tidied away the
+# player stopped being able to find a single data file. Measured:
+#
+#   special://xbmc/ is mapped to: /opt/rk3588-mediabox/kodi-candidate/share/kodi
+#   Unable to find path to Kodi data files!
+#
+# and then an abort, one second after every start. These two lines pin both
+# halves to this appliance's own tree, so which prefix a binary was configured
+# with stops being something the television depends on.
+Environment=KODI_HOME=/opt/rk3588-mediabox/kodi/share/kodi
+Environment=KODI_BIN_HOME=/opt/rk3588-mediabox/kodi/lib/kodi
 ExecStartPre=/bin/mkdir -p /var/tmp/kodi-home/.kodi/temp /var/tmp/kodi-home/.kodi/userdata
 # Give Kodi this appliance's settings the first time it runs, and only then.
 #
@@ -68,6 +86,24 @@ ExecStartPre=/bin/sh -c 'test -f /var/tmp/kodi-home/.kodi/userdata/guisettings.x
 # that is lost on every restart. Without them Kodi cannot see that the panel
 # does HDR10 and the HDMI codec will not pack an audio bitstream.
 ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
+
+# And a start that stops rather than a start that lies.
+#
+# Without its data files Kodi does not refuse to run: it prints one line, aborts
+# inside the allocator, and is gone in about a second. ExecStopPost then brings
+# the interface back, so the television returns to the home screen exactly as it
+# would from a clean exit and the person is told nothing at all. Five launches
+# were swallowed that way before a log was read.
+#
+# No leading `-`: if the tree this unit just named is not there, the unit fails
+# here and the player is never started to produce a silent return instead.
+#
+# The reason goes through `logger` and not to stderr, because this unit sends
+# StandardOutput to a file and inherits StandardError into it. An `echo` here
+# therefore lands at the end of a 2.7MB kodi-stdout.log rather than in the
+# journal — which is another way of saying nothing, when the thing being fixed
+# is a failure nobody was told about. `systemctl status kodi` must carry it.
+ExecStartPre=/bin/sh -c 'test -f "$KODI_HOME/system/settings/settings.xml" || { /usr/bin/logger -t kodi.service -p daemon.err "Kodi veri ağacı yok, oynatıcı başlatılmıyor: $KODI_HOME"; exit 1; }'
 ExecStart=/opt/rk3588-mediabox/kodi/lib/kodi/kodi-gbm --standalone --debug
 # Whatever ends Kodi, the television does not end with it: if nothing else has
 # taken the display by then, the interface is brought back. Without this the
