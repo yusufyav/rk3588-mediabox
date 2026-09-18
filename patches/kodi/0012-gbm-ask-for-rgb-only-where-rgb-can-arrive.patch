@@ -1,0 +1,179 @@
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index 5c7eaea..07f95cd 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -487,14 +487,34 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+   // this runs before the video plane is released, so the plane still reports a
+   // YUV format and the GUI would be left on the YCbCr link it no longer needs.
+   const bool yuvVideo = videoPicture && IsDirectToPlaneYuvScanout();
+-  // Ask for RGB whatever the video plane carries. This driver answers a
+-  // ten-bit BT.2020 request by dropping the link to YCbCr 4:2:2, and the
+-  // picture then arrives with its colours collapsed to red and blue. Asking
+-  // for RGB costs nothing measurable -- the display engine converts the plane
+-  // either way -- and keeps full chroma. Bisected against a 4K HDR10 clip on
+-  // 6.1.172; docs/platform/custom-runtime.md has the chain of eliminations and
+-  // why the original line is right on the golden kernel.
+-  const std::optional<bool> rgbOutput = RequestRgbOutput(true);
++  // Ask for RGB where RGB can actually arrive, and not otherwise.
++  //
++  // Asking for it unconditionally was right on the sink this was bisected
++  // against and wrong on the next one. A Sony KD-65XE9005 declares its HDMI 1
++  // a 300 MHz port and its HDMI 3 a 600 MHz one, on the same set. This
++  // appliance holds ten bits (see SetHDR below), and ten-bit RGB at 4K24 is
++  // 371 MHz: over the first of those, under the second.
++  //
++  // Over it, nothing fails. The driver keeps the depth, gives up the chroma,
++  // and transmits 4:2:2 -- and does not write that back to `color_format`, so
++  // nothing downstream can observe it. The tag below is then derived from what
++  // was asked for, the sink is told BT.2020 RGB, and it decodes YCbCr pixels
++  // with an RGB matrix. That is what "HDR is broken on HDMI 1" was: not the
++  // cable, not the port, not the kernel. A signal described as something it
++  // is not.
++  //
++  // So the question asked here is whether RGB can arrive, which is a question
++  // about the link and not about the content. If it cannot, YCbCr is requested
++  // instead and the tag follows it honestly -- the wire carries what it was
++  // always going to carry, and the sink is finally told the truth about it.
++  //
++  // The vendor Android stack on this hardware reaches the same answer from the
++  // same two EDIDs, and mediabox-platform's `color-modes` prints it:
++  // 4:2:2 12-bit is what fits a 4K HDR film down a 300 MHz port.
++  const bool rgbFits = RgbLinkFits(10);
++  if (!rgbFits)
++    CLog::LogF(LOGDEBUG, "RGB does not fit this link at this mode; asking for YCbCr");
++  const std::optional<bool> rgbOutput = RequestRgbOutput(rgbFits);
+ 
+   // What the link will carry. Prefer what was just asked for; fall back to
+   // observing the driver, and only then to guessing from the plane.
+@@ -724,6 +744,91 @@ std::optional<bool> CWinSystemGbm::RequestRgbOutput(bool wantRgb)
+   return wanted.value() == rgb.value();
+ }
+ 
++std::optional<int> CWinSystemGbm::SinkMaxCharacterRateKHz() const
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return {};
++
++  auto connector = drm->GetConnector();
++  if (!connector)
++    return {};
++
++  const std::vector<uint8_t> edid = connector->GetEDID();
++  if (edid.size() < 128 || edid[0] != 0x00 || edid[1] != 0xFF)
++    return {};
++
++  std::optional<int> rate;
++  // Walk the CTA-861 extension blocks' data block collections. Two vendor
++  // blocks carry a ceiling: the HDMI 1.4 one, and the HDMI Forum one that
++  // supersedes it. A 2.0 sink leaves a value in the older field that a 1.4
++  // source can live with, so the Forum block wins wherever it appears.
++  for (size_t block = 128; block + 128 <= edid.size(); block += 128)
++  {
++    const uint8_t* cta = &edid[block];
++    if (cta[0] != 0x02)
++      continue;
++    const size_t dtd = cta[2];
++    if (dtd < 4 || dtd > 127)
++      continue;
++    size_t at = 4;
++    while (at < dtd)
++    {
++      const size_t len = cta[at] & 0x1F;
++      const size_t tag = cta[at] >> 5;
++      const size_t end = at + 1 + len;
++      if (len == 0 || end > dtd)
++        break;
++      const uint8_t* payload = &cta[at + 1];
++      if (tag == 3 && len >= 3)
++      {
++        // HDMI 1.4: OUI 00-0C-03, then two bytes of source physical address,
++        // the deep colour flags, and the maximum TMDS clock in units of 5 MHz.
++        if (payload[0] == 0x03 && payload[1] == 0x0C && payload[2] == 0x00 && len >= 7 &&
++            payload[6] != 0 && !rate)
++          rate = payload[6] * 5000;
++        // HDMI Forum: OUI C4-5D-D8, a version byte, then the maximum character
++        // rate in the same units.
++        if (payload[0] == 0xD8 && payload[1] == 0x5D && payload[2] == 0xC4 && len >= 5 &&
++            payload[4] != 0)
++          rate = payload[4] * 5000;
++      }
++      at = end;
++    }
++  }
++  return rate;
++}
++
++bool CWinSystemGbm::RgbLinkFits(int bpc) const
++{
++  const std::optional<int> ceiling = SinkMaxCharacterRateKHz();
++  if (!ceiling)
++  {
++    // A sink that declared nothing is not a sink that declared a narrow link.
++    // A DVI monitor with no CTA extension at all takes RGB and nothing else,
++    // and switching it to YCbCr on the strength of a missing byte would break
++    // a display this has no evidence about. Behaviour is unchanged there.
++    return true;
++  }
++
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return true;
++
++  const int clock = drm->GetCurrentModeClockKHz();
++  if (clock <= 0)
++    return true;
++
++  // RGB and 4:4:4 carry every component of every pixel, so depth costs rate in
++  // proportion. (4:2:2 is the one that does not, which is exactly why it is
++  // where a deep-colour link ends up when there is no room for RGB.)
++  const int64_t needed = static_cast<int64_t>(clock) * bpc / 8;
++  const bool fits = needed <= *ceiling;
++  CLog::LogF(LOGDEBUG, "RGB {}-bit at {} kHz needs {} kHz, sink accepts {} kHz: {}", bpc, clock,
++             needed, *ceiling, fits ? "fits" : "does not fit");
++  return fits;
++}
++
+ bool CWinSystemGbm::IsHdOrLargerMode() const
+ {
+   auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+index c28f32c..96ce6a9 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -96,6 +96,16 @@ public:
+   // case the caller must fall back to observing rather than choosing.
+   std::optional<bool> RequestRgbOutput(bool wantRgb);
+ 
++  // The fastest signal the sink said it can receive, in kHz, read out of its
++  // EDID. Empty when the sink declared none, which is not the same as a slow
++  // sink and is not treated as one.
++  std::optional<int> SinkMaxCharacterRateKHz() const;
++
++  // Whether an RGB link at `bpc` bits per component fits inside what the sink
++  // declared, at the mode currently set. True when the sink declared no limit:
++  // a missing declaration is not evidence of a narrow link.
++  bool RgbLinkFits(int bpc) const;
++
+   // A connector property's CURRENT value, read from the kernel rather than
+   // from CDRMObject's cache, which only tracks values Kodi itself set.
+   std::optional<uint64_t> ReadLiveConnectorProperty(const char* name) const;
+diff --git a/xbmc/windowing/gbm/drm/DRMUtils.h b/xbmc/windowing/gbm/drm/DRMUtils.h
+index db4d756..558cf86 100644
+--- a/xbmc/windowing/gbm/drm/DRMUtils.h
++++ b/xbmc/windowing/gbm/drm/DRMUtils.h
+@@ -79,6 +79,14 @@ public:
+ 
+   std::vector<std::string> GetConnectedConnectorNames();
+ 
++  // The pixel clock of the mode currently set, in kHz.
++  //
++  // RESOLUTION_INFO carries a refresh rate and not a clock, and a link budget
++  // is decided on the clock: what may be put on the wire is the mode's pixel
++  // rate scaled by the pixel format, compared against what the sink said it can
++  // receive. Zero when no mode is set yet.
++  int GetCurrentModeClockKHz() const { return m_mode ? m_mode->clock : 0; }
++
+   virtual RESOLUTION_INFO GetCurrentMode();
+   virtual std::vector<RESOLUTION_INFO> GetModes();
+   virtual bool SetMode(const RESOLUTION_INFO& res);

@@ -591,6 +591,30 @@ contains "and gates staging leftovers"         "$capture"  'staging leftovers'
 # needs it is a verifier that cannot run on a clean board.
 lacks "the verifier needs no binutils"         "$verifier" 'strings -a'
 
+echo "-- the player asks for a link the sink can actually receive"
+# The defect this guards: ten-bit RGB does not fit a 300 MHz HDMI port at 4K,
+# the vendor driver silently subsamples to 4:2:2 and does not write the
+# negotiated format back, and a player that tags the wire from its own request
+# then tells the television RGB over YCbCr pixels. Measured on a Sony
+# KD-65XE9005, whose HDMI 1 and HDMI 3 declare 300 and 600 MHz respectively.
+rgb_patch="$here/patches/kodi/0012-gbm-ask-for-rgb-only-where-rgb-can-arrive.patch"
+if [ -f "$rgb_patch" ]; then
+  patch_text="$(cat "$rgb_patch")"
+  contains "the RGB request is conditional"      "$patch_text" 'RequestRgbOutput(rgbFits)'
+  contains "and the condition is the link budget" "$patch_text" 'RgbLinkFits(10)'
+  contains "the ceiling comes from the EDID"      "$patch_text" 'SinkMaxCharacterRateKHz'
+  contains "the HDMI Forum block wins"            "$patch_text" '0xD8 && payload[1] == 0x5D'
+  contains "the mode carries its own clock"       "$patch_text" 'GetCurrentModeClockKHz'
+  # A sink that declares nothing must keep the old behaviour: a DVI monitor
+  # takes RGB and nothing else, and a missing byte is not evidence.
+  contains "an undeclared ceiling stays on RGB"   "$patch_text" 'is not a sink that declared a narrow link'
+  # And the unconditional request it replaces must be gone.
+  lacks "no unconditional RGB request"            "$patch_text" '+  const std::optional<bool> rgbOutput = RequestRgbOutput(true);'
+else
+  echo "FAIL patches/kodi/0012 is missing"
+  failures=$((failures + 1))
+fi
+
 echo "-- the archive can be checked on the image the product is installed on"
 # A clean Armbian Minimal carries no binutils, and the archive is verified
 # before the runtime packages are installed, so the verifier had better not
