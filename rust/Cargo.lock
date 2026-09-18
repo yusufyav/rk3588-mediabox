@@ -488,6 +488,7 @@ dependencies = [
 name = "mediabox-platform"
 version = "0.1.0"
 dependencies = [
+ "mediabox-core",
  "serde",
  "serde_json",
  "tempfile",

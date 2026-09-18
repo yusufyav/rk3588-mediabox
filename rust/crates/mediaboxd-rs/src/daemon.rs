@@ -1,4 +1,5 @@
 use crate::kodi::KodiClient;
+use crate::display::DisplayColor;
 use crate::leds::LedController;
 use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
@@ -47,6 +48,11 @@ pub struct AppState {
     /// because `/sys/class/leds` is root's, and the unit that draws the
     /// television mounts /sys read-only.
     pub leds: LedController,
+    /// What the television can be sent, and what a person chose to send it.
+    /// Measured from the connected sink's EDID; here rather than in the
+    /// interface because that unit mounts /sys read-only and cannot read an
+    /// EDID back after a hotplug.
+    pub display_color: DisplayColor,
 }
 
 impl AppState {
@@ -87,6 +93,17 @@ impl AppState {
             Request::LedsSet { mode } => match self.leds.set(mode) {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("LED_ERROR", error),
+            },
+            Request::DisplayColorModes => {
+                // Measured on every call rather than cached: the answer changes
+                // when somebody moves the cable to another socket, and the two
+                // sockets of one television do not answer the same.
+                let colour = self.display_color.status();
+                Response::success(colour)
+            }
+            Request::DisplayColorModeSet { choice } => match self.display_color.set(choice) {
+                Ok(()) => Response::success(self.display_color.status()),
+                Err(error) => Response::failure("DISPLAY_COLOR_ERROR", error),
             },
             Request::MediaStatus => media_result(self.media.status().await),
             Request::MediaCapabilities => media_result(self.media.capabilities().await),
@@ -795,6 +812,7 @@ mod tests {
             // Pointed at the empty temporary directory, so the test never
             // reaches the machine's own sysfs and reports no lights.
             leds: LedController::new(dir.path(), dir.path().join("leds")),
+            display_color: DisplayColor::new(dir.path().join("color-mode")),
             applications: ApplicationManager::load(
                 None,
                 "kodi.service",

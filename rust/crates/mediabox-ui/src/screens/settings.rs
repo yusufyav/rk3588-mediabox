@@ -17,7 +17,7 @@ use crate::components::{
 use crate::model::SystemStatus;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const TABS: [(&str, &str); 9] = [
     ("account", "Hesap"),
@@ -658,6 +658,224 @@ fn Display(vitals: Option<Value>) -> impl IntoView {
                             let tone = if status == "connected" { "ok" } else { "" };
                             view! {
                                 <Row label=name value=format!("{status} · {mode}") tone=tone />
+                            }
+                        })
+                        .collect_view()}
+                </div>
+            }
+                .into_any()
+        }}
+        <ColorModes />
+    }
+}
+
+/// The colour mode the television is sent, and the list it may be chosen from.
+///
+/// The list is not a fixed menu. It is computed from the sink's own EDID and
+/// the mode in question, because those two together decide what the link can
+/// actually carry -- and they are not the same on two sockets of one set. A
+/// Sony KD-65XE9005 reports HDMI 1 as a 300 MHz port and HDMI 3 as a 600 MHz
+/// one: at 4K60 the first of those can be sent nothing but YCbCr420 8-bit,
+/// which is why an "HDR" badge over that picture would be a lie, and the panel
+/// says so on the row rather than offering the choice.
+///
+/// `Otomatik` is the answer nobody has to think about: the deepest colour the
+/// link can carry when there is HDR to carry, the fullest chroma otherwise. A
+/// fixed choice is here because a sink occasionally behaves better on something
+/// other than the measured best, and the person watching is the one who can see
+/// that.
+#[component]
+fn ColorModes() -> impl IntoView {
+    let toaster = expect_context::<Toaster>();
+    let state = RwSignal::new(None::<Value>);
+    let busy = RwSignal::new(false);
+
+    let refresh = move || {
+        spawn_local(async move {
+            match api::control(api::display_color_modes()).await {
+                Ok(value) => state.set(Some(value)),
+                Err(error) => state.set(Some(json!({
+                    "available": false,
+                    "error": error.to_string(),
+                }))),
+            }
+        });
+    };
+    refresh();
+
+    let choose = move |format: Option<(&'static str, u8)>| {
+        if busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            let result = api::control(api::display_color_mode_set(format)).await;
+            busy.set(false);
+            match result {
+                Ok(value) => {
+                    state.set(Some(value));
+                    toaster.say("Renk modu kaydedildi");
+                }
+                Err(error) => toaster.warn(format!("Renk modu ayarlanamadı: {error}")),
+            }
+        });
+    };
+
+    view! {
+        <h3>"Renk modu"</h3>
+        <p class="panel-note">
+            "Liste televizyonun EDID'inden ölçülür: her mod için bağlantının taşıyabildiği \
+             biçimler. Aynı televizyonun iki girişi aynı cevabı vermez — bir giriş 4K60'ta \
+             yalnız 8 bit taşıyorsa orada HDR sunulmaz, çünkü 8 bitlik HDR bant yapar."
+        </p>
+        {move || {
+            let Some(value) = state.get() else {
+                return view! { <div class="state"><strong>"Okunuyor…"</strong></div> }
+                    .into_any();
+            };
+            if !value.get("available").and_then(Value::as_bool).unwrap_or(false) {
+                let why = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Bağlı bir ekran yok.")
+                    .to_string();
+                return missing("Renk modu okunamadı", &why).into_any();
+            }
+            let current = value
+                .pointer("/choice/kind")
+                .and_then(Value::as_str)
+                .unwrap_or("auto")
+                .to_string();
+            let current_format = value
+                .pointer("/choice/format")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let current_bits = value
+                .pointer("/choice/bits")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u8;
+            let connector = value
+                .get("connector")
+                .and_then(Value::as_str)
+                .unwrap_or("—")
+                .to_string();
+            let sink = value
+                .get("sink")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let ceiling = value
+                .get("max_character_rate_khz")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let declared = value
+                .get("rate_is_declared")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let timings = value
+                .get("timings")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+
+            // Every format/depth pair that any listed timing can carry. A
+            // person chooses one setting, not one per mode, so the choices are
+            // the union -- and each row then says where it applies.
+            let mut choices: Vec<(String, String, u8)> = Vec::new();
+            for timing in &timings {
+                for option in timing.get("allowed").and_then(Value::as_array).into_iter().flatten() {
+                    let label = option.get("label").and_then(Value::as_str).unwrap_or("").to_string();
+                    let format = option
+                        .pointer("/mode/format")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let bits = option.pointer("/mode/bits").and_then(Value::as_u64).unwrap_or(0) as u8;
+                    if !label.is_empty() && !choices.iter().any(|(_, f, b)| *f == format && *b == bits) {
+                        choices.push((label, format, bits));
+                    }
+                }
+            }
+
+            view! {
+                <div class="rows">
+                    <Row
+                        label="Bağlayıcı".to_string()
+                        value=if sink.is_empty() { connector.clone() } else { format!("{connector} · {sink}") }
+                    />
+                    <Row
+                        label="Bağlantı tavanı".to_string()
+                        value=format!(
+                            "{} MHz{}",
+                            ceiling / 1000,
+                            if declared { "" } else { " (bildirilmedi, taban varsayıldı)" },
+                        )
+                        tone=if declared { "ok" } else { "" }
+                    />
+                    <Row label="Seçili".to_string() value=if current == "auto" {
+                        "Otomatik".to_string()
+                    } else {
+                        format!("{current_format} {current_bits}bit")
+                    } />
+                </div>
+
+                <h3>"Modlara göre"</h3>
+                <div class="rows">
+                    {timings
+                        .iter()
+                        .map(|timing| {
+                            let label = timing.get("label").and_then(Value::as_str).unwrap_or("?").to_string();
+                            let hdr = timing.get("hdr10_fits").and_then(Value::as_bool).unwrap_or(false);
+                            let allowed: Vec<String> = timing
+                                .get("allowed")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|option| {
+                                    option.get("label").and_then(Value::as_str).map(str::to_string)
+                                })
+                                .collect();
+                            view! {
+                                <Row
+                                    label=label
+                                    value=format!(
+                                        "{}{}",
+                                        allowed.join(", "),
+                                        if hdr { "  · HDR10" } else { "  · HDR yok" },
+                                    )
+                                    tone=if hdr { "ok" } else { "" }
+                                />
+                            }
+                        })
+                        .collect_view()}
+                </div>
+
+                <h3>"Seçim"</h3>
+                <div class="actions">
+                    <Action
+                        label="Otomatik".to_string()
+                        variant=if current == "auto" { "primary".to_string() } else { String::new() }
+                        disabled=Signal::derive(move || busy.get())
+                        on_press=Callback::new(move |()| choose(None))
+                    />
+                    {choices
+                        .into_iter()
+                        .map(|(label, format, bits)| {
+                            let selected = current == "fixed"
+                                && current_format == format
+                                && current_bits == bits;
+                            // Leaked so the callback can hold a 'static name;
+                            // there are at most a dozen and they live as long
+                            // as the screen does.
+                            let format: &'static str = Box::leak(format.into_boxed_str());
+                            view! {
+                                <Action
+                                    label=label
+                                    variant=if selected { "primary".to_string() } else { String::new() }
+                                    disabled=Signal::derive(move || busy.get())
+                                    on_press=Callback::new(move |()| choose(Some((format, bits))))
+                                />
                             }
                         })
                         .collect_view()}

@@ -150,6 +150,167 @@ pub struct SurfaceStatus {
 /// A person watching a film in a dark room is the reason this is a setting at
 /// all: a pulsing light beside the television is the one part of an appliance
 /// that draws the eye away from it.
+/// What the television should be sent, as a person has decided it.
+///
+/// `Auto` is the product's answer and the one nobody has to think about: the
+/// deepest colour the link can carry for HDR, the fullest chroma for everything
+/// else. A fixed choice exists because a sink sometimes lies about what it
+/// likes, and the person watching is the one who can see it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ColorChoice {
+    #[default]
+    Auto,
+    Fixed {
+        format: ColorFormat,
+        bits: u8,
+    },
+}
+
+impl ColorChoice {
+    pub fn mode(self) -> Option<ColorMode> {
+        match self {
+            ColorChoice::Auto => None,
+            ColorChoice::Fixed { format, bits } => Some(ColorMode { format, bits }),
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self.mode() {
+            None => "Otomatik".to_string(),
+            Some(mode) => mode.label(),
+        }
+    }
+}
+
+/// One entry of the colour mode list, ready to draw.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColorModeOption {
+    pub mode: ColorMode,
+    pub label: String,
+    /// What this mode costs on the wire at the timing it was computed for.
+    pub character_rate_khz: u32,
+    /// Whether HDR10 can be carried in it.
+    pub carries_hdr: bool,
+}
+
+/// One timing the sink lists, and what may be sent at it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimingOption {
+    pub label: String,
+    pub width: u16,
+    pub height: u16,
+    pub refresh_mhz: u32,
+    pub pixel_clock_khz: u32,
+    pub allowed: Vec<ColorModeOption>,
+    /// Whether HDR10 is both declared by the sink and carryable here.
+    pub hdr10_fits: bool,
+    pub auto_sdr: Option<ColorMode>,
+    pub auto_hdr: Option<ColorMode>,
+}
+
+/// What the television can be sent, measured, and what it has been told to be
+/// sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayColorStatus {
+    /// False when there is no connected output or no readable EDID. The setting
+    /// then says why instead of offering a choice that would do nothing.
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sink: Option<String>,
+    /// The fastest signal this port accepts, in kHz.
+    pub max_character_rate_khz: u32,
+    /// Whether that ceiling was declared by the sink or is the assumed floor.
+    pub rate_is_declared: bool,
+    pub st2084: bool,
+    pub hlg: bool,
+    pub choice: ColorChoice,
+    /// One entry per timing the sink lists, largest first.
+    pub timings: Vec<TimingOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------- the wire
+//
+// What a television is sent, as a vocabulary the daemon, the control client and
+// the interface all share. The measuring lives in `mediabox-platform`; these
+// are the words it reports in.
+
+/// How the pixels are laid out on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorFormat {
+    Rgb,
+    Ycbcr444,
+    Ycbcr422,
+    Ycbcr420,
+}
+
+impl ColorFormat {
+    /// The name the vendor stacks use, and the one worth showing a person.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorFormat::Rgb => "RGB",
+            ColorFormat::Ycbcr444 => "YCbCr444",
+            ColorFormat::Ycbcr422 => "YCbCr422",
+            ColorFormat::Ycbcr420 => "YCbCr420",
+        }
+    }
+}
+
+/// One pixel format at one bit depth: what a sink advertises, and what a link
+/// is asked to carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColorMode {
+    pub format: ColorFormat,
+    /// Bits per component: 8, 10 or 12.
+    pub bits: u8,
+}
+
+impl ColorMode {
+    pub const fn new(format: ColorFormat, bits: u8) -> Self {
+        Self { format, bits }
+    }
+
+    /// `YCbCr422 12bit` — the same spelling the vendor box shows.
+    pub fn label(self) -> String {
+        format!("{} {}bit", self.format.label(), self.bits)
+    }
+
+    /// The TMDS character rate this mode needs, in kHz, for a given pixel
+    /// clock.
+    ///
+    /// RGB and 4:4:4 carry every component for every pixel, so deep colour
+    /// costs bandwidth in proportion: 10 bits is a quarter more than 8. 4:2:0
+    /// halves the horizontal chroma and so halves the rate before that. 4:2:2
+    /// is the exception and the reason it exists here at all -- it is carried
+    /// in a fixed-width channel, so 12 bits of it costs exactly what 8 bits of
+    /// it does, which is what makes HDR fit down a link that cannot take deep
+    /// colour any other way.
+    pub fn character_rate_khz(self, pixel_clock_khz: u32) -> u32 {
+        let clock = u64::from(pixel_clock_khz);
+        let rate = match self.format {
+            ColorFormat::Ycbcr422 => clock,
+            ColorFormat::Ycbcr420 => clock * u64::from(self.bits) / 16,
+            ColorFormat::Rgb | ColorFormat::Ycbcr444 => clock * u64::from(self.bits) / 8,
+        };
+        rate.min(u64::from(u32::MAX)) as u32
+    }
+
+    /// Whether this mode can carry HDR10 without banding.
+    ///
+    /// Eight bits cannot. An HDR10 gradient quantised to 8 bits bands visibly,
+    /// and a product that lit up an "HDR" badge over that picture would be
+    /// claiming a capability it does not have.
+    pub fn carries_hdr(self) -> bool {
+        self.bits >= 10
+    }
+}
+
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LedMode {
@@ -349,6 +510,15 @@ pub enum Request {
     /// interface runs under a unit that mounts /sys read-only.
     LedsSet {
         mode: LedMode,
+    },
+    /// What the television can be sent, measured from its EDID, and what it
+    /// has been told to be sent.
+    DisplayColorModes,
+    /// Remember a colour mode choice across boots. The daemon owns this for the
+    /// same reason it owns the indicator lights: the interface's unit mounts
+    /// /sys read-only and the state directory is the daemon's.
+    DisplayColorModeSet {
+        choice: ColorChoice,
     },
     MediaStatus,
     MediaCapabilities,

@@ -1,3 +1,4 @@
+pub mod display;
 pub mod daemon;
 pub mod kodi;
 pub mod leds;

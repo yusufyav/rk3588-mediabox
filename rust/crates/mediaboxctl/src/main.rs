@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use mediabox_core::{Request, Response, Surface};
+use mediabox_core::{ColorChoice, ColorFormat, Request, Response, Surface};
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
@@ -49,6 +49,48 @@ enum Command {
         #[command(subcommand)]
         command: DisplayOwnerCommand,
     },
+    /// What the television can be sent, measured from its EDID
+    DisplayColor {
+        #[command(subcommand)]
+        command: DisplayColorCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DisplayColorCommand {
+    /// Every timing the sink lists, with the colour modes the link can carry
+    Modes,
+    /// Fix the colour mode, or go back to the measured default
+    Set {
+        #[arg(value_enum)]
+        format: ColorFormatArg,
+        /// Bits per component. Ignored for `auto`.
+        #[arg(default_value_t = 12)]
+        bits: u8,
+    },
+}
+
+/// The formats a person may name, plus the one that means "decide for me".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ColorFormatArg {
+    Auto,
+    Rgb,
+    Ycbcr444,
+    Ycbcr422,
+    Ycbcr420,
+}
+
+impl ColorFormatArg {
+    fn choice(self, bits: u8) -> ColorChoice {
+        let format = match self {
+            ColorFormatArg::Auto => return ColorChoice::Auto,
+            ColorFormatArg::Rgb => ColorFormat::Rgb,
+            ColorFormatArg::Ycbcr444 => ColorFormat::Ycbcr444,
+            ColorFormatArg::Ycbcr422 => ColorFormat::Ycbcr422,
+            ColorFormatArg::Ycbcr420 => ColorFormat::Ycbcr420,
+        };
+        ColorChoice::Fixed { format, bits }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -254,6 +296,12 @@ fn to_request(command: &Command) -> Request {
             SurfaceCommand::Status => Request::SurfaceStatus,
             SurfaceCommand::Switch { target } => Request::SurfaceSwitch {
                 target: (*target).into(),
+            },
+        },
+        Command::DisplayColor { command } => match command {
+            DisplayColorCommand::Modes => Request::DisplayColorModes,
+            DisplayColorCommand::Set { format, bits } => Request::DisplayColorModeSet {
+                choice: format.choice(*bits),
             },
         },
         Command::DisplayOwner { command } => match command {

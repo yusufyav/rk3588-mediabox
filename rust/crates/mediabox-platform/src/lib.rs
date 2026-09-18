@@ -32,6 +32,7 @@ pub mod cec;
 pub mod drm;
 pub mod dt;
 pub mod roots;
+pub mod video;
 
 use std::path::PathBuf;
 
@@ -41,6 +42,7 @@ pub use audio::AudioEndpoint;
 pub use cec::CecAdapter;
 pub use drm::{Connector, ConnectorKind, Controller, DrmNode, SinkIdentity};
 pub use roots::Roots;
+pub use video::{ColorFormat, ColorMode, SinkVideo, parse_sink_video};
 
 /// The file, inside the daemon's state directory, that remembers which output
 /// a person chose. One line: a connector name, a sink name, or `auto`.

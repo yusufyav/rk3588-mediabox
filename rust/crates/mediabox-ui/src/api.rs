@@ -123,6 +123,20 @@ pub fn diagnostics() -> Value {
     json!({"command": "diagnostics"})
 }
 
+/// What the television can be sent, measured from its EDID.
+pub fn display_color_modes() -> Value {
+    json!({"command": "display_color_modes"})
+}
+
+/// Fix the colour mode, or `None` to go back to the measured default.
+pub fn display_color_mode_set(format: Option<(&str, u8)>) -> Value {
+    let choice = match format {
+        None => json!({"kind": "auto"}),
+        Some((format, bits)) => json!({"kind": "fixed", "format": format, "bits": bits}),
+    };
+    json!({"command": "display_color_mode_set", "choice": choice})
+}
+
 pub fn media_home() -> Value {
     json!({"command": "media_home"})
 }
