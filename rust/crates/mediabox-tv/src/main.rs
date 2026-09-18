@@ -134,6 +134,10 @@ struct App {
     /// a poll that was already in flight when the press happened is ignored
     /// for this one field: it cannot know about a choice made after it left.
     leds_pending: Option<mediabox_core::LedMode>,
+    /// The colour mode a press chose, kept until the daemon answers. Without
+    /// it a poll that left before the press would redraw the old value for a
+    /// frame.
+    color_mode_pending: Option<Option<(mediabox_core::ColorFormat, u8)>>,
 
     /// Whether the film's controls were up when the key being acted on was
     /// pressed. Read only by Back; see there.
@@ -441,6 +445,38 @@ impl App {
     /// Whatever it says is what the row shows, including a refusal: a board
     /// that would not take the write must not be left displaying the mode
     /// somebody asked for.
+    /// Draw the chosen colour mode now, on this frame, before the daemon has
+    /// answered. The same trick the lights use.
+    fn show_color_mode(&mut self, mode: Option<(mediabox_core::ColorFormat, u8)>) {
+        let choice = match mode {
+            None => serde_json::json!({"kind": "auto"}),
+            Some((format, bits)) => serde_json::json!({
+                "kind": "fixed",
+                "format": serde_json::to_value(format).unwrap_or(Value::Null),
+                "bits": bits,
+            }),
+        };
+        if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+            if let Some(colour) = status
+                .get_mut("display_color")
+                .and_then(Value::as_object_mut)
+            {
+                colour.insert("choice".into(), choice);
+            }
+        }
+        self.recompose_settings();
+    }
+
+    fn color_mode_answered(&mut self, answer: Option<Value>) {
+        self.color_mode_pending = None;
+        if let Some(colour) = answer {
+            if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                status.insert("display_color".into(), colour);
+            }
+        }
+        self.recompose_settings();
+    }
+
     fn leds_answered(&mut self, answer: Option<Value>) {
         self.leds_pending = None;
         if let Some(leds) = answer {
@@ -1332,6 +1368,14 @@ impl App {
                 self.show_leds(mode);
                 spawn_leds(mode);
             }
+            Action::SetColorMode(mode) => {
+                // Same shape as the lights: the row already shows where the
+                // press moved it, so there is nothing to say along the bottom.
+                self.clear_notice();
+                self.color_mode_pending = Some(mode);
+                self.show_color_mode(mode);
+                spawn_color_mode(mode);
+            }
             Action::WakeTelevision => {
                 self.say("Televizyon uyandırılıyor…".into());
                 spawn_kodi(KodiCommand::WakeTelevision);
@@ -1423,6 +1467,16 @@ impl App {
             // A poll that left before the viewer pressed Ok cannot know what
             // was pressed. Keep the chosen mode until the daemon answers, or
             // the row would show the old value again for one frame.
+            if self.color_mode_pending.is_some() {
+                let kept = self
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.get("display_color"))
+                    .cloned();
+                if let (Some(kept), Some(fresh)) = (kept, fresh.as_object_mut()) {
+                    fresh.insert("display_color".into(), kept);
+                }
+            }
             if self.leds_pending.is_some() {
                 let kept = self
                     .status
@@ -2251,6 +2305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: None,
         diag: None,
         leds_pending: None,
+        color_mode_pending: None,
         display: None,
         controls_were_open: false,
         handing_over: false,
@@ -2810,6 +2865,22 @@ fn spawn_home_reload() {
 /// a board with no controllable lights, an unwritable sysfs — has to put the
 /// row back rather than leave the chosen mode sitting there as though it had
 /// worked.
+fn spawn_color_mode(mode: Option<(mediabox_core::ColorFormat, u8)>) {
+    detached("mediabox-tv-color-mode", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match client.display_color_mode_set(mode).await {
+            Ok(status) => Some(status),
+            Err(error) => {
+                eprintln!("mediabox-tv.color-mode failed: {error}");
+                None
+            }
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.color_mode_answered(answer));
+        });
+    });
+}
+
 fn spawn_leds(mode: mediabox_core::LedMode) {
     detached("mediabox-tv-leds", async move {
         let client = rpc::Client::new(socket_path());

@@ -548,6 +548,9 @@ echo "-- the Kodi seed carries what was measured on the board, not defaults"
 contains "the display mode whitelist" "$profile" '<setting id="videoscreen.whitelist">'
 contains "the screen resolution"      "$profile" '<setting id="videoscreen.resolution">'
 contains "direct-to-plane rendering"  "$profile" '<setting id="videoplayer.useprimerenderer">0'
+# The timing is what every picture decision is made against: what the link can
+# carry, and so whether HDR is signalled, is a per-mode answer.
+contains "the film's own mode is selected" "$profile" '<setting id="videoplayer.adjustrefreshrate">2'
 contains "AC-3 transcoding on"        "$profile" '<setting id="audiooutput.ac3transcode">true'
 contains "E-AC-3 passthrough off"     "$profile" '<setting id="audiooutput.eac3passthrough">false'
 contains "DTS passthrough off"        "$profile" '<setting id="audiooutput.dtspassthrough">false'
@@ -597,7 +600,7 @@ echo "-- the player asks for a link the sink can actually receive"
 # negotiated format back, and a player that tags the wire from its own request
 # then tells the television RGB over YCbCr pixels. Measured on a Sony
 # KD-65XE9005, whose HDMI 1 and HDMI 3 declare 300 and 600 MHz respectively.
-rgb_patch="$here/patches/kodi/0012-gbm-ask-for-rgb-only-where-rgb-can-arrive.patch"
+rgb_patch="$here/patches/kodi/0012-gbm-signal-hdr-only-where-the-link-can-carry-it.patch"
 if [ -f "$rgb_patch" ]; then
   patch_text="$(cat "$rgb_patch")"
   contains "the RGB request is conditional"      "$patch_text" 'RequestRgbOutput(rgbFits)'
@@ -608,6 +611,13 @@ if [ -f "$rgb_patch" ]; then
   # A sink that declares nothing must keep the old behaviour: a DVI monitor
   # takes RGB and nothing else, and a missing byte is not evidence.
   contains "an undeclared ceiling stays on RGB"   "$patch_text" 'is not a sink that declared a narrow link'
+  # The fix is not the tag, it is the transport: where HDR cannot be carried
+  # the whole BT.2020 signal is given up, the depth drops to eight, and the
+  # link stays RGB. Measured on a Sony KD-65XE9005 HDMI 1, where 4:2:2 renders
+  # HDR wrong whatever it is labelled.
+  contains "HDR is declined where it cannot be carried" "$patch_text" 'HdrLinkFits'
+  contains "and the colorimetry drops with it"          "$patch_text" 'transmitting BT.709 SDR'
+  contains "and so does the depth"                      "$patch_text" 'SetDeepColor(false)'
   # And the unconditional request it replaces must be gone.
   lacks "no unconditional RGB request"            "$patch_text" '+  const std::optional<bool> rgbOutput = RequestRgbOutput(true);'
 else

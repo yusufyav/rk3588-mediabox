@@ -300,13 +300,29 @@ impl ColorMode {
         rate.min(u64::from(u32::MAX)) as u32
     }
 
-    /// Whether this mode can carry HDR10 without banding.
+    /// Whether this mode can carry HDR10 on this hardware.
     ///
-    /// Eight bits cannot. An HDR10 gradient quantised to 8 bits bands visibly,
-    /// and a product that lit up an "HDR" badge over that picture would be
-    /// claiming a capability it does not have.
+    /// Two conditions, and the second is a platform fault rather than a fact
+    /// about HDMI.
+    ///
+    /// Eight bits cannot: an HDR10 gradient quantised to 8 bits bands visibly,
+    /// and a product that lit an "HDR" badge over that picture would be
+    /// claiming something it does not have.
+    ///
+    /// Neither can 4:2:2, here. The RK3588 vendor display driver gets HDR over
+    /// a 4:2:2 link wrong -- the picture comes back with its colours collapsed,
+    /// which is what `patches/kodi/0011` was written to steer around. Measured
+    /// again on 2026-09-18 on a Sony KD-65XE9005: at 4K the link can only be
+    /// 4:2:2 and HDR is wrong, at 1080p it comes up RGB 10-bit and HDR is
+    /// correct, on the same port, same cable, same film. The colorimetry tag
+    /// was tried both ways and changed nothing, so this is the transport and
+    /// not the signalling.
+    ///
+    /// It is not true of HDMI: the vendor Android stack on the same television
+    /// sends HDR10 as 4:2:2 12-bit and it is correct. It is true of this
+    /// driver, so it is what this product has to plan around.
     pub fn carries_hdr(self) -> bool {
-        self.bits >= 10
+        self.bits >= 10 && self.format != ColorFormat::Ycbcr422
     }
 }
 
@@ -480,6 +496,12 @@ pub struct SystemStatus {
     pub surface: SurfaceStatus,
     #[serde(default)]
     pub leds: LedStatus,
+    /// What the television can be sent, measured from its EDID, and what it
+    /// was told to send. Here rather than behind its own call because the
+    /// settings screen draws it beside everything else and one poll is one
+    /// answer.
+    #[serde(default)]
+    pub display_color: DisplayColorStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

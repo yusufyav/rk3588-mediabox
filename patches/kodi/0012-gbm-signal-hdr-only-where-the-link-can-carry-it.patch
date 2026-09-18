@@ -1,8 +1,8 @@
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
-index 5c7eaea..07f95cd 100644
+index 5c7eaea..b35bb2c 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
-@@ -487,14 +487,34 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+@@ -487,14 +487,51 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
    // this runs before the video plane is released, so the plane still reports a
    // YUV format and the GUI would be left on the YCbCr link it no longer needs.
    const bool yuvVideo = videoPicture && IsDirectToPlaneYuvScanout();
@@ -38,14 +38,46 @@ index 5c7eaea..07f95cd 100644
 +  // The vendor Android stack on this hardware reaches the same answer from the
 +  // same two EDIDs, and mediabox-platform's `color-modes` prints it:
 +  // 4:2:2 12-bit is what fits a 4K HDR film down a 300 MHz port.
-+  const bool rgbFits = RgbLinkFits(10);
-+  if (!rgbFits)
-+    CLog::LogF(LOGDEBUG, "RGB does not fit this link at this mode; asking for YCbCr");
++  // On a link that cannot carry HDR, the whole BT.2020 signal is given up --
++  // not just the transfer function.
++  //
++  // It is not enough to stop sending HDR metadata. This driver moves to a
++  // 4:2:2 link off BT.2020 colorimetry at ten bits, and a 4:2:2 link is the
++  // one this hardware renders wrong: measured on a Sony KD-65XE9005 HDMI 1,
++  // where 4K BT.2020 comes out 4:2:2 and the colours are wrong whether HDR is
++  // signalled or not, while the same port at 4K in BT.709 comes up RGB 8-bit
++  // and is correct.
++  //
++  // So where HDR does not fit, the output is BT.709 SDR, eight bits, RGB --
++  // and the video plane keeps the PQ EOTF tag `0008` gives it, which is what
++  // puts VOP2's own HDR-to-SDR and BT.2020-to-BT.709 conversions in the path.
++  // The picture is converted in hardware and transmitted as what it has become,
++  // which is exactly what the vendor Android stack does on this same socket:
++  // 4K kept, HDR dropped, eight bits, never 4:2:2.
++  const bool hdrFits = HdrLinkFits();
++  const bool rgbFits = RgbLinkFits(hdrFits ? 10 : 8);
++  if (!hdrFits)
++    CLog::LogF(LOGDEBUG, "this link cannot carry HDR; transmitting BT.709 SDR");
 +  const std::optional<bool> rgbOutput = RequestRgbOutput(rgbFits);
  
    // What the link will carry. Prefer what was just asked for; fall back to
    // observing the driver, and only then to guessing from the plane.
-@@ -724,6 +744,91 @@ std::optional<bool> CWinSystemGbm::RequestRgbOutput(bool wantRgb)
+@@ -502,6 +539,14 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+       rgbOutput ? !rgbOutput.value() : IsYuvOutput().value_or(IsDirectToPlaneYuvScanout());
+ 
+   KODI::UTILS::Colorimetry scanoutColorimetry;
++  if (!hdrFits)
++  {
++    // Default signals BT.709 RGB at this resolution, which is what the sink
++    // will be receiving once VOP2 has converted. It falls through to the same
++    // commit below, so there is one place that writes this property.
++    scanoutColorimetry = KODI::UTILS::Colorimetry::DEFAULT;
++  }
++  else
+   switch (colorimetry)
+   {
+     case KODI::UTILS::Colorimetry::BT2020_YCC:
+@@ -724,6 +769,119 @@ std::optional<bool> CWinSystemGbm::RequestRgbOutput(bool wantRgb)
    return wanted.value() == rgb.value();
  }
  
@@ -134,14 +166,75 @@ index 5c7eaea..07f95cd 100644
 +  return fits;
 +}
 +
++bool CWinSystemGbm::HdrLinkFits() const
++{
++  // HDR needs ten bits, and on this hardware it needs them at full chroma.
++  //
++  // Ten bits is the easy half: an HDR10 gradient quantised to eight bands
++  // where anyone can see it. The other half is this driver's, not HDMI's --
++  // RK3588 renders HDR over a 4:2:2 link wrong, which is the fault
++  // `patches/kodi/0011` was written to steer around and the reason this
++  // function exists rather than a bit-depth check.
++  //
++  // Measured on a Sony KD-65XE9005, whose HDMI 1 declares 300 MHz. At 4K the
++  // only ten-bit format that fits that ceiling is 4:2:2, and the picture comes
++  // back with its colours wrong. At 1080p, where ten-bit RGB fits, the same
++  // film on the same cable through the same socket is correct. The colorimetry
++  // tag was tried both ways at 4K and changed nothing, so it is the transport.
++  //
++  // The vendor Android stack on that same television sends HDR10 as 4:2:2
++  // 12-bit and it is right, so this is not a property of the set or of the
++  // standard. It is what this driver can be trusted with.
++  //
++  // So: HDR is signalled where RGB at ten bits fits, and not otherwise. Where
++  // it does not, `SetHDR` declines and the connector stays SDR -- while the
++  // video plane keeps its PQ EOTF tag from `0008`, which is what puts VOP2's
++  // own HDR-to-SDR block in the path. The picture is then converted in
++  // hardware instead of being sent as HDR down a link that cannot carry it.
++  return RgbLinkFits(10);
++}
++
  bool CWinSystemGbm::IsHdOrLargerMode() const
  {
    auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
+@@ -878,6 +1036,32 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+     return false;
+   }
+ 
++  // PQ content, and now the question this used not to ask: can the link this
++  // television is on actually carry HDR? Where it cannot, saying so is the
++  // whole fix. The connector stays SDR, the video plane keeps the PQ tag that
++  // `0008` gives it, and VOP2 converts in hardware -- which is what the vendor
++  // Android stack does on a socket that cannot take HDR, and what this box
++  // used to fail to do while reporting HDR on screen.
++  if (!HdrLinkFits())
++  {
++    CLog::LogF(LOGDEBUG, "this link cannot carry HDR at this mode; leaving the connector SDR");
++    if (connector->SupportsProperty("HDR_OUTPUT_METADATA"))
++    {
++      drm->AddProperty(connector, "HDR_OUTPUT_METADATA", 0);
++      m_hdrBlob.Reset();
++    }
++    // Eight bits, and this is the half that actually keeps the link RGB.
++    // Holding ten is what `0011` does to stop the driver preferring 4:2:2 --
++    // but that only works where ten-bit RGB fits. Where it does not, holding
++    // ten is what *causes* the 4:2:2 link, because the driver keeps the depth
++    // and gives up the chroma instead. So depth is what gets given up here.
++    SetDeepColor(false);
++    m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
++    drm->SetActive(true);
++    LogColorState("SetHDR:exit:link-cannot-carry-hdr");
++    return false;
++  }
++
+   KODI::UTILS::Eotf eotf = KODI::UTILS::GetEOTF(*videoPicture);
+   m_eotf = eotf;
+ 
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
-index c28f32c..96ce6a9 100644
+index c28f32c..b0b395d 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.h
 +++ b/xbmc/windowing/gbm/WinSystemGbm.h
-@@ -96,6 +96,16 @@ public:
+@@ -96,6 +96,19 @@ public:
    // case the caller must fall back to observing rather than choosing.
    std::optional<bool> RequestRgbOutput(bool wantRgb);
  
@@ -154,6 +247,9 @@ index c28f32c..96ce6a9 100644
 +  // declared, at the mode currently set. True when the sink declared no limit:
 +  // a missing declaration is not evidence of a narrow link.
 +  bool RgbLinkFits(int bpc) const;
++
++  // Whether HDR can be put on this link at all, at the mode currently set.
++  bool HdrLinkFits() const;
 +
    // A connector property's CURRENT value, read from the kernel rather than
    // from CDRMObject's cache, which only tracks values Kodi itself set.

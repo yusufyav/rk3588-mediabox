@@ -57,6 +57,17 @@ remote_patch_dir="$MEDIABOX_REMOTE_DIR/patches/kodi"
 
 case "$step" in
   deps)
+    # meson and liblzma-dev are here because they are not: a clean appliance,
+    # which is what a board installed from a release is, has neither, and
+    # neither failure says so plainly. Without meson, cmake stops in
+    # FindLibDvdCSS with "Could NOT find Meson" eleven frames deep in a module
+    # stack that never mentions DVDs. Without liblzma-dev, every object
+    # compiles and the very last link of kodi-gbm fails with
+    # "cannot find -llzma" after an hour of building, and libsrt-openssl-dev
+    # fails the same link the same way one package later. All three were hit
+    # on 2026-09-18 on a board installed from 2026-09-17.1: the appliance
+    # carries these libraries at run time and none of their headers, which is
+    # exactly what a build-free product looks like from a compiler's side.
     echo "== installing Kodi build dependencies (no upgrade, no recommends)"
     # build-dep on Debian's own kodi source package pulls the right set for
     # this distribution without guessing at package names. The image ships no
@@ -76,7 +87,8 @@ SRC
         git cmake ninja-build build-essential nasm gperf swig default-jre-headless \
         libgbm-dev libegl-dev libgles-dev libdrm-dev libinput-dev libxkbcommon-dev \
         libudev-dev libasound2-dev libpulse-dev \
-        nlohmann-json3-dev 2>&1 | tail -5"
+        nlohmann-json3-dev \
+        meson liblzma-dev libsrt-openssl-dev 2>&1 | tail -5"
     ;;
 
   fetch)

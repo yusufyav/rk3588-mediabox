@@ -601,6 +601,7 @@ impl AppState {
             media,
             surface: self.surface.status().await,
             leds: self.leds.status(),
+            display_color: self.display_color.status(),
         }
     }
 }

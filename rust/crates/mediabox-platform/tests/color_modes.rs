@@ -100,11 +100,17 @@ fn hdmi3_at_4k60_offers_exactly_what_the_vendor_box_offered() {
         ]
     );
 
-    // What the box had selected, unprompted, with HDR content on screen.
+    // The list is the vendor box's list. What is chosen from it is not.
+    //
+    // With HDR content on screen that box selects 4:2:2 12-bit, and on its own
+    // hardware that is correct. This product cannot follow it there: the
+    // RK3588 display driver gets HDR over a 4:2:2 link wrong, measured on this
+    // same television. So the deepest non-4:2:2 mode that fits wins instead,
+    // and at 4K60 on a 600 MHz port that is 4:2:0 at ten bits.
     assert!(sink.hdr10_fits(UHD60_KHZ));
     assert_eq!(
         sink.best_for(UHD60_KHZ, true),
-        Some(ColorMode::new(ColorFormat::Ycbcr422, 12))
+        Some(ColorMode::new(ColorFormat::Ycbcr420, 10))
     );
 }
 
@@ -122,19 +128,38 @@ fn deep_colour_that_does_not_fit_is_never_offered() {
 }
 
 #[test]
-fn a_film_gets_hdr_on_the_slow_port() {
-    // This is the case the product actually has to serve: 4K at 24 Hz, which is
-    // half the pixel rate of 60 Hz and fits 4:2:2 12-bit inside 300 MHz. HDR on
-    // HDMI 1 is not impossible, it is impossible at 60 Hz.
+fn a_film_gets_no_hdr_on_the_slow_port() {
+    // The case the product actually has to serve, and the answer is no.
+    //
+    // At 4K24 a 300 MHz port has room for 4:2:2 12-bit and for nothing else
+    // above eight bits -- and 4:2:2 is the link this driver renders HDR wrong
+    // on. So there is no way to put HDR10 on this port at 4K that is worth
+    // looking at, and the honest answer is to say so rather than to send
+    // something and call it HDR.
+    //
+    // Measured on a Sony KD-65XE9005, HDMI 1, 2026-09-18: at 4K the link is
+    // 4:2:2 and the picture is wrong; at 1080p, where RGB 10-bit fits, the
+    // same film on the same cable is correct. Both colorimetry tags were
+    // tried at 4K and neither helped.
     let sink = parse_sink_video(&edid(SONY_HDMI1)).expect("EDID");
-    assert!(sink.hdr10_fits(UHD24_KHZ));
+    assert!(!sink.hdr10_fits(UHD24_KHZ), "4:2:2 is not an HDR path here");
+
+    // 1080p is where this television can be given HDR, and it is RGB that
+    // makes it possible.
+    const HD60_KHZ: u32 = 148_500;
+    assert!(sink.hdr10_fits(HD60_KHZ));
     assert_eq!(
-        sink.best_for(UHD24_KHZ, true),
-        Some(ColorMode::new(ColorFormat::Ycbcr422, 12))
+        sink.best_for(HD60_KHZ, true),
+        Some(ColorMode::new(ColorFormat::Rgb, 12))
     );
-    // And the RGB 10-bit that the player currently asks for unconditionally is
-    // not on the list, which is the defect this whole module exists to stop.
-    assert!(!sink.modes_for(UHD24_KHZ).contains(&ColorMode::new(ColorFormat::Rgb, 10)));
+
+    // And the RGB 10-bit the player asks for unconditionally is still not on
+    // the 4K list, which is the arithmetic that started all of this.
+    assert!(
+        !sink
+            .modes_for(UHD24_KHZ)
+            .contains(&ColorMode::new(ColorFormat::Rgb, 10))
+    );
 }
 
 #[test]

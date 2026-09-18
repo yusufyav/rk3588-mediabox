@@ -242,6 +242,21 @@ impl Client {
     /// it owns the CEC adapter: `/sys/class/leds` is root's, and this process
     /// runs under a unit that mounts /sys read-only. The daemon also remembers
     /// the choice, so this is a request and not a write.
+    /// Remember a colour mode choice, or `None` for the measured default.
+    /// The daemon owns it because the state directory is the daemon's and this
+    /// process's unit mounts /sys read-only.
+    pub async fn display_color_mode_set(
+        &self,
+        mode: Option<(mediabox_core::ColorFormat, u8)>,
+    ) -> Result<Value> {
+        let choice = match mode {
+            None => json!({"kind": "auto"}),
+            Some((format, bits)) => json!({"kind": "fixed", "format": format, "bits": bits}),
+        };
+        self.call(json!({"command": "display_color_mode_set", "choice": choice}))
+            .await
+    }
+
     pub async fn leds_set(&self, mode: mediabox_core::LedMode) -> Result<Value> {
         self.call(json!({"command": "leds_set", "mode": mode}))
             .await

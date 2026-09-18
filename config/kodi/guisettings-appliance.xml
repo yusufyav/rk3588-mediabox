@@ -32,6 +32,18 @@
 <settings version="2">
   <setting id="videoplayer.useprimedecoder">true</setting>
   <setting id="videoplayer.useprimerenderer">0</setting>
+  <!--
+    Switch the display to the film's own mode when playback starts.
+
+    Named here because everything else on this appliance's picture path is
+    decided per mode: what the link can carry, and therefore whether HDR is
+    signalled at all, depends on the timing that is actually set. A box that
+    stays at the desktop mode plays a 23.976 film at 60 Hz, judders, and gets
+    its HDR verdict for the wrong timing. Left to Kodi this is a value that
+    also gets written back from memory on exit, so it is stated rather than
+    assumed.
+  -->
+  <setting id="videoplayer.adjustrefreshrate">2</setting>
 
   <setting id="videoscreen.resolution">17</setting>
   <setting id="videoscreen.whitelist">0409602160060.00000pstd,0409602160059.94010pstd,0409602160050.00000pstd,0409602160024.00000pstd,0409602160023.97600pstd,0384002160060.00000pstd,0384002160059.94010pstd,0384002160050.00000pstd,0384002160030.00000pstd,0384002160029.97000pstd,0384002160025.00000pstd,0384002160024.00000pstd,0384002160023.97600pstd,0192001080060.00000pstd,0192001080059.94020pstd,0192001080050.00000pstd,0192001080030.00000pstd,0192001080029.97010pstd,0192001080024.00000pstd,0192001080023.97608pstd,0168001050059.88325pstd,0160000900060.00000pstd,0128001024060.01974pstd,0128000720060.00000pstd,0128000720059.94020pstd,0128000720050.00000pstd,0128000720030.00000pstd,0128000720029.97010pstd,0128000720024.00000pstd,0128000720023.97616pstd,0115200864075.00000pstd,0102400768060.00384pstd</setting>
