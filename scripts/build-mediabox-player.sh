@@ -61,7 +61,20 @@ apt-get install -y -qq --no-install-recommends \
   libdisplay-info-dev \
   libass-dev libasound2-dev libpipewire-0.3-dev \
   libarchive-dev libjpeg-dev liblcms2-dev libuchardet-dev libzimg-dev \
-  libbluray-dev libdvdnav-dev libcdio-paranoia-dev liblua5.2-dev libzstd-dev
+  libbluray-dev libdvdnav-dev libcdio-paranoia-dev liblua5.2-dev libzstd-dev \
+  libva-dev libvdpau-dev libsrt-openssl-dev libxcb-shm0-dev libsndio-dev \
+  libxv-dev libxext-dev
+# The last two lines are not mpv's dependencies. They are what MediaBox's own
+# FFmpeg was configured with, and pkg-config hands them to whoever links
+# against it: `Libs.private` in libavcodec.pc names -lva, -lvdpau, -lsrt and
+# the rest, and the linker wants every one of them present even though this
+# player uses none of them. On the board this was first built on they happened
+# to be installed. On a clean image they are not, and the build stopped with
+#
+#     /usr/bin/ld: cannot find -lva: No such file or directory
+#
+# on both boards, which is the whole point of naming them here rather than
+# leaving them to whatever a machine happens to carry.
 
 cd /var/tmp/mpv-build
 rm -rf mpv
