@@ -88,12 +88,21 @@ struct priv {
     bool said_full;
 };
 
-/* Which matrix and which range the plane should convert the frame with.
+/* Which matrix, which range and which transfer curve the frame carries.
  *
  * The display controller does the YCbCr to RGB conversion in hardware and
  * defaults to BT.601 limited, which is right for a DVD and wrong for everything
  * this appliance is for. Packed into one word: the encoding in the low four
- * bits in the plane's own enum order, the range in the next four. */
+ * bits in the plane's own enum order, the range in the next four, and the
+ * transfer curve in the four above that, in the vendor driver's own EOTF
+ * numbering so the interface passes it straight through.
+ *
+ * The transfer curve is the one that was missing, and its absence was not a
+ * dull picture: the plane's EOTF is a property of the *plane*, not of the
+ * frame, so it survives whoever set it last. Kodi leaves it on ST 2084 after
+ * an HDR film, this player never wrote it, and the next SDR film was scanned
+ * out as if it were PQ -- measured, `format: NV12  color: HDR10[2]`, and on
+ * the television a magenta picture. */
 static uint32_t colour_flags(const struct mp_image_params *params)
 {
     uint32_t encoding;
@@ -110,7 +119,23 @@ static uint32_t colour_flags(const struct mp_image_params *params)
         break;
     }
     uint32_t full = params->repr.levels == PL_COLOR_LEVELS_FULL ? 1 : 0;
-    return encoding | (full << 4);
+
+    /* The vendor driver's EOTF enum: 0 traditional gamma (SDR), 2 SMPTE
+     * ST 2084, 3 BT.2100 HLG. Anything else is SDR as far as this plane is
+     * concerned. */
+    uint32_t eotf;
+    switch (params->color.transfer) {
+    case PL_COLOR_TRC_PQ:
+        eotf = 2;
+        break;
+    case PL_COLOR_TRC_HLG:
+        eotf = 3;
+        break;
+    default:
+        eotf = 0;
+        break;
+    }
+    return encoding | (full << 4) | (eotf << 8);
 }
 
 static void put32(uint8_t *at, uint32_t value)

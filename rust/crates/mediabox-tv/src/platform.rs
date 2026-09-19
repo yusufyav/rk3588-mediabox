@@ -361,6 +361,29 @@ impl SplitDisplay {
             eprintln!("mediabox-tv.platform universal planes unavailable: {e}");
         }
 
+        // And to be shown the properties that only exist for an atomic client.
+        //
+        // `EOTF` -- which transfer curve the display controller reads a film's
+        // plane with -- is one of them. Measured on the Plus: `modetest -p`
+        // lists no EOTF at all, `modetest -a -p` lists eight, one per plane.
+        // So this interface, which asked for no such capability, could not see
+        // the property, could not write it, and reported nothing: a lookup
+        // that finds nothing is not an error.
+        //
+        // What that cost is a picture. The property belongs to the plane and
+        // outlives the process that set it, Kodi is an atomic client and
+        // leaves it on ST 2084 after an HDR film, and the next film this
+        // player put on that plane -- `format: NV12` -- was scanned out as
+        // `HDR10[2]`. On the television: magenta.
+        //
+        // The capability is asked for, not required. Nothing below switches to
+        // atomic commits; this only makes the driver's own properties visible
+        // to the legacy path that was already setting COLOR_ENCODING and
+        // COLOR_RANGE on the same plane.
+        if let Err(e) = kms.set_client_capability(drm::ClientCapability::Atomic, true) {
+            eprintln!("mediabox-tv.platform atomic properties unavailable: {e}");
+        }
+
         let (connector, crtc, mode) = find_output(&kms, &wanted)?;
         let gbm_device = gbm::Device::new(OwnedFd::from(render_file))
             .map_err(|e| format!("create GBM device on {render_path}: {e}"))?;

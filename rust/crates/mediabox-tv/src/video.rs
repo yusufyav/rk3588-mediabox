@@ -53,6 +53,15 @@ pub struct Colour {
     pub encoding: u64,
     /// 0 = limited, 1 = full.
     pub range: u64,
+    /// The vendor driver's `EOTF`: 0 traditional gamma (SDR), 2 SMPTE ST 2084,
+    /// 3 BT.2100 HLG.
+    ///
+    /// This one is not a nicety. `EOTF` belongs to the plane and outlives the
+    /// process that set it: Kodi leaves it on ST 2084 after an HDR film, and
+    /// a player that never writes it inherits that for the next SDR film.
+    /// Measured on the Plus after a Kodi handover -- `format: NV12  color:
+    /// HDR10[2]` -- and on the television, magenta.
+    pub eotf: u64,
 }
 
 /// A frame that has been imported and given a framebuffer, kept until the
@@ -228,23 +237,26 @@ fn zpos<D: ControlDevice>(
     None
 }
 
-/// `COLOR_ENCODING` and `COLOR_RANGE` on one plane, by name.
+/// `COLOR_ENCODING`, `COLOR_RANGE` and `EOTF` on one plane, by name.
 ///
-/// By name because these are the two DRM properties whose identifiers differ
+/// By name because these are the DRM properties whose identifiers differ
 /// between drivers, and unlike `NAME` and `PLANE_MASK` they are ordinary enums
-/// whose names this crate keeps.
+/// and ranges whose names this crate keeps. `EOTF` is the vendor driver's own,
+/// a range of 0..=18 on this hardware.
 fn colour_properties<D: ControlDevice>(
     device: &D,
     plane: control::plane::Handle,
 ) -> (
     Option<control::property::Handle>,
     Option<control::property::Handle>,
+    Option<control::property::Handle>,
 ) {
     let Ok(properties) = device.get_properties(plane) else {
-        return (None, None);
+        return (None, None, None);
     };
     let mut encoding = None;
     let mut range = None;
+    let mut eotf = None;
     for handle in properties.as_props_and_values().0.iter().copied() {
         let Ok(info) = device.get_property(handle) else {
             continue;
@@ -252,10 +264,11 @@ fn colour_properties<D: ControlDevice>(
         match info.name().to_str() {
             Ok("COLOR_ENCODING") => encoding = Some(handle),
             Ok("COLOR_RANGE") => range = Some(handle),
+            Ok("EOTF") => eotf = Some(handle),
             _ => {}
         }
     }
-    (encoding, range)
+    (encoding, range, eotf)
 }
 
 /// Where on the panel a frame goes, in the panel's own pixels.
@@ -278,6 +291,10 @@ pub struct VideoPlane {
     /// limited/full — and both start on the first of each.
     encoding: Option<control::property::Handle>,
     range: Option<control::property::Handle>,
+    /// `EOTF`, the transfer curve the display controller should read the
+    /// frame with. Written on every film, including an SDR one, because the
+    /// value that is already there came from whatever played last.
+    eotf: Option<control::property::Handle>,
     /// `zpos`, so the film can be put under the interface rather than over it.
     depth: Option<control::property::Handle>,
     sunk: std::cell::Cell<bool>,
@@ -338,13 +355,14 @@ impl VideoPlane {
             if !formats.contains(&(DrmFourcc::Nv12 as u32)) {
                 continue;
             }
-            let (encoding, range) = colour_properties(device, handle);
+            let (encoding, range, eotf) = colour_properties(device, handle);
             let depth = zpos(device, handle).map(|(property, _)| property);
             found.push(Self {
                 plane: handle,
                 formats,
                 encoding,
                 range,
+                eotf,
                 depth,
                 sunk: std::cell::Cell::new(false),
                 applied: std::cell::Cell::new(None),
@@ -499,6 +517,14 @@ impl VideoPlane {
             && let Err(e) = device.set_property(self.plane, property, colour.range)
         {
             eprintln!("mediabox-tv.video COLOR_RANGE: {e}");
+            done = false;
+        }
+        // Written even when it is zero. A film that is not HDR has to say so,
+        // or it is shown through the curve the last film left behind.
+        if let Some(property) = self.eotf
+            && let Err(e) = device.set_property(self.plane, property, colour.eotf)
+        {
+            eprintln!("mediabox-tv.video EOTF: {e}");
             done = false;
         }
         if done {
@@ -769,6 +795,7 @@ impl Server {
                                     colour: Colour {
                                         encoding: u64::from(u32_at(&bytes, 76) & 0xf),
                                         range: u64::from((u32_at(&bytes, 76) >> 4) & 0x1),
+                                        eotf: u64::from((u32_at(&bytes, 76) >> 8) & 0xf),
                                     },
                                 },
                                 display: (u32_at(&bytes, 80), u32_at(&bytes, 84)),
@@ -1021,6 +1048,7 @@ mod tests {
             colour: Colour {
                 encoding: 1,
                 range: 0,
+                eotf: 0,
             },
         }
     }
