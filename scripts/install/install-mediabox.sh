@@ -400,6 +400,40 @@ if [ -x "$prefix/bin/mediabox-hdmi-prepare" ]; then
   else note "HDMI/ALSA preparation reported a problem; the verifier will judge it"; fi
 fi
 
+# Which video port the television landed on.
+#
+# A board with two HDMI sockets has two different pictures behind them. On
+# RK3588 the VOP2's HDR conversion block belongs to Video Port 0: a film on
+# VP0 can be tone-mapped -- measured on the Ultra, `hdr2sdr[1]` with the
+# connector in SDR -- and SDR content can be lifted for an HDR panel. VP1 and
+# VP2 have neither. HDR10 passthrough works on all of them, so nothing here
+# fails; what changes is that on VP1 an OSD drawn over HDR content is the
+# defect this project has already chased once.
+#
+# The installer cannot move a cable, and this is not a reason to refuse a
+# board. It is a reason not to let someone discover it on the screen three
+# days later, so the port is measured and named.
+if [ "$headless" -eq 0 ]; then
+  picture_connector="$("$prefix/bin/mediabox-platform" output 2>/dev/null || true)"
+  vp=""
+  for summary in /sys/kernel/debug/dri/*/summary; do
+    [ -r "$summary" ] || continue
+    vp="$(awk -v want="${picture_connector#card*-}" '
+      /^Video Port[0-9]+:/ { port = $2; sub(/^Port/, "", port); sub(/:$/, "", port) }
+      /Connector:/ { c = $0; sub(/.*Connector:/, "", c); sub(/[ \t].*/, "", c)
+                     if (c == want) { print port; exit } }' "$summary")"
+    [ -n "$vp" ] && break
+  done
+  case "$vp" in
+    "")  note "the video port behind ${picture_connector:-the display} could not be read" ;;
+    0)   ok "video port VP0 (the port with the VOP2 HDR conversion block)" ;;
+    *)   note "the television is on VP$vp, which has no VOP2 HDR conversion block.
+        HDR10 reaches the panel, but tone-mapping and SDR->HDR do not, and an
+        OSD over HDR content is where that shows. If this board has another
+        HDMI socket, that is the one to use." ;;
+  esac
+fi
+
 # ------------------------------------------------- 17. services
 #
 # The same set the golden board runs, with one deliberate difference: the
