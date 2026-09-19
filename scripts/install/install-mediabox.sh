@@ -369,9 +369,20 @@ systemctl mask ctrl-alt-del.target >/dev/null 2>&1 || true
 [ "$(systemctl is-enabled ctrl-alt-del.target 2>&1)" = masked ] \
   && ok "ctrl-alt-del masked" || note "ctrl-alt-del.target could not be masked"
 
-if "$prefix/bin/mediabox-platform" inspect >/dev/null 2>&1; then
+#
+# On a board with nothing plugged in, `inspect` prints the whole topology --
+# the KMS node, every transmitter, every output with its ALSA card and its CEC
+# node -- and then exits 1, because it could not select an output. That is the
+# empty socket again, and reading it as "the appliance does not fit this
+# kernel" was the same misdiagnosis one gate further down.
+if inspect_out="$("$prefix/bin/mediabox-platform" inspect 2>&1)"; then
   ok "platform discovery"
+elif [ "$headless" -eq 1 ] &&
+     printf '%s\n' "$inspect_out" | grep -q '^Transmitters' &&
+     printf '%s\n' "$inspect_out" | grep -q 'no connected output'; then
+  ok "platform discovery (the board is described; no output is selected, nothing is plugged in)"
 else
+  printf '%s\n' "$inspect_out" | sed 's/^/     /' >&2
   die "KERNEL_CAPABILITY_FAIL: mediabox-platform cannot describe this board.
      The prebuilt appliance does not fit this kernel. Nothing will be rebuilt."
 fi

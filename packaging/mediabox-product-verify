@@ -387,10 +387,6 @@ done
 
 # -------------------------------------------------- and, on the board itself
 if [ "$STATIC" != 1 ]; then
-  if "$P/bin/mediabox-platform" inspect >/dev/null 2>&1
-  then pass "platform inspect" succeeds
-  else fail "platform inspect" "the platform cannot be described"; fi
-
   out=""
   for s in /sys/class/drm/card*-*/status; do
     [ -e "$s" ] || continue
@@ -400,6 +396,19 @@ if [ "$STATIC" != 1 ]; then
   # holds only while this loop agrees that nothing is connected.
   headless=0
   [ -z "$out" ] && [ "$NO_DISPLAY" = 1 ] && headless=1
+
+  # `inspect` exits 1 on a board with nothing plugged in, having printed the
+  # entire topology and failed only to select an output. The description is
+  # what is being checked here; the selection needs a cable.
+  if inspect_out="$("$P/bin/mediabox-platform" inspect 2>&1)"; then
+    pass "platform inspect" succeeds
+  elif [ "$headless" = 1 ] &&
+       printf '%s\n' "$inspect_out" | grep -q '^Transmitters' &&
+       printf '%s\n' "$inspect_out" | grep -q 'no connected output'; then
+    skip "platform inspect" "the board is described; no output is selected"
+  else
+    fail "platform inspect" "the platform cannot be described"
+  fi
   if [ -n "$out" ]; then
     pass "connected output" "${out# }"
   elif [ "$headless" = 1 ]; then
