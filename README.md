@@ -180,7 +180,7 @@ the command that says whether it still holds.
 
 | Item | Value |
 | --- | --- |
-| Boards | Orange Pi 5 Ultra (running), Orange Pi 5 Plus (prepared, not installed) |
+| Boards | Orange Pi 5 Ultra (running, installed from the release and proven on a film), Orange Pi 5 Plus (installed from the same release on 2026-09-19, headless: the display gates have not run) |
 | OS | Armbian trixie |
 | Kernel | `6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio` |
 | Display output | discovered; the Ultra has one HDMI socket, the Plus has two plus DisplayPort |

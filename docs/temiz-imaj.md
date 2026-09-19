@@ -13,10 +13,27 @@ prefix'ine kuruyor; `rk3588-screenbridge` yalnızca mühendislik referansı ve
 | `rk3588-mediabox` | Medya çalışma zamanı, Mali kullanıcı alanı, Kodi, oynatıcı, denetim düzlemi, arayüzler, birimler |
 | `rk3588-screenbridge` | (isteğe bağlı) HDMI RX için özel çekirdek; ayrıca platform referans ölçümleri |
 
-> **Durum.** Ultra bu yoldan **çalışıyor** ve ölçüldü. Plus için platform
-> keşfi **canlı olarak salt-okunur doğrulandı** (bkz. bölüm 6) ama temiz imaj
-> hiç koşulmadı ve MediaBox Plus'a **kurulmadı**. Plus adımları bu yüzden
-> "doğrulanmış" değil, "türetilmiş" sayılmalıdır.
+> **Durum (2026-09-19, ölçüldü).** Her iki kart da o gün sıfır Armbian
+> vendor-6.1 imajından kuruldu ve artık **aşağıdaki derleme yolundan değil,
+> tek komutluk kurucudan** geçiyor (bkz. bölüm 1.5):
+>
+> * **Ultra** — kurulum tamamlandı; kurulu ürün doğrulayıcısı kart üzerinde
+>   yeniden koşuldu ve **tam PASS** verdi (atlanan kontrol yok). Televizyon
+>   HDMI 1'de, 4K HDR içerikte konektör `RGB888_1X24` + `hdr_type[SDR]`,
+>   film düzlemi NV15 / `hdr_type[HDR10]` + `hdr2sdr[1]`.
+> * **Plus** — `install-mediabox.sh` → `INSTALLED, NOT YET PROVEN`: karta hiçbir
+>   ekran takılı olmadığı için kurulum **headless** tamamlandı, ekran gerektiren
+>   dört kontrol ve film kapısı `SKIP`/`NOT RUN` olarak işaretlendi. Kurulumun
+>   ekran istemeyen her parçası ölçüldü: 170 çalışma zamanı paketi, 0 derleme,
+>   `/opt/rk3588-mediabox` 1.1 GB, `mediaboxd-rs` + `mediabox-media-worker` +
+>   `stremio-server` `active`.
+>
+> Plus'ta geriye yalnız ekranlı kapılar kaldı; kablo takıldığında bölüm 6'nın
+> sonundaki üç komut onları kapatır.
+
+> **Aşağıdaki bölümler (2-5) üretim yolu değildir.** Ürün, çalışan bir Ultra'dan
+> yakalanmış prebuilt arşivdir ve kurulum hiçbir şey derlemez. Derleme zinciri
+> yalnız yeni bir altın sürüm yakalanırken çalışır.
 
 ---
 
@@ -74,6 +91,35 @@ SPI/NVMe arşivleri **seçilmez** (eşleşen U-Boot/BL31 zinciri kurmazlar).
 
 **Doğrulama:** `uname -a`, `cat /etc/os-release`, `findmnt /` — hedeflenen
 çekirdek, dağıtım ve kök aygıtı.
+
+## 1.5. Üretim kurulumu — tek komut
+
+İmaj açıldıktan sonra üretim yolu bu; 2-5. bölümler yalnız yeni sürüm
+yakalarken gerekir.
+
+```bash
+git clone https://github.com/yusufyav/rk3588-mediabox
+cd rk3588-mediabox && sudo ./scripts/install/install-mediabox.sh
+```
+
+Kurucu `releases/current.env` içindeki tag + sha256'yı indirir, arşivin kendi
+manifestini doğrular, çalışma zamanı paketlerini kurar, `/opt`'u tek `rename`
+ile yerine taşır ve iki kapıyla biter: ürün doğrulayıcısı ve **bir film**.
+
+**Ekransız (headless) kurulum.** Takılı ekran yoksa kurulum durmaz: boş bir HDMI
+soketi çekirdek yeteneği değildir. Kurucu ekran gerektiren kontrolleri atlar,
+arayüzü `enable` eder ama başlatmaz ve sonucu `PASS` değil
+**`INSTALLED, NOT YET PROVEN`** diye raporlar. Kablo takıldığında:
+
+```bash
+systemctl start mediabox-tv-ui.service
+/opt/rk3588-mediabox/bin/mediabox-product-verify
+/opt/rk3588-mediabox/bin/mediabox-playback-smoke
+```
+
+Muafiyet istenerek alınamaz: doğrulayıcı `/sys/class/drm` taramasını kendi
+yapar, ekran takılı bir kartta `MEDIABOX_VERIFY_NO_DISPLAY` hiçbir şeyi
+atlatmaz.
 
 ## 2. Derleme bağımlılıkları
 
@@ -187,13 +233,25 @@ yerlerine ne geldiği:
 | `card0-HDMI-A-1` | `mediabox-platform connector-path`; konektör, adıyla eşleşiyor, DRM nesne numarasıyla değil |
 | Önyükleme farkı | Yok: her iki kart da Armbian U-Boot + `armbianEnv.txt`. Plus'ta tek fark `user_overlays` satırı |
 
-**Canlı doğrulama (salt-okunur, 2026-09-16).** Yeni keşif ikilisi Plus'a
-`/tmp` altından geçici olarak kopyalandı, çalıştırıldı ve silindi. Üç konektörü,
-her birinin ALSA ucunu ve CEC adaptörünü doğru çözdü; sonuç ScreenBridge'in
-bağımsız ölçtüğü platform matrisiyle birebir tuttu. Tek çözemediği "hangi
-konektör bağlı" oldu — çünkü o karta hiçbir ekran takılı değil.
+**Kurulumdan ölçülen (2026-09-19).** Plus sıfır imajdan kuruldu; kurulu
+`mediabox-platform inspect` üç konektörü, her birinin ALSA kartını ve CEC
+adaptörünü doğru çözüyor:
 
-MediaBox Plus'a **kurulmadı**. Kurulum bir sonraki kapının işi.
+```
+  HDMI-A-1  disconnected  fde80000.hdmi  rockchiphdmi0  /dev/cec0
+  HDMI-A-2  disconnected  fdea0000.hdmi  rockchiphdmi1  /dev/cec1
+  DP-1      disconnected  fde50000.dp    rockchipdp0    cec unavailable
+  Selected  none   warning: no connected output with a usable mode
+```
+
+Bu çıktı tabloyu doğruluyor. `Selected none` ve `exit 1` bir arıza değil, boş
+soket: kart tarif edilmiş, seçilecek çıkış yok. Hem kurucu hem doğrulayıcı bunu
+artık çıktıdan okuyor, çıkış kodundan değil.
+
+**Kalan tek iş ekranlı kapılar.** Televizyon Plus'a takıldığında (zorunlu olarak
+**HDMI-A-1**; HDMI-A-2 → VP1, VOP2'nin SDR→HDR bloğunu atlar) bölüm 1.5'teki üç
+komut çalıştırılır; film kapısı geçene kadar Plus "kurulu ama kanıtlanmamış"
+sayılır.
 
 ## 7. Süre tahmini
 
