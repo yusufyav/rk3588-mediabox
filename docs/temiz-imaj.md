@@ -14,22 +14,22 @@ prefix'ine kuruyor; `rk3588-screenbridge` yalnızca mühendislik referansı ve
 | `rk3588-screenbridge` | (isteğe bağlı) HDMI RX için özel çekirdek; ayrıca platform referans ölçümleri |
 
 > **Durum (2026-09-19, ölçüldü).** Her iki kart da o gün sıfır Armbian
-> vendor-6.1 imajından kuruldu ve artık **aşağıdaki derleme yolundan değil,
-> tek komutluk kurucudan** geçiyor (bkz. bölüm 1.5):
+> vendor-6.1 imajından, **aynı tek paketle ve tek komutla** kuruldu ve ikisi de
+> kurucunun son satırına kadar `PASS` verdi (ürün doğrulayıcısı + film kapısı):
 >
-> * **Ultra** — kurulum tamamlandı; kurulu ürün doğrulayıcısı kart üzerinde
->   yeniden koşuldu ve **tam PASS** verdi (atlanan kontrol yok). Televizyon
->   HDMI 1'de, 4K HDR içerikte konektör `RGB888_1X24` + `hdr_type[SDR]`,
->   film düzlemi NV15 / `hdr_type[HDR10]` + `hdr2sdr[1]`.
-> * **Plus** — `install-mediabox.sh` → `INSTALLED, NOT YET PROVEN`: karta hiçbir
->   ekran takılı olmadığı için kurulum **headless** tamamlandı, ekran gerektiren
->   dört kontrol ve film kapısı `SKIP`/`NOT RUN` olarak işaretlendi. Kurulumun
->   ekran istemeyen her parçası ölçüldü: 170 çalışma zamanı paketi, 0 derleme,
->   `/opt/rk3588-mediabox` 1.1 GB, `mediaboxd-rs` + `mediabox-media-worker` +
->   `stremio-server` `active`.
+> ```
+> Ultra  HDMI-A-1  VP0   product verify PASS   own-player smoke PASS
+> Plus   HDMI-A-2  VP1   product verify PASS   own-player smoke PASS
+> ```
 >
-> Plus'ta geriye yalnız ekranlı kapılar kaldı; kablo takıldığında bölüm 6'nın
-> sonundaki üç komut onları kapatır.
+> Film kapısı ses kontrolünü de içeriyor: iki kartta da oynatıcı, görüntünün
+> çıktığı konektörün ses kartına pinleniyor (Ultra `rockchiphdmi1`, Plus
+> `rockchiphdmi1` — Plus'ta HDMI-A-1 seçilirse `rockchiphdmi0`).
+>
+> Kurucu, televizyonun düştüğü VOP2 video portunu da söylüyor: VP0 HDR
+> dönüşüm bloğuna sahip, VP1/VP2 değil. Plus'ta kablo HDMI-A-2'de olduğu için
+> kurulum bunu uyarı olarak yazıyor; HDR10 geçiyor, tone-mapping ve HDR
+> üzerine OSD geçmiyor.
 
 > **Aşağıdaki bölümler (2-5) üretim yolu değildir.** Ürün, çalışan bir Ultra'dan
 > yakalanmış prebuilt arşivdir ve kurulum hiçbir şey derlemez. Derleme zinciri
