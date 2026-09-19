@@ -20,6 +20,23 @@ fails=0
 ok()  { printf '  PASS  %-28s %s\n' "$1" "${2:-}"; }
 bad() { printf '  FAIL  %-28s %s\n' "$1" "${2:-}"; fails=$((fails + 1)); }
 
+# A film needs a television.
+#
+# Run on a board with nothing plugged in, this used to report six failures that
+# all said the same thing in six wrong ways -- no player, no decoder, no plane.
+# It is not a product failure and it is not a pass either: the gate cannot run.
+connected=no
+for s in /sys/class/drm/card*-*/status; do
+  [ -e "$s" ] || continue
+  [ "$(cat "$s")" = connected ] && connected=yes
+done
+if [ "$connected" != yes ]; then
+  echo '== own-player smoke NOT RUN: no display is attached to this board.'
+  echo '   Plug the television in and run this again. Nothing stands in for it:'
+  echo '   this is the gate that proves the appliance can play a film.'
+  exit 2
+fi
+
 rpc() {
   python3 - "$SOCK" "$1" <<'PYEOF'
 import socket, sys

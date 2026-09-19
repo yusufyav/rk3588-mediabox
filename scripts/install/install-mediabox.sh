@@ -96,13 +96,30 @@ for d in /sys/class/drm/card*/device/driver; do
   case "$(basename "$(readlink -f "$d")")" in rockchip*|*rockchip*) rockchip=yes ;; esac
 done
 cap "Rockchip DRM topology" "$rockchip"
-connected=no
+cap "ALSA cards" "$([ -e /proc/asound/cards ] && echo yes || echo no)"
+
+# A cable is not a kernel capability.
+#
+# "a connected display connector" used to be one of the lines above, and it
+# refused a perfectly good board: the Plus was installed over ssh while the only
+# television in the house was on the Ultra, and the installer answered
+# KERNEL_CAPABILITY_FAIL over an HDMI socket that was merely empty. Nothing
+# about that kernel was missing. What a display is actually needed for is the
+# two gates at the end -- the verifier's display checks and the film -- so those
+# are skipped and named, and the install itself goes through.
+display=""
 for s in /sys/class/drm/card*-*/status; do
   [ -e "$s" ] || continue
-  [ "$(cat "$s")" = connected ] && connected=yes
+  [ "$(cat "$s")" = connected ] && display="$display $(basename "$(dirname "$s")")"
 done
-cap "a connected display connector" "$connected"
-cap "ALSA cards" "$([ -e /proc/asound/cards ] && echo yes || echo no)"
+headless=0
+if [ -n "$display" ]; then
+  ok "a connected display:$display"
+else
+  headless=1
+  note "no display is connected: installing headless, and the gates that need one
+        are skipped at the end rather than waived"
+fi
 
 if [ "$cap_fail" -gt 0 ]; then
   if [ "$force" -eq 1 ]; then
@@ -381,12 +398,19 @@ for u in stremio-server.service mediabox-media-worker.service mediaboxd-rs.servi
   ok "$u"
 done
 systemctl enable mediabox-tv-ui.service >/dev/null
-systemctl restart mediabox-tv-ui.service
-ok "mediabox-tv-ui.service"
+if [ "$headless" -eq 1 ]; then
+  # Enabled, so the next boot with a television attached brings it up; not
+  # started now, because it opens a connector and there is none to open.
+  note "mediabox-tv-ui.service enabled, not started: it draws on a display"
+else
+  systemctl restart mediabox-tv-ui.service
+  ok "mediabox-tv-ui.service"
+fi
 
 # ------------------------------------------------- 18. the product verifier
 step "product verifier"
-"$verifier" || die "the installed product did not verify"
+MEDIABOX_VERIFY_NO_DISPLAY="$headless" "$verifier" \
+  || die "the installed product did not verify"
 
 # ------------------------------------------- 19. and it has to play a film
 #
@@ -396,16 +420,37 @@ step "product verifier"
 # display plane are read back off the running player. Fifteen seconds, no
 # network, no account, and no way to reach the final PASS without it.
 step "own-player playback"
-"$here/packaging/mediabox-playback-smoke" \
-  || die "the appliance's own player did not play.
+if [ "$headless" -eq 1 ]; then
+  note "skipped: a film needs a television and none is attached"
+
+  # Not PASS. Everything this board can be asked without a display is
+  # installed and verified, and the one gate that proves the product -- a film
+  # on the screen -- has not run. Saying PASS here would be the same lie the
+  # film gate was added to stop.
+  step "INSTALLED, NOT YET PROVEN"
+  cat <<EOF
+  MediaBox ${MEDIABOX_RELEASE_TAG} is installed at $prefix
+  from $MEDIABOX_RELEASE_ASSET
+  nothing was compiled on this board
+  no display was attached, so the display checks and the film did not run.
+  Plug the television in and finish with:
+
+      systemctl start mediabox-tv-ui.service
+      $prefix/bin/mediabox-product-verify
+      $prefix/bin/mediabox-playback-smoke
+EOF
+else
+  "$here/packaging/mediabox-playback-smoke" \
+    || die "the appliance's own player did not play.
      Everything is installed, but the default player is not operational --
      which is the state this installer used to call PASS."
 
-step "PASS"
-cat <<EOF
+  step "PASS"
+  cat <<EOF
   MediaBox ${MEDIABOX_RELEASE_TAG} is installed at $prefix
   from $MEDIABOX_RELEASE_ASSET
   the default player is operational: it decoded a film with rkmpp and put it
   on the display's own video plane
   nothing was compiled on this board
 EOF
+fi

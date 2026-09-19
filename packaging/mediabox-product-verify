@@ -26,9 +26,14 @@ set -eu
 ROOT="${MEDIABOX_VERIFY_ROOT:-}"
 META="${MEDIABOX_VERIFY_META:-}"
 STATIC="${MEDIABOX_VERIFY_STATIC_ONLY:-0}"
+# Set by the installer when it measured no connected connector before it
+# started. It waives nothing on its own: the checks below re-measure, and a
+# board with a television attached is judged whatever the caller said.
+NO_DISPLAY="${MEDIABOX_VERIFY_NO_DISPLAY:-0}"
 P="$ROOT/opt/rk3588-mediabox"
 ETC="$ROOT/etc"
 fails=0
+skips=0
 
 MEDIABOXD_SOCK="${MEDIABOXD_SOCK:-/run/mediabox/mediaboxd.sock}"
 
@@ -59,6 +64,10 @@ PYEOF
 
 pass() { printf '  PASS  %-40s %s\n' "$1" "${2:-}"; }
 fail() { printf '  FAIL  %-40s %s\n' "$1" "${2:-}"; fails=$((fails + 1)); }
+# The one thing this verifier is allowed not to know, and it says so in its own
+# column and in its last line. Reachable only for the checks that need a
+# display, and only on a board where none is plugged in.
+skip() { printf '  SKIP  %-40s %s\n' "$1" "${2:-}"; skips=$((skips + 1)); }
 req_exec() { [ -x "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
 req_dir()  { [ -d "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
 req_file() { [ -f "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
@@ -387,7 +396,17 @@ if [ "$STATIC" != 1 ]; then
     [ -e "$s" ] || continue
     [ "$(cat "$s")" = connected ] && out="$out $(basename "$(dirname "$s")")"
   done
-  [ -n "$out" ] && pass "connected output" "${out# }" || fail "connected output" none
+  # Headless is a state of the cabling, not a mode the caller can declare: it
+  # holds only while this loop agrees that nothing is connected.
+  headless=0
+  [ -z "$out" ] && [ "$NO_DISPLAY" = 1 ] && headless=1
+  if [ -n "$out" ]; then
+    pass "connected output" "${out# }"
+  elif [ "$headless" = 1 ]; then
+    skip "connected output" "no display is attached to this board"
+  else
+    fail "connected output" none
+  fi
 
   for u in mediaboxd-rs mediabox-media-worker stremio-server; do
     st="$(systemctl is-active "$u.service" 2>/dev/null || true)"
@@ -403,7 +422,11 @@ if [ "$STATIC" != 1 ]; then
   case "$ui_state:$kodi_state" in
     active:*)   pass "the television has an owner" "the interface" ;;
     *:active)   pass "the television has an owner" "Kodi (the interface stands down for it)" ;;
-    *)          fail "the television has an owner" "neither the interface nor Kodi is running" ;;
+    *)          if [ "$headless" = 1 ]; then
+                  skip "the television has an owner" "there is no television to own"
+                else
+                  fail "the television has an owner" "neither the interface nor Kodi is running"
+                fi ;;
   esac
   # A socket file is not a listener.
   #
@@ -411,7 +434,9 @@ if [ "$STATIC" != 1 ]; then
   # interface passes just as well as a live one. What the player needs is
   # something accepting on the other end, so that is what is asked.
   sock=/run/mediabox-ui/video.sock
-  if [ "$ui_state" != active ]; then
+  if [ "$headless" = 1 ] && [ "$ui_state" != active ]; then
+    skip "interface video socket" "the interface is not running: no display is attached"
+  elif [ "$ui_state" != active ]; then
     # Nothing to listen: the socket belongs to the interface's runtime
     # directory and goes away with it. Checked whenever the interface is up,
     # which is every case that matters -- including the end of an install.
@@ -520,8 +545,10 @@ if [ "$STATIC" != 1 ]; then
 fi
 
 echo
-if [ "$fails" -eq 0 ]; then
+if [ "$fails" -eq 0 ] && [ "$skips" -eq 0 ]; then
   echo "== product verify PASS"
+elif [ "$fails" -eq 0 ]; then
+  echo "== product verify PASS with $skips display check(s) not run: no display is attached"
 else
   echo "== product verify FAIL ($fails required item(s) missing or wrong)"
 fi
