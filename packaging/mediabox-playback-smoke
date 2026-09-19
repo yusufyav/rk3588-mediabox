@@ -105,6 +105,32 @@ if [ "${pid:-0}" -gt 0 ] && [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$P/p
     && ok 'hardware decoder open' /dev/mpp_service || bad 'hardware decoder open' '/dev/mpp_service not open'
   printf '%s' "$fds" | grep -q '/dev/dma_heap/' \
     && ok 'dma-buf heap open' /dev/dma_heap || bad 'dma-buf heap open' 'no dma-buf heap open'
+
+  # And where its sound is going.
+  #
+  # Both clips that ship with the product are video-only, so nothing here can
+  # listen for the film -- which is how a player that sent every film's sound
+  # to the wrong sound card passed this gate on a board where the picture was
+  # perfect. What can be read is the decision: the card the launcher pinned has
+  # to be the card that belongs to the output the picture is on. On the Plus
+  # they were different (rockchipdp0 against rockchiphdmi1) and the television
+  # was silent.
+  want_card="$("$P/bin/mediabox-platform" alsa-card 2>/dev/null || true)"
+  cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  case "$cmdline" in
+    *--audio-device=*)
+      got_card="$(printf '%s' "$cmdline" | sed -n 's/.*--audio-device=[^ ]*CARD=\([^, ]*\).*/\1/p')"
+      if [ -z "$want_card" ]; then
+        ok 'audio on the picture output' "pinned to $got_card (no output selected to compare with)"
+      elif [ "$got_card" = "$want_card" ]; then
+        ok 'audio on the picture output' "$got_card"
+      else
+        bad 'audio on the picture output' "pinned to $got_card, the picture is on $want_card"
+      fi ;;
+    *)
+      bad 'audio on the picture output' \
+        "no --audio-device: mpv falls back to ALSA 'default', which is card 0" ;;
+  esac
 else
   bad 'player process' "no mpv at pid ${pid:-0}"
   bad 'hardware decoder open' 'no player to ask'

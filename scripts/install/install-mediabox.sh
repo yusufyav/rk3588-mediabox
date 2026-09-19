@@ -338,6 +338,13 @@ install -m 0755 "$here/packaging/mediabox-product-verify" "$prefix/bin/mediabox-
 install -m 0755 "$here/packaging/mediabox-playback-smoke" "$prefix/bin/mediabox-playback-smoke"
 ok "product checks installed"
 
+# The launcher, for the same reason the unit files come from here: it is a
+# shell script, and a line of it must not cost a 350 MB re-capture. It is the
+# file that decides which sound card the film's audio goes to, and that
+# decision was wrong on any board whose HDMI is not ALSA card 0.
+install -m 0755 "$here/packaging/mediabox-player" "$prefix/bin/mediabox-player"
+ok "player launcher"
+
 # Kodi's settings for this appliance, which kodi.service seeds on a first run.
 install -D -m 0644 "$here/config/kodi/guisettings-appliance.xml" \
   "$prefix/share/kodi/guisettings-appliance.xml"

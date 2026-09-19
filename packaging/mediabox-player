@@ -60,6 +60,36 @@ if [ ! -S "$MEDIABOX_VIDEO_SOCKET" ]; then
     exit 1
 fi
 
+# The sound card that belongs to the picture.
+#
+# With --no-config mpv autoprobes its output: pipewire, then pulse, then ALSA's
+# `default` -- and `default`, on a board with no /etc/asound.conf, is card 0.
+# On the Ultra card 0 is `rockchiphdmi1`, the board's only HDMI and the socket
+# the film is going out of, so this player had sound by coincidence. On the
+# Plus card 0 is `rockchipdp0`: measured, the tone ran on card 0 while the
+# television was on card 2, and every film played silently. Kodi was fine on
+# the same board, because mediabox-hdmi-prepare pins Kodi's profile to the card
+# the selected output resolves to.
+#
+# So the same question is asked here, of the same resolver. `hdmi:CARD=<id>` is
+# the PCM that mediabox-hdmi-prepare renders per board -- plug-wrapped, so a
+# 44.1 kHz film reaches a 48 kHz sink -- and `plughw:` is the fallback for a
+# board where that file has not been written yet. If nothing resolves, nothing
+# is pinned and mpv autoprobes as before: a silent film is better than no film.
+audio=""
+platform=/opt/rk3588-mediabox/bin/mediabox-platform
+if [ -x "$platform" ]; then
+    card="$("$platform" alsa-card 2>/dev/null || true)"
+    driver="$("$platform" alsa-driver 2>/dev/null || true)"
+    if [ -n "$card" ] && [ -n "$driver" ] && [ -f "/usr/share/alsa/cards/$driver.conf" ]; then
+        audio="--ao=alsa --audio-device=alsa/hdmi:CARD=$card,DEV=0"
+    elif [ -n "$card" ]; then
+        audio="--ao=alsa --audio-device=alsa/plughw:CARD=$card,DEV=0"
+    else
+        echo "mediabox-player: ses kartı çözülemedi, mpv kendi seçecek" >&2
+    fi
+fi
+
 # A socket the control plane can ask "where have you got to" on, which is what
 # makes handing the film to Kodi land on the same second rather than the start.
 ipc=""
@@ -67,9 +97,10 @@ if [ -n "${MEDIABOX_PLAYER_IPC:-}" ]; then
     ipc="--input-ipc-server=$MEDIABOX_PLAYER_IPC"
 fi
 
-# shellcheck disable=SC2086  # $ipc is either empty or one known flag.
+# shellcheck disable=SC2086  # $ipc and $audio are empty or known flags.
 exec /opt/rk3588-mediabox/player/bin/mpv \
     $ipc \
+    $audio \
     --no-config \
     --input-conf=/opt/rk3588-mediabox/player/share/mediabox-input.conf \
     --scripts=/opt/rk3588-mediabox/player/share/mediabox.lua \
