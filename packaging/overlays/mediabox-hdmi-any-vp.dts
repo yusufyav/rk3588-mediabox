@@ -1,0 +1,43 @@
+// Let either HDMI transmitter reach Video Port 0.
+//
+// On RK3588 the VOP2's HDR conversion block belongs to VP0. A film on VP0 can
+// be tone-mapped and an SDR overlay can be lifted into an HDR signal; VP1 and
+// VP2 can do neither. Measured on an Orange Pi 5 Plus with the television on
+// the second socket: HDR10 reached the panel, and Kodi's OSD over an HDR film
+// came out washed out and displaced -- the defect this project chased once
+// before and closed by moving a cable.
+//
+// A cable is not a fix. The board's own device tree already wires both HDMI
+// transmitters to all three video ports, and the board DTS then switches most
+// of those links off:
+//
+//   hdmi@fde80000 (HDMI-A-1)  -> vp0 okay      vp1 disabled   vp2 disabled
+//   hdmi@fdea0000 (HDMI-A-2)  -> vp0 disabled  vp1 okay       vp2 disabled
+//
+// which is what the kernel then publishes as the encoders' possible_crtcs --
+// 0x1 for one socket and 0x2 for the other -- and no userspace choice can get
+// past it. This overlay switches the two crossing links back on, so each
+// socket can be driven from either VP0 or VP1 and the interface can put
+// whichever television is actually connected on the port with the HDR block.
+//
+// Nothing here forces an assignment: it restores a choice. Only one output can
+// hold VP0 at a time, and with both links open a second display still lights
+// up on VP1 instead of not lighting up at all.
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/hdmi@fdea0000/ports/port@0/endpoint@0";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target-path = "/hdmi@fde80000/ports/port@0/endpoint@1";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+};

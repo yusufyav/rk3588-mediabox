@@ -23,6 +23,7 @@ prefix=/opt/rk3588-mediabox
 bundle=""
 verify_only=0
 force=0
+reboot_needed=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -345,6 +346,60 @@ ok "product checks installed"
 install -m 0755 "$here/packaging/mediabox-player" "$prefix/bin/mediabox-player"
 ok "player launcher"
 
+# ------------------------------------------- 11b. the video port crossbar
+#
+# Which HDMI socket a television is plugged into decides what it gets, and it
+# should not.
+#
+# On RK3588 the VOP2's HDR conversion block belongs to Video Port 0: a film
+# there can be tone-mapped, and an SDR interface drawn over an HDR film is
+# lifted into the signal rather than coming out washed out and displaced. VP1
+# and VP2 have none of it. The board's device tree wires both HDMI
+# transmitters to all three ports and then switches most of those links off,
+# so on an Orange Pi 5 Plus the kernel publishes one socket as VP0-only and the
+# other as VP1-only, and no choice in userspace can get past it:
+#
+#     216 TMDS  possible crtcs 0x1      HDMI-A-1
+#     235 TMDS  possible crtcs 0x2      HDMI-A-2
+#
+# The overlay switches the two crossing links back on. Measured after it, on
+# the same board: both encoders report 0x3, and the interface puts whichever
+# television is connected on the port with the block behind it. It forces no
+# assignment and takes nothing away -- a second display still lights up on VP1.
+step "video port crossbar"
+overlay="$here/packaging/overlays/mediabox-hdmi-any-vp.dtbo"
+env_file=/boot/armbianEnv.txt
+if [ ! -f "$env_file" ]; then
+  note "no $env_file: this board does not load user overlays"
+elif [ ! -f "$overlay" ]; then
+  note "the overlay is not in this tree: $overlay"
+elif [ ! -d /proc/device-tree/hdmi@fde80000 ] || [ ! -d /proc/device-tree/hdmi@fdea0000 ]; then
+  note "one HDMI transmitter on this board's device tree; nothing to cross"
+else
+  install -d -m 0755 /boot/overlay-user
+  if cmp -s "$overlay" /boot/overlay-user/mediabox-hdmi-any-vp.dtbo; then
+    ok "overlay present"
+  else
+    install -m 0644 "$overlay" /boot/overlay-user/mediabox-hdmi-any-vp.dtbo
+    ok "overlay installed"
+    reboot_needed=1
+  fi
+  if grep -qE '^user_overlays=.*mediabox-hdmi-any-vp' "$env_file"; then
+    ok "armbianEnv.txt loads it"
+  else
+    # The file decides whether this board boots. It is copied before it is
+    # touched, and an existing list is added to rather than replaced.
+    cp -a "$env_file" "$env_file.mediabox-$(date +%Y%m%d-%H%M%S)"
+    if grep -q '^user_overlays=' "$env_file"; then
+      sed -i 's/^user_overlays=\(.*\)$/user_overlays=\1 mediabox-hdmi-any-vp/' "$env_file"
+    else
+      printf 'user_overlays=mediabox-hdmi-any-vp\n' >>"$env_file"
+    fi
+    ok "armbianEnv.txt updated, previous copy kept beside it"
+    reboot_needed=1
+  fi
+fi
+
 # Kodi's settings for this appliance, which kodi.service seeds on a first run.
 install -D -m 0644 "$here/config/kodi/guisettings-appliance.xml" \
   "$prefix/share/kodi/guisettings-appliance.xml"
@@ -491,6 +546,8 @@ if [ "$headless" -eq 1 ]; then
       $prefix/bin/mediabox-product-verify
       $prefix/bin/mediabox-playback-smoke
 EOF
+  [ "$reboot_needed" -eq 1 ] && \
+    note "the video port overlay is loaded by U-Boot and needs a restart"
 else
   "$here/packaging/mediabox-playback-smoke" \
     || die "the appliance's own player did not play.
@@ -504,5 +561,11 @@ else
   the default player is operational: it decoded a film with rkmpp and put it
   on the display's own video plane
   nothing was compiled on this board
+EOF
+  [ "$reboot_needed" -eq 1 ] && cat <<'EOF'
+
+  One thing is waiting for a restart: the video port overlay is loaded by
+  U-Boot, so until this board is rebooted each HDMI socket still reaches only
+  the port its device tree pinned it to.
 EOF
 fi

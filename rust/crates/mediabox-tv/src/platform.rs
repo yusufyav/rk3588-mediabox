@@ -795,21 +795,75 @@ fn find_output(
         .copied()
         .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
 
+    // Not whichever video port the kernel happened to leave this socket on.
+    //
+    // On RK3588 the video ports are not equals. The driver says so itself, on
+    // each CRTC, and this board answers:
+    //
+    //     CRTC 89   PORT_ID 0   FEATURE 7
+    //     CRTC 130  PORT_ID 1   FEATURE 1
+    //     CRTC 170  PORT_ID 2   FEATURE 1
+    //
+    // VP0 is the one with the HDR conversion block behind it -- a film there
+    // can be tone-mapped and an SDR interface drawn over an HDR film is lifted
+    // into the signal instead of coming out washed out and displaced, which is
+    // exactly what a television on the second socket showed.
+    //
+    // Which socket can reach which port is the board's to say and this
+    // appliance's to use: with both crossings open, each HDMI transmitter
+    // offers VP0 and VP1, so the television that is actually connected is put
+    // on the better port whichever socket somebody plugged it into. A board
+    // whose device tree still pins one socket to one port gets its only
+    // choice, and no worse a picture than before.
+    let candidates: Vec<control::crtc::Handle> = connector
+        .encoders()
+        .iter()
+        .filter_map(|handle| kms.get_encoder(*handle).ok())
+        .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
+        .collect();
+    let rank = |crtc: &control::crtc::Handle| -> (u32, i64) {
+        let (mut feature, mut port) = (0u32, i64::MAX);
+        if let Ok(properties) = kms.get_properties(*crtc) {
+            let (handles, values) = properties.as_props_and_values();
+            for (handle, value) in handles.iter().zip(values.iter()) {
+                let Ok(info) = kms.get_property(*handle) else {
+                    continue;
+                };
+                match info.name().to_str() {
+                    // A bitmask of what the port can do. More of it is better,
+                    // and counting the bits keeps this from depending on which
+                    // bit means what in one kernel's numbering.
+                    Ok("FEATURE") => feature = (*value as u32).count_ones(),
+                    Ok("PORT_ID") => port = *value as i64,
+                    _ => {}
+                }
+            }
+        }
+        (feature, -port)
+    };
+    let best = candidates.iter().copied().max_by_key(|crtc| rank(crtc));
     let current = connector
         .current_encoder()
         .filter(|handle| connector.encoders().contains(handle))
         .and_then(|handle| kms.get_encoder(handle).ok())
         .and_then(|encoder| encoder.crtc());
-    let crtc = current
-        .or_else(|| {
-            connector
-                .encoders()
-                .iter()
-                .filter_map(|handle| kms.get_encoder(*handle).ok())
-                .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
-                .next()
-        })
-        .ok_or_else(|| PlatformError::from(format!("{wanted} has no compatible CRTC")))?;
+    // The port it is already on is kept only when nothing better is on offer;
+    // a modeset onto the good port is worth one flicker at startup.
+    let crtc = match (best, current) {
+        (Some(best), Some(current)) if best != current && rank(&best) > rank(&current) => {
+            eprintln!(
+                "mediabox-tv.platform moving {wanted} to the better video port: {best:?} over {current:?}"
+            );
+            best
+        }
+        (_, Some(current)) => current,
+        (Some(best), None) => best,
+        (None, None) => {
+            return Err(PlatformError::from(format!(
+                "{wanted} has no compatible CRTC"
+            )));
+        }
+    };
     Ok((connector, crtc, mode))
 }
 
