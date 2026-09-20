@@ -38,6 +38,12 @@ pub struct Playing {
     /// -- it refuses its own loopback as a source, which is what broke the
     /// handover once. See `Daemon::handoff_to_kodi`.
     pub source: String,
+    /// Where that film actually comes from: the upstream address the media
+    /// core resolved (`handoff.resolvedInput`). When `source` turns out to be
+    /// the core's own proxy, this is the only thing a second player can be
+    /// given -- the proxy is one ffmpeg on one pipe and a late reader joins it
+    /// mid-stream, not at the beginning.
+    pub origin: String,
     /// What to call it, and how long it is, as the caller knew them. Neither
     /// is derivable here; see `Request::MediaPlayHere`.
     pub title: Option<String>,

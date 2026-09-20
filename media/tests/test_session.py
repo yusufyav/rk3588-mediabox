@@ -286,6 +286,65 @@ class SessionLifecycleTests(unittest.TestCase):
         self.assertIsNotNone(session.pid)
         self.assertEqual(session.clients, 0)
 
+    def test_a_reader_that_arrives_alone_gets_the_stream_from_the_start(self):
+        """Kodi opens a URL three times before it plays it.
+
+        The reader that ends up playing is the last one, and on a transformed
+        session it used to attach to a pipe the earlier ones had already moved
+        along -- so it never saw the container's header. Measured on the
+        Ultra: 1a45dfa3 for the first reader, 2149d1a6 for the next, and
+        "Input #0, ac3" from Kodi's ffmpeg, which played the sound of a film
+        nobody could see.
+        """
+        manager = self._manager(
+            """
+            import sys, time
+            sys.stdout.buffer.write(b"HEADER")
+            sys.stdout.buffer.flush()
+            while True:
+                sys.stdout.buffer.write(b"x" * 4096)
+                sys.stdout.buffer.flush()
+                time.sleep(0.05)
+            """
+        )
+        session = manager.create("https://cdn.example.com/a.mkv", self._transcode_decision())
+
+        first = manager.attach(session.session_id)
+        self.assertTrue(next(first).startswith(b"HEADER"))
+        was = session.pid
+        first.close()
+
+        second = manager.attach(session.session_id)
+        self.assertTrue(
+            next(second).startswith(b"HEADER"),
+            "a reader that arrives on its own must be given the header",
+        )
+        self.assertNotEqual(session.pid, was, "it is a new child, not the old pipe")
+        second.close()
+
+    def test_a_reader_that_arrives_beside_another_does_not_rewind_it(self):
+        """The one already watching keeps its stream."""
+        manager = self._manager(
+            """
+            import sys, time
+            sys.stdout.buffer.write(b"HEADER")
+            sys.stdout.buffer.flush()
+            while True:
+                sys.stdout.buffer.write(b"x" * 4096)
+                sys.stdout.buffer.flush()
+                time.sleep(0.05)
+            """
+        )
+        session = manager.create("https://cdn.example.com/a.mkv", self._transcode_decision())
+        first = manager.attach(session.session_id)
+        next(first)
+        was = session.pid
+        second = manager.attach(session.session_id)
+        next(second)
+        self.assertEqual(session.pid, was)
+        first.close()
+        second.close()
+
     def test_stop_is_idempotent(self):
         manager = self._manager(SLOW_PRODUCER)
         session = manager.create("https://cdn.example.com/a.mkv", self._transcode_decision())

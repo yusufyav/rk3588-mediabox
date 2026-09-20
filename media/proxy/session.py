@@ -96,6 +96,10 @@ class MediaSession:
     stderr: bytearray = field(default_factory=bytearray)
     argv: tuple[str, ...] = ()
     playback_url: str | None = None
+    #: Whether anybody has read a byte out of the child yet. A stream that has
+    #: been read from cannot be handed to a second reader as it stands: see
+    #: `SessionRegistry._rewind_for_a_new_reader`.
+    served: bool = False
 
     def selected_tracks(self) -> dict[str, Any]:
         video = self.decision.video.track
@@ -305,11 +309,55 @@ class SessionManager:
                 "this session is played directly from the source; there is nothing to relay",
                 409,
             )
+        self._rewind_for_a_new_reader(session)
         self._start(session)
         with self._lock:
             session.clients += 1
             session.last_seen = self._clock()
         return self._relay(session)
+
+    def _rewind_for_a_new_reader(self, session: MediaSession) -> None:
+        """Give a reader that arrives on its own the stream from the start.
+
+        A transformed session is one ffmpeg writing to one pipe, and a pipe
+        has one position. Whoever reads it second does not get the container's
+        header -- they get wherever the muxer has got to, which is the middle
+        of a cluster.
+
+        That is not a theoretical reader. Kodi opens a URL several times before
+        it plays it: once to ask the mime type, once through CurlFile, once
+        more through its file cache. Measured on the Ultra against a remux the
+        television was handing over:
+
+            first reader of a fresh session:  1a 45 df a3   (Matroska)
+            a reader that arrived later:      21 49 d1 a6   (mid-stream)
+
+            ffmpeg[...]: Input #0, ac3, from 'http://127.0.0.1:8790/media/...'
+
+        Kodi played the audio and showed no picture, with the session's id
+        where the film's name belongs and no duration -- because what it was
+        handed was not a container at all.
+
+        So a reader that arrives when nobody else is reading gets a child of
+        its own. The command is unchanged, `-ss` included, so it restarts at
+        the same second; only the pipe is new. A reader that arrives while
+        another is mid-stream is left alone: rewinding then would break the
+        one that is already watching, and two readers of one transform is a
+        different problem from this one.
+        """
+        with self._lock:
+            if session.clients > 0 or not session.served or session.process is None:
+                return
+            process = session.process
+            session.process = None
+            session.pid = None
+            session.served = False
+            session.state = SessionState.CREATED
+        LOG.info(
+            "media session %s rewound: a new reader needs the stream from the start",
+            session.session_id,
+        )
+        _terminate(process)
 
     def _relay(self, session: MediaSession) -> Iterator[bytes]:
         process = session.process
@@ -330,6 +378,7 @@ class SessionManager:
                     return
                 with self._lock:
                     session.last_seen = self._clock()
+                    session.served = True
                 yield block
         finally:
             self.detach(session.session_id)

@@ -677,12 +677,29 @@ fi
 # handover must not go through `play_on_kodi`, which is the resolve path.
 daemon="$here/rust/crates/mediaboxd-rs/src/daemon.rs"
 handoff=$(awk '/async fn handoff_to_kodi/,/^    }$/' "$daemon")
-if printf '%s' "$handoff" | grep -q 'play_on_kodi'; then
-  echo "FAIL handoff_to_kodi resolves again instead of reusing its session"
-  printf '%s' "$handoff" | grep -n 'play_on_kodi' | sed 's/^/     /'
-  failures=$((failures + 1))
+if printf '%s' "$handoff" | grep -q 'is_proxy_address'; then
+  echo "ok   the handover asks what kind of address it is holding"
 else
-  echo "ok   the handover reuses the session it is already playing"
+  echo "FAIL handoff_to_kodi does not distinguish the core's proxy from an upstream address"
+  failures=$((failures + 1))
+fi
+# And what Kodi is given is never one of our own addresses: the core refuses
+# its own loopback as a source (400), and opening the live pipe puts Kodi in
+# the middle of the container -- measured as "Input #0, ac3": sound, no
+# picture, no duration.
+if printf '%s' "$handoff" | grep -q 'playing.origin'; then
+  echo "ok   a transformed film hands over by its upstream address"
+else
+  echo "FAIL the proxied handover does not use the upstream address"
+  failures=$((failures + 1))
+fi
+# The catalogue's own "play on Kodi" goes the same way.
+on_kodi=$(awk '/async fn play_on_kodi/,/^    }$/' "$daemon")
+if printf '%s' "$on_kodi" | grep -q 'handoff/resolvedInput'; then
+  echo "ok   playing on Kodi gives it the resolved source"
+else
+  echo "FAIL play_on_kodi still hands Kodi the media core's own address"
+  failures=$((failures + 1))
 fi
 
 echo

@@ -423,10 +423,21 @@ impl AppState {
             .unwrap_or_default()
             .to_string();
 
+        // And where it comes from, which is not always the same thing: when
+        // the film needs a transform, the address above is this core's own
+        // proxy and only the upstream one can be given to a second player.
+        let origin = session
+            .pointer("/handoff/resolvedInput")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| url.clone())
+            .unwrap_or_default();
+
         let local = self.media.session_url(&session_id);
         let playing = Playing {
             session_id: session_id.clone(),
             source: source.clone(),
+            origin,
             title: title.filter(|title| !title.trim().is_empty()),
             duration: duration_seconds.filter(|seconds| *seconds > 0),
         };
@@ -443,32 +454,46 @@ impl AppState {
 
     /// Hand what is playing here to Kodi, at the second it had reached.
     ///
-    /// The session the film is already playing from is the session Kodi gets.
-    /// This used to end it and ask for a new one, handing `playing.source` in
-    /// as if it were a fresh source -- and that address is the media core's
-    /// own loopback, which it refuses by design:
+    /// Hand the film over by giving Kodi the source, and nothing else.
+    ///
+    /// Kodi is a player. It resolves, probes, seeks and decodes; the one thing
+    /// it will not do is read a pipe somebody else is holding. Both of the
+    /// ways this went wrong were ways of forgetting that.
+    ///
+    /// It used to end the session and ask the media core for a new one with
+    /// `playing.source` as the source -- and that address is the core's own
+    /// loopback, which it refuses by design:
     ///
     ///   POST /media/session -> 400
     ///   INVALID_REQUEST: loopback sources are only allowed for the
     ///   configured streaming server
     ///
-    /// Measured on the Ultra. The session was deleted, the replacement was
-    /// refused, and because resolving and the handover ran at the same time
-    /// Kodi had already been started: it lived 73 ms, was stopped again, the
-    /// interface came back and the viewer's film was simply gone. Not even the
-    /// reason survived -- the notice that would have carried it belongs to the
-    /// interface, and the interface is restarted by the handover itself.
+    /// Because resolving and the handover ran at the same time, Kodi had
+    /// already been started when the refusal came back: it lived 73 ms, the
+    /// interface came back and the film was gone with no reason shown -- the
+    /// notice belongs to the interface, which the handover restarts.
     ///
-    /// There is nothing to resolve. The session exists and already carries the
-    /// address Kodi is meant to open -- `handoff.kodiPlaybackUrl`, which is
-    /// what `Playing::source` holds -- so the player lets go, the display
-    /// changes hands, and Kodi opens it. Re-resolving cost about six seconds
-    /// of network as well, and that is gone with it.
+    /// Handing that same address to Kodi to *open* is no better, and it is
+    /// the failure that looked like success. The transform is one ffmpeg
+    /// writing one pipe, and Kodi opens a URL several times before it plays
+    /// it -- mime type, CurlFile, file cache. Whichever reader ends up
+    /// playing is not the one that got the container's header, so its ffmpeg
+    /// probes bytes from the middle of a cluster:
     ///
-    /// The session outlives the player deliberately: it is idle only for the
-    /// handover itself, which is a couple of seconds against the core's
-    /// forty-five second reaper, and every failure below gives the display
-    /// back before ending it.
+    ///   Input #0, ac3, from 'http://127.0.0.1:8790/media/session/5b04df...'
+    ///
+    /// Kodi played the sound and showed no picture, with the session's id
+    /// where the film's name belongs and no duration at all.
+    ///
+    /// So Kodi is given an address it can own. Measured on the Ultra, same
+    /// remux, handed over as the source instead:
+    ///
+    ///   Input #0, matroska,webm, from 'https://.../To.Rome.with.Love.2012
+    ///     .1080p.BluRay.REMUX.AVC.MULTi.DTS-HD.MA.5.1-4K4U.mkv'
+    ///   duration 1:51:48, audio dtshd_ma 6ch, video on plane 75 as NV12
+    ///
+    /// -- the whole film, the real length, and Kodi decoding the DTS-HD the
+    /// core would have transcoded for a lesser player.
     async fn handoff_to_kodi(&self) -> Response {
         let Some(playing) = self.player.playing().await else {
             return Response::failure("NOTHING_PLAYING", "burada oynayan bir şey yok");
@@ -479,32 +504,49 @@ impl AppState {
         if playing.source.is_empty() {
             return Response::failure("NO_SOURCE", "bu kaynağın Kodi için adresi yok");
         }
+
+        // Which address Kodi is given. Never one of ours: that is a live pipe
+        // and Kodi is not a reader it can serve. When the film here is going
+        // through one, Kodi gets the source instead and does its own work --
+        // which for this remux means decoding DTS-HD MA itself, measured
+        // below.
+        let address = if is_proxy_address(&playing.source) {
+            if playing.origin.is_empty() {
+                return Response::failure(
+                    "NO_SOURCE",
+                    "bu kaynak dönüştürülerek oynuyor ve Kodi için ayrı bir adresi yok",
+                );
+            }
+            playing.origin.clone()
+        } else {
+            playing.source.clone()
+        };
+
+        // Nothing here belongs to Kodi, so all of it goes: the player and the
+        // transform it was reading.
         self.player.stop().await;
+        self.stop_session(&playing.session_id).await;
 
         let surface = match self.switch_surface(Surface::Kodi).await {
             Ok(status) => status,
             Err(error) => {
                 let _ = self.switch_surface(Surface::Ui).await;
-                self.stop_session(&playing.session_id).await;
                 return Response::failure("SURFACE_ERROR", error.to_string());
             }
         };
         if let Err(error) = self.await_kodi().await {
             let _ = self.switch_surface(Surface::Ui).await;
-            self.stop_session(&playing.session_id).await;
             return Response::failure("KODI_UNAVAILABLE", error);
         }
-        match self.kodi.open(&playing.source, at).await {
+        match self.kodi.open(&address, at).await {
             Ok(_) => Response::success(json!({
                 "playing": "kodi",
-                "sessionId": playing.session_id,
                 "surface": surface,
-                "playbackUrl": playing.source,
+                "playbackUrl": address,
                 "startSeconds": at,
             })),
             Err(error) => {
                 let _ = self.switch_surface(Surface::Ui).await;
-                self.stop_session(&playing.session_id).await;
                 Response::failure("KODI_ERROR", error.to_string())
             }
         }
@@ -554,16 +596,37 @@ impl AppState {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let Some(playback_url) = session
-            .pointer("/handoff/kodiPlaybackUrl")
+        // What Kodi opens: the source, resolved. The core is asked to resolve
+        // and to say what is in the file; it is not asked to stand between
+        // Kodi and the film. A transform it offers is for players that need
+        // one -- the browser, and the interface's own -- and Kodi is not one
+        // of those. See the note on `handoff_to_kodi` for what happens when
+        // it is handed the transform instead.
+        let resolved = session
+            .pointer("/handoff/resolvedInput")
             .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            self.stop_session(&session_id).await;
-            return Response::failure(
-                "MEDIA_WORKER_ERROR",
-                "medya oturumu Kodi için oynatma URL'si üretmedi",
-            );
+            .filter(|address| !address.is_empty())
+            .map(str::to_owned);
+        let playback_url = match resolved {
+            Some(address) => {
+                // Nothing will read the transform, so it does not run.
+                self.stop_session(&session_id).await;
+                address
+            }
+            None => {
+                let Some(address) = session
+                    .pointer("/handoff/kodiPlaybackUrl")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    self.stop_session(&session_id).await;
+                    return Response::failure(
+                        "MEDIA_WORKER_ERROR",
+                        "medya oturumu Kodi için oynatma URL'si üretmedi",
+                    );
+                };
+                address
+            }
         };
 
         let surface = match handover {
@@ -591,6 +654,21 @@ impl AppState {
         }
     }
 
+}
+
+/// Is this one of the media core's own session addresses?
+///
+/// Tested on the path rather than on the host: the core hands Kodi a loopback
+/// rewrite of its own base URL, so the address the interface is playing and
+/// the address Kodi is given are not spelled the same even though they are
+/// the same proxy. `/media/session/<id>` is what they share.
+fn is_proxy_address(address: &str) -> bool {
+    reqwest::Url::parse(address)
+        .map(|parsed| parsed.path().starts_with("/media/session/"))
+        .unwrap_or(false)
+}
+
+impl AppState {
     async fn stop_all_sessions(&self) {
         let Ok(listing) = self.media.sessions().await else {
             return;
@@ -872,6 +950,23 @@ mod tests {
     use mediabox_core::{CecStatus, InputMode};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    /// Which handover a film gets is decided by this, and getting it wrong
+    /// is either a 400 from the media core or a film with no picture.
+    #[test]
+    fn the_core_s_own_sessions_are_recognised_whatever_host_they_wear() {
+        assert!(is_proxy_address(
+            "http://127.0.0.1:8790/media/session/ddd28e498d739d04226cb16d2e9f4f59"
+        ));
+        assert!(is_proxy_address(
+            "http://10.27.27.35:8790/media/session/ddd28e498d739d04226cb16d2e9f4f59"
+        ));
+        assert!(!is_proxy_address(
+            "https://21-4.download.real-debrid.com/d/ZI6AQSXVDNJ2K/A%20Film.mkv"
+        ));
+        assert!(!is_proxy_address("http://127.0.0.1:11470/hlsv2/abc/master.m3u8"));
+        assert!(!is_proxy_address(""));
+    }
 
     #[tokio::test]
     async fn unix_socket_request_returns_structured_response() {
