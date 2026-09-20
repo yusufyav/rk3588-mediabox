@@ -88,6 +88,15 @@ fi
 
 if [ -n "$interface" ]; then
     say "wi-fi on $interface"
+    # Power save off. This appliance streams video and is not on a battery,
+    # and the saving is paid for in latency: on the Ultra, whose radio is on
+    # SDIO, ping across the house measured 94 ms with it on and 80 ms with it
+    # off, against 2 ms for the Plus's PCIe card on the same network. It is
+    # not the whole of that board's problem -- with it off the Ultra still
+    # pings 127 ms under load and streams 59 Mbit/s where the Plus manages
+    # 2 ms and a gigabit link rate -- but it is free to fix and it is never
+    # right for a set-top box.
+    iw dev "$interface" set power_save off 2>/dev/null || true
     # netplan renders the remembered networks; a driver that arrived late
     # needs the link configured after the fact.
     # Bounded: a netplan that cannot finish must not hold the boot, and the
