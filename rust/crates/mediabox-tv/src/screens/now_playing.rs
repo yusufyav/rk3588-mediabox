@@ -157,6 +157,10 @@ pub struct NowPlaying {
     pub subtitle: String,
     pub artwork: Option<String>,
     pub backdrop: Option<String>,
+    /// The film's own name as a picture, drawn over the backdrop while the
+    /// film is opening. Optional: plenty of titles have no logo, and the
+    /// opening screen has to read without one.
+    pub logo: Option<String>,
     pub elapsed_seconds: u64,
     pub duration_seconds: u64,
     pub state: Option<PlaybackState>,

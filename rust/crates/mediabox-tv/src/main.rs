@@ -838,11 +838,13 @@ impl App {
         self.now.title = detail.meta.name.clone();
         self.now.artwork = detail.meta.poster.clone();
         self.now.backdrop = detail.meta.background.clone();
+        self.now.logo = detail.meta.logo.clone().filter(|url| !url.is_empty());
         // Same reason as the detail screen's four slots: `paint_now_playing`
         // writes the picture only when it is already decoded, so without this
         // the film that is starting is announced over the last film's still.
         if let Some(window) = self.window.upgrade() {
             window.set_np_art(slint::Image::default());
+            window.set_np_logo(slint::Image::default());
         }
         self.now.set_technical(detail.technical_pairs());
 
@@ -2175,6 +2177,15 @@ impl App {
             self.images.want(&key);
             if let Some(art) = self.images.get(&key) {
                 window.set_np_art(art);
+            }
+        }
+        // Wanted at poster width: it is drawn at about a fifth of the panel
+        // and the shelf it was opened from has usually decoded it already.
+        if let Some(url) = now.logo.clone() {
+            let key = images::Key::new(&url, state::POSTER_WIDTH);
+            self.images.want(&key);
+            if let Some(logo) = self.images.get(&key) {
+                window.set_np_logo(logo);
             }
         }
     }

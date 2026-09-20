@@ -154,6 +154,8 @@ export component MediaBoxWindow inherits Window {
 
     // ---- now playing
     in property <image> np-art;
+    /// The film's name as a picture, for the screen it opens on.
+    in property <image> np-logo;
     in property <string> np-title;
     in property <string> np-subtitle;
     in property <string> np-note;
@@ -450,6 +452,8 @@ export component MediaBoxWindow inherits Window {
             title: root.np-title;
             note: root.np-note;
             waiting: root.np-waiting;
+            art: root.np-art;
+            logo: root.np-logo;
             elapsed: root.np-elapsed;
             duration: root.np-duration;
             progress: root.np-progress;
