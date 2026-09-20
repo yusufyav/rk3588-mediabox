@@ -71,6 +71,11 @@ pub enum Press {
 }
 
 pub struct Wifi {
+    /// Whether the daemon has answered yet. Until it has, this screen knows
+    /// nothing and says nothing: its first frame used to claim "Bu kartta
+    /// kablosuz arayüz yok" on a board whose radio was up and connected,
+    /// because `present` defaults to false and the answer takes a moment.
+    pub known: bool,
     pub present: bool,
     pub powered: bool,
     pub connected_to: Option<String>,
@@ -105,6 +110,7 @@ impl Default for Wifi {
 impl Wifi {
     pub fn new() -> Self {
         Self {
+            known: false,
             present: false,
             powered: false,
             connected_to: None,
@@ -188,6 +194,7 @@ impl Wifi {
 
     /// Fold a status answer from the daemon in.
     pub fn take_status(&mut self, value: &serde_json::Value) {
+        self.known = true;
         self.present = value
             .get("present")
             .and_then(serde_json::Value::as_bool)
@@ -422,6 +429,8 @@ pub enum BtPress {
 }
 
 pub struct Bluetooth {
+    /// As on [`Wifi`]: nothing is claimed before the daemon has answered.
+    pub known: bool,
     pub present: bool,
     pub powered: bool,
     pub controller: Option<String>,
@@ -443,6 +452,7 @@ impl Default for Bluetooth {
 impl Bluetooth {
     pub fn new() -> Self {
         Self {
+            known: false,
             present: false,
             powered: false,
             controller: None,
@@ -469,6 +479,7 @@ impl Bluetooth {
     }
 
     pub fn take_status(&mut self, value: &serde_json::Value) {
+        self.known = true;
         self.present = value
             .get("present")
             .and_then(serde_json::Value::as_bool)
@@ -729,6 +740,27 @@ mod tests {
         assert_eq!(bt.press(), BtPress::Connect);
         bt.index = BT_HEAD + 2;
         assert_eq!(bt.press(), BtPress::Pair);
+    }
+
+    /// A screen that has not heard from the daemon says nothing about the
+    /// radio. Measured on the Ultra: the first frame of the Wi-Fi screen read
+    /// "Kapalı · Bu kartta kablosuz arayüz yok" while wlan0 was up, connected
+    /// and at -39 dBm, because absence is what the fields default to.
+    #[test]
+    fn nothing_is_claimed_before_the_daemon_has_answered() {
+        let wifi = Wifi::new();
+        assert!(!wifi.known);
+        let mut wifi = Wifi::new();
+        wifi.take_status(&json!({"present": true, "powered": true, "ssid": "Ev"}));
+        assert!(wifi.known);
+        assert!(wifi.present);
+
+        let bt = Bluetooth::new();
+        assert!(!bt.known);
+        let mut bt = Bluetooth::new();
+        bt.take_status(&json!({"present": false}));
+        assert!(bt.known);
+        assert!(!bt.present);
     }
 
     #[test]

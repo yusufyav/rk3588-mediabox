@@ -92,6 +92,9 @@ component Line inherits Rectangle {
 }
 
 export component WifiScreen inherits Rectangle {
+    /// False until the daemon has answered once. Nothing below states a fact
+    /// about the radio while this is false.
+    in property <bool> known;
     in property <bool> present;
     in property <bool> powered;
     in property <string> summary;
@@ -152,9 +155,9 @@ export component WifiScreen inherits Rectangle {
             Line {
                 focused: index == 0;
                 title: "Wi-Fi";
-                under: present ? "" : "Bu kartta kablosuz arayüz yok";
-                value: powered ? "Açık" : "Kapalı";
-                dim: !present;
+                under: !known || present ? "" : "Bu kartta kablosuz arayüz yok";
+                value: known ? (powered ? "Açık" : "Kapalı") : "…";
+                dim: !known || !present;
             }
             Line {
                 // "Aranıyor…" only while a scan is what is running. It used
@@ -298,6 +301,8 @@ export component WifiScreen inherits Rectangle {
 }
 
 export component BluetoothScreen inherits Rectangle {
+    /// As on WifiScreen.
+    in property <bool> known;
     in property <bool> present;
     in property <bool> powered;
     in property <string> summary;
@@ -341,9 +346,9 @@ export component BluetoothScreen inherits Rectangle {
         Line {
             focused: index == 0;
             title: "Bluetooth";
-            under: present ? "" : "Bu kartta denetleyici görünmüyor";
-            value: powered ? "Açık" : "Kapalı";
-            dim: !present;
+            under: !known || present ? "" : "Bu kartta denetleyici görünmüyor";
+            value: known ? (powered ? "Açık" : "Kapalı") : "…";
+            dim: !known || !present;
         }
         Line {
             focused: index == 1;

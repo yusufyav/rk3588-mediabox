@@ -1644,6 +1644,7 @@ impl App {
 
     fn paint_wifi(&mut self, window: &MediaBoxWindow) {
         let wifi = &self.wifi;
+        window.set_wifi_known(wifi.known);
         window.set_wifi_present(wifi.present);
         window.set_wifi_powered(wifi.powered);
         window.set_wifi_index(wifi.index as i32);
@@ -1652,10 +1653,13 @@ impl App {
         window.set_wifi_notice(wifi.notice.clone().into());
         window.set_wifi_address(wifi.address.clone().unwrap_or_default().into());
         window.set_wifi_summary(
-            match (&wifi.connected_to, wifi.powered) {
-                (Some(ssid), _) => format!("{ssid} · bağlı"),
-                (None, true) => "Bağlı değil".to_string(),
-                (None, false) => "Kapalı".to_string(),
+            match (wifi.known, &wifi.connected_to, wifi.powered) {
+                // Nothing has come back yet, so there is nothing to say. This
+                // used to read "Kapalı" for the first moment of every visit.
+                (false, _, _) => String::new(),
+                (true, Some(ssid), _) => format!("{ssid} · bağlı"),
+                (true, None, true) => "Bağlı değil".to_string(),
+                (true, None, false) => "Kapalı".to_string(),
             }
             .into(),
         );
@@ -1705,6 +1709,7 @@ impl App {
 
     fn paint_bluetooth(&mut self, window: &MediaBoxWindow) {
         let bt = &self.bt;
+        window.set_bt_known(bt.known);
         window.set_bt_present(bt.present);
         window.set_bt_powered(bt.powered);
         window.set_bt_index(bt.index as i32);
@@ -1712,10 +1717,11 @@ impl App {
         window.set_bt_notice(bt.notice.clone().into());
         window.set_bt_press_label(bt.press_label().into());
         window.set_bt_summary(
-            match (&bt.controller, bt.powered) {
-                (Some(_), true) => "Açık".to_string(),
-                (Some(_), false) => "Kapalı".to_string(),
-                (None, _) => "Denetleyici yok".to_string(),
+            match (bt.known, &bt.controller, bt.powered) {
+                (false, _, _) => String::new(),
+                (true, Some(_), true) => "Açık".to_string(),
+                (true, Some(_), false) => "Kapalı".to_string(),
+                (true, None, _) => "Denetleyici yok".to_string(),
             }
             .into(),
         );

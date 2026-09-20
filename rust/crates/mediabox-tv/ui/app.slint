@@ -106,6 +106,7 @@ export component MediaBoxWindow inherits Window {
     in property <[KeyRow]> search-keys;
 
     // ------------------------------------------------------------ the radios
+    in property <bool> wifi-known;
     in property <bool> wifi-present;
     in property <bool> wifi-powered;
     in property <string> wifi-summary;
@@ -126,6 +127,7 @@ export component MediaBoxWindow inherits Window {
     in property <int> wifi-key-row;
     in property <int> wifi-key-col;
 
+    in property <bool> bt-known;
     in property <bool> bt-present;
     in property <bool> bt-powered;
     in property <string> bt-summary;
@@ -395,6 +397,7 @@ export component MediaBoxWindow inherits Window {
         if screen == "wifi": WifiScreen {
             width: 100%;
             height: 100%;
+            known: root.wifi-known;
             present: root.wifi-present;
             powered: root.wifi-powered;
             summary: root.wifi-summary;
@@ -417,6 +420,7 @@ export component MediaBoxWindow inherits Window {
         if screen == "bluetooth": BluetoothScreen {
             width: 100%;
             height: 100%;
+            known: root.bt-known;
             present: root.bt-present;
             powered: root.bt-powered;
             summary: root.bt-summary;

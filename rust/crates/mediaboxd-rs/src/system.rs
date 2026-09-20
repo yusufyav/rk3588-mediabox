@@ -208,6 +208,11 @@ fn network() -> Value {
             let octets = gateway.to_le_bytes();
             json!({
                 "interface": fields[0],
+                // The address the settings screen shows under this interface.
+                // It was missing here and the row read "—" on a board with a
+                // perfectly good lease -- the home panel had it right, because
+                // it reads the per-interface list below rather than this.
+                "address": address_of(fields[0]),
                 "gateway": format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3]),
             })
         })
