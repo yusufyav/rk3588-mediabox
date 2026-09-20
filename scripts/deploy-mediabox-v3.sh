@@ -130,10 +130,11 @@ say "television shell"
 cp_ "$here/packaging/mediabox-kiosk-smoke" \
     "$here/packaging/mediabox-hdmi-prepare" "$here/packaging/mediabox-display-scale" \
     "$here/packaging/mediabox-console-off" "$here/packaging/mediabox-tv-drive" \
-    "$here/packaging/mediabox-wireless-up" \
+    "$here/packaging/mediabox-wireless-up" "$here/packaging/mediabox-bt-agent" \
     "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/packaging/systemd/mediabox-console-off.service" \
     "$here/packaging/systemd/mediabox-wireless.service" \
+    "$here/packaging/systemd/mediabox-bt-agent.service" \
     "$MEDIABOX_TARGET:/etc/systemd/system/"
 sh_ "set -e
   mkdir -p /etc/mediabox
@@ -143,12 +144,15 @@ sh_ "set -e
   install -m 0755 /var/tmp/mediabox-console-off $prefix/bin/mediabox-console-off
   install -m 0755 /var/tmp/mediabox-tv-drive $prefix/bin/mediabox-tv-drive
   install -m 0755 /var/tmp/mediabox-wireless-up $prefix/bin/mediabox-wireless-up
+  install -m 0755 /var/tmp/mediabox-bt-agent $prefix/bin/mediabox-bt-agent
   rm -f /var/tmp/mediabox-kiosk-smoke /var/tmp/mediabox-hdmi-prepare \
         /var/tmp/mediabox-display-scale /var/tmp/mediabox-console-off \
-        /var/tmp/mediabox-tv-drive /var/tmp/mediabox-wireless-up
+        /var/tmp/mediabox-tv-drive /var/tmp/mediabox-wireless-up \
+        /var/tmp/mediabox-bt-agent
   # The radios, in an order this hardware survives; see the script.
   systemctl mask systemd-rfkill.service systemd-rfkill.socket >/dev/null 2>&1 || true
   systemctl enable mediabox-wireless.service >/dev/null 2>&1 || true
+  systemctl enable --now mediabox-bt-agent.service >/dev/null 2>&1 || true
   systemctl daemon-reload
   systemctl enable --now mediabox-console-off.service >/dev/null"
 

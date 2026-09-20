@@ -77,6 +77,7 @@ packaging/systemd/mediabox-console-off.service	etc/systemd/system/mediabox-conso
 packaging/systemd/mediabox-display-changed.service	etc/systemd/system/mediabox-display-changed.service
 packaging/systemd/mediabox-browser.service	etc/systemd/system/mediabox-browser.service
 packaging/systemd/mediabox-wireless.service	etc/systemd/system/mediabox-wireless.service
+packaging/systemd/mediabox-bt-agent.service	etc/systemd/system/mediabox-bt-agent.service
 packaging/systemd/kodi.service	etc/systemd/system/kodi.service
 packaging/systemd/stremio-server.service	etc/systemd/system/stremio-server.service
 packaging/systemd/logind.conf.d/10-mediabox.conf	etc/systemd/logind.conf.d/10-mediabox.conf

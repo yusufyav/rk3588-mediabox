@@ -1,0 +1,49 @@
+#!/bin/sh
+#
+# The Bluetooth pairing agent.
+#
+# Pairing is a conversation: the other device asks something — confirm this
+# six-digit number, accept this service — and something on this side has to
+# answer. That something is a bluez "agent", and without one registered every
+# request is refused. Measured on the Ultra while pairing a keyboard:
+#
+#   src/device.c:new_auth() No agent available for request type 2
+#   device_confirm_passkey: Operation not permitted
+#
+# `bluetoothctl pair <address>` looks like it should be enough, and it is not.
+# bluetoothctl registers an agent only for as long as it runs, and run with a
+# single command it exits immediately — so the agent is gone before the remote
+# device gets round to asking anything. The fix is an agent that outlives the
+# command, which is this: bluetoothctl held open on a pipe that never closes.
+#
+# NoInputNoOutput is the capability, which means "accept without asking". That
+# is the right answer here and not a lax one, because of when it applies: this
+# appliance is not pairable unless somebody standing at the television pressed
+# Eşleştir on a device they had just found, and the daemon switches pairability
+# off again the moment that finishes. A television has no keypad to type a
+# passkey on, and the alternative — refusing every keyboard and remote that
+# asks for confirmation — is what this replaced.
+set -eu
+
+# The commands, then a pipe that stays open. `sleep infinity` is not portable
+# to this shell's built-ins, so the wait is a loop; bluetoothctl reads stdin
+# and stays registered as long as it is not closed.
+{
+    # bluetoothctl needs a moment on the bus before it can register anything.
+    # Without these pauses the first attempt answers "Failed to register agent
+    # object" and the one after it "No agent is registered" — seen on the
+    # Ultra, and it only recovered because systemd restarted the unit.
+    sleep 2
+    printf 'agent NoInputNoOutput\n'
+    sleep 1
+    printf 'default-agent\n'
+    sleep 1
+    # Registering an agent turns pairability on. Off again: this appliance is
+    # pairable only for the length of a pairing the viewer asked for, which
+    # the daemon opens and closes around the pair itself.
+    printf 'pairable off\n'
+    printf 'discoverable off\n'
+    while true; do
+        sleep 3600
+    done
+} | exec /usr/bin/bluetoothctl

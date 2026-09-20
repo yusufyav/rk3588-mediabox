@@ -607,7 +607,13 @@ pub async fn bluetooth_power(on: bool) -> Result<Value, String> {
         tokio::time::sleep(Duration::from_millis(1500)).await;
     }
     bctl(&["power", if on { "on" } else { "off" }]).await?;
-    if !on {
+    if on {
+        // On, but not open: an appliance that sits there pairable is one
+        // anybody in the building can pair with. Both are turned on only for
+        // the length of a pairing the viewer asked for.
+        let _ = bctl(&["pairable", "off"]).await;
+        let _ = bctl(&["discoverable", "off"]).await;
+    } else {
         let _ = run(RFKILL, &["block", "bluetooth"]).await;
     }
     Ok(bluetooth_status().await)
@@ -624,7 +630,18 @@ pub async fn bluetooth_scan(seconds: u64) -> Result<Value, String> {
 }
 
 pub async fn bluetooth_pair(address: &str) -> Result<Value, String> {
-    bctl(&["pair", address]).await?;
+    // Pairable for exactly as long as this takes.
+    //
+    // The agent answers "yes" without asking — a television has no keypad to
+    // type a passkey on — so the protection is the window, not the answer:
+    // the appliance accepts a pairing only while somebody standing in front
+    // of it has just pressed Eşleştir on a device they found, and it stops
+    // accepting them again on the way out of this function, whether the
+    // pairing worked or not.
+    let _ = bctl(&["pairable", "on"]).await;
+    let paired = bctl(&["pair", address]).await;
+    let _ = bctl(&["pairable", "off"]).await;
+    paired?;
     // Trust it, or the device has to be authorised by hand every time it comes
     // back — which on a television means a remote that stops working after a
     // power cut and no way to say yes to it.

@@ -1,0 +1,38 @@
+[Unit]
+Description=Bluetooth pairing agent for the television
+Documentation=https://github.com/yusufyav/rk3588-mediabox
+# bluez has to be there to register with, and the radio has to have been
+# switched on in the order this hardware survives.
+After=bluetooth.service mediabox-wireless.service
+Wants=bluetooth.service
+BindsTo=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-bt-agent
+# bluetoothd restarting takes the agent's registration with it, and a board
+# whose agent quietly died pairs nothing while looking fine.
+Restart=always
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+# Confinement. It talks to bluetoothd over the system bus and does nothing
+# else: no network, no writes outside its own runtime directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

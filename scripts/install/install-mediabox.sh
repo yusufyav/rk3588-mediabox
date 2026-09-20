@@ -527,6 +527,14 @@ if [ -e /etc/systemd/system/mediabox-wireless.service ]; then
   systemctl start mediabox-wireless.service >/dev/null 2>&1 || true
   ok "mediabox-wireless.service"
 fi
+# Pairing needs something on this side that answers. Without a registered
+# agent bluez refuses every request -- "No agent available for request type 2"
+# -- and a keyboard cannot be paired at all.
+if [ -e /etc/systemd/system/mediabox-bt-agent.service ]; then
+  systemctl enable mediabox-bt-agent.service >/dev/null 2>&1 || true
+  systemctl start mediabox-bt-agent.service >/dev/null 2>&1 || true
+  ok "mediabox-bt-agent.service"
+fi
 for u in stremio-server.service mediabox-media-worker.service mediaboxd-rs.service; do
   systemctl enable "$u" >/dev/null
   systemctl restart "$u"
