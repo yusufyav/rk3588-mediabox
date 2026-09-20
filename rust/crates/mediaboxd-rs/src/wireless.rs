@@ -581,6 +581,47 @@ async fn bluetooth_blocked() -> Option<bool> {
     seen
 }
 
+/// Whether bluez can see a controller at all.
+async fn controller_present() -> bool {
+    bctl(&["show"])
+        .await
+        .map(|text| text.contains("Controller "))
+        .unwrap_or(false)
+}
+
+/// Re-run whichever unit attaches a UART Bluetooth part on this board.
+///
+/// The name is the board vendor's, not ours, and differs between them, so the
+/// known ones are tried in turn and a board that has none is unharmed: its
+/// Bluetooth is on USB or SDIO and never lost its firmware in the first place.
+async fn reattach_bluetooth() {
+    for unit in [
+        "ap6611s-bluetooth.service",
+        "brcm-bluetooth.service",
+        "hciuart.service",
+    ] {
+        if run("/usr/bin/systemctl", &["restart", unit]).await.is_ok() {
+            // Firmware down a 1.5 Mbaud line takes a few seconds.
+            tokio::time::sleep(Duration::from_millis(5000)).await;
+            // And bluez has to be restarted on top of it. It was holding a
+            // management socket on the controller that went away with the
+            // firmware, and until it lets go the new one cannot be raised:
+            // measured on the Ultra, where `bluetoothctl power on` answered
+            // "Unable to open mgmt_socket" and then
+            // "org.bluez.Error.Failed" with hci0 sitting DOWN, and came up
+            // only once bluetoothd had been restarted after the attach.
+            // The pairing agent follows it by BindsTo.
+            let _ = run("/usr/bin/systemctl", &["restart", "bluetooth.service"]).await;
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if controller_present().await {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 pub async fn bluetooth_status() -> Value {
     let controller = bctl(&["show"])
         .await
@@ -602,11 +643,30 @@ pub async fn bluetooth_power(on: bool) -> Result<Value, String> {
     if on {
         let _ = run(RFKILL, &["unblock", "bluetooth"]).await;
         // The radio needs a moment after the GPIO goes high before bluez sees
-        // a controller; on the Ultra the attach service has to run the
-        // firmware down the UART first.
+        // a controller.
         tokio::time::sleep(Duration::from_millis(1500)).await;
     }
-    bctl(&["power", if on { "on" } else { "off" }]).await?;
+    // Try, repair, try again.
+    //
+    // On a board whose Bluetooth is attached over a UART, dropping the GPIO
+    // takes the firmware with it and the part comes back mute: the controller
+    // is still listed — `bluetoothctl show` prints it even while hci0 sits
+    // DOWN, which is why asking "is there a controller" is not the test —
+    // but powering it answers "Unable to open mgmt_socket", and after the
+    // firmware is pushed again, "org.bluez.Error.Failed" until bluez itself
+    // is restarted. Measured on the Ultra; without this, switching Bluetooth
+    // off from the settings screen and on again loses it until a reboot.
+    let verb = if on { "on" } else { "off" };
+    if bctl(&["power", verb]).await.is_err() {
+        if !on {
+            // Nothing to rescue on the way down.
+            return Ok(bluetooth_status().await);
+        }
+        reattach_bluetooth().await;
+        bctl(&["power", verb])
+            .await
+            .map_err(|_| "Bluetooth denetleyicisi yanıt vermiyor".to_string())?;
+    }
     if on {
         // On, but not open: an appliance that sits there pairable is one
         // anybody in the building can pair with. Both are turned on only for
