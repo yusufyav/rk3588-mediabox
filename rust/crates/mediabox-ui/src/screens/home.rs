@@ -185,6 +185,17 @@ fn Vitals() -> impl IntoView {
             (total > 0.0).then(|| (used / total, used, total))
         })
     };
+    // The board's own name, read from its device tree by the daemon. It was a
+    // string literal, so this panel called a Plus an Ultra too.
+    let machine = move || {
+        vitals.with(|found| {
+            found
+                .as_ref()?
+                .get("machine")?
+                .as_str()
+                .map(str::to_string)
+        })
+    };
     let network = move || {
         vitals.with(|found| {
             found
@@ -258,7 +269,7 @@ fn Vitals() -> impl IntoView {
             <div class="widget">
                 <span class="widget-title">"Ağ"</span>
                 <span class="widget-strong">{move || network().unwrap_or_else(|| "—".into())}</span>
-                <span class="widget-note">"Orange Pi 5 Ultra · RK3588"</span>
+                <span class="widget-note">{move || machine().unwrap_or_else(|| "RK3588".into())}</span>
             </div>
         </aside>
     }

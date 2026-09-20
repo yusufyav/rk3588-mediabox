@@ -269,9 +269,40 @@ fn ffmpeg_processes() -> Vec<Value> {
         .collect()
 }
 
+/// Which board this is, in the board's own words.
+///
+/// Read rather than written down. Every screen that named the machine named
+/// "Orange Pi 5 Ultra" as a string literal -- the home screen's network panel,
+/// the diagnostics page and the web interface -- so a Plus said it was an
+/// Ultra, on the television, to the person holding it. There is exactly one
+/// place the answer lives and the kernel exposes it: the device tree's own
+/// model. The trailing NUL is part of the file.
+fn machine() -> String {
+    std::fs::read("/proc/device-tree/model")
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|model| model.trim_end_matches('\0').trim().to_string())
+        .filter(|model| !model.is_empty())
+        // The silicon, said once. Armbian names the Plus "Orange Pi 5 Plus"
+        // and the Ultra "RK3588 OPi 5 Ultra", so appending it unconditionally
+        // produced "RK3588 OPi 5 Ultra · RK3588" on one of the two boards.
+        .map(|model| {
+            if model.to_ascii_uppercase().contains("RK3588") {
+                model
+            } else {
+                format!("{model} · RK3588")
+            }
+        })
+        // A board whose device tree says nothing is still an RK3588: the
+        // product does not run anywhere else. Naming a specific board here
+        // would be the same mistake in a smaller place.
+        .unwrap_or_else(|| "RK3588".to_string())
+}
+
 /// Everything the diagnostics screen reads, in one snapshot.
 pub fn diagnostics() -> Value {
     json!({
+        "machine": machine(),
         "cpu": {"count": cpu_count(), "load": load_average(), "usage": cpu_usage()},
         "memory": memory(),
         "storage": [storage("/"), storage("/var/tmp")],
@@ -290,6 +321,7 @@ mod tests {
     fn a_snapshot_carries_every_section() {
         let snapshot = diagnostics();
         for key in [
+            "machine",
             "cpu",
             "memory",
             "storage",

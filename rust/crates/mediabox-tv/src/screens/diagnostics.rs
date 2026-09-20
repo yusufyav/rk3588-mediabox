@@ -133,7 +133,14 @@ fn compose(
     let mut groups = Vec::new();
 
     // ---------------------------------------------------------------- machine
-    let mut machine = vec![reading("Kart", "Orange Pi 5 Ultra · RK3588")];
+    // The board's own name, from its device tree by way of the daemon. It was
+    // a string literal here and on two other screens, so a Plus called itself
+    // an Ultra everywhere it was asked.
+    let board = diagnostics
+        .and_then(|value| value.get("machine"))
+        .and_then(Value::as_str)
+        .unwrap_or("RK3588");
+    let mut machine = vec![reading("Kart", board)];
     if let Some(usage) = number(diagnostics, "/cpu/usage") {
         machine.push(toned(
             "İşlemci",

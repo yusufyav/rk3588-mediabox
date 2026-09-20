@@ -152,10 +152,18 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         storage_text: "—".into(),
         storage_fraction: 0.0,
         network: "Ağ yok".into(),
-        machine: "Orange Pi 5 Ultra · RK3588".into(),
+        // Replaced below from the machine's own device tree. This is what a
+        // board that has not answered yet is called, not what any board is.
+        machine: "RK3588".into(),
     };
 
     let Some(root) = answer else { return model };
+
+    // Which board this is, in its own words rather than in a string literal.
+    // A Plus used to tell the person holding it that it was an Ultra.
+    if let Some(name) = root.get("machine").and_then(Value::as_str) {
+        model.machine = name.into();
+    }
 
     // What the processors are actually doing. The load average that used to be
     // shown here is a queue length, not a share of time: eight cores nearly
