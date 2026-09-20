@@ -163,6 +163,60 @@ if command -v modetest >/dev/null 2>&1; then
   kodi_screenmode="${kodi_modes%%,*}"
 fi
 
+# What the kernel's own framebuffer should be, so a handover is not four mode
+# changes.
+#
+# Between two applications the television belongs to nobody, and the kernel's
+# fbdev emulation puts its own mode back on the connector. Its mode is the
+# sink's preferred one, 1920x1080 on this television, and Kodi then records
+# *that* as the mode to restore when it exits. So one handover went
+#
+#   interface 4K -> fbdev 1080p -> Kodi 4K -> Kodi restores 1080p -> interface 4K
+#
+# reported from the appliance as "KODI açılırken arada bir 1080p ye set
+# oluyor". Switching the emulation off removes the 1080p and breaks Kodi,
+# which needs a mode already on the connector to start from -- measured, every
+# video port disabled and a black television.
+#
+# What is left is to give the emulation the right mode, and that is a boot
+# argument: the fbdev's framebuffer is allocated once, at that size. Written
+# here because this is where the answer is known -- the output in use and the
+# fastest timing its link carries as RGB -- and re-written whenever that
+# answer changes, so a cable moved to another socket or another input fixes
+# itself on the next boot.
+#
+# Measured after it, across interface -> Kodi -> interface: 3840x2160p30
+# throughout, with no 1080p and no dark gap.
+boot_env=/boot/armbianEnv.txt
+video_arg=""
+if [ -n "$kodi_screenmode" ]; then
+  video_arg="$(printf '%s' "$kodi_screenmode" | awk '{
+    w = substr($0, 1, 5) + 0; h = substr($0, 6, 5) + 0
+    hz = substr($0, 11, 9) + 0
+    printf "video=CONNECTOR:%dx%d@%d", w, h, int(hz + 0.5)
+  }')"
+  video_arg="$(printf '%s' "$video_arg" | sed "s/CONNECTOR/$connector/")"
+fi
+boot_mode=unchanged
+if [ -n "$video_arg" ] && [ -f "$boot_env" ] && [ -w "$boot_env" ]; then
+  current="$(sed -n 's/^extraargs=//p' "$boot_env" | head -1)"
+  wanted="$(printf '%s' "$current" | sed "s#video=[^ ]*##g" | tr -s ' ' | sed 's/^ //; s/ $//')"
+  wanted="${wanted:+$wanted }$video_arg"
+  if [ "$current" = "$wanted" ]; then
+    boot_mode=current
+  else
+    # This file decides whether the board boots. One copy kept, one line
+    # rewritten, and nothing else in it touched.
+    [ -f "$boot_env.mediabox-video" ] || cp -a "$boot_env" "$boot_env.mediabox-video"
+    if grep -q '^extraargs=' "$boot_env"; then
+      sed -i "s#^extraargs=.*#extraargs=$wanted#" "$boot_env"
+    else
+      printf 'extraargs=%s\n' "$wanted" >>"$boot_env"
+    fi
+    boot_mode=written
+  fi
+fi
+
 # And the two settings in Kodi's own profile that name the device.
 #
 # Kodi reads passthrough capability off the PCM *name* — only a name starting
@@ -209,7 +263,8 @@ fi
 # how a wrong sound card survives a deploy.
 echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-none}" \
      "driver=${alsa_driver:-none} alsa-conf=$alsa_conf kodi-profile=$kodi_profile" \
-     "kodi-whitelist=$kodi_whitelist${kodi_screenmode:+ gui=$kodi_screenmode}" >&2
+     "kodi-whitelist=$kodi_whitelist${kodi_screenmode:+ gui=$kodi_screenmode}" \
+     "boot-video=$boot_mode${video_arg:+ ($video_arg)}" >&2
 
 # Put the link back to SDR before an SDR interface is drawn on it.
 #
