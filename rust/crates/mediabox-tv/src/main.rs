@@ -1611,10 +1611,26 @@ impl App {
                 return;
             }
         } else if let Some(route) = route::Route::from_name(&snapshot.screen) {
-            if matches!(
-                route,
-                Route::Settings | Route::Diagnostics | Route::NowPlaying
-            ) {
+            // Every screen here is one a viewer can be put back on with
+            // nothing else being true. Now Playing is not one of them, and
+            // restoring it is how the appliance greeted somebody with a dead
+            // end: "Şimdi Oynatılan", "Şu anda bir şey oynatılmıyor", and four
+            // transport buttons that do nothing.
+            //
+            // Reproduced on the Ultra on 2026-09-20, with no player running at
+            // all: write `now-playing` into the session file, start the
+            // interface, and that is the screen on the television. It needs no
+            // exotic fault to happen -- a crash, a power cut, a deploy or a
+            // reboot while a film is on all leave that word in the file, and
+            // `watch_the_film` cannot rescue it: with no film to lose, the
+            // branch that would go back never runs.
+            //
+            // A film that really is playing does not need this line. The same
+            // `watch_the_film` adopts any film on the plane four times a
+            // second -- including one this interface did not start, which is
+            // the case this was reaching for -- and opens Now Playing itself.
+            // So the screen is reached when it is true and not when it is not.
+            if matches!(route, Route::Settings | Route::Diagnostics) {
                 self.stack.push(route);
             }
         }
