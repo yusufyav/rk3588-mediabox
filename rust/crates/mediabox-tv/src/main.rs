@@ -418,6 +418,14 @@ impl App {
     /// One line along the bottom of the home screen. The interface has nowhere
     /// else to say anything, and taking the screen away for a message about a
     /// tile would be worse than the message.
+    /// Put one line along the bottom of the panel, for a few seconds.
+    ///
+    /// **The only way to set that line.** `window.set_notice` is called here
+    /// and in `clear_notice` and nowhere else, and `tests/run-host-tests.sh`
+    /// holds it to exactly those two: a caller that writes to the window
+    /// directly gets a line with no lifetime, which then sits on the panel
+    /// until something else happens to replace it. That is how a failed
+    /// source left "Kaynak açılamadı" up over a film that was playing fine.
     fn say(&mut self, message: String) {
         if let Some(window) = self.window.upgrade() {
             window.set_notice(message.into());
@@ -1004,14 +1012,19 @@ impl App {
             return;
         }
 
-        if !playing.seen {
+        let gave_up = !playing.seen;
+        if gave_up {
             eprintln!("mediabox-tv.play here gave up: no frame in {FIRST_FRAME_GRACE:?}");
-            if let Some(window) = self.window.upgrade() {
-                window.set_notice("Kaynak açılamadı".into());
-            }
             spawn_here(HereCommand::Stop);
         }
         self.here = None;
+        // Through `say`, so it goes away by itself. Written straight to the
+        // window it had no lifetime, and one source that failed left "Kaynak
+        // açılamadı" sitting in the corner of the panel — through the next
+        // attempt, which worked, and over the film that was then playing.
+        if gave_up {
+            self.say("Kaynak açılamadı".into());
+        }
         self.now.film = false;
         self.now.close_menu();
         if self.route() == Route::NowPlaying {
@@ -1053,9 +1066,8 @@ impl App {
     /// interface's. Said where it can be read, and the watcher let go of.
     fn handoff_failed(&mut self, why: String) {
         self.handing_over = false;
-        if let Some(window) = self.window.upgrade() {
-            window.set_notice(format!("Kodi'ye aktarılamadı — {why}").into());
-        }
+        // `say`, not the window: see the note in `watch_the_film`.
+        self.say(format!("Kodi'ye aktarılamadı — {why}"));
         self.paint();
     }
 

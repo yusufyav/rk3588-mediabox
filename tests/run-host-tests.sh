@@ -650,6 +650,23 @@ contains "and cross-checks the capture's reading" "$verifier" 'recorded_runpath'
 contains "the capture records the runpath" "$capture" 'runpath.tsv'
 contains "and gates what it recorded"      "$capture" 'mpv RUNPATH recorded'
 
+# The line along the bottom of the panel has one way in.
+#
+# `say` gives it a lifetime and the quarter-second tick takes it away again.
+# A caller that writes to the window directly gets a line that never leaves:
+# that is how one source failing left "Kaynak açılamadı" in the corner of the
+# panel through the next attempt, which worked, and over the film that was
+# then playing. Two call sites are correct -- `say` itself and `clear_notice`
+# -- and a third is the bug coming back.
+notice_writes=$(grep -c 'set_notice(' "$here/rust/crates/mediabox-tv/src/main.rs" || true)
+if [ "$notice_writes" -eq 2 ]; then
+  echo "ok   the notice line is set in exactly two places"
+else
+  echo "FAIL set_notice is called $notice_writes times, expected 2 (say and clear_notice)"
+  grep -n 'set_notice(' "$here/rust/crates/mediabox-tv/src/main.rs" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all host tests passed"
