@@ -488,15 +488,27 @@ class HeadlessStremio:
         # Addon order, not answer order: which addon replied first is a network
         # accident, and a list that reorders itself between two openings of the
         # same title is a list nobody can learn.
-        for addon, streams in zip(addons, answers):
+        for position, (addon, streams) in enumerate(zip(addons, answers)):
             for stream in streams:
                 if stream.identity in seen:
                     continue
                 seen.add(stream.identity)
-                # Which addon answered. Fifty-five sources from two addons look
-                # like one undifferentiated list until they can be separated,
-                # and only the caller knows which addon was asked.
-                found.append(replace(stream, addon_name=addon.name))
+                # Which addon answered, and where it sits in the person's own
+                # collection. Fifty-five sources from two addons look like one
+                # undifferentiated list until they can be separated, and only
+                # the caller knows which addon was asked.
+                #
+                # The position is carried rather than left to be inferred from
+                # the order of this list. It is the same order today -- the
+                # loop above is in addon order on purpose -- but a reader that
+                # infers it is a reader that breaks silently the first time a
+                # stream is deduplicated away or the list is sorted. The
+                # interface groups its source filter by addon and offers the
+                # groups in this order, which is the order Stremio shows them
+                # in, so it should be told rather than left to guess.
+                found.append(
+                    replace(stream, addon_name=addon.name, addon_order=position)
+                )
         return found
 
     def _gather_streams(
@@ -505,8 +517,8 @@ class HeadlessStremio:
         """Ask every addon at once, and do not let one of them hold the rest.
 
         Asked one after another, the wait for a title was the *sum* of the
-        addons: a single installed addon whose host had gone away — RARBG, in
-        the case that made this obvious — spent fifteen seconds in a connect
+        addons: a single installed addon whose host had gone away — measured
+        on a real collection — spent fifteen seconds in a connect
         timeout, and the sources for the film did not appear until it gave up,
         however quickly the others had answered. The wait is now the slowest
         single addon, capped: whatever has not answered by the deadline is left

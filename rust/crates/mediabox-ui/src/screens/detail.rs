@@ -752,7 +752,7 @@ fn SourceList(
                     // when there is more than one to tell apart; with a single
                     // provider installed it is the same word fifty times.
                     // The addon's *own* name for itself, not the id the filter
-                    // groups by: two installs of Torrentio are two entries in
+                    // groups by: two installs of one addon are two entries in
                     // the filter but one word on the row, and printing that
                     // word fifty times buys nothing.
                     let providers: HashSet<String> =

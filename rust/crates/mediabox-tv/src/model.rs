@@ -227,6 +227,11 @@ pub struct Stream {
     /// id is a reverse-domain string.
     #[serde(rename = "addonName", default)]
     pub addon_name: Option<String>,
+    /// Where that addon sits in the person's own collection. The source
+    /// filter offers its groups in this order, which is the order the
+    /// reference shows them in.
+    #[serde(rename = "addonOrder", default)]
+    pub addon_order: Option<u32>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -252,7 +257,7 @@ impl Stream {
             .replace('\n', " ")
     }
 
-    /// The addon's own label, verbatim — "[RD+]\nTorrentio\n1080p".
+    /// The addon's own label, verbatim — "[RD+]\n<the addon>\n1080p".
     ///
     /// The reference draws this down the left of the row exactly as the addon
     /// wrote it, line breaks included, and so does this. What an addon chooses
@@ -303,7 +308,7 @@ impl Stream {
 /// just have to be separated before they can be laid out.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SourceFacts {
-    /// The debrid service already holds the file. Torrentio writes this as a
+    /// The debrid service already holds the file. An addon writes this as a
     /// "+" inside the bracketed mark it puts in front of its name, and it is
     /// the single most useful thing on the row: a cached source starts at
     /// once, an uncached one has to be fetched first.

@@ -134,14 +134,28 @@ impl Detail {
     /// able to say "only this one" is the difference between a list and a
     /// choice.
     pub fn providers(&self) -> Vec<String> {
-        let mut providers: Vec<String> = Vec::new();
-        for source in &self.sources {
+        // Each addon once, and in the order the person put their addons in.
+        //
+        // The order is asked for rather than inferred from where an addon's
+        // first source happens to land in the list. It is the same order
+        // today -- the media core merges a title's sources addon by addon, in
+        // collection order, on purpose -- but a filter that infers it is one
+        // that reorders itself silently the first time a source is
+        // deduplicated away or the list is sorted by anything else, and a
+        // list that reorders itself between two openings of the same title is
+        // a list nobody can learn. An addon that did not say where it sits
+        // goes after the ones that did, keeping the order it appeared in.
+        let mut seen: Vec<(u32, usize, String)> = Vec::new();
+        for (appearance, source) in self.sources.iter().enumerate() {
             let name = Self::provider_of(source);
-            if !name.is_empty() && !providers.contains(&name) {
-                providers.push(name);
+            if name.is_empty() || seen.iter().any(|(_, _, held)| *held == name) {
+                continue;
             }
+            let order = source.parsed.addon_order.unwrap_or(u32::MAX);
+            seen.push((order, appearance, name));
         }
-        providers
+        seen.sort_by_key(|(order, appearance, _)| (*order, *appearance));
+        seen.into_iter().map(|(_, _, name)| name).collect()
     }
 
     /// Which addon produced a source.
@@ -154,12 +168,13 @@ impl Detail {
     /// This used to be parsed out of the first line of the stream's `name`
     /// instead, with the bracketed marks stripped off the front. That works
     /// for an addon whose first line is exactly its own name and for no other
-    /// kind. Addons that put the resolution on the same line -- "Torrentio
-    /// 4k" -- produced one "provider" per resolution, so the filter offered
-    /// the same addon three times and each entry hid the rest of its own
-    /// releases. Addons that put a debrid tag outside the brackets produced
-    /// another. The parsed name is still what the row is labelled with, which
-    /// is what it is good for.
+    /// kind. An addon that puts the resolution on that line as well produced
+    /// one "provider" per resolution, so the filter offered the same addon
+    /// several times and each entry hid the rest of its own releases; one
+    /// that puts a debrid tag outside the brackets produced another; and one
+    /// whose first line names the service it links out to was filed under
+    /// that service rather than under itself. The parsed name is still what
+    /// the row is labelled with, which is what it is good for.
     fn provider_of(source: &Source) -> String {
         if let Some(name) = source
             .parsed
@@ -766,6 +781,93 @@ fn runtime_seconds(text: &str) -> Option<u64> {
 
     let total = hours * 3600 + minutes * 60;
     (understood && total > 0).then_some(total)
+}
+
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn source(addon: &str, order: Option<u32>, name: &str) -> Source {
+        let mut raw = json!({"addonName": addon, "name": name, "playable": true});
+        if let Some(order) = order {
+            raw["addonOrder"] = json!(order);
+        }
+        Source {
+            parsed: serde_json::from_value(raw.clone()).expect("a stream"),
+            raw,
+        }
+    }
+
+    fn with(sources: Vec<Source>) -> Detail {
+        let mut detail = Detail::seeded(&crate::state::Item::stub("x"));
+        detail.sources = sources;
+        detail
+    }
+
+    #[test]
+    fn the_filter_groups_by_the_addon_and_not_by_what_the_release_is_called() {
+        // One addon that writes the resolution into the same line it names
+        // itself on. Parsed from the text this was three providers, each
+        // hiding the other two thirds of its own releases.
+        let detail = with(vec![
+            source("an addon", Some(0), "an addon | cached 2160p"),
+            source("an addon", Some(0), "an addon | cached 1080p"),
+            source("an addon", Some(0), "an addon | cached 720p"),
+        ]);
+        assert_eq!(detail.providers(), vec!["an addon".to_string()]);
+        assert_eq!(detail.shown().len(), 3);
+    }
+
+    #[test]
+    fn a_link_out_is_named_after_its_addon_not_after_the_service_it_points_at() {
+        // An addon whose first line is the name of the service it links out
+        // to, which is not the name of the addon.
+        let detail = with(vec![source("an addon", Some(0), "some streaming service")]);
+        assert_eq!(detail.providers(), vec!["an addon".to_string()]);
+    }
+
+    #[test]
+    fn the_groups_come_in_the_order_the_addons_are_installed_in() {
+        // Deliberately not the order they appear in the list.
+        let detail = with(vec![
+            source("Third", Some(2), "a"),
+            source("First", Some(0), "b"),
+            source("Second", Some(1), "c"),
+        ]);
+        assert_eq!(
+            detail.providers(),
+            vec![
+                "First".to_string(),
+                "Second".to_string(),
+                "Third".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_addon_that_did_not_say_where_it_sits_goes_last() {
+        let detail = with(vec![
+            source("Quiet", None, "a"),
+            source("Placed", Some(3), "b"),
+        ]);
+        assert_eq!(
+            detail.providers(),
+            vec!["Placed".to_string(), "Quiet".to_string()]
+        );
+    }
+
+    #[test]
+    fn choosing_a_group_shows_that_addon_and_only_that_addon() {
+        let mut detail = with(vec![
+            source("A", Some(0), "one"),
+            source("B", Some(1), "two"),
+            source("A", Some(0), "three"),
+        ]);
+        detail.provider = 1; // "Tümü" is 0, so this is the first addon.
+        assert_eq!(detail.shown(), vec![0, 2]);
+    }
 }
 
 #[cfg(test)]

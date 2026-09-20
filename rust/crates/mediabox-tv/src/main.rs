@@ -1991,6 +1991,15 @@ impl App {
         window.set_np_title(now.title.clone().into());
         window.set_np_subtitle(now.subtitle.clone().into());
         window.set_np_note(now.note.clone().into());
+        // The opening message, and only while a film really is opening: from
+        // the press until the first frame lands. The note itself is drawn
+        // with the controls, and the controls are shut at exactly that
+        // moment, so the player overlay is given it separately.
+        let waiting = match self.here.as_ref() {
+            Some(playing) if self.now.film && !playing.seen => self.now.note.clone(),
+            _ => String::new(),
+        };
+        window.set_np_waiting(waiting.into());
         window.set_np_surface(now.surface.clone().into());
         window.set_np_elapsed(screens::now_playing::timecode(now.elapsed_seconds).into());
         // An unknown length is drawn as unknown. The bar stays empty with it:

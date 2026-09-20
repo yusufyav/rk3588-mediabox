@@ -217,6 +217,40 @@ if [ -n "$video_arg" ] && [ -f "$boot_env" ] && [ -w "$boot_env" ]; then
   fi
 fi
 
+# And the mode the browser's compositor should take.
+#
+# sway is the third thing that can own this television, and it was the one
+# left deciding for itself. Its config says the mode is the panel's to choose
+# and wlroots takes the *preferred* one -- which on this television is
+# 1920x1080p60, the same preferred mode the paragraph above exists to stop the
+# kernel's framebuffer from using. Measured on the Plus, opening the browser
+# from a title's page:
+#
+#   interface 3840x2160p30 -> fbdev 3840x2160p30 -> sway 1920x1080p60
+#
+# Two mode changes and a television that resynchronises for each one, and the
+# page drawn at a quarter of the panel's pixels. So the compositor is told the
+# same mode everything else was told, from the same measurement: the largest
+# timing in the panel's own shape that this link carries as RGB.
+#
+# Written as a file sway includes rather than into its config, because the
+# answer is about this board and this cable and the config is the product's.
+sway_dir=/run/mediabox
+sway_out="$sway_dir/sway-output.conf"
+browser_mode=absent
+if [ -n "$kodi_screenmode" ]; then
+  browser_mode="$(printf '%s' "$kodi_screenmode" | awk '{
+    w = substr($0, 1, 5) + 0; h = substr($0, 6, 5) + 0
+    hz = substr($0, 11, 9) + 0
+    printf "%dx%d@%.3fHz", w, h, hz
+  }')"
+  mkdir -p "$sway_dir" 2>/dev/null || true
+  line="output * mode $browser_mode"
+  if [ ! -f "$sway_out" ] || [ "$(cat "$sway_out" 2>/dev/null)" != "$line" ]; then
+    printf '%s\n' "$line" >"$sway_out" 2>/dev/null || browser_mode=unwritable
+  fi
+fi
+
 # And the two settings in Kodi's own profile that name the device.
 #
 # Kodi reads passthrough capability off the PCM *name* — only a name starting
@@ -264,6 +298,7 @@ fi
 echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-none}" \
      "driver=${alsa_driver:-none} alsa-conf=$alsa_conf kodi-profile=$kodi_profile" \
      "kodi-whitelist=$kodi_whitelist${kodi_screenmode:+ gui=$kodi_screenmode}" \
+     "browser-mode=$browser_mode" \
      "boot-video=$boot_mode${video_arg:+ ($video_arg)}" >&2
 
 # Put the link back to SDR before an SDR interface is drawn on it.

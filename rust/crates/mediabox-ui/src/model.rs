@@ -261,7 +261,7 @@ impl Stream {
     }
 
     /// The first line of the addon's own label — who is offering this, as they
-    /// write it: "[RD+] Torrentio".
+    /// write it: "[RD+] <the addon>".
     ///
     /// Addons put the provider on the first line and what the file is on the
     /// ones after, and joining them into one string is what turned a column of
@@ -309,7 +309,7 @@ impl Stream {
 /// just have to be separated before they can be laid out.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SourceFacts {
-    /// The debrid service already holds the file. Torrentio writes this as a
+    /// The debrid service already holds the file. An addon writes this as a
     /// "+" inside the bracketed mark it puts in front of its name, and it is
     /// the single most useful thing on the row: a cached source starts at
     /// once, an uncached one has to be fetched first.

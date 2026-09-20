@@ -68,6 +68,14 @@ component FilmButton inherits Rectangle {
 export component Player inherits Rectangle {
     in property <string> title;
     in property <string> note;
+    /// Said while the film is opening, before there is a single frame.
+    ///
+    /// Drawn outside the controls, because the controls are closed at exactly
+    /// the moment this matters: from the press to the first frame the panel
+    /// is black, and a black panel is what a player that has failed looks
+    /// like too. The decoder has to reach the source, and on a torrent behind
+    /// a debrid that is seconds.
+    in property <string> waiting;
     in property <string> elapsed;
     in property <string> duration;
     in property <float> progress;
@@ -116,6 +124,65 @@ export component Player inherits Rectangle {
         opacity: open ? 1.0 : 0.0;
         background: @linear-gradient(180deg, #00000000 0%, #000000bf 58%, #000000f2 100%);
         animate opacity { duration: Theme.glide; easing: Theme.ease; }
+    }
+
+    // The film is opening. Low on the panel and out of the picture's way, in
+    // the same place the name sits when the controls are up, so nothing moves
+    // when the first frame arrives and the row takes over.
+    if waiting != "": Rectangle {
+        x: 0;
+        y: root.height - self.height;
+        width: 100%;
+        height: root.height * 0.22;
+        background: @linear-gradient(180deg, #00000000 0%, #000000cc 70%, #000000e6 100%);
+    }
+    if waiting != "": HorizontalLayout {
+        x: pad;
+        y: root.height * 0.805;
+        // A layout given a position has to be given a size too: without one
+        // it takes no room, and everything inside it that can elide does.
+        width: root.width - pad * 2;
+        height: Metrics.vh * 0.07;
+        spacing: root.width * 0.012;
+        alignment: start;
+
+        // A mark that breathes, so the screen is visibly working rather than
+        // merely dark. A pulse rather than a spinner: this version of the
+        // toolkit has no rotation on a Rectangle, and a dot that fades is
+        // read the same way from a sofa.
+        Rectangle {
+            width: Metrics.vh * 0.020;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Theme.film;
+            opacity: lit ? 1.0 : 0.2;
+            property <bool> lit: false;
+            animate opacity { duration: 900ms; easing: ease-in-out; }
+            init => { self.lit = true; }
+            Timer {
+                interval: 900ms;
+                running: true;
+                triggered => { parent.lit = !parent.lit; }
+            }
+        }
+
+        VerticalLayout {
+            spacing: Metrics.vh * 0.006;
+            alignment: center;
+            Text {
+                text: waiting;
+                color: Theme.film;
+                font-size: Metrics.vh * 0.021;
+                font-weight: 700;
+            }
+            if title != "": Text {
+                text: title;
+                color: #ffffffb0;
+                font-size: Metrics.vh * 0.018;
+                font-weight: 600;
+                overflow: elide;
+            }
+        }
     }
 
     if open: Rectangle {

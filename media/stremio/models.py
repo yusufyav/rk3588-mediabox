@@ -203,6 +203,10 @@ class Stream:
     # by whoever asked the addon, since the stream itself never mentions where
     # it came from.
     addon_name: str | None = None
+    #: Where that addon sits in the person's own collection, counting from
+    #: zero. The interface groups a title's sources by addon and shows the
+    #: groups in this order, which is the order Stremio shows them in.
+    addon_order: int | None = None
     name: str | None = None
     title: str | None = None
     description: str | None = None
@@ -237,6 +241,7 @@ class Stream:
             "identity": self.identity,
             "addonId": self.addon_id,
             "addonName": self.addon_name,
+            "addonOrder": self.addon_order,
             "name": self.name,
             "title": self.title,
             "description": self.description,

@@ -157,6 +157,10 @@ export component MediaBoxWindow inherits Window {
     in property <string> np-title;
     in property <string> np-subtitle;
     in property <string> np-note;
+    // What to say while a film is opening and there is nothing on the panel
+    // yet. Its own property rather than the note, because the note is only
+    // drawn with the controls and this has to be drawn without them.
+    in property <string> np-waiting;
     in property <string> np-surface;
     in property <string> np-elapsed;
     in property <string> np-duration;
@@ -445,6 +449,7 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             title: root.np-title;
             note: root.np-note;
+            waiting: root.np-waiting;
             elapsed: root.np-elapsed;
             duration: root.np-duration;
             progress: root.np-progress;
