@@ -1,0 +1,38 @@
+[Unit]
+Description=Bring the radios up in an order this hardware survives
+Documentation=https://github.com/yusufyav/rk3588-mediabox
+# Ordinary boot ordering, deliberately. This used to run before
+# network-pre.target with DefaultDependencies=no, to be sure of beating the
+# Bluetooth radio to the chip -- and it hung there: `netplan apply` needs
+# systemd-networkd, which does not exist that early, so the unit timed out
+# after sixty seconds and was killed before it ever reached the line that
+# switches Bluetooth on. Measured on the Plus: Wi-Fi up, Bluetooth still
+# blocked, unit failed.
+#
+# It does not need to be early. Nothing else unblocks Bluetooth any more --
+# systemd-rfkill is masked on this appliance -- so the radio stays off until
+# this unit says otherwise, however late that is. Being ordered after the
+# network stack is what makes the `netplan apply` below safe.
+After=systemd-networkd.service network.target
+Wants=network.target
+
+# systemd-rfkill is deliberately not ordered against: it is masked by the
+# installer on this appliance. Its job is to remember whatever state a radio
+# was left in and restore it at boot, which on the Plus meant restoring
+# "Bluetooth on" early enough to take the chip away from the Wi-Fi driver --
+# see the script for the measurement. On an appliance the radios' boot state
+# is the product's decision, not a remembered one, and this unit is where that
+# decision lives.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-wireless-up
+# A board with no radios at all must still boot.
+SuccessExitStatus=0 1
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

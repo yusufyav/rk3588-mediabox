@@ -1,0 +1,105 @@
+#!/bin/sh
+#
+# Bring the radios up in an order the hardware can survive: Wi-Fi first,
+# Bluetooth second.
+#
+# Why this exists, measured on the Plus. Its Wi-Fi and its Bluetooth are two
+# halves of one RTL8852BE, reached by two different buses: Wi-Fi over PCIe and
+# Bluetooth over USB. Both are held off at boot by a GPIO the device tree calls
+# out — the journal says "[BT_RFKILL]: bt shut off power" before anything in
+# userspace runs — and whoever unblocks them decides which half wakes first.
+#
+# When systemd-rfkill restored "unblocked" for Bluetooth early, this happened:
+#
+#   Bluetooth: hci0: RTL: loading rtl_bt/rtl8852bu_fw.bin
+#   rtw89_8852be 0002:21:00.0: failed to dump efuse physical map
+#   rtw89_8852be 0002:21:00.0: failed to setup chip information
+#   rtw89_8852be: probe of 0002:21:00.0 failed with error -16
+#
+# -16 is EBUSY. The Bluetooth firmware load had the chip, so the Wi-Fi driver
+# could not read its efuse, and the board came up with no wireless interface at
+# all — not a down one, none. Reloading the module afterwards recovers it, so
+# this is a race at boot and not a broken card.
+#
+# So the product decides the order rather than leaving it to whatever systemd
+# restored last: unblock Wi-Fi, wait for the interface to actually exist, and
+# only then unblock Bluetooth. The reload below is the belt to that braces —
+# if the interface is still missing after the wait, the driver is bounced,
+# which is exactly what recovers it by hand.
+#
+# The Ultra does not have this race: its Bluetooth is on a UART and its Wi-Fi
+# on SDIO, two separate parts. Nothing here harms it — the waits end early and
+# the reload never runs — and it gets the same deterministic order for free.
+set -eu
+
+say() { printf 'mediabox-wireless %s\n' "$*"; }
+
+wifi_interface() {
+    for path in /sys/class/net/wl*; do
+        [ -e "$path" ] || continue
+        basename "$path"
+        return 0
+    done
+    return 1
+}
+
+# The module that owns the wireless part, asked of the system rather than
+# named here: the two boards do not run the same driver and a third would not
+# either.
+wifi_module() {
+    lsmod 2>/dev/null | awk '
+        /^(rtw89_|rtw88_|mt79|iwlwifi|bcmdhd|brcmfmac)/ { print $1; exit }
+    '
+}
+
+rfkill unblock wifi 2>/dev/null || true
+
+# Up to ten seconds for the interface to appear. On a healthy boot it is
+# already there and this returns at once.
+interface=""
+i=0
+while [ "$i" -lt 40 ]; do
+    if interface="$(wifi_interface)"; then
+        break
+    fi
+    interface=""
+    i=$((i + 1))
+    sleep 0.25
+done
+
+if [ -z "$interface" ]; then
+    module="$(wifi_module || true)"
+    if [ -n "$module" ]; then
+        say "no wireless interface; reloading $module"
+        modprobe -r "$module" 2>/dev/null || true
+        sleep 1
+        modprobe "$module" 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 40 ]; do
+            if interface="$(wifi_interface)"; then
+                break
+            fi
+            interface=""
+            i=$((i + 1))
+            sleep 0.25
+        done
+    fi
+fi
+
+if [ -n "$interface" ]; then
+    say "wi-fi on $interface"
+    # netplan renders the remembered networks; a driver that arrived late
+    # needs the link configured after the fact.
+    # Bounded: a netplan that cannot finish must not hold the boot, and the
+    # line below it -- the one that switches Bluetooth on -- has to be
+    # reached whatever happens here.
+    if [ -e /etc/netplan/20-mediabox-wifi.yaml ]; then
+        timeout 45 netplan apply 2>/dev/null || say "netplan apply did not finish"
+    fi
+else
+    say "wi-fi absent on this board"
+fi
+
+# And only now the other half of the chip.
+rfkill unblock bluetooth 2>/dev/null || true
+say "bluetooth unblocked"

@@ -506,6 +506,27 @@ fi
 
 step "services"
 systemctl enable --now mediabox-console-off.service >/dev/null 2>&1 || true
+
+# The radios come up in an order this hardware survives, and the product
+# decides that order rather than systemd restoring whatever state a radio was
+# last left in.
+#
+# On the Plus, Wi-Fi and Bluetooth are two halves of one RTL8852BE reached by
+# two buses. With systemd-rfkill restoring "Bluetooth on" early, the Bluetooth
+# firmware load held the chip and the Wi-Fi driver could not read its efuse:
+#
+#   rtw89_8852be: failed to dump efuse physical map
+#   rtw89_8852be: probe of 0002:21:00.0 failed with error -16
+#
+# The board then had no wireless interface at all. So systemd-rfkill is masked
+# and mediabox-wireless.service unblocks Wi-Fi first, waits for the interface,
+# and only then unblocks Bluetooth. See packaging/mediabox-wireless-up.
+systemctl mask systemd-rfkill.service systemd-rfkill.socket >/dev/null 2>&1 || true
+if [ -e /etc/systemd/system/mediabox-wireless.service ]; then
+  systemctl enable mediabox-wireless.service >/dev/null 2>&1 || true
+  systemctl start mediabox-wireless.service >/dev/null 2>&1 || true
+  ok "mediabox-wireless.service"
+fi
 for u in stremio-server.service mediabox-media-worker.service mediaboxd-rs.service; do
   systemctl enable "$u" >/dev/null
   systemctl restart "$u"

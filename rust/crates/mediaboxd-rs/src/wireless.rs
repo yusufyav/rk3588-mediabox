@@ -363,6 +363,15 @@ fn render_netplan(interface: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// The key to write when the caller sent no passphrase: the one already
+/// remembered for this network, or nothing at all for an open one.
+fn keep_or_none(
+    remembered: &std::collections::BTreeMap<String, String>,
+    ssid: &str,
+) -> String {
+    remembered.get(ssid).cloned().unwrap_or_default()
+}
+
 /// Derive the PSK so the passphrase itself never reaches the disk.
 async fn derive_psk(ssid: &str, passphrase: &str) -> Result<String, String> {
     // Already a derived key: 64 hex characters. Accepted as-is so a viewer who
@@ -389,12 +398,22 @@ pub async fn wifi_connect(ssid: &str, passphrase: Option<&str>) -> Result<Value,
     if ssid.trim().is_empty() {
         return Err("Ağ adı boş".into());
     }
+    let mut networks = remembered_networks();
     let psk = match passphrase {
         Some(phrase) if !phrase.is_empty() => derive_psk(ssid, phrase).await?,
-        _ => String::new(),
+        // Nothing typed: keep whatever this board already knows for this
+        // network.
+        //
+        // This is how rejoining a remembered network erased its key. The
+        // screen sends no passphrase when it does not need one — the point of
+        // remembering it — and this arm used to write an empty string in its
+        // place. netplan then rendered `"YuHome5": {}`, wpa_supplicant read
+        // `key_mgmt=NONE`, and a WPA2 network the board had been sitting on
+        // all afternoon became one it could not join at all. Found on the Plus
+        // after a reboot, by reading the generated wpa config: 82 bytes, no
+        // key in it.
+        _ => keep_or_none(&networks, ssid),
     };
-
-    let mut networks = remembered_networks();
     let previous = networks.insert(ssid.to_string(), psk);
     write_remembered(&networks)?;
     render_netplan(&interface)?;
@@ -647,6 +666,21 @@ mod tests {
     fn an_empty_controller_block_is_not_a_controller() {
         let parsed = parse_controller("No default controller available\n");
         assert!(parsed["address"].is_null());
+    }
+
+    #[test]
+    fn rejoining_a_remembered_network_keeps_its_key() {
+        let mut remembered = std::collections::BTreeMap::new();
+        remembered.insert("home".to_string(), "abc123".to_string());
+        // The screen sends no passphrase for a network the board knows; the
+        // key it already has must survive that.
+        assert_eq!(keep_or_none(&remembered, "home"), "abc123");
+    }
+
+    #[test]
+    fn a_network_nobody_has_joined_gets_no_key() {
+        let remembered = std::collections::BTreeMap::new();
+        assert_eq!(keep_or_none(&remembered, "open"), "");
     }
 
     #[tokio::test]
