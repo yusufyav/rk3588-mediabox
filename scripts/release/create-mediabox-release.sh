@@ -108,7 +108,13 @@ if mediabox_ssh "test -f $kodi_live_profile" </dev/null; then
              audiooutput.ac3transcode audiooutput.eac3passthrough audiooutput.dtspassthrough \
              audiooutput.truehdpassthrough audiooutput.dtshdpassthrough audiooutput.passthrough; do
     live="$(mediabox_ssh "sed -n 's|.*<setting id=\"$key\"[^>]*>\([^<]*\)</setting>.*|\1|p' $kodi_live_profile | head -1" </dev/null)"
-    seed="$(sed -n "s|.*<setting id="$key"[^>]*>\([^<]*\)</setting>.*|\1|p" "$kodi_seed" | head -1)"
+    # The quotes around the setting's id are part of the pattern, and they have
+    # to survive being written inside a double-quoted string: the version that
+    # came before this closed the shell's quoting instead of matching an XML
+    # one, so the seed side read empty for every key and the capture announced
+    # nine settings "differing" from a seed that agreed with the board exactly.
+    # A drift report that is always wrong is worse than no drift report.
+    seed="$(sed -n "s|.*<setting id=\"$key\"[^>]*>\([^<]*\)</setting>.*|\1|p" "$kodi_seed" | head -1)"
     if [ "$live" = "$seed" ]; then
       printf '  same   %-34s %s\n' "$key" "$(printf '%s' "$live" | cut -c1-40)"
     else
