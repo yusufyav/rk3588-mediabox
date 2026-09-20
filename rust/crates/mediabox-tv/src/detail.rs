@@ -136,12 +136,52 @@ impl Detail {
     pub fn providers(&self) -> Vec<String> {
         let mut providers: Vec<String> = Vec::new();
         for source in &self.sources {
-            let name = source.parsed.facts().provider;
+            let name = Self::provider_of(source);
             if !name.is_empty() && !providers.contains(&name) {
                 providers.push(name);
             }
         }
         providers
+    }
+
+    /// Which addon produced a source.
+    ///
+    /// The addon says so itself, in the field the protocol has for it, and
+    /// that is the only reading that matches the reference: Stremio groups a
+    /// title's releases by the addon they came from, not by what the release
+    /// happens to be called.
+    ///
+    /// This used to be parsed out of the first line of the stream's `name`
+    /// instead, with the bracketed marks stripped off the front. That works
+    /// for an addon whose first line is exactly its own name and for no other
+    /// kind. Addons that put the resolution on the same line -- "Torrentio
+    /// 4k" -- produced one "provider" per resolution, so the filter offered
+    /// the same addon three times and each entry hid the rest of its own
+    /// releases. Addons that put a debrid tag outside the brackets produced
+    /// another. The parsed name is still what the row is labelled with, which
+    /// is what it is good for.
+    fn provider_of(source: &Source) -> String {
+        if let Some(name) = source
+            .parsed
+            .addon_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return name.to_string();
+        }
+        // An addon that named neither itself nor its id is one this list can
+        // only tell apart by what it wrote, so fall back to that.
+        if let Some(id) = source
+            .parsed
+            .addon_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return id.to_string();
+        }
+        source.parsed.facts().provider
     }
 
     /// The sources the column is showing, as indices into `sources`.
@@ -155,7 +195,7 @@ impl Detail {
             .iter()
             .enumerate()
             .filter(|(_, source)| match &wanted {
-                Some(name) => source.parsed.facts().provider == *name,
+                Some(name) => Self::provider_of(source) == *name,
                 None => true,
             })
             .map(|(index, _)| index)

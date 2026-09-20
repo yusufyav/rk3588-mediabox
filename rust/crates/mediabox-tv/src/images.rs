@@ -30,7 +30,11 @@ use slint::{Rgba8Pixel, SharedPixelBuffer};
 /// Decoded pixels held in this process. Chosen against the appliance's 8 GB and
 /// the interface's own resident size; the metrics line reports what is actually
 /// used so it can be moved with evidence rather than by feel.
-const CPU_BUDGET_BYTES: usize = 160 * 1024 * 1024;
+/// Raised from 160 MB when the artwork window was widened to a screenful
+/// either side of the focus: five rails of seventeen posters at 480x720 is
+/// about 117 MB, and a budget that close to the working set evicts a poster
+/// the viewer is looking at in order to decode one they are about to look at.
+const CPU_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
 /// Downloaded bytes kept between runs, so a restart after a Kodi handover is
 /// not a fresh download of every shelf.
@@ -40,6 +44,10 @@ const DISK_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 /// shelves faster — the panel only has so many posters on it — and it does cost
 /// sockets on a box that is also streaming.
 const IN_FLIGHT: usize = 6;
+
+/// How long a picture that could not be fetched is left alone before it is
+/// asked for again.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// What a picture is wanted for. The width is part of the identity: the same
 /// URL fetched for a shelf and for a backdrop is decoded twice, at two sizes,
@@ -73,7 +81,15 @@ pub struct ImageManager {
     cache: HashMap<Key, Entry>,
     /// Requested and not yet answered, so the same picture is not queued twice.
     pending: HashMap<Key, ()>,
-    failed: HashMap<Key, ()>,
+    /// Pictures that could not be fetched, and when to try again.
+    ///
+    /// This was a set with no way out of it. One refused request -- a host
+    /// that was briefly unreachable while the viewer scrolled -- and that
+    /// poster was blank for the life of the process, however many times the
+    /// screen came back to it. A catalogue is fetched from a dozen strangers
+    /// over somebody's home connection; a failure there is a moment, not a
+    /// fact about the picture.
+    failed: HashMap<Key, std::time::Instant>,
 
     bytes: usize,
     tick: u64,
@@ -117,12 +133,16 @@ impl ImageManager {
     /// move: anything already held, already asked for or already known to be
     /// missing costs a hash lookup.
     pub fn want(&mut self, key: &Key) {
-        if key.url.is_empty()
-            || self.cache.contains_key(key)
-            || self.pending.contains_key(key)
-            || self.failed.contains_key(key)
-        {
+        if key.url.is_empty() || self.cache.contains_key(key) || self.pending.contains_key(key) {
             return;
+        }
+        // A picture that failed is asked for again, but not immediately: a
+        // host that is down stays down for longer than one scroll.
+        if let Some(when) = self.failed.get(key) {
+            if when.elapsed() < RETRY_AFTER {
+                return;
+            }
+            self.failed.remove(key);
         }
         self.pending.insert(key.clone(), ());
         let _ = self.wanted.send(key.clone());
@@ -162,7 +182,7 @@ impl ImageManager {
                 }
                 Done::Failed(key) => {
                     self.pending.remove(&key);
-                    self.failed.insert(key, ());
+                    self.failed.insert(key, std::time::Instant::now());
                 }
             }
         }

@@ -160,6 +160,8 @@ struct App {
     here: Option<Playing>,
 
     detail_backdrop: Option<String>,
+    /// When the line along the bottom stops being true. See `say`.
+    notice_until: Option<Instant>,
     detail_fade: f32,
     /// Bumped every time a detail screen is opened, so an answer for a title
     /// the viewer has already left is dropped instead of overwriting the one
@@ -396,6 +398,22 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_notice(message.into());
         }
+        self.notice_until = Some(Instant::now() + NOTICE_LIFETIME);
+    }
+
+    /// Takes the line away once it has been up long enough to read.
+    ///
+    /// A line that never leaves is worse than no line: the appliance said
+    /// "Televizyon uyandırılıyor…" and then stood there saying it, over
+    /// whatever the viewer did next, until something happened to replace it.
+    /// Called from the same quarter-second tick that watches the film.
+    fn expire_notice(&mut self) {
+        if self
+            .notice_until
+            .is_some_and(|until| until <= Instant::now())
+        {
+            self.clear_notice();
+        }
     }
 
     /// Takes that line away again.
@@ -406,6 +424,7 @@ impl App {
     /// in, so a setting that acts immediately clears it rather than adding to
     /// it.
     fn clear_notice(&mut self) {
+        self.notice_until = None;
         if let Some(window) = self.window.upgrade() {
             window.set_notice(Default::default());
         }
@@ -641,6 +660,28 @@ impl App {
         self.detail = Some(detail);
         self.detail_backdrop = None;
         self.epoch += 1;
+        // Nothing of the last film may stay on this screen.
+        //
+        // The backdrop is drawn as a cross-fade between two slots, and
+        // `paint_detail` flips to the other slot as soon as the film changes
+        // but writes the new picture into it only once the picture has been
+        // decoded. When it had not been -- which is every film that was not
+        // already on a shelf the viewer had just scrolled past -- the slot it
+        // faded to still held the *previous* film's backdrop, at full
+        // opacity, for as long as the decode took. Opening a film showed the
+        // one opened before it. The poster and the logo had the same shape:
+        // set only on a cache hit, so left over otherwise.
+        //
+        // Emptied here, where the film changes, rather than guarded in the
+        // painter: there is exactly one moment when the screen stops being
+        // about one title and starts being about another, and this is it.
+        if let Some(window) = self.window.upgrade() {
+            let blank = slint::Image::default();
+            window.set_detail_art_a(blank.clone());
+            window.set_detail_art_b(blank.clone());
+            window.set_detail_poster(blank.clone());
+            window.set_detail_logo(blank);
+        }
         self.open(Route::Detail);
         spawn_detail_load(self.epoch, kind, id);
     }
@@ -797,12 +838,25 @@ impl App {
         self.now.title = detail.meta.name.clone();
         self.now.artwork = detail.meta.poster.clone();
         self.now.backdrop = detail.meta.background.clone();
+        // Same reason as the detail screen's four slots: `paint_now_playing`
+        // writes the picture only when it is already decoded, so without this
+        // the film that is starting is announced over the last film's still.
+        if let Some(window) = self.window.upgrade() {
+            window.set_np_art(slint::Image::default());
+        }
         self.now.set_technical(detail.technical_pairs());
 
         self.remember();
         self.store.flush();
         self.here = Some(Playing::new());
         self.now.film = true;
+        // Between here and the first frame there is nothing on the panel: the
+        // decoder has to open the source, and on a torrent behind a debrid
+        // that is seconds, not milliseconds. The screen used to be the film's
+        // name over a black rectangle with a progress bar at 0:00, which is
+        // indistinguishable from a player that has failed. Cleared by
+        // `watch_the_film` the moment a frame actually lands.
+        self.now.note = "Video yükleniyor…".into();
         self.now.focus = 0;
         self.now.row = screens::now_playing::Row::Bar;
         self.now.close_menu();
@@ -886,6 +940,10 @@ impl App {
         let showing = platform::video_showing();
 
         if showing {
+            // The frame that ends the wait. Noticed on the edge, because the
+            // note belongs to the player from here on and repainting on every
+            // tick would be a frame's work for nothing.
+            let first = !playing.seen;
             playing.seen = true;
             // The position and whether it is paused are the player's to answer,
             // and it is asked only while it is up.
@@ -895,6 +953,10 @@ impl App {
             if due {
                 playing.polled = Some(std::time::Instant::now());
                 spawn_here_status();
+            }
+            if first {
+                self.now.note = String::new();
+                self.paint();
             }
             if self.now.pill_expired() {
                 self.paint();
@@ -1534,6 +1596,28 @@ impl App {
         if shelves.is_empty() {
             return false;
         }
+
+        // Whether the catalogue itself has arrived, as opposed to this board's
+        // own library, which is read from a file and is therefore always
+        // there.
+        //
+        // This is the difference between "there is something to draw" and
+        // "there is nothing more coming", and conflating the two is what made
+        // a cold boot show a television with three local files on it and no
+        // catalogue at all. The loader stops asking when this function says
+        // the answer is final; the library alone made it say so on the very
+        // first attempt, sixteen milliseconds in, while the worker's upstreams
+        // were still unreachable -- and nothing asked again for the rest of
+        // the run. What put it right was starting an application and coming
+        // back, because that restarts this process.
+        //
+        // So the shelves are drawn either way, and only a row from the
+        // catalogue ends the retry.
+        let from_catalogue = rows
+            .rows
+            .iter()
+            .any(|row| row.addon_id != model::LIBRARY_ADDON_ID && !row.items.is_empty());
+
         self.meter.data_arrived();
 
         // Whatever the last attempt said, there is a catalogue now.
@@ -1559,7 +1643,12 @@ impl App {
         }
         self.paint();
         self.restore();
-        true
+        if !from_catalogue {
+            eprintln!(
+                "mediabox-tv.load only this board's own library so far; still asking for the catalogue"
+            );
+        }
+        from_catalogue
     }
 
     /// The catalogue has not arrived yet, and the loader is going to ask again.
@@ -2327,6 +2416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         handing_over: false,
         here: None,
         detail_backdrop: None,
+        notice_until: None,
         detail_fade: 0.0,
         epoch: 0,
         resume: session::read(state_file()),
@@ -2440,7 +2530,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         slint::TimerMode::Repeated,
         Duration::from_millis(250),
         || {
-            with_app(|app| app.watch_the_film());
+            with_app(|app| {
+                app.watch_the_film();
+                app.expire_notice();
+            });
         },
     );
 
@@ -2656,6 +2749,12 @@ impl Playing {
 /// interface stops waiting for it. Measured on the appliance: a local file is
 /// on screen in under a second, a stream over the network in two to four.
 const FIRST_FRAME_GRACE: Duration = Duration::from_secs(25);
+
+/// How long a line along the bottom of the screen stays up.
+///
+/// Long enough to read a sentence twice from a sofa, short enough that it is
+/// gone before the viewer has finished doing the next thing.
+const NOTICE_LIFETIME: Duration = Duration::from_secs(6);
 
 /// How long the controls stay up after the last press.
 const CONTROLS_LINGER: Duration = Duration::from_secs(5);

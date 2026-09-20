@@ -19,10 +19,21 @@ use crate::images::{ImageManager, Key};
 use crate::model::{LibraryListing, MetaPreview};
 use crate::{AppTile, PosterItem, RailModel};
 
-/// How far either side of the focused poster is worth having ready. Measured
-/// values from the web interface, where a clipped strip gave the browser no
-/// "nearly visible" to work from and every step right landed on a blank tile.
-const BEHIND: usize = 2;
+/// How far either side of the focused poster is worth having ready.
+///
+/// Asymmetric was wrong, and the reason is where the rail puts the focus. It
+/// pins the focused poster to the left edge and scrolls the strip under it --
+/// so everything visible is ahead of the focus, and two behind was plenty --
+/// *until the end of the strip*, where the scroll clamps and the focus walks
+/// rightwards across a stationary rail instead. At the far end of a long
+/// catalogue the focus sits at the right of the screen with seven posters
+/// visible to its left, of which five were outside the window and had their
+/// artwork taken away: the row emptied itself as the viewer arrived at it.
+///
+/// About eight posters fit across a 16:9 panel at this card width, so the
+/// window is eight either way. That is one screenful behind and one ahead,
+/// which is what "nearly visible" means on a rail that can scroll both ways.
+const BEHIND: usize = 8;
 const AHEAD: usize = 8;
 
 /// Shelves are capped so one addon with forty catalogues cannot make the home

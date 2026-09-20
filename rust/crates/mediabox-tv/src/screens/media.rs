@@ -20,7 +20,20 @@ use crate::state::{Item, NAV, Nav, POSTER_WIDTH, Shelf};
 use crate::{PosterItem, RailModel};
 
 /// How far either side of the focused poster is worth having ready.
-const BEHIND: usize = 2;
+///
+/// Asymmetric was wrong, and the reason is where the rail puts the focus. It
+/// pins the focused poster to the left edge and scrolls the strip under it --
+/// so everything visible is ahead of the focus, and two behind was plenty --
+/// *until the end of the strip*, where the scroll clamps and the focus walks
+/// rightwards across a stationary rail instead. At the far end of a long
+/// catalogue the focus sits at the right of the screen with seven posters
+/// visible to its left, of which five were outside the window and had their
+/// artwork taken away: the row emptied itself as the viewer arrived at it.
+///
+/// About eight posters fit across a 16:9 panel at this card width, so the
+/// window is eight either way. That is one screenful behind and one ahead,
+/// which is what "nearly visible" means on a rail that can scroll both ways.
+const BEHIND: usize = 8;
 const AHEAD: usize = 8;
 
 /// The one row above the shelves.
@@ -182,10 +195,17 @@ impl Media {
             if shelf.items.is_empty() {
                 continue;
             }
-            // This shelf and its two neighbours. Further than that is not about
-            // to be on the panel, and holding it would be holding the
-            // catalogue.
-            let nearby = (index as i32 - (self.row as i32 - BAR_ROW as i32)).abs() <= 1;
+            // This shelf and the two either side of it. Further than that is
+            // not about to be on the panel, and holding it would be holding
+            // the catalogue.
+            //
+            // One either side was not enough for the same reason eight
+            // posters are needed behind the focus: the screen shows three
+            // rails at once, and at the bottom of the list the focus stops
+            // moving the strip and walks down it, so the rail two above the
+            // focused one is still in front of the viewer when its artwork is
+            // taken away.
+            let nearby = (index as i32 - (self.row as i32 - BAR_ROW as i32)).abs() <= 2;
             let centre = self.columns.get(index + BAR_ROW).copied().unwrap_or(0);
             let last = shelf.items.len() - 1;
             let from = centre.saturating_sub(BEHIND);
