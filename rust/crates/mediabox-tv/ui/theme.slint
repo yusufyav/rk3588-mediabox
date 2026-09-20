@@ -105,8 +105,12 @@ export global Metrics {
     out property <length> grid-gap: max(10px, min(34px, vw * 0.0115));
 
     // The letter grid on the search screen.
-    out property <length> key-w: max(46px, min(104px, vw * 0.031));
-    out property <length> key-h: key-w * 0.78;
+    // Measured off the panel rather than chosen: at the old size ten columns
+    // covered a third of a 4K screen and the grid read as a control panel in
+    // the corner rather than as the thing being used. These put it at about
+    // two fifths, which is where a television keyboard belongs.
+    out property <length> key-w: max(52px, min(140px, vw * 0.040));
+    out property <length> key-h: key-w * 0.72;
     out property <length> key-gap: max(5px, min(14px, vw * 0.005));
 
     // ---- the home screen's own frame

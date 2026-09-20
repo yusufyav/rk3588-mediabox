@@ -15,6 +15,9 @@
 pub enum Cap {
     Letter(char),
     Space,
+    /// Space on a grid that has no Shift; six columns rather than four, so
+    /// the last row still spans ten.
+    WideSpace,
     Backspace,
     Clear,
     /// Upper case for the next letter and every one after it, until pressed
@@ -35,7 +38,7 @@ impl Cap {
                     c.to_string()
                 }
             }
-            Cap::Space => "Boşluk".into(),
+            Cap::Space | Cap::WideSpace => "Boşluk".into(),
             Cap::Backspace => "Sil".into(),
             Cap::Clear => "Temizle".into(),
             Cap::Shift => "Büyük".into(),
@@ -47,8 +50,11 @@ impl Cap {
     pub fn span(self) -> u32 {
         match self {
             Cap::Letter(_) => 1,
+            // Two, two, two and four: one row of ten, like every other row,
+            // so the columns line up all the way down.
             Cap::Shift | Cap::Backspace | Cap::Clear => 2,
-            Cap::Space => 3,
+            Cap::Space => 4,
+            Cap::WideSpace => 6,
         }
     }
 }
@@ -67,10 +73,54 @@ pub fn upper(c: char) -> String {
     }
 }
 
+/// The letters every screen types on.
+///
+/// One layout, because there were three: the account form and the Wi-Fi
+/// password used one without a single Turkish letter in it, and the search
+/// screen had its own with them. A product whose every other word is Turkish
+/// could not type "Çalışma Odası" into two of its three text fields.
+///
+/// Ten columns rather than seven, which is what turned eight rows into seven:
+/// on a remote the cost of a grid is the number of presses to cross it, and
+/// height costs more than width because the eye travels further and the hand
+/// repeats the same key. Digits get their own row and punctuation the next
+/// two, instead of being scattered through the letters — the old grid put "@"
+/// after "y" and split the digits across two rows, so finding one meant
+/// reading the whole thing.
+pub fn layout() -> Vec<Vec<Cap>> {
+    let mut rows = letters();
+    rows.push(vec![Cap::Shift, Cap::Space, Cap::Backspace, Cap::Clear]);
+    rows
+}
+
+/// The same grid without Shift, for a field where case does not matter.
+///
+/// The search box is the only one: a catalogue lookup is case-insensitive, so
+/// a Shift there is a key that changes nothing and one more thing for the
+/// remote to walk past. Space takes the width it frees, so every row is still
+/// ten columns wide.
+pub fn layout_without_shift() -> Vec<Vec<Cap>> {
+    let mut rows = letters();
+    rows.push(vec![Cap::WideSpace, Cap::Backspace, Cap::Clear]);
+    rows
+}
+
+fn letters() -> Vec<Vec<Cap>> {
+    let row = |s: &str| -> Vec<Cap> { s.chars().map(Cap::Letter).collect() };
+    vec![
+        row("abcçdefgğh"),
+        row("ıijklmnoöp"),
+        row("rsştuüvyzq"),
+        row("wx01234567"),
+        row("89.@_-+!?#"),
+        row("$%&*=/:;()"),
+    ]
+}
+
 /// How many columns a grid is laid out at. Every row is exactly this wide,
 /// counting spans: the panel draws at a fixed column width and a row that came
 /// to more put a key off the edge of the television.
-pub const COLUMNS: usize = 7;
+pub const COLUMNS: usize = 10;
 
 /// What pressing a key means to whatever is holding the text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,20 +161,25 @@ impl Grid {
     /// ASCII rather than the search screen's Turkish alphabet, and deliberately:
     /// an e-mail address cannot contain ö, and a password containing one could
     /// not be typed on a keyboard that was missing the rest of ASCII anyway.
+    /// The letters, ten to a row.
+    ///
+    /// Turkish first and complete — ç, ğ, ı, ö, ş, ü — in the alphabet's own
+    /// order. The grid had none of them, on a product whose every other word
+    /// is Turkish: a network called "Çalışma Odası" could not be typed at all,
+    /// and neither could a password with a Turkish letter in it. q, w and x
+    /// follow, because SSIDs and passwords are not written in one alphabet.
+    ///
+    /// Ten columns rather than seven, which is what turned eight rows into
+    /// six: on a remote the cost of a grid is the number of presses to cross
+    /// it, and height is more expensive than width because the eye has
+    /// further to travel and the hand repeats the same key.
+    ///
+    /// Digits on their own row, punctuation on the next, and the four wide
+    /// keys last. The old grid split the digits across two rows and scattered
+    /// punctuation through the letters, so finding "." meant reading the
+    /// whole thing.
     pub fn text() -> Self {
-        let row = |s: &str| -> Vec<Cap> { s.chars().map(Cap::Letter).collect() };
-        Self::new(vec![
-            row("abcdefg"),
-            row("hijklmn"),
-            row("opqrstu"),
-            row("vwxyz@."),
-            row("0123456"),
-            row("789_-+!"),
-            vec![Cap::Shift, Cap::Space, Cap::Backspace],
-            std::iter::once(Cap::Clear)
-                .chain("#$%&?".chars().map(Cap::Letter))
-                .collect(),
-        ])
+        Self::new(layout())
     }
 
     pub fn rows(&self) -> &[Vec<Cap>] {
@@ -208,7 +263,7 @@ impl Grid {
                     Edit::Insert(c)
                 }
             }
-            Cap::Space => Edit::Insert(' '),
+            Cap::Space | Cap::WideSpace => Edit::Insert(' '),
             Cap::Backspace => Edit::Backspace,
             Cap::Clear => Edit::Clear,
             Cap::Shift => {

@@ -101,9 +101,160 @@ export struct VitalsModel {
     storage-fraction: float,
     network: string,
     machine: string,
+    // The two ways this box can be on the network, named separately. A single
+    // "Bağlı" cannot say that the cable is out and the radio is carrying it,
+    // which on an appliance is exactly the thing worth knowing at a glance.
+    eth-up: bool,
+    eth-address: string,
+    wifi-up: bool,
+    wifi-ssid: string,
+    wifi-address: string,
+    // 0 when there is no link; 1 to 4 otherwise.
+    wifi-bars: int,
 }
 
 // ------------------------------------------------------------------ the pieces
+
+// The letter grid, drawn once for every screen that takes text.
+//
+// It was copied into two screens before this, which is how the account form
+// and the Wi-Fi password face came to look slightly different from each other
+// while both looked wrong. One component, so a change to the keys is a change
+// everywhere.
+//
+// Three things make it readable from a sofa: the focused key is a filled white
+// slab rather than a slightly lighter grey, the wide keys are toned apart from
+// the letters so the eye can find Boşluk and Sil without reading them, and the
+// letters are set large enough to be legible at the back of a room.
+export component Keyboard inherits VerticalLayout {
+    in property <[KeyRow]> keys;
+    in property <int> key-row;
+    in property <int> key-col;
+    /// Whether the remote is on the grid at all. A grid nobody is standing on
+    /// draws no focus, rather than a stale one on a screen that has moved on.
+    in property <bool> active;
+
+    spacing: Metrics.key-gap;
+
+    for row[r] in keys: HorizontalLayout {
+        spacing: Metrics.key-gap;
+        alignment: start;
+        height: Metrics.key-h;
+
+        for cap[c] in row.keys: Rectangle {
+            property <bool> wide: cap.span > 1;
+            property <bool> on: active && r == key-row && c == key-col;
+
+            width: Metrics.key-w * cap.span + Metrics.key-gap * (cap.span - 1);
+            border-radius: Metrics.key-h * 0.26;
+            background: on
+                ? #ffffff
+                : (wide ? #ffffff16 : #ffffff0b);
+            border-width: on ? 0px : 1px;
+            border-color: wide ? #ffffff2a : #ffffff1c;
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            // A soft ring under the focused key, so it reads as lifted rather
+            // than merely inverted.
+            if on: Rectangle {
+                x: -3px;
+                y: -3px;
+                width: parent.width + 6px;
+                height: parent.height + 6px;
+                border-radius: parent.border-radius + 3px;
+                background: transparent;
+                border-width: 2px;
+                border-color: Theme.focus-ring;
+            }
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: cap.label;
+                color: on ? #0a0c10 : (wide ? #ffffffcc : Theme.text);
+                font-size: wide
+                    ? Metrics.key-h * 0.30
+                    : Metrics.key-h * 0.46;
+                font-weight: wide ? 700 : 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// Four bars. Shared by the home screen's network panel and the Wi-Fi screen,
+// so a radio reads the same in both places.
+export component SignalBars inherits HorizontalLayout {
+    in property <int> bars;
+    in property <length> unit: 3px;
+    spacing: unit * 0.5;
+    alignment: start;
+
+    for step[i] in [1, 2, 3, 4]: Rectangle {
+        width: unit;
+        height: unit * (1.2 + 0.8 * i);
+        y: parent.height - self.height;
+        border-radius: unit / 2;
+        background: i <= bars ? Theme.ok : #ffffff30;
+    }
+}
+
+// One way of being on the network: a mark, a name and an address.
+component LinkLine inherits HorizontalLayout {
+    in property <bool> up;
+    in property <string> name;
+    in property <string> address;
+    // -1 for the wire, 0..4 for a radio.
+    in property <int> bars: -1;
+
+    spacing: Metrics.root-font * 0.42;
+    height: Metrics.root-font * 1.5;
+
+    // The mark: a filled dot for the wire, bars for the radio. Both go grey
+    // when that way is not carrying anything.
+    Rectangle {
+        width: Metrics.root-font * 0.85;
+        if bars < 0: Rectangle {
+            width: Metrics.root-font * 0.44;
+            height: self.width;
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            border-radius: self.width / 2;
+            background: up ? Theme.ok : #ffffff30;
+        }
+        if bars >= 0: SignalBars {
+            bars: bars;
+            unit: Metrics.root-font * 0.17;
+            x: 0;
+            height: parent.height * 0.58;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+
+    Text {
+        vertical-alignment: center;
+        text: name;
+        color: up ? Theme.text : Theme.muted;
+        font-size: Metrics.root-font * 0.86;
+        font-weight: 700;
+        overflow: elide;
+        min-width: 0px;
+    }
+
+    Rectangle { horizontal-stretch: 1; min-width: Metrics.root-font * 0.2; }
+
+    Text {
+        vertical-alignment: center;
+        text: address;
+        color: up ? Theme.muted : #ffffff44;
+        font-size: Metrics.root-font * 0.76;
+        font-weight: 600;
+        overflow: elide;
+        min-width: 0px;
+    }
+}
 
 // The tile drawn when there is no artwork, and drawn behind it when there is.
 //
@@ -692,15 +843,35 @@ export component Vitals inherits Rectangle {
                     font-weight: 700;
                     letter-spacing: 0.06 * Metrics.root-font * 0.78;
                 }
-                Text {
+
+                // Neither way up: say so once, plainly, rather than drawing two
+                // grey lines and leaving the viewer to work it out.
+                if !vitals.eth-up && !vitals.wifi-up: Text {
                     text: vitals.network;
-                    color: Theme.text;
+                    color: Theme.warn;
                     font-size: Metrics.root-font * 1.05;
                     font-weight: 720;
                     overflow: elide;
                     wrap: no-wrap;
                     min-width: 0px;
                 }
+
+                if vitals.eth-up || vitals.wifi-up: VerticalLayout {
+                    spacing: Metrics.root-font * 0.18;
+
+                    if vitals.eth-up: LinkLine {
+                        up: true;
+                        name: "Ethernet";
+                        address: vitals.eth-address;
+                    }
+                    if vitals.wifi-up: LinkLine {
+                        up: true;
+                        name: vitals.wifi-ssid;
+                        address: vitals.wifi-address;
+                        bars: vitals.wifi-bars;
+                    }
+                }
+
                 Text {
                     text: vitals.machine;
                     color: Theme.muted;

@@ -243,6 +243,13 @@ impl App {
                     self.paint();
                 }
             }
+            Route::Wifi => {
+                if self.wifi.typed('\u{8}') {
+                    self.paint();
+                } else {
+                    self.act(InputAction::Back);
+                }
+            }
             _ => self.act(InputAction::Back),
         }
     }
@@ -272,6 +279,19 @@ impl App {
                         screens::account::Press::Nothing => {}
                     }
                 } else if self.account.typed(c) {
+                    self.paint();
+                }
+            }
+            // The Wi-Fi password. A viewer with a keyboard plugged in should
+            // never have to walk a letter grid to type one.
+            Route::Wifi => {
+                if c == '\r' || c == '\n' {
+                    if self.wifi.typed_enter() == screens::wireless::Press::Join {
+                        self.join_wifi();
+                    } else {
+                        self.paint();
+                    }
+                } else if self.wifi.typed(c) {
                     self.paint();
                 }
             }
@@ -1427,6 +1447,7 @@ impl App {
                     Press::None => self.paint(),
                     Press::Scan => {
                         self.wifi.busy = true;
+                        self.wifi.scanning = true;
                         self.wifi.notice = "Ağlar aranıyor…".into();
                         self.paint();
                         spawn_wifi(WifiCommand::Scan);
@@ -1438,22 +1459,7 @@ impl App {
                         self.paint();
                         spawn_wifi(WifiCommand::Power(on));
                     }
-                    Press::Join => {
-                        let Some(target) = self.wifi.target.clone() else {
-                            return;
-                        };
-                        let secret = self.wifi.password().to_string();
-                        self.wifi.busy = true;
-                        self.wifi.notice = format!("{} ağına bağlanılıyor…", target.ssid);
-                        self.paint();
-                        spawn_wifi(WifiCommand::Connect {
-                            ssid: target.ssid,
-                            psk: (!secret.is_empty()).then_some(secret),
-                        });
-                        // The typed secret is not kept here a moment longer
-                        // than the call that carries it.
-                        self.wifi.forget_secret();
-                    }
+                    Press::Join => self.join_wifi(),
                     Press::Forget => {
                         let Some(network) = self.wifi.highlighted().cloned() else {
                             return;
@@ -1475,6 +1481,27 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Join the network the password face is for.
+    ///
+    /// Reached from the button on the panel and from Enter on a real
+    /// keyboard, so both do exactly the same thing.
+    fn join_wifi(&mut self) {
+        let Some(target) = self.wifi.target.clone() else {
+            return;
+        };
+        let secret = self.wifi.password().to_string();
+        self.wifi.busy = true;
+        self.wifi.notice = format!("{} ağına bağlanılıyor…", target.ssid);
+        self.paint();
+        spawn_wifi(WifiCommand::Connect {
+            ssid: target.ssid,
+            psk: (!secret.is_empty()).then_some(secret),
+        });
+        // The typed secret is not kept here a moment longer than the call
+        // that carries it.
+        self.wifi.forget_secret();
     }
 
     fn act_on_bluetooth(&mut self, intent: Intent) {
@@ -1539,6 +1566,7 @@ impl App {
     /// An answer from the daemon about the Wi-Fi radio.
     fn wifi_answer(&mut self, answer: Result<serde_json::Value, String>, scanned: bool) {
         self.wifi.busy = false;
+        self.wifi.scanning = false;
         match answer {
             Ok(value) => {
                 self.wifi.notice.clear();
@@ -1608,6 +1636,7 @@ impl App {
         window.set_wifi_powered(wifi.powered);
         window.set_wifi_index(wifi.index as i32);
         window.set_wifi_busy(wifi.busy);
+        window.set_wifi_scanning(wifi.scanning);
         window.set_wifi_notice(wifi.notice.clone().into());
         window.set_wifi_address(wifi.address.clone().unwrap_or_default().into());
         window.set_wifi_summary(
@@ -1633,9 +1662,11 @@ impl App {
                 .into(),
         );
         window.set_wifi_password_mask(wifi.password_mask().into());
+        window.set_wifi_show(wifi.show);
         window.set_wifi_focus(
             match wifi.focus {
                 screens::wireless::PasswordFocus::Field => "field",
+                screens::wireless::PasswordFocus::Show => "show",
                 screens::wireless::PasswordFocus::Keys => "keys",
                 screens::wireless::PasswordFocus::Join => "join",
             }
@@ -1707,6 +1738,7 @@ impl App {
                 // Ask straight away: a screen that opens empty and waits for a
                 // press reads as broken.
                 self.wifi.busy = true;
+                self.wifi.scanning = true;
                 spawn_wifi(WifiCommand::Refresh);
             }
             Action::OpenBluetooth => {
@@ -1980,54 +2012,31 @@ impl App {
     }
 
     /// Puts the remote back where it was before the display changed hands.
+    /// What the appliance comes back to after a restart.
+    ///
+    /// The home screen, always. It is this product's opening screen — the
+    /// launcher, the board's own vital signs, the shelf — and an appliance
+    /// that reappears three screens deep in a settings tree, or on a detail
+    /// page for a film somebody finished last night, is not an appliance that
+    /// has started: it is one that never finished what it was doing.
+    ///
+    /// This used to put the viewer back where they were, which produced a
+    /// specific complaint and one real fault before it. The fault was Now
+    /// Playing, restored with no player running, greeting somebody with a dead
+    /// end and four transport buttons that did nothing; it was fixed by
+    /// excluding that one screen, and the same reasoning applies to all of
+    /// them. Nothing about a previous session is true at boot.
+    ///
+    /// A film that is genuinely still playing is a different matter and does
+    /// not come through here: `watch_the_film` adopts any film on the plane
+    /// four times a second — including one this interface did not start — and
+    /// opens Now Playing itself. So that screen is reached when it is true,
+    /// and never because a word was left in a file.
     fn restore(&mut self) {
-        let Some(snapshot) = self.resume.take() else {
-            return;
-        };
-
-        if snapshot.home_row > 0 && snapshot.home_row < self.home.rows() {
-            self.home.row = snapshot.home_row;
-            self.home.step(snapshot.home_col as isize, 0);
-        }
-
-        if snapshot.screen == "detail" && !snapshot.detail_id.is_empty() {
-            // Re-opened from the shelf item if it is still there, so the seed
-            // is a real one and the first frame carries artwork.
-            let seeded = self
-                .home
-                .focused()
-                .filter(|item| item.id == snapshot.detail_id)
-                .cloned();
-
-            if let Some(item) = seeded {
-                self.open_detail_for(&item);
-                return;
-            }
-        } else if let Some(route) = route::Route::from_name(&snapshot.screen) {
-            // Every screen here is one a viewer can be put back on with
-            // nothing else being true. Now Playing is not one of them, and
-            // restoring it is how the appliance greeted somebody with a dead
-            // end: "Şimdi Oynatılan", "Şu anda bir şey oynatılmıyor", and four
-            // transport buttons that do nothing.
-            //
-            // Reproduced on the Ultra on 2026-09-20, with no player running at
-            // all: write `now-playing` into the session file, start the
-            // interface, and that is the screen on the television. It needs no
-            // exotic fault to happen -- a crash, a power cut, a deploy or a
-            // reboot while a film is on all leave that word in the file, and
-            // `watch_the_film` cannot rescue it: with no film to lose, the
-            // branch that would go back never runs.
-            //
-            // A film that really is playing does not need this line. The same
-            // `watch_the_film` adopts any film on the plane four times a
-            // second -- including one this interface did not start, which is
-            // the case this was reaching for -- and opens Now Playing itself.
-            // So the screen is reached when it is true and not when it is not.
-            if matches!(route, Route::Settings | Route::Diagnostics) {
-                self.stack.push(route);
-            }
-        }
-
+        // Read and dropped: the file is still written, because the session
+        // carries more than a screen name, but the screen name no longer
+        // decides anything.
+        let _ = self.resume.take();
         self.paint();
     }
 
@@ -2529,10 +2538,12 @@ impl App {
         window.set_account_secret_after(secret_after.into());
         // Bullets and a length. The panel is never handed the password.
         window.set_account_password_mask(account.password_mask().into());
+        window.set_account_show(account.showing());
         window.set_account_focus(
             match account.focus {
                 Focus::Field(Field::Email) => "email",
                 Focus::Field(Field::Password) => "password",
+                Focus::Show => "show",
                 Focus::Keys => "keys",
                 Focus::Submit => "submit",
             }

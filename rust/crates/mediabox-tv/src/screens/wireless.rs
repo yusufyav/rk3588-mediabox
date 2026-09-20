@@ -46,6 +46,10 @@ pub enum Face {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasswordFocus {
     Field,
+    /// The switch that turns the bullets back into letters. Beside the field
+    /// rather than under it: a password you cannot read is a password you
+    /// cannot check, and on a television the only way to check it is to look.
+    Show,
     Keys,
     Join,
 }
@@ -77,10 +81,15 @@ pub struct Wifi {
     pub face: Face,
     pub focus: PasswordFocus,
     pub busy: bool,
+    /// Busy with a scan in particular, so the row can say "Aranıyor…" only
+    /// when that is what is happening.
+    pub scanning: bool,
     pub notice: String,
     /// The network the password face is for.
     pub target: Option<Network>,
     secret: String,
+    /// Whether the secret is drawn as itself.
+    pub show: bool,
     pub keys: Grid,
 }
 
@@ -105,9 +114,11 @@ impl Wifi {
             face: Face::List,
             focus: PasswordFocus::Field,
             busy: false,
+            scanning: false,
             notice: String::new(),
             target: None,
             secret: String::new(),
+            show: false,
             keys: Grid::text(),
         }
     }
@@ -118,6 +129,7 @@ impl Wifi {
         self.index = 1;
         self.notice.clear();
         self.secret.clear();
+        self.show = false;
         self.target = None;
     }
 
@@ -125,10 +137,43 @@ impl Wifi {
         &self.secret
     }
 
-    /// Bullets rather than letters, and the count is the real one — a viewer
-    /// checking they typed twelve characters can count twelve.
+    /// Bullets rather than letters, unless the viewer asked to see it. The
+    /// count is the real one either way — somebody checking they typed twelve
+    /// characters can count twelve.
     pub fn password_mask(&self) -> String {
-        "•".repeat(self.secret.chars().count())
+        if self.show {
+            self.secret.clone()
+        } else {
+            "•".repeat(self.secret.chars().count())
+        }
+    }
+
+    /// A letter from a real keyboard. Typing never moves the focus, so
+    /// somebody who starts on the keyboard and reaches for the remote finds it
+    /// where they left it.
+    pub fn typed(&mut self, c: char) -> bool {
+        if self.face != Face::Password {
+            return false;
+        }
+        if c == '\u{8}' {
+            return self.secret.pop().is_some();
+        }
+        if c == '\r' || c == '\n' {
+            return false;
+        }
+        if c.is_control() {
+            return false;
+        }
+        self.secret.push(c);
+        true
+    }
+
+    /// Enter on a real keyboard, which joins if there is enough to join with.
+    pub fn typed_enter(&mut self) -> Press {
+        if self.face != Face::Password {
+            return Press::None;
+        }
+        self.join_if_ready()
     }
 
     pub fn rows(&self) -> usize {
@@ -188,7 +233,7 @@ impl Wifi {
 
     fn step_password(&mut self, dy: i32) {
         match (self.focus, dy) {
-            (PasswordFocus::Field, 1) => {
+            (PasswordFocus::Field | PasswordFocus::Show, 1) => {
                 self.focus = PasswordFocus::Keys;
                 self.keys.enter(true);
             }
@@ -211,8 +256,16 @@ impl Wifi {
     }
 
     pub fn sideways(&mut self, dx: i32) {
-        if self.face == Face::Password && self.focus == PasswordFocus::Keys {
-            self.keys.step(dx, 0);
+        if self.face != Face::Password {
+            return;
+        }
+        match (self.focus, dx) {
+            (PasswordFocus::Keys, _) => {
+                self.keys.step(dx, 0);
+            }
+            (PasswordFocus::Field, 1) => self.focus = PasswordFocus::Show,
+            (PasswordFocus::Show, -1) => self.focus = PasswordFocus::Field,
+            _ => {}
         }
     }
 
@@ -257,6 +310,10 @@ impl Wifi {
                 self.keys.enter(true);
                 Press::None
             }
+            PasswordFocus::Show => {
+                self.show = !self.show;
+                Press::None
+            }
             PasswordFocus::Keys => {
                 match self.keys.press() {
                     Some(Edit::Insert(c)) => self.secret.push(c),
@@ -289,6 +346,7 @@ impl Wifi {
             Face::Password => {
                 self.face = Face::List;
                 self.secret.clear();
+                self.show = false;
                 self.target = None;
                 self.notice.clear();
                 true

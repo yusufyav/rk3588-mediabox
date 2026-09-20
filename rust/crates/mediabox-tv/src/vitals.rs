@@ -155,6 +155,13 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         // Replaced below from the machine's own device tree. This is what a
         // board that has not answered yet is called, not what any board is.
         machine: "RK3588".into(),
+        // Both ways down until the snapshot says otherwise.
+        eth_up: false,
+        eth_address: String::new().into(),
+        wifi_up: false,
+        wifi_ssid: String::new().into(),
+        wifi_address: String::new().into(),
+        wifi_bars: 0,
     };
 
     let Some(root) = answer else { return model };
@@ -241,5 +248,60 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         "Ağ yok".into()
     };
 
+    // The wire. The first non-wireless interface that is up and holds an
+    // address: a board with two sockets has two, and the one carrying traffic
+    // is the one worth naming.
+    if let Some(interfaces) = root.pointer("/network/interfaces").and_then(Value::as_array) {
+        for interface in interfaces {
+            let wireless = interface
+                .get("wireless")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let up = interface.get("state").and_then(Value::as_str) == Some("up");
+            let address = interface
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !wireless && up && !address.is_empty() {
+                model.eth_up = true;
+                model.eth_address = address.into();
+                break;
+            }
+        }
+    }
+
+    // The radio, which says which network it is on rather than which device
+    // the kernel gave it.
+    let wifi = root.pointer("/wireless/wifi");
+    let ssid = wifi
+        .and_then(|wifi| wifi.get("ssid"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let wifi_address = wifi
+        .and_then(|wifi| wifi.get("address"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !ssid.is_empty() {
+        model.wifi_up = true;
+        model.wifi_ssid = ssid.into();
+        model.wifi_address = wifi_address.into();
+        model.wifi_bars = wifi
+            .and_then(|wifi| wifi.get("signal"))
+            .and_then(Value::as_i64)
+            .map(signal_bars)
+            .unwrap_or(0);
+    }
+
     model
+}
+
+/// dBm to four steps. The same thresholds the Wi-Fi screen uses, so a network
+/// does not read as three bars on one screen and four on the other.
+fn signal_bars(dbm: i64) -> i32 {
+    match dbm {
+        s if s >= -55 => 4,
+        s if s >= -67 => 3,
+        s if s >= -78 => 2,
+        _ => 1,
+    }
 }

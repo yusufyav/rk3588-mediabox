@@ -113,11 +113,13 @@ export component MediaBoxWindow inherits Window {
     in property <[WifiRow]> wifi-networks;
     in property <int> wifi-index;
     in property <bool> wifi-busy;
+    in property <bool> wifi-scanning;
     in property <string> wifi-notice;
     /// "list" | "password"
     in property <string> wifi-face;
     in property <string> wifi-target;
     in property <string> wifi-password-mask;
+    in property <bool> wifi-show;
     /// "field" | "keys" | "join"
     in property <string> wifi-focus;
     in property <[KeyRow]> wifi-keys;
@@ -230,6 +232,7 @@ export component MediaBoxWindow inherits Window {
     // ---- the Stremio account
     in property <string> account-email;
     in property <string> account-password-mask;
+    in property <bool> account-show;
     in property <string> account-email-before;
     in property <string> account-email-after;
     in property <string> account-secret-before;
@@ -399,10 +402,12 @@ export component MediaBoxWindow inherits Window {
             networks: root.wifi-networks;
             index: root.wifi-index;
             busy: root.wifi-busy;
+            scanning: root.wifi-scanning;
             notice: root.wifi-notice;
             face: root.wifi-face;
             target: root.wifi-target;
             password-mask: root.wifi-password-mask;
+            show: root.wifi-show;
             focus-at: root.wifi-focus;
             keys: root.wifi-keys;
             key-row: root.wifi-key-row;
@@ -427,6 +432,7 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             email: root.account-email;
             password-mask: root.account-password-mask;
+            show: root.account-show;
             email-before: root.account-email-before;
             email-after: root.account-email-after;
             secret-before: root.account-secret-before;

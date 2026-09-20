@@ -1,5 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
-import { GridPoster, PosterItem, KeyRow, KeyCap } from "components.slint";
+import { GridPoster, PosterItem, KeyRow, KeyCap, Keyboard } from "components.slint";
 
 // Searching from the sofa.
 //
@@ -19,7 +19,8 @@ export component Search inherits Rectangle {
     in property <int> index;
     in property <int> columns;
 
-    property <length> keys-w: Metrics.key-w * 7 + Metrics.key-gap * 6;
+    // Ten columns, the grid's own width.
+    property <length> keys-w: Metrics.key-w * 10 + Metrics.key-gap * 9;
     property <length> pane-x: Metrics.gutter + keys-w + Metrics.gutter;
     property <length> cell-w: Metrics.card-w + Metrics.grid-gap;
     property <length> cell-h: Metrics.card-h + Metrics.text-card * 3.4 + Metrics.grid-gap;
@@ -74,32 +75,11 @@ export component Search inherits Rectangle {
             }
         }
 
-        for row[r] in keys: HorizontalLayout {
-            spacing: Metrics.key-gap;
-            alignment: start;
-            height: Metrics.key-h;
-
-            for cap[c] in row.keys: Rectangle {
-                property <bool> focused: on-keys && r == key-row && c == key-col;
-                width: Metrics.key-w * cap.span + Metrics.key-gap * (cap.span - 1);
-                border-radius: Theme.radius * 0.55;
-                background: focused ? Theme.focus-fill : #ffffff0f;
-                border-width: focused ? 2px : 1px;
-                border-color: focused ? Theme.focus-ring : Theme.line-soft;
-
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-                Text {
-                    width: 100%;
-                    height: 100%;
-                    text: cap.label;
-                    color: focused ? #0a0c10 : Theme.text;
-                    font-size: cap.span > 1 ? Metrics.text-chip : Metrics.root-font * 1.1;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
+        Keyboard {
+            keys: root.keys;
+            key-row: root.key-row;
+            key-col: root.key-col;
+            active: root.on-keys;
         }
     }
 

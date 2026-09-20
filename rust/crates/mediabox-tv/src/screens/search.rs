@@ -14,24 +14,14 @@ use crate::state::Item;
 /// would move a title out from under the remote when a row wrapped.
 pub const COLUMNS: usize = 5;
 
-/// The alphabet in its own order, then the digits, then the three wide keys.
+/// The same letters every other text field has, minus Shift; see
+/// `keyboard::layout_without_shift`.
 ///
-/// Seven columns on every row, including the last: the grid is laid out at a
-/// fixed column width, and a row of eight put a key off the edge of the panel.
-/// Turkish order rather than the English alphabet with the extra letters
-/// appended, because this is a Turkish product and a person looking for Ç
-/// expects it after C.
+/// This screen used to carry a grid of its own. That is how one product came
+/// to have two alphabets: this one had the Turkish letters and the one behind
+/// the account form and the Wi-Fi password did not.
 fn layout() -> Vec<Vec<Cap>> {
-    let row = |s: &str| -> Vec<Cap> { s.chars().map(Cap::Letter).collect() };
-    vec![
-        row("abcçdef"),
-        row("gğhıijk"),
-        row("lmnoöpr"),
-        row("sştuüvy"),
-        row("zwxq012"),
-        row("3456789"),
-        vec![Cap::Space, Cap::Backspace, Cap::Clear],
-    ]
+    crate::keyboard::layout_without_shift()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,11 +189,11 @@ impl Search {
         };
         match cap {
             Cap::Letter(c) => self.push(c),
-            Cap::Space => self.push(' '),
-            // The search grid has no Shift: a catalogue lookup is
-            // case-insensitive and a key that changed nothing would be one
-            // more thing to walk past. `every_key_here_does_something` holds
-            // this to it.
+            Cap::Space | Cap::WideSpace => self.push(' '),
+            // Unreachable: this grid is built without Shift, and
+            // `the_grid_here_has_no_shift` holds it that way. A catalogue
+            // lookup is case-insensitive, so the key would change nothing and
+            // be one more thing for the remote to walk past.
             Cap::Shift => return false,
             Cap::Backspace => {
                 if self.query.pop().is_none() {
@@ -293,6 +283,39 @@ mod tests {
             .map(|i| crate::state::Item::stub(&format!("t{i}")))
             .collect();
         search
+    }
+
+    /// A key that does nothing is a key the remote has to walk past.
+    #[test]
+    fn the_grid_here_has_no_shift() {
+        let search = Search::new();
+        assert!(
+            !search
+                .keys()
+                .iter()
+                .flatten()
+                .any(|cap| matches!(cap, Cap::Shift)),
+            "the search grid must not carry a key that changes nothing"
+        );
+    }
+
+    /// And every key that is here does something to the query.
+    #[test]
+    fn every_key_here_does_something() {
+        for (row, keys) in Search::new().keys().iter().enumerate() {
+            for (col, _) in keys.iter().enumerate() {
+                let mut search = Search::new();
+                search.query = "ab".into();
+                search.key_row = row;
+                search.key_col = col;
+                let before = search.query.clone();
+                search.press();
+                assert_ne!(
+                    search.query, before,
+                    "key at {row},{col} left the query alone"
+                );
+            }
+        }
     }
 
     /// The grid is drawn at a fixed column width, so a row that is wider than

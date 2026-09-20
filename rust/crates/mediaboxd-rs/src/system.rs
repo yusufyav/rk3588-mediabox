@@ -221,10 +221,17 @@ fn network() -> Value {
                     if name == "lo" {
                         return None;
                     }
+                    let state = read_trimmed(entry.path().join("operstate"));
                     Some(json!({
                         "name": name,
-                        "state": read_trimmed(entry.path().join("operstate")),
+                        "state": state,
                         "mac": read_trimmed(entry.path().join("address")),
+                        // The home screen names the wire and the radio
+                        // separately and puts an address under each, so it
+                        // needs one per interface rather than the default
+                        // route's alone.
+                        "address": address_of(&name),
+                        "wireless": name.starts_with("wl"),
                     }))
                 })
                 .collect()
@@ -299,6 +306,46 @@ fn machine() -> String {
         .unwrap_or_else(|| "RK3588".to_string())
 }
 
+/// The network a wireless interface is on, and how strong it is.
+fn link_of(interface: &str) -> (Option<String>, Option<i64>) {
+    let Ok(output) = std::process::Command::new("/usr/sbin/iw")
+        .args(["dev", interface, "link"])
+        .output()
+    else {
+        return (None, None);
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().starts_with("Not connected") {
+        return (None, None);
+    }
+    let mut ssid = None;
+    let mut signal = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("SSID: ") {
+            ssid = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("signal: ") {
+            signal = rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<i64>().ok());
+        }
+    }
+    (ssid, signal)
+}
+
+/// The IPv4 address an interface holds, if it holds one.
+fn address_of(interface: &str) -> Option<String> {
+    let output = std::process::Command::new("/usr/sbin/ip")
+        .args(["-4", "-brief", "addr", "show", interface])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .nth(2)
+        .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+}
+
 /// A one-glance summary of the radios, for the settings screen's two doors.
 ///
 /// Deliberately cheap: files under /sys and nothing else. The full picture —
@@ -320,7 +367,22 @@ fn wireless() -> Value {
                 "" => "yok",
                 _ => "bağlı değil",
             };
-            json!({"state": state, "interface": interface})
+            // The network and its strength, asked for only while the link is
+            // actually up. `iw` is a process; running it on a radio that is
+            // down would buy nothing and the home screen reads this once a
+            // second.
+            let (ssid, signal) = if state == "bağlı" {
+                link_of(&interface)
+            } else {
+                (None, None)
+            };
+            json!({
+                "state": state,
+                "interface": interface,
+                "ssid": ssid,
+                "signal": signal,
+                "address": address_of(&interface),
+            })
         }
     };
     // A controller bluez can see leaves a directory behind; whether the radio

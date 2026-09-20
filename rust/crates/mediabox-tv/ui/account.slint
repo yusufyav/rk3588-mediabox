@@ -1,5 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
-import { KeyRow, KeyCap } from "components.slint";
+import { KeyRow, KeyCap, Keyboard } from "components.slint";
 
 // Signing in to a Stremio account from the sofa.
 //
@@ -13,6 +13,8 @@ import { KeyRow, KeyCap } from "components.slint";
 export component Account inherits Rectangle {
     in property <string> email;
     in property <string> password-mask;
+    /// Whether the password is drawn as itself.
+    in property <bool> show;
     // The two halves of each field, split where the caret is. Drawn either
     // side of it, which is how a caret can sit in the middle of a word.
     in property <string> email-before;
@@ -38,7 +40,8 @@ export component Account inherits Rectangle {
     in property <string> submit-label;
     in property <bool> submit-ready;
 
-    property <length> keys-w: Metrics.key-w * 7 + Metrics.key-gap * 6;
+    // Ten columns; the grid's own width, so the column under it matches.
+    property <length> keys-w: Metrics.key-w * 10 + Metrics.key-gap * 9;
     property <length> col-w: max(keys-w, Metrics.vw * 0.30);
     property <length> col-x: (root.width - col-w) / 2;
     property <length> field-h: Metrics.root-font * 2.9;
@@ -165,10 +168,32 @@ export component Account inherits Rectangle {
 
             animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
+            // The switch that turns the bullets into letters. Inside the
+            // field's own box, reached by walking the caret off its right-hand
+            // end, so it costs no extra row.
+            Rectangle {
+                property <bool> on: focus-at == "show";
+                width: Metrics.root-font * 4.0;
+                height: parent.height - Metrics.root-font * 0.55;
+                x: parent.width - self.width - Metrics.root-font * 0.3;
+                y: (parent.height - self.height) / 2;
+                border-radius: Theme.radius * 0.5;
+                background: on ? #ffffff : #ffffff14;
+                border-width: on ? 0px : 1px;
+                border-color: #ffffff2a;
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                Text {
+                    text: show ? "Gizle" : "Göster";
+                    color: on ? #0a0c10 : Theme.text;
+                    font-size: Metrics.root-font * 0.72;
+                    font-weight: 700;
+                }
+            }
+
             // Bullets and a length. Whatever was typed is not in this file.
             if password-mask == "": Text {
                 x: Metrics.root-font * 0.7;
-                width: parent.width - Metrics.root-font * 2.0;
+                width: parent.width - Metrics.root-font * 5.2;
                 height: 100%;
                 text: "••••••••";
                 color: focused ? #0a0c1099 : Theme.dim;
@@ -181,7 +206,7 @@ export component Account inherits Rectangle {
 
             if password-mask != "": HorizontalLayout {
                 x: Metrics.root-font * 0.7;
-                width: parent.width - Metrics.root-font * 1.4;
+                width: parent.width - Metrics.root-font * 5.2;
                 height: 100%;
                 alignment: start;
                 spacing: 0px;
@@ -223,32 +248,11 @@ export component Account inherits Rectangle {
         // ------------------------------------------------------------ letters
         Rectangle { height: Metrics.block-gap * 0.3; }
 
-        for row[r] in keys: HorizontalLayout {
-            spacing: Metrics.key-gap;
-            alignment: start;
-            height: Metrics.key-h;
-
-            for cap[c] in row.keys: Rectangle {
-                property <bool> focused: focus-at == "keys" && r == key-row && c == key-col;
-                width: Metrics.key-w * cap.span + Metrics.key-gap * (cap.span - 1);
-                border-radius: Theme.radius * 0.55;
-                background: focused ? Theme.focus-fill : #ffffff0f;
-                border-width: focused ? 2px : 1px;
-                border-color: focused ? Theme.focus-ring : Theme.line-soft;
-
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-                Text {
-                    width: 100%;
-                    height: 100%;
-                    text: cap.label;
-                    color: focused ? #0a0c10 : Theme.text;
-                    font-size: cap.span > 1 ? Metrics.text-chip : Metrics.root-font * 1.05;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
+        Keyboard {
+            keys: root.keys;
+            key-row: root.key-row;
+            key-col: root.key-col;
+            active: focus-at == "keys";
         }
 
         // ------------------------------------------------------------- button

@@ -1,5 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
-import { KeyRow, KeyCap } from "components.slint";
+import { KeyRow, KeyCap, Keyboard, SignalBars } from "components.slint";
 
 // One network in the Wi-Fi list.
 export struct WifiRow {
@@ -99,12 +99,15 @@ export component WifiScreen inherits Rectangle {
     in property <[WifiRow]> networks;
     in property <int> index;
     in property <bool> busy;
+    /// Busy *with a scan*, as opposed to a join or a power switch.
+    in property <bool> scanning;
     in property <string> notice;
 
     // "list" | "password"
     in property <string> face;
     in property <string> target;
     in property <string> password-mask;
+    in property <bool> show;
     // "field" | "keys" | "join"
     in property <string> focus-at;
     in property <[KeyRow]> keys;
@@ -154,8 +157,11 @@ export component WifiScreen inherits Rectangle {
                 dim: !present;
             }
             Line {
+                // "Aranıyor…" only while a scan is what is running. It used
+                // to say that during a join as well, which told the viewer
+                // the wrong thing about the thing they had just pressed.
                 focused: index == 1;
-                title: busy ? "Aranıyor…" : "Ağları ara";
+                title: scanning ? "Aranıyor…" : "Ağları ara";
                 under: address != "" ? "Adres: " + address : "";
                 value: "";
             }
@@ -203,62 +209,74 @@ export component WifiScreen inherits Rectangle {
         }
 
         // --------------------------------------------------------- password
-        if face == "password": VerticalLayout {
-            spacing: Metrics.vh * 0.012;
+        //
+        // One column, centred, everything in it the width of the grid. Laid
+        // out full-bleed it put a full-width field and a full-width button
+        // around a keyboard a third as wide, which read as three unrelated
+        // things stacked up.
+        if face == "password": HorizontalLayout {
+            alignment: center;
+
+            VerticalLayout {
+            width: Metrics.key-w * 10 + Metrics.key-gap * 9;
+            alignment: center;
+            spacing: Metrics.vh * 0.014;
 
             Text {
                 text: target;
                 color: Theme.text;
-                font-size: Metrics.root-font * 1.2;
+                font-size: Metrics.root-font * 1.25;
                 font-weight: 700;
+                horizontal-alignment: center;
             }
 
-            Rectangle {
+            // The field and, beside it, the switch that turns the bullets
+            // back into letters. Right from the field reaches it.
+            HorizontalLayout {
+                spacing: Metrics.vh * 0.012;
                 height: Metrics.vh * 0.08;
-                border-radius: Theme.radius * 0.6;
-                background: focus-at == "field" ? Theme.focus-fill : #ffffff0f;
-                border-width: focus-at == "field" ? 2px : 1px;
-                border-color: focus-at == "field" ? Theme.focus-ring : Theme.line-soft;
-                HorizontalLayout {
-                    padding-left: Metrics.vh * 0.02;
-                    padding-right: Metrics.vh * 0.02;
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius * 0.6;
+                    background: focus-at == "field" ? Theme.focus-fill : #ffffff0f;
+                    border-width: focus-at == "field" ? 2px : 1px;
+                    border-color: focus-at == "field" ? Theme.focus-ring : Theme.line-soft;
+                    HorizontalLayout {
+                        padding-left: Metrics.vh * 0.02;
+                        padding-right: Metrics.vh * 0.02;
+                        Text {
+                            vertical-alignment: center;
+                            text: password-mask == "" ? "Parola" : password-mask;
+                            color: focus-at == "field"
+                                ? #0a0c10
+                                : (password-mask == "" ? #ffffff66 : Theme.text);
+                            font-size: Metrics.root-font * 1.1;
+                            font-weight: 700;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: Metrics.vh * 0.22;
+                    border-radius: Theme.radius * 0.6;
+                    background: focus-at == "show" ? Theme.focus-fill : #ffffff0f;
+                    border-width: focus-at == "show" ? 2px : 1px;
+                    border-color: focus-at == "show" ? Theme.focus-ring : Theme.line-soft;
                     Text {
-                        vertical-alignment: center;
-                        text: password-mask == "" ? "Parola" : password-mask;
-                        color: focus-at == "field"
-                            ? #0a0c10
-                            : (password-mask == "" ? #ffffff66 : Theme.text);
-                        font-size: Metrics.root-font * 1.1;
+                        text: show ? "Gizle" : "Göster";
+                        color: focus-at == "show" ? #0a0c10 : Theme.text;
+                        font-size: Metrics.root-font * 0.95;
                         font-weight: 700;
                     }
                 }
             }
 
-            for row[r] in keys: HorizontalLayout {
-                spacing: Metrics.key-gap;
-                alignment: start;
-                height: Metrics.key-h;
-
-                for cap[c] in row.keys: Rectangle {
-                    property <bool> on: focus-at == "keys" && r == key-row && c == key-col;
-                    width: Metrics.key-w * cap.span + Metrics.key-gap * (cap.span - 1);
-                    border-radius: Theme.radius * 0.55;
-                    background: on ? Theme.focus-fill : #ffffff0f;
-                    border-width: on ? 2px : 1px;
-                    border-color: on ? Theme.focus-ring : Theme.line-soft;
-                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-                    Text {
-                        width: 100%;
-                        height: 100%;
-                        text: cap.label;
-                        color: on ? #0a0c10 : Theme.text;
-                        font-size: cap.span > 1 ? Metrics.text-chip : Metrics.root-font * 1.05;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
+            Keyboard {
+                keys: root.keys;
+                key-row: root.key-row;
+                key-col: root.key-col;
+                active: focus-at == "keys";
             }
 
             Rectangle {
@@ -273,6 +291,7 @@ export component WifiScreen inherits Rectangle {
                     font-size: Metrics.root-font * 1.05;
                     font-weight: 700;
                 }
+            }
             }
         }
     }

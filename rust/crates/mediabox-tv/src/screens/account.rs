@@ -35,6 +35,10 @@ pub enum Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Field(Field),
+    /// The switch beside the password that turns the bullets into letters.
+    /// Reached by walking the caret off the right-hand end of the field, so
+    /// it costs no extra row on a screen that is already tall.
+    Show,
     Keys,
     Submit,
 }
@@ -164,6 +168,10 @@ pub struct Account {
     /// True while a login or a logout is in flight. A second press must not
     /// send a second one.
     pub busy: bool,
+    /// Whether the password is drawn as itself rather than as bullets. Reset
+    /// every time the form is opened: a secret left readable on a television
+    /// is a secret on a television.
+    show: bool,
     /// One short line under the button. Never carries the password, and never
     /// carries whatever the server said about it verbatim beyond its message.
     pub notice: String,
@@ -175,6 +183,7 @@ impl Account {
             session: Session::default(),
             focus: Focus::Field(Field::Email),
             field: Field::Email,
+            show: false,
             email: Entry::default(),
             password: Entry::default(),
             keys: Grid::text(),
@@ -191,8 +200,14 @@ impl Account {
         self.field = Field::Email;
         self.email.wipe();
         self.forget_password();
+        self.show = false;
         self.busy = false;
         self.notice.clear();
+    }
+
+    /// Whether the password is drawn as itself.
+    pub fn showing(&self) -> bool {
+        self.show
     }
 
     /// The only way the password leaves this struct, and the only caller is the
@@ -213,7 +228,11 @@ impl Account {
     /// What the panel is allowed to draw for the password: bullets, a length,
     /// and where the caret sits in them. Never the text.
     pub fn password_mask(&self) -> String {
-        "•".repeat(self.password.len())
+        if self.show {
+            format!("{}{}", self.password.before(), self.password.after())
+        } else {
+            "•".repeat(self.password.len())
+        }
     }
 
     /// The two halves of what the panel draws, split at the caret.
@@ -223,6 +242,9 @@ impl Account {
             Field::Email => (entry.before().to_string(), entry.after().to_string()),
             // The mask is split by count, so the caret lands between the same
             // two bullets it would land between letters.
+            Field::Password if self.show => {
+                (entry.before().to_string(), entry.after().to_string())
+            }
             Field::Password => (
                 "•".repeat(entry.caret),
                 "•".repeat(entry.len().saturating_sub(entry.caret)),
@@ -281,7 +303,34 @@ impl Account {
             }
             Focus::Field(Field::Password) => {
                 if dx != 0 {
-                    return self.password.step(dx);
+                    if self.password.step(dx) {
+                        return true;
+                    }
+                    // The caret is already at the end; one more Right is the
+                    // switch rather than nothing happening.
+                    if dx > 0 {
+                        self.focus = Focus::Show;
+                        return true;
+                    }
+                    return false;
+                }
+                if dy < 0 {
+                    self.focus = Focus::Field(Field::Email);
+                    self.field = Field::Email;
+                    return true;
+                }
+                if dy > 0 {
+                    self.keys.enter(false);
+                    self.focus = Focus::Keys;
+                    return true;
+                }
+                false
+            }
+            Focus::Show => {
+                if dx < 0 {
+                    self.focus = Focus::Field(Field::Password);
+                    self.field = Field::Password;
+                    return true;
                 }
                 if dy < 0 {
                     self.focus = Focus::Field(Field::Email);
@@ -332,6 +381,10 @@ impl Account {
                 self.field = field;
                 self.keys.enter(false);
                 self.focus = Focus::Keys;
+                Press::Changed
+            }
+            Focus::Show => {
+                self.show = !self.show;
                 Press::Changed
             }
             Focus::Keys => {
@@ -418,7 +471,7 @@ impl Account {
     /// reached again, and why this is never a trap.
     pub fn dismiss(&mut self) -> bool {
         match self.focus {
-            Focus::Keys | Focus::Submit => {
+            Focus::Keys | Focus::Submit | Focus::Show => {
                 self.focus = Focus::Field(self.field);
                 true
             }
