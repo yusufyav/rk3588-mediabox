@@ -46,26 +46,6 @@ if [ -n "$connector_path" ] && [ -e "$connector_path/status" ] && [ ! -s "$conne
   echo detect > "$connector_path/status" 2>/dev/null || true
 fi
 
-# Nothing restores a console mode in the gap between two applications.
-#
-# When the last DRM master closes -- the interface standing down for Kodi, or
-# Kodi handing the television back -- the kernel's fbdev emulation puts its own
-# mode back on the connector. Its mode is the sink's preferred one, and on this
-# television that is 1920x1080. So every handover went 4K -> 1080p -> 4K, two
-# resyncs and a visible drop, reported from the appliance as "arada bir 1080p
-# ye set oluyor".
-#
-# Measured: with the interface stopped and emulation on, `Display mode:
-# 1920x1080p60` with no application running at all; with emulation off, the
-# port simply stays dark until the next one sets its own mode.
-#
-# A television has no console to go back to -- this appliance switches the
-# virtual terminals off a few lines below -- so there is nothing to preserve
-# and one transition instead of three.
-if [ -w /sys/module/drm_kms_helper/parameters/fbdev_emulation ]; then
-  echo N > /sys/module/drm_kms_helper/parameters/fbdev_emulation 2>/dev/null || true
-fi
-
 # There is no terminal on a television.
 #
 # Run here as well as at boot: this is the moment immediately before the
