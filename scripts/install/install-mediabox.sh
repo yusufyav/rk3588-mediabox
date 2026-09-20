@@ -346,6 +346,13 @@ ok "product checks installed"
 install -m 0755 "$here/packaging/mediabox-player" "$prefix/bin/mediabox-player"
 ok "player launcher"
 
+# And the preparation step, for the same reason: it is the file that decides,
+# per board, which sound card the television's audio goes to and which display
+# modes Kodi may switch between. Both are answers about *this* board, and both
+# were wrong for a board that was not the one the archive was captured on.
+install -m 0755 "$here/packaging/mediabox-hdmi-prepare" "$prefix/bin/mediabox-hdmi-prepare"
+ok "display and audio preparation"
+
 # ------------------------------------------- 11b. the video port crossbar
 #
 # Which HDMI socket a television is plugged into decides what it gets, and it

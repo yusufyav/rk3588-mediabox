@@ -90,6 +90,79 @@ if [ -n "$alsa_driver" ] && [ -f "$template" ]; then
   fi
 fi
 
+# The mode list Kodi is allowed to switch between.
+#
+# A television box does not change resolution when a film starts. It changes
+# *refresh rate*: the interface and the film both come out at the panel's own
+# resolution, and only the cadence follows the content. That is what every
+# shipping box does, and this appliance did not -- Kodi's whitelist here was
+# every mode the sink advertises, 4096x2160 and 1920x1080 and 1280x720
+# included, so a 1080p film dropped the television to 1080p and a 4K one
+# raised it again, with a resync each way.
+#
+# So the whitelist is rendered per board instead, from what this output
+# actually is:
+#
+#   * the panel's own shape, taken from the sink's preferred mode, which keeps
+#     the DCI 4096x2160 timings out of a 16:9 television;
+#   * the largest resolution the link can carry as RGB -- character rate is
+#     the pixel clock at eight-bit RGB, so a 300 MHz link takes 4K at 30 Hz
+#     and not at 60, and a 600 MHz one takes both. Subsampled chroma is not
+#     used to make a timing fit: that is the fault this project already fixed
+#     once on the wire.
+#   * every refresh rate at that resolution the link can carry, so the film's
+#     own cadence is reachable -- 23.976 above all.
+#
+# Kodi's own format, as it writes it: five digits of width, five of height,
+# then %09.5f of the refresh computed from the timing, then `pstd`.
+kodi_modes=""
+kodi_screenmode=""
+if command -v modetest >/dev/null 2>&1; then
+  ceiling="$("$PLATFORM" color-modes 2>/dev/null |
+             sed -n 's/.*tavan[^0-9]*\([0-9]\+\) kHz.*/\1/p' | head -1)"
+  kodi_modes="$(modetest -M rockchip -c 2>/dev/null |
+    awk -v want="$connector" -v ceiling="${ceiling:-0}" '
+      # Walk into the block for our connector and stop at the next one.
+      $0 ~ ("[ \t]" want "[ \t]") { inblock = 1 }
+      inblock && /^[0-9]+\t/ && $0 !~ ("[ \t]" want "[ \t]") { inblock = 0 }
+      inblock && /^  #[0-9]+ / {
+        name = $2; refresh = $3; htot = $7; vtot = $11; clock = $12
+        if (name ~ /i$/) next                      # interlaced is not a mode here
+        if (clock == 0 || htot == 0 || vtot == 0) next
+        if (ceiling > 0 && clock > ceiling) next   # RGB at eight bits, or not at all
+        split(name, wh, "x")
+        w = wh[1] + 0; h = wh[2] + 0
+        hz = (clock * 1000.0) / (htot * vtot)
+        if ($0 ~ /preferred/) { pw = w; ph = h }
+        n++; W[n] = w; H[n] = h; HZ[n] = hz
+        if (w * h > best) { best = w * h }
+      }
+      END {
+        ratio = (ph > 0) ? int((pw * 1000) / ph) : 0
+        # The largest area that shares the panel s shape.
+        for (i = 1; i <= n; i++) {
+          r = int((W[i] * 1000) / H[i])
+          if (ratio > 0 && r != ratio) continue
+          if (W[i] * H[i] > pick) { pick = W[i] * H[i]; pw2 = W[i]; ph2 = H[i] }
+        }
+        if (pick == 0) exit
+        # Every refresh rate at that size, fastest first, which is the order
+        # Kodi writes and the order it prefers.
+        for (i = 1; i <= n; i++) {
+          if (W[i] != pw2 || H[i] != ph2) continue
+          k[++m] = sprintf("%05d%05d%09.5fpstd", W[i], H[i], HZ[i])
+          hzv[m] = HZ[i]
+        }
+        for (i = 1; i < m; i++) for (j = i + 1; j <= m; j++)
+          if (hzv[j] > hzv[i]) { t = k[i]; k[i] = k[j]; k[j] = t
+                                 tv = hzv[i]; hzv[i] = hzv[j]; hzv[j] = tv }
+        out = ""
+        for (i = 1; i <= m; i++) out = (i == 1) ? k[i] : out "," k[i]
+        print out
+      }')"
+  kodi_screenmode="${kodi_modes%%,*}"
+fi
+
 # And the two settings in Kodi's own profile that name the device.
 #
 # Kodi reads passthrough capability off the PCM *name* — only a name starting
@@ -120,11 +193,23 @@ if [ -n "$alsa_card" ] && [ -n "$alsa_driver" ] && [ -f "$profile" ]; then
     "$profile" || kodi_profile=failed
 fi
 
+kodi_whitelist=absent
+if [ -n "$kodi_modes" ] && [ -f "$profile" ]; then
+  kodi_whitelist=written
+  sed -i \
+    -e "s#\(<setting id=\"videoscreen.whitelist\"\)[^>]*>[^<]*\(</setting>\)#\1>$kodi_modes\2#" \
+    -e "s#\(<setting id=\"videoscreen.screenmode\"\)[^>]*>[^<]*\(</setting>\)#\1>$kodi_screenmode\2#" \
+    "$profile" || kodi_whitelist=failed
+  grep -q 'id="videoscreen.screenmode"' "$profile" || \
+    sed -i "s#</settings>#  <setting id=\"videoscreen.screenmode\">$kodi_screenmode</setting>\n</settings>#" "$profile"
+fi
+
 # One line in the journal saying what this board is and what was done to it.
 # Anything that did not happen says so by name; a silent preparation step is
 # how a wrong sound card survives a deploy.
 echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-none}" \
-     "driver=${alsa_driver:-none} alsa-conf=$alsa_conf kodi-profile=$kodi_profile" >&2
+     "driver=${alsa_driver:-none} alsa-conf=$alsa_conf kodi-profile=$kodi_profile" \
+     "kodi-whitelist=$kodi_whitelist${kodi_screenmode:+ gui=$kodi_screenmode}" >&2
 
 # Put the link back to SDR before an SDR interface is drawn on it.
 #
