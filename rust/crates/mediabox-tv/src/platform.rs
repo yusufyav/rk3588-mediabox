@@ -749,6 +749,25 @@ impl Drop for SplitDisplay {
 /// behind that name. They are matched by connector *name* — type plus type
 /// index, which is what sysfs publishes — and never by DRM object id: object
 /// ids are allocated per boot and a different kernel hands out different ones.
+/// The sink's EDID, as the connector publishes it.
+///
+/// Read here rather than from `/sys/class/drm/*/edid`, which this vendor
+/// driver leaves empty -- measured, zero bytes on a television that is plainly
+/// connected and answering.
+fn connector_edid(kms: &SharedKms, connector: control::connector::Handle) -> Option<Vec<u8>> {
+    let properties = kms.get_properties(connector).ok()?;
+    let (handles, values) = properties.as_props_and_values();
+    for (handle, value) in handles.iter().zip(values.iter()) {
+        let Ok(info) = kms.get_property(*handle) else {
+            continue;
+        };
+        if info.name().to_str() == Ok("EDID") && *value != 0 {
+            return kms.get_property_blob(*value).ok();
+        }
+    }
+    None
+}
+
 fn find_output(
     kms: &SharedKms,
     wanted: &str,
@@ -784,16 +803,89 @@ fn find_output(
             ))
         })?;
 
+    // The biggest mode this link can actually carry -- not the one the sink
+    // puts first.
+    //
+    // Ranking `preferred` above size looks harmless until a television says
+    // this, which one of ours does on one of its inputs:
+    //
+    //     #0  1920x1080 60.00  type: preferred, driver
+    //     #6  3840x2160 60.00  594000 kHz
+    //     #13 3840x2160 23.98  296703 kHz
+    //
+    // The appliance then ran its whole interface at 1080p on a 4K panel, and
+    // every 4K film with it, because a film is composited into the mode the
+    // interface set rather than given one of its own.
+    //
+    // So: size first, then the fastest refresh, and `preferred` only to settle
+    // a tie. And a timing the link cannot carry is not a candidate at all --
+    // that sink's link stops at 300 MHz, where 4K60 wants 594, and asking for
+    // it anyway is how this driver ends up quietly subsampling a picture
+    // nobody asked it to touch.
+    let sink = connector_edid(kms, connector.handle())
+        .and_then(|edid| mediabox_platform::video::parse_sink_video(&edid));
+    // Carried means carried as RGB, not carried at all costs.
+    //
+    // The first cut of this asked the sink only whether *something* fitted at
+    // the timing, and something always does: 4:2:0 eight-bit is half the rate
+    // of RGB. So it chose 4K60 on a 300 MHz link and the driver quietly
+    // subsampled -- measured, `bus_format[2026]: UYYVYY8_0_5X24` on a picture
+    // nobody asked to have its chroma halved. The interface is text and
+    // artwork; it is shown at full chroma or the timing is not used.
+    let carried = |mode: &&control::Mode| -> bool {
+        let Some(sink) = sink.as_ref() else {
+            return true;
+        };
+        sink.best_for(mode.clock(), false)
+            .is_some_and(|best| best.format == mediabox_platform::video::ColorFormat::Rgb)
+    };
+    // And the shape the panel actually is.
+    //
+    // This television offers 4096x2160 as well as 3840x2160, and 4096 is the
+    // larger rectangle: ranking by area alone sends a 4K television a DCI
+    // timing it then has to letterbox and rescale. The sink says what shape it
+    // is in its preferred mode -- 1920x1080 here, 16:9 -- so that is what the
+    // interface matches before it asks for size.
+    let shape = connector
+        .modes()
+        .iter()
+        .find(|mode| mode.mode_type().contains(control::ModeTypeFlags::PREFERRED))
+        .map(|mode| {
+            let (w, h) = mode.size();
+            (u32::from(w) * 1000) / u32::from(h).max(1)
+        });
+    let by_size = |mode: &&control::Mode| {
+        let (w, h) = mode.size();
+        let ratio = (u32::from(w) * 1000) / u32::from(h).max(1);
+        (
+            shape.is_none_or(|want| ratio == want),
+            u32::from(w) * u32::from(h),
+            mode.vrefresh(),
+            mode.mode_type().contains(control::ModeTypeFlags::PREFERRED),
+        )
+    };
     let mode = connector
         .modes()
         .iter()
-        .max_by_key(|mode| {
-            let preferred = mode.mode_type().contains(control::ModeTypeFlags::PREFERRED);
-            let (w, h) = mode.size();
-            (preferred, u32::from(w) * u32::from(h), mode.vrefresh())
-        })
+        .filter(carried)
+        .max_by_key(by_size)
+        // A sink whose EDID says nothing useful is still a television.
+        .or_else(|| connector.modes().iter().max_by_key(by_size))
         .copied()
         .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
+    if let Some(sink) = &sink {
+        let (w, h) = mode.size();
+        eprintln!(
+            "mediabox-tv.platform {wanted} {w}x{h}@{} chosen against a {} kHz link{}",
+            mode.vrefresh(),
+            sink.max_character_rate_khz,
+            if sink.rate_is_declared {
+                ""
+            } else {
+                " (assumed: the sink declared none)"
+            }
+        );
+    }
 
     // Not whichever video port the kernel happened to leave this socket on.
     //
