@@ -76,6 +76,36 @@ impl PlayerManager {
             .arg("--collect")
             .arg(format!("--unit={UNIT}"))
             .arg("--property=Type=exec")
+            // The film cannot outlive the interface, because the picture is
+            // the interface's. This player draws nowhere: it hands the
+            // decoder's buffers to the process that holds the display, and
+            // when that process goes there is no way to hand them to its
+            // successor. mpv notices and closes itself -- but only if mpv is
+            // still answering, and a player wedged on a decoder is exactly
+            // when this matters. `BindsTo=` is the part that does not depend
+            // on the player being well: systemd stops this unit when the
+            // interface stops, including across a restart.
+            //
+            // Without it, measured on the Ultra on 2026-09-20: the interface
+            // died with a film on, came back eighteen minutes later, and drew
+            // the home screen while the same mpv went on playing the sound.
+            .arg("--property=BindsTo=mediabox-tv-ui.service")
+            .arg("--property=After=mediabox-tv-ui.service")
+            // What the media runtime says about a film is the film's business
+            // and not the system log's. Rockchip MPP logs one line per skipped
+            // NAL unit through syslog; on one 4K film that was a hundred and
+            // forty-five thousand lines, ninety-nine and a half per cent of
+            // the journal, and it rotated away every record of the fault that
+            // was being diagnosed. The launcher quietens MPP itself; this is
+            // the ceiling for anything else that ever runs in here.
+            .arg("--property=LogRateLimitIntervalSec=30s")
+            .arg("--property=LogRateLimitBurst=500")
+            // mpv's 4 is "quit because something asked me to", which is what
+            // a stop of the interface looks like from inside the player.
+            // Without this the journal records the ordinary end of a film as
+            // `status=4/NOPERMISSION` and `Failed with result 'exit-code'`,
+            // which is a lie the next person to read it has to disprove.
+            .arg("--property=SuccessExitStatus=4")
             // The interface's own runtime directory, which is where it puts
             // the socket it listens for frames on. Not a compositor: this
             // product has not had one since the television interface became a

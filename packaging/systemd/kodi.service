@@ -44,6 +44,16 @@ WorkingDirectory=/var/tmp/kodi-home
 Environment=HOME=/var/tmp/kodi-home
 Environment=AE_SINK=ALSA
 Environment=MEDIABOX_GPU=mali
+# Rockchip MPP's running commentary, at the level a product logs at.
+#
+# MPP logs through syslog under an identifier of its own, so nothing Kodi is
+# told about its own log level reaches it, and its decoders write a line per
+# stream oddity: on one 4K HEVC film, measured on the Ultra on 2026-09-20,
+# that was a hundred and forty-five thousand lines and 99.5% of the journal,
+# which left thirteen minutes of history on a box that had been up for nearly
+# three hours. 3 is MPP's own MPP_LOG_WARN: real complaints still arrive. The
+# player's launcher sets the same variable for the same reason.
+Environment=mpp_log_level=3
 # The vendor GL user space only. Kodi's FFmpeg is linked statically and the
 # Rockchip MPP and RGA libraries it pulls in come from the RPATH the build put
 # in kodi-gbm, naming MediaBox's own media runtime — so this line cannot point

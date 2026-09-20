@@ -90,6 +90,21 @@ if [ -x "$platform" ]; then
     fi
 fi
 
+# What MPP has to say about a film, at the level a product logs at.
+#
+# Rockchip's MPP logs through syslog with an identifier of its own, so it
+# reaches the journal whatever mpv's own --msg-level is set to, and its
+# decoders log one line per stream oddity. Measured on the Ultra on
+# 2026-09-20, on one 4K HEVC film: "h265d: Skipping NAL unit 63", a hundred
+# and forty-five thousand times -- 99.5% of everything in the journal, which
+# left thirteen minutes of history on a box that had been up for two and three
+# quarter hours. The fault being diagnosed had happened twenty minutes
+# earlier and every record of it was gone.
+#
+# 3 is MPP's own MPP_LOG_WARN. Warnings and errors still arrive; the running
+# commentary does not. Nothing here silences the decoder's real complaints.
+export mpp_log_level="${mpp_log_level:-3}"
+
 # A socket the control plane can ask "where have you got to" on, which is what
 # makes handing the film to Kodi land on the same second rather than the start.
 ipc=""

@@ -53,6 +53,8 @@
 
 #include "common/common.h"
 #include "common/msg.h"
+#include "input/input.h"
+#include "input/keycodes.h"
 #include "video/img_format.h"
 #include "video/mp_image.h"
 #include "vo.h"
@@ -87,6 +89,10 @@ struct priv {
     int d_w, d_h;
     uint32_t colour;
     bool said_full;
+    /* The interface has gone and the film has already been told to stop. */
+    bool lost;
+    /* This output is being torn down; a failed write is expected, not news. */
+    bool closing;
 };
 
 /* Which matrix, which range and which transfer curve the frame carries.
@@ -179,6 +185,35 @@ static void release_held(struct priv *p, int index)
     p->nheld--;
 }
 
+/* The interface is gone, so the picture is gone with it.
+ *
+ * On this appliance the panel belongs to the interface: this output owns no
+ * display, it hands frames to a process that does. When that process dies --
+ * a crash, a restart, a deploy -- there is nowhere for a frame to go ever
+ * again, because a new interface is a new surface and this connection cannot
+ * be remade.
+ *
+ * What mpv does by itself in that situation is keep going. A video output that
+ * refuses frames does not stop the demuxer, the decoder or the sound, so the
+ * film plays on into nothing. Measured on the Ultra on 2026-09-20: the
+ * interface went down while a film was on, came back eighteen minutes later,
+ * and drew the home screen over a player that was still talking -- home screen
+ * on the television, film on the speakers, for as long as the film lasted.
+ *
+ * So the loss of the socket ends the film. MP_KEY_CLOSE_WIN is what every
+ * other output sends when its window is closed, and it is the right thing here
+ * for the same reason: the window this player had was the interface.
+ */
+static void interface_gone(struct vo *vo, const char *why)
+{
+    struct priv *p = vo->priv;
+    if (p->lost || p->closing)
+        return;
+    p->lost = true;
+    MP_WARN(vo, "MediaBox arayüzü gitti (%s); film kapatılıyor\n", why);
+    mp_input_put_key(vo->input_ctx, MP_KEY_CLOSE_WIN);
+}
+
 /* Everything the interface has finished with, without waiting for it. */
 static void drain_releases(struct vo *vo)
 {
@@ -189,11 +224,11 @@ static void drain_releases(struct vo *vo)
         if (read < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                 return;
-            MP_WARN(vo, "MediaBox arayüzü ile bağlantı koptu: %s\n", strerror(errno));
+            interface_gone(vo, strerror(errno));
             return;
         }
         if (read == 0) {
-            MP_WARN(vo, "MediaBox arayüzü bağlantıyı kapattı\n");
+            interface_gone(vo, "bağlantı kapandı");
             return;
         }
         if (read != MBV_REPLY)
@@ -246,7 +281,7 @@ static bool send_message(struct vo *vo, const uint8_t *message,
     while (sendmsg(p->fd, &header, MSG_NOSIGNAL) < 0) {
         if (errno == EINTR)
             continue;
-        MP_ERR(vo, "kare gönderilemedi: %s\n", strerror(errno));
+        interface_gone(vo, strerror(errno));
         return false;
     }
     return true;
@@ -467,6 +502,7 @@ static int control(struct vo *vo, uint32_t request, void *data)
 static void uninit(struct vo *vo)
 {
     struct priv *p = vo->priv;
+    p->closing = true;
     if (p->fd < 0)
         return;
 

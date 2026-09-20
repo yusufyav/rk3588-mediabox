@@ -341,6 +341,88 @@ grep -E 'bus_format|hdr_type' /sys/kernel/debug/dri/0/summary
 
 ---
 
+## 12. A television that is switched off is not a fault, and a film cannot outlive the interface
+
+Both halves of this were measured on the Ultra on 2026-09-20, in one run, from
+one cause. It is worth writing down as one rule because that is how it
+happened.
+
+A film was playing in the appliance's own player. The television was switched
+away. At **12:48:29** the interface's flip failed, the error went up through
+Slint, and the process exited; on the way out it released the display, and
+`dmesg` shows `vop2_crtc_atomic_disable` with no enable after it. With no
+signal the connector went to `disconnected`, and from then on **every** start
+of `mediabox-tv-ui.service` died in the same line —
+
+```
+mediabox-tv.platform no connected output with a usable mode
+Error: no connected display output
+```
+
+— `Restart=on-failure`, three seconds, again. **Two hundred and fifty times
+over eighteen minutes.** The box could not recover by itself; the set had to be
+woken by hand, at **13:06:21**, before the next restart happened to succeed.
+
+Meanwhile mpv was still running. It is a transient unit of its own, nothing
+bound it to the interface, and a video output that cannot place a frame does
+not stop mpv's demuxer, decoder or sound. So when the interface finally came
+back it drew the home screen over a film that was still playing: **home screen
+on the panel, film on the speakers.** That is what the person watching saw, and
+it is the fault as they reported it.
+
+Three things follow, and all three are in the product now:
+
+1. **The interface waits for a television; it never exits for the lack of
+   one.** `SplitDisplay::wait_for_a_television` re-reads the connector once a
+   second, forever, and says so once and then once a minute. The run continues
+   into the same code as if the set had been there all along. Because
+   `main` blocks SIGTERM before the thread that consumes it exists, the wait
+   checks `sigpending` itself — otherwise `systemctl stop` waits fifteen
+   seconds for a SIGKILL, on every deploy.
+2. **A display error with no display behind it is not an error.**
+   `SplitDisplay::present` asks the connector, and if the television is gone it
+   keeps the interface up, logs once, and forgets what it knew about the
+   controller so the frame after the set returns sets the mode again instead of
+   flipping onto the console's configuration.
+3. **The film dies with the interface, twice over.** `vo_mediabox` sends
+   `MP_KEY_CLOSE_WIN` the moment the socket to the interface fails — the window
+   this player had *was* the interface — and the transient unit carries
+   `BindsTo=mediabox-tv-ui.service`, which does not depend on mpv being well
+   enough to notice.
+
+```
+# with no television: waits, and still answers a stop
+mkdir -p /var/tmp/noscreen/sys/class/drm /var/tmp/noscreen/dev/dri
+MEDIABOX_PLATFORM_ROOT=/var/tmp/noscreen mediabox-tv &
+# mediabox-tv.platform no television is connected; waiting for one
+kill -TERM %1   # mediabox-tv.exit asked to stop while waiting for a television
+
+# nothing of the player survives the interface
+systemctl restart mediabox-tv-ui && sleep 2 && systemctl is-active mediabox-player
+```
+
+### And the journal has to survive the fault it is meant to explain
+
+None of the above could be read from the box at first, because Rockchip MPP
+logs one line per skipped NAL unit **through syslog**, under an identifier of
+its own, where neither mpv's `--msg-level` nor Kodi's log settings reach it. On
+the run above: 145 447 of 146 108 journal entries, **99.5%**, which left
+thirteen minutes of history on a box that had been up for two and three quarter
+hours. The fault was twenty minutes old and every record of it had rotated
+away.
+
+`mpp_log_level=3` — MPP's own `MPP_LOG_WARN` — is now set by
+`packaging/mediabox-player` and in `kodi.service`, and the player's transient
+unit carries `LogRateLimitIntervalSec=30s` / `LogRateLimitBurst=500` so the
+next library to do this cannot take the journal with it.
+
+```
+journalctl --no-pager | wc -l; journalctl --no-pager | grep -c 'mpp\['
+journalctl --no-pager -o short-iso | head -1   # how far back the box remembers
+```
+
+---
+
 ## The smoke test
 
 `packaging/mediabox-kiosk-smoke` checks rules 1 and 2 on every deploy, and

@@ -299,6 +299,9 @@ struct SplitDisplay {
     gbm_surface: gbm::Surface<Scanout>,
     presentation: RefCell<Presentation>,
     released: Cell<bool>,
+    /// Whether the television is currently away, so the journal says so once
+    /// rather than sixty times a second.
+    dark: Cell<bool>,
     /// What the television said it can be sent, read from its EDID once. The
     /// HDR decision is made against this and the mode in use, never against
     /// the film alone: a set that never declared ST 2084, or a link with no
@@ -316,8 +319,69 @@ struct SplitDisplay {
 }
 
 impl SplitDisplay {
+    /// Discovery, and then patience.
+    ///
+    /// A television that is switched off is not a broken appliance, and this
+    /// is what the box used to do about one: `Platform::discover` found no
+    /// connected output, this returned an error, the process exited 1, and
+    /// `Restart=on-failure` started it again three seconds later. Measured on
+    /// the Ultra on 2026-09-20: two hundred and fifty of those in eighteen
+    /// minutes, each one a second and a half of CPU, and not one of them could
+    /// have succeeded -- the connector was reading `disconnected` the whole
+    /// time. The person watching saw nothing at all until they woke the set,
+    /// and the journal had room for nothing else.
+    ///
+    /// So the interface waits instead. The connector is re-read once a second;
+    /// the moment a television is plugged in or wakes up, the run continues
+    /// into exactly the same code as if it had been there all along. Nothing
+    /// else can be done in the meantime -- there is no panel to draw the
+    /// waiting on -- and nothing else needs to be: this is a process whose
+    /// entire job is the picture.
+    ///
+    /// It waits without a deadline on purpose. A deadline would only turn a
+    /// television that is off for an hour back into the restart storm.
+    fn wait_for_a_television() -> mediabox_platform::Platform {
+        const BEAT: std::time::Duration = std::time::Duration::from_secs(1);
+        let mut waited = 0u64;
+        loop {
+            let discovered = mediabox_platform::Platform::discover();
+            if discovered.selected_output().is_some() {
+                if waited > 0 {
+                    eprintln!(
+                        "mediabox-tv.platform a television answered after {waited}s of waiting"
+                    );
+                }
+                return discovered;
+            }
+            // Once when it starts, then once a minute. The point of the line
+            // is that somebody reading the journal knows the box is alive and
+            // what it is waiting for, not that they can count the seconds.
+            if waited == 0 {
+                eprintln!(
+                    "mediabox-tv.platform no television is connected; waiting for one \
+                     (the interface does not give up, and does not restart)"
+                );
+            } else if waited % 60 == 0 {
+                eprintln!("mediabox-tv.platform still no television after {waited}s");
+            }
+            std::thread::sleep(BEAT);
+            waited += 1;
+            // `main` blocks SIGTERM and SIGINT before anything here runs, so
+            // that the display is released by ordinary code rather than from a
+            // handler -- but the thread that consumes them is not started
+            // until the event loop is. A process waiting here would therefore
+            // ignore `systemctl stop` outright and be killed fifteen seconds
+            // later, every time, including during a deploy. So the wait looks
+            // for itself.
+            if crate::session::exit_was_asked() {
+                eprintln!("mediabox-tv.exit asked to stop while waiting for a television");
+                std::process::exit(0);
+            }
+        }
+    }
+
     fn new() -> Result<Rc<Self>, PlatformError> {
-        let discovered = mediabox_platform::Platform::discover();
+        let discovered = Self::wait_for_a_television();
         for warning in &discovered.warnings {
             eprintln!("mediabox-tv.platform {warning}");
         }
@@ -335,6 +399,8 @@ impl SplitDisplay {
             .ok_or_else(|| {
                 PlatformError::from(format!("no render device shares hardware with {kms_path}"))
             })?;
+        // Present by construction: `wait_for_a_television` does not return
+        // until discovery has chosen one.
         let wanted = discovered
             .selected_output()
             .ok_or_else(|| PlatformError::from("no connected display output".to_string()))?
@@ -507,6 +573,7 @@ impl SplitDisplay {
             sink: RefCell::new(sink),
             presentation: RefCell::new(Presentation::default()),
             released: Cell::new(false),
+            dark: Cell::new(false),
         });
         eprintln!(
             "mediabox-tv.platform scale={:.3} logical={:.0}x{:.0} design={:.0}x{:.0}",
@@ -673,7 +740,68 @@ impl SplitDisplay {
         })
     }
 
+    /// Is there still a television on the other end of the cable?
+    ///
+    /// Asked of the connector rather than of the error, because the errors a
+    /// vanished sink produces are not one error: a flip can come back EACCES,
+    /// ENOENT or EINVAL depending on how far the modeset had got. `false` for
+    /// the probe argument: this reads what the driver already knows from the
+    /// hot-plug line and does not make it re-read the EDID sixty times a
+    /// second.
+    fn television_is_gone(&self) -> bool {
+        match self.kms.get_connector(self.connector.handle(), false) {
+            Ok(info) => info.state() == control::connector::State::Disconnected,
+            // If the connector cannot be read at all, something worse than an
+            // unplugged cable is happening and the caller should hear about it.
+            Err(_) => false,
+        }
+    }
+
+    /// A frame on the panel -- or nothing at all, if there is no panel.
+    ///
+    /// Somebody switching the television off, or to another input, is an
+    /// ordinary thing for an appliance and used to be fatal here: the flip
+    /// failed, the error went up through Slint, and the process exited. That
+    /// is what began the worst run this box has had. Measured on the Ultra on
+    /// 2026-09-20: the interface died at 12:48:29 with a film playing, the
+    /// display controller was left disabled, and because the connector then
+    /// read `disconnected` every restart failed in the same place -- two
+    /// hundred and fifty of them over eighteen minutes, until the set was
+    /// woken by hand. The film, owned by nobody, played its sound throughout.
+    ///
+    /// So a failure with no television behind it is not a failure. The
+    /// interface stays up, says so once, and throws away what it knew about
+    /// the display: the kernel's console owns the controller while we are
+    /// away, so the frame after the set comes back has to set the mode again
+    /// rather than flip onto somebody else's configuration.
     fn present(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match self.present_frame() {
+            Ok(()) => {
+                if self.dark.replace(false) {
+                    eprintln!("mediabox-tv.platform the television is back");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if !self.television_is_gone() {
+                    return Err(error);
+                }
+                if !self.dark.replace(true) {
+                    eprintln!(
+                        "mediabox-tv.platform the television went away ({error}); \
+                         the interface stays up and waits for it"
+                    );
+                }
+                let mut state = self.presentation.borrow_mut();
+                state.waiting_for_flip = false;
+                state.pending_previous = None;
+                state.current = None;
+                Ok(())
+            }
+        }
+    }
+
+    fn present_frame(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let frame = self.import_front_buffer()?;
         let mut state = self.presentation.borrow_mut();
         if state.current.is_none() {

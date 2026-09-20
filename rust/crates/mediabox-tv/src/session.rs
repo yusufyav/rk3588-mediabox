@@ -210,6 +210,26 @@ pub fn block_exit_signals() {
     }
 }
 
+/// Has somebody asked this process to stop, before there is anybody to hear it?
+///
+/// [`block_exit_signals`] makes SIGTERM and SIGINT wait in the pending set
+/// until [`on_shutdown`]'s thread calls `sigwait`. That thread does not exist
+/// until the interface is running, and the interface does not start running
+/// until there is a television to run on -- so between those two points the
+/// process is deaf to `systemctl stop`. Code that waits in that window asks
+/// this, and leaves.
+pub fn exit_was_asked() -> bool {
+    // SAFETY: the set is initialised by `sigpending` before it is read, and
+    // nothing here changes the process's disposition or mask.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        if libc::sigpending(&mut set) != 0 {
+            return false;
+        }
+        libc::sigismember(&set, libc::SIGTERM) == 1 || libc::sigismember(&set, libc::SIGINT) == 1
+    }
+}
+
 /// Waits for one of the shutdown signals on a thread of its own, so the last
 /// position is written by ordinary code rather than from a signal handler,
 /// where almost nothing is safe to call.
