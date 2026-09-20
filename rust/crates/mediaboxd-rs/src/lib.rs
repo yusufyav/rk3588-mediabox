@@ -9,5 +9,6 @@ pub mod player;
 pub mod system;
 pub mod transition;
 pub mod web;
+pub mod wireless;
 
 pub use daemon::{AppState, serve_unix};

@@ -105,6 +105,8 @@ struct App {
     library: screens::library::Library,
     settings: screens::settings::Settings,
     account: screens::account::Account,
+    wifi: screens::wireless::Wifi,
+    bt: screens::wireless::Bluetooth,
     diagnostics: screens::diagnostics::Diagnostics,
     now: screens::now_playing::NowPlaying,
 
@@ -216,6 +218,8 @@ impl App {
                 Route::Settings => self.act_on_settings(intent),
                 Route::Account => self.act_on_account(intent),
                 Route::Diagnostics => self.act_on_diagnostics(intent),
+                Route::Wifi => self.act_on_wifi(intent),
+                Route::Bluetooth => self.act_on_bluetooth(intent),
             },
         }
     }
@@ -1402,6 +1406,290 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------ the radios
+
+    fn act_on_wifi(&mut self, intent: Intent) {
+        use screens::wireless::Press;
+        match intent {
+            Intent::Move(dx, dy) => {
+                if dy != 0 {
+                    self.wifi.step(dy);
+                } else {
+                    self.wifi.sideways(dx);
+                }
+                self.paint();
+            }
+            Intent::Select => {
+                if self.wifi.busy {
+                    return;
+                }
+                match self.wifi.press() {
+                    Press::None => self.paint(),
+                    Press::Scan => {
+                        self.wifi.busy = true;
+                        self.wifi.notice = "Ağlar aranıyor…".into();
+                        self.paint();
+                        spawn_wifi(WifiCommand::Scan);
+                    }
+                    Press::Power(on) => {
+                        self.wifi.busy = true;
+                        self.wifi.notice =
+                            if on { "Açılıyor…" } else { "Kapatılıyor…" }.into();
+                        self.paint();
+                        spawn_wifi(WifiCommand::Power(on));
+                    }
+                    Press::Join => {
+                        let Some(target) = self.wifi.target.clone() else {
+                            return;
+                        };
+                        let secret = self.wifi.password().to_string();
+                        self.wifi.busy = true;
+                        self.wifi.notice = format!("{} ağına bağlanılıyor…", target.ssid);
+                        self.paint();
+                        spawn_wifi(WifiCommand::Connect {
+                            ssid: target.ssid,
+                            psk: (!secret.is_empty()).then_some(secret),
+                        });
+                        // The typed secret is not kept here a moment longer
+                        // than the call that carries it.
+                        self.wifi.forget_secret();
+                    }
+                    Press::Forget => {
+                        let Some(network) = self.wifi.highlighted().cloned() else {
+                            return;
+                        };
+                        self.wifi.busy = true;
+                        self.wifi.notice = format!("{} unutuluyor…", network.ssid);
+                        self.paint();
+                        spawn_wifi(WifiCommand::Forget(network.ssid));
+                    }
+                    Press::Close => self.back(),
+                }
+            }
+            Intent::Dismiss => {
+                if !self.wifi.back() {
+                    self.back();
+                } else {
+                    self.paint();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn act_on_bluetooth(&mut self, intent: Intent) {
+        use screens::wireless::BtPress;
+        match intent {
+            Intent::Move(_, dy) if dy != 0 => {
+                self.bt.step(dy);
+                self.paint();
+            }
+            Intent::Select => {
+                if self.bt.busy {
+                    return;
+                }
+                let Some(address) = self.bt.highlighted().map(|d| d.address.clone()) else {
+                    // The two head rows carry no address.
+                    match self.bt.press() {
+                        BtPress::Scan => {
+                            self.bt.busy = true;
+                            self.bt.notice = "Aygıtlar aranıyor…".into();
+                            self.paint();
+                            spawn_bt(BtCommand::Scan);
+                        }
+                        BtPress::Power(on) => {
+                            self.bt.busy = true;
+                            self.bt.notice =
+                                if on { "Açılıyor…" } else { "Kapatılıyor…" }.into();
+                            self.paint();
+                            spawn_bt(BtCommand::Power(on));
+                        }
+                        _ => {}
+                    }
+                    return;
+                };
+                let command = match self.bt.press() {
+                    BtPress::Pair => {
+                        self.bt.notice = "Eşleştiriliyor…".into();
+                        BtCommand::Pair(address)
+                    }
+                    BtPress::Connect => {
+                        self.bt.notice = "Bağlanıyor…".into();
+                        BtCommand::Connect(address)
+                    }
+                    BtPress::Disconnect => {
+                        self.bt.notice = "Bağlantı kesiliyor…".into();
+                        BtCommand::Disconnect(address)
+                    }
+                    BtPress::Forget => {
+                        self.bt.notice = "Eşleşme kaldırılıyor…".into();
+                        BtCommand::Forget(address)
+                    }
+                    _ => return,
+                };
+                self.bt.busy = true;
+                self.paint();
+                spawn_bt(command);
+            }
+            Intent::Dismiss => self.back(),
+            _ => {}
+        }
+    }
+
+    /// An answer from the daemon about the Wi-Fi radio.
+    fn wifi_answer(&mut self, answer: Result<serde_json::Value, String>, scanned: bool) {
+        self.wifi.busy = false;
+        match answer {
+            Ok(value) => {
+                self.wifi.notice.clear();
+                if scanned {
+                    let networks = value
+                        .get("networks")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .map(|item| screens::wireless::Network {
+                                    ssid: item
+                                        .get("ssid")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    signal: item
+                                        .get("signal")
+                                        .and_then(serde_json::Value::as_i64)
+                                        .unwrap_or(-99)
+                                        as i32,
+                                    secured: item
+                                        .get("secured")
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(true),
+                                    band: item
+                                        .get("band")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    remembered: item
+                                        .get("remembered")
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(false),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    self.wifi.take_networks(networks);
+                    // A scan answer carries no link state, so ask for it.
+                    spawn_wifi(WifiCommand::Status);
+                } else {
+                    self.wifi.take_status(&value);
+                    self.wifi.face = screens::wireless::Face::List;
+                }
+            }
+            Err(error) => self.wifi.notice = error,
+        }
+        self.paint();
+    }
+
+    fn bt_answer(&mut self, answer: Result<serde_json::Value, String>) {
+        self.bt.busy = false;
+        match answer {
+            Ok(value) => {
+                self.bt.notice.clear();
+                self.bt.take_status(&value);
+            }
+            Err(error) => self.bt.notice = error,
+        }
+        self.paint();
+    }
+
+    fn paint_wifi(&mut self, window: &MediaBoxWindow) {
+        let wifi = &self.wifi;
+        window.set_wifi_present(wifi.present);
+        window.set_wifi_powered(wifi.powered);
+        window.set_wifi_index(wifi.index as i32);
+        window.set_wifi_busy(wifi.busy);
+        window.set_wifi_notice(wifi.notice.clone().into());
+        window.set_wifi_address(wifi.address.clone().unwrap_or_default().into());
+        window.set_wifi_summary(
+            match (&wifi.connected_to, wifi.powered) {
+                (Some(ssid), _) => format!("{ssid} · bağlı"),
+                (None, true) => "Bağlı değil".to_string(),
+                (None, false) => "Kapalı".to_string(),
+            }
+            .into(),
+        );
+        window.set_wifi_face(
+            match wifi.face {
+                screens::wireless::Face::List => "list",
+                screens::wireless::Face::Password => "password",
+            }
+            .into(),
+        );
+        window.set_wifi_target(
+            wifi.target
+                .as_ref()
+                .map(|network| network.ssid.clone())
+                .unwrap_or_default()
+                .into(),
+        );
+        window.set_wifi_password_mask(wifi.password_mask().into());
+        window.set_wifi_focus(
+            match wifi.focus {
+                screens::wireless::PasswordFocus::Field => "field",
+                screens::wireless::PasswordFocus::Keys => "keys",
+                screens::wireless::PasswordFocus::Join => "join",
+            }
+            .into(),
+        );
+        window.set_wifi_key_row(wifi.keys.row() as i32);
+        window.set_wifi_key_col(wifi.keys.col() as i32);
+        window.set_wifi_keys(key_rows(&wifi.keys));
+        let connected = wifi.connected_to.clone();
+        window.set_wifi_networks(slint::ModelRc::new(slint::VecModel::from(
+            wifi.networks
+                .iter()
+                .map(|network| WifiRow {
+                    ssid: network.ssid.clone().into(),
+                    bars: network.bars() as i32,
+                    band: network.band.clone().into(),
+                    secured: network.secured,
+                    remembered: network.remembered,
+                    connected: connected.as_deref() == Some(network.ssid.as_str()),
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+
+    fn paint_bluetooth(&mut self, window: &MediaBoxWindow) {
+        let bt = &self.bt;
+        window.set_bt_present(bt.present);
+        window.set_bt_powered(bt.powered);
+        window.set_bt_index(bt.index as i32);
+        window.set_bt_busy(bt.busy);
+        window.set_bt_notice(bt.notice.clone().into());
+        window.set_bt_press_label(bt.press_label().into());
+        window.set_bt_summary(
+            match (&bt.controller, bt.powered) {
+                (Some(_), true) => "Açık".to_string(),
+                (Some(_), false) => "Kapalı".to_string(),
+                (None, _) => "Denetleyici yok".to_string(),
+            }
+            .into(),
+        );
+        window.set_bt_devices(slint::ModelRc::new(slint::VecModel::from(
+            bt.devices
+                .iter()
+                .map(|device| BtRow {
+                    name: device.title().into(),
+                    address: device.address.clone().into(),
+                    kind: device.kind().into(),
+                    paired: device.paired,
+                    connected: device.connected,
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+
     /// The one place a settings decision leaves this process.
     fn run(&mut self, action: Action) {
         match action {
@@ -1412,6 +1700,20 @@ impl App {
             Action::SignOut => {
                 self.say("Hesap bağlantısı kesiliyor…".into());
                 spawn_media_logout();
+            }
+            Action::OpenWifi => {
+                self.wifi.open();
+                self.open(Route::Wifi);
+                // Ask straight away: a screen that opens empty and waits for a
+                // press reads as broken.
+                self.wifi.busy = true;
+                spawn_wifi(WifiCommand::Refresh);
+            }
+            Action::OpenBluetooth => {
+                self.bt.open();
+                self.open(Route::Bluetooth);
+                self.bt.busy = true;
+                spawn_bt(BtCommand::Refresh);
             }
             Action::OpenDiagnostics => {
                 self.diagnostics.compose(
@@ -1773,6 +2075,8 @@ impl App {
             Route::Settings => self.paint_settings(&window),
             Route::Account => self.paint_account(&window),
             Route::Diagnostics => self.paint_diagnostics(&window),
+            Route::Wifi => self.paint_wifi(&window),
+            Route::Bluetooth => self.paint_bluetooth(&window),
         }
     }
 
@@ -2411,6 +2715,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         library: screens::library::Library::new(),
         settings: screens::settings::Settings::new(),
         account: screens::account::Account::new(),
+        wifi: screens::wireless::Wifi::new(),
+        bt: screens::wireless::Bluetooth::new(),
         diagnostics: screens::diagnostics::Diagnostics::new(),
         now: screens::now_playing::NowPlaying::new(),
         detail: None,
@@ -2582,6 +2888,91 @@ fn report_surface(window: &MediaBoxWindow) {
 /// milliseconds for everything local and seconds for anything that fans out to
 /// addons; keeping a runtime alive between those would be keeping threads alive
 /// for an interface that is usually doing nothing at all.
+/// A keyboard grid as Slint wants it. Shared by the account form and the
+/// Wi-Fi password face, which draw the same letters.
+fn key_rows(grid: &crate::keyboard::Grid) -> slint::ModelRc<KeyRow> {
+    let shifted = grid.shifted();
+    let rows: Vec<KeyRow> = grid
+        .rows()
+        .iter()
+        .map(|row| KeyRow {
+            keys: slint::ModelRc::new(slint::VecModel::from(
+                row.iter()
+                    .map(|cap| KeyCap {
+                        label: cap.label(shifted).into(),
+                        span: cap.span() as i32,
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+enum WifiCommand {
+    /// Status and a scan, which is what an opening screen wants.
+    Refresh,
+    Status,
+    Scan,
+    Connect { ssid: String, psk: Option<String> },
+    Forget(String),
+    Power(bool),
+}
+
+enum BtCommand {
+    Refresh,
+    Scan,
+    Power(bool),
+    Pair(String),
+    Connect(String),
+    Disconnect(String),
+    Forget(String),
+}
+
+/// Ask the daemon about the Wi-Fi radio.
+///
+/// The passphrase travels in the request body and is dropped with this future.
+/// It is never a process argument here and never printed: the error path below
+/// reports the daemon's own sentence, which is written not to contain it.
+fn spawn_wifi(command: WifiCommand) {
+    detached("mediabox-tv-wifi", async move {
+        let client = rpc::Client::new(socket_path());
+        // A scan answers with a network list; everything else answers with the
+        // radio's state, and the screen folds them in differently.
+        let scanned = matches!(command, WifiCommand::Scan | WifiCommand::Refresh);
+        let answer = match command {
+            WifiCommand::Refresh | WifiCommand::Scan => client.wifi_scan().await,
+            WifiCommand::Status => client.wifi_status().await,
+            WifiCommand::Connect { ssid, psk } => client.wifi_connect(&ssid, psk.as_deref()).await,
+            WifiCommand::Forget(ssid) => client.wifi_forget(&ssid).await,
+            WifiCommand::Power(on) => client.wifi_power(on).await,
+        };
+        let answer = answer.map_err(|error| error.to_string());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.wifi_answer(answer, scanned));
+        });
+    });
+}
+
+fn spawn_bt(command: BtCommand) {
+    detached("mediabox-tv-bluetooth", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match command {
+            BtCommand::Refresh => client.bluetooth_status().await,
+            BtCommand::Scan => client.bluetooth_scan().await,
+            BtCommand::Power(on) => client.bluetooth_power(on).await,
+            BtCommand::Pair(address) => client.bluetooth_pair(&address).await,
+            BtCommand::Connect(address) => client.bluetooth_connect(&address).await,
+            BtCommand::Disconnect(address) => client.bluetooth_disconnect(&address).await,
+            BtCommand::Forget(address) => client.bluetooth_remove(&address).await,
+        };
+        let answer = answer.map_err(|error| error.to_string());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.bt_answer(answer));
+        });
+    });
+}
+
 fn detached(name: &str, work: impl std::future::Future<Output = ()> + Send + 'static) {
     let name = name.to_string();
     std::thread::Builder::new()

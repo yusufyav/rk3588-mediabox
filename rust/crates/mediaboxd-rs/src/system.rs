@@ -299,10 +299,70 @@ fn machine() -> String {
         .unwrap_or_else(|| "RK3588".to_string())
 }
 
+/// A one-glance summary of the radios, for the settings screen's two doors.
+///
+/// Deliberately cheap: files under /sys and nothing else. The full picture —
+/// which network, how strong, which devices — costs a call to `iw` and to
+/// `bluetoothctl`, and this runs every time that screen repaints. Those live
+/// behind `wifi_status` and `bluetooth_status`, which the radio screens ask
+/// for when they are open.
+fn wireless() -> Value {
+    let wifi = match crate::wireless::wifi_interface() {
+        None => json!({"state": "yok"}),
+        Some(interface) => {
+            let operstate = read_trimmed(format!("/sys/class/net/{interface}/operstate"))
+                .unwrap_or_default();
+            // "up" here means associated: the driver only raises it once the
+            // link is carrying, which is exactly the distinction the row wants.
+            let state = match operstate.as_str() {
+                "up" => "bağlı",
+                "down" => "bağlı değil",
+                "" => "yok",
+                _ => "bağlı değil",
+            };
+            json!({"state": state, "interface": interface})
+        }
+    };
+    // A controller bluez can see leaves a directory behind; whether the radio
+    // is powered is a question for bluetoothctl, so the row says only that one
+    // is there. Paired devices are files under the controller's directory.
+    let controllers: Vec<String> = std::fs::read_dir("/sys/class/bluetooth")
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("hci"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let paired = controllers
+        .first()
+        .and_then(|hci| std::fs::read_dir(format!("/sys/class/bluetooth/{hci}")).ok())
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("{}:", controllers[0]))
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let bluetooth = if controllers.is_empty() {
+        json!({"state": "yok"})
+    } else {
+        json!({"state": "açık", "controllers": controllers, "paired": paired.to_string()})
+    };
+    json!({"wifi": wifi, "bluetooth": bluetooth})
+}
+
 /// Everything the diagnostics screen reads, in one snapshot.
 pub fn diagnostics() -> Value {
     json!({
         "machine": machine(),
+        "wireless": wireless(),
         "cpu": {"count": cpu_count(), "load": load_average(), "usage": cpu_usage()},
         "memory": memory(),
         "storage": [storage("/"), storage("/var/tmp")],

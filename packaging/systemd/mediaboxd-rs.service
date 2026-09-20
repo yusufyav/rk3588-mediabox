@@ -56,12 +56,21 @@ ProtectClock=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is here for the radios: every Wi-Fi operation below -- scanning,
+# reading the link, bringing the interface up -- is nl80211, which is generic
+# netlink. Without it `iw` fails with "Failed to connect to generic netlink"
+# and the settings screen reports no networks on a board whose radio is fine.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 DevicePolicy=closed
 # The CEC subsystem rather than one adapter by number: a board with two HDMI
 # transmitters has two, and which one is the television's depends on which
 # socket the television is in.
 DeviceAllow=char-cec rw
+# The radios. Switching Wi-Fi or Bluetooth on is a write to /dev/rfkill, and
+# with DevicePolicy=closed that node is not there at all: rfkill exits
+# non-zero, the daemon reports "powered: null", and the settings screen can
+# show the state of a radio it cannot touch. Measured on the Plus.
+DeviceAllow=/dev/rfkill rw
 # The browser's address drop. This interface chooses a web address and the
 # daemon leaves it here for the browser to read once at start; with
 # ProtectSystem=strict and nothing else named, that write failed with
@@ -75,6 +84,18 @@ ReadWritePaths=/run/mediabox /var/lib/mediabox-browser
 # startable on a board that has no gpio-leds device at all, where the daemon
 # simply reports that there is nothing to control.
 ReadWritePaths=-/sys/devices/platform/gpio-leds
+# Wi-Fi networks the viewer has joined.
+#
+# /etc/netplan because that is what configures networking on these boards --
+# Armbian's own Ethernet file lives there and netplan renders it into
+# systemd-networkd -- and this daemon writes a second file beside it rather
+# than introducing a competing network manager. /var/lib/mediabox holds the
+# derived keys; the passphrase itself is never written anywhere.
+#
+# Both are 0600 and both are the daemon's alone. ProtectSystem=strict makes
+# /etc read-only, so without the first line a viewer can pick a network, type
+# a password and watch it fail with "Read-only file system".
+ReadWritePaths=/etc/netplan /var/lib/mediabox
 
 [Install]
 WantedBy=multi-user.target

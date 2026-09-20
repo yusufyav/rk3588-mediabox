@@ -23,6 +23,12 @@ use crate::model::DisplayStatus;
 pub enum Action {
     /// Opens the diagnostics screen.
     OpenDiagnostics,
+    /// Opens the Wi-Fi screen, and the Bluetooth one. Both are their own route
+    /// for the reason the account form is: a list of networks the size of the
+    /// panel, and a letter grid under it, do not belong in the right-hand
+    /// column of a two-pane screen.
+    OpenWifi,
+    OpenBluetooth,
     /// Opens the Stremio sign-in screen. The form lives on its own route
     /// because it needs a letter grid, and a letter grid does not fit in the
     /// right-hand column of a two-pane settings screen.
@@ -84,6 +90,52 @@ pub struct Row {
     /// "" for a reading, "good" / "warn" / "bad" for one that has a verdict.
     pub tone: String,
     pub action: Option<Action>,
+}
+
+/// The Wi-Fi door, with what the daemon could tell us without asking the
+/// radio: whether the interface is up. Everything else — the network, the
+/// signal, the address — is behind the door, because reading it costs a call
+/// to `iw` and this row is composed every time the settings screen repaints.
+fn wifi_row(diagnostics: Option<&Value>) -> Row {
+    let state = text(diagnostics, "/wireless/wifi/state");
+    let (value, tone) = match state.as_deref() {
+        Some("yok") => ("Bu kartta yok".to_string(), "warn"),
+        Some("kapalı") => ("Kapalı".to_string(), "warn"),
+        Some("bağlı") => (
+            text(diagnostics, "/wireless/wifi/ssid").unwrap_or_else(|| "Bağlı".into()),
+            "good",
+        ),
+        Some(_) => ("Bağlı değil".to_string(), ""),
+        None => (String::new(), ""),
+    };
+    Row {
+        value,
+        tone: tone.into(),
+        ..Row::act("Wi-Fi", "Ağları ara ve bağlan", Action::OpenWifi)
+    }
+}
+
+fn bluetooth_row(diagnostics: Option<&Value>) -> Row {
+    let state = text(diagnostics, "/wireless/bluetooth/state");
+    let (value, tone) = match state.as_deref() {
+        Some("yok") => ("Bu kartta yok".to_string(), "warn"),
+        Some("kapalı") => ("Kapalı".to_string(), "warn"),
+        Some("açık") => {
+            let paired = text(diagnostics, "/wireless/bluetooth/paired")
+                .and_then(|count| count.parse::<u32>().ok())
+                .unwrap_or(0);
+            match paired {
+                0 => ("Açık".to_string(), "good"),
+                n => (format!("Açık · {n} aygıt eşli"), "good"),
+            }
+        }
+        Some(_) | None => (String::new(), ""),
+    };
+    Row {
+        value,
+        tone: tone.into(),
+        ..Row::act("Bluetooth", "Aygıt ara ve eşleştir", Action::OpenBluetooth)
+    }
 }
 
 impl Row {
@@ -605,16 +657,12 @@ fn compose(
                     text(diagnostics, "/network/default/gateway").unwrap_or_else(dash),
                 ),
                 Row::reading("Uzaktan kumanda", "http://<cihaz>:8788"),
+                wifi_row(diagnostics),
             ],
         },
         Group {
             title: "Bluetooth".into(),
-            rows: vec![Row::reading(
-                "Durum",
-                text(diagnostics, "/bluetooth/state")
-                    .or_else(|| text(status, "/bluetooth/state"))
-                    .unwrap_or_else(|| "Bu sürümde yönetilmiyor".into()),
-            )],
+            rows: vec![bluetooth_row(diagnostics)],
         },
         Group {
             title: "HDMI ve CEC".into(),

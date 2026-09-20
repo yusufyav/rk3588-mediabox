@@ -285,7 +285,16 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   # did not, and the television's own player never started. It is named here so
   # a clean install gets it, and gets a probe that can open https, which the
   # appliance's own Rockchip build cannot.
-  for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode fc-list fc-match; do
+  #
+  # bluetoothctl, btattach and rfkill are named for the same reason: the
+  # product does not link against bluetoothd, so no ELF closure reaches it,
+  # and a board without them has radios it cannot switch on. Both boards ship
+  # the radios blocked at boot -- "[BT_RFKILL]: bt shut off power" -- and the
+  # unblock needs rfkill present; on the Ultra the vendor's own attach unit
+  # even fails with 203/EXEC when it is missing, because its ExecStartPre is
+  # /usr/sbin/rfkill. The firmware, the patchram tool and that unit come from
+  # the board's BSP and are already on a clean image; these two are not.
+  for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode fc-list fc-match bluetoothctl btattach rfkill; do
     p="$(command -v "$c" 2>/dev/null)" || continue
     dpkg-query -S "$(readlink -f "$p")" 2>/dev/null | cut -d: -f1
   done | tr ',' '\n' | tr -d ' '

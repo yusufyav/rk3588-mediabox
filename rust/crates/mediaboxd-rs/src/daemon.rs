@@ -222,6 +222,36 @@ impl AppState {
                 Response::failure("PROTOCOL_ERROR", "input.monitor akış komutudur")
             }
             Request::SystemPower { action } => Self::system_power(action).await,
+
+            // The radios. Every one of these shells out as root — rfkill,
+            // netplan, bluetoothctl — which is exactly why they are here and
+            // not in the interface.
+            Request::WifiStatus => Response::success(crate::wireless::wifi_status().await),
+            Request::WifiScan => radio(crate::wireless::wifi_scan().await),
+            Request::WifiConnect { ssid, psk } => {
+                radio(crate::wireless::wifi_connect(&ssid, psk.as_deref()).await)
+            }
+            Request::WifiDisconnect => radio(crate::wireless::wifi_disconnect().await),
+            Request::WifiForget { ssid } => radio(crate::wireless::wifi_forget(&ssid).await),
+            Request::WifiPower { on } => radio(crate::wireless::wifi_power(on).await),
+
+            Request::BluetoothStatus => {
+                Response::success(crate::wireless::bluetooth_status().await)
+            }
+            Request::BluetoothScan => radio(crate::wireless::bluetooth_scan(12).await),
+            Request::BluetoothPower { on } => radio(crate::wireless::bluetooth_power(on).await),
+            Request::BluetoothPair { address } => {
+                radio(crate::wireless::bluetooth_pair(&address).await)
+            }
+            Request::BluetoothConnect { address } => {
+                radio(crate::wireless::bluetooth_connect(&address).await)
+            }
+            Request::BluetoothDisconnect { address } => {
+                radio(crate::wireless::bluetooth_disconnect(&address).await)
+            }
+            Request::BluetoothRemove { address } => {
+                radio(crate::wireless::bluetooth_remove(&address).await)
+            }
         }
     }
 
@@ -639,6 +669,15 @@ fn result(value: Result<Value, crate::kodi::KodiError>) -> Response {
     match value {
         Ok(value) => Response::success(value),
         Err(error) => Response::failure("KODI_ERROR", error.to_string()),
+    }
+}
+
+/// A radio call's answer. The error is already a sentence a viewer can read —
+/// and never carries what they typed.
+fn radio(value: Result<Value, String>) -> Response {
+    match value {
+        Ok(value) => Response::success(value),
+        Err(error) => Response::failure("RADIO_ERROR", error),
     }
 }
 

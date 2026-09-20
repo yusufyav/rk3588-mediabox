@@ -710,6 +710,55 @@ pub enum Request {
     SystemPower {
         action: PowerAction,
     },
+
+    // ------------------------------------------------------------ the radios
+    //
+    // Both boards ship their radios switched off at the kernel level — the
+    // journal says "[BT_RFKILL]: bt shut off power" before anything userspace
+    // runs — and switching them on needs rfkill, which is root's. The
+    // interface's unit mounts /sys read-only and has no business holding a
+    // wpa_supplicant control socket either, so the daemon owns this the same
+    // way it owns the indicator lights and the colour mode.
+    //
+    // Wi-Fi goes through wpa_supplicant's own control interface rather than
+    // NetworkManager: the appliance already runs wpa_supplicant beside
+    // systemd-networkd, and adding a second thing that claims interfaces is
+    // how a board ends up with two managers fighting over one radio.
+    WifiStatus,
+    /// Ask the radio for what is in the air. Seconds, not instant.
+    WifiScan,
+    /// Join a network. `psk` is absent for an open one; it never reaches a
+    /// log, and what is written to disk is the derived key, not the phrase.
+    WifiConnect {
+        ssid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        psk: Option<String>,
+    },
+    WifiDisconnect,
+    WifiForget {
+        ssid: String,
+    },
+    WifiPower {
+        on: bool,
+    },
+
+    BluetoothStatus,
+    BluetoothScan,
+    BluetoothPower {
+        on: bool,
+    },
+    BluetoothPair {
+        address: String,
+    },
+    BluetoothConnect {
+        address: String,
+    },
+    BluetoothDisconnect {
+        address: String,
+    },
+    BluetoothRemove {
+        address: String,
+    },
 }
 
 /// What a remote can do to a film that is already playing here.

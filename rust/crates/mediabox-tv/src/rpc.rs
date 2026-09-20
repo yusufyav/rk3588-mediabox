@@ -274,6 +274,72 @@ impl Client {
         self.call(json!({"command": "status"})).await
     }
 
+    // ------------------------------------------------------------ the radios
+    //
+    // All of these are the daemon's: rfkill, netplan and bluetoothctl are
+    // root's, and this process runs under a unit that mounts /sys read-only.
+    // The passphrase travels the same way a Stremio password does — a field in
+    // a JSON body over a socket owned by root, never a process argument and
+    // never printed.
+
+    pub async fn wifi_status(&self) -> Result<Value> {
+        self.call(json!({"command": "wifi_status"})).await
+    }
+
+    pub async fn wifi_scan(&self) -> Result<Value> {
+        self.call(json!({"command": "wifi_scan"})).await
+    }
+
+    pub async fn wifi_connect(&self, ssid: &str, psk: Option<&str>) -> Result<Value> {
+        let mut body = json!({"command": "wifi_connect", "ssid": ssid});
+        if let Some(psk) = psk {
+            body["psk"] = json!(psk);
+        }
+        self.call(body).await
+    }
+
+    pub async fn wifi_forget(&self, ssid: &str) -> Result<Value> {
+        self.call(json!({"command": "wifi_forget", "ssid": ssid}))
+            .await
+    }
+
+    pub async fn wifi_power(&self, on: bool) -> Result<Value> {
+        self.call(json!({"command": "wifi_power", "on": on})).await
+    }
+
+    pub async fn bluetooth_status(&self) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_status"})).await
+    }
+
+    pub async fn bluetooth_scan(&self) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_scan"})).await
+    }
+
+    pub async fn bluetooth_power(&self, on: bool) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_power", "on": on}))
+            .await
+    }
+
+    pub async fn bluetooth_pair(&self, address: &str) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_pair", "address": address}))
+            .await
+    }
+
+    pub async fn bluetooth_connect(&self, address: &str) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_connect", "address": address}))
+            .await
+    }
+
+    pub async fn bluetooth_disconnect(&self, address: &str) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_disconnect", "address": address}))
+            .await
+    }
+
+    pub async fn bluetooth_remove(&self, address: &str) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_remove", "address": address}))
+            .await
+    }
+
     /// What this box can run, and which of them owns the television.
     pub async fn applications(&self) -> Result<crate::model::DisplayStatus> {
         self.typed(json!({"command": "applications"})).await

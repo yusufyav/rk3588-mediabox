@@ -22,6 +22,11 @@ pub enum Route {
     /// The Stremio sign-in form, opened from the settings screen.
     Account,
     Diagnostics,
+    /// The Wi-Fi and Bluetooth screens, opened from the settings screen. Both
+    /// need a list the size of the panel, and the Wi-Fi one needs a letter
+    /// grid, so neither fits in the right-hand column of a two-pane screen.
+    Wifi,
+    Bluetooth,
 }
 
 impl Route {
@@ -40,6 +45,8 @@ impl Route {
             Route::Settings => "settings",
             Route::Account => "account",
             Route::Diagnostics => "diagnostics",
+            Route::Wifi => "wifi",
+            Route::Bluetooth => "bluetooth",
         }
     }
 
@@ -54,6 +61,8 @@ impl Route {
             "settings" => Route::Settings,
             "account" => Route::Account,
             "diagnostics" => Route::Diagnostics,
+            "wifi" => Route::Wifi,
+            "bluetooth" => Route::Bluetooth,
             _ => return None,
         })
     }
