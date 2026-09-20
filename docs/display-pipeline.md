@@ -186,6 +186,124 @@ the display to Kodi and left the monitor stuck.
 
 ---
 
+## 7. The plane's transfer curve is written on every film, including an SDR one
+
+`EOTF` belongs to the **plane**, not to the frame, and it outlives the process
+that set it. Kodi leaves it on ST 2084 after an HDR film; a player that never
+writes it inherits that for the next film. Measured on the Plus after a Kodi
+handover, with an SDR clip on the plane:
+
+```
+format: NV12 little-endian     color: HDR10[2]
+```
+
+and on the television, a magenta picture.
+
+This was invisible for a second reason worth remembering: **the property only
+exists for a client that has asked for the atomic capability.** The interface
+had asked only for universal planes, so the lookup found nothing and reported
+nothing — there was no error anywhere to find.
+
+```
+modetest -M rockchip -p    | grep -c EOTF     # 0
+modetest -M rockchip -a -p | grep -c EOTF     # 8, one per plane
+```
+
+Check: play anything and read the plane's colour line; `SDR[0]` for an SDR
+film, `HDR10[2]` for a PQ one, whatever played before it.
+
+## 8. Either HDMI socket must reach the video port with the HDR block
+
+On RK3588 the video ports are not equals: the VOP2's HDR conversion block is
+behind VP0. The driver says so on each CRTC, and this is the whole basis for
+choosing one:
+
+```
+CRTC 89   PORT_ID 0   FEATURE 7
+CRTC 130  PORT_ID 1   FEATURE 1
+CRTC 170  PORT_ID 2   FEATURE 1
+```
+
+The board's device tree wires both HDMI transmitters to all three ports and
+then switches the crossings off, which the kernel publishes as
+`possible_crtcs 0x1` and `0x2` — one socket per port, no choice in userspace.
+`packaging/overlays/mediabox-hdmi-any-vp.dtbo` switches the two crossings back
+on; the interface then ranks the CRTCs a connector can reach by that FEATURE
+mask and moves the television to the best one.
+
+Do not "simplify" this into a fixed connector-to-port table. The answer is the
+driver's, per board, and the cable moves.
+
+```
+modetest -M rockchip -e                        # both TMDS encoders: 0x3
+grep -E '^Video Port|Connector:' /sys/kernel/debug/dri/0/summary
+```
+
+## 9. The mode is the biggest the link carries **as RGB**, in the panel's shape
+
+Three ways to get this wrong, each measured on the reference television:
+
+* **`preferred` above size.** This set marks 1920x1080 preferred and lists
+  every 4K timing after it, so ranking the flag first ran a 4K panel at 1080p
+  — and every 4K film with it, because a film is composited into the mode the
+  interface set.
+* **"Does anything fit?"** Something always fits: 4:2:0 eight-bit is half the
+  rate of RGB. Asking that question chose 4K60 on a 300 MHz link and the
+  driver subsampled a text interface without being asked —
+  `bus_format[2026]: UYYVYY8_0_5X24`.
+* **Biggest rectangle.** This sink offers 4096x2160 as well as 3840x2160.
+  Ranking by area sends a 16:9 television a DCI timing to letterbox. The shape
+  comes from the sink's own preferred mode.
+
+Kodi is held to the same rule from the other side: its whitelist is **one
+resolution and every refresh rate of it**, rendered per board by
+`mediabox-hdmi-prepare`. A television box does not drop to 1080p because a
+film is 1080p; it stays at the panel's resolution and changes cadence, and the
+one scale that remains is the display controller's:
+
+```
+Display mode: 3840x2160p24        # 1080p24 film, playing in Kodi
+plane src 1920x1080 -> dst 3840x2160
+```
+
+## 10. One mode across a handover — and never by switching fbdev emulation off
+
+Between two applications the television belongs to nobody, and two things then
+put a mode on it that nobody asked for:
+
+* the kernel's fbdev emulation restores **its** mode, which is the sink's
+  preferred one — 1920x1080 here;
+* Kodi records the mode it found on startup and restores it on exit:
+  `CDRMUtils::RestoreOriginalMode(): Set original crtc mode`.
+
+Together they made one handover four mode changes: interface 4K, fbdev 1080p,
+Kodi 4K, Kodi restores 1080p, interface 4K.
+
+**Switching the emulation off does not fix it.** It was tried, it removes the
+1080p, and it leaves Kodi with no mode to start from: measured, every video
+port `DISABLED` and a black television. Kodi needs a mode already on the
+connector — it just has to be the right one. The commit and its revert are in
+the history for this reason.
+
+The mode the emulation restores comes from the kernel command line, because
+its framebuffer is allocated once at that size. `mediabox-hdmi-prepare` writes
+it from what it already knows, and rewrites it when that changes, so a cable
+moved to the other socket corrects itself on the next boot:
+
+```
+extraargs=cma=256M video=HDMI-A-2:3840x2160@30
+```
+
+Measured across interface -> Kodi -> interface after a reboot: 3840x2160p30
+throughout, no 1080p and no dark gap.
+
+```
+tr ' ' '\n' </proc/cmdline | grep ^video=
+/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare        # says current or written
+```
+
+---
+
 ## The smoke test
 
 `packaging/mediabox-kiosk-smoke` checks rules 1 and 2 on every deploy, and
