@@ -32,8 +32,11 @@ const UNIT: &str = "mediabox-player.service";
 pub struct Playing {
     /// The session the worker opened for it; stopped with the player.
     pub session_id: String,
-    /// The source as the catalogue knows it. This is what Kodi is given when
-    /// the film is handed over, because Kodi can open it directly.
+    /// The address Kodi is given when the film is handed over: the session's
+    /// own `handoff.kodiPlaybackUrl`, on the media core's loopback. It is
+    /// something Kodi opens, never something the core can be asked to resolve
+    /// -- it refuses its own loopback as a source, which is what broke the
+    /// handover once. See `Daemon::handoff_to_kodi`.
     pub source: String,
     /// What to call it, and how long it is, as the caller knew them. Neither
     /// is derivable here; see `Request::MediaPlayHere`.

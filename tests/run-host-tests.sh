@@ -667,6 +667,24 @@ else
   failures=$((failures + 1))
 fi
 
+# -- the handover does not ask the media core to resolve its own address
+#
+# A film playing here already has a session, and that session already carries
+# the address Kodi is meant to open. Handing that address back to the core as
+# a new source is what broke the handover: the core refuses its own loopback
+# ("loopback sources are only allowed for the configured streaming server"),
+# the reply was 400, and Kodi -- started in parallel -- lived 73 ms. So the
+# handover must not go through `play_on_kodi`, which is the resolve path.
+daemon="$here/rust/crates/mediaboxd-rs/src/daemon.rs"
+handoff=$(awk '/async fn handoff_to_kodi/,/^    }$/' "$daemon")
+if printf '%s' "$handoff" | grep -q 'play_on_kodi'; then
+  echo "FAIL handoff_to_kodi resolves again instead of reusing its session"
+  printf '%s' "$handoff" | grep -n 'play_on_kodi' | sed 's/^/     /'
+  failures=$((failures + 1))
+else
+  echo "ok   the handover reuses the session it is already playing"
+fi
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all host tests passed"

@@ -442,6 +442,33 @@ impl AppState {
     }
 
     /// Hand what is playing here to Kodi, at the second it had reached.
+    ///
+    /// The session the film is already playing from is the session Kodi gets.
+    /// This used to end it and ask for a new one, handing `playing.source` in
+    /// as if it were a fresh source -- and that address is the media core's
+    /// own loopback, which it refuses by design:
+    ///
+    ///   POST /media/session -> 400
+    ///   INVALID_REQUEST: loopback sources are only allowed for the
+    ///   configured streaming server
+    ///
+    /// Measured on the Ultra. The session was deleted, the replacement was
+    /// refused, and because resolving and the handover ran at the same time
+    /// Kodi had already been started: it lived 73 ms, was stopped again, the
+    /// interface came back and the viewer's film was simply gone. Not even the
+    /// reason survived -- the notice that would have carried it belongs to the
+    /// interface, and the interface is restarted by the handover itself.
+    ///
+    /// There is nothing to resolve. The session exists and already carries the
+    /// address Kodi is meant to open -- `handoff.kodiPlaybackUrl`, which is
+    /// what `Playing::source` holds -- so the player lets go, the display
+    /// changes hands, and Kodi opens it. Re-resolving cost about six seconds
+    /// of network as well, and that is gone with it.
+    ///
+    /// The session outlives the player deliberately: it is idle only for the
+    /// handover itself, which is a couple of seconds against the core's
+    /// forty-five second reaper, and every failure below gives the display
+    /// back before ending it.
     async fn handoff_to_kodi(&self) -> Response {
         let Some(playing) = self.player.playing().await else {
             return Response::failure("NOTHING_PLAYING", "burada oynayan bir şey yok");
@@ -449,12 +476,38 @@ impl AppState {
         // Asked before the player is stopped, because afterwards there is
         // nobody to ask.
         let at = self.player.position().await.unwrap_or(0);
-        self.player.stop().await;
-        self.stop_session(&playing.session_id).await;
         if playing.source.is_empty() {
             return Response::failure("NO_SOURCE", "bu kaynağın Kodi için adresi yok");
         }
-        self.play_on_kodi(Some(playing.source), None, at).await
+        self.player.stop().await;
+
+        let surface = match self.switch_surface(Surface::Kodi).await {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = self.switch_surface(Surface::Ui).await;
+                self.stop_session(&playing.session_id).await;
+                return Response::failure("SURFACE_ERROR", error.to_string());
+            }
+        };
+        if let Err(error) = self.await_kodi().await {
+            let _ = self.switch_surface(Surface::Ui).await;
+            self.stop_session(&playing.session_id).await;
+            return Response::failure("KODI_UNAVAILABLE", error);
+        }
+        match self.kodi.open(&playing.source, at).await {
+            Ok(_) => Response::success(json!({
+                "playing": "kodi",
+                "sessionId": playing.session_id,
+                "surface": surface,
+                "playbackUrl": playing.source,
+                "startSeconds": at,
+            })),
+            Err(error) => {
+                let _ = self.switch_surface(Surface::Ui).await;
+                self.stop_session(&playing.session_id).await;
+                Response::failure("KODI_ERROR", error.to_string())
+            }
+        }
     }
 
     async fn play_on_kodi(
