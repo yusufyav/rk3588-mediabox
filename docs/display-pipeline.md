@@ -304,6 +304,43 @@ tr ' ' '\n' </proc/cmdline | grep ^video=
 
 ---
 
+## 11. The television is told what it is being sent, and only when it fits
+
+The plane's `EOTF` (rule 7) is how the display controller reads the film. It
+says nothing to the television. Three connector properties do, and all three
+are set together or none of them is:
+
+```
+HDR_OUTPUT_METADATA   the CTA-861 mastering infoframe, from the film
+Colorspace            BT2020_RGB
+color_depth           ten bits
+```
+
+In front of them is the decision this product already lives by: **can this
+link carry it at the timing that is actually set?** Ten-bit RGB is 1.25x the
+pixel clock; 4:2:2 twelve-bit is not, which is why this hardware ends up
+sending HDR as 4:2:2 and that is not a fault. A link with no room is told SDR
+and the plane is tone-mapped, rather than being asked for HDR and left to
+subsample.
+
+Both branches, measured on the same television through its two inputs:
+
+| input | mode | decision | connector |
+|---|---|---|---|
+| HDMI 3, 600 MHz | 3840x2160p60 | `the film asks for HDR (eotf 2), and it fits` | `YUYV10_1X20  hdr_type[HDR10] eotf[2] BT.2020` |
+| HDMI 1, 300 MHz | 3840x2160p30 | `cannot carry it at 296703 kHz: sending SDR` | `RGB888_1X24  hdr_type[SDR]` with `hdr2sdr[1]` on the plane |
+
+and after the film, in both cases, back to `RGB888_1X24 hdr_type[SDR]`. A
+television must never be left being told it is receiving HDR by a player that
+has gone.
+
+```
+journalctl -u mediabox-tv-ui | grep -E 'the film asks|output colour'
+grep -E 'bus_format|hdr_type' /sys/kernel/debug/dri/0/summary
+```
+
+---
+
 ## The smoke test
 
 `packaging/mediabox-kiosk-smoke` checks rules 1 and 2 on every deploy, and
