@@ -61,6 +61,7 @@
 #define MBV_FRAME     0U
 #define MBV_STOP      1U
 #define MBV_RELEASE   2U
+#define MBV_HDR       3U
 #define MBV_MESSAGE   88
 #define MBV_REPLY     16
 #define MBV_MAX_FDS   4
@@ -136,6 +137,27 @@ static uint32_t colour_flags(const struct mp_image_params *params)
         break;
     }
     return encoding | (full << 4) | (eotf << 8);
+}
+
+/* CTA-861 chromaticity: 0.00002 per step. */
+static uint16_t cie(float v)
+{
+    if (!(v > 0.0f))
+        return 0;
+    float steps = v * 50000.0f + 0.5f;
+    return steps > 65535.0f ? 65535 : (uint16_t)steps;
+}
+
+static uint16_t clamp16(float v)
+{
+    if (!(v > 0.0f))
+        return 0;
+    return v > 65535.0f ? 65535 : (uint16_t)(v + 0.5f);
+}
+
+static void put16(uint8_t *at, uint16_t value)
+{
+    memcpy(at, &value, sizeof(value));
 }
 
 static void put32(uint8_t *at, uint32_t value)
@@ -277,6 +299,57 @@ static int query_format(struct vo *vo, int format)
     return format == IMGFMT_DRMPRIME;
 }
 
+/* What the film says about itself, once per configuration.
+ *
+ * The plane's EOTF tells the display controller how to read the frame; this
+ * tells the *television* what it is being sent, which is a different question
+ * and a different property -- HDR_OUTPUT_METADATA on the connector, carrying
+ * the CTA-861 Dynamic Range and Mastering InfoFrame. Kodi sets exactly these,
+ * measured on this hardware; a player that sets none of them hands a PQ
+ * picture to a set that is still being told it is SDR.
+ *
+ * Sent as its own message rather than on every frame: it changes when the
+ * film changes and the interface keeps it until then. The frame message keeps
+ * its size, so an interface that does not know this kind simply says so.
+ */
+static void send_hdr(struct vo *vo, const struct mp_image_params *params)
+{
+    struct priv *p = vo->priv;
+    const struct pl_hdr_metadata *hdr = &params->color.hdr;
+
+    uint32_t eotf;
+    switch (params->color.transfer) {
+    case PL_COLOR_TRC_PQ:  eotf = 2; break;
+    case PL_COLOR_TRC_HLG: eotf = 3; break;
+    default:               eotf = 0; break;
+    }
+
+    uint8_t message[MBV_MESSAGE];
+    memset(message, 0, sizeof(message));
+    put32(message + 0, MBV_MAGIC);
+    put32(message + 4, MBV_HDR);
+    put32(message + 8, eotf);
+    put16(message + 12, cie(hdr->prim.red.x));
+    put16(message + 14, cie(hdr->prim.red.y));
+    put16(message + 16, cie(hdr->prim.green.x));
+    put16(message + 18, cie(hdr->prim.green.y));
+    put16(message + 20, cie(hdr->prim.blue.x));
+    put16(message + 22, cie(hdr->prim.blue.y));
+    put16(message + 24, cie(hdr->prim.white.x));
+    put16(message + 26, cie(hdr->prim.white.y));
+    /* The infoframe carries the peak in cd/m² and the floor in 0.0001 cd/m². */
+    put16(message + 28, clamp16(hdr->max_luma));
+    put16(message + 30, clamp16(hdr->min_luma * 10000.0f));
+    put16(message + 32, clamp16(hdr->max_cll));
+    put16(message + 34, clamp16(hdr->max_fall));
+
+    if (p->fd >= 0 && send(p->fd, message, sizeof(message), MSG_NOSIGNAL) < 0)
+        MP_WARN(vo, "HDR bilgisi gönderilemedi\n");
+    else
+        MP_VERBOSE(vo, "HDR bilgisi: eotf %u, tepe %u cd/m2, maxcll %u\n",
+                   eotf, clamp16(hdr->max_luma), clamp16(hdr->max_cll));
+}
+
 static int reconfig(struct vo *vo, struct mp_image *img)
 {
     struct priv *p = vo->priv;
@@ -294,6 +367,7 @@ static int reconfig(struct vo *vo, struct mp_image *img)
     p->colour = colour_flags(&img->params);
     MP_VERBOSE(vo, "kare %dx%d, gösterim %dx%d, renk %u\n",
                img->params.w, img->params.h, p->d_w, p->d_h, p->colour);
+    send_hdr(vo, &img->params);
     return 0;
 }
 

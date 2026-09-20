@@ -299,6 +299,20 @@ struct SplitDisplay {
     gbm_surface: gbm::Surface<Scanout>,
     presentation: RefCell<Presentation>,
     released: Cell<bool>,
+    /// What the television said it can be sent, read from its EDID once. The
+    /// HDR decision is made against this and the mode in use, never against
+    /// the film alone: a set that never declared ST 2084, or a link with no
+    /// room for ten bits at this timing, cannot be sent HDR worth having.
+    sink_video: Option<mediabox_platform::video::SinkVideo>,
+    /// The last colour state written to the connector, so the properties are
+    /// not rewritten on every frame -- and so the television is put back to
+    /// SDR when the film ends rather than left in BT.2020.
+    signalled: Cell<Option<crate::video::HdrStatic>>,
+    /// What the film last asked for, so the decision is reported when the film
+    /// changes and not only when the answer does. "Asked for HDR and was
+    /// refused" is the interesting line, and it is the one that would
+    /// otherwise never be printed.
+    asked: Cell<Option<crate::video::HdrStatic>>,
 }
 
 impl SplitDisplay {
@@ -465,11 +479,28 @@ impl SplitDisplay {
             .map_err(|e| format!("listen for the player on {socket}: {e}"))?;
         eprintln!("mediabox-tv.video listening on {socket}");
 
+        // What the television declared about itself, kept for the HDR
+        // decision: whether it says ST 2084 at all, and how fast its link is.
+        let sink_video = connector_edid(&kms, connector.handle())
+            .and_then(|edid| mediabox_platform::video::parse_sink_video(&edid));
+        if let Some(sink) = &sink_video {
+            eprintln!(
+                "mediabox-tv.platform sink: ST2084={} HLG={} link {} kHz, HDR10 at this mode: {}",
+                sink.st2084,
+                sink.hlg,
+                sink.max_character_rate_khz,
+                sink.hdr10_fits(mode.clock())
+            );
+        }
+
         let display = Rc::new(Self {
             kms,
             connector,
             crtc,
             mode,
+            sink_video,
+            signalled: Cell::new(None),
+            asked: Cell::new(None),
             gbm_device,
             gbm_surface,
             video,
@@ -708,7 +739,128 @@ impl SplitDisplay {
         };
         let mut sink = self.sink.borrow_mut();
         sink.pump(&self.kms, self.crtc, &self.video, into);
+        self.signal_output_colour(sink.hdr());
         VIDEO.with(|cell| cell.set(sink.showing()));
+    }
+
+    /// Tell the television what it is being sent.
+    ///
+    /// The plane's `EOTF` is how the display controller reads the film; this
+    /// is the other half, and without it a PQ picture goes out over a link
+    /// still describing itself as SDR BT.709 -- which is what this appliance
+    /// did until now, while Kodi on the same board set all three of these and
+    /// got HDR10 on the wire.
+    ///
+    /// Three properties, the same ones measured on Kodi here:
+    ///   * `HDR_OUTPUT_METADATA`, the CTA-861 mastering infoframe;
+    ///   * `Colorspace`, BT2020_RGB;
+    ///   * `color_depth`, ten bits, because eight-bit HDR bands visibly.
+    ///
+    /// And one decision before them: whether this link can carry it at the
+    /// timing that is actually set. It is the same rule the rest of the
+    /// product already uses -- a 4K film at 23.976 fits ten-bit RGB in
+    /// 371 MHz, at 60 Hz it does not -- and when it does not fit, HDR is
+    /// given up rather than asked for and silently subsampled.
+    fn signal_output_colour(&self, film: Option<crate::video::HdrStatic>) {
+        let fits = self
+            .sink_video
+            .as_ref()
+            .is_some_and(|sink| sink.hdr10_fits(self.mode.clock()));
+        let wanted = match film {
+            Some(hdr) if hdr.is_hdr() && fits => Some(hdr),
+            _ => None,
+        };
+        if self.asked.replace(film) != film {
+            match film {
+                Some(hdr) if hdr.is_hdr() && !fits => eprintln!(
+                    "mediabox-tv.platform the film asks for HDR (eotf {}) and this link \
+                     cannot carry it at {} kHz: sending SDR, the plane is tone-mapped",
+                    hdr.eotf,
+                    self.mode.clock()
+                ),
+                Some(hdr) if hdr.is_hdr() => eprintln!(
+                    "mediabox-tv.platform the film asks for HDR (eotf {}), and it fits",
+                    hdr.eotf
+                ),
+                Some(_) => eprintln!("mediabox-tv.platform the film is SDR"),
+                None => {}
+            }
+        }
+        if self.signalled.get() == wanted {
+            return;
+        }
+
+        let connector = self.connector.handle();
+        let Ok(properties) = self.kms.get_properties(connector) else {
+            return;
+        };
+        let mut metadata = None;
+        let mut colorspace = None;
+        let mut depth = None;
+        for handle in properties.as_props_and_values().0.iter().copied() {
+            let Ok(info) = self.kms.get_property(handle) else {
+                continue;
+            };
+            match info.name().to_str() {
+                Ok("HDR_OUTPUT_METADATA") => metadata = Some(handle),
+                Ok("Colorspace") => colorspace = Some(handle),
+                Ok("color_depth") => depth = Some(handle),
+                _ => {}
+            }
+        }
+
+        // BT2020_RGB and 30-bit, as this driver enumerates them; 0 is
+        // "Default" and "Automatic", which is what an SDR film is sent as.
+        const BT2020_RGB: u64 = 9;
+        const TEN_BIT: u64 = 10;
+        let (space, bits) = match wanted {
+            Some(_) => (BT2020_RGB, TEN_BIT),
+            None => (0, 0),
+        };
+        let blob = match wanted {
+            Some(hdr) => match self.kms.create_property_blob(&hdr.blob()) {
+                Ok(value) => Some(value),
+                Err(e) => {
+                    eprintln!("mediabox-tv.platform HDR metadata blob: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(property) = metadata {
+            let value = blob
+                .map(|value| {
+                    let raw: u64 = value.into();
+                    raw
+                })
+                .unwrap_or(0);
+            if let Err(e) = self.kms.set_property(connector, property, value) {
+                eprintln!("mediabox-tv.platform HDR_OUTPUT_METADATA: {e}");
+            }
+        }
+        if let Some(property) = colorspace
+            && let Err(e) = self.kms.set_property(connector, property, space)
+        {
+            eprintln!("mediabox-tv.platform Colorspace: {e}");
+        }
+        if let Some(property) = depth
+            && let Err(e) = self.kms.set_property(connector, property, bits)
+        {
+            eprintln!("mediabox-tv.platform color_depth: {e}");
+        }
+        eprintln!(
+            "mediabox-tv.platform output colour: {}",
+            match wanted {
+                Some(hdr) => format!(
+                    "HDR10 eotf {} peak {} cd/m2 at {} kHz",
+                    hdr.eotf,
+                    hdr.max_luminance,
+                    self.mode.clock()
+                ),
+                None => "SDR".to_string(),
+            }
+        );
+        self.signalled.set(wanted);
     }
 
     fn release_display(&self) {

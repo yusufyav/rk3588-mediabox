@@ -64,6 +64,51 @@ pub struct Colour {
     pub eotf: u64,
 }
 
+/// What the film says about itself: the CTA-861 Dynamic Range and Mastering
+/// InfoFrame, as the player read it out of the stream.
+///
+/// Kept apart from `Colour` because it is a different question answered by a
+/// different property. `Colour` is how the display controller must *read* the
+/// plane; this is what the television is *told* it is being sent, and only the
+/// connector can be told.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct HdrStatic {
+    /// 0 traditional gamma (SDR), 2 SMPTE ST 2084, 3 BT.2100 HLG.
+    pub eotf: u8,
+    /// Mastering display primaries and white point, in CTA-861's 0.00002
+    /// steps: red x/y, green x/y, blue x/y, white x/y.
+    pub primaries: [u16; 8],
+    /// Peak in cd/m², floor in 0.0001 cd/m².
+    pub max_luminance: u16,
+    pub min_luminance: u16,
+    pub max_cll: u16,
+    pub max_fall: u16,
+}
+
+impl HdrStatic {
+    /// Whether this asks for HDR at all.
+    pub fn is_hdr(&self) -> bool {
+        self.eotf == 2 || self.eotf == 3
+    }
+
+    /// The kernel's `struct hdr_output_metadata`, as the connector's blob
+    /// wants it: a type word, then the infoframe.
+    pub fn blob(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        // metadata_type = 0 (HDMI static metadata type 1)
+        out[4] = self.eotf;
+        out[5] = 0; // metadata_type inside the infoframe: static metadata 1
+        for (i, value) in self.primaries.iter().enumerate() {
+            out[6 + i * 2..8 + i * 2].copy_from_slice(&value.to_le_bytes());
+        }
+        out[22..24].copy_from_slice(&self.max_luminance.to_le_bytes());
+        out[24..26].copy_from_slice(&self.min_luminance.to_le_bytes());
+        out[26..28].copy_from_slice(&self.max_cll.to_le_bytes());
+        out[28..30].copy_from_slice(&self.max_fall.to_le_bytes());
+        out
+    }
+}
+
 /// A frame that has been imported and given a framebuffer, kept until the
 /// display controller is finished with it.
 pub struct Imported<D: ControlDevice> {
@@ -584,6 +629,7 @@ const MAGIC: u32 = 0x3156_424d;
 const KIND_FRAME: u32 = 0;
 const KIND_STOP: u32 = 1;
 const KIND_RELEASE: u32 = 2;
+const KIND_HDR: u32 = 3;
 
 /// One fixed-size message per `sendmsg`, so a frame and its descriptors can
 /// never be split across reads:
@@ -616,10 +662,16 @@ pub enum Incoming {
         display: (u32, u32),
         fds: Vec<OwnedFd>,
     },
+    /// What the film says about itself; sent once per configuration.
+    Hdr(HdrStatic),
     /// The player is finished with the plane but is still there.
     Stop,
     /// The player went away.
     Gone,
+}
+
+fn u16_at(bytes: &[u8; MESSAGE], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
 
 fn u32_at(bytes: &[u8; MESSAGE], offset: usize) -> u32 {
@@ -774,6 +826,20 @@ impl Server {
                     }
                     match u32_at(&bytes, 4) {
                         KIND_STOP => received.push(Incoming::Stop),
+                        KIND_HDR => {
+                            let mut primaries = [0u16; 8];
+                            for (i, slot) in primaries.iter_mut().enumerate() {
+                                *slot = u16_at(&bytes, 12 + i * 2);
+                            }
+                            received.push(Incoming::Hdr(HdrStatic {
+                                eotf: u32_at(&bytes, 8) as u8,
+                                primaries,
+                                max_luminance: u16_at(&bytes, 28),
+                                min_luminance: u16_at(&bytes, 30),
+                                max_cll: u16_at(&bytes, 32),
+                                max_fall: u16_at(&bytes, 34),
+                            }));
+                        }
                         KIND_FRAME => {
                             let Ok(fourcc) = DrmFourcc::try_from(u32_at(&bytes, 16)) else {
                                 eprintln!(
@@ -852,6 +918,10 @@ pub struct Sink<D: ControlDevice + Clone> {
     on: bool,
     refused: bool,
     frames: u64,
+    /// The last thing the player said about the film it is sending. Cleared
+    /// when the film stops, because the television must not be left being
+    /// told it is receiving HDR by a player that has gone.
+    hdr: Option<HdrStatic>,
 }
 
 impl<D: ControlDevice + Clone> Sink<D> {
@@ -863,6 +933,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
             on: false,
             refused: false,
             frames: 0,
+            hdr: None,
         })
     }
 
@@ -871,6 +942,11 @@ impl<D: ControlDevice + Clone> Sink<D> {
     }
 
     /// Whether there is a film on the panel right now.
+    /// What the film asked the television to be told, while one is playing.
+    pub fn hdr(&self) -> Option<HdrStatic> {
+        self.on.then_some(self.hdr).flatten()
+    }
+
     pub fn showing(&self) -> bool {
         self.on
     }
@@ -893,6 +969,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
     ) {
         for message in self.server.pump() {
             match message {
+                Incoming::Hdr(hdr) => self.hdr = Some(hdr),
                 Incoming::Stop | Incoming::Gone => self.clear(device, crtc, planes),
                 Incoming::Frame {
                     id,
@@ -979,6 +1056,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
 
     /// Take the film off the panel and give every buffer back.
     pub fn clear(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
+        self.hdr = None;
         if let Some(index) = self.chosen
             && let Some(plane) = planes.get(index)
         {
