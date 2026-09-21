@@ -22,7 +22,7 @@ PROFILE="${MEDIABOX_BROWSER_PROFILE:-/var/lib/mediabox-browser/chromium}"
 # It currently matches nothing — the site it was written for is gone — and is
 # loaded so that adding a site is a one-line change to its manifest.
 REMOTE_EXTENSION="${MEDIABOX_BROWSER_EXTENSION:-/opt/rk3588-mediabox/browser-remote}"
-HOME_URL="${MEDIABOX_BROWSER_HOME:-https://www.youtube.com/tv}"
+HOME_URL="${MEDIABOX_BROWSER_HOME:-https://www.youtube.com/}"
 # Where a chosen address is left for the next start. The launcher writes it,
 # this reads it once, and the browser opens there instead of its home page.
 REQUEST="${MEDIABOX_BROWSER_REQUEST:-/var/lib/mediabox-browser/url}"
@@ -37,10 +37,16 @@ if [ -s "$REQUEST" ]; then
   esac
 fi
 
-# YouTube serves its remote-driven interface only to something that says it is
-# a television. Asked as an ordinary desktop browser it answers with the mouse
-# interface, which has no answer for four arrows and an OK button.
-AGENT="${MEDIABOX_BROWSER_AGENT:-Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 CrKey/1.54.250320}"
+# An ordinary desktop browser, which is what this one is.
+#
+# It used to claim to be a Chromecast, because youtube.com/tv serves a
+# remote-driven interface to something that says it is a television. On this
+# build that pair does not give a television interface at all: it gives the
+# "Ready to cast" screen and nothing else, measured on the Plus. So the
+# television address and the Chromecast string are both gone and the browser
+# asks for youtube.com as itself. Spatial navigation below is what makes the
+# desktop page reachable from four arrow keys.
+AGENT="${MEDIABOX_BROWSER_AGENT:-Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36}"
 
 # Measurement, off unless asked for, bound to loopback. Playing video in a
 # browser on this board is a claim that has to be checked rather than assumed.
@@ -53,6 +59,21 @@ debug=""
 if [ -n "${MEDIABOX_BROWSER_DEBUG_PORT:-}" ]; then
   debug="--remote-debugging-port=${MEDIABOX_BROWSER_DEBUG_PORT} --remote-allow-origins=*"
 fi
+
+# Kiosk, off by default.
+#
+# Kiosk is a browser with no way to go anywhere: no tabs, no address bar, no
+# settings, no way to install anything. That is the right shape for a single
+# fixed page and the wrong one for a web browser somebody is meant to use, and
+# this is the second. The window is still fullscreen -- sway gives it the whole
+# output and draws no decoration -- so nothing of the desktop shows either way,
+# and direct scan-out is unaffected: the tab strip is inside the same surface.
+#
+# MEDIABOX_BROWSER_KIOSK=1 puts it back for an appliance that wants one page.
+kiosk=""
+case "${MEDIABOX_BROWSER_KIOSK:-0}" in
+  1|true|yes|on) kiosk="--kiosk" ;;
+esac
 
 # Local Network Access, off.
 #
@@ -91,10 +112,10 @@ fi
 # would be three flags that say what the browser already does, and one more
 # thing to be wrong later.
 
-# shellcheck disable=SC2086  # $debug is either empty or two known flags.
+# shellcheck disable=SC2086  # $debug and $kiosk are empty or known flags.
 /usr/bin/chromium \
   $debug \
-  --kiosk \
+  $kiosk \
   --force-device-scale-factor="$SCALE" \
   --no-sandbox \
   --ozone-platform=wayland \
@@ -102,7 +123,6 @@ fi
   --user-agent="$AGENT" \
   --enable-spatial-navigation \
   --load-extension="$REMOTE_EXTENSION" \
-  --disable-extensions-except="$REMOTE_EXTENSION" \
   --no-first-run \
   --no-default-browser-check \
   --disable-component-update \
