@@ -209,26 +209,31 @@ export MEDIABOX_HOST=<the appliance's address>
 #    pinned revisions, into MediaBox's own prefix          (~30-45 min)
 ./scripts/build-media-runtime.sh
 
-# 2. the private Mali G610 user space (nothing is installed system-wide)
+# 2. the browser's way in to that runtime: a VA-API driver over MPP, pinned,
+#    built on the board against step 1                     (~1 min)
+#    Without it Chromium decodes 4K in software: this kernel has no /dev/video*
+./scripts/build-vaapi-driver.sh
+
+# 3. the private Mali G610 user space (nothing is installed system-wide)
 ./scripts/install-mali-runtime.sh
 
-# 3. the embedded player: mpv 0.41 + packaging/mpv-patches/ + vo_mediabox.c,
+# 4. the embedded player: mpv 0.41 + packaging/mpv-patches/ + vo_mediabox.c,
 #    built on the board against the runtime from step 1    (~10 min)
 ./scripts/build-mediabox-player.sh
 
-# 4. torrent and stream resolution: node and the streaming server, pinned
+# 5. torrent and stream resolution: node and the streaming server, pinned
 ./scripts/install-stremio-server.sh
 
-# 5. the product: control plane, television interface, web UI, media core,
+# 6. the product: control plane, television interface, web UI, media core,
 #    units, udev rules, config — and a kiosk smoke that fails the deploy
 ./scripts/deploy-mediabox-v3.sh
 
-# 6. Kodi, for the handoff path: deps, fetch, patch, configure, build, install
+# 7. Kodi, for the handoff path: deps, fetch, patch, configure, build, install
 #    on the board                                          (hours)
 ./scripts/build-kodi.sh
 ```
 
-Steps 1–5 are the product. Step 6 is needed for the Kodi handoff and for
+Steps 1–6 are the product. Step 7 is needed for the Kodi handoff and for
 reproducing the HDR baseline above; it is the slowest thing in the repository
 and it is not on the path to a working interface.
 

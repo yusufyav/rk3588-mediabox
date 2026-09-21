@@ -67,6 +67,30 @@ fi
 # comment inside a backslash-continued command is not a comment, it is more
 # arguments.
 
+# Hardware video decode, on.
+#
+# Three feature names, and each one was checked against *this* binary rather
+# than copied from a guide: Chromium retires these between releases and a name
+# it does not know is accepted in silence and does nothing.
+#
+#   AcceleratedVideoDecoder                 the decoder itself
+#   AcceleratedVideoDecodeLinuxGL           allowed when the context is GL,
+#                                           which is what ANGLE-on-Mali is here
+#   AcceleratedVideoDecodeLinuxZeroCopyGL   the decoded surface is imported as
+#                                           a DMA-BUF instead of being read back
+#
+# The last one is the difference between a 4K frame crossing the bus once and
+# crossing it twice. What makes any of them mean anything is the VA-API driver
+# named in the unit; without it these three turn a decoder on that has nothing
+# behind it.
+#
+# Not here, deliberately: --ignore-gpu-blocklist, --enable-gpu-rasterization
+# and --enable-zero-copy. Each was measured on this board and each was already
+# the browser's own answer -- chrome://gpu reports rasterization "Hardware
+# accelerated on all pages" and nothing on this GPU is blocklisted -- so they
+# would be three flags that say what the browser already does, and one more
+# thing to be wrong later.
+
 # shellcheck disable=SC2086  # $debug is either empty or two known flags.
 /usr/bin/chromium \
   $debug \
@@ -90,6 +114,7 @@ fi
   --overscroll-history-navigation=0 \
   --autoplay-policy=no-user-gesture-required \
   --hide-scrollbars \
+  --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL \
   "$url" || true
 
 exec /usr/bin/swaymsg exit

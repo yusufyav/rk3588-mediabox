@@ -108,7 +108,82 @@ Esmart0-win0   NV15  zpos 0    ← film, altta, donanımda ölçekli
 yerel 4K NV15  mpv %6-9 CPU · arayüz ~%0 · 1845 kare · 0 düşük · 23.96 fps
 ```
 
-## 6. Açık işler
+## 6. Tarayıcı — donanım video çözme (21 Eylül 2026)
+
+Plus üzerinde ölçüldü. Chromium sayfayı Mali'de çiziyordu ama videoyu CPU'da
+çözüyordu; bu kapandı.
+
+**Neden kapalıydı.** Vendor çekirdek (`6.1.115-vendor-rk35xx`) VPU'yu yalnız
+`/dev/mpp_service` ardında veriyor. Kutuda **hiç `/dev/video*` yok**,
+`CONFIG_VIDEO_HANTRO` kapalı, `/sys/class/video4linux` boş — yani Chromium'un
+taşıdığı V4L2 yolunun bağlanacağı bir aygıt yok. Debian'ın Chromium'unda
+hızlandırılmış çözmenin tek arka ucu VA-API ve kutuda hiçbir
+`*_drv_video.so` yoktu:
+
+```
+ERROR:media/gpu/vaapi/vaapi_wrapper.cc:1801] vaInitialize failed: unknown libva error
+chrome://gpu → Video Acceleration Information → Decoding: (boş)
+```
+
+`chrome://gpu`'daki **"Video Decode: Hardware accelerated" satırı yanıltıcı**:
+özelliğin açık olduğunu söylüyor, çözücü bulunduğunu değil. `mediaCapabilities`
+o haldeyken 4K H.264/VP9/AV1 için `powerEfficient=false` cevaplıyordu.
+
+**Ne yapıldı.** libva'yı **ürünün kendi MPP'sine** köprüleyen bir VA-API
+sürücüsü, sabit revizyonla kutuda derleniyor:
+`scripts/build-vaapi-driver.sh` → `rockchip-vaapi` `v2.2.0`
+(`8e41d785…`, LGPL-2.1) → `media-runtime/lib/dri/rockchip_drv_video.so`.
+RPATH `/opt/rk3588-mediabox/media-runtime/lib`; kutuda **ikinci bir MPP yok**,
+sistemin `dri` dizinine dokunulmuyor, ScreenBridge öneki anılmıyor.
+
+Birim `DevicePolicy=closed` kalıyor; açılan tek şey iki aygıt
+(`/dev/mpp_service`, `/dev/rga`) ve iki değişken
+(`LIBVA_DRIVER_NAME`, `LIBVA_DRIVERS_PATH`). Mali yolu değişmedi.
+Başlatıcıya eklenen üç feature adı, **bu ikilide gerçekten var olduğu
+doğrulanarak** eklendi; `--ignore-gpu-blocklist`, `--enable-gpu-rasterization`
+ve `--enable-zero-copy` **eklenmedi** çünkü ölçümde tarayıcının zaten kendi
+cevabıydılar.
+
+**Ölçüm** (aynı panel, aynı klip, 330 s sürekli):
+
+| | 4K H.264 High | 4K VP9 P0 | YouTube 2160p60 | *öncesi (yazılım)* |
+|---|---|---|---|---|
+| çözülen kare | 9902 | 9901 | 3620 | 1801 |
+| düşen kare | 0 (%0) | 5 (%0,05) | 5 (%0,138) | 0 |
+| çıkış fps | 30,0 | 30,0 | 60,3 | 30,0 |
+| Chromium CPU | %44,4 | %44,7 | %144,5 | **%161,9** |
+| Chromium (8 çek.) | %5,6 | %5,6 | %18,1 | %20,2 |
+| VPU sahipliği | var | var | var | **yok** |
+
+Yazılım/donanım farkı tek değişkenle ölçüldü (`LIBVA_DRIVERS_PATH` geçersiz
+yapılarak): 4K H.264'te tek çekirdeğin **%161,9 → %44,4**'ü, 3,6 kat.
+
+Donanım kanıtı ad değil, aygıt: Chromium'un **gpu-process**'i
+`/dev/mpp_service` üzerinde açık tanıtıcı tutuyor ve
+`/proc/mpp_service/sessions-summary` oynatma boyunca
+`device: fdc38100.rkvdec-core` gösteriyor.
+
+YouTube gerçekte **VP9** verdi (`vp09.00.51.08…`, itag 315, 3840x2160@60) —
+AV1 değil. AV1 bu sürücüde yok ve `powerEfficient=false` olarak doğru
+bildiriliyor.
+
+Sayfa çizim yolu (`tools/ui-perf.py`, panelin kendi 2560x1440@144'ünde):
+kare süresi p50 6,9 ms / p95 7,0 ms, boşta CPU %1,2, düşen kare %0–0,14.
+
+Doğrulayıcı: `mediabox-browser-verify` (kurulum, sürücü, aygıt izni, feature
+adları). `mediabox-product-verify` PASS.
+
+**Kadans — kapanmadı, bu işin dışında.** Takılı panel 2560x1440@**143,999 Hz**
+ve 60 fps içerik tam bölünmüyor (144/60 = 2,4): her kare 2 veya 3 refresh
+tutuluyor, 13,9 ms / 20,8 ms dönüşümlü. Panning görüntüde gözle *tearing gibi*
+okunuyor. Bu **decode'dan gelmiyor ve yeni değil** — aynı A/B'de yazılım
+çözmede daha kötü (ortalama 21,56 ms, tepe 444,5 ms, 18 kare atlama; donanımda
+16,83 ms / 48,5 ms / 4). Gerçek tearing yolu da yok: oynatma sırasında DRM'de
+**tek düzlem** aktif (`Cluster1-win0`, XR24, 2560x1440 tam ekran), ayrı video
+overlay düzlemi yok. Çözümü ekran modu kararında (120 Hz veya 60 Hz mod),
+bu görevin kapsamı değil.
+
+## 7. Açık işler
 
 ### Önce
 
@@ -141,8 +216,12 @@ yerel 4K NV15  mpv %6-9 CPU · arayüz ~%0 · 1845 kare · 0 düşük · 23.96 f
   `MediaPlayHere`'ın `title`/`duration_seconds` alanlarını web arayüzü henüz
   göndermiyor.
 * Kodi'nin "Şimdi Oynatılan" ekranı hâlâ eski simge setini kullanıyor.
+* Tarayıcıda AV1 donanımda çözülmüyor (sürücüde yok): VA-API karolara başlıksız
+  veri veriyor, MPP tam OBU istiyor. YouTube bu kutuda VP9 seçtiği için pratikte
+  ısırmadı; ısırırsa çare hesap tarafında codec tercihi.
+* Tarayıcıda video kodlama (encode) yok — yalnız çözme.
 
-## 7. Taşınabilirlik ve ikinci cihaz (Plus)
+## 8. Taşınabilirlik ve ikinci cihaz (Plus)
 
 **Durum: hazır, kurulmadı.** Bu bölümün önceki hâli dört sabit ve ayrı bir
 önyükleme zinciri sayıyordu; hepsi kapandı ya da yanlış çıktı.
@@ -229,7 +308,7 @@ yazan her şey kartlardan birinde yanlış televizyona sesleniyordu.
 4. Stok çekirdekle MediaBox'ı açmayı dene: HDMI RX yaması TX'i ilgilendirmiyor,
    ama bu hâlâ çıkarım.
 
-## 7. Nerede ne var
+## 9. Nerede ne var
 
 ```
 rust/crates/mediabox-tv      TV arayüzü (Slint + kendi DRM/GBM platformu)

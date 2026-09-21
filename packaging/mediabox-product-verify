@@ -80,8 +80,13 @@ req_exec bin/mediaboxctl          "control client"
 req_exec bin/mediabox-platform    "platform discovery"
 req_exec bin/mediabox-tv          "television interface"
 req_exec bin/mediabox-player      "player launcher"
+req_exec bin/mediabox-browser-verify "browser decode verifier"
 req_dir  media-runtime            "media runtime"
 req_dir  media-runtime/lib        "media runtime libraries"
+# The browser's way in to the same decoder the players use. It is the one piece
+# of the media runtime the browser needs and the players do not: they call MPP
+# directly, and Chromium can only be handed a VA-API driver.
+req_file media-runtime/lib/dri/rockchip_drv_video.so "browser video decoder"
 req_exec player/bin/mpv           "player"
 req_dir  player/share             "player data"
 req_dir  mali-g24p0-root          "Mali user space"

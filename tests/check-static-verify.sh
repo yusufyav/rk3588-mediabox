@@ -98,15 +98,20 @@ build_archive() {
   rm -rf "$root"
   P="$root/rootfs/opt/rk3588-mediabox"
   M="$root/meta"
-  mkdir -p "$P"/{bin,player/bin,player/share,media-runtime/lib,mali-g24p0-root} \
+  mkdir -p "$P"/{bin,player/bin,player/share,media-runtime/lib,media-runtime/lib/dri,mali-g24p0-root} \
            "$P"/{mali-g24p0-runtime/lib,node/bin,stremio-server,media,ui} \
            "$P"/kodi/lib/kodi "$P"/kodi/share/kodi/system/settings "$M" \
            "$root"/rootfs/etc/systemd/system "$root"/rootfs/etc/mediabox \
            "$root"/rootfs/etc/udev/rules.d "$root"/rootfs/etc/systemd/logind.conf.d
 
-  for b in mediaboxd-rs mediaboxctl mediabox-platform mediabox-tv mediabox-player; do
+  for b in mediaboxd-rs mediaboxctl mediabox-platform mediabox-tv mediabox-player \
+           mediabox-browser-verify; do
     : >"$P/bin/$b"; chmod 755 "$P/bin/$b"
   done
+  # The browser's VA-API driver. A file rather than an ELF: the verifier asks
+  # whether it was installed, and the questions about what it links are asked
+  # on the appliance by mediabox-browser-verify, where there is an MPP to link.
+  : >"$P/media-runtime/lib/dri/rockchip_drv_video.so"
   : >"$P/node/bin/node"; chmod 755 "$P/node/bin/node"
   : >"$P/stremio-server/server.js"
   : >"$P/kodi/share/kodi/system/settings/settings.xml"

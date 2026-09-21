@@ -1,0 +1,144 @@
+#!/bin/sh
+#
+# Does the television's browser actually reach the video hardware?
+#
+# The browser answering "Video Decode: Hardware accelerated" on chrome://gpu is
+# not the question. That line says a feature is switched on; it says so on this
+# board with no decoder behind it at all, which is precisely the state this
+# product was in before the driver below existed. The questions worth asking are
+# whether a decoder is installed, whether it is *this product's* decoder, whether
+# the browser is allowed to open the device, and whether the browser then lists
+# any profiles.
+#
+# Every check reads something the appliance reports about itself. Run it on the
+# box, after a deploy or whenever a browser looks like it is decoding in
+# software:
+#
+#     mediabox-browser-verify
+#
+# With the browser running and a debugging port set on it -- which is what
+# MEDIABOX_BROWSER_DEBUG_PORT in a drop-in gives -- the last section asks the
+# running browser what it thinks it can decode. Without one the script still
+# answers everything else, and says why the last part was skipped.
+set -eu
+
+PREFIX="${MEDIABOX_PREFIX:-/opt/rk3588-mediabox}"
+MEDIA_PREFIX="${MEDIABOX_MEDIA_PREFIX:-$PREFIX/media-runtime}"
+DRIVER="$MEDIA_PREFIX/lib/dri/rockchip_drv_video.so"
+UNIT=/etc/systemd/system/mediabox-browser.service
+LAUNCHER="$PREFIX/bin/mediabox-browser"
+CHROMIUM="${MEDIABOX_CHROMIUM:-/usr/lib/chromium/chromium}"
+PORT="${MEDIABOX_BROWSER_DEBUG_PORT:-9222}"
+
+fails=0
+ok()  { printf '  PASS  %-26s %s\n' "$1" "$2"; }
+bad() { printf '  FAIL  %-26s %s\n' "$1" "$2"; fails=$((fails + 1)); }
+skip(){ printf '  SKIP  %-26s %s\n' "$1" "$2"; }
+
+echo '== the decoder this board has'
+# A BSP kernel puts the VPU behind a Rockchip ioctl node and does not put it
+# behind V4L2 at all. Which of the two it is decides everything else: the V4L2
+# path Chromium also carries has nothing to bind to here.
+if [ -e /dev/mpp_service ]; then
+  ok 'decode device' '/dev/mpp_service'
+else
+  bad 'decode device' '/dev/mpp_service absent -- not a Rockchip BSP kernel'
+fi
+if ls /dev/video* >/dev/null 2>&1; then
+  skip 'v4l2 nodes' "$(ls -d /dev/video* | tr '\n' ' ')"
+else
+  ok 'v4l2 nodes' 'none, as expected on this kernel'
+fi
+
+echo '== the driver that bridges the two'
+if [ -e "$DRIVER" ]; then
+  ok 'va driver' "$DRIVER"
+else
+  bad 'va driver' "missing -- run scripts/build-vaapi-driver.sh"
+fi
+if [ -e "$DRIVER" ]; then
+  # One MPP on this box. A driver linked against the distribution's would be a
+  # second decoder stack, which is the thing the media runtime exists to avoid.
+  mpp=$(ldd "$DRIVER" 2>/dev/null | sed -n 's/.*librockchip_mpp[^ ]* => \([^ ]*\).*/\1/p' | head -1)
+  case "$mpp" in
+    "$MEDIA_PREFIX"/*) ok 'links product MPP' "$mpp" ;;
+    *)                 bad 'links product MPP' "${mpp:-unresolved}" ;;
+  esac
+  if ldd "$DRIVER" 2>/dev/null | grep -q rk3588-screenbridge; then
+    bad 'screenbridge prefix' 'the other product is on this link line'
+  else
+    ok 'screenbridge prefix' 'unreferenced'
+  fi
+  if command -v vainfo >/dev/null 2>&1; then
+    info=$(LIBVA_DRIVERS_PATH="$MEDIA_PREFIX/lib/dri" LIBVA_DRIVER_NAME=rockchip \
+           vainfo --display drm --device /dev/dri/renderD128 2>&1 || true)
+    case "$info" in
+      *'va_openDriver() returns 0'*) ok 'libva opens it' "$(printf '%s' "$info" | sed -n 's/^vainfo: Driver version: *//p')" ;;
+      *) bad 'libva opens it' "$(printf '%s' "$info" | grep -i error | head -1)" ;;
+    esac
+    for p in VAProfileH264High VAProfileVP9Profile0; do
+      case "$info" in
+        *"$p"*) ok "$p" 'VLD' ;;
+        *)      bad "$p" 'absent' ;;
+      esac
+    done
+  else
+    skip 'libva opens it' 'vainfo is not installed'
+  fi
+fi
+
+echo '== what the browser is allowed and told'
+# DevicePolicy stays closed, so the decode node has to be named. Without the
+# line the driver loads, advertises its profiles and fails on the first frame,
+# which reads exactly like a decoder that was never configured.
+for want in '/dev/mpp_service' '/dev/rga'; do
+  if grep -q "^DeviceAllow=$want rw" "$UNIT" 2>/dev/null; then
+    ok "unit grants $want" 'rw'
+  else
+    bad "unit grants $want" 'not in DeviceAllow'
+  fi
+done
+if grep -q '^DevicePolicy=closed' "$UNIT" 2>/dev/null; then
+  ok 'device policy' 'still closed'
+else
+  bad 'device policy' 'no longer closed -- the sandbox was widened'
+fi
+for want in LIBVA_DRIVER_NAME=rockchip "LIBVA_DRIVERS_PATH=$MEDIA_PREFIX/lib/dri"; do
+  if grep -q "^Environment=$want" "$UNIT" 2>/dev/null; then
+    ok "unit sets ${want%%=*}" "${want#*=}"
+  else
+    bad "unit sets ${want%%=*}" 'absent'
+  fi
+done
+
+echo '== the flags, against this browser rather than a blog'
+# A feature name Chromium no longer knows is accepted in silence. Each one is
+# checked against the binary that is installed here.
+for f in AcceleratedVideoDecoder AcceleratedVideoDecodeLinuxGL AcceleratedVideoDecodeLinuxZeroCopyGL; do
+  in_launcher=no; in_binary=no
+  grep -q "$f" "$LAUNCHER" 2>/dev/null && in_launcher=yes
+  LC_ALL=C grep -aqF "$f" "$CHROMIUM" 2>/dev/null && in_binary=yes
+  if [ "$in_launcher" = yes ] && [ "$in_binary" = yes ]; then
+    ok "$f" 'asked for, and known to this build'
+  elif [ "$in_launcher" = yes ]; then
+    bad "$f" 'asked for, but this Chromium does not know it'
+  else
+    bad "$f" 'not asked for'
+  fi
+done
+
+echo '== and what the running browser says'
+if ! systemctl is-active --quiet mediabox-browser.service; then
+  skip 'live decode profiles' 'the browser does not own the display'
+elif ! curl -s -m 3 -o /dev/null "http://127.0.0.1:$PORT/json/version" 2>/dev/null; then
+  skip 'live decode profiles' "no debugging port on $PORT"
+else
+  gpu=$(curl -s -m 5 "http://127.0.0.1:$PORT/json/version" 2>/dev/null || true)
+  case "$gpu" in
+    *Chrome*) ok 'debugging port' "$(printf '%s' "$gpu" | sed -n 's/.*"Browser": "\([^"]*\)".*/\1/p')" ;;
+    *)        bad 'debugging port' 'no answer' ;;
+  esac
+fi
+
+[ "$fails" -eq 0 ] || { echo '== browser decode verification FAILED'; exit 1; }
+echo '== the browser reaches the video hardware'

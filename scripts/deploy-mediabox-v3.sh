@@ -66,6 +66,18 @@ sh_ "test -e '$MEDIABOX_MEDIA_PREFIX/lib/pkgconfig/libavcodec.pc'" || {
   echo "  run scripts/build-media-runtime.sh" >&2
   exit 1
 }
+# The browser's decoder, which is the same MPP reached through a different door.
+#
+# Built on the appliance for the same reason the runtime is, and checked rather
+# than installed here: without it the browser starts, looks perfectly healthy
+# and decodes 4K in software, which is the failure this whole path exists to
+# stop. Not fatal -- a board can be deployed and the driver built afterwards --
+# but it is said plainly rather than discovered on the television.
+sh_ "test -e '$MEDIABOX_MEDIA_PREFIX/lib/dri/rockchip_drv_video.so'" || {
+  echo "   no VA-API driver at $MEDIABOX_MEDIA_PREFIX/lib/dri" >&2
+  echo "   the browser will decode video in software until you run" >&2
+  echo "     scripts/build-vaapi-driver.sh" >&2
+}
 
 say "control plane (cross-compile, $target_triple)"
 ( cd "$here/rust" && cargo build --release --target "$target_triple" )
@@ -212,15 +224,18 @@ sh_ "command -v sway >/dev/null && command -v chromium >/dev/null && command -v 
   sh_ "DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sway chromium kbd"
 }
-cp_ "$here/packaging/mediabox-browser" "$here/packaging/mediabox-handback" "$MEDIABOX_TARGET:/var/tmp/"
+cp_ "$here/packaging/mediabox-browser" "$here/packaging/mediabox-handback" \
+    "$here/packaging/mediabox-browser-verify" "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/config/sway-browser.conf" "$MEDIABOX_TARGET:/var/tmp/"
 tar -C "$here/packaging" -cf - browser-remote | sh_ "rm -rf $prefix/browser-remote && tar -C $prefix -xf -"
 sh_ "set -e
   mkdir -p /etc/mediabox /var/lib/mediabox-browser
   install -m 0755 /var/tmp/mediabox-browser $prefix/bin/mediabox-browser
   install -m 0755 /var/tmp/mediabox-handback $prefix/bin/mediabox-handback
+  install -m 0755 /var/tmp/mediabox-browser-verify $prefix/bin/mediabox-browser-verify
   install -m 0644 /var/tmp/sway-browser.conf /etc/mediabox/sway-browser.conf
-  rm -f /var/tmp/mediabox-browser /var/tmp/mediabox-handback /var/tmp/sway-browser.conf"
+  rm -f /var/tmp/mediabox-browser /var/tmp/mediabox-handback \
+        /var/tmp/mediabox-browser-verify /var/tmp/sway-browser.conf"
 
 say "the player MediaBox owns"
 # The player itself is built on the appliance by scripts/build-mediabox-player.sh:

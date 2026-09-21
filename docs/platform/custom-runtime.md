@@ -83,6 +83,25 @@ path, an install prefix or an rpath.
 and is not pinned here: it is a transport this product's sources can arrive
 over, and it is in the configuration the appliance was measured with.
 
+### 3b. rockchip-vaapi — the browser's way in to MPP
+
+| | |
+| --- | --- |
+| Upstream | `https://github.com/defcom5-rockchip/rockchip-vaapi.git` |
+| Pinned at | `8e41d7853415a401984dc71521e9fc4fc5f7fe97`, tag `v2.2.0` |
+| Licence | LGPL-2.1-or-later |
+| What it is | A VA-API 1.20 backend that implements the driver vtable on top of `librockchip_mpp`. It is not a second decoder: it is a different doorway onto the one in entry 1. |
+| Why it has to exist | This appliance's kernel exposes the VPU as `/dev/mpp_service` and exposes no V4L2 codec device at all — there is no `/dev/video*` on the board, `CONFIG_VIDEO_HANTRO` is unset and `/sys/class/video4linux` is empty. Chromium's two accelerated decode backends on Linux are V4L2 and VA-API; the first has nothing to bind to here, and the second needs a driver that did not exist. Without it the GPU process says `vaInitialize failed: unknown libva error`, `chrome://gpu` lists no decode profiles, and 4K is decoded by the CPU. |
+| Why not upstream `woodyst/rockchip-vaapi` | That is the original and it is a one-tag prototype: its own `docs/DEVELOPMENT.md` records that the HEVC, VP9 and AV1 paths fall through to the H.264 stub. The HEVC assembler, the 10-bit surface export and the fix for Chromium's create-export-then-decode order all live in the fork. |
+| Why that revision and not `main` | `v2.1.5` is the first release that reads a surface's bit depth from the surface rather than from the last decoded frame, which is the order Chromium uses; before it, 10-bit content exports as 8-bit NV12 and arrives garbled. `v2.2.0` is the current tag above that line. |
+| Configuration | The shipped `Makefile` hard-codes `/usr/include/rockchip` and a bare `-lrockchip_mpp`, both of which are the distribution's MPP. The build overrides `CFLAGS`/`LDFLAGS` with `pkg-config` against this prefix and adds `-Wl,-rpath,$MEDIABOX_MEDIA_PREFIX/lib`, so there is one MPP on the box and the browser links the one the players link. |
+| Built by | `scripts/build-vaapi-driver.sh` |
+| Installed at | `$MEDIABOX_MEDIA_PREFIX/lib/dri/rockchip_drv_video.so` — deliberately **not** `/usr/lib/aarch64-linux-gnu/dri`, so nothing else on the machine acquires a Rockchip decoder it did not ask for. The browser is pointed at it by `LIBVA_DRIVERS_PATH` in its unit. |
+| Consumers | the browser application, and nothing else: mpv and Kodi call MPP directly and have no use for a VA-API layer |
+| Patches | none |
+| Decode profiles | H.264 Constrained Baseline / Main / High / High10, HEVC Main / Main10, VP8, VP9 Profile 0 / Profile 2 — to 7680x4320. **No AV1**: VA-API hands the driver headerless tile data and MPP wants whole OBUs. No encode entrypoints at all. |
+| Validation | `scripts/build-vaapi-driver.sh verify` and `mediabox-browser-verify`: the driver resolves against this prefix, never names the ScreenBridge prefix, `va_openDriver()` returns 0, and H.264 High and VP9 Profile 0 are advertised |
+
 ### 4. Mali G610 user space — **not a source build**
 
 | | |

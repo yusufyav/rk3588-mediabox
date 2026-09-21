@@ -85,9 +85,27 @@ ExecStartPre=/usr/bin/chvt 8
 # an ordinary stop into a failed unit.
 ExecStopPost=-/usr/bin/chvt 1
 # The private Mali runtime is the one Kodi uses; wlroots needs it for a
-# GPU-accelerated compositor. Nothing here decodes video through the Rockchip
-# stack, so the media runtime is not on this line.
+# GPU-accelerated compositor. The media runtime is deliberately still not on
+# this line: the decoder reaches it through the RPATH in the VA-API driver
+# below, so the compositor's GL stack cannot be shadowed by a library that
+# happens to share a name with one of Rockchip's.
 Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib
+# The video decoder, which is a different device from the GPU above.
+#
+# This board's VPU is a BSP device: it is /dev/mpp_service, a Rockchip ioctl
+# interface, and there is no /dev/video* on it at all. Chromium's accelerated
+# decode on Linux is VA-API, so without a VA-API driver its GPU process says
+# "vaInitialize failed: unknown libva error", chrome://gpu lists no decode
+# profiles, and a 4K page is decoded by the CPU while the line at the top of
+# chrome://gpu still reads "Video Decode: Hardware accelerated".
+#
+# scripts/build-vaapi-driver.sh puts a driver bridging libva onto this
+# product's own MPP at the path below. Named rather than searched for: libva
+# probes the render node for a driver name and would find none, and Chromium's
+# own documentation for this is that the name has to be in the environment
+# because the browser cannot auto-detect it from inside its GPU process.
+Environment=LIBVA_DRIVER_NAME=rockchip
+Environment=LIBVA_DRIVERS_PATH=/opt/rk3588-mediabox/media-runtime/lib/dri
 # drm *and* libinput. Naming only the DRM backend gives a compositor that
 # lights up the television and has no input devices at all: no keyboard, no
 # remote, nothing. The list is explicit so the backend set cannot drift.
@@ -155,6 +173,16 @@ DeviceAllow=char-input rw
 DeviceAllow=char-alsa rw
 DeviceAllow=char-tty rw
 DeviceAllow=char-vcs rw
+# The video decoder and the 2D block it hands 10-bit frames to.
+#
+# Two nodes, named one at a time rather than by class: both are dynamic-major
+# character devices, so there is no `char-*` group that covers them without
+# covering a great deal else, and DevicePolicy stays closed. Without the first
+# of them the VA-API driver above loads, advertises its profiles and then
+# fails on the first frame -- which looks exactly like a decoder that is not
+# configured, and is not.
+DeviceAllow=/dev/mpp_service rw
+DeviceAllow=/dev/rga rw
 ReadWritePaths=/var/lib/mediabox-browser /run/mediabox-browser
 
 [Install]
