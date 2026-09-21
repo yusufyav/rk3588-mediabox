@@ -182,6 +182,43 @@ if [ -n "$comp_pid" ] && [ -r "/proc/$comp_pid/root/dev" ]; then
 else
   skip 'browser /dev' 'the browser is not running'
 fi
+echo '== the page goes to the display without a copy'
+# Direct scanout is what keeps the compositor out of the picture entirely: the
+# client's own buffer is handed to the display controller. Two things have to
+# hold, and both were measured into place rather than assumed.
+#
+# First, nothing may disable it.
+if grep -q '^Environment=WLR_SCENE_DISABLE_DIRECT_SCANOUT=1' "$UNIT" 2>/dev/null; then
+  bad 'direct scanout' 'the unit disables it'
+else
+  ok 'direct scanout' 'not disabled by the unit'
+fi
+# Second, the compositor's scene must hold one node, which means no background
+# rectangle. wlroots clears uncovered area to black by itself; an `output bg`
+# is a node, and a second node is why scanout was never attempted here.
+SWAYCONF="${MEDIABOX_SWAY_CONF:-/etc/mediabox/sway-browser.conf}"
+if grep -qE '^[[:space:]]*output[[:space:]]+\*?[^#]*[[:space:]]bg[[:space:]]' "$SWAYCONF" 2>/dev/null; then
+  bad 'no background node' 'sway config sets output bg -- that second node blocks scanout'
+else
+  ok 'no background node' 'the scene can hold a single node'
+fi
+# And what the display controller is actually reading. wlroots allocates its
+# own swapchain as XR24; Chromium's surface is AB24. A plane carrying XR24
+# while the browser is up is the compositor still doing the work.
+SUMMARY=/sys/kernel/debug/dri/0/summary
+if ! pgrep -x sway >/dev/null 2>&1; then
+  skip 'scanout plane' 'the browser is not running'
+elif [ ! -r "$SUMMARY" ]; then
+  skip 'scanout plane' 'no VOP2 summary on this kernel'
+else
+  planefmt=$(sed -n '/win[0-9]: ACTIVE/,/format:/p' "$SUMMARY" | grep -m1 -oE '[A-Z][A-Z0-9][0-9]{2}' || true)
+  case "$planefmt" in
+    AB24|AR24) ok 'scanout plane' "$planefmt -- the client's own buffer" ;;
+    XR24)      bad 'scanout plane' 'XR24 -- this is wlroots compositing, not scanout' ;;
+    *)         skip 'scanout plane' "unrecognised format '$planefmt'" ;;
+  esac
+fi
+
 for want in LIBVA_DRIVER_NAME=rockchip "LIBVA_DRIVERS_PATH=$MEDIA_PREFIX/lib/dri"; do
   if grep -q "^Environment=$want" "$UNIT" 2>/dev/null; then
     ok "unit sets ${want%%=*}" "${want#*=}"

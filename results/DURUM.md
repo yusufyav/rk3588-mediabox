@@ -236,6 +236,15 @@ tarayıcının `/dev`'ini host'unkiyle karşılaştıran canlı kontrol de için
 
 Ayrıntılı araştırma raporu: [tarayici-titreme-arastirmasi.md](tarayici-titreme-arastirmasi.md).
 
+**Kapandı.** Sebep, sway yapılandırmasındaki `output * bg` satırıydı: bir renk
+ayarı değil, çıktı boyutunda bir sahne düğümü. wlroots direct scanout'u yalnız
+sahnede tek düğüm varken yapıyor ve Chromium'un `AB24` yüzeyi alfa kanallı
+olduğu için o dikdörtgen elenemiyordu — scanout hiç denenmiyordu, bu yüzden
+wlroots bir red mesajı da yazmıyordu. Satır kaldırıldı,
+`WLR_SCENE_DISABLE_DIRECT_SCANOUT=1` kaldırıldı. VOP2 artık Chromium'un
+tamponunu tarıyor (`AB24`, wlroots'unki `XR24`); 4K VP9'da CPU %131,5 → **%91,0**,
+GPU %46-57 @1000 MHz → **%18 @300 MHz**, 861 karede **0 düşük**, fan 100 → 50.
+
 
 Titreme/yırtılma için üç mimari aday ölçülüp kapatıldı. Tekrar denenmesin:
 

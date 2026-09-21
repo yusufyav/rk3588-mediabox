@@ -1,10 +1,12 @@
 # Tarayıcıda yırtılma — araştırma raporu
 
 **Tarih:** 21 Eylül 2026 · **Cihaz:** Orange Pi 5 Plus, `6.1.115-vendor-rk35xx`
-**Panel:** 2560x1440@143,999 Hz, HDMI-A-2 · **Durum: ÇÖZÜLMEDİ**
+**Panel:** 2560x1440@143,999 Hz, HDMI-A-2 · **Durum: KAPANDI — bkz. Bölüm 8**
 
-Bu rapor bir başarı raporu değil. Sorun duruyor. Yazılmasının sebebi, bir
-sonraki denemenin bugün elenmiş yolları tekrar denememesi.
+Bu rapor önce bir başarısızlık kaydı olarak yazıldı: altı saat, üç mimari
+deneme, sonuç yok. Sonradan sebep bulundu ve düzeltildi; Bölüm 8 onu anlatıyor.
+Bölüm 1-7 olduğu gibi duruyor, çünkü elenmiş yolların kaydı düzeltmenin kendisi
+kadar değerli — ve çünkü sebebin neden bu kadar geç bulunduğunu gösteriyor.
 
 ---
 
@@ -140,7 +142,7 @@ Mali'nin GBM'i `/dev/dma_heap/system`'den tampon alıyor (bağlanmazsa
 
 ---
 
-## 6. Sıradaki tek somut adım
+## 6. Sıradaki tek somut adım — YAPILDI, bkz. Bölüm 8
 
 **Direct scanout'un neden reddedildiğini öğrenmek.**
 
@@ -174,3 +176,88 @@ yeni bir upstream bileşen, kullanıcının açık onayıyla.
   `/opt/rk3588-mediabox/bin/mediabox-browser` betiğinde, **repoda değil**.
 * **`rerender` maliyeti** — ~1,2 çekirdek ve GPU tam saatte. Kaldırılınca eski
   içerik kalıntısı geliyor, yani yara bandı ama taşıyıcı.
+
+---
+
+## 8. Sebep bulundu ve kapatıldı (21 Eylül 2026, aynı gün)
+
+Bölüm 6'daki tek açık adım yapıldı ve sorunu kapattı.
+
+### Red sebebi
+
+**Sway yapılandırmasındaki `output * bg #07080b solid_color` satırı.**
+
+O satır bir renk ayarı değil, bir **sahne düğümü**: çıktı boyutunda, her şeyin
+altında duran bir dikdörtgen. wlroots bir istemcinin tamponunu doğrudan ekran
+denetleyicisine ancak sahne listesinde **tam olarak bir düğüm** varken veriyor.
+Chromium'un yüzeyi `AB24` (ABGR8888) — alfa kanallı, dolayısıyla compositor
+arkasındakini kapattığını varsayamıyor ve dikdörtgeni eleyemiyor. İki düğüm,
+ve direct scanout **hiç denenmiyor**.
+
+Denenmediği için wlroots bir red mesajı da yazmıyor: `Direct scan-out %s`
+yalnız durum *değiştiğinde* yazılıyor, hiç etkinleşmediyse hiç yazılmıyor.
+Sessizliğin sebebi buydu.
+
+### Elenen sebepler, ölçümle
+
+| aday | sonuç |
+|---|---|
+| geometri | output 2560x1440 scale 1.0; Chromium `fullscreen=1`, `rect 0,0 2560x1440`, `deco 0x0` — **birebir** |
+| tampon import'u | `framebuffer[300]`, format `AB24`, modifier `0x0`, `imported=yes` — wlroots zaten import etmiş |
+| düzlem format desteği | plane 98 (PRIMARY, crtc 0x2): `XR24 AR24 XB24 AB24 ...`, modifier `0x0` listesinde `AB24` **var** |
+| DMA-BUF | gpu-process 214 dmabuf tutuyor |
+
+### Uygulanan düzeltme
+
+* `config/sway-browser.conf` — `output * bg` satırı kaldırıldı. Görsel kayıp
+  yok: wlroots hiçbir düğümün kapatmadığı alanı kareyi kurarken opak siyaha
+  temizliyor, yani o satırın boyadığı şeyi zaten boyuyor — ama düğüm olarak
+  değil.
+* `packaging/systemd/mediabox-browser.service` —
+  `Environment=WLR_SCENE_DISABLE_DIRECT_SCANOUT=1` kaldırıldı. O satırın
+  gerekçesi ("scanout, Chromium hâlâ çizerken okuyor") yanlış teşhisti: scanout
+  zaten hiç olmuyordu, dolayısıyla kapatmak hiçbir şeyi değiştirmiyor, yalnız
+  gerçek sebebi gizliyordu.
+* `WLR_SCENE_DEBUG_DAMAGE=rerender` **korundu**. Scanout etkinken wlroots
+  kompozit yapmıyor, yani bedeli sıfır; scanout düştüğünde (örneğin bir açılır
+  pencere) eski-kare sorununa karşı hâlâ gerekli.
+
+### Kanıt
+
+```
+00:00:02.006 [DEBUG] [wlr] [types/scene/wlr_scene.c:1858] Direct scan-out enabled
+```
+
+VOP2'nin taradığı düzlem artık Chromium'un tamponu:
+
+```
+Cluster0-win0: ACTIVE
+    format: AB24 little-endian (0x34324241)     ← wlroots'un swapchain'i XR24
+    src/dst: 2560x1440
+```
+
+Taranan tampon adresleri `0x4658000` / `0x8f95000` — wlroots'un kendi
+swapchain'i (`0x1c20000` / `0x3848000`) değil.
+
+### Ölçülen kazanç
+
+| | kompozit (önce) | direct scanout (sonra) |
+|---|---|---|
+| 4K VP9 Chromium CPU | %131,5 | **%91,0** |
+| GPU | %46-57 @ 1000 MHz | **%18 @ 300 MHz** |
+| düşen kare (2160p) | — | **0 / 861** |
+| düşen kare (720p) | — | 1 / 857 (%0,12) |
+| fan pwm | 100 | **50** |
+
+720p'nin CPU'su yüksek (%156,8) çünkü YouTube o çözünürlükte **AV1** veriyor ve
+sürücüde AV1 yok — bilinen açık kusur, bu işle ilgisiz.
+
+### Neden bu kadar geç bulundu
+
+İlk gün "tek düzlem aktif, `allocated by = sway`" diye kaydedilmişti. Oradan
+doğru soruya — *Chromium'un kendi tamponu neden birincil düzlemde değil* —
+gidilmedi; onun yerine video subsurface'leri için overlay düzlemi arandı.
+Direct scanout bir kez denendi, devreye girmedi, ve **neden girmediği
+sorulmadı**. Ayrıca unit dosyasındaki "direct scanout tearing yapıyor" yorumu
+sınanmadan olgu kabul edildi; o yorum yanlış teşhisti ve saatlerce fence
+aranmasına yol açtı.

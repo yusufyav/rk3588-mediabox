@@ -113,12 +113,27 @@ Environment=WLR_BACKENDS=drm,libinput
 # Without a GPU the compositor should still come up rather than leave the
 # television black.
 Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
-# Direct scanout hands a fullscreen client's own buffer to the display
-# controller. It saves a copy, and it is also how a browser repainting that
-# buffer ends up visible as horizontal tearing partway down the screen: the
-# scanout is reading it while Chromium is still drawing into it. Compositing
-# through wlroots costs one blit per frame and presents whole frames.
-Environment=WLR_SCENE_DISABLE_DIRECT_SCANOUT=1
+# Direct scanout, on.
+#
+# It hands the fullscreen client's own buffer to the display controller, so
+# the compositor makes no copy at all: wlroots' render list is skipped and
+# Chromium's buffer is what VOP2 reads. This line used to disable it, on the
+# grounds that scanout was reading a buffer Chromium was still drawing into.
+# That was the wrong diagnosis -- direct scanout was not happening in the
+# first place, for the reason recorded beside the missing background in
+# config/sway-browser.conf, so disabling it changed nothing and hid the real
+# cause.
+#
+# With it actually running, measured on the Plus against the same clip:
+#
+#                     compositing          direct scanout
+#   4K VP9 CPU        131.5%               91.0%
+#   GPU               46-57% @ 1000 MHz    18% @ 300 MHz
+#   dropped frames    --                   0 of 861
+#   fan               100                  50
+#
+# and the scanned-out framebuffer is Chromium's own, AB24 where wlroots'
+# swapchain is XR24. mediabox-browser-verify checks both halves of this.
 # Damage tracking off: the compositor redraws the whole output every frame
 # rather than only the region the client reports as changed.
 #
