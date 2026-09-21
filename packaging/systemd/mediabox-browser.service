@@ -166,23 +166,95 @@ ProtectClock=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Devices, as a namespace rather than as a cgroup rule.
+#
+# This unit asks for PAMName=login, because libseat is handed the DRM device
+# only inside a real login session. pam_systemd answers that request by moving
+# the processes out of this unit's cgroup and into a login session scope:
+#
+#     sway and chromium   /user.slice/user-0.slice/session-437.scope
+#     this unit           /system.slice/mediabox-browser.service
+#
+# Everything systemd enforces through the cgroup leaves with them. Measured on
+# the Plus, with /dev/loop-control -- a node no line here has ever granted:
+# a scope carrying exactly the DeviceAllow list below refuses it with EPERM,
+# and the identical open inside the running browser succeeds. So DevicePolicy
+# and DeviceAllow, by themselves, were a rule written about a cgroup the
+# browser does not live in, and the confinement this section claimed was in
+# part not there.
+#
+# What does survive is the mount namespace: it is built at exec and inherited
+# by every child, whatever cgroup that child is moved to afterwards.
+# PrivateDevices gives this unit a /dev of its own carrying nothing but the
+# kernel's harmless pseudo-devices, and each line below puts back one device
+# this browser has a reason to touch. A node not named here does not exist for
+# the browser -- not "is refused", does not exist -- which is the same answer
+# whether or not the cgroup rule is reaching it.
+#
+# /dev/dri arrives whole, and one node inside it is taken away again.
+#
+# The whole directory, because libseat enumerates every DRM device the login
+# session owns and hands wlroots the list. Binding only the display's card and
+# leaving the NPU's out was measured on the Plus and is not survivable:
+#
+#     [libseat] Could not stat path '/dev/dri/card1'
+#     [wlr] Failed to create GBM device
+#     [wlr] Could not initialize renderer
+#     [sway] Failed to create renderer
+#
+# -- sway exits on the first device it cannot stat, and the television stays
+# black. So the NPU's card stays visible.
+#
+# The NPU's *render* node is a different matter and is not settled here. That
+# node is the one Chromium looks at: the Ozone layer scans /dev/dri for
+# something to run video on, says "Preferred drm_render_node not found" and
+# takes what enumeration hands it. Under Weston it took the neural accelerator
+# -- "picking rknpu" -- initialised VA-API against it, listed nothing under
+# Decoding on chrome://gpu, and a 4K VP9 page fell to the CPU at 571% of one
+# core against 131% with the right node, same clip, same second. Under sway it
+# takes the display's node, which is the configuration this product ships, so
+# the hazard is latent rather than live.
+#
+# Closing it by naming renderD129 here was tried and rejected: that number is
+# what one kernel handed out on one board on one boot, which is what platform
+# discovery is for and what tests/run-host-tests.sh refuses in a unit file.
+# mediabox-browser-verify asks the running browser which node it actually took,
+# which is the question that survives a board with a different enumeration.
+PrivateDevices=yes
+BindPaths=/dev/dri
+BindPaths=/dev/mali0
+# Where the GL stack gets its buffers. Measured rather than guessed: a running
+# compositor holds nine handles on /dev/dma_heap/system, and without it Mali's
+# GBM cannot allocate at all --
+#
+#     [wlr] Failed to create GBM device
+#     [wlr] Could not initialize renderer
+#
+# on an otherwise complete /dev.
+BindPaths=/dev/dma_heap
+BindPaths=/dev/input
+BindPaths=/dev/snd
+# chvt, which this unit runs before and after itself, opens /dev/tty0; the
+# session's own terminal is tty8.
+BindPaths=/dev/tty0
+BindPaths=/dev/tty8
+# The video decoder and the 2D block it hands 10-bit frames to. Without the
+# first of them the VA-API driver loads, advertises its profiles and then
+# fails on the first frame -- which looks exactly like a decoder that is not
+# configured, and is not.
+BindPaths=/dev/mpp_service
+BindPaths=/dev/rga
+# The cgroup rule is kept beside it rather than dropped, so that a kernel or a
+# systemd that stops moving this unit into a session scope tightens the
+# confinement instead of quietly widening it.
 DevicePolicy=closed
 DeviceAllow=char-drm rw
 DeviceAllow=/dev/mali0 rw
+DeviceAllow=/dev/mpp_service rw
+DeviceAllow=/dev/rga rw
 DeviceAllow=char-input rw
 DeviceAllow=char-alsa rw
 DeviceAllow=char-tty rw
-DeviceAllow=char-vcs rw
-# The video decoder and the 2D block it hands 10-bit frames to.
-#
-# Two nodes, named one at a time rather than by class: both are dynamic-major
-# character devices, so there is no `char-*` group that covers them without
-# covering a great deal else, and DevicePolicy stays closed. Without the first
-# of them the VA-API driver above loads, advertises its profiles and then
-# fails on the first frame -- which looks exactly like a decoder that is not
-# configured, and is not.
-DeviceAllow=/dev/mpp_service rw
-DeviceAllow=/dev/rga rw
 ReadWritePaths=/var/lib/mediabox-browser /run/mediabox-browser
 
 [Install]

@@ -103,6 +103,85 @@ if grep -q '^DevicePolicy=closed' "$UNIT" 2>/dev/null; then
 else
   bad 'device policy' 'no longer closed -- the sandbox was widened'
 fi
+
+# And the half of the confinement that actually reaches this browser.
+#
+# PAMName=login moves these processes into a login session scope of their own,
+# and everything systemd enforces through the cgroup stays behind in a cgroup
+# they no longer live in -- measured with /dev/loop-control, which a scope
+# carrying the list above refuses and the running browser opens. The mount
+# namespace is built at exec and inherited whatever happens to the cgroup
+# afterwards, so the device list has to be expressed there too or it is a
+# comment rather than a rule.
+if grep -q '^PrivateDevices=yes' "$UNIT" 2>/dev/null; then
+  ok 'private /dev' 'namespace-enforced'
+else
+  bad 'private /dev' 'PrivateDevices absent -- DeviceAllow alone does not reach this unit'
+fi
+for want in /dev/dri /dev/mali0 /dev/dma_heap /dev/mpp_service /dev/rga; do
+  if grep -q "^BindPaths=$want\$" "$UNIT" 2>/dev/null; then
+    ok "unit binds $want" 'present'
+  else
+    bad "unit binds $want" 'not in BindPaths -- it will not exist for the browser'
+  fi
+done
+# Which render node the browser actually took.
+#
+# Chromium's Ozone layer scans /dev/dri for something to run video on, reports
+# "Preferred drm_render_node not found" and takes what enumeration gives it.
+# Measured under a compositor that offered no preference, that was the NPU:
+# VA-API came up against the neural accelerator, chrome://gpu listed nothing
+# under Decoding, and a 4K VP9 page was decoded by the CPU. The node number is
+# a property of one board on one boot, so the question is asked of the running
+# browser rather than of the unit file: whichever node it holds has to belong
+# to the same driver as the display.
+display_drv=''
+for card in /sys/class/drm/card[0-9]; do
+  [ -e "$card/device/driver" ] || continue
+  # The card that has the connectors is the display.
+  if ls -d "$card"-* >/dev/null 2>&1; then
+    display_drv=$(basename "$(readlink -f "$card/device/driver")")
+    break
+  fi
+done
+gpu_pid=$(pgrep -f 'type=gpu-process' 2>/dev/null | head -1 || true)
+if [ -z "$display_drv" ]; then
+  skip 'render node' 'no display card found in sysfs'
+elif [ -z "$gpu_pid" ]; then
+  skip 'render node' 'the browser is not running'
+else
+  held=$(ls -l "/proc/$gpu_pid/fd" 2>/dev/null \
+         | grep -oE '/dev/dri/renderD[0-9]+' | head -1 || true)
+  if [ -z "$held" ]; then
+    skip 'render node' 'the gpu process holds none yet'
+  else
+    held_drv=$(basename "$(readlink -f "/sys/class/drm/${held#/dev/dri/}/device/driver")" 2>/dev/null || echo unknown)
+    if [ "$held_drv" = "$display_drv" ]; then
+      ok 'render node' "$held, driver $held_drv"
+    else
+      bad 'render node' "$held is a $held_drv node, not the display's $display_drv"
+    fi
+  fi
+fi
+
+# What the running browser actually sees, which is the only version that counts.
+comp_pid=$(pgrep -x sway 2>/dev/null | head -1 || true)
+if [ -n "$comp_pid" ] && [ -r "/proc/$comp_pid/root/dev" ]; then
+  mine=$(ls "/proc/$comp_pid/root/dev" 2>/dev/null | wc -l)
+  host=$(ls /dev | wc -l)
+  if [ "$mine" -lt "$host" ]; then
+    ok 'browser /dev' "$mine nodes against $host on the host"
+  else
+    bad 'browser /dev' "$mine nodes, the same as the host -- the namespace is not applied"
+  fi
+  if [ -e "/proc/$comp_pid/root/dev/mmcblk0" ]; then
+    bad 'browser sees storage' '/dev/mmcblk0 is reachable from the browser'
+  else
+    ok 'browser sees storage' 'no block devices in its /dev'
+  fi
+else
+  skip 'browser /dev' 'the browser is not running'
+fi
 for want in LIBVA_DRIVER_NAME=rockchip "LIBVA_DRIVERS_PATH=$MEDIA_PREFIX/lib/dri"; do
   if grep -q "^Environment=$want" "$UNIT" 2>/dev/null; then
     ok "unit sets ${want%%=*}" "${want#*=}"

@@ -183,6 +183,82 @@ okunuyor. Bu **decode'dan gelmiyor ve yeni değil** — aynı A/B'de yazılım
 overlay düzlemi yok. Çözümü ekran modu kararında (120 Hz veya 60 Hz mod),
 bu görevin kapsamı değil.
 
+### Tarayıcının kapatılması gerçekti değildi — oldu (21 Eylül 2026)
+
+Birimin `DevicePolicy=closed` ve `DeviceAllow=` satırları **tarayıcıya hiç
+uygulanmıyordu**. Sebep `PAMName=login`: `pam_systemd` süreçleri birimin
+cgroup'undan alıp login session scope'una taşıyor, cgroup üzerinden zorlanan ne
+varsa arkada kalıyor.
+
+    sway ve chromium   /user.slice/user-0.slice/session-437.scope
+    birim              /system.slice/mediabox-browser.service
+
+Ölçüm, hiçbir satırın izin vermediği `/dev/loop-control` ile — beklenen / gerçekleşen:
+
+| | beklenen | gerçekleşen |
+|---|---|---|
+| aynı listeyi taşıyan temiz kapsam | RED | **RED (EPERM)** |
+| çalışan tarayıcının içinde | RED | **AÇILDI** |
+
+Çözüm cgroup'u zorlamak değil, kısıtı **mount namespace'ine** taşımak:
+namespace exec anında kuruluyor ve süreç sonradan hangi cgroup'a taşınırsa
+taşınsın miras kalıyor. `PrivateDevices=yes` + adı adına `BindPaths=`.
+
+| | önce | sonra |
+|---|---|---|
+| tarayıcının gördüğü `/dev` düğümü | 196 | **26** |
+| `/dev/mem`, `/dev/mmcblk0`, `/dev/loop-control` | açılabiliyor | **namespace'te yok** |
+| NPU render düğümü | açılabiliyor | **Permission denied** |
+| donanım çözme | aktif | **aktif** (`fdc38100.rkvdec-core`) |
+
+Ölçerken çıkan iki tuzak, ikisi de dosyada yazılı: `libseat` oturumdaki **her**
+DRM cihazını `stat` ediyor, NPU'nun *kartı* gizlenirse sway açılmıyor (kapatılan
+yalnız render düğümü); ve Mali'nin GBM'i tamponlarını `/dev/dma_heap/system`'den
+alıyor, o bağlanmazsa `Failed to create GBM device`.
+
+**NPU tuzağı.** Chromium'un Ozone katmanı videoyu çalıştıracak render düğümünü
+`/dev/dri` taramasıyla seçiyor ve `Preferred drm_render_node not found` diyor —
+yani doğru düğümü sıralama şansına buluyor. NPU erişilebilirken `picking rknpu`
+deyip VA-API'yi sinir hızlandırıcısına kurdu; `chrome://gpu` → Decoding boş,
+4K VP9 CPU'ya düştü. Aynı klip, aynı saniye: **%571 → %131** tek çekirdek
+cinsinden. sway altında doğru düğümü alıyor — yani tehlike **gizli, aktif
+değil**. Düğümü unit dosyasında adıyla kapatmak denendi ve **reddedildi**:
+`renderD129` bir tahtada bir boot'ta verilmiş numara, `run-host-tests.sh` bunu
+üretim dosyasında haklı olarak kabul etmiyor. Bunun yerine doğrulayıcı çalışan
+tarayıcıya hangi düğümü tuttuğunu soruyor ve sürücüsünü ekranınkiyle
+karşılaştırıyor — farklı sıralamalı bir tahtada da geçerli kalan soru bu.
+Kalıcı kapatma platform keşfinin işi; açık iş olarak aşağıda.
+
+Doğrulayıcı `mediabox-browser-verify` bunların hepsini sorguluyor; çalışan
+tarayıcının `/dev`'ini host'unkiyle karşılaştıran canlı kontrol de içinde.
+
+### Elenen yollar (21 Eylül 2026)
+
+Titreme/yırtılma için üç mimari aday ölçülüp kapatıldı. Tekrar denenmesin:
+
+* **Weston** (14.0.2, kiosk-shell, aynı mod ve aynı Chromium bayrakları). Video
+  yine donanım düzlemine çıkmadı — Chromium videoyu ayrı yüzey olarak teslim
+  etmiyor, atanacak bir şey yok; üstelik Chromium'un VA-API'si kırılıyor
+  (`PreSandboxInitialization() ... failed to find a suitable render node`,
+  `vainfo` aynı düğümde çalışırken). YouTube 4K VP9 tam ekran:
+
+  | | sway | Weston |
+  |---|---|---|
+  | Chromium CPU | **%131,5** | **%571,4** |
+  | compositor CPU | %8,2 | %12,9 |
+  | GPU yük (ort/maks) | %46 / %57 | %30 / %36 |
+  | donanım çözme | aktif | **yok** |
+  | donanım düzlemi | 1 | 1 |
+
+  Weston'da GPU'nun düşük görünmesi iyi haber değil: işi CPU yapıyordu.
+
+* **Compositor'süz Chromium** (Kodi ve native kabuk gibi doğrudan DRM'de).
+  İmkânsız: Debian ikilisinde Ozone DRM/GBM platformu derlenmemiş
+  (`ozone_platform_drm`, `OzonePlatformDrm`, `DrmThread` — hiçbiri yok).
+
+* **`tearing-control` protokolü / async page flip.** sway sunuyor,
+  **Chromium bağlanmıyor** — `wp_tearing_control_v1` ikilide geçmiyor bile.
+
 ## 7. Açık işler
 
 ### Önce
@@ -220,6 +296,11 @@ bu görevin kapsamı değil.
   veri veriyor, MPP tam OBU istiyor. YouTube bu kutuda VP9 seçtiği için pratikte
   ısırmadı; ısırırsa çare hesap tarafında codec tercihi.
 * Tarayıcıda video kodlama (encode) yok — yalnız çözme.
+* Chromium'un VA-API render düğümü seçimi sıralama şansına bağlı
+  (`Preferred drm_render_node not found`). sway altında doğrusunu alıyor,
+  ölçüldü; ama NPU'nun render düğümü erişilebilir kaldığı sürece bu garanti
+  değil. Kalıcı çözüm `mediabox-platform` keşfinin düğümü çözüp birime drop-in
+  yazması. `mediabox-browser-verify` şu an sapmayı yakalıyor, engellemiyor.
 
 ## 8. Taşınabilirlik ve ikinci cihaz (Plus)
 
