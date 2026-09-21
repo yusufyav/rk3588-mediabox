@@ -234,6 +234,9 @@ tarayıcının `/dev`'ini host'unkiyle karşılaştıran canlı kontrol de için
 
 ### Elenen yollar (21 Eylül 2026)
 
+Ayrıntılı araştırma raporu: [tarayici-titreme-arastirmasi.md](tarayici-titreme-arastirmasi.md).
+
+
 Titreme/yırtılma için üç mimari aday ölçülüp kapatıldı. Tekrar denenmesin:
 
 * **Weston** (14.0.2, kiosk-shell, aynı mod ve aynı Chromium bayrakları). Video
