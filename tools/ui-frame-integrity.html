@@ -1,0 +1,202 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MediaBox UI frame integrity</title>
+<!--
+  A page built to make one kind of fault visible and nothing else.
+
+  The complaint it is written for is a small piece of the picture that appears,
+  disappears and comes back while nothing is moving: the last letter typed into
+  the address bar, a seek-bar thumbnail under a still pointer, a dropdown held
+  open by a hover. The suspicion is that those regions are not being redrawn
+  into every buffer of the window's swap chain, so the screen shows whichever
+  buffer comes round next -- new content, old content, new content.
+
+  If that is what is happening, then a region that changes exactly once and
+  then never again will keep alternating forever, as long as the window keeps
+  producing frames for some other reason. That is the whole design of this
+  page:
+
+    #quiet    most of the picture, never redrawn, so nothing damages the
+              region under test by accident
+    #target   changes once per trial and then holds; this is what is sampled
+    #anim     a small square far away from the target, redrawn every frame, so
+              the swap chain keeps rotating with the target region untouched
+    #field    a text box, for the address-bar symptom in page form
+    #hover    a popover that opens on hover and stays open
+
+  Nothing here measures anything. The measurement is a screenshot of the
+  target's own pixels, taken from outside the browser -- see
+  tools/ui-frame-integrity.py -- because the question is what reached the
+  screen, and a page cannot answer that about itself.
+-->
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  body {
+    background: #101418;
+    font: 16px/1.4 system-ui, sans-serif;
+    color: #c8d0d8;
+  }
+  /* The still part. Drawn once, damaged never. A flat colour would do, but a
+     pattern makes a stale region obvious to a person looking at the screen as
+     well as to the sampler. */
+  #quiet {
+    position: absolute; inset: 0;
+    background:
+      repeating-linear-gradient(45deg, #161b20 0 24px, #1b2127 24px 48px);
+  }
+  /* The region under test. Magenta at rest is a locator: it appears nowhere
+     else on this page, so the harness can find where the box landed on screen
+     without being told anything about window decorations or device scale. */
+  #target {
+    position: absolute; left: 8%; top: 30%;
+    width: 240px; height: 240px;
+    background: #ff00ff;
+  }
+  /* Far from the target on purpose: if the two shared a damage rect the test
+     would repair itself. */
+  #anim {
+    position: absolute; right: 6%; bottom: 8%;
+    width: 64px; height: 64px;
+    background: #3d8bfd;
+  }
+  /* Only present when the page is asked for it. A video is the other way a
+     window keeps producing frames, and it is the way the complaint was seen:
+     a still dropdown over a playing page. */
+  #clip {
+    position: absolute; right: 6%; top: 24%;
+    width: 640px; height: 360px; background: #000; display: none;
+  }
+  #field {
+    position: absolute; left: 8%; top: 12%;
+    width: 520px; font-size: 28px; padding: 8px 12px;
+    background: #0b0e11; color: #e6edf3; border: 1px solid #30363d;
+  }
+  #hover { position: absolute; left: 8%; top: 72%; }
+  #hover .trigger { padding: 10px 18px; background: #21262d; border: 1px solid #30363d; }
+  #hover .pop {
+    display: none; margin-top: 6px; width: 320px; padding: 12px;
+    background: #f0f6fc; color: #0b0e11; border: 1px solid #8b949e;
+  }
+  #hover:hover .pop { display: block; }
+  #legend { position: absolute; left: 8%; bottom: 8%; opacity: .75; }
+</style>
+
+<div id="quiet"></div>
+<div id="target"></div>
+<div id="anim"></div>
+<video id="clip" muted loop playsinline></video>
+<input id="field" value="" spellcheck="false">
+<div id="hover">
+  <div class="trigger">hover here</div>
+  <div class="pop" id="pop">This popover is open for as long as the pointer stays on the
+  trigger. It must not blink.</div>
+</div>
+<div id="legend">MediaBox UI frame integrity &mdash; the target box changes once per trial and then holds.</div>
+
+<script>
+(() => {
+  const target = document.getElementById('target');
+  const anim = document.getElementById('anim');
+
+  // The only thing on the page that asks for a frame. Its damage rect is small
+  // and nowhere near the target, which is what keeps the target's region out of
+  // every frame after the one that changed it.
+  let tick = 0;
+  let running = true;
+  let last = 0;
+  const gaps = [];
+  function frame(now) {
+    if (running) {
+      tick = (tick + 1) % 360;
+      anim.style.transform = 'rotate(' + tick + 'deg)';
+    }
+    if (last) gaps.push(now - last);
+    last = now;
+    if (gaps.length > 20000) gaps.shift();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // What the page itself sees of the frame clock. Disabling partial swap makes
+  // every frame redraw the whole window, and if that costs too much it shows
+  // up here before it shows up anywhere else.
+  window.mbxFrames = () => {
+    const g = gaps.slice().sort((a, b) => a - b);
+    gaps.length = 0;
+    if (!g.length) return null;
+    const at = (p) => Math.round(g[Math.min(g.length - 1, Math.floor(g.length * p))] * 100) / 100;
+    return {frames: g.length, p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1)};
+  };
+
+  // The harness stops it while it is working out where something landed on the
+  // screen: it finds a region by photographing the screen twice and looking at
+  // what moved, and a square spinning in the corner moves too.
+  window.mbxAnim = (on) => { running = !!on; return running; };
+
+  // And the clip with it, for the same reason: two photographs of the screen
+  // taken a moment apart cannot be compared while a film is playing in one
+  // corner of them.
+  window.mbxVideo = (on) => {
+    const clip = document.getElementById('clip');
+    if (!clip || !clip.src) return false;
+    if (on) { clip.play().catch(() => {}); } else { clip.pause(); }
+    return !clip.paused;
+  };
+
+  // Two colours far enough apart that a mean over the sampled region cannot
+  // confuse them, and neither is the magenta the harness looks for first.
+  const STATES = ['#202020', '#e0e0e0'];
+  let state = -1;
+
+  // Called from the harness between trials. Resolves on the frame after the
+  // change has been handed to the compositor, so the harness knows when to
+  // start sampling rather than guessing.
+  window.mbxToggle = () => new Promise(resolve => {
+    state = (state + 1) % STATES.length;
+    target.style.background = STATES[state];
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve({
+      state: state, colour: STATES[state], at: Date.now()
+    })));
+  });
+
+  // Page coordinates for anything on the page. The harness pairs this with the
+  // magenta box, which it can find on the screen, and so works out where every
+  // other element landed without knowing anything about window decorations.
+  window.mbxRect = (id) => {
+    const r = document.getElementById(id).getBoundingClientRect();
+    return {x: r.x, y: r.y, w: r.width, h: r.height, dpr: devicePixelRatio};
+  };
+  window.mbxLocate = () => window.mbxRect('target');
+
+  // ?video=<url> plays a clip beside the test, ?anim=0 takes the spinning
+  // square away. Between them the frames that keep the swap chain turning can
+  // be made to come from either a decoder or the compositor thread, which is
+  // the difference between the complaint as it was reported and the complaint
+  // reduced to its parts.
+  const params = new URLSearchParams(location.search);
+  if (params.get('anim') === '0') running = false;
+  const clipSource = params.get('video');
+  if (clipSource) {
+    const clip = document.getElementById('clip');
+    clip.src = clipSource;
+    clip.style.display = 'block';
+    clip.play().catch(() => {});
+  }
+
+  // Who is taking the pointer away, and when. A popover that closes under a
+  // still pointer has been told the pointer left; this says so in the page's
+  // own words instead of by inference.
+  const pointerLog = [];
+  const hover = document.getElementById('hover');
+  for (const kind of ['pointerenter', 'pointerleave']) {
+    hover.addEventListener(kind, () => pointerLog.push([kind, Math.round(performance.now())]));
+  }
+  window.mbxPointerLog = () => {
+    const out = pointerLog.slice();
+    pointerLog.length = 0;
+    return out;
+  };
+
+  window.mbxReady = true;
+})();
+</script>

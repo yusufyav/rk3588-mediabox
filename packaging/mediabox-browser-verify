@@ -288,6 +288,30 @@ else
   esac
 fi
 
+echo '== the pointer, which is what a hover is made of'
+# Hiding the cursor is not only about the drawing. sway gives up the seat's
+# pointer focus when it hides it, so the page is told the pointer has left, and
+# everything the web opens on a hover is torn down: YouTube's seek-bar preview,
+# a menu under a resting hand, any dropdown. Measured on the Plus with a real
+# mouse trembling the way one does under a hand: at `hide_cursor 1` the page is
+# given enter and leave 5.4 times a second, and at 8000 it is given one enter
+# and no leave. So the line is not forbidden -- a television should still put
+# the pointer away -- it just may not be quick about it.
+timeout=$(sed -n 's/^[[:space:]]*seat[[:space:]][^#]*hide_cursor[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p' "$SWAYCONF" 2>/dev/null | head -1)
+if [ -z "$timeout" ]; then
+  ok 'cursor hiding' 'the cursor is never hidden, so focus is never given up'
+elif [ "$timeout" -lt 1000 ]; then
+  bad 'cursor hiding' "hide_cursor $timeout ms -- hover-opened menus will blink shut"
+else
+  ok 'cursor hiding' "hide_cursor $timeout ms, long enough to survive a resting hand"
+fi
+# And the same mechanism on a different trigger, which fires per keystroke.
+if grep -qE '^[[:space:]]*seat[[:space:]][^#]*hide_cursor[[:space:]]+when-typing[[:space:]]+enable' "$SWAYCONF" 2>/dev/null; then
+  bad 'cursor on typing' 'hide_cursor when-typing enable -- a keystroke closes an open menu'
+else
+  ok 'cursor on typing' 'typing does not take the pointer away'
+fi
+
 for want in LIBVA_DRIVER_NAME=rockchip "LIBVA_DRIVERS_PATH=$MEDIA_PREFIX/lib/dri"; do
   if grep -q "^Environment=$want" "$UNIT" 2>/dev/null; then
     ok "unit sets ${want%%=*}" "${want#*=}"

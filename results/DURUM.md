@@ -411,6 +411,69 @@ bloğun uyandığı, CPU/GPU maliyeti, ve karelerin kaç refresh durduğu.
 > donanımda çözüyor gibi gösterdi. Araç değişmeyen bir okumayı "stale" diye
 > işaretliyor ve yanına `/dev/mpp_service`'i kaç sürecin açtığını yazıyor.
 
+## 6c. Tarayıcıda hover ile açılanların yanıp sönmesi (22 Eylül 2026)
+
+Üç şikâyet tek nedenden: adres çubuğunda son karakterin bir kare görünüp
+kaybolması, YouTube seek çubuğundaki önizlemenin sabit imleç altında gidip
+gelmesi, hover ile açılan açılır kutunun aynı şekilde sönmesi.
+
+**Hipotez yanlış çıktı.** Şüphe Chromium'un partial swap / buffer-age
+defterindeydi. `--ui-disable-partial-swap` ile A/B yapıldı; GPU sürecinin kendi
+izi (CDP `Tracing`, kategori `viz,gpu,gpu.service,cc`), 8 saniye:
+
+| | `SkiaOutputSurfaceImplOnGpu::SwapBuffers` | `PostSubBuffer` | present/s |
+|---|---|---|---|
+| A (flag yok) | 479 / 480 / 412 | **0** | 51-60 |
+| B (flag var) | 507 / 427 | **0** | 53-63 |
+
+A'da da B'de de sub-buffer present yok: bu yığında viz zaten hep tam
+`SwapBuffers` çağırıyor, yani kapatılacak bir partial present yoktu. Üç belirti
+de B'de aynen sürdü. Flag launcher'a **eklenmedi**; ölçülen maliyeti var ve
+karşılığı yok (tek küçük kare animasyonunda GPU %45,8 → %54,1, tarayıcı CPU
+%83,3 → %96,8, kare süresi p50/p95 her ikisinde de 8,3/8,4 ms).
+
+Eski/yeni tampon değişimi de doğrudan arandı ve yok: bir kez değişip sonra
+sabit kalan bir kutu, 40 deneme / 640 örnek (dönen kare) ve 20 deneme / 320
+örnek (4K klip oynarken) — stale 0, ping-pong 0, deneme başına tek görüntü.
+
+**Gerçek neden compositor'da.** sway imleci gizlerken seat'in pointer focus'unu
+da bırakıyor, yani sayfaya pointer leave gidiyor; bu dosyadaki `hide_cursor 1`
+bunu fare son raporundan bir milisaniye sonra yapıyordu. Gerçek bir fareyle
+ölçüldü — uinput üzerinden 10 Hz'de bir piksel gidip gelen bir aygıt, yani elin
+altındaki optik farenin yaptığı (`swaymsg ... cursor set` ile ışınlanan imleç
+libinput'tan geçmediği için bunu hiç sınamıyor; ilk ölçümüm bu yüzden yanlış
+çıkmıştı):
+
+| ayar | sayfaya giden olaylar | sonuç |
+|---|---|---|
+| `hide_cursor 1` | enter/leave **5,4/s** | YouTube önizlemesi yanıp sönüyor |
+| `hide_cursor 8000` | tek enter, leave yok | önizleme sabit, kontroller açık |
+| `hide_cursor` yok | tek enter, leave yok | aynı |
+| `hide_cursor when-typing` | 12 tuşta 1 leave | açık menü kapanıyor |
+
+`config/sway-browser.conf` artık `seat * hide_cursor 8000` yazıyor ve
+`when-typing` satırı yok. Sekiz saniye, çünkü elde duran fare imleci canlı
+tutuyor, dokunulmayan televizyon ise imleci yine de kaldırıyor. Bırakılan tek
+şey ölçüldü: fareye hiç dokunulmazsa imleç sekiz saniye sonra bir kez geri
+alınıyor, yani sekiz saniyedir dokunulmamış bir menü kapanıyor — yanıp sönme
+değil. `mediabox-browser-verify` kısa bir `hide_cursor` değerini ve
+`when-typing`'i FAIL veriyor.
+
+**Düzeltme sonrası, gerçek fare elin altındayken:** hover açılır kutusu 10 s
+boyunca 244 örnekte **tek görüntü**; YouTube seek önizlemesi 10 s boyunca tek
+`pointerenter`, kontroller açık, önizleme ayakta.
+
+**Adres çubuğu kapanmadı.** Altı ayrı ölçümde — yazarken ve yazdıktan sonra,
+imleç üstünde dururken ve titrerken, flag'li ve flag'siz — mürekkep genişliği
+hiç geri gitmedi (0 regresyon) ve bölgedeki tek değişiklik **2x34 pikselik bir
+sütun**, yani metin imlecinin yanıp sönmesi. Düzeltmeden sonra kullanıcı
+diğer iki belirtinin gittiğini, bunun **sürdüğünü** bildirdi. Yani nedeni
+`hide_cursor` değil ve ölçüm aleti onu henüz yakalayamıyor; açık iş.
+
+Ölçüm aletleri: `tools/ui-frame-integrity.py` + `.html` (ekranı compositor'dan
+`grim` ile örnekler; koordinatları sayfadan alır), `tools/uinput-tremble.py`
+(gerçek fare).
+
 ## 7. Açık işler
 
 ### Önce
@@ -458,6 +521,17 @@ bloğun uyandığı, CPU/GPU maliyeti, ve karelerin kaç refresh durduğu.
   sentetik akışta çözücü yetişemiyor ve sebep `av1d` doygunluğu değil (%85'te
   tavan yapmıyor). Bakılacak yer CAPTURE kuyruğu derinliği ve tampon dönüş
   gecikmesi.
+* ~~Tarayıcıda hover ile açılanlar yanıp sönüyor~~ — **kapandı, 22 Eylül 2026**,
+  bölüm 6c. Neden Chromium değil, `hide_cursor`'ın pointer focus'u bırakması.
+  Kullanıcı doğruladı: hover açılır kutusu ve YouTube seek önizlemesi sabit.
+* **Adres çubuğunda son karakterin yanıp sönmesi sürüyor.** Bölüm 6c'deki
+  düzeltme diğer iki belirtiyi kaldırdı, bunu kaldırmadı; altı ölçümde
+  üretilemedi de. Ayrı bir neden var ve henüz ölçülmedi.
+* **Yırtılma (tearing) sürüyor** — video izlerken ve sayfalarda gezinirken,
+  kullanıcı tarafından bildirildi. `hide_cursor` düzeltmesinden önce de vardı,
+  sonra da var; yani bu çalışmanın getirdiği bir şey değil. Ölçülmedi. Bakılacak
+  ilk yer düzlemin `XR24` olması, yani wlroots'un derliyor olması — direct
+  scanout açıkken aynı şey oluyor mu, bilinmiyor.
 * Tarayıcıda video kodlama (encode) yok — yalnız çözme.
 * Chromium'un VA-API render düğümü seçimi sıralama şansına bağlı
   (`Preferred drm_render_node not found`). sway altında doğrusunu alıyor,
