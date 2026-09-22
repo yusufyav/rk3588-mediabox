@@ -75,6 +75,28 @@ case "${MEDIABOX_BROWSER_KIOSK:-0}" in
   1|true|yes|on) kiosk="--kiosk" ;;
 esac
 
+# The sound card that belongs to the picture.
+#
+# There is no sound server on this box, so Chromium opens ALSA's `default`,
+# and `default`, with no /etc/asound.conf, is card 0. On the Plus card 0 is
+# `rockchipdp0`: measured, the browser played to a DisplayPort with nothing on
+# it while the television was on `rockchiphdmi1`, and every page was silent.
+# mediabox-player met the same card 0 and answers it the same way, from the
+# same resolver: `hdmi:CARD=<id>` where mediabox-hdmi-prepare has rendered the
+# card's config, `plughw:` where it has not, and nothing pinned when nothing
+# resolves -- a silent page is better than no browser.
+audio=""
+platform=/opt/rk3588-mediabox/bin/mediabox-platform
+if [ -x "$platform" ]; then
+  card="$("$platform" alsa-card 2>/dev/null || true)"
+  driver="$("$platform" alsa-driver 2>/dev/null || true)"
+  if [ -n "$card" ] && [ -n "$driver" ] && [ -f "/usr/share/alsa/cards/$driver.conf" ]; then
+    audio="--alsa-output-device=hdmi:CARD=$card,DEV=0"
+  elif [ -n "$card" ]; then
+    audio="--alsa-output-device=plughw:CARD=$card,DEV=0"
+  fi
+fi
+
 # Local Network Access, off.
 #
 # A page that talks to a service on this same box trips a Chromium dialog in
@@ -147,11 +169,12 @@ BROWSER_RUNTIME="${MEDIABOX_BROWSER_RUNTIME:-/opt/rk3588-mediabox/browser-runtim
 V4L2_SHIM="$BROWSER_RUNTIME/lib/libv4l/v4l2convert.so"
 [ -e "$V4L2_SHIM" ] || V4L2_SHIM=""
 
-# shellcheck disable=SC2086  # $debug and $kiosk are empty or known flags.
+# shellcheck disable=SC2086  # $debug, $kiosk and $audio are empty or known flags.
 LD_PRELOAD="${V4L2_SHIM}${LD_PRELOAD:+:$LD_PRELOAD}" \
 /usr/bin/chromium \
   $debug \
   $kiosk \
+  $audio \
   --force-device-scale-factor="$SCALE" \
   --no-sandbox \
   --ozone-platform=wayland \
