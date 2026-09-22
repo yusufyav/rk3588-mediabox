@@ -267,3 +267,58 @@ Direct scanout bir kez denendi, devreye girmedi, ve **neden girmediği
 sorulmadı**. Ayrıca unit dosyasındaki "direct scanout tearing yapıyor" yorumu
 sınanmadan olgu kabul edildi; o yorum yanlış teşhisti ve saatlerce fence
 aranmasına yol açtı.
+
+---
+
+## 9. Bölüm 8'in kapanışı tutmadı — elenenler, ölçülerek (22-23 Eylül 2026, Plus)
+
+Kullanıcı fiziksel TV'de gördü: yırtılma ve adres çubuğunda **son karakterin
+dans etmesi** hem kompozit yolda (normal pencere, wlroots, düzlem `XR24`) hem
+de direct scanout yolunda (tam ekran, düzlem `AB24`) **var**. Bölüm 8'deki
+direct scanout düzeltmesi CPU/GPU kazancı olarak geçerli, ama yırtılmanın
+sebebi değildi. Bu bölüm o günden sonra neyin ölçülerek elendiğini tutar.
+
+Kurulum: Orange Pi 5 Plus, `6.1.115-vendor-rk35xx`, çıkış 3840x2160@60,
+Chromium 153 (Debian), sway + wlroots 0.18, Mali G610 `bifrost_kbase`
+g25p0-00eac0 (CSF), `kernel.panic=10`.
+
+### Sonuç tablosu
+
+| deney | sonuç | kanıt |
+|---|---|---|
+| pencereyi output'a oturtmak (`browser.custom_chrome_frame=false`) | **geometri değişmedi** | xdg geometry 3828x2138 önce ve sonra; sway `zxdg_decoration_manager_v1` sunuyor |
+| CDP `windowState=maximized` | **uygulanmadı** | çağrı `{}` döndü, durum `normal` kaldı |
+| `--start-maximized` | **uygulanmadı** | `normal`, 3828x2138, `XR24` |
+| **software Chromium** (`--disable-gpu`) | **yırtılma YOK, karakter dansı YOK** (kullanıcı) | Chromium'da `mali0`=0, dmabuf=0, tamponlar shm; sway Mali'yi kullanmaya devam etti. Bedeli: videoda ağır kare kaybı |
+| kernel'de implicit fence eksik mi | **hayır — fence zaten var** | `bufinfo`: üç 4K pencere tamponunun her birinde `write fence:mali <gpu-pid>-kcpu`. Kaynak `armbian/linux-rockchip fd9f823`; `CONFIG_MALI_DMA_FENCE` yalnız midgard sürücüsüne ait, bifrost ağacında `dma_resv` 0 kez geçiyor; fence'i Chromium'un **browser process'i** `DMA_BUF_IOCTL_IMPORT_SYNC_FILE` ile ekliyor |
+| fence commit'ten sonra mı geliyor | **hayır** | 204 `dma_resv_add_fence`'in 204'ü `wl_surface.commit`'ten önce (en az 48 µs); eklenmeyen karelerde fence commit anında zaten signaled |
+| release gelmeden tampon yeniden kullanılıyor mu | **hayır** | 1318 karede release'siz yeniden commit 0; kesin eşlenen 88 karede sonraki fence release'ten en az 10,65 ms sonra |
+| native EGL (ANGLE'sız) | **bu build'de yok** | `gl_factory.cc:110`: izinli liste yalnız `egl-angle` × {opengl, opengles, vulkan} |
+| ANGLE arka ucu OpenGL → **OpenGLES** (`--use-angle=gles`) | **yırtılma sürüyor** (kullanıcı) | `gl=egl-angle,angle=opengles`, renderer Mali-G610, `mali0`=1, dmabuf=121 |
+
+### Ne kaldı
+
+Semptom Chromium'un GPU → DMA-BUF yolunda doğuyor; tamponlar shm'e
+düşünce kayboluyor. Ama o yolun ölçülebilen sıralaması doğru: yazma fence'i
+commit'ten önce `dma_resv`'de, tampon release gelmeden yeniden kullanılmıyor.
+KMS tarafı da fence'i bekliyor: rockchip `drm_atomic_helper_commit`
+kullanıyor, VOP2'nin kendi `prepare_fb`'si yok, çekirdek varsayılan
+`drm_gem_plane_helper_prepare_fb`'yi çağırıyor.
+
+**Ölçülmemiş olan:** tüketicinin tamponu gerçekten ne zaman okuduğu. Sway'in
+Mali'si kompozit sırasında implicit fence'i bekliyor mu, bu hiç izlenmedi.
+Hiçbir tamponda **read** fence yok, ama bu tek başına bir bug kanıtı değil.
+ANGLE arka ucu elendi (OpenGL ve OpenGLES aynı), native EGL ise bu build'de
+denenemiyor. Sıradaki alan: Mali userspace (libmali g24p0) / GBM / `dma_heap`
+`system-uncached` tamponları.
+
+### Bu turda kapatılan açık kusur: tarayıcıda ses yoktu
+
+Kutuda ses sunucusu yok; Chromium ALSA `default`'u açıyor, o da
+`/etc/asound.conf` olmadığı için card 0'a, yani bağlı olmayan DisplayPort'a
+gidiyordu. TV `rockchiphdmi1`'de (card 2). `mediabox-player` aynı sorunu
+`mediabox-platform alsa-card` ile çözmüştü; `packaging/mediabox-browser` artık
+aynı çözücüyle `--alsa-output-device=hdmi:CARD=<kart>,DEV=0` veriyor.
+Ölçüldü: card2 `RUNNING`, S16_LE 2ch 48 kHz; kullanıcı sesi duydu. Bir USB
+kulaklığa (`GameBuds`, card 4) geçici yönlendirme de çalıştı; kalıcı bir
+"USB takılıysa onu tercih et" kuralı **eklenmedi** — ürün kararı.
