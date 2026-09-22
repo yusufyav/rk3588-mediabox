@@ -1,0 +1,61 @@
+From: MediaBox
+Subject: POLLIN means a decoded frame is waiting, not that a packet came back
+
+The plugin has one signal to give a client: the descriptor is readable, or it
+is not. It raises it for three different things -- a pending event, a buffer
+returning on the OUTPUT queue, and a frame ready on the CAPTURE queue.
+
+Only the last of those is POLLIN. In V4L2, POLLIN on a memory-to-memory device
+means one thing: a buffer can be dequeued from the CAPTURE queue. A returning
+OUTPUT buffer is the other direction and is POLLOUT, which this descriptor
+cannot express anyway.
+
+Chromium takes POLLIN at its word, and it is fed compressed data long before
+the stream's resolution is known -- so it is told there is a decoded frame
+waiting while its CAPTURE queue is still a null pointer:
+
+    void V4L2StatefulVideoDecoder::TryAndDequeueCAPTUREQueueBuffers() {
+      DCHECK(CAPTURE_queue_) << "|CAPTURE_queue_| must be created at this point";
+      const v4l2_memory queue_type = CAPTURE_queue_->GetMemoryType();
+
+DCHECK is compiled out of every shipping build, so the second line dereferences
+null. Measured on RK3588: within about two seconds of the first packet the
+browser logs "GPU process exited unexpectedly: exit_code=11" twice, the decoder
+is abandoned, and playback continues in software for every codec -- H.264 and
+AV1 alike. Nothing in the browser's log connects the crash to the decoder; from
+the outside it reads as "video decoder fallback after initial decode error".
+
+So the OUTPUT term goes. The client loses nothing by it: it drains its own
+OUTPUT queue before refilling it, from the thread that feeds the decoder, and
+never waits on poll() for permission to enqueue.
+--- a/src/libv4l-rkmpp.c
++++ b/src/libv4l-rkmpp.c
+@@ -871,7 +871,27 @@
+ 	else
+ 		has_event = rkmpp_enc_has_event(ctx->data);
+ 
+-	has_event |= !TAILQ_EMPTY(&ctx->output.avail_buffers);
++	/*
++	 * A buffer coming back on the OUTPUT queue is not POLLIN.
++	 *
++	 * This descriptor carries exactly one signal -- readable, or not -- and
++	 * a V4L2 client reads readable as POLLIN, which in V4L2 means one thing
++	 * only: a buffer can be dequeued from the CAPTURE queue. Raising it for
++	 * a returning OUTPUT buffer tells the client there is a decoded frame
++	 * waiting before the CAPTURE queue exists at all.
++	 *
++	 * Chromium takes that literally. Its stateful decoder answers POLLIN by
++	 * calling TryAndDequeueCAPTUREQueueBuffers(), which is guarded only by a
++	 * DCHECK -- compiled out of every shipping build -- and then dereferences
++	 * a CAPTURE queue that is still null. Measured on RK3588: the GPU process
++	 * dies with SIGSEGV within two seconds of the first frame being fed, the
++	 * browser falls back to software for every codec, and nothing in its log
++	 * connects the two.
++	 *
++	 * The client does not lose anything. It drains the OUTPUT queue itself
++	 * before refilling it, on its own thread, and never waits on poll() to
++	 * be told it may enqueue more.
++	 */
+ 	has_event |= !TAILQ_EMPTY(&ctx->capture.avail_buffers);
+ 
+ 	/* Report POLLIN event */

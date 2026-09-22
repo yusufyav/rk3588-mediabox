@@ -1,0 +1,90 @@
+From: MediaBox
+Subject: dec: ask the decoder for eight-bit frames, and stop asserting on the rest
+
+This plugin has exactly one capture format, NV12, because that is the one
+Chromium's V4L2 decoder can import. It never tells MPP so. A ten-bit stream
+therefore decodes into MPP_FMT_YUV420SP_10BIT -- NV15 -- and the plugin meets
+it with
+
+    assert(dec->video_info.mpp_format == MPP_FMT_YUV420SP);
+
+AV1 Main 10 is not a corner case on a television: it is what YouTube serves at
+2160p, and the assert runs inside the browser's GPU process, so the answer to a
+ten-bit video would have been the display going away rather than one video
+failing.
+
+Two changes, both small.
+
+The decoder is asked for eight-bit output. MPP_DEC_SET_OUTPUT_FORMAT is the
+existing control for this and the hardware honours it in its own output stage:
+the RK3588 AV1 block still reconstructs the stream at ten bits, and what lands
+in the DMA-BUF is NV12. Nothing is converted on the CPU and no frame crosses
+the bus a second time. The picture is eight-bit, which is where Chromium was
+going to end up anyway -- its renderable formats on this board are NV12 and
+AR24 -- so the depth is lost at the same place either way, and this way it is
+lost inside the decoder instead of in a copy.
+
+The assert becomes a refusal. With the control above it should be unreachable;
+it is kept because an assert that can take the television down is the wrong
+shape for this code however sure we are, and a stream that finds a way past
+the control should cost a decoder, not a display.
+--- a/src/libv4l-rkmpp-dec.c
++++ b/src/libv4l-rkmpp-dec.c
+@@ -272,6 +272,20 @@
+ 		return;
+ 	}
+ 
++	/*
++	 * A frame format this plugin cannot describe is a reason to stop, not
++	 * to abort. With the output format asked for in streamon this is not
++	 * reachable; it is here so that a stream which finds a way past that
++	 * loses a decoder and not the whole browser.
++	 */
++	if (video_info.mpp_format != MPP_FMT_YUV420SP) {
++		LOGE("unsupported mpp format(%d), refusing the stream\n",
++		     video_info.mpp_format);
++
++		LEAVE();
++		return;
++	}
++
+ 	dec->video_info = video_info;
+ 	dec->video_info.dirty = true;
+ 	dec->video_info.event = dec->event_subscribed;
+@@ -294,7 +308,6 @@
+ 	ctx->capture.format.plane_fmt[0].sizeimage =
+ 		dec->video_info.size;
+ 
+-	assert(dec->video_info.mpp_format == MPP_FMT_YUV420SP);
+ 	ctx->capture.format.pixelformat = V4L2_PIX_FMT_NV12;
+ 
+ 	LEAVE();
+@@ -522,6 +535,7 @@
+ 	struct rkmpp_context *ctx = dec->ctx;
+ 	struct rkmpp_buf_queue *queue;
+ 	MppPollType poll_type;
++	MppFrameFormat out_fmt;
+ 	uint32_t split;
+ 	MPP_RET ret;
+ 
+@@ -579,6 +593,20 @@
+ 		goto err_destroy_mpp;
+ 	}
+ 
++	/*
++	 * Eight bits out, whatever came in. Chromium imports NV12 here and
++	 * nothing else, and without this a ten-bit stream -- AV1 Main 10, the
++	 * one a television actually meets -- arrives as NV15 and is refused
++	 * above. The hardware still decodes at ten bits; only its output stage
++	 * is narrowed, so no frame is converted on the CPU to get here.
++	 */
++	out_fmt = MPP_FMT_YUV420SP;
++	ret = ctx->mpi->control(ctx->mpp, MPP_DEC_SET_OUTPUT_FORMAT, &out_fmt);
++	if (ret != MPP_OK) {
++		LOGE("failed to set mpp output format\n");
++		goto err_destroy_mpp;
++	}
++
+ 	/* Enable timeout mode to avoid hang during get_frame */
+ 	poll_type = RKMPP_DEC_POLL_TIMEOUT_MS;
+ 	ret = ctx->mpi->control(ctx->mpp, MPP_SET_OUTPUT_TIMEOUT,

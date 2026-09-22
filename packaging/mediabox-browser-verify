@@ -44,13 +44,71 @@ if [ -e /dev/mpp_service ]; then
 else
   bad 'decode device' '/dev/mpp_service absent -- not a Rockchip BSP kernel'
 fi
+# And the host still has none. The browser has exactly one, and it is a file
+# this product put in its private /dev -- see the browser-runtime section
+# below. A /dev/video* on the *host* would be a second, unmanaged decoder.
 if ls /dev/video* >/dev/null 2>&1; then
-  skip 'v4l2 nodes' "$(ls -d /dev/video* | tr '\n' ' ')"
+  bad 'host v4l2 nodes' "$(ls -d /dev/video* | tr '\n' ' ') -- nothing should create these"
 else
-  ok 'v4l2 nodes' 'none, as expected on this kernel'
+  ok 'host v4l2 nodes' 'none, as expected on this kernel'
 fi
 
-echo '== the driver that bridges the two'
+echo '== the AV1 block, which is not one of the rkvdec cores'
+# RK3588 decodes AV1 in a device of its own at fdc70000, and the kernel says so.
+# Without it the browser can be asked for AV1 all day and never get it.
+if grep -q 'AV1DEC' /proc/mpp_service/supports-device 2>/dev/null; then
+  ok 'AV1 endpoint' "$(sed -n 's/.*\(AV1DEC.*\)/\1/p' /proc/mpp_service/supports-device | head -1)"
+else
+  bad 'AV1 endpoint' 'mpp_service does not advertise AV1DEC'
+fi
+
+echo '== the browser runtime, which is the decode path'
+# The V4L2 device Chromium opens is a library, not a node: libv4l-rkmpp on top
+# of this product's MPP, reached through an LD_PRELOAD in the launcher, with
+# the codec list bind-mounted into the browser's own /dev. See
+# scripts/build-browser-runtime.sh, which builds and verifies it in place.
+BROWSER_RUNTIME="${MEDIABOX_BROWSER_RUNTIME:-$PREFIX/browser-runtime}"
+for f in "$BROWSER_RUNTIME/lib/libv4l/v4l2convert.so" \
+         "$BROWSER_RUNTIME/lib/libv4l/plugins/libv4l-rkmpp.so" \
+         "$BROWSER_RUNTIME/etc/video-dec0"; do
+  if [ -e "$f" ]; then
+    ok "runtime $(basename "$f")" 'present'
+  else
+    bad "runtime $(basename "$f")" "missing -- run scripts/build-browser-runtime.sh"
+  fi
+done
+plugin="$BROWSER_RUNTIME/lib/libv4l/plugins/libv4l-rkmpp.so"
+if [ -e "$plugin" ]; then
+  # One MPP on this box, and it is this product's -- the same rule the VA-API
+  # driver is held to below.
+  pmpp=$(ldd "$plugin" 2>/dev/null | sed -n 's/.*librockchip_mpp[^ ]* => \([^ ]*\).*/\1/p' | head -1)
+  case "$pmpp" in
+    "$MEDIA_PREFIX"/*) ok 'plugin links product MPP' "$pmpp" ;;
+    *)                 bad 'plugin links product MPP' "${pmpp:-unresolved}" ;;
+  esac
+fi
+# The spellings of open() a hardened browser actually calls. Without these the
+# wrapper loads, interposes nothing, and the decoder is never asked a question.
+shim="$BROWSER_RUNTIME/lib/libv4l/v4l2convert.so"
+if [ -e "$shim" ] && command -v nm >/dev/null 2>&1; then
+  missing=''
+  for sym in open __open_2 __open64_2 ioctl mmap poll; do
+    nm -D --defined-only "$shim" 2>/dev/null | grep -q " T $sym\$" || missing="$missing $sym"
+  done
+  if [ -z "$missing" ]; then
+    ok 'shim interposes' 'open, __open_2, __open64_2, ioctl, mmap, poll'
+  else
+    bad 'shim interposes' "missing:$missing"
+  fi
+fi
+# And the codec the whole exercise was for.
+if grep -q '^codecs=.*AV1' "$BROWSER_RUNTIME/etc/video-dec0" 2>/dev/null; then
+  ok 'device offers AV1' "$(sed -n 's/^codecs=//p' "$BROWSER_RUNTIME/etc/video-dec0")"
+else
+  bad 'device offers AV1' 'the codec list does not name AV1'
+fi
+
+echo '== the VA-API driver, which is now the fallback and not the path'
 if [ -e "$DRIVER" ]; then
   ok 'va driver' "$DRIVER"
 else
@@ -125,6 +183,12 @@ for want in /dev/dri /dev/mali0 /dev/dma_heap /dev/mpp_service /dev/rga; do
     bad "unit binds $want" 'not in BindPaths -- it will not exist for the browser'
   fi
 done
+# The V4L2 node, which is a file from the product prefix rather than a device.
+if grep -q '^BindPaths=.*:/dev/video0$' "$UNIT" 2>/dev/null; then
+  ok 'unit binds /dev/video0' "$(sed -n 's/^BindPaths=\(.*\):\/dev\/video0$/\1/p' "$UNIT")"
+else
+  bad 'unit binds /dev/video0' 'absent -- the browser will find no V4L2 device'
+fi
 # Which render node the browser actually took.
 #
 # Chromium's Ozone layer scans /dev/dri for something to run video on, reports
@@ -214,7 +278,12 @@ else
   planefmt=$(sed -n '/win[0-9]: ACTIVE/,/format:/p' "$SUMMARY" | grep -m1 -oE '[A-Z][A-Z0-9][0-9]{2}' || true)
   case "$planefmt" in
     AB24|AR24) ok 'scanout plane' "$planefmt -- the client's own buffer" ;;
-    XR24)      bad 'scanout plane' 'XR24 -- this is wlroots compositing, not scanout' ;;
+    # Known cause, measured 22 Sep 2026: a windowed Chromium draws its own
+    # frame, so the surface geometry comes out 12x22 short of the output and
+    # wlroots will not even attempt scanout. MEDIABOX_BROWSER_KIOSK=1 makes the
+    # geometry match and the plane returns to AB24, at the cost of the tab
+    # strip. See results/DURUM.md section 6b before re-investigating.
+    XR24)      bad 'scanout plane' 'XR24 -- wlroots is compositing; a windowed browser does not cover the output exactly' ;;
     *)         skip 'scanout plane' "unrecognised format '$planefmt'" ;;
   esac
 fi
@@ -230,7 +299,7 @@ done
 echo '== the flags, against this browser rather than a blog'
 # A feature name Chromium no longer knows is accepted in silence. Each one is
 # checked against the binary that is installed here.
-for f in AcceleratedVideoDecoder AcceleratedVideoDecodeLinuxGL AcceleratedVideoDecodeLinuxZeroCopyGL; do
+for f in AcceleratedVideoDecoder AcceleratedVideoDecodeLinuxGL AcceleratedVideoDecodeLinuxZeroCopyGL PreferV4L2VideoAcceleration; do
   in_launcher=no; in_binary=no
   grep -q "$f" "$LAUNCHER" 2>/dev/null && in_launcher=yes
   LC_ALL=C grep -aqF "$f" "$CHROMIUM" 2>/dev/null && in_binary=yes

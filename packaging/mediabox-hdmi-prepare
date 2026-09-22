@@ -159,7 +159,49 @@ if command -v modetest >/dev/null 2>&1; then
         out = ""
         for (i = 1; i <= m; i++) out = (i == 1) ? k[i] : out "," k[i]
         print out
+
+        # And the mode the *browser* should take, which is not the fastest.
+        #
+        # Kodi changes refresh to match the film. A browser cannot: a web page
+        # is one surface carrying video at whatever rate a site serves and
+        # everything else at the panel own rate, so the output keeps a single
+        # mode for the whole session and the video has to fit into it. Almost
+        # all of the web is 23.976, 24, 29.97, 30, 59.94 or 60 fps.
+        #
+        # The fastest mode is the wrong answer for that. On the panel measured
+        # here the fastest is 143.999 Hz, and 143.999 / 60 is 2.4 -- so a 60
+        # fps video cannot be held for a whole number of refreshes and each
+        # frame stands for two or three of them in turn. Nothing is dropped,
+        # the frame counters stay clean, and the motion stutters anyway.
+        # Measured in the browser: 58.3 percent of frames held two refreshes,
+        # 39.3 percent held three.
+        #
+        # So take the fastest mode whose refresh is a whole multiple of 60 or
+        # of 59.94, and fall back to the fastest if the sink offers none. Read
+        # out of the mode list, never written here: which timings exist is for
+        # the sink to say, and this box meets more than one.
+        best_hz = 0; best_k = ""
+        for (i = 1; i <= m; i++) {
+          if (whole(hzv[i], 60) || whole(hzv[i], 60000 / 1001)) {
+            if (hzv[i] > best_hz) { best_hz = hzv[i]; best_k = k[i] }
+          }
+        }
+        if (best_k == "") best_k = k[1]
+        print best_k
+      }
+      # A refresh is a whole multiple of a frame rate when every video frame
+      # can be shown for the same number of refreshes. The tolerance is tight
+      # on purpose: a ratio off by a thousandth is a frame slipping once every
+      # few minutes, which is visible, and EDID timings are exact enough to
+      # tell the difference.
+      function whole(hz, base,   r, n) {
+        r = hz / base
+        n = int(r + 0.5)
+        if (n < 1) return 0
+        return (r - n < 0.001 && n - r < 0.001)
       }')"
+  browser_screenmode="$(printf '%s\n' "$kodi_modes" | sed -n 2p)"
+  kodi_modes="$(printf '%s\n' "$kodi_modes" | sed -n 1p)"
   kodi_screenmode="${kodi_modes%%,*}"
 fi
 
@@ -238,8 +280,12 @@ fi
 sway_dir=/run/mediabox
 sway_out="$sway_dir/sway-output.conf"
 browser_mode=absent
-if [ -n "$kodi_screenmode" ]; then
-  browser_mode="$(printf '%s' "$kodi_screenmode" | awk '{
+# The browser gets the cadence-clean mode worked out above, not the mode Kodi
+# starts in. Kodi opens at the fastest rate and then follows the film; the
+# browser holds one rate for everything it shows, so the one it holds has to be
+# a whole multiple of the rates the web is made of.
+if [ -n "${browser_screenmode:-}" ]; then
+  browser_mode="$(printf '%s' "$browser_screenmode" | awk '{
     w = substr($0, 1, 5) + 0; h = substr($0, 6, 5) + 0
     hz = substr($0, 11, 9) + 0
     printf "%dx%d@%.3fHz", w, h, hz

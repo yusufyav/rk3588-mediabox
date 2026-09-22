@@ -1,0 +1,37 @@
+From: MediaBox
+Subject: log to stderr, because fd 1 in a browser is not a terminal
+
+This plugin writes its diagnostics with printf(), to stdout.
+
+Inside Chromium that is not a terminal and not a log: a child process's fd 1 is
+a socket the browser hands it, and on this appliance it is the mojo channel the
+GPU process talks to the browser over. Every line the plugin prints goes into
+that channel and is never seen.
+
+Measured on RK3588: with the decoder failing on its first frame and the log
+level turned all the way up -- from the environment and then, when that was not
+believed, from the device file itself, which this plugin also reads it from --
+not one line appeared anywhere, while /proc/<gpu>/fd showed `1 -> socket:[...]`
+and `2 -> /tmp/chromium.log`. The plugin was running the whole time. Hours can
+be spent on a decoder that is talking, into the one file descriptor nobody is
+reading.
+
+stderr is where a library's diagnostics belong, it is the descriptor Chromium
+leaves alone, and it is not carrying anyone's protocol.
+--- a/include/libv4l-rkmpp.h
++++ b/include/libv4l-rkmpp.h
+@@ -67,10 +67,10 @@
+ #define LOG(fmt, ...) do { \
+ 	struct timeval tv; \
+ 	gettimeofday(&tv, NULL); \
+-	printf("[%03ld.%03ld] [RKMPP] [%ld] %s(%d): " fmt, \
+-	       tv.tv_sec % 1000, tv.tv_usec / 1000, gettid(), \
+-	       __func__, __LINE__, ##__VA_ARGS__); \
+-	fflush(stdout); \
++	fprintf(stderr, "[%03ld.%03ld] [RKMPP] [%ld] %s(%d): " fmt, \
++	        tv.tv_sec % 1000, tv.tv_usec / 1000, gettid(), \
++	        __func__, __LINE__, ##__VA_ARGS__); \
++	fflush(stderr); \
+ 	} while (0)
+ 
+ #define LOGV(level, fmt, ...) \

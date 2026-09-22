@@ -93,17 +93,19 @@ Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib
 # The video decoder, which is a different device from the GPU above.
 #
 # This board's VPU is a BSP device: it is /dev/mpp_service, a Rockchip ioctl
-# interface, and there is no /dev/video* on it at all. Chromium's accelerated
-# decode on Linux is VA-API, so without a VA-API driver its GPU process says
-# "vaInitialize failed: unknown libva error", chrome://gpu lists no decode
-# profiles, and a 4K page is decoded by the CPU while the line at the top of
-# chrome://gpu still reads "Video Decode: Hardware accelerated".
+# interface, and there is no /dev/video* on it at all. Chromium has two
+# accelerated decode backends compiled in and the browser chooses V4L2, for the
+# reason written out in the launcher: VA-API here carries H.264, HEVC and VP9
+# and cannot carry AV1, because its AV1 entry point hands a driver tile data the
+# browser has already parsed while MPP wants the stream. The V4L2 device the
+# browser opens is a library, not a node -- browser-runtime, built by
+# scripts/build-browser-runtime.sh -- and it is LD_PRELOADed by the launcher.
 #
-# scripts/build-vaapi-driver.sh puts a driver bridging libva onto this
-# product's own MPP at the path below. Named rather than searched for: libva
-# probes the render node for a driver name and would find none, and Chromium's
-# own documentation for this is that the name has to be in the environment
-# because the browser cannot auto-detect it from inside its GPU process.
+# The two lines below are the backend that is no longer chosen. They are kept,
+# not left by accident: they are inert while the launcher asks for V4L2, and
+# they are what makes going back a matter of dropping one feature name rather
+# than reinstalling a decoder. Nothing races -- media_switches.h is explicit
+# that the flag *selects* a backend, so exactly one of the two is ever live.
 Environment=LIBVA_DRIVER_NAME=rockchip
 Environment=LIBVA_DRIVERS_PATH=/opt/rk3588-mediabox/media-runtime/lib/dri
 # drm *and* libinput. Naming only the DRM backend gives a compositor that
@@ -259,6 +261,22 @@ BindPaths=/dev/tty8
 # configured, and is not.
 BindPaths=/dev/mpp_service
 BindPaths=/dev/rga
+# The V4L2 decoder Chromium looks for, which on this board is a claim rather
+# than a device.
+#
+# Chromium's V4L2 backend opens /dev/video0..255 and asks each one what it can
+# decode. There is no such node on a Rockchip BSP kernel, so browser-runtime
+# supplies one: libv4l-rkmpp takes its codec list from the *contents* of the
+# node it is opened on -- and refuses any node that is a character device -- so
+# what is bound here is an ordinary file listing AV1, VP9, VP8, H.264 and H.265
+# and the largest picture each may be.
+#
+# Bound rather than created. The file lives in the product prefix and is put
+# there by the runtime build, so a clean image has it; nothing is written into
+# the host's /dev, and this browser's private /dev is the only place on the box
+# where a /dev/video0 exists at all. It needs no DeviceAllow below, because it
+# is not a device.
+BindPaths=/opt/rk3588-mediabox/browser-runtime/etc/video-dec0:/dev/video0
 # The cgroup rule is kept beside it rather than dropped, so that a kernel or a
 # systemd that stops moving this unit into a session scope tightens the
 # confinement instead of quietly widening it.

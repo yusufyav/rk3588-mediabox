@@ -271,6 +271,146 @@ Titreme/yırtılma için üç mimari aday ölçülüp kapatıldı. Tekrar denenm
 * **`tearing-control` protokolü / async page flip.** sway sunuyor,
   **Chromium bağlanmıyor** — `wp_tearing_control_v1` ikilide geçmiyor bile.
 
+## 6b. Tarayıcı — AV1 donanım çözme ve cadence (22 Eylül 2026)
+
+Plus üzerinde ölçüldü. Bölüm 6'daki VA-API yolu H.264/HEVC/VP9 taşıyordu ama
+AV1 taşımıyordu; artık tarayıcının tek donanım çözücü arka ucu **V4L2/RKMPP** ve
+AV1 dahil hepsi onun üzerinden gidiyor.
+
+**Silikon zaten vardı.** RK3588'in AV1 çözücüsü rkvdec çekirdeklerinden ayrı bir
+blok: `av1d@fdc70000`, DT'de `status: okay`, çekirdek
+`DEVICE[ 4]:AV1DEC HW_ID:0x80019000` diye ilan ediyor. Kontrollü 4K60 AV1 Main
+klibi ürünün kendi ffmpeg'iyle (`av1_rkmpp`) çözüldü: 8-bit 1800/1800 kare
+67 fps, 10-bit 1800/1800 kare 60 fps (çıkış `nv15`), `fdc70000.av1d` %64–82,
+rkvdec %0. Yani eksik olan donanım değil, ona giden yoldu.
+
+**Neden VA-API değil.** VA-API'nin AV1 giriş noktası sürücüye tarayıcının zaten
+ayrıştırdığı tile verisini veriyor; MPP'nin genel AV1 çözücüsü ise akışın
+kendisini istiyor. İkisini birleştiren bir şey yok. Chromium'un diğer arka ucu,
+V4L2 stateful çözücü, tam da akış gönderir — MPP'nin şekli bu.
+
+**Chromium derlenmedi.** Debian'ın Chromium 153'ü her iki arka ucu da içinde
+taşıyor ve hangisinin çalışacağını `media/base/media_switches.h` yazıyor:
+*"When both VA-API and V4L2 are compiled in, selects the active backend:
+disabled (default) => VA-API, enabled => V4L2. Toggle via
+`--enable-features=PreferV4L2VideoAcceleration`."* V4L2 codec tablosunda `AV01`
+var ve `AV1PROFILE_PROFILE_MAIN`'e bağlı. Yol zaten oradaydı; eksik olan yolun
+ucundaki cihazdı.
+
+`scripts/build-browser-runtime.sh` o cihazı kuruyor —
+`/opt/rk3588-mediabox/browser-runtime`, hepsi pinli, ürünün kendi MPP'sine
+karşı derli, ikinci bir MPP yok. Cihaz düğümü bir *dosya*: libv4l-rkmpp
+yeteneklerini açıldığı düğümün içeriğinden okuyor, ve birim onu kendi özel
+`/dev`'inde `/dev/video0`'a bağlıyor. Host'un `/dev`'ine hiçbir şey yazılmıyor.
+
+### Dört sessiz arıza
+
+Hiçbiri hata mesajı vermiyordu; hepsi "çözücü kötü kare üretti" gibi görünüyordu.
+
+1. **Fortified `open()`.** `v4l2convert.so` yalnız `open`/`open64` sarıyor.
+   `_FORTIFY_SOURCE` ile derli Chromium sabit bayraklı `open()` çağrılarını
+   `__open_2`/`__open64_2`'ye çeviriyor, yani sarmalayıcı **hiç** devreye
+   girmiyordu. strace tarayıcının `/dev/video0`'ı açtığını gösterirken plugin
+   tek satır yazmıyordu. (`packaging/v4l-utils-patches/0001`)
+
+2. **Plugin stdout'a yazıyordu.** Chromium alt sürecinde fd 1 bir mojo IPC
+   soketi. Plugin'in bütün günlüğü oraya gidip kayboluyordu; `2` ise
+   yakalanabilir durumdaydı. Saatler, konuşan ama kimsenin okumadığı bir
+   çözücüye harcanabilir. (`packaging/libv4l-rkmpp-patches/0002`)
+
+3. **POLLPRI yok.** Stateful çözücüye çözünürlüğün bilindiğini söyleyen tek
+   şey POLLPRI. Plugin cihaz fd'sini bir epoll fd'siyle değiştiriyor ve epoll
+   fd'si POLLPRI üretemez — olay hiç sorulmuyordu. Shim artık olayı erken
+   alıp saklıyor, POLLPRI'yi *yalnız gerçek olay varken* veriyor ve istemcinin
+   kendi `VIDIOC_DQEVENT`'ini o saklanan olayla yanıtlıyor.
+   (`packaging/v4l-utils-patches/0002`)
+
+4. **POLLIN yanlış şeyi anlatıyordu.** Plugin'in tek "okunabilir" sinyali hem
+   olay, hem geri dönen OUTPUT tamponu, hem hazır CAPTURE karesi içindi.
+   V4L2'de POLLIN yalnız sonuncusu demek. Chromium bunu harfiyen alıp
+   `TryAndDequeueCAPTUREQueueBuffers()` çağırıyor — ki yalnız `DCHECK` ile
+   korunuyor, release'de derlenmiyor — ve henüz null olan CAPTURE kuyruğunu
+   dereference ediyor: `GPU process exited unexpectedly: exit_code=11`, her
+   codec'te. OUTPUT terimi kaldırıldı; olay anında POLLIN temizleniyor.
+   (`packaging/libv4l-rkmpp-patches/0003`)
+
+Ayrıca 10-bit: plugin'in tek capture formatı NV12 ve 10-bit akışta
+`assert(mpp_format == MPP_FMT_YUV420SP)` GPU sürecini düşürüyordu. Çözücüye
+`MPP_DEC_SET_OUTPUT_FORMAT` ile sekiz bit çıkış söyleniyor — donanım yine on
+bitte kurguluyor, kendi çıkış katı NV12 yazıyor, CPU'da dönüşüm yok.
+(`packaging/libv4l-rkmpp-patches/0001`)
+
+### 144 Hz cadence
+
+Panel 2560x1440'ta 143.999, 119.998, 74.97 ve 59.95 Hz sunuyor. Tarayıcı
+Kodi gibi filme göre mod değiştiremez: bir web sayfası tek yüzey, video ne
+hızda gelirse gelsin geri kalanı panelin hızında. 143.999/60 = 2.4 — 60 fps
+kare tam sayıda refresh boyunca duramaz. Hiçbir kare düşmeden titrer.
+
+`mediabox-hdmi-prepare` artık tarayıcı için en hızlı modu değil, refresh'i
+60'ın veya 59.94'ün tam katı olan **en hızlı** modu seçiyor; yoksa eskisi gibi
+en hızlıya düşüyor. Mod listesi EDID'den okunuyor, hiçbir timing yazılı değil.
+Kodi'nin beyaz listesi ve native arayüzün politikası değişmedi.
+
+Aynı klip, aynı yapı, yalnız mod farklı (4K60 AV1, tarayıcıda):
+
+| kare kaç refresh durdu | 143.999 Hz | 119.998 Hz |
+|---|---|---|
+| 2 refresh | %58,0 | **%91,8** |
+| 3 refresh | %39,8 | %0,5 |
+
+### Ölçülen (22 Eylül 2026, Plus, 2560x1440p120)
+
+Hepsi tarayıcının içinde, `tools/browser-video-probe.py` ile. "platform" sütunu
+Chromium'un kendi `kIsPlatformVideoDecoder` cevabı; donanım sütunu
+`/proc/mpp_service/load`'dan hangi bloğun **canlı** olduğu.
+
+| test | decoder | düşük kare | donanım | cadence 2x |
+|---|---|---|---|---|
+| YouTube 2160p60 AV1 (`av01.0.13M.08`) | V4L2, platform | **%0,097** (7/7192) | `av1d` %59–90 | %99,6 |
+| YouTube 2160p60 VP9 (`vp09.00.51.08`) | V4L2, platform | %0,132 (5/3780) | `rkvdec-core0/1` ~%14,5 | %99,7 |
+| H.264 4K60, kontrollü | V4L2, platform | %0,115 (4/3469) | `rkvdec-core0/1` ~%19 | %99,9 |
+| AV1 4K60 8-bit, kontrollü, **10 dakika** | V4L2, platform | %4,97 (1745/35137) | `av1d` %31–85 | %92,2 |
+
+Codec yönlendirmesi doğru: AV1 ayrı `av1d` bloğuna, VP9 ve H.264 rkvdec
+çekirdeklerine gidiyor.
+
+**Kontrollü klip neden daha kötü.** `testsrc2` 25 Mbps'te gürültüye yakın —
+YouTube'un 2160p60 AV1'inden belirgin şekilde ağır, sesi yok ve yerel diskten
+geliyor. Sentetik klip **çözücü kapasitesini**, YouTube **ürünün gerçek hâlini**
+ölçüyor. Düşük karelerin sunum yolundan değil çözücü kapasitesinden geldiğini
+ayıran ölçüm de bu: gerçek içerikte oran %0,1'in altında.
+
+**Direct scanout — ayrı bir regresyon, bu çalışmadan önce.** Tarama düzlemi
+`XR24`, yani wlroots derliyor. Sebep bu bölümdeki hiçbir değişiklik değil:
+`a72a2f9` kiosk modunu kaldırdığında Chromium pencere modunda kendi çerçevesini
+çizmeye başladı ve yüzey geometrisi `2548x1418` kaldı — 2560x1440 çıkışı tam
+kaplamadığı için wlroots scanout'u **denemiyor** bile. `MEDIABOX_BROWSER_KIOSK=1`
+ile geometri çıkışa oturuyor ve düzlem `AB24` dönüyor. Ölçülen fark, aynı klip:
+
+| | sekmeli (XR24) | kiosk (AB24) |
+|---|---|---|
+| GPU | %33 ort, 1000 MHz'e çıkıyor | **%22 ort, 300–400 MHz** |
+| düşük kare | %4,97 | %4,37 |
+| CPU | %121,6 | %122,8 |
+
+Yani scanout GPU'yu ve ısıyı kurtarıyor, düşük kareyi kurtarmıyor. Bu
+Chromium'da dekorasyonu kapatan bir bayrakla çözülebilirdi; bu derlemede öyle
+bir feature adı yok (`WaylandWindowDecorations` ikilide geçmiyor). Sekme şeridi
+ile direct scanout şu an gerçek bir takas — ürün kararı olduğu için burada
+değiştirilmedi, açık iş olarak aşağıda.
+
+### Ölçüm aracı
+
+`tools/browser-video-probe.py` dört soruyu aynı anda soruyor: Chromium'un
+çözücüye verdiği ad (DevTools Media alanı), `/proc/mpp_service/load`'dan hangi
+bloğun uyandığı, CPU/GPU maliyeti, ve karelerin kaç refresh durduğu.
+
+> **Tuzak.** `/proc/mpp_service/load` boştayken sıfırlanmıyor, **son hesapladığı
+> değeri saklıyor**. Bu oturumda tam olarak bu, yazılımda çözen bir tarayıcıyı
+> donanımda çözüyor gibi gösterdi. Araç değişmeyen bir okumayı "stale" diye
+> işaretliyor ve yanına `/dev/mpp_service`'i kaç sürecin açtığını yazıyor.
+
 ## 7. Açık işler
 
 ### Önce
@@ -304,9 +444,20 @@ Titreme/yırtılma için üç mimari aday ölçülüp kapatıldı. Tekrar denenm
   `MediaPlayHere`'ın `title`/`duration_seconds` alanlarını web arayüzü henüz
   göndermiyor.
 * Kodi'nin "Şimdi Oynatılan" ekranı hâlâ eski simge setini kullanıyor.
-* Tarayıcıda AV1 donanımda çözülmüyor (sürücüde yok): VA-API karolara başlıksız
-  veri veriyor, MPP tam OBU istiyor. YouTube bu kutuda VP9 seçtiği için pratikte
-  ısırmadı; ısırırsa çare hesap tarafında codec tercihi.
+* ~~Tarayıcıda AV1 donanımda çözülmüyor~~ — **kapandı, 22 Eylül 2026**, bölüm 6b.
+  Çözüm VA-API'yi genişletmek değil, tarayıcının zaten taşıdığı V4L2 arka ucunu
+  seçmek oldu.
+* **Direct scanout kapalı** (`XR24`). Sebebi `a72a2f9`'daki kiosk kaldırma:
+  pencere modunda Chromium kendi çerçevesini çiziyor ve yüzey geometrisi
+  `2548x1418` kalıyor, çıkışı tam kaplamıyor. Ölçülen maliyet GPU'da %22 → %33
+  ve saatin 400 MHz → 1000 MHz'e çıkması. `MEDIABOX_BROWSER_KIOSK=1` scanout'u
+  geri getiriyor ama sekme şeridini alıyor. Bu derlemede dekorasyonu kapatan bir
+  Chromium bayrağı yok. Karar ürün tarafında: sekme mi, scanout mu.
+* **Kontrollü 4K60 AV1'de düşük kare %4,4-5,0.** Gerçek içerikte (YouTube
+  2160p60 AV1) %0,097 ölçüldü, yani ürün durumunda sorun değil; ama 25 Mbps
+  sentetik akışta çözücü yetişemiyor ve sebep `av1d` doygunluğu değil (%85'te
+  tavan yapmıyor). Bakılacak yer CAPTURE kuyruğu derinliği ve tampon dönüş
+  gecikmesi.
 * Tarayıcıda video kodlama (encode) yok — yalnız çözme.
 * Chromium'un VA-API render düğümü seçimi sıralama şansına bağlı
   (`Preferred drm_render_node not found`). sway altında doğrusunu alıyor,

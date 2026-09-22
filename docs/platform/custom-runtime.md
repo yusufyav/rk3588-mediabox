@@ -102,6 +102,25 @@ over, and it is in the configuration the appliance was measured with.
 | Decode profiles | H.264 Constrained Baseline / Main / High / High10, HEVC Main / Main10, VP8, VP9 Profile 0 / Profile 2 — to 7680x4320. **No AV1**: VA-API hands the driver headerless tile data and MPP wants whole OBUs. No encode entrypoints at all. |
 | Validation | `scripts/build-vaapi-driver.sh verify` and `mediabox-browser-verify`: the driver resolves against this prefix, never names the ScreenBridge prefix, `va_openDriver()` returns 0, and H.264 High and VP9 Profile 0 are advertised |
 
+### 3c. browser-runtime — the V4L2 door onto MPP, and the one that carries AV1
+
+| | |
+| --- | --- |
+| Upstream | `https://github.com/JeffyCN/libv4l-rkmpp.git` and `v4l-utils` |
+| Pinned at | libv4l-rkmpp `c5bc0aef0bc571872eb67508dcd75e05247eb83a` (1.8.0 + 3); v4l-utils `1.30.1` tarball, SHA-256 `c1cf549c…bae197` |
+| Licence | GPL-2.0-or-later (plugin), LGPL-2.1-or-later (libv4l2) |
+| What it is | Rockchip's own V4L2 memory-to-memory decoder for Chromium, implemented as a libv4l plugin on top of `librockchip_mpp`, plus the `v4l2convert.so` wrapper that puts it in the path of a browser that was never linked against libv4l2. Not a second decoder: a different doorway onto the one in entry 1. |
+| Why it has to exist | The VA-API door (entry 3b) cannot carry AV1, and not for want of silicon — RK3588 has an AV1 decoder of its own at `av1d@fdc70000` and the kernel advertises it as `DEVICE[ 4]:AV1DEC`. VA-API's AV1 entry point hands a driver tile data the browser has already parsed; MPP's AV1 decoder wants the stream. Chromium's V4L2 backend sends a stream, which is the shape MPP has, and its V4L2 codec table already contains `AV01` mapped to `AV1PROFILE_PROFILE_MAIN`. |
+| Why no Chromium build | Debian's Chromium 153 carries both backends. `media/base/media_switches.h`: *"When both VA-API and V4L2 are compiled in, selects the active backend: disabled (default) => VA-API, enabled => V4L2. Toggle via `--enable-features=PreferV4L2VideoAcceleration`."* The launcher asks for V4L2; nothing is compiled. |
+| Configuration | Built against this prefix's libv4l2 and `$MEDIABOX_MEDIA_PREFIX`'s MPP by `pkg-config`, with an RPATH naming both, so there is one MPP on the box and the browser links the one the players link. Decoder ceiling 4096x2304. |
+| Built by | `scripts/build-browser-runtime.sh` |
+| Installed at | `$MEDIABOX_PREFIX/browser-runtime` — the wrapper at `lib/libv4l/v4l2convert.so`, the plugin at `lib/libv4l/plugins/libv4l-rkmpp.so`, and the codec list at `etc/video-dec0`. Nothing goes to `/usr`. |
+| The device node | `etc/video-dec0` is an ordinary **file**: libv4l-rkmpp reads its capabilities out of the node it is opened on and refuses any node that is a character device. The browser's unit bind-mounts it at `/dev/video0` inside its own `PrivateDevices` namespace, so this board's `/dev` never gains a video node and nothing is left behind by hand. |
+| Consumers | the browser application, and nothing else |
+| Patches | four, all in `packaging/` and all with their measurement in the header: `v4l-utils-patches/0001` interposes the fortified `__open_2`/`__open64_2`, without which the wrapper is loaded and interposes nothing; `v4l-utils-patches/0002` carries the resolution-change event to a client that waits on `POLLPRI`, which a libv4l plugin cannot raise; `libv4l-rkmpp-patches/0001` asks MPP for eight-bit output so a ten-bit stream decodes instead of tripping an `assert` inside the GPU process; `libv4l-rkmpp-patches/0002` logs to stderr rather than into Chromium's mojo socket; `libv4l-rkmpp-patches/0003` stops reporting `POLLIN` for a returning OUTPUT buffer, which made Chromium dereference a CAPTURE queue it had not created yet. Upstream's own dependency, JeffyCN's `0001-libv4l2-Support-mmap-to-libv4l-plugin.patch`, is fetched by hash and applied first. |
+| Decode profiles | AV1 Main, VP9, VP8, H.264, H.265 — to 4096x2304, frames as NV12. AV1 is decoded by `fdc70000.av1d`; the rest by the rkvdec cores. |
+| Validation | `scripts/build-browser-runtime.sh verify` asks the chain the questions Chromium asks (`tools/v4l2-probe.c`, run inside a mount namespace of its own so the host's `/dev` is untouched), and `mediabox-browser-verify` checks it again on the appliance. `tools/browser-video-probe.py` measures the running browser. |
+
 ### 4. Mali G610 user space — **not a source build**
 
 | | |

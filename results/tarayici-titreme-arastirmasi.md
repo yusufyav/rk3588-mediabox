@@ -3,6 +3,12 @@
 **Tarih:** 21 Eylül 2026 · **Cihaz:** Orange Pi 5 Plus, `6.1.115-vendor-rk35xx`
 **Panel:** 2560x1440@143,999 Hz, HDMI-A-2 · **Durum: KAPANDI — bkz. Bölüm 8**
 
+> **Sonrası (22 Eylül 2026).** Bu raporun kapanışı yırtılmayı bitirdi ama
+> cadence'ı bitirmedi: 143,999 Hz, 60 fps'in tam katı olmadığı için hiçbir kare
+> düşmeden titreme bırakıyordu. O da kapandı — tarayıcı artık panelin sunduğu
+> modlardan 60/59,94'ün tam katı olanını alıyor. Aynı çalışmada AV1 donanım
+> çözme de açıldı. `results/DURUM.md` bölüm 6b.
+
 Bu rapor önce bir başarısızlık kaydı olarak yazıldı: altı saat, üç mimari
 deneme, sonuç yok. Sonradan sebep bulundu ve düzeltildi; Bölüm 8 onu anlatıyor.
 Bölüm 1-7 olduğu gibi duruyor, çünkü elenmiş yolların kaydı düzeltmenin kendisi

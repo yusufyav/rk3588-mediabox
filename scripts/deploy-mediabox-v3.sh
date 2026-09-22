@@ -73,9 +73,17 @@ sh_ "test -e '$MEDIABOX_MEDIA_PREFIX/lib/pkgconfig/libavcodec.pc'" || {
 # and decodes 4K in software, which is the failure this whole path exists to
 # stop. Not fatal -- a board can be deployed and the driver built afterwards --
 # but it is said plainly rather than discovered on the television.
+sh_ "test -e '$MEDIABOX_PREFIX/browser-runtime/lib/libv4l/plugins/libv4l-rkmpp.so'" || {
+  echo "   no browser runtime at $MEDIABOX_PREFIX/browser-runtime" >&2
+  echo "   the browser will decode video in software until you run" >&2
+  echo "     scripts/build-browser-runtime.sh" >&2
+}
+# The VA-API driver is the backend the browser no longer selects. It is still
+# checked, because it is the documented way back: dropping one feature name
+# from the launcher has to land on a decoder that is there.
 sh_ "test -e '$MEDIABOX_MEDIA_PREFIX/lib/dri/rockchip_drv_video.so'" || {
   echo "   no VA-API driver at $MEDIABOX_MEDIA_PREFIX/lib/dri" >&2
-  echo "   the browser will decode video in software until you run" >&2
+  echo "   the fallback decode path is absent; build it with" >&2
   echo "     scripts/build-vaapi-driver.sh" >&2
 }
 

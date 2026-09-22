@@ -1,0 +1,66 @@
+From: MediaBox
+Subject: v4l2convert: interpose the fortified spellings of open()
+
+v4l2convert.so is an LD_PRELOAD wrapper: it exists so that an application which
+was never linked against libv4l2 still reaches a libv4l plugin when it opens
+/dev/video*. It interposes `open` and `open64`.
+
+A hardened build calls neither.
+
+With _FORTIFY_SOURCE set -- Debian's default for every package, and what the
+Chromium on this appliance is built with -- glibc's <fcntl.h> rewrites
+open(path, flags) into __open_2(path, flags) whenever `flags` is a compile-time
+constant that does not contain O_CREAT, because then there is no mode argument
+left to check. `readelf -d` on the browser shows exactly that: it imports
+__open_2 and __open64_2 beside open and open64, and Chromium's V4L2 probe
+passes a constant O_RDWR|O_NONBLOCK|O_CLOEXEC.
+
+Measured on RK3588 before this patch: strace shows the browser opening
+/dev/video0 and walking /dev/video1..255, so the enumeration is happening and
+the node is found -- and the plugin behind it, with its logging turned all the
+way up, prints nothing at all, because the call went straight to glibc. From
+the outside this is indistinguishable from a device that answered wrongly.
+
+So the two fortified entry points are added. glibc emits them only after
+proving O_CREAT is absent, which is why neither forwards a mode: each hands the
+path to the wrapper's own open() and the ordinary path takes over from there.
+
+Not added: __openat_2 and __openat64_2. This file does not interpose openat()
+either, and adding half of that pair would mean a wrapper whose behaviour
+depended on which spelling a caller happened to compile to. The V4L2 probe uses
+open().
+--- a/lib/libv4l2/v4l2convert.c
++++ b/lib/libv4l2/v4l2convert.c
+@@ -87,7 +87,32 @@
+ 	return fd;
+ }
+ 
++/*
++ * The fortified spellings of open(), which are the ones a hardened build
++ * actually calls.
++ *
++ * With _FORTIFY_SOURCE on -- Debian's default, and what Chromium is built with
++ * -- glibc's <fcntl.h> rewrites open(path, flags) into __open_2(path, flags)
++ * whenever `flags` is a compile-time constant with no O_CREAT, because then
++ * there is no mode argument to check. The call never reaches the `open` symbol
++ * at all, so an LD_PRELOAD that interposes only `open` interposes nothing:
++ * measured on RK3588, where Chromium opened /dev/video0 straight through this
++ * wrapper and the V4L2 plugin behind it was never asked a single question.
++ *
++ * glibc emits these only after proving O_CREAT is absent, so there is no mode
++ * to forward and open() below takes the ordinary path.
++ */
++LIBV4L_PUBLIC int __open_2(const char *file, int oflag)
++{
++	return open(file, oflag);
++}
++
+ #if defined(linux) && defined(__GLIBC__)
++LIBV4L_PUBLIC int __open64_2(const char *file, int oflag)
++{
++	return open(file, oflag | O_LARGEFILE);
++}
++
+ LIBV4L_PUBLIC int open64(const char *file, int oflag, ...)
+ {
+ 	int fd;

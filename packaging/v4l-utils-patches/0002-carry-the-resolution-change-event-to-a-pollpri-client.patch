@@ -1,0 +1,286 @@
+From: MediaBox
+Subject: v4l2convert: carry the resolution-change event to a client that waits on POLLPRI
+
+A libv4l plugin cannot raise POLLPRI. All it can do is make the file
+descriptor readable -- libv4l-rkmpp replaces the descriptor with an epoll one
+and writes to an eventfd inside it -- and an epoll descriptor reports POLLIN
+and never POLLPRI. There is no way to express "an event is waiting" through
+the plugin interface at all.
+
+A V4L2 stateful decoder client is told the stream's resolution by exactly that
+signal and by nothing else:
+
+    struct pollfd pollfds[] = {{.fd = device_fd, .events = POLLIN | POLLPRI},
+                               {.fd = wake_event, .events = POLLIN}};
+    ...
+    if (events_from_device & POLLPRI) {
+      struct v4l2_event event = {};
+      if (HandledIoctl(device_fd, VIDIOC_DQEVENT, &event) != kIoctlOk) { ... }
+      std::move(resolution_change_callback).Run();
+    }
+
+-- media/gpu/v4l2/v4l2_stateful_video_decoder.cc, Chromium 153.
+
+Measured on RK3588, with the plugin's own log turned up: it takes the H.264
+headers, drives MPP, and reports `frame info changed: 1920x1080` -- and then
+the browser never calls VIDIOC_DQEVENT, never issues a single ioctl against the
+CAPTURE queue, and some seconds later falls back to software with "video
+decoder fallback after initial decode error". Every codec, every clip. From
+outside it looks like a decoder that produced a bad frame; nothing had been
+decoded at all.
+
+Raising POLLPRI whenever the descriptor is readable was tried first and is
+worse than useless: the client then dequeues an event that is not there on
+every wakeup, which on this board is a tight loop and a GPU process that dies
+with SIGSEGV within two seconds.
+
+So the event itself decides. When a descriptor this wrapper handed to libv4l2
+becomes readable and the caller asked about POLLPRI, one event is dequeued from
+the plugin; if there really was one it is held here, POLLPRI is reported, and
+the client's own VIDIOC_DQEVENT is answered from that store exactly once. No
+event, no POLLPRI -- and when there is one, POLLIN is cleared, because the
+descriptor was readable for the event and not for a frame. Telling a client
+both at once is what kills it: it services POLLIN first, and its CAPTURE queue
+does not exist yet. Descriptors this wrapper did not open are never touched, and
+a caller that did not ask about POLLPRI sees an ordinary poll().
+
+The descriptors are tracked on open() and released on close(), both of which
+this file already interposes.
+
+The request number is compared as an unsigned int. VIDIOC_DQEVENT is
+0x80885659; where this file declares ioctl()'s request as a signed int -- which
+it does, on a build with HAVE_POSIX_IOCTL -- that value arrives negative and a
+plain comparison never matches. v4l2_ioctl() normalises it for exactly this
+reason, but it does so after this point.
+--- a/lib/libv4l2/v4l2convert.c
++++ b/lib/libv4l2/v4l2convert.c
+@@ -34,9 +34,153 @@
+ #else
+ #include <linux/videodev2.h>
+ #endif
++#include <poll.h>
++#include <pthread.h>
++#include <dlfcn.h>
++#include <errno.h>
+ #include <libv4l2.h>
+ #include "../libv4lconvert/libv4lsyscall-priv.h"
+ 
++/*
++ * Resolution-change events, for an application that waits for POLLPRI.
++ *
++ * A libv4l plugin has no way to raise POLLPRI. It can only make the file
++ * descriptor readable -- libv4l-rkmpp, for instance, replaces the fd with an
++ * epoll descriptor and writes to an eventfd inside it -- and an epoll
++ * descriptor reports POLLIN and never POLLPRI.
++ *
++ * That is fatal for a V4L2 stateful decoder client, which is told by POLLPRI
++ * and nothing else that the stream's resolution is now known:
++ *
++ *     struct pollfd pollfds[] = {{.fd = device_fd, .events = POLLIN|POLLPRI}};
++ *     ...
++ *     if (events_from_device & POLLPRI) { VIDIOC_DQEVENT; ... }
++ *
++ * -- media/gpu/v4l2/v4l2_stateful_video_decoder.cc. Measured on RK3588: the
++ * plugin decodes the headers, reports the source change, and the client never
++ * asks for it, never configures its CAPTURE queue, and after a few seconds
++ * gives up and decodes in software.
++ *
++ * Raising POLLPRI whenever the fd is merely readable does not work either: the
++ * client then dequeues an event that is not there on every frame, which on
++ * this board is a tight loop and a dead GPU process.
++ *
++ * So the event is what decides. When a tracked descriptor becomes readable and
++ * the caller asked about POLLPRI, this dequeues an event from the plugin; if
++ * there really was one it is kept here and POLLPRI is reported, and the
++ * client's own VIDIOC_DQEVENT is answered from the store. No event, no POLLPRI,
++ * and nothing else about poll() changes.
++ */
++#define V4L2_EVENT_SHIM_MAX 16
++
++static pthread_mutex_t v4l2_event_shim_lock = PTHREAD_MUTEX_INITIALIZER;
++static int v4l2_event_shim_fd[V4L2_EVENT_SHIM_MAX];
++static int v4l2_event_shim_held[V4L2_EVENT_SHIM_MAX];
++static struct v4l2_event v4l2_event_shim_event[V4L2_EVENT_SHIM_MAX];
++static int v4l2_event_shim_ready;
++
++static void v4l2_event_shim_setup(void)
++{
++	int i;
++
++	if (v4l2_event_shim_ready)
++		return;
++	for (i = 0; i < V4L2_EVENT_SHIM_MAX; i++)
++		v4l2_event_shim_fd[i] = -1;
++	v4l2_event_shim_ready = 1;
++}
++
++/* Remember a descriptor libv4l2 accepted, so poll() knows whose it is. */
++static void v4l2_event_shim_track(int fd)
++{
++	int i;
++
++	pthread_mutex_lock(&v4l2_event_shim_lock);
++	v4l2_event_shim_setup();
++	for (i = 0; i < V4L2_EVENT_SHIM_MAX; i++) {
++		if (v4l2_event_shim_fd[i] == -1 || v4l2_event_shim_fd[i] == fd) {
++			v4l2_event_shim_fd[i] = fd;
++			v4l2_event_shim_held[i] = 0;
++			break;
++		}
++	}
++	pthread_mutex_unlock(&v4l2_event_shim_lock);
++}
++
++static void v4l2_event_shim_forget(int fd)
++{
++	int i;
++
++	pthread_mutex_lock(&v4l2_event_shim_lock);
++	v4l2_event_shim_setup();
++	for (i = 0; i < V4L2_EVENT_SHIM_MAX; i++) {
++		if (v4l2_event_shim_fd[i] == fd) {
++			v4l2_event_shim_fd[i] = -1;
++			v4l2_event_shim_held[i] = 0;
++		}
++	}
++	pthread_mutex_unlock(&v4l2_event_shim_lock);
++}
++
++static int v4l2_event_shim_index(int fd)
++{
++	int i;
++
++	v4l2_event_shim_setup();
++	for (i = 0; i < V4L2_EVENT_SHIM_MAX; i++)
++		if (v4l2_event_shim_fd[i] == fd)
++			return i;
++	return -1;
++}
++
++/* Hand back an event taken early, so the client's DQEVENT sees it once. */
++static int v4l2_event_shim_take(int fd, struct v4l2_event *out)
++{
++	int index, taken = 0;
++
++	pthread_mutex_lock(&v4l2_event_shim_lock);
++	index = v4l2_event_shim_index(fd);
++	if (index != -1 && v4l2_event_shim_held[index]) {
++		*out = v4l2_event_shim_event[index];
++		v4l2_event_shim_held[index] = 0;
++		taken = 1;
++	}
++	pthread_mutex_unlock(&v4l2_event_shim_lock);
++	return taken;
++}
++
++/* Is there an event waiting on this descriptor? Asked by dequeuing one. */
++static int v4l2_event_shim_pending(int fd)
++{
++	struct v4l2_event event;
++	int index, held;
++
++	pthread_mutex_lock(&v4l2_event_shim_lock);
++	index = v4l2_event_shim_index(fd);
++	held = (index != -1) ? v4l2_event_shim_held[index] : 0;
++	pthread_mutex_unlock(&v4l2_event_shim_lock);
++
++	if (index == -1)
++		return 0;
++	if (held)
++		return 1;
++
++	memset(&event, 0, sizeof(event));
++	if (v4l2_ioctl(fd, VIDIOC_DQEVENT, &event))
++		return 0;
++
++	pthread_mutex_lock(&v4l2_event_shim_lock);
++	index = v4l2_event_shim_index(fd);
++	if (index == -1) {
++		pthread_mutex_unlock(&v4l2_event_shim_lock);
++		return 0;
++	}
++	v4l2_event_shim_event[index] = event;
++	v4l2_event_shim_held[index] = 1;
++	pthread_mutex_unlock(&v4l2_event_shim_lock);
++	return 1;
++}
++
+ /* Check that open/read/mmap is not a define */
+ #if defined open || defined read || defined mmap
+ #error open/read/mmap is a prepocessor macro !!
+@@ -82,7 +226,8 @@
+ 
+ 	/* Try to Register with libv4l2 (in case of failure pass the fd to the
+ 	   application as is) */
+-	v4l2_fd_open(fd, 0);
++	if (v4l2_fd_open(fd, 0) != -1)
++		v4l2_event_shim_track(fd);
+ 
+ 	return fd;
+ }
+@@ -115,6 +260,7 @@
+ #ifndef ANDROID
+ LIBV4L_PUBLIC int close(int fd)
+ {
++	v4l2_event_shim_forget(fd);
+ 	return v4l2_close(fd);
+ }
+ 
+@@ -136,9 +282,57 @@
+ 	arg = va_arg(ap, void *);
+ 	va_end(ap);
+ 
++	/* An event poll() took early is delivered here, once. */
++	if ((unsigned int)request == (unsigned int)VIDIOC_DQEVENT && arg &&
++	    v4l2_event_shim_take(fd, (struct v4l2_event *)arg))
++		return 0;
++
+ 	return v4l2_ioctl(fd, request, arg);
+ }
+ 
++LIBV4L_PUBLIC int poll(struct pollfd *fds, nfds_t nfds, int timeout)
++{
++	/* There is no SYS_POLL here to borrow, and aarch64 has no poll(2) at
++	   all -- only ppoll(2) -- so the C library's own poll is used. */
++	static int (*libc_poll)(struct pollfd *, nfds_t, int);
++	nfds_t i;
++	int ret;
++
++	if (!libc_poll)
++		libc_poll = dlsym(RTLD_NEXT, "poll");
++	if (!libc_poll) {
++		errno = ENOSYS;
++		return -1;
++	}
++
++	ret = libc_poll(fds, nfds, timeout);
++	if (ret <= 0 || !fds)
++		return ret;
++
++	for (i = 0; i < nfds; i++) {
++		if (!(fds[i].events & POLLPRI))
++			continue;
++		if (!(fds[i].revents & POLLIN))
++			continue;
++		if (v4l2_event_shim_pending(fds[i].fd)) {
++			/* The descriptor is readable because of the event, not
++			   because a frame is waiting: say so, and only so. */
++			fds[i].revents |= POLLPRI;
++			fds[i].revents &= ~POLLIN;
++		}
++	}
++
++	return ret;
++}
++
++/* The spelling a fortified build calls; see __open_2 above. */
++LIBV4L_PUBLIC int __poll_chk(struct pollfd *fds, nfds_t nfds, int timeout,
++		__SIZE_TYPE__ fdslen)
++{
++	(void)fdslen;
++	return poll(fds, nfds, timeout);
++}
++
+ LIBV4L_PUBLIC ssize_t read(int fd, void *buffer, size_t n)
+ {
+ 	return v4l2_read(fd, buffer, n);

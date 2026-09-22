@@ -209,9 +209,14 @@ export MEDIABOX_HOST=<the appliance's address>
 #    pinned revisions, into MediaBox's own prefix          (~30-45 min)
 ./scripts/build-media-runtime.sh
 
-# 2. the browser's way in to that runtime: a VA-API driver over MPP, pinned,
-#    built on the board against step 1                     (~1 min)
-#    Without it Chromium decodes 4K in software: this kernel has no /dev/video*
+# 2. the browser's way in to that runtime. Two doors onto the same MPP:
+#
+#    the V4L2 one, which is the one the browser uses and the only one that
+#    carries AV1 -- libv4l-rkmpp plus a patched libv4l2, pinned, built on the
+#    board against step 1                                  (~3 min)
+./scripts/build-browser-runtime.sh
+#
+#    and the VA-API one, kept as the documented way back   (~1 min)
 ./scripts/build-vaapi-driver.sh
 
 # 3. the private Mali G610 user space (nothing is installed system-wide)

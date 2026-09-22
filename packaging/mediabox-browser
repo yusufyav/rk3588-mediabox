@@ -90,7 +90,7 @@ esac
 
 # Hardware video decode, on.
 #
-# Three feature names, and each one was checked against *this* binary rather
+# Four feature names, and each one was checked against *this* binary rather
 # than copied from a guide: Chromium retires these between releases and a name
 # it does not know is accepted in silence and does nothing.
 #
@@ -99,11 +99,25 @@ esac
 #                                           which is what ANGLE-on-Mali is here
 #   AcceleratedVideoDecodeLinuxZeroCopyGL   the decoded surface is imported as
 #                                           a DMA-BUF instead of being read back
+#   PreferV4L2VideoAcceleration             which of the two backends compiled
+#                                           into this binary actually runs
 #
-# The last one is the difference between a 4K frame crossing the bus once and
-# crossing it twice. What makes any of them mean anything is the VA-API driver
-# named in the unit; without it these three turn a decoder on that has nothing
-# behind it.
+# The third is the difference between a 4K frame crossing the bus once and
+# crossing it twice.
+#
+# The fourth is why AV1 plays at all. This browser has both of Chromium's
+# accelerated decode backends compiled in, and media/base/media_switches.h says
+# what that flag decides: "When both VA-API and V4L2 are compiled in, selects
+# the active backend: disabled (default) => VA-API, enabled => V4L2." VA-API is
+# the backend this appliance shipped with, and it carries H.264, HEVC and VP9
+# and not AV1 -- not for want of silicon, but because VA-API hands a driver
+# tile data the browser has already parsed while MPP's AV1 decoder wants the
+# stream. V4L2's decoder sends a stream, which is the shape MPP has, so the
+# backend is switched here and AV1 arrives with it. The V4L2 device is the
+# LD_PRELOAD below; without it this flag turns on a backend with nothing behind
+# it, exactly as the VA-API driver's absence used to.
+#
+# One decoder at a time, not two racing: this is a switch, not an addition.
 #
 # Not here, deliberately: --ignore-gpu-blocklist, --enable-gpu-rasterization
 # and --enable-zero-copy. Each was measured on this board and each was already
@@ -112,7 +126,29 @@ esac
 # would be three flags that say what the browser already does, and one more
 # thing to be wrong later.
 
+# The video decoder, as a library rather than a device.
+#
+# This board's VPU is a BSP device -- /dev/mpp_service, a Rockchip ioctl
+# interface -- and there is no /dev/video* on it at all, so Chromium's V4L2
+# backend has nothing to open. browser-runtime supplies the missing half:
+# libv4l-rkmpp is Rockchip's own V4L2 decoder for Chromium on top of MPP, and
+# v4l2convert.so is what puts it in the browser's path, because Debian's
+# Chromium is not linked against libv4l2 and so would never load a plugin.
+#
+# Preloaded here rather than in the unit on purpose: the unit starts sway, and
+# the compositor has no business being wrapped. Only the browser gets it.
+#
+# It intercepts almost nothing. Its open() looks at one prefix, /dev/video, and
+# every other call it wraps -- ioctl, mmap, read, close -- falls through to the
+# kernel on a lookup that misses for every fd in the process but the decoder's.
+# The node it finds there is the codec list the unit bind-mounts at
+# /dev/video0, inside this browser's own /dev and nowhere else on the box.
+BROWSER_RUNTIME="${MEDIABOX_BROWSER_RUNTIME:-/opt/rk3588-mediabox/browser-runtime}"
+V4L2_SHIM="$BROWSER_RUNTIME/lib/libv4l/v4l2convert.so"
+[ -e "$V4L2_SHIM" ] || V4L2_SHIM=""
+
 # shellcheck disable=SC2086  # $debug and $kiosk are empty or known flags.
+LD_PRELOAD="${V4L2_SHIM}${LD_PRELOAD:+:$LD_PRELOAD}" \
 /usr/bin/chromium \
   $debug \
   $kiosk \
@@ -134,7 +170,7 @@ esac
   --overscroll-history-navigation=0 \
   --autoplay-policy=no-user-gesture-required \
   --hide-scrollbars \
-  --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL \
+  --enable-features=AcceleratedVideoDecoder,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,PreferV4L2VideoAcceleration \
   "$url" || true
 
 exec /usr/bin/swaymsg exit
