@@ -12,6 +12,7 @@
 
 mod actions;
 mod detail;
+mod fdstore;
 mod images;
 mod input;
 mod keyboard;
@@ -2929,6 +2930,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // unblocked kills the process where it stands, without the display ever
     // being released. See session::block_exit_signals.
     session::block_exit_signals();
+
+    // The display device a previous stop left lit, if there is one. Taken
+    // before any thread exists; closed once this run's first frame is shown.
+    fdstore::adopt();
 
     let started = Instant::now();
     let trace_input = !std::env::args().any(|a| a == "--quiet-input");

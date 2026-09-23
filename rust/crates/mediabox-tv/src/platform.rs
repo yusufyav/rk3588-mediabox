@@ -125,8 +125,16 @@ struct Scanout {
     _dma_buf: OwnedFd,
 }
 
+/// Set once the display has been handed over lit: from then on the frame on
+/// the panel belongs to the next owner's start, and nothing here may remove
+/// it -- removing the framebuffer on a primary plane switches the CRTC off.
+static KEEP_SCANOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl Drop for Scanout {
     fn drop(&mut self) {
+        if KEEP_SCANOUT.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         if let Err(e) = self.kms.destroy_framebuffer(self.framebuffer) {
             eprintln!("mediabox-tv.kms cleanup rmfb failed: {e}");
         }
@@ -844,6 +852,7 @@ impl SplitDisplay {
                 self.size().height
             );
             state.first_frame_logged = true;
+            crate::fdstore::release_inherited();
         }
         Ok(())
     }
@@ -1005,7 +1014,26 @@ impl SplitDisplay {
         // not inherit a primary this process raised.
         crate::video::lower_interface(&self.kms, self.crtc);
         let _ = self.wait_for_page_flip();
-        let _ = self.kms.set_crtc(self.crtc, None, (0, 0), &[], None);
+        // The CRTC is left lit, on this process's last frame, and the device
+        // is handed to systemd instead of closed; see `fdstore`. Switching it
+        // off here -- as this used to -- is what let the kernel console put the
+        // sink's preferred 1080p on the wire between two owners, and Kodi then
+        // took that 1080p as the mode to start from and to restore.
+        //
+        // Only when systemd cannot take the device does the old behaviour
+        // stand: an unkept file closes at exit and removes its framebuffers
+        // anyway, so the CRTC is switched off cleanly rather than by accident.
+        let kept = self
+            .presentation
+            .borrow()
+            .current
+            .is_some()
+            && crate::fdstore::keep(self.kms.as_fd().as_raw_fd());
+        if kept {
+            KEEP_SCANOUT.store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            let _ = self.kms.set_crtc(self.crtc, None, (0, 0), &[], None);
+        }
         let (pending, current) = {
             let mut state = self.presentation.borrow_mut();
             (state.pending_previous.take(), state.current.take())
@@ -1013,7 +1041,10 @@ impl SplitDisplay {
         drop(pending);
         drop(current);
         let _ = self.kms.release_master_lock();
-        eprintln!("mediabox-tv.platform DRM released");
+        eprintln!(
+            "mediabox-tv.platform DRM released{}",
+            if kept { ", display left lit for the next owner" } else { "" }
+        );
     }
 }
 

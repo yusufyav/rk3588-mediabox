@@ -30,6 +30,13 @@ After=screenbridge-daemon.service
 
 [Service]
 Type=simple
+# The interface hands its open display device to systemd when it stops, so the
+# picture stays on the wire until the next owner takes it -- without that the
+# kernel console puts the sink's preferred 1080p up between the two, and Kodi
+# starts from it. See rust/crates/mediabox-tv/src/fdstore.rs.
+NotifyAccess=main
+FileDescriptorStoreMax=2
+FileDescriptorStorePreserve=yes
 User=root
 RuntimeDirectory=mediabox-ui
 RuntimeDirectoryMode=0700
