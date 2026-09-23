@@ -257,6 +257,26 @@ impl Client {
             .await
     }
 
+    /// Save a fan curve for the next boot. The daemon validates it and writes
+    /// the overlay; the kernel's pwm-fan is what drives the fan either way.
+    pub async fn fan_curve_set(&self, curve: &mediabox_core::FanCurve) -> Result<Value> {
+        if curve.profile == mediabox_core::FanProfile::Custom {
+            self.call(json!({
+                "command": "fan_curve_set",
+                "profile": curve.profile,
+                "points": curve.points,
+            }))
+            .await
+        } else {
+            self.call(json!({"command": "fan_curve_set", "profile": curve.profile}))
+                .await
+        }
+    }
+
+    pub async fn fan_curve_reset(&self) -> Result<Value> {
+        self.call(json!({"command": "fan_curve_reset"})).await
+    }
+
     pub async fn leds_set(&self, mode: mediabox_core::LedMode) -> Result<Value> {
         self.call(json!({"command": "leds_set", "mode": mode}))
             .await

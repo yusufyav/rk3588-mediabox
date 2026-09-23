@@ -437,6 +437,8 @@ pub fn diagnostics() -> Value {
         "drm": drm(),
         "network": network(),
         "ffmpeg": ffmpeg_processes(),
+        // The fan's own reading, not a second one: see crate::fan::status.
+        "fan": crate::fan::diagnostics(&crate::fan::status(&crate::fan::FanPaths::system())),
     })
 }
 
@@ -456,6 +458,7 @@ mod tests {
             "drm",
             "network",
             "ffmpeg",
+            "fan",
         ] {
             assert!(snapshot.get(key).is_some(), "missing {key}");
         }

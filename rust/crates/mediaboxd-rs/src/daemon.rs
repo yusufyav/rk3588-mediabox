@@ -1,5 +1,6 @@
 use crate::kodi::KodiClient;
 use crate::display::DisplayColor;
+use crate::fan::FanController;
 use crate::leds::LedController;
 use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
@@ -53,6 +54,9 @@ pub struct AppState {
     /// interface because that unit mounts /sys read-only and cannot read an
     /// EDID back after a hotplug.
     pub display_color: DisplayColor,
+    /// The fan's curve for the next boot. The kernel drives the fan; this
+    /// only writes the overlay it reads at boot, which is /boot's and root's.
+    pub fan: FanController,
 }
 
 impl AppState {
@@ -105,6 +109,14 @@ impl AppState {
                 Ok(()) => Response::success(self.display_color.status()),
                 Err(error) => Response::failure("DISPLAY_COLOR_ERROR", error),
             },
+            Request::FanStatus => Response::success(self.fan.status()),
+            Request::FanCurveSet { profile, points } => {
+                match mediabox_core::FanCurve::resolve(profile, points) {
+                    Ok(curve) => fan_result(self.fan.set(curve)),
+                    Err(error) => Response::failure("FAN_CURVE_INVALID", error.to_string()),
+                }
+            }
+            Request::FanCurveReset => fan_result(self.fan.reset()),
             Request::MediaStatus => media_result(self.media.status().await),
             Request::MediaCapabilities => media_result(self.media.capabilities().await),
             Request::MediaHome => media_result(self.media.home().await),
@@ -763,6 +775,7 @@ impl AppState {
             surface: self.surface.status().await,
             leds: self.leds.status(),
             display_color: self.display_color.status(),
+            fan: self.fan.status(),
         }
     }
 }
@@ -939,6 +952,13 @@ pub fn system_snapshot() -> Value {
     json!({"hostname":hostname,"kernel":kernel,"architecture":std::env::consts::ARCH,"uptime_seconds":uptime_seconds})
 }
 
+fn fan_result(result: Result<mediabox_core::FanStatus, crate::fan::FanError>) -> Response {
+    match result {
+        Ok(status) => Response::success(status),
+        Err(error) => Response::failure(error.code(), error.to_string()),
+    }
+}
+
 pub fn socket_is_live(path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
@@ -1001,6 +1021,7 @@ mod tests {
             // reaches the machine's own sysfs and reports no lights.
             leds: LedController::new(dir.path(), dir.path().join("leds")),
             display_color: DisplayColor::new(dir.path().join("color-mode")),
+            fan: FanController::new(crate::fan::FanPaths::under(dir.path())),
             applications: ApplicationManager::load(
                 None,
                 "kodi.service",

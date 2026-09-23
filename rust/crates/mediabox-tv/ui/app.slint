@@ -7,6 +7,7 @@ import { Detail, SourceRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
 import { Player, MenuRow } from "player.slint";
 import { Settings } from "settings.slint";
+import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { Account } from "account.slint";
 import { WifiScreen, BluetoothScreen, WifiRow, BtRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
@@ -17,7 +18,8 @@ import {
 
 export {
     RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
-    DiagGroup, SheetRow, KeyCap, KeyRow, NpControl,
+    DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
+    CoolInfo, CoolPoint, CoolTick, CoolSeg,
 }
 
 // What the television shows before there is anything to show.
@@ -230,6 +232,8 @@ export component MediaBoxWindow inherits Window {
     in property <bool> settings-on-sections: true;
     in property <[SettingRow]> settings-rows;
     in property <int> settings-row;
+    in property <bool> settings-cooling;
+    in property <CoolingView> settings-cooling-view;
 
     // ---- the Stremio account
     in property <string> account-email;
@@ -392,6 +396,8 @@ export component MediaBoxWindow inherits Window {
             on-sections: root.settings-on-sections;
             rows: root.settings-rows;
             row-index: root.settings-row;
+            cooling: root.settings-cooling;
+            cooling-view: root.settings-cooling-view;
         }
 
         if screen == "wifi": WifiScreen {

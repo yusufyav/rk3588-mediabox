@@ -241,6 +241,7 @@ production=(
   "$here"/packaging/mediabox-display-changed
   "$here"/packaging/mediabox-display-scale
   "$here"/packaging/mediabox-kiosk-smoke
+  "$here"/packaging/mediabox-fan-setup
   "$here"/config/mediabox-applications.json
 )
 pattern='/dev/dri/card[0-9]|/dev/dri/renderD[0-9]|/dev/cec[0-9]|rockchiphdmi[0-9]|rockchip-hdmi[0-9]|card[0-9]-HDMI|HDMI-A-[0-9]|\bDP-1\b'
@@ -898,6 +899,78 @@ check "the YUV wire and HDR metadata Kodi left are cleared" "$(colour)" \
   "modetest -w 236:HDR_OUTPUT_METADATA:0;modetest -w 236:color_format:0;"
 check "nothing is committed to a connector an owner still holds" \
   "$(MEDIABOX_HDMI_CONNECTOR_RESET=0 colour)" ""
+
+# -- The fan's boot configuration ------------------------------------------
+# /boot/armbianEnv.txt decides whether the board boots, and its user_overlays
+# line already carries the HDMI crossbar. The fan setup adds its own two
+# entries -- the Plus's 50 Hz carrier correction on a Plus only, the curve on
+# any board with a pwm-fan -- and leaves everything else where it was.
+echo "-- fan boot configuration"
+fs="$(mktemp -d)"
+fan_board() {
+  rm -rf "$fs/dt" "$fs/overlay-user"
+  mkdir -p "$fs/dt/pwm-fan" "$fs/overlay-user"
+  printf '%s\0' "$1" >"$fs/dt/model"
+  printf 'pwm-fan\0' >"$fs/dt/pwm-fan/compatible"
+  printf '%s\n' "$2" >"$fs/armbianEnv.txt"
+  rm -f "$fs/armbianEnv.txt.mediabox-fan"
+}
+fan_setup() {
+  MEDIABOX_BOOT_ENV="$fs/armbianEnv.txt" MEDIABOX_OVERLAY_DIR="$fs/overlay-user" \
+    MEDIABOX_DT_ROOT="$fs/dt" \
+    MEDIABOX_FAN_FIX_DTBO="$here/packaging/overlays/mediabox-fan-opi5plus-50hz.dtbo" \
+    bash "$here/packaging/mediabox-fan-setup"
+}
+overlays() { grep '^user_overlays=' "$fs/armbianEnv.txt"; }
+
+env_plus=$'verbosity=1\nextraargs=cma=256M video=HDMI-A-2:2560x1440@144\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz\nrootfstype=ext4'
+fan_board "Orange Pi 5 Plus" "$env_plus"
+out="$(fan_setup)"
+check "a Plus gets its carrier fix and the curve, after what was there" "$(overlays)" \
+  'user_overlays=mediabox-hdmi-any-vp fan-pwm-50hz mediabox-fan-curve mediabox-fan-opi5plus-50hz'
+check "every other line is untouched" "$(grep -v '^user_overlays=' "$fs/armbianEnv.txt")" \
+  "$(printf '%s\n' "$env_plus" | grep -v '^user_overlays=')"
+check "the fix installed is the repository's" \
+  "$(cmp -s "$fs/overlay-user/mediabox-fan-opi5plus-50hz.dtbo" "$here/packaging/overlays/mediabox-fan-opi5plus-50hz.dtbo" && echo same)" same
+check "the original is kept once" "$(cat "$fs/armbianEnv.txt.mediabox-fan")" "$env_plus"
+contains "a change says a reboot is needed" "$out" "reboot needed"
+before="$(sha256sum "$fs/armbianEnv.txt")"
+out="$(fan_setup)"
+check "a second run adds nothing twice and writes nothing" "$(sha256sum "$fs/armbianEnv.txt")" "$before"
+check "and asks for no reboot" "$([[ "$out" == *"reboot needed"* ]] && echo yes || echo no)" no
+
+fan_board "Orange Pi 5 Plus" $'verbosity=1\nuser_overlays=mediabox-fan-curve mediabox-hdmi-any-vp mediabox-fan-curve'
+fan_setup >/dev/null
+check "a doubled entry of ours is folded, others keep their order" "$(overlays)" \
+  'user_overlays=mediabox-fan-curve mediabox-hdmi-any-vp mediabox-fan-opi5plus-50hz'
+
+fan_board "Orange Pi 5 Plus" 'verbosity=1'
+fan_setup >/dev/null
+check "a file with no overlay line gets one" "$(overlays)" \
+  'user_overlays=mediabox-fan-curve mediabox-fan-opi5plus-50hz'
+
+fan_board "Orange Pi 5 Ultra" $'user_overlays=mediabox-hdmi-any-vp'
+fan_setup >/dev/null
+check "an Ultra gets the curve and never the Plus fix" "$(overlays)" \
+  'user_overlays=mediabox-hdmi-any-vp mediabox-fan-curve'
+check "and no Plus fix file" "$([ -e "$fs/overlay-user/mediabox-fan-opi5plus-50hz.dtbo" ] && echo yes || echo no)" no
+
+fan_board "Orange Pi 5 Ultra" $'user_overlays=mediabox-hdmi-any-vp mediabox-fan-opi5plus-50hz mediabox-fan-curve'
+fan_setup >/dev/null
+check "a disk moved from a Plus to an Ultra loses the Plus fix only" "$(overlays)" \
+  'user_overlays=mediabox-hdmi-any-vp mediabox-fan-curve'
+
+fan_board "" $'user_overlays=mediabox-hdmi-any-vp mediabox-fan-opi5plus-50hz'
+fan_setup >/dev/null
+check "a board that does not name itself keeps what it had" "$(overlays)" \
+  'user_overlays=mediabox-hdmi-any-vp mediabox-fan-opi5plus-50hz mediabox-fan-curve'
+
+fan_board "Orange Pi 5 Plus" $'user_overlays=mediabox-hdmi-any-vp'
+rm -f "$fs/dt/pwm-fan/compatible"
+before="$(sha256sum "$fs/armbianEnv.txt")"
+fan_setup >/dev/null
+check "a board with no pwm-fan is left alone" "$(sha256sum "$fs/armbianEnv.txt")" "$before"
+rm -rf "$fs"
 
 echo
 if [ "$failures" -eq 0 ]; then

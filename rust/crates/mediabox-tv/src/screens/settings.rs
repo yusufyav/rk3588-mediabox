@@ -14,7 +14,7 @@
 //! The destructive rows are the reason [`Action::confirms`] exists. Nothing on
 //! this screen restarts or shuts down the appliance on one press.
 
-use mediabox_core::LedMode;
+use mediabox_core::{FanStatus, LedMode};
 use serde_json::Value;
 
 use crate::model::DisplayStatus;
@@ -187,6 +187,9 @@ pub struct Settings {
     pub section: usize,
     pub pane: Pane,
     positions: Vec<usize>,
+    /// The fan curve editor, which is the whole of the "Soğutma" section: a
+    /// graph and a list of points rather than rows of readings.
+    pub cooling: super::cooling::Cooling,
 }
 
 impl Settings {
@@ -196,6 +199,7 @@ impl Settings {
             section: 0,
             pane: Pane::Sections,
             positions: Vec::new(),
+            cooling: super::cooling::Cooling::new(),
         };
         settings.compose(None, None, None);
         settings
@@ -217,6 +221,31 @@ impl Settings {
     }
 
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
+        // The fan editor has its own list and its own buttons; the section
+        // list only hands the remote over and takes it back.
+        if self.is_cooling() {
+            match self.pane {
+                Pane::Sections if dx > 0 => {
+                    if !self.cooling.available() {
+                        return false;
+                    }
+                    self.pane = Pane::Rows;
+                    self.cooling.enter();
+                    return true;
+                }
+                Pane::Rows => {
+                    return match self.cooling.step(dx, dy) {
+                        super::cooling::Nav::Moved => true,
+                        super::cooling::Nav::Unchanged => false,
+                        super::cooling::Nav::Leave => {
+                            self.pane = Pane::Sections;
+                            true
+                        }
+                    };
+                }
+                Pane::Sections => {}
+            }
+        }
         match self.pane {
             Pane::Sections => {
                 if dx > 0 {
@@ -292,6 +321,7 @@ impl Settings {
         diagnostics: Option<&Value>,
         display: Option<&DisplayStatus>,
     ) {
+        self.cooling.load(fan_status(status));
         let groups = compose(status, diagnostics, display);
         let changed = self.groups.len() != groups.len();
         self.groups = groups;
@@ -305,6 +335,40 @@ impl Settings {
         }
         self.settle(1);
     }
+}
+
+fn fan_status(status: Option<&Value>) -> Option<FanStatus> {
+    serde_json::from_value(status?.get("fan")?.clone()).ok()
+}
+
+impl Settings {
+    /// Whether the section on screen is the fan editor, which draws and moves
+    /// by its own rules.
+    /// Whether keys belong to the fan editor: its section, with the focus in
+    /// it rather than on the section list.
+    pub fn typing_cooling(&self) -> bool {
+        self.is_cooling() && self.pane == Pane::Rows
+    }
+
+    pub fn is_cooling(&self) -> bool {
+        self.groups
+            .get(self.section)
+            .is_some_and(|group| group.title == COOLING)
+    }
+}
+
+/// The section the fan editor lives in.
+pub const COOLING: &str = "Soğutma";
+
+/// What the section list says before the editor can open: why there is no
+/// fan to edit.
+fn cooling(status: Option<&Value>) -> Vec<Row> {
+    let reason = match fan_status(status) {
+        Some(fan) if fan.available => return vec![Row::reading("Fan eğrisi", "Sağa basın")],
+        Some(fan) => fan.error.unwrap_or_else(|| "Fan okunamadı".into()),
+        None => "Fan okunuyor…".into(),
+    };
+    vec![Row::reading("Fan", reason)]
 }
 
 fn text(root: Option<&Value>, pointer: &str) -> Option<String> {
@@ -723,6 +787,10 @@ fn compose(
             rows: leds(status),
         },
         Group {
+            title: COOLING.into(),
+            rows: cooling(status),
+        },
+        Group {
             title: "Sistem".into(),
             rows: vec![
                 Row::reading("Sürüm", text(status, "/version").unwrap_or_else(dash)),
@@ -786,6 +854,7 @@ mod tests {
             "HDMI ve CEC",
             "Ekran",
             "Ses",
+            "Soğutma",
             "Sistem",
             "Tanılama",
         ] {
@@ -1011,6 +1080,64 @@ mod tests {
     fn a_board_with_no_controllable_lights_offers_nothing_to_press() {
         let rows = lights(false, "off");
         assert!(rows.iter().all(|row| !row.selectable()));
+    }
+
+    // --------------------------------------------------------------- the fan
+
+    fn fan_answer() -> serde_json::Value {
+        serde_json::json!({"fan": {
+            "available": true,
+            "temperature_c": 52.4,
+            "pwm": 50,
+            "pwm_percent": 19.6,
+            "rpm_available": false,
+            "control_backend": "kernel-pwm-fan",
+            "curve": mediabox_core::FanCurve::balanced(),
+            "pending_reboot": false,
+            "board_fix": "active",
+            "boot_config_ready": true,
+        }})
+    }
+
+    /// Right from the section list opens the editor, Left from its first
+    /// button comes back, and neither changes the curve.
+    #[test]
+    fn the_cooling_section_hands_the_remote_to_the_editor_and_back() {
+        let mut settings = Settings::new();
+        settings.compose(Some(&fan_answer()), None, None);
+        settings.section = settings
+            .groups
+            .iter()
+            .position(|g| g.title == COOLING)
+            .expect("cooling section");
+        assert!(settings.is_cooling());
+        let before = settings.cooling.draft().cloned();
+        assert!(settings.step(1, 0));
+        assert_eq!(settings.pane, Pane::Rows);
+        assert!(settings.step(0, 1));
+        assert!(settings.step(-1, 0));
+        assert_eq!(settings.pane, Pane::Sections);
+        assert_eq!(settings.cooling.draft().cloned(), before);
+    }
+
+    /// No fan, no editor: the section says why and the remote stays put.
+    #[test]
+    fn a_board_with_no_fan_does_not_open_the_editor() {
+        let mut settings = Settings::new();
+        let status = serde_json::json!({"fan": {
+            "available": false, "rpm_available": false, "control_backend": "kernel-pwm-fan",
+            "pending_reboot": false, "board_fix": "not_needed", "boot_config_ready": false,
+            "error": "bu kartta pwm-fan denetimli bir fan bulunamadı",
+        }});
+        settings.compose(Some(&status), None, None);
+        settings.section = settings
+            .groups
+            .iter()
+            .position(|g| g.title == COOLING)
+            .unwrap();
+        assert!(!settings.step(1, 0));
+        assert_eq!(settings.pane, Pane::Sections);
+        assert!(settings.rows()[0].value.contains("pwm-fan"));
     }
 
     /// Before the daemon has answered, the screen must not claim a mode.

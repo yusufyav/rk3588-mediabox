@@ -140,6 +140,9 @@ struct App {
     /// it a poll that left before the press would redraw the old value for a
     /// frame.
     color_mode_pending: Option<Option<(mediabox_core::ColorFormat, u8)>>,
+    /// A fan curve save or reset is in flight. The same guard as the two
+    /// above: a poll that left before it cannot know the curve was saved.
+    fan_pending: bool,
 
     /// Whether the film's controls were up when the key being acted on was
     /// pressed. Read only by Back; see there.
@@ -250,6 +253,14 @@ impl App {
                     self.act(InputAction::Back);
                 }
             }
+            // A digit typed into a fan curve cell, then the edit itself.
+            Route::Settings if self.settings.typing_cooling() => {
+                if self.settings.cooling.backspace() {
+                    self.paint();
+                } else {
+                    self.act(InputAction::Back);
+                }
+            }
             _ => self.act(InputAction::Back),
         }
     }
@@ -292,6 +303,13 @@ impl App {
                         self.paint();
                     }
                 } else if self.wifi.typed(c) {
+                    self.paint();
+                }
+            }
+            // Digits into the fan curve table: a temperature or a percent,
+            // without walking a value up one step at a time.
+            Route::Settings if self.settings.typing_cooling() => {
+                if self.settings.cooling.typed(c) {
                     self.paint();
                 }
             }
@@ -524,6 +542,49 @@ impl App {
             if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
                 status.insert("display_color".into(), colour);
             }
+        }
+        self.recompose_settings();
+    }
+
+    /// The daemon's answer to a fan curve being saved or reset.
+    ///
+    /// The status it returns replaces the kept one, so the rows say what the
+    /// daemon wrote rather than what was asked for. A refusal is said along
+    /// the bottom in the daemon's own words: an unsafe curve, a board whose
+    /// boot configuration does not load the overlay.
+    fn fan_answered(&mut self, reset: bool, answer: Result<Value, String>) {
+        self.fan_pending = false;
+        match answer {
+            Ok(fan) => {
+                let pending = fan
+                    .get("pending_reboot")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let saved = fan
+                    .get("configured")
+                    .cloned()
+                    .and_then(|curve| serde_json::from_value(curve).ok());
+                match (reset, saved) {
+                    (true, _) => self.settings.cooling.reset_done(pending),
+                    (false, Some(curve)) => self.settings.cooling.saved(curve, pending),
+                    // Saved, and the daemon did not say what: keep the draft
+                    // as it is and let the next poll tell.
+                    (false, None) => {}
+                }
+                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("fan".into(), fan);
+                }
+                self.say(
+                    match (reset, pending) {
+                        (false, true) => "Fan eğrisi kaydedildi",
+                        (false, false) => "Fan eğrisi zaten bu",
+                        (true, true) => "Kartın kendi eğrisine dönülecek",
+                        (true, false) => "Zaten kartın kendi eğrisi",
+                    }
+                    .into(),
+                );
+            }
+            Err(error) => self.say(format!("Fan eğrisi kaydedilemedi — {error}")),
         }
         self.recompose_settings();
     }
@@ -1350,6 +1411,10 @@ impl App {
                     }
                     return;
                 }
+                if self.settings.is_cooling() {
+                    self.press_cooling();
+                    return;
+                }
                 let Some(action) = self.settings.focused().and_then(|row| row.action) else {
                     return;
                 };
@@ -1360,6 +1425,12 @@ impl App {
                 }
             }
             Intent::Dismiss => {
+                // Back in the fan editor closes an open cell or the restart
+                // question before it leaves the section.
+                if self.settings.typing_cooling() && self.settings.cooling.back() {
+                    self.paint();
+                    return;
+                }
                 if self.settings.pane == screens::settings::Pane::Rows {
                     self.settings.pane = screens::settings::Pane::Sections;
                     self.paint();
@@ -1368,6 +1439,29 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Ok in the fan editor. Editing stays in this process; saving and
+    /// resetting are the daemon's. Restarting is asked for from the question
+    /// the editor puts up after a save, with "later" under the focus, and that
+    /// question is the confirmation.
+    fn press_cooling(&mut self) {
+        use screens::cooling::Press;
+        match self.settings.cooling.press() {
+            Press::Nothing => {}
+            Press::Changed => self.paint(),
+            Press::Save(curve) => {
+                self.say("Fan eğrisi kaydediliyor…".into());
+                self.fan_pending = true;
+                spawn_fan(Some(curve));
+            }
+            Press::Reset => {
+                self.say("Kartın kendi fan eğrisine dönülüyor…".into());
+                self.fan_pending = true;
+                spawn_fan(None);
+            }
+            Press::Restart => self.run(Action::Restart),
         }
     }
 
@@ -1901,6 +1995,16 @@ impl App {
                     .cloned();
                 if let (Some(kept), Some(fresh)) = (kept, fresh.as_object_mut()) {
                     fresh.insert("leds".into(), kept);
+                }
+            }
+            if self.fan_pending {
+                let kept = self
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.get("fan"))
+                    .cloned();
+                if let (Some(kept), Some(fresh)) = (kept, fresh.as_object_mut()) {
+                    fresh.insert("fan".into(), kept);
                 }
             }
             self.status = Some(fresh);
@@ -2541,6 +2645,125 @@ impl App {
                 })
                 .collect::<Vec<_>>(),
         )));
+        self.paint_cooling(window);
+    }
+
+    fn paint_cooling(&self, window: &MediaBoxWindow) {
+        let cooling = self.settings.is_cooling();
+        window.set_settings_cooling(cooling);
+        if !cooling {
+            return;
+        }
+        let view = self.settings.cooling.view();
+        fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+            slint::ModelRc::new(slint::VecModel::from(items))
+        }
+        let ticks = |items: &[screens::cooling::Tick]| {
+            model(
+                items
+                    .iter()
+                    .map(|tick| CoolTick {
+                        at: tick.at as f32,
+                        label: tick.label.clone().into(),
+                        shown: tick.shown,
+                    })
+                    .collect(),
+            )
+        };
+        let chips = |items: &[screens::cooling::Chip]| {
+            model(
+                items
+                    .iter()
+                    .map(|chip| CoolChip {
+                        label: chip.label.clone().into(),
+                        enabled: chip.enabled,
+                        on: chip.on,
+                        focused: chip.focused,
+                    })
+                    .collect(),
+            )
+        };
+        let line = |items: &[screens::cooling::Segment]| {
+            model(
+                items
+                    .iter()
+                    .map(|seg| CoolSeg {
+                        x0: seg.x0 as f32,
+                        y0: seg.y0 as f32,
+                        x1: seg.x1 as f32,
+                        y1: seg.y1 as f32,
+                    })
+                    .collect(),
+            )
+        };
+        window.set_settings_cooling_view(CoolingView {
+            available: view.available,
+            message: view.message.into(),
+            temperature: view.temperature.into(),
+            duty: view.duty.into(),
+            duty_raw: view.duty_raw.into(),
+            curve: view.curve.into(),
+            profile: view.profile.into(),
+            state: view.state.into(),
+            state_tone: view.state_tone.into(),
+            chips: chips(&view.chips),
+            line: line(&view.line),
+            previous_line: line(&view.previous_line),
+            legend: view.legend.into(),
+            points: model(
+                view.points
+                    .iter()
+                    .map(|p| CoolPoint {
+                        x: p.x as f32,
+                        y: p.y as f32,
+                        selected: p.selected,
+                        last: p.last,
+                    })
+                    .collect(),
+            ),
+            x_ticks: ticks(&view.x_ticks),
+            y_ticks: ticks(&view.y_ticks),
+            has_now: view.now_x.is_some() && view.now_y.is_some(),
+            now_x: view.now_x.unwrap_or(0.0) as f32,
+            now_y: view.now_y.unwrap_or(0.0) as f32,
+            now_temperature: view.now_temperature.into(),
+            now_duty: view.now_duty.into(),
+            trip_x: view.trip_x as f32,
+            callout: view.callout.into(),
+            callout_editing: view.callout_editing,
+            rows: model(
+                view.rows
+                    .into_iter()
+                    .map(|row| CoolRow {
+                        number: row.number.into(),
+                        temperature: row.temperature.into(),
+                        duty: row.duty.into(),
+                        raw: row.raw.into(),
+                        locked: row.locked,
+                        selected: row.selected,
+                        can_add: row.can_add,
+                        can_remove: row.can_remove,
+                        focus_col: row.focus_col,
+                        edit_col: row.edit_col,
+                    })
+                    .collect(),
+            ),
+            count: view.count.into(),
+            actions: chips(&view.actions),
+            note: view.note.into(),
+            advanced: view.advanced,
+            info: model(
+                view.info
+                    .into_iter()
+                    .map(|(label, value)| CoolInfo {
+                        label: label.into(),
+                        value: value.into(),
+                    })
+                    .collect(),
+            ),
+            prompt: view.prompt,
+            prompt_focus: view.prompt_focus as i32,
+        });
     }
 
     fn paint_account(&mut self, window: &MediaBoxWindow) {
@@ -2766,6 +2989,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diag: None,
         leds_pending: None,
         color_mode_pending: None,
+        fan_pending: false,
         display: None,
         controls_were_open: false,
         handing_over: false,
@@ -3432,6 +3656,27 @@ fn spawn_color_mode(mode: Option<(mediabox_core::ColorFormat, u8)>) {
         };
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.color_mode_answered(answer));
+        });
+    });
+}
+
+/// Save a fan curve for the next boot, or `None` to go back to the board's
+/// own. The answer comes back to the event loop either way: a refusal is the
+/// daemon's to explain.
+fn spawn_fan(curve: Option<mediabox_core::FanCurve>) {
+    detached("mediabox-tv-fan", async move {
+        let client = rpc::Client::new(socket_path());
+        let reset = curve.is_none();
+        let answer = match &curve {
+            Some(curve) => client.fan_curve_set(curve).await,
+            None => client.fan_curve_reset().await,
+        }
+        .map_err(|error| {
+            eprintln!("mediabox-tv.fan failed: {error}");
+            error.to_string()
+        });
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.fan_answered(reset, answer));
         });
     });
 }

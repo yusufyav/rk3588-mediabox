@@ -1,0 +1,988 @@
+import { Theme, Metrics } from "theme.slint";
+
+// The fan curve editor: what the SoC and the fan are doing, the curve as a
+// graph, and the curve's points as a table a remote can walk and a keyboard
+// can type into.
+//
+// Everything here is drawn from one CoolingView composed in Rust
+// (src/screens/cooling.rs), where the focus and the editing live and are
+// tested. This file only puts it on the panel.
+//
+// Two rules keep the graph legible. One scale: the line, the points, the
+// ticks and the current readings are all fractions of the plot, placed by the
+// same two functions, so nothing can be drawn to a different scale from the
+// rest -- a Path in its own view box was, and the curve came out squeezed
+// into the middle of the plot. And one label inside the plot: the selected
+// point's. The current temperature and duty are labelled on their axes, and
+// ticks under those labels are left out in Rust.
+
+// One straight piece of the curve, as fractions of the plot.
+export struct CoolSeg {
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+}
+
+export struct CoolPoint {
+    x: float,
+    y: float,
+    selected: bool,
+    last: bool,
+}
+
+export struct CoolTick {
+    at: float,
+    label: string,
+    shown: bool,
+}
+
+export struct CoolChip {
+    label: string,
+    enabled: bool,
+    on: bool,
+    focused: bool,
+}
+
+export struct CoolRow {
+    number: string,
+    temperature: string,
+    duty: string,
+    raw: string,
+    locked: bool,
+    selected: bool,
+    can-add: bool,
+    can-remove: bool,
+    // -1 none, 0 temperature, 1 duty, 2 add, 3 remove.
+    focus-col: int,
+    edit-col: int,
+}
+
+export struct CoolInfo {
+    label: string,
+    value: string,
+}
+
+export struct CoolingView {
+    available: bool,
+    message: string,
+    temperature: string,
+    duty: string,
+    duty-raw: string,
+    curve: string,
+    profile: string,
+    state: string,
+    // "good", "accent" or "warn".
+    state-tone: string,
+    chips: [CoolChip],
+    line: [CoolSeg],
+    previous-line: [CoolSeg],
+    legend: string,
+    points: [CoolPoint],
+    x-ticks: [CoolTick],
+    y-ticks: [CoolTick],
+    has-now: bool,
+    now-x: float,
+    now-y: float,
+    now-temperature: string,
+    now-duty: string,
+    trip-x: float,
+    callout: string,
+    callout-editing: bool,
+    rows: [CoolRow],
+    count: string,
+    actions: [CoolChip],
+    note: string,
+    advanced: bool,
+    info: [CoolInfo],
+    prompt: bool,
+    prompt-focus: int,
+}
+
+// A button: white when the remote is on it, faint when it cannot be pressed.
+component Button inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> focused;
+    in property <bool> primary;
+    in property <length> font: Metrics.root-font * 0.9;
+    property <bool> lit: primary && enabled && !focused;
+    height: Metrics.root-font * 2.7;
+    min-width: txt.preferred-width + Metrics.root-font * 2.4;
+    border-radius: Metrics.root-font * 0.55;
+    background: focused ? Theme.focus-fill : (lit ? Theme.accent : (enabled ? Theme.bg-card : transparent));
+    border-width: 2px;
+    border-color: focused ? Theme.focus-ring : (lit ? Theme.accent : (enabled ? Theme.line : Theme.line-soft));
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    txt := Text {
+        text: label;
+        color: focused ? #0a0c10 : (lit ? Theme.accent-ink : (enabled ? Theme.text : Theme.dim));
+        font-size: font;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+}
+
+// One reading of the strip along the top.
+component Reading inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> sub;
+    border-radius: Theme.radius * 0.85;
+    background: Theme.bg-raise;
+    border-width: 1px;
+    border-color: Theme.line-soft;
+    VerticalLayout {
+        padding-left: Metrics.root-font * 0.9;
+        padding-right: Metrics.root-font * 0.9;
+        alignment: center;
+        spacing: 0px;
+        Text {
+            text: label;
+            color: Theme.dim;
+            font-size: Metrics.root-font * 0.66;
+            font-weight: 650;
+            letter-spacing: Metrics.root-font * 0.04;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        HorizontalLayout {
+            spacing: Metrics.root-font * 0.4;
+            alignment: start;
+            Text {
+                text: value;
+                color: Theme.text;
+                font-size: Metrics.root-font * 1.27;
+                font-weight: 800;
+                wrap: no-wrap;
+            }
+            if sub != "": Text {
+                text: sub;
+                color: Theme.muted;
+                font-size: Metrics.root-font * 0.82;
+                font-weight: 600;
+                vertical-alignment: bottom;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A cell of the table.
+component Cell inherits Rectangle {
+    in property <string> label;
+    in property <string> sub;
+    in property <bool> focused;
+    in property <bool> editing;
+    in property <bool> locked;
+    in property <bool> row-selected;
+    border-radius: Metrics.root-font * 0.42;
+    background: editing ? Theme.accent : (focused ? Theme.focus-fill : (row-selected && !locked ? #ffffff0d : transparent));
+    border-width: 2px;
+    border-color: editing ? Theme.accent : (focused ? Theme.focus-ring : transparent);
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    HorizontalLayout {
+        padding-left: Metrics.root-font * 0.55;
+        padding-right: Metrics.root-font * 0.55;
+        spacing: Metrics.root-font * 0.35;
+        Text {
+            text: label;
+            color: editing ? Theme.accent-ink : (focused ? #0a0c10 : (locked ? Theme.muted : Theme.text));
+            font-size: Metrics.root-font * 0.95;
+            font-weight: 750;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+        if sub != "": Text {
+            text: sub;
+            color: editing ? #5a3d0a : (focused ? #3b4350 : Theme.dim);
+            font-size: Metrics.root-font * 0.72;
+            font-weight: 600;
+            vertical-alignment: center;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+        if editing: Text {
+            text: "▲▼";
+            color: Theme.accent-ink;
+            font-size: Metrics.root-font * 0.6;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// A small square button on the selected row.
+component RowButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled;
+    in property <bool> focused;
+    border-radius: Metrics.root-font * 0.42;
+    background: focused ? Theme.focus-fill : #ffffff14;
+    border-width: 2px;
+    border-color: focused ? Theme.focus-ring : transparent;
+    opacity: enabled ? 1.0 : 0.3;
+    Text {
+        text: label;
+        color: focused ? #0a0c10 : Theme.text;
+        font-size: Metrics.root-font * 1.05;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A swatch and its word, for the legend.
+component Key inherits HorizontalLayout {
+    in property <string> label;
+    in property <brush> tint;
+    in property <bool> band;
+    spacing: Metrics.root-font * 0.35;
+    Rectangle {
+        width: band ? Metrics.root-font * 0.62 : Metrics.root-font * 1.0;
+        Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: band ? Metrics.root-font * 0.62 : 3px;
+            border-radius: band ? 3px : 0px;
+            background: tint;
+        }
+    }
+    Text {
+        text: label;
+        color: Theme.muted;
+        font-size: Metrics.root-font * 0.72;
+        font-weight: 550;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+}
+
+// A straight piece of line from (ax, ay) to (bx, by), in the parent's own
+// coordinates: a thin rectangle as long as the piece, turned to its angle
+// about its centre. The root is an empty box at the parent's origin, because
+// Slint does not turn a component's root.
+component Piece inherits Rectangle {
+    in property <length> ax;
+    in property <length> ay;
+    in property <length> bx;
+    in property <length> by;
+    in property <length> thickness;
+    in property <brush> tint;
+    property <float> dx: (bx - ax) / 1px;
+    property <float> dy: (by - ay) / 1px;
+    property <length> long: sqrt(dx * dx + dy * dy) * 1px;
+    x: 0;
+    y: 0;
+    width: 0;
+    height: 0;
+    Rectangle {
+        x: (ax + bx) / 2 - long / 2;
+        y: (ay + by) / 2 - thickness / 2;
+        width: long;
+        height: thickness;
+        background: tint;
+        transform-rotation: atan2(dy, dx);
+    }
+}
+
+export component CoolingPane inherits Rectangle {
+    in property <CoolingView> view;
+    in property <bool> active-pane;
+
+    property <length> rf: Metrics.root-font;
+    property <length> gap: rf * 0.9;
+    property <length> head-h: rf * 2.9;
+    property <length> read-y: head-h + rf * 0.7;
+    property <length> read-h: rf * 3.8;
+    property <length> main-y: read-y + read-h + gap;
+    property <length> act-h: rf * 3.1;
+    property <length> act-y: root.height - act-h;
+    property <length> main-h: act-y - gap - main-y;
+    property <length> table-w: rf * 21.8;
+
+    // ---------------------------------------------------------------- header
+
+    Text {
+        x: 0;
+        y: 0;
+        height: head-h;
+        text: "Soğutma";
+        color: Theme.text;
+        font-size: rf * 1.5;
+        font-weight: 800;
+        vertical-alignment: center;
+    }
+
+    if view.available: Rectangle {
+        x: root.width - self.width;
+        y: (head-h - self.height) / 2;
+        width: chips.preferred-width;
+        height: rf * 2.5;
+        border-radius: rf * 0.62;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line;
+        chips := HorizontalLayout {
+            padding: rf * 0.22;
+            spacing: rf * 0.25;
+            for chip in view.chips: Rectangle {
+                min-width: word.preferred-width + rf * 2;
+                border-radius: rf * 0.45;
+                background: chip.focused && active-pane ? Theme.focus-fill : (chip.on ? #ffffff1c : transparent);
+                border-width: chip.focused && active-pane ? 2px : 0px;
+                border-color: Theme.focus-ring;
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                word := Text {
+                    text: chip.label;
+                    color: chip.focused && active-pane ? #0a0c10 : (chip.on ? Theme.text : Theme.muted);
+                    font-size: rf * 0.9;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    if !view.available: Text {
+        x: 0;
+        y: read-y;
+        width: root.width * 0.7;
+        text: view.message;
+        color: Theme.muted;
+        font-size: rf;
+        wrap: word-wrap;
+    }
+
+    // -------------------------------------------------------------- readings
+
+    if view.available: HorizontalLayout {
+        x: 0;
+        y: read-y;
+        width: root.width;
+        height: read-h;
+        spacing: rf * 0.64;
+        Reading {
+            horizontal-stretch: 1;
+            label: "SOC SICAKLIĞI";
+            value: view.temperature;
+        }
+        Reading {
+            horizontal-stretch: 1;
+            label: "FAN GÜCÜ (PWM)";
+            value: view.duty;
+            sub: view.duty-raw;
+        }
+        Reading {
+            horizontal-stretch: 1;
+            label: "EĞRİ";
+            value: view.curve;
+            sub: view.profile;
+        }
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                property <color> tone: view.state-tone == "good" ? #4ade80 : (view.state-tone == "warn" ? #fbbf24 : #ffb43a);
+                height: rf * 2.36;
+                min-width: state-row.preferred-width + rf * 2;
+                border-radius: self.height / 2;
+                background: tone.with-alpha(0.08);
+                border-width: 1px;
+                border-color: tone.with-alpha(0.4);
+                state-row := HorizontalLayout {
+                    alignment: center;
+                    spacing: rf * 0.45;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: rf * 0.55;
+                            height: self.width;
+                            border-radius: self.width / 2;
+                            background: tone;
+                        }
+                    }
+                    Text {
+                        text: view.state;
+                        color: tone;
+                        font-size: rf * 0.86;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------- graph
+
+    if view.available && !view.advanced: Rectangle {
+        property <length> card-w: root.width - table-w - gap;
+        property <length> th: rf * 0.16;
+        property <length> pl: rf * 3.8;
+        property <length> pr: rf * 1.35;
+        property <length> pt: head-h + rf * 0.5;
+        property <length> pb: rf * 3.0;
+        property <length> pw: card-w - pl - pr;
+        property <length> ph: main-h - pt - pb;
+        property <color> ink: #ffb43a;
+        // The accent at 12 % over the card, mixed here so the area can be
+        // opaque: see the area below.
+        property <color> fill: #2c261e;
+
+        pure function fx(f: float) -> length {
+            return pl + pw * f;
+        }
+        pure function fy(f: float) -> length {
+            return pt + ph * (1 - f);
+        }
+
+        x: 0;
+        y: main-y;
+        width: card-w;
+        height: main-h;
+        border-radius: Theme.radius;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+        clip: true;
+
+        Text {
+            x: rf * 1.1;
+            y: 0;
+            height: head-h;
+            text: "Fan eğrisi";
+            color: Theme.text;
+            font-size: rf;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+        // The legend, right-aligned in the header. Given its own width: a
+        // layout placed by x alone stretched to the card and ran its first
+        // word under the title.
+        HorizontalLayout {
+            x: card-w * 0.4;
+            y: 0;
+            width: card-w * 0.6 - rf;
+            height: head-h;
+            spacing: rf * 0.9;
+            alignment: end;
+            Key { label: view.legend; tint: ink; }
+            if view.previous-line.length > 0: Key { label: "Önceki"; tint: Theme.muted; }
+            Key { label: "Şu an"; tint: #ffffff; }
+            Key { label: "Kısma"; tint: #f8717166; band: true; }
+        }
+
+        // Tick labels.
+        for tick in view.x-ticks: Text {
+            x: fx(tick.at) - rf * 1.5;
+            y: pt + ph + rf * 0.55;
+            width: rf * 3;
+            visible: tick.shown;
+            text: tick.label;
+            color: tick.at >= 1 ? Theme.dim : Theme.muted;
+            font-size: rf * 0.77;
+            horizontal-alignment: center;
+        }
+        for tick in view.y-ticks: Text {
+            x: 0;
+            y: fy(tick.at) - rf * 0.6;
+            width: pl - rf * 0.6;
+            height: rf * 1.2;
+            visible: tick.shown;
+            text: tick.label;
+            color: Theme.muted;
+            font-size: rf * 0.77;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+
+        // The draft's area first, under everything else: for each piece, a
+        // large rectangle turned to lie along the piece and cut to the piece's
+        // own width, so the fill's edge is the line itself. Opaque, and one
+        // pixel wider than the piece, so neighbours meet without a seam.
+        for seg in view.line: Rectangle {
+            property <length> ax: fx(seg.x0);
+            property <length> bx: fx(seg.x1);
+            property <angle> turn: atan2((fy(seg.y1) - fy(seg.y0)) / 1px, (bx - ax) / 1px);
+            property <length> big: ph * 3 + pw;
+            x: ax;
+            y: pt;
+            width: bx - ax + 1px;
+            height: ph;
+            clip: true;
+            Rectangle {
+                // Centre half a side below the piece's midpoint, along its
+                // normal: the top edge then runs through the piece.
+                x: (bx - ax) / 2 - big / 2 * sin(turn) - big / 2;
+                y: (fy(seg.y0) + fy(seg.y1)) / 2 - pt + big / 2 * cos(turn) - big / 2;
+                width: big;
+                height: big;
+                transform-rotation: turn;
+                background: fill;
+            }
+        }
+        // The grid over the area, as the web draws it.
+        for tick in view.x-ticks: Rectangle {
+            x: fx(tick.at);
+            y: pt;
+            width: 1px;
+            height: ph;
+            background: #ffffff0d;
+        }
+        for tick in view.y-ticks: Rectangle {
+            x: pl;
+            y: fy(tick.at);
+            width: pw;
+            height: 1px;
+            background: tick.at == 0 ? #ffffff2e : #ffffff0d;
+        }
+
+        // The throttling band: 75 °C to the edge.
+        Rectangle {
+            x: fx(view.trip-x);
+            y: pt;
+            width: pw * (1 - view.trip-x);
+            height: ph;
+            background: #f8717121;
+        }
+        Rectangle {
+            x: fx(view.trip-x) - 1px;
+            y: pt;
+            width: 2px;
+            height: ph;
+            background: #f871718c;
+        }
+        Text {
+            x: fx(view.trip-x) + (pw * (1 - view.trip-x) - self.width) / 2;
+            y: pt + (ph - self.height) / 2;
+            width: ph;
+            height: rf * 0.9;
+            text: "KISMA ≥ 75 °C";
+            color: Theme.bad;
+            font-size: rf * 0.66;
+            font-weight: 700;
+            letter-spacing: rf * 0.12;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            transform-rotation: -90deg;
+        }
+
+        // The running curve, behind the draft, when they differ.
+        for seg in view.previous-line: Piece {
+            ax: fx(seg.x0);
+            ay: fy(seg.y0);
+            bx: fx(seg.x1);
+            by: fy(seg.y1);
+            thickness: 2px;
+            tint: #9aa5b4b3;
+        }
+        // The draft's line, with a round joint at every corner.
+        for seg in view.line: Piece {
+            ax: fx(seg.x0);
+            ay: fy(seg.y0);
+            bx: fx(seg.x1);
+            by: fy(seg.y1);
+            thickness: th;
+            tint: ink;
+        }
+        for seg in view.line: Rectangle {
+            x: fx(seg.x1) - th / 2;
+            y: fy(seg.y1) - th / 2;
+            width: th;
+            height: th;
+            border-radius: th / 2;
+            background: ink;
+        }
+
+        // Now: the temperature down the plot, the duty across it, dashed.
+        if view.has-now: Rectangle {
+            x: 0;
+            y: 0;
+            width: card-w;
+            height: main-h;
+            for i in 36: Rectangle {
+                x: fx(view.now-x) - 1px;
+                y: pt + ph * i / 36;
+                width: 2px;
+                height: ph / 72;
+                background: #ffffffcc;
+            }
+            for i in 60: Rectangle {
+                x: pl + pw * i / 60;
+                y: fy(view.now-y) - 1px;
+                width: pw / 120;
+                height: 2px;
+                background: #ffffff73;
+            }
+            Rectangle {
+                x: fx(view.now-x) - self.width / 2;
+                y: fy(view.now-y) - self.height / 2;
+                width: rf * 0.6;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: #ffffff;
+            }
+            // Their labels, on the axes.
+            Rectangle {
+                width: rf * 4;
+                height: rf * 1.5;
+                x: max(0px, min(card-w - self.width, fx(view.now-x) - self.width / 2));
+                y: pt + ph + rf * 0.4;
+                border-radius: self.height / 2;
+                background: #ffffff;
+                Text {
+                    text: view.now-temperature;
+                    color: #0a0c10;
+                    font-size: rf * 0.77;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            Rectangle {
+                width: rf * 3.1;
+                height: rf * 1.5;
+                x: pl - self.width - rf * 0.35;
+                y: fy(view.now-y) - self.height / 2;
+                border-radius: self.height / 2;
+                background: #e6e9ee;
+                Text {
+                    text: view.now-duty;
+                    color: #0a0c10;
+                    font-size: rf * 0.77;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // The points.
+        for point in view.points: Rectangle {
+            property <length> d: point.selected ? rf * 1.05 : rf * 0.72;
+            x: fx(point.x) - d / 2;
+            y: fy(point.y) - d / 2;
+            width: d;
+            height: d;
+            border-radius: d / 2;
+            background: Theme.bg-raise;
+            border-width: point.selected ? rf * 0.18 : rf * 0.14;
+            border-color: point.selected ? #ffffff : ink;
+            if point.last: Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: rf * 0.28;
+                height: self.width;
+                background: ink;
+            }
+        }
+
+        // The one label inside the plot: the selected point's, in the plot's
+        // top-left corner. A curve never falls, so that corner is the one place
+        // it can never be; beside the point, the label sat on the next point
+        // and on the line.
+        for point in view.points: Rectangle {
+            property <length> cw: rf * 9.8;
+            property <length> ch: rf * 1.9;
+            visible: point.selected && view.callout != "";
+            x: pl + rf * 0.6;
+            y: pt + rf * 0.5;
+            width: cw;
+            height: ch;
+            border-radius: rf * 0.45;
+            background: view.callout-editing ? Theme.accent : #ffffff;
+            Text {
+                text: view.callout;
+                color: view.callout-editing ? Theme.accent-ink : #0a0c10;
+                font-size: rf * 0.82;
+                font-weight: 800;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------- table
+
+    if view.available && !view.advanced: Rectangle {
+        property <length> pad: rf * 0.7;
+        property <length> cols-y: head-h;
+        property <length> cols-h: rf * 1.5;
+        property <length> note-h: rf * 2.6;
+        property <length> rows-y: cols-y + cols-h;
+        property <length> row-h: min(rf * 2.3, (main-h - rows-y - note-h - pad) / 10);
+        property <length> num-w: rf * 1.4;
+        property <length> temp-w: rf * 5.8;
+        property <length> btn-w: rf * 2.0;
+        property <length> sp: rf * 0.3;
+        property <length> duty-w: self.width - pad * 2 - num-w - temp-w - btn-w * 2 - sp * 4;
+
+        x: root.width - table-w;
+        y: main-y;
+        width: table-w;
+        height: main-h;
+        border-radius: Theme.radius;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+
+        Text {
+            x: pad + rf * 0.3;
+            y: 0;
+            height: head-h;
+            text: "Noktalar";
+            color: Theme.text;
+            font-size: rf;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+        Text {
+            x: parent.width - pad - rf * 0.3 - self.width;
+            y: 0;
+            height: head-h;
+            text: view.count;
+            color: Theme.dim;
+            font-size: rf * 0.72;
+            vertical-alignment: center;
+        }
+        Text {
+            x: pad + num-w + sp + rf * 0.55;
+            y: cols-y;
+            height: cols-h;
+            text: "SICAKLIK";
+            color: Theme.dim;
+            font-size: rf * 0.63;
+            font-weight: 650;
+            vertical-alignment: center;
+        }
+        Text {
+            x: pad + num-w + temp-w + sp * 2 + rf * 0.55;
+            y: cols-y;
+            height: cols-h;
+            text: "PWM";
+            color: Theme.dim;
+            font-size: rf * 0.63;
+            font-weight: 650;
+            vertical-alignment: center;
+        }
+
+        for row[i] in view.rows: Rectangle {
+            property <length> inner: row-h - rf * 0.3;
+            x: pad;
+            y: rows-y + row-h * i;
+            width: parent.width - pad * 2;
+            height: row-h;
+            border-radius: rf * 0.45;
+            background: row.selected ? #ffffff0a : transparent;
+
+            Text {
+                x: 0;
+                width: num-w;
+                height: parent.height;
+                text: row.number;
+                color: Theme.dim;
+                font-size: rf * 0.86;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            Cell {
+                x: num-w + sp;
+                y: (parent.height - self.height) / 2;
+                width: temp-w;
+                height: inner;
+                label: row.temperature;
+                focused: active-pane && row.focus-col == 0;
+                editing: row.edit-col == 0;
+                row-selected: row.selected;
+            }
+            Cell {
+                x: num-w + temp-w + sp * 2;
+                y: (parent.height - self.height) / 2;
+                width: duty-w;
+                height: inner;
+                label: row.duty;
+                sub: row.raw;
+                locked: row.locked;
+                focused: active-pane && row.focus-col == 1;
+                editing: row.edit-col == 1;
+                row-selected: row.selected;
+            }
+            if row.selected: RowButton {
+                x: num-w + temp-w + duty-w + sp * 3;
+                y: (parent.height - self.height) / 2;
+                width: btn-w;
+                height: inner;
+                label: "+";
+                enabled: row.can-add;
+                focused: active-pane && row.focus-col == 2;
+            }
+            if row.selected: RowButton {
+                x: num-w + temp-w + duty-w + btn-w + sp * 4;
+                y: (parent.height - self.height) / 2;
+                width: btn-w;
+                height: inner;
+                label: "−";
+                enabled: row.can-remove;
+                focused: active-pane && row.focus-col == 3;
+            }
+        }
+
+        Text {
+            x: pad + rf * 0.3;
+            y: parent.height - note-h - pad * 0.5;
+            width: parent.width - pad * 2 - rf * 0.6;
+            height: note-h;
+            text: view.note;
+            color: Theme.muted;
+            font-size: rf * 0.72;
+            wrap: word-wrap;
+            vertical-alignment: bottom;
+        }
+    }
+
+    // ------------------------------------------------------ technical readings
+
+    if view.available && view.advanced: Rectangle {
+        property <length> pad: rf * 1.4;
+        property <length> col-w: (self.width - pad * 2 - rf * 2) / 2;
+        property <length> kv-h: rf * 2.5;
+        x: 0;
+        y: main-y;
+        width: root.width;
+        height: main-h;
+        border-radius: Theme.radius;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+
+        Text {
+            x: pad;
+            y: rf * 0.6;
+            height: head-h;
+            text: "Gelişmiş bilgiler";
+            color: Theme.text;
+            font-size: rf;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+        for kv[i] in view.info: Rectangle {
+            x: pad + mod(i, 2) * (col-w + rf * 2);
+            y: head-h + rf * 0.8 + floor(i / 2) * kv-h;
+            width: col-w;
+            height: kv-h;
+            Text {
+                x: 0;
+                height: parent.height;
+                text: kv.label;
+                color: Theme.muted;
+                font-size: rf * 0.9;
+                vertical-alignment: center;
+            }
+            Text {
+                x: parent.width - self.width;
+                height: parent.height;
+                text: kv.value;
+                color: kv.value == "Etkin" ? Theme.ok : (kv.value == "Ölçülemiyor" ? Theme.dim : Theme.text);
+                font-size: rf * 0.9;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.line-soft;
+            }
+        }
+        Text {
+            x: pad;
+            y: head-h + rf * 1.6 + ceil(view.info.length / 2) * kv-h;
+            width: parent.width - pad * 2;
+            text: "PWM fana giden güç oranıdır, dönüş hızı değildir: bu kartta devir ölçen hat yok. 50 Hz düzeltmesi bu kartın donanımı için gerekir ve değiştirilemez; bir ayar değil, kartın bir özelliği. Eğri çekirdeğe 1 °C aralıklı eşikler olarak yazılır; çizim ile fanın gerçek davranışı arasındaki fark bir dereceden azdır. Kaydedilen eğri yeniden başlatınca yüklenir.";
+            color: Theme.dim;
+            font-size: rf * 0.77;
+            wrap: word-wrap;
+        }
+    }
+
+    // --------------------------------------------------------------- actions
+
+    if view.available: HorizontalLayout {
+        x: 0;
+        y: act-y;
+        width: root.width;
+        height: act-h;
+        spacing: rf * 0.64;
+        alignment: start;
+        for act[i] in view.actions: VerticalLayout {
+            alignment: center;
+            Button {
+                label: act.label;
+                enabled: act.enabled;
+                focused: active-pane && act.focused;
+                primary: i == 0;
+            }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Text {
+            text: "Kaydedilen eğri yeniden başlatınca etkin olur.";
+            color: Theme.muted;
+            font-size: rf * 0.8;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+    }
+
+    // ------------------------------------------------------ restart question
+
+    if view.prompt: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000a8;
+        Rectangle {
+            width: min(parent.width * 0.72, rf * 38);
+            height: sheet.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius * 1.25;
+            background: Theme.bg-sheet;
+            border-width: 1px;
+            border-color: Theme.line;
+            sheet := VerticalLayout {
+                padding: rf * 1.9;
+                spacing: rf * 0.6;
+                Text {
+                    text: "Fan eğrisi kaydedildi";
+                    color: Theme.text;
+                    font-size: rf * 1.45;
+                    font-weight: 800;
+                }
+                Text {
+                    text: "Yeni eğri yeniden başlatıldıktan sonra etkin olacaktır.";
+                    color: Theme.muted;
+                    font-size: rf;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    padding-top: rf * 0.6;
+                    spacing: rf * 0.64;
+                    alignment: start;
+                    Button {
+                        label: "Şimdi yeniden başlat";
+                        focused: view.prompt-focus == 0;
+                    }
+                    Button {
+                        label: "Daha sonra";
+                        focused: view.prompt-focus == 1;
+                    }
+                }
+            }
+        }
+    }
+}

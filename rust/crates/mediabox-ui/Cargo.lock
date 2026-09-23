@@ -848,11 +848,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediabox-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mediabox-ui"
 version = "0.1.0"
 dependencies = [
  "js-sys",
  "leptos",
+ "mediabox-core",
  "serde",
  "serde_json",
  "wasm-bindgen",

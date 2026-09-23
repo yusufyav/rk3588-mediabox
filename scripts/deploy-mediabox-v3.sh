@@ -304,6 +304,20 @@ sh_ "set -e
 say "library manifest -> /etc/mediabox-library.json"
 cp_ "$here/config/mediabox-library.json" "$MEDIABOX_TARGET:/etc/mediabox-library.json"
 
+say "fan overlays -> /boot"
+# The curve's entry in user_overlays, and on an Orange Pi 5 Plus the board's
+# 50 Hz carrier correction; see packaging/mediabox-fan-setup. Before the units,
+# so the daemon restarted below finds /boot/overlay-user there to be written.
+# Whatever else user_overlays carries -- the HDMI crossbar -- is kept.
+cp_ "$here/packaging/mediabox-fan-setup" \
+    "$here/packaging/overlays/mediabox-fan-opi5plus-50hz.dtbo" "$MEDIABOX_TARGET:/var/tmp/"
+sh_ "set -e
+  install -m 0755 /var/tmp/mediabox-fan-setup $prefix/bin/mediabox-fan-setup
+  install -D -m 0644 /var/tmp/mediabox-fan-opi5plus-50hz.dtbo \
+    $prefix/share/overlays/mediabox-fan-opi5plus-50hz.dtbo
+  rm -f /var/tmp/mediabox-fan-setup /var/tmp/mediabox-fan-opi5plus-50hz.dtbo
+  $prefix/bin/mediabox-fan-setup"
+
 say "units"
 cp_ "$here/packaging/systemd/mediaboxd-rs.service" \
     "$here/packaging/systemd/mediabox-media-worker.service" \

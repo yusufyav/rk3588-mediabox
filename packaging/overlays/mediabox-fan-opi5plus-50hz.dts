@@ -1,0 +1,38 @@
+// Run the Orange Pi 5 Plus's fan on a 50 Hz carrier instead of 20 kHz.
+//
+// The Plus's device tree drives its fan with <&pwm3 0 50000 0>: a 50 us period,
+// 20 kHz. At the first cooling level the kernel gives it -- 50/255 -- the fan
+// did not start; it sat still with the SoC at 50 C. The Orange Pi 5 Ultra's
+// tree has the same cooling levels and the same trips and drives its fan at a
+// 20 ms period, 50 Hz, where 50/255 turns it.
+//
+// This overlay changes that one number and nothing else: the same controller
+// (pwm3), the same channel, the same polarity flags. Applied on the Plus and
+// read back after a reboot from /sys/firmware/devicetree/base/pwm-fan/pwms:
+//
+//   00 00 01 cd  00 00 00 00  01 31 2d 00  00 00 00 00
+//   = <&pwm3 0 20000000 0>
+//
+// It is a property of the board, not a setting, and it is installed only on a
+// board whose /proc/device-tree/model is the Plus -- never on the Ultra, whose
+// own carrier is already this one. See packaging/mediabox-fan-setup.
+//
+// The curve itself -- which duty at which temperature -- is a different
+// overlay, mediabox-fan-curve, written by mediaboxd-rs. Resetting the curve
+// does not remove this one.
+//
+// Rebuild with:  dtc -@ -I dts -O dtb -o mediabox-fan-opi5plus-50hz.dtbo mediabox-fan-opi5plus-50hz.dts
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "rockchip,rk3588";
+
+	fragment@0 {
+		target = <&fan>;
+
+		__overlay__ {
+			pwms = <&pwm3 0 20000000 0>;
+		};
+	};
+};

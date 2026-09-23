@@ -5,6 +5,7 @@ use mediabox_input::InputManager;
 use mediaboxd_rs::daemon::{AppState, CecRuntime, apply_kodi_route, serve_unix, socket_is_live};
 use mediaboxd_rs::kodi::KodiClient;
 use mediaboxd_rs::display::DisplayColor;
+use mediaboxd_rs::fan::FanController;
 use mediaboxd_rs::leds::LedController;
 use mediaboxd_rs::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use mediaboxd_rs::media::MediaClient;
@@ -170,6 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // established by whatever draws the television -- so this only restores
         // the choice the player will read.
         display_color: DisplayColor::new(mediaboxd_rs::display::STATE_FILE),
+        fan: FanController::system(),
     });
 
     let stop = Arc::new(AtomicBool::new(false));

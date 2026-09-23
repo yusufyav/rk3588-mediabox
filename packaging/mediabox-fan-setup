@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+#
+# Make this board's boot configuration carry what the fan needs. Run as root,
+# by the installer and by the deploy script; safe to run again at any time.
+#
+# Two overlays, and only one of them is a choice:
+#
+#   mediabox-fan-opi5plus-50hz   the Orange Pi 5 Plus's carrier correction:
+#                                its fan does not start at the lowest cooling
+#                                level on the board's 20 kHz carrier and does
+#                                on 50 Hz. A property of the board, installed
+#                                on the Plus only and never on the Ultra, whose
+#                                own tree already runs at 50 Hz.
+#
+#   mediabox-fan-curve           the curve chosen in the settings screen.
+#                                mediaboxd-rs writes the file; this only makes
+#                                sure the boot loader is told to look for it.
+#                                Until a curve is saved the file does not exist
+#                                and Armbian's boot script skips the entry.
+#
+# /boot/armbianEnv.txt decides whether the board boots, so it is treated the
+# way mediabox-hdmi-prepare treats it: one line changed, every other overlay in
+# that line kept in its order, nothing added twice, one copy of the original
+# kept, and the new file written beside the old and renamed over it. A run that
+# has nothing to change writes nothing.
+#
+# The kernel's pwm-fan stays the only thing that drives the fan. Nothing here
+# touches a running PWM.
+set -euo pipefail
+
+prefix=/opt/rk3588-mediabox
+boot_env="${MEDIABOX_BOOT_ENV:-/boot/armbianEnv.txt}"
+overlay_dir="${MEDIABOX_OVERLAY_DIR:-/boot/overlay-user}"
+dt="${MEDIABOX_DT_ROOT:-/proc/device-tree}"
+fix_src="${MEDIABOX_FAN_FIX_DTBO:-$prefix/share/overlays/mediabox-fan-opi5plus-50hz.dtbo}"
+
+curve=mediabox-fan-curve
+fix=mediabox-fan-opi5plus-50hz
+
+say() { printf 'fan-setup: %s\n' "$*"; }
+
+if [ ! -f "$boot_env" ]; then
+  say "no $boot_env; this board does not load user overlays, nothing to do"
+  exit 0
+fi
+
+# The board, by what its own device tree calls it.
+model=""
+[ -r "$dt/model" ] && model="$(tr -d '\0' <"$dt/model")"
+
+# A fan the kernel's pwm-fan drives, anywhere at the top of the tree. Found by
+# what it is rather than by its node name.
+has_fan=0
+for compatible in "$dt"/*/compatible; do
+  [ -f "$compatible" ] || continue
+  if tr '\0' '\n' <"$compatible" | grep -qx 'pwm-fan'; then
+    has_fan=1
+    break
+  fi
+done
+
+add=""
+drop=""
+changed=0
+
+if [ "$has_fan" -eq 0 ]; then
+  say "no pwm-fan node in this board's device tree; nothing to do"
+  exit 0
+fi
+add="$curve"
+
+case "$model" in
+  "")
+    # A board that does not say what it is gets nothing added and nothing
+    # taken away on its behalf.
+    say "board model unreadable; carrier correction neither added nor removed"
+    ;;
+  *"Orange Pi 5 Plus")
+    if [ ! -f "$fix_src" ]; then
+      say "carrier correction needed but $fix_src is missing; not listed"
+    else
+      mkdir -p "$overlay_dir"
+      if cmp -s "$fix_src" "$overlay_dir/$fix.dtbo"; then
+        say "carrier correction present ($fix)"
+      else
+        cp "$fix_src" "$overlay_dir/.$fix.dtbo.next"
+        chmod 0644 "$overlay_dir/.$fix.dtbo.next"
+        sync "$overlay_dir/.$fix.dtbo.next" 2>/dev/null || sync
+        mv -f "$overlay_dir/.$fix.dtbo.next" "$overlay_dir/$fix.dtbo"
+        say "carrier correction installed ($fix)"
+        changed=1
+      fi
+      add="$add $fix"
+    fi
+    ;;
+  *)
+    # Not the Plus. If a disk that was set up on a Plus has been moved to this
+    # board, its correction must not come along: it names the Plus's PWM.
+    drop="$fix"
+    say "board is '$model'; no carrier correction"
+    ;;
+esac
+
+mkdir -p "$overlay_dir"
+
+# The user_overlays line, with this script's entries added or dropped and
+# everything else exactly where it was. Only this script's own entries are
+# de-duplicated; somebody else's list is somebody else's.
+wanted="$(awk -v add="$add" -v drop="$drop" '
+  function join_to(list, item) { return list == "" ? item : list " " item }
+  BEGIN {
+    na = split(add, ADD, " ")
+    nd = split(drop, DROP_LIST, " ")
+    for (i = 1; i <= na; i++) OURS[ADD[i]] = 1
+    for (i = 1; i <= nd; i++) { OURS[DROP_LIST[i]] = 1; DROP[DROP_LIST[i]] = 1 }
+  }
+  /^user_overlays=/ && !seen {
+    seen = 1
+    n = split(substr($0, 15), ENTRY, " ")
+    out = ""
+    for (i = 1; i <= n; i++) {
+      entry = ENTRY[i]
+      if (entry in DROP) continue
+      if ((entry in OURS) && (entry in HAVE)) continue
+      HAVE[entry] = 1
+      out = join_to(out, entry)
+    }
+    for (i = 1; i <= na; i++) if (!(ADD[i] in HAVE)) { HAVE[ADD[i]] = 1; out = join_to(out, ADD[i]) }
+    print "user_overlays=" out
+    next
+  }
+  { print }
+  END {
+    if (!seen && na > 0) {
+      out = ""
+      for (i = 1; i <= na; i++) out = join_to(out, ADD[i])
+      print "user_overlays=" out
+    }
+  }' "$boot_env")"
+
+if [ "$wanted" = "$(cat "$boot_env")" ]; then
+  say "boot configuration current: $(grep -m1 '^user_overlays=' "$boot_env" || true)"
+else
+  [ -f "$boot_env.mediabox-fan" ] || cp -a "$boot_env" "$boot_env.mediabox-fan"
+  next="$boot_env.mediabox-fan-next"
+  printf '%s\n' "$wanted" >"$next"
+  chmod --reference="$boot_env" "$next" 2>/dev/null || true
+  sync "$next" 2>/dev/null || sync
+  mv -f "$next" "$boot_env"
+  sync
+  say "boot configuration updated: $(grep -m1 '^user_overlays=' "$boot_env")"
+  changed=1
+fi
+
+if [ "$changed" -eq 1 ]; then
+  say "reboot needed"
+fi

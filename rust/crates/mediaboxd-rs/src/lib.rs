@@ -1,5 +1,6 @@
 pub mod display;
 pub mod daemon;
+pub mod fan;
 pub mod kodi;
 pub mod leds;
 pub mod lifecycle;

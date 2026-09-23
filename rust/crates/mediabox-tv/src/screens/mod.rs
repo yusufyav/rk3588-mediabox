@@ -6,6 +6,7 @@
 //! testable — and the focus model is the product on a television.
 
 pub mod account;
+pub mod cooling;
 pub mod diagnostics;
 pub mod library;
 pub mod media;

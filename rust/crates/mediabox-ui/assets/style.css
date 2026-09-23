@@ -2113,3 +2113,252 @@ body:not(.tv) .detail-side-window {
   content-visibility: auto;
   contain-intrinsic-size: auto none auto calc(var(--card) * 1.5 + 92px);
 }
+
+/* ----------------------------------------------------------------- cooling */
+
+/* Class names here are prefixed (fan-, g-, lg-): the page already has a
+ * `.now` and a `.chip` of its own, full-screen and padded, and a bare `.now`
+ * in the legend became a 1080-pixel swatch that pushed the graph off the card.
+ *
+ * The fan curve editor. The same screen the television draws: readings, the
+ * curve beside its point table, the buttons under both. The graph is one SVG
+ * in one view box, so its steps, points, ticks and labels cannot be drawn to
+ * different scales. */
+.fan-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.fan-head h2 { margin: 0; }
+.fan-seg {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.22rem;
+  border-radius: 13px;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+}
+.fan-seg-opt {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.86rem;
+  color: var(--muted);
+  background: transparent;
+  padding: 0.5em 1.05em;
+  border-radius: 9px;
+}
+.fan-seg-opt.on { background: rgba(255, 255, 255, 0.11); color: var(--text); }
+.fan-seg-opt.label { cursor: default; }
+.fan-seg-opt.is-focused,
+.fan-seg-opt:focus-visible { background: #fff; color: #0a0c10; outline: none; }
+
+.fan-readings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 0.6rem;
+  align-items: center;
+}
+.fan-reading {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.6rem 0.95rem;
+  border-radius: 14px;
+  background: var(--bg-raise);
+  border: 1px solid var(--line-soft);
+  min-width: 0;
+}
+.fan-reading .k {
+  color: var(--dim);
+  font-size: 0.64rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.fan-reading .v { font-size: 1.22rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fan-reading .v small { font-size: 0.78rem; font-weight: 600; color: var(--muted); margin-left: 0.45rem; }
+.fan-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55em 1.1em;
+  border-radius: 999px;
+  border: 1px solid;
+  font-weight: 700;
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+.fan-state::before { content: ""; width: 0.55em; height: 0.55em; border-radius: 50%; background: currentColor; }
+.fan-state.ok { color: var(--ok); border-color: rgba(74, 222, 128, 0.35); background: rgba(74, 222, 128, 0.07); }
+.fan-state.draft { color: var(--accent); border-color: rgba(255, 180, 58, 0.4); background: rgba(255, 180, 58, 0.08); }
+.fan-state.pending { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08); }
+
+.fan-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(19rem, 22rem);
+  gap: 0.8rem;
+  align-items: stretch;
+}
+.fan-card {
+  background: var(--bg-raise);
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  padding: 0.3rem 0.9rem 0.8rem;
+  min-width: 0;
+}
+.fan-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 2.8rem;
+  flex-wrap: wrap;
+}
+.fan-card-head b { font-size: 1rem; }
+.fan-card-head > span { color: var(--dim); font-size: 0.72rem; }
+.fan-legend { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--muted); font-size: 0.72rem; flex-wrap: wrap; }
+.fan-legend i { display: inline-block; width: 1rem; height: 0; border-top: 3px solid; margin-left: 0.55rem; }
+.fan-legend i:first-child { margin-left: 0; }
+.fan-legend i.lg-curve { border-color: var(--accent); }
+.fan-legend i.lg-running { border-color: var(--muted); border-top-style: dashed; }
+.fan-legend i.lg-now { border-color: #fff; border-top-style: dotted; }
+.fan-legend i.lg-band { width: 0.62rem; height: 0.62rem; border: 0; border-radius: 3px; background: rgba(248, 113, 113, 0.4); }
+
+.fan-graph { display: block; width: 100%; height: auto; }
+.fan-graph .grid { stroke: rgba(255, 255, 255, 0.05); stroke-width: 1; }
+.fan-graph .grid.base { stroke: rgba(255, 255, 255, 0.18); }
+.fan-graph .tick { fill: var(--muted); font-size: 19px; font-weight: 560; }
+.fan-graph .tick.end { fill: var(--dim); }
+.fan-graph .trip-band { fill: rgba(248, 113, 113, 0.13); }
+.fan-graph .trip { stroke: rgba(248, 113, 113, 0.55); stroke-width: 2; }
+.fan-graph .trip-label { fill: var(--bad); font-size: 15px; font-weight: 700; letter-spacing: 3px; }
+.fan-graph .fill { fill: rgba(255, 180, 58, 0.12); stroke: none; }
+.fan-graph .curve { fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linejoin: round; }
+.fan-graph .running { fill: none; stroke: rgba(154, 165, 180, 0.7); stroke-width: 2.5; stroke-dasharray: 7 6; }
+.fan-graph .g-now { stroke: rgba(255, 255, 255, 0.8); stroke-width: 2; stroke-dasharray: 4 6; }
+.fan-graph .g-now.duty { stroke: rgba(255, 255, 255, 0.45); }
+.fan-graph .now-dot { fill: #fff; }
+.fan-graph .g-chip { fill: #fff; }
+.fan-graph .g-chip.duty { fill: #e6e9ee; }
+.fan-graph .chip-text { fill: #0a0c10; font-size: 18px; font-weight: 800; }
+.fan-graph .point { fill: var(--bg-raise); stroke: var(--accent); stroke-width: 3; }
+.fan-graph .point.selected { stroke: #fff; stroke-width: 4; }
+.fan-graph .point-lock { fill: var(--accent); }
+.fan-graph .point.hovered { fill: var(--accent); }
+.fan-graph .point-hit { fill: transparent; cursor: pointer; }
+/* The values over a point: while the mouse is on it, or while one of its
+   cells is being typed into (then in the accent, like the cell). */
+.fan-graph .callout { pointer-events: none; }
+.fan-graph .callout rect,
+.fan-graph .callout path { fill: #fff; }
+.fan-graph .callout text { fill: #0a0c10; font-size: 19px; font-weight: 800; }
+.fan-graph .callout.editing rect,
+.fan-graph .callout.editing path { fill: var(--accent); }
+.fan-graph .callout.editing text { fill: var(--accent-ink); }
+
+.fan-table { display: flex; flex-direction: column; }
+.fan-cols,
+.fan-row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 5.6rem) minmax(0, 1fr) 2.1rem 2.1rem;
+  gap: 0.3rem;
+  align-items: center;
+}
+.fan-cols {
+  padding: 0 0.35rem 0.25rem;
+  color: var(--dim);
+  font-size: 0.62rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.fan-cols span:nth-child(2),
+.fan-cols span:nth-child(3) { padding-left: 0.55rem; }
+.fan-rows { display: grid; gap: 0.2rem; align-content: start; flex: 1; }
+.fan-row { padding: 0.18rem 0.35rem; border-radius: 10px; cursor: pointer; }
+.fan-row.selected { background: rgba(255, 255, 255, 0.045); }
+.fan-num { color: var(--dim); font-weight: 700; font-size: 0.84rem; text-align: center; font-variant-numeric: tabular-nums; }
+.fan-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.35rem 0.55rem;
+  border-radius: 9px;
+  border: 2px solid transparent;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  cursor: text;
+}
+.fan-row.selected .fan-cell:not(.locked) { background: rgba(255, 255, 255, 0.05); }
+.fan-cell:focus-within { background: var(--accent) !important; border-color: var(--accent); color: var(--accent-ink); }
+.fan-cell.locked { color: var(--muted); cursor: default; }
+.fan-input {
+  appearance: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  width: 2.2em;
+  padding: 0;
+  text-align: right;
+  min-width: 0;
+}
+.fan-cell.duty { gap: 0; }
+.fan-cell.duty .fan-input { text-align: left; width: 2.1em; }
+.fan-input:disabled { color: inherit; opacity: 1; -webkit-text-fill-color: currentColor; }
+.fan-unit { font-size: 0.86em; }
+.fan-raw { margin-left: auto; color: var(--dim); font-size: 0.72rem; font-weight: 600; }
+.fan-cell:focus-within .fan-raw { color: #5a3d0a; }
+.fan-rowbtn {
+  appearance: none;
+  height: 2.1rem;
+  border-radius: 9px;
+  border: 2px solid transparent;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font: inherit;
+  font-weight: 800;
+  font-size: 1.05rem;
+  visibility: hidden;
+}
+.fan-rowbtn.shown { visibility: visible; }
+.fan-rowbtn[disabled] { opacity: 0.3; }
+.fan-rowbtn.is-focused,
+.fan-rowbtn:focus-visible { background: #fff; color: #0a0c10; border-color: #fff; outline: none; }
+.fan-note { margin: 0.6rem 0.35rem 0; color: var(--muted); font-size: 0.72rem; line-height: 1.45; min-height: 2.1rem; }
+
+.fan-actions { align-items: center; }
+.fan-foot { margin-left: auto; color: var(--muted); font-size: 0.8rem; }
+
+.fan-advanced h3 { margin: 0.7rem 0 0.4rem; font-size: 1rem; }
+.fan-kv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 2rem; }
+.fan-kv-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.62rem 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 0.9rem;
+}
+.fan-kv-row > span:first-child { color: var(--muted); }
+.fan-kv-value { font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+.fan-kv-value.ok { color: var(--ok); }
+.fan-kv-value.warn { color: var(--warn); }
+.fan-kv-value.dim { color: var(--dim); }
+.fan-advanced .panel-note { margin-top: 0.9rem; max-width: none; }
+
+.fan-prompt { width: min(38rem, 100%); }
+
+@media (max-width: 1100px) {
+  .fan-main { grid-template-columns: minmax(0, 1fr); }
+  .fan-readings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .fan-state { grid-column: 1 / -1; justify-self: start; }
+}
+@media (max-width: 620px) {
+  .fan-readings { grid-template-columns: minmax(0, 1fr); }
+  .fan-kv { grid-template-columns: minmax(0, 1fr); }
+  .fan-foot { margin-left: 0; }
+  /* The graph is drawn in its own units and shrinks with the page; at phone
+     width its labels would be a few pixels tall. */
+  .fan-graph .tick,
+  .fan-graph .chip-text { font-size: 28px; }
+}

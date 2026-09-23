@@ -96,6 +96,17 @@ ReadWritePaths=-/sys/devices/platform/gpio-leds
 # /etc read-only, so without the first line a viewer can pick a network, type
 # a password and watch it fail with "Read-only file system".
 ReadWritePaths=/etc/netplan /var/lib/mediabox
+# The fan's curve for the next boot, and nothing else under /boot.
+#
+# The kernel's pwm-fan drives the fan; a curve chosen in the settings screen is
+# written as a device-tree overlay that the boot loader applies. The daemon
+# writes exactly one file, mediabox-fan-curve.dtbo, beside the other user
+# overlays -- written next to the old one and renamed over it, which is why the
+# directory is named and not the file. armbianEnv.txt stays read-only here: the
+# entry that loads the curve is put there once, by mediabox-fan-setup, as root
+# at install time. The leading dash keeps the unit startable on a board with no
+# user overlay directory, where saving a curve is refused and says why.
+ReadWritePaths=-/boot/overlay-user
 
 [Install]
 WantedBy=multi-user.target

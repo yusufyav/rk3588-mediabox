@@ -407,6 +407,23 @@ else
   fi
 fi
 
+# ------------------------------------------------- 11c. the fan's overlays
+#
+# The kernel's pwm-fan drives the fan from a curve in the device tree, and the
+# settings screen can choose that curve for the next boot. The setup script
+# makes the boot loader look for the curve's overlay and, on an Orange Pi 5
+# Plus only, installs the board's 50 Hz carrier correction: on its own 20 kHz
+# carrier the Plus's fan does not start at the lowest cooling level. It keeps
+# every other user overlay, the crossbar above included, and changes nothing
+# on a second run.
+step "fan"
+install -D -m 0644 "$here/packaging/overlays/mediabox-fan-opi5plus-50hz.dtbo" \
+  "$prefix/share/overlays/mediabox-fan-opi5plus-50hz.dtbo"
+install -m 0755 "$here/packaging/mediabox-fan-setup" "$prefix/bin/mediabox-fan-setup"
+fan_out="$("$prefix/bin/mediabox-fan-setup")"
+printf '%s\n' "$fan_out" | sed 's/^fan-setup: /  --    /'
+case "$fan_out" in *"reboot needed"*) reboot_needed=1 ;; esac
+
 # Kodi's settings for this appliance, which kodi.service seeds on a first run.
 install -D -m 0644 "$here/config/kodi/guisettings-appliance.xml" \
   "$prefix/share/kodi/guisettings-appliance.xml"

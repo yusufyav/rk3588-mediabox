@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use mediabox_core::{ColorChoice, ColorFormat, Request, Response, Surface};
+use mediabox_core::{ColorChoice, ColorFormat, FanPoint, FanProfile, Request, Response, Surface};
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
@@ -54,6 +54,61 @@ enum Command {
         #[command(subcommand)]
         command: DisplayColorCommand,
     },
+    /// The fan as the kernel runs it, and its curve for the next boot
+    Fan {
+        #[command(subcommand)]
+        command: FanCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FanCommand {
+    /// SoC temperature, PWM duty and carrier, and the curve
+    Status,
+    /// Save a curve for the next boot. `custom` takes 2-10 --point T:PWM
+    Set {
+        #[arg(value_enum)]
+        profile: FanProfileArg,
+        /// One point of a custom curve, e.g. --point 50:50
+        #[arg(long = "point", value_parser = parse_fan_point)]
+        points: Vec<FanPoint>,
+    },
+    /// Go back to the board's own curve from the next boot on
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum FanProfileArg {
+    Balanced,
+    Cool,
+    Custom,
+}
+
+impl From<FanProfileArg> for FanProfile {
+    fn from(value: FanProfileArg) -> Self {
+        match value {
+            FanProfileArg::Balanced => FanProfile::Balanced,
+            FanProfileArg::Cool => FanProfile::Cool,
+            FanProfileArg::Custom => FanProfile::Custom,
+        }
+    }
+}
+
+/// `T:PWM`, both whole numbers. Whether the point is safe is the daemon's
+/// question, not this parser's.
+fn parse_fan_point(text: &str) -> Result<FanPoint, String> {
+    let (temperature, pwm) = text
+        .split_once(':')
+        .ok_or_else(|| format!("'{text}': SICAKLIK:PWM bekleniyor"))?;
+    Ok(FanPoint::new(
+        temperature
+            .trim()
+            .parse()
+            .map_err(|_| format!("'{temperature}' sayı değil"))?,
+        pwm.trim()
+            .parse()
+            .map_err(|_| format!("'{pwm}' sayı değil"))?,
+    ))
 }
 
 #[derive(Debug, Subcommand)]
@@ -303,6 +358,14 @@ fn to_request(command: &Command) -> Request {
             DisplayColorCommand::Set { format, bits } => Request::DisplayColorModeSet {
                 choice: format.choice(*bits),
             },
+        },
+        Command::Fan { command } => match command {
+            FanCommand::Status => Request::FanStatus,
+            FanCommand::Set { profile, points } => Request::FanCurveSet {
+                profile: (*profile).into(),
+                points: (!points.is_empty()).then(|| points.clone()),
+            },
+            FanCommand::Reset => Request::FanCurveReset,
         },
         Command::DisplayOwner { command } => match command {
             DisplayOwnerCommand::Status => Request::DisplayOwner,

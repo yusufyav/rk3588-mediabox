@@ -1938,6 +1938,20 @@ fn printable(code: u32, shift: bool) -> Option<char> {
         52 => mark('.', '>'),
         53 => mark('/', '?'),
         57 => ' ',
+        // The keypad's digits, so a value can be typed on a number pad: the
+        // fan curve's temperatures and percents. Kernel order, 7 8 9 over
+        // 4 5 6 over 1 2 3 over 0, whatever Num Lock says -- there is no
+        // keypad navigation here to give way to.
+        71 => '7',
+        72 => '8',
+        73 => '9',
+        75 => '4',
+        76 => '5',
+        77 => '6',
+        79 => '1',
+        80 => '2',
+        81 => '3',
+        82 => '0',
         _ => return None,
     })
 }
@@ -1957,6 +1971,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_keypad_types_digits() {
+        let typed: String = [82, 79, 80, 81, 75, 76, 77, 71, 72, 73]
+            .into_iter()
+            .map(|code| key_text(code, false).unwrap().to_string())
+            .collect();
+        assert_eq!(typed, "0123456789");
     }
 
     #[test]

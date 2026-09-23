@@ -137,6 +137,33 @@ pub fn display_color_mode_set(format: Option<(&str, u8)>) -> Value {
     json!({"command": "display_color_mode_set", "choice": choice})
 }
 
+/// The fan as the kernel runs it, and the curve chosen for the next boot.
+pub fn fan_status() -> Value {
+    json!({"command": "fan_status"})
+}
+
+/// Save a curve for the next boot. A preset is named; only a custom curve
+/// carries its points. The daemon checks it again whatever this side did.
+pub fn fan_curve_set(curve: &mediabox_core::FanCurve) -> Value {
+    if curve.profile == mediabox_core::FanProfile::Custom {
+        json!({"command": "fan_curve_set", "profile": curve.profile, "points": curve.points})
+    } else {
+        json!({"command": "fan_curve_set", "profile": curve.profile})
+    }
+}
+
+/// Back to the board's own curve from the next boot on.
+pub fn fan_curve_reset() -> Value {
+    json!({"command": "fan_curve_reset"})
+}
+
+/// Restart the appliance. The same closed request the television's power
+/// sheet sends; here it is reached only from the row a person pressed after
+/// saving a curve that needs it.
+pub fn system_restart() -> Value {
+    json!({"command": "system_power", "action": "restart"})
+}
+
 pub fn media_home() -> Value {
     json!({"command": "media_home"})
 }
