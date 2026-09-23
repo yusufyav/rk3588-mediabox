@@ -16,7 +16,7 @@
 //! so `card="$(mediabox-platform alsa-card)" || exit` is the whole of a caller's
 //! error handling.
 
-use mediabox_platform::video::parse_sink_video;
+use mediabox_platform::video::{parse_sink_video, parse_timings};
 use mediabox_platform::{Binding, Devices, Platform, SelectionReason};
 
 fn main() -> std::process::ExitCode {
@@ -133,26 +133,47 @@ fn main() -> std::process::ExitCode {
                 eprintln!("mediabox-platform: {} üzerinde okunabilir bir EDID yok", path.display());
                 return std::process::ExitCode::FAILURE;
             };
-            let modes = sink.modes_for(clock);
+            // The mode asked about, as the sink declares it: the largest one
+            // at that pixel clock in the shape of the sink's preferred mode.
+            let timings = parse_timings(&edid);
+            let shape = timings
+                .iter()
+                .find(|timing| timing.preferred)
+                .map(|timing| u32::from(timing.width) * 1000 / u32::from(timing.height).max(1));
+            let Some(timing) = timings
+                .iter()
+                .filter(|timing| timing.pixel_clock_khz.abs_diff(clock) <= 1 && !timing.interlaced)
+                .max_by_key(|timing| {
+                    let ratio = u32::from(timing.width) * 1000 / u32::from(timing.height).max(1);
+                    (shape == Some(ratio), timing.refresh_mhz)
+                })
+                .copied()
+            else {
+                eprintln!("mediabox-platform: EDID {clock} kHz piksel saatinde bir mod bildirmiyor");
+                return std::process::ExitCode::FAILURE;
+            };
+            let modes = sink.modes_for(&timing);
             if json {
                 let report = serde_json::json!({
                     "connector": devices.connector,
                     "pixel_clock_khz": clock,
+                    "timing": timing,
                     "max_character_rate_khz": sink.max_character_rate_khz,
                     "rate_is_declared": sink.rate_is_declared,
                     "st2084": sink.st2084,
                     "hlg": sink.hlg,
-                    "hdr10_fits": sink.hdr10_fits(clock),
+                    "hdr10_fits": sink.hdr10_fits(&timing),
                     "advertised": sink.advertised,
                     "allowed": modes,
-                    "auto_sdr": sink.best_for(clock, false),
-                    "auto_hdr": sink.best_for(clock, true),
+                    "auto_sdr": sink.best_for(&timing, false),
+                    "auto_hdr": sink.best_for(&timing, true),
                 });
                 println!("{}", serde_json::to_string_pretty(&report).unwrap());
             } else {
                 println!(
-                    "{}  {} kHz piksel saati",
+                    "{}  {}  {} kHz piksel saati",
                     devices.connector.as_deref().unwrap_or("-"),
+                    timing.label(),
                     clock
                 );
                 println!(
@@ -164,10 +185,10 @@ fn main() -> std::process::ExitCode {
                     "  HDR              ST2084={} HLG={} bu modda sığar={}",
                     sink.st2084,
                     sink.hlg,
-                    sink.hdr10_fits(clock)
+                    sink.hdr10_fits(&timing)
                 );
-                let auto_sdr = sink.best_for(clock, false);
-                let auto_hdr = sink.best_for(clock, true);
+                let auto_sdr = sink.best_for(&timing, false);
+                let auto_hdr = sink.best_for(&timing, true);
                 if modes.is_empty() {
                     println!("  izin verilen     yok — bu mod bu bağlantıya sığmıyor");
                 }

@@ -28,6 +28,7 @@
 //! product's answer.
 
 pub mod audio;
+mod cta_vics;
 pub mod cec;
 pub mod drm;
 pub mod dt;

@@ -257,6 +257,16 @@ impl Client {
             .await
     }
 
+    /// Remember a resolution choice. The daemon restarts this process so the
+    /// mode is set again from it.
+    pub async fn display_resolution_set(
+        &self,
+        choice: mediabox_core::ResolutionChoice,
+    ) -> Result<Value> {
+        self.call(json!({"command": "display_resolution_set", "choice": choice}))
+            .await
+    }
+
     /// Save a fan curve for the next boot. The daemon validates it and writes
     /// the overlay; the kernel's pwm-fan is what drives the fan either way.
     pub async fn fan_curve_set(&self, curve: &mediabox_core::FanCurve) -> Result<Value> {

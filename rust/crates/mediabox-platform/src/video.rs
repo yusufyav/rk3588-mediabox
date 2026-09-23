@@ -1,234 +1,449 @@
-//! What the sink will accept, and which of those the link can actually carry.
+//! What a television can be sent at a given mode, by the rules of HDMI.
 //!
-//! A television advertises the pixel formats it understands and, separately,
-//! how fast a signal it can receive. Those two facts are not the same question
-//! and the interesting answer is their intersection: at 4K60 a sink may well
-//! understand RGB 10-bit and still be unable to be sent it, because RGB 10-bit
-//! at that mode needs 742 MHz and the port tops out at 600.
+//! Nothing here is this product's own opinion. Every rule is the one the Linux
+//! kernel implements, named where it lives, with the specification section the
+//! kernel itself cites:
 //!
-//! Getting this wrong is not theoretical. A Sony KD-65XE9005 reports HDMI 1 as
-//! a 300 MHz port and HDMI 3 as a 600 MHz one, on the same set, with different
-//! EDIDs. A player that asks for RGB 10-bit on the first of those does not get
-//! an error: the driver quietly subsamples to 4:2:2, the picture is fine, and
-//! the colorimetry the sink is told still says RGB. The television then decodes
-//! YCbCr pixels with an RGB matrix and HDR arrives wrong.
+//!   * the rate a mode costs on the wire     `drm_hdmi_compute_mode_clock`
+//!     (drivers/gpu/drm/display/drm_hdmi_helper.c; HDMI 1.0 s6.5, HDMI 2.0 s7.1)
+//!   * whether the sink takes a format/depth `sink_supports_format_bpc`
+//!     (drivers/gpu/drm/display/drm_hdmi_state_helper.c; CTA-861-F s5.4,
+//!     HDMI 1.3 s6.5)
+//!   * whether the rate fits                 `hdmi_clock_valid` (same file)
+//!   * what `Auto` picks                      `hdmi_compute_config` (same file)
+//!   * what the EDID declares                 `drm_parse_hdmi_deep_color_info`,
+//!     `drm_parse_ycbcr420_deep_color_info`, `drm_parse_hdmi_forum_scds`,
+//!     `parse_cta_y420vdb`, `parse_cta_y420cmdb` (drivers/gpu/drm/drm_edid.c)
 //!
-//! So this module computes, rather than assumes, and everything it reports is
-//! read out of the EDID. `modes_for` is the list a person may be offered and
-//! `best_for` is what to use when nobody has chosen. The Android stack on the
-//! same hardware arrives at the same list; `tests/color_modes.rs` holds the
-//! EDIDs of both ports of that Sony and checks this code against what the
-//! vendor box put on screen.
+//! The source's own limits are the ones the running vendor HDMI driver
+//! exposes on this board, read off the connector: `color_format` offers RGB,
+//! YCbCr 4:4:4, 4:2:2 and 4:2:0; `color_depth` offers 24 and 30 bit, so ten
+//! bits per component at most; and its `mode_valid` stops TMDS at 600 MHz.
+//!
+//! Checked against the reference Android box on both inputs of the same Sony,
+//! whose lists are in `tests/color_modes.rs`.
 
 pub use mediabox_core::{ColorFormat, ColorMode};
 use serde::{Deserialize, Serialize};
 
-/// What one sink said it can be sent, on the port it is plugged into.
-///
-/// Every field is parsed from the EDID. A sink that advertises nothing gets the
-/// conservative answers, never generous ones.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SinkVideo {
-    /// The fastest signal the sink will accept, in kHz. From the HDMI Forum
-    /// VSDB when the sink has one, otherwise from the HDMI 1.4 VSDB, otherwise
-    /// the 165 MHz every HDMI receiver is required to manage.
-    pub max_character_rate_khz: u32,
-    /// Whether the sink said so itself, or whether this is the floor assumed
-    /// for a sink that said nothing. Worth reporting: it is the difference
-    /// between a measured limit and a guess.
-    pub rate_is_declared: bool,
-    /// The format/depth pairs the sink advertises, before any link budget is
-    /// applied. This is the same set the Amlogic vendor stack calls `dc_cap`.
-    pub advertised: Vec<ColorMode>,
-    /// Whether the sink declared the HDR10 transfer function (SMPTE ST 2084).
-    pub st2084: bool,
-    /// Hybrid Log-Gamma.
-    pub hlg: bool,
+use crate::cta_vics::CTA_VICS;
+
+/// What this board's HDMI transmitter can send.
+pub struct SourceCaps {
+    pub max_tmds_khz: u32,
+    pub max_bpc: u8,
+    pub formats: &'static [ColorFormat],
 }
 
-impl SinkVideo {
-    /// Every advertised mode this link can actually carry at `pixel_clock_khz`,
-    /// in the order they are worth showing: full chroma first, then the
-    /// subsampled formats, deepest colour first within each.
-    pub fn modes_for(&self, pixel_clock_khz: u32) -> Vec<ColorMode> {
-        let mut modes: Vec<ColorMode> = self
-            .advertised
-            .iter()
-            .copied()
-            .filter(|mode| mode.character_rate_khz(pixel_clock_khz) <= self.max_character_rate_khz)
-            .collect();
-        modes.sort_by_key(|mode| (mode.format, std::cmp::Reverse(mode.bits)));
-        modes
-    }
+/// RK3588 HDMI TX under the vendor kernel this product runs.
+pub const RK3588_HDMI: SourceCaps = SourceCaps {
+    max_tmds_khz: 600_000,
+    max_bpc: 10,
+    formats: &[
+        ColorFormat::Rgb,
+        ColorFormat::Ycbcr444,
+        ColorFormat::Ycbcr422,
+        ColorFormat::Ycbcr420,
+    ],
+};
 
-    /// What to send when nobody has chosen.
-    ///
-    /// For HDR the deepest colour that fits wins, and chroma is what gets given
-    /// up to reach it -- 4:2:2 12-bit before 4:4:4 8-bit. That is not a
-    /// preference, it is the same choice the vendor Android stack makes on this
-    /// hardware, and it is the right way round: subsampled chroma is a detail
-    /// at viewing distance, and eight-bit HDR bands where anyone can see it.
-    ///
-    /// For SDR the order reverses: there is nothing to gain from the extra bits
-    /// and full chroma keeps text and the interface crisp.
-    pub fn best_for(&self, pixel_clock_khz: u32, hdr: bool) -> Option<ColorMode> {
-        let modes = self.modes_for(pixel_clock_khz);
-        if hdr {
-            // Deepest first; among equals, the fullest chroma.
-            modes
-                .iter()
-                .filter(|mode| mode.carries_hdr())
-                .copied()
-                .max_by_key(|mode| (mode.bits, std::cmp::Reverse(mode.format)))
-                .or_else(|| self.best_for(pixel_clock_khz, false))
+/// What one sink declared, on the port it is plugged into. Parsed the way
+/// `drm_edid.c` parses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SinkVideo {
+    /// `display_info.max_tmds_clock`: the HDMI VSDB's Max_TMDS_Clock, replaced
+    /// by the HF-VSDB's Max_TMDS_Character_Rate when that is above 340 MHz.
+    /// Zero when the sink declared neither.
+    pub max_character_rate_khz: u32,
+    pub rate_is_declared: bool,
+    /// Everything declared, before any mode or link budget is applied -- what
+    /// the Amlogic stack calls `dc_cap`.
+    pub advertised: Vec<ColorMode>,
+    pub st2084: bool,
+    pub hlg: bool,
+    /// An HDMI VSDB is present (`display_info.is_hdmi`). A DVI sink takes RGB
+    /// at eight bits and nothing else.
+    pub is_hdmi: bool,
+    pub ycbcr444: bool,
+    pub ycbcr422: bool,
+    /// Deep colour for RGB (`edid_hdmi_rgb444_dc_modes`), for 4:4:4
+    /// (`edid_hdmi_ycbcr444_dc_modes`, only with DC_Y444) and for 4:2:0
+    /// (`hdmi.y420_dc_modes`), as bit depths.
+    pub rgb_deep: Vec<u8>,
+    pub ycbcr444_deep: Vec<u8>,
+    pub ycbcr420_deep: Vec<u8>,
+    /// VICs the sink takes only as 4:2:0 (Y420VDB) and those it takes as
+    /// 4:2:0 as well (Y420CMDB over the video data block).
+    pub y420_only: Vec<u8>,
+    pub y420_also: Vec<u8>,
+}
+
+/// One timing, as a mode the kernel lists or the EDID declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timing {
+    pub width: u16,
+    pub height: u16,
+    /// Millihertz, so 23.976 is a number rather than a rounding.
+    pub refresh_mhz: u32,
+    pub pixel_clock_khz: u32,
+    pub htotal: u16,
+    pub vtotal: u16,
+    pub interlaced: bool,
+    /// The sink's preferred timing.
+    pub preferred: bool,
+    /// The CTA-861 code, when it is one.
+    pub vic: Option<u8>,
+}
+
+impl Timing {
+    /// A timing from its raw numbers, with the CTA code worked out the way
+    /// `drm_match_cea_mode` does it: same active and total size, same scan,
+    /// and the clock either the code's own or its 1000/1001 variant.
+    pub fn new(
+        width: u16,
+        height: u16,
+        pixel_clock_khz: u32,
+        htotal: u16,
+        vtotal: u16,
+        interlaced: bool,
+        preferred: bool,
+    ) -> Self {
+        let total = u64::from(htotal) * u64::from(vtotal);
+        let mut refresh_mhz = if total == 0 {
+            0
         } else {
-            // Fullest chroma first; among equals, the fewest bits, because deep
-            // colour buys nothing here and costs link budget.
-            modes
-                .iter()
-                .copied()
-                .min_by_key(|mode| (mode.format, mode.bits))
+            (u64::from(pixel_clock_khz) * 1_000_000 / total) as u32
+        };
+        if interlaced {
+            refresh_mhz *= 2;
+        }
+        let vic = CTA_VICS
+            .iter()
+            .find(|(_, w, h, clock, ht, vt, i, _)| {
+                *w == width
+                    && *h == height
+                    && *ht == htotal
+                    && *vt == vtotal
+                    && *i == interlaced
+                    && (clock.abs_diff(pixel_clock_khz) <= 1
+                        || (u64::from(*clock) * 1000 / 1001).abs_diff(u64::from(pixel_clock_khz)) <= 1)
+            })
+            .map(|entry| entry.0);
+        Self {
+            width,
+            height,
+            refresh_mhz,
+            pixel_clock_khz,
+            htotal,
+            vtotal,
+            interlaced,
+            preferred,
+            vic,
         }
     }
 
-    /// Whether HDR10 can be both signalled and carried at this mode.
-    ///
-    /// Both halves matter. A sink that declares ST 2084 on a link with no room
-    /// for ten bits cannot be sent HDR worth having, and a link with room to
-    /// spare cannot be sent HDR to a sink that never declared it.
-    pub fn hdr10_fits(&self, pixel_clock_khz: u32) -> bool {
-        self.st2084
-            && self
-                .modes_for(pixel_clock_khz)
-                .iter()
-                .any(|mode| mode.carries_hdr())
+    /// `3840x2160p59.94` / `1920x1080i60` — what a person recognises a mode by.
+    pub fn label(self) -> String {
+        let hz = f64::from(self.refresh_mhz) / 1000.0;
+        let rate = if (hz - hz.round()).abs() < 0.005 {
+            format!("{}", hz.round() as u32)
+        } else {
+            format!("{hz:.3}").trim_end_matches('0').trim_end_matches('.').to_string()
+        };
+        format!(
+            "{}x{}{}{}",
+            self.width,
+            self.height,
+            if self.interlaced { "i" } else { "p" },
+            rate
+        )
     }
 }
 
-/// The rate assumed for a sink that declares none: the HDMI floor, 165 MHz.
-const DEFAULT_CHARACTER_RATE_KHZ: u32 = 165_000;
+impl SinkVideo {
+    /// `drm_mode_is_420_only` / `drm_mode_is_420`.
+    fn is_420_only(&self, timing: &Timing) -> bool {
+        timing.vic.is_some_and(|vic| self.y420_only.contains(&vic))
+    }
+    fn is_420(&self, timing: &Timing) -> bool {
+        timing
+            .vic
+            .is_some_and(|vic| self.y420_only.contains(&vic) || self.y420_also.contains(&vic))
+    }
 
-/// Read an EDID's video capabilities.
+    /// `sink_supports_format_bpc`.
+    fn supports(&self, timing: &Timing, format: ColorFormat, bits: u8) -> bool {
+        // CTA-861-F s5.4: VIC 1 is eight bits only.
+        if timing.vic == Some(1) && bits != 8 {
+            return false;
+        }
+        if !self.is_hdmi && (format != ColorFormat::Rgb || bits != 8) {
+            return false;
+        }
+        if self.is_420_only(timing) && format != ColorFormat::Ycbcr420 {
+            return false;
+        }
+        match format {
+            ColorFormat::Rgb => bits == 8 || self.rgb_deep.contains(&bits),
+            ColorFormat::Ycbcr420 => {
+                self.is_420(timing) && (bits == 8 || self.ycbcr420_deep.contains(&bits))
+            }
+            // HDMI 1.3 s6.5: deep colour is not relevant to 4:2:2; up to 12.
+            ColorFormat::Ycbcr422 => self.ycbcr422 && bits <= 12,
+            ColorFormat::Ycbcr444 => {
+                self.ycbcr444 && (bits == 8 || self.ycbcr444_deep.contains(&bits))
+            }
+        }
+    }
+
+    /// `hdmi_clock_valid`, with this board's transmitter as the driver's own
+    /// `tmds_char_rate_valid`.
+    fn fits(&self, rate_khz: u32, source: &SourceCaps) -> bool {
+        (self.max_character_rate_khz == 0 || rate_khz <= self.max_character_rate_khz)
+            && rate_khz <= source.max_tmds_khz
+    }
+
+    /// Every format and depth that may be sent at this timing.
+    ///
+    /// 4:2:2 is listed once, at the source's depth: HDMI carries it in a
+    /// twelve-bit container whatever the depth, so a shallower 4:2:2 is the
+    /// same signal with the low bits zero (HDMI 1.0 s6.5).
+    pub fn modes_for(&self, timing: &Timing) -> Vec<ColorMode> {
+        self.modes_for_source(timing, &RK3588_HDMI)
+    }
+
+    pub fn modes_for_source(&self, timing: &Timing, source: &SourceCaps) -> Vec<ColorMode> {
+        let mut modes = Vec::new();
+        for &format in source.formats {
+            let depths: Vec<u8> = if format == ColorFormat::Ycbcr422 {
+                vec![source.max_bpc.min(12)]
+            } else {
+                (8..=source.max_bpc).rev().step_by(2).collect()
+            };
+            for bits in depths {
+                let mode = ColorMode::new(format, bits);
+                if self.supports(timing, format, bits)
+                    && self.fits(mode.character_rate_khz(timing.pixel_clock_khz), source)
+                {
+                    modes.push(mode);
+                }
+            }
+        }
+        modes
+    }
+
+    /// What `Auto` sends: `hdmi_compute_config` -- RGB at the deepest depth
+    /// asked for down to eight, then 4:2:0 the same way.
+    ///
+    /// For HDR the depth asked for is ten, because HDR10 is a ten-bit format;
+    /// where RGB cannot carry ten bits the other formats that can are tried
+    /// in the order of what they give up least -- 4:4:4, then 4:2:2, then
+    /// 4:2:0 -- which is where the reference Android box lands on a 300 MHz
+    /// input (2160p24, YCbCr 4:2:2 12-bit). If nothing carries ten bits there
+    /// is no HDR at this timing and the SDR answer is returned.
+    pub fn best_for(&self, timing: &Timing, hdr: bool) -> Option<ColorMode> {
+        let modes = self.modes_for(timing);
+        let has = |format: ColorFormat, bits: u8| {
+            modes
+                .iter()
+                .copied()
+                .find(|mode| mode.format == format && mode.bits == bits)
+        };
+        if hdr && self.st2084 {
+            for format in [
+                ColorFormat::Rgb,
+                ColorFormat::Ycbcr444,
+                ColorFormat::Ycbcr422,
+                ColorFormat::Ycbcr420,
+            ] {
+                if let Some(mode) = modes
+                    .iter()
+                    .copied()
+                    .filter(|mode| mode.format == format && mode.carries_hdr())
+                    .max_by_key(|mode| mode.bits)
+                {
+                    return Some(mode);
+                }
+            }
+        }
+        has(ColorFormat::Rgb, 8).or_else(|| has(ColorFormat::Ycbcr420, 8))
+    }
+
+    /// Whether HDR10 can be both signalled and carried at this timing.
+    pub fn hdr10_fits(&self, timing: &Timing) -> bool {
+        self.st2084 && self.modes_for(timing).iter().any(|mode| mode.carries_hdr())
+    }
+}
+
+/// The mode `Auto` drives the television at.
+///
+/// HDMI names no such rule -- a source may use any mode the sink lists -- so
+/// this is the reference Android box's, measured on both inputs of the Sony:
+/// the largest mode in the shape of the sink's preferred one, at the fastest
+/// refresh the link carries in any format, progressive. On the 300 MHz input
+/// that is 2160p60 in 4:2:0 even though the preferred mode is 1080p.
+pub fn auto_timing(timings: &[Timing], sink: Option<&SinkVideo>) -> Option<Timing> {
+    let shape = timings
+        .iter()
+        .find(|timing| timing.preferred)
+        .map(|timing| u32::from(timing.width) * 1000 / u32::from(timing.height).max(1));
+    let carried = |timing: &&Timing| {
+        !timing.interlaced && sink.is_none_or(|sink| !sink.modes_for(timing).is_empty())
+    };
+    let key = |timing: &&Timing| {
+        let ratio = u32::from(timing.width) * 1000 / u32::from(timing.height).max(1);
+        (
+            shape.is_none_or(|want| ratio == want),
+            u32::from(timing.width) * u32::from(timing.height),
+            timing.refresh_mhz,
+            timing.preferred,
+        )
+    };
+    timings
+        .iter()
+        .filter(carried)
+        .max_by_key(key)
+        .or_else(|| timings.iter().max_by_key(key))
+        .copied()
+}
+
+/// The mode a resolution choice resolves to on the sink plugged in now: the
+/// mode chosen when this sink lists it and the link carries it, `Auto`
+/// otherwise.
+pub fn choose_timing(
+    choice: mediabox_core::ResolutionChoice,
+    timings: &[Timing],
+    sink: Option<&SinkVideo>,
+) -> Option<Timing> {
+    if let mediabox_core::ResolutionChoice::Fixed {
+        width,
+        height,
+        refresh_mhz,
+        interlaced,
+    } = choice
+    {
+        if let Some(timing) = timings.iter().find(|timing| {
+            timing.width == width
+                && timing.height == height
+                && timing.interlaced == interlaced
+                && timing.refresh_mhz.abs_diff(refresh_mhz) <= 5
+                && sink.is_none_or(|sink| !sink.modes_for(timing).is_empty())
+        }) {
+            return Some(*timing);
+        }
+    }
+    auto_timing(timings, sink)
+}
+
+/// `display_info.max_tmds_clock` for a sink that declares nothing.
+const UNDECLARED: u32 = 0;
+
+/// Read an EDID's video capabilities, the way `drm_edid.c` does.
 ///
 /// Returns `None` for something that is not an EDID at all. A valid EDID with
-/// no CTA extension is not an error -- it is a sink that advertises only RGB at
-/// eight bits, which is exactly what it is then told.
+/// no CTA extension is a DVI sink: RGB at eight bits.
 pub fn parse_sink_video(edid: &[u8]) -> Option<SinkVideo> {
     if edid.len() < 128 || edid[0..8] != [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] {
         return None;
     }
-
-    // Every HDMI sink takes RGB at eight bits. Nothing else is assumed.
-    let mut video = SinkVideo {
-        max_character_rate_khz: DEFAULT_CHARACTER_RATE_KHZ,
+    let mut sink = SinkVideo {
+        max_character_rate_khz: UNDECLARED,
         rate_is_declared: false,
-        advertised: vec![ColorMode::new(ColorFormat::Rgb, 8)],
+        advertised: Vec::new(),
         st2084: false,
         hlg: false,
+        is_hdmi: false,
+        ycbcr444: false,
+        ycbcr422: false,
+        rgb_deep: Vec::new(),
+        ycbcr444_deep: Vec::new(),
+        ycbcr420_deep: Vec::new(),
+        y420_only: Vec::new(),
+        y420_also: Vec::new(),
     };
-
-    // Deep colour is declared once, in the HDMI 1.4 VSDB, and applies to RGB;
-    // whether it also applies to 4:4:4 is a separate bit in the same byte.
-    let mut deep_bits: Vec<u8> = Vec::new();
-    let mut deep_444 = false;
-    let mut ycbcr444 = false;
-    let mut ycbcr422 = false;
-    let mut ycbcr420_any = false;
-    let mut deep_420_bits: Vec<u8> = Vec::new();
-    let mut forum_rate = false;
+    let mut svds: Vec<u8> = Vec::new();
+    let mut cmdb: Option<u64> = None;
+    let mut forum_rate: Option<u32> = None;
 
     for block in edid[128..].chunks_exact(128) {
-        // CTA-861 extension only.
         if block[0] != 0x02 {
             continue;
         }
-        let dtd_start = block[2] as usize;
-        if block[1] >= 3 {
-            // Byte 3 carries the colour-format support flags.
-            ycbcr444 |= block[3] & 0x20 != 0;
-            ycbcr422 |= block[3] & 0x10 != 0;
+        if block[1] >= 2 {
+            sink.ycbcr444 |= block[3] & 0x20 != 0;
+            sink.ycbcr422 |= block[3] & 0x10 != 0;
         }
-        // The data block collection runs from byte 4 to the first detailed
-        // timing. A sink with no collection says so by putting them at 4.
+        let dtd_start = block[2] as usize;
         if !(4..=127).contains(&dtd_start) {
             continue;
         }
         let mut at = 4usize;
-        while at < dtd_start && at < block.len() {
+        while at < dtd_start {
             let header = block[at];
             let len = (header & 0x1F) as usize;
-            let tag = header >> 5;
             let end = at + 1 + len;
-            if len == 0 || end > block.len() || end > dtd_start {
+            if end > dtd_start {
                 break;
             }
             let payload = &block[at + 1..end];
-            match tag {
-                // Vendor-specific: HDMI 1.4 (00-0C-03) or HDMI Forum (C4-5D-D8).
+            match header >> 5 {
+                // Video data block: the SVDs, in order, for the 4:2:0 map.
+                2 => svds.extend(payload.iter().map(|svd| svd_to_vic(*svd))),
                 3 if payload.len() >= 3 => {
                     let oui = [payload[0], payload[1], payload[2]];
                     if oui == [0x03, 0x0C, 0x00] {
-                        // After the three OUI bytes come two bytes of source
-                        // physical address, then the deep colour flags, then
-                        // the maximum TMDS clock in units of 5 MHz. A sink that
-                        // also carries an HDMI Forum block leaves a value here
-                        // that a 1.4 source can live with, so the Forum block
-                        // wins whichever order the two appear in.
-                        if payload.len() >= 7 && payload[6] != 0 && !forum_rate {
-                            video.max_character_rate_khz = u32::from(payload[6]) * 5_000;
-                            video.rate_is_declared = true;
+                        // drm_parse_hdmi_vsdb_video / _deep_color_info.
+                        sink.is_hdmi = true;
+                        if payload.len() >= 7 && payload[6] != 0 {
+                            sink.max_character_rate_khz = u32::from(payload[6]) * 5_000;
                         }
                         if payload.len() >= 6 {
                             let dc = payload[5];
-                            deep_444 |= dc & 0x08 != 0;
-                            if dc & 0x10 != 0 {
-                                deep_bits.push(10);
+                            for (bit, bits) in [(0x10u8, 10u8), (0x20, 12), (0x40, 16)] {
+                                if dc & bit != 0 {
+                                    sink.rgb_deep.push(bits);
+                                }
                             }
-                            if dc & 0x20 != 0 {
-                                deep_bits.push(12);
-                            }
-                            if dc & 0x40 != 0 {
-                                deep_bits.push(16);
+                            if dc & 0x08 != 0 {
+                                sink.ycbcr444_deep = sink.rgb_deep.clone();
                             }
                         }
                     } else if oui == [0xD8, 0x5D, 0xC4] {
-                        // The HDMI Forum block supersedes the 1.4 rate: a 2.0
-                        // sink puts its real ceiling here and leaves the older
-                        // field at a value a 1.4 source can live with.
+                        // drm_parse_hdmi_forum_scds / _ycbcr420_deep_color_info.
                         if payload.len() >= 5 && payload[4] != 0 {
-                            video.max_character_rate_khz = u32::from(payload[4]) * 5_000;
-                            video.rate_is_declared = true;
-                            forum_rate = true;
+                            forum_rate = Some(u32::from(payload[4]) * 5_000);
                         }
-                        // 4:2:0 deep colour is declared separately, and a sink
-                        // that takes 4:2:0 at ten bits very often does not take
-                        // it at twelve.
                         if payload.len() >= 7 {
-                            let dc420 = payload[6];
-                            if dc420 & 0x01 != 0 {
-                                deep_420_bits.push(10);
-                            }
-                            if dc420 & 0x02 != 0 {
-                                deep_420_bits.push(12);
-                            }
-                            if dc420 & 0x04 != 0 {
-                                deep_420_bits.push(16);
+                            for (bit, bits) in [(0x01u8, 10u8), (0x02, 12), (0x04, 16)] {
+                                if payload[6] & bit != 0 {
+                                    sink.ycbcr420_deep.push(bits);
+                                }
                             }
                         }
                     }
                 }
-                // Extended tag: the byte after the header says which.
                 7 if !payload.is_empty() => match payload[0] {
-                    // HDR static metadata: the transfer functions the sink has.
                     0x06 if payload.len() >= 2 => {
-                        video.st2084 |= payload[1] & 0x04 != 0;
-                        video.hlg |= payload[1] & 0x08 != 0;
+                        sink.st2084 |= payload[1] & 0x04 != 0;
+                        sink.hlg |= payload[1] & 0x08 != 0;
                     }
-                    // Either 4:2:0 block means the sink takes 4:2:0 for at
-                    // least some modes. Which modes is a per-VIC question this
-                    // does not need: the caller already knows the mode it is
-                    // asking about is one the sink listed.
-                    0x0E | 0x0F => ycbcr420_any = true,
+                    // parse_cta_y420vdb
+                    0x0E => sink
+                        .y420_only
+                        .extend(payload[1..].iter().map(|svd| svd_to_vic(*svd))),
+                    // parse_cta_y420cmdb: an empty map means every SVD.
+                    0x0F => {
+                        let bytes = &payload[1..];
+                        let mut map = 0u64;
+                        if bytes.is_empty() {
+                            map = u64::MAX;
+                        } else {
+                            for (index, byte) in bytes.iter().take(8).enumerate() {
+                                map |= u64::from(*byte) << (8 * index);
+                            }
+                        }
+                        cmdb = Some(cmdb.unwrap_or(0) | map);
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -237,131 +452,68 @@ pub fn parse_sink_video(edid: &[u8]) -> Option<SinkVideo> {
         }
     }
 
-    deep_bits.sort_unstable();
-    deep_bits.dedup();
-    deep_420_bits.sort_unstable();
-    deep_420_bits.dedup();
-
-    for bits in &deep_bits {
-        // 16 bits per component is declarable and not something this product
-        // has any use for; it is dropped rather than offered.
-        if *bits <= 12 {
-            video.advertised.push(ColorMode::new(ColorFormat::Rgb, *bits));
+    // HF-VSDB's rate replaces the VSDB's only above 340 MHz.
+    if let Some(rate) = forum_rate {
+        if rate > 340_000 {
+            sink.max_character_rate_khz = rate;
         }
     }
-    if ycbcr444 {
-        video.advertised.push(ColorMode::new(ColorFormat::Ycbcr444, 8));
-        if deep_444 {
-            for bits in &deep_bits {
-                if *bits <= 12 {
-                    video
-                        .advertised
-                        .push(ColorMode::new(ColorFormat::Ycbcr444, *bits));
-                }
-            }
-        }
-    }
-    if ycbcr422 {
-        // 4:2:2 is carried twelve bits wide or not at all.
-        video.advertised.push(ColorMode::new(ColorFormat::Ycbcr422, 12));
-    }
-    if ycbcr420_any {
-        video.advertised.push(ColorMode::new(ColorFormat::Ycbcr420, 8));
-        for bits in &deep_420_bits {
-            if *bits <= 12 {
-                video
-                    .advertised
-                    .push(ColorMode::new(ColorFormat::Ycbcr420, *bits));
+    sink.rate_is_declared = sink.max_character_rate_khz != UNDECLARED;
+    if let Some(map) = cmdb {
+        for (index, vic) in svds.iter().enumerate().take(64) {
+            if map & (1u64 << index) != 0 {
+                sink.y420_also.push(*vic);
             }
         }
     }
 
-    video.advertised.sort_by_key(|mode| (mode.format, mode.bits));
-    video.advertised.dedup();
-    Some(video)
+    // The declared set, for showing.
+    sink.advertised.push(ColorMode::new(ColorFormat::Rgb, 8));
+    for bits in &sink.rgb_deep {
+        sink.advertised.push(ColorMode::new(ColorFormat::Rgb, *bits));
+    }
+    if sink.ycbcr444 {
+        sink.advertised.push(ColorMode::new(ColorFormat::Ycbcr444, 8));
+        for bits in &sink.ycbcr444_deep {
+            sink.advertised.push(ColorMode::new(ColorFormat::Ycbcr444, *bits));
+        }
+    }
+    if sink.ycbcr422 {
+        sink.advertised.push(ColorMode::new(ColorFormat::Ycbcr422, 12));
+    }
+    if !sink.y420_only.is_empty() || !sink.y420_also.is_empty() {
+        sink.advertised.push(ColorMode::new(ColorFormat::Ycbcr420, 8));
+        for bits in &sink.ycbcr420_deep {
+            sink.advertised.push(ColorMode::new(ColorFormat::Ycbcr420, *bits));
+        }
+    }
+    sink.advertised.sort_by_key(|mode| (mode.format, mode.bits));
+    sink.advertised.dedup();
+    Some(sink)
 }
 
-/// One timing the sink says it supports, with the pixel clock that decides
-/// what can be sent at it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Timing {
-    pub width: u16,
-    pub height: u16,
-    /// Millihertz, so 23.976 Hz is a number rather than a rounding.
-    pub refresh_mhz: u32,
-    pub pixel_clock_khz: u32,
-    /// The CTA-861 code, when the sink named one. Detailed timings have none.
-    pub vic: Option<u8>,
-}
-
-impl Timing {
-    /// `3840x2160p23.976` — what a person recognises a mode by.
-    pub fn label(self) -> String {
-        format!(
-            "{}x{}p{:.3}",
-            self.width,
-            self.height,
-            f64::from(self.refresh_mhz) / 1000.0
-        )
+/// `svd_to_vic`: a native flag in bit 7 only for codes below 65.
+fn svd_to_vic(svd: u8) -> u8 {
+    if (129..=192).contains(&svd) {
+        svd & 0x7F
+    } else {
+        svd
     }
 }
 
-/// The CTA-861 video codes this appliance can encounter, with their timings.
-///
-/// A short table rather than a complete one, and unknown codes are skipped
-/// instead of guessed: a mode this product cannot name is a mode it has no
-/// business computing a link budget for. The fractional entries are the
-/// 1000/1001 rates, which is what film actually arrives as.
-const CTA_TIMINGS: &[(u8, u16, u16, u32, u32)] = &[
-    // vic, width, height, refresh mHz, pixel clock kHz
-    (4, 1280, 720, 60_000, 74_250),
-    (16, 1920, 1080, 60_000, 148_500),
-    (17, 720, 576, 50_000, 27_000),
-    (19, 1280, 720, 50_000, 74_250),
-    (31, 1920, 1080, 50_000, 148_500),
-    (32, 1920, 1080, 24_000, 74_250),
-    (33, 1920, 1080, 25_000, 74_250),
-    (34, 1920, 1080, 30_000, 74_250),
-    (60, 1280, 720, 24_000, 59_400),
-    (61, 1280, 720, 25_000, 74_250),
-    (62, 1280, 720, 30_000, 74_250),
-    (93, 3840, 2160, 24_000, 297_000),
-    (94, 3840, 2160, 25_000, 297_000),
-    (95, 3840, 2160, 30_000, 297_000),
-    (96, 3840, 2160, 50_000, 594_000),
-    (97, 3840, 2160, 60_000, 594_000),
-    (98, 4096, 2160, 24_000, 297_000),
-    (99, 4096, 2160, 25_000, 297_000),
-    (100, 4096, 2160, 30_000, 297_000),
-    (101, 4096, 2160, 50_000, 594_000),
-    (102, 4096, 2160, 60_000, 594_000),
-];
-
-/// Every timing the sink lists, largest first.
-///
-/// Read from the CTA video data block, where a television puts the modes it
-/// actually wants to be sent, plus the base block's own detailed timings for
-/// the preferred mode a monitor may only describe that way. Interlaced codes
-/// are left out: nothing this product drives is interlaced, and offering one
-/// would only be a mode a person could pick and regret.
+/// Every timing the EDID declares -- detailed timings and CTA video codes --
+/// largest first.
 pub fn parse_timings(edid: &[u8]) -> Vec<Timing> {
     let mut timings: Vec<Timing> = Vec::new();
     if edid.len() < 128 || edid[0..8] != [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] {
         return timings;
     }
-
-    // The base block's detailed timings: four slots of eighteen bytes, a
-    // zero pixel clock meaning the slot holds something else.
     for slot in 0..4 {
         let at = 54 + slot * 18;
-        if at + 18 > 128 {
-            break;
-        }
-        if let Some(timing) = detailed_timing(&edid[at..at + 18]) {
+        if let Some(timing) = detailed_timing(&edid[at..at + 18], slot == 0) {
             timings.push(timing);
         }
     }
-
     for block in edid[128..].chunks_exact(128) {
         if block[0] != 0x02 {
             continue;
@@ -371,71 +523,61 @@ pub fn parse_timings(edid: &[u8]) -> Vec<Timing> {
             continue;
         }
         let mut at = 4usize;
-        while at < dtd_start && at < block.len() {
+        while at < dtd_start {
             let header = block[at];
             let len = (header & 0x1F) as usize;
             let end = at + 1 + len;
-            if len == 0 || end > block.len() || end > dtd_start {
+            if end > dtd_start {
                 break;
             }
-            // Tag 2 is the video data block: one byte per short video
-            // descriptor, the low seven bits of which are the code.
             if header >> 5 == 2 {
-                for byte in &block[at + 1..end] {
-                    let vic = byte & 0x7F;
-                    if let Some(timing) = cta_timing(vic) {
+                for svd in &block[at + 1..end] {
+                    if let Some(timing) = cta_timing(svd_to_vic(*svd)) {
+                        timings.push(timing);
+                    }
+                }
+            }
+            // Modes the sink takes only as 4:2:0 are modes too
+            // (`do_y420vdb_modes`): 2160p60 on a 300 MHz input is one.
+            if header >> 5 == 7 && end > at + 2 && block[at + 1] == 0x0E {
+                for svd in &block[at + 2..end] {
+                    if let Some(timing) = cta_timing(svd_to_vic(*svd)) {
                         timings.push(timing);
                     }
                 }
             }
             at = end;
         }
-        // And the extension block's own detailed timings.
         let mut at = dtd_start;
         while at + 18 <= 127 {
-            if let Some(timing) = detailed_timing(&block[at..at + 18]) {
+            if let Some(timing) = detailed_timing(&block[at..at + 18], false) {
                 timings.push(timing);
             }
             at += 18;
         }
     }
-
     timings.sort_by_key(|timing| {
         (
             std::cmp::Reverse(u32::from(timing.width) * u32::from(timing.height)),
             std::cmp::Reverse(timing.refresh_mhz),
         )
     });
-    timings.dedup_by_key(|timing| (timing.width, timing.height, timing.refresh_mhz));
+    timings.dedup_by_key(|timing| (timing.width, timing.height, timing.refresh_mhz, timing.interlaced));
     timings
 }
 
 fn cta_timing(vic: u8) -> Option<Timing> {
-    CTA_TIMINGS
-        .iter()
-        .find(|(code, ..)| *code == vic)
-        .map(|(code, width, height, refresh_mhz, pixel_clock_khz)| Timing {
-            width: *width,
-            height: *height,
-            refresh_mhz: *refresh_mhz,
-            pixel_clock_khz: *pixel_clock_khz,
-            vic: Some(*code),
-        })
+    let (_, width, height, clock, htotal, vtotal, interlaced, _) =
+        *CTA_VICS.iter().find(|entry| entry.0 == vic)?;
+    Some(Timing::new(width, height, clock, htotal, vtotal, interlaced, false))
 }
 
-/// One eighteen-byte detailed timing descriptor.
-fn detailed_timing(bytes: &[u8]) -> Option<Timing> {
+fn detailed_timing(bytes: &[u8], preferred: bool) -> Option<Timing> {
     if bytes.len() < 18 {
         return None;
     }
-    // A zero pixel clock marks a descriptor that is a name or a range, not a
-    // timing.
     let clock_10khz = u16::from_le_bytes([bytes[0], bytes[1]]);
     if clock_10khz == 0 {
-        return None;
-    }
-    // Interlaced: the top bit of the last byte.
-    if bytes[17] & 0x80 != 0 {
         return None;
     }
     let width = u16::from(bytes[2]) | (u16::from(bytes[4] & 0xF0) << 4);
@@ -445,19 +587,20 @@ fn detailed_timing(bytes: &[u8]) -> Option<Timing> {
     if width == 0 || height == 0 {
         return None;
     }
-    let pixel_clock_khz = u32::from(clock_10khz) * 10;
-    let total = u64::from(width + hblank) * u64::from(height + vblank);
-    if total == 0 {
-        return None;
-    }
-    // Millihertz, computed from the timing rather than rounded to whole hertz,
-    // so 23.976 does not become 24 and a film does not judder.
-    let refresh_mhz = (u64::from(pixel_clock_khz) * 1_000_000 / total) as u32;
-    Some(Timing {
+    let interlaced = bytes[17] & 0x80 != 0;
+    // An interlaced DTD describes one field.
+    let (height, vtotal) = if interlaced {
+        (height * 2, (height + vblank) * 2 + 1)
+    } else {
+        (height, height + vblank)
+    };
+    Some(Timing::new(
         width,
         height,
-        refresh_mhz,
-        pixel_clock_khz,
-        vic: None,
-    })
+        u32::from(clock_10khz) * 10,
+        width + hblank,
+        vtotal,
+        interlaced,
+        preferred,
+    ))
 }

@@ -127,6 +127,23 @@ impl AppState {
                 Ok(()) => Response::success(self.display_color.status()),
                 Err(error) => Response::failure("DISPLAY_COLOR_ERROR", error),
             },
+            Request::DisplayResolutionSet { choice } => {
+                match self.display_color.set_resolution(choice) {
+                    Ok(()) => {
+                        // Answered first: the interface that asked is the one
+                        // being restarted, and it should hear that it worked.
+                        let surface = self.surface.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            if let Err(error) = surface.restart_ui().await {
+                                eprintln!("mediaboxd-rs: çözünürlük uygulanamadı: {error}");
+                            }
+                        });
+                        Response::success(self.display_color.status())
+                    }
+                    Err(error) => Response::failure("DISPLAY_RESOLUTION_ERROR", error),
+                }
+            }
             Request::FanStatus => Response::success(self.fan.status()),
             Request::FanCurveSet { profile, points } => {
                 match mediabox_core::FanCurve::resolve(profile, points) {

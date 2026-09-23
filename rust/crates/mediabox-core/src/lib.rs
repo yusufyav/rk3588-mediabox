@@ -183,6 +183,27 @@ impl ColorChoice {
     }
 }
 
+/// Which mode the television is driven at, as a person has decided it.
+///
+/// `Auto` first, as the reference Android box lists it: the largest mode in
+/// the panel's own shape at the fastest refresh the link carries in any
+/// format. A fixed choice names one mode the sink listed; if the sink plugged
+/// in later does not list it, `Auto` is used instead -- a choice made for one
+/// television is never forced onto another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResolutionChoice {
+    #[default]
+    Auto,
+    Fixed {
+        width: u16,
+        height: u16,
+        /// Millihertz, so 59.94 and 60 are different modes.
+        refresh_mhz: u32,
+        interlaced: bool,
+    },
+}
+
 /// One entry of the colour mode list, ready to draw.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColorModeOption {
@@ -227,6 +248,9 @@ pub struct DisplayColorStatus {
     pub st2084: bool,
     pub hlg: bool,
     pub choice: ColorChoice,
+    /// The resolution choice, as remembered.
+    #[serde(default)]
+    pub resolution: ResolutionChoice,
     /// One entry per timing the sink lists, largest first.
     pub timings: Vec<TimingOption>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,29 +324,10 @@ impl ColorMode {
         rate.min(u64::from(u32::MAX)) as u32
     }
 
-    /// Whether this mode can carry HDR10 on this hardware.
-    ///
-    /// Two conditions, and the second is a platform fault rather than a fact
-    /// about HDMI.
-    ///
-    /// Eight bits cannot: an HDR10 gradient quantised to 8 bits bands visibly,
-    /// and a product that lit an "HDR" badge over that picture would be
-    /// claiming something it does not have.
-    ///
-    /// Neither can 4:2:2, here. The RK3588 vendor display driver gets HDR over
-    /// a 4:2:2 link wrong -- the picture comes back with its colours collapsed,
-    /// which is what `patches/kodi/0011` was written to steer around. Measured
-    /// again on 2026-09-18 on a Sony KD-65XE9005: at 4K the link can only be
-    /// 4:2:2 and HDR is wrong, at 1080p it comes up RGB 10-bit and HDR is
-    /// correct, on the same port, same cable, same film. The colorimetry tag
-    /// was tried both ways and changed nothing, so this is the transport and
-    /// not the signalling.
-    ///
-    /// It is not true of HDMI: the vendor Android stack on the same television
-    /// sends HDR10 as 4:2:2 12-bit and it is correct. It is true of this
-    /// driver, so it is what this product has to plan around.
+    /// Whether this mode can carry HDR10: ten bits per component or more, in
+    /// any format. HDR10 is a ten-bit format; eight bits of PQ bands.
     pub fn carries_hdr(self) -> bool {
-        self.bits >= 10 && self.format != ColorFormat::Ycbcr422
+        self.bits >= 10
     }
 }
 
@@ -1364,6 +1369,12 @@ pub enum Request {
     /// /sys read-only and the state directory is the daemon's.
     DisplayColorModeSet {
         choice: ColorChoice,
+    },
+    /// Remember a resolution choice and put the interface on it. The interface
+    /// sets its mode when it starts, so the daemon restarts it; the display
+    /// stays lit across that restart.
+    DisplayResolutionSet {
+        choice: ResolutionChoice,
     },
     /// The fan as the kernel is running it, and the curve chosen for it.
     FanStatus,

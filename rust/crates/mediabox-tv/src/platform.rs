@@ -315,6 +315,12 @@ struct SplitDisplay {
     /// the film alone: a set that never declared ST 2084, or a link with no
     /// room for ten bits at this timing, cannot be sent HDR worth having.
     sink_video: Option<mediabox_platform::video::SinkVideo>,
+    /// The mode in use, in the terms the colour rules are written in.
+    timing: mediabox_platform::video::Timing,
+    /// The colour mode a person chose in the settings, `Auto` otherwise.
+    colour_choice: Cell<mediabox_core::ColorChoice>,
+    /// The format and depth last written to the connector.
+    applied: Cell<Option<mediabox_core::ColorMode>>,
     /// The last colour state written to the connector, so the properties are
     /// not rewritten on every frame -- and so the television is put back to
     /// SDR when the film ends rather than left in BT.2020.
@@ -563,7 +569,7 @@ impl SplitDisplay {
                 sink.st2084,
                 sink.hlg,
                 sink.max_character_rate_khz,
-                sink.hdr10_fits(mode.clock())
+                sink.hdr10_fits(&timing_of(&mode))
             );
         }
 
@@ -573,6 +579,11 @@ impl SplitDisplay {
             crtc,
             mode,
             sink_video,
+            timing: timing_of(&mode),
+            colour_choice: Cell::new(
+                read_choice::<mediabox_core::ColorChoice>(COLOUR_FILE).unwrap_or_default(),
+            ),
+            applied: Cell::new(None),
             signalled: Cell::new(None),
             asked: Cell::new(None),
             gbm_device,
@@ -783,6 +794,12 @@ impl SplitDisplay {
     /// away, so the frame after the set comes back has to set the mode again
     /// rather than flip onto somebody else's configuration.
     fn present(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // A colour mode chosen in the settings is put on the wire here, on the
+        // next frame, rather than waiting for the next film or restart.
+        if let Some(choice) = COLOUR_WANTED.with(Cell::take) {
+            self.colour_choice.set(choice);
+            self.signal_output_colour(self.asked.get());
+        }
         match self.present_frame() {
             Ok(()) => {
                 if self.dark.replace(false) {
@@ -853,6 +870,9 @@ impl SplitDisplay {
             );
             state.first_frame_logged = true;
             crate::fdstore::release_inherited();
+            drop(state);
+            self.signal_output_colour(self.asked.get());
+            return Ok(());
         }
         Ok(())
     }
@@ -902,7 +922,7 @@ impl SplitDisplay {
         let fits = self
             .sink_video
             .as_ref()
-            .is_some_and(|sink| sink.hdr10_fits(self.mode.clock()));
+            .is_some_and(|sink| sink.hdr10_fits(&self.timing));
         let wanted = match film {
             Some(hdr) if hdr.is_hdr() && fits => Some(hdr),
             _ => None,
@@ -923,7 +943,20 @@ impl SplitDisplay {
                 None => {}
             }
         }
-        if self.signalled.get() == wanted {
+        // The format and depth on the wire, by the same rules as the list in
+        // the settings: the one a person chose if it can be sent at this mode
+        // (and carries HDR, when HDR is wanted), otherwise what `Auto` gives.
+        let format = self.sink_video.as_ref().and_then(|sink| {
+            let allowed = sink.modes_for(&self.timing);
+            let fixed = self.colour_choice.get().mode().filter(|mode| allowed.contains(mode));
+            match wanted {
+                Some(_) => fixed
+                    .filter(|mode| mode.carries_hdr())
+                    .or_else(|| sink.best_for(&self.timing, true)),
+                None => fixed.or_else(|| sink.best_for(&self.timing, false)),
+            }
+        });
+        if self.signalled.get() == wanted && self.applied.get() == format {
             return;
         }
 
@@ -934,6 +967,7 @@ impl SplitDisplay {
         let mut metadata = None;
         let mut colorspace = None;
         let mut depth = None;
+        let mut pixel_format = None;
         for handle in properties.as_props_and_values().0.iter().copied() {
             let Ok(info) = self.kms.get_property(handle) else {
                 continue;
@@ -942,17 +976,32 @@ impl SplitDisplay {
                 Ok("HDR_OUTPUT_METADATA") => metadata = Some(handle),
                 Ok("Colorspace") => colorspace = Some(handle),
                 Ok("color_depth") => depth = Some(handle),
+                Ok("color_format") => pixel_format = Some(handle),
                 _ => {}
             }
         }
 
-        // BT2020_RGB and 30-bit, as this driver enumerates them; 0 is
-        // "Default" and "Automatic", which is what an SDR film is sent as.
-        const BT2020_RGB: u64 = 9;
-        const TEN_BIT: u64 = 10;
-        let (space, bits) = match wanted {
-            Some(_) => (BT2020_RGB, TEN_BIT),
-            None => (0, 0),
+        // As this driver enumerates them: `Colorspace` Default=0,
+        // BT2020_RGB=9, BT2020_YCC=10; `color_depth` Automatic=0, 24bit=8,
+        // 30bit=10; `color_format` rgb=0, ycbcr444=1, ycbcr422=2, ycbcr420=3.
+        use mediabox_core::ColorFormat;
+        let (space, bits, layout) = match format {
+            Some(mode) => (
+                match (wanted, mode.format) {
+                    (Some(_), ColorFormat::Rgb) => 9,
+                    (Some(_), _) => 10,
+                    (None, _) => 0,
+                },
+                u64::from(mode.bits),
+                Some(match mode.format {
+                    ColorFormat::Rgb => 0u64,
+                    ColorFormat::Ycbcr444 => 1,
+                    ColorFormat::Ycbcr422 => 2,
+                    ColorFormat::Ycbcr420 => 3,
+                }),
+            ),
+            // No EDID to reason from: the driver's own choice.
+            None => (0, 0, None),
         };
         let blob = match wanted {
             Some(hdr) => match self.kms.create_property_blob(&hdr.blob()) {
@@ -985,6 +1034,12 @@ impl SplitDisplay {
         {
             eprintln!("mediabox-tv.platform color_depth: {e}");
         }
+        if let (Some(property), Some(layout)) = (pixel_format, layout)
+            && let Err(e) = self.kms.set_property(connector, property, layout)
+        {
+            eprintln!("mediabox-tv.platform color_format: {e}");
+        }
+        self.applied.set(format);
         eprintln!(
             "mediabox-tv.platform output colour: {}",
             match wanted {
@@ -996,6 +1051,11 @@ impl SplitDisplay {
                 ),
                 None => "SDR".to_string(),
             }
+        );
+        eprintln!(
+            "mediabox-tv.platform output format: {} at {}",
+            format.map(|mode| mode.label()).unwrap_or_else(|| "sürücünün seçimi".into()),
+            self.timing.label()
         );
         self.signalled.set(wanted);
     }
@@ -1144,46 +1204,17 @@ fn find_output(
     // 594 MHz of pixels into 300 -- and offers the other formats only at modes
     // where they fit. The kernel already listed 4K60 for that input and falls
     // back to 4:2:0 on its own; the interface was the only thing refusing it.
-    let carried = |mode: &&control::Mode| -> bool {
-        let Some(sink) = sink.as_ref() else {
-            return true;
-        };
-        !sink.modes_for(mode.clock()).is_empty()
-    };
-    // And the shape the panel actually is.
-    //
-    // This television offers 4096x2160 as well as 3840x2160, and 4096 is the
-    // larger rectangle: ranking by area alone sends a 4K television a DCI
-    // timing it then has to letterbox and rescale. The sink says what shape it
-    // is in its preferred mode -- 1920x1080 here, 16:9 -- so that is what the
-    // interface matches before it asks for size.
-    let shape = connector
-        .modes()
-        .iter()
-        .find(|mode| mode.mode_type().contains(control::ModeTypeFlags::PREFERRED))
-        .map(|mode| {
-            let (w, h) = mode.size();
-            (u32::from(w) * 1000) / u32::from(h).max(1)
-        });
-    let by_size = |mode: &&control::Mode| {
-        let (w, h) = mode.size();
-        let ratio = (u32::from(w) * 1000) / u32::from(h).max(1);
-        (
-            shape.is_none_or(|want| ratio == want),
-            u32::from(w) * u32::from(h),
-            mode.vrefresh(),
-            mode.mode_type().contains(control::ModeTypeFlags::PREFERRED),
-        )
-    };
-    let mode = connector
-        .modes()
-        .iter()
-        .filter(carried)
-        .max_by_key(by_size)
-        // A sink whose EDID says nothing useful is still a television.
-        .or_else(|| connector.modes().iter().max_by_key(by_size))
-        .copied()
+    // Which mode, by the product's one rule set: the modes the kernel lists
+    // for this sink, the resolution a person chose if this sink lists it and
+    // the link carries it, `Auto` otherwise. See mediabox_platform::video.
+    let modes: Vec<control::Mode> = connector.modes().to_vec();
+    let timings: Vec<mediabox_platform::video::Timing> = modes.iter().map(timing_of).collect();
+    let choice = read_choice::<mediabox_core::ResolutionChoice>(RESOLUTION_FILE).unwrap_or_default();
+    let chosen = mediabox_platform::video::choose_timing(choice, &timings, sink.as_ref())
         .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
+    let auto = mediabox_platform::video::auto_timing(&timings, sink.as_ref());
+    let mode = modes[timings.iter().position(|timing| *timing == chosen).unwrap_or(0)];
+    publish_offer(&timings, chosen, auto, choice, sink.as_ref());
     if let Some(sink) = &sink {
         let (w, h) = mode.size();
         eprintln!(
@@ -2075,4 +2106,82 @@ mod tests {
 pub fn install() -> Result<(), PlatformError> {
     slint::platform::set_platform(Box::new(SplitPlatform::new()?))
         .map_err(|e| PlatformError::from(e.to_string()))
+}
+
+/// Where the daemon remembers the choices made in the settings. Read-only
+/// here; the daemon writes them.
+const RESOLUTION_FILE: &str = "/var/lib/mediabox/resolution";
+const COLOUR_FILE: &str = "/var/lib/mediabox/color-mode";
+
+fn read_choice<T: serde::de::DeserializeOwned>(path: &str) -> Option<T> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(text.trim()).ok()
+}
+
+/// A KMS mode in the terms the HDMI rules are written in.
+fn timing_of(mode: &control::Mode) -> mediabox_platform::video::Timing {
+    let (width, height) = mode.size();
+    mediabox_platform::video::Timing::new(
+        width,
+        height,
+        mode.clock(),
+        mode.hsync().2,
+        mode.vsync().2,
+        mode.flags().contains(control::ModeFlags::INTERLACE),
+        mode.mode_type().contains(control::ModeTypeFlags::PREFERRED),
+    )
+}
+
+/// What the settings screen offers: every mode the kernel lists for this
+/// sink, which one is on, what `Auto` would be, and the colour modes each
+/// can be sent in.
+static OFFER: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+pub fn display_offer() -> Option<serde_json::Value> {
+    OFFER.lock().ok()?.clone()
+}
+
+fn publish_offer(
+    timings: &[mediabox_platform::video::Timing],
+    current: mediabox_platform::video::Timing,
+    auto: Option<mediabox_platform::video::Timing>,
+    choice: mediabox_core::ResolutionChoice,
+    sink: Option<&mediabox_platform::video::SinkVideo>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    let list: Vec<serde_json::Value> = timings
+        .iter()
+        .filter(|timing| seen.insert((timing.width, timing.height, timing.refresh_mhz, timing.interlaced)))
+        .map(|timing| {
+            let allowed = sink.map(|sink| sink.modes_for(timing)).unwrap_or_default();
+            serde_json::json!({
+                "label": timing.label(),
+                "width": timing.width,
+                "height": timing.height,
+                "refresh_mhz": timing.refresh_mhz,
+                "interlaced": timing.interlaced,
+                "allowed": allowed,
+                "hdr10": sink.is_some_and(|sink| sink.hdr10_fits(timing)),
+                "auto_sdr": sink.and_then(|sink| sink.best_for(timing, false)),
+            })
+        })
+        .collect();
+    let offer = serde_json::json!({
+        "timings": list,
+        "current": current.label(),
+        "auto": auto.map(|timing| timing.label()),
+        "choice": choice,
+    });
+    if let Ok(mut slot) = OFFER.lock() {
+        *slot = Some(offer);
+    }
+}
+
+thread_local! {
+    static COLOUR_WANTED: Cell<Option<mediabox_core::ColorChoice>> = const { Cell::new(None) };
+}
+
+/// Put a colour mode chosen in the settings on the wire, from the next frame.
+pub fn set_colour_choice(choice: mediabox_core::ColorChoice) {
+    COLOUR_WANTED.with(|wanted| wanted.set(Some(choice)));
 }

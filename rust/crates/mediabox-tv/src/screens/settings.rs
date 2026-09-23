@@ -46,6 +46,8 @@ pub enum Action {
     /// the lights do: what a press does is settled while the screen is
     /// composed, and is readable in the row.
     SetColorMode(Option<(mediabox_core::ColorFormat, u8)>),
+    /// A resolution from the list, or `Auto`.
+    SetResolution(mediabox_core::ResolutionChoice),
     /// CEC: wake the television, or send it to standby. Neither touches this
     /// appliance's own power state — the daemon owns /dev/cec0 and this is a
     /// message to the panel.
@@ -466,145 +468,129 @@ fn leds(status: Option<&Value>) -> Vec<Row> {
 /// One row to press, in the shape the lights already use: it shows what it is
 /// on and what the next press moves to, so nothing about the choice is hidden
 /// behind a menu a remote has to walk into.
-fn color_modes(status: Option<&Value>) -> Vec<Row> {
-    if flag(status, "/display_color/available") != Some(true) {
-        let reason = text(status, "/display_color/error")
-            .unwrap_or_else(|| "Ölçülecek bir ekran yok".into());
-        return vec![Row::reading("Renk modu", reason)];
-    }
-
-    let connector = text(status, "/display_color/connector").unwrap_or_else(|| "—".into());
-    let sink = text(status, "/display_color/sink");
-    let ceiling = status
-        .and_then(|status| status.pointer("/display_color/max_character_rate_khz"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let declared = flag(status, "/display_color/rate_is_declared") == Some(true);
-
-    // Every format the sink can be sent at any mode it lists. One setting, not
-    // one per mode, so the choices are the union and the rows below say where
-    // each one applies.
-    let mut choices: Vec<(String, mediabox_core::ColorFormat, u8)> = Vec::new();
-    let timings = status
-        .and_then(|status| status.pointer("/display_color/timings"))
+/// The display: resolution first, then the colour modes of the resolution in
+/// use -- the order the reference Android box puts them in.
+///
+/// Both lists come from the interface's own display: every mode the kernel
+/// lists for the television plugged in now, and for each the formats the
+/// HDMI rules allow (mediabox_platform::video). Nothing is listed that this
+/// television did not declare, and nothing that the link cannot carry.
+fn display_rows(status: Option<&Value>) -> Vec<Row> {
+    let Some(offer) = crate::platform::display_offer() else {
+        return vec![Row::reading("Çözünürlük", "Ölçülecek bir ekran yok")];
+    };
+    let timings = offer
+        .get("timings")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let current = offer.get("current").and_then(Value::as_str).unwrap_or("—").to_string();
+    let auto = offer.get("auto").and_then(Value::as_str).unwrap_or("—").to_string();
+    let choice: mediabox_core::ResolutionChoice = offer
+        .get("choice")
+        .and_then(|choice| serde_json::from_value(choice.clone()).ok())
+        .unwrap_or_default();
+
+    let mut rows = Vec::new();
+    rows.push(Row::toned("Çözünürlük", current.clone(), "good"));
+    rows.push(Row {
+        label: "Otomatik".into(),
+        value: auto,
+        hint: if choice == mediabox_core::ResolutionChoice::Auto {
+            "Seçili".into()
+        } else {
+            "Ok: seç".into()
+        },
+        tone: if choice == mediabox_core::ResolutionChoice::Auto {
+            "good".into()
+        } else {
+            String::new()
+        },
+        action: Some(Action::SetResolution(mediabox_core::ResolutionChoice::Auto)),
+    });
     for timing in &timings {
-        for option in timing
-            .get("allowed")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(label) = option.get("label").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(mode) = option.get("mode") else { continue };
-            let Ok(mode) = serde_json::from_value::<mediabox_core::ColorMode>(mode.clone()) else {
-                continue;
-            };
-            if !choices
-                .iter()
-                .any(|(_, format, bits)| *format == mode.format && *bits == mode.bits)
-            {
-                choices.push((label.to_string(), mode.format, mode.bits));
-            }
-        }
+        let label = timing.get("label").and_then(Value::as_str).unwrap_or("?").to_string();
+        let fixed = mediabox_core::ResolutionChoice::Fixed {
+            width: timing.get("width").and_then(Value::as_u64).unwrap_or(0) as u16,
+            height: timing.get("height").and_then(Value::as_u64).unwrap_or(0) as u16,
+            refresh_mhz: timing.get("refresh_mhz").and_then(Value::as_u64).unwrap_or(0) as u32,
+            interlaced: timing.get("interlaced").and_then(Value::as_bool).unwrap_or(false),
+        };
+        let allowed = timing.get("allowed").and_then(Value::as_array).map_or(0, Vec::len);
+        let hdr = timing.get("hdr10").and_then(Value::as_bool) == Some(true);
+        let selected = choice == fixed;
+        rows.push(Row {
+            label,
+            value: if allowed == 0 {
+                "bu bağlantıya sığmıyor".into()
+            } else if hdr {
+                "HDR10".into()
+            } else {
+                String::new()
+            },
+            hint: if selected { "Seçili".into() } else { "Ok: seç".into() },
+            tone: if selected { "good".into() } else { String::new() },
+            action: (allowed > 0).then_some(Action::SetResolution(fixed)),
+        });
     }
 
-    // Where the remote is now, and where one press moves it: Auto, then each
-    // measured mode, then round.
-    let current: Option<(mediabox_core::ColorFormat, u8)> = status
+    // The colour modes of the resolution in use.
+    let colour: Option<(mediabox_core::ColorFormat, u8)> = status
         .and_then(|status| status.pointer("/display_color/choice"))
         .and_then(|choice| serde_json::from_value::<mediabox_core::ColorChoice>(choice.clone()).ok())
         .and_then(|choice| choice.mode())
         .map(|mode| (mode.format, mode.bits));
-    let at = match current {
-        None => 0usize,
-        Some((format, bits)) => choices
-            .iter()
-            .position(|(_, f, b)| *f == format && *b == bits)
-            .map(|index| index + 1)
-            .unwrap_or(0),
-    };
-    let next = if choices.is_empty() {
-        None
-    } else if at >= choices.len() {
-        None
-    } else {
-        Some((choices[at].1, choices[at].2))
-    };
-    let next_label = match next {
-        None => "Otomatik".to_string(),
-        Some((format, bits)) => format!("{} {}bit", format.label(), bits),
-    };
-    let current_label = match current {
-        None => "Otomatik".to_string(),
-        Some((format, bits)) => format!("{} {}bit", format.label(), bits),
-    };
-
-    let mut rows = vec![
-        Row {
-            label: "Renk modu".into(),
-            value: current_label,
-            hint: format!("Ok: {next_label}"),
-            tone: if current.is_none() {
-                "good".into()
-            } else {
-                String::new()
-            },
-            action: Some(Action::SetColorMode(next)),
+    let here = timings
+        .iter()
+        .find(|timing| timing.get("label").and_then(Value::as_str) == Some(current.as_str()));
+    let allowed: Vec<mediabox_core::ColorMode> = here
+        .and_then(|timing| timing.get("allowed"))
+        .and_then(|allowed| serde_json::from_value(allowed.clone()).ok())
+        .unwrap_or_default();
+    let auto_colour = here
+        .and_then(|timing| timing.get("auto_sdr"))
+        .and_then(|mode| serde_json::from_value::<mediabox_core::ColorMode>(mode.clone()).ok())
+        .map(|mode| mode.label())
+        .unwrap_or_else(|| "—".into());
+    rows.push(Row::toned(
+        "Renk modu",
+        match colour {
+            None => format!("Otomatik · {auto_colour}"),
+            Some((format, bits)) => format!("{} {}bit", format.label(), bits),
         },
-        Row::reading(
-            "Bağlayıcı",
-            match sink {
-                Some(sink) => format!("{connector} · {sink}"),
-                None => connector,
-            },
-        ),
-        Row::toned(
-            "Bağlantı tavanı",
-            if ceiling > 0 {
-                format!(
-                    "{} MHz{}",
-                    ceiling / 1000,
-                    if declared { "" } else { " · bildirilmedi" }
-                )
-            } else {
-                "—".to_string()
-            },
-            if declared { "good" } else { "" },
-        ),
-    ];
-
-    // One row per mode the sink lists: what may be sent at it, and whether HDR
-    // fits there at all. Four is enough to see the shape without turning a
-    // settings panel into a table.
-    for timing in timings.iter().take(4) {
-        let label = timing
-            .get("label")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-            .to_string();
-        let hdr = timing.get("hdr10_fits").and_then(Value::as_bool) == Some(true);
-        let allowed: Vec<&str> = timing
-            .get("allowed")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|option| option.get("label").and_then(Value::as_str))
-            .collect();
-        rows.push(Row::toned(
-            &label,
-            format!(
-                "{} · {}",
-                allowed.join(", "),
-                if hdr { "HDR10" } else { "HDR sığmıyor" }
-            ),
-            if hdr { "good" } else { "" },
-        ));
+        "good",
+    ));
+    rows.push(Row {
+        label: "Otomatik".into(),
+        value: auto_colour,
+        hint: if colour.is_none() { "Seçili".into() } else { "Ok: seç".into() },
+        tone: if colour.is_none() { "good".into() } else { String::new() },
+        action: Some(Action::SetColorMode(None)),
+    });
+    for mode in allowed {
+        let selected = colour == Some((mode.format, mode.bits));
+        rows.push(Row {
+            label: mode.label(),
+            value: if mode.carries_hdr() { "HDR10 taşır".into() } else { String::new() },
+            hint: if selected { "Seçili".into() } else { "Ok: seç".into() },
+            tone: if selected { "good".into() } else { String::new() },
+            action: Some(Action::SetColorMode(Some((mode.format, mode.bits)))),
+        });
     }
+
+    // What the numbers above come from.
+    let ceiling = status
+        .and_then(|status| status.pointer("/display_color/max_character_rate_khz"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    rows.push(Row::reading(
+        "Bağlantı tavanı",
+        if ceiling > 0 {
+            format!("{} MHz (ekran bildirdi)", ceiling / 1000)
+        } else {
+            "ekran bildirmedi".into()
+        },
+    ));
     rows
 }
 
@@ -767,7 +753,7 @@ fn compose(
                     Row::reading("Kaynak", "Panelin tercih ettiği kip"),
                     Row::reading("Çıkış", "HDMI-A · doğrudan tarama"),
                 ];
-                rows.extend(color_modes(status));
+                rows.extend(display_rows(status));
                 rows
             },
         },

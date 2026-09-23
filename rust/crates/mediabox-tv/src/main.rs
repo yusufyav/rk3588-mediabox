@@ -539,6 +539,13 @@ impl App {
 
     fn color_mode_answered(&mut self, answer: Option<Value>) {
         self.color_mode_pending = None;
+        if let Some(choice) = answer
+            .as_ref()
+            .and_then(|colour| colour.get("choice"))
+            .and_then(|choice| serde_json::from_value::<mediabox_core::ColorChoice>(choice.clone()).ok())
+        {
+            platform::set_colour_choice(choice);
+        }
         if let Some(colour) = answer {
             if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
                 status.insert("display_color".into(), colour);
@@ -1886,6 +1893,10 @@ impl App {
                 self.color_mode_pending = Some(mode);
                 self.show_color_mode(mode);
                 spawn_color_mode(mode);
+            }
+            Action::SetResolution(choice) => {
+                self.say("Çözünürlük uygulanıyor…".into());
+                spawn_resolution(choice);
             }
             Action::WakeTelevision => {
                 self.say("Televizyon uyandırılıyor…".into());
@@ -3662,6 +3673,16 @@ fn spawn_color_mode(mode: Option<(mediabox_core::ColorFormat, u8)>) {
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.color_mode_answered(answer));
         });
+    });
+}
+
+/// Remember a resolution; the daemon then restarts this process on it.
+fn spawn_resolution(choice: mediabox_core::ResolutionChoice) {
+    detached("mediabox-tv-resolution", async move {
+        let client = rpc::Client::new(socket_path());
+        if let Err(error) = client.display_resolution_set(choice).await {
+            eprintln!("mediabox-tv.resolution failed: {error}");
+        }
     });
 }
 

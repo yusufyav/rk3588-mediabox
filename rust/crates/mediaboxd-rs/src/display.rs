@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use mediabox_core::{
-    ColorChoice, ColorModeOption, DisplayColorStatus, TimingOption,
+    ColorChoice, ColorModeOption, DisplayColorStatus, ResolutionChoice, TimingOption,
 };
 use mediabox_platform::video::{parse_sink_video, parse_timings};
 use mediabox_platform::{Devices, Platform};
@@ -32,9 +32,15 @@ use mediabox_platform::{Devices, Platform};
 /// in the daemon's own `StateDirectory`; this is not a new store.
 pub const STATE_FILE: &str = "/var/lib/mediabox/color-mode";
 
+/// Where the chosen resolution is remembered, beside the colour mode. The
+/// interface reads it when it sets its mode.
+pub const RESOLUTION_FILE: &str = "/var/lib/mediabox/resolution";
+
 pub struct DisplayColor {
     state: PathBuf,
     choice: Mutex<ColorChoice>,
+    resolution_state: PathBuf,
+    resolution: Mutex<ResolutionChoice>,
 }
 
 impl DisplayColor {
@@ -44,14 +50,30 @@ impl DisplayColor {
     pub fn new(state: impl Into<PathBuf>) -> Self {
         let state = state.into();
         let choice = read_state(&state).unwrap_or_default();
+        let resolution_state = state.with_file_name("resolution");
+        let resolution = read_resolution(&resolution_state).unwrap_or_default();
         Self {
             state,
             choice: Mutex::new(choice),
+            resolution_state,
+            resolution: Mutex::new(resolution),
         }
     }
 
     pub fn choice(&self) -> ColorChoice {
         *self.choice.lock().expect("colour choice")
+    }
+
+    pub fn resolution(&self) -> ResolutionChoice {
+        *self.resolution.lock().expect("resolution choice")
+    }
+
+    /// Remembers a resolution choice. The interface applies it when it next
+    /// sets its mode; the daemon restarts it for that.
+    pub fn set_resolution(&self, choice: ResolutionChoice) -> Result<(), String> {
+        write_resolution(&self.resolution_state, &choice)?;
+        *self.resolution.lock().expect("resolution choice") = choice;
+        Ok(())
     }
 
     /// Remembers a choice.
@@ -82,6 +104,7 @@ impl DisplayColor {
         let devices = Devices::from(platform);
         let mut status = DisplayColorStatus {
             choice,
+            resolution: self.resolution(),
             connector: devices.connector.clone(),
             ..Default::default()
         };
@@ -113,7 +136,7 @@ impl DisplayColor {
 
         for timing in parse_timings(&edid) {
             let allowed: Vec<ColorModeOption> = sink
-                .modes_for(timing.pixel_clock_khz)
+                .modes_for(&timing)
                 .into_iter()
                 .map(|mode| ColorModeOption {
                     label: mode.label(),
@@ -133,9 +156,9 @@ impl DisplayColor {
                 height: timing.height,
                 refresh_mhz: timing.refresh_mhz,
                 pixel_clock_khz: timing.pixel_clock_khz,
-                hdr10_fits: sink.hdr10_fits(timing.pixel_clock_khz),
-                auto_sdr: sink.best_for(timing.pixel_clock_khz, false),
-                auto_hdr: sink.best_for(timing.pixel_clock_khz, true),
+                hdr10_fits: sink.hdr10_fits(&timing),
+                auto_sdr: sink.best_for(&timing, false),
+                auto_hdr: sink.best_for(&timing, true),
                 allowed,
             });
         }
@@ -151,6 +174,19 @@ impl DisplayColor {
 fn read_state(path: &Path) -> Option<ColorChoice> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(text.trim()).ok()
+}
+
+fn read_resolution(path: &Path) -> Option<ResolutionChoice> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(text.trim()).ok()
+}
+
+fn write_resolution(path: &Path, value: &ResolutionChoice) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let text = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    std::fs::write(path, format!("{text}\n")).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
