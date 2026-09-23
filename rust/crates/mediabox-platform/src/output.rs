@@ -240,6 +240,14 @@ pub struct Plan {
     pub kodi_whitelist: Vec<String>,
     /// sway's spelling: `3840x2160@60.000Hz`.
     pub browser_mode: String,
+    /// Every mode Kodi may be on, with the colour it sends there: SDR, and an
+    /// HDR film -- `colour 3840x2160@296703/5500x2250 rgb:8 ycbcr422:10`,
+    /// `none` where nothing carries HDR10. Keyed by the size, the pixel clock
+    /// and the totals, which is what Kodi knows of the mode it set: the clock
+    /// alone does not name a mode -- 2160p23.976 and 2160p29.97 share one --
+    /// and neither do the totals: 1080i60 and 1080p30 share those, so an
+    /// interlaced mode's size carries an `i`.
+    pub colours: Vec<String>,
 }
 
 /// The chosen mode, as the other owners take it.
@@ -277,11 +285,44 @@ pub fn plan(offer: &OutputOffer, setting: &OutputSetting) -> Option<Plan> {
             .or_else(|| same.first().copied())
             .unwrap_or(chosen),
     };
+    let spell = |mode: Option<ColorMode>| match mode {
+        Some(mode) => format!("{}:{}", format_name(mode.format), mode.bits),
+        None => "none".to_string(),
+    };
+    let colours = offer
+        .modes()
+        .filter(|mode| mode.allowed().next().is_some())
+        .map(|mode| {
+            format!(
+                "colour {}x{}{}@{}/{}x{} {} {}",
+                mode.width,
+                mode.height,
+                if mode.interlaced { "i" } else { "" },
+                mode.pixel_clock_khz,
+                mode.htotal,
+                mode.vtotal,
+                spell(offer.colour(setting, mode)),
+                spell(offer.hdr_colour(setting, mode))
+            )
+        })
+        .collect();
     Some(Plan {
+        colours,
         kodi_screenmode: kodi(chosen),
         kodi_whitelist: same.iter().map(|mode| kodi(mode)).collect(),
         browser_mode: format!("{}x{}@{:.3}Hz", browser.width, browser.height, hz(browser)),
     })
+}
+
+/// The name this driver's `color_format` enum gives a format.
+fn format_name(format: mediabox_core::ColorFormat) -> &'static str {
+    use mediabox_core::ColorFormat::*;
+    match format {
+        Rgb => "rgb",
+        Ycbcr444 => "ycbcr444",
+        Ycbcr422 => "ycbcr422",
+        Ycbcr420 => "ycbcr420",
+    }
 }
 
 /// The refresh from the timing itself, as Kodi and sway compute it.

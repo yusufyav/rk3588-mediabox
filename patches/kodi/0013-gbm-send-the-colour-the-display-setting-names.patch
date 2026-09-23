@@ -1,0 +1,297 @@
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
+index b35bb2c..57d4401 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.cpp
++++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
+@@ -29,7 +29,9 @@
+ #include "utils/log.h"
+ #include "windowing/GraphicContext.h"
+ 
++#include <fstream>
+ #include <mutex>
++#include <sstream>
+ #include <string.h>
+ 
+ #include <drm_fourcc.h>
+@@ -514,24 +516,33 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+   // On a link that cannot carry HDR, the whole BT.2020 signal is given up --
+   // not just the transfer function.
+   //
+-  // It is not enough to stop sending HDR metadata. This driver moves to a
+-  // 4:2:2 link off BT.2020 colorimetry at ten bits, and a 4:2:2 link is the
+-  // one this hardware renders wrong: measured on a Sony KD-65XE9005 HDMI 1,
+-  // where 4K BT.2020 comes out 4:2:2 and the colours are wrong whether HDR is
+-  // signalled or not, while the same port at 4K in BT.709 comes up RGB 8-bit
+-  // and is correct.
++  // Where HDR does not fit at all, the output is BT.709 SDR and the video
++  // plane keeps the PQ EOTF tag `0008` gives it, which is what puts VOP2's own
++  // HDR-to-SDR and BT.2020-to-BT.709 conversions in the path.
+   //
+-  // So where HDR does not fit, the output is BT.709 SDR, eight bits, RGB --
+-  // and the video plane keeps the PQ EOTF tag `0008` gives it, which is what
+-  // puts VOP2's own HDR-to-SDR and BT.2020-to-BT.709 conversions in the path.
+-  // The picture is converted in hardware and transmitted as what it has become,
+-  // which is exactly what the vendor Android stack does on this same socket:
+-  // 4K kept, HDR dropped, eight bits, never 4:2:2.
++  // Where it does fit, the format is named, not left to the driver. This used
++  // to ask for RGB, or for 4:4:4, and let the driver negotiate down to the
++  // 4:2:2 that fits -- a 4:2:2 link nobody had asked for, whose colours came
++  // out wrong, and which was then taken for "this hardware renders HDR over
++  // 4:2:2 wrong". It does not. Measured on 2026-09-23 on a Sony KD-65XE9005's
++  // 300 MHz input: the appliance's own player asks for `ycbcr422` at ten bits
++  // and tags BT2020_YCC, the wire is YUYV10_1X20, and the HDR film is correct
++  // on the television -- which is also what the vendor Android box sends there.
++  //
++  // So the format and depth come from the appliance's display setting
++  // (PlannedOutput): the same HDMI rules and the same per-mode choice the
++  // appliance's own player uses. Without a plan the earlier behaviour stands.
+   const bool hdrFits = HdrLinkFits();
+-  const bool rgbFits = RgbLinkFits(hdrFits ? 10 : 8);
+   if (!hdrFits)
+     CLog::LogF(LOGDEBUG, "this link cannot carry HDR; transmitting BT.709 SDR");
+-  const std::optional<bool> rgbOutput = RequestRgbOutput(rgbFits);
++  const bool hdrContent = videoPicture && (videoPicture->color_transfer == AVCOL_TRC_SMPTE2084 ||
++                                           videoPicture->color_transfer == AVCOL_TRC_ARIB_STD_B67);
++  const std::optional<OutputPlan> plan = PlannedOutput();
++  const std::optional<PlannedColour> planned =
++      plan ? (hdrContent && hdrFits ? plan->hdr : plan->sdr) : std::nullopt;
++  const std::optional<bool> rgbOutput = planned
++                                            ? RequestOutputFormat(planned->format)
++                                            : RequestRgbOutput(RgbLinkFits(hdrFits ? 10 : 8));
+ 
+   // What the link will carry. Prefer what was just asked for; fall back to
+   // observing the driver, and only then to guessing from the plane.
+@@ -856,32 +867,120 @@ bool CWinSystemGbm::RgbLinkFits(int bpc) const
+ 
+ bool CWinSystemGbm::HdrLinkFits() const
+ {
+-  // HDR needs ten bits, and on this hardware it needs them at full chroma.
+-  //
+-  // Ten bits is the easy half: an HDR10 gradient quantised to eight bands
+-  // where anyone can see it. The other half is this driver's, not HDMI's --
+-  // RK3588 renders HDR over a 4:2:2 link wrong, which is the fault
+-  // `patches/kodi/0011` was written to steer around and the reason this
+-  // function exists rather than a bit-depth check.
+-  //
+-  // Measured on a Sony KD-65XE9005, whose HDMI 1 declares 300 MHz. At 4K the
+-  // only ten-bit format that fits that ceiling is 4:2:2, and the picture comes
+-  // back with its colours wrong. At 1080p, where ten-bit RGB fits, the same
+-  // film on the same cable through the same socket is correct. The colorimetry
+-  // tag was tried both ways at 4K and changed nothing, so it is the transport.
+-  //
+-  // The vendor Android stack on that same television sends HDR10 as 4:2:2
+-  // 12-bit and it is right, so this is not a property of the set or of the
+-  // standard. It is what this driver can be trusted with.
+-  //
+-  // So: HDR is signalled where RGB at ten bits fits, and not otherwise. Where
+-  // it does not, `SetHDR` declines and the connector stays SDR -- while the
+-  // video plane keeps its PQ EOTF tag from `0008`, which is what puts VOP2's
+-  // own HDR-to-SDR block in the path. The picture is then converted in
+-  // hardware instead of being sent as HDR down a link that cannot carry it.
++  // HDR10 needs ten bits in some format the link can carry at this mode.
++  // Which formats those are is the appliance's display setting's answer, by
++  // the HDMI rules: on a 300 MHz input at 4K24 that is 4:2:2, at 4K60 there is
++  // none. Without a plan, only ten-bit RGB is trusted, as before.
++  if (const std::optional<OutputPlan> plan = PlannedOutput())
++    return plan->hdr.has_value();
+   return RgbLinkFits(10);
+ }
+ 
++std::optional<CWinSystemGbm::OutputPlan> CWinSystemGbm::PlannedOutput() const
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return {};
++  const int clock = drm->GetCurrentModeClockKHz();
++  if (clock <= 0)
++    return {};
++  // The clock alone does not name a mode: 2160p23.976 and 2160p29.97 share
++  // one and the totals tell them apart; 1080i60 and 1080p30 share those too,
++  // and only the interlace flag does.
++  const std::string key = std::to_string(drm->GetCurrentModeWidth()) + "x" +
++                          std::to_string(drm->GetCurrentModeHeight()) +
++                          (drm->IsCurrentModeInterlaced() ? "i" : "") + "@" +
++                          std::to_string(clock) + "/" +
++                          std::to_string(drm->GetCurrentModeHTotal()) + "x" +
++                          std::to_string(drm->GetCurrentModeVTotal());
++
++  std::ifstream file("/run/mediabox/output-plan");
++  if (!file)
++    return {};
++
++  auto parse = [](const std::string& token) -> std::optional<PlannedColour> {
++    const size_t colon = token.find(':');
++    if (token == "none" || colon == std::string::npos)
++      return {};
++    const std::string bits = token.substr(colon + 1);
++    if (bits.empty() || bits.find_first_not_of("0123456789") != std::string::npos)
++      return {};
++    return PlannedColour{token.substr(0, colon), std::stoi(bits)};
++  };
++
++  // colour <w>x<h>[i]@<clock kHz>/<htotal>x<vtotal> <sdr format:bits> <hdr format:bits|none>
++  std::string line;
++  while (std::getline(file, line))
++  {
++    std::istringstream words(line);
++    std::string tag, mode, sdr, hdr;
++    if (!(words >> tag >> mode >> sdr >> hdr) || tag != "colour" || mode != key)
++      continue;
++    CLog::LogF(LOGDEBUG, "display setting at {}: SDR {} HDR {}", key, sdr, hdr);
++    return OutputPlan{parse(sdr), parse(hdr)};
++  }
++  CLog::LogF(LOGDEBUG, "no display setting for {}", key);
++  return {};
++}
++
++std::optional<bool> CWinSystemGbm::RequestOutputFormat(const std::string& name)
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return {};
++
++  auto connector = drm->GetConnector();
++  if (!connector || !connector->SupportsProperty("color_format"))
++    return {};
++
++  std::optional<uint64_t> rgb = connector->GetPropertyEnumValue("color_format", "rgb");
++  std::optional<uint64_t> wanted = connector->GetPropertyEnumValue("color_format", name.c_str());
++  if (!rgb || !wanted)
++  {
++    CLog::LogF(LOGWARNING, "connector has no \"{}\" color_format", name);
++    return {};
++  }
++
++  CLog::LogF(LOGDEBUG, "requesting output pixel format \"{}\" ({}) from the display setting",
++             name, wanted.value());
++  drm->AddProperty(connector, "color_format", wanted.value());
++  drm->SetActive(true);
++  return wanted.value() == rgb.value();
++}
++
++void CWinSystemGbm::SetColourDepth(int bits)
++{
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  if (!drm)
++    return;
++
++  auto connector = drm->GetConnector();
++  if (!connector)
++    return;
++
++  if (connector->SupportsProperty("max bpc"))
++  {
++    CLog::LogF(LOGDEBUG, "setting max bpc to {} from the display setting", bits);
++    drm->AddProperty(connector, "max bpc", static_cast<uint64_t>(bits));
++    drm->SetActive(true);
++    return;
++  }
++
++  if (connector->SupportsProperty("color_depth"))
++  {
++    const std::string want = std::to_string(bits * 3) + "bit";
++    std::optional<uint64_t> value = connector->GetPropertyEnumValue("color_depth", want.c_str());
++    if (!value)
++    {
++      CLog::LogF(LOGWARNING, "connector has no \"{}\" color_depth", want);
++      return;
++    }
++    CLog::LogF(LOGDEBUG, "setting color_depth to {} from the display setting", want);
++    drm->AddProperty(connector, "color_depth", value.value());
++    drm->SetActive(true);
++  }
++}
++
+ bool CWinSystemGbm::IsHdOrLargerMode() const
+ {
+   auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
+@@ -1022,7 +1121,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+     // previously committed link was 8 bit or already 4:2:2 -- so a link that
+     // never drops to 8 bit never trips the rule, and HDR arrives as RGB at
+     // full chroma and full depth.
+-    SetDeepColor(true);
++    if (const std::optional<OutputPlan> plan = PlannedOutput(); plan && plan->sdr)
++      SetColourDepth(plan->sdr->bits);
++    else
++      SetDeepColor(true);
+     m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
+     LogColorState("SetHDR:exit:cleared");
+     return false;
+@@ -1055,7 +1157,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+     // but that only works where ten-bit RGB fits. Where it does not, holding
+     // ten is what *causes* the 4:2:2 link, because the driver keeps the depth
+     // and gives up the chroma instead. So depth is what gets given up here.
+-    SetDeepColor(false);
++    if (const std::optional<OutputPlan> plan = PlannedOutput(); plan && plan->sdr)
++      SetColourDepth(plan->sdr->bits);
++    else
++      SetDeepColor(false);
+     m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
+     drm->SetActive(true);
+     LogColorState("SetHDR:exit:link-cannot-carry-hdr");
+@@ -1140,7 +1245,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+     }
+ 
+     drm->AddProperty(connector, "HDR_OUTPUT_METADATA", m_hdrBlob.Get());
+-    SetDeepColor(true);
++    if (const std::optional<OutputPlan> plan = PlannedOutput(); plan && plan->hdr)
++      SetColourDepth(plan->hdr->bits);
++    else
++      SetDeepColor(true);
+     drm->SetActive(true);
+     LogColorState("SetHDR:exit:hdr");
+   }
+diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
+index b0b395d..a2276c6 100644
+--- a/xbmc/windowing/gbm/WinSystemGbm.h
++++ b/xbmc/windowing/gbm/WinSystemGbm.h
+@@ -109,6 +109,31 @@ public:
+   // Whether HDR can be put on this link at all, at the mode currently set.
+   bool HdrLinkFits() const;
+ 
++  // The colour MediaBox's display setting sends at the mode currently set --
++  // a format by this driver's own enum name and a depth -- for SDR and for an
++  // HDR film. Read from /run/mediabox/output-plan, which the appliance's
++  // control plane writes from the HDMI rules and the person's choice, so this
++  // player sends what the appliance's own player sends at the same mode.
++  // Empty when there is no plan, or no line for this mode.
++  struct PlannedColour
++  {
++    std::string format;
++    int bits = 8;
++  };
++  struct OutputPlan
++  {
++    std::optional<PlannedColour> sdr;
++    std::optional<PlannedColour> hdr;
++  };
++  std::optional<OutputPlan> PlannedOutput() const;
++
++  // Ask for one output pixel format by its enum name. Returns whether it is
++  // RGB, or nothing when the driver cannot be asked.
++  std::optional<bool> RequestOutputFormat(const std::string& name);
++
++  // Ask for a depth in bits per component.
++  void SetColourDepth(int bits);
++
+   // A connector property's CURRENT value, read from the kernel rather than
+   // from CDRMObject's cache, which only tracks values Kodi itself set.
+   std::optional<uint64_t> ReadLiveConnectorProperty(const char* name) const;
+diff --git a/xbmc/windowing/gbm/drm/DRMUtils.h b/xbmc/windowing/gbm/drm/DRMUtils.h
+index 558cf86..426b3c8 100644
+--- a/xbmc/windowing/gbm/drm/DRMUtils.h
++++ b/xbmc/windowing/gbm/drm/DRMUtils.h
+@@ -86,6 +86,14 @@ public:
+   // rate scaled by the pixel format, compared against what the sink said it can
+   // receive. Zero when no mode is set yet.
+   int GetCurrentModeClockKHz() const { return m_mode ? m_mode->clock : 0; }
++  int GetCurrentModeWidth() const { return m_mode ? m_mode->hdisplay : 0; }
++  int GetCurrentModeHeight() const { return m_mode ? m_mode->vdisplay : 0; }
++  int GetCurrentModeHTotal() const { return m_mode ? m_mode->htotal : 0; }
++  int GetCurrentModeVTotal() const { return m_mode ? m_mode->vtotal : 0; }
++  bool IsCurrentModeInterlaced() const
++  {
++    return m_mode && (m_mode->flags & DRM_MODE_FLAG_INTERLACE);
++  }
+ 
+   virtual RESOLUTION_INFO GetCurrentMode();
+   virtual std::vector<RESOLUTION_INFO> GetModes();

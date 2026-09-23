@@ -284,6 +284,15 @@ Display mode: 3840x2160p24        # 1080p24 film, playing in Kodi
 plane src 1920x1080 -> dst 3840x2160
 ```
 
+Kodi's colour comes from the same place (`patches/kodi/0013`): the plan has a
+line per mode, `colour 3840x2160@296703/5500x2250 rgb:8 ycbcr422:10` -- size,
+clock and totals, because 2160p23.976 and 2160p29.97 share a clock and 1080i60
+and 1080p30 share the totals too (an interlaced size carries an `i`) -- with
+the SDR colour and the HDR one. Kodi names that format to the driver rather than
+asking for RGB and letting it negotiate down, and tags it truthfully. The
+interface reports the display again whenever it reconnects to the daemon,
+because the daemon's runtime directory, and the plan in it, goes with it.
+
 **Check:**
 
 ```sh
@@ -356,7 +365,11 @@ Both branches, measured on the same television through its two inputs, when
 4:2:2 was still not counted as carrying HDR (it is now: ten bits in a
 twelve-bit container, and the Android box sends HDR on the 300 MHz input as
 exactly that -- whether this board's driver renders it correctly is to be
-measured):
+measured) -- and since measured, on 2026-09-23, on the 300 MHz input: 4:2:2 ten-bit
+HDR is correct on the television from this appliance's player, and from Kodi
+once it asked for `ycbcr422` by name (`YUYV10_1X20 HDR10[2] BT.2020` at
+2160p23.976). The old "wrong colours" were a format left to the driver and
+tagged as something else:
 
 | input | mode | decision | connector |
 |---|---|---|---|

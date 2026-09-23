@@ -430,6 +430,18 @@ impl OutputOffer {
             .or_else(|| self.mode(&self.auto))
     }
 
+    /// The colour sent at `mode` for an HDR film under `setting`: the chosen
+    /// one when it can be sent there and carries ten bits, what `Auto` sends
+    /// HDR as otherwise, `None` when nothing at this mode carries HDR10.
+    pub fn hdr_colour(&self, setting: &OutputSetting, mode: &OutputModeOffer) -> Option<ColorMode> {
+        setting
+            .colours
+            .get(&mode.label)
+            .copied()
+            .filter(|chosen| mode.carries(*chosen) && chosen.carries_hdr())
+            .or(mode.auto_hdr)
+    }
+
     /// The colour sent at `mode` for SDR under `setting`: the chosen one when
     /// it can be sent there, `Auto` otherwise.
     pub fn colour(&self, setting: &OutputSetting, mode: &OutputModeOffer) -> Option<ColorMode> {

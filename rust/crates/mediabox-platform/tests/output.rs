@@ -328,3 +328,41 @@ fn kodi_and_the_browser_take_the_chosen_mode() {
     assert_eq!(thirty.kodi_screenmode, "0384002160030.00000pstd");
     assert_eq!(thirty.browser_mode, "3840x2160@30.000Hz");
 }
+
+#[test]
+fn kodi_is_told_the_colour_of_every_mode_it_may_be_on() {
+    let offer = offer_for(PLUS_300);
+    let line = |plan: &mediabox_platform::output::Plan, key: &str| {
+        plan.colours
+            .iter()
+            .find(|line| line.starts_with(&format!("colour {key} ")))
+            .cloned()
+            .unwrap_or_else(|| panic!("{key} in {:?}", plan.colours))
+    };
+    let auto = plan(&offer, &OutputSetting::default()).unwrap();
+    // 4K60 on 300 MHz: 4:2:0 eight-bit, and no HDR10 at all.
+    assert_eq!(line(&auto, "3840x2160@594000/4400x2250"), "colour 3840x2160@594000/4400x2250 ycbcr420:8 none");
+    // 4K 23.976: RGB for SDR, HDR10 as 4:2:2 -- the Android box's answer.
+    // Its clock is 29.97's too; the totals tell them apart.
+    assert_eq!(line(&auto, "3840x2160@296703/5500x2250"), "colour 3840x2160@296703/5500x2250 rgb:8 ycbcr422:10");
+
+    // A colour chosen for a mode is that mode's, for SDR and -- when it
+    // carries ten bits -- for HDR; 23.976 beside it is untouched.
+    let mut chosen = OutputSetting { sink: "d3d7".into(), ..Default::default() };
+    chosen
+        .colours
+        .insert("3840x2160p29.97".into(), ColorMode::new(ColorFormat::Ycbcr422, 10));
+    let with = plan(&offer, &chosen).unwrap();
+    assert_eq!(line(&with, "3840x2160@296703/4400x2250"), "colour 3840x2160@296703/4400x2250 ycbcr422:10 ycbcr422:10");
+    assert_eq!(line(&with, "3840x2160@296703/5500x2250"), "colour 3840x2160@296703/5500x2250 rgb:8 ycbcr422:10");
+    let keys: Vec<&str> = with.colours.iter().map(|l| l.split(' ').nth(1).unwrap()).collect();
+    let mut unique = keys.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), keys.len(), "every key names one mode");
+    chosen
+        .colours
+        .insert("3840x2160p29.97".into(), ColorMode::new(ColorFormat::Rgb, 8));
+    let eight = plan(&offer, &chosen).unwrap();
+    assert_eq!(line(&eight, "3840x2160@296703/4400x2250"), "colour 3840x2160@296703/4400x2250 rgb:8 ycbcr422:10");
+}

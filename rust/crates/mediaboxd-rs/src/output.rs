@@ -302,12 +302,16 @@ impl Output {
         else {
             return;
         };
-        let text = format!(
+        let mut text = format!(
             "kodi_screenmode={}\nkodi_whitelist={}\nbrowser_mode={}\n",
             plan.kodi_screenmode,
             plan.kodi_whitelist.join(","),
             plan.browser_mode
         );
+        for line in &plan.colours {
+            text.push_str(line);
+            text.push('\n');
+        }
         if let Err(error) = write_atomic(&self.plan_path, &text) {
             eprintln!("mediaboxd-rs: output plan not written: {error}");
         }

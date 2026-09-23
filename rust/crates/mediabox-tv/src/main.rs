@@ -4053,6 +4053,11 @@ async fn read_events() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .error_for_status()?;
 
+    // Connected: a daemon that has just started knows nothing about the
+    // display until it is told, and its runtime directory -- the plan Kodi and
+    // the browser start from -- went with the last one.
+    let _ = slint::invoke_from_event_loop(platform::report_output_again);
+
     // Frames are newline-delimited and small; assembling them here avoids
     // pulling a stream adapter crate in for four lines of work.
     let mut pending = String::new();

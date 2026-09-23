@@ -2217,6 +2217,11 @@ impl Platform for SplitPlatform {
             if let Some(setting) = OUTPUT_WANTED.with(|wanted| wanted.borrow_mut().take()) {
                 self.window.switch_output(setting);
             }
+            if OUTPUT_REPORT_DUE.with(|due| due.replace(false))
+                && self.window.display.presentation.borrow().current.is_some()
+            {
+                self.window.display.report();
+            }
             self.window.render_if_needed()?;
             // A switch the kernel refused has put the old size back.
             if self.window.display.switch.borrow().is_none()
@@ -2502,6 +2507,9 @@ pub fn on_output_report(
 thread_local! {
     /// A setting to put on the wire, from the daemon.
     static OUTPUT_WANTED: RefCell<Option<mediabox_core::OutputSetting>> = const { RefCell::new(None) };
+    /// The daemon asked to hear about the display again: it has started since
+    /// the last report and knows nothing.
+    static OUTPUT_REPORT_DUE: Cell<bool> = const { Cell::new(false) };
     /// Why the last mode asked for is not on the wire, when the kernel said no.
     static OUTPUT_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -2509,6 +2517,12 @@ thread_local! {
 /// Put `setting` on the wire from the next pass of the event loop.
 pub fn apply_output(setting: mediabox_core::OutputSetting) {
     OUTPUT_WANTED.with(|wanted| *wanted.borrow_mut() = Some(setting));
+}
+
+/// Tell the daemon about the display again, from the next pass of the event
+/// loop.
+pub fn report_output_again() {
+    OUTPUT_REPORT_DUE.with(|due| due.set(true));
 }
 
 pub fn output_error() -> Option<String> {
