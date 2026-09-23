@@ -188,7 +188,12 @@ A directory listing rather than an inference: the adapter is registered as a
 child device of the transmitter, so `/sys/devices/platform/fdea0000.hdmi/cec0`
 *is* that output's adapter. `/dev/cec0` is never written down; on a board with
 two transmitters, which of the two is the television's depends on which socket
-the television is in.
+the television is in. The daemon therefore does not pick one at start:
+it holds every adapter, configures each as a playback device whether or not a
+sink is there yet, and sends commands through whichever holds a logical
+address when they are sent (see [`../hdmi-cec.md`](../hdmi-cec.md)).
+`mediabox-platform cec-device` still names the selected output's adapter, for
+scripts and for reading.
 
 **DisplayPort has no CEC.** That is reported as an output with no adapter, not
 as a failure: a box on DisplayPort still plays films, it just cannot turn the

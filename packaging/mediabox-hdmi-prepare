@@ -47,9 +47,11 @@ alsa_driver="$("$PLATFORM" alsa-driver 2>/dev/null || true)"
 # init failed`, SError in dw_hdmi_qp_setup, kernel panic 1.7 s into every boot.
 #
 # Without it the kernel takes the mode from the EDID of the display actually
-# connected, which is what every other HDMI source does. The cost is the one
-# the argument was for: on a sink whose preferred mode is below the one Kodi
-# uses, a handover can show that preferred mode for a moment.
+# connected, which is what every other HDMI source does. What the argument was
+# for -- no 1080p between two applications -- is done instead by never letting
+# the display go: the interface hands its open device to systemd's file
+# descriptor store when it stops, so the kernel console's mode never reaches
+# the wire (docs/display-pipeline.md, rule 10).
 #
 # So the only thing left to do with the argument is take it off boards an older
 # version put it on -- before looking for a display, because a board that boots
@@ -195,8 +197,8 @@ fi
 # sway is the third thing that can own this television, and it was the one
 # left deciding for itself. Its config says the mode is the panel's to choose
 # and wlroots takes the *preferred* one -- which on this television is
-# 1920x1080p60, the same preferred mode the paragraph above exists to stop the
-# kernel's framebuffer from using. Measured on the Plus, opening the browser
+# 1920x1080p60, the same preferred mode the kernel console would put on the
+# wire between two owners. Measured on the Plus, opening the browser
 # from a title's page:
 #
 #   interface 3840x2160p30 -> fbdev 3840x2160p30 -> sway 1920x1080p60

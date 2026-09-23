@@ -154,7 +154,7 @@ Accepted, measured rather than assumed, on the Kodi path:
 
 ### Do not regress
 
-Three properties were expensive to establish and are easy to undo:
+Four properties were expensive to establish and are easy to undo:
 
 * **Do not software-PQ encode the GUI on this Rockchip direct-to-plane HDR
   path.** Kodi's built-in software HDR GUI compositor must stay off here; the
@@ -165,6 +165,12 @@ Three properties were expensive to establish and are easy to undo:
 * **The Android golden model is SDR GUI + VOP2 SDR2HDR**, not a PQ GUI. Android
   on the same silicon keeps its GUI genuinely SDR and lets VOP2 lift it. That
   capture is the oracle this stack was made to match.
+* **Do not let the driver choose the output format.** Name the one the display
+  setting gives the mode (`color_format=ycbcr422` for HDR on a 300 MHz input)
+  and tag it truthfully. A format left to the driver to negotiate down is what
+  once made 4:2:2 HDR look wrong; HDR over 4:2:2 is correct here, from the
+  appliance's player and from Kodi. See
+  [`docs/display-pipeline.md`](docs/display-pipeline.md) rules 9 and 11.
 
 See [`docs/gates.md`](docs/gates.md) for what each gate asked and answered, and
 [`docs/architecture.md`](docs/architecture.md) for why the pipeline is shaped
@@ -180,7 +186,7 @@ the command that says whether it still holds.
 
 | Item | Value |
 | --- | --- |
-| Boards | Orange Pi 5 Ultra (running, installed from the release and proven on a film), Orange Pi 5 Plus (installed from the same release on 2026-09-19, headless: the display gates have not run) |
+| Boards | Orange Pi 5 Ultra (running, installed from the release and proven on a film), Orange Pi 5 Plus (installed from the same release on 2026-09-19; the display work of 2026-09-23 -- modes, colour, HDR over 4:2:2, CEC, handover -- was measured on it with a Sony KD-65XE9005, and its Kodi was rebuilt on the board with `0013`, which the release does not carry yet) |
 | OS | Armbian trixie |
 | Kernel | `6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio` |
 | Display output | discovered; the Ultra has one HDMI socket, the Plus has two plus DisplayPort |

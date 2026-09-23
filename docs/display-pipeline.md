@@ -7,6 +7,30 @@ the television shows it.
 
 Each rule names the one command that tells you whether it currently holds.
 
+## Decisions of 2026-09-23
+
+Taken while a kernel panic, a 1080p flash between applications, a dead CEC and
+a missing HDR were traced on the Orange Pi 5 Plus with a Sony KD-65XE9005, and
+measured against the reference Android box (Ugoos SK1) on the same inputs. Each
+replaces something this product had decided for itself.
+
+| Decision | Replaces | Where |
+|---|---|---|
+| No display mode on the kernel command line, ever; an old `video=` is removed | writing the panel's fastest mode into `/boot` | rule 10 |
+| The display is never released between owners: the interface's device goes to systemd's fd store | switching the CRTC off on exit, which let the console's 1080p through | rule 10 |
+| CEC holds every adapter and follows the television to whichever socket it is on | one adapter chosen at start, given up without a physical address | [`hdmi-cec.md`](hdmi-cec.md) |
+| What can be sent is mainline Linux's HDMI rules, ported by name, never a rule of this product's | "RGB at eight bits or not at all", "4:2:2 cannot carry HDR" | rule 9 |
+| `Auto` is the Android box's rule: largest mode in the panel's shape at the fastest refresh the link carries in any format | the sink's preferred mode, or the largest that fits as RGB | rule 9 |
+| A choice is one record bound to the display's EDID checksums; another display is `Auto` | a choice applied to whatever is plugged in | rule 9 |
+| A change is a trial the daemon takes back after 15 s unless kept, applied in place with `TEST_ONLY` | restarting the interface to change mode | rule 9 |
+| One setting for the interface, Kodi and the browser, through `/run/mediabox/output-plan` | three owners with three rules | rule 9, [`platform/custom-runtime.md`](platform/custom-runtime.md) § 0013 |
+| HDR over 4:2:2 is correct on this hardware; the format is named to the driver, never negotiated | `0012`'s "RK3588 renders HDR over 4:2:2 wrong" | rule 11 |
+| A panic is reproduced only with something waiting for it: serial console, or `kernel.panic` set | reading where the journal ends as the crash | rule 13 |
+
+A question about what "a box" does is answered by measuring the reference box
+on the same input, not by reasoning about it; several of the rules replaced
+above were reasoned from one input and were wrong on the other.
+
 ---
 
 ## 1. The browser's scale factor must be a whole number
@@ -42,7 +66,7 @@ tearing — look at the scale factor first.
 
 ---
 
-## 2. No resolution is written down anywhere
+## 2. No resolution is written down for a display it was not chosen on
 
 This appliance is plugged into whatever panel the house has: a 4K television,
 a 1440p monitor, an older 1080p set. Every place that named a resolution was a
@@ -332,12 +356,33 @@ television on the same socket, GTF 807.9 MHz, PHY PLL failure, SError in
 `dw_hdmi_qp_setup`, kernel panic on every boot.
 
 Without the argument the kernel takes its mode from the EDID of the display
-actually connected. On a sink whose preferred mode is below the one Kodi uses,
-a handover can show that preferred mode for a moment; that is the cost.
+actually connected, as every other HDMI source does.
+
+What keeps the mode across a handover is that **the display never belongs to
+nobody.** The kernel console's mode reaches the wire only through the Rockchip
+driver's `lastclose`, which runs when the last open file of the display device
+is closed. So the interface, when it stops, leaves its last frame lit on the
+CRTC, gives up DRM master, and hands its open device to systemd's file
+descriptor store (`FileDescriptorStoreMax=2`, `FileDescriptorStorePreserve=yes`,
+`NotifyAccess=main` in `mediabox-tv-ui.service`; `src/fdstore.rs`). The file
+stays open, `lastclose` never runs, and Kodi or the browser starts from the mode
+already on the wire -- and restores that one when it exits. The interface takes
+the file back at its next start and closes it once its own first frame is up.
+Measured on the Plus, Sony 300 MHz input, sampled every 100 ms:
+
+```
+before  4K60 -> DISABLED -> 1080p60 -> Kodi 4K30 -> 1080p60 -> 4K60
+after   4K60 -> Kodi 4K30 -> 4K60
+```
+
+The reference Android box on the same input never leaves its mode between
+applications either.
 
 ```
 tr ' ' '\n' </proc/cmdline | grep ^video=               # expect nothing
 /opt/rk3588-mediabox/bin/mediabox-hdmi-prepare        # says boot-video=not-asked
+systemctl show mediabox-tv-ui -p FileDescriptorStoreMax  # 2
+journalctl -u mediabox-tv-ui | grep 'display left lit for the next owner'
 ```
 
 ---
@@ -345,21 +390,24 @@ tr ' ' '\n' </proc/cmdline | grep ^video=               # expect nothing
 ## 11. The television is told what it is being sent, and only when it fits
 
 The plane's `EOTF` (rule 7) is how the display controller reads the film. It
-says nothing to the television. Three connector properties do, and all three
-are set together or none of them is:
+says nothing to the television. Four connector properties do, and they are set
+together or not at all:
 
 ```
 HDR_OUTPUT_METADATA   the CTA-861 mastering infoframe, from the film
-Colorspace            BT2020_RGB
+color_format          the format rule 9 gives this mode for HDR, by name
 color_depth           ten bits
+Colorspace            BT2020_RGB for RGB, BT2020_YCC for any YCbCr format
 ```
 
 In front of them is the decision this product already lives by: **can this
-link carry it at the timing that is actually set?** Ten-bit RGB is 1.25x the
-pixel clock; 4:2:2 twelve-bit is not, which is why this hardware ends up
-sending HDR as 4:2:2 and that is not a fault. A link with no room is told SDR
-and the plane is tone-mapped, rather than being asked for HDR and left to
-subsample.
+link carry ten bits, in any format, at the timing that is actually set?**
+Ten-bit RGB is 1.25x the pixel clock; 4:2:2 is carried in a twelve-bit
+container and costs the clock alone, which is why HDR on a 300 MHz input goes
+as 4:2:2 -- and that is correct, not a fault. The format is **named** to the
+driver, never left to it to negotiate down: a request for RGB or 4:4:4 that the
+driver quietly turned into 4:2:2 is what once made HDR look wrong here. A link
+with no ten-bit format at all is told SDR and the plane is tone-mapped.
 
 Both branches, measured on the same television through its two inputs, when
 4:2:2 was still not counted as carrying HDR (it is now: ten bits in a
@@ -465,6 +513,37 @@ next library to do this cannot take the journal with it.
 ```
 journalctl --no-pager | wc -l; journalctl --no-pager | grep -c 'mpp\['
 journalctl --no-pager -o short-iso | head -1   # how far back the box remembers
+```
+
+---
+
+## 13. A panic leaves no evidence unless something is waiting for it
+
+The panic in rule 10 took a day to see, because on this board, as shipped, a
+kernel panic destroys its own evidence:
+
+* `kernel.panic=0`: the board hangs instead of rebooting, somebody pulls the
+  plug, and DRAM -- with ramoops in it -- is gone. `/sys/fs/pstore` comes up
+  empty.
+* the journal lives on eMMC under ext4 `commit=120`, so the journal of a boot
+  that did not shut down cleanly simply ends at its last flush, seven or eight
+  seconds in. **That is not the moment it crashed.** Reading it as one is how
+  the first diagnosis went wrong.
+* `loglevel=1` leaves the console ramoops nearly empty even when it survives.
+
+What caught it was the serial console: the debug UART at 1 500 000 baud, a USB
+serial adapter on the workstation, logging from before power-on. The trace --
+`can't find frl rate, phy pll init failed`, `SError` in `dw_hdmi_qp_setup` --
+was there on the first boot recorded that way.
+
+`sysctl -w kernel.panic=10` makes a panic reboot warm, which lets ramoops
+survive into `/sys/fs/pstore`; it is a runtime setting and is gone after the
+next boot. Neither it nor the serial console is part of the product; they are
+what to set up **before** trying to reproduce a panic, not after.
+
+```sh
+sysctl kernel.panic                    # 0 on the product: evidence is lost
+ls /sys/fs/pstore                      # empty after a cold power cycle
 ```
 
 ---

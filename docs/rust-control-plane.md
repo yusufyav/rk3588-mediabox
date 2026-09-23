@@ -71,6 +71,59 @@ Basış satırı aynı karede değiştirir, daemon'un yanıtı onun yerini alır
 (reddedilen bir istek satırı geri alır), ve basıştan önce yola çıkmış bir
 yoklama bu alan için yoksayılır. Cihazda ölçülen tuş-çizim süresi 3–7 ms'dir.
 
+## Ekran ayarı
+
+Çözünürlük, yenileme ve renk biçimi seçimi üç parçaya ayrılır. Hiçbiri kendi
+kuralını hesaplamaz; kurallar tek yerdedir:
+
+- **Kurallar — `mediabox_platform::output` / `video`.** Mainline Linux'un
+  `drm_hdmi_compute_mode_clock`, `sink_supports_format_bpc`, `hdmi_clock_valid`
+  ve `drm_edid.c` Y420VDB/Y420CMDB ayrıştırmasının birebir karşılığı. Çekirdeğin
+  bağlayıcıya verdiği mod listesi ve EDID'den bir `OutputOffer` üretir: her mod
+  bir kez, boyuta göre gruplu (TV boyutları önce, VESA/DMT modları
+  "Bilgisayar modları" altında); her modda RGB, 4:4:4, 4:2:2, 4:2:0'ın kartın
+  her derinliğindeki hücresi, gereken hız ve reddediliyorsa `Refusal` gerekçesi
+  (`Only420`, `No420Here`, `DepthNotDeclared`, `OverSink`, `EightBitOnly`, …).
+  Kaynak sınırları çalışan vendor sürücünün sunduğudur: 600 MHz, 10 bit.
+- **Uygulama — `mediabox-tv`.** Ekranı tutan tek süreç ve EDID'in tek okuyucusu
+  (bu vendor sürücü `/sys/class/drm/*/edid`'i boş bırakır). Teklifi hesaplar,
+  her mod kurduğunda `output_report` ile daemon'a bildirir, daemon'dan gelen
+  ayarı süreç yeniden başlamadan uygular: `TEST_ONLY` ile sorulmuş tek bir
+  atomik commit (mod + kare + `color_format`/`color_depth`/`Colorspace`); boyut
+  değişirse yeni GBM/EGL yüzeyi, eskisi yeni boyuttaki ilk kare ekrana çıkınca
+  bırakılır. Daemon'un olay akışına her yeniden bağlandığında ekranı yeniden
+  bildirir.
+- **Karar ve saat — `mediaboxd-rs` (`src/output.rs`).** Tek kayıt,
+  `/var/lib/mediabox/output.json`: `{sink, resolution, colours}`. `sink`, seçimin
+  yapıldığı ekranın EDID blok checksum'ları (`edid_checkvalue`, ör. `d3d7`);
+  mod başına renk `colours[<mod etiketi>]`. Referans Android kutusunun modeli,
+  kendi `systemcontrol`'ünden okundu: `hdmimode`, `<mod>_deepcolor`,
+  `hdmichecksum`, "tv sink changed". Farklı EDID'li bir ekran bildirildiğinde
+  kayıt o ekrana `Auto` olarak taşınır; bir ekran için yapılan seçim başka
+  ekranda asla denenmez.
+
+Yeni bir ayar **denemedir**: `output_try` onu olay akışıyla arayüze uygulatır,
+diske yazmaz ve 15 saniye sayar (Windows'un "Bu ekran ayarları kalsın mı?"
+akışı). `output_keep` yazar; `output_revert` ya da süre dolması önceki ayarı geri
+uygular. Sayaç daemon'dadır: ekran görüntü alamasa ya da arayüz kapansa da geri
+dönülür, yeniden açılan arayüz diskteki (eski) ayarı okur. Deneme yalnız arayüz
+ekranı tutarken kabul edilir.
+
+Komutlar: `output_status`, `output_report {offer, wire}` (yalnız arayüz),
+`output_try {resolution, colour}`, `output_keep`, `output_revert`. `Status`
+içinde `output` alanı aynı durumu taşır. Olay akışında (`/v1/events`)
+`{"output": "apply" | "kept" | "reverted" | "changed", …}` çerçeveleri bütün
+istemcilere gider; onay sorusu TV'de ve web'de birlikte sorulur. Hatta giden
+biçim her `output_status`'ta ekran denetleyicisinden
+(`/sys/kernel/debug/dri/0/summary`, `bus_format`) okunur.
+
+Daemon her bildirimde `/run/mediabox/output-plan` yazar. `mediabox-hdmi-prepare`
+Kodi'nin başlangıç modunu, yenileme listesini ve tarayıcının modunu buradan
+alır; Kodi (`patches/kodi/0013`) her mod için SDR ve HDR renk biçimini aynı
+dosyadaki `colour <G>x<Y>[i]@<saat kHz>/<htoplam>x<vtoplam> <sdr> <hdr|none>`
+satırlarından okur. Ayrıntı ve ölçümler:
+[`display-pipeline.md`](display-pipeline.md) § 9–11.
+
 ## Input routing
 
 `Ui` modunda tüm aksiyonlar yalnız event bus'a yayınlanır. `KodiPlayback`
