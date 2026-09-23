@@ -23,7 +23,7 @@
 //! Checked against the reference Android box on both inputs of the same Sony,
 //! whose lists are in `tests/color_modes.rs`.
 
-pub use mediabox_core::{ColorFormat, ColorMode};
+pub use mediabox_core::{ColorFormat, ColorMode, ColourCell, Refusal};
 use serde::{Deserialize, Serialize};
 
 use crate::cta_vics::CTA_VICS;
@@ -126,7 +126,9 @@ impl Timing {
                     && *vt == vtotal
                     && *i == interlaced
                     && (clock.abs_diff(pixel_clock_khz) <= 1
-                        || (u64::from(*clock) * 1000 / 1001).abs_diff(u64::from(pixel_clock_khz)) <= 1)
+                        || cea_mode_alternate_clock(*clock, *ht, *vt, *h, *i)
+                            .abs_diff(pixel_clock_khz)
+                            <= 1)
             })
             .map(|entry| entry.0);
         Self {
@@ -160,6 +162,31 @@ impl Timing {
     }
 }
 
+/// `cea_mode_alternate_clock`: the 1000/1001 variant of a CTA mode whose
+/// nominal refresh is a multiple of 6 Hz. The table holds the 59.94 Hz clock
+/// for 240- and 480-line modes and the 60 Hz one for the rest.
+fn cea_mode_alternate_clock(clock: u32, htotal: u16, vtotal: u16, vdisplay: u16, interlaced: bool) -> u32 {
+    let total = u64::from(htotal) * u64::from(vtotal);
+    if total == 0 {
+        return clock;
+    }
+    // drm_mode_vrefresh: rounded to the nearest hertz, doubled for interlace.
+    let mut vrefresh = (u64::from(clock) * 1000 + total / 2) / total;
+    if interlaced {
+        vrefresh *= 2;
+    }
+    if vrefresh % 6 != 0 {
+        return clock;
+    }
+    let clock = u64::from(clock);
+    let alternate = if vdisplay == 240 || vdisplay == 480 {
+        (clock * 1001 + 500) / 1000
+    } else {
+        (clock * 1000 + 500) / 1001
+    };
+    alternate as u32
+}
+
 impl SinkVideo {
     /// `drm_mode_is_420_only` / `drm_mode_is_420`.
     fn is_420_only(&self, timing: &Timing) -> bool {
@@ -171,36 +198,97 @@ impl SinkVideo {
             .is_some_and(|vic| self.y420_only.contains(&vic) || self.y420_also.contains(&vic))
     }
 
-    /// `sink_supports_format_bpc`.
-    fn supports(&self, timing: &Timing, format: ColorFormat, bits: u8) -> bool {
+    /// `sink_supports_format_bpc`, then `hdmi_clock_valid`, in the kernel's
+    /// order, answering with the first rule that refuses -- or `None` when the
+    /// mode may be sent.
+    pub fn refusal(
+        &self,
+        timing: &Timing,
+        mode: ColorMode,
+        source: &SourceCaps,
+    ) -> Option<Refusal> {
+        let ColorMode { format, bits } = mode;
+        if bits > source.max_bpc && format != ColorFormat::Ycbcr422 {
+            return Some(Refusal::SourceDepth {
+                bits,
+                max: source.max_bpc,
+            });
+        }
         // CTA-861-F s5.4: VIC 1 is eight bits only.
         if timing.vic == Some(1) && bits != 8 {
-            return false;
+            return Some(Refusal::EightBitOnly);
         }
         if !self.is_hdmi && (format != ColorFormat::Rgb || bits != 8) {
-            return false;
+            return Some(Refusal::NotHdmi);
         }
         if self.is_420_only(timing) && format != ColorFormat::Ycbcr420 {
-            return false;
+            return Some(Refusal::Only420);
         }
-        match format {
-            ColorFormat::Rgb => bits == 8 || self.rgb_deep.contains(&bits),
+        let declared = match format {
+            ColorFormat::Rgb => {
+                if bits == 8 || self.rgb_deep.contains(&bits) {
+                    None
+                } else {
+                    Some(Refusal::DepthNotDeclared { bits })
+                }
+            }
             ColorFormat::Ycbcr420 => {
-                self.is_420(timing) && (bits == 8 || self.ycbcr420_deep.contains(&bits))
+                if !self.is_420(timing) {
+                    Some(Refusal::No420Here)
+                } else if bits == 8 || self.ycbcr420_deep.contains(&bits) {
+                    None
+                } else {
+                    Some(Refusal::DepthNotDeclared { bits })
+                }
             }
             // HDMI 1.3 s6.5: deep colour is not relevant to 4:2:2; up to 12.
-            ColorFormat::Ycbcr422 => self.ycbcr422 && bits <= 12,
+            ColorFormat::Ycbcr422 => (!self.ycbcr422).then_some(Refusal::FormatNotDeclared),
             ColorFormat::Ycbcr444 => {
-                self.ycbcr444 && (bits == 8 || self.ycbcr444_deep.contains(&bits))
+                if !self.ycbcr444 {
+                    Some(Refusal::FormatNotDeclared)
+                } else if bits == 8 || self.ycbcr444_deep.contains(&bits) {
+                    None
+                } else {
+                    Some(Refusal::DepthNotDeclared { bits })
+                }
             }
+        };
+        if declared.is_some() {
+            return declared;
         }
+        // `hdmi_clock_valid`, with this board's transmitter as the driver's
+        // own `tmds_char_rate_valid`.
+        let need_khz = mode.character_rate_khz(timing.pixel_clock_khz);
+        if self.max_character_rate_khz != 0 && need_khz > self.max_character_rate_khz {
+            return Some(Refusal::OverSink {
+                need_khz,
+                max_khz: self.max_character_rate_khz,
+            });
+        }
+        if need_khz > source.max_tmds_khz {
+            return Some(Refusal::OverSource {
+                need_khz,
+                max_khz: source.max_tmds_khz,
+            });
+        }
+        None
     }
 
-    /// `hdmi_clock_valid`, with this board's transmitter as the driver's own
-    /// `tmds_char_rate_valid`.
-    fn fits(&self, rate_khz: u32, source: &SourceCaps) -> bool {
-        (self.max_character_rate_khz == 0 || rate_khz <= self.max_character_rate_khz)
-            && rate_khz <= source.max_tmds_khz
+    /// Every cell the display screen draws at this timing: each format at
+    /// each depth the source has, 4:2:2 once. Refused ones say why.
+    pub fn cells_for(&self, timing: &Timing, source: &SourceCaps) -> Vec<ColourCell> {
+        let mut cells = Vec::new();
+        for &format in source.formats {
+            for bits in depths(format, source) {
+                let mode = ColorMode::new(format, bits);
+                cells.push(ColourCell {
+                    mode,
+                    rate_khz: mode.character_rate_khz(timing.pixel_clock_khz),
+                    refused: self.refusal(timing, mode, source),
+                });
+            }
+        }
+        cells
     }
 
     /// Every format and depth that may be sent at this timing.
@@ -215,16 +303,9 @@ impl SinkVideo {
     pub fn modes_for_source(&self, timing: &Timing, source: &SourceCaps) -> Vec<ColorMode> {
         let mut modes = Vec::new();
         for &format in source.formats {
-            let depths: Vec<u8> = if format == ColorFormat::Ycbcr422 {
-                vec![source.max_bpc.min(12)]
-            } else {
-                (8..=source.max_bpc).rev().step_by(2).collect()
-            };
-            for bits in depths {
+            for bits in depths(format, source).into_iter().rev() {
                 let mode = ColorMode::new(format, bits);
-                if self.supports(timing, format, bits)
-                    && self.fits(mode.character_rate_khz(timing.pixel_clock_khz), source)
-                {
+                if self.refusal(timing, mode, source).is_none() {
                     modes.push(mode);
                 }
             }
@@ -333,6 +414,18 @@ pub fn choose_timing(
         }
     }
     auto_timing(timings, sink)
+}
+
+/// The depths a format is offered at, shallowest first. 4:2:2 is offered once,
+/// at the source's depth: HDMI carries it in a twelve-bit container whatever
+/// the depth, so a shallower 4:2:2 is the same signal with the low bits zero
+/// (HDMI 1.0 s6.5).
+fn depths(format: ColorFormat, source: &SourceCaps) -> Vec<u8> {
+    if format == ColorFormat::Ycbcr422 {
+        vec![source.max_bpc.min(12)]
+    } else {
+        (8..=source.max_bpc).step_by(2).collect()
+    }
 }
 
 /// `display_info.max_tmds_clock` for a sink that declares nothing.

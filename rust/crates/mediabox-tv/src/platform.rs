@@ -290,6 +290,14 @@ pub fn video_showing() -> bool {
     VIDEO.with(|cell| cell.get())
 }
 
+/// A new mode and colour asked for, and what to go back to if the kernel
+/// refuses them.
+struct Switch {
+    previous_mode: control::Mode,
+    previous_colour: Option<mediabox_core::ColorMode>,
+    resized: bool,
+}
+
 struct SplitDisplay {
     kms: SharedKms,
     /// The overlays the appliance's own player can draw into, best first.
@@ -302,9 +310,24 @@ struct SplitDisplay {
     sink: RefCell<crate::video::Sink<SharedKms>>,
     connector: control::connector::Info,
     crtc: control::crtc::Handle,
-    mode: control::Mode,
+    /// The mode on the wire. It changes when a person picks another one in
+    /// the display settings, without this process starting again.
+    mode: Cell<control::Mode>,
     gbm_device: gbm::Device<OwnedFd>,
-    gbm_surface: gbm::Surface<Scanout>,
+    /// What the interface draws into, at the mode's size. Replaced when the
+    /// size changes; `generation` counts the replacements so the EGL surface
+    /// drawn through can follow.
+    gbm_surface: RefCell<gbm::Surface<Scanout>>,
+    generation: Cell<u64>,
+    /// The surface of the previous size, kept until a frame of the new one is
+    /// on the panel: the frame showing now was drawn into it.
+    retired: RefCell<Option<gbm::Surface<Scanout>>>,
+    /// A mode and colour asked for and not yet on the wire.
+    switch: RefCell<Option<Switch>>,
+    /// Everything this display offers, by the HDMI rules
+    /// (`mediabox_platform::output`), computed once from the kernel's mode
+    /// list and the EDID.
+    offer: Option<mediabox_core::OutputOffer>,
     presentation: RefCell<Presentation>,
     released: Cell<bool>,
     /// Whether the television is currently away, so the journal says so once
@@ -316,9 +339,10 @@ struct SplitDisplay {
     /// room for ten bits at this timing, cannot be sent HDR worth having.
     sink_video: Option<mediabox_platform::video::SinkVideo>,
     /// The mode in use, in the terms the colour rules are written in.
-    timing: mediabox_platform::video::Timing,
-    /// The colour mode a person chose in the settings, `Auto` otherwise.
-    colour_choice: Cell<mediabox_core::ColorChoice>,
+    timing: Cell<mediabox_platform::video::Timing>,
+    /// The colour sent for everything but an HDR film: the one chosen for
+    /// this mode if it can be sent here, what `Auto` gives otherwise.
+    colour: Cell<Option<mediabox_core::ColorMode>>,
     /// The format and depth last written to the connector.
     applied: Cell<Option<mediabox_core::ColorMode>>,
     /// The last colour state written to the connector, so the properties are
@@ -478,7 +502,7 @@ impl SplitDisplay {
             eprintln!("mediabox-tv.platform atomic properties unavailable: {e}");
         }
 
-        let (connector, crtc, mode) = find_output(&kms, &wanted)?;
+        let (connector, crtc, mode, offer, colour) = find_output(&kms, &wanted)?;
         let gbm_device = gbm::Device::new(OwnedFd::from(render_file))
             .map_err(|e| format!("create GBM device on {render_path}: {e}"))?;
         if gbm_device.backend_name() != "armsoc" {
@@ -577,17 +601,19 @@ impl SplitDisplay {
             kms,
             connector,
             crtc,
-            mode,
+            mode: Cell::new(mode),
             sink_video,
-            timing: timing_of(&mode),
-            colour_choice: Cell::new(
-                read_choice::<mediabox_core::ColorChoice>(COLOUR_FILE).unwrap_or_default(),
-            ),
+            timing: Cell::new(timing_of(&mode)),
+            colour: Cell::new(colour),
+            offer,
             applied: Cell::new(None),
             signalled: Cell::new(None),
             asked: Cell::new(None),
             gbm_device,
-            gbm_surface,
+            gbm_surface: RefCell::new(gbm_surface),
+            generation: Cell::new(0),
+            retired: RefCell::new(None),
+            switch: RefCell::new(None),
             video,
             sink: RefCell::new(sink),
             presentation: RefCell::new(Presentation::default()),
@@ -606,7 +632,7 @@ impl SplitDisplay {
     }
 
     fn size(&self) -> slint::PhysicalSize {
-        let (width, height) = self.mode.size();
+        let (width, height) = self.mode.get().size();
         slint::PhysicalSize::new(width.into(), height.into())
     }
 
@@ -631,7 +657,7 @@ impl SplitDisplay {
         {
             return forced;
         }
-        let (width, height) = self.mode.size();
+        let (width, height) = self.mode.get().size();
         let fit = (f32::from(width) / DESIGN.0).min(f32::from(height) / DESIGN.1);
         // Rounded up rather than down: on a panel between two whole scales the
         // tighter one is the television-shaped answer.
@@ -664,7 +690,7 @@ impl SplitDisplay {
     fn import_front_buffer(
         &self,
     ) -> Result<PresentedFrame, Box<dyn std::error::Error + Send + Sync>> {
-        let mut bo = unsafe { self.gbm_surface.lock_front_buffer() }
+        let mut bo = unsafe { self.gbm_surface.borrow().lock_front_buffer() }
             .map_err(|e| format!("lock Mali GBM front buffer: {e}"))?;
         if bo.format() != gbm::Format::Argb8888 {
             return Err(format!("unexpected GBM format: {:?}", bo.format()).into());
@@ -794,12 +820,6 @@ impl SplitDisplay {
     /// away, so the frame after the set comes back has to set the mode again
     /// rather than flip onto somebody else's configuration.
     fn present(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // A colour mode chosen in the settings is put on the wire here, on the
-        // next frame, rather than waiting for the next film or restart.
-        if let Some(choice) = COLOUR_WANTED.with(Cell::take) {
-            self.colour_choice.set(choice);
-            self.signal_output_colour(self.asked.get());
-        }
         match self.present_frame() {
             Ok(()) => {
                 if self.dark.replace(false) {
@@ -827,6 +847,9 @@ impl SplitDisplay {
     }
 
     fn present_frame(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.switch.borrow().is_some() {
+            return self.commit_switch();
+        }
         let frame = self.import_front_buffer()?;
         let mut state = self.presentation.borrow_mut();
         if state.current.is_none() {
@@ -836,7 +859,7 @@ impl SplitDisplay {
                     Some(frame.framebuffer),
                     (0, 0),
                     &[self.connector.handle()],
-                    Some(self.mode),
+                    Some(self.mode.get()),
                 )
                 .map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
             state.current = Some(frame);
@@ -872,6 +895,7 @@ impl SplitDisplay {
             crate::fdstore::release_inherited();
             drop(state);
             self.signal_output_colour(self.asked.get());
+            self.report();
             return Ok(());
         }
         Ok(())
@@ -887,7 +911,7 @@ impl SplitDisplay {
         if self.released.get() {
             return;
         }
-        let (width, height) = self.mode.size();
+        let (width, height) = self.mode.get().size();
         let into = crate::video::Rect {
             x: 0,
             y: 0,
@@ -922,7 +946,7 @@ impl SplitDisplay {
         let fits = self
             .sink_video
             .as_ref()
-            .is_some_and(|sink| sink.hdr10_fits(&self.timing));
+            .is_some_and(|sink| sink.hdr10_fits(&self.timing.get()));
         let wanted = match film {
             Some(hdr) if hdr.is_hdr() && fits => Some(hdr),
             _ => None,
@@ -933,7 +957,7 @@ impl SplitDisplay {
                     "mediabox-tv.platform the film asks for HDR (eotf {}) and this link \
                      cannot carry it at {} kHz: sending SDR, the plane is tone-mapped",
                     hdr.eotf,
-                    self.mode.clock()
+                    self.mode.get().clock()
                 ),
                 Some(hdr) if hdr.is_hdr() => eprintln!(
                     "mediabox-tv.platform the film asks for HDR (eotf {}), and it fits",
@@ -943,18 +967,18 @@ impl SplitDisplay {
                 None => {}
             }
         }
-        // The format and depth on the wire, by the same rules as the list in
-        // the settings: the one a person chose if it can be sent at this mode
-        // (and carries HDR, when HDR is wanted), otherwise what `Auto` gives.
-        let format = self.sink_video.as_ref().and_then(|sink| {
-            let allowed = sink.modes_for(&self.timing);
-            let fixed = self.colour_choice.get().mode().filter(|mode| allowed.contains(mode));
-            match wanted {
-                Some(_) => fixed
-                    .filter(|mode| mode.carries_hdr())
-                    .or_else(|| sink.best_for(&self.timing, true)),
-                None => fixed.or_else(|| sink.best_for(&self.timing, false)),
-            }
+        // The format and depth on the wire, by the same rules as the display
+        // settings: the one chosen for this mode (already checked against it),
+        // and for an HDR film the chosen one only if it carries ten bits,
+        // otherwise what `Auto` sends HDR as here.
+        let timing = self.timing.get();
+        let format = self.sink_video.as_ref().and_then(|sink| match wanted {
+            Some(_) => self
+                .colour
+                .get()
+                .filter(|mode| mode.carries_hdr())
+                .or_else(|| sink.best_for(&timing, true)),
+            None => self.colour.get().or_else(|| sink.best_for(&timing, false)),
         });
         if self.signalled.get() == wanted && self.applied.get() == format {
             return;
@@ -1047,7 +1071,7 @@ impl SplitDisplay {
                     "HDR10 eotf {} peak {} cd/m2 at {} kHz",
                     hdr.eotf,
                     hdr.max_luminance,
-                    self.mode.clock()
+                    self.mode.get().clock()
                 ),
                 None => "SDR".to_string(),
             }
@@ -1055,9 +1079,239 @@ impl SplitDisplay {
         eprintln!(
             "mediabox-tv.platform output format: {} at {}",
             format.map(|mode| mode.label()).unwrap_or_else(|| "sürücünün seçimi".into()),
-            self.timing.label()
+            timing.label()
         );
         self.signalled.set(wanted);
+    }
+
+    /// Asks for `mode`, with `colour` on the wire, from the next frame.
+    ///
+    /// A different size needs a surface of that size to draw the next frame
+    /// into; the one the panel is showing is kept until that frame is up.
+    /// Nothing reaches the display controller here: the next frame is
+    /// committed with the mode in one atomic commit (see `commit_switch`).
+    fn begin_switch(
+        &self,
+        mode: control::Mode,
+        colour: Option<mediabox_core::ColorMode>,
+    ) -> Result<bool, String> {
+        self.wait_for_page_flip().map_err(|e| e.to_string())?;
+        let previous_mode = self.mode.get();
+        let resized = mode.size() != previous_mode.size();
+        if resized {
+            let (width, height) = mode.size();
+            let surface = self
+                .gbm_device
+                .create_surface::<Scanout>(
+                    width.into(),
+                    height.into(),
+                    gbm::Format::Argb8888,
+                    gbm::BufferObjectFlags::RENDERING
+                        | gbm::BufferObjectFlags::SCANOUT
+                        | gbm::BufferObjectFlags::LINEAR,
+                )
+                .map_err(|e| format!("create a {width}x{height} surface: {e}"))?;
+            let old = self.gbm_surface.replace(surface);
+            *self.retired.borrow_mut() = Some(old);
+            self.generation.set(self.generation.get() + 1);
+        }
+        *self.switch.borrow_mut() = Some(Switch {
+            previous_mode,
+            previous_colour: self.colour.get(),
+            resized,
+        });
+        self.mode.set(mode);
+        self.timing.set(timing_of(&mode));
+        self.colour.set(colour);
+        let (width, height) = mode.size();
+        MODE.with(|cell| cell.set((width.into(), height.into(), mode.vrefresh())));
+        Ok(resized)
+    }
+
+    /// The first frame after `begin_switch`, with the mode and the colour, in
+    /// one atomic commit -- asked first with `TEST_ONLY`, so a mode the kernel
+    /// will not take changes nothing. One commit is one link training: the
+    /// television resynchronises once, not once for the mode and again for
+    /// each colour property.
+    fn commit_switch(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let frame = self.import_front_buffer()?;
+        let switch = self.switch.borrow_mut().take().expect("a switch was asked for");
+        let mode = self.mode.get();
+        let colour = self.colour.get();
+        match self.atomic_modeset(frame.framebuffer, mode, colour) {
+            Ok(()) => {
+                let (pending, current) = {
+                    let mut state = self.presentation.borrow_mut();
+                    state.waiting_for_flip = false;
+                    (state.pending_previous.take(), state.current.replace(frame))
+                };
+                // The frames of the old size first, then the surface they came
+                // from.
+                drop(pending);
+                drop(current);
+                drop(self.retired.borrow_mut().take());
+                self.applied.set(colour);
+                self.signalled.set(None);
+                OUTPUT_ERROR.with(|cell| cell.borrow_mut().take());
+                eprintln!(
+                    "mediabox-tv.platform output now {} {}",
+                    self.timing.get().label(),
+                    colour.map(|mode| mode.label()).unwrap_or_else(|| "sürücünün seçimi".into())
+                );
+                // An HDR film, if one is playing, is signalled again on top.
+                self.signal_output_colour(self.asked.get());
+            }
+            Err(error) => {
+                eprintln!(
+                    "mediabox-tv.platform the kernel refused {} {}: {error}; staying on {}",
+                    self.timing.get().label(),
+                    colour.map(|mode| mode.label()).unwrap_or_default(),
+                    timing_of(&switch.previous_mode).label()
+                );
+                OUTPUT_ERROR.with(|cell| {
+                    *cell.borrow_mut() = Some(format!("Çekirdek bu modu kabul etmedi: {error}"))
+                });
+                self.mode.set(switch.previous_mode);
+                self.timing.set(timing_of(&switch.previous_mode));
+                self.colour.set(switch.previous_colour);
+                let (width, height) = switch.previous_mode.size();
+                MODE.with(|cell| {
+                    cell.set((width.into(), height.into(), switch.previous_mode.vrefresh()))
+                });
+                drop(frame);
+                if switch.resized
+                    && let Some(old) = self.retired.borrow_mut().take()
+                {
+                    drop(self.gbm_surface.replace(old));
+                    self.generation.set(self.generation.get() + 1);
+                }
+            }
+        }
+        self.report();
+        Ok(())
+    }
+
+    /// The commit itself: this CRTC on this connector at `mode`, the primary
+    /// plane showing `framebuffer` over the whole of it, and the connector's
+    /// colour properties -- tested, then applied.
+    fn atomic_modeset(
+        &self,
+        framebuffer: control::framebuffer::Handle,
+        mode: control::Mode,
+        colour: Option<mediabox_core::ColorMode>,
+    ) -> Result<(), String> {
+        use control::property::Value;
+        let current = self
+            .presentation
+            .borrow()
+            .current
+            .as_ref()
+            .map(|frame| frame.framebuffer);
+        // The plane the interface is on: the one on this CRTC showing the
+        // frame on the panel now.
+        let plane = self
+            .kms
+            .plane_handles()
+            .map_err(|e| format!("planes: {e}"))?
+            .into_iter()
+            .find(|handle| {
+                self.kms.get_plane(*handle).is_ok_and(|plane| {
+                    plane.crtc() == Some(self.crtc)
+                        && current.is_some()
+                        && plane.framebuffer() == current
+                })
+            })
+            .ok_or("the interface's plane is not on the panel")?;
+        fn need<H: control::ResourceHandle>(
+            kms: &SharedKms,
+            object: H,
+            name: &str,
+        ) -> Result<control::property::Handle, String> {
+            find_property(kms, object, name).ok_or_else(|| format!("no {name} property"))
+        }
+        let connector = self.connector.handle();
+        let (width, height) = mode.size();
+        let blob = self
+            .kms
+            .create_property_blob(&mode)
+            .map_err(|e| format!("mode blob: {e}"))?;
+        let mut request = control::atomic::AtomicModeReq::new();
+        request.add_property(connector, need(&self.kms, connector, "CRTC_ID")?, Value::CRTC(Some(self.crtc)));
+        request.add_property(self.crtc, need(&self.kms, self.crtc, "MODE_ID")?, blob);
+        request.add_property(self.crtc, need(&self.kms, self.crtc, "ACTIVE")?, Value::Boolean(true));
+        let at = |name: &str, value: Value<'static>| -> Result<(control::property::Handle, Value<'static>), String> {
+            Ok((need(&self.kms, plane, name)?, value))
+        };
+        for (property, value) in [
+            at("FB_ID", Value::Framebuffer(Some(framebuffer)))?,
+            at("CRTC_ID", Value::CRTC(Some(self.crtc)))?,
+            at("SRC_X", Value::UnsignedRange(0))?,
+            at("SRC_Y", Value::UnsignedRange(0))?,
+            at("SRC_W", Value::UnsignedRange(u64::from(width) << 16))?,
+            at("SRC_H", Value::UnsignedRange(u64::from(height) << 16))?,
+            at("CRTC_X", Value::SignedRange(0))?,
+            at("CRTC_Y", Value::SignedRange(0))?,
+            at("CRTC_W", Value::UnsignedRange(width.into()))?,
+            at("CRTC_H", Value::UnsignedRange(height.into()))?,
+        ] {
+            request.add_property(plane, property, value);
+        }
+        // As this driver enumerates them: `color_format` rgb=0, ycbcr444=1,
+        // ycbcr422=2, ycbcr420=3; `color_depth` in bits; SDR is `Colorspace`
+        // Default and no HDR metadata.
+        if let Some(colour) = colour {
+            use mediabox_core::ColorFormat;
+            let layout = match colour.format {
+                ColorFormat::Rgb => 0u64,
+                ColorFormat::Ycbcr444 => 1,
+                ColorFormat::Ycbcr422 => 2,
+                ColorFormat::Ycbcr420 => 3,
+            };
+            for (name, value) in [
+                ("color_format", layout),
+                ("color_depth", u64::from(colour.bits)),
+                ("Colorspace", 0),
+                ("HDR_OUTPUT_METADATA", 0),
+            ] {
+                if let Some(property) = find_property(&self.kms, connector, name) {
+                    request.add_property(connector, property, Value::UnsignedRange(value));
+                }
+            }
+        }
+        let flags = control::AtomicCommitFlags::ALLOW_MODESET;
+        let tested = self
+            .kms
+            .atomic_commit(flags | control::AtomicCommitFlags::TEST_ONLY, request.clone())
+            .map_err(|e| format!("TEST_ONLY: {e}"));
+        let result = tested.and_then(|()| {
+            self.kms
+                .atomic_commit(flags, request)
+                .map_err(|e| format!("commit: {e}"))
+        });
+        if let Value::Blob(id) = blob {
+            let _ = self.kms.destroy_property_blob(id);
+        }
+        result
+    }
+
+    /// Tells the daemon what this display offers and what is on the wire.
+    fn report(&self) {
+        let Some(offer) = self.offer.clone() else { return };
+        let bus = std::fs::read_to_string(SUMMARY_FILE)
+            .ok()
+            .and_then(|summary| mediabox_platform::output::wire_bus_format(&summary, &offer.connector));
+        let wire = mediabox_core::OutputWire {
+            mode: self.timing.get().label(),
+            colour: bus
+                .as_ref()
+                .and_then(|(_, colour)| *colour)
+                .or(self.applied.get()),
+            bus_format: bus.map(|(name, _)| name),
+            hdr: self.signalled.get().is_some(),
+        };
+        if let Some(reporter) = REPORTER.get() {
+            reporter(offer, wire);
+        }
     }
 
     fn release_display(&self) {
@@ -1147,6 +1401,8 @@ fn find_output(
         control::connector::Info,
         control::crtc::Handle,
         control::Mode,
+        Option<mediabox_core::OutputOffer>,
+        Option<mediabox_core::ColorMode>,
     ),
     PlatformError,
 > {
@@ -1174,60 +1430,57 @@ fn find_output(
             ))
         })?;
 
-    // The biggest mode this link can actually carry -- not the one the sink
-    // puts first.
+    // Which mode, by the HDMI rules and the person's choice.
     //
-    // Ranking `preferred` above size looks harmless until a television says
-    // this, which one of ours does on one of its inputs:
-    //
-    //     #0  1920x1080 60.00  type: preferred, driver
-    //     #6  3840x2160 60.00  594000 kHz
-    //     #13 3840x2160 23.98  296703 kHz
-    //
-    // The appliance then ran its whole interface at 1080p on a 4K panel, and
-    // every 4K film with it, because a film is composited into the mode the
-    // interface set rather than given one of its own.
-    //
-    // So: size first, then the fastest refresh, and `preferred` only to settle
-    // a tie. And a timing the link cannot carry is not a candidate at all --
-    // that sink's link stops at 300 MHz, where 4K60 wants 594, and asking for
-    // it anyway is how this driver ends up quietly subsampling a picture
-    // nobody asked it to touch.
-    let sink = connector_edid(kms, connector.handle())
-        .and_then(|edid| mediabox_platform::video::parse_sink_video(&edid));
-    // Carried means carried in any format the sink takes, as every HDMI source
-    // does it.
-    //
-    // This used to demand RGB, so on the Sony's 300 MHz input the interface
-    // ran at 3840x2160@30. The reference Android box on the same input, same
-    // afternoon, runs 2160p60 in YCbCr 4:2:0 8-bit -- the only format that fits
-    // 594 MHz of pixels into 300 -- and offers the other formats only at modes
-    // where they fit. The kernel already listed 4K60 for that input and falls
-    // back to 4:2:0 on its own; the interface was the only thing refusing it.
-    // Which mode, by the product's one rule set: the modes the kernel lists
-    // for this sink, the resolution a person chose if this sink lists it and
-    // the link carries it, `Auto` otherwise. See mediabox_platform::video.
+    // Every mode the kernel lists for this display, with the colour modes the
+    // EDID and the link allow at each, is the offer; the kept setting is read
+    // from the daemon's state and applies only to the display it was made on
+    // (its EDID checkvalue), `Auto` otherwise -- the reference Android box's
+    // rule. `Auto` is the largest mode in the panel's shape at the fastest
+    // refresh the link carries in any format; on the Sony's 300 MHz input that
+    // is 2160p60 in 4:2:0, not the 1080p it lists as preferred, which is what
+    // this interface once ran a 4K panel at.
     let modes: Vec<control::Mode> = connector.modes().to_vec();
     let timings: Vec<mediabox_platform::video::Timing> = modes.iter().map(timing_of).collect();
-    let choice = read_choice::<mediabox_core::ResolutionChoice>(RESOLUTION_FILE).unwrap_or_default();
-    let chosen = mediabox_platform::video::choose_timing(choice, &timings, sink.as_ref())
-        .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
-    let auto = mediabox_platform::video::auto_timing(&timings, sink.as_ref());
-    let mode = modes[timings.iter().position(|timing| *timing == chosen).unwrap_or(0)];
-    publish_offer(&timings, chosen, auto, choice, sink.as_ref());
-    if let Some(sink) = &sink {
-        let (w, h) = mode.size();
-        eprintln!(
-            "mediabox-tv.platform {wanted} {w}x{h}@{} chosen against a {} kHz link{}",
-            mode.vrefresh(),
-            sink.max_character_rate_khz,
-            if sink.rate_is_declared {
-                ""
-            } else {
-                " (assumed: the sink declared none)"
-            }
-        );
-    }
+    let edid = connector_edid(kms, connector.handle()).unwrap_or_default();
+    let offer = mediabox_platform::output::offer(
+        &timings,
+        &edid,
+        wanted,
+        mediabox_platform::output::edid_name(&edid),
+        &mediabox_platform::video::RK3588_HDMI,
+    );
+    let (mode, colour) = match &offer {
+        Some(offer) => {
+            let setting = read_setting().for_sink(&offer.sink);
+            let chosen = offer
+                .resolve(setting.resolution)
+                .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
+            let mode = modes
+                .iter()
+                .copied()
+                .find(|mode| same_mode(mode, chosen))
+                .ok_or_else(|| PlatformError::from(format!("{} is not in the mode list", chosen.label)))?;
+            eprintln!(
+                "mediabox-tv.platform {wanted} {} chosen ({}), link {} kHz",
+                chosen.label,
+                match setting.resolution {
+                    mediabox_core::ResolutionChoice::Auto => "otomatik",
+                    _ => "seçim",
+                },
+                offer.link.max_character_rate_khz
+            );
+            (mode, offer.colour(&setting, chosen))
+        }
+        // No EDID to reason from: the largest mode, fastest first.
+        None => {
+            let chosen = mediabox_platform::video::auto_timing(&timings, None)
+                .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
+            let at = timings.iter().position(|timing| *timing == chosen).unwrap_or(0);
+            eprintln!("mediabox-tv.platform {wanted} has no readable EDID; {} chosen", chosen.label());
+            (modes[at], None)
+        }
+    };
 
     // Not whichever video port the kernel happened to leave this socket on.
     //
@@ -1298,7 +1551,18 @@ fn find_output(
             )));
         }
     };
-    Ok((connector, crtc, mode))
+    Ok((connector, crtc, mode, offer, colour))
+}
+
+/// Whether a KMS mode is the one the offer names.
+fn same_mode(mode: &control::Mode, offered: &mediabox_core::OutputModeOffer) -> bool {
+    let timing = timing_of(mode);
+    timing.width == offered.width
+        && timing.height == offered.height
+        && timing.pixel_clock_khz == offered.pixel_clock_khz
+        && timing.htotal == offered.htotal
+        && timing.vtotal == offered.vtotal
+        && timing.interlaced == offered.interlaced
 }
 
 impl HasWindowHandle for SplitDisplay {
@@ -1307,7 +1571,7 @@ impl HasWindowHandle for SplitDisplay {
     ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         Ok(unsafe {
             let handle = raw_window_handle::GbmWindowHandle::new(
-                std::ptr::NonNull::from(&*self.gbm_surface.as_raw()).cast(),
+                std::ptr::NonNull::from(&*self.gbm_surface.borrow().as_raw()).cast(),
             );
             raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Gbm(
                 handle,
@@ -1333,7 +1597,11 @@ impl HasDisplayHandle for SplitDisplay {
 
 struct GlContext {
     context: glutin::context::PossiblyCurrentContext,
-    surface: glutin::surface::Surface<WindowSurface>,
+    config: glutin::config::Config,
+    /// Drawn through into the display's GBM surface; made again when that is
+    /// replaced by one of another size (`SplitDisplay::generation`).
+    surface: RefCell<glutin::surface::Surface<WindowSurface>>,
+    generation: Cell<u64>,
     display: Rc<SplitDisplay>,
 }
 
@@ -1366,20 +1634,7 @@ impl GlContext {
             .build(Some(window_handle.as_raw()));
         let context = unsafe { gl_display.create_context(&config, &attrs) }
             .map_err(|e| format!("create Mali EGL GLES context: {e}"))?;
-        let size = display.size();
-        let width = NonZeroU32::new(size.width).unwrap();
-        let height = NonZeroU32::new(size.height).unwrap();
-        let surface_attrs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
-            window_handle.as_raw(),
-            width,
-            height,
-        );
-        let surface = unsafe {
-            config
-                .display()
-                .create_window_surface(&config, &surface_attrs)
-        }
-        .map_err(|e| format!("create Mali EGL window surface: {e}"))?;
+        let surface = window_surface(&config, &display)?;
         let context = context
             .make_current(&surface)
             .map_err(|e| format!("make Mali EGL context current: {e}"))?;
@@ -1399,12 +1654,52 @@ impl GlContext {
             "mediabox-tv.gpu EGL_VENDOR={} EGL_VERSION={} GL_VENDOR={} GL_RENDERER={}",
             egl_vendor, egl_version, gl_vendor, gl_renderer
         );
+        let generation = display.generation.get();
         Ok(Self {
             context,
-            surface,
+            config,
+            surface: RefCell::new(surface),
+            generation: Cell::new(generation),
             display,
         })
     }
+
+    /// A new EGL surface over the display's GBM surface when that has been
+    /// replaced. The old one is destroyed here, before the GBM surface it drew
+    /// into is -- that one outlives it until the first frame of the new size
+    /// is on the panel.
+    fn follow_surface(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let generation = self.display.generation.get();
+        if self.generation.get() == generation {
+            return Ok(());
+        }
+        let surface = window_surface(&self.config, &self.display).map_err(|e| e.to_string())?;
+        self.context.make_current(&surface)?;
+        drop(self.surface.replace(surface));
+        self.generation.set(generation);
+        Ok(())
+    }
+}
+
+fn window_surface(
+    config: &glutin::config::Config,
+    display: &SplitDisplay,
+) -> Result<glutin::surface::Surface<WindowSurface>, PlatformError> {
+    let window_handle = display
+        .window_handle()
+        .map_err(|e| format!("GBM window handle: {e}"))?;
+    let size = display.size();
+    let surface_attrs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
+        window_handle.as_raw(),
+        NonZeroU32::new(size.width).unwrap(),
+        NonZeroU32::new(size.height).unwrap(),
+    );
+    unsafe {
+        config
+            .display()
+            .create_window_surface(config, &surface_attrs)
+    }
+    .map_err(|e| format!("create Mali EGL window surface: {e}").into())
 }
 
 #[link(name = "EGL")]
@@ -1505,8 +1800,9 @@ impl GlContext {
 
 unsafe impl OpenGLInterface for GlContext {
     fn ensure_current(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.follow_surface()?;
         if !self.context.is_current() {
-            self.context.make_current(&self.surface)?;
+            self.context.make_current(&*self.surface.borrow())?;
         }
         Ok(())
     }
@@ -1517,7 +1813,7 @@ unsafe impl OpenGLInterface for GlContext {
         // while the panel is still showing the last one; with two it is the
         // same wait as before, in the same place.
         let at = std::time::Instant::now();
-        if !self.display.gbm_surface.has_free_buffers() {
+        if !self.display.gbm_surface.borrow().has_free_buffers() {
             self.display.wait_for_page_flip()?;
         }
         let waited = at.elapsed();
@@ -1529,7 +1825,7 @@ unsafe impl OpenGLInterface for GlContext {
         }
 
         let at = std::time::Instant::now();
-        self.surface.swap_buffers(&self.context)?;
+        self.surface.borrow().swap_buffers(&self.context)?;
         let swapped = at.elapsed();
 
         let at = std::time::Instant::now();
@@ -1582,6 +1878,59 @@ impl SplitWindow {
             redraw: Cell::new(true),
             bench: std::env::var_os("MEDIABOX_TV_BENCH").is_some(),
         }))
+    }
+
+    /// Tells Slint the panel's size and scale, when they are not what it was
+    /// last told: after a mode of another size, or back from one the kernel
+    /// refused. The scale first, then the size in the logical pixels that
+    /// scale defines.
+    fn sync_size(&self) {
+        let scale = self.display.scale_factor();
+        if (self.window.scale_factor() - scale).abs() > f32::EPSILON {
+            self.window
+                .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+        }
+        let logical = self.size().to_logical(self.window.scale_factor());
+        if self.window.size().to_logical(self.window.scale_factor()) != logical {
+            self.window.dispatch_event(WindowEvent::Resized { size: logical });
+        }
+        self.redraw.set(true);
+    }
+
+    /// A setting from the daemon: the mode and colour it resolves to on this
+    /// display, from the next frame.
+    fn switch_output(&self, setting: mediabox_core::OutputSetting) {
+        let display = &self.display;
+        let Some(offer) = display.offer.as_ref() else {
+            eprintln!("mediabox-tv.platform no offer: this display's EDID could not be read");
+            return;
+        };
+        let setting = setting.for_sink(&offer.sink);
+        let Some(target) = offer.resolve(setting.resolution) else { return };
+        let colour = offer.colour(&setting, target);
+        let Some(mode) = display
+            .connector
+            .modes()
+            .iter()
+            .copied()
+            .find(|mode| same_mode(mode, target))
+        else {
+            eprintln!("mediabox-tv.platform {} is not in the mode list", target.label);
+            return;
+        };
+        if mode == display.mode.get() && colour == display.colour.get() {
+            display.report();
+            return;
+        }
+        eprintln!(
+            "mediabox-tv.platform switching to {} {}",
+            target.label,
+            colour.map(|mode| mode.label()).unwrap_or_default()
+        );
+        match display.begin_switch(mode, colour) {
+            Ok(_) => self.sync_size(),
+            Err(error) => eprintln!("mediabox-tv.platform switch not started: {error}"),
+        }
     }
 
     fn render_if_needed(&self) -> Result<(), PlatformError> {
@@ -1865,7 +2214,16 @@ impl Platform for SplitPlatform {
             if self.drain_messages() {
                 break;
             }
+            if let Some(setting) = OUTPUT_WANTED.with(|wanted| wanted.borrow_mut().take()) {
+                self.window.switch_output(setting);
+            }
             self.window.render_if_needed()?;
+            // A switch the kernel refused has put the old size back.
+            if self.window.display.switch.borrow().is_none()
+                && self.window.window.size() != self.window.size()
+            {
+                self.window.sync_size();
+            }
 
             let timeout = if self.window.redraw.get() {
                 0
@@ -2108,14 +2466,64 @@ pub fn install() -> Result<(), PlatformError> {
         .map_err(|e| PlatformError::from(e.to_string()))
 }
 
-/// Where the daemon remembers the choices made in the settings. Read-only
-/// here; the daemon writes them.
-const RESOLUTION_FILE: &str = "/var/lib/mediabox/resolution";
-const COLOUR_FILE: &str = "/var/lib/mediabox/color-mode";
+/// The display controller's own account of what is on the wire.
+const SUMMARY_FILE: &str = "/sys/kernel/debug/dri/0/summary";
 
-fn read_choice<T: serde::de::DeserializeOwned>(path: &str) -> Option<T> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(text.trim()).ok()
+/// A property of a KMS object, by name.
+fn find_property<H: control::ResourceHandle>(
+    kms: &SharedKms,
+    object: H,
+    name: &str,
+) -> Option<control::property::Handle> {
+    let properties = kms.get_properties(object).ok()?;
+    properties
+        .as_props_and_values()
+        .0
+        .iter()
+        .copied()
+        .find(|handle| {
+            kms.get_property(*handle)
+                .is_ok_and(|info| info.name().to_str() == Ok(name))
+        })
+}
+
+/// Who hears about the display after every mode set: the application, which
+/// tells the daemon.
+static REPORTER: std::sync::OnceLock<
+    Box<dyn Fn(mediabox_core::OutputOffer, mediabox_core::OutputWire) + Send + Sync>,
+> = std::sync::OnceLock::new();
+
+pub fn on_output_report(
+    reporter: impl Fn(mediabox_core::OutputOffer, mediabox_core::OutputWire) + Send + Sync + 'static,
+) {
+    let _ = REPORTER.set(Box::new(reporter));
+}
+
+thread_local! {
+    /// A setting to put on the wire, from the daemon.
+    static OUTPUT_WANTED: RefCell<Option<mediabox_core::OutputSetting>> = const { RefCell::new(None) };
+    /// Why the last mode asked for is not on the wire, when the kernel said no.
+    static OUTPUT_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Put `setting` on the wire from the next pass of the event loop.
+pub fn apply_output(setting: mediabox_core::OutputSetting) {
+    OUTPUT_WANTED.with(|wanted| *wanted.borrow_mut() = Some(setting));
+}
+
+pub fn output_error() -> Option<String> {
+    OUTPUT_ERROR.with(|cell| cell.borrow().clone())
+}
+
+/// Where the daemon keeps the display setting. Read-only here; the daemon
+/// writes it.
+const SETTING_FILE: &str = "/var/lib/mediabox/output.json";
+
+fn read_setting() -> mediabox_core::OutputSetting {
+    std::fs::read_to_string(SETTING_FILE)
+        .ok()
+        .and_then(|text| serde_json::from_str(text.trim()).ok())
+        .unwrap_or_default()
 }
 
 /// A KMS mode in the terms the HDMI rules are written in.
@@ -2132,56 +2540,3 @@ fn timing_of(mode: &control::Mode) -> mediabox_platform::video::Timing {
     )
 }
 
-/// What the settings screen offers: every mode the kernel lists for this
-/// sink, which one is on, what `Auto` would be, and the colour modes each
-/// can be sent in.
-static OFFER: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
-
-pub fn display_offer() -> Option<serde_json::Value> {
-    OFFER.lock().ok()?.clone()
-}
-
-fn publish_offer(
-    timings: &[mediabox_platform::video::Timing],
-    current: mediabox_platform::video::Timing,
-    auto: Option<mediabox_platform::video::Timing>,
-    choice: mediabox_core::ResolutionChoice,
-    sink: Option<&mediabox_platform::video::SinkVideo>,
-) {
-    let mut seen = std::collections::HashSet::new();
-    let list: Vec<serde_json::Value> = timings
-        .iter()
-        .filter(|timing| seen.insert((timing.width, timing.height, timing.refresh_mhz, timing.interlaced)))
-        .map(|timing| {
-            let allowed = sink.map(|sink| sink.modes_for(timing)).unwrap_or_default();
-            serde_json::json!({
-                "label": timing.label(),
-                "width": timing.width,
-                "height": timing.height,
-                "refresh_mhz": timing.refresh_mhz,
-                "interlaced": timing.interlaced,
-                "allowed": allowed,
-                "hdr10": sink.is_some_and(|sink| sink.hdr10_fits(timing)),
-                "auto_sdr": sink.and_then(|sink| sink.best_for(timing, false)),
-            })
-        })
-        .collect();
-    let offer = serde_json::json!({
-        "timings": list,
-        "current": current.label(),
-        "auto": auto.map(|timing| timing.label()),
-        "choice": choice,
-    });
-    if let Ok(mut slot) = OFFER.lock() {
-        *slot = Some(offer);
-    }
-}
-
-thread_local! {
-    static COLOUR_WANTED: Cell<Option<mediabox_core::ColorChoice>> = const { Cell::new(None) };
-}
-
-/// Put a colour mode chosen in the settings on the wire, from the next frame.
-pub fn set_colour_choice(choice: mediabox_core::ColorChoice) {
-    COLOUR_WANTED.with(|wanted| wanted.set(Some(choice)));
-}

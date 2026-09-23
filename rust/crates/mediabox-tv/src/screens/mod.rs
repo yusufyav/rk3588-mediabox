@@ -7,6 +7,7 @@
 
 pub mod account;
 pub mod cooling;
+pub mod output;
 pub mod diagnostics;
 pub mod library;
 pub mod media;

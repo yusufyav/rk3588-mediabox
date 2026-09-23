@@ -18,10 +18,15 @@ use crate::model::SystemStatus;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use mediabox_core::{
+    ColorFormat, ColorMode, ColourCell, OUTPUT_TRIAL_SECONDS, OutputModeOffer, OutputOffer,
+    OutputSetting, OutputStatus, Request, ResolutionChoice,
+};
+use std::collections::BTreeMap;
+use mediabox_core::{
     FAN_CURVE_MAX_POINTS, FAN_CURVE_MIN_POINTS, FAN_PWM_MAX, FAN_TEMP_MAX_C, FanBoardFix, FanCurve,
     FanProfile, FanStatus, fan_pwm_allowed, fan_pwm_from_percent, fan_pwm_percent,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use wasm_bindgen::JsCast;
 
 const TABS: [(&str, &str); 10] = [
@@ -361,7 +366,7 @@ pub fn Settings() -> impl IntoView {
                             }
                             "bluetooth" => view! { <Bluetooth system=system /> }.into_any(),
                             "cec" => view! { <Cec system=system /> }.into_any(),
-                            "display" => view! { <Display vitals=vitals /> }.into_any(),
+                            "display" => view! { <Display /> }.into_any(),
                             "audio" => view! { <Audio caps=caps /> }.into_any(),
                             "cooling" => view! { <Cooling fan=fan /> }.into_any(),
                             "account" => view! { <Account /> }.into_any(),
@@ -642,272 +647,648 @@ fn Cec(system: SystemStatus) -> impl IntoView {
     }
 }
 
-#[component]
-fn Display(vitals: Option<Value>) -> impl IntoView {
-    let connectors = vitals
-        .as_ref()
-        .and_then(|root| root.get("drm"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    view! {
-        <h2>"Ekran"</h2>
-        <p class="panel-note">
-            "Bağlayıcı durumu doğrudan DRM/KMS'ten okunur. Kodi ve MediaBox arayüzü aynı \
-             ekranı paylaşır; aynı anda yalnız biri DRM master olabilir."
-        </p>
-        {if connectors.is_empty() {
-            missing("DRM bilgisi okunamadı", "Çekirdek bağlayıcı listesi görülemedi.").into_any()
-        } else {
-            view! {
-                <div class="rows">
-                    {connectors
-                        .into_iter()
-                        .map(|connector| {
-                            let name = connector
-                                .get("connector")
-                                .and_then(Value::as_str)
-                                .unwrap_or("?")
-                                .to_string();
-                            let status = connector
-                                .get("status")
-                                .and_then(Value::as_str)
-                                .unwrap_or("?")
-                                .to_string();
-                            let mode = connector
-                                .get("mode")
-                                .and_then(Value::as_str)
-                                .unwrap_or("—")
-                                .to_string();
-                            let tone = if status == "connected" { "ok" } else { "" };
-                            view! {
-                                <Row label=name value=format!("{status} · {mode}") tone=tone />
-                            }
-                        })
-                        .collect_view()}
-                </div>
-            }
-                .into_any()
-        }}
-        <ColorModes />
-    }
-}
-
-/// The colour mode the television is sent, and the list it may be chosen from.
+/// The display: the size, its refresh and the colour mode at it, as the
+/// television's own screen shows them -- readings along the top, the three
+/// lists in cards, buttons under them.
 ///
-/// The list is not a fixed menu. It is computed from the sink's own EDID and
-/// the mode in question, because those two together decide what the link can
-/// actually carry -- and they are not the same on two sockets of one set. A
-/// Sony KD-65XE9005 reports HDMI 1 as a 300 MHz port and HDMI 3 as a 600 MHz
-/// one: at 4K60 the first of those can be sent nothing but YCbCr420 8-bit,
-/// which is why an "HDR" badge over that picture would be a lie, and the panel
-/// says so on the row rather than offering the choice.
-///
-/// `Otomatik` is the answer nobody has to think about: the deepest colour the
-/// link can carry when there is HDR to carry, the fullest chroma otherwise. A
-/// fixed choice is here because a sink occasionally behaves better on something
-/// other than the measured best, and the person watching is the one who can see
-/// that.
+/// Nothing is decided here. Every mode, every colour cell and every reason
+/// comes from the daemon's account of the display, which the television's
+/// interface computed by the HDMI rules from the kernel's mode list and the
+/// EDID. A choice is a draft until "Uygula"; then it is on trial, and the
+/// question whether to keep it is asked here and on the television alike.
 #[component]
-fn ColorModes() -> impl IntoView {
+fn Display() -> impl IntoView {
     let toaster = expect_context::<Toaster>();
-    let state = RwSignal::new(None::<Value>);
+    let events = expect_context::<crate::app::OutputEvents>();
+    let status = RwSignal::new(None::<Result<OutputStatus, String>>);
+    // The draft: `None` until the daemon's first answer seeds it, and again
+    // after a trial ends.
+    let draft = RwSignal::new(None::<(ResolutionChoice, BTreeMap<String, ColorMode>)>);
+    let open = RwSignal::new(None::<(u16, u16)>);
+    let hovered = RwSignal::new(String::new());
+    let edid = RwSignal::new(false);
     let busy = RwSignal::new(false);
+    let now = RwSignal::new(0u32);
 
-    let refresh = move || {
+    let read = move || {
         spawn_local(async move {
-            match api::control(api::display_color_modes()).await {
-                Ok(value) => state.set(Some(value)),
-                Err(error) => state.set(Some(json!({
-                    "available": false,
-                    "error": error.to_string(),
-                }))),
+            let answer = api::typed::<OutputStatus>(api::output(&Request::OutputStatus))
+                .await
+                .map_err(|error| error.message);
+            if let Ok(found) = &answer {
+                if draft.with_untracked(Option::is_none) {
+                    let kept = found
+                        .trial
+                        .as_ref()
+                        .map(|trial| trial.setting.clone())
+                        .unwrap_or_else(|| found.setting.clone());
+                    draft.set(Some((kept.resolution, kept.colours)));
+                }
             }
+            status.set(Some(answer));
         });
     };
-    refresh();
+    read();
+    // Every display event on the daemon's stream: a trial, a keep, a new mode.
+    Effect::new(move |seen: Option<u64>| {
+        let count = events.0.get();
+        if seen.is_some_and(|seen| seen != count) {
+            if status.with_untracked(|s| {
+                s.as_ref()
+                    .and_then(|s| s.as_ref().ok())
+                    .is_some_and(|s| s.trial.is_some())
+            }) {
+                // The trial this page was showing is over, or another began:
+                // the draft follows what the daemon says next.
+                draft.set(None);
+            }
+            read();
+        }
+        count
+    });
+    // The countdown, while there is one.
+    Effect::new(move |previous: Option<Option<IntervalHandle>>| {
+        if let Some(Some(handle)) = previous {
+            handle.clear();
+        }
+        let trial = status.with(|s| {
+            s.as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .and_then(|s| s.trial.as_ref().map(|t| t.seconds_left))
+        })?;
+        now.set(trial);
+        set_interval_with_handle(
+            move || now.update(|left| *left = left.saturating_sub(1)),
+            std::time::Duration::from_secs(1),
+        )
+        .ok()
+    });
 
-    let choose = move |format: Option<(&'static str, u8)>| {
+    let call = move |request: Request, done: &'static str| {
         if busy.get_untracked() {
             return;
         }
         busy.set(true);
         spawn_local(async move {
-            let result = api::control(api::display_color_mode_set(format)).await;
+            let answer = api::typed::<OutputStatus>(api::output(&request)).await;
             busy.set(false);
-            match result {
-                Ok(value) => {
-                    state.set(Some(value));
-                    toaster.say("Renk modu kaydedildi");
+            match answer {
+                Ok(found) => {
+                    if !done.is_empty() {
+                        toaster.say(done);
+                    }
+                    status.set(Some(Ok(found)));
                 }
-                Err(error) => toaster.warn(format!("Renk modu ayarlanamadı: {error}")),
+                Err(error) => toaster.warn(error.message),
             }
         });
     };
 
     view! {
-        <h3>"Renk modu"</h3>
-        <p class="panel-note">
-            "Liste televizyonun EDID'inden ölçülür: her mod için bağlantının taşıyabildiği \
-             biçimler. Aynı televizyonun iki girişi aynı cevabı vermez — bir giriş 4K60'ta \
-             yalnız 8 bit taşıyorsa orada HDR sunulmaz, çünkü 8 bitlik HDR bant yapar."
-        </p>
         {move || {
-            let Some(value) = state.get() else {
-                return view! { <div class="state"><strong>"Okunuyor…"</strong></div> }
+            let Some(answer) = status.get() else {
+                return view! { <div class="state"><strong>"Okunuyor…"</strong></div> }.into_any();
+            };
+            let found = match answer {
+                Ok(found) => found,
+                Err(why) => return missing("Ekran okunamadı", &why).into_any(),
+            };
+            let Some(offer) = found.offer.clone() else {
+                let why = found.error.clone().unwrap_or_else(|| "Bağlı bir ekran yok.".into());
+                return view! {
+                    <h2>"Ekran"</h2>
+                    {missing("Ekran okunamadı", &why)}
+                }
                     .into_any();
             };
-            if !value.get("available").and_then(Value::as_bool).unwrap_or(false) {
-                let why = value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Bağlı bir ekran yok.")
-                    .to_string();
-                return missing("Renk modu okunamadı", &why).into_any();
-            }
-            let current = value
-                .pointer("/choice/kind")
-                .and_then(Value::as_str)
-                .unwrap_or("auto")
-                .to_string();
-            let current_format = value
-                .pointer("/choice/format")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let current_bits = value
-                .pointer("/choice/bits")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u8;
-            let connector = value
-                .get("connector")
-                .and_then(Value::as_str)
-                .unwrap_or("—")
-                .to_string();
-            let sink = value
-                .get("sink")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let ceiling = value
-                .get("max_character_rate_khz")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let declared = value
-                .get("rate_is_declared")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let timings = value
-                .get("timings")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-
-            // Every format/depth pair that any listed timing can carry. A
-            // person chooses one setting, not one per mode, so the choices are
-            // the union -- and each row then says where it applies.
-            let mut choices: Vec<(String, String, u8)> = Vec::new();
-            for timing in &timings {
-                for option in timing.get("allowed").and_then(Value::as_array).into_iter().flatten() {
-                    let label = option.get("label").and_then(Value::as_str).unwrap_or("").to_string();
-                    let format = option
-                        .pointer("/mode/format")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let bits = option.pointer("/mode/bits").and_then(Value::as_u64).unwrap_or(0) as u8;
-                    if !label.is_empty() && !choices.iter().any(|(_, f, b)| *f == format && *b == bits) {
-                        choices.push((label, format, bits));
-                    }
-                }
-            }
+            let (resolution, colours) = draft.get().unwrap_or_default();
+            let chosen = offer.resolve(resolution).cloned();
+            let chosen_colour = chosen
+                .as_ref()
+                .and_then(|mode| colours.get(&mode.label).copied());
+            let kept = found
+                .trial
+                .as_ref()
+                .map(|trial| trial.setting.clone())
+                .unwrap_or_else(|| found.setting.clone());
+            let label = chosen.as_ref().map(|mode| mode.label.clone()).unwrap_or_default();
+            let unsaved = resolution != kept.resolution
+                || chosen_colour != kept.colours.get(&label).copied();
+            let wire = found.wire.clone().unwrap_or_default();
+            let wire_mode = offer.mode(&wire.mode).cloned();
+            let link = offer.link.clone();
+            let ceiling = if link.max_character_rate_khz > 0 {
+                link.max_character_rate_khz.min(link.source_max_khz)
+            } else {
+                link.source_max_khz
+            };
+            let load = match (&wire_mode, wire.colour) {
+                (Some(mode), Some(colour)) => colour.character_rate_khz(mode.pixel_clock_khz),
+                _ => 0,
+            };
+            let (state, state_class) = if found.trial.is_some() {
+                ("Onay bekliyor", "draft")
+            } else if unsaved {
+                ("Uygulanmadı", "draft")
+            } else if wire_mode.as_ref().is_some_and(|mode| mode.hdr10()) {
+                ("Etkin · HDR hazır", "ok")
+            } else {
+                ("Etkin · HDR yok", "ok")
+            };
+            let open_size = open.get().or_else(|| chosen.as_ref().map(|mode| (mode.width, mode.height)));
+            let group = offer
+                .groups
+                .iter()
+                .find(|group| Some((group.width, group.height)) == open_size)
+                .cloned();
+            let set_draft = move |resolution: ResolutionChoice, colours: BTreeMap<String, ColorMode>| {
+                draft.set(Some((resolution, colours)));
+            };
+            let colours_for_sizes = colours.clone();
+            let colours_for_rates = colours.clone();
+            let colours_for_cells = colours.clone();
+            let colours_for_auto = colours.clone();
+            let chosen_label = label.clone();
+            let chosen_label_auto = label.clone();
+            let mut divided = false;
 
             view! {
-                <div class="rows">
-                    <Row
-                        label="Bağlayıcı".to_string()
-                        value=if sink.is_empty() { connector.clone() } else { format!("{connector} · {sink}") }
-                    />
-                    <Row
-                        label="Bağlantı tavanı".to_string()
-                        value=format!(
-                            "{} MHz{}",
-                            ceiling / 1000,
-                            if declared { "" } else { " (bildirilmedi, taban varsayıldı)" },
-                        )
-                        tone=if declared { "ok" } else { "" }
-                    />
-                    <Row label="Seçili".to_string() value=if current == "auto" {
-                        "Otomatik".to_string()
-                    } else {
-                        format!("{current_format} {current_bits}bit")
-                    } />
+                <div class="fan-head">
+                    <h2>"Ekran"</h2>
+                    <span class="out-sink">
+                        {format!(
+                            "{} · {} · {} MHz",
+                            offer.sink_name.clone().unwrap_or_else(|| "Ekran".into()),
+                            offer.connector,
+                            link.max_character_rate_khz / 1000
+                        )}
+                    </span>
+                </div>
+                <div class="fan-readings">
+                    <div class="fan-reading">
+                        <span class="k">"Şu an giden"</span>
+                        <span class="v">
+                            {wire_mode.as_ref().map(|m| format!("{}×{}", m.width, m.height)).unwrap_or_else(|| "—".into())}
+                            <small>{wire_mode.as_ref().map(|m| format!("{} Hz", hz_text(m.refresh_mhz))).unwrap_or_default()}</small>
+                        </span>
+                    </div>
+                    <div class="fan-reading">
+                        <span class="k">"Renk"</span>
+                        <span class="v">
+                            {wire.colour.map(format_short).unwrap_or_else(|| "—".into())}
+                            <small>
+                                {wire.colour.map(|c| format!("{} bit", c.bits)).unwrap_or_default()}
+                                {wire.bus_format.clone().map(|bus| format!(" · {bus}")).unwrap_or_default()}
+                            </small>
+                        </span>
+                    </div>
+                    <div class="fan-reading">
+                        <span class="k">"Hat yükü"</span>
+                        <span class="v">
+                            {if load > 0 { format!("{}", load / 1000) } else { "—".into() }}
+                            <small>{format!("/ {} MHz", ceiling / 1000)}</small>
+                        </span>
+                        <span class="out-load">
+                            <i style=format!(
+                                "width:{:.1}%",
+                                if ceiling > 0 { (f64::from(load) / f64::from(ceiling) * 100.0).min(100.0) } else { 0.0 }
+                            )></i>
+                        </span>
+                    </div>
+                    <span class=format!("fan-state {state_class}")>{state}</span>
                 </div>
 
-                <h3>"Modlara göre"</h3>
-                <div class="rows">
-                    {timings
-                        .iter()
-                        .map(|timing| {
-                            let label = timing.get("label").and_then(Value::as_str).unwrap_or("?").to_string();
-                            let hdr = timing.get("hdr10_fits").and_then(Value::as_bool).unwrap_or(false);
-                            let allowed: Vec<String> = timing
-                                .get("allowed")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                                .filter_map(|option| {
-                                    option.get("label").and_then(Value::as_str).map(str::to_string)
+                <div class="out-main">
+                    <section class="fan-card">
+                        <div class="fan-card-head">
+                            <b>"Çözünürlük"</b>
+                            <span>{format!("{} boyut · {} mod", offer.groups.len(), offer.modes().count())}</span>
+                        </div>
+                        <div class="out-list" role="radiogroup" aria-label="Çözünürlük">
+                            <label class="out-row">
+                                <input
+                                    type="radio"
+                                    name="out-size"
+                                    data-focus="1"
+                                    prop:checked=resolution == ResolutionChoice::Auto
+                                    on:change=move |_| {
+                                        open.set(None);
+                                        set_draft(ResolutionChoice::Auto, colours_for_sizes.clone());
+                                    }
+                                />
+                                <span class="out-t">"Otomatik"<small>{offer.mode(&offer.auto).map(label_of).unwrap_or_default()}</small></span>
+                                {(kept.resolution == ResolutionChoice::Auto && found.trial.is_none()).then(|| view! { <span class="out-tag out-now">"şu an"</span> })}
+                            </label>
+                            {offer
+                                .groups
+                                .iter()
+                                .map(|group| {
+                                    let size = (group.width, group.height);
+                                    let fastest = group
+                                        .modes
+                                        .iter()
+                                        .filter(|mode| mode.allowed().next().is_some())
+                                        .map(|mode| mode.refresh_mhz)
+                                        .max();
+                                    let heading = (group.computer && !divided).then(|| view! {
+                                        <div class="out-divider">"Bilgisayar modları"</div>
+                                    });
+                                    divided |= group.computer;
+                                    let selected = resolution != ResolutionChoice::Auto
+                                        && chosen.as_ref().is_some_and(|m| (m.width, m.height) == size);
+                                    let showing = open_size == Some(size);
+                                    let hdr = group.modes.iter().any(|m| m.hdr10());
+                                    let name = group.name.clone();
+                                    view! {
+                                        {heading}
+                                        <button
+                                            class="out-row"
+                                            class:open=showing
+                                            data-focus="1"
+                                            tabindex="-1"
+                                            on:click=move |_| open.set(Some(size))
+                                        >
+                                            <span class=if selected { "out-dot on" } else { "out-dot" }></span>
+                                            <span class="out-t">
+                                                {format!("{}×{}", size.0, size.1)}
+                                                <small>{match fastest {
+                                                    Some(hz) if name.is_empty() => format!("{} Hz'e kadar", hz_text(hz)),
+                                                    Some(hz) => format!("{name} · {} Hz'e kadar", hz_text(hz)),
+                                                    None => "sığmıyor".into(),
+                                                }}</small>
+                                            </span>
+                                            {hdr.then(|| view! { <span class="out-tag out-hdr">"HDR"</span> })}
+                                        </button>
+                                    }
                                 })
-                                .collect();
-                            view! {
-                                <Row
-                                    label=label
-                                    value=format!(
-                                        "{}{}",
-                                        allowed.join(", "),
-                                        if hdr { "  · HDR10" } else { "  · HDR yok" },
-                                    )
-                                    tone=if hdr { "ok" } else { "" }
-                                />
-                            }
-                        })
-                        .collect_view()}
+                                .collect_view()}
+                        </div>
+                    </section>
+
+                    <section class="fan-card">
+                        <div class="fan-card-head">
+                            <b>"Yenileme"</b>
+                            <span>{open_size.map(|(w, h)| format!("{w}×{h}")).unwrap_or_default()}</span>
+                        </div>
+                        <div class="out-list" role="radiogroup" aria-label="Yenileme">
+                            {group
+                                .map(|group| {
+                                    group
+                                        .modes
+                                        .into_iter()
+                                        .map(|mode| {
+                                            let fits = mode.allowed().next().is_some();
+                                            let checked = mode.is(resolution);
+                                            let choice = mode.choice();
+                                            let on_wire = mode.label == wire.mode;
+                                            let colours = colours_for_rates.clone();
+                                            let reason = if fits {
+                                                format!(
+                                                    "{}: {} renk seçeneği. {}",
+                                                    label_of(&mode),
+                                                    mode.allowed().count(),
+                                                    if mode.hdr10() { "HDR10 taşınabilir." } else { "HDR10 taşınamaz: bu modda 10 bit sığmıyor." }
+                                                )
+                                            } else {
+                                                format!("{}: bu bağlantıda hiçbir renk biçimi sığmıyor.", label_of(&mode))
+                                            };
+                                            view! {
+                                                <label class="out-row" class:refused=!fits on:mouseenter=move |_| hovered.set(reason.clone())>
+                                                    <input
+                                                        type="radio"
+                                                        name="out-rate"
+                                                        data-focus="1"
+                                                        disabled=!fits
+                                                        prop:checked=checked
+                                                        on:change=move |_| set_draft(choice, colours.clone())
+                                                    />
+                                                    <span class="out-t">
+                                                        {format!("{} Hz{}", hz_text(mode.refresh_mhz), if mode.interlaced { " i" } else { "" })}
+                                                        {mode.preferred.then(|| view! { <small>"Ekranın tercihi"</small> })}
+                                                    </span>
+                                                    {on_wire.then(|| view! { <span class="out-tag out-now">"şu an"</span> })}
+                                                    {mode.hdr10().then(|| view! { <span class="out-tag out-hdr">"HDR"</span> })}
+                                                </label>
+                                            }
+                                        })
+                                        .collect_view()
+                                })}
+                        </div>
+                    </section>
+
+                    <section class="fan-card">
+                        <div class="fan-card-head">
+                            <b>"Renk"</b>
+                            <span>{chosen.as_ref().map(label_of).unwrap_or_default()}</span>
+                        </div>
+                        <label class="out-auto">
+                            <input
+                                type="radio"
+                                name="out-colour"
+                                data-focus="1"
+                                prop:checked=chosen_colour.is_none()
+                                on:change=move |_| {
+                                    let mut colours = colours_for_auto.clone();
+                                    colours.remove(&chosen_label_auto);
+                                    set_draft(resolution, colours);
+                                }
+                            />
+                            <span class="out-t">"Otomatik"</span>
+                            <small>{format!(
+                                "SDR: {} · HDR: {}",
+                                chosen.as_ref().and_then(|m| m.auto_sdr).map(colour_text).unwrap_or_else(|| "—".into()),
+                                chosen.as_ref().and_then(|m| m.auto_hdr).map(colour_text).unwrap_or_else(|| "yok".into())
+                            )}</small>
+                        </label>
+                        <div class="out-grid">
+                            <span></span><span class="out-gh">"8 bit"</span><span class="out-gh">"10 bit"</span>
+                            {[
+                                (ColorFormat::Rgb, "RGB"),
+                                (ColorFormat::Ycbcr444, "YCbCr 4:4:4"),
+                                (ColorFormat::Ycbcr422, "YCbCr 4:2:2"),
+                                (ColorFormat::Ycbcr420, "YCbCr 4:2:0"),
+                            ]
+                                .into_iter()
+                                .map(|(format, name)| {
+                                    let cells: Vec<ColourCell> = chosen
+                                        .as_ref()
+                                        .map(|m| m.cells.iter().filter(|c| c.mode.format == format).cloned().collect())
+                                        .unwrap_or_default();
+                                    let cells_view = cells
+                                        .into_iter()
+                                        .map(|cell| {
+                                            let ok = cell.refused.is_none();
+                                            let checked = chosen_colour == Some(cell.mode);
+                                            let on_wire = wire.mode == chosen_label && wire.colour == Some(cell.mode);
+                                            let reason = match cell.refused {
+                                                Some(refusal) => format!("{}: seçilemez. {}", colour_text(cell.mode), refusal.text(cell.mode.format)),
+                                                None => format!(
+                                                    "{}: gereken {} MHz, bu bağlantının {} MHz tavanına sığar.{}",
+                                                    colour_text(cell.mode),
+                                                    cell.rate_khz / 1000,
+                                                    ceiling / 1000,
+                                                    if cell.mode.carries_hdr() { " HDR10 taşır." } else { " HDR10 için 10 bit gerekir." }
+                                                ),
+                                            };
+                                            let fill = (f64::from(cell.rate_khz) / f64::from(link.source_max_khz) * 100.0).min(100.0);
+                                            let tick = f64::from(ceiling) / f64::from(link.source_max_khz) * 100.0;
+                                            let colours = colours_for_cells.clone();
+                                            let label = chosen_label.clone();
+                                            let span = cell.mode.format == ColorFormat::Ycbcr422;
+                                            let title = reason.clone();
+                                            view! {
+                                                <label
+                                                    class="out-cell"
+                                                    class:refused=!ok
+                                                    class:span=span
+                                                    class:chosen=checked
+                                                    title=title
+                                                    on:mouseenter=move |_| hovered.set(reason.clone())
+                                                >
+                                                    <input
+                                                        type="radio"
+                                                        name="out-colour"
+                                                        data-focus="1"
+                                                        disabled=!ok
+                                                        prop:checked=checked
+                                                        on:change=move |_| {
+                                                            let mut colours = colours.clone();
+                                                            colours.insert(label.clone(), cell.mode);
+                                                            set_draft(resolution, colours);
+                                                        }
+                                                    />
+                                                    <span class="out-st">
+                                                        {match (ok, checked, on_wire) {
+                                                            (false, _, _) => "Olmaz",
+                                                            (true, true, _) => "Seçili",
+                                                            (true, false, true) => "Şu an",
+                                                            (true, false, false) => "Seçilebilir",
+                                                        }}
+                                                        {span.then(|| " · 12 bit kapta")}
+                                                    </span>
+                                                    {(ok && cell.mode.carries_hdr()).then(|| view! { <span class="out-tag out-hdr">"HDR"</span> })}
+                                                    <span class="out-mhz">{format!("{} MHz", cell.rate_khz / 1000)}</span>
+                                                    <span class="out-meter">
+                                                        <i style=format!("width:{fill:.1}%")></i>
+                                                        <b style=format!("left:{tick:.1}%")></b>
+                                                    </span>
+                                                </label>
+                                            }
+                                        })
+                                        .collect_view();
+                                    view! {
+                                        <span class="out-gf">{name}</span>
+                                        {cells_view}
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                        <p class="fan-note">{move || {
+                            let text = hovered.get();
+                            if text.is_empty() { "Bir hücrenin üzerine gelince gerekçesi burada yazar.".to_string() } else { text }
+                        }}</p>
+                    </section>
                 </div>
 
-                <h3>"Seçim"</h3>
-                <div class="actions">
+                <div class="actions-row fan-actions">
                     <Action
-                        label="Otomatik".to_string()
-                        variant=if current == "auto" { "primary".to_string() } else { String::new() }
-                        disabled=Signal::derive(move || busy.get())
-                        on_press=Callback::new(move |()| choose(None))
+                        label="Uygula"
+                        variant="primary"
+                        disabled=Signal::derive(move || !unsaved || busy.get())
+                        on_press=Callback::new(move |()| {
+                            call(Request::OutputTry { resolution, colour: chosen_colour }, "");
+                        })
                     />
-                    {choices
-                        .into_iter()
-                        .map(|(label, format, bits)| {
-                            let selected = current == "fixed"
-                                && current_format == format
-                                && current_bits == bits;
-                            // Leaked so the callback can hold a 'static name;
-                            // there are at most a dozen and they live as long
-                            // as the screen does.
-                            let format: &'static str = Box::leak(format.into_boxed_str());
-                            view! {
-                                <Action
-                                    label=label
-                                    variant=if selected { "primary".to_string() } else { String::new() }
-                                    disabled=Signal::derive(move || busy.get())
-                                    on_press=Callback::new(move |()| choose(Some((format, bits))))
-                                />
+                    <Action
+                        label="Geri al"
+                        disabled=Signal::derive(move || !unsaved)
+                        on_press=Callback::new({
+                            let kept = kept.clone();
+                            move |()| {
+                                open.set(None);
+                                draft.set(Some((kept.resolution, kept.colours.clone())));
                             }
                         })
-                        .collect_view()}
+                    />
+                    <Action
+                        label="Otomatiğe dön"
+                        on_press=Callback::new(move |()| {
+                            open.set(None);
+                            draft.set(Some(Default::default()));
+                        })
+                    />
+                    <Action label="EDID bilgileri" on_press=Callback::new(move |()| edid.set(true)) />
+                    <span class="fan-foot">
+                        {if unsaved {
+                            format!("Taslak ekrana gönderilmedi. Uygula'ya basınca {OUTPUT_TRIAL_SECONDS} saniye içinde onay istenir.")
+                        } else {
+                            "Seçim bu ekran için saklanır; başka bir ekran Otomatik ile açılır.".to_string()
+                        }}
+                    </span>
                 </div>
+
+                {found.trial.clone().map(|trial| {
+                    let describe = |setting: &OutputSetting| {
+                        offer
+                            .resolve(setting.resolution)
+                            .map(|mode| format!(
+                                "{} · {}",
+                                label_of(mode),
+                                offer.colour(setting, mode).map(colour_text).unwrap_or_default()
+                            ))
+                            .unwrap_or_default()
+                    };
+                    let new = describe(&trial.setting);
+                    let old = describe(&trial.previous);
+                    view! {
+                        <div class="overlay" data-focus-scope="1">
+                            <div class="sheet fan-prompt">
+                                <h2>"Bu görüntü kalsın mı?"</h2>
+                                <p><b>{format!("Yeni: {new}")}</b></p>
+                                <p class="panel-note">
+                                    {move || format!(
+                                        "Yanıt gelmezse {} saniye sonra önceki ayara dönülür: {old}. Süreyi denetim düzlemi tutar; ekran görüntü alamasa ya da arayüz kapansa bile geri dönülür.",
+                                        now.get()
+                                    )}
+                                </p>
+                                <div class="actions-row">
+                                    <Action
+                                        label="Koru"
+                                        variant="primary"
+                                        autofocus=true
+                                        on_press=Callback::new(move |()| call(Request::OutputKeep, "Bu ekran için kaydedildi"))
+                                    />
+                                    <Action
+                                        label="Geri dön"
+                                        variant="ghost"
+                                        on_press=Callback::new(move |()| call(Request::OutputRevert, "Önceki ayara dönüldü"))
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    }
+                })}
+
+                {move || edid.get().then(|| {
+                    let rows = edid_rows(&offer);
+                    view! {
+                        <div class="overlay" data-focus-scope="1">
+                            <div class="sheet fan-prompt">
+                                <h2>"EDID bilgileri"</h2>
+                                <div class="fan-kv out-kv">
+                                    {rows
+                                        .into_iter()
+                                        .map(|(k, v)| view! {
+                                            <div class="fan-kv-row"><span>{k}</span><span class="fan-kv-value">{v}</span></div>
+                                        })
+                                        .collect_view()}
+                                </div>
+                                <div class="actions-row">
+                                    <Action label="Kapat" variant="primary" autofocus=true on_press=Callback::new(move |()| edid.set(false)) />
+                                </div>
+                            </div>
+                        </div>
+                    }
+                })}
             }
                 .into_any()
         }}
     }
+}
+
+/// `3840×2160 · 59.94 Hz`
+fn label_of(mode: &OutputModeOffer) -> String {
+    format!(
+        "{}×{} · {} Hz{}",
+        mode.width,
+        mode.height,
+        hz_text(mode.refresh_mhz),
+        if mode.interlaced { " (geçmeli)" } else { "" }
+    )
+}
+
+fn hz_text(refresh_mhz: u32) -> String {
+    let hz = f64::from(refresh_mhz) / 1000.0;
+    if (hz - hz.round()).abs() < 0.005 {
+        format!("{}", hz.round() as u32)
+    } else {
+        format!("{hz:.3}").trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+fn format_short(mode: ColorMode) -> String {
+    match mode.format {
+        ColorFormat::Rgb => "RGB",
+        ColorFormat::Ycbcr444 => "4:4:4",
+        ColorFormat::Ycbcr422 => "4:2:2",
+        ColorFormat::Ycbcr420 => "4:2:0",
+    }
+    .into()
+}
+
+fn colour_text(mode: ColorMode) -> String {
+    match mode.format {
+        ColorFormat::Rgb => format!("RGB {} bit", mode.bits),
+        _ => format!("YCbCr {} {} bit", format_short(mode), mode.bits),
+    }
+}
+
+fn edid_rows(offer: &OutputOffer) -> Vec<(String, String)> {
+    let link = &offer.link;
+    let depths = |bits: &[u8]| {
+        if bits.is_empty() {
+            "yok".to_string()
+        } else {
+            bits.iter().map(|b| format!("{b} bit")).collect::<Vec<_>>().join(", ")
+        }
+    };
+    let vics = |vics: &[u8]| vics.iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
+    vec![
+        ("Ekran adı".into(), offer.sink_name.clone().unwrap_or_else(|| "—".into())),
+        ("Bağlayıcı".into(), offer.connector.clone()),
+        (
+            "Bu girişin tavanı".into(),
+            if link.max_character_rate_khz > 0 {
+                format!("{} MHz · {}", link.max_character_rate_khz / 1000, link.declared_by)
+            } else {
+                "bildirilmedi".into()
+            },
+        ),
+        ("HDMI".into(), if link.is_hdmi { "evet".into() } else { "hayır (DVI)".into() }),
+        (
+            "YCbCr".into(),
+            match (link.ycbcr444, link.ycbcr422) {
+                (true, true) => "4:4:4, 4:2:2".into(),
+                (true, false) => "4:4:4".into(),
+                (false, true) => "4:2:2".into(),
+                (false, false) => "yok".into(),
+            },
+        ),
+        ("Derin renk (RGB)".into(), depths(&link.rgb_deep)),
+        (
+            "4:2:0 modları (VIC)".into(),
+            match (link.y420_only.is_empty(), link.y420_also.is_empty()) {
+                (true, true) => "yok".into(),
+                (false, _) => format!("{} · yalnız 4:2:0", vics(&link.y420_only)),
+                (true, false) => format!("{} · 4:2:0 da olur", vics(&link.y420_also)),
+            },
+        ),
+        ("4:2:0 derin renk".into(), depths(&link.ycbcr420_deep)),
+        (
+            "HDR aktarımı".into(),
+            match (link.st2084, link.hlg) {
+                (true, true) => "SMPTE ST 2084 (HDR10), HLG".into(),
+                (true, false) => "SMPTE ST 2084 (HDR10)".into(),
+                (false, true) => "HLG".into(),
+                (false, false) => "yok".into(),
+            },
+        ),
+        ("Kimlik (checksum)".into(), offer.sink.clone()),
+        (
+            "Kaynak (bu kart)".into(),
+            format!("{} MHz · {} bit · RGB, 4:4:4, 4:2:2, 4:2:0", link.source_max_khz / 1000, link.source_max_bits),
+        ),
+    ]
 }
 
 #[component]

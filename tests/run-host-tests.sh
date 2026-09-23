@@ -720,7 +720,6 @@ case "$1" in
     if [ -s "$HP/seq" ]; then head -1 "$HP/seq" | tr '|' '\n'; [ "$(wc -l <"$HP/seq")" -gt 1 ] && sed -i 1d "$HP/seq"
     else cat "$HP/outputs"; fi ;;
   output) awk -F '\t' '$2 == "connected" { print $1; exit }' "$HP/outputs" ;;
-  color-modes) printf '  bağlantı tavanı  600000 kHz (sink bildirdi)\n' ;;
   *) ;;
 esac
 EOF
@@ -883,8 +882,18 @@ check "a settled display removes a video= an older version left, and writes none
   $'verbosity=1\nextraargs=cma=256M\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
 contains "and says it removed it" "$out" 'boot-video=removed'
 check "the original is kept once" "$(cat "$hp/armbianEnv.txt.mediabox-video")" "$env_before"
-check "the browser's mode follows the same display" \
+printf '%s\n' 'kodi_screenmode=0256001440119.99800pstd' \
+  'kodi_whitelist=0256001440119.99800pstd,0256001440059.95000pstd' \
+  'browser_mode=2560x1440@119.998Hz' >"$hp/run/output-plan"
+prepare_real env >/dev/null
+check "the browser's mode is the display setting's, from the daemon's plan" \
   "$(cat "$hp/run/sway-output.conf")" 'output * mode 2560x1440@119.998Hz'
+rm -f "$hp/run/output-plan"
+echo 'output * mode 1920x1080@60.000Hz' >"$hp/run/sway-output.conf"
+out="$(prepare_real env)"
+check "with no plan yet the browser's mode is left as it is" \
+  "$(cat "$hp/run/sway-output.conf")" 'output * mode 1920x1080@60.000Hz'
+contains "and says so" "$out" 'browser-mode=absent'
 contains "and a second run finds nothing to remove" \
   "$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)" 'boot-video=absent'
 

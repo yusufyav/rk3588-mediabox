@@ -156,6 +156,12 @@ impl Ambient {
 #[derive(Clone, Copy)]
 pub struct Toaster(RwSignal<Option<(String, bool)>>);
 
+/// Counts the daemon's display events. A page showing the display settings
+/// reads the daemon again when it changes: a setting put on trial from the
+/// television or `mediaboxctl` is asked about here too.
+#[derive(Clone, Copy)]
+pub struct OutputEvents(pub RwSignal<u64>);
+
 impl Toaster {
     pub fn say(&self, message: impl Into<String>) {
         self.0.set(Some((message.into(), false)));
@@ -307,7 +313,7 @@ fn dispatch_inner(action: &str, nav: Nav) -> bool {
 /// A press can also arrive as an ordinary key event, because the kernel's CEC
 /// driver registers an input device of its own. Both paths land on the same
 /// rate limit, so a press that comes twice still moves one step.
-fn listen_to_remote(nav: Nav) {
+fn listen_to_remote(nav: Nav, output: OutputEvents) {
     let url = if focus::television() {
         "/v1/events?tv=1"
     } else {
@@ -323,6 +329,10 @@ fn listen_to_remote(nav: Nav) {
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
             return;
         };
+        if payload.get("output").is_some() {
+            output.0.update(|count| *count += 1);
+            return;
+        }
         // Only the press edge moves anything; a release would double every step.
         if payload.get("pressed").and_then(|v| v.as_bool()) != Some(true) {
             return;
@@ -471,7 +481,9 @@ pub fn App() -> impl IntoView {
 
     install_keyboard(nav);
     install_focus_guard();
-    listen_to_remote(nav);
+    let output = OutputEvents(RwSignal::new(0));
+    provide_context(output);
+    listen_to_remote(nav, output);
 
     // Focus must survive every screen change, and a screen that has just
     // rendered has no focused element until this runs. Coming back from a

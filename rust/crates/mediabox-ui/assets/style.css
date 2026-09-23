@@ -2348,6 +2348,125 @@ body:not(.tv) .detail-side-window {
 
 .fan-prompt { width: min(38rem, 100%); }
 
+/* The display editor. The same screen the television draws: readings, the
+   sizes, the refresh rates of one and the colour cells of the mode chosen,
+   buttons under them. Every choice is a real radio button, so a keyboard, a
+   screen reader and a phone all reach it. */
+.out-sink {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 650;
+  padding: 0.55em 1em;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg-raise);
+}
+.out-load { display: block; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 0.3rem; }
+.out-load i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
+.out-main {
+  display: grid;
+  grid-template-columns: minmax(15rem, 1fr) minmax(11.5rem, 0.7fr) minmax(0, 1.9fr);
+  gap: 0.8rem;
+  align-items: stretch;
+}
+.out-list { display: grid; gap: 0.15rem; align-content: start; max-height: 30rem; overflow-y: auto; scrollbar-width: thin; }
+.out-row {
+  appearance: none;
+  display: grid;
+  grid-template-columns: 1.2rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.out-row:hover { background: rgba(255, 255, 255, 0.04); }
+.out-row.open { background: rgba(255, 255, 255, 0.06); }
+.out-row.refused { color: var(--dim); cursor: default; }
+.out-row input, .out-auto input, .out-cell input { accent-color: var(--accent); margin: 0; }
+.out-row:focus-within, .out-row.is-focused, .out-row:focus-visible { background: #fff; color: #0a0c10; outline: none; }
+.out-row:focus-within small, .out-row:focus-visible small { color: #3b4350; }
+.out-dot { width: 0.8rem; height: 0.8rem; border-radius: 50%; border: 2px solid var(--line); justify-self: center; }
+.out-dot.on { border-color: var(--accent); background: var(--accent); }
+.out-t { display: grid; font-weight: 700; min-width: 0; white-space: nowrap; }
+.out-t small { color: var(--dim); font-weight: 600; font-size: 0.72rem; }
+.out-tag {
+  font-size: 0.64rem;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.15em 0.45em;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.out-tag.out-hdr { color: #e9d5ff; border-color: #5b3fa8; background: #1d1433; }
+.out-tag.out-now { color: var(--ok); border-color: #1f6b3d; background: #0d2117; }
+.out-divider { color: var(--dim); font-size: 0.64rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 0.7rem 0.55rem 0.25rem; }
+.out-auto {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 2px solid var(--line-soft);
+  cursor: pointer;
+}
+.out-auto small { margin-left: auto; color: var(--muted); font-weight: 600; font-size: 0.78rem; }
+.out-auto:focus-within { background: #fff; color: #0a0c10; border-color: #fff; }
+.out-grid {
+  display: grid;
+  grid-template-columns: 6.2rem minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.4rem;
+  margin-top: 0.7rem;
+  align-items: stretch;
+}
+.out-gh { color: var(--dim); font-size: 0.62rem; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; align-self: end; padding-left: 0.3rem; }
+.out-gf { color: var(--muted); font-weight: 700; font-size: 0.84rem; align-self: center; }
+.out-cell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 0.3rem 0.4rem;
+  padding: 0.45rem 0.6rem 0.55rem;
+  border-radius: 11px;
+  border: 2px solid var(--line-soft);
+  background: var(--bg-card);
+  cursor: pointer;
+  min-width: 0;
+}
+.out-cell.span { grid-column: span 2; }
+.out-cell.refused { background: transparent; border-style: dashed; border-color: var(--line); cursor: help; }
+.out-cell.refused .out-st { color: var(--dim); }
+.out-cell.chosen { border-color: var(--accent); }
+.out-cell.chosen .out-st { color: var(--accent); }
+.out-cell:focus-within { background: #fff; border-color: #fff; border-style: solid; color: #0a0c10; }
+.out-st { font-weight: 750; font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.out-mhz { color: var(--muted); font-size: 0.74rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.out-meter { grid-column: 1 / -1; position: relative; height: 5px; border-radius: 3px; background: #0a0d12; }
+.out-meter i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: #5d6879; }
+.out-cell.chosen .out-meter i { background: var(--accent); }
+.out-cell.refused .out-meter i { background: #7f2d2d; }
+.out-meter b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--muted); }
+.out-kv { grid-template-columns: minmax(0, 1fr); }
+
+@media (max-width: 1100px) {
+  .out-main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .out-main > .fan-card:last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 620px) {
+  .out-main { grid-template-columns: minmax(0, 1fr); }
+  .out-grid { grid-template-columns: 4.6rem minmax(0, 1fr) minmax(0, 1fr); }
+}
+
 @media (max-width: 1100px) {
   .fan-main { grid-template-columns: minmax(0, 1fr); }
   .fan-readings { grid-template-columns: repeat(3, minmax(0, 1fr)); }

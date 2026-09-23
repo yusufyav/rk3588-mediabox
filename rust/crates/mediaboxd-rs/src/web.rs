@@ -272,6 +272,10 @@ async fn serve_events(
     television: bool,
 ) -> io::Result<()> {
     let mut events = state.input.subscribe();
+    // The display setting's events go to every client: a change made from a
+    // phone is put on the wire by the interface, and the question whether to
+    // keep it is asked wherever somebody is looking.
+    let mut output = state.output.subscribe();
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
@@ -279,26 +283,35 @@ async fn serve_events(
         )
         .await?;
     loop {
-        let next = tokio::time::timeout(Duration::from_secs(20), events.recv()).await;
-        let payload = match next {
-            // A comment frame keeps a browser from deciding the stream died.
-            Err(_) => ": keepalive\n\n".to_string(),
-            // Navigation goes to the television and nowhere else.
-            //
-            // This stream reaches every client, so while it carried the
-            // remote's presses a laptop or a phone on the LAN moved in step
-            // with whoever was holding the remote in the living room. Only the
-            // client that says it is the television — the kiosk, which asks
-            // for `?tv=1` — is driven by that remote.
-            Ok(Ok(event)) if !television && is_navigation(event.action) => continue,
-            Ok(Ok(event)) => format!(
-                "data: {}\n\n",
-                serde_json::to_string(&event).expect("event JSON")
-            ),
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(count))) => {
-                format!("data: {{\"warning\":\"lagged\",\"events\":{count}}}\n\n")
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return Ok(()),
+        let payload = tokio::select! {
+            next = tokio::time::timeout(Duration::from_secs(20), events.recv()) => match next {
+                // A comment frame keeps a browser from deciding the stream died.
+                Err(_) => ": keepalive\n\n".to_string(),
+                // Navigation goes to the television and nowhere else.
+                //
+                // This stream reaches every client, so while it carried the
+                // remote's presses a laptop or a phone on the LAN moved in step
+                // with whoever was holding the remote in the living room. Only the
+                // client that says it is the television — the kiosk, which asks
+                // for `?tv=1` — is driven by that remote.
+                Ok(Ok(event)) if !television && is_navigation(event.action) => continue,
+                Ok(Ok(event)) => format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&event).expect("event JSON")
+                ),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(count))) => {
+                    format!("data: {{\"warning\":\"lagged\",\"events\":{count}}}\n\n")
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return Ok(()),
+            },
+            next = output.recv() => match next {
+                Ok(event) => format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&event).expect("event JSON")
+                ),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+            },
         };
         stream.write_all(payload.as_bytes()).await?;
     }

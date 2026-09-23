@@ -16,7 +16,6 @@
 //! so `card="$(mediabox-platform alsa-card)" || exit` is the whole of a caller's
 //! error handling.
 
-use mediabox_platform::video::{parse_sink_video, parse_timings};
 use mediabox_platform::{Binding, Devices, Platform, SelectionReason};
 
 fn main() -> std::process::ExitCode {
@@ -108,113 +107,6 @@ fn main() -> std::process::ExitCode {
             .connector_sysfs
             .map(|path| path.display().to_string())),
         "cec-device" => one(devices.cec.map(|path| path.display().to_string())),
-        // What the selected television can actually be sent at a given mode.
-        //
-        // Two separate facts live in an EDID: the formats a sink understands,
-        // and how fast a signal it will accept. Their intersection is what may
-        // be put on the wire, and it is not the same on two ports of one set --
-        // this is the command that says so out loud rather than leaving a
-        // player to ask for something the link cannot carry and be quietly
-        // given something else.
-        //
-        //   mediabox-platform color-modes [piksel-saati-kHz]
-        "color-modes" => {
-            let clock: u32 = args_rest
-                .iter()
-                .find(|arg| !arg.starts_with('-'))
-                .and_then(|arg| arg.parse().ok())
-                .unwrap_or(594_000);
-            let Some(path) = devices.connector_sysfs.clone() else {
-                eprintln!("mediabox-platform: seçili bir çıkış yok");
-                return std::process::ExitCode::FAILURE;
-            };
-            let edid = std::fs::read(path.join("edid")).unwrap_or_default();
-            let Some(sink) = parse_sink_video(&edid) else {
-                eprintln!("mediabox-platform: {} üzerinde okunabilir bir EDID yok", path.display());
-                return std::process::ExitCode::FAILURE;
-            };
-            // The mode asked about, as the sink declares it: the largest one
-            // at that pixel clock in the shape of the sink's preferred mode.
-            let timings = parse_timings(&edid);
-            let shape = timings
-                .iter()
-                .find(|timing| timing.preferred)
-                .map(|timing| u32::from(timing.width) * 1000 / u32::from(timing.height).max(1));
-            let Some(timing) = timings
-                .iter()
-                .filter(|timing| timing.pixel_clock_khz.abs_diff(clock) <= 1 && !timing.interlaced)
-                .max_by_key(|timing| {
-                    let ratio = u32::from(timing.width) * 1000 / u32::from(timing.height).max(1);
-                    (shape == Some(ratio), timing.refresh_mhz)
-                })
-                .copied()
-            else {
-                eprintln!("mediabox-platform: EDID {clock} kHz piksel saatinde bir mod bildirmiyor");
-                return std::process::ExitCode::FAILURE;
-            };
-            let modes = sink.modes_for(&timing);
-            if json {
-                let report = serde_json::json!({
-                    "connector": devices.connector,
-                    "pixel_clock_khz": clock,
-                    "timing": timing,
-                    "max_character_rate_khz": sink.max_character_rate_khz,
-                    "rate_is_declared": sink.rate_is_declared,
-                    "st2084": sink.st2084,
-                    "hlg": sink.hlg,
-                    "hdr10_fits": sink.hdr10_fits(&timing),
-                    "advertised": sink.advertised,
-                    "allowed": modes,
-                    "auto_sdr": sink.best_for(&timing, false),
-                    "auto_hdr": sink.best_for(&timing, true),
-                });
-                println!("{}", serde_json::to_string_pretty(&report).unwrap());
-            } else {
-                println!(
-                    "{}  {}  {} kHz piksel saati",
-                    devices.connector.as_deref().unwrap_or("-"),
-                    timing.label(),
-                    clock
-                );
-                println!(
-                    "  bağlantı tavanı  {} kHz ({})",
-                    sink.max_character_rate_khz,
-                    if sink.rate_is_declared { "sink bildirdi" } else { "bildirilmedi, taban varsayıldı" }
-                );
-                println!(
-                    "  HDR              ST2084={} HLG={} bu modda sığar={}",
-                    sink.st2084,
-                    sink.hlg,
-                    sink.hdr10_fits(&timing)
-                );
-                let auto_sdr = sink.best_for(&timing, false);
-                let auto_hdr = sink.best_for(&timing, true);
-                if modes.is_empty() {
-                    println!("  izin verilen     yok — bu mod bu bağlantıya sığmıyor");
-                }
-                for mode in &modes {
-                    let mut marks = Vec::new();
-                    if Some(*mode) == auto_sdr {
-                        marks.push("SDR varsayılanı");
-                    }
-                    if Some(*mode) == auto_hdr {
-                        marks.push("HDR varsayılanı");
-                    }
-                    println!(
-                        "  {:<16} {} kHz{}{}",
-                        mode.label(),
-                        mode.character_rate_khz(clock),
-                        if marks.is_empty() { "" } else { "  <- " },
-                        marks.join(", ")
-                    );
-                }
-            }
-            if modes.is_empty() {
-                return std::process::ExitCode::FAILURE;
-            }
-            std::process::ExitCode::SUCCESS
-        }
-
         other => {
             eprintln!("mediabox-platform: bilinmeyen komut '{other}'");
             eprint!("{}", USAGE);
@@ -235,7 +127,6 @@ kullanım: mediabox-platform <komut> [--json]
   alsa-card      o çıkışın ALSA kart kimliği
   alsa-index     o kartın bu açılıştaki ALSA numarası (/proc/asound için)
   cec-device     o çıkışın CEC aygıtı
-  color-modes    seçili çıkışa gönderilebilecek renk modları [piksel-saati-kHz]
 ";
 
 fn report(platform: &Platform) {

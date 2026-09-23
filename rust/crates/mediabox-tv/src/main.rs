@@ -137,10 +137,9 @@ struct App {
     /// a poll that was already in flight when the press happened is ignored
     /// for this one field: it cannot know about a choice made after it left.
     leds_pending: Option<mediabox_core::LedMode>,
-    /// The colour mode a press chose, kept until the daemon answers. Without
-    /// it a poll that left before the press would redraw the old value for a
-    /// frame.
-    color_mode_pending: Option<Option<(mediabox_core::ColorFormat, u8)>>,
+    /// The seconds last drawn on the display question, so it is redrawn once
+    /// a second and not four times.
+    output_seconds: u32,
     /// A fan curve save or reset is in flight. The same guard as the two
     /// above: a poll that left before it cannot know the curve was saved.
     fan_pending: bool,
@@ -515,43 +514,61 @@ impl App {
     /// Whatever it says is what the row shows, including a refusal: a board
     /// that would not take the write must not be left displaying the mode
     /// somebody asked for.
-    /// Draw the chosen colour mode now, on this frame, before the daemon has
-    /// answered. The same trick the lights use.
-    fn show_color_mode(&mut self, mode: Option<(mediabox_core::ColorFormat, u8)>) {
-        let choice = match mode {
-            None => serde_json::json!({"kind": "auto"}),
-            Some((format, bits)) => serde_json::json!({
-                "kind": "fixed",
-                "format": serde_json::to_value(format).unwrap_or(Value::Null),
-                "bits": bits,
-            }),
-        };
-        if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
-            if let Some(colour) = status
-                .get_mut("display_color")
-                .and_then(Value::as_object_mut)
-            {
-                colour.insert("choice".into(), choice);
+    /// The daemon's answer about the display: its whole account, which
+    /// replaces the kept one, or a refusal in its own words.
+    fn output_answered(&mut self, answer: Result<Value, String>) {
+        match answer {
+            Ok(output) => {
+                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("output".into(), output);
+                }
             }
+            Err(error) => self.say(error),
         }
         self.recompose_settings();
     }
 
-    fn color_mode_answered(&mut self, answer: Option<Value>) {
-        self.color_mode_pending = None;
-        if let Some(choice) = answer
-            .as_ref()
-            .and_then(|colour| colour.get("choice"))
-            .and_then(|choice| serde_json::from_value::<mediabox_core::ColorChoice>(choice.clone()).ok())
-        {
-            platform::set_colour_choice(choice);
-        }
-        if let Some(colour) = answer {
-            if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
-                status.insert("display_color".into(), colour);
+    /// What the daemon said on the event stream about the display.
+    fn output_event(&mut self, event: mediabox_core::OutputEvent) {
+        use mediabox_core::OutputEvent;
+        match event {
+            OutputEvent::Apply {
+                setting,
+                trial_seconds,
+            } => {
+                platform::apply_output(setting);
+                if let Some(seconds) = trial_seconds {
+                    self.settings.output.trial(seconds);
+                    self.output_seconds = 0;
+                }
+                self.paint();
             }
+            OutputEvent::Kept => {
+                self.settings.output.trial_ended("Bu ekran için kaydedildi.");
+                spawn_output(mediabox_core::Request::OutputStatus);
+            }
+            OutputEvent::Reverted { timed_out } => {
+                self.settings.output.trial_ended(if timed_out {
+                    "Onay gelmedi; önceki ayara dönüldü."
+                } else {
+                    "Önceki ayara dönüldü."
+                });
+                spawn_output(mediabox_core::Request::OutputStatus);
+            }
+            OutputEvent::Changed => spawn_output(mediabox_core::Request::OutputStatus),
         }
-        self.recompose_settings();
+    }
+
+    /// Redraws the display question when the seconds on it change.
+    fn tick_output(&mut self) {
+        if !self.settings.output.asking() {
+            return;
+        }
+        let seconds = self.settings.output.view().seconds;
+        if seconds != self.output_seconds {
+            self.output_seconds = seconds;
+            self.paint();
+        }
     }
 
     /// The daemon's answer to a fan curve being saved or reset.
@@ -1423,6 +1440,10 @@ impl App {
                     self.press_cooling();
                     return;
                 }
+                if self.settings.is_output() {
+                    self.press_output();
+                    return;
+                }
                 let Some(action) = self.settings.focused().and_then(|row| row.action) else {
                     return;
                 };
@@ -1438,6 +1459,12 @@ impl App {
                 if self.settings.typing_cooling() && self.settings.cooling.back() {
                     self.paint();
                     return;
+                }
+                if self.settings.in_output() {
+                    if let Some(press) = self.settings.output.back() {
+                        self.output_pressed(press);
+                        return;
+                    }
                 }
                 if self.settings.pane == screens::settings::Pane::Rows {
                     self.settings.pane = screens::settings::Pane::Sections;
@@ -1470,6 +1497,27 @@ impl App {
                 spawn_fan(None);
             }
             Press::Restart => self.run(Action::Restart),
+        }
+    }
+
+    /// Ok in the display editor. Choosing stays in this process; a trial,
+    /// keeping it and taking it back are the daemon's.
+    fn press_output(&mut self) {
+        let press = self.settings.output.press();
+        self.output_pressed(press);
+    }
+
+    fn output_pressed(&mut self, press: screens::output::Press) {
+        use screens::output::Press;
+        match press {
+            Press::Nothing => {}
+            Press::Changed => self.paint(),
+            Press::Try(resolution, colour) => {
+                self.say("Ekran ayarı deneniyor…".into());
+                spawn_output(mediabox_core::Request::OutputTry { resolution, colour });
+            }
+            Press::Keep => spawn_output(mediabox_core::Request::OutputKeep),
+            Press::Revert => spawn_output(mediabox_core::Request::OutputRevert),
         }
     }
 
@@ -1886,18 +1934,6 @@ impl App {
                 self.show_leds(mode);
                 spawn_leds(mode);
             }
-            Action::SetColorMode(mode) => {
-                // Same shape as the lights: the row already shows where the
-                // press moved it, so there is nothing to say along the bottom.
-                self.clear_notice();
-                self.color_mode_pending = Some(mode);
-                self.show_color_mode(mode);
-                spawn_color_mode(mode);
-            }
-            Action::SetResolution(choice) => {
-                self.say("Çözünürlük uygulanıyor…".into());
-                spawn_resolution(choice);
-            }
             Action::WakeTelevision => {
                 self.say("Televizyon uyandırılıyor…".into());
                 spawn_kodi(KodiCommand::WakeTelevision);
@@ -1986,19 +2022,6 @@ impl App {
             }
         }
         if let Some(mut fresh) = status {
-            // A poll that left before the viewer pressed Ok cannot know what
-            // was pressed. Keep the chosen mode until the daemon answers, or
-            // the row would show the old value again for one frame.
-            if self.color_mode_pending.is_some() {
-                let kept = self
-                    .status
-                    .as_ref()
-                    .and_then(|status| status.get("display_color"))
-                    .cloned();
-                if let (Some(kept), Some(fresh)) = (kept, fresh.as_object_mut()) {
-                    fresh.insert("display_color".into(), kept);
-                }
-            }
             if self.leds_pending.is_some() {
                 let kept = self
                     .status
@@ -2658,6 +2681,107 @@ impl App {
                 .collect::<Vec<_>>(),
         )));
         self.paint_cooling(window);
+        self.paint_output(window);
+    }
+
+    fn paint_output(&self, window: &MediaBoxWindow) {
+        let output = self.settings.is_output();
+        window.set_settings_output(output);
+        if !output {
+            return;
+        }
+        let view = self.settings.output.view();
+        fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+            slint::ModelRc::new(slint::VecModel::from(items))
+        }
+        let rows = |items: &[screens::output::RowView]| {
+            model(
+                items
+                    .iter()
+                    .map(|row| OutRow {
+                        title: row.title.clone().into(),
+                        sub: row.sub.clone().into(),
+                        selected: row.selected,
+                        open: row.open,
+                        focused: row.focused,
+                        now: row.now,
+                        hdr: row.hdr,
+                        divider: row.divider,
+                        refused: row.refused,
+                    })
+                    .collect(),
+            )
+        };
+        window.set_settings_output_view(OutputView {
+            available: view.available,
+            message: view.message.into(),
+            sink: view.sink.into(),
+            wire_size: view.wire_size.into(),
+            wire_rate: view.wire_rate.into(),
+            wire_format: view.wire_format.into(),
+            wire_bits: view.wire_bits.into(),
+            load: view.load.into(),
+            load_max: view.load_max.into(),
+            load_fill: view.load_fill as f32,
+            state: view.state.into(),
+            state_tone: view.state_tone.into(),
+            resolutions: rows(&view.resolutions),
+            resolution_focus: view.resolution_focus as i32,
+            divider_at: view.divider_at,
+            resolution_count: view.resolution_count.into(),
+            rate_title: view.rate_title.into(),
+            rates: rows(&view.rates),
+            colour_title: view.colour_title.into(),
+            auto_colour: view.auto_colour.into(),
+            auto_colour_selected: view.auto_colour_selected,
+            auto_colour_focused: view.auto_colour_focused,
+            cells: model(
+                view.cells
+                    .iter()
+                    .map(|cell| OutCell {
+                        row: cell.row as i32,
+                        col: cell.col as i32,
+                        span: cell.span,
+                        state: cell.state.clone().into(),
+                        mhz: cell.mhz.clone().into(),
+                        fill: cell.fill as f32,
+                        tick: cell.tick as f32,
+                        ok: cell.ok,
+                        selected: cell.selected,
+                        focused: cell.focused,
+                        hdr: cell.hdr,
+                        now: cell.now,
+                    })
+                    .collect(),
+            ),
+            reason: view.reason.into(),
+            actions: model(
+                view.actions
+                    .iter()
+                    .map(|act| OutAction {
+                        label: act.label.clone().into(),
+                        enabled: act.enabled,
+                        focused: act.focused,
+                    })
+                    .collect(),
+            ),
+            note: view.note.into(),
+            sheet: view.sheet,
+            seconds: view.seconds as i32,
+            fraction: view.fraction as f32,
+            trial: view.trial.into(),
+            previous: view.previous.into(),
+            confirm_focus: view.confirm_focus as i32,
+            edid: model(
+                view.edid
+                    .into_iter()
+                    .map(|(label, value)| OutInfo {
+                        label: label.into(),
+                        value: value.into(),
+                    })
+                    .collect(),
+            ),
+        });
     }
 
     fn paint_cooling(&self, window: &MediaBoxWindow) {
@@ -2956,6 +3080,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install the RK3588 split render/display platform before Slint creates a
     // component. It renders on the Mali GBM render node and presents the
     // exported dma-buf on the Rockchip KMS card.
+    platform::on_output_report(report_output);
     platform::install()?;
 
     // The window, and nothing else. When the television showed nothing there
@@ -3004,7 +3129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: None,
         diag: None,
         leds_pending: None,
-        color_mode_pending: None,
+        output_seconds: 0,
         fan_pending: false,
         display: None,
         controls_were_open: false,
@@ -3128,6 +3253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             with_app(|app| {
                 app.watch_the_film();
                 app.expire_notice();
+                app.tick_output();
             });
         },
     );
@@ -3660,28 +3786,31 @@ fn spawn_home_reload() {
 /// a board with no controllable lights, an unwritable sysfs — has to put the
 /// row back rather than leave the chosen mode sitting there as though it had
 /// worked.
-fn spawn_color_mode(mode: Option<(mediabox_core::ColorFormat, u8)>) {
-    detached("mediabox-tv-color-mode", async move {
+/// One call about the display; the answer comes back to the event loop.
+fn spawn_output(request: mediabox_core::Request) {
+    detached("mediabox-tv-output", async move {
         let client = rpc::Client::new(socket_path());
-        let answer = match client.display_color_mode_set(mode).await {
-            Ok(status) => Some(status),
-            Err(error) => {
-                eprintln!("mediabox-tv.color-mode failed: {error}");
-                None
-            }
-        };
+        let answer = client.output(&request).await.map_err(|error| {
+            eprintln!("mediabox-tv.output {request:?} failed: {error}");
+            error.to_string()
+        });
         let _ = slint::invoke_from_event_loop(move || {
-            with_app(|app| app.color_mode_answered(answer));
+            with_app(|app| app.output_answered(answer));
         });
     });
 }
 
-/// Remember a resolution; the daemon then restarts this process on it.
-fn spawn_resolution(choice: mediabox_core::ResolutionChoice) {
-    detached("mediabox-tv-resolution", async move {
+/// What this process put on the wire, to the daemon. Called by the platform
+/// after every mode set; the daemon keeps the setting, and the web page and
+/// `mediaboxctl` read the display from it.
+fn report_output(offer: mediabox_core::OutputOffer, wire: mediabox_core::OutputWire) {
+    detached("mediabox-tv-output-report", async move {
         let client = rpc::Client::new(socket_path());
-        if let Err(error) = client.display_resolution_set(choice).await {
-            eprintln!("mediabox-tv.resolution failed: {error}");
+        if let Err(error) = client
+            .output(&mediabox_core::Request::OutputReport { offer, wire })
+            .await
+        {
+            eprintln!("mediabox-tv.output report failed: {error}");
         }
     });
 }
@@ -3944,6 +4073,12 @@ fn deliver(line: &str) {
     let Some(payload) = line.strip_prefix("data: ") else {
         return;
     };
+    if let Ok(event) = serde_json::from_str::<mediabox_core::OutputEvent>(payload) {
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.output_event(event));
+        });
+        return;
+    }
     let Ok(event) = serde_json::from_str::<InputEvent>(payload) else {
         return;
     };

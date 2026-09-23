@@ -123,18 +123,10 @@ pub fn diagnostics() -> Value {
     json!({"command": "diagnostics"})
 }
 
-/// What the television can be sent, measured from its EDID.
-pub fn display_color_modes() -> Value {
-    json!({"command": "display_color_modes"})
-}
-
-/// Fix the colour mode, or `None` to go back to the measured default.
-pub fn display_color_mode_set(format: Option<(&str, u8)>) -> Value {
-    let choice = match format {
-        None => json!({"kind": "auto"}),
-        Some((format, bits)) => json!({"kind": "fixed", "format": format, "bits": bits}),
-    };
-    json!({"command": "display_color_mode_set", "choice": choice})
+/// A request about the display: its status, a trial, keeping or taking one
+/// back. The daemon answers each with its whole account of the display.
+pub fn output(request: &mediabox_core::Request) -> Value {
+    serde_json::to_value(request).unwrap_or(Value::Null)
 }
 
 /// The fan as the kernel runs it, and the curve chosen for the next boot.

@@ -1,4 +1,4 @@
-use crate::display::DisplayColor;
+use crate::output::Output;
 use crate::fan::FanController;
 use crate::kodi::KodiClient;
 use crate::leds::LedController;
@@ -67,11 +67,10 @@ pub struct AppState {
     /// because `/sys/class/leds` is root's, and the unit that draws the
     /// television mounts /sys read-only.
     pub leds: LedController,
-    /// What the television can be sent, and what a person chose to send it.
-    /// Measured from the connected sink's EDID; here rather than in the
-    /// interface because that unit mounts /sys read-only and cannot read an
-    /// EDID back after a hotplug.
-    pub display_color: DisplayColor,
+    /// The display setting: the kept one, bound to the display it was made
+    /// on, and a new one on trial. The interface reports what the display
+    /// offers; the daemon keeps the choice and the clock.
+    pub output: Arc<Output>,
     /// The fan's curve for the next boot. The kernel drives the fan; this
     /// only writes the overlay it reads at boot, which is /boot's and root's.
     pub fan: FanController,
@@ -116,34 +115,26 @@ impl AppState {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("LED_ERROR", error),
             },
-            Request::DisplayColorModes => {
-                // Measured on every call rather than cached: the answer changes
-                // when somebody moves the cable to another socket, and the two
-                // sockets of one television do not answer the same.
-                let colour = self.display_color.status();
-                Response::success(colour)
+            Request::OutputStatus => Response::success(self.output.status()),
+            Request::OutputReport { offer, wire } => {
+                self.output.report(offer, wire);
+                Response::success(self.output.status())
             }
-            Request::DisplayColorModeSet { choice } => match self.display_color.set(choice) {
-                Ok(()) => Response::success(self.display_color.status()),
-                Err(error) => Response::failure("DISPLAY_COLOR_ERROR", error),
-            },
-            Request::DisplayResolutionSet { choice } => {
-                match self.display_color.set_resolution(choice) {
-                    Ok(()) => {
-                        // Answered first: the interface that asked is the one
-                        // being restarted, and it should hear that it worked.
-                        let surface = self.surface.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                            if let Err(error) = surface.restart_ui().await {
-                                eprintln!("mediaboxd-rs: çözünürlük uygulanamadı: {error}");
-                            }
-                        });
-                        Response::success(self.display_color.status())
-                    }
-                    Err(error) => Response::failure("DISPLAY_RESOLUTION_ERROR", error),
+            Request::OutputTry { resolution, colour } => {
+                let holds = self.surface.status().await.active == mediabox_core::Surface::Ui;
+                match self.output.try_setting(resolution, colour, holds) {
+                    Ok(status) => Response::success(status),
+                    Err(error) => Response::failure("OUTPUT_REFUSED", error),
                 }
             }
+            Request::OutputKeep => match self.output.keep() {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("OUTPUT_REFUSED", error),
+            },
+            Request::OutputRevert => match self.output.revert() {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("OUTPUT_REFUSED", error),
+            },
             Request::FanStatus => Response::success(self.fan.status()),
             Request::FanCurveSet { profile, points } => {
                 match mediabox_core::FanCurve::resolve(profile, points) {
@@ -808,7 +799,7 @@ impl AppState {
             media,
             surface: self.surface.status().await,
             leds: self.leds.status(),
-            display_color: self.display_color.status(),
+            output: self.output.status(),
             fan: self.fan.status(),
         }
     }
@@ -1056,7 +1047,11 @@ mod tests {
             // Pointed at the empty temporary directory, so the test never
             // reaches the machine's own sysfs and reports no lights.
             leds: LedController::new(dir.path(), dir.path().join("leds")),
-            display_color: DisplayColor::new(dir.path().join("color-mode")),
+            output: Output::new(
+                dir.path().join("output.json"),
+                dir.path().join("output-plan"),
+                dir.path().join("summary"),
+            ),
             fan: FanController::new(crate::fan::FanPaths::under(dir.path())),
             applications: ApplicationManager::load(
                 None,

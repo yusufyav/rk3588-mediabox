@@ -174,22 +174,6 @@ impl SurfaceManager {
         Ok(self.status().await)
     }
 
-    /// Restart the interface, if it is the one on the television, so that it
-    /// sets its mode again. The display stays lit across it.
-    pub async fn restart_ui(&self) -> Result<(), LifecycleError> {
-        let _handover = self.transition.begin().await;
-        if !unit_is_active(&self.ui_unit).await {
-            return Ok(());
-        }
-        let output = systemctl(&["restart", &self.ui_unit]).await?;
-        if !output.status.success() {
-            return Err(LifecycleError::Failed(
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     async fn stop_unit(&self, unit: &str) -> Result<(), LifecycleError> {
         if !unit_is_active(unit).await {
             return Ok(());

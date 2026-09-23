@@ -1,0 +1,878 @@
+import { Theme, Metrics } from "theme.slint";
+
+// The display settings: what is on the wire now, the sizes the display lists,
+// the refresh rates of one, and the colour modes at the mode chosen -- each
+// with what it costs on the link and why a refused one is refused.
+//
+// Everything here is drawn from one OutputView composed in Rust
+// (src/screens/output.rs), where the focus and the draft live and are tested.
+// This file only puts it on the panel, in the fan editor's language: readings
+// along the top, the working area in cards, buttons and one sentence along the
+// bottom.
+
+export struct OutRow {
+    title: string,
+    sub: string,
+    selected: bool,
+    open: bool,
+    focused: bool,
+    now: bool,
+    hdr: bool,
+    divider: bool,
+    refused: bool,
+}
+
+export struct OutCell {
+    row: int,
+    col: int,
+    span: bool,
+    state: string,
+    mhz: string,
+    fill: float,
+    tick: float,
+    ok: bool,
+    selected: bool,
+    focused: bool,
+    hdr: bool,
+    now: bool,
+}
+
+export struct OutAction {
+    label: string,
+    enabled: bool,
+    focused: bool,
+}
+
+export struct OutInfo {
+    label: string,
+    value: string,
+}
+
+export struct OutputView {
+    available: bool,
+    message: string,
+    sink: string,
+    wire-size: string,
+    wire-rate: string,
+    wire-format: string,
+    wire-bits: string,
+    load: string,
+    load-max: string,
+    load-fill: float,
+    state: string,
+    state-tone: string,
+    resolutions: [OutRow],
+    // The row the remote is on (or the chosen one), and the first computer
+    // mode's row, -1 when there is none: for scrolling the list.
+    resolution-focus: int,
+    divider-at: int,
+    resolution-count: string,
+    rate-title: string,
+    rates: [OutRow],
+    colour-title: string,
+    auto-colour: string,
+    auto-colour-selected: bool,
+    auto-colour-focused: bool,
+    cells: [OutCell],
+    reason: string,
+    actions: [OutAction],
+    note: string,
+    sheet: int,
+    seconds: int,
+    fraction: float,
+    trial: string,
+    previous: string,
+    confirm-focus: int,
+    edid: [OutInfo],
+}
+
+component Button inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> focused;
+    in property <bool> primary;
+    property <bool> lit: primary && enabled && !focused;
+    height: Metrics.root-font * 2.7;
+    min-width: txt.preferred-width + Metrics.root-font * 2.4;
+    border-radius: Metrics.root-font * 0.55;
+    background: focused ? Theme.focus-fill : (lit ? Theme.accent : (enabled ? Theme.bg-card : transparent));
+    border-width: 2px;
+    border-color: focused ? Theme.focus-ring : (lit ? Theme.accent : (enabled ? Theme.line : Theme.line-soft));
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    txt := Text {
+        text: label;
+        color: focused ? #0a0c10 : (lit ? Theme.accent-ink : (enabled ? Theme.text : Theme.dim));
+        font-size: Metrics.root-font * 0.9;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+}
+
+component Reading inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> sub;
+    in property <float> bar: -1;
+    border-radius: Theme.radius * 0.85;
+    background: Theme.bg-raise;
+    border-width: 1px;
+    border-color: Theme.line-soft;
+    VerticalLayout {
+        padding-left: Metrics.root-font * 0.9;
+        padding-right: Metrics.root-font * 0.9;
+        alignment: center;
+        spacing: 0px;
+        Text {
+            text: label;
+            color: Theme.dim;
+            font-size: Metrics.root-font * 0.66;
+            font-weight: 650;
+            letter-spacing: Metrics.root-font * 0.04;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        HorizontalLayout {
+            spacing: Metrics.root-font * 0.4;
+            alignment: start;
+            Text {
+                text: value;
+                color: Theme.text;
+                font-size: Metrics.root-font * 1.27;
+                font-weight: 800;
+                wrap: no-wrap;
+            }
+            if sub != "": Text {
+                text: sub;
+                color: Theme.muted;
+                font-size: Metrics.root-font * 0.82;
+                font-weight: 600;
+                vertical-alignment: bottom;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+        }
+        if bar >= 0: Rectangle {
+            height: Metrics.root-font * 0.26;
+            border-radius: self.height / 2;
+            background: Theme.line;
+            Rectangle {
+                x: 0;
+                width: parent.width * bar;
+                border-radius: parent.border-radius;
+                background: bar > 0.98 ? Theme.warn : Theme.ok;
+            }
+        }
+    }
+}
+
+// A small word in a box: HDR, şu an.
+component Tag inherits Rectangle {
+    in property <string> label;
+    in property <string> tone;
+    in property <bool> on-white;
+    property <color> ink: tone == "hdr" ? #e9d5ff : (tone == "now" ? #4ade80 : #9aa5b4);
+    height: Metrics.root-font * 1.1;
+    width: word.preferred-width + Metrics.root-font * 0.6;
+    border-radius: Metrics.root-font * 0.25;
+    background: on-white ? transparent : (tone == "hdr" ? #1d1433 : (tone == "now" ? #0d2117 : transparent));
+    border-width: 1px;
+    border-color: on-white ? #0a0c1040 : (tone == "hdr" ? #5b3fa8 : (tone == "now" ? #1f6b3d : Theme.line));
+    word := Text {
+        text: label;
+        color: on-white ? #0a0c10 : ink;
+        font-size: Metrics.root-font * 0.58;
+        font-weight: 750;
+        letter-spacing: Metrics.root-font * 0.03;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One row of a list: a dot for what is chosen, a title and a line under it,
+// and tags on the right.
+component ListRow inherits Rectangle {
+    in property <OutRow> item;
+    in property <bool> active;
+    property <bool> lit: item.focused && active;
+    height: Metrics.root-font * 2.55;
+    border-radius: Metrics.root-font * 0.5;
+    background: lit ? Theme.focus-fill : (item.open ? #ffffff0d : transparent);
+    border-width: 2px;
+    border-color: lit ? Theme.focus-ring : transparent;
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    HorizontalLayout {
+        padding-left: Metrics.root-font * 0.45;
+        padding-right: Metrics.root-font * 0.6;
+        spacing: Metrics.root-font * 0.45;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Metrics.root-font * 0.62;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: item.selected ? Theme.accent : transparent;
+                border-width: 2px;
+                border-color: item.selected ? Theme.accent : Theme.line;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: item.title;
+                color: lit ? #0a0c10 : (item.refused ? Theme.dim : Theme.text);
+                font-size: Metrics.root-font * 0.95;
+                font-weight: 700;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+            if item.sub != "": Text {
+                text: item.sub;
+                color: lit ? #3b4350 : Theme.dim;
+                font-size: Metrics.root-font * 0.66;
+                font-weight: 600;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: Metrics.root-font * 0.3;
+            if item.now: VerticalLayout {
+                alignment: center;
+                Tag { label: "ŞU AN"; tone: "now"; on-white: lit; }
+            }
+            if item.hdr: VerticalLayout {
+                alignment: center;
+                Tag { label: "HDR"; tone: "hdr"; on-white: lit; }
+            }
+            if item.refused: VerticalLayout {
+                alignment: center;
+                Tag { label: "SIĞMAZ"; tone: ""; on-white: lit; }
+            }
+        }
+    }
+}
+
+// One colour cell: what it is to the draft, what it costs, and a bar of that
+// cost against what this board sends at most, with the link's ceiling marked.
+component ColourCellBox inherits Rectangle {
+    in property <OutCell> cell;
+    in property <bool> active;
+    property <bool> lit: cell.focused && active;
+    border-radius: Metrics.root-font * 0.5;
+    background: lit ? Theme.focus-fill : (cell.ok ? Theme.bg-card : transparent);
+    border-width: 2px;
+    border-color: lit ? Theme.focus-ring : (cell.selected ? Theme.accent : (cell.ok ? Theme.line-soft : Theme.line));
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    VerticalLayout {
+        padding-left: Metrics.root-font * 0.6;
+        padding-right: Metrics.root-font * 0.6;
+        padding-top: Metrics.root-font * 0.4;
+        padding-bottom: Metrics.root-font * 0.5;
+        spacing: Metrics.root-font * 0.3;
+        HorizontalLayout {
+            spacing: Metrics.root-font * 0.3;
+            Text {
+                text: cell.span ? cell.state + " · 12 bit kapta" : cell.state;
+                color: lit ? #0a0c10 : (cell.selected ? Theme.accent : (cell.ok ? Theme.text : Theme.dim));
+                font-size: Metrics.root-font * 0.76;
+                font-weight: 750;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+            if cell.hdr: VerticalLayout {
+                alignment: center;
+                Tag { label: "HDR"; tone: "hdr"; on-white: lit; }
+            }
+            if cell.now && cell.ok: VerticalLayout {
+                alignment: center;
+                Tag { label: "ŞU AN"; tone: "now"; on-white: lit; }
+            }
+            Text {
+                text: cell.mhz;
+                color: lit ? #0a0c10 : Theme.muted;
+                font-size: Metrics.root-font * 0.68;
+                font-weight: 650;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            height: Metrics.root-font * 0.26;
+            border-radius: self.height / 2;
+            background: lit ? #d6dbe3 : #0a0d12;
+            Rectangle {
+                x: 0;
+                width: parent.width * cell.fill;
+                border-radius: parent.border-radius;
+                background: cell.ok ? (cell.selected ? Theme.accent : #5d6879) : #7f2d2d;
+            }
+            Rectangle {
+                x: parent.width * cell.tick - 1px;
+                y: -Metrics.root-font * 0.15;
+                width: 2px;
+                height: parent.height + Metrics.root-font * 0.3;
+                background: lit ? #3b4350 : Theme.muted;
+            }
+        }
+    }
+}
+
+export component OutputPane inherits Rectangle {
+    in property <OutputView> view;
+    in property <bool> active-pane;
+
+    property <length> rf: Metrics.root-font;
+    property <length> gap: rf * 0.9;
+    property <length> head-h: rf * 2.9;
+    property <length> read-y: head-h + rf * 0.7;
+    property <length> read-h: rf * 3.8;
+    property <length> main-y: read-y + read-h + gap;
+    property <length> act-h: rf * 3.1;
+    property <length> act-y: root.height - act-h;
+    property <length> main-h: act-y - gap - main-y;
+    property <length> res-w: rf * 16.8;
+    property <length> rate-w: rf * 12.2;
+    property <length> pad: rf * 0.7;
+    property <length> row-h: rf * 2.55;
+    property <length> row-gap: rf * 0.15;
+
+    Text {
+        x: 0;
+        y: 0;
+        height: head-h;
+        text: "Ekran";
+        color: Theme.text;
+        font-size: rf * 1.5;
+        font-weight: 800;
+        vertical-alignment: center;
+    }
+
+    if view.available: Rectangle {
+        x: root.width - self.width;
+        y: (head-h - self.height) / 2;
+        width: sink-text.preferred-width + rf * 1.8;
+        height: rf * 2.5;
+        border-radius: rf * 0.62;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line;
+        sink-text := Text {
+            text: view.sink;
+            color: Theme.muted;
+            font-size: rf * 0.8;
+            font-weight: 650;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if !view.available: Text {
+        x: 0;
+        y: read-y;
+        width: root.width * 0.7;
+        text: view.message;
+        color: Theme.muted;
+        font-size: rf;
+        wrap: word-wrap;
+    }
+
+    // -------------------------------------------------------------- readings
+
+    if view.available: HorizontalLayout {
+        x: 0;
+        y: read-y;
+        width: root.width;
+        height: read-h;
+        spacing: rf * 0.64;
+        Reading {
+            horizontal-stretch: 1;
+            label: "ŞU AN GİDEN";
+            value: view.wire-size;
+            sub: view.wire-rate;
+        }
+        Reading {
+            horizontal-stretch: 1;
+            label: "RENK";
+            value: view.wire-format;
+            sub: view.wire-bits;
+        }
+        Reading {
+            horizontal-stretch: 1;
+            label: "HAT YÜKÜ";
+            value: view.load;
+            sub: view.load-max;
+            bar: view.load-fill;
+        }
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                property <color> tone: view.state-tone == "good" ? #4ade80 : (view.state-tone == "warn" ? #fbbf24 : #ffb43a);
+                height: rf * 2.36;
+                min-width: state-row.preferred-width + rf * 2;
+                border-radius: self.height / 2;
+                background: tone.with-alpha(0.08);
+                border-width: 1px;
+                border-color: tone.with-alpha(0.4);
+                state-row := HorizontalLayout {
+                    alignment: center;
+                    spacing: rf * 0.45;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: rf * 0.55;
+                            height: self.width;
+                            border-radius: self.width / 2;
+                            background: tone;
+                        }
+                    }
+                    Text {
+                        text: view.state;
+                        color: tone;
+                        font-size: rf * 0.86;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------- resolutions
+
+    if view.available: Rectangle {
+        property <length> list-y: head-h;
+        property <length> list-h: main-h - list-y - pad;
+        x: 0;
+        y: main-y;
+        width: res-w;
+        height: main-h;
+        border-radius: Theme.radius;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+        clip: true;
+
+        Text {
+            x: pad + rf * 0.3;
+            y: 0;
+            height: head-h;
+            text: "Çözünürlük";
+            color: Theme.text;
+            font-size: rf;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+        Text {
+            x: parent.width - pad - rf * 0.3 - self.width;
+            y: 0;
+            height: head-h;
+            text: view.resolution-count;
+            color: Theme.dim;
+            font-size: rf * 0.72;
+            vertical-alignment: center;
+        }
+        // The list scrolls to keep the row the remote is on in view: once it
+        // would fall below the bottom, the rows above move up by whole rows.
+        Rectangle {
+            property <length> pitch: row-h + row-gap;
+            property <length> divider-h: rf * 1.5;
+            property <length> focus-bottom: (view.resolution-focus + 1) * pitch
+                + (view.divider-at >= 0 && view.resolution-focus >= view.divider-at ? divider-h : 0px);
+            x: pad;
+            y: list-y;
+            width: parent.width - pad * 2;
+            height: list-h;
+            clip: true;
+            VerticalLayout {
+                y: min(0px, parent.height - focus-bottom);
+                spacing: row-gap;
+                alignment: start;
+                for row in view.resolutions: VerticalLayout {
+                    spacing: 0px;
+                    if row.divider: Text {
+                        height: divider-h - row-gap;
+                        text: "BİLGİSAYAR MODLARI";
+                        color: Theme.dim;
+                        font-size: rf * 0.6;
+                        font-weight: 700;
+                        letter-spacing: rf * 0.06;
+                        vertical-alignment: bottom;
+                    }
+                    ListRow { item: row; active: active-pane; }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- rates
+
+    if view.available: Rectangle {
+        x: res-w + gap;
+        y: main-y;
+        width: rate-w;
+        height: main-h;
+        border-radius: Theme.radius;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+        clip: true;
+
+        Text {
+            x: pad + rf * 0.3;
+            y: 0;
+            height: head-h;
+            text: "Yenileme";
+            color: Theme.text;
+            font-size: rf;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+        Text {
+            x: parent.width - pad - rf * 0.3 - self.width;
+            y: 0;
+            height: head-h;
+            text: view.rate-title;
+            color: Theme.dim;
+            font-size: rf * 0.66;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            x: pad;
+            y: head-h;
+            width: parent.width - pad * 2;
+            height: main-h - head-h - pad;
+            spacing: row-gap;
+            alignment: start;
+            for row in view.rates: ListRow { item: row; active: active-pane; }
+        }
+    }
+
+    // --------------------------------------------------------------- colours
+
+    if view.available: Rectangle {
+        property <length> inner-x: pad + rf * 0.2;
+        property <length> inner-w: self.width - inner-x * 2;
+        property <length> label-w: rf * 5.2;
+        property <length> col-w: (inner-w - label-w - rf * 0.8) / 2;
+        property <length> chip-y: head-h;
+        property <length> chip-h: rf * 2.7;
+        property <length> heads-y: chip-y + chip-h + rf * 0.6;
+        property <length> heads-h: rf * 1.2;
+        property <length> grid-y: heads-y + heads-h;
+        property <length> cell-h: rf * 2.9;
+        property <length> cell-gap: rf * 0.4;
+        x: res-w + gap + rate-w + gap;
+        y: main-y;
+        width: root.width - self.x;
+        height: main-h;
+        border-radius: Theme.radius;
+        background: Theme.bg-raise;
+        border-width: 1px;
+        border-color: Theme.line-soft;
+
+        Text {
+            x: inner-x;
+            y: 0;
+            height: head-h;
+            text: "Renk";
+            color: Theme.text;
+            font-size: rf;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+        Text {
+            x: parent.width - inner-x - self.width;
+            y: 0;
+            height: head-h;
+            text: view.colour-title;
+            color: Theme.dim;
+            font-size: rf * 0.72;
+            vertical-alignment: center;
+        }
+
+        // Otomatik.
+        auto-chip := Rectangle {
+            property <bool> lit: view.auto-colour-focused && active-pane;
+            x: inner-x;
+            y: chip-y;
+            width: inner-w;
+            height: chip-h;
+            border-radius: rf * 0.5;
+            background: lit ? Theme.focus-fill : Theme.bg-card;
+            border-width: 2px;
+            border-color: lit ? Theme.focus-ring : Theme.line-soft;
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+            HorizontalLayout {
+                padding-left: rf * 0.45;
+                padding-right: rf * 0.7;
+                spacing: rf * 0.45;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: rf * 0.62;
+                        height: self.width;
+                        border-radius: self.width / 2;
+                        background: view.auto-colour-selected ? Theme.accent : transparent;
+                        border-width: 2px;
+                        border-color: view.auto-colour-selected ? Theme.accent : Theme.line;
+                    }
+                }
+                Text {
+                    text: "Otomatik";
+                    color: auto-chip.lit ? #0a0c10 : Theme.text;
+                    font-size: rf * 0.95;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: view.auto-colour;
+                    color: auto-chip.lit ? #3b4350 : Theme.muted;
+                    font-size: rf * 0.72;
+                    font-weight: 600;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // The grid: a format per row, a depth per column.
+        Text {
+            x: inner-x + label-w + rf * 0.4;
+            y: heads-y;
+            height: heads-h;
+            text: "8 BIT";
+            color: Theme.dim;
+            font-size: rf * 0.63;
+            font-weight: 650;
+        }
+        Text {
+            x: inner-x + label-w + rf * 0.8 + col-w;
+            y: heads-y;
+            height: heads-h;
+            text: "10 BIT";
+            color: Theme.dim;
+            font-size: rf * 0.63;
+            font-weight: 650;
+        }
+        for name[i] in ["RGB", "YCbCr 4:4:4", "YCbCr 4:2:2", "YCbCr 4:2:0"]: Text {
+            x: inner-x;
+            y: grid-y + i * (cell-h + cell-gap);
+            width: label-w;
+            height: cell-h;
+            text: name;
+            color: Theme.muted;
+            font-size: rf * 0.78;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        for cell in view.cells: ColourCellBox {
+            x: inner-x + label-w + (cell.span ? 0 : cell.col * (col-w + rf * 0.4));
+            y: grid-y + cell.row * (cell-h + cell-gap);
+            width: cell.span ? col-w * 2 + rf * 0.4 : col-w;
+            height: cell-h;
+            cell: cell;
+            active: active-pane;
+        }
+
+        // What is under the focus.
+        Rectangle {
+            x: inner-x;
+            y: grid-y + 4 * (cell-h + cell-gap) + rf * 0.2;
+            width: inner-w;
+            height: 1px;
+            background: Theme.line-soft;
+        }
+        Text {
+            x: inner-x;
+            y: grid-y + 4 * (cell-h + cell-gap) + rf * 0.6;
+            width: inner-w;
+            height: parent.height - self.y - pad;
+            text: view.reason;
+            color: Theme.muted;
+            font-size: rf * 0.78;
+            font-weight: 600;
+            wrap: word-wrap;
+            vertical-alignment: top;
+        }
+    }
+
+    // --------------------------------------------------------------- actions
+
+    if view.available: HorizontalLayout {
+        x: 0;
+        y: act-y;
+        width: root.width;
+        height: act-h;
+        spacing: rf * 0.64;
+        alignment: start;
+        for act[i] in view.actions: VerticalLayout {
+            alignment: center;
+            Button {
+                label: act.label;
+                enabled: act.enabled;
+                focused: active-pane && act.focused;
+                primary: i == 0;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: view.note;
+            color: Theme.muted;
+            font-size: rf * 0.78;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    // ----------------------------------------------------------- confirmation
+
+    if view.sheet == 1: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000b3;
+        Rectangle {
+            width: min(parent.width * 0.72, rf * 38);
+            height: sheet.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius * 1.25;
+            background: Theme.bg-sheet;
+            border-width: 1px;
+            border-color: Theme.line;
+            sheet := VerticalLayout {
+                padding: rf * 1.9;
+                spacing: rf * 0.8;
+                Text {
+                    text: "Bu görüntü kalsın mı?";
+                    color: Theme.text;
+                    font-size: rf * 1.45;
+                    font-weight: 800;
+                }
+                Text {
+                    text: "Yeni: " + view.trial;
+                    color: Theme.text;
+                    font-size: rf;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: rf * 1.1;
+                    Rectangle {
+                        width: rf * 4.4;
+                        height: self.width;
+                        border-radius: self.width / 2;
+                        background: Theme.bg-raise;
+                        border-width: rf * 0.3;
+                        border-color: Theme.line;
+                        // The time left, as the share of the ring's colour.
+                        Rectangle {
+                            x: parent.border-width;
+                            y: parent.height - parent.border-width - self.height;
+                            width: parent.width - parent.border-width * 2;
+                            height: (parent.height - parent.border-width * 2) * view.fraction;
+                            border-radius: self.width / 2;
+                            background: #ffb43a33;
+                        }
+                        Text {
+                            text: view.seconds;
+                            color: Theme.text;
+                            font-size: rf * 1.6;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Yanıt gelmezse " + view.seconds + " saniye sonra önceki ayara dönülür: " + view.previous + ". Süreyi denetim düzlemi tutar; ekran görüntü alamasa ya da arayüz kapansa bile geri dönülür.";
+                        color: Theme.muted;
+                        font-size: rf * 0.82;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    padding-top: rf * 0.4;
+                    spacing: rf * 0.64;
+                    alignment: start;
+                    Button { label: "Koru"; focused: view.confirm-focus == 0; }
+                    Button { label: "Geri dön"; focused: view.confirm-focus == 1; }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ EDID
+
+    if view.sheet == 2: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000b3;
+        Rectangle {
+            property <length> kv-h: rf * 1.9;
+            width: min(parent.width * 0.8, rf * 42);
+            height: rf * 7 + view.edid.length * kv-h;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius * 1.25;
+            background: Theme.bg-sheet;
+            border-width: 1px;
+            border-color: Theme.line;
+            Text {
+                x: rf * 1.9;
+                y: rf * 1.4;
+                text: "EDID bilgileri";
+                color: Theme.text;
+                font-size: rf * 1.45;
+                font-weight: 800;
+            }
+            for kv[i] in view.edid: Rectangle {
+                x: rf * 1.9;
+                y: rf * 3.6 + i * kv-h;
+                width: parent.width - rf * 3.8;
+                height: kv-h;
+                Text {
+                    x: 0;
+                    height: parent.height;
+                    text: kv.label;
+                    color: Theme.muted;
+                    font-size: rf * 0.85;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: parent.width * 0.42;
+                    width: parent.width * 0.58;
+                    height: parent.height;
+                    text: kv.value;
+                    color: Theme.text;
+                    font-size: rf * 0.85;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Theme.line-soft;
+                }
+            }
+            Button {
+                x: rf * 1.9;
+                y: parent.height - self.height - rf * 1.2;
+                label: "Kapat";
+                focused: true;
+            }
+        }
+    }
+}

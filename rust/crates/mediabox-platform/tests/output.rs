@@ -1,0 +1,330 @@
+//! The display screen's offer, checked against what the Orange Pi 5 Plus
+//! actually saw on 2026-09-23: the kernel's own mode list for HDMI-A-2
+//! (`modetest -M rockchip -c`), the EDID on that connector, and the display
+//! controller's summary from debugfs, all taken from the same boot with the
+//! Sony KD-65XE9005 on its 300 MHz input.
+//!
+//! The 600 MHz input is the same set's other EDID (tests/color_modes.rs). Its
+//! kernel list was not captured, so it is checked against the same list: the
+//! rules are per mode, and every mode below is one that input declares too.
+
+use mediabox_core::{
+    ColorFormat, ColorMode, OutputSetting, Refusal, ResolutionChoice, edid_checkvalue,
+};
+use mediabox_platform::output::{edid_name, offer, plan, wire_bus_format};
+use mediabox_platform::video::{RK3588_HDMI, Timing};
+
+/// The EDID on HDMI-A-2, read from the connector's EDID property.
+const PLUS_300: &str = "\
+00ffffffffffff004dd903f301010101011a0103809051780a0dc9a05747982712484c2108008180a9c0714f\
+b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e2855009f295300\
+001e000000fc00534f4e5920545620202a30300a000000fd00303e0e461e000a20202020202001d302034df0\
+575d5e5f621f101405130420223c3e1216030711150206012c0d7f071507503d07bc570600830f00006e030c\
+004000b83c2f008001020304e200f9e305ff01e50e60616566e3060d01011d8018711c1620582c25009f2953\
+00009e0000000000000000000000000000000000000000000000000000000000000000d7";
+
+/// The Sony's other input: HF-VSDB, 600 MHz, 4:2:0 at ten bits.
+const SONY_600: &str = "\
+00ffffffffffff004dd903f901010101011b0103809051780a0dc9a05747982712484c2108008180a9c0714f\
+b300010101010101010108e80030f2705a80b0588a009f295300001e023a801871382d40582c45009f295300\
+001e000000fc00534f4e5920545620202a30300a000000fd00173e0e883c000a2020202020200171020359f0\
+5b61605d5e5f621f101405130420223c3e12160307111502060165662c0d7f071507503d07bc570400830f00\
+006e030c003000b83c2f00800102030467d85dc401788001e200cbe305ff01e50f03000006e3060d01011d00\
+7251d01e206e2855009f295300001e00000000000000000000000000000000000000006b";
+
+/// width, height, clock kHz, htotal, vtotal, interlaced, preferred -- in the
+/// kernel's order.
+const KERNEL_MODES: &[(u16, u16, u32, u16, u16, bool, bool)] = &[
+    (1920, 1080, 148500, 2200, 1125, false, true),
+    (4096, 2160, 594000, 4400, 2250, false, false),
+    (4096, 2160, 593407, 4400, 2250, false, false),
+    (4096, 2160, 594000, 5280, 2250, false, false),
+    (4096, 2160, 297000, 5500, 2250, false, false),
+    (4096, 2160, 296703, 5500, 2250, false, false),
+    (3840, 2160, 594000, 4400, 2250, false, false),
+    (3840, 2160, 593407, 4400, 2250, false, false),
+    (3840, 2160, 594000, 5280, 2250, false, false),
+    (3840, 2160, 297000, 4400, 2250, false, false),
+    (3840, 2160, 296703, 4400, 2250, false, false),
+    (3840, 2160, 297000, 5280, 2250, false, false),
+    (3840, 2160, 297000, 5500, 2250, false, false),
+    (3840, 2160, 296703, 5500, 2250, false, false),
+    (1920, 1080, 148352, 2200, 1125, false, false),
+    (1920, 1080, 74250, 2200, 1125, true, false),
+    (1920, 1080, 74176, 2200, 1125, true, false),
+    (1920, 1080, 148500, 2640, 1125, false, false),
+    (1920, 1080, 74250, 2640, 1125, true, false),
+    (1920, 1080, 74250, 2200, 1125, false, false),
+    (1920, 1080, 74176, 2200, 1125, false, false),
+    (1920, 1080, 74250, 2750, 1125, false, false),
+    (1920, 1080, 74176, 2750, 1125, false, false),
+    (1680, 1050, 119000, 1840, 1080, false, false),
+    (1600, 900, 108000, 1800, 1000, false, false),
+    (1280, 1024, 108000, 1688, 1066, false, false),
+    (1152, 864, 108000, 1600, 900, false, false),
+    (1280, 720, 74250, 1650, 750, false, false),
+    (1280, 720, 74176, 1650, 750, false, false),
+    (1280, 720, 74250, 1980, 750, false, false),
+    (1280, 720, 74250, 3300, 750, false, false),
+    (1280, 720, 74176, 3300, 750, false, false),
+    (1280, 720, 59400, 3300, 750, false, false),
+    (1280, 720, 59341, 3300, 750, false, false),
+    (1024, 768, 65000, 1344, 806, false, false),
+    (800, 600, 40000, 1056, 628, false, false),
+    (720, 576, 27000, 864, 625, false, false),
+    (720, 480, 27027, 858, 525, false, false),
+    (720, 480, 27000, 858, 525, false, false),
+    (640, 480, 25200, 800, 525, false, false),
+    (640, 480, 25175, 800, 525, false, false),
+];
+
+const SUMMARY: &str = r#"Video Port0: ACTIVE
+    Connector:HDMI-A-2	Encoder: TMDS-235
+	bus_format[2026]: UYYVYY8_0_5X24
+	overlay_mode[1] output_mode[e] SDR[0] color-encoding[BT.709] color-range[Limited]
+    Display mode: 3840x2160p60
+	dclk[594000 kHz] real_dclk[594000 kHz] aclk[750000 kHz] type[40] flag[5]
+	H: 3840 4016 4104 4400
+	V: 2160 2168 2178 2250
+	Fixed H: 3840 4016 4104 4400
+	Fixed V: 2160 2168 2178 2250
+    Cluster0-win0: ACTIVE
+	win_id: 0
+	format: AR24 little-endian (0x34325241) pixel_blend_mode[0] glb_alpha[0xff]
+	color: SDR[0] color-encoding[BT.601] color-range[Limited]
+	rotate: xmirror: 0 ymirror: 0 rotate_90: 0 rotate_270: 0
+	csc: y2r[0] r2y[1] csc mode[1]
+	zpos: 11
+	src: pos[0, 0] rect[3840 x 2160]
+	dst: pos[0, 0] rect[3840 x 2160]
+	buf[0]: addr: 0x0000000001fa4000 pitch: 15360 offset: 0
+Video Port1: DISABLED
+Video Port2: DISABLED
+"#;
+
+fn edid(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+        .collect()
+}
+
+fn kernel() -> Vec<Timing> {
+    KERNEL_MODES
+        .iter()
+        .map(|&(w, h, clock, htotal, vtotal, interlaced, preferred)| {
+            Timing::new(w, h, clock, htotal, vtotal, interlaced, preferred)
+        })
+        .collect()
+}
+
+fn offer_for(hex: &str) -> mediabox_core::OutputOffer {
+    offer(&kernel(), &edid(hex), "HDMI-A-2", Some("SONY TV".into()), &RK3588_HDMI)
+        .expect("an EDID")
+}
+
+fn cell(offer: &mediabox_core::OutputOffer, mode: &str, format: ColorFormat, bits: u8) -> Option<Refusal> {
+    offer
+        .mode(mode)
+        .unwrap_or_else(|| panic!("{mode} listed"))
+        .cells
+        .iter()
+        .find(|cell| cell.mode == ColorMode::new(format, bits))
+        .unwrap_or_else(|| panic!("{mode} {format:?} {bits} drawn"))
+        .refused
+}
+
+#[test]
+fn every_mode_the_kernel_lists_is_shown_once_under_its_size() {
+    let offer = offer_for(PLUS_300);
+    let labels: Vec<&str> = offer.modes().map(|mode| mode.label.as_str()).collect();
+    assert_eq!(labels.len(), 41, "the kernel lists 41, none twice");
+    let mut sorted = labels.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), labels.len(), "no label twice: {labels:?}");
+
+    let sizes: Vec<(u16, u16, bool)> = offer
+        .groups
+        .iter()
+        .map(|group| (group.width, group.height, group.computer))
+        .collect();
+    assert_eq!(
+        sizes,
+        vec![
+            (4096, 2160, false),
+            (3840, 2160, false),
+            (1920, 1080, false),
+            (1280, 720, false),
+            (720, 576, false),
+            (720, 480, false),
+            (1680, 1050, true),
+            (1600, 900, true),
+            (1280, 1024, true),
+            (1152, 864, true),
+            (1024, 768, true),
+            (800, 600, true),
+            (640, 480, true),
+        ]
+    );
+    let uhd = &offer.groups[1];
+    assert_eq!(uhd.name, "4K UHD");
+    let rates: Vec<&str> = uhd.modes.iter().map(|mode| mode.label.as_str()).collect();
+    assert_eq!(
+        rates,
+        vec![
+            "3840x2160p60",
+            "3840x2160p59.94",
+            "3840x2160p50",
+            "3840x2160p30",
+            "3840x2160p29.97",
+            "3840x2160p25",
+            "3840x2160p24",
+            "3840x2160p23.976",
+        ]
+    );
+    // Progressive first, then interlaced.
+    let full_hd: Vec<&str> = offer.groups[2].modes.iter().map(|mode| mode.label.as_str()).collect();
+    assert_eq!(full_hd.last(), Some(&"1920x1080i50"));
+    assert!(offer.mode("1920x1080p60").unwrap().preferred);
+}
+
+#[test]
+fn auto_is_the_largest_mode_in_the_panels_shape_at_the_fastest_rate_on_both_inputs() {
+    assert_eq!(offer_for(PLUS_300).auto, "3840x2160p60");
+    assert_eq!(offer_for(SONY_600).auto, "3840x2160p60");
+}
+
+#[test]
+fn on_the_300_mhz_input_4k60_is_4_2_0_eight_bit_and_every_other_cell_says_why() {
+    let offer = offer_for(PLUS_300);
+    let m = "3840x2160p60";
+    assert_eq!(cell(&offer, m, ColorFormat::Ycbcr420, 8), None);
+    assert_eq!(cell(&offer, m, ColorFormat::Rgb, 8), Some(Refusal::Only420));
+    assert_eq!(cell(&offer, m, ColorFormat::Ycbcr422, 10), Some(Refusal::Only420));
+    assert_eq!(
+        cell(&offer, m, ColorFormat::Ycbcr420, 10),
+        Some(Refusal::DepthNotDeclared { bits: 10 })
+    );
+    let mode = offer.mode(m).unwrap();
+    assert_eq!(mode.auto_sdr, Some(ColorMode::new(ColorFormat::Ycbcr420, 8)));
+    assert_eq!(mode.auto_hdr, None, "no ten-bit cell: no HDR10 at 4K60 here");
+}
+
+#[test]
+fn on_the_300_mhz_input_4k30_takes_rgb_and_carries_hdr_as_4_2_2() {
+    let offer = offer_for(PLUS_300);
+    let m = "3840x2160p30";
+    let mode = offer.mode(m).unwrap();
+    let allowed: Vec<String> = mode.allowed().map(|mode| mode.label()).collect();
+    assert_eq!(allowed, vec!["RGB 8bit", "YCbCr444 8bit", "YCbCr422 10bit"]);
+    assert_eq!(
+        cell(&offer, m, ColorFormat::Rgb, 10),
+        Some(Refusal::OverSink { need_khz: 371_250, max_khz: 300_000 })
+    );
+    assert_eq!(cell(&offer, m, ColorFormat::Ycbcr420, 8), Some(Refusal::No420Here));
+    assert_eq!(mode.auto_sdr, Some(ColorMode::new(ColorFormat::Rgb, 8)));
+    assert_eq!(mode.auto_hdr, Some(ColorMode::new(ColorFormat::Ycbcr422, 10)));
+}
+
+#[test]
+fn on_the_600_mhz_input_4k60_takes_everything_that_fits_600_mhz() {
+    let offer = offer_for(SONY_600);
+    let m = "3840x2160p60";
+    let allowed: Vec<String> = offer.mode(m).unwrap().allowed().map(|mode| mode.label()).collect();
+    assert_eq!(
+        allowed,
+        vec!["RGB 8bit", "YCbCr444 8bit", "YCbCr422 10bit", "YCbCr420 8bit", "YCbCr420 10bit"]
+    );
+    assert_eq!(
+        cell(&offer, m, ColorFormat::Rgb, 10),
+        Some(Refusal::OverSink { need_khz: 742_500, max_khz: 600_000 })
+    );
+}
+
+#[test]
+fn vga_is_eight_bits_only() {
+    let offer = offer_for(PLUS_300);
+    assert_eq!(cell(&offer, "640x480p60", ColorFormat::Rgb, 10), Some(Refusal::EightBitOnly));
+}
+
+#[test]
+fn the_display_says_its_own_name() {
+    assert_eq!(edid_name(&edid(PLUS_300)).as_deref(), Some("SONY TV  *00"));
+}
+
+#[test]
+fn the_display_is_known_by_its_block_checksums() {
+    assert_eq!(edid_checkvalue(&edid(PLUS_300)), "d3d7");
+    assert_eq!(offer_for(PLUS_300).sink, "d3d7");
+    assert_ne!(offer_for(SONY_600).sink, "d3d7");
+}
+
+#[test]
+fn a_choice_made_on_another_display_is_auto_here() {
+    let mut colours = std::collections::BTreeMap::new();
+    colours.insert("3840x2160p30".to_string(), ColorMode::new(ColorFormat::Ycbcr422, 10));
+    let made_elsewhere = OutputSetting {
+        sink: "7171".into(),
+        resolution: ResolutionChoice::Fixed {
+            width: 3840,
+            height: 2160,
+            refresh_mhz: 30_000,
+            interlaced: false,
+        },
+        colours,
+    };
+    let here = made_elsewhere.for_sink("d3d7");
+    assert_eq!(here.resolution, ResolutionChoice::Auto);
+    assert!(here.colours.is_empty());
+    assert_eq!(here.sink, "d3d7");
+    assert_eq!(made_elsewhere.for_sink("7171"), made_elsewhere);
+}
+
+#[test]
+fn a_colour_that_cannot_be_sent_at_a_mode_is_auto_there() {
+    let offer = offer_for(PLUS_300);
+    let mut setting = OutputSetting { sink: "d3d7".into(), ..Default::default() };
+    setting
+        .colours
+        .insert("3840x2160p60".into(), ColorMode::new(ColorFormat::Rgb, 8));
+    let mode = offer.mode("3840x2160p60").unwrap();
+    assert_eq!(offer.colour(&setting, mode), Some(ColorMode::new(ColorFormat::Ycbcr420, 8)));
+    let thirty = offer.mode("3840x2160p30").unwrap();
+    setting
+        .colours
+        .insert("3840x2160p30".into(), ColorMode::new(ColorFormat::Ycbcr422, 10));
+    assert_eq!(offer.colour(&setting, thirty), Some(ColorMode::new(ColorFormat::Ycbcr422, 10)));
+}
+
+#[test]
+fn the_wire_is_read_from_the_display_controller() {
+    let (bus, colour) = wire_bus_format(SUMMARY, "HDMI-A-2").expect("a bus format");
+    assert_eq!(bus, "UYYVYY8_0_5X24");
+    assert_eq!(colour, Some(ColorMode::new(ColorFormat::Ycbcr420, 8)));
+    assert_eq!(wire_bus_format(SUMMARY, "HDMI-A-1"), None);
+}
+
+#[test]
+fn kodi_and_the_browser_take_the_chosen_mode() {
+    let offer = offer_for(PLUS_300);
+    let auto = plan(&offer, &OutputSetting::default()).unwrap();
+    assert_eq!(auto.kodi_screenmode, "0384002160060.00000pstd");
+    assert_eq!(auto.kodi_whitelist.len(), 8, "every 4K UHD refresh: {:?}", auto.kodi_whitelist);
+    assert_eq!(auto.kodi_whitelist.last().unwrap(), "0384002160023.97600pstd");
+    assert_eq!(auto.browser_mode, "3840x2160@60.000Hz");
+
+    let fixed = OutputSetting {
+        sink: "d3d7".into(),
+        resolution: ResolutionChoice::Fixed {
+            width: 3840,
+            height: 2160,
+            refresh_mhz: 30_000,
+            interlaced: false,
+        },
+        ..Default::default()
+    };
+    let thirty = plan(&offer, &fixed).unwrap();
+    assert_eq!(thirty.kodi_screenmode, "0384002160030.00000pstd");
+    assert_eq!(thirty.browser_mode, "3840x2160@30.000Hz");
+}

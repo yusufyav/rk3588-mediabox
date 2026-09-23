@@ -238,33 +238,11 @@ impl Client {
         self.call(json!({"command": "cec_standby_tv"})).await
     }
 
-    /// The board's indicator lights, which the daemon owns for the same reason
-    /// it owns the CEC adapter: `/sys/class/leds` is root's, and this process
-    /// runs under a unit that mounts /sys read-only. The daemon also remembers
-    /// the choice, so this is a request and not a write.
-    /// Remember a colour mode choice, or `None` for the measured default.
-    /// The daemon owns it because the state directory is the daemon's and this
-    /// process's unit mounts /sys read-only.
-    pub async fn display_color_mode_set(
-        &self,
-        mode: Option<(mediabox_core::ColorFormat, u8)>,
-    ) -> Result<Value> {
-        let choice = match mode {
-            None => json!({"kind": "auto"}),
-            Some((format, bits)) => json!({"kind": "fixed", "format": format, "bits": bits}),
-        };
-        self.call(json!({"command": "display_color_mode_set", "choice": choice}))
-            .await
-    }
-
-    /// Remember a resolution choice. The daemon restarts this process so the
-    /// mode is set again from it.
-    pub async fn display_resolution_set(
-        &self,
-        choice: mediabox_core::ResolutionChoice,
-    ) -> Result<Value> {
-        self.call(json!({"command": "display_resolution_set", "choice": choice}))
-            .await
+    /// The display setting: its status, a trial, keeping or taking back a
+    /// trial, or the report of what this process put on the wire. Every one
+    /// answers with the daemon's whole account of the display.
+    pub async fn output(&self, request: &mediabox_core::Request) -> Result<Value> {
+        self.call(serde_json::to_value(request)?).await
     }
 
     /// Save a fan curve for the next boot. The daemon validates it and writes

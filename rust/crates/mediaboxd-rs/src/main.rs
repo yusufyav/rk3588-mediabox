@@ -3,7 +3,7 @@ use mediabox_cec::{Adapter, CecError, unavailable_status};
 use mediabox_core::{CecStatus, InputAction, InputMode, InputSource, Surface};
 use mediabox_input::InputManager;
 use mediaboxd_rs::daemon::{AppState, CecRuntime, apply_kodi_route, serve_unix, socket_is_live};
-use mediaboxd_rs::display::DisplayColor;
+use mediaboxd_rs::output::Output;
 use mediaboxd_rs::fan::FanController;
 use mediaboxd_rs::kodi::KodiClient;
 use mediaboxd_rs::leds::LedController;
@@ -159,7 +159,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The remembered colour mode. Nothing is applied here -- the link is
         // established by whatever draws the television -- so this only restores
         // the choice the player will read.
-        display_color: DisplayColor::new(mediaboxd_rs::display::STATE_FILE),
+        output: Output::new(
+            mediaboxd_rs::output::SETTING_FILE,
+            mediaboxd_rs::output::PLAN_FILE,
+            mediaboxd_rs::output::SUMMARY_FILE,
+        ),
         fan: FanController::system(),
     });
 

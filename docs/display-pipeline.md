@@ -48,7 +48,8 @@ This appliance is plugged into whatever panel the house has: a 4K television,
 a 1440p monitor, an older 1080p set. Every place that named a resolution was a
 place that failed on somebody else's panel.
 
-Removed, and must not come back:
+A mode a person chooses in the display settings is kept, but only for the
+display it was chosen on (rule 9); nothing below may come back:
 
 | file | what it used to say |
 |------|---------------------|
@@ -67,10 +68,9 @@ A pinned mode the panel cannot do produces, on every start:
 — a failed mode set followed by a fallback, which a person sees as the
 television going dark twice on its way to the home screen.
 
-wlroots takes the panel's preferred mode when nothing is written down — that is
-the browser application's compositor. The television's own interface asks
-`mediabox-platform` for the selected output and takes that connector's preferred
-mode. The layout survives the change because the scale is measured from the mode
+The television's own interface takes the mode rule 9 gives it, and the
+browser's compositor is told the same mode through
+`/run/mediabox/sway-output.conf`. The layout survives the change because the scale is measured from the mode
 that was actually taken (rule 1), and `mediabox-display-changed`, triggered by
 udev on a DRM hotplug, compares against the state `mediabox-display-seed`
 records at boot -- so the first plug after a headless boot is not lost -- and
@@ -243,31 +243,53 @@ modetest -M rockchip -e                        # both TMDS encoders: 0x3
 grep -E '^Video Port|Connector:' /sys/kernel/debug/dri/0/summary
 ```
 
-## 9. The mode is the biggest the link carries **as RGB**, in the panel's shape
+## 9. The mode and colour are the HDMI rules' answer, and the person's choice
 
-Three ways to get this wrong, each measured on the reference television:
+What the display can be sent is worked out once, in
+`mediabox_platform::output`, from the mode list the kernel gives the connector
+and the display's EDID, by mainline Linux's own rules
+(`drm_hdmi_compute_mode_clock`, `sink_supports_format_bpc`,
+`hdmi_clock_valid`, the Y420VDB/Y420CMDB parsing of `drm_edid.c`). Every mode
+gets every colour cell -- RGB, 4:4:4, 4:2:2, 4:2:0 at each depth the board has
+-- with the rate it costs and, when it cannot be sent, the rule that says so.
+The television's settings, the web page and `mediaboxctl display modes` all
+draw that one answer.
 
-* **`preferred` above size.** This set marks 1920x1080 preferred and lists
-  every 4K timing after it, so ranking the flag first ran a 4K panel at 1080p
-  — and every 4K film with it, because a film is composited into the mode the
-  interface set.
-* **"Does anything fit?"** Something always fits: 4:2:0 eight-bit is half the
-  rate of RGB. Asking that question chose 4K60 on a 300 MHz link and the
-  driver subsampled a text interface without being asked —
-  `bus_format[2026]: UYYVYY8_0_5X24`.
-* **Biggest rectangle.** This sink offers 4096x2160 as well as 3840x2160.
-  Ranking by area sends a 16:9 television a DCI timing to letterbox. The shape
-  comes from the sink's own preferred mode.
+`Auto` is the reference Android box's rule, measured on both inputs of the
+Sony: the largest mode in the shape of the sink's preferred one, at the fastest
+refresh the link carries **in any format**. On the 300 MHz input that is
+2160p60 in 4:2:0 eight-bit, not the 1080p the set marks preferred; `Auto`
+colour is RGB 8 bit where it fits and 4:2:0 8 bit otherwise, and for an HDR
+film the first format that carries ten bits (RGB, 4:4:4, 4:2:2, 4:2:0).
 
-Kodi is held to the same rule from the other side: its whitelist is **one
-resolution and every refresh rate of it**, rendered per board by
-`mediabox-hdmi-prepare`. A television box does not drop to 1080p because a
-film is 1080p; it stays at the panel's resolution and changes cadence, and the
-one scale that remains is the display controller's:
+A person can choose another mode and another colour at it. The choice is one
+record, bound to the display it was made on by the EDID's block checksums --
+the Android box's `hdmimode` / `<mode>_deepcolor` / `hdmichecksum`. A display
+with another EDID is `Auto`, and the record moves to it: a mode chosen for one
+display is never tried on another (rule 10 is what that costs).
+
+A change is applied in place -- one atomic commit of mode, frame and colour,
+asked first with `TEST_ONLY` -- and is on trial: unless it is kept within 15
+seconds the daemon puts the earlier setting back, and it never reached the disk,
+so a restart finds the earlier one too.
+
+Kodi and the browser start from the same setting: the daemon writes
+`/run/mediabox/output-plan` and `mediabox-hdmi-prepare` gives Kodi the chosen
+mode and every refresh of that size as its whitelist -- a television box does
+not drop to 1080p because a film is 1080p; it keeps the resolution and changes
+cadence, and the one scale left is the display controller's:
 
 ```
 Display mode: 3840x2160p24        # 1080p24 film, playing in Kodi
 plane src 1920x1080 -> dst 3840x2160
+```
+
+**Check:**
+
+```sh
+mediaboxctl display status        # what is on the wire, from the display controller
+mediaboxctl display modes 3840x2160p30
+cat /run/mediabox/output-plan
 ```
 
 ## 10. One mode across a handover — and never by switching fbdev emulation off
@@ -330,7 +352,11 @@ sending HDR as 4:2:2 and that is not a fault. A link with no room is told SDR
 and the plane is tone-mapped, rather than being asked for HDR and left to
 subsample.
 
-Both branches, measured on the same television through its two inputs:
+Both branches, measured on the same television through its two inputs, when
+4:2:2 was still not counted as carrying HDR (it is now: ten bits in a
+twelve-bit container, and the Android box sends HDR on the 300 MHz input as
+exactly that -- whether this board's driver renders it correctly is to be
+measured):
 
 | input | mode | decision | connector |
 |---|---|---|---|

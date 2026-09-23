@@ -154,119 +154,40 @@ if [ -n "$alsa_driver" ] && [ -f "$template" ]; then
   fi
 fi
 
-# The mode list Kodi is allowed to switch between.
+# The mode Kodi starts in and the refresh rates it may change between, and the
+# browser's mode: the display setting, as the daemon works it out.
 #
-# A television box does not change resolution when a film starts. It changes
-# *refresh rate*: the interface and the film both come out at the panel's own
-# resolution, and only the cadence follows the content. That is what every
-# shipping box does, and this appliance did not -- Kodi's whitelist here was
-# every mode the sink advertises, 4096x2160 and 1920x1080 and 1280x720
-# included, so a 1080p film dropped the television to 1080p and a 4K one
-# raised it again, with a resync each way.
+# One setting for everything that owns the television. It is chosen in the
+# display settings (or left on Auto) and put on the wire by the interface; the
+# daemon keeps it, bound to the display it was chosen on, and writes what it
+# means for the other two owners to /run/mediabox/output-plan every time the
+# interface reports the display:
 #
-# So the whitelist is rendered per board instead, from what this output
-# actually is:
+#   kodi_screenmode   the chosen mode, in Kodi's own spelling
+#                     (%05d%05d%09.5fpstd, the refresh from the timing);
+#   kodi_whitelist    every refresh this display lists at that size that
+#                     anything can be sent at, fastest first -- a film changes
+#                     the cadence, never the resolution, as a television box
+#                     does;
+#   browser_mode      the chosen mode, or on Auto the fastest refresh at that
+#                     size that is a whole multiple of 60 or 59.94 Hz.
 #
-#   * the panel's own shape, taken from the sink's preferred mode, which keeps
-#     the DCI 4096x2160 timings out of a 16:9 television;
-#   * the largest resolution the link can carry as RGB -- character rate is
-#     the pixel clock at eight-bit RGB, so a 300 MHz link takes 4K at 30 Hz
-#     and not at 60, and a 600 MHz one takes both. Subsampled chroma is not
-#     used to make a timing fit: that is the fault this project already fixed
-#     once on the wire.
-#   * every refresh rate at that resolution the link can carry, so the film's
-#     own cadence is reachable -- 23.976 above all.
+# Which modes can be sent, and in what, is the HDMI rules' answer
+# (mediabox_platform::output) -- not a rule of this script's. This used to be
+# worked out here in awk with a rule of its own, "RGB at eight bits or not at
+# all", from a ceiling read through /sys/class/drm/*/edid, which this vendor
+# driver leaves empty.
 #
-# Kodi's own format, as it writes it: five digits of width, five of height,
-# then %09.5f of the refresh computed from the timing, then `pstd`.
+# No plan yet (the interface has not reported a display since the daemon
+# started) leaves Kodi's and the browser's own settings as they are.
 kodi_modes=""
 kodi_screenmode=""
-if command -v modetest >/dev/null 2>&1; then
-  ceiling="$("$PLATFORM" color-modes 2>/dev/null |
-             sed -n 's/.*tavan[^0-9]*\([0-9]\+\) kHz.*/\1/p' | head -1)"
-  kodi_modes="$(modetest -M rockchip -c 2>/dev/null |
-    awk -v want="$connector" -v ceiling="${ceiling:-0}" '
-      # Walk into the block for our connector and stop at the next one.
-      $0 ~ ("[ \t]" want "[ \t]") { inblock = 1 }
-      inblock && /^[0-9]+\t/ && $0 !~ ("[ \t]" want "[ \t]") { inblock = 0 }
-      inblock && /^  #[0-9]+ / {
-        name = $2; refresh = $3; htot = $7; vtot = $11; clock = $12
-        if (name ~ /i$/) next                      # interlaced is not a mode here
-        if (clock == 0 || htot == 0 || vtot == 0) next
-        if (ceiling > 0 && clock > ceiling) next   # RGB at eight bits, or not at all
-        split(name, wh, "x")
-        w = wh[1] + 0; h = wh[2] + 0
-        hz = (clock * 1000.0) / (htot * vtot)
-        if ($0 ~ /preferred/) { pw = w; ph = h }
-        n++; W[n] = w; H[n] = h; HZ[n] = hz
-        if (w * h > best) { best = w * h }
-      }
-      END {
-        ratio = (ph > 0) ? int((pw * 1000) / ph) : 0
-        # The largest area that shares the panel s shape.
-        for (i = 1; i <= n; i++) {
-          r = int((W[i] * 1000) / H[i])
-          if (ratio > 0 && r != ratio) continue
-          if (W[i] * H[i] > pick) { pick = W[i] * H[i]; pw2 = W[i]; ph2 = H[i] }
-        }
-        if (pick == 0) exit
-        # Every refresh rate at that size, fastest first, which is the order
-        # Kodi writes and the order it prefers.
-        for (i = 1; i <= n; i++) {
-          if (W[i] != pw2 || H[i] != ph2) continue
-          k[++m] = sprintf("%05d%05d%09.5fpstd", W[i], H[i], HZ[i])
-          hzv[m] = HZ[i]
-        }
-        for (i = 1; i < m; i++) for (j = i + 1; j <= m; j++)
-          if (hzv[j] > hzv[i]) { t = k[i]; k[i] = k[j]; k[j] = t
-                                 tv = hzv[i]; hzv[i] = hzv[j]; hzv[j] = tv }
-        out = ""
-        for (i = 1; i <= m; i++) out = (i == 1) ? k[i] : out "," k[i]
-        print out
-
-        # And the mode the *browser* should take, which is not the fastest.
-        #
-        # Kodi changes refresh to match the film. A browser cannot: a web page
-        # is one surface carrying video at whatever rate a site serves and
-        # everything else at the panel own rate, so the output keeps a single
-        # mode for the whole session and the video has to fit into it. Almost
-        # all of the web is 23.976, 24, 29.97, 30, 59.94 or 60 fps.
-        #
-        # The fastest mode is the wrong answer for that. On the panel measured
-        # here the fastest is 143.999 Hz, and 143.999 / 60 is 2.4 -- so a 60
-        # fps video cannot be held for a whole number of refreshes and each
-        # frame stands for two or three of them in turn. Nothing is dropped,
-        # the frame counters stay clean, and the motion stutters anyway.
-        # Measured in the browser: 58.3 percent of frames held two refreshes,
-        # 39.3 percent held three.
-        #
-        # So take the fastest mode whose refresh is a whole multiple of 60 or
-        # of 59.94, and fall back to the fastest if the sink offers none. Read
-        # out of the mode list, never written here: which timings exist is for
-        # the sink to say, and this box meets more than one.
-        best_hz = 0; best_k = ""
-        for (i = 1; i <= m; i++) {
-          if (whole(hzv[i], 60) || whole(hzv[i], 60000 / 1001)) {
-            if (hzv[i] > best_hz) { best_hz = hzv[i]; best_k = k[i] }
-          }
-        }
-        if (best_k == "") best_k = k[1]
-        print best_k
-      }
-      # A refresh is a whole multiple of a frame rate when every video frame
-      # can be shown for the same number of refreshes. The tolerance is tight
-      # on purpose: a ratio off by a thousandth is a frame slipping once every
-      # few minutes, which is visible, and EDID timings are exact enough to
-      # tell the difference.
-      function whole(hz, base,   r, n) {
-        r = hz / base
-        n = int(r + 0.5)
-        if (n < 1) return 0
-        return (r - n < 0.001 && n - r < 0.001)
-      }')"
-  browser_screenmode="$(printf '%s\n' "$kodi_modes" | sed -n 2p)"
-  kodi_modes="$(printf '%s\n' "$kodi_modes" | sed -n 1p)"
-  kodi_screenmode="${kodi_modes%%,*}"
+browser_screenmode=""
+plan="${MEDIABOX_RUN_DIR:-/run/mediabox}/output-plan"
+if [ -r "$plan" ]; then
+  kodi_screenmode="$(sed -n 's/^kodi_screenmode=\([0-9a-z.]*\)$/\1/p' "$plan")"
+  kodi_modes="$(sed -n 's/^kodi_whitelist=\([0-9a-z.,]*\)$/\1/p' "$plan")"
+  browser_screenmode="$(sed -n 's/^browser_mode=\([0-9x@.Hz]*\)$/\1/p' "$plan")"
 fi
 
 # And the mode the browser's compositor should take.
@@ -282,24 +203,19 @@ fi
 #
 # Two mode changes and a television that resynchronises for each one, and the
 # page drawn at a quarter of the panel's pixels. So the compositor is told the
-# same mode everything else was told, from the same measurement: the largest
-# timing in the panel's own shape that this link carries as RGB.
+# same mode everything else was told: the display setting's, from the plan
+# above.
 #
 # Written as a file sway includes rather than into its config, because the
 # answer is about this board and this cable and the config is the product's.
 sway_dir="${MEDIABOX_RUN_DIR:-/run/mediabox}"
 sway_out="$sway_dir/sway-output.conf"
 browser_mode=absent
-# The browser gets the cadence-clean mode worked out above, not the mode Kodi
-# starts in. Kodi opens at the fastest rate and then follows the film; the
-# browser holds one rate for everything it shows, so the one it holds has to be
-# a whole multiple of the rates the web is made of.
+# The browser gets the plan's browser_mode, not the mode Kodi starts in: Kodi
+# follows the film's cadence, the browser holds one rate for everything it
+# shows.
 if [ -n "${browser_screenmode:-}" ]; then
-  browser_mode="$(printf '%s' "$browser_screenmode" | awk '{
-    w = substr($0, 1, 5) + 0; h = substr($0, 6, 5) + 0
-    hz = substr($0, 11, 9) + 0
-    printf "%dx%d@%.3fHz", w, h, hz
-  }')"
+  browser_mode="$browser_screenmode"
   mkdir -p "$sway_dir" 2>/dev/null || true
   line="output * mode $browser_mode"
   if [ ! -f "$sway_out" ] || [ "$(cat "$sway_out" 2>/dev/null)" != "$line" ]; then

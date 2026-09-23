@@ -1,4 +1,4 @@
-pub mod display;
+pub mod output;
 pub mod daemon;
 pub mod fan;
 pub mod kodi;

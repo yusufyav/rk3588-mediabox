@@ -33,6 +33,7 @@ pub mod cec;
 pub mod drm;
 pub mod dt;
 pub mod roots;
+pub mod output;
 pub mod video;
 
 use std::path::PathBuf;

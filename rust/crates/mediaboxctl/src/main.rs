@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use mediabox_core::{ColorChoice, ColorFormat, FanPoint, FanProfile, Request, Response, Surface};
+use mediabox_core::{
+    ColorFormat, ColorMode, FanPoint, FanProfile, OutputStatus, Request, ResolutionChoice, Response,
+    Surface,
+};
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
@@ -49,10 +52,10 @@ enum Command {
         #[command(subcommand)]
         command: DisplayOwnerCommand,
     },
-    /// What the television can be sent, measured from its EDID
-    DisplayColor {
+    /// The display's modes and colour modes, and the one it is driven at
+    Display {
         #[command(subcommand)]
-        command: DisplayColorCommand,
+        command: DisplayCommand,
     },
     /// The fan as the kernel runs it, and its curve for the next boot
     Fan {
@@ -112,23 +115,36 @@ fn parse_fan_point(text: &str) -> Result<FanPoint, String> {
 }
 
 #[derive(Debug, Subcommand)]
-enum DisplayColorCommand {
-    /// Every timing the sink lists, with the colour modes the link can carry
-    Modes,
-    /// Fix the colour mode, or go back to the measured default
+enum DisplayCommand {
+    /// What is on the wire, what was chosen, and a change waiting to be kept
+    Status,
+    /// Every mode the display lists and what can be sent at each; with a mode,
+    /// every colour cell there and why a refused one is refused
+    Modes {
+        /// `3840x2160p30`, as the list prints it
+        mode: Option<String>,
+    },
+    /// Put a mode on the wire on trial; it is taken back unless kept
     Set {
-        #[arg(value_enum)]
-        format: ColorFormatArg,
-        /// Bits per component. Ignored for `auto`.
-        #[arg(default_value_t = 12)]
+        /// `auto`, `3840x2160@30`, or a label from the list (`3840x2160p29.97`)
+        #[arg(value_parser = parse_resolution)]
+        mode: ResolutionChoice,
+        /// A colour mode at that mode; left out, `Auto`
+        #[arg(long, value_enum)]
+        color: Option<ColorFormatArg>,
+        /// Bits per component, with --color
+        #[arg(long, default_value_t = 8)]
         bits: u8,
     },
+    /// Keep the mode on trial
+    Keep,
+    /// Take the mode on trial back now
+    Revert,
 }
 
-/// The formats a person may name, plus the one that means "decide for me".
+/// The formats a person may name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ColorFormatArg {
-    Auto,
     Rgb,
     Ycbcr444,
     Ycbcr422,
@@ -136,16 +152,34 @@ enum ColorFormatArg {
 }
 
 impl ColorFormatArg {
-    fn choice(self, bits: u8) -> ColorChoice {
+    fn mode(self, bits: u8) -> ColorMode {
         let format = match self {
-            ColorFormatArg::Auto => return ColorChoice::Auto,
             ColorFormatArg::Rgb => ColorFormat::Rgb,
             ColorFormatArg::Ycbcr444 => ColorFormat::Ycbcr444,
             ColorFormatArg::Ycbcr422 => ColorFormat::Ycbcr422,
             ColorFormatArg::Ycbcr420 => ColorFormat::Ycbcr420,
         };
-        ColorChoice::Fixed { format, bits }
+        ColorMode::new(format, bits)
     }
+}
+
+/// `auto`, `WxH@Hz`, or a mode label `WxHp59.94` / `WxHi60`.
+fn parse_resolution(text: &str) -> Result<ResolutionChoice, String> {
+    if text.eq_ignore_ascii_case("auto") {
+        return Ok(ResolutionChoice::Auto);
+    }
+    let bad = || format!("'{text}' bir mod değil: auto, 3840x2160@30 ya da 3840x2160p29.97");
+    let (width, rest) = text.split_once('x').ok_or_else(bad)?;
+    let at = rest.find(['@', 'p', 'i']).ok_or_else(bad)?;
+    let (height, rate) = rest.split_at(at);
+    let interlaced = rate.starts_with('i');
+    let hz: f64 = rate[1..].trim_end_matches("Hz").parse().map_err(|_| bad())?;
+    Ok(ResolutionChoice::Fixed {
+        width: width.parse().map_err(|_| bad())?,
+        height: height.parse().map_err(|_| bad())?,
+        refresh_mhz: (hz * 1000.0).round() as u32,
+        interlaced,
+    })
 }
 
 #[derive(Debug, Subcommand)]
@@ -306,7 +340,22 @@ async fn main() {
     match execute(&args.socket, request).await {
         Ok(lines) => {
             for response in lines {
-                if args.json {
+                let shown = match &args.command {
+                    Command::Display { command } if !args.json => {
+                        let detail = match command {
+                            DisplayCommand::Modes { mode } => Some(mode.as_deref().unwrap_or("")),
+                            _ => None,
+                        };
+                        Some(print_output(&response, detail))
+                    }
+                    _ => None,
+                };
+                if let Some(result) = shown {
+                    if let Err(message) = result {
+                        eprintln!("Hata: {message}");
+                        std::process::exit(1);
+                    }
+                } else if args.json {
                     println!("{}", serde_json::to_string(&response).expect("JSON"));
                 } else if let Err(message) = print_human(&response) {
                     eprintln!("Hata: {message}");
@@ -353,11 +402,14 @@ fn to_request(command: &Command) -> Request {
                 target: (*target).into(),
             },
         },
-        Command::DisplayColor { command } => match command {
-            DisplayColorCommand::Modes => Request::DisplayColorModes,
-            DisplayColorCommand::Set { format, bits } => Request::DisplayColorModeSet {
-                choice: format.choice(*bits),
+        Command::Display { command } => match command {
+            DisplayCommand::Status | DisplayCommand::Modes { .. } => Request::OutputStatus,
+            DisplayCommand::Set { mode, color, bits } => Request::OutputTry {
+                resolution: *mode,
+                colour: color.map(|format| format.mode(*bits)),
             },
+            DisplayCommand::Keep => Request::OutputKeep,
+            DisplayCommand::Revert => Request::OutputRevert,
         },
         Command::Fan { command } => match command {
             FanCommand::Status => Request::FanStatus,
@@ -458,6 +510,108 @@ async fn execute_monitor(path: &PathBuf, json: bool) -> Result<(), Box<dyn std::
             println!("{}", serde_json::to_string(&value)?);
         } else {
             print_human(&value).map_err(std::io::Error::other)?;
+        }
+    }
+    Ok(())
+}
+
+/// The display, as a person reads it. `detail` is `None` for the summary,
+/// `Some("")` for every mode, `Some(label)` for one mode's every cell.
+fn print_output(value: &Value, detail: Option<&str>) -> Result<(), String> {
+    let response: Response = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+    if !response.ok {
+        return Err(response
+            .error
+            .map(|e| e.message)
+            .unwrap_or_else(|| "bilinmeyen daemon hatası".into()));
+    }
+    let status: OutputStatus =
+        serde_json::from_value(response.result.unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
+    let Some(offer) = &status.offer else {
+        println!("Ekran: {}", status.error.as_deref().unwrap_or("bilinmiyor"));
+        return Ok(());
+    };
+    let link = &offer.link;
+    println!(
+        "Ekran: {} · {} · {} MHz{}",
+        offer.sink_name.as_deref().unwrap_or("?"),
+        offer.connector,
+        link.max_character_rate_khz / 1000,
+        if link.declared_by.is_empty() {
+            " (bildirilmedi)".to_string()
+        } else {
+            format!(" ({})", link.declared_by)
+        }
+    );
+    if let Some(wire) = &status.wire {
+        println!(
+            "Şu an: {} · {}{}",
+            wire.mode,
+            wire.colour.map(|mode| mode.label()).unwrap_or_else(|| "?".into()),
+            wire.bus_format
+                .as_deref()
+                .map(|bus| format!(" ({bus})"))
+                .unwrap_or_default()
+        );
+    }
+    let resolved = offer.resolve(status.setting.resolution);
+    println!(
+        "Seçim: {}{}",
+        match status.setting.resolution {
+            ResolutionChoice::Auto => "Otomatik".to_string(),
+            _ => resolved.map(|mode| mode.label.clone()).unwrap_or_default(),
+        },
+        match resolved.and_then(|mode| status.setting.colours.get(&mode.label)) {
+            Some(colour) => format!(" · {}", colour.label()),
+            None => " · renk otomatik".into(),
+        }
+    );
+    if let Some(trial) = &status.trial {
+        println!(
+            "Deneme: {} sn içinde onaylanmazsa geri alınır (mediaboxctl display keep | revert)",
+            trial.seconds_left
+        );
+    }
+    let Some(detail) = detail else { return Ok(()) };
+    if !detail.is_empty() {
+        let mode = offer
+            .mode(detail)
+            .ok_or_else(|| format!("{detail} bu ekranın listesinde yok"))?;
+        for cell in &mode.cells {
+            match cell.refused {
+                None => println!(
+                    "  {:<16} {:>4} MHz  gönderilebilir{}",
+                    cell.mode.label(),
+                    cell.rate_khz / 1000,
+                    if cell.mode.carries_hdr() { " · HDR10" } else { "" }
+                ),
+                Some(refusal) => println!(
+                    "  {:<16} {:>4} MHz  olmaz: {}",
+                    cell.mode.label(),
+                    cell.rate_khz / 1000,
+                    refusal.text(cell.mode.format)
+                ),
+            }
+        }
+        return Ok(());
+    }
+    for group in &offer.groups {
+        println!(
+            "{}x{}{}{}",
+            group.width,
+            group.height,
+            if group.name.is_empty() { String::new() } else { format!(" · {}", group.name) },
+            if group.computer { " · bilgisayar modu" } else { "" }
+        );
+        for mode in &group.modes {
+            let allowed: Vec<String> = mode.allowed().map(|mode| mode.label()).collect();
+            println!(
+                "  {:<18} {}{}{}",
+                mode.label,
+                if allowed.is_empty() { "sığmaz".to_string() } else { allowed.join(", ") },
+                if mode.hdr10() { " · HDR10" } else { "" },
+                if mode.label == offer.auto { " · otomatik" } else { "" }
+            );
         }
     }
     Ok(())
@@ -769,6 +923,25 @@ fn render_surface(
 
 #[cfg(test)]
 mod tests {
+    use super::parse_resolution;
+    use mediabox_core::ResolutionChoice;
+
+    #[test]
+    fn a_mode_is_named_the_way_the_list_prints_it_or_as_a_rate() {
+        let uhd = |refresh_mhz, interlaced| ResolutionChoice::Fixed {
+            width: 3840,
+            height: 2160,
+            refresh_mhz,
+            interlaced,
+        };
+        assert_eq!(parse_resolution("auto"), Ok(ResolutionChoice::Auto));
+        assert_eq!(parse_resolution("3840x2160@30"), Ok(uhd(30_000, false)));
+        assert_eq!(parse_resolution("3840x2160p29.97"), Ok(uhd(29_970, false)));
+        assert_eq!(parse_resolution("3840x2160p23.976"), Ok(uhd(23_976, false)));
+        assert_eq!(parse_resolution("3840x2160i60"), Ok(uhd(60_000, true)));
+        assert!(parse_resolution("4k").is_err());
+    }
+
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 

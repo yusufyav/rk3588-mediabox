@@ -1,6 +1,7 @@
 import { Theme, Metrics } from "theme.slint";
 import { SettingRow } from "components.slint";
 import { CoolingPane, CoolingView } from "cooling.slint";
+import { OutputPane, OutputView } from "output.slint";
 
 // What the box can be told, from the sofa.
 //
@@ -16,6 +17,9 @@ export component Settings inherits Rectangle {
     // The fan curve editor takes the whole right-hand side of its section.
     in property <bool> cooling;
     in property <CoolingView> cooling-view;
+    // So does the display editor.
+    in property <bool> output;
+    in property <OutputView> output-view;
 
     property <length> sections-w: max(220px, min(520px, root.width * 0.22));
     property <length> rows-x: Metrics.gutter + sections-w + Metrics.gutter * 0.8;
@@ -80,8 +84,17 @@ export component Settings inherits Rectangle {
         active-pane: !on-sections;
     }
 
+    if output: OutputPane {
+        x: rows-x;
+        y: top;
+        width: root.width - rows-x - Metrics.gutter;
+        height: root.height - top - Metrics.gutter * 0.6;
+        view: output-view;
+        active-pane: !on-sections;
+    }
+
     VerticalLayout {
-        visible: !cooling;
+        visible: !cooling && !output;
         x: rows-x;
         y: top;
         // Capped rather than run to the far edge. A label on the left of a
