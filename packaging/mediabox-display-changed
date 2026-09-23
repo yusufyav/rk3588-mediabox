@@ -109,6 +109,9 @@ if [ "${1:-}" = seed ]; then
     prepare
     say "açılışta bağlı ekran kaydedildi"
   else
+    # Nothing to prepare for, but a boot argument an older version left must
+    # still come off before the next display is plugged in.
+    MEDIABOX_HDMI_BOOT_VIDEO=1 "$PREPARE" || say "hazırlık başarısız ($?)"
     say "açılışta bağlı ekran yok; ilk takılış kurtarılacak"
   fi
   exit 0

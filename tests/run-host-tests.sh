@@ -866,8 +866,14 @@ prepare_real() {
 }
 printf '%s\n' "$env_before" >"$hp/armbianEnv.txt"; rm -f "$hp/armbianEnv.txt.mediabox-video"
 printf '%s' "$off" >"$hp/outputs"
-prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1 >/dev/null
-check "a disconnected display leaves /boot alone" "$(cat "$hp/armbianEnv.txt")" "$env_before"
+prepare_real env >/dev/null
+check "an application's own preparation leaves /boot alone, with no display" "$(cat "$hp/armbianEnv.txt")" "$env_before"
+out="$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)"
+check "a boot with no display still removes a video= an older version left" \
+  "$(cat "$hp/armbianEnv.txt")" \
+  $'verbosity=1\nextraargs=cma=256M\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
+contains "and says so" "$out" 'boot-video=removed'
+printf '%s\n' "$env_before" >"$hp/armbianEnv.txt"; rm -f "$hp/armbianEnv.txt.mediabox-video"
 printf '%s' "$on" >"$hp/outputs"
 prepare_real env >/dev/null
 check "an application's own preparation leaves /boot alone" "$(cat "$hp/armbianEnv.txt")" "$env_before"

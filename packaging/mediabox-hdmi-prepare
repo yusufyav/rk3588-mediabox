@@ -33,11 +33,75 @@ connector="$("$PLATFORM" output 2>/dev/null || true)"
 alsa_card="$("$PLATFORM" alsa-card 2>/dev/null || true)"
 alsa_driver="$("$PLATFORM" alsa-driver 2>/dev/null || true)"
 
+# No mode on the kernel command line. Ever.
+#
+# This used to write the display's fastest mode into /boot as `video=`, so the
+# kernel's fbdev emulation would hold 4K between two applications instead of
+# the sink's preferred 1080p. But that argument belongs to whichever display
+# was plugged in when it was written, and the kernel applies it to whatever is
+# plugged in at the next boot -- before any of this runs. When the new display
+# does not list that mode the kernel invents one with the GTF formula, and the
+# vendor HDMI driver does not reject it. Measured on the Orange Pi 5 Plus,
+# 2026-09-23: `video=HDMI-A-2:2560x1440@144` left by a 1440p monitor, a Sony
+# television on the same socket, GTF 807.9 MHz, `can't find frl rate, phy pll
+# init failed`, SError in dw_hdmi_qp_setup, kernel panic 1.7 s into every boot.
+#
+# Without it the kernel takes the mode from the EDID of the display actually
+# connected, which is what every other HDMI source does. The cost is the one
+# the argument was for: on a sink whose preferred mode is below the one Kodi
+# uses, a handover can show that preferred mode for a moment.
+#
+# So the only thing left to do with the argument is take it off boards an older
+# version put it on -- before looking for a display, because a board that boots
+# with nothing connected still boots with the argument, and the next display
+# plugged in is the one it would be applied to. mediabox-display-changed runs
+# this as root at every boot and after a display change with
+# MEDIABOX_HDMI_BOOT_VIDEO=1; every other caller is sandboxed and leaves /boot
+# alone.
+boot_env="${MEDIABOX_BOOT_ENV:-/boot/armbianEnv.txt}"
+video_arg=""
+boot_mode=not-asked
+if [ "${MEDIABOX_HDMI_BOOT_VIDEO:-0}" != 1 ]; then
+  :
+elif [ ! -f "$boot_env" ]; then
+  boot_mode=unknown
+elif ! grep -q '^extraargs=.*video=' "$boot_env"; then
+  boot_mode=absent
+elif [ ! -w "$boot_env" ]; then
+  boot_mode=unwritable
+else
+  current="$(sed -n 's/^extraargs=//p' "$boot_env" | head -1)"
+  video_arg="$(printf '%s\n' "$current" | tr ' ' '\n' | grep '^video=' | tr '\n' ' ' | sed 's/ $//')"
+  wanted="$(printf '%s' "$current" | sed "s#video=[^ ]*##g" | tr -s ' ' | sed 's/^ //; s/ $//')"
+  if [ "$current" = "$wanted" ]; then
+    boot_mode=absent
+  else
+    # This file decides whether the board boots. One copy kept, one line
+    # rewritten, nothing else in it touched, and never half of it on disk: the
+    # new file is written and flushed beside the old one and renamed over it.
+    before="$(sha256sum "$boot_env" | cut -c1-12)"
+    [ -f "$boot_env.mediabox-video" ] || cp -a "$boot_env" "$boot_env.mediabox-video"
+    next="$boot_env.mediabox-next"
+    if grep -q '^extraargs=' "$boot_env"; then
+      awk -v line="extraargs=$wanted" \
+        '/^extraargs=/ && !done { print line; done = 1; next } { print }' \
+        "$boot_env" >"$next"
+    else
+      { cat "$boot_env"; printf 'extraargs=%s\n' "$wanted"; } >"$next"
+    fi
+    chmod --reference="$boot_env" "$next" 2>/dev/null || true
+    sync "$next" 2>/dev/null || sync
+    mv -f "$next" "$boot_env"
+    sync
+    boot_mode="removed $before->$(sha256sum "$boot_env" | cut -c1-12)"
+  fi
+fi
+
 if [ -z "$connector" ]; then
   # Nothing is plugged in, or discovery could not decide. Neither is this
   # script's to fix, and neither is a reason to fail the unit that runs it:
   # whoever takes the display next reports it properly.
-  echo "mediabox-hdmi-prepare: seçili bir ekran çıkışı yok" >&2
+  echo "mediabox-hdmi-prepare: seçili bir ekran çıkışı yok boot-video=$boot_mode${video_arg:+ ($video_arg)}" >&2
   exit 0
 fi
 
@@ -203,67 +267,6 @@ if command -v modetest >/dev/null 2>&1; then
   browser_screenmode="$(printf '%s\n' "$kodi_modes" | sed -n 2p)"
   kodi_modes="$(printf '%s\n' "$kodi_modes" | sed -n 1p)"
   kodi_screenmode="${kodi_modes%%,*}"
-fi
-
-# No mode on the kernel command line. Ever.
-#
-# This used to write the display's fastest mode into /boot as `video=`, so the
-# kernel's fbdev emulation would hold 4K between two applications instead of
-# the sink's preferred 1080p. But that argument belongs to whichever display
-# was plugged in when it was written, and the kernel applies it to whatever is
-# plugged in at the next boot -- before any of this runs. When the new display
-# does not list that mode the kernel invents one with the GTF formula, and the
-# vendor HDMI driver does not reject it. Measured on the Orange Pi 5 Plus,
-# 2026-09-23: `video=HDMI-A-2:2560x1440@144` left by a 1440p monitor, a Sony
-# television on the same socket, GTF 807.9 MHz, `can't find frl rate, phy pll
-# init failed`, SError in dw_hdmi_qp_setup, kernel panic 1.7 s into every boot.
-#
-# Without it the kernel takes the mode from the EDID of the display actually
-# connected, which is what every other HDMI source does. The cost is the one
-# the argument was for: on a sink whose preferred mode is below the one Kodi
-# uses, a handover can show that preferred mode for a moment.
-#
-# So the only thing left to do with the argument is take it off boards an older
-# version put it on. mediabox-display-changed runs this as root at boot and
-# after a display change with MEDIABOX_HDMI_BOOT_VIDEO=1; every other caller is
-# sandboxed and leaves /boot alone.
-boot_env="${MEDIABOX_BOOT_ENV:-/boot/armbianEnv.txt}"
-video_arg=""
-boot_mode=not-asked
-if [ "${MEDIABOX_HDMI_BOOT_VIDEO:-0}" != 1 ]; then
-  :
-elif [ ! -f "$boot_env" ]; then
-  boot_mode=unknown
-elif ! grep -q '^extraargs=.*video=' "$boot_env"; then
-  boot_mode=absent
-elif [ ! -w "$boot_env" ]; then
-  boot_mode=unwritable
-else
-  current="$(sed -n 's/^extraargs=//p' "$boot_env" | head -1)"
-  video_arg="$(printf '%s\n' "$current" | tr ' ' '\n' | grep '^video=' | tr '\n' ' ' | sed 's/ $//')"
-  wanted="$(printf '%s' "$current" | sed "s#video=[^ ]*##g" | tr -s ' ' | sed 's/^ //; s/ $//')"
-  if [ "$current" = "$wanted" ]; then
-    boot_mode=absent
-  else
-    # This file decides whether the board boots. One copy kept, one line
-    # rewritten, nothing else in it touched, and never half of it on disk: the
-    # new file is written and flushed beside the old one and renamed over it.
-    before="$(sha256sum "$boot_env" | cut -c1-12)"
-    [ -f "$boot_env.mediabox-video" ] || cp -a "$boot_env" "$boot_env.mediabox-video"
-    next="$boot_env.mediabox-next"
-    if grep -q '^extraargs=' "$boot_env"; then
-      awk -v line="extraargs=$wanted" \
-        '/^extraargs=/ && !done { print line; done = 1; next } { print }' \
-        "$boot_env" >"$next"
-    else
-      { cat "$boot_env"; printf 'extraargs=%s\n' "$wanted"; } >"$next"
-    fi
-    chmod --reference="$boot_env" "$next" 2>/dev/null || true
-    sync "$next" 2>/dev/null || sync
-    mv -f "$next" "$boot_env"
-    sync
-    boot_mode="removed $before->$(sha256sum "$boot_env" | cut -c1-12)"
-  fi
 fi
 
 # And the mode the browser's compositor should take.
