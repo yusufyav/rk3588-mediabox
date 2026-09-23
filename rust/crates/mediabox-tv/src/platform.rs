@@ -1104,20 +1104,20 @@ fn find_output(
     // nobody asked it to touch.
     let sink = connector_edid(kms, connector.handle())
         .and_then(|edid| mediabox_platform::video::parse_sink_video(&edid));
-    // Carried means carried as RGB, not carried at all costs.
+    // Carried means carried in any format the sink takes, as every HDMI source
+    // does it.
     //
-    // The first cut of this asked the sink only whether *something* fitted at
-    // the timing, and something always does: 4:2:0 eight-bit is half the rate
-    // of RGB. So it chose 4K60 on a 300 MHz link and the driver quietly
-    // subsampled -- measured, `bus_format[2026]: UYYVYY8_0_5X24` on a picture
-    // nobody asked to have its chroma halved. The interface is text and
-    // artwork; it is shown at full chroma or the timing is not used.
+    // This used to demand RGB, so on the Sony's 300 MHz input the interface
+    // ran at 3840x2160@30. The reference Android box on the same input, same
+    // afternoon, runs 2160p60 in YCbCr 4:2:0 8-bit -- the only format that fits
+    // 594 MHz of pixels into 300 -- and offers the other formats only at modes
+    // where they fit. The kernel already listed 4K60 for that input and falls
+    // back to 4:2:0 on its own; the interface was the only thing refusing it.
     let carried = |mode: &&control::Mode| -> bool {
         let Some(sink) = sink.as_ref() else {
             return true;
         };
-        sink.best_for(mode.clock(), false)
-            .is_some_and(|best| best.format == mediabox_platform::video::ColorFormat::Rgb)
+        !sink.modes_for(mode.clock()).is_empty()
     };
     // And the shape the panel actually is.
     //
