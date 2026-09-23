@@ -1,53 +1,215 @@
 #!/bin/sh
 #
-# The television changed. Put the interface on the new one.
+# The television changed. Put whatever owns it back on it.
 #
-# The shell chooses its connector, its mode and its scale once, when it starts:
-# the GBM surface is created at that mode and the EGL surface with it. Nothing
-# reads DRM hotplug events, so unplugging the panel and plugging in another one
-# leaves the interface scanning out a mode the new display does not have —
-# reported from the appliance as "ekran değiştirince görüntü gelmiyor".
+# The interface chooses its connector, mode and scale once, when it starts, and
+# does not modeset in place when a display comes back; Kodi has not been
+# measured doing so. Both are handed the display again: stopped, prepared for,
+# started. The browser's compositor does modeset in place, and that is left to
+# it -- see the browser branch below. One replug on the Plus (2026-09-23
+# 10:37, @120) stayed black with sway reporting the output active; it was not
+# reproduced in eleven replugs since, under the conditions tried, and is
+# recorded as unresolved rather than worked around here.
 #
-# Re-modesetting in place is the right answer and is a rebuild of the platform's
-# surface, context and framebuffers. This is the appliance's answer in the
-# meantime, and on this box it is a good one: the shell keeps its position on
-# disk, systemd restarts it, and it is drawing again in under half a second —
-# measured first_frame_ms 413-486 across today's starts.
+# One path, and it has to be the same whichever application is up:
 #
-# Guarded three ways, because a restart loop on a television is worse than a
-# television that needs one restart:
+#   settle        one plug is several uevents; read until two reads agree
+#   compare       against the state recorded at boot or by the last run
+#   disconnected  record it and touch nothing -- there is no panel to recover,
+#                 and a restart now only starts an owner that finds nothing
+#   connected     under the transition lock, find the one active owner;
+#                 the browser is left running and only its configuration is
+#                   refreshed; anything else is
+#                   stopped, and waited for: DRM master is released on the last
+#                     close, and systemctl stop returns after that
+#                   run mediabox-hdmi-prepare here, as root and unsandboxed,
+#                     so the colour reset, the browser's sway mode and the
+#                     boot video= argument are all rewritten for this display
+#                   record the state, start the same owner
 #
-#   * only when the interface is the thing on the display — if Kodi or the
-#     browser owns it, the change is theirs to handle;
-#   * only when the connector's state or its preferred mode actually differs
-#     from what was recorded, so the driver's own change events (a DPMS cycle,
-#     a modeset by whoever holds master) do not trigger anything;
-#   * and after a settle, because one plug produces several events.
+# `seed`, run once at boot before any owner starts, records what is connected
+# then. Without it the first uevent after boot had nothing to compare with and
+# was only recorded -- on a box that booted with the television off, that first
+# event is the plug, and it was the one that got dropped.
 set -eu
 
-STAMP=/run/mediabox-display.stamp
-UNIT=mediabox-tv-ui.service
+PLATFORM="${MEDIABOX_PLATFORM:-/opt/rk3588-mediabox/bin/mediabox-platform}"
+PREPARE="${MEDIABOX_HDMI_PREPARE:-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare}"
+STAMP="${MEDIABOX_DISPLAY_STAMP:-/run/mediabox-display.stamp}"
+LOCK="${MEDIABOX_TRANSITION_LOCK:-/run/mediabox/display-transition.lock}"
+SYSTEMCTL="${MEDIABOX_SYSTEMCTL:-systemctl}"
+SETTLE="${MEDIABOX_DISPLAY_SETTLE:-0.5}"
+SWAY_OUT="${MEDIABOX_RUN_DIR:-/run/mediabox}/sway-output.conf"
+BROWSER_RUN="${MEDIABOX_BROWSER_RUN:-/run/mediabox-browser}"
+SWAYMSG="${MEDIABOX_SWAYMSG:-swaymsg}"
+RELINK_PAUSE="${MEDIABOX_RELINK_PAUSE:-1}"
+OWNERS="mediabox-tv-ui.service mediabox-browser.service kodi.service"
 
-# One plug, several uevents. Let them land before reading anything.
-sleep 1
+say() { echo "mediabox-display-changed: $*" >&2; }
 
-# Every display output this board has, not every HDMI one: a box on
-# DisplayPort has to notice its screen changing too, and a board with two HDMI
-# sockets has to notice which of them it happened on. The list comes from
-# mediabox-platform so that this script and the interface agree about what the
-# outputs are; the sysfs sweep it replaced named `card*-HDMI-A-*`, which is one
-# board's answer to both questions.
-now=$(/opt/rk3588-mediabox/bin/mediabox-platform outputs 2>/dev/null || true)
-[ -n "$now" ] || exit 0
+# What is compared: each connector and whether something is on it, and not
+# the mode column. That column is the kernel's last probe, not the panel's: a
+# socket just plugged into reads `connected -` until something probes it, and a
+# socket just left keeps its old mode for a while and then drops it. Measured
+# moving a monitor between sockets, each of those drifts ran a second recovery
+# seconds after the first. A different panel on the same socket is still seen:
+# swapping one is an unplug and a plug.
+outputs() {
+  "$PLATFORM" outputs 2>/dev/null | awk -F '\t' '{ print $1 "\t" $2 }' || true
+}
 
-was=$(cat "$STAMP" 2>/dev/null || true)
-printf '%s' "$now" > "$STAMP"
+# Have the kernel read the modes of every connected socket, so the preparation
+# below finds the output it is preparing for. The same one-word write the
+# preparation itself uses when a connector has no EDID.
+probe() {
+  for status in "${MEDIABOX_DRM_SYSFS:-/sys/class/drm}"/card*-*/status; do
+    [ "$(cat "$status" 2>/dev/null)" = connected ] || continue
+    echo detect >"$status" 2>/dev/null || true
+  done
+}
 
-[ "$now" = "$was" ] && exit 0
-[ -n "$was" ] || exit 0          # first run after boot records, changes nothing
+# Take every connected socket down and bring it back, with nobody holding the
+# display, so the kernel's own framebuffer modesets it from scratch and the
+# link to the panel is trained again. Needed after Kodi, which leaves the CRTC
+# lit when it exits: measured on the Plus, the framebuffer then restores the
+# same mode without a modeset, Kodi starts on the same mode without one either,
+# and a link that has not been trained since the plug stays black -- twice in a
+# row. `off` read DISABLED on the video port, `detect` brought a full modeset
+# (`Update mode`, `final tmdsclk`) and Kodi came back on the panel. `detect` is
+# also what puts the connector's forcing back to automatic.
+relink() {
+  for status in "${MEDIABOX_DRM_SYSFS:-/sys/class/drm}"/card*-*/status; do
+    [ "$(cat "$status" 2>/dev/null)" = connected ] || continue
+    echo off >"$status" 2>/dev/null || continue
+    sleep "$RELINK_PAUSE"
+    echo detect >"$status" 2>/dev/null || true
+    say "bağlantı yeniden kuruldu: ${status%/status}"
+  done
+}
 
-systemctl is-active --quiet "$UNIT" || exit 0
+connected() {
+  printf '%s\n' "$1" | awk -F '\t' '$2 == "connected" { found = 1 } END { exit !found }'
+}
 
-echo "mediabox-display-changed: restarting $UNIT for a new display" >&2
-printf 'was:\n%s\nnow:\n%s\n' "$was" "$now" >&2
-systemctl restart --no-block "$UNIT"
+# The display the privileged preparation is run for, with the boot argument
+# included. Failing is reported and survived: an owner started without it is
+# still better than no owner. `prepare 0` leaves the connector's properties
+# alone, for when an owner that stays up holds DRM master.
+prepare() {
+  probe
+  MEDIABOX_HDMI_BOOT_VIDEO=1 MEDIABOX_HDMI_CONNECTOR_RESET="${1:-1}" "$PREPARE" ||
+    say "hazırlık başarısız ($?)"
+}
+
+if [ "${1:-}" = seed ]; then
+  now="$(outputs)"
+  printf '%s' "$now" >"$STAMP"
+  if connected "$now"; then
+    prepare
+    say "açılışta bağlı ekran kaydedildi"
+  else
+    say "açılışta bağlı ekran yok; ilk takılış kurtarılacak"
+  fi
+  exit 0
+fi
+
+# Until two reads a beat apart agree, and not forever.
+settled() {
+  previous="$(outputs)"
+  turns=0
+  while :; do
+    sleep "$SETTLE"
+    current="$(outputs)"
+    [ "$current" = "$previous" ] && break
+    previous="$current"
+    turns=$((turns + 1))
+    [ "$turns" -lt 10 ] || break
+  done
+  printf '%s' "$current"
+}
+
+# The control plane's handover gate. Held for the whole recovery: kodi.service's
+# ExecStopPost asks it whether a stop was requested, and without it stopping
+# Kodi here would queue a second, competing return to the interface. Waited for,
+# bounded, so a handover already running finishes before its outcome is judged.
+if [ -d "$(dirname "$LOCK")" ] && exec 9>"$LOCK"; then
+  flock -w 30 9 || say "geçiş kilidi 30 sn içinde alınamadı; yine de devam"
+fi
+
+# A start request that arrives while this unit is running is merged into it,
+# so the state is read again after each recovery rather than trusted.
+round=0
+while [ "$round" -lt 3 ]; do
+  round=$((round + 1))
+  now="$(settled)"
+  [ -n "$now" ] || { say "çıkışlar okunamadı"; exit 0; }
+  if [ -f "$STAMP" ]; then
+    was="$(cat "$STAMP")"
+  else
+    was=""
+    say "açılış durumu kaydedilmemiş (mediabox-display-seed çalışmadı mı?)"
+  fi
+  [ "$now" = "$was" ] && exit 0
+
+  if ! connected "$now"; then
+    printf '%s' "$now" >"$STAMP"
+    say "ekran ayrıldı; sahibine dokunulmadı"
+    exit 0
+  fi
+
+  owner=""
+  count=0
+  for unit in $OWNERS; do
+    if $SYSTEMCTL is-active --quiet "$unit"; then
+      owner="$unit"
+      count=$((count + 1))
+    fi
+  done
+  if [ "$count" -gt 1 ]; then
+    # Conflicts= should make this impossible. Restarting one of them blind
+    # would be choosing an owner, which is the control plane's decision.
+    say "HATA: birden fazla ekran sahibi etkin; hiçbiri yeniden başlatılmıyor"
+    exit 1
+  fi
+
+  printf 'was:\n%s\nnow:\n%s\n' "$was" "$now" >&2
+  if [ -z "$owner" ]; then
+    say "yeni ekran, etkin sahip yok: yalnız hazırlanıyor"
+    prepare
+    printf '%s' "$now" >"$STAMP"
+    continue
+  fi
+
+  # The browser stays up. Its compositor notices the plug itself and modesets
+  # the output in place, and the same Chromium -- page, tabs, the video where
+  # it was -- is on the panel again: measured on the Plus, eleven replugs at
+  # 2560x1440@120 and six at @60, none restarted. Stopping it to recover lost
+  # all of that for nothing. What is left to do here is the configuration: the
+  # mode it should take on this display and the boot argument. A new mode is
+  # handed to sway by a reload, which re-reads its config and starts nothing;
+  # an unchanged one needs no reload at all.
+  if [ "$owner" = mediabox-browser.service ]; then
+    before="$(cat "$SWAY_OUT" 2>/dev/null || true)"
+    prepare 0
+    printf '%s' "$now" >"$STAMP"
+    after="$(cat "$SWAY_OUT" 2>/dev/null || true)"
+    if [ "$after" = "$before" ]; then
+      say "yeni ekran: tarayıcı yerinde; mod aynı, dokunulmadı"
+    else
+      socket="$(ls "$BROWSER_RUN"/sway-ipc.*.sock 2>/dev/null | head -1 || true)"
+      if [ -n "$socket" ] && SWAYSOCK="$socket" $SWAYMSG reload >/dev/null 2>&1; then
+        say "yeni ekran: tarayıcı yerinde; yeni mod sway'e verildi ($after)"
+      else
+        say "yeni ekran: tarayıcı yerinde; sway yeniden yüklenemedi"
+      fi
+    fi
+    continue
+  fi
+
+  say "yeni ekran: $owner durduruluyor, hazırlanıyor, başlatılıyor"
+  $SYSTEMCTL stop "$owner"
+  [ "$owner" = kodi.service ] && relink
+  prepare
+  printf '%s' "$now" >"$STAMP"
+  $SYSTEMCTL start "$owner" || say "$owner başlatılamadı"
+done

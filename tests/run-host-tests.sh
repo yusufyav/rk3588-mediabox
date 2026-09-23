@@ -702,6 +702,203 @@ else
   failures=$((failures + 1))
 fi
 
+echo "-- a display change recovers whichever application owns the display"
+
+# Run the helper against stubs: what is plugged in, which units are active, and
+# a log of what it asked systemd and the preparation to do. No framework --
+# three small scripts in a scratch directory.
+hp="$(mktemp -d)"
+trap 'rm -rf "$hp"' EXIT
+mkdir -p "$hp/bin" "$hp/run" "$hp/browser" "$hp/sys/card0-HDMI-A-1" "$hp/sys/card0-HDMI-A-2"
+: >"$hp/browser/sway-ipc.0.1.sock"
+cat >"$hp/bin/platform" <<'EOF'
+#!/bin/sh
+case "$1" in
+  outputs)
+    # A sequence file plays one state per call, then keeps the last one.
+    if [ -s "$HP/seq" ]; then head -1 "$HP/seq" | tr '|' '\n'; [ "$(wc -l <"$HP/seq")" -gt 1 ] && sed -i 1d "$HP/seq"
+    else cat "$HP/outputs"; fi ;;
+  output) awk -F '\t' '$2 == "connected" { print $1; exit }' "$HP/outputs" ;;
+  color-modes) printf '  bağlantı tavanı  600000 kHz (sink bildirdi)\n' ;;
+  *) ;;
+esac
+EOF
+cat >"$hp/bin/systemctl" <<'EOF'
+#!/bin/sh
+if [ "$1" = is-active ]; then grep -qx "$3" "$HP/active"; exit; fi
+echo "systemctl $*" >>"$HP/log"
+EOF
+cat >"$hp/bin/prepare" <<'EOF'
+#!/bin/sh
+echo "prepare boot-video=${MEDIABOX_HDMI_BOOT_VIDEO:-0} reset=${MEDIABOX_HDMI_CONNECTOR_RESET:-1}" >>"$HP/log"
+# The browser's mode, as the real preparation would write it for this display.
+[ -s "$HP/swaymode" ] && cp "$HP/swaymode" "$HP/run/sway-output.conf"
+exit 0
+EOF
+printf '#!/bin/sh\necho "swaymsg $* sock=${SWAYSOCK##*/}" >>"$HP/log"\n' >"$hp/bin/swaymsg"
+chmod +x "$hp/bin/"*
+on=$'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tconnected\t2560x1440'
+off=$'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tdisconnected\t2560x1440'
+# What is recorded: each socket and whether something is on it, no mode.
+off_state=$'HDMI-A-1\tdisconnected\nHDMI-A-2\tdisconnected'
+on_state=$'HDMI-A-1\tdisconnected\nHDMI-A-2\tconnected'
+
+# changed <was-or-SEED> <now> <active units...>: prints the log, one line each.
+changed() {
+  : >"$hp/log"; printf '%s\n' "${@:3}" >"$hp/active"
+  printf '%s' "$2" >"$hp/outputs"
+  if [ "$1" = SEED ]; then run_helper seed; else printf '%s' "$1" >"$hp/run/stamp"; fi
+  printf '%s' "$2" >"$hp/outputs"
+  run_helper
+  tr '\n' ';' <"$hp/log"
+}
+run_helper() {
+  HP="$hp" MEDIABOX_PLATFORM="$hp/bin/platform" MEDIABOX_HDMI_PREPARE="$hp/bin/prepare" \
+    MEDIABOX_SYSTEMCTL="$hp/bin/systemctl" MEDIABOX_DISPLAY_STAMP="$hp/run/stamp" \
+    MEDIABOX_TRANSITION_LOCK="$hp/run/lock" MEDIABOX_DISPLAY_SETTLE=0 MEDIABOX_RELINK_PAUSE=0 MEDIABOX_DRM_SYSFS="$hp/sys" \
+    MEDIABOX_RUN_DIR="$hp/run" MEDIABOX_BROWSER_RUN="$hp/browser" MEDIABOX_SWAYMSG="$hp/bin/swaymsg" \
+    sh "$here/packaging/mediabox-display-changed" "$@" 2>/dev/null
+  echo "exit=$?" >>"$hp/log"
+}
+recover_ui="systemctl stop mediabox-tv-ui.service;prepare boot-video=1 reset=1;systemctl start mediabox-tv-ui.service;exit=0;"
+
+# 1. Booted with nothing plugged in: the seed records it, so the first plug
+#    is a change and is acted on instead of being the one that gets recorded.
+: >"$hp/log"; printf '%s' "$off" >"$hp/outputs"; rm -f "$hp/run/stamp"
+run_helper seed
+check "seeding a headless boot records the disconnected state" "$(cat "$hp/run/stamp")" "$off_state"
+printf 'mediabox-tv-ui.service\n' >"$hp/active"; : >"$hp/log"
+printf '%s' "$on" >"$hp/outputs"; run_helper
+check "the first plug after a headless boot recovers the owner" "$(tr '\n' ';' <"$hp/log")" "$recover_ui"
+# 2. Nothing changed: no restart.
+check "an unchanged display restarts nothing" "$(changed "$on_state" "$on" mediabox-tv-ui.service)" "exit=0;"
+# 3-5. Whichever owner is active is the one recovered.
+# 3. The browser is not restarted: its compositor modesets in place and the
+#    same Chromium carries on. Its configuration is refreshed without touching
+#    the connector it holds, and sway is reloaded only for a new mode.
+echo 'output * mode 2560x1440@119.998Hz' >"$hp/swaymode"; cp "$hp/swaymode" "$hp/run/sway-output.conf"
+check "the browser keeps running when the same display comes back" \
+  "$(changed "$off_state" "$on" mediabox-browser.service)" "prepare boot-video=1 reset=0;exit=0;"
+echo 'output * mode 1920x1080@60.000Hz' >"$hp/swaymode"
+check "a display with another mode is handed to sway by a reload" \
+  "$(changed "$off_state" "$on" mediabox-browser.service)" \
+  "prepare boot-video=1 reset=0;swaymsg reload sock=sway-ipc.0.1.sock;exit=0;"
+: >"$hp/swaymode"
+check "the interface is recovered when it owns the display" \
+  "$(changed "$off_state" "$on" mediabox-tv-ui.service)" "$recover_ui"
+check "Kodi is recovered when it owns the display" \
+  "$(changed "$off_state" "$on" kodi.service)" \
+  "systemctl stop kodi.service;prepare boot-video=1 reset=1;systemctl start kodi.service;exit=0;"
+# 6. Two owners at once is not a state to guess about.
+check "two active owners restart nothing" \
+  "$(changed "$off_state" "$on" mediabox-tv-ui.service mediabox-browser.service)" "exit=1;"
+check "and leave the change to be seen again" "$(cat "$hp/run/stamp")" "$off_state"
+# 7 is in every recovery line above: stop, then prepare, then start.
+# A disconnect alone has nothing to recover and must not write video= (8).
+check "only a disconnect touches no owner and prepares nothing" \
+  "$(changed "$on_state" "$off" mediabox-browser.service)" "exit=0;"
+check "and is recorded, so the replug is a change" "$(cat "$hp/run/stamp")" "$off_state"
+check "a mode column drifting on its own is not a change" \
+  "$(changed "$off_state" $'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tdisconnected\t-' kodi.service)" "exit=0;"
+# A socket reads `connected -` until something probes it. Measured moving a
+# monitor between sockets: waiting for the mode cost five seconds and then ran
+# the recovery twice. The socket is probed, and recovered once.
+printf '%s\n' 'HDMI-A-1\tconnected\t-|HDMI-A-2\tdisconnected' 'HDMI-A-1\tconnected\t-|HDMI-A-2\tdisconnected' \
+  'HDMI-A-1\tconnected\t2560x1440|HDMI-A-2\tdisconnected' | sed 's/\\t/\t/g' >"$hp/seq"
+check "a socket without its mode yet is recovered once" \
+  "$(changed "$off_state" "" mediabox-tv-ui.service)" "$recover_ui"
+check "and recorded without a mode" "$(cat "$hp/run/stamp")" $'HDMI-A-1\tconnected\nHDMI-A-2\tdisconnected'
+rm -f "$hp/seq"
+echo connected >"$hp/sys/card0-HDMI-A-2/status"; echo disconnected >"$hp/sys/card0-HDMI-A-1/status"
+changed "$off_state" "$on" mediabox-tv-ui.service >/dev/null
+check "a connected socket is probed before it is prepared" "$(cat "$hp/sys/card0-HDMI-A-2/status")" detect
+check "an empty one is left alone" "$(cat "$hp/sys/card0-HDMI-A-1/status")" disconnected
+# Kodi leaves the CRTC lit, and nothing after it modesets: the link is taken
+# down and brought back between its stop and the preparation. Nobody else's.
+echo connected >"$hp/sys/card0-HDMI-A-2/status"
+: >"$hp/log"; printf 'kodi.service\n' >"$hp/active"; printf '%s' "$off_state" >"$hp/run/stamp"
+printf '%s' "$on" >"$hp/outputs"
+relinked="$(HP="$hp" MEDIABOX_PLATFORM="$hp/bin/platform" MEDIABOX_HDMI_PREPARE="$hp/bin/prepare" \
+  MEDIABOX_SYSTEMCTL="$hp/bin/systemctl" MEDIABOX_DISPLAY_STAMP="$hp/run/stamp" \
+  MEDIABOX_TRANSITION_LOCK="$hp/run/lock" MEDIABOX_DISPLAY_SETTLE=0 MEDIABOX_RELINK_PAUSE=0 \
+  MEDIABOX_DRM_SYSFS="$hp/sys" MEDIABOX_RUN_DIR="$hp/run" \
+  sh "$here/packaging/mediabox-display-changed" 2>&1 >/dev/null)"
+contains "Kodi's connector is taken down and brought back" "$relinked" 'bağlantı yeniden kuruldu'
+echo connected >"$hp/sys/card0-HDMI-A-2/status"
+: >"$hp/log"; printf 'mediabox-tv-ui.service\n' >"$hp/active"; printf '%s' "$off_state" >"$hp/run/stamp"
+relinked="$(HP="$hp" MEDIABOX_PLATFORM="$hp/bin/platform" MEDIABOX_HDMI_PREPARE="$hp/bin/prepare" \
+  MEDIABOX_SYSTEMCTL="$hp/bin/systemctl" MEDIABOX_DISPLAY_STAMP="$hp/run/stamp" \
+  MEDIABOX_TRANSITION_LOCK="$hp/run/lock" MEDIABOX_DISPLAY_SETTLE=0 MEDIABOX_RELINK_PAUSE=0 \
+  MEDIABOX_DRM_SYSFS="$hp/sys" MEDIABOX_RUN_DIR="$hp/run" \
+  sh "$here/packaging/mediabox-display-changed" 2>&1 >/dev/null)"
+lacks "the interface's is not, it modesets from scratch itself" "$relinked" 'bağlantı yeniden kuruldu'
+lacks "the helper no longer restarts without waiting" \
+  "$(strip_sh "$here/packaging/mediabox-display-changed")" 'restart --no-block'
+contains "the boot record is installed" \
+  "$(cat "$here/scripts/release/create-mediabox-release.sh")" 'mediabox-display-seed.service'
+contains "and runs before any owner" \
+  "$(cat "$here/packaging/systemd/mediabox-display-seed.service")" \
+  'Before=mediabox-tv-ui.service mediabox-browser.service kodi.service'
+
+# 8-9. The boot argument, through the real preparation with modetest stubbed:
+# written only when asked, only for a connected output, and only the one token.
+cat >"$hp/bin/modetest" <<'EOF'
+#!/bin/sh
+if [ "$3" = -w ]; then echo "modetest -w $4" >>"$HP/log"; exit 0; fi
+[ "$3" = -c ] || exit 0
+printf '236\t235\tconnected\tHDMI-A-2       \t600x340\t\t27\t235\n  props:\n'
+printf '\t1 EDID:\n\t\tflags: immutable blob\n\t\tblobs:\n\n\t\tvalue:\n\t\t\t00ffffffffffff00\n'
+printf '\t7 HDR_OUTPUT_METADATA:\n\t\tflags: blob\n\t\tblobs:\n\n\t\tvalue:\n'
+[ -s "$HP/hdr" ] && printf '\t\t\t%s\n' "$(cat "$HP/hdr")"
+printf '\t238 color_format:\n\t\tflags: enum\n\t\tenums: rgb=0 ycbcr444=1\n\t\tvalue: %s\n' "$(cat "$HP/cf" 2>/dev/null || echo 0)"
+printf '\t249 Colorspace:\n\t\tflags: enum\n\t\tvalue: 0\n  modes:\n'
+printf '  #0 2560x1440 59.95 2560 2608 2640 2720 1440 1443 1448 1481 241500 flags: phsync, nvsync; type: preferred, driver\n'
+printf '  #1 2560x1440 144.00 2560 2568 2600 2720 1440 1465 1473 1490 583600 flags: phsync, pvsync; type: userdef, driver\n'
+printf '  #2 2560x1440 120.00 2560 2608 2640 2720 1440 1443 1448 1525 497750 flags: phsync, pvsync; type: driver\n'
+EOF
+chmod +x "$hp/bin/modetest"
+env_before=$'verbosity=1\nextraargs=cma=256M video=HDMI-A-1:3840x2160@60\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
+prepare_real() {
+  HP="$hp" PATH="$hp/bin:$PATH" MEDIABOX_PLATFORM="$hp/bin/platform" \
+    MEDIABOX_BOOT_ENV="$hp/armbianEnv.txt" MEDIABOX_RUN_DIR="$hp/run" MEDIABOX_HDMI_KEEP_HDR=1 \
+    "$@" sh "$here/packaging/mediabox-hdmi-prepare" 2>&1
+}
+printf '%s\n' "$env_before" >"$hp/armbianEnv.txt"; rm -f "$hp/armbianEnv.txt.mediabox-video"
+printf '%s' "$off" >"$hp/outputs"
+prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1 >/dev/null
+check "a disconnected display writes no video= argument" "$(cat "$hp/armbianEnv.txt")" "$env_before"
+printf '%s' "$on" >"$hp/outputs"
+prepare_real env >/dev/null
+check "an application's own preparation leaves /boot alone" "$(cat "$hp/armbianEnv.txt")" "$env_before"
+out="$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)"
+check "a settled reconnect moves video= to the connector and mode in use" \
+  "$(cat "$hp/armbianEnv.txt")" \
+  $'verbosity=1\nextraargs=cma=256M video=HDMI-A-2:2560x1440@144\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
+contains "and says it wrote it" "$out" 'boot-video=written'
+check "the original is kept once" "$(cat "$hp/armbianEnv.txt.mediabox-video")" "$env_before"
+check "the browser's mode follows the same display" \
+  "$(cat "$hp/run/sway-output.conf")" 'output * mode 2560x1440@119.998Hz'
+contains "and a second run finds nothing to write" \
+  "$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)" 'boot-video=current'
+
+# The colour reset writes only what is not already so: on this driver the
+# first write after boot re-trains the link under a lit panel and the monitor
+# stays black. What Kodi leaves behind is still put back.
+colour() {
+  : >"$hp/log"
+  HP="$hp" PATH="$hp/bin:$PATH" MEDIABOX_PLATFORM="$hp/bin/platform" MEDIABOX_MODETEST="$hp/bin/modetest" \
+    MEDIABOX_BOOT_ENV="$hp/armbianEnv.txt" MEDIABOX_RUN_DIR="$hp/run" \
+    sh "$here/packaging/mediabox-hdmi-prepare" >/dev/null 2>&1
+  tr '\n' ';' <"$hp/log"
+}
+printf '%s' "$on" >"$hp/outputs"; echo 0 >"$hp/cf"; : >"$hp/hdr"
+check "a connector already in SDR RGB is not written to" "$(colour)" ""
+echo 1 >"$hp/cf"; echo 0102030405 >"$hp/hdr"
+check "the YUV wire and HDR metadata Kodi left are cleared" "$(colour)" \
+  "modetest -w 236:HDR_OUTPUT_METADATA:0;modetest -w 236:color_format:0;"
+check "nothing is committed to a connector an owner still holds" \
+  "$(MEDIABOX_HDMI_CONNECTOR_RESET=0 colour)" ""
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all host tests passed"

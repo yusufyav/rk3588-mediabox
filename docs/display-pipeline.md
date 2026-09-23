@@ -72,8 +72,12 @@ the browser application's compositor. The television's own interface asks
 `mediabox-platform` for the selected output and takes that connector's preferred
 mode. The layout survives the change because the scale is measured from the mode
 that was actually taken (rule 1), and `mediabox-display-changed`, triggered by
-udev on a DRM hotplug, restarts the interface if the panel is swapped while the
-box is running.
+udev on a DRM hotplug, compares against the state `mediabox-display-seed`
+records at boot -- so the first plug after a headless boot is not lost -- and
+when a panel is plugged in hands the interface or Kodi the display again (stop,
+`mediabox-hdmi-prepare` as root, start). The browser is not restarted: sway
+modesets in place and the same Chromium carries on; only its configuration is
+refreshed, and sway is reloaded only when the mode it should take changed.
 
 **Check:**
 

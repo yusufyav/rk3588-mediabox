@@ -229,7 +229,17 @@ fi
 #
 # Measured after it, across interface -> Kodi -> interface: 3840x2160p30
 # throughout, with no 1080p and no dark gap.
-boot_env=/boot/armbianEnv.txt
+#
+# Written only when the caller asks, and only one caller does. This used to
+# depend on which application happened to start: kodi.service is unsandboxed
+# and wrote it, mediabox-tv-ui.service has ProtectSystem=strict and could not --
+# measured inside the running interface, /boot/armbianEnv.txt reads RO -- yet
+# reported `boot-video=unchanged` as if it had looked. So a cable moved while
+# the interface was up stayed stale until somebody happened to open a film.
+# mediabox-display-changed runs this as root, outside any sandbox, at boot and
+# after a display change has settled on a connected output, and sets
+# MEDIABOX_HDMI_BOOT_VIDEO=1; every other caller leaves the file alone.
+boot_env="${MEDIABOX_BOOT_ENV:-/boot/armbianEnv.txt}"
 video_arg=""
 if [ -n "$kodi_screenmode" ]; then
   video_arg="$(printf '%s' "$kodi_screenmode" | awk '{
@@ -239,8 +249,14 @@ if [ -n "$kodi_screenmode" ]; then
   }')"
   video_arg="$(printf '%s' "$video_arg" | sed "s/CONNECTOR/$connector/")"
 fi
-boot_mode=unchanged
-if [ -n "$video_arg" ] && [ -f "$boot_env" ] && [ -w "$boot_env" ]; then
+boot_mode=not-asked
+if [ "${MEDIABOX_HDMI_BOOT_VIDEO:-0}" != 1 ]; then
+  :
+elif [ -z "$video_arg" ] || [ ! -f "$boot_env" ]; then
+  boot_mode=unknown
+elif [ ! -w "$boot_env" ]; then
+  boot_mode=unwritable
+else
   current="$(sed -n 's/^extraargs=//p' "$boot_env" | head -1)"
   wanted="$(printf '%s' "$current" | sed "s#video=[^ ]*##g" | tr -s ' ' | sed 's/^ //; s/ $//')"
   wanted="${wanted:+$wanted }$video_arg"
@@ -248,14 +264,23 @@ if [ -n "$video_arg" ] && [ -f "$boot_env" ] && [ -w "$boot_env" ]; then
     boot_mode=current
   else
     # This file decides whether the board boots. One copy kept, one line
-    # rewritten, and nothing else in it touched.
+    # rewritten, nothing else in it touched, and never half of it on disk: the
+    # new file is written and flushed beside the old one and renamed over it.
+    before="$(sha256sum "$boot_env" | cut -c1-12)"
     [ -f "$boot_env.mediabox-video" ] || cp -a "$boot_env" "$boot_env.mediabox-video"
+    next="$boot_env.mediabox-next"
     if grep -q '^extraargs=' "$boot_env"; then
-      sed -i "s#^extraargs=.*#extraargs=$wanted#" "$boot_env"
+      awk -v line="extraargs=$wanted" \
+        '/^extraargs=/ && !done { print line; done = 1; next } { print }' \
+        "$boot_env" >"$next"
     else
-      printf 'extraargs=%s\n' "$wanted" >>"$boot_env"
+      { cat "$boot_env"; printf 'extraargs=%s\n' "$wanted"; } >"$next"
     fi
-    boot_mode=written
+    chmod --reference="$boot_env" "$next" 2>/dev/null || true
+    sync "$next" 2>/dev/null || sync
+    mv -f "$next" "$boot_env"
+    sync
+    boot_mode="written $before->$(sha256sum "$boot_env" | cut -c1-12)"
   fi
 fi
 
@@ -277,7 +302,7 @@ fi
 #
 # Written as a file sway includes rather than into its config, because the
 # answer is about this board and this cable and the config is the product's.
-sway_dir=/run/mediabox
+sway_dir="${MEDIABOX_RUN_DIR:-/run/mediabox}"
 sway_out="$sway_dir/sway-output.conf"
 browser_mode=absent
 # The browser gets the cadence-clean mode worked out above, not the mode Kodi
@@ -377,15 +402,50 @@ echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-none}" \
 # The connector is matched by name and not by "the first one that says HDMI":
 # modetest's object ids are allocated per boot and the first connected HDMI is
 # not necessarily the one this box is drawing on.
-if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ]; then
-  conn=$(/usr/bin/modetest -M rockchip -c 2>/dev/null \
+#
+# And only what is not already so. On this driver the first property write after
+# boot re-trains the HDMI link without taking the CRTC down, even when it writes
+# the value that is already there -- measured on the Plus with an HP X27q at
+# 2560x1440p144: every value already 0, the write printed `final tmdsclk =
+# 583600000` with no modeset around it, and the monitor stayed black while the
+# interface drew on it, on the old code and on the new. The interface then
+# starts at the mode already on the connector, so nothing modesets it back. A
+# property that is already right is therefore left alone; one Kodi left behind
+# is still put back.
+#
+# And only while nobody holds the display. Everything above this block is
+# configuration -- files, mixer controls, a sysfs probe -- and is safe whoever
+# is drawing; this is a DRM commit, which needs master and changes the wire
+# under whoever has it. mediabox-display-changed runs the rest of this script
+# for a browser that stays up across a replug and asks for this part to be
+# left out with MEDIABOX_HDMI_CONNECTOR_RESET=0.
+MODETEST="${MEDIABOX_MODETEST:-/usr/bin/modetest}"
+if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ] && [ "${MEDIABOX_HDMI_CONNECTOR_RESET:-1}" = 1 ]; then
+  listing="$("$MODETEST" -M rockchip -c 2>/dev/null || true)"
+  conn=$(printf '%s\n' "$listing" \
     | awk -v want="$connector" '$3 == "connected" && $4 == want { print $1; exit }')
   if [ -n "${conn:-}" ]; then
-    /usr/bin/modetest -M rockchip -w "$conn:Colorspace:0" >/dev/null 2>&1 || true
-    /usr/bin/modetest -M rockchip -w "$conn:HDR_OUTPUT_METADATA:0" >/dev/null 2>&1 || true
+    # name=value for this connector's properties. A blob prints its bytes on
+    # the lines after `value:`; set means there are some.
+    props="$(printf '%s\n' "$listing" | awk -v id="$conn" '
+      /^[0-9]+\t/ { inblock = ($1 == id); next }
+      !inblock { next }
+      /^\t[0-9]+ [^ ]+:$/ { name = $2; sub(/:$/, "", name); blob = 0; bytes = 0; next }
+      /^\t\tflags:.*blob/ { blob = 1; next }
+      /^\t\tvalue:/ { if (blob) { val[name] = 0; bytes = 1 } else val[name] = $2; next }
+      bytes && /^\t\t\t[0-9a-f]+$/ { val[name] = 1; next }
+      END { for (n in val) print n "=" val[n] }')"
+    reset() {
+      case "$props" in
+        *"$1=0"*) ;;
+        *) "$MODETEST" -M rockchip -w "$conn:$1:0" >/dev/null 2>&1 || true ;;
+      esac
+    }
+    reset Colorspace
+    reset HDR_OUTPUT_METADATA
     # rgb=0 in this driver's enum. Set last, so a refusal of either of the two
     # above does not stop the wire going back to RGB.
-    /usr/bin/modetest -M rockchip -w "$conn:color_format:0" >/dev/null 2>&1 || true
+    reset color_format
   fi
 fi
 exit 0

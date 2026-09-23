@@ -139,7 +139,7 @@ build_archive() {
   fi
 
   for u in mediaboxd-rs mediabox-tv-ui mediabox-media-worker stremio-server \
-           mediabox-console-off mediabox-display-changed mediabox-browser kodi; do
+           mediabox-console-off mediabox-display-changed mediabox-display-seed mediabox-browser kodi; do
     : >"$root/rootfs/etc/systemd/system/$u.service"
   done
   for f in etc/mediaboxd.toml etc/mediabox-library.json etc/mediabox-applications.json \

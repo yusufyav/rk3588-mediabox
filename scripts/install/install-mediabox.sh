@@ -506,6 +506,8 @@ fi
 
 step "services"
 systemctl enable --now mediabox-console-off.service >/dev/null 2>&1 || true
+# The boot record the hotplug helper compares against; see the unit.
+systemctl enable mediabox-display-seed.service >/dev/null 2>&1 || true
 
 # The radios come up in an order this hardware survives, and the product
 # decides that order rather than systemd restoring whatever state a radio was

@@ -198,7 +198,8 @@ say "power keys -> the appliance, not systemd-logind"
 cp_ "$here/packaging/udev/80-mediabox-no-power-switch.rules" \
     "$here/packaging/udev/81-mediabox-display-hotplug.rules" \
     "$here/packaging/mediabox-display-changed" "$MEDIABOX_TARGET:/var/tmp/"
-cp_ "$here/packaging/systemd/mediabox-display-changed.service" "$MEDIABOX_TARGET:/etc/systemd/system/"
+cp_ "$here/packaging/systemd/mediabox-display-changed.service" \
+    "$here/packaging/systemd/mediabox-display-seed.service" "$MEDIABOX_TARGET:/etc/systemd/system/"
 cp_ "$here/packaging/systemd/logind.conf.d/10-mediabox.conf" "$MEDIABOX_TARGET:/var/tmp/logind-mediabox.conf"
 sh_ "set -e
   install -m 0644 /var/tmp/80-mediabox-no-power-switch.rules \
@@ -214,6 +215,7 @@ sh_ "set -e
   udevadm control --reload-rules
   udevadm trigger --subsystem-match=input --action=change
   systemctl daemon-reload
+  systemctl enable mediabox-display-seed.service >/dev/null
   # logind rereads its configuration on reload; the watched-button set is
   # rebuilt from udev's tags at the same time.
   systemctl kill -s HUP systemd-logind.service 2>/dev/null || systemctl restart systemd-logind.service"

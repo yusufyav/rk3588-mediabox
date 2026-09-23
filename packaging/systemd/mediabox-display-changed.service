@@ -1,7 +1,10 @@
 [Unit]
-Description=Put the interface on the display that was just plugged in
+Description=Put the display's owner back on the display that was just plugged in
 # Triggered by udev on a DRM connector change; see
-# packaging/udev/81-mediabox-display-hotplug.rules.
+# packaging/udev/81-mediabox-display-hotplug.rules. Ordered after the boot
+# record, so a uevent early in boot compares against it instead of against
+# nothing.
+After=mediabox-display-seed.service
 
 [Service]
 Type=oneshot

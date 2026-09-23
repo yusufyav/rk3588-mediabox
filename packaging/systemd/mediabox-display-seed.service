@@ -1,0 +1,20 @@
+[Unit]
+Description=Record which displays are connected before anything draws on them
+# The hotplug helper compares every change against a record in /run. Before
+# this unit that record was written by the first uevent after boot, which was
+# therefore never acted on -- and on a box booted with the television off, the
+# first uevent is the television being plugged in.
+#
+# Before every display owner: the preparation it runs for a connected display
+# briefly takes DRM master, which nobody else may hold at that moment.
+After=systemd-udev-settle.service local-fs.target
+Wants=systemd-udev-settle.service
+Before=mediabox-tv-ui.service mediabox-browser.service kodi.service mediaboxd-rs.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-display-changed seed
+
+[Install]
+WantedBy=multi-user.target

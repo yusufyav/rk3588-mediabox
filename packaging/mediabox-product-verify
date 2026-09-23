@@ -378,7 +378,7 @@ done
 
 # ---------------------------------------------------------------- the units
 for u in mediaboxd-rs mediabox-tv-ui mediabox-media-worker stremio-server \
-         mediabox-console-off mediabox-display-changed mediabox-browser kodi; do
+         mediabox-console-off mediabox-display-changed mediabox-display-seed mediabox-browser kodi; do
   f="$ETC/systemd/system/$u.service"
   [ -f "$f" ] && pass "unit $u.service" installed || fail "unit $u.service" "MISSING $f"
 done
