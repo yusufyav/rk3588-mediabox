@@ -38,11 +38,16 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------- the board
 
 say "golden board"
-identity="$(mediabox_ssh 'printf "%s\t%s\t%s\t%s\n" \
+# Which board it is, as the board says it. The product is the same on either
+# supported board -- the installer and the control plane resolve what differs
+# on the board they land on -- so any one that runs it can be the golden one,
+# and the release records which it was rather than assuming.
+identity="$(mediabox_ssh 'printf "%s\t%s\t%s\t%s\t%s\n" \
   "$(hostname)" "$(uname -r)" "$(uname -m)" \
-  "$(. /etc/os-release; echo "$PRETTY_NAME")"')" || die "cannot reach $MEDIABOX_HOST"
-IFS=$'\t' read -r g_host g_kernel g_arch g_os <<<"$identity"
-printf '  host=%s kernel=%s arch=%s\n  os=%s\n' "$g_host" "$g_kernel" "$g_arch" "$g_os"
+  "$(. /etc/os-release; echo "$PRETTY_NAME")" \
+  "$(tr -d "\0" </proc/device-tree/model 2>/dev/null)"')" || die "cannot reach $MEDIABOX_HOST"
+IFS=$'\t' read -r g_host g_kernel g_arch g_os g_model <<<"$identity"
+printf '  host=%s kernel=%s arch=%s\n  os=%s\n  model=%s\n' "$g_host" "$g_kernel" "$g_arch" "$g_os" "$g_model"
 [ "$g_arch" = aarch64 ] || die "golden board is $g_arch, not aarch64"
 mediabox_ssh "test -d $MEDIABOX_PREFIX" || die "$MEDIABOX_PREFIX absent on the golden board"
 
@@ -164,7 +169,7 @@ echo "  integration files differing from the repository: $drift"
 
 say "inventory, closure and capability baseline"
 mediabox_ssh "PREFIX='$MEDIABOX_PREFIX' STAGE='$stage' VERSION='$version' \
-  GOLDEN_KERNEL='$g_kernel' GOLDEN_OS='$g_os' GOLDEN_ARCH='$g_arch' \
+  GOLDEN_KERNEL='$g_kernel' GOLDEN_OS='$g_os' GOLDEN_ARCH='$g_arch' GOLDEN_MODEL='$g_model' \
   GOLDEN_HOST='$MEDIABOX_HOST' bash -s" <<'REMOTE_EOF'
 set -euo pipefail
 M="$STAGE/meta"
@@ -350,8 +355,9 @@ rm -f "$elf_list"
 # release-info: what can be proved, and only that.
 cat >"$M/release-info" <<EOF
 version=$VERSION
-artifact_source=live-golden-ultra
-opt_source=live-golden-ultra
+artifact_source=live-golden-board
+opt_source=live-golden-board
+golden_model=$GOLDEN_MODEL
 etc_source=repo-packaging+golden-only-config
 golden_capture_host=$GOLDEN_HOST
 golden_capture_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -509,5 +515,5 @@ cat <<EOF
 
   Pin it with:
     scripts/release/create-mediabox-release.sh --version $version
-    MEDIABOX_RELEASE_TAG=appliance-golden-ultra-$version
+    MEDIABOX_RELEASE_TAG=appliance-golden-$version
 EOF
