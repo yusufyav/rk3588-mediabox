@@ -867,20 +867,20 @@ prepare_real() {
 printf '%s\n' "$env_before" >"$hp/armbianEnv.txt"; rm -f "$hp/armbianEnv.txt.mediabox-video"
 printf '%s' "$off" >"$hp/outputs"
 prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1 >/dev/null
-check "a disconnected display writes no video= argument" "$(cat "$hp/armbianEnv.txt")" "$env_before"
+check "a disconnected display leaves /boot alone" "$(cat "$hp/armbianEnv.txt")" "$env_before"
 printf '%s' "$on" >"$hp/outputs"
 prepare_real env >/dev/null
 check "an application's own preparation leaves /boot alone" "$(cat "$hp/armbianEnv.txt")" "$env_before"
 out="$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)"
-check "a settled reconnect moves video= to the connector and mode in use" \
+check "a settled display removes a video= an older version left, and writes none" \
   "$(cat "$hp/armbianEnv.txt")" \
-  $'verbosity=1\nextraargs=cma=256M video=HDMI-A-2:2560x1440@144\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
-contains "and says it wrote it" "$out" 'boot-video=written'
+  $'verbosity=1\nextraargs=cma=256M\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
+contains "and says it removed it" "$out" 'boot-video=removed'
 check "the original is kept once" "$(cat "$hp/armbianEnv.txt.mediabox-video")" "$env_before"
 check "the browser's mode follows the same display" \
   "$(cat "$hp/run/sway-output.conf")" 'output * mode 2560x1440@119.998Hz'
-contains "and a second run finds nothing to write" \
-  "$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)" 'boot-video=current'
+contains "and a second run finds nothing to remove" \
+  "$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)" 'boot-video=absent'
 
 # The colour reset writes only what is not already so: on this driver the
 # first write after boot re-trains the link under a lit panel and the monitor

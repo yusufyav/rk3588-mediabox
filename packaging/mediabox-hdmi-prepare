@@ -205,63 +205,45 @@ if command -v modetest >/dev/null 2>&1; then
   kodi_screenmode="${kodi_modes%%,*}"
 fi
 
-# What the kernel's own framebuffer should be, so a handover is not four mode
-# changes.
+# No mode on the kernel command line. Ever.
 #
-# Between two applications the television belongs to nobody, and the kernel's
-# fbdev emulation puts its own mode back on the connector. Its mode is the
-# sink's preferred one, 1920x1080 on this television, and Kodi then records
-# *that* as the mode to restore when it exits. So one handover went
+# This used to write the display's fastest mode into /boot as `video=`, so the
+# kernel's fbdev emulation would hold 4K between two applications instead of
+# the sink's preferred 1080p. But that argument belongs to whichever display
+# was plugged in when it was written, and the kernel applies it to whatever is
+# plugged in at the next boot -- before any of this runs. When the new display
+# does not list that mode the kernel invents one with the GTF formula, and the
+# vendor HDMI driver does not reject it. Measured on the Orange Pi 5 Plus,
+# 2026-09-23: `video=HDMI-A-2:2560x1440@144` left by a 1440p monitor, a Sony
+# television on the same socket, GTF 807.9 MHz, `can't find frl rate, phy pll
+# init failed`, SError in dw_hdmi_qp_setup, kernel panic 1.7 s into every boot.
 #
-#   interface 4K -> fbdev 1080p -> Kodi 4K -> Kodi restores 1080p -> interface 4K
+# Without it the kernel takes the mode from the EDID of the display actually
+# connected, which is what every other HDMI source does. The cost is the one
+# the argument was for: on a sink whose preferred mode is below the one Kodi
+# uses, a handover can show that preferred mode for a moment.
 #
-# reported from the appliance as "KODI açılırken arada bir 1080p ye set
-# oluyor". Switching the emulation off removes the 1080p and breaks Kodi,
-# which needs a mode already on the connector to start from -- measured, every
-# video port disabled and a black television.
-#
-# What is left is to give the emulation the right mode, and that is a boot
-# argument: the fbdev's framebuffer is allocated once, at that size. Written
-# here because this is where the answer is known -- the output in use and the
-# fastest timing its link carries as RGB -- and re-written whenever that
-# answer changes, so a cable moved to another socket or another input fixes
-# itself on the next boot.
-#
-# Measured after it, across interface -> Kodi -> interface: 3840x2160p30
-# throughout, with no 1080p and no dark gap.
-#
-# Written only when the caller asks, and only one caller does. This used to
-# depend on which application happened to start: kodi.service is unsandboxed
-# and wrote it, mediabox-tv-ui.service has ProtectSystem=strict and could not --
-# measured inside the running interface, /boot/armbianEnv.txt reads RO -- yet
-# reported `boot-video=unchanged` as if it had looked. So a cable moved while
-# the interface was up stayed stale until somebody happened to open a film.
-# mediabox-display-changed runs this as root, outside any sandbox, at boot and
-# after a display change has settled on a connected output, and sets
-# MEDIABOX_HDMI_BOOT_VIDEO=1; every other caller leaves the file alone.
+# So the only thing left to do with the argument is take it off boards an older
+# version put it on. mediabox-display-changed runs this as root at boot and
+# after a display change with MEDIABOX_HDMI_BOOT_VIDEO=1; every other caller is
+# sandboxed and leaves /boot alone.
 boot_env="${MEDIABOX_BOOT_ENV:-/boot/armbianEnv.txt}"
 video_arg=""
-if [ -n "$kodi_screenmode" ]; then
-  video_arg="$(printf '%s' "$kodi_screenmode" | awk '{
-    w = substr($0, 1, 5) + 0; h = substr($0, 6, 5) + 0
-    hz = substr($0, 11, 9) + 0
-    printf "video=CONNECTOR:%dx%d@%d", w, h, int(hz + 0.5)
-  }')"
-  video_arg="$(printf '%s' "$video_arg" | sed "s/CONNECTOR/$connector/")"
-fi
 boot_mode=not-asked
 if [ "${MEDIABOX_HDMI_BOOT_VIDEO:-0}" != 1 ]; then
   :
-elif [ -z "$video_arg" ] || [ ! -f "$boot_env" ]; then
+elif [ ! -f "$boot_env" ]; then
   boot_mode=unknown
+elif ! grep -q '^extraargs=.*video=' "$boot_env"; then
+  boot_mode=absent
 elif [ ! -w "$boot_env" ]; then
   boot_mode=unwritable
 else
   current="$(sed -n 's/^extraargs=//p' "$boot_env" | head -1)"
+  video_arg="$(printf '%s\n' "$current" | tr ' ' '\n' | grep '^video=' | tr '\n' ' ' | sed 's/ $//')"
   wanted="$(printf '%s' "$current" | sed "s#video=[^ ]*##g" | tr -s ' ' | sed 's/^ //; s/ $//')"
-  wanted="${wanted:+$wanted }$video_arg"
   if [ "$current" = "$wanted" ]; then
-    boot_mode=current
+    boot_mode=absent
   else
     # This file decides whether the board boots. One copy kept, one line
     # rewritten, nothing else in it touched, and never half of it on disk: the
@@ -280,7 +262,7 @@ else
     sync "$next" 2>/dev/null || sync
     mv -f "$next" "$boot_env"
     sync
-    boot_mode="written $before->$(sha256sum "$boot_env" | cut -c1-12)"
+    boot_mode="removed $before->$(sha256sum "$boot_env" | cut -c1-12)"
   fi
 fi
 

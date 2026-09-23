@@ -289,21 +289,24 @@ port `DISABLED` and a black television. Kodi needs a mode already on the
 connector — it just has to be the right one. The commit and its revert are in
 the history for this reason.
 
-The mode the emulation restores comes from the kernel command line, because
-its framebuffer is allocated once at that size. `mediabox-hdmi-prepare` writes
-it from what it already knows, and rewrites it when that changes, so a cable
-moved to the other socket corrects itself on the next boot:
+This used to be answered with a mode on the kernel command line
+(`video=HDMI-A-2:3840x2160@30`), written by `mediabox-hdmi-prepare`. It is no
+longer written, and an existing one is removed. The argument belongs to the
+display that was connected when it was written, and the kernel applies it to
+whatever is connected at the next boot, before anything in this product runs.
+A display that does not list that mode gets one invented by the GTF formula,
+which the vendor HDMI driver does not reject. Measured on the Orange Pi 5 Plus,
+2026-09-23: `video=HDMI-A-2:2560x1440@144` from a 1440p monitor, a Sony
+television on the same socket, GTF 807.9 MHz, PHY PLL failure, SError in
+`dw_hdmi_qp_setup`, kernel panic on every boot.
+
+Without the argument the kernel takes its mode from the EDID of the display
+actually connected. On a sink whose preferred mode is below the one Kodi uses,
+a handover can show that preferred mode for a moment; that is the cost.
 
 ```
-extraargs=cma=256M video=HDMI-A-2:3840x2160@30
-```
-
-Measured across interface -> Kodi -> interface after a reboot: 3840x2160p30
-throughout, no 1080p and no dark gap.
-
-```
-tr ' ' '\n' </proc/cmdline | grep ^video=
-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare        # says current or written
+tr ' ' '\n' </proc/cmdline | grep ^video=               # expect nothing
+/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare        # says boot-video=not-asked
 ```
 
 ---

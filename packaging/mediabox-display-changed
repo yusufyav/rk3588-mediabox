@@ -23,8 +23,9 @@
 #                   stopped, and waited for: DRM master is released on the last
 #                     close, and systemctl stop returns after that
 #                   run mediabox-hdmi-prepare here, as root and unsandboxed,
-#                     so the colour reset, the browser's sway mode and the
-#                     boot video= argument are all rewritten for this display
+#                     so the colour reset and the browser's sway mode are
+#                     rewritten for this display, and a boot video= argument
+#                     an older version left is removed
 #                   record the state, start the same owner
 #
 # `seed`, run once at boot before any owner starts, records what is connected
