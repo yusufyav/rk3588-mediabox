@@ -6,7 +6,7 @@ use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -111,6 +111,7 @@ impl Default for RawMessage {
 
 const CEC_ADAP_G_CAPS: libc::c_ulong = ioc(IOC_READ | IOC_WRITE, 0, std::mem::size_of::<RawCaps>());
 const CEC_ADAP_G_PHYS_ADDR: libc::c_ulong = ioc(IOC_READ, 1, std::mem::size_of::<u16>());
+const CEC_ADAP_G_LOG_ADDRS: libc::c_ulong = ioc(IOC_READ, 3, std::mem::size_of::<RawLogAddrs>());
 const CEC_ADAP_S_LOG_ADDRS: libc::c_ulong =
     ioc(IOC_READ | IOC_WRITE, 4, std::mem::size_of::<RawLogAddrs>());
 const CEC_TRANSMIT: libc::c_ulong = ioc(IOC_READ | IOC_WRITE, 5, std::mem::size_of::<RawMessage>());
@@ -236,6 +237,7 @@ struct State {
 
 pub struct Adapter {
     file: File,
+    path: PathBuf,
     physical_address: u16,
     logical_address: u8,
     state: Mutex<State>,
@@ -293,8 +295,21 @@ impl Adapter {
         }
         let mut physical = 0u16;
         ioctl(fd, CEC_ADAP_G_PHYS_ADDR, &mut physical, "G_PHYS_ADDR")?;
-        if physical == CEC_PHYS_ADDR_INVALID {
-            return Err(CecError::NoPhysicalAddress);
+        // No physical address is not a reason to give up on the adapter. The
+        // HDMI driver sets it when a sink is plugged into this socket and
+        // clears it when it is taken out, and the kernel claims the logical
+        // address below on its own the moment one arrives. Refusing here is
+        // what left a box that booted with the television off without CEC
+        // until the next restart.
+        //
+        // A configuration left by a previous process is cleared first:
+        // setting logical addresses on a configured adapter is refused.
+        let mut existing = RawLogAddrs::default();
+        if ioctl(fd, CEC_ADAP_G_LOG_ADDRS, &mut existing, "G_LOG_ADDRS").is_ok()
+            && existing.num_log_addrs > 0
+        {
+            let mut clear = RawLogAddrs::default();
+            ioctl(fd, CEC_ADAP_S_LOG_ADDRS, &mut clear, "S_LOG_ADDRS(clear)")?;
         }
         let mut addresses = RawLogAddrs {
             cec_version: CEC_VERSION_2_0,
@@ -318,7 +333,7 @@ impl Adapter {
             };
         }
         let logical = addresses.log_addr[0];
-        if logical > 14 {
+        if physical != CEC_PHYS_ADDR_INVALID && logical > 14 {
             return Err(CecError::Busy("Playback mantıksal adresi alınamadı".into()));
         }
         let driver = c_string(&caps.driver);
@@ -329,12 +344,14 @@ impl Adapter {
             adapter: Some(format!("{} ({})", path.display(), name)),
             driver: Some(driver),
             capabilities,
-            physical_address: Some(format_physical_address(physical)),
-            logical_addresses: vec![logical],
+            physical_address: (physical != CEC_PHYS_ADDR_INVALID)
+                .then(|| format_physical_address(physical)),
+            logical_addresses: (logical <= 14).then_some(logical).into_iter().collect(),
             ..Default::default()
         };
         Ok(Arc::new(Self {
             file,
+            path: path.to_path_buf(),
             physical_address: physical,
             logical_address: logical,
             state: Mutex::new(State {
@@ -345,8 +362,90 @@ impl Adapter {
         }))
     }
 
+    /// Whether a sink is on this adapter's socket and the adapter holds a
+    /// logical address there -- the one adapter that can talk to the
+    /// television.
+    pub fn is_live(&self) -> bool {
+        matches!(self.addresses(), (physical, Some(_)) if physical != CEC_PHYS_ADDR_INVALID)
+    }
+
+    /// For waiting on several adapters at once.
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        self.file.as_raw_fd()
+    }
+
+    /// Every adapter on the board that can act as a playback device.
+    ///
+    /// One per HDMI transmitter on this SoC, and which of them has the
+    /// television is the kernel's to say -- it sets a physical address on the
+    /// socket a sink is plugged into -- so all of them are configured and the
+    /// live one is asked for when something is sent.
+    pub fn open_all() -> Vec<Arc<Self>> {
+        let Ok(entries) = std::fs::read_dir("/dev") else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.as_encoded_bytes().starts_with(b"cec"))
+            })
+            .collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|path| match Self::open(&path) {
+                Ok(adapter) => Some(adapter),
+                Err(error) => {
+                    eprintln!("CEC {}: {error}", path.display());
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The device node this adapter was opened on.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The physical and logical address as the kernel holds them now.
+    ///
+    /// Neither is a constant. The physical address is the television input
+    /// the cable is in -- 1.0.0.0 on the Sony's HDMI 1, 4.0.0.0 on its HDMI 4
+    /// -- and the kernel updates it on every hotplug and claims the logical
+    /// address again. The values read at open were the ones this used to send
+    /// forever, which is an Active Source naming an input the box is no longer
+    /// on.
+    pub fn addresses(&self) -> (u16, Option<u8>) {
+        let fd = self.file.as_raw_fd();
+        let mut physical = self.physical_address;
+        let _ = ioctl(fd, CEC_ADAP_G_PHYS_ADDR, &mut physical, "G_PHYS_ADDR");
+        let mut addresses = RawLogAddrs::default();
+        let logical = match ioctl(fd, CEC_ADAP_G_LOG_ADDRS, &mut addresses, "G_LOG_ADDRS") {
+            Ok(()) if addresses.num_log_addrs >= 1 && addresses.log_addr[0] <= 14 => {
+                Some(addresses.log_addr[0])
+            }
+            Ok(()) => None,
+            Err(_) => Some(self.logical_address),
+        };
+        (physical, logical)
+    }
+
+    fn logical_now(&self) -> Result<u8, CecError> {
+        match self.addresses() {
+            (physical, Some(logical)) if physical != CEC_PHYS_ADDR_INVALID => Ok(logical),
+            _ => Err(CecError::NoPhysicalAddress),
+        }
+    }
+
     pub fn status(&self) -> CecStatus {
+        let (physical, logical) = self.addresses();
         let mut state = self.state.lock().expect("CEC state lock");
+        state.status.physical_address =
+            (physical != CEC_PHYS_ADDR_INVALID).then(|| format_physical_address(physical));
+        state.status.logical_addresses = logical.into_iter().collect();
         state.status.known_devices = state.devices.values().cloned().collect();
         state.status.clone()
     }
@@ -407,24 +506,24 @@ impl Adapter {
     }
 
     pub fn active_source(&self) -> Result<(), CecError> {
-        self.transmit(&active_source_message(
-            self.logical_address,
-            self.physical_address,
-        ))
+        let logical = self.logical_now()?;
+        let (physical, _) = self.addresses();
+        self.transmit(&active_source_message(logical, physical))
     }
     pub fn wake_tv(&self) -> Result<(), CecError> {
-        self.transmit(&wake_tv_message(self.logical_address))
+        self.transmit(&wake_tv_message(self.logical_now()?))
     }
     pub fn standby_tv(&self) -> Result<(), CecError> {
-        self.transmit(&standby_tv_message(self.logical_address))
+        self.transmit(&standby_tv_message(self.logical_now()?))
     }
 
     pub fn discover_devices(&self) -> Result<Vec<CecDevice>, CecError> {
+        let own = self.logical_now()?;
         for destination in 0..15u8 {
-            if destination == self.logical_address {
+            if destination == own {
                 continue;
             }
-            let poll = [(self.logical_address << 4) | destination];
+            let poll = [(own << 4) | destination];
             if self.transmit(&poll).is_ok() {
                 let now = wallclock_ns();
                 self.state
@@ -438,7 +537,7 @@ impl Adapter {
                         device_type: None,
                         last_seen_ns: now,
                     });
-                let _ = self.transmit(&[(self.logical_address << 4) | destination, 0x83]);
+                let _ = self.transmit(&[(own << 4) | destination, 0x83]);
             }
         }
         Ok(self.status().known_devices)

@@ -1,11 +1,11 @@
 use clap::Parser;
-use mediabox_cec::{Adapter, unavailable_status};
+use mediabox_cec::{Adapter, CecError, unavailable_status};
 use mediabox_core::{CecStatus, InputAction, InputMode, InputSource, Surface};
 use mediabox_input::InputManager;
 use mediaboxd_rs::daemon::{AppState, CecRuntime, apply_kodi_route, serve_unix, socket_is_live};
-use mediaboxd_rs::kodi::KodiClient;
 use mediaboxd_rs::display::DisplayColor;
 use mediaboxd_rs::fan::FanController;
+use mediaboxd_rs::kodi::KodiClient;
 use mediaboxd_rs::leds::LedController;
 use mediaboxd_rs::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use mediaboxd_rs::media::MediaClient;
@@ -61,28 +61,6 @@ struct Args {
     input_mode: ModeArg,
 }
 
-/// The CEC adapter on the selected display output, if this board has one
-/// there.
-///
-/// `None` is a normal answer and not a fault: DisplayPort carries no CEC, and
-/// a box with nothing plugged in has no selected output to ask about. The
-/// caller falls back to plain adapter discovery, and the daemon reports CEC as
-/// unavailable if that finds nothing either.
-fn discovered_cec_adapter() -> Option<PathBuf> {
-    let platform = mediabox_platform::Platform::discover();
-    for warning in &platform.warnings {
-        eprintln!("mediaboxd-rs.platform {warning}");
-    }
-    let output = platform.selected_output()?;
-    let adapter = output.cec.as_ref()?;
-    eprintln!(
-        "mediaboxd-rs: CEC {} ({} üzerinden)",
-        adapter.device.display(),
-        output.connector.name
-    );
-    Some(adapter.device.clone())
-}
-
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum ModeArg {
     Ui,
@@ -102,27 +80,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ModeArg::Ui => InputMode::Ui,
         ModeArg::KodiPlayback => InputMode::KodiPlayback,
     });
-    let (adapter, unavailable) = if args.disable_cec {
+    // Every CEC adapter on the board, not the one belonging to whatever was
+    // plugged in when the daemon started. The kernel keeps one adapter per
+    // HDMI transmitter and gives a physical address to the socket a sink is
+    // plugged into; configured once as a playback device, an adapter claims
+    // its logical address by itself whenever that happens. Choosing a single
+    // adapter here, once, is what left a box that booted with the television
+    // off -- or had its cable moved to the other socket -- with no CEC at all.
+    let (adapters, unavailable) = if args.disable_cec {
         (
-            None,
+            Vec::new(),
             CecStatus {
                 error: Some("CEC komut satırından kapatıldı".into()),
                 ..Default::default()
             },
         )
     } else {
-        // Which adapter is this television's is a topology question, not a
-        // numbering one. A board with two HDMI transmitters has two adapters,
-        // and the lowest-numbered one is the socket nothing is plugged into as
-        // often as it is the right one. So the adapter is the one that belongs
-        // to the output the display stage selected — the same choice the
-        // television interface makes, from the same resolver.
-        let wanted = args.cec_device.clone().or_else(discovered_cec_adapter);
-        match Adapter::discover(wanted.as_deref()) {
-            Ok(adapter) => (Some(adapter), CecStatus::default()),
-            Err(error) if args.require_cec => return Err(error.into()),
-            Err(error) => (None, unavailable_status(wanted.as_deref(), &error)),
+        let adapters = match args.cec_device.as_deref() {
+            Some(path) => match Adapter::open(path) {
+                Ok(adapter) => vec![adapter],
+                Err(error) if args.require_cec => return Err(error.into()),
+                Err(error) => {
+                    eprintln!("CEC {}: {error}", path.display());
+                    Vec::new()
+                }
+            },
+            None => Adapter::open_all(),
+        };
+        if adapters.is_empty() && args.require_cec {
+            return Err(CecError::NotFound.into());
         }
+        let unavailable = unavailable_status(args.cec_device.as_deref(), &CecError::NotFound);
+        (adapters, unavailable)
     };
     let kodi = Arc::new(KodiClient::new(
         &args.kodi_endpoint,
@@ -154,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handovers,
         )?,
         cec: CecRuntime {
-            adapter: adapter.clone(),
+            adapters: adapters.clone(),
             unavailable,
         },
         input: input.clone(),
@@ -175,7 +164,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let stop = Arc::new(AtomicBool::new(false));
-    let receiver = if let Some(adapter) = adapter {
+    // What wakes the receiver to stop. It sleeps in poll() with no timeout,
+    // so without this it would only notice a shutdown on the next CEC message.
+    // SAFETY: a plain eventfd, owned here and closed at exit.
+    let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+    let receiver = if !adapters.is_empty() && wake >= 0 {
         let stop = stop.clone();
         let input = input.clone();
         let kodi = kodi.clone();
@@ -185,47 +178,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::Builder::new()
                 .name("mediabox-cec-rx".into())
                 .spawn(move || {
+                    // One wait on every adapter: the remote's keys arrive on
+                    // whichever socket the television is on.
+                    let mut waits: Vec<libc::pollfd> = adapters
+                        .iter()
+                        .map(|adapter| adapter.raw_fd())
+                        .chain(std::iter::once(wake))
+                        .map(|fd| libc::pollfd {
+                            fd,
+                            events: libc::POLLIN,
+                            revents: 0,
+                        })
+                        .collect();
                     while !stop.load(Ordering::Relaxed) {
-                        match adapter.receive(250) {
-                            Ok(Some((parsed, Some((action, pressed))))) => {
-                                let mode = input.mode();
-                                let decision = input.publish(
-                                    action,
-                                    InputSource::Cec,
-                                    pressed,
-                                    Some(parsed.event.timestamp_ns),
-                                );
-                                if pressed {
-                                    let kodi = kodi.clone();
-                                    runtime.spawn(async move {
-                                        let _ = apply_kodi_route(&kodi, decision).await;
-                                    });
-                                }
-                                // Home reclaims the display; Back does not.
-                                //
-                                // Back belongs to whatever is on screen. The
-                                // kernel's CEC driver publishes the remote as
-                                // a real input device, so Kodi receives Back
-                                // itself and answers it the way Kodi does —
-                                // leave full screen, show the menu, keep the
-                                // film running. Taking the display away on
-                                // Back instead is what made a single press
-                                // stop the film and quit Kodi.
-                                if pressed
-                                    && mode == InputMode::KodiPlayback
-                                    && matches!(action, InputAction::Home)
-                                {
-                                    let state = state.clone();
-                                    runtime.spawn(async move {
-                                        if let Err(error) = state.switch_surface(Surface::Ui).await
-                                        {
-                                            eprintln!("surface -> ui: {error}");
-                                        }
-                                    });
-                                }
+                        for wait in &mut waits {
+                            wait.revents = 0;
+                        }
+                        // Asleep in the kernel until the television sends
+                        // something or the daemon stops: no timeout, so an
+                        // idle box never wakes this thread.
+                        // SAFETY: the descriptors belong to adapters this
+                        // thread holds for as long as it runs, and the wake fd.
+                        let ready = unsafe {
+                            libc::poll(waits.as_mut_ptr(), waits.len() as libc::nfds_t, -1)
+                        };
+                        if ready <= 0 {
+                            continue;
+                        }
+                        for (adapter, wait) in adapters.iter().zip(&waits) {
+                            if wait.revents & libc::POLLIN == 0 {
+                                continue;
                             }
-                            Ok(_) => {}
-                            Err(error) => eprintln!("CEC receive: {error}"),
+                            match adapter.receive(1) {
+                                Ok(Some((parsed, Some((action, pressed))))) => {
+                                    let mode = input.mode();
+                                    let decision = input.publish(
+                                        action,
+                                        InputSource::Cec,
+                                        pressed,
+                                        Some(parsed.event.timestamp_ns),
+                                    );
+                                    if pressed {
+                                        let kodi = kodi.clone();
+                                        runtime.spawn(async move {
+                                            let _ = apply_kodi_route(&kodi, decision).await;
+                                        });
+                                    }
+                                    // Home reclaims the display; Back does not.
+                                    //
+                                    // Back belongs to whatever is on screen. The
+                                    // kernel's CEC driver publishes the remote as
+                                    // a real input device, so Kodi receives Back
+                                    // itself and answers it the way Kodi does —
+                                    // leave full screen, show the menu, keep the
+                                    // film running. Taking the display away on
+                                    // Back instead is what made a single press
+                                    // stop the film and quit Kodi.
+                                    if pressed
+                                        && mode == InputMode::KodiPlayback
+                                        && matches!(action, InputAction::Home)
+                                    {
+                                        let state = state.clone();
+                                        runtime.spawn(async move {
+                                            if let Err(error) =
+                                                state.switch_surface(Surface::Ui).await
+                                            {
+                                                eprintln!("surface -> ui: {error}");
+                                            }
+                                        });
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => eprintln!("CEC receive: {error}"),
+                            }
                         }
                     }
                 })?,
@@ -294,6 +319,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     shutdown_signal().await?;
     stop.store(true, Ordering::Relaxed);
+    if wake >= 0 {
+        let one: u64 = 1;
+        // SAFETY: eight bytes to the eventfd created above.
+        unsafe { libc::write(wake, (&one as *const u64).cast(), 8) };
+    }
     unix_task.abort();
     for task in web_tasks {
         task.abort();

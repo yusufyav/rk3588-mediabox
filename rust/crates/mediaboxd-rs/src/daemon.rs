@@ -1,6 +1,6 @@
-use crate::kodi::KodiClient;
 use crate::display::DisplayColor;
 use crate::fan::FanController;
+use crate::kodi::KodiClient;
 use crate::leds::LedController;
 use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
@@ -21,15 +21,33 @@ use tokio::net::{UnixListener, UnixStream};
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 pub struct CecRuntime {
-    pub adapter: Option<Arc<Adapter>>,
+    /// Every adapter on the board, each configured as a playback device.
+    pub adapters: Vec<Arc<Adapter>>,
+    /// What to report when there is no adapter at all.
     pub unavailable: CecStatus,
 }
 
 impl CecRuntime {
+    /// The adapter on the socket the television is on, if one is.
+    pub fn adapter(&self) -> Option<Arc<Adapter>> {
+        self.adapters
+            .iter()
+            .find(|adapter| adapter.is_live())
+            .cloned()
+    }
+
     pub fn status(&self) -> CecStatus {
-        self.adapter
-            .as_ref()
-            .map_or_else(|| self.unavailable.clone(), |adapter| adapter.status())
+        if let Some(adapter) = self.adapter() {
+            return adapter.status();
+        }
+        match self.adapters.first() {
+            Some(adapter) => CecStatus {
+                available: false,
+                error: Some(mediabox_cec::CecError::NoPhysicalAddress.to_string()),
+                ..adapter.status()
+            },
+            None => self.unavailable.clone(),
+        }
     }
 }
 
@@ -79,7 +97,7 @@ impl AppState {
             },
             Request::CecStatus => Response::success(self.cec.status()),
             Request::CecDevices => {
-                let Some(adapter) = self.cec.adapter.clone() else {
+                let Some(adapter) = self.cec.adapter() else {
                     return Response::failure("CEC_UNAVAILABLE", cec_error(&self.cec.status()));
                 };
                 match tokio::task::spawn_blocking(move || adapter.discover_devices()).await {
@@ -665,7 +683,6 @@ impl AppState {
             }
         }
     }
-
 }
 
 /// Is this one of the media core's own session addresses?
@@ -799,7 +816,7 @@ async fn cec_action<F>(runtime: &CecRuntime, action: F) -> Response
 where
     F: FnOnce(&Adapter) -> Result<(), mediabox_cec::CecError> + Send + 'static,
 {
-    let Some(adapter) = runtime.adapter.clone() else {
+    let Some(adapter) = runtime.adapter() else {
         return Response::failure("CEC_UNAVAILABLE", cec_error(&runtime.status()));
     };
     match tokio::task::spawn_blocking(move || action(&adapter)).await {
@@ -984,7 +1001,9 @@ mod tests {
         assert!(!is_proxy_address(
             "https://21-4.download.real-debrid.com/d/ZI6AQSXVDNJ2K/A%20Film.mkv"
         ));
-        assert!(!is_proxy_address("http://127.0.0.1:11470/hlsv2/abc/master.m3u8"));
+        assert!(!is_proxy_address(
+            "http://127.0.0.1:11470/hlsv2/abc/master.m3u8"
+        ));
         assert!(!is_proxy_address(""));
     }
 
@@ -999,7 +1018,7 @@ mod tests {
             ),
             lifecycle: KodiLifecycle::new("kodi.service").unwrap(),
             cec: CecRuntime {
-                adapter: None,
+                adapters: Vec::new(),
                 unavailable: CecStatus {
                     error: Some("testte kapalı".into()),
                     ..Default::default()
