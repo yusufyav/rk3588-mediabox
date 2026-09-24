@@ -378,7 +378,8 @@ done
 
 # ---------------------------------------------------------------- the units
 for u in mediaboxd-rs mediabox-tv-ui mediabox-media-worker stremio-server \
-         mediabox-console-off mediabox-display-changed mediabox-display-seed mediabox-browser kodi; do
+         mediabox-console-off mediabox-display-changed mediabox-display-seed \
+         mediabox-display-observer mediabox-browser kodi; do
   f="$ETC/systemd/system/$u.service"
   [ -f "$f" ] && pass "unit $u.service" installed || fail "unit $u.service" "MISSING $f"
 done
@@ -386,6 +387,7 @@ for f in etc/mediaboxd.toml etc/mediabox-library.json etc/mediabox-applications.
          etc/mediabox-media-worker.env etc/mediabox/sway-browser.conf \
          etc/udev/rules.d/80-mediabox-no-power-switch.rules \
          etc/udev/rules.d/81-mediabox-display-hotplug.rules \
+         etc/alsa/conf.d/60-mediabox-unrouted.conf \
          etc/systemd/logind.conf.d/10-mediabox.conf; do
   [ -f "$ROOT/$f" ] && pass "integration $(basename "$f")" ok || fail "integration $f" "MISSING"
 done
@@ -422,7 +424,7 @@ if [ "$STATIC" != 1 ]; then
     fail "connected output" none
   fi
 
-  for u in mediaboxd-rs mediabox-media-worker stremio-server; do
+  for u in mediaboxd-rs mediabox-media-worker stremio-server mediabox-display-observer; do
     st="$(systemctl is-active "$u.service" 2>/dev/null || true)"
     [ "$st" = active ] && pass "$u running" "$st" || fail "$u running" "${st:-unknown}"
   done

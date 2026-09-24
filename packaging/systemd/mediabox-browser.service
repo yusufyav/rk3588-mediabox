@@ -72,14 +72,13 @@ StandardInput=tty-force
 # start, which is what pinned it down. This is not a property of one board: the
 # unit asks for a terminal of its own, so it has to ask for it to be shown.
 ExecStartPre=/usr/bin/chvt 8
-# The mode this board's cable can carry is *not* measured here, although sway
-# is told it: `mediabox-hdmi-prepare` writes it into /run/mediabox, and this
-# unit is confined out of that directory on purpose -- the control plane's
-# socket lives there and a browser has no business writing to it. The
-# interface runs that step before every start of its own and this unit is only
-# ever started by the interface handing the display over, so the file is there
-# by the time sway reads it. If it is not, sway's `include` of a missing file
-# is not an error and the compositor falls back to choosing for itself.
+# The mode sway is told, written fresh at every start into this unit's own
+# runtime directory -- which goes when the unit stops, so no start can find the
+# last display's line. `mediabox-platform sway-output` prints the control
+# plane's plan for the mode, bound to the selected connector, only when that
+# plan is for this boot, the observer's current generation and the connector
+# and EDID read now; otherwise a comment saying why, and sway chooses.
+ExecStartPre=/bin/sh -c '/opt/rk3588-mediabox/bin/mediabox-platform sway-output >/run/mediabox-browser/sway-output.conf'
 # And back to tty1 on the way out, so stopping the browser does not leave the
 # console parked on an empty terminal. Tolerant: a failure here must not turn
 # an ordinary stop into a failed unit.

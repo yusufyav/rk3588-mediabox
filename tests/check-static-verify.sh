@@ -102,7 +102,8 @@ build_archive() {
            "$P"/{mali-g24p0-runtime/lib,node/bin,stremio-server,media,ui} \
            "$P"/kodi/lib/kodi "$P"/kodi/share/kodi/system/settings "$M" \
            "$root"/rootfs/etc/systemd/system "$root"/rootfs/etc/mediabox \
-           "$root"/rootfs/etc/udev/rules.d "$root"/rootfs/etc/systemd/logind.conf.d
+           "$root"/rootfs/etc/udev/rules.d "$root"/rootfs/etc/systemd/logind.conf.d \
+           "$root"/rootfs/etc/alsa/conf.d
 
   for b in mediaboxd-rs mediaboxctl mediabox-platform mediabox-tv mediabox-player \
            mediabox-browser-verify; do
@@ -139,13 +140,15 @@ build_archive() {
   fi
 
   for u in mediaboxd-rs mediabox-tv-ui mediabox-media-worker stremio-server \
-           mediabox-console-off mediabox-display-changed mediabox-display-seed mediabox-browser kodi; do
+           mediabox-console-off mediabox-display-changed mediabox-display-seed \
+           mediabox-display-observer mediabox-browser kodi; do
     : >"$root/rootfs/etc/systemd/system/$u.service"
   done
   for f in etc/mediaboxd.toml etc/mediabox-library.json etc/mediabox-applications.json \
            etc/mediabox-media-worker.env etc/mediabox/sway-browser.conf \
            etc/udev/rules.d/80-mediabox-no-power-switch.rules \
            etc/udev/rules.d/81-mediabox-display-hotplug.rules \
+           etc/alsa/conf.d/60-mediabox-unrouted.conf \
            etc/systemd/logind.conf.d/10-mediabox.conf; do
     : >"$root/rootfs/$f"
   done

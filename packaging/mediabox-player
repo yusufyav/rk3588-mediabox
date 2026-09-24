@@ -74,8 +74,10 @@ fi
 # So the same question is asked here, of the same resolver. `hdmi:CARD=<id>` is
 # the PCM that mediabox-hdmi-prepare renders per board -- plug-wrapped, so a
 # 44.1 kHz film reaches a 48 kHz sink -- and `plughw:` is the fallback for a
-# board where that file has not been written yet. If nothing resolves, nothing
-# is pinned and mpv autoprobes as before: a silent film is better than no film.
+# board where that file has not been written yet. If nothing resolves -- no
+# card, or a transmitter that is not firmly known -- the sound goes to mpv's
+# null output: a silent film is better than no film, and better than a film
+# whose sound plays on another television.
 audio=""
 platform=/opt/rk3588-mediabox/bin/mediabox-platform
 if [ -x "$platform" ]; then
@@ -86,7 +88,11 @@ if [ -x "$platform" ]; then
     elif [ -n "$card" ]; then
         audio="--ao=alsa --audio-device=alsa/plughw:CARD=$card,DEV=0"
     else
-        echo "mediabox-player: ses kartı çözülemedi, mpv kendi seçecek" >&2
+        # No card, or the output's transmitter is not firmly known: the
+        # sound goes nowhere rather than to whichever card mpv would find
+        # first -- on a board with two HDMI sockets, the other television.
+        audio="--ao=null"
+        echo "mediabox-player: bu çıkışın ses kartı çözülemedi; ses gönderilmiyor" >&2
     fi
 fi
 

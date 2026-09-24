@@ -14,19 +14,31 @@
 # One path, and it has to be the same whichever application is up:
 #
 #   settle        one plug is several uevents; read until two reads agree
-#   compare       against the state recorded at boot or by the last run
+#   compare       against the state recorded at boot or by the last run: each
+#                 connector, whether something is on it, and the SHA-256 of
+#                 the EDID it publishes -- so a sink replaced without the
+#                 socket ever reading `disconnected` is a change too
 #   disconnected  record it and touch nothing -- there is no panel to recover,
 #                 and a restart now only starts an owner that finds nothing
-#   connected     under the transition lock, find the one active owner;
+#   connected     wait, briefly, for the control plane's plan for the new sink
+#                 when Kodi or the browser owns the display -- they start from
+#                 it, and it is made while the owner that is still up holds
+#                 the display; then, under the transition lock, find the one
+#                 active owner;
 #                 the browser is left running and only its configuration is
 #                   refreshed; anything else is
 #                   stopped, and waited for: DRM master is released on the last
 #                     close, and systemctl stop returns after that
 #                   run mediabox-hdmi-prepare here, as root and unsandboxed,
-#                     so the colour reset and the browser's sway mode are
-#                     rewritten for this display, and a boot video= argument
-#                     an older version left is removed
+#                     so the colour reset and Kodi's profile are rewritten for
+#                     this display, and a boot video= argument an older
+#                     version left is removed
 #                   record the state, start the same owner
+#
+# This runs on udev's hotplug event, and on the control plane's word when the
+# display observer -- which looks every few seconds whether or not an event
+# arrived -- sees the sink change. Either way it decides from what it reads
+# now, not from the event.
 #
 # `seed`, run once at boot before any owner starts, records what is connected
 # then. Without it the first uevent after boot had nothing to compare with and
@@ -40,23 +52,30 @@ STAMP="${MEDIABOX_DISPLAY_STAMP:-/run/mediabox-display.stamp}"
 LOCK="${MEDIABOX_TRANSITION_LOCK:-/run/mediabox/display-transition.lock}"
 SYSTEMCTL="${MEDIABOX_SYSTEMCTL:-systemctl}"
 SETTLE="${MEDIABOX_DISPLAY_SETTLE:-0.5}"
-SWAY_OUT="${MEDIABOX_RUN_DIR:-/run/mediabox}/sway-output.conf"
 BROWSER_RUN="${MEDIABOX_BROWSER_RUN:-/run/mediabox-browser}"
+SWAY_OUT="$BROWSER_RUN/sway-output.conf"
+PLAN_WAIT="${MEDIABOX_PLAN_WAIT:-8}"
 SWAYMSG="${MEDIABOX_SWAYMSG:-swaymsg}"
 RELINK_PAUSE="${MEDIABOX_RELINK_PAUSE:-1}"
 OWNERS="mediabox-tv-ui.service mediabox-browser.service kodi.service"
 
 say() { echo "mediabox-display-changed: $*" >&2; }
 
-# What is compared: each connector and whether something is on it, and not
-# the mode column. That column is the kernel's last probe, not the panel's: a
-# socket just plugged into reads `connected -` until something probes it, and a
-# socket just left keeps its old mode for a while and then drops it. Measured
-# moving a monitor between sockets, each of those drifts ran a second recovery
-# seconds after the first. A different panel on the same socket is still seen:
-# swapping one is an unplug and a plug.
+# What is compared: each connector, whether something is on it, and the
+# SHA-256 of its EDID -- not the mode column. That column is the kernel's last
+# probe, not the panel's: a socket just plugged into reads `connected -` until
+# something probes it, and a socket just left keeps its old mode for a while
+# and then drops it. Measured moving a monitor between sockets, each of those
+# drifts ran a second recovery seconds after the first. The EDID is what says
+# which sink it is: an AV receiver or a switch can put another one on the
+# socket without it ever reading `disconnected`.
 outputs() {
-  "$PLATFORM" outputs 2>/dev/null | awk -F '\t' '{ print $1 "\t" $2 }' || true
+  "$PLATFORM" outputs 2>/dev/null | awk -F '\t' '{ print $1 "\t" $2 "\t" $4 }' || true
+}
+
+# The browser's output line, from the plan for this display only.
+sway_output() {
+  "$PLATFORM" sway-output >"$SWAY_OUT.new" 2>/dev/null && mv -f "$SWAY_OUT.new" "$SWAY_OUT"
 }
 
 # Have the kernel read the modes of every connected socket, so the preparation
@@ -132,6 +151,23 @@ settled() {
   printf '%s' "$current"
 }
 
+# Kodi and the browser start from the plan, and the plan for a new sink can
+# only be made while somebody holds the display: the observer reads the
+# kernel's mode list only then, and never under the transition lock. So it is
+# waited for here, before the lock -- while the owner that is still up holds
+# the display -- and for a bounded time. Without it they start on their own
+# defaults for this display, never on the last one's.
+seen="$(outputs)"
+if connected "$seen" && [ "$seen" != "$(cat "$STAMP" 2>/dev/null || true)" ]; then
+  for unit in kodi.service mediabox-browser.service; do
+    if $SYSTEMCTL is-active --quiet "$unit"; then
+      "$PLATFORM" plan --wait "$PLAN_WAIT" >/dev/null 2>&1 ||
+        say "yeni ekranın planı $PLAN_WAIT sn içinde hazır olmadı; sahip kendi varsayılanıyla açılacak"
+      break
+    fi
+  done
+fi
+
 # The control plane's handover gate. Held for the whole recovery: kodi.service's
 # ExecStopPost asks it whether a stop was requested, and without it stopping
 # Kodi here would queue a second, competing return to the interface. Waited for,
@@ -195,6 +231,7 @@ while [ "$round" -lt 3 ]; do
   if [ "$owner" = mediabox-browser.service ]; then
     before="$(cat "$SWAY_OUT" 2>/dev/null || true)"
     prepare 0
+    sway_output
     printf '%s' "$now" >"$STAMP"
     after="$(cat "$SWAY_OUT" 2>/dev/null || true)"
     if [ "$after" = "$before" ]; then

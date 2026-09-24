@@ -128,8 +128,12 @@ if [ -e "$DRIVER" ]; then
     ok 'screenbridge prefix' 'unreferenced'
   fi
   if command -v vainfo >/dev/null 2>&1; then
+    # The render node that belongs to the display hardware, as discovery
+    # finds it: renderD128 is whichever DRM device probed first (the NPU, on
+    # some boards).
+    render="$("$PREFIX/bin/mediabox-platform" render-node 2>/dev/null || true)"
     info=$(LIBVA_DRIVERS_PATH="$MEDIA_PREFIX/lib/dri" LIBVA_DRIVER_NAME=rockchip \
-           vainfo --display drm --device /dev/dri/renderD128 2>&1 || true)
+           vainfo --display drm --device "${render:-/dev/null}" 2>&1 || true)
     case "$info" in
       *'va_openDriver() returns 0'*) ok 'libva opens it' "$(printf '%s' "$info" | sed -n 's/^vainfo: Driver version: *//p')" ;;
       *) bad 'libva opens it' "$(printf '%s' "$info" | grep -i error | head -1)" ;;

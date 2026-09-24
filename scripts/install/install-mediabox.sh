@@ -333,6 +333,19 @@ else
     done
 fi
 
+# Integration files an archive captured before they existed does not list.
+# They are packaging, so this tree is their source either way; the observer's
+# unit only where the archive carries the observer.
+for pair in \
+  "packaging/systemd/mediabox-display-observer.service:etc/systemd/system/mediabox-display-observer.service:bin/mediabox-display-observer" \
+  "config/alsa/60-mediabox-unrouted.conf:etc/alsa/conf.d/60-mediabox-unrouted.conf:"; do
+  src="${pair%%:*}"; rest="${pair#*:}"; rel="${rest%%:*}"; needs="${rest#*:}"
+  [ -e "/$rel" ] && continue
+  [ -z "$needs" ] || [ -e "$prefix/$needs" ] || continue
+  install -D -m 0644 "$here/$src" "/$rel"
+  printf '  ok    /%-52s %s\n' "$rel" "repo (not in this archive's manifest)"
+done
+
 # The product's own checks live beside the product, so the appliance can be
 # asked whether it is whole without this repository being present.
 install -m 0755 "$here/packaging/mediabox-product-verify" "$prefix/bin/mediabox-product-verify"
@@ -525,6 +538,16 @@ step "services"
 systemctl enable --now mediabox-console-off.service >/dev/null 2>&1 || true
 # The boot record the hotplug helper compares against; see the unit.
 systemctl enable mediabox-display-seed.service >/dev/null 2>&1 || true
+# The display's hardware state, which the control plane reads and takes from
+# nothing else. Started now: it touches nothing on the television. An archive
+# from before the observer has no binary for it, and that is said, not hidden.
+if [ -x "$prefix/bin/mediabox-display-observer" ]; then
+  systemctl daemon-reload
+  systemctl enable --now mediabox-display-observer.service >/dev/null
+  ok "mediabox-display-observer.service"
+else
+  note "this archive predates the display observer; it is not installed"
+fi
 
 # The radios come up in an order this hardware survives, and the product
 # decides that order rather than systemd restoring whatever state a radio was

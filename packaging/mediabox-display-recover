@@ -28,7 +28,7 @@ MEDIABOXCTL="${MEDIABOXCTL:-/opt/rk3588-mediabox/bin/mediaboxctl}"
 # transition that starts after this test serialises against it instead of
 # racing it, and a switch to a surface that is already up is a no-op.
 busy=0
-flock -n -E 9 "$LOCK" true >/dev/null 2>&1 || busy=$?
+flock -n -s -E 9 "$LOCK" true >/dev/null 2>&1 || busy=$?
 [ "$busy" -eq 9 ] && exit 0
 
 exec "$MEDIABOXCTL" surface switch ui

@@ -1,13 +1,14 @@
 [Unit]
-Description=MediaBox display observer (shadow mode: observes, decides nothing)
+Description=MediaBox display observer (the display's hardware state)
 # Watches the selected output -- sysfs, DRM uevents, debugfs, the device tree --
-# and publishes one snapshot of it under /run/mediabox-display-observer. See
-# rust/crates/mediabox-platform/src/observer.rs.
+# and publishes one snapshot of it under /run/mediabox-display-observer: the
+# generation, the sink's EDID identity, the topology and where audio and CEC
+# may go, the kernel's mode list and the offer, and what the driver reports on
+# the wire. See rust/crates/mediabox-platform/src/observer.rs.
 #
-# Shadow mode: nothing reads the snapshot to act on it. The control plane, the
-# interface, Kodi and the browser make every display decision exactly as
-# before; the observer is compared with them (it asks the control plane what
-# it believes, read-only) and logs where they differ.
+# It is the only source of display hardware state: the control plane reads the
+# snapshot (a directory only this unit writes) and takes no hardware facts from
+# any client. It decides nothing itself.
 #
 # Deliberately not ordered against any owner of the display and not a part of
 # the display's lifetime: it keeps no descriptor on the DRM device (the DRM
@@ -59,10 +60,9 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount @swap @reboot @module @raw-io @cpu-emulation @obsolete
-# No network. AF_NETLINK is the kernel's uevent broadcast (a hint to look now;
-# the timer looks anyway). AF_UNIX is the control plane's local socket, asked
-# `output_status` for the comparison, and nothing else.
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# No network, and no socket to anybody: AF_NETLINK is the kernel's uevent
+# broadcast (a hint to look now; the timer looks anyway).
+RestrictAddressFamilies=AF_NETLINK
 IPAddressDeny=any
 
 [Install]

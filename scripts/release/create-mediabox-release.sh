@@ -71,6 +71,7 @@ trap cleanup EXIT
 say "system integration"
 mediabox_ssh "mkdir -p '$stage/rootfs/etc/systemd/system' \
   '$stage/rootfs/etc/systemd/logind.conf.d' '$stage/rootfs/etc/udev/rules.d' \
+  '$stage/rootfs/etc/alsa/conf.d' \
   '$stage/rootfs/etc/mediabox' '$stage/rootfs/etc/chromium/policies/managed' '$stage/meta'"
 
 # repo path <TAB> installed path
@@ -81,6 +82,7 @@ packaging/systemd/mediabox-media-worker.service	etc/systemd/system/mediabox-medi
 packaging/systemd/mediabox-console-off.service	etc/systemd/system/mediabox-console-off.service
 packaging/systemd/mediabox-display-changed.service	etc/systemd/system/mediabox-display-changed.service
 packaging/systemd/mediabox-display-seed.service	etc/systemd/system/mediabox-display-seed.service
+packaging/systemd/mediabox-display-observer.service	etc/systemd/system/mediabox-display-observer.service
 packaging/systemd/mediabox-browser.service	etc/systemd/system/mediabox-browser.service
 packaging/systemd/mediabox-wireless.service	etc/systemd/system/mediabox-wireless.service
 packaging/systemd/mediabox-bt-agent.service	etc/systemd/system/mediabox-bt-agent.service
@@ -90,6 +92,7 @@ packaging/systemd/logind.conf.d/10-mediabox.conf	etc/systemd/logind.conf.d/10-me
 packaging/udev/80-mediabox-no-power-switch.rules	etc/udev/rules.d/80-mediabox-no-power-switch.rules
 packaging/udev/81-mediabox-display-hotplug.rules	etc/udev/rules.d/81-mediabox-display-hotplug.rules
 config/sway-browser.conf	etc/mediabox/sway-browser.conf
+config/alsa/60-mediabox-unrouted.conf	etc/alsa/conf.d/60-mediabox-unrouted.conf
 config/mediabox-applications.json	etc/mediabox-applications.json
 config/mediabox-library.json	etc/mediabox-library.json
 packaging/chromium-policies.json	etc/chromium/policies/managed/mediabox.json

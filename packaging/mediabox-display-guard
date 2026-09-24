@@ -35,11 +35,17 @@ RECOVER="${MEDIABOX_DISPLAY_RECOVER:-/opt/rk3588-mediabox/bin/mediabox-display-r
 # here is precisely the deadlock b34a48a fixed: the control plane is inside
 # `systemctl stop kodi`, and `systemctl stop` is waiting for this script.
 #
+# Asked with a *shared* lock. A transition holds it exclusively; the display
+# observer holds it shared for the milliseconds it has the display device open
+# to read a mode list. A shared question is refused by the first and granted
+# beside the second, so a Kodi that ends while the observer happens to be
+# reading is still a Kodi that ended, and the interface still comes back.
+#
 # Reading it wrong is safe in one direction only, and that is the direction it
 # fails in: a lock we cannot test reads as "nobody asked", which queues a
 # recovery that the daemon serialises behind any real transition anyway.
 busy=0
-flock -n -E 9 "$LOCK" true >/dev/null 2>&1 || busy=$?
+flock -n -s -E 9 "$LOCK" true >/dev/null 2>&1 || busy=$?
 [ "$busy" -eq 9 ] && exit 0
 
 # Nobody asked. The interface goes back, and it does not wait for a clock to

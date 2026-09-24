@@ -238,13 +238,19 @@ production=(
   "$here"/packaging/systemd/*.service
   "$here"/packaging/mediabox-hdmi-prepare
   "$here"/packaging/mediabox-player
+  "$here"/packaging/mediabox-browser
+  "$here"/packaging/mediabox-browser-verify
+  "$here"/packaging/mediabox-playback-smoke
   "$here"/packaging/mediabox-display-changed
+  "$here"/packaging/mediabox-display-guard
+  "$here"/packaging/mediabox-display-recover
   "$here"/packaging/mediabox-display-scale
   "$here"/packaging/mediabox-kiosk-smoke
   "$here"/packaging/mediabox-fan-setup
   "$here"/config/mediabox-applications.json
+  "$here"/config/sway-browser.conf
 )
-pattern='/dev/dri/card[0-9]|/dev/dri/renderD[0-9]|/dev/cec[0-9]|rockchiphdmi[0-9]|rockchip-hdmi[0-9]|card[0-9]-HDMI|HDMI-A-[0-9]|\bDP-1\b'
+pattern='/dev/dri/card[0-9]|/dev/dri/renderD[0-9]|/dev/cec[0-9]|debug/dri/[0-9]|rockchiphdmi[0-9]|rockchip-hdmi[0-9]|card[0-9]-HDMI|HDMI-A-[0-9]|\bDP-1\b|output \* mode'
 hardcodes=""
 for file in "${production[@]}"; do
   [ -f "$file" ] || continue
@@ -332,6 +338,10 @@ lacks "recovery does not poll units"     "$guard$recover" 'is-active'
 contains "the guard reads the transition gate" "$guard" 'flock -n'
 contains "and never blocks on it"              "$guard" '-E 9'
 contains "the recovery re-reads it"            "$recover" 'flock -n'
+# Shared, so the observer's shared hold while it reads a mode list is not
+# taken for a handover and a Kodi that ended by itself is still recovered.
+contains "the guard asks with a shared lock"   "$guard" 'flock -n -s'
+contains "and so does the recovery"            "$recover" 'flock -n -s'
 contains "the guard detaches the recovery"     "$guard" 'systemd-run --no-block'
 contains "into a cgroup of its own"            "$guard" '--collect'
 contains "ordered after the player's own stop" "$guard" '--property=After=kodi.service'
@@ -720,6 +730,12 @@ case "$1" in
     if [ -s "$HP/seq" ]; then head -1 "$HP/seq" | tr '|' '\n'; [ "$(wc -l <"$HP/seq")" -gt 1 ] && sed -i 1d "$HP/seq"
     else cat "$HP/outputs"; fi ;;
   output) awk -F '\t' '$2 == "connected" { print $1; exit }' "$HP/outputs" ;;
+  # The plan is current when the test says so; waiting for it is logged.
+  plan) [ "${2:-}" = --wait ] && echo "plan --wait" >>"$HP/log"
+        [ -s "$HP/plan" ] && cat "$HP/plan" ;;
+  sway-output) if [ -s "$HP/swaymode" ]; then cat "$HP/swaymode"; else echo "# no current display plan"; fi ;;
+  alsa-card) [ -s "$HP/card" ] && cat "$HP/card" ;;
+  alsa-driver) [ -s "$HP/card" ] && echo rockchip-hdmi ;;
   *) ;;
 esac
 EOF
@@ -731,17 +747,18 @@ EOF
 cat >"$hp/bin/prepare" <<'EOF'
 #!/bin/sh
 echo "prepare boot-video=${MEDIABOX_HDMI_BOOT_VIDEO:-0} reset=${MEDIABOX_HDMI_CONNECTOR_RESET:-1}" >>"$HP/log"
-# The browser's mode, as the real preparation would write it for this display.
-[ -s "$HP/swaymode" ] && cp "$HP/swaymode" "$HP/run/sway-output.conf"
 exit 0
 EOF
 printf '#!/bin/sh\necho "swaymsg $* sock=${SWAYSOCK##*/}" >>"$HP/log"\n' >"$hp/bin/swaymsg"
 chmod +x "$hp/bin/"*
-on=$'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tconnected\t2560x1440'
-off=$'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tdisconnected\t2560x1440'
-# What is recorded: each socket and whether something is on it, no mode.
-off_state=$'HDMI-A-1\tdisconnected\nHDMI-A-2\tdisconnected'
-on_state=$'HDMI-A-1\tdisconnected\nHDMI-A-2\tconnected'
+# name, state, preferred mode, EDID SHA-256 -- as `mediabox-platform outputs`.
+on=$'HDMI-A-1\tdisconnected\t-\t-\nHDMI-A-2\tconnected\t2560x1440\taaaa'
+off=$'HDMI-A-1\tdisconnected\t-\t-\nHDMI-A-2\tdisconnected\t2560x1440\t-'
+other=$'HDMI-A-1\tdisconnected\t-\t-\nHDMI-A-2\tconnected\t3840x2160\tcccc'
+# What is recorded: each socket, whether something is on it, and which sink
+# (its EDID) -- no mode.
+off_state=$'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tdisconnected\t-'
+on_state=$'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tconnected\taaaa'
 
 # changed <was-or-SEED> <now> <active units...>: prints the log, one line each.
 changed() {
@@ -775,23 +792,35 @@ check "an unchanged display restarts nothing" "$(changed "$on_state" "$on" media
 # 3-5. Whichever owner is active is the one recovered.
 # 3. The browser is not restarted: its compositor modesets in place and the
 #    same Chromium carries on. Its configuration is refreshed without touching
-#    the connector it holds, and sway is reloaded only for a new mode.
-echo 'output * mode 2560x1440@119.998Hz' >"$hp/swaymode"; cp "$hp/swaymode" "$hp/run/sway-output.conf"
+#    the connector it holds, and sway is reloaded only for a new mode. The
+#    new sink's plan is waited for first: it can only be made while the
+#    browser still holds the display.
+echo 'output HDMI-A-2 mode 2560x1440@119.998Hz' >"$hp/swaymode"; cp "$hp/swaymode" "$hp/browser/sway-output.conf"
 check "the browser keeps running when the same display comes back" \
-  "$(changed "$off_state" "$on" mediabox-browser.service)" "prepare boot-video=1 reset=0;exit=0;"
-echo 'output * mode 1920x1080@60.000Hz' >"$hp/swaymode"
+  "$(changed "$off_state" "$on" mediabox-browser.service)" "plan --wait;prepare boot-video=1 reset=0;exit=0;"
+echo 'output HDMI-A-2 mode 1920x1080@60.000Hz' >"$hp/swaymode"
 check "a display with another mode is handed to sway by a reload" \
   "$(changed "$off_state" "$on" mediabox-browser.service)" \
-  "prepare boot-video=1 reset=0;swaymsg reload sock=sway-ipc.0.1.sock;exit=0;"
+  "plan --wait;prepare boot-video=1 reset=0;swaymsg reload sock=sway-ipc.0.1.sock;exit=0;"
+check "sway is told the plan's line, for the selected connector" \
+  "$(cat "$hp/browser/sway-output.conf")" 'output HDMI-A-2 mode 1920x1080@60.000Hz'
 : >"$hp/swaymode"
 check "the interface is recovered when it owns the display" \
   "$(changed "$off_state" "$on" mediabox-tv-ui.service)" "$recover_ui"
-check "Kodi is recovered when it owns the display" \
+check "Kodi is recovered when it owns the display, once the new plan is waited for" \
   "$(changed "$off_state" "$on" kodi.service)" \
-  "systemctl stop kodi.service;prepare boot-video=1 reset=1;systemctl start kodi.service;exit=0;"
+  "plan --wait;systemctl stop kodi.service;prepare boot-video=1 reset=1;systemctl start kodi.service;exit=0;"
+# A sink replaced on the same socket without it ever reading `disconnected`:
+# connected to connected, another EDID. That is a new display.
+check "connected to connected with another EDID recovers the owner" \
+  "$(changed "$on_state" "$other" mediabox-tv-ui.service)" "$recover_ui"
+check "and records the new sink" "$(cat "$hp/run/stamp")" \
+  $'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tconnected\tcccc'
+check "the same sink seen again restarts nothing" \
+  "$(changed $'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tconnected\tcccc' "$other" kodi.service)" "exit=0;"
 # 6. Two owners at once is not a state to guess about.
 check "two active owners restart nothing" \
-  "$(changed "$off_state" "$on" mediabox-tv-ui.service mediabox-browser.service)" "exit=1;"
+  "$(changed "$off_state" "$on" mediabox-tv-ui.service mediabox-browser.service)" "plan --wait;exit=1;"
 check "and leave the change to be seen again" "$(cat "$hp/run/stamp")" "$off_state"
 # 7 is in every recovery line above: stop, then prepare, then start.
 # A disconnect alone has nothing to recover and must not write video= (8).
@@ -799,15 +828,15 @@ check "only a disconnect touches no owner and prepares nothing" \
   "$(changed "$on_state" "$off" mediabox-browser.service)" "exit=0;"
 check "and is recorded, so the replug is a change" "$(cat "$hp/run/stamp")" "$off_state"
 check "a mode column drifting on its own is not a change" \
-  "$(changed "$off_state" $'HDMI-A-1\tdisconnected\t-\nHDMI-A-2\tdisconnected\t-' kodi.service)" "exit=0;"
+  "$(changed "$off_state" $'HDMI-A-1\tdisconnected\t-\t-\nHDMI-A-2\tdisconnected\t-\t-' kodi.service)" "exit=0;"
 # A socket reads `connected -` until something probes it. Measured moving a
 # monitor between sockets: waiting for the mode cost five seconds and then ran
 # the recovery twice. The socket is probed, and recovered once.
-printf '%s\n' 'HDMI-A-1\tconnected\t-|HDMI-A-2\tdisconnected' 'HDMI-A-1\tconnected\t-|HDMI-A-2\tdisconnected' \
-  'HDMI-A-1\tconnected\t2560x1440|HDMI-A-2\tdisconnected' | sed 's/\\t/\t/g' >"$hp/seq"
+printf '%s\n' 'HDMI-A-1\tconnected\t-\tbbbb|HDMI-A-2\tdisconnected\t-\t-' 'HDMI-A-1\tconnected\t-\tbbbb|HDMI-A-2\tdisconnected\t-\t-' \
+  'HDMI-A-1\tconnected\t2560x1440\tbbbb|HDMI-A-2\tdisconnected\t-\t-' | sed 's/\\t/\t/g' >"$hp/seq"
 check "a socket without its mode yet is recovered once" \
   "$(changed "$off_state" "" mediabox-tv-ui.service)" "$recover_ui"
-check "and recorded without a mode" "$(cat "$hp/run/stamp")" $'HDMI-A-1\tconnected\nHDMI-A-2\tdisconnected'
+check "and recorded without a mode" "$(cat "$hp/run/stamp")" $'HDMI-A-1\tconnected\tbbbb\nHDMI-A-2\tdisconnected\t-'
 rm -f "$hp/seq"
 echo connected >"$hp/sys/card0-HDMI-A-2/status"; echo disconnected >"$hp/sys/card0-HDMI-A-1/status"
 changed "$off_state" "$on" mediabox-tv-ui.service >/dev/null
@@ -882,20 +911,55 @@ check "a settled display removes a video= an older version left, and writes none
   $'verbosity=1\nextraargs=cma=256M\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
 contains "and says it removed it" "$out" 'boot-video=removed'
 check "the original is kept once" "$(cat "$hp/armbianEnv.txt.mediabox-video")" "$env_before"
-printf '%s\n' 'kodi_screenmode=0256001440119.99800pstd' \
-  'kodi_whitelist=0256001440119.99800pstd,0256001440059.95000pstd' \
-  'browser_mode=2560x1440@119.998Hz' >"$hp/run/output-plan"
-prepare_real env >/dev/null
-check "the browser's mode is the display setting's, from the daemon's plan" \
-  "$(cat "$hp/run/sway-output.conf")" 'output * mode 2560x1440@119.998Hz'
-rm -f "$hp/run/output-plan"
-echo 'output * mode 1920x1080@60.000Hz' >"$hp/run/sway-output.conf"
-out="$(prepare_real env)"
-check "with no plan yet the browser's mode is left as it is" \
-  "$(cat "$hp/run/sway-output.conf")" 'output * mode 1920x1080@60.000Hz'
-contains "and says so" "$out" 'browser-mode=absent'
 contains "and a second run finds nothing to remove" \
   "$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)" 'boot-video=absent'
+
+# Kodi's profile: the plan's mode only when the platform says the plan is for
+# this display now; otherwise the mode already on the wire, never the last
+# display's. And the sound device: the output's card, or -- when the
+# transmitter is not firmly known -- the PCM that discards everything.
+kodi_profile="$hp/guisettings.xml"
+fresh_profile() {
+  printf '%s\n' '<settings version="2">' \
+    '  <setting id="audiooutput.audiodevice" default="true">ALSA:@</setting>' \
+    '  <setting id="audiooutput.passthroughdevice">ALSA:@</setting>' \
+    '  <setting id="videoscreen.screenmode">0192001080060.00000pstd</setting>' \
+    '  <setting id="videoscreen.whitelist">0192001080060.00000pstd</setting>' \
+    '</settings>' >"$kodi_profile"
+}
+setting() { sed -n "s|.*<setting id=\"$1\"[^>]*>\([^<]*\)</setting>.*|\1|p" "$kodi_profile"; }
+printf '%s\n' 'schema=2' 'kodi_screenmode=0256001440119.99800pstd' \
+  'kodi_whitelist=0256001440119.99800pstd,0256001440059.95000pstd' >"$hp/plan"
+echo rockchiphdmi1 >"$hp/card"
+fresh_profile
+out="$(prepare_real env MEDIABOX_KODI_PROFILE="$kodi_profile")"
+check "Kodi starts on the current plan's mode" "$(setting videoscreen.screenmode)" '0256001440119.99800pstd'
+check "and switches among its whitelist" "$(setting videoscreen.whitelist)" \
+  '0256001440119.99800pstd,0256001440059.95000pstd'
+check "its sound goes to the output's own card" "$(setting audiooutput.audiodevice)" \
+  'ALSA:hdmi:CARD=rockchiphdmi1,DEV=0|rockchip-hdmi'
+contains "and the line says the plan was current" "$out" 'plan=current'
+: >"$hp/plan"; : >"$hp/card"
+fresh_profile
+out="$(prepare_real env MEDIABOX_KODI_PROFILE="$kodi_profile")"
+check "without a current plan Kodi starts on the mode already on the wire" \
+  "$(setting videoscreen.screenmode)" 'DESKTOP'
+check "and no whitelist from another display" "$(setting videoscreen.whitelist)" ''
+check "an output whose card is not firmly known sends Kodi's sound nowhere" \
+  "$(setting audiooutput.audiodevice)" 'ALSA:mediabox_unrouted|MediaBox'
+check "passthrough too" "$(setting audiooutput.passthroughdevice)" 'ALSA:mediabox_unrouted|MediaBox'
+contains "and the line says so" "$out" 'plan=stale'
+contains "and names no card" "$out" 'card=unrouted'
+lacks "the preparation writes no compositor configuration" \
+  "$(strip_sh "$here/packaging/mediabox-hdmi-prepare")" 'sway-output.conf'
+contains "the unrouted PCM discards everything" \
+  "$(cat "$here/config/alsa/60-mediabox-unrouted.conf")" 'type null'
+contains "the browser unit writes its own output line at every start" \
+  "$(cat "$here/packaging/systemd/mediabox-browser.service")" 'mediabox-platform sway-output >/run/mediabox-browser/sway-output.conf'
+contains "and sway reads it from there" "$(cat "$here/config/sway-browser.conf")" \
+  'include /run/mediabox-browser/sway-output.conf'
+contains "the player sends unrouted sound nowhere" "$(cat "$here/packaging/mediabox-player")" '--ao=null'
+contains "and so does the browser" "$(cat "$here/packaging/mediabox-browser")" '--alsa-output-device=null'
 
 # The colour reset writes only what is not already so: on this driver the
 # first write after boot re-trains the link under a lit panel and the monitor
@@ -905,7 +969,7 @@ colour() {
   HP="$hp" PATH="$hp/bin:$PATH" MEDIABOX_PLATFORM="$hp/bin/platform" MEDIABOX_MODETEST="$hp/bin/modetest" \
     MEDIABOX_BOOT_ENV="$hp/armbianEnv.txt" MEDIABOX_RUN_DIR="$hp/run" \
     sh "$here/packaging/mediabox-hdmi-prepare" >/dev/null 2>&1
-  tr '\n' ';' <"$hp/log"
+  grep -v '^plan --wait' "$hp/log" | tr '\n' ';'
 }
 printf '%s' "$on" >"$hp/outputs"; echo 0 >"$hp/cf"; : >"$hp/hdr"
 check "a connector already in SDR RGB is not written to" "$(colour)" ""

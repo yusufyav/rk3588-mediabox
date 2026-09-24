@@ -2,6 +2,10 @@
 Description=RK3588 MediaBox Rust control plane
 After=network.target systemd-udev-settle.service mediabox-media-worker.service kodi.service
 Wants=network.target systemd-udev-settle.service mediabox-media-worker.service
+# The display's hardware state comes from the observer and from nowhere else,
+# so it runs wherever the control plane does. Not ordered: until it has
+# published, the control plane says it does not know the display yet.
+Wants=mediabox-display-observer.service
 
 [Service]
 Type=simple

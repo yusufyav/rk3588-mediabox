@@ -83,8 +83,9 @@ esac
 # it while the television was on `rockchiphdmi1`, and every page was silent.
 # mediabox-player met the same card 0 and answers it the same way, from the
 # same resolver: `hdmi:CARD=<id>` where mediabox-hdmi-prepare has rendered the
-# card's config, `plughw:` where it has not, and nothing pinned when nothing
-# resolves -- a silent page is better than no browser.
+# card's config, `plughw:` where it has not, and ALSA's `null` when nothing
+# resolves -- a silent page is better than no browser, and better than one
+# playing on another television.
 audio=""
 platform=/opt/rk3588-mediabox/bin/mediabox-platform
 if [ -x "$platform" ]; then
@@ -94,6 +95,10 @@ if [ -x "$platform" ]; then
     audio="--alsa-output-device=hdmi:CARD=$card,DEV=0"
   elif [ -n "$card" ]; then
     audio="--alsa-output-device=plughw:CARD=$card,DEV=0"
+  else
+    # Not `default`, which is card 0: when the output's card is not firmly
+    # known, a page is silent rather than playing to another television.
+    audio="--alsa-output-device=null"
   fi
 fi
 

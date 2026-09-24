@@ -126,9 +126,10 @@ sh_ "install -m 0755 /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabo
        /var/tmp/mediabox-display-observer /var/tmp/mediabox-tv && \
      ln -sfn $prefix/bin/mediaboxctl /usr/local/bin/mediaboxctl"
 
-say "display observer (shadow mode)"
-# Watches the display and decides nothing; see the unit for why it is ordered
-# against nothing. Restarting it never touches the television.
+say "display observer"
+# The display's hardware state, which the control plane takes from nothing
+# else; see the unit for why it is ordered against nothing. Restarting it never
+# touches the television.
 cp_ "$here/packaging/systemd/mediabox-display-observer.service" "$MEDIABOX_TARGET:/etc/systemd/system/"
 sh_ "systemctl daemon-reload && systemctl enable mediabox-display-observer.service >/dev/null && \
      systemctl restart mediabox-display-observer.service"
@@ -160,6 +161,7 @@ cp_ "$here/packaging/mediabox-kiosk-smoke" \
     "$here/packaging/mediabox-hdmi-prepare" "$here/packaging/mediabox-display-scale" \
     "$here/packaging/mediabox-console-off" "$here/packaging/mediabox-tv-drive" \
     "$here/packaging/mediabox-wireless-up" "$here/packaging/mediabox-bt-agent" \
+    "$here/packaging/mediabox-product-verify" "$here/packaging/mediabox-playback-smoke" \
     "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/packaging/systemd/mediabox-console-off.service" \
     "$here/packaging/systemd/mediabox-wireless.service" \
@@ -174,6 +176,11 @@ sh_ "set -e
   install -m 0755 /var/tmp/mediabox-tv-drive $prefix/bin/mediabox-tv-drive
   install -m 0755 /var/tmp/mediabox-wireless-up $prefix/bin/mediabox-wireless-up
   install -m 0755 /var/tmp/mediabox-bt-agent $prefix/bin/mediabox-bt-agent
+  # The product's own checks, so an upgraded board is checked by the checks
+  # of the product it now runs, as a fresh install is.
+  install -m 0755 /var/tmp/mediabox-product-verify $prefix/bin/mediabox-product-verify
+  install -m 0755 /var/tmp/mediabox-playback-smoke $prefix/bin/mediabox-playback-smoke
+  rm -f /var/tmp/mediabox-product-verify /var/tmp/mediabox-playback-smoke
   rm -f /var/tmp/mediabox-kiosk-smoke /var/tmp/mediabox-hdmi-prepare \
         /var/tmp/mediabox-display-scale /var/tmp/mediabox-console-off \
         /var/tmp/mediabox-tv-drive /var/tmp/mediabox-wireless-up \
@@ -278,11 +285,14 @@ say "templates that are filled in from the board"
 # Kodi's profile has to name the PCM that config defines; on a board with two
 # HDMI sockets neither is the same in both. mediabox-hdmi-prepare renders them
 # before anything draws, from mediabox-platform's answer.
-cp_ "$here/config/alsa/mediabox-hdmi.conf.in" "$MEDIABOX_TARGET:/var/tmp/"
+cp_ "$here/config/alsa/mediabox-hdmi.conf.in" "$here/config/alsa/60-mediabox-unrouted.conf" \
+    "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/config/kodi/guisettings-appliance.xml" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "set -e
   mkdir -p $prefix/share/alsa /var/tmp/kodi-home/.kodi/userdata
   install -m 0644 /var/tmp/mediabox-hdmi.conf.in $prefix/share/alsa/mediabox-hdmi.conf.in
+  install -D -m 0644 /var/tmp/60-mediabox-unrouted.conf /etc/alsa/conf.d/60-mediabox-unrouted.conf
+  rm -f /var/tmp/60-mediabox-unrouted.conf
   test -f /var/tmp/kodi-home/.kodi/userdata/guisettings.xml \
     || install -m 0644 /var/tmp/guisettings-appliance.xml /var/tmp/kodi-home/.kodi/userdata/guisettings.xml
   rm -f /var/tmp/mediabox-hdmi.conf.in /var/tmp/guisettings-appliance.xml"

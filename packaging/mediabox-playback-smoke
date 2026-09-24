@@ -158,9 +158,11 @@ esac
 
 # And what the display controller is actually scanning out. A film that decodes
 # into a buffer nothing puts on a plane is a black television.
-state_file=
-for d in /sys/kernel/debug/dri/*/state; do [ -r "$d" ] && state_file="$d" && break; done
-if [ -n "$state_file" ]; then
+# The display device's own debugfs directory, as discovery finds and checks it
+# -- the first readable `dri/*` can be another device's.
+state_file="$("$P/bin/mediabox-platform" dri-debugfs 2>/dev/null || true)"
+[ -n "$state_file" ] && state_file="$state_file/state"
+if [ -n "$state_file" ] && [ -r "$state_file" ]; then
   plane="$(awk '
     /^plane\[/ { name = $0; crtc = ""; fmt = ""; owner = "" }
     /crtc=video_port/ { crtc = $0 }
