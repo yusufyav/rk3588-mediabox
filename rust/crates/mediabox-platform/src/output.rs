@@ -91,6 +91,9 @@ pub fn offer(
 
     Some(OutputOffer {
         sink: edid_checkvalue(edid),
+        edid_sha256: crate::edid::Edid::parse(edid)
+            .identity()
+            .map(|identity| identity.0),
         sink_name,
         connector: connector.to_string(),
         link: link(&sink, source),

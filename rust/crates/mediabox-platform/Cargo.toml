@@ -14,6 +14,8 @@ license.workspace = true
 mediabox-core = { path = "../mediabox-core" }
 serde.workspace = true
 serde_json.workspace = true
+# The canonical EDID identity is the SHA-256 of the bytes received.
+sha2 = "0.10.9"
 
 [[bin]]
 name = "mediabox-platform"

@@ -216,8 +216,14 @@ impl OutputSetting {
     }
 }
 
-/// The EDID's identity as the reference box keeps it: the checksum byte of
-/// every 128-byte block, in order, as hex (its `checkvalue`, e.g. `d307`).
+/// The EDID as the reference box keeps it: the checksum byte of every
+/// 128-byte block, in order, as hex (its `checkvalue`, e.g. `d307`).
+///
+/// Legacy and diagnostic. It is what [`OutputSetting::sink`] has always been
+/// bound to, so it stays until that record migrates, but it is not an
+/// identity: two EDIDs with different contents and the same checksums are two
+/// displays. The identity is the SHA-256 of the bytes
+/// (`mediabox_platform::edid::Edid::identity`).
 pub fn edid_checkvalue(edid: &[u8]) -> String {
     edid.chunks_exact(128)
         .map(|block| format!("{:02x}", block[127]))
@@ -455,8 +461,15 @@ pub struct OutputLink {
 /// computes a rule of its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputOffer {
-    /// [`edid_checkvalue`] of the display.
+    /// [`edid_checkvalue`] of the display: what a kept setting is still bound
+    /// to (see [`OutputSetting`]). Not an identity -- two displays can share
+    /// it -- and kept only until the setting moves to `edid_sha256`.
     pub sink: String,
+    /// SHA-256 of the EDID exactly as received, when it is whole and valid:
+    /// the display's identity. Absent from an interface older than it, and
+    /// for an EDID that failed its checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edid_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sink_name: Option<String>,
     pub connector: String,

@@ -235,6 +235,10 @@ pub fn edid(manufacturer: [u8; 3], product: u16, serial: u32, name: &str) -> Vec
     if name.len() < 13 {
         block[at + 5 + name.len()] = 0x0A;
     }
+    // And the checksum a real one carries: a base block that does not sum to
+    // zero is not an EDID, and the parser says so.
+    let sum = block[..127].iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    block[127] = 0u8.wrapping_sub(sum);
     block
 }
 

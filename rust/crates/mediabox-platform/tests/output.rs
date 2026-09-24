@@ -426,3 +426,38 @@ fn every_mode_offered_carries_the_key_of_the_timing_it_is() {
     // Even without the timing, the refresh Kodi is told is the field rate.
     assert_eq!(old_i60.refresh(), mediabox_core::Refresh::new(60, 1));
 }
+
+/// The captured EDIDs, read by the checked parser. What is asserted is what
+/// the bytes say under CTA-861, not what the television is known to do.
+#[test]
+fn the_captured_edids_are_whole_and_say_what_their_blocks_say() {
+    use mediabox_platform::edid::{EdidReport, EdidStatus};
+    let slow = EdidReport::of(&edid(PLUS_300));
+    let fast = EdidReport::of(&edid(SONY_600));
+    for report in [&slow, &fast] {
+        assert_eq!(report.status, EdidStatus::Valid);
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+        let hdr = report.cta.hdr_static.expect("HDR static metadata block");
+        // 0x0d: traditional SDR, SMPTE ST 2084, HLG; 0x01: Static Metadata Type 1.
+        assert!(hdr.eotf_traditional_sdr && hdr.eotf_st2084 && hdr.eotf_hlg);
+        assert!(!hdr.eotf_traditional_hdr && hdr.static_metadata_type1);
+        // 0xff: every colorimetry bit, BT.2020 RGB, YCC and cYCC among them.
+        let colour = report.cta.colorimetry.expect("colorimetry block");
+        assert!(colour.bt2020_rgb && colour.bt2020_ycc && colour.bt2020_cycc);
+        assert!(!colour.dci_p3);
+    }
+    // The physical address each input gave the box: 4.0.0.0 and 3.0.0.0.
+    assert_eq!(slow.cta.hdmi_vsdb.unwrap().physical_address, 0x4000);
+    assert_eq!(fast.cta.hdmi_vsdb.unwrap().physical_address, 0x3000);
+    assert!(slow.cta.hdmi_forum.is_none());
+    assert_eq!(fast.cta.hdmi_forum.unwrap().max_tmds_character_rate_khz, Some(600_000));
+    // Same display, two inputs, two EDIDs: two identities. The 600 MHz one is
+    // byte for byte what HDMI-A-2 on the Plus published on 2026-09-24.
+    assert_eq!(
+        fast.sha256.as_ref().unwrap().0,
+        "1175a696da42d0dc913a90983653ceef0ba6572ba64f85c1c8826ab43345fc54"
+    );
+    assert_ne!(slow.sha256, fast.sha256);
+    // And the offer carries it.
+    assert_eq!(offer_for(SONY_600).edid_sha256, fast.sha256.map(|id| id.0));
+}

@@ -28,6 +28,7 @@ use mediabox_core::mode_flags;
 use serde::{Deserialize, Serialize};
 
 use crate::cta_vics::{CTA_VICS, cta_mode, match_cea_mode};
+use crate::edid::{CtaCapabilities, Edid, cta_dtds, data_blocks, svd_to_vic};
 
 /// What this board's HDMI transmitter can send.
 pub struct SourceCaps {
@@ -477,129 +478,56 @@ const UNDECLARED: u32 = 0;
 
 /// Read an EDID's video capabilities, the way `drm_edid.c` does.
 ///
-/// Returns `None` for something that is not an EDID at all. A valid EDID with
-/// no CTA extension is a DVI sink: RGB at eight bits.
+/// Returns `None` for something that is not an EDID at all
+/// ([`crate::edid::EdidStatus::InvalidBase`] or absent). A valid EDID with no
+/// CTA extension is a DVI sink: RGB at eight bits. Only blocks that passed
+/// their checks are read ([`crate::edid`]); what was set aside is in
+/// [`crate::edid::EdidReport`].
 pub fn parse_sink_video(edid: &[u8]) -> Option<SinkVideo> {
-    if edid.len() < 128 || edid[0..8] != [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] {
+    let edid = Edid::parse(edid);
+    if !edid.status.usable() {
         return None;
     }
+    let (cta, _) = CtaCapabilities::read(&edid);
+    Some(sink_video(&cta))
+}
+
+/// The display screen's view of what the CTA extensions declare.
+pub fn sink_video(cta: &CtaCapabilities) -> SinkVideo {
     let mut sink = SinkVideo {
-        max_character_rate_khz: UNDECLARED,
+        max_character_rate_khz: cta.max_tmds_khz(),
         rate_is_declared: false,
         advertised: Vec::new(),
-        st2084: false,
-        hlg: false,
-        is_hdmi: false,
-        ycbcr444: false,
-        ycbcr422: false,
+        st2084: cta.hdr_static.is_some_and(|hdr| hdr.eotf_st2084),
+        hlg: cta.hdr_static.is_some_and(|hdr| hdr.eotf_hlg),
+        is_hdmi: cta.hdmi_vsdb.is_some(),
+        ycbcr444: cta.ycbcr444,
+        ycbcr422: cta.ycbcr422,
         rgb_deep: Vec::new(),
         ycbcr444_deep: Vec::new(),
         ycbcr420_deep: Vec::new(),
-        y420_only: Vec::new(),
-        y420_also: Vec::new(),
+        y420_only: cta.y420_only.clone(),
+        y420_also: cta.y420_also.clone(),
     };
-    let mut svds: Vec<u8> = Vec::new();
-    let mut cmdb: Option<u64> = None;
-    let mut forum_rate: Option<u32> = None;
-
-    for block in edid[128..].chunks_exact(128) {
-        if block[0] != 0x02 {
-            continue;
-        }
-        if block[1] >= 2 {
-            sink.ycbcr444 |= block[3] & 0x20 != 0;
-            sink.ycbcr422 |= block[3] & 0x10 != 0;
-        }
-        let dtd_start = block[2] as usize;
-        if !(4..=127).contains(&dtd_start) {
-            continue;
-        }
-        let mut at = 4usize;
-        while at < dtd_start {
-            let header = block[at];
-            let len = (header & 0x1F) as usize;
-            let end = at + 1 + len;
-            if end > dtd_start {
-                break;
-            }
-            let payload = &block[at + 1..end];
-            match header >> 5 {
-                // Video data block: the SVDs, in order, for the 4:2:0 map.
-                2 => svds.extend(payload.iter().map(|svd| svd_to_vic(*svd))),
-                3 if payload.len() >= 3 => {
-                    let oui = [payload[0], payload[1], payload[2]];
-                    if oui == [0x03, 0x0C, 0x00] {
-                        // drm_parse_hdmi_vsdb_video / _deep_color_info.
-                        sink.is_hdmi = true;
-                        if payload.len() >= 7 && payload[6] != 0 {
-                            sink.max_character_rate_khz = u32::from(payload[6]) * 5_000;
-                        }
-                        if payload.len() >= 6 {
-                            let dc = payload[5];
-                            for (bit, bits) in [(0x10u8, 10u8), (0x20, 12), (0x40, 16)] {
-                                if dc & bit != 0 {
-                                    sink.rgb_deep.push(bits);
-                                }
-                            }
-                            if dc & 0x08 != 0 {
-                                sink.ycbcr444_deep = sink.rgb_deep.clone();
-                            }
-                        }
-                    } else if oui == [0xD8, 0x5D, 0xC4] {
-                        // drm_parse_hdmi_forum_scds / _ycbcr420_deep_color_info.
-                        if payload.len() >= 5 && payload[4] != 0 {
-                            forum_rate = Some(u32::from(payload[4]) * 5_000);
-                        }
-                        if payload.len() >= 7 {
-                            for (bit, bits) in [(0x01u8, 10u8), (0x02, 12), (0x04, 16)] {
-                                if payload[6] & bit != 0 {
-                                    sink.ycbcr420_deep.push(bits);
-                                }
-                            }
-                        }
-                    }
-                }
-                7 if !payload.is_empty() => match payload[0] {
-                    0x06 if payload.len() >= 2 => {
-                        sink.st2084 |= payload[1] & 0x04 != 0;
-                        sink.hlg |= payload[1] & 0x08 != 0;
-                    }
-                    // parse_cta_y420vdb
-                    0x0E => sink
-                        .y420_only
-                        .extend(payload[1..].iter().map(|svd| svd_to_vic(*svd))),
-                    // parse_cta_y420cmdb: an empty map means every SVD.
-                    0x0F => {
-                        let bytes = &payload[1..];
-                        let mut map = 0u64;
-                        if bytes.is_empty() {
-                            map = u64::MAX;
-                        } else {
-                            for (index, byte) in bytes.iter().take(8).enumerate() {
-                                map |= u64::from(*byte) << (8 * index);
-                            }
-                        }
-                        cmdb = Some(cmdb.unwrap_or(0) | map);
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-            at = end;
-        }
-    }
-
-    // HF-VSDB's rate replaces the VSDB's only above 340 MHz.
-    if let Some(rate) = forum_rate {
-        if rate > 340_000 {
-            sink.max_character_rate_khz = rate;
-        }
-    }
     sink.rate_is_declared = sink.max_character_rate_khz != UNDECLARED;
-    if let Some(map) = cmdb {
-        for (index, vic) in svds.iter().enumerate().take(64) {
-            if map & (1u64 << index) != 0 {
-                sink.y420_also.push(*vic);
+    if let Some(vsdb) = cta.hdmi_vsdb {
+        for (declared, bits) in [(vsdb.dc_30bit, 10u8), (vsdb.dc_36bit, 12), (vsdb.dc_48bit, 16)] {
+            if declared {
+                sink.rgb_deep.push(bits);
+            }
+        }
+        if vsdb.dc_y444 {
+            sink.ycbcr444_deep = sink.rgb_deep.clone();
+        }
+    }
+    if let Some(forum) = cta.hdmi_forum {
+        for (declared, bits) in [
+            (forum.dc_420_30bit, 10u8),
+            (forum.dc_420_36bit, 12),
+            (forum.dc_420_48bit, 16),
+        ] {
+            if declared {
+                sink.ycbcr420_deep.push(bits);
             }
         }
     }
@@ -626,49 +554,28 @@ pub fn parse_sink_video(edid: &[u8]) -> Option<SinkVideo> {
     }
     sink.advertised.sort_by_key(|mode| (mode.format, mode.bits));
     sink.advertised.dedup();
-    Some(sink)
-}
-
-/// `svd_to_vic`: a native flag in bit 7 only for codes below 65.
-fn svd_to_vic(svd: u8) -> u8 {
-    if (129..=192).contains(&svd) {
-        svd & 0x7F
-    } else {
-        svd
-    }
+    sink
 }
 
 /// Every timing the EDID declares -- detailed timings and CTA video codes --
 /// largest first.
 pub fn parse_timings(edid: &[u8]) -> Vec<Timing> {
     let mut timings: Vec<Timing> = Vec::new();
-    if edid.len() < 128 || edid[0..8] != [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] {
+    let edid = Edid::parse(edid);
+    let Some(base) = edid.base() else {
         return timings;
-    }
+    };
     for slot in 0..4 {
         let at = 54 + slot * 18;
-        if let Some(timing) = detailed_timing(&edid[at..at + 18], slot == 0) {
+        if let Some(timing) = detailed_timing(&base[at..at + 18], slot == 0) {
             timings.push(timing);
         }
     }
-    for block in edid[128..].chunks_exact(128) {
-        if block[0] != 0x02 {
-            continue;
-        }
-        let dtd_start = block[2] as usize;
-        if !(4..=127).contains(&dtd_start) {
-            continue;
-        }
-        let mut at = 4usize;
-        while at < dtd_start {
-            let header = block[at];
-            let len = (header & 0x1F) as usize;
-            let end = at + 1 + len;
-            if end > dtd_start {
-                break;
-            }
-            if header >> 5 == 2 {
-                for svd in &block[at + 1..end] {
+    let mut ignored = Vec::new();
+    for (index, block) in edid.cta_extensions() {
+        for db in data_blocks(index, block, &mut ignored) {
+            if db.tag == 2 {
+                for svd in db.payload {
                     if let Some(timing) = cta_timing(svd_to_vic(*svd)) {
                         timings.push(timing);
                     }
@@ -676,21 +583,18 @@ pub fn parse_timings(edid: &[u8]) -> Vec<Timing> {
             }
             // Modes the sink takes only as 4:2:0 are modes too
             // (`do_y420vdb_modes`): 2160p60 on a 300 MHz input is one.
-            if header >> 5 == 7 && end > at + 2 && block[at + 1] == 0x0E {
-                for svd in &block[at + 2..end] {
+            if db.tag == 7 && db.payload.first() == Some(&0x0E) {
+                for svd in &db.payload[1..] {
                     if let Some(timing) = cta_timing(svd_to_vic(*svd)) {
                         timings.push(timing);
                     }
                 }
             }
-            at = end;
         }
-        let mut at = dtd_start;
-        while at + 18 <= 127 {
-            if let Some(timing) = detailed_timing(&block[at..at + 18], false) {
+        for dtd in cta_dtds(block) {
+            if let Some(timing) = detailed_timing(dtd, false) {
                 timings.push(timing);
             }
-            at += 18;
         }
     }
     timings.sort_by_key(|timing| {

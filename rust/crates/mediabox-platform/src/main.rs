@@ -11,6 +11,7 @@
 //!   mediabox-platform output             the selected connector's name
 //!   mediabox-platform alsa-card          that output's sound card id
 //!   mediabox-platform cec-device         that output's CEC adapter
+//!   mediabox-platform edid [--json]      that output's EDID, checked
 //!
 //! The one-word forms print nothing and exit non-zero when there is no answer,
 //! so `card="$(mediabox-platform alsa-card)" || exit` is the whole of a caller's
@@ -107,6 +108,42 @@ fn main() -> std::process::ExitCode {
             .connector_sysfs
             .map(|path| path.display().to_string())),
         "cec-device" => one(devices.cec.map(|path| path.display().to_string())),
+        // The selected output's EDID as the checked parser reads it: its
+        // status, its identity, what the CTA blocks declare and what was set
+        // aside. Diagnostics; nothing reads this to decide anything.
+        "edid" => {
+            let Some(output) = platform.selected_output() else {
+                return std::process::ExitCode::FAILURE;
+            };
+            let bytes = std::fs::read(output.connector.sysfs.join("edid")).unwrap_or_default();
+            let report = mediabox_platform::edid::EdidReport::of(&bytes);
+            if json {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(text) => println!("{text}"),
+                    Err(error) => {
+                        eprintln!("mediabox-platform: {error}");
+                        return std::process::ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                println!("connector     {}", output.connector.name);
+                println!("status        {:?}", report.status);
+                println!("bytes         {}", report.bytes);
+                println!(
+                    "sha256        {}",
+                    report.sha256.as_ref().map(|id| id.0.as_str()).unwrap_or("-")
+                );
+                println!("checkvalue    {} (legacy)", report.legacy_checkvalue);
+                for issue in &report.issues {
+                    println!("issue         {issue:?}");
+                }
+            }
+            if report.status.usable() {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
         other => {
             eprintln!("mediabox-platform: bilinmeyen komut '{other}'");
             eprint!("{}", USAGE);
@@ -127,6 +164,7 @@ kullanım: mediabox-platform <komut> [--json]
   alsa-card      o çıkışın ALSA kart kimliği
   alsa-index     o kartın bu açılıştaki ALSA numarası (/proc/asound için)
   cec-device     o çıkışın CEC aygıtı
+  edid           o çıkışın EDID'i: durum, SHA-256 kimlik, sorunlar
 ";
 
 fn report(platform: &Platform) {
@@ -234,6 +272,11 @@ fn report(platform: &Platform) {
                     .as_deref()
                     .map(|name| format!(" \"{name}\""))
                     .unwrap_or_default()
+            );
+            println!(
+                "      edid        {:?} sha256 {}",
+                sink.edid_status,
+                sink.sha256.as_deref().unwrap_or("-")
             );
         }
     }

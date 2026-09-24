@@ -110,6 +110,18 @@ pub struct SinkIdentity {
     pub product: u16,
     pub serial: u32,
     pub name: Option<String>,
+    /// SHA-256 of the EDID exactly as the kernel published it, when it is
+    /// whole and valid ([`crate::edid::Edid::identity`]). Manufacturer,
+    /// product and serial say which model; this says which EDID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// What the EDID's checks found ([`crate::edid::EdidStatus`]).
+    #[serde(default = "unchecked")]
+    pub edid_status: crate::edid::EdidStatus,
+}
+
+fn unchecked() -> crate::edid::EdidStatus {
+    crate::edid::EdidStatus::Absent
 }
 
 /// One HDMI or DisplayPort transmitter, as a platform device.
@@ -198,9 +210,8 @@ fn read_connector(path: &Path) -> Connector {
 /// and comparable, so that "the television in the living room" survives a
 /// reboot that renumbers every DRM object on the board.
 fn parse_edid_identity(edid: &[u8]) -> Option<SinkIdentity> {
-    if edid.len() < 128 || edid[0..8] != [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] {
-        return None;
-    }
+    let checked = crate::edid::Edid::parse(edid);
+    let edid = checked.base()?;
     let packed = u16::from_be_bytes([edid[8], edid[9]]);
     let letter = |shift: u16| -> char {
         let value = ((packed >> shift) & 0x1F) as u8;
@@ -234,6 +245,8 @@ fn parse_edid_identity(edid: &[u8]) -> Option<SinkIdentity> {
         product,
         serial,
         name,
+        sha256: checked.identity().map(|identity| identity.0),
+        edid_status: checked.status,
     })
 }
 
