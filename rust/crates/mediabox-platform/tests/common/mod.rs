@@ -242,6 +242,97 @@ pub fn edid(manufacturer: [u8; 3], product: u16, serial: u32, name: &str) -> Vec
     block
 }
 
+/// The same base block with a CTA-861 extension whose HDMI VSDB gives this
+/// input `physical_address` -- which is what the transmitter's CEC adapter is
+/// given when this sink is on its socket.
+pub fn edid_with_address(
+    manufacturer: [u8; 3],
+    product: u16,
+    serial: u32,
+    name: &str,
+    physical_address: u16,
+) -> Vec<u8> {
+    let mut bytes = edid(manufacturer, product, serial, name);
+    bytes[126] = 1;
+    let sum = bytes[..127].iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    bytes[127] = 0u8.wrapping_sub(sum);
+    let mut cta = vec![0u8; 128];
+    cta[0] = 0x02;
+    cta[1] = 0x03;
+    let [a, b] = physical_address.to_be_bytes();
+    cta[4..12].copy_from_slice(&[0x67, 0x03, 0x0C, 0x00, a, b, 0x00, 0x3C]);
+    cta[2] = 12;
+    let sum = cta[..127].iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    cta[127] = 0u8.wrapping_sub(sum);
+    bytes.extend(cta);
+    bytes
+}
+
+impl Board {
+    /// `/sys/class/drm/<card>/dev`: the device's major:minor.
+    pub fn drm_dev(&self, card: &str, numbers: &str) -> &Self {
+        let path = self.sys(&format!("class/drm/{card}"));
+        let target = fs::canonicalize(&path).unwrap_or(path);
+        fs::write(target.join("dev"), format!("{numbers}\n")).unwrap();
+        self
+    }
+
+    /// `/sys/kernel/debug/dri/<minor>`, with its `name` and `summary`.
+    pub fn dri_debugfs(&self, minor: u32, name: &str, summary: Option<&str>) -> &Self {
+        let dir = self.sys(&format!("kernel/debug/dri/{minor}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("name"), format!("{name}\n")).unwrap();
+        if let Some(summary) = summary {
+            fs::write(dir.join("summary"), summary).unwrap();
+        }
+        self
+    }
+
+    /// A CEC adapter's debugfs status: its physical address, `f.f.f.f` for
+    /// none.
+    pub fn cec_status(&self, adapter: &str, physical_address: &str) -> &Self {
+        let dir = self.sys(&format!("kernel/debug/cec/{adapter}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("status"),
+            format!("enabled: 1\nconfigured: 1\nphys_addr: {physical_address}\n"),
+        )
+        .unwrap();
+        self
+    }
+
+    /// The PHY a transmitter consumes, as the device link, the PHY's
+    /// device-tree clock name and the clock framework's debugfs publish it.
+    pub fn phy(
+        &self,
+        transmitter: &str,
+        phy_device: &str,
+        clock: &str,
+        rate_hz: u64,
+        enabled: bool,
+    ) -> &Self {
+        let phy_name = format!("phy-{phy_device}.0");
+        let phy_dir = self.sys(&format!("devices/platform/{phy_device}/phy/{phy_name}"));
+        fs::create_dir_all(&phy_dir).unwrap();
+        let node = self.sys(&format!("firmware/devicetree/base/hdmiphy@{phy_device}"));
+        fs::create_dir_all(&node).unwrap();
+        fs::write(node.join("clock-output-names"), format!("{clock}\0")).unwrap();
+        let _ = symlink(&node, self.sys(&format!("devices/platform/{phy_device}/of_node")));
+        let link = self.sys(&format!("devices/virtual/devlink/phy:{phy_name}--platform:{transmitter}"));
+        fs::create_dir_all(&link).unwrap();
+        let _ = symlink(&phy_dir, link.join("supplier"));
+        let _ = symlink(
+            &link,
+            self.sys(&format!("devices/platform/{transmitter}/supplier:phy:{phy_name}")),
+        );
+        let clk = self.sys(&format!("kernel/debug/clk/{clock}"));
+        fs::create_dir_all(&clk).unwrap();
+        fs::write(clk.join("clk_rate"), format!("{rate_hz}\n")).unwrap();
+        fs::write(clk.join("clk_enable_count"), if enabled { "2\n" } else { "0\n" }).unwrap();
+        self
+    }
+}
+
 /// One HDMI transmitter, one connector, one sound card, one CEC adapter.
 ///
 /// The board this product was written on. `HDMI-A-1` is the only output there

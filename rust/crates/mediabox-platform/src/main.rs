@@ -18,7 +18,7 @@
 //! so `card="$(mediabox-platform alsa-card)" || exit` is the whole of a caller's
 //! error handling.
 
-use mediabox_platform::{Binding, Devices, Platform, SelectionReason};
+use mediabox_platform::{Confidence, Devices, Platform, SelectionReason};
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args().skip(1);
@@ -109,6 +109,13 @@ fn main() -> std::process::ExitCode {
             .connector_sysfs
             .map(|path| path.display().to_string())),
         "cec-device" => one(devices.cec.map(|path| path.display().to_string())),
+        // The KMS device's debugfs directory, found from the device rather
+        // than assumed to be `dri/0`. Nothing when it cannot be resolved and
+        // checked -- a script then says "unknown", it does not guess.
+        "dri-debugfs" => one(platform
+            .debugfs
+            .dir()
+            .map(|dir| dir.display().to_string())),
         // The selected output's EDID as the checked parser reads it: its
         // status, its identity, what the CTA blocks declare and what was set
         // aside. Diagnostics; nothing reads this to decide anything.
@@ -189,9 +196,20 @@ kullanım: mediabox-platform <komut> [--json]
   alsa-card      o çıkışın ALSA kart kimliği
   alsa-index     o kartın bu açılıştaki ALSA numarası (/proc/asound için)
   cec-device     o çıkışın CEC aygıtı
+  dri-debugfs    mod kuran DRM aygıtının debugfs dizini (doğrulanmış)
   edid           o çıkışın EDID'i: durum, SHA-256 kimlik, sorunlar
   source         bu sistemin eşleştiği kaynak profili
 ";
+
+fn confidence(value: Confidence) -> &'static str {
+    match value {
+        Confidence::Exact => "exact",
+        Confidence::Measured => "measured",
+        Confidence::Derived => "derived: connector order",
+        Confidence::Ambiguous => "ambiguous",
+        Confidence::Unavailable => "unavailable",
+    }
+}
 
 fn report(platform: &Platform) {
     let show = |label: &str, value: String| println!("{label:<14}{value}");
@@ -209,6 +227,15 @@ fn report(platform: &Platform) {
                 )
             })
             .unwrap_or_else(|| "-".into()),
+    );
+    show(
+        "debugfs",
+        match &platform.debugfs {
+            mediabox_platform::debugfs::Debugfs::Resolved { dir, minor } => {
+                format!("{} (minor {minor})", dir.display())
+            }
+            mediabox_platform::debugfs::Debugfs::Unknown { reason } => format!("unknown: {reason}"),
+        },
     );
     show(
         "Render",
@@ -257,12 +284,11 @@ fn report(platform: &Platform) {
         println!(
             "      transmitter {} ({})",
             output.controller.as_deref().unwrap_or("-"),
-            match output.binding {
-                Binding::Measured => "measured",
-                Binding::Ordered => "by order",
-                Binding::Ambiguous => "ambiguous",
-            }
+            confidence(output.binding)
         );
+        for line in &output.evidence {
+            println!("                  {line}");
+        }
         println!(
             "      audio       {}",
             output
@@ -285,7 +311,11 @@ fn report(platform: &Platform) {
             output
                 .cec
                 .as_ref()
-                .map(|cec| cec.device.display().to_string())
+                .map(|cec| format!(
+                    "{} ({})",
+                    cec.device.display(),
+                    confidence(output.cec_confidence())
+                ))
                 .unwrap_or_else(|| "unavailable".into())
         );
         if let Some(sink) = &output.connector.sink {

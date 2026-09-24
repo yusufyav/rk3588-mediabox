@@ -8,7 +8,7 @@
 mod common;
 
 use common::{Board, edid, one_hdmi, three_outputs};
-use mediabox_platform::{Binding, ConnectorKind, Overrides, Platform, Roots, SelectionReason};
+use mediabox_platform::{Binding, Confidence, ConnectorKind, Devices, Overrides, Platform, Roots, SelectionReason};
 
 fn inspect(board: &Board) -> Platform {
     Platform::inspect(&Roots::under(board.root()), &Overrides::default())
@@ -180,12 +180,15 @@ fn two_connected_outputs_resolve_deterministically_to_the_television() {
 }
 
 #[test]
-fn two_cables_of_the_same_kind_fall_back_to_order_rather_than_guessing() {
+fn two_cables_of_the_same_kind_are_ambiguous_and_nothing_is_guessed() {
     // Extcon says "a cable is in me" and nothing more, so with two HDMI
     // transmitters both reporting one it cannot say which connector is which.
-    // The binding falls back to order and says so, instead of picking one of
-    // the two measurements and calling it measured.
-    let platform = inspect(&three_outputs(&["HDMI-A-1", "HDMI-A-2"]));
+    // Both fit equally: that is ambiguous, not "by order" -- connector order
+    // is a derivation and is not allowed to settle a tie between two
+    // measurements. The sound card still follows the order-derived candidate,
+    // as it always has; CEC, which must not act on a guess, is withheld.
+    let board = three_outputs(&["HDMI-A-1", "HDMI-A-2"]);
+    let platform = inspect(&board);
     let by_name = |name: &str| {
         platform
             .outputs
@@ -193,8 +196,10 @@ fn two_cables_of_the_same_kind_fall_back_to_order_rather_than_guessing() {
             .find(|output| output.connector.name == name)
             .expect("the connector")
     };
-    assert_eq!(by_name("HDMI-A-1").binding, Binding::Ordered);
-    assert_eq!(by_name("HDMI-A-2").binding, Binding::Ordered);
+    assert_eq!(by_name("HDMI-A-1").binding, Confidence::Ambiguous);
+    assert_eq!(by_name("HDMI-A-2").binding, Confidence::Ambiguous);
+    assert!(!by_name("HDMI-A-1").cec_confidence().actionable());
+    assert_eq!(Devices::from(&platform).cec, None);
     assert_eq!(
         by_name("HDMI-A-1")
             .audio
@@ -376,7 +381,7 @@ fn connectors_bind_by_order_when_nothing_is_plugged_in_to_measure() {
         by_name("HDMI-A-1").controller.as_deref(),
         Some("fde80000.hdmi")
     );
-    assert_eq!(by_name("HDMI-A-1").binding, Binding::Ordered);
+    assert_eq!(by_name("HDMI-A-1").binding, Binding::Derived);
     assert_eq!(
         by_name("HDMI-A-2").controller.as_deref(),
         Some("fdea0000.hdmi")

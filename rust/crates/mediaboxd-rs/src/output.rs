@@ -38,8 +38,31 @@ pub const SETTING_FILE: &str = "/var/lib/mediabox/output.json";
 /// assignments. Runtime state: it is written again from the next report.
 pub const PLAN_FILE: &str = "/run/mediabox/output-plan";
 
-/// The display controller's own account of what is on the wire.
-pub const SUMMARY_FILE: &str = "/sys/kernel/debug/dri/0/summary";
+/// Where the display controller's own account of the wire is read from.
+///
+/// Production discovers it: the display device's debugfs directory is named by
+/// its primary minor, which is not `0` on every board, and is checked against
+/// the device before it is read (`mediabox_platform::debugfs`). Unreadable is
+/// an answer -- the wire's bus format is then what the interface last
+/// reported -- and never a reason to guess a directory.
+#[derive(Debug, Clone)]
+pub enum Summary {
+    Discover,
+    At(PathBuf),
+}
+
+impl Summary {
+    fn read(&self) -> Option<String> {
+        match self {
+            Summary::Discover => {
+                mediabox_platform::debugfs::discover(&mediabox_platform::Roots::from_env())
+                    .read("summary")
+                    .known()
+            }
+            Summary::At(path) => std::fs::read_to_string(path).ok(),
+        }
+    }
+}
 
 struct Trial {
     setting: OutputSetting,
@@ -60,7 +83,7 @@ struct State {
 pub struct Output {
     setting_path: PathBuf,
     plan_path: PathBuf,
-    summary_path: PathBuf,
+    summary: Summary,
     state: Mutex<State>,
     events: broadcast::Sender<OutputEvent>,
 }
@@ -72,7 +95,7 @@ impl Output {
     pub fn new(
         setting_path: impl Into<PathBuf>,
         plan_path: impl Into<PathBuf>,
-        summary_path: impl Into<PathBuf>,
+        summary: Summary,
     ) -> Arc<Self> {
         let setting_path = setting_path.into();
         let kept = read_setting(&setting_path).unwrap_or_default();
@@ -80,7 +103,7 @@ impl Output {
         Arc::new(Self {
             setting_path,
             plan_path: plan_path.into(),
-            summary_path: summary_path.into(),
+            summary,
             state: Mutex::new(State {
                 kept,
                 ..Default::default()
@@ -120,7 +143,7 @@ impl Output {
         // The bus format as the display controller reports it now, whoever
         // set it: Kodi changes the wire without telling anybody.
         if let (Some(wire), Some(offer)) = (status.wire.as_mut(), status.offer.as_ref())
-            && let Ok(summary) = std::fs::read_to_string(&self.summary_path)
+            && let Some(summary) = self.summary.read()
             && let Some((bus, colour)) =
                 mediabox_platform::output::wire_bus_format(&summary, &offer.connector)
         {
@@ -405,7 +428,7 @@ mod tests {
         Output::new(
             dir.path().join("output.json"),
             dir.path().join("output-plan"),
-            dir.path().join("summary"),
+            Summary::At(dir.path().join("summary")),
         )
     }
 

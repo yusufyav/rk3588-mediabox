@@ -30,11 +30,13 @@
 pub mod audio;
 mod cta_vics;
 pub mod cec;
+pub mod debugfs;
 pub mod drm;
 pub mod dt;
 pub mod edid;
 pub mod roots;
 pub mod source;
+pub mod topology;
 pub mod output;
 pub mod video;
 
@@ -82,32 +84,69 @@ impl Overrides {
     }
 }
 
-/// How firmly a connector was tied to the transmitter behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How firmly a link in the topology is known.
+///
+/// Ordered from strongest to weakest; a chain is as strong as its weakest
+/// link ([`Confidence::and`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Binding {
-    /// The transmitter reports a cable and exactly one connector of its kind is
-    /// connected. Measured, on this boot, from two independent places.
+pub enum Confidence {
+    /// A structural fact the kernel publishes: the CEC adapter is a child
+    /// device of the transmitter; the sound card names the transmitter as its
+    /// codec in the device tree. Nothing about a connector is ever this: the
+    /// kernel publishes no link from a DRM connector to its transmitter.
+    Exact,
+    /// Measured on this boot, from independent places, and unambiguous: the
+    /// sink's EDID physical address is the one the transmitter's CEC adapter
+    /// was given, or the only connected connector of its kind meets the only
+    /// transmitter with a cable, a running PHY clock, and connector order
+    /// agrees.
     Measured,
-    /// Nothing was plugged in to compare, so connectors and transmitters of the
-    /// same kind were paired in order. The kernel numbers connectors in
-    /// registration order and this orders transmitters by address; on every
-    /// board measured so far the two agree, and where anything *was* plugged in
-    /// the measurement above confirms it.
-    Ordered,
-    /// Order and measurement disagree, or there is more than one way to read
-    /// the topology. Reported rather than resolved: a wrong answer here sends
-    /// audio to a different television than the picture.
+    /// Worked out without anything to measure: the Nth connector of a kind is
+    /// the Nth transmitter of that kind by address. Nothing observed
+    /// disagrees; nothing observed confirms.
+    Derived,
+    /// More than one reading fits, or the readings disagree. Reported rather
+    /// than resolved: a wrong answer sends audio or a CEC command to a
+    /// different television than the picture.
     Ambiguous,
+    /// There is nothing to link to.
+    Unavailable,
 }
+
+impl Confidence {
+    /// The weaker of two links.
+    pub fn and(self, other: Confidence) -> Confidence {
+        self.max(other)
+    }
+
+    /// Firm enough to act on -- to send a CEC command down.
+    pub fn actionable(self) -> bool {
+        matches!(
+            self,
+            Confidence::Exact | Confidence::Measured | Confidence::Derived
+        )
+    }
+}
+
+/// The name this used to have. Same type.
+pub type Binding = Confidence;
 
 /// A display output, with everything that belongs to it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Output {
     pub connector: Connector,
-    /// The transmitter driving it, if it could be identified.
+    /// The transmitter driving it, if one could be identified. Under an
+    /// ambiguous binding this is the best candidate, kept so that what
+    /// follows the transmitter structurally (the sound card) behaves as it
+    /// did; anything that must not act on a guess -- CEC -- checks
+    /// [`Output::binding`] first.
     pub controller: Option<String>,
-    pub binding: Binding,
+    /// Connector to transmitter.
+    pub binding: Confidence,
+    /// What was measured, in words, for whoever reads the report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
     /// The sound card that carries this output's audio.
     pub audio: Option<AudioEndpoint>,
     /// The CEC adapter on this output. `None` on DisplayPort, which has none.
@@ -118,6 +157,24 @@ impl Output {
     /// A selector that names this output and survives a reboot.
     pub fn selector(&self) -> String {
         self.connector.name.clone()
+    }
+
+    /// Connector to transmitter to CEC adapter. The second link is
+    /// structural (the adapter is the transmitter's child device).
+    pub fn cec_confidence(&self) -> Confidence {
+        match &self.cec {
+            Some(_) => self.binding.and(Confidence::Exact),
+            None => Confidence::Unavailable,
+        }
+    }
+
+    /// Connector to transmitter to sound card. The second link is structural
+    /// (the card's device-tree codec is the transmitter).
+    pub fn audio_confidence(&self) -> Confidence {
+        match &self.audio {
+            Some(_) => self.binding.and(Confidence::Exact),
+            None => Confidence::Unavailable,
+        }
     }
 }
 
@@ -153,6 +210,12 @@ pub struct Platform {
     /// The DRM device that renders, on the same hardware as the one above.
     pub render: Option<DrmNode>,
     pub controllers: Vec<Controller>,
+    /// What was measured about each transmitter, to tie connectors to them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measured: Vec<(String, topology::TransmitterEvidence)>,
+    /// The display device's debugfs directory, found from the KMS device.
+    #[serde(default = "debugfs_unknown")]
+    pub debugfs: debugfs::Debugfs,
     /// Every output this board has, connected or not.
     pub outputs: Vec<Output>,
     /// The one the product should use, if there is one.
@@ -183,6 +246,8 @@ impl Platform {
                 kms: None,
                 render: None,
                 controllers: Vec::new(),
+                measured: Vec::new(),
+                debugfs: debugfs_unknown(),
                 outputs: Vec::new(),
                 selected: None,
                 warnings,
@@ -210,10 +275,23 @@ impl Platform {
         let audio = audio::endpoints(roots, &dt, &controllers);
         let cec = cec::adapters(roots, &controllers);
 
-        let bound = bind(&connectors, &controllers, &mut warnings);
+        // The debugfs directory of this KMS device, never `dri/0` by
+        // assumption, and what can be measured to tie connectors to
+        // transmitters. Both are optional: without them the binding is by
+        // connector order and says so.
+        let debugfs = debugfs::resolve(roots, &kms);
+        let summary = debugfs.read("summary").known();
+        let measured = topology::measure(roots, &controllers, &cec);
+        let bound = topology::bind(
+            &connectors,
+            &controllers,
+            &measured,
+            summary.as_deref(),
+            &mut warnings,
+        );
         let outputs: Vec<Output> = bound
             .into_iter()
-            .map(|(connector, controller, binding)| Output {
+            .map(|topology::Bound { connector, controller, confidence: binding, evidence }| Output {
                 audio: controller.as_ref().and_then(|device| {
                     audio
                         .iter()
@@ -228,6 +306,7 @@ impl Platform {
                 connector,
                 controller,
                 binding,
+                evidence,
             })
             .collect();
 
@@ -236,6 +315,8 @@ impl Platform {
             kms: Some(kms),
             render,
             controllers,
+            measured,
+            debugfs,
             outputs,
             selected,
             warnings,
@@ -245,78 +326,6 @@ impl Platform {
     pub fn selected_output(&self) -> Option<&Output> {
         self.selected.as_ref().map(|selection| &selection.output)
     }
-}
-
-/// Tie each display connector to the transmitter behind it.
-///
-/// Two independent readings, and they are combined rather than ranked: the
-/// measured one is used when it is unambiguous, the ordered one otherwise, and
-/// a disagreement between them is reported instead of being resolved.
-fn bind(
-    connectors: &[Connector],
-    controllers: &[Controller],
-    warnings: &mut Vec<String>,
-) -> Vec<(Connector, Option<String>, Binding)> {
-    let mut out = Vec::new();
-    for connector in connectors {
-        if !connector.kind.is_display_output() {
-            continue;
-        }
-        let kind = connector.kind;
-        let same_kind: Vec<&Controller> = controllers
-            .iter()
-            .filter(|controller| controller.kind == kind)
-            .collect();
-
-        // In order: the Nth connector of a type is the Nth transmitter of that
-        // type. Connector numbering starts at 1.
-        let ordered = connector
-            .index
-            .checked_sub(1)
-            .and_then(|slot| same_kind.get(slot as usize))
-            .map(|controller| controller.device.clone());
-
-        // Measured: one connector of this kind is plugged in, and one
-        // transmitter of this kind says so.
-        let connected_of_kind = connectors
-            .iter()
-            .filter(|other| other.kind == kind && other.connected)
-            .count();
-        let live: Vec<&&Controller> = same_kind
-            .iter()
-            .filter(|controller| controller.cable_present == Some(true))
-            .collect();
-        let measured = (connector.connected && connected_of_kind == 1 && live.len() == 1)
-            .then(|| live[0].device.clone());
-
-        let (controller, binding) = match (measured, ordered) {
-            (Some(measured), Some(ordered)) if measured == ordered => {
-                (Some(measured), Binding::Measured)
-            }
-            (Some(measured), Some(ordered)) => {
-                warnings.push(format!(
-                    "{}: the cable is in {measured} but connector order says {ordered}; \
-                     audio and CEC are not being tied to an output",
-                    connector.name
-                ));
-                let _ = ordered;
-                (Some(measured), Binding::Ambiguous)
-            }
-            (Some(measured), None) => (Some(measured), Binding::Measured),
-            (None, Some(ordered)) => (Some(ordered), Binding::Ordered),
-            (None, None) => {
-                if !controllers.is_empty() {
-                    warnings.push(format!(
-                        "{}: no transmitter of its kind was found",
-                        connector.name
-                    ));
-                }
-                (None, Binding::Ambiguous)
-            }
-        };
-        out.push((connector.clone(), controller, binding));
-    }
-    out
 }
 
 /// Which output the product should put itself on.
@@ -422,6 +431,12 @@ fn policy<'a>(usable: &[&'a Output]) -> &'a Output {
         .expect("caller checked that there is at least one")
 }
 
+fn debugfs_unknown() -> debugfs::Debugfs {
+    debugfs::Debugfs::Unknown {
+        reason: "not resolved".into(),
+    }
+}
+
 /// Paths a consumer needs, resolved once.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Devices {
@@ -440,7 +455,10 @@ impl From<&Platform> for Devices {
         Self {
             kms: platform.kms.as_ref().map(|node| node.device.clone()),
             render: platform.render.as_ref().map(|node| node.device.clone()),
+            // Only an adapter the output is firmly tied to: a CEC command sent
+            // down a guessed adapter reaches a different television.
             cec: selected
+                .filter(|output| output.cec_confidence().actionable())
                 .and_then(|output| output.cec.as_ref())
                 .map(|adapter| adapter.device.clone()),
             alsa_card_id: selected

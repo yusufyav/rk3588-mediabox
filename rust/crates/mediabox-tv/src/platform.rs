@@ -341,6 +341,10 @@ struct SplitDisplay {
     /// What this source can send and how its driver is spoken to, resolved
     /// once against the running system (`mediabox_platform::source`).
     source: &'static mediabox_platform::source::SourceProfile,
+    /// This display device's debugfs directory, as discovery resolved and
+    /// checked it -- the display controller's own account of the wire is
+    /// read from there, and is unknown when it could not be resolved.
+    debugfs: mediabox_platform::debugfs::Debugfs,
     /// The mode in use, in the terms the colour rules are written in.
     timing: Cell<mediabox_platform::video::Timing>,
     /// The colour sent for everything but an HDR film: the one chosen for
@@ -612,6 +616,7 @@ impl SplitDisplay {
             mode: Cell::new(mode),
             sink_video,
             source,
+            debugfs: discovered.debugfs.clone(),
             timing: Cell::new(timing_of(&mode)),
             colour: Cell::new(colour),
             offer,
@@ -1303,8 +1308,10 @@ impl SplitDisplay {
     /// Tells the daemon what this display offers and what is on the wire.
     fn report(&self) {
         let Some(offer) = self.offer.clone() else { return };
-        let bus = std::fs::read_to_string(SUMMARY_FILE)
-            .ok()
+        let bus = self
+            .debugfs
+            .read("summary")
+            .known()
             .and_then(|summary| mediabox_platform::output::wire_bus_format(&summary, &offer.connector));
         let wire = mediabox_core::OutputWire {
             mode: self.timing.get().label(),
@@ -2539,9 +2546,6 @@ pub fn install() -> Result<(), PlatformError> {
     slint::platform::set_platform(Box::new(SplitPlatform::new()?))
         .map_err(|e| PlatformError::from(e.to_string()))
 }
-
-/// The display controller's own account of what is on the wire.
-const SUMMARY_FILE: &str = "/sys/kernel/debug/dri/0/summary";
 
 /// A property of a KMS object, by name.
 fn find_property<H: control::ResourceHandle>(

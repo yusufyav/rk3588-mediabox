@@ -145,6 +145,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cec: CecRuntime {
             adapters: adapters.clone(),
             unavailable,
+            // A named adapter is an operator's decision and is where commands
+            // go. Otherwise the selected output's, resolved at send time: the
+            // television can be moved to the other socket between commands.
+            target: match args.cec_device.clone() {
+                Some(path) => Arc::new(move || mediaboxd_rs::cec::CecTarget::Adapter {
+                    path: path.clone(),
+                    expected_address: None,
+                    confidence: mediabox_platform::Confidence::Exact,
+                }),
+                None => Arc::new(|| {
+                    mediaboxd_rs::cec::target(&mediabox_platform::Platform::discover())
+                }),
+            },
         },
         input: input.clone(),
         media: Arc::new(MediaClient::new(
@@ -162,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         output: Output::new(
             mediaboxd_rs::output::SETTING_FILE,
             mediaboxd_rs::output::PLAN_FILE,
-            mediaboxd_rs::output::SUMMARY_FILE,
+            mediaboxd_rs::output::Summary::Discover,
         ),
         fan: FanController::system(),
         ethernet: mediaboxd_rs::ethernet::Ethernet::system(),

@@ -61,14 +61,17 @@ printf '%s\n' "$log" | grep -q 'first_data_ms=' && ok home 'real data loaded' ||
 # to list first. A board with one connector puts the live plane at the top and
 # `head -1` reads it by luck; a board with three does not, and every idle plane
 # reads crtc-pos=0x0 with crtc=(null). Ask for a plane that is attached to a
-# CRTC instead of trusting the order.
+# CRTC instead of trusting the order. And the display device's own debugfs
+# directory, found by mediabox-platform from the device -- not dri/0 by
+# assumption; unresolved reads as no mode, never as another device's.
+dri_debugfs=$("$PLATFORM" dri-debugfs 2>/dev/null || true)
 mode=$(awk '
   /^[^\t]/ { inplane = ($0 ~ /^plane\[/); attached = 0 }
   inplane && /^\tcrtc=/ { attached = ($0 !~ /\(null\)/) }
   inplane && attached && /^\tcrtc-pos=/ {
     if (match($0, /[0-9]+x[0-9]+/)) { print substr($0, RSTART, RLENGTH); exit }
   }
-' /sys/kernel/debug/dri/0/state 2>/dev/null)
+' "${dri_debugfs:-/nonexistent}/state" 2>/dev/null)
 native=$(printf '%s\n' "$log" | sed -n 's/.*native=\([0-9]*x[0-9]*\).*/\1/p' | tail -1)
 [ -n "$mode" ] && [ "$mode" = "$native" ] && ok 'native mode' "$mode" || bad 'native mode' "KMS=${mode:-none} app=${native:-none}"
 if pgrep -x sway >/dev/null || pgrep -f 'chromium.*mediabox-ui/chromium' >/dev/null; then bad compositor 'still present'; else ok compositor 'none'; fi

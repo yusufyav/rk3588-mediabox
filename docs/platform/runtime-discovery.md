@@ -80,15 +80,15 @@ Transmitters
 
 Outputs
     HDMI-A-1     disconnected  -
-      transmitter fde80000.hdmi (by order)
+      transmitter fde80000.hdmi (derived: connector order)
       audio       rockchiphdmi0 (hw:CARD=rockchiphdmi0,DEV=0, eld absent)
       cec         /dev/cec0
     HDMI-A-2     disconnected  -
-      transmitter fdea0000.hdmi (by order)
+      transmitter fdea0000.hdmi (derived: connector order)
       audio       rockchiphdmi1 (hw:CARD=rockchiphdmi1,DEV=0, eld absent)
       cec         /dev/cec1
     DP-1         disconnected  -
-      transmitter fde50000.dp (by order)
+      transmitter fde50000.dp (derived: connector order)
       audio       rockchipdp0 (hw:CARD=rockchipdp0,DEV=0, eld absent)
       cec         unavailable
 
@@ -141,22 +141,36 @@ only exists for a node the board brought to `okay`, so this is already the set
 of transmitters the board actually wired up: one on the Ultra, three on the Plus,
 and neither number written down anywhere.
 
-Tying a connector to one of them is done two ways, and the two are combined
-rather than ranked:
+Tying a connector to one of them is the one link the kernel does not publish,
+so it is measured where it can be and every answer carries a confidence
+(`mediabox_platform::Confidence`, see `src/topology.rs`):
 
-* **Measured.** Each transmitter publishes an extcon device with its own hotplug
-  state. When exactly one connector of a kind is `connected` and exactly one
-  transmitter of that kind reports a cable, the pair is unambiguous and the
-  binding is reported as `measured`.
-* **Ordered.** Otherwise, the Nth connector of a type is the Nth transmitter of
-  that type, transmitters sorted by the address in their device-tree node name.
-  The kernel numbers connectors in registration order and the address is the one
-  property of a transmitter that does not move between boots, kernels or boards.
-  Reported as `by order`.
+* **exact** — structural facts the kernel does publish: the CEC adapter is the
+  transmitter's child device; the sound card names the transmitter as its codec.
+  Never a connector-to-transmitter answer.
+* **measured** — the sink's EDID physical address (HDMI VSDB) is the address the
+  transmitter's CEC adapter holds (read from `/sys/kernel/debug/cec/<cecN>/status`),
+  on one adapter only; or exactly one connector of a kind is connected, exactly
+  one transmitter of that kind has a cable (extcon) and a running PHY pixel
+  clock (`supplier:phy:*` → `clock-output-names` → `/sys/kernel/debug/clk`), and
+  connector order agrees. The address match outranks connector order.
+* **derived** — nothing to measure: the Nth connector of a type is the Nth
+  transmitter of that type by device-tree address. Shown as `derived: connector
+  order`.
+* **ambiguous** — two transmitters fit equally (two sinks at the same physical
+  address, two cables and nothing else), or the measurements disagree. Reported
+  with a warning, never resolved by picking one.
+* **unavailable** — nothing of that kind to link to.
 
-When both readings are available and **disagree**, that is reported as
-`ambiguous` and a warning is raised rather than resolved. A wrong answer here
-sends the sound to a different television than the picture.
+A CEC command is sent only down an adapter whose chain is measured, derived or
+exact (`Output::cec_confidence`), and only while that adapter holds the physical
+address the selected sink declares. Under an ambiguous binding the sound card
+still follows the order-derived candidate, as it always has; CEC does not.
+
+The display device's debugfs directory is resolved the same way, from the KMS
+device: `/sys/class/drm/<card>/dev` gives its primary minor, `dri/<minor>/name`
+must name the same platform device, and anything else is `unknown` — never
+`dri/0` by assumption (`mediabox-platform dri-debugfs`).
 
 ### The sound card
 

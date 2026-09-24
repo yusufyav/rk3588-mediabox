@@ -5,6 +5,7 @@ use crate::leds::LedController;
 use crate::lifecycle::{ApplicationManager, KodiLifecycle, SurfaceManager};
 use crate::media::MediaClient;
 use crate::player::{PlayerManager, Playing};
+use crate::cec::CecTarget;
 use mediabox_cec::Adapter;
 use mediabox_core::{
     CecStatus, InputMode, InputSource, PowerAction, Request, Response, ServiceHealth, Surface,
@@ -22,31 +23,54 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 pub struct CecRuntime {
     /// Every adapter on the board, each configured as a playback device.
+    /// All of them are listened to; a command is sent down one only.
     pub adapters: Vec<Arc<Adapter>>,
     /// What to report when there is no adapter at all.
     pub unavailable: CecStatus,
+    /// Where a command goes: the selected output's transmitter's adapter,
+    /// resolved when the command is sent (`crate::cec`).
+    pub target: Arc<dyn Fn() -> CecTarget + Send + Sync>,
 }
 
 impl CecRuntime {
-    /// The adapter on the socket the television is on, if one is.
-    pub fn adapter(&self) -> Option<Arc<Adapter>> {
-        self.adapters
-            .iter()
-            .find(|adapter| adapter.is_live())
-            .cloned()
+    /// The adapter a command goes down, or why none may: the selected
+    /// output's, never merely the first one that is live.
+    pub fn adapter(&self) -> Result<Arc<Adapter>, String> {
+        let target = (self.target)();
+        let chosen = crate::cec::choose(&self.adapters, &target);
+        match (&chosen, &target) {
+            (Ok(adapter), CecTarget::Adapter { confidence, .. }) => eprintln!(
+                "mediaboxd-rs: CEC target {} ({confidence:?}, selected output)",
+                adapter.path().display()
+            ),
+            (Err(why), _) => eprintln!("mediaboxd-rs: CEC not sent: {why}"),
+            _ => {}
+        }
+        chosen
     }
 
     pub fn status(&self) -> CecStatus {
-        if let Some(adapter) = self.adapter() {
-            return adapter.status();
+        if self.adapters.is_empty() {
+            return self.unavailable.clone();
         }
-        match self.adapters.first() {
-            Some(adapter) => CecStatus {
-                available: false,
-                error: Some(mediabox_cec::CecError::NoPhysicalAddress.to_string()),
-                ..adapter.status()
-            },
-            None => self.unavailable.clone(),
+        let target = (self.target)();
+        match crate::cec::choose(&self.adapters, &target) {
+            Ok(adapter) => adapter.status(),
+            Err(why) => {
+                let selected = match &target {
+                    CecTarget::Adapter { path, .. } => self
+                        .adapters
+                        .iter()
+                        .find(|adapter| adapter.path() == path.as_path())
+                        .map(|adapter| adapter.status()),
+                    CecTarget::Refused(_) => None,
+                };
+                CecStatus {
+                    available: false,
+                    error: Some(why),
+                    ..selected.unwrap_or_default()
+                }
+            }
         }
     }
 }
@@ -99,8 +123,9 @@ impl AppState {
             },
             Request::CecStatus => Response::success(self.cec.status()),
             Request::CecDevices => {
-                let Some(adapter) = self.cec.adapter() else {
-                    return Response::failure("CEC_UNAVAILABLE", cec_error(&self.cec.status()));
+                let adapter = match self.cec.adapter() {
+                    Ok(adapter) => adapter,
+                    Err(why) => return Response::failure("CEC_UNAVAILABLE", why),
                 };
                 match tokio::task::spawn_blocking(move || adapter.discover_devices()).await {
                     Ok(Ok(devices)) => Response::success(devices),
@@ -823,19 +848,13 @@ fn string_field(value: &Value, field: &str) -> String {
         .to_string()
 }
 
-fn cec_error(status: &CecStatus) -> String {
-    status
-        .error
-        .clone()
-        .unwrap_or_else(|| "CEC kullanılamıyor".into())
-}
-
 async fn cec_action<F>(runtime: &CecRuntime, action: F) -> Response
 where
     F: FnOnce(&Adapter) -> Result<(), mediabox_cec::CecError> + Send + 'static,
 {
-    let Some(adapter) = runtime.adapter() else {
-        return Response::failure("CEC_UNAVAILABLE", cec_error(&runtime.status()));
+    let adapter = match runtime.adapter() {
+        Ok(adapter) => adapter,
+        Err(why) => return Response::failure("CEC_UNAVAILABLE", why),
     };
     match tokio::task::spawn_blocking(move || action(&adapter)).await {
         Ok(Ok(())) => Response::success(json!({"transmitted":true})),
@@ -1048,6 +1067,7 @@ mod tests {
                     error: Some("testte kapalı".into()),
                     ..Default::default()
                 },
+                target: Arc::new(|| crate::cec::CecTarget::Refused("testte kapalı".into())),
             },
             input: InputManager::new(InputMode::Ui),
             media: Arc::new(
@@ -1067,7 +1087,7 @@ mod tests {
             output: Output::new(
                 dir.path().join("output.json"),
                 dir.path().join("output-plan"),
-                dir.path().join("summary"),
+                crate::output::Summary::At(dir.path().join("summary")),
             ),
             fan: FanController::new(crate::fan::FanPaths::under(dir.path())),
             ethernet: crate::ethernet::Ethernet::new(

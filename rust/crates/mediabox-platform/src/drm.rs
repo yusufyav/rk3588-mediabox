@@ -97,6 +97,11 @@ pub struct Connector {
     /// product and serial. This, not the connector's DRM object id, is what a
     /// remembered output choice is stored against.
     pub sink: Option<SinkIdentity>,
+    /// The physical address the sink's EDID gives this input (HDMI VSDB),
+    /// which the transmitter's CEC adapter is given too: the measurement that
+    /// ties this connector to its transmitter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_address: Option<u16>,
     /// Where the kernel publishes this connector. Carried because the things
     /// that have to be done to a connector before anything draws on it — force
     /// a detect, read the EDID back — are sysfs writes, and a caller that has
@@ -200,6 +205,11 @@ fn read_connector(path: &Path) -> Connector {
         preferred_mode: modes.first().cloned(),
         mode_count: modes.len(),
         sink: parse_edid_identity(&edid),
+        physical_address: crate::edid::EdidReport::of(&edid)
+            .cta
+            .hdmi_vsdb
+            .map(|vsdb| vsdb.physical_address)
+            .filter(|address| *address != 0xFFFF),
         sysfs: path.to_path_buf(),
     }
 }

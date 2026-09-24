@@ -1,4 +1,5 @@
 pub mod output;
+pub mod cec;
 pub mod daemon;
 pub mod ethernet;
 pub mod fan;
