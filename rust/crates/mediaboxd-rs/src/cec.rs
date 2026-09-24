@@ -41,24 +41,15 @@ pub fn target(platform: &Platform) -> CecTarget {
     let Some(output) = platform.selected_output() else {
         return CecTarget::Refused("seçili bir ekran çıkışı yok".into());
     };
-    let Some(adapter) = &output.cec else {
-        return CecTarget::Refused(format!(
-            "{} çıkışının CEC bağdaştırıcısı yok",
-            output.connector.name
-        ));
-    };
-    let confidence = output.cec_confidence();
-    if !confidence.actionable() {
-        return CecTarget::Refused(format!(
-            "{} ile verici arasındaki bağ belirsiz ({confidence:?}); CEC komutu başka bir \
-             televizyona gidebilir, gönderilmiyor",
-            output.connector.name
-        ));
-    }
-    CecTarget::Adapter {
-        path: adapter.device.clone(),
-        expected_address: output.connector.physical_address,
-        confidence,
+    // The same rule the sound card follows (`Output::audio_route`): one
+    // answer to "which transmitter is the picture on", or none.
+    match output.cec_route() {
+        Ok(adapter) => CecTarget::Adapter {
+            path: adapter.device.clone(),
+            expected_address: output.connector.physical_address,
+            confidence: output.cec_confidence(),
+        },
+        Err(why) => CecTarget::Refused(why),
     }
 }
 

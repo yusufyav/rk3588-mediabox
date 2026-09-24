@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use mediabox_core::{
     ColorFormat, ColorMode, ColourCell, OUTPUT_TRIAL_SECONDS, OutputModeOffer, OutputOffer,
-    OutputSetting, OutputStatus, ResolutionChoice,
+    OutputSetting, OutputStatus, ResolutionChoice, TimingKey,
 };
 
 /// Where the focus is.
@@ -58,8 +58,10 @@ pub enum Press {
     Changed,
     /// Put this on the wire, on trial.
     Try(ResolutionChoice, Option<ColorMode>),
-    Keep,
-    Revert,
+    /// Keep, or take back, the trial the question is about -- by its id, so
+    /// an answer to a question that is already over answers nothing.
+    Keep(u64),
+    Revert(u64),
 }
 
 /// What a move did.
@@ -128,7 +130,7 @@ enum Choice {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Draft {
     resolution: ResolutionChoice,
-    colours: BTreeMap<String, ColorMode>,
+    colours: BTreeMap<TimingKey, ColorMode>,
 }
 
 impl From<&OutputSetting> for Draft {
@@ -296,7 +298,7 @@ impl Output {
     /// The draft's colour choice at its own mode, `None` for `Auto`.
     fn draft_colour(&self) -> Option<ColorMode> {
         let mode = self.draft_mode()?;
-        self.draft.as_ref()?.colours.get(&mode.label).copied()
+        self.draft.as_ref()?.colours.get(&mode.timing_key).copied()
     }
 
     /// Whether the draft would change what the daemon has: another mode, or
@@ -305,8 +307,10 @@ impl Output {
         let (Some(draft), Some(base)) = (&self.draft, &self.base) else {
             return false;
         };
-        let label = self.draft_mode().map(|mode| mode.label.clone()).unwrap_or_default();
-        draft.resolution != base.resolution || draft.colours.get(&label) != base.colours.get(&label)
+        let Some(key) = self.draft_mode().map(|mode| mode.timing_key) else {
+            return draft.resolution != base.resolution;
+        };
+        draft.resolution != base.resolution || draft.colours.get(&key) != base.colours.get(&key)
     }
 
     fn groups(&self) -> usize {
@@ -598,7 +602,10 @@ impl Output {
                 if !self.confirm_ready() {
                     return Press::Nothing;
                 }
-                return if focus == 0 { Press::Keep } else { Press::Revert };
+                let Some(trial) = self.status.as_ref().and_then(|status| status.trial.as_ref()) else {
+                    return Press::Nothing;
+                };
+                return if focus == 0 { Press::Keep(trial.id) } else { Press::Revert(trial.id) };
             }
             Sheet::Edid => {
                 self.sheet = Sheet::None;
@@ -646,7 +653,7 @@ impl Output {
                 };
                 if self.cell == 0 {
                     if let Some(draft) = self.draft.as_mut() {
-                        draft.colours.remove(&mode.label);
+                        draft.colours.remove(&mode.timing_key);
                     }
                     return Press::Changed;
                 }
@@ -655,7 +662,7 @@ impl Output {
                     Some(refusal) => self.note = refusal.text(cell.mode.format),
                     None => {
                         if let Some(draft) = self.draft.as_mut() {
-                            draft.colours.insert(mode.label.clone(), cell.mode);
+                            draft.colours.insert(mode.timing_key, cell.mode);
                         }
                     }
                 }
@@ -736,7 +743,7 @@ impl Output {
 
     /// Puts an option into the draft. Nothing leaves this process.
     fn choose(&mut self, choice: Choice) {
-        let label = self.draft_mode().map(|mode| mode.label.clone());
+        let key = self.draft_mode().map(|mode| mode.timing_key);
         let resolution = match choice {
             Choice::AutoResolution => Some(ResolutionChoice::Auto),
             Choice::Size(group) => self.mode_for_size(group),
@@ -747,12 +754,12 @@ impl Output {
         if let Some(resolution) = resolution {
             draft.resolution = resolution;
         }
-        match (choice, label) {
-            (Choice::AutoColour, Some(label)) => {
-                draft.colours.remove(&label);
+        match (choice, key) {
+            (Choice::AutoColour, Some(key)) => {
+                draft.colours.remove(&key);
             }
-            (Choice::Colour(mode), Some(label)) => {
-                draft.colours.insert(label, mode);
+            (Choice::Colour(mode), Some(key)) => {
+                draft.colours.insert(key, mode);
             }
             _ => {}
         }
@@ -787,8 +794,11 @@ impl Output {
             return Vec::new();
         };
         let draft = self.draft();
-        let wire = status.wire.clone().unwrap_or_default();
-        let wire_mode = offer.mode(&wire.mode);
+        // What the driver reports: requested values are never shown as the
+        // wire, and a wire that cannot be read is shown as nothing.
+        let wire_label = status.wire_mode().unwrap_or_default();
+        let wire_colour = status.wire_colour();
+        let wire_mode = offer.mode(&wire_label);
         match kind {
             Pick::Resolution => {
                 let draft_group = self.group_of(draft.resolution);
@@ -869,7 +879,7 @@ impl Output {
                                         enabled: mode.allowed().next().is_some(),
                                         badge: if mode.hdr10() { "HDR".into() } else { String::new() },
                                         badge_tone: "hdr".into(),
-                                        now: mode.label == wire.mode,
+                                        now: mode.label == wire_label,
                                         focused: false,
                                     },
                                     Choice::Mode(mode.choice()),
@@ -903,13 +913,13 @@ impl Output {
                             sub: format!(
                                 "{} MHz · {}",
                                 cell.rate_khz / 1000,
-                                if cell.mode.carries_hdr() { "HDR10 taşır" } else { "HDR10 için 10 bit gerekir" }
+                                if cell.hdr10 { "HDR10 taşır" } else { "HDR10 taşımaz" }
                             ),
                             selected: chosen == Some(cell.mode),
                             enabled: true,
-                            badge: if cell.mode.carries_hdr() { "HDR".into() } else { String::new() },
+                            badge: if cell.hdr10 { "HDR".into() } else { String::new() },
                             badge_tone: "hdr".into(),
-                            now: mode.label == wire.mode && wire.colour == Some(cell.mode),
+                            now: mode.label == wire_label && wire_colour == Some(cell.mode),
                             focused: false,
                         },
                         Choice::Colour(cell.mode),
@@ -923,7 +933,15 @@ impl Output {
     /// Back. `None` when there is nothing for it to do here, so it leaves.
     pub fn back(&mut self) -> Option<Press> {
         match self.sheet {
-            Sheet::Confirm { .. } => Some(Press::Revert),
+            Sheet::Confirm { .. } => Some(
+                match self.status.as_ref().and_then(|status| status.trial.as_ref()) {
+                    Some(trial) => Press::Revert(trial.id),
+                    None => {
+                        self.sheet = Sheet::None;
+                        Press::Changed
+                    }
+                },
+            ),
             Sheet::Edid => {
                 self.sheet = Sheet::None;
                 Some(Press::Changed)
@@ -963,15 +981,18 @@ impl Output {
         let draft = self.draft();
         let focus = |zone: Zone| self.sheet == Sheet::None && self.zone == zone;
         let unsaved = self.unsaved();
-        let wire = status.wire.clone().unwrap_or_default();
-        let wire_mode = offer.mode(&wire.mode);
+        // What the driver reports: requested values are never shown as the
+        // wire, and a wire that cannot be read is shown as nothing.
+        let wire_label = status.wire_mode().unwrap_or_default();
+        let wire_colour = status.wire_colour();
+        let wire_mode = offer.mode(&wire_label);
         let link = &offer.link;
         let ceiling = if link.max_character_rate_khz > 0 {
             link.max_character_rate_khz.min(link.source_max_khz)
         } else {
             link.source_max_khz
         };
-        let load = match (wire_mode, wire.colour) {
+        let load = match (wire_mode, wire_colour) {
             (Some(mode), Some(colour)) => mode.character_rate_khz(colour),
             _ => 0,
         };
@@ -1043,7 +1064,7 @@ impl Output {
                 selected: mode.is(draft.resolution),
                 open: false,
                 focused: focus(Zone::Rates) && self.rate == index,
-                now: mode.label == wire.mode,
+                now: mode.label == wire_label,
                 hdr: mode.hdr10(),
                 divider: false,
                 refused: mode.allowed().next().is_none(),
@@ -1060,7 +1081,7 @@ impl Output {
                     .enumerate()
                     .map(|(index, cell)| {
                         let (row, col, span) = Self::place(cell);
-                        let on_wire = mode.label == wire.mode && wire.colour == Some(cell.mode);
+                        let on_wire = mode.label == wire_label && wire_colour == Some(cell.mode);
                         CellView {
                             row,
                             col,
@@ -1078,7 +1099,7 @@ impl Output {
                             ok: cell.refused.is_none(),
                             selected: chosen == Some(cell.mode),
                             focused: focus(Zone::Colours) && self.cell == index + 1,
-                            hdr: cell.refused.is_none() && cell.mode.carries_hdr(),
+                            hdr: cell.hdr10,
                             now: on_wire,
                         }
                     })
@@ -1205,9 +1226,9 @@ impl Output {
                 .iter()
                 .find(|group| group.width == mode.width && group.height == mode.height)
         });
-        let current_badges = match (wire_mode, wire.colour) {
+        let current_badges = match (wire_mode, wire_colour) {
             (Some(_), Some(colour)) => vec![
-                if wire.hdr {
+                if status.hdr_applied() {
                     ("HDR".to_string(), "hdr".to_string())
                 } else {
                     ("SDR".to_string(), String::new())
@@ -1270,8 +1291,8 @@ impl Output {
             wire_rate: wire_mode
                 .map(|mode| format!("{} Hz{}", hz_text(mode.refresh_mhz), if mode.interlaced { " i" } else { "" }))
                 .unwrap_or_default(),
-            wire_format: wire.colour.map(format_short).unwrap_or_else(|| "—".into()),
-            wire_bits: wire.colour.map(|mode| format!("{} bit", mode.bits)).unwrap_or_default(),
+            wire_format: wire_colour.map(format_short).unwrap_or_else(|| "—".into()),
+            wire_bits: wire_colour.map(|mode| format!("{} bit", mode.bits)).unwrap_or_default(),
             load: if load > 0 { format!("{}", load / 1000) } else { "—".into() },
             load_max: format!("/ {} MHz", ceiling / 1000),
             load_fill: if ceiling > 0 { (f64::from(load) / f64::from(ceiling)).min(1.0) } else { 0.0 },
@@ -1333,10 +1354,10 @@ impl Output {
                         "{name}: gereken {} MHz, bu bağlantının {} MHz tavanına sığar.{}",
                         cell.rate_khz / 1000,
                         ceiling / 1000,
-                        if cell.mode.carries_hdr() {
+                        if cell.hdr10 {
                             " HDR10 taşır."
                         } else {
-                            " HDR10 için 10 bit gerekir."
+                            " HDR10 taşımaz."
                         }
                     ),
                 }
@@ -1434,8 +1455,8 @@ impl Output {
                 label: "Renk biçimi".into(),
                 hint: match (colour, mode) {
                     (None, Some(mode)) => auto_colour_line(mode),
-                    (Some(colour), _) if colour.carries_hdr() => "HDR10 taşır".into(),
-                    (Some(_), _) => "HDR10 için 10 bit gerekir".into(),
+                    (Some(colour), Some(mode)) if mode.carries_hdr10(colour) => "HDR10 taşır".into(),
+                    (Some(_), _) => "HDR10 taşımaz".into(),
                     (None, None) => String::new(),
                 },
                 value: colour.map(colour_text).unwrap_or_else(|| "Otomatik (önerilen)".into()),
@@ -1507,6 +1528,10 @@ fn colour_text(mode: ColorMode) -> String {
     }
 }
 
+fn yes(value: bool) -> &'static str {
+    if value { "var" } else { "yok" }
+}
+
 fn edid_rows(offer: &OutputOffer) -> Vec<(String, String)> {
     let link = &offer.link;
     let depths = |bits: &[u8]| {
@@ -1559,13 +1584,24 @@ fn edid_rows(offer: &OutputOffer) -> Vec<(String, String)> {
         (
             "HDR aktarımı".into(),
             match (link.st2084, link.hlg) {
-                (true, true) => "SMPTE ST 2084 (HDR10), HLG".into(),
-                (true, false) => "SMPTE ST 2084 (HDR10)".into(),
+                (true, true) => "SMPTE ST 2084 (PQ), HLG".into(),
+                (true, false) => "SMPTE ST 2084 (PQ)".into(),
                 (false, true) => "HLG".into(),
                 (false, false) => "yok".into(),
             },
         ),
-        ("Kimlik (checksum)".into(), offer.sink.clone()),
+        (
+            "HDR10 koşulları".into(),
+            format!(
+                "Statik meta veri tip 1: {} · BT.2020 RGB: {} · BT.2020 YCC: {} · kaynak: {}",
+                yes(link.static_metadata_type1),
+                yes(link.bt2020_rgb),
+                yes(link.bt2020_ycc),
+                yes(link.source_hdr10)
+            ),
+        ),
+        ("Kimlik (EDID SHA-256)".into(), offer.edid_sha256.clone()),
+        ("Eski kimlik (checksum)".into(), offer.legacy_checkvalue.clone()),
         (
             "Kaynak (bu kart)".into(),
             format!("{} MHz · {} bit · RGB, 4:4:4, 4:2:2, 4:2:0", link.source_max_khz / 1000, link.source_max_bits),
@@ -1695,7 +1731,7 @@ pub struct View {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use mediabox_core::{OutputTrial, OutputWire};
+    use mediabox_core::{AppliedOutput, DisplayIdentity, Observed, ObservedOutput, OutputTrial};
     use mediabox_platform::video::{RK3588_HDMI, Timing};
 
     /// The Sony's 300 MHz input, as the Plus read it (see
@@ -1725,17 +1761,29 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         ];
         let offer = mediabox_platform::output::offer(&timings, &edid(), "HDMI-A-2", Some("SONY TV".into()), &RK3588_HDMI)
             .expect("an EDID");
+        let sixty = offer.mode("3840x2160p60").unwrap().timing_key;
         OutputStatus {
-            wire: Some(OutputWire {
-                mode: "3840x2160p60".into(),
+            // The driver's report, and the owner's: both say 4K60 in 4:2:0.
+            observed: Some(ObservedOutput {
+                mode: Observed::Known("3840x2160p60".into()),
+                bus_format: Observed::Known("UYYVYY8_0_5X24".into()),
                 colour: Some(ColorMode::new(ColorFormat::Ycbcr420, 8)),
-                bus_format: Some("UYYVYY8_0_5X24".into()),
+                phy_clock_khz: Observed::Unknown("not measured".into()),
+            }),
+            applied: Some(AppliedOutput {
+                identity: DisplayIdentity {
+                    connector: offer.connector.clone(),
+                    edid_sha256: offer.edid_sha256.clone(),
+                },
+                trial: None,
+                timing_key: sixty,
+                label: "3840x2160p60".into(),
+                colour: Some(ColorMode::new(ColorFormat::Ycbcr420, 8)),
                 hdr: false,
             }),
-            setting: OutputSetting { sink: offer.sink.clone(), ..setting },
+            setting: OutputSetting { edid_sha256: offer.edid_sha256.clone(), ..setting },
             offer: Some(offer),
-            trial: None,
-            error: None,
+            ..Default::default()
         }
     }
 
@@ -1770,7 +1818,9 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
     }
 
     fn thirty() -> ResolutionChoice {
-        ResolutionChoice::Fixed { width: 3840, height: 2160, refresh_mhz: 30_000, interlaced: false }
+        ResolutionChoice::Timing {
+            key: Timing::new(3840, 2160, 297_000, 4400, 2250, false, false).key(),
+        }
     }
 
     #[test]
@@ -1848,14 +1898,23 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
     #[test]
     fn a_trial_is_asked_about_and_back_takes_it_back() {
         let mut screen = screen();
+        let mut trying = status(OutputSetting::default());
+        trying.trial = Some(OutputTrial {
+            id: 41,
+            setting: OutputSetting { resolution: thirty(), ..trying.setting.clone() },
+            previous: trying.setting.clone(),
+            seconds_left: OUTPUT_TRIAL_SECONDS,
+            applied: true,
+        });
+        screen.load(Some(trying));
         screen.trial(OUTPUT_TRIAL_SECONDS);
         assert!(screen.asking());
         assert_eq!(screen.view().sheet, 1);
         after_guard(&mut screen);
-        assert_eq!(screen.press(), Press::Keep, "Koru under the focus");
+        assert_eq!(screen.press(), Press::Keep(41), "Koru under the focus, for that trial");
         screen.step(1, 0);
-        assert_eq!(screen.press(), Press::Revert);
-        assert_eq!(screen.back(), Some(Press::Revert));
+        assert_eq!(screen.press(), Press::Revert(41));
+        assert_eq!(screen.back(), Some(Press::Revert(41)));
         screen.trial_ended("Önceki moda dönüldü.");
         assert!(!screen.asking());
     }
@@ -1865,9 +1924,11 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         let mut screen = Output::new();
         let mut started = status(OutputSetting::default());
         started.trial = Some(OutputTrial {
+            id: 7,
             setting: OutputSetting { resolution: thirty(), ..started.setting.clone() },
             previous: started.setting.clone(),
             seconds_left: 12,
+            applied: false,
         });
         screen.load(Some(started));
         assert!(screen.asking());
@@ -1932,7 +1993,9 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         let (resolution, _) = screen.chosen();
         assert_eq!(
             resolution,
-            ResolutionChoice::Fixed { width: 1920, height: 1080, refresh_mhz: 60_000, interlaced: false }
+            ResolutionChoice::Timing {
+                key: Timing::new(1920, 1080, 148_500, 2200, 1125, false, true).key()
+            }
         );
         assert!(screen.unsaved());
         assert_eq!(screen.view().simple[0].value, "Full HD");
@@ -1997,7 +2060,10 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
             screen.step(0, 1);
         }
         assert_eq!(screen.simple_focus().1, SIMPLE_ROWS, "on the buttons");
-        assert!(matches!(screen.press(), Press::Try(ResolutionChoice::Fixed { width: 1920, .. }, None)));
+        assert!(matches!(
+            screen.press(),
+            Press::Try(ResolutionChoice::Timing { key }, None) if key.timing().hdisplay == 1920
+        ));
         // "Geri al" drops the draft.
         screen.step(1, 0);
         assert_eq!(screen.press(), Press::Changed);
@@ -2027,24 +2093,39 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
 
     /// The Ok that pressed Uygula can arrive again as the question appears;
     /// it must not keep a mode nobody has seen.
+    /// The display page as it opens, with trial `id` running.
+    fn simple_trying(id: u64) -> Output {
+        let mut screen = simple();
+        let mut trying = status(OutputSetting::default());
+        trying.trial = Some(OutputTrial {
+            id,
+            setting: OutputSetting { resolution: thirty(), ..trying.setting.clone() },
+            previous: trying.setting.clone(),
+            seconds_left: OUTPUT_TRIAL_SECONDS,
+            applied: true,
+        });
+        screen.load(Some(trying));
+        screen
+    }
+
     #[test]
     fn the_question_takes_no_ok_at_first() {
-        let mut screen = simple();
+        let mut screen = simple_trying(3);
         screen.trial(OUTPUT_TRIAL_SECONDS);
         assert!(!screen.view().confirm_ready);
         assert_eq!(screen.press(), Press::Nothing);
         assert!(screen.asking(), "still asking");
         after_guard(&mut screen);
         assert!(screen.view().confirm_ready);
-        assert_eq!(screen.press(), Press::Keep);
+        assert_eq!(screen.press(), Press::Keep(3));
     }
 
     /// Going back is never held: it is the safe answer.
     #[test]
     fn back_answers_the_question_at_once() {
-        let mut screen = simple();
+        let mut screen = simple_trying(3);
         screen.trial(OUTPUT_TRIAL_SECONDS);
-        assert_eq!(screen.back(), Some(Press::Revert));
+        assert_eq!(screen.back(), Some(Press::Revert(3)));
     }
 
     /// A trial ends however it ends, and the page is where it was.

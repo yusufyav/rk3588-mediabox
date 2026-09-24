@@ -139,10 +139,10 @@ pub type Binding = Confidence;
 pub struct Output {
     pub connector: Connector,
     /// The transmitter driving it, if one could be identified. Under an
-    /// ambiguous binding this is the best candidate, kept so that what
-    /// follows the transmitter structurally (the sound card) behaves as it
-    /// did; anything that must not act on a guess -- CEC -- checks
-    /// [`Output::binding`] first.
+    /// ambiguous binding this is the best candidate, kept for the report.
+    /// Nothing is routed through it: audio and CEC go where
+    /// [`Output::audio_route`] and [`Output::cec_route`] say, and those
+    /// refuse a guess.
     pub controller: Option<String>,
     /// Connector to transmitter.
     pub binding: Confidence,
@@ -177,6 +177,40 @@ impl Output {
             Some(_) => self.binding.and(Confidence::Exact),
             None => Confidence::Unavailable,
         }
+    }
+
+    /// The sound card this output's audio goes to, or why it goes nowhere.
+    ///
+    /// The same rule as [`Output::cec_route`], because it is the same
+    /// question: which transmitter is the picture on. When that is not known
+    /// firmly, sound sent to "the likely one" reaches a different television
+    /// as surely as a CEC command would.
+    pub fn audio_route(&self) -> Result<&AudioEndpoint, String> {
+        self.transmitter_route()?;
+        self.audio
+            .as_ref()
+            .ok_or_else(|| format!("{} çıkışının ses kartı yok", self.connector.name))
+    }
+
+    /// The CEC adapter commands for this output go down, or why none.
+    pub fn cec_route(&self) -> Result<&CecAdapter, String> {
+        self.transmitter_route()?;
+        self.cec
+            .as_ref()
+            .ok_or_else(|| format!("{} çıkışının CEC bağdaştırıcısı yok", self.connector.name))
+    }
+
+    /// Whether the connector is tied to its transmitter firmly enough for
+    /// anything that follows the transmitter to be sent anywhere.
+    fn transmitter_route(&self) -> Result<(), String> {
+        if self.binding.actionable() {
+            return Ok(());
+        }
+        Err(format!(
+            "{} ile verici arasındaki bağ belirsiz ({:?}); ses ve CEC başka bir \
+             televizyona gidebilir, gönderilmiyor",
+            self.connector.name, self.binding
+        ))
     }
 }
 
@@ -328,6 +362,17 @@ impl Platform {
     pub fn selected_output(&self) -> Option<&Output> {
         self.selected.as_ref().map(|selection| &selection.output)
     }
+
+    /// The selected connector and the SHA-256 of the EDID it publishes now:
+    /// what a plan, a trial or an owner's report is bound to. `None` when
+    /// nothing is connected or the EDID is not whole and valid.
+    pub fn selected_identity(&self) -> Option<mediabox_core::DisplayIdentity> {
+        let output = self.selected_output()?;
+        Some(mediabox_core::DisplayIdentity {
+            connector: output.connector.name.clone(),
+            edid_sha256: output.connector.sink.as_ref()?.sha256.clone()?,
+        })
+    }
 }
 
 /// Which output the product should put itself on.
@@ -457,17 +502,17 @@ impl From<&Platform> for Devices {
         Self {
             kms: platform.kms.as_ref().map(|node| node.device.clone()),
             render: platform.render.as_ref().map(|node| node.device.clone()),
-            // Only an adapter the output is firmly tied to: a CEC command sent
-            // down a guessed adapter reaches a different television.
+            // Only what the output is firmly tied to: a CEC command or a
+            // sound sent down a guessed transmitter reaches a different
+            // television.
             cec: selected
-                .filter(|output| output.cec_confidence().actionable())
-                .and_then(|output| output.cec.as_ref())
+                .and_then(|output| output.cec_route().ok())
                 .map(|adapter| adapter.device.clone()),
             alsa_card_id: selected
-                .and_then(|output| output.audio.as_ref())
+                .and_then(|output| output.audio_route().ok())
                 .map(|endpoint| endpoint.card_id.clone()),
             alsa_driver: selected
-                .and_then(|output| output.audio.as_ref())
+                .and_then(|output| output.audio_route().ok())
                 .and_then(|endpoint| endpoint.driver.clone()),
             connector: selected.map(|output| output.connector.name.clone()),
             connector_sysfs: selected.map(|output| output.connector.sysfs.clone()),

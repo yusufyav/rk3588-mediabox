@@ -565,6 +565,7 @@ dependencies = [
  "mediabox-input",
  "mediabox-platform",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

@@ -210,6 +210,77 @@ fn two_live_adapters_that_cannot_be_told_apart_are_ambiguous_and_cec_is_withheld
 }
 
 #[test]
+fn an_ambiguous_topology_sends_neither_sound_nor_cec_to_the_likely_transmitter() {
+    // Both sinks connected, nothing tells the transmitters apart. The
+    // connector-order candidate for HDMI-A-2 is fdea0000.hdmi and its card is
+    // rockchiphdmi1 -- which is exactly the guess that must not be acted on.
+    let board = two_hdmi([Some(0x1000), Some(0x1000)]);
+    board.cec_status("cec0", "1.0.0.0");
+    board.cec_status("cec1", "1.0.0.0");
+    board.remember_output("HDMI-A-2");
+    let platform = inspect(&board);
+    let selected = platform.selected_output().unwrap();
+    assert_eq!(selected.binding, Confidence::Ambiguous);
+    assert!(selected.audio.is_some(), "the candidate's card is known, for the report");
+    let audio = selected.audio_route().unwrap_err();
+    let cec = selected.cec_route().unwrap_err();
+    assert!(audio.contains("belirsiz") && cec.contains("belirsiz"), "{audio} / {cec}");
+    let devices = Devices::from(&platform);
+    assert_eq!(devices.alsa_card_id, None, "no card rather than the likely one");
+    assert_eq!(devices.alsa_driver, None);
+    assert_eq!(devices.cec, None);
+}
+
+#[test]
+fn a_sinks_adapter_losing_its_address_for_a_moment_does_not_unbind_it() {
+    // Mid-handover: nobody drives the panel, the set drops CEC for a moment.
+    // The cable is still in the one transmitter and nothing says otherwise.
+    let board = two_hdmi([None, Some(0x3000)]);
+    board.cec_status("cec0", "f.f.f.f");
+    board.cec_status("cec1", "f.f.f.f");
+    let platform = inspect(&board);
+    let selected = platform.selected_output().unwrap();
+    assert_eq!(selected.controller.as_deref(), Some("fdea0000.hdmi"));
+    assert_eq!(selected.binding, Confidence::Measured, "{:?}", selected.evidence);
+    assert_eq!(selected.audio_route().unwrap().card_id, "rockchiphdmi1");
+}
+
+#[test]
+fn a_stale_no_cable_does_not_outweigh_the_sinks_own_address() {
+    // After a forced `off` and `detect` the vendor driver leaves extcon at
+    // HDMI=0 with the sink plugged in; its adapter still holds the sink's
+    // address and its PHY still runs at the connector's clock.
+    let board = two_hdmi([None, Some(0x3000)]);
+    board.transmitter("fdea0000.hdmi", "hdmi@fdea0000", 0x101, Some(false));
+    board.cec_status("cec0", "f.f.f.f");
+    board.cec_status("cec1", "3.0.0.0");
+    let platform = inspect(&board);
+    let selected = platform.selected_output().unwrap();
+    assert_eq!(selected.controller.as_deref(), Some("fdea0000.hdmi"));
+    assert_eq!(selected.binding, Confidence::Measured, "{:?}", selected.evidence);
+    assert!(selected.evidence.iter().any(|line| line.contains("extcon says no cable")));
+    // And with nothing live at all, "no cable" everywhere is still not a guess.
+    board.cec_status("cec1", "f.f.f.f");
+    let platform = inspect(&board);
+    assert_eq!(platform.selected_output().unwrap().binding, Confidence::Ambiguous);
+}
+
+#[test]
+fn a_firm_binding_routes_sound_and_cec_to_the_same_transmitter() {
+    let board = two_hdmi([None, Some(0x3000)]);
+    board.cec_status("cec0", "f.f.f.f");
+    board.cec_status("cec1", "3.0.0.0");
+    let platform = inspect(&board);
+    let selected = platform.selected_output().unwrap();
+    assert_eq!(selected.controller.as_deref(), Some("fdea0000.hdmi"));
+    assert_eq!(selected.audio_route().unwrap().card_id, "rockchiphdmi1");
+    assert!(selected.cec_route().unwrap().device.ends_with("cec1"));
+    let devices = Devices::from(&platform);
+    assert_eq!(devices.alsa_card_id.as_deref(), Some("rockchiphdmi1"));
+    assert!(devices.cec.unwrap().ends_with("cec1"));
+}
+
+#[test]
 fn a_connected_sink_that_no_transmitter_measures_as_its_own_is_ambiguous() {
     // The cable is in, but the only adapter with an address holds a
     // different one than the sink declares.

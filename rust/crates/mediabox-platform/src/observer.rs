@@ -1,17 +1,19 @@
-//! The display, observed from outside whoever owns it. Shadow mode.
+//! The display, observed from outside whoever owns it: the one account of
+//! the hardware the rest of the product works from.
 //!
 //! `mediabox-display-observer` watches the selected output and publishes what
-//! it sees as one snapshot. It decides nothing: the control plane and the
-//! interface still make every display decision exactly as before, and nothing
-//! reads this snapshot to act on it yet. It is here to be compared with them,
-//! so that when decisions do move to it (Display Architecture v2, P6) they move
-//! onto something that has been watched agreeing with the product first.
+//! it sees as one snapshot: the generation, the sink's identity, the topology
+//! and where audio and CEC may go, the kernel's mode list and the offer
+//! computed from it, and what the display controller says is on the wire. The
+//! control plane reads it and nothing else as hardware truth; it decides
+//! nothing itself.
 //!
 //! How it looks (Gate 0, G0-1): sysfs, uevents, debugfs, the device tree. It
 //! keeps no descriptor on the display device. The kernel's own mode list and
 //! the connector's properties are read through `drm_query`, under AM-2, only
-//! when what the observer sees materially changes (or an earlier read was
-//! deferred) -- never on every pass, and never by taking the display.
+//! for a connector and EDID it has not read before -- never on every pass, and
+//! never by taking the display. What it read is kept in its runtime directory,
+//! so a restart does not read again.
 //!
 //! How it keeps up: level-triggered. Every pass reads everything again and
 //! compares the result with the last one; a uevent only says "look now", and a
@@ -20,9 +22,9 @@
 //! What a generation is: `(boot_id, seq)`, where `seq` moves when the
 //! *material* content of the snapshot changes -- the KMS device, the
 //! connector, whether it is connected, the EDID's identity, the transmitter
-//! and what hangs off it, and the capability and mode fingerprints. An event
-//! is not a generation; the same content seen twice is the same generation,
-//! across restarts of the observer within a boot.
+//! and what hangs off it, the source profile, and the capability and mode
+//! fingerprints. An event is not a generation; the same content seen twice is
+//! the same generation, across restarts of the observer within a boot.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,20 +33,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::debugfs::{self, Debugfs, Observed};
-use crate::drm_query::{self, Access, Query};
+use crate::drm_query::{self, Access, KernelMode, Query};
 use crate::edid::EdidReport;
-use crate::source::{self, SourceSignature};
+use crate::source::{self, PropertySignature, SourceSignature};
 use crate::{Confidence, Overrides, Platform, Roots};
+use mediabox_core::{DisplayGeneration, DisplayIdentity, DisplayState, OutputOffer, Route};
 
 /// The upper bound between two full looks.
-pub const PERIOD: Duration = Duration::from_secs(5);
-pub const SCHEMA: u32 = 1;
+pub const PERIOD: Duration = Duration::from_secs(2);
+pub const SCHEMA: u32 = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Generation {
-    pub boot_id: String,
-    pub seq: u64,
-}
+/// A snapshot older than this is not the display now: the observer has
+/// stopped looking, and what it last saw is not taken as current.
+pub const STALE_AFTER: Duration = Duration::from_secs(10);
+
+/// The observer's runtime directory, under `/run` ([`Roots::run`]).
+pub const RUNTIME: &str = "mediabox-display-observer";
+const SNAPSHOT: &str = "snapshot.json";
 
 /// Why a pass ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,8 +83,11 @@ pub struct Material {
     pub edid_sha256: Option<String>,
     pub transmitter: Option<String>,
     pub topology: Option<Confidence>,
+    /// Where audio and CEC go: only a route [`crate::Output::audio_route`]
+    /// and [`crate::Output::cec_route`] allow.
     pub audio: Option<String>,
     pub cec: Option<String>,
+    pub source_profile: String,
     pub capability_fingerprint: Option<String>,
     pub kernel_modes_fingerprint: Option<String>,
 }
@@ -101,24 +109,10 @@ pub struct Master {
     pub pid: u32,
 }
 
-/// What the control plane's own report says, beside the observer's.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Comparison {
-    pub daemon_reachable: bool,
-    pub daemon_connector: Option<String>,
-    pub daemon_edid_sha256: Option<String>,
-    pub daemon_source_profile: Option<String>,
-    /// Every field both sides have, equal.
-    pub agrees: bool,
-    pub differences: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub schema: u32,
-    /// Always true in this wave: nothing acts on this snapshot.
-    pub shadow: bool,
-    pub generation: Generation,
+    pub generation: DisplayGeneration,
     pub material_digest: String,
     pub reason: Reason,
     pub boottime_ns: u64,
@@ -128,45 +122,108 @@ pub struct Snapshot {
     pub physical_address: Option<String>,
     pub edid_status: Option<crate::edid::EdidStatus>,
     pub edid_legacy_checkvalue: Option<String>,
+    /// The profile and how it was matched: `rk3588-vendor61-dw-hdmi-qp@1 (matched)`.
     pub source_profile: String,
     pub topology_evidence: Vec<String>,
-    pub audio_confidence: Option<Confidence>,
-    pub cec_confidence: Option<Confidence>,
+    pub audio: Route,
+    pub cec: Route,
+    /// What the display controller reports for the connector (debugfs).
     pub current_mode: Observed<String>,
     pub bus_format: Observed<String>,
+    /// The PHY clock of the transmitter the connector is bound to, when that
+    /// binding is firm and the board publishes the clock.
+    pub phy_clock_khz: Observed<u64>,
     pub debugfs: Debugfs,
     pub kernel_modes: KernelModes,
+    /// What can be sent to this sink, from the kernel's mode list and its
+    /// EDID under the source profile. `None` until the list has been read
+    /// for this connector and EDID.
+    pub offer: Option<OutputOffer>,
     pub drm_master: Observed<Master>,
-    pub comparison: Option<Comparison>,
     pub warnings: Vec<String>,
 }
 
-/// Where the observer keeps its generation, so a restart continues it.
+impl Snapshot {
+    /// The output and sink this snapshot is about, when one is connected
+    /// with a valid EDID.
+    pub fn identity(&self) -> Option<DisplayIdentity> {
+        Some(DisplayIdentity {
+            connector: self.material.connector.clone()?,
+            edid_sha256: self.material.edid_sha256.clone()?,
+        })
+        .filter(|_| self.material.connected == Some(true))
+    }
+
+    /// The part the control plane reports.
+    pub fn display_state(&self) -> DisplayState {
+        DisplayState {
+            generation: self.generation.clone(),
+            connector: self.material.connector.clone(),
+            connected: self.material.connected == Some(true),
+            edid_sha256: self.material.edid_sha256.clone(),
+            transmitter: self.material.transmitter.clone(),
+            topology: self
+                .material
+                .topology
+                .map(|confidence| format!("{confidence:?}").to_lowercase())
+                .unwrap_or_else(|| "unavailable".into()),
+            audio: self.audio.clone(),
+            cec: self.cec.clone(),
+            source_profile: self.source_profile.clone(),
+        }
+    }
+}
+
+/// The snapshot the observer published under `runtime`, if there is one this
+/// build can read and it is recent: the file outlives an observer that
+/// stopped, and a sink can change while nobody is looking.
+pub fn published(runtime: &Path) -> Option<Snapshot> {
+    let text = std::fs::read_to_string(runtime.join(SNAPSHOT)).ok()?;
+    let now = boottime_ns();
+    serde_json::from_str::<Snapshot>(&text).ok().filter(|snapshot| {
+        snapshot.schema == SCHEMA
+            && now.saturating_sub(snapshot.boottime_ns) <= STALE_AFTER.as_nanos() as u64
+    })
+}
+
+/// `CLOCK_BOOTTIME`, in nanoseconds: what a snapshot's age is measured in.
+pub fn boottime_ns() -> u64 {
+    clocks().0
+}
+
+/// Its generation alone.
+pub fn published_generation(runtime: &Path) -> Option<DisplayGeneration> {
+    published(runtime).map(|snapshot| snapshot.generation)
+}
+
+/// Where the observer keeps its generation and the last mode list it read,
+/// so a restart continues both.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Kept {
     boot_id: String,
     seq: u64,
     digest: String,
-    /// The last kernel mode list read, and the connector and EDID it was
-    /// read for. A read that is deferred later -- a restart in a masterless
-    /// window -- is not a change in what the display offers, so it carries
-    /// this forward instead of moving the generation.
+    /// The last kernel mode list read, the connector properties read with
+    /// it, and the connector and EDID they were read for. A restart reuses
+    /// them for the same connector and EDID instead of opening the display
+    /// device again -- and a read that is deferred later is not a change in
+    /// what the display offers.
     #[serde(default)]
     modes_for: String,
     #[serde(default)]
     modes_fingerprint: Option<String>,
+    #[serde(default)]
+    modes: Vec<KernelMode>,
+    #[serde(default)]
+    properties: Option<PropertySignature>,
 }
 
 /// The observer, between passes.
 pub struct Observer {
     pub roots: Roots,
     pub runtime: PathBuf,
-    pub daemon_socket: Option<PathBuf>,
     pub drm: Option<Box<dyn Fn(&Platform) -> Box<dyn Access>>>,
     kept: Kept,
-    /// The last kernel mode read, the connector properties read with it, and
-    /// what they were read for (connector and EDID).
-    modes: Option<(String, KernelModes, Option<crate::source::PropertySignature>)>,
     last_query_note: Option<String>,
 }
 
@@ -179,16 +236,14 @@ impl Observer {
         Self {
             roots,
             runtime,
-            daemon_socket: None,
             drm: None,
             kept,
-            modes: None,
             last_query_note: None,
         }
     }
 
     pub fn snapshot_path(&self) -> PathBuf {
-        self.runtime.join("snapshot.json")
+        self.runtime.join(SNAPSHOT)
     }
 
     /// One full look, published.
@@ -196,13 +251,19 @@ impl Observer {
         let platform = Platform::inspect(&self.roots, &Overrides::default());
         let boot_id = crate::roots::read_trimmed(self.roots.proc("sys/kernel/random/boot_id"))
             .unwrap_or_else(|| "unknown".into());
+        if self.kept.boot_id != boot_id {
+            self.kept = Kept {
+                boot_id: boot_id.clone(),
+                ..Kept::default()
+            };
+        }
         let selected = platform.selected_output();
         let edid_bytes = selected
             .map(|output| std::fs::read(output.connector.sysfs.join("edid")).unwrap_or_default());
         let edid = edid_bytes.as_deref().map(EdidReport::of);
 
-        // The kernel's mode list and the connector's properties: read again
-        // only for a connector and EDID not read before, or after a deferral.
+        // The kernel's mode list and the connector's properties: read only
+        // for a connector and EDID not read before.
         let modes_for = format!(
             "{}|{}",
             selected.map(|o| o.connector.name.as_str()).unwrap_or("-"),
@@ -211,10 +272,14 @@ impl Observer {
                 .map(|id| id.0.as_str())
                 .unwrap_or("-")
         );
-        let current_modes_for = modes_for.clone();
-        let stale = !matches!(&self.modes, Some((key, KernelModes::Known { .. }, _)) if *key == modes_for);
-        if stale {
-            let mut properties = None;
+        let mut deferred = None;
+        let mut read_now = false;
+        // A kept read with no modes in it is one written before the list was
+        // kept (an upgrade): it is read again, not taken as a list of none.
+        if self.kept.modes_for != modes_for
+            || self.kept.modes_fingerprint.is_none()
+            || self.kept.modes.is_empty()
+        {
             let result = match (selected, &self.drm) {
                 (Some(output), Some(open)) if output.connector.connected => {
                     let access = open(&platform);
@@ -230,32 +295,38 @@ impl Observer {
                     reason: "the selected output is not connected".into(),
                 },
             };
-            let modes = match result {
+            match result {
                 Query::Done(read) => {
-                    properties = Some(read.properties.clone());
-                    kernel_modes(&read)
+                    self.kept.modes_for = modes_for.clone();
+                    self.kept.modes_fingerprint = Some(fingerprint(&read.modes));
+                    self.kept.modes = read.modes;
+                    self.kept.properties = Some(read.properties);
+                    self.last_query_note = None;
+                    read_now = true;
                 }
-                Query::Deferred { reason } => KernelModes::Deferred { reason },
-            };
-            if let KernelModes::Deferred { reason } = &modes
-                && self.last_query_note.as_deref() != Some(reason)
-            {
-                eprintln!("mediabox-display-observer: {reason}");
-                self.last_query_note = Some(reason.clone());
+                Query::Deferred { reason } => {
+                    if self.last_query_note.as_deref() != Some(&reason) {
+                        eprintln!("mediabox-display-observer: {reason}");
+                        self.last_query_note = Some(reason.clone());
+                    }
+                    deferred = Some(reason);
+                }
             }
-            if matches!(modes, KernelModes::Known { .. }) {
-                self.last_query_note = None;
-            }
-            self.modes = Some((modes_for, modes, properties));
         }
-        let kernel_modes = self
-            .modes
-            .as_ref()
-            .map(|(_, modes, _)| modes.clone())
-            .unwrap_or(KernelModes::Deferred {
+        // What was read for another connector or EDID is not this one's.
+        let current = self.kept.modes_for == modes_for
+            && self.kept.modes_fingerprint.is_some()
+            && !self.kept.modes.is_empty();
+        let kernel_modes = match (&deferred, current) {
+            (_, true) => kernel_modes(&self.kept.modes),
+            (Some(reason), false) => KernelModes::Deferred {
+                reason: reason.clone(),
+            },
+            (None, false) => KernelModes::Deferred {
                 reason: "not read yet".into(),
-            });
-        let properties = self.modes.as_ref().and_then(|(_, _, properties)| properties.clone());
+            },
+        };
+        let properties = current.then(|| self.kept.properties.clone()).flatten();
 
         let resolved = source::resolve(&SourceSignature {
             static_part: source::static_signature(&self.roots, &platform),
@@ -270,6 +341,49 @@ impl Observer {
             hex(&Sha256::digest(text.as_bytes()))
         });
 
+        let offer = match (selected, edid_bytes.as_deref()) {
+            (Some(output), Some(bytes)) if current && output.connector.connected => {
+                let timings: Vec<crate::video::Timing> = self
+                    .kept
+                    .modes
+                    .iter()
+                    .map(|mode| crate::video::Timing::from_mode(mode.timing, mode.preferred))
+                    .collect();
+                crate::output::offer(
+                    &timings,
+                    bytes,
+                    &output.connector.name,
+                    crate::output::edid_name(bytes),
+                    &resolved.profile.caps,
+                )
+                .map(|mut offer| {
+                    offer.link.source_profile = resolved.describe();
+                    offer
+                })
+            }
+            _ => None,
+        };
+
+        let route = |result: Result<String, String>| match result {
+            Ok(device) => Route {
+                device: Some(device),
+                refused: None,
+            },
+            Err(why) => Route {
+                device: None,
+                refused: Some(why),
+            },
+        };
+        let no_output = || Err("seçili bir ekran çıkışı yok".to_string());
+        let audio = route(selected.map_or_else(no_output, |output| {
+            output.audio_route().map(|audio| audio.card_id.clone())
+        }));
+        let cec = route(selected.map_or_else(no_output, |output| {
+            output
+                .cec_route()
+                .map(|adapter| adapter.device.display().to_string())
+        }));
+
         let material = Material {
             kms_device: platform.kms.as_ref().map(|node| {
                 format!("{} ({})", node.name, node.parent.as_deref().unwrap_or("?"))
@@ -279,41 +393,19 @@ impl Observer {
             edid_sha256: edid.as_ref().and_then(|report| report.sha256.as_ref()).map(|id| id.0.clone()),
             transmitter: selected.and_then(|output| output.controller.clone()),
             topology: selected.map(|output| output.binding),
-            audio: selected.and_then(|output| output.audio.as_ref()).map(|audio| audio.card_id.clone()),
-            cec: selected
-                .and_then(|output| output.cec.as_ref())
-                .map(|cec| cec.device.display().to_string()),
+            audio: audio.device.clone(),
+            cec: cec.device.clone(),
+            source_profile: resolved.profile.name(),
             capability_fingerprint,
-            kernel_modes_fingerprint: match &kernel_modes {
-                KernelModes::Known { fingerprint, .. } => Some(fingerprint.clone()),
-                KernelModes::Deferred { .. } if self.kept.modes_for == current_modes_for => {
-                    self.kept.modes_fingerprint.clone()
-                }
-                KernelModes::Deferred { .. } => None,
-            },
+            kernel_modes_fingerprint: current.then(|| self.kept.modes_fingerprint.clone()).flatten(),
         };
         let digest = material.digest();
-        if self.kept.boot_id != boot_id {
-            self.kept = Kept {
-                boot_id: boot_id.clone(),
-                ..Kept::default()
-            };
-        }
-        let mut changed_modes = false;
-        if let KernelModes::Known { fingerprint, .. } = &kernel_modes
-            && (self.kept.modes_for != current_modes_for
-                || self.kept.modes_fingerprint.as_ref() != Some(fingerprint))
-        {
-            self.kept.modes_for = current_modes_for.clone();
-            self.kept.modes_fingerprint = Some(fingerprint.clone());
-            changed_modes = true;
-        }
         let new_generation = self.kept.digest != digest;
         if new_generation {
             self.kept.seq += 1;
             self.kept.digest = digest.clone();
             eprintln!(
-                "mediabox-display-observer: generation {}:{} ({reason:?}) connector={} connected={} edid={} transmitter={} ({:?}) cec={} modes={}",
+                "mediabox-display-observer: generation {}:{} ({reason:?}) connector={} connected={} edid={} transmitter={} ({:?}) audio={} cec={} modes={}",
                 boot_id,
                 self.kept.seq,
                 material.connector.as_deref().unwrap_or("-"),
@@ -321,14 +413,24 @@ impl Observer {
                 material.edid_sha256.as_deref().map(|s| &s[..16.min(s.len())]).unwrap_or("-"),
                 material.transmitter.as_deref().unwrap_or("-"),
                 material.topology,
+                material.audio.as_deref().unwrap_or("-"),
                 material.cec.as_deref().unwrap_or("-"),
                 match &kernel_modes {
                     KernelModes::Known { count, .. } => count.to_string(),
                     KernelModes::Deferred { reason } => format!("deferred ({reason})"),
                 }
             );
+            // Why a binding is not firm, for whoever reads the journal: it is
+            // what takes sound and CEC away.
+            if let Some(output) = selected.filter(|output| !output.binding.actionable()) {
+                eprintln!(
+                    "mediabox-display-observer: {} is not firmly tied to a transmitter: {}",
+                    output.connector.name,
+                    output.evidence.join("; ")
+                );
+            }
         }
-        if new_generation || changed_modes {
+        if new_generation || read_now {
             let _ = write_atomic(
                 &self.runtime.join("generation.json"),
                 &serde_json::to_string(&self.kept).unwrap_or_default(),
@@ -348,6 +450,22 @@ impl Observer {
         };
         let current_mode = observed(activity.as_ref().and_then(|a| a.mode.clone()), "mode");
         let bus_format = observed(activity.as_ref().and_then(|a| a.bus_format.clone()), "bus format");
+        let phy_clock_khz = match selected {
+            None => Observed::Unknown("seçili bir ekran çıkışı yok".into()),
+            Some(output) if !output.binding.actionable() => {
+                Observed::Unknown(format!("the transmitter is not firmly known ({:?})", output.binding))
+            }
+            Some(output) => platform
+                .measured
+                .iter()
+                .find(|(device, _)| Some(device) == output.controller.as_ref())
+                .and_then(|(_, evidence)| evidence.phy_clock.as_ref())
+                .map(|clock| match clock.enabled {
+                    true => Observed::Known(clock.rate_hz / 1000),
+                    false => Observed::Unknown(format!("{} is off", clock.name)),
+                })
+                .unwrap_or_else(|| Observed::Unknown("no PHY clock is published for this transmitter".into())),
+        };
         let drm_master = match platform.debugfs.read("clients") {
             Observed::Known(table) => match current_master(&table) {
                 Some(master) => Observed::Known(master),
@@ -357,10 +475,9 @@ impl Observer {
         };
 
         let (boottime_ns, realtime_ms) = clocks();
-        let mut snapshot = Snapshot {
+        let snapshot = Snapshot {
             schema: SCHEMA,
-            shadow: true,
-            generation: Generation {
+            generation: DisplayGeneration {
                 boot_id,
                 seq: self.kept.seq,
             },
@@ -379,20 +496,18 @@ impl Observer {
             edid_legacy_checkvalue: edid.as_ref().map(|report| report.legacy_checkvalue.clone()),
             source_profile: resolved.describe(),
             topology_evidence: selected.map(|output| output.evidence.clone()).unwrap_or_default(),
-            audio_confidence: selected.map(|output| output.audio_confidence()),
-            cec_confidence: selected.map(|output| output.cec_confidence()),
+            audio,
+            cec,
             current_mode,
             bus_format,
+            phy_clock_khz,
             debugfs: platform.debugfs.clone(),
             kernel_modes,
+            offer,
             drm_master,
-            comparison: None,
             warnings: platform.warnings.clone(),
             material,
         };
-        if let Some(socket) = &self.daemon_socket {
-            snapshot.comparison = Some(compare(&snapshot, socket));
-        }
         let _ = write_atomic(
             &self.snapshot_path(),
             &serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
@@ -411,23 +526,28 @@ fn format_pa(address: u16) -> String {
     )
 }
 
-fn kernel_modes(read: &drm_query::ConnectorQuery) -> KernelModes {
-    let mut keys: Vec<String> = read
-        .modes
-        .iter()
-        .map(|mode| mode.timing.key().to_string())
-        .collect();
-    let preferred = read
-        .modes
+fn keys(modes: &[KernelMode]) -> (Vec<String>, Option<String>) {
+    let mut keys: Vec<String> = modes.iter().map(|mode| mode.timing.key().to_string()).collect();
+    let preferred = modes
         .iter()
         .find(|mode| mode.preferred)
         .map(|mode| mode.timing.key().to_string());
     keys.sort();
     keys.dedup();
+    (keys, preferred)
+}
+
+fn fingerprint(modes: &[KernelMode]) -> String {
+    let (keys, preferred) = keys(modes);
     let text = format!("{}|{}", keys.join(","), preferred.as_deref().unwrap_or(""));
+    hex(&Sha256::digest(text.as_bytes()))
+}
+
+fn kernel_modes(modes: &[KernelMode]) -> KernelModes {
+    let (keys, preferred) = keys(modes);
     KernelModes::Known {
-        count: read.modes.len(),
-        fingerprint: hex(&Sha256::digest(text.as_bytes())),
+        count: modes.len(),
+        fingerprint: fingerprint(modes),
         preferred,
         keys,
     }
@@ -449,75 +569,6 @@ pub fn current_master(clients: &str) -> Option<Master> {
         }
     }
     None
-}
-
-/// Ask the control plane what it believes, and say where it differs. The
-/// control plane's belief is what the interface last reported to it.
-fn compare(snapshot: &Snapshot, socket: &Path) -> Comparison {
-    use std::io::{BufRead, BufReader, Write};
-    let asked = (|| -> Option<serde_json::Value> {
-        let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
-        stream.set_read_timeout(Some(Duration::from_millis(800))).ok()?;
-        stream.set_write_timeout(Some(Duration::from_millis(800))).ok()?;
-        (&stream).write_all(b"{\"command\":\"output_status\"}\n").ok()?;
-        let mut line = String::new();
-        BufReader::new(&stream).read_line(&mut line).ok()?;
-        serde_json::from_str(&line).ok()
-    })();
-    let Some(answer) = asked else {
-        return Comparison {
-            daemon_reachable: false,
-            daemon_connector: None,
-            daemon_edid_sha256: None,
-            daemon_source_profile: None,
-            agrees: false,
-            differences: vec!["the control plane did not answer".into()],
-        };
-    };
-    let offer = answer.pointer("/result/offer");
-    let text = |pointer: &str| {
-        offer
-            .and_then(|offer| offer.pointer(pointer))
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-    };
-    let daemon_connector = text("/connector");
-    let daemon_edid_sha256 = text("/edid_sha256");
-    let daemon_source_profile = text("/link/source_profile");
-    let mut differences = Vec::new();
-    let mut check = |what: &str, ours: Option<&str>, theirs: Option<&str>| {
-        if let (Some(ours), Some(theirs)) = (ours, theirs)
-            && ours != theirs
-        {
-            differences.push(format!("{what}: observer {ours}, control plane {theirs}"));
-        }
-    };
-    check(
-        "connector",
-        snapshot.material.connector.as_deref(),
-        daemon_connector.as_deref(),
-    );
-    check(
-        "EDID SHA-256",
-        snapshot.material.edid_sha256.as_deref(),
-        daemon_edid_sha256.as_deref(),
-    );
-    // The profile the interface resolved with the connector's properties in
-    // hand, against the observer's: compared by name, not by how verified.
-    let name = |text: &str| text.split_whitespace().next().unwrap_or_default().to_string();
-    check(
-        "source profile",
-        Some(name(&snapshot.source_profile)).as_deref(),
-        daemon_source_profile.as_deref().map(name).as_deref(),
-    );
-    Comparison {
-        daemon_reachable: true,
-        agrees: differences.is_empty(),
-        daemon_connector,
-        daemon_edid_sha256,
-        daemon_source_profile,
-        differences,
-    }
 }
 
 fn clocks() -> (u64, u64) {

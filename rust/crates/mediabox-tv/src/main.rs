@@ -533,6 +533,7 @@ impl App {
     fn output_answered(&mut self, answer: Result<Value, String>) {
         match answer {
             Ok(output) => {
+                follow_output(&output);
                 if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
                     status.insert("output".into(), output);
                 }
@@ -547,21 +548,33 @@ impl App {
         use mediabox_core::OutputEvent;
         match event {
             OutputEvent::Apply {
+                identity,
                 setting,
+                trial,
                 trial_seconds,
             } => {
-                platform::apply_output(setting);
+                // For this output and sink only: a setting made for another
+                // display is never tried on this one.
+                if platform::identity().as_ref() != Some(&identity) {
+                    eprintln!(
+                        "mediabox-tv.output an Apply for {} {} is not for this display; ignored",
+                        identity.connector,
+                        &identity.edid_sha256[..identity.edid_sha256.len().min(12)]
+                    );
+                    return;
+                }
+                platform::apply_output(setting, trial);
                 if let Some(seconds) = trial_seconds {
                     self.settings.output.trial(seconds);
                     self.output_seconds = (0, false);
                 }
                 self.paint();
             }
-            OutputEvent::Kept => {
+            OutputEvent::Kept { .. } => {
                 self.settings.output.trial_ended("Bu ekran için kaydedildi.");
                 spawn_output(mediabox_core::Request::OutputStatus);
             }
-            OutputEvent::Reverted { timed_out } => {
+            OutputEvent::Reverted { timed_out, .. } => {
                 self.settings.output.trial_ended(if timed_out {
                     "Onay gelmedi; önceki ayara dönüldü."
                 } else {
@@ -1561,8 +1574,8 @@ impl App {
                 self.say("Ekran ayarı deneniyor…".into());
                 spawn_output(mediabox_core::Request::OutputTry { resolution, colour });
             }
-            Press::Keep => spawn_output(mediabox_core::Request::OutputKeep),
-            Press::Revert => spawn_output(mediabox_core::Request::OutputRevert),
+            Press::Keep(trial) => spawn_output(mediabox_core::Request::OutputKeep { trial }),
+            Press::Revert(trial) => spawn_output(mediabox_core::Request::OutputRevert { trial }),
         }
     }
 
@@ -4154,19 +4167,41 @@ fn spawn_output(request: mediabox_core::Request) {
     });
 }
 
-/// What this process put on the wire, to the daemon. Called by the platform
-/// after every mode set; the daemon keeps the setting, and the web page and
-/// `mediaboxctl` read the display from it.
-fn report_output(offer: mediabox_core::OutputOffer, wire: mediabox_core::OutputWire) {
+/// What this process committed, to the daemon. Called by the platform after
+/// every mode set; the daemon takes it for the output and sink the observer
+/// sees, and the web page and `mediaboxctl` read it as the applied state.
+fn report_output(report: mediabox_core::OwnerReport) {
     detached("mediabox-tv-output-report", async move {
         let client = rpc::Client::new(socket_path());
-        if let Err(error) = client
-            .output(&mediabox_core::Request::OutputReport { offer, wire })
-            .await
-        {
+        if let Err(error) = client.owner_report(&report).await {
             eprintln!("mediabox-tv.output report failed: {error}");
         }
     });
+}
+
+/// The daemon's account of the display, followed: the setting it says is in
+/// force here -- the trial's, or the kept one -- is put on the wire when it
+/// is not what is there. A daemon that restarted mid-trial took the trial
+/// back, and this is how the wire hears of it; an `Apply` lost on the way is
+/// made up for the same way.
+fn follow_output(output: &Value) {
+    let Ok(status) = serde_json::from_value::<mediabox_core::OutputStatus>(output.clone()) else {
+        return;
+    };
+    let Some(ours) = platform::identity() else { return };
+    if status.display.as_ref().and_then(|display| display.identity()) != Some(ours.clone()) {
+        return;
+    }
+    let (wanted, trial) = match &status.trial {
+        Some(trial) => (trial.setting.clone(), Some(trial.id)),
+        None => (status.setting.clone(), None),
+    };
+    if wanted.edid_sha256 != ours.edid_sha256 {
+        return;
+    }
+    if platform::on_wire() != Some((wanted.clone(), trial)) {
+        platform::apply_output(wanted, trial);
+    }
 }
 
 /// Save a fan curve for the next boot, or `None` to go back to the board's

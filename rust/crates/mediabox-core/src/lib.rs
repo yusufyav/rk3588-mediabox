@@ -4,7 +4,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod ethernet;
+mod output;
 mod timing;
+pub use output::{
+    AppliedOutput, ColourCell, DisplayGeneration, DisplayIdentity, DisplayState, LegacyResolution,
+    LegacySetting, OUTPUT_SETTING_SCHEMA, OUTPUT_TRIAL_SECONDS, Observed, ObservedOutput,
+    OutputEvent, OutputGroup, OutputLink, OutputModeOffer, OutputOffer, OutputSetting,
+    OutputStatus, OutputTrial, OwnerReport, Refusal, ResolutionChoice, Route, SelectedOutput,
+    StoredSetting,
+};
 pub use timing::{ModeTiming, Refresh, TimingKey, mode_flags};
 pub use ethernet::{
     ETHERNET_DNS_MAX, ETHERNET_TRIAL_SECONDS, EthernetConfig, EthernetPort, EthernetStatus,
@@ -145,449 +153,6 @@ pub struct SurfaceStatus {
     pub ui_installed: bool,
 }
 
-/// What the two indicator lights on the board are doing.
-///
-/// The board carries three lights. Two of them hang off GPIO — `blue_led` on
-/// gpio-21 and `green_led` on gpio-22, both active low — and the kernel gives
-/// them a `heartbeat` trigger from the device tree, so out of the box they
-/// pulse for as long as the appliance is on. The third is red, appears nowhere
-/// in the device tree, and is wired to the supply rather than to any pin of the
-/// SoC: no amount of software reaches it. This type therefore describes the two
-/// that can be told what to do, and nothing pretends otherwise.
-///
-/// A person watching a film in a dark room is the reason this is a setting at
-/// all: a pulsing light beside the television is the one part of an appliance
-/// that draws the eye away from it.
-/// Which mode the television is driven at, as a person has decided it.
-///
-/// `Auto` first, as the reference Android box lists it: the largest mode in
-/// the panel's own shape at the fastest refresh the link carries in any
-/// format. A fixed choice names one mode the sink listed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ResolutionChoice {
-    #[default]
-    Auto,
-    Fixed {
-        width: u16,
-        height: u16,
-        /// Millihertz, so 59.94 and 60 are different modes.
-        refresh_mhz: u32,
-        interlaced: bool,
-    },
-}
-
-/// What a person chose for the display, and the display it was chosen on.
-///
-/// This is the reference Android box's model, read out of its own
-/// `systemcontrol` (Amlogic): one record -- `hdmimode`, `is.bestmode`, and a
-/// colour per mode as `<mode>_deepcolor` -- beside `hdmichecksum`, the EDID's
-/// block checksums as the sink was when the choice was made. When a display
-/// with a different EDID is plugged in (`isEdidChange`, "tv sink changed"),
-/// the box does not carry the choice over: it takes the best mode and binds
-/// the record to the new sink. A choice made for one display is never tried on
-/// another, which is how a stale mode once panicked this board.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputSetting {
-    /// [`edid_checkvalue`] of the sink this was chosen on. Empty for a box
-    /// that has never been told anything.
-    #[serde(default)]
-    pub sink: String,
-    #[serde(default)]
-    pub resolution: ResolutionChoice,
-    /// A colour mode per mode label (`3840x2160p30`). A mode with no entry is
-    /// on `Auto`.
-    #[serde(default)]
-    pub colours: std::collections::BTreeMap<String, ColorMode>,
-}
-
-impl OutputSetting {
-    /// The setting as it applies to the sink whose checkvalue is `sink`: this
-    /// one if it was made there, `Auto` bound to that sink otherwise.
-    pub fn for_sink(&self, sink: &str) -> OutputSetting {
-        if self.sink == sink {
-            self.clone()
-        } else {
-            OutputSetting {
-                sink: sink.to_string(),
-                ..Default::default()
-            }
-        }
-    }
-}
-
-/// The EDID as the reference box keeps it: the checksum byte of every
-/// 128-byte block, in order, as hex (its `checkvalue`, e.g. `d307`).
-///
-/// Legacy and diagnostic. It is what [`OutputSetting::sink`] has always been
-/// bound to, so it stays until that record migrates, but it is not an
-/// identity: two EDIDs with different contents and the same checksums are two
-/// displays. The identity is the SHA-256 of the bytes
-/// (`mediabox_platform::edid::Edid::identity`).
-pub fn edid_checkvalue(edid: &[u8]) -> String {
-    edid.chunks_exact(128)
-        .map(|block| format!("{:02x}", block[127]))
-        .collect()
-}
-
-/// Why a colour mode cannot be sent at a mode. Each is one rule of the
-/// kernel's, and [`Refusal::text`] names the specification it comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Refusal {
-    /// CTA-861-F s5.4: VIC 1 is eight bits only.
-    EightBitOnly,
-    /// No HDMI VSDB: a DVI sink takes RGB at eight bits.
-    NotHdmi,
-    /// Y420VDB: the sink takes this mode as 4:2:0 and nothing else.
-    Only420,
-    /// 4:2:0 at a mode in neither the Y420VDB nor the Y420CMDB.
-    No420Here,
-    /// The sink does not declare this format (CTA-861 extension byte 3).
-    FormatNotDeclared,
-    /// The sink does not declare this depth for this format.
-    DepthNotDeclared { bits: u8 },
-    /// The source has no such depth.
-    SourceDepth { bits: u8, max: u8 },
-    /// Over the sink's declared character rate.
-    OverSink { need_khz: u32, max_khz: u32 },
-    /// Over what this transmitter sends.
-    OverSource { need_khz: u32, max_khz: u32 },
-}
-
-impl Refusal {
-    pub fn text(self, format: ColorFormat) -> String {
-        match self {
-            Refusal::EightBitOnly => {
-                "640×480 (VIC 1) yalnızca 8 bit gönderilebilir (CTA-861-F §5.4).".into()
-            }
-            Refusal::NotHdmi => {
-                "Ekran HDMI bloğu bildirmiyor; DVI ekrana yalnızca RGB 8 bit gider.".into()
-            }
-            Refusal::Only420 => {
-                "Ekran bu modu yalnızca 4:2:0 ile kabul ediyor (CTA-861 Y420VDB).".into()
-            }
-            Refusal::No420Here => "Ekran bu modda 4:2:0 bildirmiyor; 4:2:0 yalnızca \
-                 Y420 listesindeki modlarda (CTA-861 Y420VDB/Y420CMDB)."
-                .into(),
-            Refusal::FormatNotDeclared => format!(
-                "Ekran {} bildirmiyor (CTA-861 uzantı bloğu).",
-                format.label()
-            ),
-            Refusal::DepthNotDeclared { bits } => match format {
-                ColorFormat::Ycbcr420 => format!(
-                    "Ekran 4:2:0'da {bits} bit bildirmiyor (HF-VSDB DC_{}bit_420).",
-                    bits * 3
-                ),
-                _ => format!(
-                    "Ekran {} için {bits} bit bildirmiyor (HDMI VSDB DC_{}bit).",
-                    format.label(),
-                    bits * 3
-                ),
-            },
-            Refusal::SourceDepth { bits, max } => {
-                format!("Bu kart en çok {max} bit gönderiyor; {bits} bit yok.")
-            }
-            Refusal::OverSink { need_khz, max_khz } => format!(
-                "Gereken {} MHz; bu giriş en çok {} MHz taşıyor (ekranın EDID'i).",
-                need_khz / 1000,
-                max_khz / 1000
-            ),
-            Refusal::OverSource { need_khz, max_khz } => format!(
-                "Gereken {} MHz; bu kart en çok {} MHz gönderiyor.",
-                need_khz / 1000,
-                max_khz / 1000
-            ),
-        }
-    }
-}
-
-/// One colour mode at one mode: what it costs on the wire, and whether it can
-/// be sent there.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ColourCell {
-    pub mode: ColorMode,
-    pub rate_khz: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refused: Option<Refusal>,
-}
-
-/// One mode the kernel lists for the display, with every colour cell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputModeOffer {
-    /// `3840x2160p59.94`: the key a colour choice is kept under.
-    pub label: String,
-    pub width: u16,
-    pub height: u16,
-    pub refresh_mhz: u32,
-    pub interlaced: bool,
-    pub pixel_clock_khz: u32,
-    pub htotal: u16,
-    pub vtotal: u16,
-    pub preferred: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vic: Option<u8>,
-    /// The timing's identity ([`TimingKey`]). The label above is what a
-    /// person reads and two timings can share it; this is what names the one
-    /// the kernel listed. Absent from a report by an interface older than
-    /// the key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timing_key: Option<TimingKey>,
-    /// The whole timing, so that what is derived from it -- the refresh Kodi
-    /// and sway are told, the rate on the wire -- is derived from the kernel's
-    /// numbers rather than from the rounded ones above.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timing: Option<ModeTiming>,
-    pub cells: Vec<ColourCell>,
-    /// What `Auto` sends here for SDR and for HDR10. `None` when nothing fits,
-    /// or, for HDR, when no cell carries ten bits.
-    pub auto_sdr: Option<ColorMode>,
-    pub auto_hdr: Option<ColorMode>,
-}
-
-impl OutputModeOffer {
-    pub fn allowed(&self) -> impl Iterator<Item = ColorMode> + '_ {
-        self.cells
-            .iter()
-            .filter(|cell| cell.refused.is_none())
-            .map(|cell| cell.mode)
-    }
-
-    pub fn carries(&self, mode: ColorMode) -> bool {
-        self.allowed().any(|allowed| allowed == mode)
-    }
-
-    pub fn hdr10(&self) -> bool {
-        self.auto_hdr.is_some()
-    }
-
-    /// The exact refresh: from the timing when the report carried it, from
-    /// the clock and totals otherwise -- doubled for interlace either way,
-    /// because a field is a refresh.
-    pub fn refresh(&self) -> Refresh {
-        match self.timing {
-            Some(timing) => timing.refresh(),
-            None => Refresh::new(
-                u64::from(self.pixel_clock_khz) * 1000 * if self.interlaced { 2 } else { 1 },
-                u64::from(self.htotal) * u64::from(self.vtotal),
-            ),
-        }
-    }
-
-    /// What `colour` costs on the wire here, in kHz: the platform's own
-    /// figure when it computed one for this cell, which knows about pixel
-    /// repetition; the timing's otherwise.
-    pub fn character_rate_khz(&self, colour: ColorMode) -> u32 {
-        if let Some(cell) = self.cells.iter().find(|cell| cell.mode == colour) {
-            return cell.rate_khz;
-        }
-        match self.timing {
-            Some(timing) => timing.hdmi_character_rate_khz(colour),
-            None => colour.character_rate_khz(self.pixel_clock_khz),
-        }
-    }
-
-    pub fn choice(&self) -> ResolutionChoice {
-        ResolutionChoice::Fixed {
-            width: self.width,
-            height: self.height,
-            refresh_mhz: self.refresh_mhz,
-            interlaced: self.interlaced,
-        }
-    }
-
-    /// Whether a persisted choice names this mode.
-    ///
-    /// A choice is still kept as size, millihertz and scan (`output.json`),
-    /// so this matches it the way it always has, to within five millihertz.
-    /// That is how a *stored intent* is found again, not what a mode is:
-    /// a mode's identity is its [`TimingKey`], and the stored choice moves to
-    /// the key when persisted intent is migrated (Display Architecture v2,
-    /// P9). Nothing new should compare modes this way.
-    pub fn is(&self, choice: ResolutionChoice) -> bool {
-        match choice {
-            ResolutionChoice::Auto => false,
-            ResolutionChoice::Fixed {
-                width,
-                height,
-                refresh_mhz,
-                interlaced,
-            } => {
-                self.width == width
-                    && self.height == height
-                    && self.interlaced == interlaced
-                    && self.refresh_mhz.abs_diff(refresh_mhz) <= 5
-            }
-        }
-    }
-}
-
-/// Every mode of one size, fastest first.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputGroup {
-    pub width: u16,
-    pub height: u16,
-    /// The industry's name for the size (`4K UHD`, `Full HD`), empty when it
-    /// has none.
-    pub name: String,
-    /// No mode of this size is a CTA-861 television mode other than VIC 1:
-    /// these are a computer monitor's modes (VESA DMT).
-    pub computer: bool,
-    pub modes: Vec<OutputModeOffer>,
-}
-
-/// What the display declared about its link, for the "EDID" sheet.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputLink {
-    pub max_character_rate_khz: u32,
-    /// `HDMI VSDB`, `HF-VSDB`, or empty when the sink declared no rate.
-    pub declared_by: String,
-    pub is_hdmi: bool,
-    pub ycbcr444: bool,
-    pub ycbcr422: bool,
-    pub rgb_deep: Vec<u8>,
-    pub ycbcr420_deep: Vec<u8>,
-    pub y420_only: Vec<u8>,
-    pub y420_also: Vec<u8>,
-    pub st2084: bool,
-    pub hlg: bool,
-    pub source_max_khz: u32,
-    pub source_max_bits: u8,
-    /// The source profile the limits above are from, and how it was matched
-    /// (`rk3588-vendor61-dw-hdmi-qp@1 (matched)`). Empty from an interface
-    /// older than profiles.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub source_profile: String,
-}
-
-/// Everything the display screen draws, computed from the modes the kernel
-/// lists for the display plugged in and from its EDID, by the rules in
-/// `mediabox_platform::video`. Every interface draws this; none of them
-/// computes a rule of its own.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputOffer {
-    /// [`edid_checkvalue`] of the display: what a kept setting is still bound
-    /// to (see [`OutputSetting`]). Not an identity -- two displays can share
-    /// it -- and kept only until the setting moves to `edid_sha256`.
-    pub sink: String,
-    /// SHA-256 of the EDID exactly as received, when it is whole and valid:
-    /// the display's identity. Absent from an interface older than it, and
-    /// for an EDID that failed its checks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edid_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sink_name: Option<String>,
-    pub connector: String,
-    pub link: OutputLink,
-    /// The label of the mode `Auto` resolves to.
-    pub auto: String,
-    pub groups: Vec<OutputGroup>,
-}
-
-impl OutputOffer {
-    pub fn modes(&self) -> impl Iterator<Item = &OutputModeOffer> {
-        self.groups.iter().flat_map(|group| group.modes.iter())
-    }
-
-    pub fn mode(&self, label: &str) -> Option<&OutputModeOffer> {
-        self.modes().find(|mode| mode.label == label)
-    }
-
-    /// The mode a resolution choice resolves to here: the chosen one when this
-    /// display lists it and something can be sent at it, `Auto` otherwise.
-    pub fn resolve(&self, choice: ResolutionChoice) -> Option<&OutputModeOffer> {
-        self.modes()
-            .find(|mode| mode.is(choice) && mode.allowed().next().is_some())
-            .or_else(|| self.mode(&self.auto))
-    }
-
-    /// The colour sent at `mode` for an HDR film under `setting`: the chosen
-    /// one when it can be sent there and carries ten bits, what `Auto` sends
-    /// HDR as otherwise, `None` when nothing at this mode carries HDR10.
-    pub fn hdr_colour(&self, setting: &OutputSetting, mode: &OutputModeOffer) -> Option<ColorMode> {
-        setting
-            .colours
-            .get(&mode.label)
-            .copied()
-            .filter(|chosen| mode.carries(*chosen) && chosen.carries_hdr())
-            .or(mode.auto_hdr)
-    }
-
-    /// The colour sent at `mode` for SDR under `setting`: the chosen one when
-    /// it can be sent there, `Auto` otherwise.
-    pub fn colour(&self, setting: &OutputSetting, mode: &OutputModeOffer) -> Option<ColorMode> {
-        setting
-            .colours
-            .get(&mode.label)
-            .copied()
-            .filter(|chosen| mode.carries(*chosen))
-            .or(mode.auto_sdr)
-    }
-}
-
-/// What is on the wire, as the kernel reports it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputWire {
-    /// The mode label, `3840x2160p60`.
-    pub mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub colour: Option<ColorMode>,
-    /// The media bus format the display controller reports, verbatim
-    /// (`UYYVYY8_0_5X24`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bus_format: Option<String>,
-    #[serde(default)]
-    pub hdr: bool,
-}
-
-/// A choice on trial: applied, not yet kept.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputTrial {
-    pub setting: OutputSetting,
-    pub previous: OutputSetting,
-    pub seconds_left: u32,
-}
-
-/// The display, as the daemon knows it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputStatus {
-    /// `None` until the interface has read a display and reported it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offer: Option<OutputOffer>,
-    /// The kept setting, as it applies to the display in `offer`.
-    pub setting: OutputSetting,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trial: Option<OutputTrial>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wire: Option<OutputWire>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// What the daemon tells the interfaces about the display, on the event
-/// stream beside the remote's presses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "output", rename_all = "snake_case")]
-pub enum OutputEvent {
-    /// Put this on the wire. `trial_seconds` is set while it is on trial.
-    Apply {
-        setting: OutputSetting,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        trial_seconds: Option<u32>,
-    },
-    /// The trial was kept.
-    Kept,
-    /// The trial ended without being kept; the `Apply` for the earlier setting
-    /// comes with it.
-    Reverted { timed_out: bool },
-    /// The daemon's answer changed: a new report, a new wire.
-    Changed,
-}
-
-/// How long a new display setting stays on trial before it is taken back.
-/// The reference for the flow is the desktop's "Keep these display settings?"
-/// (Windows: 15 seconds).
-pub const OUTPUT_TRIAL_SECONDS: u32 = 15;
 
 // ---------------------------------------------------------------- the wire
 //
@@ -664,6 +229,19 @@ impl ColorMode {
 }
 
 
+/// What the two indicator lights on the board are doing.
+///
+/// The board carries three lights. Two of them hang off GPIO — `blue_led` on
+/// gpio-21 and `green_led` on gpio-22, both active low — and the kernel gives
+/// them a `heartbeat` trigger from the device tree, so out of the box they
+/// pulse for as long as the appliance is on. The third is red, appears nowhere
+/// in the device tree, and is wired to the supply rather than to any pin of the
+/// SoC: no amount of software reaches it. This type therefore describes the two
+/// that can be told what to do, and nothing pretends otherwise.
+///
+/// A person watching a film in a dark room is the reason this is a setting at
+/// all: a pulsing light beside the television is the one part of an appliance
+/// that draws the eye away from it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LedMode {
@@ -1698,14 +1276,6 @@ pub enum Request {
     /// The display: its modes and colour cells, the kept setting, a trial in
     /// progress, and what is on the wire.
     OutputStatus,
-    /// From the interface, which holds the display: the modes the kernel lists
-    /// for the display plugged in, with its EDID's rules applied, and what it
-    /// just put on the wire. The interface is the one reader of the EDID -- this
-    /// vendor driver leaves `/sys/class/drm/*/edid` empty.
-    OutputReport {
-        offer: OutputOffer,
-        wire: OutputWire,
-    },
     /// Put a mode, and a colour mode at it, on the wire on trial. Undone after
     /// [`OUTPUT_TRIAL_SECONDS`] unless kept. `colour: None` is `Auto` at that
     /// mode.
@@ -1714,10 +1284,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         colour: Option<ColorMode>,
     },
-    /// Keep the setting on trial: it is written down and used from now on.
-    OutputKeep,
-    /// Take the setting on trial back now.
-    OutputRevert,
+    /// Keep the setting on trial `trial`: it is written down and used from
+    /// now on. Refused for any other trial, and for one the owner has not
+    /// reported committed on the sink plugged in now.
+    OutputKeep { trial: u64 },
+    /// Take the setting on trial `trial` back now.
+    OutputRevert { trial: u64 },
     /// The wired ports and what each is set to.
     EthernetStatus,
     /// Put an address on a wired port on trial. It is taken back after

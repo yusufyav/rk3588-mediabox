@@ -1,12 +1,11 @@
 //! `mediabox-display-observer` -- the display, watched from outside whoever
-//! owns it, in shadow mode. See `mediabox_platform::observer`.
+//! owns it. See `mediabox_platform::observer`.
 //!
-//!   mediabox-display-observer                 watch, publish, compare
+//!   mediabox-display-observer                 watch and publish
 //!   mediabox-display-observer --once          one look, printed, then exit
 //!
 //! Options: `--runtime <dir>` (default /run/mediabox-display-observer),
-//! `--no-drm-query` (never read the kernel's mode list, even under AM-2),
-//! `--no-compare` (do not ask the control plane what it believes).
+//! `--no-drm-query` (never read the kernel's mode list, even under AM-2).
 
 use std::path::PathBuf;
 
@@ -14,8 +13,7 @@ use mediabox_platform::drm_query::{Access, System};
 use mediabox_platform::observer::{self, Observer, Reason, Uevents, Wake};
 use mediabox_platform::{Platform, Roots};
 
-const TRANSITION_LOCK: &str = "/run/mediabox/display-transition.lock";
-const DAEMON_SOCKET: &str = "/run/mediabox/mediaboxd.sock";
+const TRANSITION_LOCK: &str = "mediabox/display-transition.lock";
 
 extern "C" fn on_signal(_: libc::c_int) {
     observer::request_stop();
@@ -32,21 +30,20 @@ fn main() -> std::process::ExitCode {
     };
     if flag("--help") || flag("-h") {
         eprintln!(
-            "kullanım: mediabox-display-observer [--once] [--runtime <dizin>] [--no-drm-query] [--no-compare]"
+            "kullanım: mediabox-display-observer [--once] [--runtime <dizin>] [--no-drm-query]"
         );
         return std::process::ExitCode::SUCCESS;
     }
+    let roots = Roots::from_env();
     let runtime = value("--runtime")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/run/mediabox-display-observer"));
-    let mut observer = Observer::new(Roots::from_env(), runtime);
-    if !flag("--no-compare") {
-        observer.daemon_socket = Some(PathBuf::from(DAEMON_SOCKET));
-    }
+        .unwrap_or_else(|| roots.run(observer::RUNTIME));
+    let transition_lock = roots.run(TRANSITION_LOCK);
+    let mut observer = Observer::new(roots, runtime);
     if !flag("--no-drm-query") {
-        observer.drm = Some(Box::new(|platform: &Platform| -> Box<dyn Access> {
+        observer.drm = Some(Box::new(move |platform: &Platform| -> Box<dyn Access> {
             Box::new(System {
-                transition_lock: PathBuf::from(TRANSITION_LOCK),
+                transition_lock: transition_lock.clone(),
                 clients: platform
                     .debugfs
                     .dir()
@@ -73,7 +70,7 @@ fn main() -> std::process::ExitCode {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
     eprintln!(
-        "mediabox-display-observer: shadow mode; publishing {}, looking every {:?} and on DRM uevents",
+        "mediabox-display-observer: publishing {}, looking every {:?} and on DRM uevents",
         observer.snapshot_path().display(),
         observer::PERIOD
     );

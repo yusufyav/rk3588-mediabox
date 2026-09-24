@@ -19,7 +19,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use mediabox_core::{
     ColorFormat, ColorMode, ColourCell, OUTPUT_TRIAL_SECONDS, OutputModeOffer, OutputOffer,
-    OutputSetting, OutputStatus, Request, ResolutionChoice,
+    OutputSetting, OutputStatus, Request, ResolutionChoice, TimingKey,
 };
 use std::collections::BTreeMap;
 use mediabox_core::{
@@ -663,7 +663,7 @@ fn Display() -> impl IntoView {
     let status = RwSignal::new(None::<Result<OutputStatus, String>>);
     // The draft: `None` until the daemon's first answer seeds it, and again
     // after a trial ends.
-    let draft = RwSignal::new(None::<(ResolutionChoice, BTreeMap<String, ColorMode>)>);
+    let draft = RwSignal::new(None::<(ResolutionChoice, BTreeMap<TimingKey, ColorMode>)>);
     let open = RwSignal::new(None::<(u16, u16)>);
     let hovered = RwSignal::new(String::new());
     let edid = RwSignal::new(false);
@@ -765,24 +765,32 @@ fn Display() -> impl IntoView {
             let chosen = offer.resolve(resolution).cloned();
             let chosen_colour = chosen
                 .as_ref()
-                .and_then(|mode| colours.get(&mode.label).copied());
+                .and_then(|mode| colours.get(&mode.timing_key).copied());
             let kept = found
                 .trial
                 .as_ref()
                 .map(|trial| trial.setting.clone())
                 .unwrap_or_else(|| found.setting.clone());
             let label = chosen.as_ref().map(|mode| mode.label.clone()).unwrap_or_default();
+            let chosen_key = chosen.as_ref().map(|mode| mode.timing_key);
             let unsaved = resolution != kept.resolution
-                || chosen_colour != kept.colours.get(&label).copied();
-            let wire = found.wire.clone().unwrap_or_default();
-            let wire_mode = offer.mode(&wire.mode).cloned();
+                || chosen_colour != chosen_key.and_then(|key| kept.colours.get(&key).copied());
+            // What the driver reports, never what was asked for; nothing
+            // when it cannot be read.
+            let wire_label = found.wire_mode().unwrap_or_default();
+            let wire_colour = found.wire_colour();
+            let wire_bus = found
+                .observed
+                .as_ref()
+                .and_then(|observed| observed.bus_format.as_known().cloned());
+            let wire_mode = offer.mode(&wire_label).cloned();
             let link = offer.link.clone();
             let ceiling = if link.max_character_rate_khz > 0 {
                 link.max_character_rate_khz.min(link.source_max_khz)
             } else {
                 link.source_max_khz
             };
-            let load = match (&wire_mode, wire.colour) {
+            let load = match (&wire_mode, wire_colour) {
                 (Some(mode), Some(colour)) => mode.character_rate_khz(colour),
                 _ => 0,
             };
@@ -801,7 +809,7 @@ fn Display() -> impl IntoView {
                 .iter()
                 .find(|group| Some((group.width, group.height)) == open_size)
                 .cloned();
-            let set_draft = move |resolution: ResolutionChoice, colours: BTreeMap<String, ColorMode>| {
+            let set_draft = move |resolution: ResolutionChoice, colours: BTreeMap<TimingKey, ColorMode>| {
                 draft.set(Some((resolution, colours)));
             };
             let colours_for_sizes = colours.clone();
@@ -809,7 +817,7 @@ fn Display() -> impl IntoView {
             let colours_for_cells = colours.clone();
             let colours_for_auto = colours.clone();
             let chosen_label = label.clone();
-            let chosen_label_auto = label.clone();
+            let chosen_key_auto = chosen_key;
             let mut divided = false;
 
             view! {
@@ -835,10 +843,10 @@ fn Display() -> impl IntoView {
                     <div class="fan-reading">
                         <span class="k">"Renk"</span>
                         <span class="v">
-                            {wire.colour.map(format_short).unwrap_or_else(|| "—".into())}
+                            {wire_colour.map(format_short).unwrap_or_else(|| "—".into())}
                             <small>
-                                {wire.colour.map(|c| format!("{} bit", c.bits)).unwrap_or_default()}
-                                {wire.bus_format.clone().map(|bus| format!(" · {bus}")).unwrap_or_default()}
+                                {wire_colour.map(|c| format!("{} bit", c.bits)).unwrap_or_default()}
+                                {wire_bus.clone().map(|bus| format!(" · {bus}")).unwrap_or_default()}
                             </small>
                         </span>
                     </div>
@@ -940,7 +948,7 @@ fn Display() -> impl IntoView {
                                             let fits = mode.allowed().next().is_some();
                                             let checked = mode.is(resolution);
                                             let choice = mode.choice();
-                                            let on_wire = mode.label == wire.mode;
+                                            let on_wire = mode.label == wire_label;
                                             let colours = colours_for_rates.clone();
                                             let reason = if fits {
                                                 format!(
@@ -989,7 +997,9 @@ fn Display() -> impl IntoView {
                                 prop:checked=chosen_colour.is_none()
                                 on:change=move |_| {
                                     let mut colours = colours_for_auto.clone();
-                                    colours.remove(&chosen_label_auto);
+                                    if let Some(key) = chosen_key_auto {
+                                        colours.remove(&key);
+                                    }
                                     set_draft(resolution, colours);
                                 }
                             />
@@ -1019,7 +1029,7 @@ fn Display() -> impl IntoView {
                                         .map(|cell| {
                                             let ok = cell.refused.is_none();
                                             let checked = chosen_colour == Some(cell.mode);
-                                            let on_wire = wire.mode == chosen_label && wire.colour == Some(cell.mode);
+                                            let on_wire = wire_label == chosen_label && wire_colour == Some(cell.mode);
                                             let reason = match cell.refused {
                                                 Some(refusal) => format!("{}: seçilemez. {}", colour_text(cell.mode), refusal.text(cell.mode.format)),
                                                 None => format!(
@@ -1027,13 +1037,13 @@ fn Display() -> impl IntoView {
                                                     colour_text(cell.mode),
                                                     cell.rate_khz / 1000,
                                                     ceiling / 1000,
-                                                    if cell.mode.carries_hdr() { " HDR10 taşır." } else { " HDR10 için 10 bit gerekir." }
+                                                    if cell.hdr10 { " HDR10 taşır." } else { " HDR10 taşımaz." }
                                                 ),
                                             };
                                             let fill = (f64::from(cell.rate_khz) / f64::from(link.source_max_khz) * 100.0).min(100.0);
                                             let tick = f64::from(ceiling) / f64::from(link.source_max_khz) * 100.0;
                                             let colours = colours_for_cells.clone();
-                                            let label = chosen_label.clone();
+                                            let key = chosen_key;
                                             let span = cell.mode.format == ColorFormat::Ycbcr422;
                                             let title = reason.clone();
                                             view! {
@@ -1053,7 +1063,9 @@ fn Display() -> impl IntoView {
                                                         prop:checked=checked
                                                         on:change=move |_| {
                                                             let mut colours = colours.clone();
-                                                            colours.insert(label.clone(), cell.mode);
+                                                            if let Some(key) = key {
+                                                                colours.insert(key, cell.mode);
+                                                            }
                                                             set_draft(resolution, colours);
                                                         }
                                                     />
@@ -1138,6 +1150,7 @@ fn Display() -> impl IntoView {
                             ))
                             .unwrap_or_default()
                     };
+                    let id = trial.id;
                     let new = describe(&trial.setting);
                     let old = describe(&trial.previous);
                     view! {
@@ -1156,12 +1169,12 @@ fn Display() -> impl IntoView {
                                         label="Koru"
                                         variant="primary"
                                         autofocus=true
-                                        on_press=Callback::new(move |()| call(Request::OutputKeep, "Bu ekran için kaydedildi"))
+                                        on_press=Callback::new(move |()| call(Request::OutputKeep { trial: id }, "Bu ekran için kaydedildi"))
                                     />
                                     <Action
                                         label="Geri dön"
                                         variant="ghost"
-                                        on_press=Callback::new(move |()| call(Request::OutputRevert, "Önceki ayara dönüldü"))
+                                        on_press=Callback::new(move |()| call(Request::OutputRevert { trial: id }, "Önceki ayara dönüldü"))
                                     />
                                 </div>
                             </div>
@@ -1233,6 +1246,10 @@ fn colour_text(mode: ColorMode) -> String {
     }
 }
 
+fn yes(value: bool) -> &'static str {
+    if value { "var" } else { "yok" }
+}
+
 fn edid_rows(offer: &OutputOffer) -> Vec<(String, String)> {
     let link = &offer.link;
     let depths = |bits: &[u8]| {
@@ -1277,13 +1294,24 @@ fn edid_rows(offer: &OutputOffer) -> Vec<(String, String)> {
         (
             "HDR aktarımı".into(),
             match (link.st2084, link.hlg) {
-                (true, true) => "SMPTE ST 2084 (HDR10), HLG".into(),
-                (true, false) => "SMPTE ST 2084 (HDR10)".into(),
+                (true, true) => "SMPTE ST 2084 (PQ), HLG".into(),
+                (true, false) => "SMPTE ST 2084 (PQ)".into(),
                 (false, true) => "HLG".into(),
                 (false, false) => "yok".into(),
             },
         ),
-        ("Kimlik (checksum)".into(), offer.sink.clone()),
+        (
+            "HDR10 koşulları".into(),
+            format!(
+                "Statik meta veri tip 1: {} · BT.2020 RGB: {} · BT.2020 YCC: {} · kaynak: {}",
+                yes(link.static_metadata_type1),
+                yes(link.bt2020_rgb),
+                yes(link.bt2020_ycc),
+                yes(link.source_hdr10)
+            ),
+        ),
+        ("Kimlik (EDID SHA-256)".into(), offer.edid_sha256.clone()),
+        ("Eski kimlik (checksum)".into(), offer.legacy_checkvalue.clone()),
         (
             "Kaynak (bu kart)".into(),
             format!("{} MHz · {} bit · RGB, 4:4:4, 4:2:2, 4:2:0", link.source_max_khz / 1000, link.source_max_bits),

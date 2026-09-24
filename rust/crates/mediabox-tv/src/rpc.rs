@@ -245,6 +245,12 @@ impl Client {
         self.call(serde_json::to_value(request)?).await
     }
 
+    /// What this process committed to the display. Not a request: it has a
+    /// type of its own, which only the daemon's local socket takes.
+    pub async fn owner_report(&self, report: &mediabox_core::OwnerReport) -> Result<Value> {
+        self.call(serde_json::to_value(report)?).await
+    }
+
     /// Any request the daemon's own protocol type describes, as it is: the
     /// wired ports use this, and answer with their whole account.
     pub async fn request(&self, request: &mediabox_core::Request) -> Result<Value> {

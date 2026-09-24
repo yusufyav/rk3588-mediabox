@@ -25,13 +25,28 @@ pub struct DeviceTree {
 
 impl DeviceTree {
     /// Index every node that has a phandle. The tree is a few thousand small
-    /// files and this is one walk of it, done once per inspection.
+    /// files, and it is the firmware's: it does not change while the system
+    /// runs. So it is walked once per process and tree, not once per
+    /// inspection -- the display observer inspects every two seconds, and the
+    /// walk was nine tenths of what that cost (14 000 `statx` a pass,
+    /// measured on the Plus).
     pub fn open(roots: &Roots) -> Self {
+        static WALKED: std::sync::Mutex<Option<HashMap<PathBuf, HashMap<u32, PathBuf>>>> =
+            std::sync::Mutex::new(None);
         let base = roots.sys("firmware/devicetree/base");
-        let mut phandles = HashMap::new();
-        if base.is_dir() {
-            index(&base, &mut phandles, 0);
+        if !base.is_dir() {
+            return Self { base, phandles: HashMap::new() };
         }
+        let mut walked = WALKED.lock().unwrap_or_else(|e| e.into_inner());
+        let phandles = walked
+            .get_or_insert_with(HashMap::new)
+            .entry(base.clone())
+            .or_insert_with(|| {
+                let mut phandles = HashMap::new();
+                index(&base, &mut phandles, 0);
+                phandles
+            })
+            .clone();
         Self { base, phandles }
     }
 

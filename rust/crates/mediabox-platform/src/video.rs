@@ -37,6 +37,9 @@ pub struct SourceCaps {
     pub max_tmds_khz: u32,
     pub max_bpc: u8,
     pub formats: &'static [ColorFormat],
+    /// The source signals HDR10: the HDR infoframe and BT.2020 colorimetry
+    /// can be asked of its driver.
+    pub hdr10: bool,
 }
 
 /// RK3588 HDMI TX under the vendor kernel this product runs: the link limits
@@ -57,8 +60,15 @@ pub struct SinkVideo {
     /// Everything declared, before any mode or link budget is applied -- what
     /// the Amlogic stack calls `dc_cap`.
     pub advertised: Vec<ColorMode>,
+    /// HDR Static Metadata data block: the PQ and HLG transfer functions.
     pub st2084: bool,
     pub hlg: bool,
+    /// The same block's Static Metadata Descriptor Type 1: what the HDR10
+    /// infoframe carries. PQ without it is not HDR10.
+    pub static_metadata_type1: bool,
+    /// Colorimetry data block: BT.2020 in RGB, and in YCbCr.
+    pub bt2020_rgb: bool,
+    pub bt2020_ycc: bool,
     /// An HDMI VSDB is present (`display_info.is_hdmi`). A DVI sink takes RGB
     /// at eight bits and nothing else.
     pub is_hdmi: bool,
@@ -325,6 +335,7 @@ impl SinkVideo {
                     mode,
                     rate_khz: timing.mode.hdmi_character_rate_khz(mode),
                     refused: self.refusal(timing, mode, source),
+                    hdr10: self.hdr10_refusal(timing, mode, source).is_none(),
                 });
             }
         }
@@ -356,12 +367,11 @@ impl SinkVideo {
     /// What `Auto` sends: `hdmi_compute_config` -- RGB at the deepest depth
     /// asked for down to eight, then 4:2:0 the same way.
     ///
-    /// For HDR the depth asked for is ten, because HDR10 is a ten-bit format;
-    /// where RGB cannot carry ten bits the other formats that can are tried
-    /// in the order of what they give up least -- 4:4:4, then 4:2:2, then
-    /// 4:2:0 -- which is where the reference Android box lands on a 300 MHz
-    /// input (2160p24, YCbCr 4:2:2 12-bit). If nothing carries ten bits there
-    /// is no HDR at this timing and the SDR answer is returned.
+    /// For HDR the answer is the cell that carries HDR10 ([`Self::hdr10_refusal`])
+    /// and gives up least -- RGB, then 4:4:4, then 4:2:2, then 4:2:0, the
+    /// deepest of each -- which is where the reference Android box lands on a
+    /// 300 MHz input (2160p24, YCbCr 4:2:2 12-bit). If no cell carries HDR10
+    /// there is no HDR at this timing and the SDR answer is returned.
     pub fn best_for(&self, timing: &Timing, hdr: bool) -> Option<ColorMode> {
         self.best_for_source(timing, hdr, &RK3588_HDMI)
     }
@@ -373,6 +383,9 @@ impl SinkVideo {
         hdr: bool,
         source: &SourceCaps,
     ) -> Option<ColorMode> {
+        if hdr && let Some(mode) = self.best_hdr10(timing, source) {
+            return Some(mode);
+        }
         let modes = self.modes_for_source(timing, source);
         let has = |format: ColorFormat, bits: u8| {
             modes
@@ -380,24 +393,67 @@ impl SinkVideo {
                 .copied()
                 .find(|mode| mode.format == format && mode.bits == bits)
         };
-        if hdr && self.st2084 {
-            for format in [
-                ColorFormat::Rgb,
-                ColorFormat::Ycbcr444,
-                ColorFormat::Ycbcr422,
-                ColorFormat::Ycbcr420,
-            ] {
-                if let Some(mode) = modes
-                    .iter()
-                    .copied()
-                    .filter(|mode| mode.format == format && mode.carries_hdr())
-                    .max_by_key(|mode| mode.bits)
-                {
-                    return Some(mode);
-                }
-            }
-        }
         has(ColorFormat::Rgb, 8).or_else(|| has(ColorFormat::Ycbcr420, 8))
+    }
+
+    /// The cell HDR10 goes out in at this timing, or `None`.
+    pub fn best_hdr10(&self, timing: &Timing, source: &SourceCaps) -> Option<ColorMode> {
+        let modes = self.modes_for_source(timing, source);
+        [
+            ColorFormat::Rgb,
+            ColorFormat::Ycbcr444,
+            ColorFormat::Ycbcr422,
+            ColorFormat::Ycbcr420,
+        ]
+        .into_iter()
+        .find_map(|format| {
+            modes
+                .iter()
+                .copied()
+                .filter(|mode| {
+                    mode.format == format && self.hdr10_refusal(timing, *mode, source).is_none()
+                })
+                .max_by_key(|mode| mode.bits)
+        })
+    }
+
+    /// Why HDR10 cannot go out in `mode` at `timing`, or `None` when it can.
+    ///
+    /// Each condition on its own, because each is declared on its own and a
+    /// sink can have any one without the others (CTA-861-G s7.5.13, s7.5.5):
+    /// the source signals HDR at all; the sink declares the PQ transfer
+    /// function and Static Metadata Type 1, which is what the HDR10 infoframe
+    /// is; it declares BT.2020 in the encoding sent -- RGB for RGB, YCC for
+    /// YCbCr; the depth is ten bits or more; and the cell can be sent at all,
+    /// by every link rule in [`Self::refusal`] -- 4:2:0 only where the Y420
+    /// blocks allow it and at a depth the HF-VSDB declares, and within the
+    /// sink's and the source's character rate.
+    pub fn hdr10_refusal(
+        &self,
+        timing: &Timing,
+        mode: ColorMode,
+        source: &SourceCaps,
+    ) -> Option<HdrRefusal> {
+        if !source.hdr10 {
+            return Some(HdrRefusal::SourceNoHdr);
+        }
+        if !self.st2084 {
+            return Some(HdrRefusal::NoPq);
+        }
+        if !self.static_metadata_type1 {
+            return Some(HdrRefusal::NoStaticMetadataType1);
+        }
+        let bt2020 = match mode.format {
+            ColorFormat::Rgb => self.bt2020_rgb,
+            _ => self.bt2020_ycc,
+        };
+        if !bt2020 {
+            return Some(HdrRefusal::NoBt2020 { format: mode.format });
+        }
+        if !mode.carries_hdr() {
+            return Some(HdrRefusal::Depth { bits: mode.bits });
+        }
+        self.refusal(timing, mode, source).map(HdrRefusal::Link)
     }
 
     /// Whether HDR10 can be both signalled and carried at this timing.
@@ -407,12 +463,26 @@ impl SinkVideo {
 
     /// [`Self::hdr10_fits`] for a source other than the shipping one.
     pub fn hdr10_fits_source(&self, timing: &Timing, source: &SourceCaps) -> bool {
-        self.st2084
-            && self
-                .modes_for_source(timing, source)
-                .iter()
-                .any(|mode| mode.carries_hdr())
+        self.best_hdr10(timing, source).is_some()
     }
+}
+
+/// Why HDR10 cannot be sent in a cell: one condition, the first that fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HdrRefusal {
+    /// The source profile does not signal HDR.
+    SourceNoHdr,
+    /// The sink declares no PQ (SMPTE ST 2084) transfer function.
+    NoPq,
+    /// The sink declares no Static Metadata Descriptor Type 1.
+    NoStaticMetadataType1,
+    /// The sink declares no BT.2020 colorimetry in this encoding.
+    NoBt2020 { format: ColorFormat },
+    /// Fewer than ten bits: eight bits of PQ bands.
+    Depth { bits: u8 },
+    /// The cell cannot be sent at this timing at all.
+    Link(Refusal),
 }
 
 /// The mode `Auto` drives the television at.
@@ -457,35 +527,6 @@ pub fn auto_timing_source(
         .copied()
 }
 
-/// The mode a resolution choice resolves to on the sink plugged in now: the
-/// mode chosen when this sink lists it and the link carries it, `Auto`
-/// otherwise. The stored choice is matched as it is stored -- see
-/// `OutputModeOffer::is` for why that is not a mode's identity.
-pub fn choose_timing(
-    choice: mediabox_core::ResolutionChoice,
-    timings: &[Timing],
-    sink: Option<&SinkVideo>,
-) -> Option<Timing> {
-    if let mediabox_core::ResolutionChoice::Fixed {
-        width,
-        height,
-        refresh_mhz,
-        interlaced,
-    } = choice
-    {
-        if let Some(timing) = timings.iter().find(|timing| {
-            timing.width == width
-                && timing.height == height
-                && timing.interlaced == interlaced
-                && timing.refresh_mhz.abs_diff(refresh_mhz) <= 5
-                && sink.is_none_or(|sink| !sink.modes_for(timing).is_empty())
-        }) {
-            return Some(*timing);
-        }
-    }
-    auto_timing(timings, sink)
-}
-
 /// The depths a format is offered at, shallowest first. 4:2:2 is offered once,
 /// at the source's depth: HDMI carries it in a twelve-bit container whatever
 /// the depth, so a shallower 4:2:2 is the same signal with the low bits zero
@@ -525,6 +566,9 @@ pub fn sink_video(cta: &CtaCapabilities) -> SinkVideo {
         advertised: Vec::new(),
         st2084: cta.hdr_static.is_some_and(|hdr| hdr.eotf_st2084),
         hlg: cta.hdr_static.is_some_and(|hdr| hdr.eotf_hlg),
+        static_metadata_type1: cta.hdr_static.is_some_and(|hdr| hdr.static_metadata_type1),
+        bt2020_rgb: cta.colorimetry.is_some_and(|c| c.bt2020_rgb),
+        bt2020_ycc: cta.colorimetry.is_some_and(|c| c.bt2020_ycc),
         is_hdmi: cta.hdmi_vsdb.is_some(),
         ycbcr444: cta.ycbcr444,
         ycbcr422: cta.ycbcr422,

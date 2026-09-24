@@ -11,6 +11,9 @@
 //!   mediabox-platform output             the selected connector's name
 //!   mediabox-platform alsa-card          that output's sound card id
 //!   mediabox-platform cec-device         that output's CEC adapter
+//!   mediabox-platform plan [--wait <s>]  the display plan, if it is for what
+//!                                        is plugged in now
+//!   mediabox-platform sway-output        the browser compositor's output line
 //!   mediabox-platform edid [--json]      that output's EDID, checked
 //!   mediabox-platform source [--json]    the source profile this system matches
 //!
@@ -72,17 +75,27 @@ fn main() -> std::process::ExitCode {
         // mode. A stable shape for the shell scripts that used to sweep
         // /sys/class/drm themselves, so that they and the interface agree on
         // what this board's outputs are.
+        //
+        // The fourth column is the SHA-256 of the EDID the connector
+        // publishes: a different sink on a socket that never read
+        // `disconnected` in between is still a different line.
         "outputs" => {
             for output in &platform.outputs {
                 println!(
-                    "{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}",
                     output.connector.name,
                     if output.connector.connected {
                         "connected"
                     } else {
                         "disconnected"
                     },
-                    output.connector.preferred_mode.as_deref().unwrap_or("-")
+                    output.connector.preferred_mode.as_deref().unwrap_or("-"),
+                    output
+                        .connector
+                        .sink
+                        .as_ref()
+                        .and_then(|sink| sink.sha256.as_deref())
+                        .unwrap_or("-")
                 );
             }
             if platform.outputs.is_empty() {
@@ -93,7 +106,17 @@ fn main() -> std::process::ExitCode {
         "mode" => one(platform
             .selected_output()
             .and_then(|output| output.connector.preferred_mode.clone())),
-        "alsa-card" => one(devices.alsa_card_id),
+        // Nothing, and the reason on stderr, when the output's transmitter is
+        // not firmly known: a caller then sends sound nowhere rather than to
+        // the likely card.
+        "alsa-card" => match platform.selected_output().map(|output| output.audio_route()) {
+            Some(Ok(audio)) => one(Some(audio.card_id.clone())),
+            Some(Err(why)) => {
+                eprintln!("mediabox-platform: {why}");
+                std::process::ExitCode::FAILURE
+            }
+            None => std::process::ExitCode::FAILURE,
+        },
         // The number ALSA gave that card *this boot*. Only for the interfaces
         // that are indexed by number and offer nothing else — /proc/asound is
         // the one that matters. Resolving the stable id to this boot's number
@@ -101,14 +124,52 @@ fn main() -> std::process::ExitCode {
         // moves when a card probes in a different order.
         "alsa-index" => one(platform
             .selected_output()
-            .and_then(|output| output.audio.as_ref())
+            .and_then(|output| output.audio_route().ok())
             .and_then(|audio| audio.card_index)
             .map(|index| index.to_string())),
         "alsa-driver" => one(devices.alsa_driver),
         "connector-path" => one(devices
             .connector_sysfs
             .map(|path| path.display().to_string())),
-        "cec-device" => one(devices.cec.map(|path| path.display().to_string())),
+        "cec-device" => match platform.selected_output().map(|output| output.cec_route()) {
+            Some(Ok(adapter)) => one(Some(adapter.device.display().to_string())),
+            Some(Err(why)) => {
+                eprintln!("mediabox-platform: {why}");
+                std::process::ExitCode::FAILURE
+            }
+            None => std::process::ExitCode::FAILURE,
+        },
+        // The plan the control plane wrote for Kodi and the browser, printed
+        // only if it was made for this boot, the observer's current
+        // generation, and the connector and EDID read now. Otherwise nothing
+        // on stdout, why on stderr, and a failing exit: an owner then starts
+        // on its own defaults for this sink rather than on another sink's
+        // mode. `--wait <s>` looks again until one is current.
+        "plan" => {
+            let wait = flag_value(&args_rest, "--wait")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            match current_plan(&platform, wait) {
+                Ok(plan) => {
+                    print!("{}", plan.render());
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(why) => {
+                    eprintln!("mediabox-platform: plan: {why}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
+        // What sway includes: the plan's mode on the plan's connector, or a
+        // comment saying why there is none -- never a mode for all outputs,
+        // and never one from a plan for another sink.
+        "sway-output" => {
+            match current_plan(&platform, 0.0) {
+                Ok(plan) => print!("{}", plan.sway_output()),
+                Err(why) => println!("# no current display plan: {why}"),
+            }
+            std::process::ExitCode::SUCCESS
+        }
         // The KMS device's debugfs directory, found from the device rather
         // than assumed to be `dri/0`. Nothing when it cannot be resolved and
         // checked -- a script then says "unknown", it does not guess.
@@ -184,6 +245,40 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|at| args.get(at + 1))
+        .map(String::as_str)
+}
+
+/// The plan file, if it is for what is plugged in now; looked for again for
+/// up to `wait` seconds.
+fn current_plan(platform: &Platform, wait: f64) -> Result<mediabox_platform::output::Plan, String> {
+    let roots = mediabox_platform::Roots::from_env();
+    let path = roots.run(mediabox_platform::output::PLAN_FILE);
+    let observer = roots.run(mediabox_platform::observer::RUNTIME);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(wait.max(0.0));
+    let mut platform = std::borrow::Cow::Borrowed(platform);
+    loop {
+        let answer = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))
+            .and_then(|text| mediabox_platform::output::Plan::parse(&text))
+            .and_then(|plan| {
+                let generation = mediabox_platform::observer::published_generation(&observer);
+                match plan.stale(generation.as_ref(), platform.selected_identity().as_ref()) {
+                    Some(why) => Err(why),
+                    None => Ok(plan),
+                }
+            });
+        if answer.is_ok() || std::time::Instant::now() >= deadline {
+            return answer;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        platform = std::borrow::Cow::Owned(Platform::discover());
+    }
+}
+
 const USAGE: &str = "\
 kullanım: mediabox-platform <komut> [--json]
 
@@ -196,6 +291,8 @@ kullanım: mediabox-platform <komut> [--json]
   alsa-card      o çıkışın ALSA kart kimliği
   alsa-index     o kartın bu açılıştaki ALSA numarası (/proc/asound için)
   cec-device     o çıkışın CEC aygıtı
+  plan           şu anki ekran için yazılmış plan (değilse hata) [--wait <sn>]
+  sway-output    tarayıcı kompozitörünün çıkış satırı
   dri-debugfs    mod kuran DRM aygıtının debugfs dizini (doğrulanmış)
   edid           o çıkışın EDID'i: durum, SHA-256 kimlik, sorunlar
   source         bu sistemin eşleştiği kaynak profili

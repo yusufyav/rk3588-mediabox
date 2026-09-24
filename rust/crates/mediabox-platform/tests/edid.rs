@@ -6,11 +6,11 @@
 //! means. The captured EDIDs of a real television are in tests/output.rs and
 //! tests/color_modes.rs, for provenance.
 
-use mediabox_core::{ColorFormat, ColorMode, Refusal, edid_checkvalue};
+use mediabox_core::{ColorFormat, ColorMode, Refusal};
 use mediabox_platform::edid::{
     CtaCapabilities, Edid, EdidIssue, EdidReport, EdidStatus, ForumBlock,
 };
-use mediabox_platform::video::{RK3588_HDMI, Timing, parse_sink_video, parse_timings};
+use mediabox_platform::video::{HdrRefusal, RK3588_HDMI, Timing, parse_sink_video, parse_timings};
 
 // ------------------------------------------------------------ the builder
 
@@ -437,7 +437,7 @@ fn same_legacy_checkvalue_different_sha256() {
     let mut two = one.clone();
     two[12] = two[12].wrapping_add(1);
     two[13] = two[13].wrapping_sub(1);
-    assert_eq!(edid_checkvalue(&one), edid_checkvalue(&two));
+    assert_eq!(Edid::parse(&one).legacy_checkvalue(), Edid::parse(&two).legacy_checkvalue());
     assert_eq!(Edid::parse(&two).status, EdidStatus::Valid);
     let (a, b) = (Edid::parse(&one).identity().unwrap(), Edid::parse(&two).identity().unwrap());
     assert_ne!(a, b);
@@ -491,4 +491,135 @@ fn no_mutation_or_truncation_panics_or_invents_a_capability() {
         bytes.resize(length, 0xA5);
         check(&bytes);
     }
+}
+
+// ------------------------------------------------------------ HDR10
+
+/// BT.2020 RGB and YCC in the colorimetry block's first byte.
+const BT2020_RGB: u8 = 0x80;
+const BT2020_YCC: u8 = 0x40;
+
+fn uhd24() -> Timing {
+    Timing::new(3840, 2160, 297_000, 5500, 2250, false, false)
+}
+
+#[test]
+fn an_hdr10_capable_sink_takes_hdr10_where_every_condition_holds() {
+    // 600 MHz, deep colour for RGB, PQ with Static Metadata Type 1, BT.2020 both ways.
+    let bytes = edid(&[Cta::new()
+        .svds(&[16, 93, 97])
+        .hdmi_vsdb(0x1000, DC_30 | DC_36 | DC_Y444, 68)
+        .hf_vsdb(120, 0x80, 0x01)
+        .hdr_static(EOTF_SDR | EOTF_PQ, 0x01)
+        .colorimetry(BT2020_RGB | BT2020_YCC, 0x00)
+        .build()]);
+    let sink = parse_sink_video(&bytes).unwrap();
+    assert!(sink.st2084 && sink.static_metadata_type1 && sink.bt2020_rgb && sink.bt2020_ycc);
+    // 4K24: RGB at ten bits fits 600 MHz, and that is what HDR10 goes out in.
+    assert_eq!(sink.best_hdr10(&uhd24(), &RK3588_HDMI), Some(ColorMode::new(ColorFormat::Rgb, 10)));
+    // 4K60 RGB10 needs 742.5 MHz: not RGB, and the refusal says the link.
+    assert_eq!(
+        sink.hdr10_refusal(&uhd60(), ColorMode::new(ColorFormat::Rgb, 10), &RK3588_HDMI),
+        Some(HdrRefusal::Link(Refusal::OverSink { need_khz: 742_500, max_khz: 600_000 }))
+    );
+    // Eight bits of PQ is not HDR10, whatever else holds.
+    assert_eq!(
+        sink.hdr10_refusal(&uhd24(), ColorMode::new(ColorFormat::Rgb, 8), &RK3588_HDMI),
+        Some(HdrRefusal::Depth { bits: 8 })
+    );
+}
+
+#[test]
+fn an_sdr_only_sink_gets_no_hdr10_anywhere() {
+    let bytes = edid(&[Cta::new()
+        .svds(&[16, 93, 97])
+        .hdmi_vsdb(0x1000, DC_30 | DC_36 | DC_Y444, 68)
+        .hf_vsdb(120, 0x80, 0x01)
+        .colorimetry(BT2020_RGB | BT2020_YCC, 0x00)
+        .build()]);
+    let sink = parse_sink_video(&bytes).unwrap();
+    assert!(!sink.st2084);
+    assert!(!sink.hdr10_fits(&uhd24()));
+    assert_eq!(
+        sink.hdr10_refusal(&uhd24(), ColorMode::new(ColorFormat::Rgb, 10), &RK3588_HDMI),
+        Some(HdrRefusal::NoPq)
+    );
+    // And `Auto` for an HDR film is the SDR answer.
+    assert_eq!(sink.best_for(&uhd24(), true), sink.best_for(&uhd24(), false));
+}
+
+#[test]
+fn pq_alone_is_not_hdr10_without_static_metadata_type1_or_bt2020() {
+    let no_type1 = edid(&[Cta::new()
+        .svds(&[16, 93])
+        .hdmi_vsdb(0x1000, DC_30 | DC_36 | DC_Y444, 68)
+        .hf_vsdb(120, 0x80, 0x01)
+        .hdr_static(EOTF_SDR | EOTF_PQ, 0x00)
+        .colorimetry(BT2020_RGB | BT2020_YCC, 0x00)
+        .build()]);
+    let sink = parse_sink_video(&no_type1).unwrap();
+    assert!(sink.st2084 && !sink.static_metadata_type1);
+    assert!(!sink.hdr10_fits(&uhd24()), "PQ without SMT1: the HDR10 infoframe has nothing to carry");
+    assert_eq!(
+        sink.hdr10_refusal(&uhd24(), ColorMode::new(ColorFormat::Rgb, 10), &RK3588_HDMI),
+        Some(HdrRefusal::NoStaticMetadataType1)
+    );
+
+    // BT.2020 declared for YCC only: HDR10 goes out as YCbCr, never RGB.
+    let ycc_only = edid(&[Cta::new()
+        .svds(&[16, 93])
+        .hdmi_vsdb(0x1000, DC_30 | DC_36 | DC_Y444, 68)
+        .hf_vsdb(120, 0x80, 0x01)
+        .hdr_static(EOTF_SDR | EOTF_PQ, 0x01)
+        .colorimetry(BT2020_YCC, 0x00)
+        .build()]);
+    let sink = parse_sink_video(&ycc_only).unwrap();
+    assert_eq!(
+        sink.hdr10_refusal(&uhd24(), ColorMode::new(ColorFormat::Rgb, 10), &RK3588_HDMI),
+        Some(HdrRefusal::NoBt2020 { format: ColorFormat::Rgb })
+    );
+    assert_eq!(sink.best_hdr10(&uhd24(), &RK3588_HDMI), Some(ColorMode::new(ColorFormat::Ycbcr444, 10)));
+
+    // No colorimetry block at all: no HDR10.
+    let none = edid(&[Cta::new()
+        .svds(&[16, 93])
+        .hdmi_vsdb(0x1000, DC_30 | DC_36 | DC_Y444, 68)
+        .hf_vsdb(120, 0x80, 0x01)
+        .hdr_static(EOTF_SDR | EOTF_PQ, 0x01)
+        .build()]);
+    assert!(!parse_sink_video(&none).unwrap().hdr10_fits(&uhd24()));
+}
+
+#[test]
+fn a_y420_only_high_bandwidth_mode_carries_hdr10_only_as_ten_bit_4_2_0() {
+    // 4K60 is 4:2:0 only (Y420VDB), on a 600 MHz input.
+    let with_deep = edid(&[Cta::new()
+        .svds(&[16, 93])
+        .hdmi_vsdb(0x1000, DC_30 | DC_36 | DC_Y444, 68)
+        .hf_vsdb(120, 0x80, 0x01) // DC_30bit_420
+        .y420vdb(&[97])
+        .hdr_static(EOTF_SDR | EOTF_PQ, 0x01)
+        .colorimetry(BT2020_RGB | BT2020_YCC, 0x00)
+        .build()]);
+    let sink = parse_sink_video(&with_deep).unwrap();
+    assert_eq!(sink.best_hdr10(&uhd60(), &RK3588_HDMI), Some(ColorMode::new(ColorFormat::Ycbcr420, 10)));
+    assert_eq!(
+        sink.hdr10_refusal(&uhd60(), ColorMode::new(ColorFormat::Ycbcr422, 10), &RK3588_HDMI),
+        Some(HdrRefusal::Link(Refusal::Only420))
+    );
+    // Without DC_30bit_420 the same mode has no ten-bit cell: no HDR10.
+    let without = edid(&[Cta::new()
+        .svds(&[16, 93])
+        .hdmi_vsdb(0x1000, DC_30 | DC_36 | DC_Y444, 68)
+        .hf_vsdb(120, 0x80, 0x00)
+        .y420vdb(&[97])
+        .hdr_static(EOTF_SDR | EOTF_PQ, 0x01)
+        .colorimetry(BT2020_RGB | BT2020_YCC, 0x00)
+        .build()]);
+    let sink = parse_sink_video(&without).unwrap();
+    assert_eq!(sink.best_hdr10(&uhd60(), &RK3588_HDMI), None);
+    assert_eq!(
+        sink.hdr10_refusal(&uhd60(), ColorMode::new(ColorFormat::Ycbcr420, 10), &RK3588_HDMI),
+        Some(HdrRefusal::Link(Refusal::DepthNotDeclared { bits: 10 }))
+    );
 }

@@ -927,8 +927,8 @@ fn output(status: Option<&Value>) -> Row {
             let now = output
                 .offer
                 .as_ref()
-                .zip(output.wire.as_ref())
-                .and_then(|(offer, wire)| offer.mode(&wire.mode))
+                .zip(output.wire_mode())
+                .and_then(|(offer, wire)| offer.mode(&wire))
                 .map(super::output::label)
                 .unwrap_or_default();
             Row::link(Page::Output, Page::Output.blurb(), now, "")

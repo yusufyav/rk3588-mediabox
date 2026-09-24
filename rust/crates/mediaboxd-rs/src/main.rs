@@ -128,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // and readable from outside the daemon by `mediabox-display-guard`. Two
     // of these would be two gates, which is the bug it exists to prevent.
     let handovers = DisplayTransition::new();
+    let transitions = handovers.clone();
     let state = Arc::new(AppState {
         kodi: kodi.clone(),
         lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
@@ -172,17 +173,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The remembered colour mode. Nothing is applied here -- the link is
         // established by whatever draws the television -- so this only restores
         // the choice the player will read.
-        output: Output::new(
-            mediaboxd_rs::output::SETTING_FILE,
-            mediaboxd_rs::output::PLAN_FILE,
-            mediaboxd_rs::output::Summary::Discover,
-        ),
+        output: Output::new(mediaboxd_rs::output::Paths::system(), || {
+            // Hotplug recovery is one unit's job; this only asks for it when
+            // the observer saw the sink change and udev's event may not have
+            // arrived. The unit compares against its own record and does
+            // nothing when the change was already handled.
+            std::thread::spawn(|| {
+                let _ = std::process::Command::new("/usr/bin/systemctl")
+                    .args(["start", "--no-block", "mediabox-display-changed.service"])
+                    .status();
+            });
+        }),
         fan: FanController::system(),
         ethernet: mediaboxd_rs::ethernet::Ethernet::system(),
     });
     // An address left on trial by a run of this daemon that did not finish
     // is taken back before anything else is asked of the network.
     state.ethernet.recover().await;
+
+    // A display setting on trial belongs to the owner it was sent to.
+    transitions.on_begin({
+        let output = state.output.clone();
+        move || output.owner_changing()
+    });
+    // The observer's snapshot, followed: level-triggered, once a second, so
+    // a new generation -- a sink changed, a mode list read -- is acted on
+    // whether or not anybody asks for the status.
+    tokio::spawn({
+        let output = state.output.clone();
+        async move {
+            let mut beat = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                beat.tick().await;
+                output.reconcile();
+            }
+        }
+    });
 
     let stop = Arc::new(AtomicBool::new(false));
     // What wakes the receiver to stop. It sleeps in poll() with no timeout,

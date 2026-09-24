@@ -1,5 +1,6 @@
-//! The shadow observer, on a captured board: generations, a hotplug whose
-//! uevent never arrives, and a display with no master.
+//! The observer, on a captured board: generations, the offer it publishes, a
+//! hotplug whose uevent never arrives, a sink replaced without a disconnect,
+//! a display with no master, and restarts.
 
 mod common;
 
@@ -129,7 +130,6 @@ fn the_snapshot_says_what_the_display_is() {
     let board = plus();
     let opened = Arc::new(AtomicU32::new(0));
     let snapshot = observer(&board, &opened).reconcile(Reason::Startup);
-    assert!(snapshot.shadow);
     assert_eq!(snapshot.generation.boot_id, "b0071d");
     assert_eq!(snapshot.generation.seq, 1);
     let m = &snapshot.material;
@@ -147,7 +147,19 @@ fn the_snapshot_says_what_the_display_is() {
     assert_eq!(snapshot.bus_format.clone().known().as_deref(), Some("RGB888_1X24"));
     assert_eq!(snapshot.drm_master.clone().known().unwrap().command, "mediabox-tv");
     assert!(matches!(&snapshot.kernel_modes, KernelModes::Known { count: 2, .. }));
+    // Where audio and CEC go, from the firm binding: the transmitter's own.
+    assert!(snapshot.cec.device.as_deref().unwrap().ends_with("cec1"));
+    // And what can be sent to this sink, from the kernel's list and the EDID.
+    let offer = snapshot.offer.as_ref().expect("an offer once the modes are read");
+    assert_eq!(offer.connector, "HDMI-A-2");
+    assert_eq!(Some(&offer.edid_sha256), m.edid_sha256.as_ref());
+    assert_eq!(offer.modes().count(), 2);
+    assert_eq!(snapshot.identity().unwrap().connector, "HDMI-A-2");
     assert_eq!(published(&board), snapshot, "what is published is what was seen");
+    assert_eq!(
+        observer::published_generation(&board.root().join("run/observer")),
+        Some(snapshot.generation.clone())
+    );
 }
 
 #[test]
@@ -253,28 +265,70 @@ fn a_different_edid_on_the_same_connector_is_a_new_generation() {
         &["3840x2160"],
         &edid_with_address(*b"SNY", 0xF903, 0x0202_0202, "TV", 0x3000),
     );
-    let after = watched.reconcile(Reason::Uevent);
+    // No uevent at all: connected before, connected after, a different sink.
+    let after = watched.reconcile(Reason::Periodic);
+    assert_eq!(after.material.connected, Some(true));
     assert_ne!(before.material.edid_sha256, after.material.edid_sha256);
     assert_eq!(after.generation.seq, before.generation.seq + 1);
-    // A new display is looked at afresh, once.
+    assert_ne!(before.identity(), after.identity(), "connected to connected is still a new sink");
+    // A new display is looked at afresh, once, and its offer is its own.
     assert_eq!(opened.load(Ordering::SeqCst), 2);
+    assert_eq!(after.offer.unwrap().edid_sha256, after.material.edid_sha256.unwrap());
 }
 
 #[test]
-fn a_restart_that_cannot_read_the_modes_is_not_a_new_generation() {
+fn a_restart_keeps_what_was_read_and_does_not_open_the_device_again() {
     let board = plus();
     let opened = Arc::new(AtomicU32::new(0));
     let first = observer(&board, &opened).reconcile(Reason::Startup);
     assert!(matches!(first.kernel_modes, KernelModes::Known { .. }));
-    // Restarted inside a masterless window: the modes cannot be read now,
-    // and nothing about the display changed.
+    // Restarted inside a masterless window: nothing about the display
+    // changed, so nothing is read again -- and nothing is lost.
     clients(&board, MASTERLESS);
     let restarted = observer(&board, &opened).reconcile(Reason::Startup);
-    assert!(matches!(restarted.kernel_modes, KernelModes::Deferred { .. }));
+    assert_eq!(restarted.kernel_modes, first.kernel_modes);
     assert_eq!(restarted.generation, first.generation);
-    assert_eq!(
-        restarted.material.kernel_modes_fingerprint,
-        first.material.kernel_modes_fingerprint
+    assert_eq!(restarted.offer, first.offer, "the offer survives the restart");
+    assert_eq!(opened.load(Ordering::SeqCst), 1, "not opened again");
+}
+
+#[test]
+fn what_was_read_for_one_sink_is_not_another_sinks() {
+    let board = plus();
+    let opened = Arc::new(AtomicU32::new(0));
+    let mut watched = observer(&board, &opened);
+    watched.reconcile(Reason::Startup);
+    // A different sink arrives while nobody is master: its mode list cannot
+    // be read, and the old one is not passed off as its.
+    clients(&board, MASTERLESS);
+    board.connector(
+        "card0",
+        "display-subsystem",
+        "HDMI-A-2",
+        true,
+        &["1920x1080"],
+        &edid_with_address(*b"HWP", 0x3412, 0x0303_0303, "Monitor", 0x3000),
     );
-    assert_eq!(opened.load(Ordering::SeqCst), 1, "masterless: not opened");
+    let seen = watched.reconcile(Reason::Uevent);
+    assert!(matches!(seen.kernel_modes, KernelModes::Deferred { .. }));
+    assert!(seen.offer.is_none(), "no offer until this sink's modes are read");
+    assert_eq!(seen.material.kernel_modes_fingerprint, None);
+}
+
+#[test]
+fn a_kept_read_from_before_the_list_was_kept_is_read_again() {
+    let board = plus();
+    let opened = Arc::new(AtomicU32::new(0));
+    let first = observer(&board, &opened).reconcile(Reason::Startup);
+    // What an observer of the previous version left: the connector and EDID
+    // it read for and a fingerprint, but no list.
+    let path = board.root().join("run/observer/generation.json");
+    let mut kept: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    kept.as_object_mut().unwrap().remove("modes");
+    kept.as_object_mut().unwrap().remove("properties");
+    fs::write(&path, kept.to_string()).unwrap();
+    let upgraded = observer(&board, &opened).reconcile(Reason::Startup);
+    assert_eq!(opened.load(Ordering::SeqCst), 2, "read again, once");
+    assert!(matches!(upgraded.kernel_modes, KernelModes::Known { count: 2, .. }));
+    assert_eq!(upgraded.offer, first.offer);
 }

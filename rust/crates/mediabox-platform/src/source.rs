@@ -61,11 +61,9 @@ pub struct SourceProfile {
     pub version: u32,
     pub scope: Option<ProductScope>,
     pub abi: Option<VendorAbi>,
+    /// The link limits, and whether HDR10 may be signalled at all -- the
+    /// source's half of the HDR10 rules (`SinkVideo::hdr10_refusal`).
     pub caps: SourceCaps,
-    /// Whether HDR may be signalled at all under this profile. The HDR
-    /// eligibility rules themselves are elsewhere; this is only the source's
-    /// half of them.
-    pub hdr: bool,
 }
 
 impl SourceProfile {
@@ -130,8 +128,8 @@ pub const RK3588_VENDOR_61: SourceProfile = SourceProfile {
             ColorFormat::Ycbcr422,
             ColorFormat::Ycbcr420,
         ],
+        hdr10: true,
     },
-    hdr: true,
 };
 
 /// What any source can be trusted with when the system is not the one a
@@ -147,8 +145,8 @@ pub const CONSERVATIVE: SourceProfile = SourceProfile {
         max_tmds_khz: u32::MAX,
         max_bpc: 8,
         formats: &[ColorFormat::Rgb],
+        hdr10: false,
     },
-    hdr: false,
 };
 
 /// The profiles this build knows, most specific first.
@@ -448,7 +446,7 @@ mod tests {
         assert_eq!(resolved.profile, &CONSERVATIVE);
         assert_eq!(resolved.profile.caps.formats, &[ColorFormat::Rgb]);
         assert_eq!(resolved.profile.caps.max_bpc, 8);
-        assert!(!resolved.profile.hdr);
+        assert!(!resolved.profile.caps.hdr10);
         assert!(matches!(&resolved.matched, ProfileMatch::Mismatch { reasons } if reasons.iter().any(|r| r.contains("kernel"))));
     }
 
@@ -500,6 +498,9 @@ mod tests {
             advertised: Vec::new(),
             st2084: true,
             hlg: true,
+            static_metadata_type1: true,
+            bt2020_rgb: true,
+            bt2020_ycc: true,
             is_hdmi: true,
             ycbcr444: true,
             ycbcr422: true,
@@ -513,6 +514,13 @@ mod tests {
         assert_eq!(
             sink.modes_for_source(&uhd60, &CONSERVATIVE.caps),
             vec![ColorMode::new(ColorFormat::Rgb, 8)]
+        );
+        // A sink that declares every HDR10 condition still gets none from a
+        // source that does not signal HDR.
+        assert_eq!(sink.best_hdr10(&uhd60, &CONSERVATIVE.caps), None);
+        assert_eq!(
+            sink.hdr10_refusal(&uhd60, ColorMode::new(ColorFormat::Rgb, 8), &CONSERVATIVE.caps),
+            Some(crate::video::HdrRefusal::SourceNoHdr)
         );
     }
 }

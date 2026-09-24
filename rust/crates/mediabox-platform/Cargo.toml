@@ -23,7 +23,7 @@ sha2 = "0.10.9"
 name = "mediabox-platform"
 path = "src/main.rs"
 
-# The display, observed from outside whoever owns it (shadow mode).
+# The display, observed from outside whoever owns it: its hardware state.
 [[bin]]
 name = "mediabox-display-observer"
 path = "src/bin/mediabox-display-observer.rs"

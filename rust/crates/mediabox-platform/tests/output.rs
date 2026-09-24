@@ -9,9 +9,10 @@
 //! rules are per mode, and every mode below is one that input declares too.
 
 use mediabox_core::{
-    ColorFormat, ColorMode, OutputSetting, Refusal, ResolutionChoice, edid_checkvalue,
+    ColorFormat, ColorMode, DisplayGeneration, DisplayIdentity, OutputSetting, Refusal,
+    ResolutionChoice,
 };
-use mediabox_platform::output::{edid_name, offer, plan, wire_bus_format};
+use mediabox_platform::output::{Plan, Provenance, bus_colour, edid_name, offer};
 use mediabox_platform::video::{RK3588_HDMI, Timing};
 
 /// The EDID on HDMI-A-2, read from the connector's EDID property.
@@ -121,6 +122,30 @@ fn kernel() -> Vec<Timing> {
 fn offer_for(hex: &str) -> mediabox_core::OutputOffer {
     offer(&kernel(), &edid(hex), "HDMI-A-2", Some("SONY TV".into()), &RK3588_HDMI)
         .expect("an EDID")
+}
+
+/// What a plan is made for: this offer's sink at generation `seq`.
+fn provenance(offer: &mediabox_core::OutputOffer, seq: u64) -> Provenance {
+    Provenance {
+        generation: DisplayGeneration {
+            boot_id: "b0071d".into(),
+            seq,
+        },
+        identity: DisplayIdentity {
+            connector: offer.connector.clone(),
+            edid_sha256: offer.edid_sha256.clone(),
+        },
+        transmitter: "fdea0000.hdmi".into(),
+        source_profile: "rk3588-vendor61-dw-hdmi-qp@1".into(),
+    }
+}
+
+fn plan(offer: &mediabox_core::OutputOffer, setting: &OutputSetting) -> Option<Plan> {
+    mediabox_platform::output::plan(offer, setting, provenance(offer, 7))
+}
+
+fn key(offer: &mediabox_core::OutputOffer, label: &str) -> mediabox_core::TimingKey {
+    offer.mode(label).unwrap_or_else(|| panic!("{label} listed")).timing_key
 }
 
 fn cell(offer: &mediabox_core::OutputOffer, mode: &str, format: ColorFormat, bits: u8) -> Option<Refusal> {
@@ -254,55 +279,68 @@ fn the_display_says_its_own_name() {
 }
 
 #[test]
-fn the_display_is_known_by_its_block_checksums() {
-    assert_eq!(edid_checkvalue(&edid(PLUS_300)), "d3d7");
-    assert_eq!(offer_for(PLUS_300).sink, "d3d7");
-    assert_ne!(offer_for(SONY_600).sink, "d3d7");
+fn the_display_is_known_by_the_sha256_of_its_edid_and_the_checksums_are_kept_only_to_migrate() {
+    let slow = offer_for(PLUS_300);
+    let fast = offer_for(SONY_600);
+    assert_eq!(slow.legacy_checkvalue, "d3d7");
+    assert_ne!(fast.legacy_checkvalue, "d3d7");
+    assert_eq!(slow.edid_sha256.len(), 64);
+    assert_ne!(slow.edid_sha256, fast.edid_sha256);
 }
 
 #[test]
 fn a_choice_made_on_another_display_is_auto_here() {
+    let offer = offer_for(PLUS_300);
     let mut colours = std::collections::BTreeMap::new();
-    colours.insert("3840x2160p30".to_string(), ColorMode::new(ColorFormat::Ycbcr422, 10));
+    colours.insert(key(&offer, "3840x2160p30"), ColorMode::new(ColorFormat::Ycbcr422, 10));
     let made_elsewhere = OutputSetting {
-        sink: "7171".into(),
-        resolution: ResolutionChoice::Fixed {
-            width: 3840,
-            height: 2160,
-            refresh_mhz: 30_000,
-            interlaced: false,
-        },
+        edid_sha256: "7171".repeat(16),
+        resolution: key(&offer, "3840x2160p30").pipe_choice(),
         colours,
     };
-    let here = made_elsewhere.for_sink("d3d7");
+    let here = made_elsewhere.for_sink(&offer.edid_sha256);
     assert_eq!(here.resolution, ResolutionChoice::Auto);
     assert!(here.colours.is_empty());
-    assert_eq!(here.sink, "d3d7");
-    assert_eq!(made_elsewhere.for_sink("7171"), made_elsewhere);
+    assert_eq!(here.edid_sha256, offer.edid_sha256);
+    assert_eq!(made_elsewhere.for_sink(&"7171".repeat(16)), made_elsewhere);
+    // And the plan for this sink is made from that: Auto.
+    assert_eq!(plan(&offer, &made_elsewhere).unwrap().kodi_screenmode, "0384002160060.00000pstd");
+}
+
+trait Choice {
+    fn pipe_choice(self) -> ResolutionChoice;
+}
+impl Choice for mediabox_core::TimingKey {
+    fn pipe_choice(self) -> ResolutionChoice {
+        ResolutionChoice::Timing { key: self }
+    }
 }
 
 #[test]
 fn a_colour_that_cannot_be_sent_at_a_mode_is_auto_there() {
     let offer = offer_for(PLUS_300);
-    let mut setting = OutputSetting { sink: "d3d7".into(), ..Default::default() };
+    let mut setting = OutputSetting { edid_sha256: offer.edid_sha256.clone(), ..Default::default() };
     setting
         .colours
-        .insert("3840x2160p60".into(), ColorMode::new(ColorFormat::Rgb, 8));
+        .insert(key(&offer, "3840x2160p60"), ColorMode::new(ColorFormat::Rgb, 8));
     let mode = offer.mode("3840x2160p60").unwrap();
     assert_eq!(offer.colour(&setting, mode), Some(ColorMode::new(ColorFormat::Ycbcr420, 8)));
     let thirty = offer.mode("3840x2160p30").unwrap();
     setting
         .colours
-        .insert("3840x2160p30".into(), ColorMode::new(ColorFormat::Ycbcr422, 10));
+        .insert(key(&offer, "3840x2160p30"), ColorMode::new(ColorFormat::Ycbcr422, 10));
     assert_eq!(offer.colour(&setting, thirty), Some(ColorMode::new(ColorFormat::Ycbcr422, 10)));
 }
 
 #[test]
-fn the_wire_is_read_from_the_display_controller() {
-    let (bus, colour) = wire_bus_format(SUMMARY, "HDMI-A-2").expect("a bus format");
+fn the_bus_formats_on_an_hdmi_link_are_colour_modes() {
+    let activity = mediabox_platform::debugfs::connector_activity(SUMMARY, "HDMI-A-2").expect("HDMI-A-2");
+    let bus = activity.bus_format.expect("a bus format");
     assert_eq!(bus, "UYYVYY8_0_5X24");
-    assert_eq!(colour, Some(ColorMode::new(ColorFormat::Ycbcr420, 8)));
-    assert_eq!(wire_bus_format(SUMMARY, "HDMI-A-1"), None);
+    assert_eq!(bus_colour(&bus), Some(ColorMode::new(ColorFormat::Ycbcr420, 8)));
+    assert_eq!(bus_colour("YUYV10_1X20"), Some(ColorMode::new(ColorFormat::Ycbcr422, 10)));
+    assert_eq!(bus_colour("NOT_A_FORMAT"), None);
+    assert_eq!(mediabox_platform::debugfs::connector_activity(SUMMARY, "HDMI-A-1"), None);
 }
 
 #[test]
@@ -315,13 +353,8 @@ fn kodi_and_the_browser_take_the_chosen_mode() {
     assert_eq!(auto.browser_mode, "3840x2160@60.000Hz");
 
     let fixed = OutputSetting {
-        sink: "d3d7".into(),
-        resolution: ResolutionChoice::Fixed {
-            width: 3840,
-            height: 2160,
-            refresh_mhz: 30_000,
-            interlaced: false,
-        },
+        edid_sha256: offer.edid_sha256.clone(),
+        resolution: key(&offer, "3840x2160p30").pipe_choice(),
         ..Default::default()
     };
     let thirty = plan(&offer, &fixed).unwrap();
@@ -348,10 +381,10 @@ fn kodi_is_told_the_colour_of_every_mode_it_may_be_on() {
 
     // A colour chosen for a mode is that mode's, for SDR and -- when it
     // carries ten bits -- for HDR; 23.976 beside it is untouched.
-    let mut chosen = OutputSetting { sink: "d3d7".into(), ..Default::default() };
+    let mut chosen = OutputSetting { edid_sha256: offer.edid_sha256.clone(), ..Default::default() };
     chosen
         .colours
-        .insert("3840x2160p29.97".into(), ColorMode::new(ColorFormat::Ycbcr422, 10));
+        .insert(key(&offer, "3840x2160p29.97"), ColorMode::new(ColorFormat::Ycbcr422, 10));
     let with = plan(&offer, &chosen).unwrap();
     assert_eq!(line(&with, "3840x2160@296703/4400x2250"), "colour 3840x2160@296703/4400x2250 ycbcr422:10 ycbcr422:10");
     assert_eq!(line(&with, "3840x2160@296703/5500x2250"), "colour 3840x2160@296703/5500x2250 rgb:8 ycbcr422:10");
@@ -362,7 +395,7 @@ fn kodi_is_told_the_colour_of_every_mode_it_may_be_on() {
     assert_eq!(unique.len(), keys.len(), "every key names one mode");
     chosen
         .colours
-        .insert("3840x2160p29.97".into(), ColorMode::new(ColorFormat::Rgb, 8));
+        .insert(key(&offer, "3840x2160p29.97"), ColorMode::new(ColorFormat::Rgb, 8));
     let eight = plan(&offer, &chosen).unwrap();
     assert_eq!(line(&eight, "3840x2160@296703/4400x2250"), "colour 3840x2160@296703/4400x2250 rgb:8 ycbcr422:10");
 }
@@ -374,7 +407,7 @@ fn an_interlaced_choice_is_told_to_kodi_and_sway_as_interlaced_at_its_field_rate
     assert!(i60.interlaced);
     assert_eq!(i60.vic, Some(5));
     let fixed = OutputSetting {
-        sink: "d3d7".into(),
+        edid_sha256: offer.edid_sha256.clone(),
         resolution: i60.choice(),
         ..Default::default()
     };
@@ -396,8 +429,8 @@ fn every_mode_offered_carries_the_key_of_the_timing_it_is() {
     let mut keys: Vec<String> = offer
         .modes()
         .map(|mode| {
-            let key = mode.timing_key.expect("a key");
-            assert_eq!(Some(key.timing()), mode.timing);
+            let key = mode.timing_key;
+            assert_eq!(key.timing(), mode.timing);
             assert_eq!(key.timing().label(), mode.label);
             key.to_string()
         })
@@ -408,23 +441,11 @@ fn every_mode_offered_carries_the_key_of_the_timing_it_is() {
     assert_eq!(keys.len(), count);
 
     // What the web page and the television receive: the key survives the
-    // wire, and an offer from an interface older than the key still reads.
+    // wire, and the refresh of an interlaced mode is its field rate.
     let json = serde_json::to_string(&offer).unwrap();
     let back: mediabox_core::OutputOffer = serde_json::from_str(&json).unwrap();
     assert_eq!(back, offer);
-    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
-    for group in legacy["groups"].as_array_mut().unwrap() {
-        for mode in group["modes"].as_array_mut().unwrap() {
-            let mode = mode.as_object_mut().unwrap();
-            mode.remove("timing_key");
-            mode.remove("timing");
-        }
-    }
-    let old: mediabox_core::OutputOffer = serde_json::from_value(legacy).unwrap();
-    let old_i60 = old.mode("1920x1080i60").unwrap();
-    assert_eq!(old_i60.timing_key, None);
-    // Even without the timing, the refresh Kodi is told is the field rate.
-    assert_eq!(old_i60.refresh(), mediabox_core::Refresh::new(60, 1));
+    assert_eq!(back.mode("1920x1080i60").unwrap().refresh(), mediabox_core::Refresh::new(60, 1));
 }
 
 /// The captured EDIDs, read by the checked parser. What is asserted is what
@@ -459,5 +480,81 @@ fn the_captured_edids_are_whole_and_say_what_their_blocks_say() {
     );
     assert_ne!(slow.sha256, fast.sha256);
     // And the offer carries it.
-    assert_eq!(offer_for(SONY_600).edid_sha256, fast.sha256.map(|id| id.0));
+    assert_eq!(Some(offer_for(SONY_600).edid_sha256), fast.sha256.map(|id| id.0));
 }
+
+// ------------------------------------------------------------ the plan
+
+#[test]
+fn the_plan_carries_what_it_was_made_for_and_reads_back_whole() {
+    let offer = offer_for(SONY_600);
+    let made = plan(&offer, &OutputSetting::default()).unwrap();
+    let text = made.render();
+    for line in [
+        "schema=2",
+        "boot_id=b0071d",
+        "generation=7",
+        "connector=HDMI-A-2",
+        "transmitter=fdea0000.hdmi",
+        "source_profile=rk3588-vendor61-dw-hdmi-qp@1",
+        "kodi_screenmode=0384002160060.00000pstd",
+    ] {
+        assert!(text.lines().any(|have| have == line), "{line} in\n{text}");
+    }
+    assert!(text.contains(&format!("edid_sha256={}\n", offer.edid_sha256)));
+    assert!(text.contains(&format!("timing_key={}\n", key(&offer, "3840x2160p60"))));
+    assert_eq!(Plan::parse(&text), Ok(made));
+    // A plan from before provenance is not a plan.
+    let old = "kodi_screenmode=0384002160060.00000pstd\nbrowser_mode=3840x2160@60.000Hz\n";
+    assert!(Plan::parse(old).is_err());
+    let truncated: String = text.lines().take(4).map(|line| format!("{line}\n")).collect();
+    assert!(Plan::parse(&truncated).is_err());
+}
+
+#[test]
+fn a_plan_is_current_only_for_its_generation_and_its_sink() {
+    let sony = offer_for(SONY_600);
+    let other = offer_for(PLUS_300);
+    let made = plan(&sony, &OutputSetting::default()).unwrap();
+    let now = |seq| DisplayGeneration { boot_id: "b0071d".into(), seq };
+    let on = |offer: &mediabox_core::OutputOffer| DisplayIdentity {
+        connector: offer.connector.clone(),
+        edid_sha256: offer.edid_sha256.clone(),
+    };
+    assert_eq!(made.stale(Some(&now(7)), Some(&on(&sony))), None);
+    // The generation moved: stale, whatever else holds.
+    assert!(made.stale(Some(&now(8)), Some(&on(&sony))).unwrap().contains("generation"));
+    // Another boot.
+    let reboot = DisplayGeneration { boot_id: "other".into(), seq: 7 };
+    assert!(made.stale(Some(&reboot), Some(&on(&sony))).is_some());
+    // Sink A's plan on sink B, even at an equal generation number.
+    assert!(made.stale(Some(&now(7)), Some(&on(&other))).is_some());
+    // Nothing to check against is not current.
+    assert!(made.stale(None, Some(&on(&sony))).is_some());
+    assert!(made.stale(Some(&now(7)), None).is_some());
+    // And a plan is never made for one sink from another's offer.
+    assert!(mediabox_platform::output::plan(&other, &OutputSetting::default(), provenance(&sony, 7)).is_none());
+}
+
+#[test]
+fn sway_is_given_the_mode_on_the_selected_connector_only() {
+    let offer = offer_for(SONY_600);
+    let made = plan(&offer, &OutputSetting::default()).unwrap();
+    assert_eq!(made.sway_output(), "output HDMI-A-2 mode 3840x2160@60.000Hz\n");
+    assert!(!made.sway_output().contains('*'));
+}
+
+// ------------------------------------------------------------ HDR10
+
+#[test]
+fn hdr10_on_the_sony_at_2160p23_976_is_ycbcr_422_ten_bit() {
+    // The physical case this product runs: Plus, Sony, 300 MHz input.
+    let offer = offer_for(PLUS_300);
+    let mode = offer.mode("3840x2160p23.976").unwrap();
+    assert_eq!(mode.auto_hdr, Some(ColorMode::new(ColorFormat::Ycbcr422, 10)));
+    assert!(mode.carries_hdr10(ColorMode::new(ColorFormat::Ycbcr422, 10)));
+    assert!(!mode.carries_hdr10(ColorMode::new(ColorFormat::Rgb, 8)), "eight bits is not HDR10");
+    let link = &offer.link;
+    assert!(link.st2084 && link.static_metadata_type1 && link.bt2020_rgb && link.bt2020_ycc && link.source_hdr10);
+}
+

@@ -45,7 +45,7 @@ pub mod mode_flags {
 
 /// One timing, field for field `struct drm_mode_modeinfo` without the name,
 /// the type and the kernel's own rounded `vrefresh`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModeTiming {
     pub clock_khz: u32,
     pub hdisplay: u16,
@@ -265,7 +265,7 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 ///
 /// A label is not a key: `1920x1080p60` names a CTA timing and a DMT one with
 /// different sync, and both keys say so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TimingKey(pub ModeTiming);
 
 impl TimingKey {

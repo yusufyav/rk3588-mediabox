@@ -175,8 +175,8 @@ enum DisplayCommand {
     /// Put a mode on the wire on trial; it is taken back unless kept
     Set {
         /// `auto`, `3840x2160@30`, or a label from the list (`3840x2160p29.97`)
-        #[arg(value_parser = parse_resolution)]
-        mode: ResolutionChoice,
+        #[arg(value_parser = parse_mode_name)]
+        mode: ModeName,
         /// A colour mode at that mode; left out, `Auto`
         #[arg(long, value_enum)]
         color: Option<ColorFormatArg>,
@@ -211,10 +211,23 @@ impl ColorFormatArg {
     }
 }
 
+/// A mode as a person types it. It names a mode of the display plugged in
+/// only once it is looked up in that display's offer ([`ModeName::resolve`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeName {
+    Auto,
+    Rate {
+        width: u16,
+        height: u16,
+        refresh_mhz: u32,
+        interlaced: bool,
+    },
+}
+
 /// `auto`, `WxH@Hz`, or a mode label `WxHp59.94` / `WxHi60`.
-fn parse_resolution(text: &str) -> Result<ResolutionChoice, String> {
+fn parse_mode_name(text: &str) -> Result<ModeName, String> {
     if text.eq_ignore_ascii_case("auto") {
-        return Ok(ResolutionChoice::Auto);
+        return Ok(ModeName::Auto);
     }
     let bad = || format!("'{text}' bir mod değil: auto, 3840x2160@30 ya da 3840x2160p29.97");
     let (width, rest) = text.split_once('x').ok_or_else(bad)?;
@@ -222,12 +235,46 @@ fn parse_resolution(text: &str) -> Result<ResolutionChoice, String> {
     let (height, rate) = rest.split_at(at);
     let interlaced = rate.starts_with('i');
     let hz: f64 = rate[1..].trim_end_matches("Hz").parse().map_err(|_| bad())?;
-    Ok(ResolutionChoice::Fixed {
+    Ok(ModeName::Rate {
         width: width.parse().map_err(|_| bad())?,
         height: height.parse().map_err(|_| bad())?,
         refresh_mhz: (hz * 1000.0).round() as u32,
         interlaced,
     })
+}
+
+impl ModeName {
+    /// The one mode of `offer` this names: a rate typed to three decimals
+    /// matches the mode's own to within five millihertz. None, or more than
+    /// one, is an error that lists what there is.
+    fn resolve(self, offer: &mediabox_core::OutputOffer) -> Result<ResolutionChoice, String> {
+        let ModeName::Rate {
+            width,
+            height,
+            refresh_mhz,
+            interlaced,
+        } = self
+        else {
+            return Ok(ResolutionChoice::Auto);
+        };
+        let matching: Vec<&mediabox_core::OutputModeOffer> = offer
+            .modes()
+            .filter(|mode| {
+                mode.width == width
+                    && mode.height == height
+                    && mode.interlaced == interlaced
+                    && mode.refresh_mhz.abs_diff(refresh_mhz) <= 5
+            })
+            .collect();
+        match matching.as_slice() {
+            [mode] => Ok(mode.choice()),
+            [] => Err("bu ekran böyle bir mod listelemiyor (mediaboxctl display modes)".into()),
+            several => Err(format!(
+                "birden fazla mod uyuyor: {}",
+                several.iter().map(|mode| mode.label.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -373,7 +420,17 @@ enum MediaCommand {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let request = to_request(&args.command);
+    let mut request = to_request(&args.command);
+    if let Command::Display { command } = &args.command {
+        match display_request(&args.socket, command).await {
+            Ok(Some(resolved)) => request = resolved,
+            Ok(None) => {}
+            Err(message) => {
+                eprintln!("Hata: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
     let monitor = matches!(request, Request::InputMonitor);
     if monitor {
         if let Err(error) = execute_monitor(&args.socket, args.json).await {
@@ -451,13 +508,13 @@ fn to_request(command: &Command) -> Request {
             },
         },
         Command::Display { command } => match command {
-            DisplayCommand::Status | DisplayCommand::Modes { .. } => Request::OutputStatus,
-            DisplayCommand::Set { mode, color, bits } => Request::OutputTry {
-                resolution: *mode,
-                colour: color.map(|format| format.mode(*bits)),
-            },
-            DisplayCommand::Keep => Request::OutputKeep,
-            DisplayCommand::Revert => Request::OutputRevert,
+            // Named against the display's own offer, and a trial by its id:
+            // both are read from the daemon first (`display_request`).
+            DisplayCommand::Status
+            | DisplayCommand::Modes { .. }
+            | DisplayCommand::Set { .. }
+            | DisplayCommand::Keep
+            | DisplayCommand::Revert => Request::OutputStatus,
         },
         Command::Ethernet { command } => match command {
             EthernetCommand::Status => Request::EthernetStatus,
@@ -544,6 +601,45 @@ fn to_request(command: &Command) -> Request {
     }
 }
 
+/// A display command that names something of the daemon's -- a mode of the
+/// display plugged in, the trial running now -- as the request that names it.
+async fn display_request(path: &PathBuf, command: &DisplayCommand) -> Result<Option<Request>, String> {
+    if matches!(command, DisplayCommand::Status | DisplayCommand::Modes { .. }) {
+        return Ok(None);
+    }
+    let answer = execute(path, Request::OutputStatus)
+        .await
+        .map_err(|error| format!("mediaboxd kullanılamıyor: {error}"))?;
+    let status: OutputStatus = answer
+        .into_iter()
+        .next()
+        .and_then(|value| value.get("result").cloned())
+        .and_then(|result| serde_json::from_value(result).ok())
+        .ok_or("daemon ekran durumunu vermedi")?;
+    let trial = || {
+        status
+            .trial
+            .as_ref()
+            .map(|trial| trial.id)
+            .ok_or("onay bekleyen bir ayar yok")
+    };
+    Ok(Some(match command {
+        DisplayCommand::Set { mode, color, bits } => {
+            let offer = status
+                .offer
+                .as_ref()
+                .ok_or_else(|| status.error.clone().unwrap_or("ekran bilinmiyor".into()))?;
+            Request::OutputTry {
+                resolution: mode.resolve(offer)?,
+                colour: color.map(|format| format.mode(*bits)),
+            }
+        }
+        DisplayCommand::Keep => Request::OutputKeep { trial: trial()? },
+        DisplayCommand::Revert => Request::OutputRevert { trial: trial()? },
+        DisplayCommand::Status | DisplayCommand::Modes { .. } => return Ok(None),
+    }))
+}
+
 async fn execute(
     path: &PathBuf,
     request: Request,
@@ -608,16 +704,40 @@ fn print_output(value: &Value, detail: Option<&str>) -> Result<(), String> {
             format!(" ({})", link.declared_by)
         }
     );
-    if let Some(wire) = &status.wire {
+    // What the driver reports, and only that, as "now": a value somebody
+    // asked for is not the wire.
+    if let Some(observed) = &status.observed {
+        let known = |value: &mediabox_core::Observed<String>| match value {
+            mediabox_core::Observed::Known(value) => value.clone(),
+            mediabox_core::Observed::Unknown(_) => "bilinmiyor".into(),
+        };
         println!(
-            "Şu an: {} · {}{}",
-            wire.mode,
-            wire.colour.map(|mode| mode.label()).unwrap_or_else(|| "?".into()),
-            wire.bus_format
-                .as_deref()
-                .map(|bus| format!(" ({bus})"))
-                .unwrap_or_default()
+            "Sürücü: {} · {}{}",
+            known(&observed.mode),
+            observed.colour.map(|mode| mode.label()).unwrap_or_else(|| known(&observed.bus_format)),
+            match &observed.phy_clock_khz {
+                mediabox_core::Observed::Known(khz) => format!(" · PHY {} kHz", khz),
+                mediabox_core::Observed::Unknown(_) => String::new(),
+            }
         );
+    }
+    if let Some(applied) = &status.applied {
+        println!(
+            "Uygulanan (DRM): {} · {}{}",
+            applied.label,
+            applied.colour.map(|mode| mode.label()).unwrap_or_else(|| "sürücünün seçimi".into()),
+            if applied.hdr { " · HDR10" } else { "" }
+        );
+    }
+    if let Some(display) = &status.display {
+        println!(
+            "Ses: {} · CEC: {}",
+            display.audio.device.as_deref().or(display.audio.refused.as_deref()).unwrap_or("-"),
+            display.cec.device.as_deref().or(display.cec.refused.as_deref()).unwrap_or("-")
+        );
+    }
+    for note in &status.notes {
+        println!("Not: {note}");
     }
     let resolved = offer.resolve(status.setting.resolution);
     println!(
@@ -626,15 +746,17 @@ fn print_output(value: &Value, detail: Option<&str>) -> Result<(), String> {
             ResolutionChoice::Auto => "Otomatik".to_string(),
             _ => resolved.map(|mode| mode.label.clone()).unwrap_or_default(),
         },
-        match resolved.and_then(|mode| status.setting.colours.get(&mode.label)) {
+        match resolved.and_then(|mode| status.setting.colours.get(&mode.timing_key)) {
             Some(colour) => format!(" · {}", colour.label()),
             None => " · renk otomatik".into(),
         }
     );
     if let Some(trial) = &status.trial {
         println!(
-            "Deneme: {} sn içinde onaylanmazsa geri alınır (mediaboxctl display keep | revert)",
-            trial.seconds_left
+            "Deneme {}: {} sn içinde onaylanmazsa geri alınır{} (mediaboxctl display keep | revert)",
+            trial.id,
+            trial.seconds_left,
+            if trial.applied { "" } else { "; ekran henüz uygulamadı" }
         );
     }
     let Some(detail) = detail else { return Ok(()) };
@@ -648,7 +770,7 @@ fn print_output(value: &Value, detail: Option<&str>) -> Result<(), String> {
                     "  {:<16} {:>4} MHz  gönderilebilir{}",
                     cell.mode.label(),
                     cell.rate_khz / 1000,
-                    if cell.mode.carries_hdr() { " · HDR10" } else { "" }
+                    if cell.hdr10 { " · HDR10" } else { "" }
                 ),
                 Some(refusal) => println!(
                     "  {:<16} {:>4} MHz  olmaz: {}",
@@ -988,23 +1110,22 @@ fn render_surface(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_resolution;
-    use mediabox_core::ResolutionChoice;
+    use super::{ModeName, parse_mode_name};
 
     #[test]
     fn a_mode_is_named_the_way_the_list_prints_it_or_as_a_rate() {
-        let uhd = |refresh_mhz, interlaced| ResolutionChoice::Fixed {
+        let uhd = |refresh_mhz, interlaced| ModeName::Rate {
             width: 3840,
             height: 2160,
             refresh_mhz,
             interlaced,
         };
-        assert_eq!(parse_resolution("auto"), Ok(ResolutionChoice::Auto));
-        assert_eq!(parse_resolution("3840x2160@30"), Ok(uhd(30_000, false)));
-        assert_eq!(parse_resolution("3840x2160p29.97"), Ok(uhd(29_970, false)));
-        assert_eq!(parse_resolution("3840x2160p23.976"), Ok(uhd(23_976, false)));
-        assert_eq!(parse_resolution("3840x2160i60"), Ok(uhd(60_000, true)));
-        assert!(parse_resolution("4k").is_err());
+        assert_eq!(parse_mode_name("auto"), Ok(ModeName::Auto));
+        assert_eq!(parse_mode_name("3840x2160@30"), Ok(uhd(30_000, false)));
+        assert_eq!(parse_mode_name("3840x2160p29.97"), Ok(uhd(29_970, false)));
+        assert_eq!(parse_mode_name("3840x2160p23.976"), Ok(uhd(23_976, false)));
+        assert_eq!(parse_mode_name("3840x2160i60"), Ok(uhd(60_000, true)));
+        assert!(parse_mode_name("4k").is_err());
     }
 
     use super::*;

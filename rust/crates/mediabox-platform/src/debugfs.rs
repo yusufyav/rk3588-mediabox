@@ -61,22 +61,7 @@ impl Debugfs {
     }
 }
 
-/// A value read from somewhere that may not be there. Unknown is an answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", content = "value", rename_all = "snake_case")]
-pub enum Observed<T> {
-    Known(T),
-    Unknown(String),
-}
-
-impl<T> Observed<T> {
-    pub fn known(self) -> Option<T> {
-        match self {
-            Observed::Known(value) => Some(value),
-            Observed::Unknown(_) => None,
-        }
-    }
-}
+pub use mediabox_core::Observed;
 
 /// The debugfs directory of the display device discovery chooses, the way
 /// [`crate::Platform::inspect`] chooses it: the DRM device that owns

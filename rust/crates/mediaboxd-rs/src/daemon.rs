@@ -92,8 +92,9 @@ pub struct AppState {
     /// television mounts /sys read-only.
     pub leds: LedController,
     /// The display setting: the kept one, bound to the display it was made
-    /// on, and a new one on trial. The interface reports what the display
-    /// offers; the daemon keeps the choice and the clock.
+    /// on, and a new one on trial. The observer says what the display is and
+    /// offers; the owner says what it committed; the daemon keeps the choice
+    /// and the clock.
     pub output: Arc<Output>,
     /// The fan's curve for the next boot. The kernel drives the fan; this
     /// only writes the overlay it reads at boot, which is /boot's and root's.
@@ -144,10 +145,6 @@ impl AppState {
                 Err(error) => Response::failure("LED_ERROR", error),
             },
             Request::OutputStatus => Response::success(self.output.status()),
-            Request::OutputReport { offer, wire } => {
-                self.output.report(offer, wire);
-                Response::success(self.output.status())
-            }
             Request::OutputTry { resolution, colour } => {
                 let holds = self.surface.status().await.active == mediabox_core::Surface::Ui;
                 match self.output.try_setting(resolution, colour, holds) {
@@ -155,11 +152,11 @@ impl AppState {
                     Err(error) => Response::failure("OUTPUT_REFUSED", error),
                 }
             }
-            Request::OutputKeep => match self.output.keep() {
+            Request::OutputKeep { trial } => match self.output.keep(trial) {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("OUTPUT_REFUSED", error),
             },
-            Request::OutputRevert => match self.output.revert() {
+            Request::OutputRevert { trial } => match self.output.revert(trial) {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("OUTPUT_REFUSED", error),
             },
@@ -924,6 +921,7 @@ pub async fn serve_unix(listener: UnixListener, state: Arc<AppState>) -> io::Res
 }
 
 async fn handle_unix(stream: UnixStream, state: Arc<AppState>) -> io::Result<()> {
+    let peer = stream.peer_cred().ok().map(|credentials| credentials.uid());
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
     let mut line = String::new();
@@ -937,6 +935,26 @@ async fn handle_unix(stream: UnixStream, state: Arc<AppState>) -> io::Result<()>
             &Response::failure("INVALID_REQUEST", "istek çok büyük veya satır sonu yok"),
         )
         .await;
+    }
+    // What the display's owner committed is not a request. It has a type of
+    // its own, which only this socket parses -- the HTTP listeners take
+    // `Request` and nothing else -- and only root may send it: the owner runs
+    // as root, and nothing on the LAN can be it.
+    if let Ok(serde_json::Value::Object(object)) = serde_json::from_str::<Value>(&line)
+        && object.contains_key("report")
+    {
+        let response = match (peer, serde_json::from_value::<mediabox_core::OwnerReport>(Value::Object(object))) {
+            (Some(0), Ok(report)) => match state.output.owner_report(report) {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("OUTPUT_REPORT_REFUSED", error),
+            },
+            (_, Err(error)) => Response::failure("INVALID_REQUEST", error.to_string()),
+            (peer, Ok(_)) => Response::failure(
+                "OUTPUT_REPORT_REFUSED",
+                format!("ekran raporu yalnız root'tan kabul edilir (uid {peer:?})"),
+            ),
+        };
+        return write_response(&mut write, &response).await;
     }
     let request: Request = match serde_json::from_str(&line) {
         Ok(value) => value,
@@ -1051,12 +1069,9 @@ mod tests {
         assert!(!is_proxy_address(""));
     }
 
-    #[tokio::test]
-    async fn unix_socket_request_returns_structured_response() {
-        let dir = tempdir().unwrap();
-        let socket = dir.path().join("daemon.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let state = Arc::new(AppState {
+    /// A whole daemon state, pointed at `dir` for everything it keeps.
+    fn test_state(dir: &tempfile::TempDir) -> Arc<AppState> {
+        Arc::new(AppState {
             kodi: Arc::new(
                 KodiClient::new("http://127.0.0.1:9/jsonrpc", Duration::from_millis(20)).unwrap(),
             ),
@@ -1085,9 +1100,13 @@ mod tests {
             // reaches the machine's own sysfs and reports no lights.
             leds: LedController::new(dir.path(), dir.path().join("leds")),
             output: Output::new(
-                dir.path().join("output.json"),
-                dir.path().join("output-plan"),
-                crate::output::Summary::At(dir.path().join("summary")),
+                crate::output::Paths {
+                    setting: dir.path().join("output.json"),
+                    trial: dir.path().join("output-trial.json"),
+                    plan: dir.path().join("output-plan"),
+                    observer: dir.path().join("observer"),
+                },
+                || {},
             ),
             fan: FanController::new(crate::fan::FanPaths::under(dir.path())),
             ethernet: crate::ethernet::Ethernet::new(
@@ -1101,7 +1120,15 @@ mod tests {
                 crate::transition::DisplayTransition::new(),
             )
             .unwrap(),
-        });
+        })
+    }
+
+    #[tokio::test]
+    async fn unix_socket_request_returns_structured_response() {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let state = test_state(&dir);
         let task = tokio::spawn(serve_unix(listener, state));
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         stream
@@ -1112,6 +1139,53 @@ mod tests {
         BufReader::new(stream).read_line(&mut line).await.unwrap();
         let response: Response = serde_json::from_str(&line).unwrap();
         assert!(response.ok);
+        task.abort();
+    }
+
+    #[test]
+    fn nothing_a_controller_sends_can_say_what_the_display_hardware_is() {
+        // The interface used to report the offer and the wire as a command
+        // any client could send. There is no such command any more.
+        assert!(serde_json::from_str::<Request>(
+            r#"{"command":"output_report","offer":{},"wire":{"mode":"3840x2160p60"}}"#
+        )
+        .is_err());
+        // What the owner committed is its own type, which `Request` -- all
+        // the HTTP listeners parse -- is not.
+        let report = mediabox_core::OwnerReport::Failed {
+            identity: mediabox_core::DisplayIdentity::default(),
+            trial: None,
+            error: "x".into(),
+        };
+        let text = serde_json::to_string(&report).unwrap();
+        assert!(serde_json::from_str::<Request>(&text).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_owner_report_from_anyone_but_root_is_refused() {
+        if unsafe { libc::getuid() } == 0 {
+            return; // the check is about the peer, and here the peer is root
+        }
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let state = test_state(&dir);
+        let task = tokio::spawn(serve_unix(listener, state));
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let report = mediabox_core::OwnerReport::Failed {
+            identity: mediabox_core::DisplayIdentity::default(),
+            trial: None,
+            error: "x".into(),
+        };
+        stream
+            .write_all(format!("{}\n", serde_json::to_string(&report).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        let response: Response = serde_json::from_str(&line).unwrap();
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "OUTPUT_REPORT_REFUSED");
         task.abort();
     }
 

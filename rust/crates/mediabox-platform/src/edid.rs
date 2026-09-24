@@ -22,8 +22,8 @@
 //!
 //! The EDID's identity is the SHA-256 of the exact bytes received, when they
 //! are a whole, valid EDID. The checksum bytes the older identity was built
-//! from (`edid_checkvalue`) are kept for compatibility and diagnostics only:
-//! two different displays can share them.
+//! from ([`Edid::legacy_checkvalue`]) are kept to migrate a record written
+//! that way, and for diagnostics: two different displays can share them.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -223,10 +223,15 @@ impl Edid {
         .then(|| sha256_hex(&self.bytes))
     }
 
-    /// The checksum byte of every whole block, as hex: the older identity
-    /// (`mediabox_core::edid_checkvalue`). Compatibility and diagnostics only.
+    /// The checksum byte of every whole block, as hex (`d307`): what the
+    /// reference box calls `checkvalue`, and what `output.json` was bound to
+    /// before the SHA-256. Not an identity -- two EDIDs with different
+    /// contents can share it. Migration and diagnostics only.
     pub fn legacy_checkvalue(&self) -> String {
-        mediabox_core::edid_checkvalue(&self.bytes)
+        self.bytes
+            .chunks_exact(128)
+            .map(|block| format!("{:02x}", block[127]))
+            .collect()
     }
 }
 
@@ -597,7 +602,7 @@ pub struct EdidReport {
     pub bytes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<EdidIdentity>,
-    /// `edid_checkvalue`, for comparison with what older records hold.
+    /// [`Edid::legacy_checkvalue`], for migrating what older records hold.
     pub legacy_checkvalue: String,
     pub cta: CtaCapabilities,
     pub issues: Vec<EdidIssue>,

@@ -9,8 +9,9 @@
 //! list or the connector's properties asks for them this way, and no other
 //! (Gate 0, AM-2):
 //!
-//! 1. take the display transition lock, without waiting -- a transition in
-//!    progress is a reason to come back later, not to wait;
+//! 1. take the display transition lock, shared and without waiting -- a
+//!    transition in progress is a reason to come back later, not to wait,
+//!    and a shared hold is never mistaken for a transition;
 //! 2. check, just before opening, that a DRM master exists (debugfs `clients`)
 //!    -- and if none does, defer;
 //! 3. open the primary node read-only, as a non-master client (a master
@@ -182,8 +183,14 @@ impl Access for System {
         // Read-only: the lock file is the control plane's; the observer does
         // not create it, and a missing one is reported, not made.
         let fd = open_raw(&self.transition_lock, libc::O_RDONLY)?;
+        // Shared, not exclusive. A transition holds it exclusively, so this
+        // still fails while one runs and keeps one from starting while the
+        // node is open. But a shared hold is not a transition: whoever asks
+        // "is somebody changing the display?" -- kodi.service's guard, when
+        // Kodi ends by itself -- asks with a shared lock and gets it, and the
+        // recovery this query happened to coincide with is not skipped.
         // SAFETY: a live descriptor owned above.
-        let taken = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        let taken = unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0;
         Ok(taken.then(|| Box::new(Flock(fd)) as Box<dyn std::any::Any>))
     }
 

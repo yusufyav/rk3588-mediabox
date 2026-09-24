@@ -21,6 +21,9 @@ pub struct Roots {
     /// `StateDirectory`; a remembered output choice lives beside the
     /// indicator-light mode rather than in a store of this crate's own.
     pub state: PathBuf,
+    /// `/run`: what the appliance publishes for this boot -- the observer's
+    /// snapshot, the display plan.
+    pub run: PathBuf,
 }
 
 impl Default for Roots {
@@ -37,6 +40,7 @@ impl Roots {
             dev: PathBuf::from("/dev"),
             proc: PathBuf::from("/proc"),
             state: PathBuf::from("/var/lib/mediabox"),
+            run: PathBuf::from("/run"),
         }
     }
 
@@ -48,6 +52,7 @@ impl Roots {
             dev: root.join("dev"),
             proc: root.join("proc"),
             state: root.join("var/lib/mediabox"),
+            run: root.join("run"),
         }
     }
 
@@ -70,6 +75,10 @@ impl Roots {
 
     pub fn state(&self, rest: &str) -> PathBuf {
         self.state.join(rest)
+    }
+
+    pub fn run(&self, rest: &str) -> PathBuf {
+        self.run.join(rest)
     }
 
     /// A device node's path as the rest of the system will see it.

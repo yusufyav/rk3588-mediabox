@@ -295,6 +295,7 @@ pub fn video_showing() -> bool {
 struct Switch {
     previous_mode: control::Mode,
     previous_colour: Option<mediabox_core::ColorMode>,
+    previous_setting: (mediabox_core::OutputSetting, Option<u64>),
     resized: bool,
 }
 
@@ -333,18 +334,13 @@ struct SplitDisplay {
     /// Whether the television is currently away, so the journal says so once
     /// rather than sixty times a second.
     dark: Cell<bool>,
-    /// What the television said it can be sent, read from its EDID once. The
-    /// HDR decision is made against this and the mode in use, never against
-    /// the film alone: a set that never declared ST 2084, or a link with no
-    /// room for ten bits at this timing, cannot be sent HDR worth having.
-    sink_video: Option<mediabox_platform::video::SinkVideo>,
+    /// The setting on the wire, as the daemon last sent it (or as it was
+    /// read from disk at start), and the daemon's trial it belongs to.
+    setting: RefCell<mediabox_core::OutputSetting>,
+    trial: Cell<Option<u64>>,
     /// What this source can send and how its driver is spoken to, resolved
     /// once against the running system (`mediabox_platform::source`).
     source: &'static mediabox_platform::source::SourceProfile,
-    /// This display device's debugfs directory, as discovery resolved and
-    /// checked it -- the display controller's own account of the wire is
-    /// read from there, and is unknown when it could not be resolved.
-    debugfs: mediabox_platform::debugfs::Debugfs,
     /// The mode in use, in the terms the colour rules are written in.
     timing: Cell<mediabox_platform::video::Timing>,
     /// The colour sent for everything but an HDR film: the one chosen for
@@ -513,7 +509,7 @@ impl SplitDisplay {
             &mediabox_platform::Roots::from_env(),
             &discovered,
         );
-        let (connector, crtc, mode, offer, colour, source) =
+        let (connector, crtc, mode, offer, colour, source, setting) =
             find_output(&kms, &wanted, &static_signature)?;
         let gbm_device = gbm::Device::new(OwnedFd::from(render_file))
             .map_err(|e| format!("create GBM device on {render_path}: {e}"))?;
@@ -546,12 +542,12 @@ impl SplitDisplay {
             connector.interface_id(),
             discovered
                 .selected_output()
-                .and_then(|output| output.audio.as_ref())
+                .and_then(|output| output.audio_route().ok())
                 .map(|audio| audio.card_id.as_str())
                 .unwrap_or("-"),
             discovered
                 .selected_output()
-                .and_then(|output| output.cec.as_ref())
+                .and_then(|output| output.cec_route().ok())
                 .map(|cec| cec.device.display().to_string())
                 .unwrap_or_else(|| "-".into()),
             width,
@@ -595,28 +591,34 @@ impl SplitDisplay {
             .map_err(|e| format!("listen for the player on {socket}: {e}"))?;
         eprintln!("mediabox-tv.video listening on {socket}");
 
-        // What the television declared about itself, kept for the HDR
-        // decision: whether it says ST 2084 at all, and how fast its link is.
-        let sink_video = connector_edid(&kms, connector.handle())
-            .and_then(|edid| mediabox_platform::video::parse_sink_video(&edid));
-        if let Some(sink) = &sink_video {
+        if let Some(offer) = &offer
+            && let Some(offered) = offer.modes().find(|offered| same_mode(&mode, offered))
+        {
             eprintln!(
-                "mediabox-tv.platform sink: ST2084={} HLG={} link {} kHz, HDR10 at this mode: {}",
-                sink.st2084,
-                sink.hlg,
-                sink.max_character_rate_khz,
-                sink.hdr10_fits_source(&timing_of(&mode), &source.caps)
+                "mediabox-tv.platform sink {}: ST2084={} SMT1={} BT2020 rgb={} ycc={} link {} kHz, HDR10 at this mode: {}",
+                &offer.edid_sha256[..12],
+                offer.link.st2084,
+                offer.link.static_metadata_type1,
+                offer.link.bt2020_rgb,
+                offer.link.bt2020_ycc,
+                offer.link.max_character_rate_khz,
+                offered.auto_hdr.map(|hdr| hdr.label()).unwrap_or_else(|| "yok".into())
             );
         }
 
+        let identity = offer.as_ref().map(|offer| mediabox_core::DisplayIdentity {
+            connector: offer.connector.clone(),
+            edid_sha256: offer.edid_sha256.clone(),
+        });
+        IDENTITY.with(|cell| *cell.borrow_mut() = identity);
         let display = Rc::new(Self {
             kms,
             connector,
             crtc,
             mode: Cell::new(mode),
-            sink_video,
+            setting: RefCell::new(setting),
+            trial: Cell::new(None),
             source,
-            debugfs: discovered.debugfs.clone(),
             timing: Cell::new(timing_of(&mode)),
             colour: Cell::new(colour),
             offer,
@@ -951,16 +953,22 @@ impl SplitDisplay {
     ///   * `Colorspace`, BT2020_RGB;
     ///   * `color_depth`, ten bits, because eight-bit HDR bands visibly.
     ///
-    /// And one decision before them: whether this link can carry it at the
-    /// timing that is actually set. It is the same rule the rest of the
-    /// product already uses -- a 4K film at 23.976 fits ten-bit RGB in
-    /// 371 MHz, at 60 Hz it does not -- and when it does not fit, HDR is
-    /// given up rather than asked for and silently subsampled.
+    /// And one decision before them: whether HDR10 can go out at the timing
+    /// that is actually set, and in what. That is the offer's answer -- the
+    /// same one Kodi's plan carries -- and it holds every condition apart:
+    /// the sink's PQ, Static Metadata Type 1 and BT.2020 in the encoding
+    /// sent, ten bits, the link, the Y420 rules and the source profile. A 4K
+    /// film at 23.976 on a 300 MHz input goes out as 4:2:2 at ten bits; at
+    /// 60 Hz nothing carries it, and HDR is given up rather than asked for
+    /// and silently subsampled.
     fn signal_output_colour(&self, film: Option<crate::video::HdrStatic>) {
-        let fits = self
-            .sink_video
-            .as_ref()
-            .is_some_and(|sink| sink.hdr10_fits_source(&self.timing.get(), &self.source.caps));
+        let offered = self.offer.as_ref().and_then(|offer| {
+            let mode = offer.modes().find(|offered| same_mode(&self.mode.get(), offered))?;
+            Some((offer, mode))
+        });
+        let setting = self.setting.borrow().clone();
+        let hdr_colour = offered.and_then(|(offer, mode)| offer.hdr_colour(&setting, mode));
+        let fits = hdr_colour.is_some();
         let wanted = match film {
             Some(hdr) if hdr.is_hdr() && fits => Some(hdr),
             _ => None,
@@ -968,10 +976,10 @@ impl SplitDisplay {
         if self.asked.replace(film) != film {
             match film {
                 Some(hdr) if hdr.is_hdr() && !fits => eprintln!(
-                    "mediabox-tv.platform the film asks for HDR (eotf {}) and this link \
-                     cannot carry it at {} kHz: sending SDR, the plane is tone-mapped",
+                    "mediabox-tv.platform the film asks for HDR (eotf {}) and HDR10 cannot go \
+                     out at {}: sending SDR, the plane is tone-mapped",
                     hdr.eotf,
-                    self.mode.get().clock()
+                    self.timing.get().label()
                 ),
                 Some(hdr) if hdr.is_hdr() => eprintln!(
                     "mediabox-tv.platform the film asks for HDR (eotf {}), and it fits",
@@ -981,22 +989,14 @@ impl SplitDisplay {
                 None => {}
             }
         }
-        // The format and depth on the wire, by the same rules as the display
-        // settings: the one chosen for this mode (already checked against it),
-        // and for an HDR film the chosen one only if it carries ten bits,
-        // otherwise what `Auto` sends HDR as here.
+        // The format and depth on the wire: for SDR the colour chosen for this
+        // mode (already checked against it) or what `Auto` sends; for an HDR
+        // film the HDR10 colour the offer names.
         let timing = self.timing.get();
-        let format = self.sink_video.as_ref().and_then(|sink| match wanted {
-            Some(_) => self
-                .colour
-                .get()
-                .filter(|mode| mode.carries_hdr())
-                .or_else(|| sink.best_for_source(&timing, true, &self.source.caps)),
-            None => self
-                .colour
-                .get()
-                .or_else(|| sink.best_for_source(&timing, false, &self.source.caps)),
-        });
+        let format = match wanted {
+            Some(_) => hdr_colour,
+            None => self.colour.get(),
+        };
         if self.signalled.get() == wanted && self.applied.get() == format {
             return;
         }
@@ -1108,6 +1108,8 @@ impl SplitDisplay {
         &self,
         mode: control::Mode,
         colour: Option<mediabox_core::ColorMode>,
+        setting: mediabox_core::OutputSetting,
+        trial: Option<u64>,
     ) -> Result<bool, String> {
         self.wait_for_page_flip().map_err(|e| e.to_string())?;
         let previous_mode = self.mode.get();
@@ -1132,6 +1134,7 @@ impl SplitDisplay {
         *self.switch.borrow_mut() = Some(Switch {
             previous_mode,
             previous_colour: self.colour.get(),
+            previous_setting: (self.setting.replace(setting), self.trial.replace(trial)),
             resized,
         });
         self.mode.set(mode);
@@ -1185,6 +1188,16 @@ impl SplitDisplay {
                 OUTPUT_ERROR.with(|cell| {
                     *cell.borrow_mut() = Some(format!("Çekirdek bu modu kabul etmedi: {error}"))
                 });
+                if let Some(identity) = self.identity() {
+                    report(mediabox_core::OwnerReport::Failed {
+                        identity,
+                        trial: self.trial.get(),
+                        error: error.clone(),
+                    });
+                }
+                let (setting, trial) = switch.previous_setting;
+                *self.setting.borrow_mut() = setting;
+                self.trial.set(trial);
                 self.mode.set(switch.previous_mode);
                 self.timing.set(timing_of(&switch.previous_mode));
                 self.colour.set(switch.previous_colour);
@@ -1305,26 +1318,31 @@ impl SplitDisplay {
         result
     }
 
-    /// Tells the daemon what this display offers and what is on the wire.
+    /// The output and sink this process drives: what a report, and an
+    /// `Apply` from the daemon, are about. `None` without a valid EDID.
+    fn identity(&self) -> Option<mediabox_core::DisplayIdentity> {
+        self.offer.as_ref().map(|offer| mediabox_core::DisplayIdentity {
+            connector: offer.connector.clone(),
+            edid_sha256: offer.edid_sha256.clone(),
+        })
+    }
+
+    /// Tells the daemon what this process committed -- the mode, the colour
+    /// it asked for, whether HDR is signalled, and the trial it belongs to --
+    /// for this output and sink. What the display offers and what the
+    /// driver reports are the observer's to say, not this process's.
     fn report(&self) {
-        let Some(offer) = self.offer.clone() else { return };
-        let bus = self
-            .debugfs
-            .read("summary")
-            .known()
-            .and_then(|summary| mediabox_platform::output::wire_bus_format(&summary, &offer.connector));
-        let wire = mediabox_core::OutputWire {
-            mode: self.timing.get().label(),
-            colour: bus
-                .as_ref()
-                .and_then(|(_, colour)| *colour)
-                .or(self.applied.get()),
-            bus_format: bus.map(|(name, _)| name),
+        ON_WIRE.with(|cell| *cell.borrow_mut() = Some((self.setting.borrow().clone(), self.trial.get())));
+        let Some(identity) = self.identity() else { return };
+        let timing = self.timing.get();
+        report(mediabox_core::OwnerReport::Applied(mediabox_core::AppliedOutput {
+            identity,
+            trial: self.trial.get(),
+            timing_key: timing.key(),
+            label: timing.label(),
+            colour: self.applied.get(),
             hdr: self.signalled.get().is_some(),
-        };
-        if let Some(reporter) = REPORTER.get() {
-            reporter(offer, wire);
-        }
+        }));
     }
 
     fn release_display(&self) {
@@ -1381,17 +1399,13 @@ impl Drop for SplitDisplay {
     }
 }
 
-/// The connector discovery chose, found again through the open KMS device.
+/// The sink's EDID, as the connector's `EDID` property blob publishes it.
 ///
-/// Discovery works from sysfs and names an output; this needs the DRM objects
-/// behind that name. They are matched by connector *name* — type plus type
-/// index, which is what sysfs publishes — and never by DRM object id: object
-/// ids are allocated per boot and a different kernel hands out different ones.
-/// The sink's EDID, as the connector publishes it.
-///
-/// Read here rather than from `/sys/class/drm/*/edid`, which this vendor
-/// driver leaves empty -- measured, zero bytes on a television that is plainly
-/// connected and answering.
+/// Read through the descriptor this process already holds as master. The
+/// same bytes are in `/sys/class/drm/<connector>/edid` -- measured on the Plus
+/// with a Sony and an HP, the sysfs file and this blob have the same SHA-256
+/// -- and that is where the observer reads them; this one is read here only
+/// because it is already at hand.
 fn connector_edid(kms: &SharedKms, connector: control::connector::Handle) -> Option<Vec<u8>> {
     let properties = kms.get_properties(connector).ok()?;
     let (handles, values) = properties.as_props_and_values();
@@ -1446,6 +1460,12 @@ fn property_signature(
     signature
 }
 
+/// The connector discovery chose, found again through the open KMS device.
+///
+/// Discovery works from sysfs and names an output; this needs the DRM objects
+/// behind that name. They are matched by connector *name* — type plus type
+/// index, which is what sysfs publishes — and never by DRM object id: object
+/// ids are allocated per boot and a different kernel hands out different ones.
 fn find_output(
     kms: &SharedKms,
     wanted: &str,
@@ -1458,6 +1478,7 @@ fn find_output(
         Option<mediabox_core::OutputOffer>,
         Option<mediabox_core::ColorMode>,
         &'static mediabox_platform::source::SourceProfile,
+        mediabox_core::OutputSetting,
     ),
     PlatformError,
 > {
@@ -1488,10 +1509,12 @@ fn find_output(
     // Which mode, by the HDMI rules and the person's choice.
     //
     // Every mode the kernel lists for this display, with the colour modes the
-    // EDID and the link allow at each, is the offer; the kept setting is read
-    // from the daemon's state and applies only to the display it was made on
-    // (its EDID checkvalue), `Auto` otherwise -- the reference Android box's
-    // rule. `Auto` is the largest mode in the panel's shape at the fastest
+    // EDID and the link allow at each, is the offer -- the same function, on
+    // the same inputs, as the observer's -- and the kept setting is read from
+    // the daemon's state and applies only to the display it was made on (the
+    // SHA-256 of its EDID), `Auto` otherwise -- the reference Android box's
+    // rule. A record from before that binding is read the way the daemon
+    // migrates it, and not written: the daemon writes it. `Auto` is the largest mode in the panel's shape at the fastest
     // refresh the link carries in any format; on the Sony's 300 MHz input that
     // is 2160p60 in 4:2:0, not the 1080p it lists as preferred, which is what
     // this interface once ran a 4K panel at.
@@ -1519,9 +1542,15 @@ fn find_output(
     if let Some(offer) = offer.as_mut() {
         offer.link.source_profile = resolved.describe();
     }
-    let (mode, colour) = match &offer {
+    let (mode, colour, setting) = match &offer {
         Some(offer) => {
-            let setting = read_setting().for_sink(&offer.sink);
+            let kernel: Vec<mediabox_core::ModeTiming> = timings.iter().map(|timing| timing.mode).collect();
+            let (setting, notes) = read_setting()
+                .map(|stored| stored.for_offer(offer, &kernel))
+                .unwrap_or_else(|| (mediabox_core::OutputSetting::default().for_sink(&offer.edid_sha256), Vec::new()));
+            for note in notes {
+                eprintln!("mediabox-tv.platform kept setting: {note}");
+            }
             let chosen = offer
                 .resolve(setting.resolution)
                 .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
@@ -1539,7 +1568,8 @@ fn find_output(
                 },
                 offer.link.max_character_rate_khz
             );
-            (mode, offer.colour(&setting, chosen))
+            let colour = offer.colour(&setting, chosen);
+            (mode, colour, setting)
         }
         // No EDID to reason from: the largest mode, fastest first.
         None => {
@@ -1547,7 +1577,7 @@ fn find_output(
                 .ok_or_else(|| PlatformError::from(format!("{wanted} has no mode")))?;
             let at = timings.iter().position(|timing| *timing == chosen).unwrap_or(0);
             eprintln!("mediabox-tv.platform {wanted} has no readable EDID; {} chosen", chosen.label());
-            (modes[at], None)
+            (modes[at], None, mediabox_core::OutputSetting::default())
         }
     };
 
@@ -1620,25 +1650,13 @@ fn find_output(
             )));
         }
     };
-    Ok((connector, crtc, mode, offer, colour, resolved.profile))
+    Ok((connector, crtc, mode, offer, colour, resolved.profile, setting))
 }
 
-/// Whether a KMS mode is the one the offer names.
-/// Whether a kernel mode is the one offered: by the timing's key when the
-/// offer carries one -- two modes can share a size, a clock and totals and
-/// still be two timings -- and by those numbers for an offer from before the
-/// key.
+/// Whether a kernel mode is the one offered: by the timing's key -- two
+/// modes can share a size, a clock and totals and still be two timings.
 fn same_mode(mode: &control::Mode, offered: &mediabox_core::OutputModeOffer) -> bool {
-    let timing = timing_of(mode);
-    if let Some(key) = offered.timing_key {
-        return timing.key() == key;
-    }
-    timing.width == offered.width
-        && timing.height == offered.height
-        && timing.pixel_clock_khz == offered.pixel_clock_khz
-        && timing.htotal == offered.htotal
-        && timing.vtotal == offered.vtotal
-        && timing.interlaced == offered.interlaced
+    timing_of(mode).key() == offered.timing_key
 }
 
 impl HasWindowHandle for SplitDisplay {
@@ -1975,13 +1993,13 @@ impl SplitWindow {
 
     /// A setting from the daemon: the mode and colour it resolves to on this
     /// display, from the next frame.
-    fn switch_output(&self, setting: mediabox_core::OutputSetting) {
+    fn switch_output(&self, setting: mediabox_core::OutputSetting, trial: Option<u64>) {
         let display = &self.display;
         let Some(offer) = display.offer.as_ref() else {
             eprintln!("mediabox-tv.platform no offer: this display's EDID could not be read");
             return;
         };
-        let setting = setting.for_sink(&offer.sink);
+        let setting = setting.for_sink(&offer.edid_sha256);
         let Some(target) = offer.resolve(setting.resolution) else { return };
         let colour = offer.colour(&setting, target);
         let Some(mode) = display
@@ -1995,6 +2013,8 @@ impl SplitWindow {
             return;
         };
         if mode == display.mode.get() && colour == display.colour.get() {
+            *display.setting.borrow_mut() = setting;
+            display.trial.set(trial);
             display.report();
             return;
         }
@@ -2003,7 +2023,7 @@ impl SplitWindow {
             target.label,
             colour.map(|mode| mode.label()).unwrap_or_default()
         );
-        match display.begin_switch(mode, colour) {
+        match display.begin_switch(mode, colour, setting, trial) {
             Ok(_) => self.sync_size(),
             Err(error) => eprintln!("mediabox-tv.platform switch not started: {error}"),
         }
@@ -2290,8 +2310,8 @@ impl Platform for SplitPlatform {
             if self.drain_messages() {
                 break;
             }
-            if let Some(setting) = OUTPUT_WANTED.with(|wanted| wanted.borrow_mut().take()) {
-                self.window.switch_output(setting);
+            if let Some((setting, trial)) = OUTPUT_WANTED.with(|wanted| wanted.borrow_mut().take()) {
+                self.window.switch_output(setting, trial);
             }
             if OUTPUT_REPORT_DUE.with(|due| due.replace(false))
                 && self.window.display.presentation.borrow().current.is_some()
@@ -2567,35 +2587,54 @@ fn find_property<H: control::ResourceHandle>(
 
 /// Who hears about the display after every mode set: the application, which
 /// tells the daemon.
-static REPORTER: std::sync::OnceLock<
-    Box<dyn Fn(mediabox_core::OutputOffer, mediabox_core::OutputWire) + Send + Sync>,
-> = std::sync::OnceLock::new();
+static REPORTER: std::sync::OnceLock<Box<dyn Fn(mediabox_core::OwnerReport) + Send + Sync>> =
+    std::sync::OnceLock::new();
 
-pub fn on_output_report(
-    reporter: impl Fn(mediabox_core::OutputOffer, mediabox_core::OutputWire) + Send + Sync + 'static,
-) {
+pub fn on_output_report(reporter: impl Fn(mediabox_core::OwnerReport) + Send + Sync + 'static) {
     let _ = REPORTER.set(Box::new(reporter));
 }
 
+fn report(report: mediabox_core::OwnerReport) {
+    if let Some(reporter) = REPORTER.get() {
+        reporter(report);
+    }
+}
+
 thread_local! {
-    /// A setting to put on the wire, from the daemon.
-    static OUTPUT_WANTED: RefCell<Option<mediabox_core::OutputSetting>> = const { RefCell::new(None) };
+    /// A setting to put on the wire, from the daemon, and its trial.
+    static OUTPUT_WANTED: RefCell<Option<(mediabox_core::OutputSetting, Option<u64>)>> = const { RefCell::new(None) };
     /// The daemon asked to hear about the display again: it has started since
     /// the last report and knows nothing.
     static OUTPUT_REPORT_DUE: Cell<bool> = const { Cell::new(false) };
     /// Why the last mode asked for is not on the wire, when the kernel said no.
     static OUTPUT_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The setting on the wire and its trial, as last reported.
+    static ON_WIRE: RefCell<Option<(mediabox_core::OutputSetting, Option<u64>)>> = const { RefCell::new(None) };
+    /// The output and sink this process drives.
+    static IDENTITY: RefCell<Option<mediabox_core::DisplayIdentity>> = const { RefCell::new(None) };
 }
 
-/// Put `setting` on the wire from the next pass of the event loop.
-pub fn apply_output(setting: mediabox_core::OutputSetting) {
-    OUTPUT_WANTED.with(|wanted| *wanted.borrow_mut() = Some(setting));
+/// Put `setting` (trial `trial`, if it is one) on the wire from the next pass
+/// of the event loop.
+pub fn apply_output(setting: mediabox_core::OutputSetting, trial: Option<u64>) {
+    OUTPUT_WANTED.with(|wanted| *wanted.borrow_mut() = Some((setting, trial)));
 }
 
 /// Tell the daemon about the display again, from the next pass of the event
 /// loop.
 pub fn report_output_again() {
     OUTPUT_REPORT_DUE.with(|due| due.set(true));
+}
+
+/// The setting on the wire and its trial, as last reported to the daemon.
+pub fn on_wire() -> Option<(mediabox_core::OutputSetting, Option<u64>)> {
+    ON_WIRE.with(|cell| cell.borrow().clone())
+}
+
+/// The output and sink this process drives; an `Apply` for any other is not
+/// for it.
+pub fn identity() -> Option<mediabox_core::DisplayIdentity> {
+    IDENTITY.with(|cell| cell.borrow().clone())
 }
 
 pub fn output_error() -> Option<String> {
@@ -2606,11 +2645,10 @@ pub fn output_error() -> Option<String> {
 /// writes it.
 const SETTING_FILE: &str = "/var/lib/mediabox/output.json";
 
-fn read_setting() -> mediabox_core::OutputSetting {
+fn read_setting() -> Option<mediabox_core::StoredSetting> {
     std::fs::read_to_string(SETTING_FILE)
         .ok()
-        .and_then(|text| serde_json::from_str(text.trim()).ok())
-        .unwrap_or_default()
+        .and_then(|text| mediabox_core::StoredSetting::parse(&text))
 }
 
 /// A KMS mode in the terms the HDMI rules are written in: the whole timing,

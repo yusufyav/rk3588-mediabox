@@ -124,17 +124,21 @@ fn fit(
     device: &str,
 ) -> Fit {
     let mut support = Fit::Silent;
-    if evidence.cable == Some(false) {
-        notes.push(format!("{device}: no cable"));
-        return Fit::Contradicted;
-    }
-    if evidence.cable == Some(true) {
-        support = Fit::Weak;
-    }
+    // Live, first-hand evidence that this transmitter drives this sink now:
+    // its CEC adapter holds the address the sink's EDID declares (the address
+    // is taken from the EDID read through this transmitter), or its PHY runs
+    // at the connector's dot clock.
+    let mut live = false;
     match (evidence.cec_physical_address, connector.physical_address) {
+        // No address says no sink is answering CEC on this transmitter now --
+        // a set in standby, or one whose HPD dropped for a moment while an
+        // owner of the display went away. It says nothing about which
+        // transmitter the connector is: it is no evidence, either way.
+        // Measured on the Plus: counted as a contradiction, it turned a
+        // measured binding ambiguous for seconds during a handover, which is
+        // exactly when the next owner's sound card is chosen.
         (Some(None), _) => {
             notes.push(format!("{device}: CEC adapter has no physical address (f.f.f.f)"));
-            return Fit::Contradicted;
         }
         (Some(Some(held)), Some(declared)) if held != declared => {
             notes.push(format!(
@@ -152,6 +156,7 @@ fn fit(
                 connector.name
             ));
             support = Fit::Strong;
+            live = true;
         }
         _ => {}
     }
@@ -174,9 +179,27 @@ fn fit(
             clock.rate_hz,
             if matches_dclk { ", the connector's dclk" } else { "" }
         ));
+        live |= matches_dclk;
         if support == Fit::Silent {
             support = Fit::Weak;
         }
+    }
+    // The cable, as extcon mirrors the hot-plug line. It is the driver's
+    // mirror and it goes stale: a connector forced `off` and back to `detect`
+    // -- which the hotplug recovery does after Kodi -- leaves it at "no cable"
+    // with the sink plugged in and answering, until the line next moves.
+    // Measured on the Plus. So "no cable" contradicts only when nothing live
+    // says otherwise.
+    match evidence.cable {
+        Some(false) if live => {
+            notes.push(format!("{device}: extcon says no cable; the live evidence above says otherwise"));
+        }
+        Some(false) => {
+            notes.push(format!("{device}: no cable"));
+            return Fit::Contradicted;
+        }
+        Some(true) if support == Fit::Silent => support = Fit::Weak,
+        _ => {}
     }
     support
 }
