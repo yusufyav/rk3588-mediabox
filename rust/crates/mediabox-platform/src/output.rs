@@ -114,6 +114,8 @@ fn mode_offer(sink: &SinkVideo, timing: &Timing, source: &SourceCaps) -> OutputM
         vtotal: timing.vtotal,
         preferred: timing.preferred,
         vic: timing.vic,
+        timing_key: Some(timing.key()),
+        timing: Some(timing.mode),
         cells: sink.cells_for(timing, source),
         auto_sdr: sink.best_for(timing, false),
         auto_hdr,
@@ -325,17 +327,29 @@ fn format_name(format: mediabox_core::ColorFormat) -> &'static str {
     }
 }
 
-/// The refresh from the timing itself, as Kodi and sway compute it.
+/// The refresh from the timing itself, as Kodi and sway compute it: the
+/// exact fraction ([`OutputModeOffer::refresh`]), so an interlaced mode's is
+/// its field rate -- 1080i60 is 60 here, not the 30 its clock over its totals
+/// would say -- and only then a decimal, because that is what both are told.
 fn hz(mode: &OutputModeOffer) -> f64 {
-    let total = f64::from(mode.htotal) * f64::from(mode.vtotal);
-    if total == 0.0 {
+    let refresh = mode.refresh();
+    if refresh.num == 0 {
         return f64::from(mode.refresh_mhz) / 1000.0;
     }
-    f64::from(mode.pixel_clock_khz) * 1000.0 / total
+    refresh.as_f64()
 }
 
+/// Kodi's `videoscreen.screenmode`: `%05d%05d%09.5f` then `istd` or `pstd`
+/// (`CDisplaySettings::GetStringFromResolution`); the refresh of an
+/// interlaced mode is its field rate, as Kodi's own resolution list has it.
 fn kodi(mode: &OutputModeOffer) -> String {
-    format!("{:05}{:05}{:09.5}pstd", mode.width, mode.height, hz(mode))
+    format!(
+        "{:05}{:05}{:09.5}{}std",
+        mode.width,
+        mode.height,
+        hz(mode),
+        if mode.interlaced { "i" } else { "p" }
+    )
 }
 
 /// Every video frame shown for the same number of refreshes, to a thousandth.

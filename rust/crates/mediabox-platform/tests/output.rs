@@ -366,3 +366,63 @@ fn kodi_is_told_the_colour_of_every_mode_it_may_be_on() {
     let eight = plan(&offer, &chosen).unwrap();
     assert_eq!(line(&eight, "3840x2160@296703/4400x2250"), "colour 3840x2160@296703/4400x2250 rgb:8 ycbcr422:10");
 }
+
+#[test]
+fn an_interlaced_choice_is_told_to_kodi_and_sway_as_interlaced_at_its_field_rate() {
+    let offer = offer_for(PLUS_300);
+    let i60 = offer.mode("1920x1080i60").expect("1080i60 listed");
+    assert!(i60.interlaced);
+    assert_eq!(i60.vic, Some(5));
+    let fixed = OutputSetting {
+        sink: "d3d7".into(),
+        resolution: i60.choice(),
+        ..Default::default()
+    };
+    let plan = plan(&offer, &fixed).unwrap();
+    // Not `0192001080030.00000pstd`: the clock over the totals is a frame
+    // rate, and an interlaced mode's refresh is its field rate.
+    assert_eq!(plan.kodi_screenmode, "0192001080060.00000istd");
+    assert_eq!(plan.browser_mode, "1920x1080@60.000Hz");
+    // The whitelist Kodi switches refresh between stays progressive.
+    assert!(plan.kodi_whitelist.iter().all(|mode| mode.ends_with("pstd")));
+    // And its colour line is keyed as interlaced, apart from 1080p30.
+    assert!(plan.colours.iter().any(|line| line.starts_with("colour 1920x1080i@74250/2200x1125 ")));
+    assert!(plan.colours.iter().any(|line| line.starts_with("colour 1920x1080@74250/2200x1125 ")));
+}
+
+#[test]
+fn every_mode_offered_carries_the_key_of_the_timing_it_is() {
+    let offer = offer_for(PLUS_300);
+    let mut keys: Vec<String> = offer
+        .modes()
+        .map(|mode| {
+            let key = mode.timing_key.expect("a key");
+            assert_eq!(Some(key.timing()), mode.timing);
+            assert_eq!(key.timing().label(), mode.label);
+            key.to_string()
+        })
+        .collect();
+    let count = keys.len();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), count);
+
+    // What the web page and the television receive: the key survives the
+    // wire, and an offer from an interface older than the key still reads.
+    let json = serde_json::to_string(&offer).unwrap();
+    let back: mediabox_core::OutputOffer = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, offer);
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    for group in legacy["groups"].as_array_mut().unwrap() {
+        for mode in group["modes"].as_array_mut().unwrap() {
+            let mode = mode.as_object_mut().unwrap();
+            mode.remove("timing_key");
+            mode.remove("timing");
+        }
+    }
+    let old: mediabox_core::OutputOffer = serde_json::from_value(legacy).unwrap();
+    let old_i60 = old.mode("1920x1080i60").unwrap();
+    assert_eq!(old_i60.timing_key, None);
+    // Even without the timing, the refresh Kodi is told is the field rate.
+    assert_eq!(old_i60.refresh(), mediabox_core::Refresh::new(60, 1));
+}

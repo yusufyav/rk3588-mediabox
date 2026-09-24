@@ -972,7 +972,7 @@ impl Output {
             link.source_max_khz
         };
         let load = match (wire_mode, wire.colour) {
-            (Some(mode), Some(colour)) => colour.character_rate_khz(mode.pixel_clock_khz),
+            (Some(mode), Some(colour)) => mode.character_rate_khz(colour),
             _ => 0,
         };
 

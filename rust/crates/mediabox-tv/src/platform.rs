@@ -2540,16 +2540,28 @@ fn read_setting() -> mediabox_core::OutputSetting {
         .unwrap_or_default()
 }
 
-/// A KMS mode in the terms the HDMI rules are written in.
+/// A KMS mode in the terms the HDMI rules are written in: the whole timing,
+/// flags and all -- pixel repetition and interlace are in the flags, and a
+/// mode known by its size and totals alone is not the mode the kernel listed.
 fn timing_of(mode: &control::Mode) -> mediabox_platform::video::Timing {
     let (width, height) = mode.size();
-    mediabox_platform::video::Timing::new(
-        width,
-        height,
-        mode.clock(),
-        mode.hsync().2,
-        mode.vsync().2,
-        mode.flags().contains(control::ModeFlags::INTERLACE),
+    let (hsync_start, hsync_end, htotal) = mode.hsync();
+    let (vsync_start, vsync_end, vtotal) = mode.vsync();
+    mediabox_platform::video::Timing::from_mode(
+        mediabox_core::ModeTiming::new(
+            mode.clock(),
+            width,
+            hsync_start,
+            hsync_end,
+            htotal,
+            mode.hskew(),
+            height,
+            vsync_start,
+            vsync_end,
+            vtotal,
+            mode.vscan(),
+            mode.flags().bits(),
+        ),
         mode.mode_type().contains(control::ModeTypeFlags::PREFERRED),
     )
 }

@@ -23,10 +23,11 @@
 //! Checked against the reference Android box on both inputs of the same Sony,
 //! whose lists are in `tests/color_modes.rs`.
 
-pub use mediabox_core::{ColorFormat, ColorMode, ColourCell, Refusal};
+pub use mediabox_core::{ColorFormat, ColorMode, ColourCell, ModeTiming, Refusal, TimingKey};
+use mediabox_core::mode_flags;
 use serde::{Deserialize, Serialize};
 
-use crate::cta_vics::CTA_VICS;
+use crate::cta_vics::{CTA_VICS, cta_mode, match_cea_mode};
 
 /// What this board's HDMI transmitter can send.
 pub struct SourceCaps {
@@ -79,26 +80,60 @@ pub struct SinkVideo {
 }
 
 /// One timing, as a mode the kernel lists or the EDID declares.
+///
+/// `mode` is the timing itself, whole ([`ModeTiming`]), and what names it is
+/// its [`TimingKey`]. The fields beside it are derived from it once, here, for
+/// the code that reads a size or a rate: none of them identifies a mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timing {
+    pub mode: ModeTiming,
     pub width: u16,
     pub height: u16,
-    /// Millihertz, so 23.976 is a number rather than a rounding.
+    /// Millihertz, rounded down from the exact refresh: 23.976 is a number
+    /// rather than a rounding, and an interlaced mode's is its field rate.
     pub refresh_mhz: u32,
     pub pixel_clock_khz: u32,
     pub htotal: u16,
     pub vtotal: u16,
     pub interlaced: bool,
-    /// The sink's preferred timing.
+    /// The sink's preferred timing. What the kernel says about the timing,
+    /// not part of it.
     pub preferred: bool,
-    /// The CTA-861 code, when it is one.
+    /// The CTA-861 code, when it is one (`drm_match_cea_mode`).
     pub vic: Option<u8>,
 }
 
 impl Timing {
-    /// A timing from its raw numbers, with the CTA code worked out the way
-    /// `drm_match_cea_mode` does it: same active and total size, same scan,
-    /// and the clock either the code's own or its 1000/1001 variant.
+    /// A timing the kernel listed, or the EDID declared, with its CTA code
+    /// worked out the way the kernel does it.
+    pub fn from_mode(mode: ModeTiming, preferred: bool) -> Self {
+        Self::with_vic(mode, preferred, match_cea_mode(&mode))
+    }
+
+    fn with_vic(mode: ModeTiming, preferred: bool, vic: Option<u8>) -> Self {
+        Self {
+            mode,
+            width: mode.hdisplay,
+            height: mode.vdisplay,
+            refresh_mhz: mode.refresh().millihertz(),
+            pixel_clock_khz: mode.clock_khz,
+            htotal: mode.htotal,
+            vtotal: mode.vtotal,
+            interlaced: mode.interlaced(),
+            preferred,
+            vic,
+        }
+    }
+
+    /// A timing known only by its size, clock and totals -- a test, or a
+    /// capture from before timings were kept whole.
+    ///
+    /// When those are a CTA-861 code's, at its clock or its 1000/1001 variant,
+    /// the code's own timing is used (its sync, its flags, pixel repetition
+    /// included); otherwise the sync positions are unknown and left at the
+    /// active edge, and the key says so by differing from any mode the kernel
+    /// would list. Production code builds a timing from the kernel's mode with
+    /// [`Timing::from_mode`].
     pub fn new(
         width: u16,
         height: u16,
@@ -108,78 +143,76 @@ impl Timing {
         interlaced: bool,
         preferred: bool,
     ) -> Self {
-        let total = u64::from(htotal) * u64::from(vtotal);
-        let mut refresh_mhz = if total == 0 {
-            0
-        } else {
-            (u64::from(pixel_clock_khz) * 1_000_000 / total) as u32
-        };
-        if interlaced {
-            refresh_mhz *= 2;
-        }
-        let vic = CTA_VICS
+        let cta = CTA_VICS
             .iter()
-            .find(|(_, w, h, clock, ht, vt, i, _)| {
-                *w == width
-                    && *h == height
-                    && *ht == htotal
-                    && *vt == vtotal
-                    && *i == interlaced
-                    && (clock.abs_diff(pixel_clock_khz) <= 1
-                        || cea_mode_alternate_clock(*clock, *ht, *vt, *h, *i)
-                            .abs_diff(pixel_clock_khz)
-                            <= 1)
+            .filter(|entry| {
+                let (_, _, hd, _, _, ht, _, vd, _, _, vt, _, flags) = **entry;
+                hd == width
+                    && vd == height
+                    && ht == htotal
+                    && vt == vtotal
+                    && (flags & mode_flags::INTERLACE != 0) == interlaced
             })
-            .map(|entry| entry.0);
-        Self {
-            width,
-            height,
-            refresh_mhz,
-            pixel_clock_khz,
-            htotal,
-            vtotal,
-            interlaced,
-            preferred,
-            vic,
+            .filter_map(|entry| cta_mode(entry.0).map(|mode| (entry.0, mode)))
+            .find(|(_, mode)| {
+                mode.clock_khz.abs_diff(pixel_clock_khz) <= 1
+                    || cea_alternate_clock(mode).abs_diff(pixel_clock_khz) <= 1
+            });
+        match cta {
+            Some((vic, mode)) => Self::with_vic(
+                ModeTiming {
+                    clock_khz: pixel_clock_khz,
+                    ..mode
+                },
+                preferred,
+                Some(vic),
+            ),
+            None => Self::with_vic(
+                ModeTiming::new(
+                    pixel_clock_khz,
+                    width,
+                    width,
+                    width,
+                    htotal,
+                    0,
+                    height,
+                    height,
+                    height,
+                    vtotal,
+                    0,
+                    if interlaced { mode_flags::INTERLACE } else { 0 },
+                ),
+                preferred,
+                None,
+            ),
         }
+    }
+
+    pub fn key(&self) -> TimingKey {
+        self.mode.key()
     }
 
     /// `3840x2160p59.94` / `1920x1080i60` — what a person recognises a mode by.
+    /// Never what a mode is looked up by.
     pub fn label(self) -> String {
-        let hz = f64::from(self.refresh_mhz) / 1000.0;
-        let rate = if (hz - hz.round()).abs() < 0.005 {
-            format!("{}", hz.round() as u32)
-        } else {
-            format!("{hz:.3}").trim_end_matches('0').trim_end_matches('.').to_string()
-        };
-        format!(
-            "{}x{}{}{}",
-            self.width,
-            self.height,
-            if self.interlaced { "i" } else { "p" },
-            rate
-        )
+        self.mode.label()
+    }
+
+    /// The TMDS character rate `colour` needs at this timing, in hertz
+    /// ([`ModeTiming::hdmi_character_rate_hz`]).
+    pub fn character_rate_hz(&self, colour: ColorMode) -> Option<u64> {
+        self.mode.hdmi_character_rate_hz(colour)
     }
 }
 
-/// `cea_mode_alternate_clock`: the 1000/1001 variant of a CTA mode whose
-/// nominal refresh is a multiple of 6 Hz. The table holds the 59.94 Hz clock
-/// for 240- and 480-line modes and the 60 Hz one for the rest.
-fn cea_mode_alternate_clock(clock: u32, htotal: u16, vtotal: u16, vdisplay: u16, interlaced: bool) -> u32 {
-    let total = u64::from(htotal) * u64::from(vtotal);
-    if total == 0 {
-        return clock;
+/// The 1000/1001 variant's clock, for [`Timing::new`]'s lookup by totals
+/// (`cea_mode_alternate_clock`).
+fn cea_alternate_clock(mode: &ModeTiming) -> u32 {
+    if mode.refresh().hertz_rounded() % 6 != 0 {
+        return mode.clock_khz;
     }
-    // drm_mode_vrefresh: rounded to the nearest hertz, doubled for interlace.
-    let mut vrefresh = (u64::from(clock) * 1000 + total / 2) / total;
-    if interlaced {
-        vrefresh *= 2;
-    }
-    if vrefresh % 6 != 0 {
-        return clock;
-    }
-    let clock = u64::from(clock);
-    let alternate = if vdisplay == 240 || vdisplay == 480 {
+    let clock = u64::from(mode.clock_khz);
+    let alternate = if mode.vdisplay == 240 || mode.vdisplay == 480 {
         (clock * 1001 + 500) / 1000
     } else {
         (clock * 1000 + 500) / 1001
@@ -257,15 +290,25 @@ impl SinkVideo {
             return declared;
         }
         // `hdmi_clock_valid`, with this board's transmitter as the driver's
-        // own `tmds_char_rate_valid`.
-        let need_khz = mode.character_rate_khz(timing.pixel_clock_khz);
-        if self.max_character_rate_khz != 0 && need_khz > self.max_character_rate_khz {
+        // own `tmds_char_rate_valid`: compared in hertz, as the kernel does,
+        // on the rate `drm_hdmi_compute_mode_clock` gives -- which is where
+        // pixel repetition doubles a 480i clock.
+        let Some(need_hz) = timing.character_rate_hz(mode) else {
+            return Some(Refusal::SourceDepth {
+                bits,
+                max: source.max_bpc,
+            });
+        };
+        let need_khz = timing.mode.hdmi_character_rate_khz(mode);
+        if self.max_character_rate_khz != 0
+            && need_hz > u64::from(self.max_character_rate_khz) * 1000
+        {
             return Some(Refusal::OverSink {
                 need_khz,
                 max_khz: self.max_character_rate_khz,
             });
         }
-        if need_khz > source.max_tmds_khz {
+        if need_hz > u64::from(source.max_tmds_khz) * 1000 {
             return Some(Refusal::OverSource {
                 need_khz,
                 max_khz: source.max_tmds_khz,
@@ -283,7 +326,7 @@ impl SinkVideo {
                 let mode = ColorMode::new(format, bits);
                 cells.push(ColourCell {
                     mode,
-                    rate_khz: mode.character_rate_khz(timing.pixel_clock_khz),
+                    rate_khz: timing.mode.hdmi_character_rate_khz(mode),
                     refused: self.refusal(timing, mode, source),
                 });
             }
@@ -390,7 +433,8 @@ pub fn auto_timing(timings: &[Timing], sink: Option<&SinkVideo>) -> Option<Timin
 
 /// The mode a resolution choice resolves to on the sink plugged in now: the
 /// mode chosen when this sink lists it and the link carries it, `Auto`
-/// otherwise.
+/// otherwise. The stored choice is matched as it is stored -- see
+/// `OutputModeOffer::is` for why that is not a mode's identity.
 pub fn choose_timing(
     choice: mediabox_core::ResolutionChoice,
     timings: &[Timing],
@@ -655,16 +699,31 @@ pub fn parse_timings(edid: &[u8]) -> Vec<Timing> {
             std::cmp::Reverse(timing.refresh_mhz),
         )
     });
-    timings.dedup_by_key(|timing| (timing.width, timing.height, timing.refresh_mhz, timing.interlaced));
-    timings
+    // The same timing declared twice -- a detailed timing that is also a CTA
+    // code -- is one timing; what names it is its key, not its label.
+    let mut unique: Vec<Timing> = Vec::new();
+    for timing in timings {
+        match unique.iter_mut().find(|kept| kept.key() == timing.key()) {
+            Some(kept) => kept.preferred |= timing.preferred,
+            None => unique.push(timing),
+        }
+    }
+    unique
 }
 
+/// A timing the EDID declares by its code. The code is the one declared: the
+/// kernel's mode for it carries its picture aspect ratio, which is what tells
+/// VIC 7 from VIC 6 -- the same timing at 16:9 rather than 4:3 -- and which a
+/// timing matched without it cannot recover.
 fn cta_timing(vic: u8) -> Option<Timing> {
-    let (_, width, height, clock, htotal, vtotal, interlaced, _) =
-        *CTA_VICS.iter().find(|entry| entry.0 == vic)?;
-    Some(Timing::new(width, height, clock, htotal, vtotal, interlaced, false))
+    cta_mode(vic).map(|mode| Timing::with_vic(mode, false, Some(vic)))
 }
 
+/// One 18-byte detailed timing descriptor, as `drm_mode_detailed()`
+/// (drivers/gpu/drm/drm_edid.c) reads it, without the per-sink quirks: sync
+/// offsets and widths, the bogus-total fix-up, the interlace quirk for the
+/// CTA interlaced sizes, and the sync polarity. Stereo descriptors and ones
+/// with no sync width are refused, as the kernel refuses them.
 fn detailed_timing(bytes: &[u8], preferred: bool) -> Option<Timing> {
     if bytes.len() < 18 {
         return None;
@@ -673,27 +732,73 @@ fn detailed_timing(bytes: &[u8], preferred: bool) -> Option<Timing> {
     if clock_10khz == 0 {
         return None;
     }
-    let width = u16::from(bytes[2]) | (u16::from(bytes[4] & 0xF0) << 4);
+    let hactive = u16::from(bytes[2]) | (u16::from(bytes[4] & 0xF0) << 4);
     let hblank = u16::from(bytes[3]) | (u16::from(bytes[4] & 0x0F) << 8);
-    let height = u16::from(bytes[5]) | (u16::from(bytes[7] & 0xF0) << 4);
+    let vactive = u16::from(bytes[5]) | (u16::from(bytes[7] & 0xF0) << 4);
     let vblank = u16::from(bytes[6]) | (u16::from(bytes[7] & 0x0F) << 8);
-    if width == 0 || height == 0 {
+    let hi = bytes[11];
+    let hsync_offset = (u16::from(hi & 0xC0) << 2) | u16::from(bytes[8]);
+    let hsync_width = (u16::from(hi & 0x30) << 4) | u16::from(bytes[9]);
+    let vsync_offset = (u16::from(hi & 0x0C) << 2) | u16::from(bytes[10] >> 4);
+    let vsync_width = (u16::from(hi & 0x03) << 4) | u16::from(bytes[10] & 0x0F);
+    let misc = bytes[17];
+    if hactive < 64 || vactive < 64 || misc & 0x20 != 0 || hsync_width == 0 || vsync_width == 0 {
         return None;
     }
-    let interlaced = bytes[17] & 0x80 != 0;
-    // An interlaced DTD describes one field.
-    let (height, vtotal) = if interlaced {
-        (height * 2, (height + vblank) * 2 + 1)
-    } else {
-        (height, height + vblank)
-    };
-    Some(Timing::new(
-        width,
-        height,
-        u32::from(clock_10khz) * 10,
-        width + hblank,
-        vtotal,
-        interlaced,
+    let hsync_start = hactive + hsync_offset;
+    let hsync_end = hsync_start + hsync_width;
+    let mut htotal = hactive + hblank;
+    let mut vdisplay = vactive;
+    let mut vsync_start = vactive + vsync_offset;
+    let mut vsync_end = vsync_start + vsync_width;
+    let mut vtotal = vactive + vblank;
+    if hsync_end > htotal {
+        htotal = hsync_end + 1;
+    }
+    if vsync_end > vtotal {
+        vtotal = vsync_end + 1;
+    }
+    let mut flags = 0;
+    // drm_mode_do_interlace_quirk: a descriptor for one of the CTA interlaced
+    // sizes gives one field, and is doubled into the frame.
+    if misc & 0x80 != 0 {
+        const CTA_INTERLACED: [(u16, u16); 7] = [
+            (1920, 1080),
+            (720, 480),
+            (1440, 480),
+            (2880, 480),
+            (720, 576),
+            (1440, 576),
+            (2880, 576),
+        ];
+        if CTA_INTERLACED
+            .iter()
+            .any(|&(w, h)| hactive == w && vdisplay == h / 2)
+        {
+            vdisplay *= 2;
+            vsync_start *= 2;
+            vsync_end *= 2;
+            vtotal = vtotal * 2 | 1;
+        }
+        flags |= mode_flags::INTERLACE;
+    }
+    flags |= if misc & 0x02 != 0 { mode_flags::PHSYNC } else { mode_flags::NHSYNC };
+    flags |= if misc & 0x04 != 0 { mode_flags::PVSYNC } else { mode_flags::NVSYNC };
+    Some(Timing::from_mode(
+        ModeTiming::new(
+            u32::from(clock_10khz) * 10,
+            hactive,
+            hsync_start,
+            hsync_end,
+            htotal,
+            0,
+            vdisplay,
+            vsync_start,
+            vsync_end,
+            vtotal,
+            0,
+            flags,
+        ),
         preferred,
     ))
 }

@@ -355,6 +355,8 @@ mod tests {
             vtotal: 2250,
             preferred: false,
             vic: Some(95),
+            timing_key: None,
+            timing: None,
             cells: cells
                 .iter()
                 .map(|(mode, ok)| ColourCell {

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod ethernet;
+mod timing;
+pub use timing::{ModeTiming, Refresh, TimingKey, mode_flags};
 pub use ethernet::{
     ETHERNET_DNS_MAX, ETHERNET_TRIAL_SECONDS, EthernetConfig, EthernetPort, EthernetStatus,
     EthernetTrial, prefix_mask,
@@ -319,6 +321,17 @@ pub struct OutputModeOffer {
     pub preferred: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vic: Option<u8>,
+    /// The timing's identity ([`TimingKey`]). The label above is what a
+    /// person reads and two timings can share it; this is what names the one
+    /// the kernel listed. Absent from a report by an interface older than
+    /// the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_key: Option<TimingKey>,
+    /// The whole timing, so that what is derived from it -- the refresh Kodi
+    /// and sway are told, the rate on the wire -- is derived from the kernel's
+    /// numbers rather than from the rounded ones above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<ModeTiming>,
     pub cells: Vec<ColourCell>,
     /// What `Auto` sends here for SDR and for HDR10. `None` when nothing fits,
     /// or, for HDR, when no cell carries ten bits.
@@ -342,6 +355,32 @@ impl OutputModeOffer {
         self.auto_hdr.is_some()
     }
 
+    /// The exact refresh: from the timing when the report carried it, from
+    /// the clock and totals otherwise -- doubled for interlace either way,
+    /// because a field is a refresh.
+    pub fn refresh(&self) -> Refresh {
+        match self.timing {
+            Some(timing) => timing.refresh(),
+            None => Refresh::new(
+                u64::from(self.pixel_clock_khz) * 1000 * if self.interlaced { 2 } else { 1 },
+                u64::from(self.htotal) * u64::from(self.vtotal),
+            ),
+        }
+    }
+
+    /// What `colour` costs on the wire here, in kHz: the platform's own
+    /// figure when it computed one for this cell, which knows about pixel
+    /// repetition; the timing's otherwise.
+    pub fn character_rate_khz(&self, colour: ColorMode) -> u32 {
+        if let Some(cell) = self.cells.iter().find(|cell| cell.mode == colour) {
+            return cell.rate_khz;
+        }
+        match self.timing {
+            Some(timing) => timing.hdmi_character_rate_khz(colour),
+            None => colour.character_rate_khz(self.pixel_clock_khz),
+        }
+    }
+
     pub fn choice(&self) -> ResolutionChoice {
         ResolutionChoice::Fixed {
             width: self.width,
@@ -351,6 +390,14 @@ impl OutputModeOffer {
         }
     }
 
+    /// Whether a persisted choice names this mode.
+    ///
+    /// A choice is still kept as size, millihertz and scan (`output.json`),
+    /// so this matches it the way it always has, to within five millihertz.
+    /// That is how a *stored intent* is found again, not what a mode is:
+    /// a mode's identity is its [`TimingKey`], and the stored choice moves to
+    /// the key when persisted intent is migrated (Display Architecture v2,
+    /// P9). Nothing new should compare modes this way.
     pub fn is(&self, choice: ResolutionChoice) -> bool {
         match choice {
             ResolutionChoice::Auto => false,
