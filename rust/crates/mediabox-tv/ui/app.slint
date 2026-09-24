@@ -8,7 +8,8 @@ import { NowPlaying } from "now_playing.slint";
 import { Player, MenuRow } from "player.slint";
 import { Settings } from "settings.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
-import { OutputView, OutRow, OutCell, OutAction, OutInfo } from "output.slint";
+import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple, OutChoice } from "output.slint";
+import { SettingNav, Badge, InfoLine, Toast } from "kit.slint";
 import { Account } from "account.slint";
 import { WifiScreen, BluetoothScreen, WifiRow, BtRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
@@ -21,6 +22,7 @@ export {
     RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
+    OutSimple, OutChoice, SettingNav, Badge, InfoLine,
 }
 
 // What the television shows before there is anything to show.
@@ -228,11 +230,16 @@ export component MediaBoxWindow inherits Window {
     in property <[TechRow]> np-technical;
 
     // ---- settings
-    in property <[string]> settings-sections;
+    in property <[SettingNav]> settings-sections;
     in property <int> settings-section;
     in property <bool> settings-on-sections: true;
     in property <[SettingRow]> settings-rows;
     in property <int> settings-row;
+    // The page open on the right-hand side, "" for a category's own list.
+    in property <string> settings-page;
+    in property <string> settings-page-icon;
+    in property <string> settings-title;
+    in property <string> settings-blurb;
     in property <bool> settings-cooling;
     in property <CoolingView> settings-cooling-view;
     in property <bool> settings-output;
@@ -262,6 +269,7 @@ export component MediaBoxWindow inherits Window {
 
     // ---- diagnostics
     in property <[DiagGroup]> diag-groups;
+    in property <[SettingNav]> diag-nav;
     in property <int> diag-group;
 
     // ---- the sheet over everything
@@ -399,6 +407,11 @@ export component MediaBoxWindow inherits Window {
             on-sections: root.settings-on-sections;
             rows: root.settings-rows;
             row-index: root.settings-row;
+            page: root.settings-page;
+            page-icon: root.settings-page-icon;
+            title: root.settings-title;
+            blurb: root.settings-blurb;
+            vitals: root.vitals;
             cooling: root.settings-cooling;
             cooling-view: root.settings-cooling-view;
             output: root.settings-output;
@@ -471,13 +484,18 @@ export component MediaBoxWindow inherits Window {
             width: 100%;
             height: 100%;
             groups: root.diag-groups;
+            nav: root.diag-nav;
             group: root.diag-group;
+            vitals: root.vitals;
         }
 
         // The bar. One component for every screen, so where the viewer is in
         // the product, what time it is and whether the box is on the network
         // are answered the same way everywhere.
-        if screen != "boot" && screen != "film" && screen != "detail": TopBar {
+        // The settings screens and the diagnostics carry their own heading and
+        // clock in the corner, in the settings language.
+        if screen != "boot" && screen != "film" && screen != "detail"
+            && screen != "settings" && screen != "diagnostics": TopBar {
             x: 0;
             y: 0;
             width: 100%;
@@ -488,9 +506,7 @@ export component MediaBoxWindow inherits Window {
             heading: screen == "media" ? "Filmler ve Diziler"
                 : screen == "search" ? "Ara"
                 : screen == "library" ? "Kitaplık"
-                : screen == "settings" ? "Ayarlar"
                 : screen == "account" ? "Hesap"
-                : screen == "diagnostics" ? "Tanılama"
                 : screen == "wifi" ? "Wi-Fi"
                 : screen == "bluetooth" ? "Bluetooth"
                 : screen == "now-playing" ? "Şimdi Oynatılan"
@@ -499,26 +515,10 @@ export component MediaBoxWindow inherits Window {
 
         // What went wrong, if anything did, without taking the screen away from
         // what is working.
-        if notice != "": Rectangle {
-            x: Metrics.gutter;
-            y: root.height - self.height - Metrics.gutter * 0.6;
-            width: label.preferred-width + Metrics.root-font * 2;
-            height: Metrics.root-font * 2.4;
-            border-radius: Theme.radius * 0.7;
-            background: #151a23e0;
-            border-width: 1px;
-            border-color: Theme.line;
-
-            label := Text {
-                text: notice;
-                color: Theme.warn;
-                font-size: Metrics.text-chip;
-                font-weight: 600;
-                vertical-alignment: center;
-                width: 100%;
-                height: 100%;
-                horizontal-alignment: center;
-            }
+        if notice != "": Toast {
+            x: Metrics.safe-x;
+            y: root.height - self.height - Metrics.safe-y * 0.8;
+            text: notice;
         }
 
         if sheet-open: Sheet {

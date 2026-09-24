@@ -124,6 +124,20 @@ fn share_tone(fraction: f64) -> &'static str {
     }
 }
 
+/// The mark a group is drawn with in the column.
+pub fn icon(title: &str) -> &'static str {
+    match title {
+        "Makine" => "chip",
+        "Depolama" => "info",
+        "Ağ" => "network",
+        "Ekran ve GPU" => "monitor",
+        "Oynatma" => "play",
+        "CEC" => "tv",
+        "Servisler" => "bars",
+        _ => "info",
+    }
+}
+
 fn compose(
     status: Option<&Value>,
     diagnostics: Option<&Value>,
@@ -141,6 +155,15 @@ fn compose(
         .and_then(Value::as_str)
         .unwrap_or("RK3588");
     let mut machine = vec![reading("Kart", board)];
+    // The kernel's version. It was on the settings screen's "Sistem" section,
+    // which is for what a person can act on; this is where it is looked for.
+    if let Some(kernel) = status
+        .and_then(|value| value.get("kernel"))
+        .and_then(Value::as_str)
+        .filter(|kernel| !kernel.is_empty())
+    {
+        machine.push(reading("Linux çekirdeği", kernel));
+    }
     if let Some(usage) = number(diagnostics, "/cpu/usage") {
         machine.push(toned(
             "İşlemci",

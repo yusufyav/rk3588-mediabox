@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { FocusRing, StateNote } from "kit.slint";
 
 // The fan curve editor: what the SoC and the fan are doing, the curve as a
 // graph, and the curve's points as a table a remote can walk and a keyboard
@@ -99,29 +100,37 @@ export struct CoolingView {
     prompt-focus: int,
 }
 
-// A button: white when the remote is on it, faint when it cannot be pressed.
+// A button: the settings language's warm outline when the remote is on it,
+// faint when it cannot be pressed.
 component Button inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
     in property <bool> focused;
     in property <bool> primary;
-    in property <length> font: Metrics.root-font * 0.9;
-    property <bool> lit: primary && enabled && !focused;
-    height: Metrics.root-font * 2.7;
-    min-width: txt.preferred-width + Metrics.root-font * 2.4;
-    border-radius: Metrics.root-font * 0.55;
-    background: focused ? Theme.focus-fill : (lit ? Theme.accent : (enabled ? Theme.bg-card : transparent));
-    border-width: 2px;
-    border-color: focused ? Theme.focus-ring : (lit ? Theme.accent : (enabled ? Theme.line : Theme.line-soft));
-    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    in property <length> font: Metrics.t-secondary;
+    property <bool> lit: primary && enabled;
+    height: Metrics.button-h;
+    min-width: txt.preferred-width + Metrics.button-h * 1.1;
+    border-radius: self.height / 2;
+    background: lit ? (focused ? #ffc766 : Theme.focus.with-alpha(0.9))
+        : (focused ? Theme.s-card-hi : (enabled ? Theme.s-card : transparent));
+    border-width: 1px;
+    border-color: lit || focused ? transparent : (enabled ? Theme.s-line : Theme.s-hairline);
+    animate background { duration: Theme.t-focus; easing: Theme.ease; }
     txt := Text {
         text: label;
-        color: focused ? #0a0c10 : (lit ? Theme.accent-ink : (enabled ? Theme.text : Theme.dim));
+        color: lit ? Theme.accent-ink : (enabled ? (focused ? #ffffff : Theme.text) : Theme.dim);
         font-size: font;
         font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
         wrap: no-wrap;
+    }
+    FocusRing {
+        width: 100%;
+        height: 100%;
+        radius: parent.height / 2;
+        on: focused;
     }
 }
 
@@ -180,17 +189,17 @@ component Cell inherits Rectangle {
     in property <bool> locked;
     in property <bool> row-selected;
     border-radius: Metrics.root-font * 0.42;
-    background: editing ? Theme.accent : (focused ? Theme.focus-fill : (row-selected && !locked ? #ffffff0d : transparent));
-    border-width: 2px;
-    border-color: editing ? Theme.accent : (focused ? Theme.focus-ring : transparent);
-    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    background: editing ? Theme.accent : (focused ? Theme.s-card-hi : (row-selected && !locked ? #ffffff0d : transparent));
+    border-width: editing ? 2px : 0px;
+    border-color: Theme.accent;
+    animate background { duration: Theme.t-focus; easing: Theme.ease; }
     HorizontalLayout {
         padding-left: Metrics.root-font * 0.55;
         padding-right: Metrics.root-font * 0.55;
         spacing: Metrics.root-font * 0.35;
         Text {
             text: label;
-            color: editing ? Theme.accent-ink : (focused ? #0a0c10 : (locked ? Theme.muted : Theme.text));
+            color: editing ? Theme.accent-ink : (focused ? #ffffff : (locked ? Theme.muted : Theme.text));
             font-size: Metrics.root-font * 0.95;
             font-weight: 750;
             vertical-alignment: center;
@@ -198,7 +207,7 @@ component Cell inherits Rectangle {
         }
         if sub != "": Text {
             text: sub;
-            color: editing ? #5a3d0a : (focused ? #3b4350 : Theme.dim);
+            color: editing ? #5a3d0a : Theme.muted;
             font-size: Metrics.root-font * 0.72;
             font-weight: 600;
             vertical-alignment: center;
@@ -214,6 +223,12 @@ component Cell inherits Rectangle {
             horizontal-stretch: 1;
         }
     }
+    FocusRing {
+        width: 100%;
+        height: 100%;
+        radius: parent.border-radius;
+        on: focused && !editing;
+    }
 }
 
 // A small square button on the selected row.
@@ -222,13 +237,17 @@ component RowButton inherits Rectangle {
     in property <bool> enabled;
     in property <bool> focused;
     border-radius: Metrics.root-font * 0.42;
-    background: focused ? Theme.focus-fill : #ffffff14;
-    border-width: 2px;
-    border-color: focused ? Theme.focus-ring : transparent;
+    background: focused ? Theme.s-card-hi : #ffffff14;
     opacity: enabled ? 1.0 : 0.3;
+    FocusRing {
+        width: 100%;
+        height: 100%;
+        radius: parent.border-radius;
+        on: focused;
+    }
     Text {
         text: label;
-        color: focused ? #0a0c10 : Theme.text;
+        color: focused ? #ffffff : Theme.text;
         font-size: Metrics.root-font * 1.05;
         font-weight: 800;
         horizontal-alignment: center;
@@ -292,6 +311,9 @@ component Piece inherits Rectangle {
 export component CoolingPane inherits Rectangle {
     in property <CoolingView> view;
     in property <bool> active-pane;
+    // False when the screen around it already says "Soğutma" in its own
+    // heading; the profile chips keep their row either way.
+    in property <bool> titled: true;
 
     property <length> rf: Metrics.root-font;
     property <length> gap: rf * 0.9;
@@ -306,7 +328,7 @@ export component CoolingPane inherits Rectangle {
 
     // ---------------------------------------------------------------- header
 
-    Text {
+    if titled: Text {
         x: 0;
         y: 0;
         height: head-h;
@@ -332,13 +354,17 @@ export component CoolingPane inherits Rectangle {
             for chip in view.chips: Rectangle {
                 min-width: word.preferred-width + rf * 2;
                 border-radius: rf * 0.45;
-                background: chip.focused && active-pane ? Theme.focus-fill : (chip.on ? #ffffff1c : transparent);
-                border-width: chip.focused && active-pane ? 2px : 0px;
-                border-color: Theme.focus-ring;
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                background: chip.focused && active-pane ? Theme.s-card-hi : (chip.on ? #ffffff1c : transparent);
+                animate background { duration: Theme.t-focus; easing: Theme.ease; }
+                FocusRing {
+                    width: 100%;
+                    height: 100%;
+                    radius: parent.border-radius;
+                    on: chip.focused && active-pane;
+                }
                 word := Text {
                     text: chip.label;
-                    color: chip.focused && active-pane ? #0a0c10 : (chip.on ? Theme.text : Theme.muted);
+                    color: chip.focused && active-pane ? #ffffff : (chip.on ? Theme.text : Theme.muted);
                     font-size: rf * 0.9;
                     font-weight: 700;
                     horizontal-alignment: center;
@@ -348,14 +374,13 @@ export component CoolingPane inherits Rectangle {
         }
     }
 
-    if !view.available: Text {
+    if !view.available: StateNote {
         x: 0;
-        y: read-y;
-        width: root.width * 0.7;
-        text: view.message;
-        color: Theme.muted;
-        font-size: rf;
-        wrap: word-wrap;
+        y: 0;
+        width: min(root.width, Metrics.list-w);
+        kind: "unavailable";
+        title: "Fan ayarlanamıyor";
+        message: view.message;
     }
 
     // -------------------------------------------------------------- readings

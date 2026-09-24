@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { Dialog, ActionButton, SettingCard } from "kit.slint";
 
 // One shelf item, as the interface needs it. Everything expensive — the
 // artwork, the progress, the fallback's hue — is decided in Rust and arrives
@@ -56,8 +57,19 @@ export struct SettingRow {
     value: string,
     hint: string,
     tone: string,
-    // False for a reading. Focus never lands on one.
+    // False for a reading or a heading. Focus never lands on one.
     selectable: bool,
+    // "header", "reading", "link" (goes somewhere) or "action" (does
+    // something).
+    kind: string,
+    // A mark from the Icons table, or "".
+    icon: string,
+    // How many rows of each height come before this one, so the screen can
+    // place it — and scroll to it — by arithmetic rather than by measuring.
+    n-header: int,
+    n-reading: int,
+    n-card: int,
+    n-flat: int,
 }
 
 export struct DiagGroup {
@@ -1046,110 +1058,46 @@ export component Chip inherits Rectangle {
 // A sheet over whatever is on the panel: the power menu, a confirmation.
 //
 // It has its own focus scope in Rust and the screen behind it does not move,
-// which is the whole reason it is a sheet and not a screen.
-export component Sheet inherits Rectangle {
+// which is the whole reason it is a sheet and not a screen. Drawn as the
+// settings language's dialog, so a question looks the same wherever it is
+// asked.
+export component Sheet inherits Dialog {
     in property <string> title;
     in property <string> kind;
     in property <[SheetRow]> rows;
     in property <int> index;
 
-    width: 100%;
-    height: 100%;
-    // A flat scrim rather than a blur: a full-screen blur on this board was
-    // measured at a quarter of a core, every frame, for a rectangle.
-    background: #04050ac7;
+    panel-w: Metrics.sheet-w;
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: Metrics.sheet-w;
-        height: body.preferred-height + Metrics.sheet-pad * 2;
-        border-radius: Theme.radius * 1.2;
-        background: Theme.bg-sheet;
-        border-width: 1px;
-        border-color: Theme.line;
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Metrics.t-section;
+        font-weight: 750;
+        wrap: word-wrap;
+    }
 
-        body := VerticalLayout {
-            padding: Metrics.sheet-pad;
-            spacing: Metrics.root-font * 0.6;
-            alignment: start;
+    if kind == "confirm": HorizontalLayout {
+        padding-top: Metrics.row-gap;
+        spacing: Metrics.row-gap * 1.2;
+        alignment: start;
 
-            Text {
-                text: root.title;
-                color: Theme.text;
-                font-size: Metrics.root-font * 1.28;
-                font-weight: 760;
-                wrap: word-wrap;
-            }
+        for row[i] in rows: ActionButton {
+            label: row.label;
+            focused: i == index;
+            danger: row.tone == "bad";
+        }
+    }
 
-            if kind == "confirm": HorizontalLayout {
-                spacing: Metrics.root-font * 0.8;
-                alignment: start;
+    if kind != "confirm": VerticalLayout {
+        spacing: Metrics.row-gap;
 
-                for row[i] in rows: Rectangle {
-                    property <bool> focused: i == index;
-                    width: Metrics.sheet-w * 0.4;
-                    height: Metrics.root-font * 3.0;
-                    border-radius: Theme.radius * 0.8;
-                    background: focused
-                        ? (row.tone == "bad" ? Theme.bad : Theme.focus-fill)
-                        : #ffffff0f;
-                    border-width: focused ? 2px : 1px;
-                    border-color: focused ? Theme.focus-ring : Theme.line;
-
-                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-                    Text {
-                        width: 100%;
-                        height: 100%;
-                        text: row.label;
-                        color: focused ? #0a0c10 : Theme.text;
-                        font-size: Metrics.root-font;
-                        font-weight: 720;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            if kind != "confirm": VerticalLayout {
-                spacing: Metrics.root-font * 0.35;
-
-                for row[i] in rows: Rectangle {
-                    property <bool> focused: i == index;
-                    height: Metrics.root-font * 3.4;
-                    border-radius: Theme.radius * 0.8;
-                    background: focused ? #ffffff16 : transparent;
-                    border-width: focused ? 2px : 1px;
-                    border-color: focused ? Theme.focus-ring : Theme.line-soft;
-
-                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-                    VerticalLayout {
-                        padding-left: Metrics.root-font;
-                        padding-right: Metrics.root-font;
-                        alignment: center;
-                        spacing: 0px;
-
-                        Text {
-                            text: row.label;
-                            color: row.tone == "bad" ? Theme.bad : Theme.text;
-                            font-size: Metrics.root-font * 1.02;
-                            font-weight: 700;
-                            overflow: elide;
-                            wrap: no-wrap;
-                        }
-                        if row.hint != "": Text {
-                            text: row.hint;
-                            color: Theme.dim;
-                            font-size: Metrics.text-chip;
-                            font-weight: 600;
-                            overflow: elide;
-                            wrap: no-wrap;
-                        }
-                    }
-                }
-            }
+        for row[i] in rows: SettingCard {
+            label: row.label;
+            hint: row.hint;
+            kind: "action";
+            danger: row.tone == "bad";
+            focused: i == index;
         }
     }
 }

@@ -1,15 +1,18 @@
 //! What the box can be told, from the sofa.
 //!
-//! Sections down the left, rows down the right, and the same rule as the rest
-//! of the interface: the remote is on exactly one of the two panes and crossing
-//! between them is Left and Right, never a guess.
+//! Seven categories down the left, the chosen one's contents on the right, and
+//! the same rule as the rest of the interface: the remote is on exactly one
+//! place at a time, crossing between the column and the right-hand side is
+//! Left and Right, and Back always goes one level up, never a guess.
 //!
-//! Most rows are readings rather than switches. This is an appliance and the
-//! things worth changing from a television remote are few; what belongs here is
-//! being able to *see* that the box is on the network, that CEC found the
-//! television, that the player is where it should be — and to act on the three
-//! or four things a person actually does: wake the television, send it to
-//! standby, restart the player, restart the box.
+//! A category's contents are cards and readings. A card does something or
+//! leads somewhere — a page of its own on the same right-hand side (an account,
+//! the display, the fan curve) or another screen (Wi-Fi, the diagnostics) — and
+//! it is the only thing focus ever lands on. A reading only says what is true:
+//! that the box is on the network, that CEC found the television, which
+//! version this is. This is an appliance and the things worth changing from a
+//! television remote are few; what belongs here is being able to *see* the
+//! rest, and to act on the handful of things a person actually does.
 //!
 //! The destructive rows are the reason [`Action::confirms`] exists. Nothing on
 //! this screen restarts or shuts down the appliance on one press.
@@ -75,6 +78,81 @@ impl Action {
             _ => "",
         }
     }
+
+    /// Whether this goes somewhere rather than doing something, and so carries
+    /// a chevron.
+    fn leads_somewhere(self) -> bool {
+        matches!(
+            self,
+            Action::OpenDiagnostics | Action::OpenWifi | Action::OpenBluetooth | Action::OpenAccount
+        )
+    }
+}
+
+/// A page a card opens on the same right-hand side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Playback,
+    Account,
+    /// The display editor.
+    Output,
+    /// The fan curve editor.
+    Cooling,
+}
+
+impl Page {
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Playback => "Oynatma",
+            Page::Account => "Hesap",
+            Page::Output => OUTPUT,
+            Page::Cooling => COOLING,
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Page::Playback => "Oynatıcının durumu ve yeniden başlatılması",
+            Page::Account => "Stremio hesabı ve eklentileri",
+            Page::Output => "Çözünürlük, yenileme hızı ve renk",
+            Page::Cooling => "Fan eğrisi ve işlemci sıcaklığı",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Page::Playback => "play",
+            Page::Account => "user",
+            Page::Output => "monitor",
+            Page::Cooling => "fan",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// How a row is drawn, and whether focus can land on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Header,
+    Reading,
+    /// A card that leads somewhere.
+    Link,
+    /// A card that does something.
+    Action,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Header => "header",
+            Kind::Reading => "reading",
+            Kind::Link => "link",
+            Kind::Action => "action",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,7 +162,11 @@ pub struct Row {
     pub hint: String,
     /// "" for a reading, "good" / "warn" / "bad" for one that has a verdict.
     pub tone: String,
+    /// A mark from the interface's own table, "" for none.
+    pub icon: &'static str,
+    pub header: bool,
     pub action: Option<Action>,
+    pub page: Option<Page>,
 }
 
 /// The Wi-Fi door, with what the daemon could tell us without asking the
@@ -106,7 +188,7 @@ fn wifi_row(diagnostics: Option<&Value>) -> Row {
     Row {
         value,
         tone: tone.into(),
-        ..Row::act("Wi-Fi", "Ağları ara ve bağlan", Action::OpenWifi)
+        ..Row::act("Wi-Fi", "Ağları ara ve bağlan", "wifi", Action::OpenWifi)
     }
 }
 
@@ -129,7 +211,7 @@ fn bluetooth_row(diagnostics: Option<&Value>) -> Row {
     Row {
         value,
         tone: tone.into(),
-        ..Row::act("Bluetooth", "Aygıt ara ve eşleştir", Action::OpenBluetooth)
+        ..Row::act("Bluetooth", "Aygıt ara ve eşleştir", "bluetooth", Action::OpenBluetooth)
     }
 }
 
@@ -140,7 +222,10 @@ impl Row {
             value: value.into(),
             hint: String::new(),
             tone: String::new(),
+            icon: "",
+            header: false,
             action: None,
+            page: None,
         }
     }
 
@@ -151,41 +236,83 @@ impl Row {
         }
     }
 
-    fn act(label: &str, hint: &str, action: Action) -> Self {
+    fn header(label: &str) -> Self {
         Self {
-            label: label.into(),
-            value: String::new(),
+            header: true,
+            ..Row::reading(label, "")
+        }
+    }
+
+    fn act(label: &str, hint: &str, icon: &'static str, action: Action) -> Self {
+        Self {
             hint: hint.into(),
-            tone: String::new(),
+            icon,
             action: Some(action),
+            ..Row::reading(label, "")
+        }
+    }
+
+    fn link(page: Page, hint: &str, value: impl Into<String>, tone: &str) -> Self {
+        Self {
+            hint: hint.into(),
+            icon: page.icon(),
+            page: Some(page),
+            tone: tone.into(),
+            ..Row::reading(page.title(), value)
         }
     }
 
     pub fn selectable(&self) -> bool {
-        self.action.is_some()
+        self.action.is_some() || self.page.is_some()
+    }
+
+    pub fn kind(&self) -> Kind {
+        if self.header {
+            Kind::Header
+        } else if self.page.is_some() || self.action.is_some_and(Action::leads_somewhere) {
+            Kind::Link
+        } else if self.action.is_some() {
+            Kind::Action
+        } else {
+            Kind::Reading
+        }
     }
 }
 
 pub struct Group {
     pub title: String,
+    pub blurb: &'static str,
+    pub icon: &'static str,
     pub rows: Vec<Row>,
 }
 
+/// Where the remote is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
+    /// The category column.
     Sections,
+    /// The chosen category's cards.
     Rows,
+    /// A page a card opened.
+    Page,
 }
+
+const PAGES: usize = 4;
 
 pub struct Settings {
     pub groups: Vec<Group>,
     pub section: usize,
     pub pane: Pane,
     positions: Vec<usize>,
-    /// The fan curve editor, which is the whole of the "Soğutma" section: a
+    /// The page open on the right-hand side while `pane` is `Page`.
+    page: Option<Page>,
+    /// The rows of the pages that are lists, composed with everything else.
+    page_rows: [Vec<Row>; PAGES],
+    page_positions: [usize; PAGES],
+    /// The fan curve editor, which is the whole of the "Soğutma" page: a
     /// graph and a list of points rather than rows of readings.
     pub cooling: super::cooling::Cooling,
-    /// The display editor, which is the whole of the "Ekran" section.
+    /// The display editor, which is the whole of the "Ekran" page.
     pub output: super::output::Output,
 }
 
@@ -196,6 +323,9 @@ impl Settings {
             section: 0,
             pane: Pane::Sections,
             positions: Vec::new(),
+            page: None,
+            page_rows: Default::default(),
+            page_positions: [0; PAGES],
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
         };
@@ -203,79 +333,106 @@ impl Settings {
         settings
     }
 
-    pub fn row_index(&self) -> usize {
-        self.positions.get(self.section).copied().unwrap_or(0)
+    /// The page on screen, if one is.
+    pub fn page(&self) -> Option<Page> {
+        if self.pane == Pane::Page { self.page } else { None }
     }
 
+    /// Whether the rows on the right are a list page's rather than the
+    /// category's.
+    fn in_list_page(&self) -> bool {
+        matches!(self.page(), Some(Page::Playback | Page::Account))
+    }
+
+    pub fn row_index(&self) -> usize {
+        match self.page() {
+            Some(page) if self.in_list_page() => self.page_positions[page.index()],
+            _ => self.positions.get(self.section).copied().unwrap_or(0),
+        }
+    }
+
+    /// The rows on the right-hand side: a list page's, or the category's.
     pub fn rows(&self) -> &[Row] {
-        self.groups
-            .get(self.section)
-            .map(|g| g.rows.as_slice())
-            .unwrap_or(&[])
+        match self.page() {
+            Some(page) if self.in_list_page() => &self.page_rows[page.index()],
+            _ => self
+                .groups
+                .get(self.section)
+                .map(|g| g.rows.as_slice())
+                .unwrap_or(&[]),
+        }
     }
 
     pub fn focused(&self) -> Option<&Row> {
         self.rows().get(self.row_index())
     }
 
+    /// What the right-hand side is headed with.
+    pub fn heading(&self) -> (String, String) {
+        match self.page() {
+            Some(Page::Output) if self.output.advanced() => {
+                ("Gelişmiş ekran ayarları".into(), self.output.sink_line())
+            }
+            Some(page) => (page.title().into(), page.blurb().into()),
+            None => self
+                .groups
+                .get(self.section)
+                .map(|g| (g.title.clone(), g.blurb.to_string()))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn set_row_index(&mut self, at: usize) {
+        match self.page() {
+            Some(page) if self.in_list_page() => self.page_positions[page.index()] = at,
+            _ => {
+                if let Some(slot) = self.positions.get_mut(self.section) {
+                    *slot = at;
+                }
+            }
+        }
+    }
+
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
-        // The fan editor has its own list and its own buttons; the section
-        // list only hands the remote over and takes it back.
-        if self.is_output() {
-            match self.pane {
-                Pane::Sections if dx > 0 => {
-                    if !self.output.available() {
-                        return false;
-                    }
-                    self.pane = Pane::Rows;
-                    self.output.enter();
-                    return true;
-                }
-                Pane::Rows => {
-                    return match self.output.step(dx, dy) {
-                        super::output::Nav::Moved => true,
-                        super::output::Nav::Unchanged => false,
-                        super::output::Nav::Leave => {
-                            self.pane = Pane::Sections;
-                            true
-                        }
-                    };
-                }
-                Pane::Sections => {}
-            }
-        }
-        if self.is_cooling() {
-            match self.pane {
-                Pane::Sections if dx > 0 => {
-                    if !self.cooling.available() {
-                        return false;
-                    }
-                    self.pane = Pane::Rows;
-                    self.cooling.enter();
-                    return true;
-                }
-                Pane::Rows => {
-                    return match self.cooling.step(dx, dy) {
-                        super::cooling::Nav::Moved => true,
-                        super::cooling::Nav::Unchanged => false,
-                        super::cooling::Nav::Leave => {
-                            self.pane = Pane::Sections;
-                            true
-                        }
-                    };
-                }
-                Pane::Sections => {}
-            }
-        }
         match self.pane {
+            Pane::Page => match self.page {
+                // The editors have their own lists and buttons; this only
+                // hands the remote over and takes it back.
+                Some(Page::Output) => match self.output.step(dx, dy) {
+                    super::output::Nav::Moved => true,
+                    super::output::Nav::Unchanged => false,
+                    super::output::Nav::Leave => {
+                        self.close_page();
+                        true
+                    }
+                },
+                Some(Page::Cooling) => match self.cooling.step(dx, dy) {
+                    super::cooling::Nav::Moved => true,
+                    super::cooling::Nav::Unchanged => false,
+                    super::cooling::Nav::Leave => {
+                        self.close_page();
+                        true
+                    }
+                },
+                Some(_) => {
+                    if dx < 0 {
+                        self.close_page();
+                        return true;
+                    }
+                    self.move_rows(dy)
+                }
+                None => false,
+            },
+            Pane::Rows => {
+                if dx < 0 {
+                    self.pane = Pane::Sections;
+                    return true;
+                }
+                self.move_rows(dy)
+            }
             Pane::Sections => {
                 if dx > 0 {
-                    if self.rows().is_empty() {
-                        return false;
-                    }
-                    self.pane = Pane::Rows;
-                    self.settle(1);
-                    return true;
+                    return self.enter_rows();
                 }
                 if dx < 0 || dy == 0 {
                     return false;
@@ -288,54 +445,96 @@ impl Settings {
                 self.section = next;
                 true
             }
-            Pane::Rows => {
-                if dx < 0 {
-                    self.pane = Pane::Sections;
-                    return true;
-                }
-                if dy == 0 {
-                    return false;
-                }
-                let before = self.row_index();
-                self.settle_from(before as i32 + dy, dy);
-                self.row_index() != before
-            }
         }
+    }
+
+    /// From the column onto the category's first card, or where the remote
+    /// was last time. A category with nothing to press keeps the remote on the
+    /// column: focus sitting on a line that does nothing is focus a viewer
+    /// cannot trust.
+    fn enter_rows(&mut self) -> bool {
+        let rows = self.groups.get(self.section).map_or(&[][..], |g| g.rows.as_slice());
+        if !rows.iter().any(Row::selectable) {
+            return false;
+        }
+        self.pane = Pane::Rows;
+        self.settle(1);
+        true
+    }
+
+    fn move_rows(&mut self, dy: i32) -> bool {
+        if dy == 0 {
+            return false;
+        }
+        let before = self.row_index();
+        if let Some(at) = next_selectable(self.rows(), before as i32 + dy, dy) {
+            self.set_row_index(at);
+        }
+        self.row_index() != before
     }
 
     /// Lands on the nearest row that can actually be chosen.
     ///
-    /// A settings screen is mostly readings, and focus sitting on a line that
-    /// does nothing when Ok is pressed is focus a viewer cannot trust. Rows
-    /// that are only information are stepped over.
+    /// A settings screen is mostly readings, and rows that are only
+    /// information are stepped over.
     fn settle(&mut self, direction: i32) {
         let start = self.row_index() as i32;
-        self.settle_from(start, direction);
+        let found = next_selectable(self.rows(), start, direction)
+            .or_else(|| next_selectable(self.rows(), start, -direction));
+        if let Some(at) = found {
+            self.set_row_index(at);
+        }
     }
 
-    fn settle_from(&mut self, start: i32, direction: i32) {
-        let rows = self.rows().len() as i32;
-        if rows == 0 {
-            return;
-        }
-        let direction = if direction == 0 {
-            1
-        } else {
-            direction.signum()
-        };
-        let mut at = start;
-        while at >= 0 && at < rows {
-            if self.rows()[at as usize].selectable() {
-                self.positions[self.section] = at as usize;
-                return;
+    /// Opens the page a card leads to. An editor with nothing to edit does
+    /// not open: its card is a reading that says why in the first place.
+    pub fn open(&mut self, page: Page) -> bool {
+        match page {
+            Page::Output => {
+                if !self.output.available() {
+                    return false;
+                }
+                self.output.enter();
             }
-            at += direction;
+            Page::Cooling => {
+                if !self.cooling.available() {
+                    return false;
+                }
+                self.cooling.enter();
+            }
+            Page::Playback | Page::Account => {}
         }
-        // Nothing selectable that way; leave the remote where it was.
+        self.page = Some(page);
+        self.pane = Pane::Page;
+        if self.in_list_page() {
+            self.settle(1);
+        }
+        true
     }
 
-    /// Rebuilt from whatever the control plane last answered. Keeps the pane
-    /// and the position, because this runs on a timer.
+    fn close_page(&mut self) {
+        self.pane = Pane::Rows;
+        self.page = None;
+    }
+
+    /// Back, once the editor on screen has had its say: one level up. False
+    /// on the column itself, where Back leaves the screen.
+    pub fn back(&mut self) -> bool {
+        match self.pane {
+            Pane::Page => {
+                self.close_page();
+                true
+            }
+            Pane::Rows => {
+                self.pane = Pane::Sections;
+                true
+            }
+            Pane::Sections => false,
+        }
+    }
+
+    /// Rebuilt from whatever the control plane last answered. Keeps the pane,
+    /// the page and every position, because this runs on a timer.
     pub fn compose(
         &mut self,
         status: Option<&Value>,
@@ -355,8 +554,39 @@ impl Settings {
             let slot = self.positions[index].min(group.rows.len().saturating_sub(1));
             self.positions[index] = slot;
         }
-        self.settle(1);
+        for page in [Page::Playback, Page::Account] {
+            let rows = page_rows(page, status, display);
+            let slot = self.page_positions[page.index()].min(rows.len().saturating_sub(1));
+            self.page_rows[page.index()] = rows;
+            self.page_positions[page.index()] = slot;
+        }
+        // An editor whose display or fan went away while it was open has
+        // nothing left to edit; its category says why.
+        match self.page() {
+            Some(Page::Output) if !self.output.available() => self.close_page(),
+            Some(Page::Cooling) if !self.cooling.available() => self.close_page(),
+            _ => {}
+        }
+        if self.pane == Pane::Rows && !self.rows().iter().any(Row::selectable) {
+            self.pane = Pane::Sections;
+        }
+        if self.pane != Pane::Sections {
+            self.settle(1);
+        }
     }
+}
+
+/// The first row from `start` that can be chosen, walking in `direction`.
+fn next_selectable(rows: &[Row], start: i32, direction: i32) -> Option<usize> {
+    let direction = if direction == 0 { 1 } else { direction.signum() };
+    let mut at = start;
+    while at >= 0 && (at as usize) < rows.len() {
+        if rows[at as usize].selectable() {
+            return Some(at as usize);
+        }
+        at += direction;
+    }
+    None
 }
 
 fn fan_status(status: Option<&Value>) -> Option<FanStatus> {
@@ -368,63 +598,76 @@ fn output_status(status: Option<&Value>) -> Option<mediabox_core::OutputStatus> 
 }
 
 impl Settings {
-    /// Whether the section on screen is the fan editor, which draws and moves
-    /// by its own rules.
-    /// Whether keys belong to the fan editor: its section, with the focus in
-    /// it rather than on the section list.
+    /// Whether keys belong to the fan editor: its page, open.
     pub fn typing_cooling(&self) -> bool {
-        self.is_cooling() && self.pane == Pane::Rows
+        self.is_cooling()
     }
 
+    /// Whether the page on screen is the fan editor, which draws and moves by
+    /// its own rules.
     pub fn is_cooling(&self) -> bool {
-        self.groups
-            .get(self.section)
-            .is_some_and(|group| group.title == COOLING)
+        self.page() == Some(Page::Cooling)
     }
 
-    /// Whether the section on screen is the display editor.
+    /// Whether the page on screen is the display editor.
     pub fn is_output(&self) -> bool {
-        self.groups
-            .get(self.section)
-            .is_some_and(|group| group.title == OUTPUT)
+        self.page() == Some(Page::Output)
     }
 
     /// Whether the remote belongs to the display editor.
     pub fn in_output(&self) -> bool {
-        self.is_output() && self.pane == Pane::Rows
+        self.is_output()
     }
 }
 
-/// The section the display editor lives in.
+/// The display editor's page.
 pub const OUTPUT: &str = "Ekran";
 
-/// What the section list says before the editor can open: why there is no
-/// display to set.
-fn output(status: Option<&Value>) -> Vec<Row> {
+/// The card that opens the display editor, or — when there is no display to
+/// set — a reading that says why.
+fn output(status: Option<&Value>) -> Row {
     match output_status(status) {
         Some(output) if output.offer.is_some() => {
-            vec![Row::reading("Çözünürlük ve renk", "Sağa basın")]
+            let now = output
+                .offer
+                .as_ref()
+                .zip(output.wire.as_ref())
+                .and_then(|(offer, wire)| offer.mode(&wire.mode))
+                .map(super::output::label)
+                .unwrap_or_default();
+            Row::link(Page::Output, Page::Output.blurb(), now, "")
         }
-        Some(output) => vec![Row::reading(
-            "Ekran",
+        Some(output) => Row::toned(
+            OUTPUT,
             output.error.unwrap_or_else(|| "Ekran okunamadı".into()),
-        )],
-        None => vec![Row::reading("Ekran", "Okunuyor…")],
+            "warn",
+        ),
+        None => Row::reading(OUTPUT, "Okunuyor…"),
     }
 }
 
-/// The section the fan editor lives in.
+/// The fan editor's page.
 pub const COOLING: &str = "Soğutma";
 
-/// What the section list says before the editor can open: why there is no
+/// The card that opens the fan editor, or a reading that says why there is no
 /// fan to edit.
-fn cooling(status: Option<&Value>) -> Vec<Row> {
-    let reason = match fan_status(status) {
-        Some(fan) if fan.available => return vec![Row::reading("Fan eğrisi", "Sağa basın")],
-        Some(fan) => fan.error.unwrap_or_else(|| "Fan okunamadı".into()),
-        None => "Fan okunuyor…".into(),
-    };
-    vec![Row::reading("Fan", reason)]
+fn cooling(status: Option<&Value>) -> Row {
+    match fan_status(status) {
+        Some(fan) if fan.available => {
+            let now = match (fan.temperature_c, fan.pwm_percent) {
+                (Some(celsius), Some(duty)) => format!("{celsius:.0} °C · fan %{duty:.0}"),
+                (Some(celsius), None) => format!("{celsius:.0} °C"),
+                _ => String::new(),
+            };
+            Row::link(Page::Cooling, "Fan eğrisi", now, "")
+        }
+        Some(fan) => Row::toned(
+            "Fan",
+            fan.error.unwrap_or_else(|| "Fan okunamadı".into()),
+            "warn",
+        ),
+        None => Row::reading("Fan", "Fan okunuyor…"),
+    }
 }
 
 fn text(root: Option<&Value>, pointer: &str) -> Option<String> {
@@ -462,7 +705,8 @@ fn duration(seconds: u64) -> String {
     }
 }
 
-/// The board's indicator lights.
+/// The board's indicator lights: the card, and the readings that go under
+/// the "Işıklar" heading.
 ///
 /// Three lights, and only two of them are anybody's to change. The red one is
 /// wired to the supply and appears nowhere in the device tree, so it is a
@@ -474,7 +718,7 @@ fn duration(seconds: u64) -> String {
 /// the right is where the lights are now, and pressing Ok moves to the mode
 /// named in the hint. A remote has three buttons that matter and no text
 /// field, so stepping round a ring of three is the whole interaction.
-fn leds(status: Option<&Value>) -> Vec<Row> {
+fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
     let red = Row::reading("Kırmızı ışık", "Donanımdan yanar — kapatılamaz");
 
     if flag(status, "/leds/available") != Some(true) {
@@ -482,7 +726,7 @@ fn leds(status: Option<&Value>) -> Vec<Row> {
         // lights are on gpio-leds. Either way there is nothing to press.
         let reason =
             text(status, "/leds/error").unwrap_or_else(|| "Denetlenebilir ışık bulunamadı".into());
-        return vec![Row::reading("Yeşil ve mavi ışık", reason), red];
+        return (None, vec![Row::reading("Yeşil ve mavi ışık", reason), red]);
     }
 
     let mode = match text(status, "/leds/mode").as_deref() {
@@ -492,33 +736,41 @@ fn leds(status: Option<&Value>) -> Vec<Row> {
     };
     let next = mode.next();
 
-    vec![
-        Row {
-            label: "Yeşil ve mavi ışık".into(),
+    (
+        Some(Row {
             value: mode.label().into(),
-            hint: format!("Ok: {}", next.label()),
             tone: if mode == LedMode::Off {
                 "good".into()
             } else {
                 String::new()
             },
-            action: Some(Action::SetLeds(next)),
-        },
-        red,
-        Row::reading("Kalıcılık", "Seçim yeniden başlatmadan sonra korunur"),
-    ]
+            ..Row::act(
+                "Yeşil ve mavi ışık",
+                &format!("Ok: {}", next.label()),
+                "bulb",
+                Action::SetLeds(next),
+            )
+        }),
+        vec![
+            red,
+            Row::reading("Kalıcılık", "Seçim yeniden başlatmadan sonra korunur"),
+        ],
+    )
 }
 
+fn signed_in(status: Option<&Value>) -> bool {
+    flag(status, "/media/provider/authenticated").unwrap_or(false)
+}
 
 /// The Stremio account.
 ///
 /// The same three readings the web interface shows, from the same place in the
-/// status, and one row to press. Connected, it offers the way out; not
+/// status, and one card to press. Connected, it offers the way out; not
 /// connected, it offers the way in — there is never both, because a screen that
 /// shows a sign-out button to somebody who is not signed in is a screen that
 /// has not read its own state.
 fn account(status: Option<&Value>) -> Vec<Row> {
-    let signed_in = flag(status, "/media/provider/authenticated").unwrap_or(false);
+    let signed_in = signed_in(status);
     let note = Row::reading(
         "Eklentiler",
         if signed_in {
@@ -530,17 +782,21 @@ fn account(status: Option<&Value>) -> Vec<Row> {
 
     if !signed_in {
         return vec![
-            Row::toned("Durum", "Bağlı değil", "warn"),
-            note,
             Row::act(
                 "Giriş yap",
                 "E-posta ve parolanızı kumandayla girin",
+                "signin",
                 Action::OpenAccount,
             ),
+            Row::header("Durum"),
+            Row::toned("Durum", "Bağlı değil", "warn"),
+            note,
         ];
     }
 
     vec![
+        Row::act("Çıkış yap", "Hesabın bağlantısını keser", "signout", Action::SignOut),
+        Row::header("Durum"),
         Row::toned("Durum", "Bağlı", "good"),
         Row::reading(
             "Hesap",
@@ -555,17 +811,15 @@ fn account(status: Option<&Value>) -> Vec<Row> {
                 .to_string(),
         ),
         note,
-        Row::act("Çıkış yap", "Hesabın bağlantısını keser", Action::SignOut),
     ]
 }
 
-fn compose(
-    status: Option<&Value>,
-    diagnostics: Option<&Value>,
-    display: Option<&DisplayStatus>,
-) -> Vec<Group> {
-    let dash = || "—".to_string();
+fn kodi_running(status: Option<&Value>) -> bool {
+    flag(status, "/kodi/running").unwrap_or(false)
+}
 
+/// The player: what it is doing, and the one thing to do about it.
+fn playback(status: Option<&Value>, display: Option<&DisplayStatus>) -> Vec<Row> {
     let owner = display
         .and_then(|d| d.owner.clone())
         .map(|id| match id.as_str() {
@@ -575,40 +829,95 @@ fn compose(
             other => other.to_string(),
         })
         .unwrap_or_else(|| "Boşta".into());
+    let running = kodi_running(status);
+    vec![
+        Row::act(
+            "Oynatıcıyı yeniden başlat",
+            "Kodi'yi kapatıp açar",
+            "restart",
+            Action::RestartPlayer,
+        ),
+        Row::header("Durum"),
+        Row::toned(
+            "Oynatıcı",
+            if running { "Çalışıyor" } else { "Kapalı" },
+            if running { "good" } else { "" },
+        ),
+        Row::reading("Ekranı tutan", owner),
+        Row::reading("Görüntü", "Kopyalanır — yeniden kodlanmaz"),
+        Row::reading("Ses", "Gerekirse AC-3'e çevrilir"),
+    ]
+}
+
+fn page_rows(page: Page, status: Option<&Value>, display: Option<&DisplayStatus>) -> Vec<Row> {
+    match page {
+        Page::Playback => playback(status, display),
+        Page::Account => account(status),
+        Page::Output | Page::Cooling => Vec::new(),
+    }
+}
+
+fn compose(
+    status: Option<&Value>,
+    diagnostics: Option<&Value>,
+    _display: Option<&DisplayStatus>,
+) -> Vec<Group> {
+    let dash = || "—".to_string();
 
     let (cec_state, cec_tone) = yes_no(flag(status, "/cec/available"));
-    let kodi_running = flag(status, "/kodi/running").unwrap_or(false);
+    let running = kodi_running(status);
+    let signed_in = signed_in(status);
+    let (led_card, led_readings) = leds(status);
+
+    let mut device = Vec::new();
+    device.extend(led_card);
+    device.push(cooling(status));
+    device.push(Row::header("Işıklar"));
+    device.extend(led_readings);
 
     vec![
         Group {
-            title: "Oynatma".into(),
+            title: "Medya".into(),
+            blurb: "Oynatma ve hesap ile ilgili ayarlar",
+            icon: "play",
             rows: vec![
-                Row::toned(
-                    "Oynatıcı",
-                    if kodi_running {
-                        "Çalışıyor"
-                    } else {
-                        "Kapalı"
-                    },
-                    if kodi_running { "good" } else { "" },
+                Row::link(
+                    Page::Playback,
+                    "Oynatıcının durumu ve yeniden başlatılması",
+                    if running { "Çalışıyor" } else { "Kapalı" },
+                    if running { "good" } else { "" },
                 ),
-                Row::reading("Ekranı tutan", owner),
-                Row::reading("Görüntü", "Kopyalanır — yeniden kodlanmaz"),
-                Row::reading("Ses", "Gerekirse AC-3'e çevrilir"),
-                Row::act(
-                    "Oynatıcıyı yeniden başlat",
-                    "Kodi'yi kapatıp açar",
-                    Action::RestartPlayer,
+                Row::link(
+                    Page::Account,
+                    "Stremio hesabı ve eklentileri",
+                    if signed_in { "Bağlı" } else { "Bağlı değil" },
+                    if signed_in { "good" } else { "warn" },
                 ),
             ],
         },
         Group {
-            title: "Hesap".into(),
-            rows: account(status),
+            title: "Görüntü ve Ses".into(),
+            blurb: "Ekran çözünürlüğü, renk ve ses çıkışı",
+            icon: "monitor",
+            rows: vec![
+                output(status),
+                Row::header("Ses"),
+                Row::reading(
+                    "Çıkış",
+                    text(diagnostics, "/audio/default").unwrap_or_else(|| "HDMI".into()),
+                ),
+                Row::reading("Geçirgen kodekler", "AC-3 · E-AC-3 · DTS"),
+                Row::reading("Nesne tabanlı ses", "AC-3'e çevrilir"),
+            ],
         },
         Group {
-            title: "Ağ".into(),
+            title: "Bağlantılar".into(),
+            blurb: "Ağ ve kablosuz bağlantılar",
+            icon: "wifi",
             rows: vec![
+                wifi_row(diagnostics),
+                bluetooth_row(diagnostics),
+                Row::header("Ağ"),
                 Row::reading(
                     "Arayüz",
                     text(diagnostics, "/network/default/interface").unwrap_or_else(dash),
@@ -621,17 +930,26 @@ fn compose(
                     "Ağ geçidi",
                     text(diagnostics, "/network/default/gateway").unwrap_or_else(dash),
                 ),
-                Row::reading("Uzaktan kumanda", "http://<cihaz>:8788"),
-                wifi_row(diagnostics),
             ],
         },
         Group {
-            title: "Bluetooth".into(),
-            rows: vec![bluetooth_row(diagnostics)],
-        },
-        Group {
-            title: "HDMI ve CEC".into(),
+            title: "TV ve Kumanda".into(),
+            blurb: "Televizyonu HDMI-CEC ile yönetin",
+            icon: "remote",
             rows: vec![
+                Row::act(
+                    "Televizyonu uyandır",
+                    "CEC ile açılış isteği",
+                    "tv",
+                    Action::WakeTelevision,
+                ),
+                Row::act(
+                    "Televizyonu beklemeye al",
+                    "CEC ile standby",
+                    "moon",
+                    Action::StandbyTelevision,
+                ),
+                Row::header("HDMI-CEC"),
                 Row::toned("CEC", cec_state, cec_tone),
                 Row::reading(
                     "Bağdaştırıcı",
@@ -641,47 +959,26 @@ fn compose(
                     "Fiziksel adres",
                     text(status, "/cec/physical_address").unwrap_or_else(dash),
                 ),
-                Row::act(
-                    "Televizyonu uyandır",
-                    "CEC ile açılış isteği",
-                    Action::WakeTelevision,
-                ),
-                Row::act(
-                    "Televizyonu beklemeye al",
-                    "CEC ile standby",
-                    Action::StandbyTelevision,
-                ),
+                Row::header("Telefon kumandası"),
+                Row::reading("Uzaktan kumanda", "http://<cihaz>:8788"),
             ],
         },
         Group {
-            title: OUTPUT.into(),
-            rows: output(status),
-        },
-        Group {
-            title: "Ses".into(),
-            rows: vec![
-                Row::reading(
-                    "Çıkış",
-                    text(diagnostics, "/audio/default").unwrap_or_else(|| "HDMI".into()),
-                ),
-                Row::reading("Geçirgen kodekler", "AC-3 · E-AC-3 · DTS"),
-                Row::reading("Nesne tabanlı ses", "AC-3'e çevrilir"),
-            ],
-        },
-        Group {
-            title: "Işıklar".into(),
-            rows: leds(status),
-        },
-        Group {
-            title: COOLING.into(),
-            rows: cooling(status),
+            title: "Cihaz".into(),
+            blurb: "Işıklar ve soğutma",
+            icon: "chip",
+            rows: device,
         },
         Group {
             title: "Sistem".into(),
+            blurb: "Sürüm, yeniden başlatma ve kapatma",
+            icon: "info",
             rows: vec![
+                Row::act("Yeniden başlat", "Cihazı kapatıp açar", "restart", Action::Restart),
+                Row::act("Kapat", "Cihazı kapatır", "power", Action::Shutdown),
+                Row::header("Sürüm"),
                 Row::reading("Sürüm", text(status, "/version").unwrap_or_else(dash)),
                 Row::reading("Makine", text(status, "/hostname").unwrap_or_else(dash)),
-                Row::reading("Çekirdek", text(status, "/kernel").unwrap_or_else(dash)),
                 Row::reading(
                     "Açık kalma",
                     status
@@ -690,15 +987,16 @@ fn compose(
                         .map(duration)
                         .unwrap_or_else(dash),
                 ),
-                Row::act("Yeniden başlat", "Cihazı kapatıp açar", Action::Restart),
-                Row::act("Kapat", "Cihazı kapatır", Action::Shutdown),
             ],
         },
         Group {
             title: "Tanılama".into(),
+            blurb: "İşlemci, bellek, sıcaklık, ekran ve servisler",
+            icon: "bars",
             rows: vec![Row::act(
                 "Tanılamayı aç",
-                "İşlemci, bellek, sıcaklık, ekran, servisler",
+                "Salt okunur teknik ayrıntılar",
+                "bars",
                 Action::OpenDiagnostics,
             )],
         },
@@ -709,9 +1007,34 @@ fn compose(
 mod tests {
     use super::*;
 
+    fn section(settings: &mut Settings, title: &str) {
+        settings.section = settings
+            .groups
+            .iter()
+            .position(|g| g.title == title)
+            .unwrap_or_else(|| panic!("no {title} section"));
+    }
+
+    /// Every card on every category and list page, with what it does.
+    fn reachable(settings: &Settings) -> (Vec<Action>, Vec<Page>) {
+        let mut actions = Vec::new();
+        let mut pages = Vec::new();
+        let rows = settings
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .chain(settings.page_rows.iter().flatten());
+        for row in rows {
+            actions.extend(row.action);
+            pages.extend(row.page);
+        }
+        (actions, pages)
+    }
+
     #[test]
     fn focus_lands_on_something_that_can_be_pressed() {
-        let settings = Settings::new();
+        let mut settings = Settings::new();
+        assert!(settings.step(1, 0));
         assert!(
             settings
                 .focused()
@@ -729,22 +1052,71 @@ mod tests {
         }
     }
 
+    /// The categories of the design, in its order.
     #[test]
-    fn the_brief_s_sections_are_all_here() {
+    fn the_categories_are_the_design_s() {
         let settings = Settings::new();
         let titles: Vec<&str> = settings.groups.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Medya",
+                "Görüntü ve Ses",
+                "Bağlantılar",
+                "TV ve Kumanda",
+                "Cihaz",
+                "Sistem",
+                "Tanılama"
+            ]
+        );
+        for group in &settings.groups {
+            assert!(!group.icon.is_empty() && !group.blurb.is_empty(), "{}", group.title);
+        }
+    }
+
+    /// The move to seven categories must not lose anything the old sections
+    /// could do: every action and every editor is still one card away.
+    #[test]
+    fn nothing_the_old_sections_could_do_is_lost() {
+        let status = serde_json::json!({
+            "leds": {"available": true, "mode": "off", "leds": []},
+            "fan": fan_answer()["fan"],
+            "output": output_answer(),
+        });
+        let mut settings = Settings::new();
+        settings.compose(Some(&status), None, None);
+        let (actions, pages) = reachable(&settings);
         for wanted in [
-            "Oynatma",
-            "Ağ",
-            "Bluetooth",
-            "HDMI ve CEC",
-            "Ekran",
-            "Ses",
-            "Soğutma",
-            "Sistem",
-            "Tanılama",
+            Action::OpenDiagnostics,
+            Action::OpenWifi,
+            Action::OpenBluetooth,
+            Action::OpenAccount,
+            Action::WakeTelevision,
+            Action::StandbyTelevision,
+            Action::RestartPlayer,
+            Action::Restart,
+            Action::Shutdown,
+            Action::SetLeds(LedMode::On),
         ] {
-            assert!(titles.contains(&wanted), "{wanted} missing from {titles:?}");
+            assert!(actions.contains(&wanted), "{wanted:?} is not reachable");
+        }
+        for wanted in [Page::Playback, Page::Account, Page::Output, Page::Cooling] {
+            assert!(pages.contains(&wanted), "{wanted:?} is not reachable");
+        }
+        // And the readings the old sections showed are still somewhere.
+        let labels: Vec<&str> = settings
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .chain(settings.page_rows.iter().flatten())
+            .map(|row| row.label.as_str())
+            .collect();
+        for wanted in [
+            "Oynatıcı", "Ekranı tutan", "Arayüz", "Adres", "Ağ geçidi", "Uzaktan kumanda", "CEC",
+            "Bağdaştırıcı", "Fiziksel adres", "Çıkış", "Geçirgen kodekler", "Kırmızı ışık",
+            "Sürüm", "Makine", "Açık kalma",
+        ] {
+            assert!(labels.contains(&wanted), "{wanted} is gone");
         }
     }
 
@@ -759,42 +1131,109 @@ mod tests {
         assert_eq!(settings.pane, Pane::Sections);
     }
 
+    /// Up and down on the column change the category; the right-hand side
+    /// follows, and nothing is entered.
     #[test]
-    fn readings_are_stepped_over() {
+    fn the_column_walks_the_categories() {
         let mut settings = Settings::new();
-        // "Sistem" — four readings then two actions.
-        settings.section = settings
-            .groups
-            .iter()
-            .position(|g| g.title == "Sistem")
-            .expect("system section");
-        settings.pane = Pane::Rows;
-        settings.settle(1);
+        assert!(!settings.step(0, -1), "already at the top");
+        assert!(settings.step(0, 1));
+        assert_eq!(settings.section, 1);
+        assert_eq!(settings.pane, Pane::Sections);
+        for _ in 0..20 {
+            settings.step(0, 1);
+        }
+        assert_eq!(settings.section, settings.groups.len() - 1);
+    }
+
+    #[test]
+    fn readings_and_headings_are_stepped_over() {
+        let mut settings = Settings::new();
+        section(&mut settings, "Sistem");
+        assert!(settings.step(1, 0));
         assert_eq!(
             settings.focused().and_then(|r| r.action),
             Some(Action::Restart)
         );
-        settings.step(0, 1);
+        assert!(settings.step(0, 1));
+        assert_eq!(
+            settings.focused().and_then(|r| r.action),
+            Some(Action::Shutdown)
+        );
+        // Below are only a heading and readings: the remote stays.
+        assert!(!settings.step(0, 1));
         assert_eq!(
             settings.focused().and_then(|r| r.action),
             Some(Action::Shutdown)
         );
     }
 
+    /// Each category keeps the card the remote was on.
+    #[test]
+    fn each_category_remembers_its_row() {
+        let mut settings = Settings::new();
+        section(&mut settings, "Sistem");
+        settings.step(1, 0);
+        settings.step(0, 1);
+        settings.step(-1, 0);
+        settings.step(0, -1); // Cihaz
+        settings.step(0, 1); // Sistem again
+        settings.step(1, 0);
+        assert_eq!(
+            settings.focused().and_then(|r| r.action),
+            Some(Action::Shutdown)
+        );
+    }
+
+    /// A list page opens on its first card, Left and Back both come back up
+    /// to the card that opened it.
+    #[test]
+    fn a_page_opens_and_back_or_left_comes_back_to_its_card() {
+        let mut settings = Settings::new();
+        settings.step(1, 0);
+        assert_eq!(settings.focused().and_then(|r| r.page), Some(Page::Playback));
+        assert!(settings.open(Page::Playback));
+        assert_eq!(settings.page(), Some(Page::Playback));
+        assert_eq!(settings.heading().0, "Oynatma");
+        assert_eq!(
+            settings.focused().and_then(|r| r.action),
+            Some(Action::RestartPlayer)
+        );
+        assert!(settings.step(-1, 0));
+        assert_eq!(settings.pane, Pane::Rows);
+        assert_eq!(settings.focused().and_then(|r| r.page), Some(Page::Playback));
+        settings.open(Page::Playback);
+        assert!(settings.back());
+        assert_eq!(settings.pane, Pane::Rows);
+        assert!(settings.back());
+        assert_eq!(settings.pane, Pane::Sections);
+        assert!(!settings.back(), "the column is where Back leaves the screen");
+    }
+
+    /// A poll while a page is open keeps the page and the position.
+    #[test]
+    fn a_poll_keeps_the_page_open() {
+        let mut settings = Settings::new();
+        settings.step(1, 0);
+        settings.step(0, 1);
+        settings.open(Page::Account);
+        settings.compose(Some(&provider(true)), None, None);
+        assert_eq!(settings.page(), Some(Page::Account));
+        assert_eq!(settings.focused().and_then(|r| r.action), Some(Action::SignOut));
+    }
+
     /// The whole point of the settings screen's power rows.
     #[test]
     fn every_destructive_row_asks_first() {
         let settings = Settings::new();
-        for group in &settings.groups {
-            for row in &group.rows {
-                let Some(action) = row.action else { continue };
-                if matches!(
-                    action,
-                    Action::Restart | Action::Shutdown | Action::RestartPlayer
-                ) {
-                    assert!(action.confirms(), "{:?} does not confirm", action);
-                    assert!(!action.question().is_empty());
-                }
+        let (actions, _) = reachable(&settings);
+        for action in actions {
+            if matches!(
+                action,
+                Action::Restart | Action::Shutdown | Action::RestartPlayer | Action::SignOut
+            ) {
+                assert!(action.confirms(), "{:?} does not confirm", action);
+                assert!(!action.question().is_empty());
             }
         }
     }
@@ -811,6 +1250,24 @@ mod tests {
         }
     }
 
+    /// Cards that go somewhere carry a chevron; cards that do something do
+    /// not; readings and headings are neither.
+    #[test]
+    fn a_row_is_drawn_as_what_it_does() {
+        let settings = Settings::new();
+        for row in settings.groups.iter().flat_map(|g| g.rows.iter()) {
+            match row.kind() {
+                Kind::Link => assert!(
+                    row.page.is_some() || row.action.is_some_and(Action::leads_somewhere),
+                    "{}",
+                    row.label
+                ),
+                Kind::Action => assert!(row.action.is_some() && row.page.is_none()),
+                Kind::Header | Kind::Reading => assert!(!row.selectable(), "{}", row.label),
+            }
+        }
+    }
+
     // ------------------------------------------------------------ the account
 
     fn provider(authenticated: bool) -> serde_json::Value {
@@ -822,27 +1279,31 @@ mod tests {
     }
 
     fn account_rows(status: Option<&Value>) -> Vec<Row> {
-        compose(status, None, None)
-            .into_iter()
-            .find(|group| group.title == "Hesap")
-            .expect("account section")
-            .rows
+        page_rows(Page::Account, status, None)
+    }
+
+    fn value_of<'a>(rows: &'a [Row], label: &str) -> &'a str {
+        &rows
+            .iter()
+            .find(|row| row.label == label && !row.header)
+            .unwrap_or_else(|| panic!("no {label} row"))
+            .value
     }
 
     /// The web interface has had this since the beginning; the native shell is
     /// where a person actually sits.
     #[test]
-    fn the_settings_screen_has_an_account_section() {
+    fn the_settings_screen_has_an_account_page() {
         let settings = Settings::new();
-        let titles: Vec<&str> = settings.groups.iter().map(|g| g.title.as_str()).collect();
-        assert!(titles.contains(&"Hesap"), "{titles:?}");
+        let (_, pages) = reachable(&settings);
+        assert!(pages.contains(&Page::Account));
     }
 
     #[test]
     fn a_box_with_no_account_offers_the_way_in() {
         let status = provider(false);
         let rows = account_rows(Some(&status));
-        assert_eq!(rows[0].value, "Bağlı değil");
+        assert_eq!(value_of(&rows, "Durum"), "Bağlı değil");
         let actions: Vec<Action> = rows.iter().filter_map(|row| row.action).collect();
         assert_eq!(actions, [Action::OpenAccount]);
         // A sign-out button in front of somebody who is not signed in is a
@@ -854,11 +1315,26 @@ mod tests {
     fn a_connected_box_shows_the_account_and_offers_the_way_out() {
         let status = provider(true);
         let rows = account_rows(Some(&status));
-        assert_eq!(rows[0].value, "Bağlı");
+        assert_eq!(value_of(&rows, "Durum"), "Bağlı");
         assert!(rows.iter().any(|row| row.value == "someone@example.com"));
         assert!(rows.iter().any(|row| row.value == "7"));
         let actions: Vec<Action> = rows.iter().filter_map(|row| row.action).collect();
         assert_eq!(actions, [Action::SignOut]);
+    }
+
+    /// The card on the category says the same thing the page does.
+    #[test]
+    fn the_account_card_tells_whether_it_is_connected() {
+        for (authenticated, value) in [(true, "Bağlı"), (false, "Bağlı değil")] {
+            let status = provider(authenticated);
+            let groups = compose(Some(&status), None, None);
+            let card = groups[0]
+                .rows
+                .iter()
+                .find(|row| row.page == Some(Page::Account))
+                .expect("account card");
+            assert_eq!(card.value, value);
+        }
     }
 
     /// An unanswered status is a box that is not signed in, which is also what
@@ -866,7 +1342,7 @@ mod tests {
     #[test]
     fn an_unanswered_status_does_not_claim_an_account() {
         let rows = account_rows(None);
-        assert_eq!(rows[0].value, "Bağlı değil");
+        assert_eq!(value_of(&rows, "Durum"), "Bağlı değil");
         assert_eq!(
             rows.iter().filter_map(|row| row.action).collect::<Vec<_>>(),
             [Action::OpenAccount]
@@ -882,15 +1358,19 @@ mod tests {
         assert!(Action::OpenAccount.question().is_empty());
     }
 
-    /// Nothing about the account section may put a secret on the panel. The
-    /// rows are built from the status, and the status has no password in it —
-    /// this holds the screen to that even if one ever appeared.
+    /// Nothing about the account may put a secret on the panel. The rows are
+    /// built from the status, and the status has no password in it — this
+    /// holds the screen to that even if one ever appeared.
     #[test]
     fn no_account_row_can_carry_a_secret() {
         let mut status = provider(true);
         status["media"]["provider"]["password"] = "hunter2".into();
         status["media"]["provider"]["authKey"] = "sekritkey".into();
-        for row in account_rows(Some(&status)) {
+        let groups = compose(Some(&status), None, None);
+        let rows = account_rows(Some(&status))
+            .into_iter()
+            .chain(groups.into_iter().flat_map(|g| g.rows));
+        for row in rows {
             for field in [&row.label, &row.value, &row.hint] {
                 assert!(!field.contains("hunter2"), "{field}");
                 assert!(!field.contains("sekritkey"), "{field}");
@@ -911,13 +1391,16 @@ mod tests {
         })
     }
 
-    fn lights(available: bool, mode: &str) -> Vec<Row> {
-        let status = answered(available, mode);
-        compose(Some(&status), None, None)
+    fn device(status: Option<&Value>) -> Vec<Row> {
+        compose(status, None, None)
             .into_iter()
-            .find(|group| group.title == "Işıklar")
-            .expect("lights section")
+            .find(|group| group.title == "Cihaz")
+            .expect("device section")
             .rows
+    }
+
+    fn lights(available: bool, mode: &str) -> Vec<Row> {
+        device(Some(&answered(available, mode)))
     }
 
     /// One press moves one step, and the ring closes. Off leads, because that
@@ -930,8 +1413,10 @@ mod tests {
             ("heartbeat", LedMode::Off),
         ] {
             let rows = lights(true, now);
-            let row = rows.first().expect("a row");
-            assert!(row.selectable(), "{now} is not selectable");
+            let row = rows
+                .iter()
+                .find(|row| matches!(row.action, Some(Action::SetLeds(_))))
+                .expect("a lights card");
             assert_eq!(row.action, Some(Action::SetLeds(next)), "from {now}");
             // The value is where the lights are, not where they are going.
             assert_eq!(
@@ -965,7 +1450,18 @@ mod tests {
     #[test]
     fn a_board_with_no_controllable_lights_offers_nothing_to_press() {
         let rows = lights(false, "off");
-        assert!(rows.iter().all(|row| !row.selectable()));
+        assert!(
+            rows.iter()
+                .all(|row| !matches!(row.action, Some(Action::SetLeds(_))))
+        );
+    }
+
+    /// Before the daemon has answered, the screen must not claim a mode.
+    #[test]
+    fn an_unanswered_status_does_not_invent_a_mode() {
+        let rows = device(None);
+        assert!(rows.iter().all(|row| !matches!(row.action, Some(Action::SetLeds(_)))));
+        assert!(rows.iter().any(|row| row.label == "Yeşil ve mavi ışık"));
     }
 
     // --------------------------------------------------------------- the fan
@@ -985,28 +1481,37 @@ mod tests {
         }})
     }
 
-    /// Right from the section list opens the editor, Left from its first
-    /// button comes back, and neither changes the curve.
+    fn output_answer() -> serde_json::Value {
+        serde_json::to_value(super::super::output::tests::status_for_tests()).unwrap()
+    }
+
+    /// The fan card opens the editor, Left from its first button comes back
+    /// to the card, and neither changes the curve.
     #[test]
-    fn the_cooling_section_hands_the_remote_to_the_editor_and_back() {
+    fn the_cooling_card_hands_the_remote_to_the_editor_and_back() {
         let mut settings = Settings::new();
         settings.compose(Some(&fan_answer()), None, None);
-        settings.section = settings
-            .groups
-            .iter()
-            .position(|g| g.title == COOLING)
-            .expect("cooling section");
-        assert!(settings.is_cooling());
+        section(&mut settings, "Cihaz");
         let before = settings.cooling.draft().cloned();
         assert!(settings.step(1, 0));
-        assert_eq!(settings.pane, Pane::Rows);
+        let card = settings
+            .rows()
+            .iter()
+            .find(|row| row.page == Some(Page::Cooling))
+            .expect("a cooling card")
+            .clone();
+        assert!(card.value.contains("52 °C"), "{}", card.value);
+        assert!(settings.open(Page::Cooling));
+        assert!(settings.is_cooling());
+        assert_eq!(settings.heading().0, "Soğutma");
         assert!(settings.step(0, 1));
         assert!(settings.step(-1, 0));
-        assert_eq!(settings.pane, Pane::Sections);
+        assert_eq!(settings.pane, Pane::Rows);
+        assert!(!settings.is_cooling());
         assert_eq!(settings.cooling.draft().cloned(), before);
     }
 
-    /// No fan, no editor: the section says why and the remote stays put.
+    /// No fan, no editor: the category says why and nothing opens.
     #[test]
     fn a_board_with_no_fan_does_not_open_the_editor() {
         let mut settings = Settings::new();
@@ -1016,25 +1521,44 @@ mod tests {
             "error": "bu kartta pwm-fan denetimli bir fan bulunamadı",
         }});
         settings.compose(Some(&status), None, None);
-        settings.section = settings
-            .groups
-            .iter()
-            .position(|g| g.title == COOLING)
-            .unwrap();
-        assert!(!settings.step(1, 0));
+        let rows = device(Some(&status));
+        let fan = rows.iter().find(|row| row.label == "Fan").expect("a fan reading");
+        assert!(!fan.selectable());
+        assert!(fan.value.contains("pwm-fan"));
+        assert!(!settings.open(Page::Cooling));
         assert_eq!(settings.pane, Pane::Sections);
-        assert!(settings.rows()[0].value.contains("pwm-fan"));
     }
 
-    /// Before the daemon has answered, the screen must not claim a mode.
+    // ------------------------------------------------------------ the display
+
+    /// The display card says what is on the wire, opens the simple face, and
+    /// the advanced face is named in the heading.
     #[test]
-    fn an_unanswered_status_does_not_invent_a_mode() {
-        let rows = compose(None, None, None)
-            .into_iter()
-            .find(|group| group.title == "Işıklar")
-            .expect("lights section")
-            .rows;
-        assert!(rows.iter().all(|row| !row.selectable()));
-        assert!(!rows.is_empty());
+    fn the_display_card_opens_the_editor() {
+        let mut settings = Settings::new();
+        let status = serde_json::json!({"output": output_answer()});
+        settings.compose(Some(&status), None, None);
+        section(&mut settings, "Görüntü ve Ses");
+        assert!(settings.step(1, 0));
+        let card = settings.focused().expect("the display card").clone();
+        assert_eq!(card.page, Some(Page::Output));
+        assert_eq!(card.value, "3840×2160 · 60 Hz");
+        assert!(settings.open(Page::Output));
+        assert!(settings.in_output());
+        assert_eq!(settings.heading().0, "Ekran");
+        // Left from the simple face comes back to the card.
+        assert!(settings.step(-1, 0));
+        assert_eq!(settings.pane, Pane::Rows);
+    }
+
+    /// No display to set: a reading that says why, not a card that does
+    /// nothing.
+    #[test]
+    fn no_display_is_a_reading() {
+        let status = serde_json::json!({"output": {"setting": {}, "error": "EDID okunamadı"}});
+        let groups = compose(Some(&status), None, None);
+        let row = &groups[1].rows[0];
+        assert!(!row.selectable());
+        assert_eq!(row.value, "EDID okunamadı");
     }
 }

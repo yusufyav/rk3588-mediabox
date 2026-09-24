@@ -1,0 +1,870 @@
+import { Theme, Metrics, Icons } from "theme.slint";
+
+// The pieces the settings screens are built from, and the screens they open.
+//
+// One focus treatment, one card, one label, one dialog — so the display page,
+// the fan page and the category lists cannot drift apart the way the letter
+// grid once did between two screens that each had their own. Every size comes
+// from Metrics and every colour from Theme; nothing here is written for one
+// panel.
+//
+// Cheap on purpose. This is drawn by FemtoVG on a Mali G610 at up to 4K: solid
+// fills, hairlines and a couple of gradients, no blur, no drop shadow, no
+// opacity layer. The focus glow is two extra rounded outlines.
+
+// One entry in the category column.
+export struct SettingNav {
+    label: string,
+    icon: string,
+    blurb: string,
+}
+
+// A line mark from the Icons table.
+export component Icon inherits Path {
+    in property <string> name;
+    in property <length> size: Metrics.icon;
+    in property <brush> ink: Theme.text;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: Icons.path(name);
+    fill: transparent;
+    stroke: ink;
+    stroke-width: max(1.4px, size * 0.075);
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// The warm outline and its glow, laid over whatever it frames. Drawn as
+// outlines on top rather than as the frame's own border so that focus never
+// moves the frame's content by a pixel.
+export component FocusRing inherits Rectangle {
+    in property <bool> on;
+    in property <length> radius: Metrics.s-radius;
+    property <length> g: Metrics.glow-w;
+
+    background: transparent;
+    border-radius: radius;
+    border-width: on ? Metrics.focus-w : 0px;
+    border-color: Theme.focus;
+
+    if on: Rectangle {
+        x: -g;
+        y: -g;
+        width: parent.width + g * 2;
+        height: parent.height + g * 2;
+        border-radius: radius + g;
+        border-width: g;
+        border-color: Theme.focus-glow;
+        background: transparent;
+    }
+    if on: Rectangle {
+        x: -g * 2;
+        y: -g * 2;
+        width: parent.width + g * 4;
+        height: parent.height + g * 4;
+        border-radius: radius + g * 2;
+        border-width: g;
+        border-color: Theme.focus-glow-far;
+        background: transparent;
+    }
+}
+
+// A verdict: a dot and a word. The word is always there, so the colour is never
+// the only thing that says it.
+export component StatusChip inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> tone;
+    in property <length> font-size: Metrics.t-meta;
+    spacing: font-size * 0.45;
+    alignment: end;
+
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: font-size * 0.5;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: tone == "" ? Theme.dim : Theme.tone(tone);
+        }
+    }
+    Text {
+        text: root.text;
+        color: tone == "" ? Theme.muted : Theme.tone(tone);
+        font-size: root.font-size;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// A small word in a pill: HDR, YCbCr 4:4:4, 10-bit, ŞU AN.
+//   tone: "hdr" amber, "good" green, "warn", "" neutral.
+export component ValueBadge inherits Rectangle {
+    in property <string> text;
+    in property <string> tone;
+    in property <length> font-size: Metrics.t-meta * 0.86;
+    property <color> ink: tone == "hdr" ? Theme.badge-hdr
+        : tone == "good" ? Theme.badge-good
+        : tone == "warn" ? #fbbf24
+        : Theme.badge-plain;
+
+    height: max(Metrics.badge-h, font-size * 1.7);
+    width: word.preferred-width + font-size * 1.3;
+    border-radius: self.height / 2;
+    background: ink.with-alpha(0.12);
+    border-width: 1px;
+    border-color: ink.with-alpha(0.34);
+
+    word := Text {
+        text: root.text;
+        color: ink;
+        font-size: root.font-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A heading between groups of rows.
+export component SectionHeader inherits Rectangle {
+    in property <string> text;
+    height: Metrics.header-h;
+
+    Text {
+        x: 0;
+        y: parent.height - self.height - Metrics.row-gap * 0.4;
+        width: parent.width;
+        text: root.text;
+        color: Theme.text;
+        font-size: Metrics.t-section * 0.86;
+        font-weight: 700;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// The title of whatever is on the right-hand side, and one line about it.
+export component PageHeader inherits VerticalLayout {
+    in property <string> title;
+    in property <string> blurb;
+    spacing: Metrics.t-page * 0.12;
+    alignment: start;
+
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Metrics.t-page;
+        font-weight: 750;
+        letter-spacing: -0.012 * Metrics.t-page;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    if blurb != "": Text {
+        text: root.blurb;
+        color: Theme.muted;
+        font-size: Metrics.t-secondary;
+        font-weight: 500;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// A row that does something: a mark, a name, a line under it, and on the right
+// where it stands now and where it goes. The settings screens' one clickable
+// object.
+export component SettingCard inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <string> hint;
+    in property <string> value;
+    in property <string> tone;
+    // "link" goes somewhere and carries a chevron; "action" does something.
+    in property <string> kind: "link";
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    // Ends something — the machine, the session. Its name is red, as a word
+    // on a card rather than a colour alone.
+    in property <bool> danger;
+
+    height: hint == "" ? Metrics.set-h-flat : Metrics.set-h;
+    border-radius: Metrics.s-radius;
+    background: focused ? Theme.s-card-hi : Theme.s-card;
+    border-width: 1px;
+    border-color: focused ? transparent : Theme.s-line;
+    animate background { duration: Theme.t-focus; easing: Theme.ease; }
+
+    HorizontalLayout {
+        padding-left: Metrics.card-pad;
+        padding-right: Metrics.card-pad * 0.8;
+        spacing: Metrics.card-pad * 0.8;
+
+        if icon != "": VerticalLayout {
+            alignment: center;
+            Icon {
+                name: icon;
+                size: Metrics.icon * 1.15;
+                ink: !enabled ? Theme.dim : (focused ? Theme.text : #c9ced8);
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Metrics.t-primary * 0.12;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            Text {
+                text: label;
+                color: !enabled ? Theme.dim : (danger ? Theme.bad : (focused ? #ffffff : Theme.text));
+                font-size: Metrics.t-primary;
+                font-weight: focused ? 650 : 600;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if hint != "": Text {
+                text: hint;
+                color: focused ? #b9bfcb : Theme.muted;
+                font-size: Metrics.t-secondary;
+                font-weight: 500;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+
+        if value != "" && tone != "": StatusChip {
+            text: value;
+            tone: tone;
+            font-size: Metrics.t-secondary;
+            max-width: root.width * 0.45;
+        }
+        if value != "" && tone == "": VerticalLayout {
+            alignment: center;
+            max-width: root.width * 0.45;
+            Text {
+                text: value;
+                color: focused ? Theme.text : #c3c8d2;
+                font-size: Metrics.t-secondary;
+                font-weight: 600;
+                horizontal-alignment: right;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+
+        if kind == "link": VerticalLayout {
+            alignment: center;
+            Icon {
+                name: "chevron";
+                size: Metrics.icon-small;
+                ink: focused ? Theme.text : Theme.dim;
+            }
+        }
+    }
+
+    FocusRing {
+        width: 100%;
+        height: 100%;
+        on: focused;
+    }
+}
+
+// A reading: a name and what it is. Not focusable, and drawn so it does not
+// look it — no surface of its own, a hairline under it.
+export component ReadingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> tone;
+
+    height: Metrics.reading-h;
+
+    HorizontalLayout {
+        padding-left: Metrics.card-pad * 0.25;
+        padding-right: Metrics.card-pad * 0.25;
+        spacing: Metrics.card-pad;
+
+        Text {
+            text: label;
+            color: Theme.muted;
+            font-size: Metrics.t-secondary;
+            font-weight: 500;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+            min-width: 0px;
+        }
+        if tone == "": Text {
+            text: value;
+            color: Theme.text;
+            font-size: Metrics.t-secondary;
+            font-weight: 600;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+            wrap: no-wrap;
+            min-width: 0px;
+        }
+        if tone != "": StatusChip {
+            text: value;
+            tone: tone;
+            font-size: Metrics.t-secondary;
+            horizontal-stretch: 1;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.s-hairline;
+    }
+}
+
+// A button along the bottom of an editor, or in a dialog.
+export component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> focused;
+    // The one that commits: amber when it can be pressed, before focus is on it.
+    in property <bool> primary;
+    // A destructive answer: red when the remote is on it.
+    in property <bool> danger;
+    property <bool> lit: primary && enabled;
+
+    height: Metrics.button-h;
+    min-width: caption.preferred-width + Metrics.button-h * 1.1;
+    border-radius: self.height / 2;
+    background: lit ? (focused ? #ffc766 : Theme.focus.with-alpha(0.9))
+        : (focused && danger ? #7f1d1d
+        : (focused ? Theme.s-card-hi : (enabled ? Theme.s-card : transparent)));
+    border-width: 1px;
+    border-color: lit || focused ? transparent : (enabled ? Theme.s-line : Theme.s-hairline);
+    animate background { duration: Theme.t-focus; easing: Theme.ease; }
+
+    caption := Text {
+        text: label;
+        color: lit ? Theme.accent-ink : (enabled ? (focused ? #ffffff : (danger ? Theme.bad : Theme.text)) : Theme.dim);
+        font-size: Metrics.t-secondary;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+
+    FocusRing {
+        width: 100%;
+        height: 100%;
+        radius: parent.height / 2;
+        on: focused;
+    }
+}
+
+// One option in a list of choices: a dot for the one chosen, a name and a line
+// under it, and labels on the right.
+export component ChoiceRow inherits Rectangle {
+    in property <string> title;
+    in property <string> sub;
+    in property <bool> selected;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    in property <string> badge;
+    in property <string> badge-tone;
+    in property <bool> now;
+
+    height: sub == "" ? Metrics.set-h-flat * 0.92 : Metrics.set-h * 0.9;
+    border-radius: Metrics.s-radius * 0.8;
+    background: focused ? Theme.s-card-hi : (selected ? Theme.s-current : transparent);
+    animate background { duration: Theme.t-focus; easing: Theme.ease; }
+
+    HorizontalLayout {
+        padding-left: Metrics.card-pad * 0.8;
+        padding-right: Metrics.card-pad * 0.8;
+        spacing: Metrics.card-pad * 0.7;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Metrics.t-primary * 0.8;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: transparent;
+                border-width: max(2px, Metrics.focus-w * 0.8);
+                border-color: selected ? Theme.focus : (enabled ? #5a6170 : #343945);
+                Rectangle {
+                    width: parent.width * 0.46;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: selected ? Theme.focus : transparent;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: Metrics.t-primary * 0.08;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            Text {
+                text: title;
+                color: !enabled ? Theme.dim : (focused ? #ffffff : Theme.text);
+                font-size: Metrics.t-primary;
+                font-weight: selected || focused ? 650 : 560;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if sub != "": Text {
+                text: sub;
+                color: Theme.muted;
+                font-size: Metrics.t-meta;
+                font-weight: 500;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+        if now: VerticalLayout {
+            alignment: center;
+            ValueBadge { text: "ŞU AN"; tone: "good"; }
+        }
+        if badge != "": VerticalLayout {
+            alignment: center;
+            ValueBadge { text: badge; tone: badge-tone; }
+        }
+    }
+
+    FocusRing {
+        width: 100%;
+        height: 100%;
+        radius: parent.border-radius;
+        on: focused;
+    }
+}
+
+// What a panel says instead of its contents: still being read, nothing there,
+// not on this board, or broken. An icon and words, never a colour alone.
+//   kind: "busy" | "empty" | "unavailable" | "error"
+export component StateNote inherits Rectangle {
+    in property <string> kind: "unavailable";
+    in property <string> title;
+    in property <string> message;
+    property <brush> ink: kind == "error" ? Theme.bad : (kind == "busy" ? Theme.muted : Theme.warn);
+
+    height: body.preferred-height;
+
+    body := HorizontalLayout {
+        spacing: Metrics.card-pad * 0.8;
+        alignment: start;
+        VerticalLayout {
+            alignment: start;
+            Icon {
+                name: kind == "busy" ? "clock" : (kind == "empty" ? "info" : "alert");
+                size: Metrics.icon * 1.1;
+                ink: root.ink;
+            }
+        }
+        VerticalLayout {
+            spacing: Metrics.t-secondary * 0.3;
+            horizontal-stretch: 1;
+            Text {
+                text: title;
+                color: Theme.text;
+                font-size: Metrics.t-primary;
+                font-weight: 650;
+                wrap: word-wrap;
+            }
+            if message != "": Text {
+                text: message;
+                color: Theme.muted;
+                font-size: Metrics.t-secondary;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+export struct InfoLine {
+    label: string,
+    value: string,
+    tone: string,
+}
+
+export struct Badge {
+    text: string,
+    tone: string,
+}
+
+// A panel of what is true now, beside a list of what can be changed. Never
+// operated: the remote does not land on it.
+export component InfoPanel inherits Rectangle {
+    in property <string> caption;
+    in property <string> icon;
+    in property <string> title;
+    in property <string> line;
+    in property <[Badge]> badges;
+    in property <[InfoLine]> rows;
+
+    border-radius: Metrics.s-radius;
+    background: #10131bcc;
+    border-width: 1px;
+    border-color: Theme.s-hairline;
+    height: body.preferred-height;
+
+    body := VerticalLayout {
+        padding: Metrics.card-pad;
+        spacing: Metrics.row-gap;
+        alignment: start;
+
+        Text {
+            text: caption;
+            color: Theme.muted;
+            font-size: Metrics.t-meta;
+            font-weight: 600;
+        }
+        HorizontalLayout {
+            spacing: Metrics.card-pad * 0.7;
+            if icon != "": VerticalLayout {
+                alignment: center;
+                Icon { name: icon; size: Metrics.icon * 1.35; ink: #d7dbe3; }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: Metrics.t-meta * 0.2;
+                horizontal-stretch: 1;
+                min-width: 0px;
+                Text {
+                    text: title;
+                    color: Theme.text;
+                    font-size: Metrics.t-section;
+                    font-weight: 750;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+                if line != "": Text {
+                    text: line;
+                    color: Theme.muted;
+                    font-size: Metrics.t-secondary;
+                    font-weight: 500;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+            }
+        }
+        if badges.length > 0: HorizontalLayout {
+            spacing: Metrics.row-gap * 0.8;
+            alignment: start;
+            for b in badges: ValueBadge { text: b.text; tone: b.tone; }
+        }
+        if rows.length > 0: Rectangle { height: Metrics.row-gap * 0.2; }
+        for r in rows: HorizontalLayout {
+            spacing: Metrics.card-pad * 0.6;
+            height: Metrics.t-meta * 1.75;
+            Text {
+                text: r.label;
+                color: Theme.muted;
+                font-size: Metrics.t-meta;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+            Text {
+                text: r.value;
+                color: r.tone == "" ? Theme.text : Theme.tone(r.tone);
+                font-size: Metrics.t-meta;
+                font-weight: 600;
+                horizontal-alignment: right;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+                min-width: 0px;
+            }
+        }
+    }
+}
+
+// A panel over the screen, on a flat scrim. A blur behind it would be a
+// full-screen pass per frame on this board, for a rectangle. The yes-or-no
+// question is the shared Sheet (components.slint) drawn on this; the display's
+// trial, its EDID and its lists (output.slint) are too.
+export component Dialog inherits Rectangle {
+    in property <length> panel-w: Metrics.dialog-w;
+    width: 100%;
+    height: 100%;
+    background: #04050ad0;
+
+    panel := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(panel-w, parent.width - Metrics.safe-x * 2);
+        height: min(inner.preferred-height, parent.height - Metrics.safe-y * 2);
+        border-radius: Metrics.s-radius * 1.3;
+        background: @linear-gradient(180deg, #171a24 0%, #11141c 100%);
+        border-width: 1px;
+        border-color: Theme.s-line;
+        clip: true;
+
+        inner := VerticalLayout {
+            padding: Metrics.dialog-pad;
+            spacing: Metrics.row-gap * 1.4;
+            alignment: start;
+            @children
+        }
+    }
+}
+
+// A line along the bottom that says what just happened. Words first: the
+// marker's colour only repeats what the words say.
+export component Toast inherits Rectangle {
+    in property <string> text;
+    height: Metrics.button-h;
+    width: min(caption.preferred-width + Metrics.button-h * 1.6, Metrics.vw - Metrics.safe-x * 2);
+    border-radius: self.height / 2;
+    background: #171a24f0;
+    border-width: 1px;
+    border-color: Theme.s-line;
+
+    HorizontalLayout {
+        padding-left: Metrics.button-h * 0.45;
+        padding-right: Metrics.button-h * 0.55;
+        spacing: Metrics.button-h * 0.3;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Metrics.t-meta * 0.55;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: Theme.focus;
+            }
+        }
+        caption := Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Metrics.t-meta;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+}
+
+// The ground behind the settings screens: near-black with a little navy and a
+// little violet in it, as the reference has. Three gradients the renderer
+// fills and never animates.
+export component Backdrop inherits Rectangle {
+    background: @linear-gradient(160deg, #0a0c14 0%, #07080d 55%, #06070b 100%);
+    Rectangle {
+        x: parent.width * 0.42;
+        y: -parent.height * 0.35;
+        width: parent.width * 0.9;
+        height: parent.height * 0.95;
+        background: @radial-gradient(circle, #3d2e7048 0%, #3d2e7000 65%);
+    }
+    Rectangle {
+        x: parent.width * 0.55;
+        y: parent.height * 0.45;
+        width: parent.width * 0.7;
+        height: parent.height * 0.9;
+        background: @radial-gradient(circle, #17345640 0%, #17345600 62%);
+    }
+}
+
+// The category column.
+//
+// At the top level it lists the categories, one of them current. Inside a page
+// it becomes where that page is: the category it belongs to, with a mark that
+// Back leads there, and the page itself as the current entry — the reference's
+// own arrangement.
+export component SideNav inherits Rectangle {
+    in property <[SettingNav]> items;
+    in property <int> current;
+    // The remote is on this column.
+    in property <bool> active;
+    // Inside a page: its parent's name and its own.
+    in property <string> parent-label;
+    in property <string> page-label;
+    in property <string> page-icon;
+    // What the column is headed with: the settings, or the diagnostics opened
+    // from them.
+    in property <string> heading: "Ayarlar";
+    in property <string> heading-icon: "gear";
+
+    property <length> item-h: Metrics.nav-item-h;
+    property <length> head-h: Metrics.t-nav-head * 2.6;
+
+    background: Theme.s-nav;
+
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.s-hairline;
+    }
+
+    HorizontalLayout {
+        x: Metrics.safe-x + Metrics.nav-pad;
+        y: Metrics.safe-y;
+        width: Metrics.nav-w - Metrics.nav-pad * 2;
+        height: head-h;
+        spacing: Metrics.t-nav-head * 0.5;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Icon { name: heading-icon; size: Metrics.t-nav-head * 1.1; ink: Theme.text; }
+        }
+        Text {
+            text: heading;
+            color: Theme.text;
+            font-size: Metrics.t-nav-head;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    if page-label == "": VerticalLayout {
+        x: Metrics.safe-x;
+        y: Metrics.safe-y + head-h + Metrics.row-gap;
+        width: Metrics.nav-w;
+        spacing: Metrics.row-gap * 0.55;
+        alignment: start;
+
+        for item[i] in items: Rectangle {
+            property <bool> here: i == current;
+            property <bool> lit: here && active;
+            height: item-h;
+            border-radius: Metrics.s-radius;
+            background: lit ? Theme.s-card-hi : (here ? Theme.s-current : transparent);
+            animate background { duration: Theme.t-focus; easing: Theme.ease; }
+
+            HorizontalLayout {
+                padding-left: Metrics.nav-pad;
+                padding-right: Metrics.nav-pad;
+                spacing: Metrics.nav-pad * 1.1;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        name: item.icon;
+                        size: Metrics.icon * 1.05;
+                        ink: here ? Theme.text : Theme.muted;
+                    }
+                }
+                Text {
+                    text: item.label;
+                    color: lit ? #ffffff : (here ? Theme.text : Theme.muted);
+                    font-size: Metrics.t-primary;
+                    font-weight: here ? 650 : 520;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+            }
+
+            // Current but not focused: a short amber bar on the leading edge,
+            // so the section the right-hand side belongs to is visible while
+            // the remote is over there.
+            if here && !active: Rectangle {
+                x: 0;
+                y: parent.height * 0.26;
+                width: Metrics.focus-w * 1.2;
+                height: parent.height * 0.48;
+                border-radius: self.width / 2;
+                background: Theme.focus;
+            }
+
+            FocusRing {
+                width: 100%;
+                height: 100%;
+                on: lit;
+            }
+        }
+    }
+
+    if page-label != "": VerticalLayout {
+        x: Metrics.safe-x;
+        y: Metrics.safe-y + head-h + Metrics.row-gap;
+        width: Metrics.nav-w;
+        spacing: Metrics.row-gap * 0.55;
+        alignment: start;
+
+        HorizontalLayout {
+            height: item-h;
+            padding-left: Metrics.nav-pad;
+            spacing: Metrics.nav-pad * 0.8;
+            VerticalLayout {
+                alignment: center;
+                Icon { name: "back"; size: Metrics.icon-small; ink: Theme.muted; }
+            }
+            Text {
+                text: parent-label;
+                color: Theme.muted;
+                font-size: Metrics.t-secondary;
+                font-weight: 520;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+        Rectangle {
+            height: item-h;
+            border-radius: Metrics.s-radius;
+            background: Theme.s-current;
+            HorizontalLayout {
+                padding-left: Metrics.nav-pad;
+                padding-right: Metrics.nav-pad;
+                spacing: Metrics.nav-pad * 1.1;
+                VerticalLayout {
+                    alignment: center;
+                    Icon { name: page-icon; size: Metrics.icon * 1.05; ink: Theme.text; }
+                }
+                Text {
+                    text: page-label;
+                    color: Theme.text;
+                    font-size: Metrics.t-primary;
+                    font-weight: 650;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+            }
+            Rectangle {
+                x: 0;
+                y: parent.height * 0.26;
+                width: Metrics.focus-w * 1.2;
+                height: parent.height * 0.48;
+                border-radius: self.width / 2;
+                background: Theme.focus;
+            }
+        }
+    }
+}
+
+// The name of the box, whether it is on the network, and the time: the top
+// right of every settings screen.
+export component StatusCorner inherits HorizontalLayout {
+    in property <string> network;
+    in property <string> time;
+    spacing: Metrics.t-secondary * 1.2;
+    alignment: end;
+
+    Text {
+        text: "MediaBox";
+        color: Theme.text;
+        font-size: Metrics.t-secondary;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+    Text {
+        text: network;
+        color: Theme.muted;
+        font-size: Metrics.t-meta;
+        font-weight: 550;
+        vertical-alignment: center;
+    }
+    Text {
+        text: time;
+        color: Theme.text;
+        font-size: Metrics.t-secondary * 1.05;
+        font-weight: 650;
+        vertical-alignment: center;
+    }
+}

@@ -111,7 +111,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 ///
 /// A full reading is written as two half-circles: a single arc of exactly 360
 /// degrees has the same start and end point and renders as nothing at all.
-fn arc(fraction: f64) -> String {
+pub(crate) fn arc(fraction: f64) -> String {
     let fraction = fraction.clamp(0.0, 1.0);
     if fraction <= 0.001 {
         return String::new();

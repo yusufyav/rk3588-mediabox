@@ -137,9 +137,10 @@ struct App {
     /// a poll that was already in flight when the press happened is ignored
     /// for this one field: it cannot know about a choice made after it left.
     leds_pending: Option<mediabox_core::LedMode>,
-    /// The seconds last drawn on the display question, so it is redrawn once
-    /// a second and not four times.
-    output_seconds: u32,
+    /// The seconds last drawn on the display question, and whether its
+    /// buttons were taking Ok yet, so it is redrawn when either changes and
+    /// not four times a second.
+    output_seconds: (u32, bool),
     /// A fan curve save or reset is in flight. The same guard as the two
     /// above: a poll that left before it cannot know the curve was saved.
     fan_pending: bool,
@@ -539,7 +540,7 @@ impl App {
                 platform::apply_output(setting);
                 if let Some(seconds) = trial_seconds {
                     self.settings.output.trial(seconds);
-                    self.output_seconds = 0;
+                    self.output_seconds = (0, false);
                 }
                 self.paint();
             }
@@ -564,9 +565,10 @@ impl App {
         if !self.settings.output.asking() {
             return;
         }
-        let seconds = self.settings.output.view().seconds;
-        if seconds != self.output_seconds {
-            self.output_seconds = seconds;
+        let view = self.settings.output.view();
+        let now = (view.seconds, view.confirm_ready);
+        if now != self.output_seconds {
+            self.output_seconds = now;
             self.paint();
         }
     }
@@ -1444,7 +1446,16 @@ impl App {
                     self.press_output();
                     return;
                 }
-                let Some(action) = self.settings.focused().and_then(|row| row.action) else {
+                let Some(row) = self.settings.focused() else {
+                    return;
+                };
+                if let Some(page) = row.page {
+                    if self.settings.open(page) {
+                        self.paint();
+                    }
+                    return;
+                }
+                let Some(action) = row.action else {
                     return;
                 };
                 if action.confirms() {
@@ -1466,8 +1477,9 @@ impl App {
                         return;
                     }
                 }
-                if self.settings.pane == screens::settings::Pane::Rows {
-                    self.settings.pane = screens::settings::Pane::Sections;
+                // One level up: a page to its card, a card to the column,
+                // and from the column out of the screen.
+                if self.settings.back() {
                     self.paint();
                 } else {
                     self.back();
@@ -2661,25 +2673,29 @@ impl App {
     }
 
     fn paint_settings(&mut self, window: &MediaBoxWindow) {
-        window.set_settings_sections(strings(
-            self.settings.groups.iter().map(|group| group.title.clone()),
-        ));
-        window.set_settings_section(self.settings.section as i32);
-        window.set_settings_on_sections(self.settings.pane == screens::settings::Pane::Sections);
-        window.set_settings_row(self.settings.row_index() as i32);
-        window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(
+        window.set_settings_sections(slint::ModelRc::new(slint::VecModel::from(
             self.settings
-                .rows()
+                .groups
                 .iter()
-                .map(|row| SettingRow {
-                    label: row.label.clone().into(),
-                    value: row.value.clone().into(),
-                    hint: row.hint.clone().into(),
-                    tone: row.tone.clone().into(),
-                    selectable: row.selectable(),
+                .map(|group| SettingNav {
+                    label: group.title.clone().into(),
+                    icon: group.icon.into(),
+                    blurb: group.blurb.into(),
                 })
                 .collect::<Vec<_>>(),
         )));
+        window.set_settings_section(self.settings.section as i32);
+        window.set_settings_on_sections(self.settings.pane == screens::settings::Pane::Sections);
+        window.set_settings_row(self.settings.row_index() as i32);
+        let page = self.settings.page();
+        window.set_settings_page(page.map_or("", |page| page.title()).into());
+        window.set_settings_page_icon(page.map_or("", |page| page.icon()).into());
+        let (title, blurb) = self.settings.heading();
+        window.set_settings_title(title.into());
+        window.set_settings_blurb(blurb.into());
+        window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(setting_rows(
+            self.settings.rows(),
+        ))));
         self.paint_cooling(window);
         self.paint_output(window);
     }
@@ -2715,6 +2731,72 @@ impl App {
         window.set_settings_output_view(OutputView {
             available: view.available,
             message: view.message.into(),
+            face: view.face,
+            simple: model(
+                view.simple
+                    .iter()
+                    .map(|card| OutSimple {
+                        icon: card.icon.clone().into(),
+                        label: card.label.clone().into(),
+                        hint: card.hint.clone().into(),
+                        value: card.value.clone().into(),
+                        kind: "link".into(),
+                        focused: card.focused,
+                    })
+                    .collect(),
+            ),
+            simple_actions: model(
+                view.simple_actions
+                    .iter()
+                    .map(|act| OutAction {
+                        label: act.label.clone().into(),
+                        enabled: act.enabled,
+                        focused: act.focused,
+                    })
+                    .collect(),
+            ),
+            current_title: view.current_title.into(),
+            current_line: view.current_line.into(),
+            current_badges: model(
+                view.current_badges
+                    .into_iter()
+                    .map(|(text, tone)| Badge {
+                        text: text.into(),
+                        tone: tone.into(),
+                    })
+                    .collect(),
+            ),
+            current_rows: model(
+                view.current_rows
+                    .into_iter()
+                    .map(|(label, value)| InfoLine {
+                        label: label.into(),
+                        value: value.into(),
+                        tone: "".into(),
+                    })
+                    .collect(),
+            ),
+            picker_open: view.picker_open,
+            picker_title: view.picker_title.into(),
+            picker_note: view.picker_note.into(),
+            picker: model(
+                view.picker
+                    .iter()
+                    .map(|option| OutChoice {
+                        title: option.title.clone().into(),
+                        sub: option.sub.clone().into(),
+                        selected: option.selected,
+                        focused: option.focused,
+                        enabled: option.enabled,
+                        badge: option.badge.clone().into(),
+                        badge_tone: option.badge_tone.clone().into(),
+                        now: option.now,
+                    })
+                    .collect(),
+            ),
+            picker_focus: view.picker_focus as i32,
+            arc: view.arc.into(),
+            confirm_ready: view.confirm_ready,
             sink: view.sink.into(),
             wire_size: view.wire_size.into(),
             wire_rate: view.wire_rate.into(),
@@ -2972,6 +3054,17 @@ impl App {
 
     fn paint_diagnostics(&mut self, window: &MediaBoxWindow) {
         window.set_diag_group(self.diagnostics.group as i32);
+        window.set_diag_nav(slint::ModelRc::new(slint::VecModel::from(
+            self.diagnostics
+                .groups
+                .iter()
+                .map(|group| SettingNav {
+                    label: group.title.clone().into(),
+                    icon: screens::diagnostics::icon(&group.title).into(),
+                    blurb: "".into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
         window.set_diag_groups(slint::ModelRc::new(slint::VecModel::from(
             self.diagnostics
                 .groups
@@ -3040,6 +3133,38 @@ fn hero_facts(item: &state::Item) -> String {
     }
     facts.extend(item.genres.iter().take(2).cloned());
     facts.join("  ·  ")
+}
+
+/// The settings rows as the panel takes them, each with how many rows of each
+/// height come before it: the screen places and scrolls them by arithmetic.
+fn setting_rows(rows: &[screens::settings::Row]) -> Vec<SettingRow> {
+    use screens::settings::Kind;
+    let (mut headers, mut readings, mut cards, mut flats) = (0, 0, 0, 0);
+    rows.iter()
+        .map(|row| {
+            let kind = row.kind();
+            let out = SettingRow {
+                label: row.label.clone().into(),
+                value: row.value.clone().into(),
+                hint: row.hint.clone().into(),
+                tone: row.tone.clone().into(),
+                selectable: row.selectable(),
+                kind: kind.name().into(),
+                icon: row.icon.into(),
+                n_header: headers,
+                n_reading: readings,
+                n_card: cards,
+                n_flat: flats,
+            };
+            match kind {
+                Kind::Header => headers += 1,
+                Kind::Reading => readings += 1,
+                Kind::Link | Kind::Action if row.hint.is_empty() => flats += 1,
+                Kind::Link | Kind::Action => cards += 1,
+            }
+            out
+        })
+        .collect()
 }
 
 fn strings(values: impl Iterator<Item = String>) -> slint::ModelRc<slint::SharedString> {
@@ -3129,7 +3254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: None,
         diag: None,
         leds_pending: None,
-        output_seconds: 0,
+        output_seconds: (0, false),
         fan_pending: false,
         display: None,
         controls_were_open: false,
