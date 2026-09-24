@@ -14,12 +14,19 @@ license.workspace = true
 mediabox-core = { path = "../mediabox-core" }
 serde.workspace = true
 serde_json.workspace = true
+# The observer's uevent socket and its guarded, read-only DRM query.
+libc.workspace = true
 # The canonical EDID identity is the SHA-256 of the bytes received.
 sha2 = "0.10.9"
 
 [[bin]]
 name = "mediabox-platform"
 path = "src/main.rs"
+
+# The display, observed from outside whoever owns it (shadow mode).
+[[bin]]
+name = "mediabox-display-observer"
+path = "src/bin/mediabox-display-observer.rs"
 
 [dev-dependencies]
 tempfile = "3.27.0"

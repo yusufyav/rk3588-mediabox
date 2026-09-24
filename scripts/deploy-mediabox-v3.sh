@@ -118,11 +118,20 @@ sh_ "fc-list | grep -qi emoji && fc-list | grep -qi inter" || {
 
 say "binaries -> $prefix/bin"
 sh_ "mkdir -p $prefix/bin $prefix/ui $prefix/assets"
-cp_ "$bin/mediaboxd-rs" "$bin/mediaboxctl" "$bin/mediabox-platform" "$tv_bin" "$MEDIABOX_TARGET:/var/tmp/"
+cp_ "$bin/mediaboxd-rs" "$bin/mediaboxctl" "$bin/mediabox-platform" \
+    "$bin/mediabox-display-observer" "$tv_bin" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "install -m 0755 /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabox-platform \
-       /var/tmp/mediabox-tv $prefix/bin/ && \
-     rm -f /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabox-platform /var/tmp/mediabox-tv && \
+       /var/tmp/mediabox-display-observer /var/tmp/mediabox-tv $prefix/bin/ && \
+     rm -f /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabox-platform \
+       /var/tmp/mediabox-display-observer /var/tmp/mediabox-tv && \
      ln -sfn $prefix/bin/mediaboxctl /usr/local/bin/mediaboxctl"
+
+say "display observer (shadow mode)"
+# Watches the display and decides nothing; see the unit for why it is ordered
+# against nothing. Restarting it never touches the television.
+cp_ "$here/packaging/systemd/mediabox-display-observer.service" "$MEDIABOX_TARGET:/etc/systemd/system/"
+sh_ "systemctl daemon-reload && systemctl enable mediabox-display-observer.service >/dev/null && \
+     systemctl restart mediabox-display-observer.service"
 
 say "media core -> $prefix"
 tar -C "$here" -cf - media | sh_ "rm -rf $prefix/media && tar -C $prefix -xf -"

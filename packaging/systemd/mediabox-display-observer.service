@@ -1,0 +1,69 @@
+[Unit]
+Description=MediaBox display observer (shadow mode: observes, decides nothing)
+# Watches the selected output -- sysfs, DRM uevents, debugfs, the device tree --
+# and publishes one snapshot of it under /run/mediabox-display-observer. See
+# rust/crates/mediabox-platform/src/observer.rs.
+#
+# Shadow mode: nothing reads the snapshot to act on it. The control plane, the
+# interface, Kodi and the browser make every display decision exactly as
+# before; the observer is compared with them (it asks the control plane what
+# it believes, read-only) and logs where they differ.
+#
+# Deliberately not ordered against any owner of the display and not a part of
+# the display's lifetime: it keeps no descriptor on the DRM device (the DRM
+# FDStore handoff is the display's lifetime keeper, and stays that), and
+# starting, stopping or crashing it changes nothing on the television.
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-display-observer
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=5s
+
+# Its own runtime directory is the only place it writes.
+RuntimeDirectory=mediabox-display-observer
+RuntimeDirectoryMode=0755
+# Kept across a restart of the observer (it is /run: never across a boot), so
+# that the generation continues instead of starting again from 1 with the
+# same content.
+RuntimeDirectoryPreserve=yes
+UMask=0022
+
+# Root, with no capabilities at all. debugfs (/sys/kernel/debug, 0700 root) is
+# read as its owner, which needs no capability; nothing else it reads is
+# privileged. /dev/dri/card* is opened read-only and only under the rules of
+# the guarded query (transition lock free, a DRM master present, closed at
+# once) -- never kept, never master.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+DevicePolicy=closed
+DeviceAllow=char-drm r
+ProtectSystem=strict
+ReadWritePaths=/run/mediabox-display-observer
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @module @raw-io @cpu-emulation @obsolete
+# No network. AF_NETLINK is the kernel's uevent broadcast (a hint to look now;
+# the timer looks anyway). AF_UNIX is the control plane's local socket, asked
+# `output_status` for the comparison, and nothing else.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

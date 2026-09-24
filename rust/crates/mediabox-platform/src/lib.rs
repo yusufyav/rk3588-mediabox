@@ -33,10 +33,12 @@ pub mod cec;
 pub mod debugfs;
 pub mod drm;
 pub mod dt;
+pub mod drm_query;
 pub mod edid;
 pub mod roots;
 pub mod source;
 pub mod topology;
+pub mod observer;
 pub mod output;
 pub mod video;
 
