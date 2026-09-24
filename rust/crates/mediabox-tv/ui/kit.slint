@@ -610,6 +610,70 @@ export component Dialog inherits Rectangle {
     }
 }
 
+// One option of a short list opened from a card.
+export struct ChoiceItem {
+    title: string,
+    sub: string,
+    selected: bool,
+    focused: bool,
+    enabled: bool,
+    badge: string,
+    badge-tone: string,
+    now: bool,
+}
+
+// A short list over the screen: the resolutions, a refresh rate, a colour
+// format, the lights' mode. The one already chosen carries the dot and the
+// remote opens on it; Ok takes the one under the focus and Back closes the
+// list without changing anything — both decided in Rust.
+export component ChoiceSheet inherits Dialog {
+    in property <string> title;
+    in property <[ChoiceItem]> items;
+    in property <int> focus-at;
+    in property <string> note;
+    property <length> pitch: Metrics.set-h * 0.9 + Metrics.row-gap * 0.4;
+    property <int> shown: min(items.length, 6);
+    property <length> viewport: shown * pitch + Metrics.glow-w * 4;
+    property <length> total: items.length * pitch + Metrics.glow-w * 4;
+    property <length> scroll: clamp(focus-at * pitch - (viewport - pitch) / 2, 0px, max(0px, total - viewport));
+
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Metrics.t-section;
+        font-weight: 750;
+    }
+    Rectangle {
+        height: viewport;
+        clip: true;
+        VerticalLayout {
+            x: Metrics.glow-w * 2;
+            y: Metrics.glow-w * 2 - scroll;
+            width: parent.width - Metrics.glow-w * 4;
+            spacing: Metrics.row-gap * 0.4;
+            alignment: start;
+            animate y { duration: Theme.t-row; easing: Theme.ease; }
+            for c in items: ChoiceRow {
+                height: Metrics.set-h * 0.9;
+                title: c.title;
+                sub: c.sub;
+                selected: c.selected;
+                focused: c.focused;
+                enabled: c.enabled;
+                badge: c.badge;
+                badge-tone: c.badge-tone;
+                now: c.now;
+            }
+        }
+    }
+    if note != "": Text {
+        text: root.note;
+        color: Theme.muted;
+        font-size: Metrics.t-meta;
+        wrap: word-wrap;
+    }
+}
+
 // A line along the bottom that says what just happened. Words first: the
 // marker's colour only repeats what the words say.
 export component Toast inherits Rectangle {

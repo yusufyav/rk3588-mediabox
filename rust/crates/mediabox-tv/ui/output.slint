@@ -1,7 +1,7 @@
 import { Theme, Metrics } from "theme.slint";
 import {
     Icon, FocusRing, ValueBadge, StatusChip, SettingCard, ActionButton, ChoiceRow,
-    InfoPanel, InfoLine, Badge, Dialog, StateNote,
+    InfoPanel, InfoLine, Badge, Dialog, StateNote, ChoiceItem, ChoiceSheet,
 } from "kit.slint";
 
 // The display settings, in two faces.
@@ -66,18 +66,6 @@ export struct OutSimple {
     focused: bool,
 }
 
-// One option of a choice opened from the simple face.
-export struct OutChoice {
-    title: string,
-    sub: string,
-    selected: bool,
-    focused: bool,
-    enabled: bool,
-    badge: string,
-    badge-tone: string,
-    now: bool,
-}
-
 export struct OutputView {
     available: bool,
     message: string,
@@ -103,7 +91,7 @@ export struct OutputView {
     picker-open: bool,
     picker-title: string,
     picker-note: string,
-    picker: [OutChoice],
+    picker: [ChoiceItem],
     picker-focus: int,
     // ---- the advanced face
     resolutions: [OutRow],
@@ -899,54 +887,6 @@ component EdidDialog inherits Dialog {
     }
 }
 
-// A choice opened from the simple face: the resolutions, the refresh rates of
-// the one chosen, or the colour formats at it.
-component ChoiceDialog inherits Dialog {
-    in property <OutputView> view;
-    property <length> pitch: Metrics.set-h * 0.9 + Metrics.row-gap * 0.4;
-    property <int> shown: min(view.picker.length, 6);
-    property <length> viewport: shown * pitch + Metrics.glow-w * 4;
-    property <length> total: view.picker.length * pitch + Metrics.glow-w * 4;
-    property <length> scroll: clamp(view.picker-focus * pitch - (viewport - pitch) / 2, 0px, max(0px, total - viewport));
-    panel-w: Metrics.dialog-w;
-
-    Text {
-        text: view.picker-title;
-        color: Theme.text;
-        font-size: Metrics.t-section;
-        font-weight: 750;
-    }
-    Rectangle {
-        height: viewport;
-        clip: true;
-        VerticalLayout {
-            x: Metrics.glow-w * 2;
-            y: Metrics.glow-w * 2 - scroll;
-            width: parent.width - Metrics.glow-w * 4;
-            spacing: Metrics.row-gap * 0.4;
-            alignment: start;
-            animate y { duration: Theme.t-row; easing: Theme.ease; }
-            for c in view.picker: ChoiceRow {
-                height: Metrics.set-h * 0.9;
-                title: c.title;
-                sub: c.sub;
-                selected: c.selected;
-                focused: c.focused;
-                enabled: c.enabled;
-                badge: c.badge;
-                badge-tone: c.badge-tone;
-                now: c.now;
-            }
-        }
-    }
-    Text {
-        text: view.picker-note;
-        color: Theme.muted;
-        font-size: Metrics.t-meta;
-        wrap: word-wrap;
-    }
-}
-
 export component OutputPane inherits Rectangle {
     in property <OutputView> view;
     in property <bool> active-pane;
@@ -976,12 +916,17 @@ export component OutputPane inherits Rectangle {
 
     // The dialogs cover the whole panel rather than this pane: a question
     // about what the television is showing is the only thing on it.
-    if view.picker-open && view.sheet == 0: ChoiceDialog {
+    // A list opened from the simple face: the resolutions, the refresh rates
+    // of the one chosen, or the colour formats at it.
+    if view.picker-open && view.sheet == 0: ChoiceSheet {
         x: -root.x;
         y: -root.y;
         width: Metrics.vw;
         height: Metrics.vh;
-        view: view;
+        title: view.picker-title;
+        items: view.picker;
+        focus-at: view.picker-focus;
+        note: view.picker-note;
     }
 
     if view.sheet == 1: TrialDialog {

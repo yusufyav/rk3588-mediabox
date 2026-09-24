@@ -4,7 +4,7 @@ import { CoolingPane, CoolingView } from "cooling.slint";
 import { OutputPane, OutputView } from "output.slint";
 import {
     SettingNav, SideNav, PageHeader, SettingCard, ReadingRow, SectionHeader,
-    Backdrop, StatusCorner,
+    Backdrop, StatusCorner, ChoiceItem, ChoiceSheet,
 } from "kit.slint";
 
 // What the box can be told, from the sofa.
@@ -35,6 +35,12 @@ export component Settings inherits Rectangle {
     in property <bool> output;
     in property <OutputView> output-view;
     in property <VitalsModel> vitals;
+    // A short list opened from a card, over everything.
+    in property <bool> choice-open;
+    in property <string> choice-title;
+    in property <[ChoiceItem]> choice;
+    in property <int> choice-focus;
+    in property <string> choice-note;
 
     property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
     property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
@@ -156,9 +162,18 @@ export component Settings inherits Rectangle {
                     value: entry.value;
                     tone: entry.tone;
                     kind: entry.kind;
-                    focused: !on-sections && i == row-index;
+                    focused: !on-sections && !choice-open && i == row-index;
                 }
             }
         }
+    }
+
+    if choice-open: ChoiceSheet {
+        width: 100%;
+        height: 100%;
+        title: choice-title;
+        items: choice;
+        focus-at: choice-focus;
+        note: choice-note;
     }
 }

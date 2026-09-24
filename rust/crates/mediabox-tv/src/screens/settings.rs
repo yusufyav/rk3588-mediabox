@@ -39,10 +39,10 @@ pub enum Action {
     /// Disconnect the Stremio account. Somebody's add-ons stop being the ones
     /// this box uses, so it asks first.
     SignOut,
-    /// Set the board's indicator lights to this mode. The row carries the mode
-    /// it would move to rather than a "cycle" instruction, so what a press
-    /// does is decided while the screen is composed and is visible in the row
-    /// itself.
+    /// Opens the list of the lights' modes, with the one they are in marked.
+    ChooseLeds,
+    /// Set the board's indicator lights to this mode: what choosing one in
+    /// that list does.
     SetLeds(LedMode),
     /// CEC: wake the television, or send it to standby. Neither touches this
     /// appliance's own power state — the daemon owns /dev/cec0 and this is a
@@ -84,7 +84,11 @@ impl Action {
     fn leads_somewhere(self) -> bool {
         matches!(
             self,
-            Action::OpenDiagnostics | Action::OpenWifi | Action::OpenBluetooth | Action::OpenAccount
+            Action::OpenDiagnostics
+                | Action::OpenWifi
+                | Action::OpenBluetooth
+                | Action::OpenAccount
+                | Action::ChooseLeds
         )
     }
 }
@@ -299,6 +303,25 @@ pub enum Pane {
 
 const PAGES: usize = 4;
 
+/// A short list opened from a card, as the screen draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChoiceView {
+    pub title: String,
+    pub note: String,
+    pub focus: usize,
+    /// (title, line under it, chosen now)
+    pub items: Vec<(String, String, bool)>,
+}
+
+/// What each of the lights' modes does, in the list that chooses one.
+fn led_line(mode: LedMode) -> &'static str {
+    match mode {
+        LedMode::Off => "Yeşil ve mavi ışık söner",
+        LedMode::On => "Sürekli yanar",
+        LedMode::Heartbeat => "Kalp atışı gibi yanıp söner — kartın kendi ayarı",
+    }
+}
+
 pub struct Settings {
     pub groups: Vec<Group>,
     pub section: usize,
@@ -309,6 +332,10 @@ pub struct Settings {
     /// The rows of the pages that are lists, composed with everything else.
     page_rows: [Vec<Row>; PAGES],
     page_positions: [usize; PAGES],
+    /// The mode the lights are in, when the board has lights anybody can set.
+    leds: Option<LedMode>,
+    /// The lights' list, open, with the remote on this option.
+    choice: Option<usize>,
     /// The fan curve editor, which is the whole of the "Soğutma" page: a
     /// graph and a list of points rather than rows of readings.
     pub cooling: super::cooling::Cooling,
@@ -326,6 +353,8 @@ impl Settings {
             page: None,
             page_rows: Default::default(),
             page_positions: [0; PAGES],
+            leds: None,
+            choice: None,
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
         };
@@ -393,7 +422,48 @@ impl Settings {
         }
     }
 
+    /// Whether a list opened from a card holds the remote.
+    pub fn choosing(&self) -> bool {
+        self.choice.is_some()
+    }
+
+    /// Opens the lights' list on the mode they are in now. Nothing changes
+    /// until one is chosen.
+    pub fn open_choice(&mut self) -> bool {
+        let Some(mode) = self.leds else { return false };
+        self.choice = Some(LedMode::ALL.iter().position(|m| *m == mode).unwrap_or(0));
+        true
+    }
+
+    /// Ok in the list: the mode under the focus, to be set. The list closes.
+    pub fn choose(&mut self) -> Option<Action> {
+        let at = self.choice.take()?;
+        let mode = LedMode::ALL.get(at).copied()?;
+        (self.leds != Some(mode)).then_some(Action::SetLeds(mode))
+    }
+
+    pub fn choice_view(&self) -> Option<ChoiceView> {
+        let focus = self.choice?;
+        Some(ChoiceView {
+            title: "Yeşil ve mavi ışık".into(),
+            note: "Kırmızı ışık donanımdan yanar; bu seçim onu etkilemez.".into(),
+            focus,
+            items: LedMode::ALL
+                .iter()
+                .map(|mode| (mode.label().to_string(), led_line(*mode).to_string(), self.leds == Some(*mode)))
+                .collect(),
+        })
+    }
+
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
+        if let Some(at) = self.choice {
+            if dy == 0 {
+                return false;
+            }
+            let next = (at as i32 + dy).clamp(0, LedMode::ALL.len() as i32 - 1) as usize;
+            self.choice = Some(next);
+            return next != at;
+        }
         match self.pane {
             Pane::Page => match self.page {
                 // The editors have their own lists and buttons; this only
@@ -520,6 +590,9 @@ impl Settings {
     /// Back, once the editor on screen has had its say: one level up. False
     /// on the column itself, where Back leaves the screen.
     pub fn back(&mut self) -> bool {
+        if self.choice.take().is_some() {
+            return true;
+        }
         match self.pane {
             Pane::Page => {
                 self.close_page();
@@ -543,6 +616,11 @@ impl Settings {
     ) {
         self.cooling.load(fan_status(status));
         self.output.load(output_status(status));
+        self.leds = led_mode(status);
+        // Lights that stopped answering have nothing left to choose.
+        if self.leds.is_none() {
+            self.choice = None;
+        }
         let groups = compose(status, diagnostics, display);
         let changed = self.groups.len() != groups.len();
         self.groups = groups;
@@ -705,6 +783,18 @@ fn duration(seconds: u64) -> String {
     }
 }
 
+/// The mode the lights are in, when the board has lights anybody can set.
+fn led_mode(status: Option<&Value>) -> Option<LedMode> {
+    if flag(status, "/leds/available") != Some(true) {
+        return None;
+    }
+    Some(match text(status, "/leds/mode").as_deref() {
+        Some("off") => LedMode::Off,
+        Some("on") => LedMode::On,
+        _ => LedMode::Heartbeat,
+    })
+}
+
 /// The board's indicator lights: the card, and the readings that go under
 /// the "Işıklar" heading.
 ///
@@ -714,10 +804,10 @@ fn duration(seconds: u64) -> String {
 /// off and can still see a light needs to be told why, on the screen, rather
 /// than left to wonder whether the setting worked.
 ///
-/// The choosable row carries the *next* mode rather than a cycle: the value on
-/// the right is where the lights are now, and pressing Ok moves to the mode
-/// named in the hint. A remote has three buttons that matter and no text
-/// field, so stepping round a ring of three is the whole interaction.
+/// The card says where the lights are now and opens the list of the three
+/// modes, as the display's cards do. It used to step round the ring on each
+/// press, and two presses of Ok — one meant, one not — left the lights in a
+/// mode nobody had picked.
 fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
     let red = Row::reading("Kırmızı ışık", "Donanımdan yanar — kapatılamaz");
 
@@ -729,12 +819,7 @@ fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
         return (None, vec![Row::reading("Yeşil ve mavi ışık", reason), red]);
     }
 
-    let mode = match text(status, "/leds/mode").as_deref() {
-        Some("off") => LedMode::Off,
-        Some("on") => LedMode::On,
-        _ => LedMode::Heartbeat,
-    };
-    let next = mode.next();
+    let mode = led_mode(status).unwrap_or_default();
 
     (
         Some(Row {
@@ -746,9 +831,9 @@ fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
             },
             ..Row::act(
                 "Yeşil ve mavi ışık",
-                &format!("Ok: {}", next.label()),
+                "Kapalı, sürekli açık ya da nabız",
                 "bulb",
-                Action::SetLeds(next),
+                Action::ChooseLeds,
             )
         }),
         vec![
@@ -1096,7 +1181,7 @@ mod tests {
             Action::RestartPlayer,
             Action::Restart,
             Action::Shutdown,
-            Action::SetLeds(LedMode::On),
+            Action::ChooseLeds,
         ] {
             assert!(actions.contains(&wanted), "{wanted:?} is not reachable");
         }
@@ -1243,6 +1328,7 @@ mod tests {
         assert!(!Action::OpenDiagnostics.confirms());
         assert!(!Action::WakeTelevision.confirms());
         assert!(!Action::StandbyTelevision.confirms());
+        assert!(!Action::ChooseLeds.confirms());
         // An indicator light is not somebody's evening.
         for mode in LedMode::ALL {
             assert!(!Action::SetLeds(mode).confirms());
@@ -1403,31 +1489,90 @@ mod tests {
         device(Some(&answered(available, mode)))
     }
 
-    /// One press moves one step, and the ring closes. Off leads, because that
-    /// is the mode this setting exists to reach.
+    fn lights_card(rows: &[Row]) -> Option<&Row> {
+        rows.iter().find(|row| row.action == Some(Action::ChooseLeds))
+    }
+
+    /// The card says where the lights are, and a press opens the list rather
+    /// than changing anything.
     #[test]
-    fn the_lights_row_steps_round_the_ring() {
-        for (now, next) in [
-            ("off", LedMode::On),
-            ("on", LedMode::Heartbeat),
-            ("heartbeat", LedMode::Off),
-        ] {
+    fn the_lights_card_shows_the_mode_and_opens_a_list() {
+        for (now, mode) in [("off", LedMode::Off), ("on", LedMode::On), ("heartbeat", LedMode::Heartbeat)] {
             let rows = lights(true, now);
-            let row = rows
-                .iter()
-                .find(|row| matches!(row.action, Some(Action::SetLeds(_))))
-                .expect("a lights card");
-            assert_eq!(row.action, Some(Action::SetLeds(next)), "from {now}");
-            // The value is where the lights are, not where they are going.
-            assert_eq!(
-                row.value,
-                LedMode::ALL[LedMode::ALL
-                    .iter()
-                    .position(|m| m.next() == next)
-                    .expect("a predecessor")]
-                .label()
-            );
+            let card = lights_card(&rows).expect("a lights card");
+            assert_eq!(card.value, mode.label(), "from {now}");
+            assert_eq!(card.kind(), Kind::Link, "it opens something");
         }
+    }
+
+    fn lit(mode: &str) -> Settings {
+        let mut settings = Settings::new();
+        settings.compose(Some(&answered(true, mode)), None, None);
+        section(&mut settings, "Cihaz");
+        assert!(settings.step(1, 0));
+        assert_eq!(settings.focused().and_then(|r| r.action), Some(Action::ChooseLeds));
+        settings
+    }
+
+    /// The list opens on the mode the lights are in, marked as chosen.
+    #[test]
+    fn the_list_opens_on_the_current_mode() {
+        let mut settings = lit("on");
+        assert!(settings.open_choice());
+        let view = settings.choice_view().expect("an open list");
+        assert_eq!(view.focus, 1);
+        let chosen: Vec<&str> = view
+            .items
+            .iter()
+            .filter(|(_, _, now)| *now)
+            .map(|(title, _, _)| title.as_str())
+            .collect();
+        assert_eq!(chosen, [LedMode::On.label()]);
+        assert_eq!(view.items.len(), LedMode::ALL.len());
+    }
+
+    /// Moving never sets anything; Ok sets the one under the focus and closes.
+    #[test]
+    fn ok_sets_the_mode_under_the_focus() {
+        let mut settings = lit("heartbeat");
+        settings.open_choice();
+        assert!(settings.step(0, -1));
+        assert!(settings.step(0, -1));
+        assert!(!settings.step(0, -1), "Kapalı is the top");
+        assert!(!settings.step(1, 0), "sideways does nothing in a list");
+        assert_eq!(settings.choose(), Some(Action::SetLeds(LedMode::Off)));
+        assert!(!settings.choosing());
+    }
+
+    /// Choosing the mode the lights are already in changes nothing.
+    #[test]
+    fn choosing_the_current_mode_asks_for_nothing() {
+        let mut settings = lit("off");
+        settings.open_choice();
+        assert_eq!(settings.choose(), None);
+        assert!(!settings.choosing());
+    }
+
+    /// Back closes the list and leaves the remote on the card.
+    #[test]
+    fn back_closes_the_list_without_setting_anything() {
+        let mut settings = lit("on");
+        settings.open_choice();
+        settings.step(0, 1);
+        assert!(settings.back());
+        assert!(!settings.choosing());
+        assert_eq!(settings.pane, Pane::Rows);
+        assert_eq!(settings.focused().and_then(|r| r.action), Some(Action::ChooseLeds));
+    }
+
+    /// No lights to set, no list — even if one was open when they went away.
+    #[test]
+    fn lights_that_go_away_close_the_list() {
+        let mut settings = lit("on");
+        settings.open_choice();
+        settings.compose(Some(&answered(false, "off")), None, None);
+        assert!(!settings.choosing());
+        assert!(!settings.open_choice());
     }
 
     /// The question that started this: the lights were turned off and one was
@@ -1450,17 +1595,14 @@ mod tests {
     #[test]
     fn a_board_with_no_controllable_lights_offers_nothing_to_press() {
         let rows = lights(false, "off");
-        assert!(
-            rows.iter()
-                .all(|row| !matches!(row.action, Some(Action::SetLeds(_))))
-        );
+        assert!(lights_card(&rows).is_none());
     }
 
     /// Before the daemon has answered, the screen must not claim a mode.
     #[test]
     fn an_unanswered_status_does_not_invent_a_mode() {
         let rows = device(None);
-        assert!(rows.iter().all(|row| !matches!(row.action, Some(Action::SetLeds(_)))));
+        assert!(lights_card(&rows).is_none());
         assert!(rows.iter().any(|row| row.label == "Yeşil ve mavi ışık"));
     }
 

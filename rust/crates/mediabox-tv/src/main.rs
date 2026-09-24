@@ -1432,6 +1432,15 @@ impl App {
                 }
             }
             Intent::Select => {
+                // A list opened from a card: Ok takes the option under the
+                // focus, and the list closes whether or not it changed anything.
+                if self.settings.choosing() {
+                    match self.settings.choose() {
+                        Some(action) => self.run(action),
+                        None => self.paint(),
+                    }
+                    return;
+                }
                 if self.settings.pane == screens::settings::Pane::Sections {
                     if self.settings.step(1, 0) {
                         self.paint();
@@ -1934,6 +1943,11 @@ impl App {
                     self.display.as_ref(),
                 );
                 self.open(Route::Diagnostics);
+            }
+            Action::ChooseLeds => {
+                if self.settings.open_choice() {
+                    self.paint();
+                }
             }
             Action::SetLeds(mode) => {
                 // No message along the bottom. A setting whose own row shows
@@ -2696,6 +2710,30 @@ impl App {
         window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(setting_rows(
             self.settings.rows(),
         ))));
+        let choice = self.settings.choice_view();
+        window.set_settings_choice_open(choice.is_some());
+        if let Some(choice) = choice {
+            window.set_settings_choice_title(choice.title.into());
+            window.set_settings_choice_note(choice.note.into());
+            window.set_settings_choice_focus(choice.focus as i32);
+            window.set_settings_choice(slint::ModelRc::new(slint::VecModel::from(
+                choice
+                    .items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (title, sub, selected))| ChoiceItem {
+                        title: title.into(),
+                        sub: sub.into(),
+                        selected,
+                        focused: index == choice.focus,
+                        enabled: true,
+                        badge: "".into(),
+                        badge_tone: "".into(),
+                        now: false,
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+        }
         self.paint_cooling(window);
         self.paint_output(window);
     }
@@ -2782,7 +2820,7 @@ impl App {
             picker: model(
                 view.picker
                     .iter()
-                    .map(|option| OutChoice {
+                    .map(|option| ChoiceItem {
                         title: option.title.clone().into(),
                         sub: option.sub.clone().into(),
                         selected: option.selected,
