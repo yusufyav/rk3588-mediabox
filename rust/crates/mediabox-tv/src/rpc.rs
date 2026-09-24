@@ -245,6 +245,12 @@ impl Client {
         self.call(serde_json::to_value(request)?).await
     }
 
+    /// Any request the daemon's own protocol type describes, as it is: the
+    /// wired ports use this, and answer with their whole account.
+    pub async fn request(&self, request: &mediabox_core::Request) -> Result<Value> {
+        self.call(serde_json::to_value(request)?).await
+    }
+
     /// Save a fan curve for the next boot. The daemon validates it and writes
     /// the overlay; the kernel's pwm-fan is what drives the fan either way.
     pub async fn fan_curve_set(&self, curve: &mediabox_core::FanCurve) -> Result<Value> {

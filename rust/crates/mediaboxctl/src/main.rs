@@ -62,6 +62,54 @@ enum Command {
         #[command(subcommand)]
         command: FanCommand,
     },
+    /// The wired ports, and an address written by hand on trial
+    Ethernet {
+        #[command(subcommand)]
+        command: EthernetCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EthernetCommand {
+    /// Every wired port, what it has, what it is set to, and a change waiting
+    Status,
+    /// Put an address on a port on trial; it is taken back unless kept
+    Set {
+        /// The port, as `status` names it
+        interface: String,
+        /// `dhcp`, or an address with its prefix: `192.168.2.80/24`
+        #[arg(value_parser = parse_ethernet)]
+        address: EthernetAddress,
+        /// The default route's gateway, with an address
+        #[arg(long)]
+        gateway: Option<std::net::Ipv4Addr>,
+        /// A name server, with an address; may be given twice
+        #[arg(long)]
+        dns: Vec<std::net::Ipv4Addr>,
+    },
+    /// Keep the address on trial
+    Keep,
+    /// Take the address on trial back now
+    Revert,
+}
+
+#[derive(Debug, Clone)]
+enum EthernetAddress {
+    Dhcp,
+    Fixed(std::net::Ipv4Addr, u8),
+}
+
+fn parse_ethernet(text: &str) -> Result<EthernetAddress, String> {
+    if text.eq_ignore_ascii_case("dhcp") {
+        return Ok(EthernetAddress::Dhcp);
+    }
+    let (address, prefix) = text
+        .split_once('/')
+        .ok_or("`dhcp` ya da `192.168.2.80/24` biçiminde olmalı")?;
+    Ok(EthernetAddress::Fixed(
+        address.parse().map_err(|_| format!("{address} bir IPv4 adresi değil"))?,
+        prefix.parse().map_err(|_| format!("{prefix} bir ağ öneki değil"))?,
+    ))
 }
 
 #[derive(Debug, Subcommand)]
@@ -410,6 +458,23 @@ fn to_request(command: &Command) -> Request {
             },
             DisplayCommand::Keep => Request::OutputKeep,
             DisplayCommand::Revert => Request::OutputRevert,
+        },
+        Command::Ethernet { command } => match command {
+            EthernetCommand::Status => Request::EthernetStatus,
+            EthernetCommand::Set { interface, address, gateway, dns } => Request::EthernetTry {
+                interface: interface.clone(),
+                config: match address {
+                    EthernetAddress::Dhcp => mediabox_core::EthernetConfig::Dhcp,
+                    EthernetAddress::Fixed(address, prefix) => mediabox_core::EthernetConfig::Static {
+                        address: *address,
+                        prefix: *prefix,
+                        gateway: *gateway,
+                        dns: dns.clone(),
+                    },
+                },
+            },
+            EthernetCommand::Keep => Request::EthernetKeep,
+            EthernetCommand::Revert => Request::EthernetRevert,
         },
         Command::Fan { command } => match command {
             FanCommand::Status => Request::FanStatus,

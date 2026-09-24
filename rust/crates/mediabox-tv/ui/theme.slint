@@ -8,7 +8,10 @@
 //
 // Two rules run through all of it. Content first: artwork is as large as the
 // panel affords and chrome is as small as it can be while still being readable
-// from a sofa. And one focus language: a white ring, a small growth, 130 ms.
+// from a sofa. And a focus language per kind of screen: what is browsed — the
+// posters, the launcher — takes a white ring and a small growth; what is
+// operated — the settings and everything opened from them — takes the warm
+// outline below, and nothing there grows.
 
 export global Theme {
     // Ground and surfaces. Near-black rather than black — a television's own
@@ -58,6 +61,86 @@ export global Theme {
              : name == "warn" ? warn
              : name == "bad"  ? bad
              : muted;
+    }
+
+    // ---- the settings language
+    //
+    // The settings screens, and everything opened from them, are operated
+    // rather than browsed, so their focus is not the posters' white ring and
+    // growth. It is a warm outline on a slightly brighter surface, with the
+    // text brought up to full white: three signals at once, so it reads from a
+    // sofa and does not depend on colour alone. Nothing grows — a list whose
+    // rows change size under the remote is a list that cannot be read while
+    // moving through it.
+    out property <color> focus: #f4b64e;
+    // The glow is two rings of the same amber at low alpha rather than a blur:
+    // a drop shadow is a blur pass on this GPU for every frame it is drawn.
+    out property <color> focus-glow: #f4b64e38;
+    out property <color> focus-glow-far: #f4b64e14;
+
+    out property <brush> s-ground: #07080d;
+    // The column down the left, a shade apart from the ground.
+    out property <brush> s-nav: #0b0d14;
+    out property <brush> s-card: #141720;
+    out property <brush> s-card-hi: #1e212c;
+    out property <brush> s-line: #252a36;
+    out property <brush> s-hairline: #1a1e28;
+    // Where the remote is not, but the place it came from is: the section a
+    // page belongs to, the choice already made.
+    out property <brush> s-current: #ffffff10;
+
+    // Verdicts as small labels. Colour and a word, always: a status that is
+    // only a colour is a status half of the room cannot read.
+    out property <color> badge-hdr: #f6c46a;
+    out property <color> badge-good: #6ee7a0;
+    out property <color> badge-plain: #dfe3ea;
+
+    // Whether anything moves at all. Every duration in the settings language
+    // is read through this, so a reduced-motion preference is one property
+    // rather than a search through every file.
+    in property <bool> motion: true;
+    out property <duration> t-focus: motion ? 120ms : 0ms;
+    out property <duration> t-row: motion ? 160ms : 0ms;
+    out property <duration> t-dialog: motion ? 200ms : 0ms;
+    out property <duration> t-fade: motion ? 220ms : 0ms;
+}
+
+// Line marks, drawn rather than shipped, in a 24×24 box and stroked. Rust names
+// a mark by word ("monitor", "wifi") and never carries path data, so a screen's
+// state stays free of drawing.
+export global Icons {
+    public pure function path(name: string) -> string {
+        return name == "gear" ? "M12 8.6a3.4 3.4 0 1 0 0 6.8a3.4 3.4 0 1 0 0-6.8z M10.3 2.8h3.4l.5 2.6a7.2 7.2 0 0 1 1.9 1.1l2.5-.9 1.7 2.9-2 1.7a7.4 7.4 0 0 1 0 2.2l2 1.7-1.7 2.9-2.5-.9a7.2 7.2 0 0 1-1.9 1.1l-.5 2.6h-3.4l-.5-2.6a7.2 7.2 0 0 1-1.9-1.1l-2.5.9-1.7-2.9 2-1.7a7.4 7.4 0 0 1 0-2.2l-2-1.7 1.7-2.9 2.5.9a7.2 7.2 0 0 1 1.9-1.1z"
+             : name == "play" ? "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M10 8.3v7.4l5.8-3.7z"
+             : name == "monitor" ? "M3.5 4.5h17a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-17a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z M8.5 20.5h7 M12 16.5v4"
+             : name == "wifi" ? "M2.8 9.2a13.5 13.5 0 0 1 18.4 0 M5.9 12.6a9 9 0 0 1 12.2 0 M9 16a4.6 4.6 0 0 1 6 0 M11.2 19.4a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0"
+             : name == "remote" ? "M8.5 2.5h7a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2z M10.6 7a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0-2.8 0 M9.8 12.2h4.4 M9.8 15.4h4.4"
+             : name == "chip" ? "M7.5 6.5h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z M10 10h4v4h-4z M9.5 3v3.5 M14.5 3v3.5 M9.5 17.5V21 M14.5 17.5V21 M3 9.5h3.5 M3 14.5h3.5 M17.5 9.5H21 M17.5 14.5H21"
+             : name == "info" ? "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M12 10.8v5.7 M11.2 7.6a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0"
+             : name == "bars" ? "M5 20.5v-5 M9.7 20.5v-9 M14.3 20.5v-6.5 M19 20.5v-15"
+             : name == "user" ? "M12 3.5a4.2 4.2 0 1 0 0 8.4a4.2 4.2 0 1 0 0-8.4z M4.5 20.5a7.5 7.5 0 0 1 15 0"
+             : name == "speaker" ? "M3.5 9.3h3.8l5-4.3v14l-5-4.3H3.5z M16 9a4.2 4.2 0 0 1 0 6 M18.6 6.4a7.8 7.8 0 0 1 0 11.2"
+             : name == "bluetooth" ? "M6.8 7.2l10.4 9.6-5.2 4.7V2.5l5.2 4.7L6.8 16.8"
+             : name == "power" ? "M12 3v8 M7.2 5.8a8 8 0 1 0 9.6 0"
+             : name == "restart" ? "M20 12a8 8 0 1 1-2.4-5.7 M20.2 3.8v4.8h-4.8"
+             : name == "fan" ? "M12 10.3a1.7 1.7 0 1 0 0 3.4a1.7 1.7 0 1 0 0-3.4z M12 10.3c-.6-3.6.4-6.8 2.9-6.8 2.4 0 2.6 3.7-1.3 7.2 M13.7 12c3.6-.6 6.8.4 6.8 2.9 0 2.4-3.7 2.6-7.2-1.3 M12 13.7c.6 3.6-.4 6.8-2.9 6.8-2.4 0-2.6-3.7 1.3-7.2 M10.3 12c-3.6.6-6.8-.4-6.8-2.9 0-2.4 3.7-2.6 7.2 1.3"
+             : name == "bulb" ? "M9.2 18.2h5.6 M10.2 21h3.6 M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.3 1.1 2.1v.3h5v-.3c0-.8.4-1.5 1.1-2.1A6 6 0 0 0 12 3z"
+             : name == "tv" ? "M3.5 6.5h17a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-17a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1z M8 2.5l4 4 4-4"
+             : name == "moon" ? "M20 14.3A8.2 8.2 0 1 1 9.7 4a6.6 6.6 0 0 0 10.3 10.3z"
+             : name == "network" ? "M9 3.5h6v5H9z M3.5 15.5h6v5h-6z M14.5 15.5h6v5h-6z M12 8.5v3.5 M6.5 15.5V12h11v3.5"
+             : name == "signin" ? "M14 3.5h4.5a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H14 M9.5 7.5l4.5 4.5-4.5 4.5 M14 12H3.5"
+             : name == "signout" ? "M10 3.5H5.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2H10 M15.5 7.5l4.5 4.5-4.5 4.5 M20 12H9.5"
+             : name == "resolution" ? "M3.5 5.5h17v13h-17z M7 9.5v-1h2.5 M17 14.5v1h-2.5"
+             : name == "refresh" ? "M4 12a8 8 0 0 1 13.7-5.6l2 2 M19.8 4v4.5h-4.5 M20 12a8 8 0 0 1-13.7 5.6l-2-2 M4.2 20v-4.5h4.5"
+             : name == "palette" ? "M12 3a9 9 0 1 0 0 18c1.1 0 1.7-.8 1.7-1.6 0-1.3-1.1-1.6-1.1-2.8 0-1 .8-1.6 1.8-1.6h2.7a3.9 3.9 0 0 0 3.9-3.9C21 6.7 17 3 12 3z M7.2 11.8a1 1 0 1 0 2 0a1 1 0 1 0-2 0 M10.6 7.6a1 1 0 1 0 2 0a1 1 0 1 0-2 0 M15 9.2a1 1 0 1 0 2 0a1 1 0 1 0-2 0"
+             : name == "sliders" ? "M4 7h9 M17 7h3 M15 4.8v4.4 M4 17h3 M11 17h9 M9 14.8v4.4"
+             : name == "chevron" ? "M9 5l7 7-7 7"
+             : name == "back" ? "M15 5l-7 7 7 7"
+             : name == "check" ? "M5 12.5l4.5 4.5 9.5-9.5"
+             : name == "alert" ? "M12 3.8l9.2 16H2.8z M12 10v4.6 M11.25 17.3a.75.75 0 1 0 1.5 0a.75.75 0 1 0-1.5 0"
+             : name == "clock" ? "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M12 7.5V12l3 2"
+             : name == "hdmi" ? "M3 8.5h18v4l-2.5 3h-13L3 12.5z M7 11.5h10"
+             : "";
     }
 }
 
@@ -136,4 +219,63 @@ export global Metrics {
     // A sheet over the screen: the sources, the power menu, a confirmation.
     out property <length> sheet-w: max(320px, min(900px, vw * 0.44));
     out property <length> sheet-pad: max(14px, min(44px, vw * 0.016));
+
+    // ---- the settings screens
+    //
+    // One set of figures for the settings screens and everything they open,
+    // written against the 1920-wide design and scaled by the panel's width.
+    // A 4K panel is the same 1920 logical pixels at twice the density — the
+    // platform's integer scale does that (platform.rs `scale_factor`) — so
+    // nothing here knows about 4K; it only has to be right at 1920 and still
+    // readable at 1280. The floors are what 1280 is held to: a 720p television
+    // is the same size in the room as a 1080p one, so type there is smaller in
+    // pixels, but never so small that the rasteriser loses the letters.
+
+    // How far in from the panel's edges anything is drawn.
+    out property <length> safe-x: max(24px, min(120px, vw * 0.036));
+    out property <length> safe-y: max(18px, min(80px, vh * 0.05));
+
+    // The category column: its width, the height of one entry, its inset.
+    out property <length> nav-w: max(236px, min(560px, vw * 0.19));
+    out property <length> nav-item-h: max(40px, min(96px, vh * 0.058));
+    out property <length> nav-pad: max(10px, min(30px, vw * 0.0105));
+    // Where the content column starts, and how wide it may be.
+    out property <length> pane-x: safe-x + nav-w + max(28px, min(120px, vw * 0.045));
+    out property <length> pane-w: vw - pane-x - safe-x;
+    // A list of settings is capped rather than run to the far edge: a label on
+    // one side of a wide panel and its value on the other cannot be read as
+    // one line from a sofa.
+    out property <length> list-w: min(pane-w, max(480px, vw * 0.44));
+
+    // The type. 1080p: 45 / 30 / 26 / 21 / 19.
+    out property <length> t-page: max(28px, min(96px, vw * 0.0234));
+    out property <length> t-section: max(18px, min(64px, vw * 0.0152));
+    out property <length> t-primary: max(17px, min(56px, vw * 0.0135));
+    out property <length> t-secondary: max(14.5px, min(46px, vw * 0.011));
+    out property <length> t-meta: max(13.5px, min(40px, vw * 0.0099));
+    out property <length> t-nav-head: max(20px, min(68px, vw * 0.0167));
+
+    // Rows. A card is a row that does something; a reading only says.
+    out property <length> set-h: max(62px, min(190px, vh * 0.092));
+    out property <length> set-h-flat: max(50px, min(150px, vh * 0.07));
+    out property <length> reading-h: max(40px, min(128px, vh * 0.058));
+    out property <length> header-h: max(38px, min(120px, vh * 0.058));
+    out property <length> row-gap: max(7px, min(26px, vh * 0.012));
+    out property <length> card-pad: max(14px, min(56px, vw * 0.0145));
+    out property <length> s-radius: max(10px, min(32px, vw * 0.0083));
+    out property <length> icon: max(20px, min(68px, vw * 0.0172));
+    out property <length> icon-small: max(15px, min(52px, vw * 0.0125));
+
+    // The focus outline and its glow. Whole-ish pixels at 1080p so the line is
+    // crisp; the 4K panel doubles it with everything else.
+    out property <length> focus-w: max(2px, min(6px, vw * 0.0016));
+    out property <length> glow-w: max(3px, min(10px, vw * 0.0024));
+
+    // A small label: HDR, 10-bit, Bağlı.
+    out property <length> badge-h: max(22px, min(64px, vh * 0.03));
+
+    // A dialog over a settings screen.
+    out property <length> dialog-w: max(420px, min(1180px, vw * 0.4));
+    out property <length> dialog-pad: max(18px, min(64px, vw * 0.0185));
+    out property <length> button-h: max(40px, min(110px, vh * 0.054));
 }

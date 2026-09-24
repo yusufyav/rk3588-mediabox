@@ -9,8 +9,14 @@
 //!   outside this process has seen until "Uygula".
 //!
 //! Moving the focus never changes a value. Ok chooses the thing under the
-//! focus into the draft; a cell that cannot be sent says why instead. Nothing
-//! is decided here: every mode, every colour cell and every reason comes from
+//! focus into the draft; a cell that cannot be sent says why instead.
+//!
+//! There are two faces. The simple one is three cards -- the resolution, the
+//! refresh rate, the colour format -- each opening a short list of what this
+//! display can take, beside what is on the wire now. The advanced one is the
+//! whole offer: every size, the rates of one, and the format × depth grid with
+//! what each costs on the link. Both edit the same draft. Nothing is decided
+//! here: every mode, every colour cell and every reason comes from
 //! the offer the platform computed by the HDMI rules
 //! (`mediabox_platform::output`), and the daemon checks a setting again before
 //! it goes on trial.
@@ -61,16 +67,62 @@ pub enum Press {
 pub enum Nav {
     Moved,
     Unchanged,
-    /// Left from the resolutions: back to the section list.
+    /// Left from the simple face: back to the card that opened the page.
     Leave,
 }
+
+/// How long the trial question takes no Ok after it appears.
+///
+/// The question comes up the moment the daemon has put the new mode on the
+/// wire, and the press that asked for the trial can still be arriving: a CEC
+/// remote sends the press, the hold and the release, and Ok is never
+/// rate-limited (see input.rs). One of those landing on "Koru" would keep a
+/// mode nobody has seen -- the television may still be black, re-locking to
+/// the new signal. So for this long Ok on the question does nothing; Back,
+/// which only ever goes back, is never held.
+pub const CONFIRM_GUARD: Duration = Duration::from_millis(1200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Sheet {
     None,
     /// "Bu görüntü kalsın mı?", until `deadline`. 0 keeps, 1 goes back.
-    Confirm { deadline: Instant, focus: usize },
+    /// `since` is when it was asked, for the guard.
+    Confirm { deadline: Instant, focus: usize, since: Instant },
     Edid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Face {
+    Simple,
+    Advanced,
+}
+
+/// The rows of the simple face, top to bottom; the buttons are below them.
+const SIMPLE_ROWS: usize = 4;
+const SIMPLE_ACTIONS: usize = 2;
+
+/// Which list a simple-face card opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    Resolution,
+    Rate,
+    Colour,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Picker {
+    kind: Pick,
+    focus: usize,
+}
+
+/// What choosing an option puts in the draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    AutoResolution,
+    Size(usize),
+    Mode(ResolutionChoice),
+    AutoColour,
+    Colour(ColorMode),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -107,6 +159,11 @@ pub struct Output {
     act: usize,
     sheet: Sheet,
     note: String,
+    face: Face,
+    /// The simple face's row, `SIMPLE_ROWS` for its buttons.
+    simple: usize,
+    simple_act: usize,
+    picker: Option<Picker>,
 }
 
 impl Default for Output {
@@ -124,6 +181,10 @@ impl Default for Output {
             act: 0,
             sheet: Sheet::None,
             note: String::new(),
+            face: Face::Simple,
+            simple: 0,
+            simple_act: 0,
+            picker: None,
         }
     }
 }
@@ -166,12 +227,42 @@ impl Output {
     }
 
     fn ask(&mut self, seconds: u32) {
+        let now = Instant::now();
+        self.picker = None;
         self.sheet = Sheet::Confirm {
-            deadline: Instant::now() + Duration::from_secs(seconds.into()),
+            deadline: now + Duration::from_secs(seconds.into()),
             // "Koru" first, as the reference does: the question is only seen
-            // by somebody whose display shows it.
+            // by somebody whose display shows it -- and the guard keeps a
+            // press meant for "Uygula" from answering it.
             focus: 0,
+            since: now,
         };
+    }
+
+    /// Whether Ok on the trial question is taken yet.
+    fn confirm_ready(&self) -> bool {
+        match self.sheet {
+            Sheet::Confirm { since, .. } => since.elapsed() >= CONFIRM_GUARD,
+            _ => true,
+        }
+    }
+
+    pub fn advanced(&self) -> bool {
+        self.face == Face::Advanced
+    }
+
+    /// The display, its connector and its link, in one line.
+    pub fn sink_line(&self) -> String {
+        self.offer()
+            .map(|offer| {
+                format!(
+                    "{} · {} · {} MHz",
+                    offer.sink_name.as_deref().unwrap_or("Ekran"),
+                    offer.connector,
+                    offer.link.max_character_rate_khz / 1000
+                )
+            })
+            .unwrap_or_default()
     }
 
     /// The trial is over, kept or not: the draft is what the daemon says next.
@@ -274,12 +365,28 @@ impl Output {
     }
 
     #[cfg(test)]
+    pub fn simple_focus(&self) -> (Face, usize, Option<(Pick, usize)>) {
+        (self.face, self.simple, self.picker.map(|p| (p.kind, p.focus)))
+    }
+
+    #[cfg(test)]
     pub fn chosen(&self) -> (ResolutionChoice, Option<ColorMode>) {
         (self.draft().resolution, self.draft_colour())
     }
 
-    /// The remote comes in from the section list: onto the draft's size.
+    /// The page opens: on the simple face's first card.
     pub fn enter(&mut self) {
+        self.face = Face::Simple;
+        self.simple = 0;
+        self.simple_act = 0;
+        self.picker = None;
+        self.note.clear();
+        self.settle();
+    }
+
+    /// The advanced face opens: onto the draft's size.
+    fn enter_advanced(&mut self) {
+        self.face = Face::Advanced;
         self.zone = Zone::Resolutions;
         let draft = self.draft();
         match draft.resolution {
@@ -308,7 +415,6 @@ impl Output {
     // ------------------------------------------------------------ moving
 
     pub fn step(&mut self, dx: i32, dy: i32) -> Nav {
-        let before = (self.zone, self.res, self.rate, self.cell, self.act, self.open);
         match &mut self.sheet {
             Sheet::Confirm { focus, .. } => {
                 if dx != 0 {
@@ -320,11 +426,18 @@ impl Output {
             Sheet::Edid => return Nav::Unchanged,
             Sheet::None => {}
         }
+        if self.face == Face::Simple {
+            return self.step_simple(dx, dy);
+        }
+        let before = (self.zone, self.res, self.rate, self.cell, self.act, self.open);
         self.note.clear();
         match self.zone {
             Zone::Resolutions => {
+                // Left from the first list is back to the simple face, not
+                // out of the page: one level at a time.
                 if dx < 0 {
-                    return Nav::Leave;
+                    self.face = Face::Simple;
+                    return Nav::Moved;
                 }
                 if dx > 0 {
                     self.zone = if self.res == 0 { Zone::Colours } else { Zone::Rates };
@@ -370,6 +483,45 @@ impl Output {
         if before == (self.zone, self.res, self.rate, self.cell, self.act, self.open) {
             Nav::Unchanged
         } else {
+            Nav::Moved
+        }
+    }
+
+    fn step_simple(&mut self, dx: i32, dy: i32) -> Nav {
+        if let Some(picker) = self.picker {
+            if dy == 0 {
+                return Nav::Unchanged;
+            }
+            let count = self.choices(picker.kind).len();
+            let focus = (picker.focus as i32 + dy).clamp(0, count as i32 - 1) as usize;
+            if focus == picker.focus {
+                return Nav::Unchanged;
+            }
+            self.picker = Some(Picker { focus, ..picker });
+            return Nav::Moved;
+        }
+        let before = (self.simple, self.simple_act);
+        if self.simple == SIMPLE_ROWS {
+            if dy < 0 {
+                self.simple = SIMPLE_ROWS - 1;
+            } else if dx < 0 && self.simple_act == 0 {
+                return Nav::Leave;
+            } else if dx != 0 {
+                self.simple_act =
+                    (self.simple_act as i32 + dx).clamp(0, SIMPLE_ACTIONS as i32 - 1) as usize;
+            }
+        } else if dx < 0 {
+            return Nav::Leave;
+        } else if dy != 0 {
+            self.simple = (self.simple as i32 + dy).clamp(0, SIMPLE_ROWS as i32) as usize;
+            if self.simple == SIMPLE_ROWS {
+                self.simple_act = 0;
+            }
+        }
+        if before == (self.simple, self.simple_act) {
+            Nav::Unchanged
+        } else {
+            self.note.clear();
             Nav::Moved
         }
     }
@@ -443,6 +595,9 @@ impl Output {
     pub fn press(&mut self) -> Press {
         match self.sheet.clone() {
             Sheet::Confirm { focus, .. } => {
+                if !self.confirm_ready() {
+                    return Press::Nothing;
+                }
                 return if focus == 0 { Press::Keep } else { Press::Revert };
             }
             Sheet::Edid => {
@@ -452,6 +607,9 @@ impl Output {
             Sheet::None => {}
         }
         self.note.clear();
+        if self.face == Face::Simple {
+            return self.press_simple();
+        }
         match self.zone {
             Zone::Resolutions => {
                 if self.res == 0 {
@@ -528,6 +686,240 @@ impl Output {
         }
     }
 
+    fn press_simple(&mut self) -> Press {
+        if let Some(picker) = self.picker {
+            let options = self.choices(picker.kind);
+            let Some((option, choice)) = options.get(picker.focus) else {
+                return Press::Nothing;
+            };
+            if !option.enabled {
+                self.note = format!("{}: bu bağlantıya sığmıyor.", option.title);
+                return Press::Changed;
+            }
+            self.choose(*choice);
+            self.picker = None;
+            return Press::Changed;
+        }
+        match self.simple {
+            0 => self.open_picker(Pick::Resolution),
+            1 => self.open_picker(Pick::Rate),
+            2 => self.open_picker(Pick::Colour),
+            3 => {
+                self.enter_advanced();
+                Press::Changed
+            }
+            _ => match self.simple_act {
+                0 if self.unsaved() => Press::Try(self.draft().resolution, self.draft_colour()),
+                0 => Press::Nothing,
+                _ => {
+                    if !self.unsaved() {
+                        return Press::Nothing;
+                    }
+                    self.draft = self.base.clone();
+                    self.note = "Taslak bırakıldı.".into();
+                    Press::Changed
+                }
+            },
+        }
+    }
+
+    /// Opens a list with the focus on what the draft has now.
+    fn open_picker(&mut self, kind: Pick) -> Press {
+        let options = self.choices(kind);
+        if options.is_empty() {
+            return Press::Nothing;
+        }
+        let focus = options.iter().position(|(option, _)| option.selected).unwrap_or(0);
+        self.picker = Some(Picker { kind, focus });
+        Press::Changed
+    }
+
+    /// Puts an option into the draft. Nothing leaves this process.
+    fn choose(&mut self, choice: Choice) {
+        let label = self.draft_mode().map(|mode| mode.label.clone());
+        let resolution = match choice {
+            Choice::AutoResolution => Some(ResolutionChoice::Auto),
+            Choice::Size(group) => self.mode_for_size(group),
+            Choice::Mode(mode) => Some(mode),
+            Choice::AutoColour | Choice::Colour(_) => None,
+        };
+        let Some(draft) = self.draft.as_mut() else { return };
+        if let Some(resolution) = resolution {
+            draft.resolution = resolution;
+        }
+        match (choice, label) {
+            (Choice::AutoColour, Some(label)) => {
+                draft.colours.remove(&label);
+            }
+            (Choice::Colour(mode), Some(label)) => {
+                draft.colours.insert(label, mode);
+            }
+            _ => {}
+        }
+    }
+
+    /// The mode a size stands for when it is chosen on its own: the draft's
+    /// refresh rate if this size has it, else the display's preferred mode,
+    /// else the fastest progressive one -- among those that fit the link.
+    fn mode_for_size(&self, group: usize) -> Option<ResolutionChoice> {
+        let modes = &self.offer()?.groups.get(group)?.modes;
+        let fits = |mode: &&OutputModeOffer| mode.allowed().next().is_some();
+        let refresh = self.draft_mode().map(|mode| (mode.refresh_mhz, mode.interlaced));
+        modes
+            .iter()
+            .filter(fits)
+            .find(|mode| Some((mode.refresh_mhz, mode.interlaced)) == refresh)
+            .or_else(|| modes.iter().filter(fits).find(|mode| mode.preferred))
+            .or_else(|| {
+                modes
+                    .iter()
+                    .filter(fits)
+                    .filter(|mode| !mode.interlaced)
+                    .max_by_key(|mode| mode.refresh_mhz)
+            })
+            .or_else(|| modes.iter().find(fits))
+            .map(OutputModeOffer::choice)
+    }
+
+    /// The options of one list, in order, with what each would choose.
+    fn choices(&self, kind: Pick) -> Vec<(ChoiceView, Choice)> {
+        let (Some(status), Some(offer)) = (self.status.as_ref(), self.offer()) else {
+            return Vec::new();
+        };
+        let draft = self.draft();
+        let wire = status.wire.clone().unwrap_or_default();
+        let wire_mode = offer.mode(&wire.mode);
+        match kind {
+            Pick::Resolution => {
+                let draft_group = self.group_of(draft.resolution);
+                let mut options = vec![(
+                    ChoiceView {
+                        title: "Otomatik".into(),
+                        sub: offer
+                            .mode(&offer.auto)
+                            .map(|mode| format!("Ekranın tercihi · {}", label(mode)))
+                            .unwrap_or_default(),
+                        selected: draft.resolution == ResolutionChoice::Auto,
+                        enabled: true,
+                        ..ChoiceView::default()
+                    },
+                    Choice::AutoResolution,
+                )];
+                for (index, group) in offer.groups.iter().enumerate() {
+                    let fastest = group
+                        .modes
+                        .iter()
+                        .filter(|mode| mode.allowed().next().is_some())
+                        .map(|mode| mode.refresh_mhz)
+                        .max();
+                    let size = format!("{} × {}", group.width, group.height);
+                    options.push((
+                        ChoiceView {
+                            title: if group.name.is_empty() { size.clone() } else { group.name.clone() },
+                            sub: match (group.name.is_empty(), fastest) {
+                                (_, None) => format!("{size} · bu bağlantıya sığmıyor"),
+                                (true, Some(hz)) => format!("{} Hz'e kadar", hz_text(hz)),
+                                (false, Some(hz)) => format!("{size} · {} Hz'e kadar", hz_text(hz)),
+                            },
+                            selected: draft.resolution != ResolutionChoice::Auto
+                                && draft_group == Some(index),
+                            enabled: fastest.is_some(),
+                            badge: if group.modes.iter().any(OutputModeOffer::hdr10) {
+                                "HDR".into()
+                            } else {
+                                String::new()
+                            },
+                            badge_tone: "hdr".into(),
+                            now: wire_mode.is_some_and(|mode| {
+                                mode.width == group.width && mode.height == group.height
+                            }),
+                            focused: false,
+                        },
+                        Choice::Size(index),
+                    ));
+                }
+                options
+            }
+            Pick::Rate => {
+                let group = self
+                    .group_of(draft.resolution)
+                    .and_then(|group| offer.groups.get(group));
+                let auto = draft.resolution == ResolutionChoice::Auto;
+                group
+                    .map(|group| {
+                        group
+                            .modes
+                            .iter()
+                            .map(|mode| {
+                                (
+                                    ChoiceView {
+                                        title: format!(
+                                            "{} Hz{}",
+                                            hz_text(mode.refresh_mhz),
+                                            if mode.interlaced { " (geçmeli)" } else { "" }
+                                        ),
+                                        sub: if auto && mode.label == offer.auto {
+                                            "Otomatik bunu seçiyor".into()
+                                        } else if mode.preferred {
+                                            "Ekranın tercihi".into()
+                                        } else {
+                                            String::new()
+                                        },
+                                        selected: !auto && mode.is(draft.resolution),
+                                        enabled: mode.allowed().next().is_some(),
+                                        badge: if mode.hdr10() { "HDR".into() } else { String::new() },
+                                        badge_tone: "hdr".into(),
+                                        now: mode.label == wire.mode,
+                                        focused: false,
+                                    },
+                                    Choice::Mode(mode.choice()),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            Pick::Colour => {
+                let Some(mode) = self.draft_mode() else {
+                    return Vec::new();
+                };
+                let chosen = self.draft_colour();
+                let mut options = vec![(
+                    ChoiceView {
+                        title: "Otomatik (önerilen)".into(),
+                        sub: auto_colour_line(mode),
+                        selected: chosen.is_none(),
+                        enabled: true,
+                        ..ChoiceView::default()
+                    },
+                    Choice::AutoColour,
+                )];
+                // Only what fits: the advanced face lists the rest with the
+                // reason each is refused.
+                for cell in mode.cells.iter().filter(|cell| cell.refused.is_none()) {
+                    options.push((
+                        ChoiceView {
+                            title: colour_text(cell.mode),
+                            sub: format!(
+                                "{} MHz · {}",
+                                cell.rate_khz / 1000,
+                                if cell.mode.carries_hdr() { "HDR10 taşır" } else { "HDR10 için 10 bit gerekir" }
+                            ),
+                            selected: chosen == Some(cell.mode),
+                            enabled: true,
+                            badge: if cell.mode.carries_hdr() { "HDR".into() } else { String::new() },
+                            badge_tone: "hdr".into(),
+                            now: mode.label == wire.mode && wire.colour == Some(cell.mode),
+                            focused: false,
+                        },
+                        Choice::Colour(cell.mode),
+                    ));
+                }
+                options
+            }
+        }
+    }
+
     /// Back. `None` when there is nothing for it to do here, so it leaves.
     pub fn back(&mut self) -> Option<Press> {
         match self.sheet {
@@ -536,11 +928,22 @@ impl Output {
                 self.sheet = Sheet::None;
                 Some(Press::Changed)
             }
+            Sheet::None if self.face == Face::Simple => {
+                if self.picker.take().is_some() {
+                    self.note.clear();
+                    return Some(Press::Changed);
+                }
+                None
+            }
             Sheet::None if self.zone == Zone::Actions => {
                 self.zone = self.above;
                 Some(Press::Changed)
             }
-            Sheet::None => None,
+            // Out of the advanced face, onto the card that opened it.
+            Sheet::None => {
+                self.face = Face::Simple;
+                Some(Press::Changed)
+            }
         }
     }
 
@@ -719,7 +1122,7 @@ impl Output {
 
         let (sheet, seconds, confirm_focus) = match &self.sheet {
             Sheet::None => (0, 0, 0),
-            Sheet::Confirm { deadline, focus } => (
+            Sheet::Confirm { deadline, focus, .. } => (
                 1,
                 deadline.saturating_duration_since(Instant::now()).as_secs_f32().ceil() as u32,
                 *focus,
@@ -749,15 +1152,118 @@ impl Output {
             })
             .unwrap_or_default();
 
+        let simple = self.simple_view(offer, &draft);
+        let simple_focus = |index: usize| {
+            self.sheet == Sheet::None && self.picker.is_none() && self.simple == SIMPLE_ROWS
+                && self.simple_act == index
+        };
+        let simple_actions = ["Uygula", "Geri al"]
+            .iter()
+            .enumerate()
+            .map(|(index, label)| ActionView {
+                label: (*label).into(),
+                enabled: unsaved,
+                focused: simple_focus(index),
+            })
+            .collect();
+        let (picker_open, picker_title, picker_note, picker, picker_focus) = match self.picker {
+            Some(picker) => {
+                let options = self.choices(picker.kind);
+                let refused = self
+                    .draft_mode()
+                    .map_or(0, |mode| mode.cells.iter().filter(|cell| cell.refused.is_some()).count());
+                (
+                    true,
+                    match picker.kind {
+                        Pick::Resolution => "Çözünürlük",
+                        Pick::Rate => "Yenileme hızı",
+                        Pick::Colour => "Renk biçimi",
+                    }
+                    .to_string(),
+                    match picker.kind {
+                        Pick::Colour if refused > 0 => format!(
+                            "Bu modda sığmayan {refused} biçim, nedeniyle birlikte Gelişmiş ayarlarda."
+                        ),
+                        _ => "Seçim taslağa girer; ekrana Uygula ile gider.".to_string(),
+                    },
+                    options
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (option, _))| ChoiceView {
+                            focused: index == picker.focus,
+                            ..option
+                        })
+                        .collect(),
+                    picker.focus,
+                )
+            }
+            None => (false, String::new(), String::new(), Vec::new(), 0),
+        };
+        let wire_group = wire_mode.and_then(|mode| {
+            offer
+                .groups
+                .iter()
+                .find(|group| group.width == mode.width && group.height == mode.height)
+        });
+        let current_badges = match (wire_mode, wire.colour) {
+            (Some(_), Some(colour)) => vec![
+                if wire.hdr {
+                    ("HDR".to_string(), "hdr".to_string())
+                } else {
+                    ("SDR".to_string(), String::new())
+                },
+                (format_long(colour), String::new()),
+                (
+                    format!("{} bit", colour.bits),
+                    if colour.bits >= 10 { "good".into() } else { String::new() },
+                ),
+            ],
+            _ => Vec::new(),
+        };
+
         View {
             available: true,
             message: String::new(),
-            sink: format!(
-                "{} · {} · {} MHz",
-                offer.sink_name.as_deref().unwrap_or("Ekran"),
-                offer.connector,
-                link.max_character_rate_khz / 1000
-            ),
+            face: if self.face == Face::Simple { 0 } else { 1 },
+            simple,
+            simple_actions,
+            current_title: match (wire_mode, wire_group) {
+                (Some(_), Some(group)) if !group.name.is_empty() => group.name.clone(),
+                (Some(mode), _) => format!("{} × {}", mode.width, mode.height),
+                _ => "—".into(),
+            },
+            current_line: wire_mode
+                .map(|mode| {
+                    format!(
+                        "{} × {} @ {} Hz{}",
+                        mode.width,
+                        mode.height,
+                        hz_text(mode.refresh_mhz),
+                        if mode.interlaced { " (geçmeli)" } else { "" }
+                    )
+                })
+                .unwrap_or_default(),
+            current_badges,
+            current_rows: vec![
+                ("Ekran".into(), offer.sink_name.clone().unwrap_or_else(|| "—".into())),
+                ("Bağlantı".into(), offer.connector.clone()),
+                (
+                    "Hat yükü".into(),
+                    if load > 0 {
+                        format!("{} / {} MHz", load / 1000, ceiling / 1000)
+                    } else {
+                        "—".into()
+                    },
+                ),
+            ],
+            picker_open,
+            picker_title,
+            picker_note,
+            picker,
+            picker_focus,
+            arc: crate::vitals::arc(f64::from(seconds) / f64::from(OUTPUT_TRIAL_SECONDS)),
+            confirm_ready: self.confirm_ready(),
+            sink: self.sink_line(),
             wire_size: wire_mode
                 .map(|mode| format!("{}×{}", mode.width, mode.height))
                 .unwrap_or_else(|| "—".into()),
@@ -793,11 +1299,7 @@ impl Output {
                 .unwrap_or_default(),
             rates,
             colour_title: mode.map(label).unwrap_or_default(),
-            auto_colour: format!(
-                "SDR: {} · HDR: {}",
-                mode.and_then(|mode| mode.auto_sdr).map(colour_text).unwrap_or_else(|| "—".into()),
-                mode.and_then(|mode| mode.auto_hdr).map(colour_text).unwrap_or_else(|| "yok".into())
-            ),
+            auto_colour: mode.map(auto_colour_line).unwrap_or_default(),
             auto_colour_selected: chosen.is_none(),
             auto_colour_focused: focus(Zone::Colours) && self.cell == 0,
             cells,
@@ -878,10 +1380,89 @@ impl Output {
             Zone::Actions => String::new(),
         }
     }
+
+    /// The simple face's four cards.
+    fn simple_view(&self, offer: &OutputOffer, draft: &Draft) -> Vec<SimpleView> {
+        let focus = |index: usize| {
+            self.sheet == Sheet::None && self.picker.is_none() && self.simple == index
+        };
+        let mode = self.draft_mode();
+        let auto = draft.resolution == ResolutionChoice::Auto;
+        let group = self.group_of(draft.resolution).and_then(|group| offer.groups.get(group));
+        let size = mode.map(|mode| format!("{} × {}", mode.width, mode.height)).unwrap_or_default();
+        let named = group.map(|group| group.name.clone()).filter(|name| !name.is_empty());
+        let colour = self.draft_colour();
+        vec![
+            SimpleView {
+                icon: "resolution".into(),
+                label: "Çözünürlük".into(),
+                hint: match (&named, auto) {
+                    (Some(name), true) => format!("Ekranın tercihi · {name} · {size}"),
+                    (None, true) => format!("Ekranın tercihi · {size}"),
+                    (Some(_), false) => size.clone(),
+                    (None, false) => String::new(),
+                },
+                value: if auto {
+                    "Otomatik".into()
+                } else {
+                    named.clone().unwrap_or_else(|| size.clone())
+                },
+                focused: focus(0),
+            },
+            SimpleView {
+                icon: "refresh".into(),
+                label: "Yenileme hızı".into(),
+                hint: match (mode, auto) {
+                    (Some(_), true) => "Çözünürlükle birlikte otomatik".into(),
+                    (Some(mode), false) if mode.hdr10() => "Bu hızda HDR10 taşınabilir".into(),
+                    (Some(_), false) => "Bu hızda HDR10 taşınamaz".into(),
+                    (None, _) => String::new(),
+                },
+                value: mode
+                    .map(|mode| {
+                        format!(
+                            "{} Hz{}",
+                            hz_text(mode.refresh_mhz),
+                            if mode.interlaced { " (geçmeli)" } else { "" }
+                        )
+                    })
+                    .unwrap_or_else(|| "—".into()),
+                focused: focus(1),
+            },
+            SimpleView {
+                icon: "palette".into(),
+                label: "Renk biçimi".into(),
+                hint: match (colour, mode) {
+                    (None, Some(mode)) => auto_colour_line(mode),
+                    (Some(colour), _) if colour.carries_hdr() => "HDR10 taşır".into(),
+                    (Some(_), _) => "HDR10 için 10 bit gerekir".into(),
+                    (None, None) => String::new(),
+                },
+                value: colour.map(colour_text).unwrap_or_else(|| "Otomatik (önerilen)".into()),
+                focused: focus(2),
+            },
+            SimpleView {
+                icon: "sliders".into(),
+                label: "Gelişmiş ayarlar".into(),
+                hint: "Tüm modlar, renk kodlaması, bağlantı yükü ve EDID".into(),
+                value: String::new(),
+                focused: focus(3),
+            },
+        ]
+    }
+}
+
+/// What `Otomatik` sends at a mode, for SDR and for HDR10.
+fn auto_colour_line(mode: &OutputModeOffer) -> String {
+    format!(
+        "SDR: {} · HDR: {}",
+        mode.auto_sdr.map(colour_text).unwrap_or_else(|| "—".into()),
+        mode.auto_hdr.map(colour_text).unwrap_or_else(|| "yok".into())
+    )
 }
 
 /// `3840×2160 · 59.94 Hz`
-fn label(mode: &OutputModeOffer) -> String {
+pub(crate) fn label(mode: &OutputModeOffer) -> String {
     format!(
         "{}×{} · {} Hz{}",
         mode.width,
@@ -891,7 +1472,7 @@ fn label(mode: &OutputModeOffer) -> String {
     )
 }
 
-fn hz_text(refresh_mhz: u32) -> String {
+pub(crate) fn hz_text(refresh_mhz: u32) -> String {
     let hz = f64::from(refresh_mhz) / 1000.0;
     if (hz - hz.round()).abs() < 0.005 {
         format!("{}", hz.round() as u32)
@@ -908,6 +1489,14 @@ fn format_short(mode: ColorMode) -> String {
         ColorFormat::Ycbcr420 => "4:2:0",
     }
     .into()
+}
+
+/// `YCbCr 4:4:4`, the format without its depth.
+fn format_long(mode: ColorMode) -> String {
+    match mode.format {
+        ColorFormat::Rgb => "RGB".into(),
+        _ => format!("YCbCr {}", format_short(mode)),
+    }
 }
 
 /// `YCbCr 4:2:2 10 bit`
@@ -1016,6 +1605,29 @@ pub struct CellView {
     pub now: bool,
 }
 
+/// One card of the simple face.
+#[derive(Debug, Clone, Default)]
+pub struct SimpleView {
+    pub icon: String,
+    pub label: String,
+    pub hint: String,
+    pub value: String,
+    pub focused: bool,
+}
+
+/// One option of a list opened from the simple face.
+#[derive(Debug, Clone, Default)]
+pub struct ChoiceView {
+    pub title: String,
+    pub sub: String,
+    pub selected: bool,
+    pub focused: bool,
+    pub enabled: bool,
+    pub badge: String,
+    pub badge_tone: String,
+    pub now: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ActionView {
     pub label: String,
@@ -1027,6 +1639,21 @@ pub struct ActionView {
 pub struct View {
     pub available: bool,
     pub message: String,
+    /// 0 the simple face, 1 the advanced one.
+    pub face: i32,
+    pub simple: Vec<SimpleView>,
+    pub simple_actions: Vec<ActionView>,
+    /// What is on the wire now, for the panel beside the simple face.
+    pub current_title: String,
+    pub current_line: String,
+    /// (word, tone)
+    pub current_badges: Vec<(String, String)>,
+    pub current_rows: Vec<(String, String)>,
+    pub picker_open: bool,
+    pub picker_title: String,
+    pub picker_note: String,
+    pub picker: Vec<ChoiceView>,
+    pub picker_focus: usize,
     pub sink: String,
     pub wire_size: String,
     pub wire_rate: String,
@@ -1055,6 +1682,10 @@ pub struct View {
     pub sheet: i32,
     pub seconds: u32,
     pub fraction: f64,
+    /// The time left as a ring's arc.
+    pub arc: String,
+    /// False while the question's guard holds Ok back.
+    pub confirm_ready: bool,
     pub trial: String,
     pub previous: String,
     pub confirm_focus: usize,
@@ -1062,7 +1693,7 @@ pub struct View {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mediabox_core::{OutputTrial, OutputWire};
     use mediabox_platform::video::{RK3588_HDMI, Timing};
@@ -1108,11 +1739,34 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         }
     }
 
+    /// The Sony, as the daemon would report it, for other screens' tests.
+    pub(crate) fn status_for_tests() -> OutputStatus {
+        status(OutputSetting::default())
+    }
+
+    /// The display page, open, on the advanced face -- where most of these
+    /// tests walk.
     fn screen() -> Output {
         let mut screen = Output::new();
         screen.load(Some(status(OutputSetting::default())));
         screen.enter();
+        screen.enter_advanced();
         screen
+    }
+
+    /// The display page as it opens: the simple face.
+    fn simple() -> Output {
+        let mut screen = Output::new();
+        screen.load(Some(status(OutputSetting::default())));
+        screen.enter();
+        screen
+    }
+
+    /// Past the trial question's guard, as a person reading it would be.
+    fn after_guard(screen: &mut Output) {
+        if let Sheet::Confirm { since, .. } = &mut screen.sheet {
+            *since -= CONFIRM_GUARD;
+        }
     }
 
     fn thirty() -> ResolutionChoice {
@@ -1197,6 +1851,7 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         screen.trial(OUTPUT_TRIAL_SECONDS);
         assert!(screen.asking());
         assert_eq!(screen.view().sheet, 1);
+        after_guard(&mut screen);
         assert_eq!(screen.press(), Press::Keep, "Koru under the focus");
         screen.step(1, 0);
         assert_eq!(screen.press(), Press::Revert);
@@ -1238,5 +1893,170 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         assert_eq!(view.wire_format, "4:2:0");
         assert_eq!(view.load, "297");
         assert_eq!(view.load_max, "/ 300 MHz");
+    }
+
+    // ------------------------------------------------------- the simple face
+
+    #[test]
+    fn the_page_opens_on_the_simple_face() {
+        let screen = simple();
+        let view = screen.view();
+        assert_eq!(view.face, 0);
+        let labels: Vec<&str> = view.simple.iter().map(|card| card.label.as_str()).collect();
+        assert_eq!(labels, ["Çözünürlük", "Yenileme hızı", "Renk biçimi", "Gelişmiş ayarlar"]);
+        assert!(view.simple[0].focused);
+        assert_eq!(view.simple[0].value, "Otomatik");
+        assert_eq!(view.simple[1].value, "60 Hz");
+        assert_eq!(view.simple[2].value, "Otomatik (önerilen)");
+        // What is on the wire, as the kernel reports it -- nothing invented.
+        assert_eq!(view.current_title, "4K UHD");
+        assert_eq!(view.current_line, "3840 × 2160 @ 60 Hz");
+        let badges: Vec<&str> = view.current_badges.iter().map(|(word, _)| word.as_str()).collect();
+        assert_eq!(badges, ["SDR", "YCbCr 4:2:0", "8 bit"]);
+    }
+
+    /// A size chosen on its own keeps the draft's refresh rate where it can,
+    /// and nothing reaches the daemon until Uygula.
+    #[test]
+    fn a_size_from_the_list_goes_into_the_draft_only() {
+        let mut screen = simple();
+        assert_eq!(screen.press(), Press::Changed); // opens the sizes
+        let (_, _, picker) = screen.simple_focus();
+        assert_eq!(picker, Some((Pick::Resolution, 0)), "on Otomatik, the draft's");
+        let titles: Vec<String> = screen.view().picker.iter().map(|o| o.title.clone()).collect();
+        assert_eq!(titles, ["Otomatik", "4K UHD", "Full HD", "HD"]);
+        screen.step(0, 1);
+        screen.step(0, 1); // Full HD
+        assert_eq!(screen.press(), Press::Changed);
+        assert_eq!(screen.simple_focus().2, None, "the list closes");
+        let (resolution, _) = screen.chosen();
+        assert_eq!(
+            resolution,
+            ResolutionChoice::Fixed { width: 1920, height: 1080, refresh_mhz: 60_000, interlaced: false }
+        );
+        assert!(screen.unsaved());
+        assert_eq!(screen.view().simple[0].value, "Full HD");
+    }
+
+    #[test]
+    fn back_closes_a_list_without_choosing() {
+        let mut screen = simple();
+        screen.press();
+        screen.step(0, 2);
+        assert_eq!(screen.back(), Some(Press::Changed));
+        assert_eq!(screen.simple_focus().2, None);
+        assert!(!screen.unsaved());
+        // With no list open, Back is the page's to leave.
+        assert_eq!(screen.back(), None);
+    }
+
+    /// The refresh rates are exact: 59.94 is 59.94, never "60".
+    #[test]
+    fn the_rates_keep_their_fractions() {
+        let mut screen = Output::new();
+        let mut answer = status(OutputSetting::default());
+        let offer = answer.offer.as_mut().unwrap();
+        // 4K at 59.94 alongside the 60 the fixture already has.
+        let mut fraction = offer.groups[0].modes[0].clone();
+        fraction.refresh_mhz = 59_940;
+        fraction.label = "3840x2160p59.94".into();
+        offer.groups[0].modes.insert(1, fraction);
+        screen.load(Some(answer));
+        screen.enter();
+        screen.step(0, 1);
+        screen.press(); // the rates of 4K, the draft's size
+        let titles: Vec<String> = screen.view().picker.iter().map(|o| o.title.clone()).collect();
+        assert!(titles.contains(&"59.94 Hz".to_string()), "{titles:?}");
+        assert!(titles.contains(&"60 Hz".to_string()), "{titles:?}");
+    }
+
+    /// The colour list offers only what fits, and says the rest is in the
+    /// advanced face.
+    #[test]
+    fn the_colour_list_offers_only_what_fits() {
+        let mut screen = simple();
+        screen.step(0, 2);
+        screen.press();
+        let view = screen.view();
+        assert_eq!(view.picker[0].title, "Otomatik (önerilen)");
+        assert!(view.picker.iter().all(|option| option.enabled));
+        // 4K60 on a 300 MHz input: only 4:2:0 fits.
+        assert!(view.picker.iter().skip(1).all(|option| option.title.contains("4:2:0")));
+        assert!(view.picker_note.contains("Gelişmiş"), "{}", view.picker_note);
+    }
+
+    /// Apply from the simple face asks for the same trial the advanced face
+    /// does.
+    #[test]
+    fn apply_from_the_simple_face_asks_for_a_trial() {
+        let mut screen = simple();
+        screen.press();
+        screen.step(0, 2); // Full HD
+        screen.press();
+        for _ in 0..4 {
+            screen.step(0, 1);
+        }
+        assert_eq!(screen.simple_focus().1, SIMPLE_ROWS, "on the buttons");
+        assert!(matches!(screen.press(), Press::Try(ResolutionChoice::Fixed { width: 1920, .. }, None)));
+        // "Geri al" drops the draft.
+        screen.step(1, 0);
+        assert_eq!(screen.press(), Press::Changed);
+        assert!(!screen.unsaved());
+    }
+
+    /// The advanced face is one card away, and Left or Back from it comes back
+    /// to that card rather than out of the page.
+    #[test]
+    fn the_advanced_face_is_a_level_below() {
+        let mut screen = simple();
+        screen.step(0, 3);
+        assert_eq!(screen.press(), Press::Changed);
+        assert!(screen.advanced());
+        assert_eq!(screen.view().face, 1);
+        assert_eq!(screen.step(-1, 0), Nav::Moved);
+        assert!(!screen.advanced());
+        assert_eq!(screen.simple_focus().1, 3, "back on Gelişmiş ayarlar");
+        screen.press();
+        assert_eq!(screen.back(), Some(Press::Changed));
+        assert!(!screen.advanced());
+        // Left from the simple face leaves the page.
+        assert_eq!(screen.step(-1, 0), Nav::Leave);
+    }
+
+    // ------------------------------------------------------------ the guard
+
+    /// The Ok that pressed Uygula can arrive again as the question appears;
+    /// it must not keep a mode nobody has seen.
+    #[test]
+    fn the_question_takes_no_ok_at_first() {
+        let mut screen = simple();
+        screen.trial(OUTPUT_TRIAL_SECONDS);
+        assert!(!screen.view().confirm_ready);
+        assert_eq!(screen.press(), Press::Nothing);
+        assert!(screen.asking(), "still asking");
+        after_guard(&mut screen);
+        assert!(screen.view().confirm_ready);
+        assert_eq!(screen.press(), Press::Keep);
+    }
+
+    /// Going back is never held: it is the safe answer.
+    #[test]
+    fn back_answers_the_question_at_once() {
+        let mut screen = simple();
+        screen.trial(OUTPUT_TRIAL_SECONDS);
+        assert_eq!(screen.back(), Some(Press::Revert));
+    }
+
+    /// A trial ends however it ends, and the page is where it was.
+    #[test]
+    fn a_trial_that_times_out_leaves_the_page_as_it_was() {
+        let mut screen = simple();
+        screen.step(0, 3);
+        screen.trial(OUTPUT_TRIAL_SECONDS);
+        assert_eq!(screen.step(0, 1), Nav::Unchanged, "the question holds the remote");
+        screen.trial_ended("Onay gelmedi; önceki ayara dönüldü.");
+        assert!(!screen.asking());
+        assert_eq!(screen.simple_focus().1, 3);
+        assert!(screen.view().note.contains("Onay gelmedi"));
     }
 }

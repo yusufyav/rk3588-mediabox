@@ -3,6 +3,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod ethernet;
+pub use ethernet::{
+    ETHERNET_DNS_MAX, ETHERNET_TRIAL_SECONDS, EthernetConfig, EthernetPort, EthernetStatus,
+    EthernetTrial, prefix_mask,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackState {
@@ -1590,6 +1596,9 @@ pub struct SystemStatus {
     /// The fan and its curve, for the same reason: one poll, one answer.
     #[serde(default)]
     pub fan: FanStatus,
+    /// The wired ports, what each is set to, and a change waiting to be kept.
+    #[serde(default)]
+    pub ethernet: EthernetStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1644,6 +1653,18 @@ pub enum Request {
     OutputKeep,
     /// Take the setting on trial back now.
     OutputRevert,
+    /// The wired ports and what each is set to.
+    EthernetStatus,
+    /// Put an address on a wired port on trial. It is taken back after
+    /// [`ETHERNET_TRIAL_SECONDS`] unless kept, and by a reboot in between.
+    EthernetTry {
+        interface: String,
+        config: EthernetConfig,
+    },
+    /// Keep the address on trial: it is written down and used from now on.
+    EthernetKeep,
+    /// Take the address on trial back now.
+    EthernetRevert,
     /// The fan as the kernel is running it, and the curve chosen for it.
     FanStatus,
     /// Choose the curve the kernel is given from the next boot on.

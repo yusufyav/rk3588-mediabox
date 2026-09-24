@@ -1,80 +1,80 @@
 import { Theme, Metrics } from "theme.slint";
-import { Reading, TechRow, DiagGroup } from "components.slint";
+import { TechRow, DiagGroup, VitalsModel } from "components.slint";
+import { SettingNav, SideNav, PageHeader, ReadingRow, Backdrop, StatusCorner } from "kit.slint";
 
 // What the machine is doing, in one place and out of the way.
 //
-// The same two-pane shape as the settings screen, and for the same reason: a
-// grid of cards sized by guesswork clipped its own contents — the temperature
-// readings fell off the bottom of the first card in the first run of this
-// screen. A list on the left and its readings on the right always fits,
-// whatever the panel is and however many readings a group turns out to have.
+// The settings screens' own shape, because it is opened from them and is the
+// same kind of place: the groups down the left, the chosen group's readings on
+// the right. A list and its readings always fit, whatever the panel is and
+// however many readings a group turns out to have — a grid of cards sized by
+// guesswork clipped its own contents in the first run of this screen.
 //
-// Nothing here is operated. The remote moves between groups and that is all.
+// Nothing here is operated. The remote moves between groups and that is all,
+// so the focus is always on the column.
 export component Diagnostics inherits Rectangle {
     in property <[DiagGroup]> groups;
+    in property <[SettingNav]> nav;
     in property <int> group;
+    in property <VitalsModel> vitals;
 
-    property <length> list-w: max(220px, min(520px, root.width * 0.22));
-    property <length> rows-x: Metrics.gutter + list-w + Metrics.gutter * 0.8;
-    property <length> top: Metrics.topbar + Metrics.block-gap;
-    property <length> row-h: Metrics.root-font * 3.2;
+    property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
+    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
+    property <length> row-h: Metrics.reading-h * 0.84;
 
-    background: Theme.bg;
+    background: Theme.s-ground;
     clip: true;
 
+    Backdrop {
+        width: 100%;
+        height: 100%;
+    }
+
+    SideNav {
+        x: 0;
+        y: 0;
+        width: Metrics.safe-x + Metrics.nav-w + Metrics.safe-x * 0.5;
+        height: root.height;
+        heading: "Tanılama";
+        heading-icon: "bars";
+        items: nav;
+        current: group;
+        active: true;
+    }
+
+    StatusCorner {
+        x: root.width - Metrics.safe-x - self.width;
+        y: Metrics.safe-y;
+        width: self.preferred-width;
+        height: Metrics.t-nav-head * 2.6;
+        network: vitals.network;
+        time: vitals.time;
+    }
+
+    PageHeader {
+        x: Metrics.pane-x;
+        y: Metrics.safe-y + Metrics.t-nav-head * 0.5;
+        width: Metrics.pane-w * 0.68;
+        title: groups.length > 0 ? groups[group].title : "Tanılama";
+        blurb: "Salt okunur · teknik ayrıntılar";
+    }
+
     Rectangle {
-        x: Metrics.gutter;
+        x: Metrics.pane-x;
         y: top;
-        width: list-w;
-        height: root.height - top - Metrics.gutter * 0.6;
-        border-radius: Theme.radius;
-        background: #ffffff08;
-        border-width: 1px;
-        border-color: Theme.line-soft;
-    }
+        width: Metrics.list-w;
+        height: root.height - top - Metrics.safe-y;
+        clip: true;
 
-    VerticalLayout {
-        x: Metrics.gutter + Metrics.root-font * 0.4;
-        y: top + Metrics.root-font * 0.4;
-        width: list-w - Metrics.root-font * 0.8;
-        spacing: Metrics.root-font * 0.15;
-        alignment: start;
-
-        for entry[i] in groups: Rectangle {
-            property <bool> focused: i == group;
-            height: row-h;
-            border-radius: Theme.radius * 0.7;
-            background: focused ? Theme.focus-fill : transparent;
-            border-width: focused ? 2px : 0px;
-            border-color: Theme.focus-ring;
-
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-            Text {
-                x: Metrics.root-font * 0.8;
-                width: parent.width - Metrics.root-font * 1.6;
-                height: 100%;
-                text: entry.title;
-                color: focused ? #0a0c10 : Theme.muted;
-                font-size: Metrics.root-font * 1.0;
-                font-weight: 700;
-                vertical-alignment: center;
-                overflow: elide;
-                wrap: no-wrap;
+        VerticalLayout {
+            spacing: 0px;
+            alignment: start;
+            for reading in groups[group].rows: ReadingRow {
+                height: row-h;
+                label: reading.label;
+                value: reading.value;
+                tone: reading.tone;
             }
-        }
-    }
-
-    VerticalLayout {
-        x: rows-x;
-        y: top;
-        width: min(root.width - rows-x - Metrics.gutter, Metrics.vw * 0.46);
-        spacing: 0px;
-        alignment: start;
-
-        for reading in groups[group].rows: Reading {
-            entry: reading;
-            label-w: parent.width * 0.44;
         }
     }
 }

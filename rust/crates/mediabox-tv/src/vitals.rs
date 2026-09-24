@@ -111,7 +111,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 ///
 /// A full reading is written as two half-circles: a single arc of exactly 360
 /// degrees has the same start and end point and renders as nothing at all.
-fn arc(fraction: f64) -> String {
+pub(crate) fn arc(fraction: f64) -> String {
     let fraction = fraction.clamp(0.0, 1.0);
     if fraction <= 0.001 {
         return String::new();
@@ -297,7 +297,7 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
 
 /// dBm to four steps. The same thresholds the Wi-Fi screen uses, so a network
 /// does not read as three bars on one screen and four on the other.
-fn signal_bars(dbm: i64) -> i32 {
+pub(crate) fn signal_bars(dbm: i64) -> i32 {
     match dbm {
         s if s >= -55 => 4,
         s if s >= -67 => 3,

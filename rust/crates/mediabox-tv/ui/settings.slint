@@ -1,169 +1,192 @@
 import { Theme, Metrics } from "theme.slint";
-import { SettingRow } from "components.slint";
+import { SettingRow, VitalsModel } from "components.slint";
 import { CoolingPane, CoolingView } from "cooling.slint";
 import { OutputPane, OutputView } from "output.slint";
+import { EthernetPane, EthernetView } from "ethernet.slint";
+import {
+    SettingNav, SideNav, PageHeader, SettingCard, ReadingRow, SectionHeader,
+    Backdrop, StatusCorner, ChoiceItem, ChoiceSheet,
+} from "kit.slint";
 
 // What the box can be told, from the sofa.
 //
-// Sections down the left, rows down the right. Most rows are readings: this is
-// an appliance and the things worth changing from a remote are few. The ones
-// that are not readings are marked, and focus only ever lands on those.
+// Seven categories down the left; the chosen one's contents on the right, as
+// cards for what can be done and plain rows for what is only true. A card that
+// leads to a page of its own — an account, the display — opens it on the same
+// right-hand side, and the column on the left turns into where that page is.
+//
+// All of it is laid out in Rust's order (src/screens/settings.rs) and placed
+// here by arithmetic rather than measured, so where the focused row is — and
+// therefore how far the list scrolls — is known without asking the layout.
 export component Settings inherits Rectangle {
-    in property <[string]> sections;
+    in property <[SettingNav]> sections;
     in property <int> section;
     in property <bool> on-sections;
     in property <[SettingRow]> rows;
     in property <int> row-index;
-    // The fan curve editor takes the whole right-hand side of its section.
+    // The page on screen, "" for a category's own list; its mark; and the
+    // title and line the right-hand side opens with.
+    in property <string> page;
+    in property <string> page-icon;
+    in property <string> title;
+    in property <string> blurb;
+    // The fan curve editor and the display editor are pages of their own.
     in property <bool> cooling;
     in property <CoolingView> cooling-view;
-    // So does the display editor.
     in property <bool> output;
     in property <OutputView> output-view;
+    // And a wired port's address.
+    in property <bool> ethernet;
+    in property <EthernetView> ethernet-view;
+    in property <VitalsModel> vitals;
+    // A short list opened from a card, over everything.
+    in property <bool> choice-open;
+    in property <string> choice-title;
+    in property <[ChoiceItem]> choice;
+    in property <int> choice-focus;
+    in property <string> choice-note;
 
-    property <length> sections-w: max(220px, min(520px, root.width * 0.22));
-    property <length> rows-x: Metrics.gutter + sections-w + Metrics.gutter * 0.8;
-    property <length> top: Metrics.topbar + Metrics.block-gap;
-    property <length> row-h: Metrics.root-font * 3.6;
+    property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
+    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
+    property <length> bottom: root.height - Metrics.safe-y;
+    property <bool> editor: cooling || output || ethernet;
 
-    background: Theme.bg;
+    background: Theme.s-ground;
     clip: true;
 
-    // A quiet ground behind the two columns, so the screen reads as a panel
-    // rather than as text floating on black.
-    Rectangle {
-        x: Metrics.gutter;
-        y: top;
-        width: sections-w;
-        height: root.height - top - Metrics.gutter * 0.6;
-        border-radius: Theme.radius;
-        background: #ffffff08;
-        border-width: 1px;
-        border-color: Theme.line-soft;
+    Backdrop {
+        width: 100%;
+        height: 100%;
     }
 
-    VerticalLayout {
-        x: Metrics.gutter + Metrics.root-font * 0.4;
-        y: top + Metrics.root-font * 0.4;
-        width: sections-w - Metrics.root-font * 0.8;
-        spacing: Metrics.root-font * 0.15;
-        alignment: start;
+    SideNav {
+        x: 0;
+        y: 0;
+        width: Metrics.safe-x + Metrics.nav-w + Metrics.safe-x * 0.5;
+        height: root.height;
+        items: sections;
+        current: section;
+        active: on-sections;
+        parent-label: page == "" ? "" : sections[section].label;
+        page-label: page;
+        page-icon: page-icon;
+    }
 
-        for label[i] in sections: Rectangle {
-            property <bool> chosen: i == section;
-            property <bool> focused: on-sections && chosen;
-            height: row-h;
-            border-radius: Theme.radius * 0.7;
-            background: focused ? Theme.focus-fill : (chosen ? #ffffff14 : transparent);
-            border-width: focused ? 2px : 0px;
-            border-color: Theme.focus-ring;
+    StatusCorner {
+        x: root.width - Metrics.safe-x - self.width;
+        y: Metrics.safe-y;
+        width: self.preferred-width;
+        height: Metrics.t-nav-head * 2.6;
+        network: vitals.network;
+        time: vitals.time;
+    }
 
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-            Text {
-                x: Metrics.root-font * 0.8;
-                width: parent.width - Metrics.root-font * 1.6;
-                height: 100%;
-                text: label;
-                color: focused ? #0a0c10 : (chosen ? Theme.text : Theme.muted);
-                font-size: Metrics.root-font * 1.0;
-                font-weight: 700;
-                vertical-alignment: center;
-                overflow: elide;
-                wrap: no-wrap;
-            }
-        }
+    PageHeader {
+        x: Metrics.pane-x;
+        y: Metrics.safe-y + Metrics.t-nav-head * 0.5;
+        width: Metrics.pane-w * 0.68;
+        title: root.title;
+        blurb: root.blurb;
     }
 
     if cooling: CoolingPane {
-        x: rows-x;
+        x: Metrics.pane-x;
         y: top;
-        width: root.width - rows-x - Metrics.gutter;
-        height: root.height - top - Metrics.gutter * 0.6;
+        width: Metrics.pane-w;
+        height: bottom - top;
         view: cooling-view;
+        active-pane: !on-sections;
+        titled: false;
+    }
+
+    if ethernet: EthernetPane {
+        x: Metrics.pane-x;
+        y: top;
+        width: Metrics.pane-w;
+        height: bottom - top;
+        view: ethernet-view;
         active-pane: !on-sections;
     }
 
     if output: OutputPane {
-        x: rows-x;
+        x: Metrics.pane-x;
         y: top;
-        width: root.width - rows-x - Metrics.gutter;
-        height: root.height - top - Metrics.gutter * 0.6;
+        width: Metrics.pane-w;
+        height: bottom - top;
         view: output-view;
         active-pane: !on-sections;
     }
 
-    VerticalLayout {
-        visible: !cooling && !output;
-        x: rows-x;
-        y: top;
-        // Capped rather than run to the far edge. A label on the left of a
-        // 2560-pixel panel and its reading on the right is two things nobody
-        // can read as one line from a sofa.
-        width: min(root.width - rows-x - Metrics.gutter, Metrics.vw * 0.46);
-        spacing: Metrics.root-font * 0.15;
-        alignment: start;
+    // The list. It scrolls, by whole rows' worth of arithmetic, only when the
+    // focused row would otherwise fall off the bottom; the room above and below
+    // it is the focus glow's, so the outline is never cut.
+    if !editor: Rectangle {
+        property <length> pad: Metrics.glow-w * 3;
+        property <length> focus-y: rows.length == 0 ? 0px : y-of(rows[row-index]);
+        property <length> focus-h: rows.length == 0 ? 0px : h-of(rows[row-index]);
+        property <length> scroll: max(0px, focus-y + focus-h + pad * 2 - self.height);
 
-        for entry[i] in rows: Rectangle {
-            property <bool> focused: !on-sections && i == row-index;
-            height: entry.hint == "" ? row-h : row-h * 1.16;
-            border-radius: Theme.radius * 0.7;
-            background: focused ? #ffffff16 : transparent;
-            border-width: focused ? 2px : 1px;
-            border-color: focused ? Theme.focus-ring : transparent;
+        x: Metrics.pane-x - pad;
+        y: top - pad;
+        width: Metrics.list-w + pad * 2;
+        height: bottom - top + pad;
+        clip: true;
 
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+        pure function y-of(r: SettingRow) -> length {
+            return r.n-header * Metrics.header-h
+                + r.n-reading * Metrics.reading-h
+                + r.n-card * (Metrics.set-h + Metrics.row-gap)
+                + r.n-flat * (Metrics.set-h-flat + Metrics.row-gap);
+        }
+        pure function h-of(r: SettingRow) -> length {
+            return r.kind == "header" ? Metrics.header-h
+                : r.kind == "reading" ? Metrics.reading-h
+                : r.hint == "" ? Metrics.set-h-flat
+                : Metrics.set-h;
+        }
 
-            HorizontalLayout {
-                x: Metrics.root-font * 0.8;
-                width: parent.width - Metrics.root-font * 1.6;
-                height: 100%;
-                spacing: Metrics.root-font;
+        Rectangle {
+            x: pad;
+            y: pad - scroll;
+            width: Metrics.list-w;
+            animate y { duration: Theme.t-row; easing: Theme.ease; }
 
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 0px;
-                    horizontal-stretch: 1;
+            for entry[i] in rows: Rectangle {
+                x: 0;
+                y: y-of(entry);
+                width: parent.width;
+                height: h-of(entry);
 
-                    Text {
-                        text: entry.label;
-                        color: entry.selectable ? Theme.text : Theme.muted;
-                        font-size: Metrics.root-font * 0.98;
-                        font-weight: entry.selectable ? 700 : 620;
-                        overflow: elide;
-                        wrap: no-wrap;
-                    }
-                    if entry.hint != "": Text {
-                        text: entry.hint;
-                        color: Theme.dim;
-                        font-size: Metrics.text-chip;
-                        font-weight: 600;
-                        overflow: elide;
-                        wrap: no-wrap;
-                    }
+                if entry.kind == "header": SectionHeader {
+                    width: 100%;
+                    text: entry.label;
                 }
-
-                Text {
-                    text: entry.value;
-                    color: entry.tone == "" ? Theme.text : Theme.tone(entry.tone);
-                    font-size: Metrics.root-font * 0.96;
-                    font-weight: 680;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
-                    overflow: elide;
-                    wrap: no-wrap;
+                if entry.kind == "reading": ReadingRow {
+                    width: 100%;
+                    label: entry.label;
+                    value: entry.value;
+                    tone: entry.tone;
                 }
-
-                // A chevron, for a row that goes somewhere or does something.
-                if entry.selectable: Text {
-                    text: "›";
-                    color: Theme.dim;
-                    font-size: Metrics.root-font * 1.3;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    width: Metrics.root-font;
+                if entry.kind == "link" || entry.kind == "action": SettingCard {
+                    width: 100%;
+                    icon: entry.icon;
+                    label: entry.label;
+                    hint: entry.hint;
+                    value: entry.value;
+                    tone: entry.tone;
+                    kind: entry.kind;
+                    focused: !on-sections && !choice-open && i == row-index;
                 }
             }
         }
+    }
+
+    if choice-open: ChoiceSheet {
+        width: 100%;
+        height: 100%;
+        title: choice-title;
+        items: choice;
+        focus-at: choice-focus;
+        note: choice-note;
     }
 }

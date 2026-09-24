@@ -137,9 +137,12 @@ struct App {
     /// a poll that was already in flight when the press happened is ignored
     /// for this one field: it cannot know about a choice made after it left.
     leds_pending: Option<mediabox_core::LedMode>,
-    /// The seconds last drawn on the display question, so it is redrawn once
-    /// a second and not four times.
-    output_seconds: u32,
+    /// The seconds last drawn on the display question, and whether its
+    /// buttons were taking Ok yet, so it is redrawn when either changes and
+    /// not four times a second.
+    output_seconds: (u32, bool),
+    /// The same for the wired port's question.
+    ethernet_seconds: Option<(u32, bool)>,
     /// A fan curve save or reset is in flight. The same guard as the two
     /// above: a poll that left before it cannot know the curve was saved.
     fan_pending: bool,
@@ -253,6 +256,12 @@ impl App {
                     self.act(InputAction::Back);
                 }
             }
+            // A digit off a wired port's number pad.
+            Route::Settings if self.settings.typing_ethernet() => {
+                if self.settings.ethernet.backspace() {
+                    self.paint();
+                }
+            }
             // A digit typed into a fan curve cell, then the edit itself.
             Route::Settings if self.settings.typing_cooling() => {
                 if self.settings.cooling.backspace() {
@@ -308,6 +317,11 @@ impl App {
             }
             // Digits into the fan curve table: a temperature or a percent,
             // without walking a value up one step at a time.
+            Route::Settings if self.settings.typing_ethernet() => {
+                if self.settings.ethernet.typed(c) {
+                    self.paint();
+                }
+            }
             Route::Settings if self.settings.typing_cooling() => {
                 if self.settings.cooling.typed(c) {
                     self.paint();
@@ -539,7 +553,7 @@ impl App {
                 platform::apply_output(setting);
                 if let Some(seconds) = trial_seconds {
                     self.settings.output.trial(seconds);
-                    self.output_seconds = 0;
+                    self.output_seconds = (0, false);
                 }
                 self.paint();
             }
@@ -564,9 +578,10 @@ impl App {
         if !self.settings.output.asking() {
             return;
         }
-        let seconds = self.settings.output.view().seconds;
-        if seconds != self.output_seconds {
-            self.output_seconds = seconds;
+        let view = self.settings.output.view();
+        let now = (view.seconds, view.confirm_ready);
+        if now != self.output_seconds {
+            self.output_seconds = now;
             self.paint();
         }
     }
@@ -1430,6 +1445,15 @@ impl App {
                 }
             }
             Intent::Select => {
+                // A list opened from a card: Ok takes the option under the
+                // focus, and the list closes whether or not it changed anything.
+                if self.settings.choosing() {
+                    match self.settings.choose() {
+                        Some(action) => self.run(action),
+                        None => self.paint(),
+                    }
+                    return;
+                }
                 if self.settings.pane == screens::settings::Pane::Sections {
                     if self.settings.step(1, 0) {
                         self.paint();
@@ -1444,7 +1468,21 @@ impl App {
                     self.press_output();
                     return;
                 }
-                let Some(action) = self.settings.focused().and_then(|row| row.action) else {
+                if self.settings.is_ethernet() {
+                    let press = self.settings.ethernet.press();
+                    self.ethernet_pressed(press);
+                    return;
+                }
+                let Some(row) = self.settings.focused() else {
+                    return;
+                };
+                if let Some(page) = row.page {
+                    if self.settings.open(page) {
+                        self.paint();
+                    }
+                    return;
+                }
+                let Some(action) = row.action else {
                     return;
                 };
                 if action.confirms() {
@@ -1466,8 +1504,15 @@ impl App {
                         return;
                     }
                 }
-                if self.settings.pane == screens::settings::Pane::Rows {
-                    self.settings.pane = screens::settings::Pane::Sections;
+                if self.settings.is_ethernet() {
+                    if let Some(press) = self.settings.ethernet.back() {
+                        self.ethernet_pressed(press);
+                        return;
+                    }
+                }
+                // One level up: a page to its card, a card to the column,
+                // and from the column out of the screen.
+                if self.settings.back() {
                     self.paint();
                 } else {
                     self.back();
@@ -1518,6 +1563,56 @@ impl App {
             }
             Press::Keep => spawn_output(mediabox_core::Request::OutputKeep),
             Press::Revert => spawn_output(mediabox_core::Request::OutputRevert),
+        }
+    }
+
+    /// Ok or Back on a wired port's page. Typing stays in this process; a
+    /// trial, keeping it and taking it back are the daemon's.
+    fn ethernet_pressed(&mut self, press: screens::ethernet::Press) {
+        use screens::ethernet::Press;
+        self.settings.ethernet.sent(&press);
+        match press {
+            Press::Nothing => {}
+            Press::Changed => self.paint(),
+            Press::Try(interface, config) => {
+                self.say("Ağ ayarı deneniyor…".into());
+                spawn_ethernet(mediabox_core::Request::EthernetTry { interface, config });
+            }
+            Press::Keep => spawn_ethernet(mediabox_core::Request::EthernetKeep),
+            Press::Revert => spawn_ethernet(mediabox_core::Request::EthernetRevert),
+        }
+    }
+
+    /// The daemon's answer about the wired ports: its whole account, which
+    /// replaces the kept one, or a refusal in its own words — said on the page
+    /// as well as along the bottom, since it is about what is on the page.
+    fn ethernet_answered(&mut self, answer: Result<Value, String>) {
+        match answer {
+            Ok(ethernet) => {
+                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("ethernet".into(), ethernet);
+                }
+            }
+            Err(error) => {
+                self.settings.ethernet.refused(error.clone());
+                self.say(error);
+            }
+        }
+        self.recompose_settings();
+    }
+
+    /// Redraws the port's question when its seconds change, and asks the
+    /// daemon what happened once they run out: it has taken the address back.
+    fn tick_ethernet(&mut self) {
+        let now = self.settings.ethernet.countdown();
+        if now != self.ethernet_seconds {
+            self.ethernet_seconds = now;
+            if self.settings.is_ethernet() {
+                self.paint();
+            }
+        }
+        if self.settings.ethernet.due_for_status() {
+            spawn_ethernet(mediabox_core::Request::EthernetStatus);
         }
     }
 
@@ -1922,6 +2017,11 @@ impl App {
                     self.display.as_ref(),
                 );
                 self.open(Route::Diagnostics);
+            }
+            Action::ChooseLeds => {
+                if self.settings.open_choice() {
+                    self.paint();
+                }
             }
             Action::SetLeds(mode) => {
                 // No message along the bottom. A setting whose own row shows
@@ -2661,27 +2761,157 @@ impl App {
     }
 
     fn paint_settings(&mut self, window: &MediaBoxWindow) {
-        window.set_settings_sections(strings(
-            self.settings.groups.iter().map(|group| group.title.clone()),
-        ));
-        window.set_settings_section(self.settings.section as i32);
-        window.set_settings_on_sections(self.settings.pane == screens::settings::Pane::Sections);
-        window.set_settings_row(self.settings.row_index() as i32);
-        window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(
+        window.set_settings_sections(slint::ModelRc::new(slint::VecModel::from(
             self.settings
-                .rows()
+                .groups
                 .iter()
-                .map(|row| SettingRow {
-                    label: row.label.clone().into(),
-                    value: row.value.clone().into(),
-                    hint: row.hint.clone().into(),
-                    tone: row.tone.clone().into(),
-                    selectable: row.selectable(),
+                .map(|group| SettingNav {
+                    label: group.title.clone().into(),
+                    icon: group.icon.into(),
+                    blurb: group.blurb.into(),
                 })
                 .collect::<Vec<_>>(),
         )));
+        window.set_settings_section(self.settings.section as i32);
+        window.set_settings_on_sections(self.settings.pane == screens::settings::Pane::Sections);
+        window.set_settings_row(self.settings.row_index() as i32);
+        let page = self.settings.page();
+        window.set_settings_page(self.settings.page_label().into());
+        window.set_settings_page_icon(page.map_or("", |page| page.icon()).into());
+        let (title, blurb) = self.settings.heading();
+        window.set_settings_title(title.into());
+        window.set_settings_blurb(blurb.into());
+        window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(setting_rows(
+            self.settings.rows(),
+        ))));
+        let choice = self.settings.choice_view();
+        window.set_settings_choice_open(choice.is_some());
+        if let Some(choice) = choice {
+            window.set_settings_choice_title(choice.title.into());
+            window.set_settings_choice_note(choice.note.into());
+            window.set_settings_choice_focus(choice.focus as i32);
+            window.set_settings_choice(slint::ModelRc::new(slint::VecModel::from(
+                choice
+                    .items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (title, sub, selected))| ChoiceItem {
+                        title: title.into(),
+                        sub: sub.into(),
+                        selected,
+                        focused: index == choice.focus,
+                        enabled: true,
+                        badge: "".into(),
+                        badge_tone: "".into(),
+                        now: false,
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+        }
         self.paint_cooling(window);
         self.paint_output(window);
+        self.paint_ethernet(window);
+    }
+
+    fn paint_ethernet(&self, window: &MediaBoxWindow) {
+        let on = self.settings.is_ethernet();
+        window.set_settings_ethernet(on);
+        if !on {
+            return;
+        }
+        let view = self.settings.ethernet.view();
+        fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+            slint::ModelRc::new(slint::VecModel::from(items))
+        }
+        window.set_settings_ethernet_view(EthernetView {
+            available: view.available,
+            message: view.message.into(),
+            cards: model(
+                view.cards
+                    .into_iter()
+                    .map(|card| OutSimple {
+                        icon: card.icon.into(),
+                        label: card.label.into(),
+                        hint: card.hint.into(),
+                        value: card.value.into(),
+                        kind: "link".into(),
+                        focused: card.focused,
+                    })
+                    .collect(),
+            ),
+            actions: model(
+                view.actions
+                    .into_iter()
+                    .map(|act| OutAction {
+                        label: act.label.into(),
+                        enabled: act.enabled,
+                        focused: act.focused,
+                    })
+                    .collect(),
+            ),
+            note: view.note.into(),
+            state: view.state.into(),
+            state_tone: view.state_tone.into(),
+            current_title: view.current_title.into(),
+            current_line: view.current_line.into(),
+            current_badges: model(
+                view.current_badges
+                    .into_iter()
+                    .map(|(text, tone)| Badge { text: text.into(), tone: tone.into() })
+                    .collect(),
+            ),
+            current_rows: model(
+                view.current_rows
+                    .into_iter()
+                    .map(|(label, value)| InfoLine { label: label.into(), value: value.into(), tone: "".into() })
+                    .collect(),
+            ),
+            picker_open: view.picker_open,
+            picker_title: view.picker_title.into(),
+            picker: model(
+                view.picker
+                    .into_iter()
+                    .map(|option| ChoiceItem {
+                        title: option.title.into(),
+                        sub: option.sub.into(),
+                        selected: option.selected,
+                        focused: option.focused,
+                        enabled: true,
+                        badge: "".into(),
+                        badge_tone: "".into(),
+                        now: false,
+                    })
+                    .collect(),
+            ),
+            picker_focus: view.picker_focus as i32,
+            entry_open: view.entry_open,
+            entry_title: view.entry_title.into(),
+            entry_text: view.entry_text.into(),
+            entry_hint: view.entry_hint.into(),
+            entry_error: view.entry_error.into(),
+            keys: model(
+                view.keys
+                    .into_iter()
+                    .map(|row| KeyRow {
+                        keys: model(
+                            row.into_iter()
+                                .map(|(label, span)| KeyCap { label: label.into(), span: span as i32 })
+                                .collect(),
+                        ),
+                    })
+                    .collect(),
+            ),
+            key_row: view.key_row as i32,
+            key_col: view.key_col as i32,
+            sheet: view.sheet,
+            seconds: view.seconds as i32,
+            arc: view.arc.into(),
+            confirm_ready: view.confirm_ready,
+            confirm_focus: view.confirm_focus as i32,
+            trial: view.trial.into(),
+            previous: view.previous.into(),
+            trial_now: view.trial_now.into(),
+        });
     }
 
     fn paint_output(&self, window: &MediaBoxWindow) {
@@ -2715,6 +2945,72 @@ impl App {
         window.set_settings_output_view(OutputView {
             available: view.available,
             message: view.message.into(),
+            face: view.face,
+            simple: model(
+                view.simple
+                    .iter()
+                    .map(|card| OutSimple {
+                        icon: card.icon.clone().into(),
+                        label: card.label.clone().into(),
+                        hint: card.hint.clone().into(),
+                        value: card.value.clone().into(),
+                        kind: "link".into(),
+                        focused: card.focused,
+                    })
+                    .collect(),
+            ),
+            simple_actions: model(
+                view.simple_actions
+                    .iter()
+                    .map(|act| OutAction {
+                        label: act.label.clone().into(),
+                        enabled: act.enabled,
+                        focused: act.focused,
+                    })
+                    .collect(),
+            ),
+            current_title: view.current_title.into(),
+            current_line: view.current_line.into(),
+            current_badges: model(
+                view.current_badges
+                    .into_iter()
+                    .map(|(text, tone)| Badge {
+                        text: text.into(),
+                        tone: tone.into(),
+                    })
+                    .collect(),
+            ),
+            current_rows: model(
+                view.current_rows
+                    .into_iter()
+                    .map(|(label, value)| InfoLine {
+                        label: label.into(),
+                        value: value.into(),
+                        tone: "".into(),
+                    })
+                    .collect(),
+            ),
+            picker_open: view.picker_open,
+            picker_title: view.picker_title.into(),
+            picker_note: view.picker_note.into(),
+            picker: model(
+                view.picker
+                    .iter()
+                    .map(|option| ChoiceItem {
+                        title: option.title.clone().into(),
+                        sub: option.sub.clone().into(),
+                        selected: option.selected,
+                        focused: option.focused,
+                        enabled: option.enabled,
+                        badge: option.badge.clone().into(),
+                        badge_tone: option.badge_tone.clone().into(),
+                        now: option.now,
+                    })
+                    .collect(),
+            ),
+            picker_focus: view.picker_focus as i32,
+            arc: view.arc.into(),
+            confirm_ready: view.confirm_ready,
             sink: view.sink.into(),
             wire_size: view.wire_size.into(),
             wire_rate: view.wire_rate.into(),
@@ -2972,6 +3268,17 @@ impl App {
 
     fn paint_diagnostics(&mut self, window: &MediaBoxWindow) {
         window.set_diag_group(self.diagnostics.group as i32);
+        window.set_diag_nav(slint::ModelRc::new(slint::VecModel::from(
+            self.diagnostics
+                .groups
+                .iter()
+                .map(|group| SettingNav {
+                    label: group.title.clone().into(),
+                    icon: screens::diagnostics::icon(&group.title).into(),
+                    blurb: "".into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
         window.set_diag_groups(slint::ModelRc::new(slint::VecModel::from(
             self.diagnostics
                 .groups
@@ -3040,6 +3347,38 @@ fn hero_facts(item: &state::Item) -> String {
     }
     facts.extend(item.genres.iter().take(2).cloned());
     facts.join("  ·  ")
+}
+
+/// The settings rows as the panel takes them, each with how many rows of each
+/// height come before it: the screen places and scrolls them by arithmetic.
+fn setting_rows(rows: &[screens::settings::Row]) -> Vec<SettingRow> {
+    use screens::settings::Kind;
+    let (mut headers, mut readings, mut cards, mut flats) = (0, 0, 0, 0);
+    rows.iter()
+        .map(|row| {
+            let kind = row.kind();
+            let out = SettingRow {
+                label: row.label.clone().into(),
+                value: row.value.clone().into(),
+                hint: row.hint.clone().into(),
+                tone: row.tone.clone().into(),
+                selectable: row.selectable(),
+                kind: kind.name().into(),
+                icon: row.icon.into(),
+                n_header: headers,
+                n_reading: readings,
+                n_card: cards,
+                n_flat: flats,
+            };
+            match kind {
+                Kind::Header => headers += 1,
+                Kind::Reading => readings += 1,
+                Kind::Link | Kind::Action if row.hint.is_empty() => flats += 1,
+                Kind::Link | Kind::Action => cards += 1,
+            }
+            out
+        })
+        .collect()
 }
 
 fn strings(values: impl Iterator<Item = String>) -> slint::ModelRc<slint::SharedString> {
@@ -3129,7 +3468,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: None,
         diag: None,
         leds_pending: None,
-        output_seconds: 0,
+        output_seconds: (0, false),
+        ethernet_seconds: None,
         fan_pending: false,
         display: None,
         controls_were_open: false,
@@ -3254,6 +3594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.watch_the_film();
                 app.expire_notice();
                 app.tick_output();
+                app.tick_ethernet();
             });
         },
     );
@@ -3787,6 +4128,19 @@ fn spawn_home_reload() {
 /// row back rather than leave the chosen mode sitting there as though it had
 /// worked.
 /// One call about the display; the answer comes back to the event loop.
+fn spawn_ethernet(request: mediabox_core::Request) {
+    detached("mediabox-tv-ethernet", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.request(&request).await.map_err(|error| {
+            eprintln!("mediabox-tv.ethernet {request:?} failed: {error}");
+            error.to_string()
+        });
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.ethernet_answered(answer));
+        });
+    });
+}
+
 fn spawn_output(request: mediabox_core::Request) {
     detached("mediabox-tv-output", async move {
         let client = rpc::Client::new(socket_path());

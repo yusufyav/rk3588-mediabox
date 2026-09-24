@@ -74,6 +74,9 @@ pub struct AppState {
     /// The fan's curve for the next boot. The kernel drives the fan; this
     /// only writes the overlay it reads at boot, which is /boot's and root's.
     pub fan: FanController,
+    /// The wired ports and an address written by hand on trial. Here for the
+    /// radio's reason: /etc/netplan and networkd are root's.
+    pub ethernet: Arc<crate::ethernet::Ethernet>,
 }
 
 impl AppState {
@@ -135,6 +138,12 @@ impl AppState {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("OUTPUT_REFUSED", error),
             },
+            Request::EthernetStatus => Response::success(self.ethernet.status()),
+            Request::EthernetTry { interface, config } => {
+                ethernet_result(self.ethernet.try_config(&interface, config).await)
+            }
+            Request::EthernetKeep => ethernet_result(self.ethernet.keep().await),
+            Request::EthernetRevert => ethernet_result(self.ethernet.revert().await),
             Request::FanStatus => Response::success(self.fan.status()),
             Request::FanCurveSet { profile, points } => {
                 match mediabox_core::FanCurve::resolve(profile, points) {
@@ -801,6 +810,7 @@ impl AppState {
             leds: self.leds.status(),
             output: self.output.status(),
             fan: self.fan.status(),
+            ethernet: self.ethernet.status(),
         }
     }
 }
@@ -977,6 +987,13 @@ pub fn system_snapshot() -> Value {
     json!({"hostname":hostname,"kernel":kernel,"architecture":std::env::consts::ARCH,"uptime_seconds":uptime_seconds})
 }
 
+fn ethernet_result(result: Result<mediabox_core::EthernetStatus, String>) -> Response {
+    match result {
+        Ok(status) => Response::success(status),
+        Err(error) => Response::failure("ETHERNET_REFUSED", error),
+    }
+}
+
 fn fan_result(result: Result<mediabox_core::FanStatus, crate::fan::FanError>) -> Response {
     match result {
         Ok(status) => Response::success(status),
@@ -1053,6 +1070,10 @@ mod tests {
                 dir.path().join("summary"),
             ),
             fan: FanController::new(crate::fan::FanPaths::under(dir.path())),
+            ethernet: crate::ethernet::Ethernet::new(
+                crate::ethernet::EthernetPaths::under(dir.path()),
+                false,
+            ),
             applications: ApplicationManager::load(
                 None,
                 "kodi.service",
