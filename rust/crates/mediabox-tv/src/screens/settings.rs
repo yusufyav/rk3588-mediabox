@@ -316,7 +316,7 @@ pub struct ChoiceView {
 /// What each of the lights' modes does, in the list that chooses one.
 fn led_line(mode: LedMode) -> &'static str {
     match mode {
-        LedMode::Off => "Yeşil ve mavi ışık söner",
+        LedMode::Off => "Yeşil ve mavi led söner",
         LedMode::On => "Sürekli yanar",
         LedMode::Heartbeat => "Kalp atışı gibi yanıp söner — kartın kendi ayarı",
     }
@@ -445,8 +445,8 @@ impl Settings {
     pub fn choice_view(&self) -> Option<ChoiceView> {
         let focus = self.choice?;
         Some(ChoiceView {
-            title: "Yeşil ve mavi ışık".into(),
-            note: "Kırmızı ışık donanımdan yanar; bu seçim onu etkilemez.".into(),
+            title: "Yeşil ve mavi led".into(),
+            note: "Kırmızı led donanımdan yanar; bu seçim onu etkilemez.".into(),
             focus,
             items: LedMode::ALL
                 .iter()
@@ -698,6 +698,137 @@ impl Settings {
     }
 }
 
+/// One network card, as the daemon found it on this board.
+struct Link {
+    name: String,
+    address: Option<String>,
+    up: bool,
+    wireless: bool,
+}
+
+fn links(diagnostics: Option<&Value>) -> Option<Vec<Link>> {
+    let list = diagnostics?.pointer("/network/interfaces")?.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|entry| {
+                Some(Link {
+                    name: entry.get("name")?.as_str()?.to_string(),
+                    address: entry
+                        .get("address")
+                        .and_then(Value::as_str)
+                        .filter(|address| !address.is_empty())
+                        .map(str::to_string),
+                    up: entry.get("state").and_then(Value::as_str) == Some("up"),
+                    wireless: entry.get("wireless").and_then(Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// A radio's strength in words, with the figure beside them: four steps, the
+/// same ones the Wi-Fi screen and the home screen's bars use.
+fn signal(dbm: i64) -> (String, &'static str) {
+    let (word, tone) = match crate::vitals::signal_bars(dbm) {
+        4 => ("Çok iyi", "good"),
+        3 => ("İyi", "good"),
+        2 => ("Orta", "warn"),
+        _ => ("Zayıf", "bad"),
+    };
+    (format!("{word} · {dbm} dBm"), tone)
+}
+
+/// The "Ağ" heading and what is under it: the Wi-Fi network and its signal,
+/// then every network card on its own line with its own address.
+///
+/// The cards are whatever the daemon found on this board — one wired port on
+/// an Ultra, two on a Plus — so nothing here counts them in advance. With more
+/// than one wired port each is numbered and named by its interface, since the
+/// two sockets are otherwise indistinguishable on the screen.
+fn network(diagnostics: Option<&Value>) -> Vec<Row> {
+    let dash = || "—".to_string();
+    let mut rows = vec![Row::header("Ağ")];
+    let Some(links) = links(diagnostics) else {
+        rows.push(Row::reading("Durum", "Okunuyor…"));
+        return rows;
+    };
+    let default = text(diagnostics, "/network/default/interface");
+
+    let mut wired: Vec<&Link> = links.iter().filter(|link| !link.wireless).collect();
+    wired.sort_by(|a, b| a.name.cmp(&b.name));
+    let wired_label = |index: usize| {
+        if wired.len() > 1 { format!("Ethernet {}", index + 1) } else { "Ethernet".to_string() }
+    };
+    let label_of = |name: &str| -> String {
+        if let Some(index) = wired.iter().position(|link| link.name == name) {
+            wired_label(index)
+        } else if links.iter().any(|link| link.wireless && link.name == name) {
+            "Wi-Fi".into()
+        } else {
+            name.to_string()
+        }
+    };
+
+    // The radio.
+    let radio = links.iter().find(|link| link.wireless);
+    let state = text(diagnostics, "/wireless/wifi/state");
+    if radio.is_some() || matches!(state.as_deref(), Some(s) if s != "yok") {
+        if state.as_deref() == Some("bağlı") {
+            rows.push(Row::toned(
+                "Wi-Fi ağı",
+                text(diagnostics, "/wireless/wifi/ssid").unwrap_or_else(dash),
+                "good",
+            ));
+            if let Some(dbm) = diagnostics
+                .and_then(|value| value.pointer("/wireless/wifi/signal"))
+                .and_then(Value::as_i64)
+            {
+                let (value, tone) = signal(dbm);
+                rows.push(Row::toned("Wi-Fi sinyali", value, tone));
+            }
+            let address = text(diagnostics, "/wireless/wifi/address")
+                .or_else(|| radio.and_then(|link| link.address.clone()));
+            rows.push(Row::reading(
+                "Wi-Fi adresi",
+                match (address, radio) {
+                    (Some(address), Some(link)) => format!("{address} · {}", link.name),
+                    (Some(address), None) => address,
+                    (None, _) => "Adres bekleniyor".into(),
+                },
+            ));
+        } else {
+            rows.push(Row::reading(
+                "Wi-Fi ağı",
+                if state.as_deref() == Some("kapalı") { "Kapalı" } else { "Bağlı değil" },
+            ));
+        }
+    }
+
+    // The wires, each on its own line.
+    for (index, link) in wired.iter().enumerate() {
+        let (value, tone) = match (&link.address, link.up) {
+            (Some(address), _) => (format!("{address} · {}", link.name), "good"),
+            (None, true) => (format!("Bağlı, adres bekleniyor · {}", link.name), "warn"),
+            (None, false) => (format!("Kablo takılı değil · {}", link.name), ""),
+        };
+        rows.push(Row::toned(&wired_label(index), value, tone));
+    }
+    if wired.is_empty() {
+        rows.push(Row::reading("Ethernet", "Bu kartta yok"));
+    }
+
+    // Which of them carries the traffic, and through where.
+    rows.push(Row::reading(
+        "Varsayılan bağlantı",
+        default.as_deref().map(label_of).unwrap_or_else(|| "Yok".into()),
+    ));
+    rows.push(Row::reading(
+        "Ağ geçidi",
+        text(diagnostics, "/network/default/gateway").unwrap_or_else(dash),
+    ));
+    rows
+}
+
 /// The display editor's page.
 pub const OUTPUT: &str = "Ekran";
 
@@ -809,14 +940,14 @@ fn led_mode(status: Option<&Value>) -> Option<LedMode> {
 /// press, and two presses of Ok — one meant, one not — left the lights in a
 /// mode nobody had picked.
 fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
-    let red = Row::reading("Kırmızı ışık", "Donanımdan yanar — kapatılamaz");
+    let red = Row::reading("Kırmızı led", "Donanımdan yanar — kapatılamaz");
 
     if flag(status, "/leds/available") != Some(true) {
         // Either the daemon has not answered yet, or this is not a board whose
         // lights are on gpio-leds. Either way there is nothing to press.
         let reason =
-            text(status, "/leds/error").unwrap_or_else(|| "Denetlenebilir ışık bulunamadı".into());
-        return (None, vec![Row::reading("Yeşil ve mavi ışık", reason), red]);
+            text(status, "/leds/error").unwrap_or_else(|| "Denetlenebilir led bulunamadı".into());
+        return (None, vec![Row::reading("Yeşil ve mavi led", reason), red]);
     }
 
     let mode = led_mode(status).unwrap_or_default();
@@ -830,7 +961,7 @@ fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
                 String::new()
             },
             ..Row::act(
-                "Yeşil ve mavi ışık",
+                "Yeşil ve mavi led",
                 "Kapalı, sürekli açık ya da nabız",
                 "bulb",
                 Action::ChooseLeds,
@@ -957,7 +1088,7 @@ fn compose(
     let mut device = Vec::new();
     device.extend(led_card);
     device.push(cooling(status));
-    device.push(Row::header("Işıklar"));
+    device.push(Row::header("Led"));
     device.extend(led_readings);
 
     vec![
@@ -1002,20 +1133,10 @@ fn compose(
             rows: vec![
                 wifi_row(diagnostics),
                 bluetooth_row(diagnostics),
-                Row::header("Ağ"),
-                Row::reading(
-                    "Arayüz",
-                    text(diagnostics, "/network/default/interface").unwrap_or_else(dash),
-                ),
-                Row::reading(
-                    "Adres",
-                    text(diagnostics, "/network/default/address").unwrap_or_else(dash),
-                ),
-                Row::reading(
-                    "Ağ geçidi",
-                    text(diagnostics, "/network/default/gateway").unwrap_or_else(dash),
-                ),
-            ],
+            ]
+            .into_iter()
+            .chain(network(diagnostics))
+            .collect(),
         },
         Group {
             title: "TV ve Kumanda".into(),
@@ -1050,7 +1171,7 @@ fn compose(
         },
         Group {
             title: "Cihaz".into(),
-            blurb: "Işıklar ve soğutma",
+            blurb: "Led ve soğutma",
             icon: "chip",
             rows: device,
         },
@@ -1169,7 +1290,7 @@ mod tests {
             "output": output_answer(),
         });
         let mut settings = Settings::new();
-        settings.compose(Some(&status), None, None);
+        settings.compose(Some(&status), Some(&plus_like(true)), None);
         let (actions, pages) = reachable(&settings);
         for wanted in [
             Action::OpenDiagnostics,
@@ -1197,8 +1318,8 @@ mod tests {
             .map(|row| row.label.as_str())
             .collect();
         for wanted in [
-            "Oynatıcı", "Ekranı tutan", "Arayüz", "Adres", "Ağ geçidi", "Uzaktan kumanda", "CEC",
-            "Bağdaştırıcı", "Fiziksel adres", "Çıkış", "Geçirgen kodekler", "Kırmızı ışık",
+            "Oynatıcı", "Ekranı tutan", "Ağ geçidi", "Uzaktan kumanda", "CEC",
+            "Bağdaştırıcı", "Fiziksel adres", "Çıkış", "Geçirgen kodekler", "Kırmızı led",
             "Sürüm", "Makine", "Açık kalma",
         ] {
             assert!(labels.contains(&wanted), "{wanted} is gone");
@@ -1603,7 +1724,7 @@ mod tests {
     fn an_unanswered_status_does_not_invent_a_mode() {
         let rows = device(None);
         assert!(lights_card(&rows).is_none());
-        assert!(rows.iter().any(|row| row.label == "Yeşil ve mavi ışık"));
+        assert!(rows.iter().any(|row| row.label == "Yeşil ve mavi led"));
     }
 
     // --------------------------------------------------------------- the fan
@@ -1669,6 +1790,83 @@ mod tests {
         assert!(fan.value.contains("pwm-fan"));
         assert!(!settings.open(Page::Cooling));
         assert_eq!(settings.pane, Pane::Sections);
+    }
+
+    // ------------------------------------------------------------ the network
+
+    fn connections(diagnostics: &Value) -> Vec<Row> {
+        compose(None, Some(diagnostics), None)
+            .into_iter()
+            .find(|group| group.title == "Bağlantılar")
+            .expect("connections")
+            .rows
+    }
+
+    fn plus_like(wired_up: bool) -> Value {
+        serde_json::json!({
+            "network": {
+                "default": {"interface": if wired_up { "end1" } else { "wlan0" }, "gateway": "192.0.2.1"},
+                "interfaces": [
+                    {"name": "wlan0", "address": "192.0.2.74", "state": "up", "wireless": true},
+                    {"name": "end1", "address": if wired_up { Value::from("192.0.2.80") } else { Value::Null },
+                     "state": if wired_up { "up" } else { "down" }, "wireless": false},
+                    {"name": "end0", "address": null, "state": "down", "wireless": false},
+                ],
+            },
+            "wireless": {"wifi": {"state": "bağlı", "ssid": "Ev Ağı", "signal": -72,
+                                  "address": "192.0.2.74", "interface": "wlan0"}},
+        })
+    }
+
+    /// A Plus has two wired ports: both are listed, numbered, each with its
+    /// own address — and the radio's address is its own line.
+    #[test]
+    fn every_wired_port_is_listed_with_its_own_address() {
+        let rows = connections(&plus_like(true));
+        assert_eq!(value_of(&rows, "Ethernet 1"), "Kablo takılı değil · end0");
+        assert_eq!(value_of(&rows, "Ethernet 2"), "192.0.2.80 · end1");
+        assert_eq!(value_of(&rows, "Wi-Fi adresi"), "192.0.2.74 · wlan0");
+        assert_eq!(value_of(&rows, "Varsayılan bağlantı"), "Ethernet 2");
+        assert!(rows.iter().all(|row| row.label != "Ethernet"), "numbered when there are two");
+    }
+
+    /// An Ultra has one: it is simply "Ethernet".
+    #[test]
+    fn a_single_wired_port_is_not_numbered() {
+        let diagnostics = serde_json::json!({"network": {
+            "default": {"interface": "end0", "gateway": "192.0.2.1"},
+            "interfaces": [{"name": "end0", "address": "192.0.2.9", "state": "up", "wireless": false}],
+        }});
+        let rows = connections(&diagnostics);
+        assert_eq!(value_of(&rows, "Ethernet"), "192.0.2.9 · end0");
+        assert_eq!(value_of(&rows, "Varsayılan bağlantı"), "Ethernet");
+        assert!(
+            rows.iter().all(|row| !["Wi-Fi ağı", "Wi-Fi sinyali", "Wi-Fi adresi"].contains(&row.label.as_str())),
+            "no radio, no radio rows"
+        );
+    }
+
+    /// The network the radio is on, and how strong it is, in words and dBm.
+    #[test]
+    fn the_radio_says_its_network_and_its_signal() {
+        let rows = connections(&plus_like(false));
+        assert_eq!(value_of(&rows, "Wi-Fi ağı"), "Ev Ağı");
+        let signal = rows.iter().find(|row| row.label == "Wi-Fi sinyali").expect("a signal row");
+        assert_eq!(signal.value, "Orta · -72 dBm");
+        assert_eq!(signal.tone, "warn", "a verdict, and a word beside the colour");
+        assert_eq!(value_of(&rows, "Varsayılan bağlantı"), "Wi-Fi");
+    }
+
+    /// Nothing about the network is claimed before the daemon has answered.
+    #[test]
+    fn an_unanswered_network_claims_nothing() {
+        let rows = compose(None, None, None)
+            .into_iter()
+            .find(|group| group.title == "Bağlantılar")
+            .unwrap()
+            .rows;
+        assert_eq!(value_of(&rows, "Durum"), "Okunuyor…");
+        assert!(rows.iter().all(|row| !row.label.starts_with("Ethernet")));
     }
 
     // ------------------------------------------------------------ the display

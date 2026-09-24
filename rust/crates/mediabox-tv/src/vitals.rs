@@ -297,7 +297,7 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
 
 /// dBm to four steps. The same thresholds the Wi-Fi screen uses, so a network
 /// does not read as three bars on one screen and four on the other.
-fn signal_bars(dbm: i64) -> i32 {
+pub(crate) fn signal_bars(dbm: i64) -> i32 {
     match dbm {
         s if s >= -55 => 4,
         s if s >= -67 => 3,
