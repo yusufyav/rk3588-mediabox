@@ -73,7 +73,7 @@ yoklama bu alan için yoksayılır. Cihazda ölçülen tuş-çizim süresi 3–7
 
 ## Ekran ayarı
 
-Çözünürlük, yenileme ve renk biçimi seçimi üç parçaya ayrılır. Hiçbiri kendi
+Çözünürlük, yenileme ve renk biçimi seçimi dört parçaya ayrılır. Hiçbiri kendi
 kuralını hesaplamaz; kurallar tek yerdedir:
 
 - **Kurallar — `mediabox_platform::output` / `video`.** Mainline Linux'un
@@ -85,44 +85,58 @@ kuralını hesaplamaz; kurallar tek yerdedir:
   her derinliğindeki hücresi, gereken hız ve reddediliyorsa `Refusal` gerekçesi
   (`Only420`, `No420Here`, `DepthNotDeclared`, `OverSink`, `EightBitOnly`, …).
   Kaynak sınırları çalışan vendor sürücünün sunduğudur: 600 MHz, 10 bit.
-- **Uygulama — `mediabox-tv`.** Ekranı tutan tek süreç ve EDID'in tek okuyucusu
-  (bu vendor sürücü `/sys/class/drm/*/edid`'i boş bırakır). Teklifi hesaplar,
-  her mod kurduğunda `output_report` ile daemon'a bildirir, daemon'dan gelen
-  ayarı süreç yeniden başlamadan uygular: `TEST_ONLY` ile sorulmuş tek bir
-  atomik commit (mod + kare + `color_format`/`color_depth`/`Colorspace`); boyut
-  değişirse yeni GBM/EGL yüzeyi, eskisi yeni boyuttaki ilk kare ekrana çıkınca
-  bırakılır. Daemon'un olay akışına her yeniden bağlandığında ekranı yeniden
-  bildirir.
+- **Donanım durumu — `mediabox-display-observer`.** Seçili çıkışı sysfs,
+  uevent, debugfs ve device tree'den izler; tek bir snapshot yayımlar
+  (`/run/mediabox-display-observer/snapshot.json`): generation, EDID SHA-256,
+  topoloji ve ses/CEC yönü, çekirdeğin mod listesi ve ondan hesaplanan teklif,
+  sürücünün bildirdiği hat. Daemon donanım gerçeğini yalnız buradan alır.
+  Kurallar: [`display-pipeline.md`](display-pipeline.md) § 14.
+- **Uygulama — `mediabox-tv`.** Ekranı tutan süreç. Teklifi gözlemciyle aynı
+  fonksiyon ve aynı girdilerle hesaplar, daemon'dan gelen ayarı süreç yeniden
+  başlamadan uygular: `TEST_ONLY` ile sorulmuş tek bir atomik commit (mod +
+  kare + `color_format`/`color_depth`/`Colorspace`); boyut değişirse yeni
+  GBM/EGL yüzeyi. Ne uyguladığını (`OwnerReport::Applied`: bağlayıcı, EDID
+  SHA-256, timing key, renk, HDR, deneme kimliği) ya da uygulayamadığını
+  yalnız yerel sokete bildirir. Daemon'un durumunu her okuyuşunda, orada
+  geçerli olan ayar (deneme ya da kayıtlı) hatta değilse onu uygular.
 - **Karar ve saat — `mediaboxd-rs` (`src/output.rs`).** Tek kayıt,
-  `/var/lib/mediabox/output.json`: `{sink, resolution, colours}`. `sink`, seçimin
-  yapıldığı ekranın EDID blok checksum'ları (`edid_checkvalue`, ör. `d3d7`);
-  mod başına renk `colours[<mod etiketi>]`. Referans Android kutusunun modeli,
-  kendi `systemcontrol`'ünden okundu: `hdmimode`, `<mod>_deepcolor`,
-  `hdmichecksum`, "tv sink changed". Farklı EDID'li bir ekran bildirildiğinde
-  kayıt o ekrana `Auto` olarak taşınır; bir ekran için yapılan seçim başka
-  ekranda asla denenmez.
+  `/var/lib/mediabox/output.json` (şema 2): `{edid_sha256, resolution,
+  colours}`. Ekran kimliği doğrulanmış tam EDID'in SHA-256'sıdır; mod ve mod
+  başına renk timing key ile tutulur. Referans Android kutusunun modeli
+  (`hdmimode`, `<mod>_deepcolor`, `hdmichecksum`, "tv sink changed"): farklı
+  EDID'li bir ekranda kayıt o ekrana `Auto` olarak taşınır. Eski kayıt
+  (checksum, boyut + mHz, etiket) o checksum'lı ekran ilk görüldüğünde bir kez
+  taşınır; birden fazla timing'e uyan seçim tahmin edilmez, `Auto` olur.
 
-Yeni bir ayar **denemedir**: `output_try` onu olay akışıyla arayüze uygulatır,
-diske yazmaz ve 15 saniye sayar (Windows'un "Bu ekran ayarları kalsın mı?"
-akışı). `output_keep` yazar; `output_revert` ya da süre dolması önceki ayarı geri
-uygular. Sayaç daemon'dadır: ekran görüntü alamasa ya da arayüz kapansa da geri
-dönülür, yeniden açılan arayüz diskteki (eski) ayarı okur. Deneme yalnız arayüz
-ekranı tutarken kabul edilir.
+Yeni bir ayar **denemedir**: `output_try` bir deneme kimliği üretir, denemeyi
+`/var/lib/mediabox/output-trial.json`'a yazar, sonra olay akışıyla sahibine
+uygulatır ve 15 saniye sayar. `output_keep {trial}` yalnız o kimlik, aynı ekran
+ve sahibin uyguladığını bildirmiş olması halinde diske yazar; yazma başarısızsa
+hiçbir şey kaydedilmez. `output_revert {trial}`, süre dolması, sahibin
+uygulayamaması, yeniden başlaması ya da ekranı devretmesi ve ekranın değişmesi
+denemeyi bitirir ve önceki ayarı geri uygulatır. Yeniden başlayan daemon
+günlüğü bulur ve denemeyi geri alır. Deneme yalnız arayüz ekranı tutarken
+kabul edilir.
 
-Komutlar: `output_status`, `output_report {offer, wire}` (yalnız arayüz),
-`output_try {resolution, colour}`, `output_keep`, `output_revert`. `Status`
-içinde `output` alanı aynı durumu taşır. Olay akışında (`/v1/events`)
+Komutlar: `output_status`, `output_try {resolution, colour}`,
+`output_keep {trial}`, `output_revert {trial}`. Donanımı anlatan bir komut
+yoktur; sahibin raporu `Request` değil, ayrı bir tiptir (`OwnerReport`) ve
+yalnız yerel sokette, root'tan kabul edilir. `Status` içinde `output` alanı
+aynı durumu taşır ve istenen (`setting`, `trial`), politikanın seçtiği
+(`selected`), DRM'e uygulanan (`applied`) ve sürücünün bildirdiği (`observed`,
+okunamıyorsa `unknown`) değerleri ayrı tutar. Olay akışında (`/v1/events`)
 `{"output": "apply" | "kept" | "reverted" | "changed", …}` çerçeveleri bütün
-istemcilere gider; onay sorusu TV'de ve web'de birlikte sorulur. Hatta giden
-biçim her `output_status`'ta ekran denetleyicisinden
-(`/sys/kernel/debug/dri/0/summary`, `bus_format`) okunur.
+istemcilere gider; `apply` hangi bağlayıcı ve EDID için olduğunu taşır.
 
-Daemon her bildirimde `/run/mediabox/output-plan` yazar. `mediabox-hdmi-prepare`
-Kodi'nin başlangıç modunu, yenileme listesini ve tarayıcının modunu buradan
-alır; Kodi (`patches/kodi/0013`) her mod için SDR ve HDR renk biçimini aynı
-dosyadaki `colour <G>x<Y>[i]@<saat kHz>/<htoplam>x<vtoplam> <sdr> <hdr|none>`
-satırlarından okur. Ayrıntı ve ölçümler:
-[`display-pipeline.md`](display-pipeline.md) § 9–11.
+Daemon gözlemcinin geçerli generation'ı için `/run/mediabox/output-plan` yazar
+(şema, boot, generation, bağlayıcı, verici, EDID SHA-256, timing key, kaynak
+profili) ve generation değişince kaldırır ya da yeniden yazar.
+`mediabox-hdmi-prepare` Kodi'nin başlangıç modunu ve yenileme listesini, tarayıcı
+birimi sway'in modunu yalnız `mediabox-platform plan`/`sway-output` üzerinden,
+plan şu anki ekran içinse alır. Kodi (`patches/kodi/0013`) her mod için SDR ve
+HDR renk biçimini aynı dosyadaki
+`colour <G>x<Y>[i]@<saat kHz>/<htoplam>x<vtoplam> <sdr> <hdr|none>` satırlarından
+okur. Ayrıntı ve ölçümler: [`display-pipeline.md`](display-pipeline.md) § 9–11, 14.
 
 ## Input routing
 

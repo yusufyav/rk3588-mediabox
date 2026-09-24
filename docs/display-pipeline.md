@@ -21,9 +21,11 @@ replaces something this product had decided for itself.
 | CEC holds every adapter and follows the television to whichever socket it is on | one adapter chosen at start, given up without a physical address | [`hdmi-cec.md`](hdmi-cec.md) |
 | What can be sent is mainline Linux's HDMI rules, ported by name, never a rule of this product's | "RGB at eight bits or not at all", "4:2:2 cannot carry HDR" | rule 9 |
 | `Auto` is the Android box's rule: largest mode in the panel's shape at the fastest refresh the link carries in any format | the sink's preferred mode, or the largest that fits as RGB | rule 9 |
-| A choice is one record bound to the display's EDID checksums; another display is `Auto` | a choice applied to whatever is plugged in | rule 9 |
-| A change is a trial the daemon takes back after 15 s unless kept, applied in place with `TEST_ONLY` | restarting the interface to change mode | rule 9 |
-| One setting for the interface, Kodi and the browser, through `/run/mediabox/output-plan` | three owners with three rules | rule 9, [`platform/custom-runtime.md`](platform/custom-runtime.md) § 0013 |
+| A choice is one record bound to the SHA-256 of the display's validated EDID, a mode by its timing key; another display is `Auto` | a choice applied to whatever is plugged in; later, one bound to block checksums and a mode by size and millihertz | rule 9 |
+| A change is a trial with an id, journalled, bound to its sink and taken back after 15 s unless kept once applied, applied in place with `TEST_ONLY` | restarting the interface to change mode | rule 9 |
+| One setting for the interface, Kodi and the browser, through `/run/mediabox/output-plan`, used only for the display generation it was made for | three owners with three rules; a plan for the last sink used on the next | rule 9, [`platform/custom-runtime.md`](platform/custom-runtime.md) § 0013 |
+| The display's hardware state has one author, the observer; no client can say what the EDID, the offer or the wire is | the interface's report, which any client could send | rule 14 |
+| Audio and CEC follow the selected output's transmitter only when that link is firm; otherwise they go nowhere | the likely card, the first live adapter | rule 14 |
 | HDR over 4:2:2 is correct on this hardware; the format is named to the driver, never negotiated | `0012`'s "RK3588 renders HDR over 4:2:2 wrong" | rule 11 |
 | A panic is reproduced only with something waiting for it: serial console, or `kernel.panic` set | reading where the journal ends as the crash | rule 13 |
 
@@ -93,15 +95,22 @@ A pinned mode the panel cannot do produces, on every start:
 television going dark twice on its way to the home screen.
 
 The television's own interface takes the mode rule 9 gives it, and the
-browser's compositor is told the same mode through
-`/run/mediabox/sway-output.conf`. The layout survives the change because the scale is measured from the mode
-that was actually taken (rule 1), and `mediabox-display-changed`, triggered by
-udev on a DRM hotplug, compares against the state `mediabox-display-seed`
-records at boot -- so the first plug after a headless boot is not lost -- and
-when a panel is plugged in hands the interface or Kodi the display again (stop,
-`mediabox-hdmi-prepare` as root, start). The browser is not restarted: sway
-modesets in place and the same Chromium carries on; only its configuration is
-refreshed, and sway is reloaded only when the mode it should take changed.
+browser's compositor is told the same mode, on the selected connector only
+(`output HDMI-A-2 mode …`, never `output *`), through
+`/run/mediabox-browser/sway-output.conf` -- written by the browser's unit as it
+starts, from a plan that is for the display plugged in now, into a directory
+that goes when the browser stops. The layout survives the change because the
+scale is measured from the mode that was actually taken (rule 1), and
+`mediabox-display-changed`, triggered by udev on a DRM hotplug and by the
+control plane when the observer sees the sink change (rule 14), compares each
+connector, its state and the SHA-256 of its EDID against the state
+`mediabox-display-seed` records at boot -- so the first plug after a headless
+boot is not lost, and a sink replaced without the socket reading
+`disconnected` is a change -- and when a panel is plugged in hands the
+interface or Kodi the display again (stop, `mediabox-hdmi-prepare` as root,
+start). The browser is not restarted: sway modesets in place and the same
+Chromium carries on; only its configuration is refreshed, and sway is reloaded
+only when the mode it should take changed.
 
 **Check:**
 
@@ -287,18 +296,40 @@ colour is RGB 8 bit where it fits and 4:2:0 8 bit otherwise, and for an HDR
 film the first format that carries ten bits (RGB, 4:4:4, 4:2:2, 4:2:0).
 
 A person can choose another mode and another colour at it. The choice is one
-record, bound to the display it was made on by the EDID's block checksums --
-the Android box's `hdmimode` / `<mode>_deepcolor` / `hdmichecksum`. A display
-with another EDID is `Auto`, and the record moves to it: a mode chosen for one
-display is never tried on another (rule 10 is what that costs).
+record (`/var/lib/mediabox/output.json`, schema 2), bound to the display it was
+made on by the SHA-256 of its whole, validated EDID, with the mode and each
+colour named by the timing's key (`t1:…`) -- the Android box's `hdmimode` /
+`<mode>_deepcolor` / `hdmichecksum`, with an identity two displays cannot
+share. A display with another EDID is `Auto`, and the record moves to it: a
+mode chosen for one display is never tried on another (rule 10 is what that
+costs). A record written before (bound to block checksums, a mode by size and
+millihertz, a colour by label) is migrated once, the first time a display with
+those checksums is seen: a choice that names exactly one timing of the
+kernel's list is kept by its key, one that names more than one is `Auto`, and
+the status says which.
 
 A change is applied in place -- one atomic commit of mode, frame and colour,
-asked first with `TEST_ONLY` -- and is on trial: unless it is kept within 15
-seconds the daemon puts the earlier setting back, and it never reached the disk,
-so a restart finds the earlier one too.
+asked first with `TEST_ONLY` -- and is on trial. A trial has an id, is bound to
+the connector and EDID it was made for, and is journalled
+(`/var/lib/mediabox/output-trial.json`) before it is sent. It can be kept only
+by its id, and only once the owner has reported it committed on that sink;
+it ends, and the earlier setting goes back, when 15 seconds pass, when it is
+reverted, when the owner fails to apply it, restarts, or hands the display
+over, and when the sink changes. A daemon that restarts finds the journal and
+takes the trial back: what is on disk was never the trial. A Keep whose write
+fails keeps nothing.
 
 Kodi and the browser start from the same setting: the daemon writes
-`/run/mediabox/output-plan` and `mediabox-hdmi-prepare` gives Kodi the chosen
+`/run/mediabox/output-plan` for the observer's current display generation --
+with `schema`, `boot_id`, `generation`, `connector`, `transmitter`,
+`edid_sha256`, `timing_key` and `source_profile` -- and removes it the moment
+that is not the generation. `mediabox-platform plan` prints it only when all of
+that is still true, checked against the observer and against the connector and
+EDID read then; `mediabox-hdmi-prepare` takes it only that way, and without a
+current plan starts Kodi on the mode already on the wire (`DESKTOP`). When
+Kodi or the browser owns the display and the sink changes, the recovery waits
+briefly for the new sink's plan before handing the display over. With a
+current plan `mediabox-hdmi-prepare` gives Kodi the chosen
 mode and every refresh of that size as its whitelist -- a television box does
 not drop to 1080p because a film is 1080p; it keeps the resolution and changes
 cadence, and the one scale left is the display controller's:
@@ -313,16 +344,17 @@ line per mode, `colour 3840x2160@296703/5500x2250 rgb:8 ycbcr422:10` -- size,
 clock and totals, because 2160p23.976 and 2160p29.97 share a clock and 1080i60
 and 1080p30 share the totals too (an interlaced size carries an `i`) -- with
 the SDR colour and the HDR one. Kodi names that format to the driver rather than
-asking for RGB and letting it negotiate down, and tags it truthfully. The
-interface reports the display again whenever it reconnects to the daemon,
-because the daemon's runtime directory, and the plan in it, goes with it.
+asking for RGB and letting it negotiate down, and tags it truthfully. That
+line's shape is what Kodi's own reader parses and does not change; the
+provenance lines beside it are what keep another display's line from being
+read.
 
 **Check:**
 
 ```sh
-mediaboxctl display status        # what is on the wire, from the display controller
+mediaboxctl display status        # requested, applied (DRM), and what the driver reports
 mediaboxctl display modes 3840x2160p30
-cat /run/mediabox/output-plan
+mediabox-platform plan            # the plan, only if it is for this display now
 ```
 
 ## 10. One mode across a handover — and never by switching fbdev emulation off
@@ -400,8 +432,16 @@ color_depth           ten bits
 Colorspace            BT2020_RGB for RGB, BT2020_YCC for any YCbCr format
 ```
 
-In front of them is the decision this product already lives by: **can this
-link carry ten bits, in any format, at the timing that is actually set?**
+In front of them is the decision this product already lives by: **can HDR10
+go out at the timing that is actually set, and in what?** Each condition is
+its own, because each is declared on its own (`SinkVideo::hdr10_refusal`): the
+source profile signals HDR at all; the sink declares the PQ transfer function
+*and* Static Metadata Type 1 (PQ alone is not HDR10); it declares BT.2020 in
+the encoding sent -- RGB for RGB, YCC for YCbCr; the depth is ten bits or more;
+and the cell can be sent at all -- 4:2:0 only where the Y420 blocks allow it and
+at a depth the HF-VSDB declares, within the sink's and the source's rate. A
+source profile that is not matched (`conservative-rgb8-sdr`) sends SDR RGB 8
+bit, whatever the sink says. Then the link:
 Ten-bit RGB is 1.25x the pixel clock; 4:2:2 is carried in a twelve-bit
 container and costs the clock alone, which is why HDR on a 300 MHz input goes
 as 4:2:2 -- and that is correct, not a fault. The format is **named** to the
@@ -430,7 +470,7 @@ has gone.
 
 ```
 journalctl -u mediabox-tv-ui | grep -E 'the film asks|output colour'
-grep -E 'bus_format|hdr_type' /sys/kernel/debug/dri/0/summary
+grep -E 'bus_format|hdr_type' "$(mediabox-platform dri-debugfs)/summary"
 ```
 
 ---
@@ -547,6 +587,73 @@ ls /sys/fs/pstore                      # empty after a cold power cycle
 ```
 
 ---
+
+## 14. The display's hardware state has one author
+
+`mediabox-display-observer` watches the selected output and publishes one
+snapshot, `/run/mediabox-display-observer/snapshot.json`: a generation
+`(boot_id, seq)` that moves only when something material changes -- the KMS
+device, the connector, whether it is connected, the EDID's SHA-256, the
+transmitter, where audio and CEC go, the source profile, the capability and
+mode fingerprints -- the kernel's mode list and the offer computed from it, and
+what the driver reports on the wire. The control plane reads that file, once a
+second and on every request, and takes the display's hardware state from
+nowhere else: the request vocabulary (`mediabox_core::Request`), which the LAN
+listener parses, has no way to say what the EDID, the offer, the wire or the
+applied state is. What the owner committed is an `OwnerReport`, a type only
+the local socket parses, only from root, and only for the connector and EDID
+the observer sees now. Requested, policy-selected, DRM-applied and
+driver-observed are separate fields of the status; a value somebody asked for
+is never shown as the wire, and a wire that cannot be read is `Unknown`.
+
+How the observer looks is fixed (Gate 0), because each of these was the way a
+display was once lost:
+
+* **No descriptor kept** on the display device. Opening a primary node with no
+  master makes the opener master, and the next owner's `SET_MASTER` fails.
+* **FDStore is the display's lifetime keeper** between owners (rule 10); the
+  observer is not, and is ordered against no owner. Starting, stopping or
+  crashing it changes nothing on the television.
+* **The mode list is read only under AM-2** (`mediabox_platform::drm_query`):
+  the transition lock taken *shared* and without waiting, a master present in
+  debugfs `clients`, the node opened read-only, checked again that this process
+  did not become master, `GETCONNECTOR` never with a zero count (a forced
+  probe), closed at once -- and only for a connector and EDID not read before.
+  What was read is kept in the runtime directory, so a restart does not read
+  again.
+* **The transition lock's meaning:** exclusive is a handover (the control
+  plane, `mediabox-display-changed`); shared is the observer's read. The guard
+  and the recovery ask with a shared lock, so a Kodi that ends while the
+  observer is reading is still recovered.
+* **debugfs is found, never assumed**: card → `dev` → minor →
+  `dri/<minor>`, checked against the device's `name`. Unreadable is `Unknown`.
+* **Events are hints.** A DRM or CEC uevent makes the observer look now; the
+  timer looks every two seconds anyway, and every pass reads everything again.
+  A lost event costs one period. A generation that changes the sink makes the
+  control plane ask for `mediabox-display-changed`, which decides from what it
+  reads, not from the event.
+
+Audio and CEC are derived from the selected output, by one rule
+(`Output::audio_route`, `Output::cec_route`): only when the connector is tied
+to its transmitter firmly (`Exact`, `Measured`, or `Derived` where nothing on
+the board can be measured). When the topology is `Ambiguous` -- two sinks,
+nothing to tell the transmitters apart -- there is no route: `mediabox-platform
+alsa-card` and `cec-device` print nothing and say why, CEC refuses, Kodi is
+given `mediabox_unrouted` (a PCM that discards everything), the player `--ao=null`
+and the browser ALSA's `null`. Silence, and no command, rather than the other
+television.
+
+Production code names no board's devices by number or name: not `card0`, not
+`cec0`, not `/sys/kernel/debug/dri/0`, not a connector ordinal, not a sink
+model. Test fixtures do.
+
+**Check:**
+
+```sh
+jq '.generation, .material, .audio, .cec, .kernel_modes.state' /run/mediabox-display-observer/snapshot.json
+ls -l /proc/$(systemctl show -p MainPID --value mediabox-display-observer)/fd | grep -c dri   # 0
+mediaboxctl display status
+```
 
 ## The smoke test
 

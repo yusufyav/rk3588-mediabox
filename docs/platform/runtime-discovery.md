@@ -162,10 +162,14 @@ so it is measured where it can be and every answer carries a confidence
   with a warning, never resolved by picking one.
 * **unavailable** — nothing of that kind to link to.
 
-A CEC command is sent only down an adapter whose chain is measured, derived or
-exact (`Output::cec_confidence`), and only while that adapter holds the physical
-address the selected sink declares. Under an ambiguous binding the sound card
-still follows the order-derived candidate, as it always has; CEC does not.
+A CEC command is sent, and sound is played, only down the adapter and the card
+of a transmitter whose link to the connector is measured, derived or exact --
+one rule for both (`Output::cec_route`, `Output::audio_route`) -- and a CEC
+command only while that adapter holds the physical address the selected sink
+declares. Under an ambiguous binding there is no route for either: the
+order-derived candidate is kept for the report and nothing is sent to it
+(`mediabox-platform alsa-card` and `cec-device` print nothing and say why; see
+[`../display-pipeline.md`](../display-pipeline.md) § 14).
 
 The display device's debugfs directory is resolved the same way, from the KMS
 device: `/sys/class/drm/<card>/dev` gives its primary minor, `dri/<minor>/name`
