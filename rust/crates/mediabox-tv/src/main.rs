@@ -141,6 +141,8 @@ struct App {
     /// buttons were taking Ok yet, so it is redrawn when either changes and
     /// not four times a second.
     output_seconds: (u32, bool),
+    /// The same for the wired port's question.
+    ethernet_seconds: Option<(u32, bool)>,
     /// A fan curve save or reset is in flight. The same guard as the two
     /// above: a poll that left before it cannot know the curve was saved.
     fan_pending: bool,
@@ -254,6 +256,12 @@ impl App {
                     self.act(InputAction::Back);
                 }
             }
+            // A digit off a wired port's number pad.
+            Route::Settings if self.settings.typing_ethernet() => {
+                if self.settings.ethernet.backspace() {
+                    self.paint();
+                }
+            }
             // A digit typed into a fan curve cell, then the edit itself.
             Route::Settings if self.settings.typing_cooling() => {
                 if self.settings.cooling.backspace() {
@@ -309,6 +317,11 @@ impl App {
             }
             // Digits into the fan curve table: a temperature or a percent,
             // without walking a value up one step at a time.
+            Route::Settings if self.settings.typing_ethernet() => {
+                if self.settings.ethernet.typed(c) {
+                    self.paint();
+                }
+            }
             Route::Settings if self.settings.typing_cooling() => {
                 if self.settings.cooling.typed(c) {
                     self.paint();
@@ -1455,6 +1468,11 @@ impl App {
                     self.press_output();
                     return;
                 }
+                if self.settings.is_ethernet() {
+                    let press = self.settings.ethernet.press();
+                    self.ethernet_pressed(press);
+                    return;
+                }
                 let Some(row) = self.settings.focused() else {
                     return;
                 };
@@ -1483,6 +1501,12 @@ impl App {
                 if self.settings.in_output() {
                     if let Some(press) = self.settings.output.back() {
                         self.output_pressed(press);
+                        return;
+                    }
+                }
+                if self.settings.is_ethernet() {
+                    if let Some(press) = self.settings.ethernet.back() {
+                        self.ethernet_pressed(press);
                         return;
                     }
                 }
@@ -1539,6 +1563,56 @@ impl App {
             }
             Press::Keep => spawn_output(mediabox_core::Request::OutputKeep),
             Press::Revert => spawn_output(mediabox_core::Request::OutputRevert),
+        }
+    }
+
+    /// Ok or Back on a wired port's page. Typing stays in this process; a
+    /// trial, keeping it and taking it back are the daemon's.
+    fn ethernet_pressed(&mut self, press: screens::ethernet::Press) {
+        use screens::ethernet::Press;
+        self.settings.ethernet.sent(&press);
+        match press {
+            Press::Nothing => {}
+            Press::Changed => self.paint(),
+            Press::Try(interface, config) => {
+                self.say("Ağ ayarı deneniyor…".into());
+                spawn_ethernet(mediabox_core::Request::EthernetTry { interface, config });
+            }
+            Press::Keep => spawn_ethernet(mediabox_core::Request::EthernetKeep),
+            Press::Revert => spawn_ethernet(mediabox_core::Request::EthernetRevert),
+        }
+    }
+
+    /// The daemon's answer about the wired ports: its whole account, which
+    /// replaces the kept one, or a refusal in its own words — said on the page
+    /// as well as along the bottom, since it is about what is on the page.
+    fn ethernet_answered(&mut self, answer: Result<Value, String>) {
+        match answer {
+            Ok(ethernet) => {
+                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("ethernet".into(), ethernet);
+                }
+            }
+            Err(error) => {
+                self.settings.ethernet.refused(error.clone());
+                self.say(error);
+            }
+        }
+        self.recompose_settings();
+    }
+
+    /// Redraws the port's question when its seconds change, and asks the
+    /// daemon what happened once they run out: it has taken the address back.
+    fn tick_ethernet(&mut self) {
+        let now = self.settings.ethernet.countdown();
+        if now != self.ethernet_seconds {
+            self.ethernet_seconds = now;
+            if self.settings.is_ethernet() {
+                self.paint();
+            }
+        }
+        if self.settings.ethernet.due_for_status() {
+            spawn_ethernet(mediabox_core::Request::EthernetStatus);
         }
     }
 
@@ -2702,7 +2776,7 @@ impl App {
         window.set_settings_on_sections(self.settings.pane == screens::settings::Pane::Sections);
         window.set_settings_row(self.settings.row_index() as i32);
         let page = self.settings.page();
-        window.set_settings_page(page.map_or("", |page| page.title()).into());
+        window.set_settings_page(self.settings.page_label().into());
         window.set_settings_page_icon(page.map_or("", |page| page.icon()).into());
         let (title, blurb) = self.settings.heading();
         window.set_settings_title(title.into());
@@ -2736,6 +2810,108 @@ impl App {
         }
         self.paint_cooling(window);
         self.paint_output(window);
+        self.paint_ethernet(window);
+    }
+
+    fn paint_ethernet(&self, window: &MediaBoxWindow) {
+        let on = self.settings.is_ethernet();
+        window.set_settings_ethernet(on);
+        if !on {
+            return;
+        }
+        let view = self.settings.ethernet.view();
+        fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+            slint::ModelRc::new(slint::VecModel::from(items))
+        }
+        window.set_settings_ethernet_view(EthernetView {
+            available: view.available,
+            message: view.message.into(),
+            cards: model(
+                view.cards
+                    .into_iter()
+                    .map(|card| OutSimple {
+                        icon: card.icon.into(),
+                        label: card.label.into(),
+                        hint: card.hint.into(),
+                        value: card.value.into(),
+                        kind: "link".into(),
+                        focused: card.focused,
+                    })
+                    .collect(),
+            ),
+            actions: model(
+                view.actions
+                    .into_iter()
+                    .map(|act| OutAction {
+                        label: act.label.into(),
+                        enabled: act.enabled,
+                        focused: act.focused,
+                    })
+                    .collect(),
+            ),
+            note: view.note.into(),
+            state: view.state.into(),
+            state_tone: view.state_tone.into(),
+            current_title: view.current_title.into(),
+            current_line: view.current_line.into(),
+            current_badges: model(
+                view.current_badges
+                    .into_iter()
+                    .map(|(text, tone)| Badge { text: text.into(), tone: tone.into() })
+                    .collect(),
+            ),
+            current_rows: model(
+                view.current_rows
+                    .into_iter()
+                    .map(|(label, value)| InfoLine { label: label.into(), value: value.into(), tone: "".into() })
+                    .collect(),
+            ),
+            picker_open: view.picker_open,
+            picker_title: view.picker_title.into(),
+            picker: model(
+                view.picker
+                    .into_iter()
+                    .map(|option| ChoiceItem {
+                        title: option.title.into(),
+                        sub: option.sub.into(),
+                        selected: option.selected,
+                        focused: option.focused,
+                        enabled: true,
+                        badge: "".into(),
+                        badge_tone: "".into(),
+                        now: false,
+                    })
+                    .collect(),
+            ),
+            picker_focus: view.picker_focus as i32,
+            entry_open: view.entry_open,
+            entry_title: view.entry_title.into(),
+            entry_text: view.entry_text.into(),
+            entry_hint: view.entry_hint.into(),
+            entry_error: view.entry_error.into(),
+            keys: model(
+                view.keys
+                    .into_iter()
+                    .map(|row| KeyRow {
+                        keys: model(
+                            row.into_iter()
+                                .map(|(label, span)| KeyCap { label: label.into(), span: span as i32 })
+                                .collect(),
+                        ),
+                    })
+                    .collect(),
+            ),
+            key_row: view.key_row as i32,
+            key_col: view.key_col as i32,
+            sheet: view.sheet,
+            seconds: view.seconds as i32,
+            arc: view.arc.into(),
+            confirm_ready: view.confirm_ready,
+            confirm_focus: view.confirm_focus as i32,
+            trial: view.trial.into(),
+            previous: view.previous.into(),
+            trial_now: view.trial_now.into(),
+        });
     }
 
     fn paint_output(&self, window: &MediaBoxWindow) {
@@ -3293,6 +3469,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diag: None,
         leds_pending: None,
         output_seconds: (0, false),
+        ethernet_seconds: None,
         fan_pending: false,
         display: None,
         controls_were_open: false,
@@ -3417,6 +3594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.watch_the_film();
                 app.expire_notice();
                 app.tick_output();
+                app.tick_ethernet();
             });
         },
     );
@@ -3950,6 +4128,19 @@ fn spawn_home_reload() {
 /// row back rather than leave the chosen mode sitting there as though it had
 /// worked.
 /// One call about the display; the answer comes back to the event loop.
+fn spawn_ethernet(request: mediabox_core::Request) {
+    detached("mediabox-tv-ethernet", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.request(&request).await.map_err(|error| {
+            eprintln!("mediabox-tv.ethernet {request:?} failed: {error}");
+            error.to_string()
+        });
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.ethernet_answered(answer));
+        });
+    });
+}
+
 fn spawn_output(request: mediabox_core::Request) {
     detached("mediabox-tv-output", async move {
         let client = rpc::Client::new(socket_path());

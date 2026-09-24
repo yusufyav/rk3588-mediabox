@@ -1,0 +1,238 @@
+import { Theme, Metrics } from "theme.slint";
+import { KeyRow, Keyboard } from "components.slint";
+import {
+    Icon, SettingCard, ActionButton, StatusChip, InfoPanel, InfoLine, Badge, Dialog,
+    StateNote, ChoiceItem, ChoiceSheet, TrialSheet,
+} from "kit.slint";
+import { OutSimple, OutAction } from "output.slint";
+
+// One wired port's address: the display page's shape, for the same kind of
+// decision. Cards for what can be set, the port as it is now beside them, a
+// list for the two things that are a choice (how the address is taken, the
+// mask) and a number pad for the ones that are typed.
+//
+// Drawn from one EthernetView composed in Rust (src/screens/ethernet.rs),
+// where the focus, the draft and the trial question live and are tested.
+
+export struct EthernetView {
+    available: bool,
+    message: string,
+    cards: [OutSimple],
+    actions: [OutAction],
+    note: string,
+    state: string,
+    state-tone: string,
+    current-title: string,
+    current-line: string,
+    current-badges: [Badge],
+    current-rows: [InfoLine],
+    picker-open: bool,
+    picker-title: string,
+    picker: [ChoiceItem],
+    picker-focus: int,
+    entry-open: bool,
+    entry-title: string,
+    entry-text: string,
+    entry-hint: string,
+    entry-error: string,
+    keys: [KeyRow],
+    key-row: int,
+    key-col: int,
+    sheet: int,
+    seconds: int,
+    arc: string,
+    confirm-ready: bool,
+    confirm-focus: int,
+    trial: string,
+    previous: string,
+    trial-now: string,
+}
+
+// The number pad, over the page: the field as typed so far, what it expects,
+// what was wrong with the last try, and the keys.
+component EntrySheet inherits Dialog {
+    in property <EthernetView> view;
+    panel-w: max(Metrics.dialog-w * 0.9, Metrics.key-w * 3 + Metrics.key-gap * 2 + Metrics.dialog-pad * 2);
+
+    Text {
+        text: view.entry-title;
+        color: Theme.text;
+        font-size: Metrics.t-section;
+        font-weight: 750;
+    }
+    // What has been typed, in a field of its own, with a caret after it.
+    Rectangle {
+        height: Metrics.set-h-flat;
+        border-radius: Metrics.s-radius * 0.8;
+        background: #0c0e14;
+        border-width: max(2px, Metrics.focus-w * 0.8);
+        border-color: view.entry-error != "" ? Theme.bad : Theme.focus;
+        HorizontalLayout {
+            padding-left: Metrics.card-pad * 0.8;
+            padding-right: Metrics.card-pad * 0.8;
+            spacing: Metrics.t-primary * 0.08;
+            alignment: start;
+            Text {
+                text: view.entry-text;
+                color: Theme.text;
+                font-size: Metrics.t-primary * 1.15;
+                font-weight: 650;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: max(2px, Metrics.focus-w);
+                    height: Metrics.t-primary * 1.2;
+                    background: Theme.focus;
+                }
+            }
+        }
+    }
+    if view.entry-error != "": HorizontalLayout {
+        spacing: Metrics.t-meta * 0.5;
+        VerticalLayout {
+            alignment: center;
+            Icon { name: "alert"; size: Metrics.t-meta * 1.2; ink: Theme.bad; }
+        }
+        Text {
+            text: view.entry-error;
+            color: Theme.bad;
+            font-size: Metrics.t-meta;
+            font-weight: 600;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+    if view.entry-error == "": Text {
+        text: view.entry-hint;
+        color: Theme.muted;
+        font-size: Metrics.t-meta;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        alignment: center;
+        Keyboard {
+            keys: view.keys;
+            key-row: view.key-row;
+            key-col: view.key-col;
+            active: true;
+        }
+    }
+}
+
+export component EthernetPane inherits Rectangle {
+    in property <EthernetView> view;
+    in property <bool> active-pane;
+
+    property <length> gap: Metrics.row-gap;
+    property <length> info-x: Metrics.list-w + Metrics.card-pad * 1.6;
+
+    if !view.available: StateNote {
+        x: 0;
+        y: 0;
+        width: min(root.width, Metrics.list-w);
+        kind: "unavailable";
+        title: "Port okunamıyor";
+        message: view.message;
+    }
+
+    if view.available: VerticalLayout {
+        x: 0;
+        y: 0;
+        width: Metrics.list-w;
+        spacing: gap;
+        alignment: start;
+
+        for card[i] in view.cards: VerticalLayout {
+            spacing: 0px;
+            // The written address stands apart from the choice above it.
+            if i == 1: Rectangle { height: gap * 0.6; }
+            SettingCard {
+                icon: card.icon;
+                label: card.label;
+                hint: card.hint;
+                value: card.value;
+                kind: card.kind;
+                focused: active-pane && card.focused && view.sheet == 0
+                    && !view.picker-open && !view.entry-open;
+            }
+        }
+
+        HorizontalLayout {
+            padding-top: gap * 1.4;
+            spacing: gap * 1.4;
+            alignment: start;
+            for act[i] in view.actions: ActionButton {
+                label: act.label;
+                enabled: act.enabled;
+                focused: active-pane && act.focused;
+                primary: i == 0;
+            }
+            VerticalLayout {
+                alignment: center;
+                StatusChip {
+                    text: view.state;
+                    tone: view.state-tone;
+                    font-size: Metrics.t-meta;
+                }
+            }
+        }
+
+        Text {
+            text: view.note;
+            color: Theme.muted;
+            font-size: Metrics.t-meta;
+            wrap: word-wrap;
+        }
+    }
+
+    if view.available && root.width - info-x > Metrics.t-primary * 9: InfoPanel {
+        x: info-x;
+        y: 0;
+        width: root.width - info-x;
+        caption: "Şu an";
+        icon: "network";
+        title: view.current-title;
+        line: view.current-line;
+        badges: view.current-badges;
+        rows: view.current-rows;
+    }
+
+    // The lists and the pad cover the whole panel, as the display's do.
+    if view.picker-open && view.sheet == 0: ChoiceSheet {
+        x: -root.x;
+        y: -root.y;
+        width: Metrics.vw;
+        height: Metrics.vh;
+        title: view.picker-title;
+        items: view.picker;
+        focus-at: view.picker-focus;
+    }
+
+    if view.entry-open && view.sheet == 0: EntrySheet {
+        x: -root.x;
+        y: -root.y;
+        width: Metrics.vw;
+        height: Metrics.vh;
+        view: view;
+    }
+
+    if view.sheet == 1: TrialSheet {
+        x: -root.x;
+        y: -root.y;
+        width: Metrics.vw;
+        height: Metrics.vh;
+        title: "Bu ağ ayarı kalsın mı?";
+        new-label: "Yeni ayar";
+        new-value: view.trial;
+        old-label: "Önceki ayar";
+        old-value: view.previous;
+        seconds: view.seconds;
+        arc: view.arc;
+        ready: view.confirm-ready;
+        focus-at: view.confirm-focus;
+        status-line: view.trial-now;
+        message: "Yanıt verilmezse " + view.seconds + " saniye sonra önceki ayara dönülür. Süreyi denetim düzlemi tutar; arayüz kapansa ya da cihaz yeniden başlasa bile ayar geri alınır.";
+    }
+}

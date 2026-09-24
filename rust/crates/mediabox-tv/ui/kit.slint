@@ -674,6 +674,134 @@ export component ChoiceSheet inherits Dialog {
     }
 }
 
+// "Bu … kalsın mı?": a change that is in effect and not yet kept. The daemon
+// holds the clock and goes back by itself when it runs out; this only asks,
+// shows what is new against what was, and how long is left. `ready` is false
+// for the first moment, while the press that asked for the trial may still be
+// arriving — the buttons are drawn but "Koru" takes nothing.
+export component TrialSheet inherits Dialog {
+    in property <string> title;
+    in property <string> new-label;
+    in property <string> new-value;
+    in property <string> old-label;
+    in property <string> old-value;
+    in property <int> seconds;
+    in property <string> arc;
+    in property <bool> ready;
+    in property <int> focus-at;
+    in property <string> message;
+    // A live line about what the change did, "" for none.
+    in property <string> status-line;
+    panel-w: Metrics.dialog-w * 1.25;
+
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Metrics.t-section * 1.05;
+        font-weight: 750;
+        wrap: word-wrap;
+    }
+
+    HorizontalLayout {
+        spacing: Metrics.dialog-pad;
+
+        // The time left, as a ring that empties: calm, and legible across a
+        // room.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Metrics.t-page * 2.3;
+                height: self.width;
+                Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: "M 12 2 A 10 10 0 1 1 11.99 2";
+                    fill: transparent;
+                    stroke: Theme.s-line;
+                    stroke-width: parent.width * 0.06;
+                }
+                if root.arc != "": Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: root.arc;
+                    fill: transparent;
+                    stroke: Theme.focus;
+                    stroke-width: parent.width * 0.06;
+                    stroke-line-cap: round;
+                }
+                Text {
+                    text: root.seconds;
+                    color: Theme.text;
+                    font-size: Metrics.t-page * 0.9;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: Metrics.row-gap * 0.9;
+            alignment: center;
+            horizontal-stretch: 1;
+            for line[i] in [
+                { label: root.new-label, value: root.new-value },
+                { label: root.old-label, value: root.old-value },
+            ]: VerticalLayout {
+                spacing: Metrics.t-meta * 0.15;
+                Text {
+                    text: line.label;
+                    color: Theme.muted;
+                    font-size: Metrics.t-meta;
+                    font-weight: 600;
+                }
+                Text {
+                    text: line.value;
+                    color: i == 0 ? Theme.text : #c3c8d2;
+                    font-size: Metrics.t-primary;
+                    font-weight: i == 0 ? 700 : 550;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    if status-line != "": Text {
+        text: root.status-line;
+        color: Theme.text;
+        font-size: Metrics.t-secondary;
+        font-weight: 600;
+        wrap: word-wrap;
+    }
+
+    Text {
+        text: root.message;
+        color: Theme.muted;
+        font-size: Metrics.t-meta;
+        wrap: word-wrap;
+    }
+
+    HorizontalLayout {
+        padding-top: Metrics.row-gap * 0.6;
+        spacing: Metrics.row-gap * 1.4;
+        alignment: start;
+        ActionButton {
+            label: "Koru";
+            enabled: root.ready;
+            focused: root.focus-at == 0;
+            primary: true;
+        }
+        ActionButton {
+            label: "Geri dön";
+            focused: root.focus-at == 1;
+        }
+    }
+}
+
 // A line along the bottom that says what just happened. Words first: the
 // marker's colour only repeats what the words say.
 export component Toast inherits Rectangle {

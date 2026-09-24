@@ -102,6 +102,9 @@ pub enum Page {
     Output,
     /// The fan curve editor.
     Cooling,
+    /// One wired port's address. Last, because the list pages index arrays by
+    /// their place and this is not one of them.
+    Ethernet,
 }
 
 impl Page {
@@ -111,6 +114,7 @@ impl Page {
             Page::Account => "Hesap",
             Page::Output => OUTPUT,
             Page::Cooling => COOLING,
+            Page::Ethernet => "Ethernet",
         }
     }
 
@@ -120,6 +124,7 @@ impl Page {
             Page::Account => "Stremio hesabı ve eklentileri",
             Page::Output => "Çözünürlük, yenileme hızı ve renk",
             Page::Cooling => "Fan eğrisi ve işlemci sıcaklığı",
+            Page::Ethernet => "Adres ayarı",
         }
     }
 
@@ -129,6 +134,7 @@ impl Page {
             Page::Account => "user",
             Page::Output => "monitor",
             Page::Cooling => "fan",
+            Page::Ethernet => "network",
         }
     }
 
@@ -171,6 +177,8 @@ pub struct Row {
     pub header: bool,
     pub action: Option<Action>,
     pub page: Option<Page>,
+    /// The wired port an Ethernet card opens.
+    pub port: Option<String>,
 }
 
 /// The Wi-Fi door, with what the daemon could tell us without asking the
@@ -230,6 +238,7 @@ impl Row {
             header: false,
             action: None,
             page: None,
+            port: None,
         }
     }
 
@@ -341,6 +350,8 @@ pub struct Settings {
     pub cooling: super::cooling::Cooling,
     /// The display editor, which is the whole of the "Ekran" page.
     pub output: super::output::Output,
+    /// One wired port's address editor: the "Ethernet" pages.
+    pub ethernet: super::ethernet::Ethernet,
 }
 
 impl Settings {
@@ -357,6 +368,7 @@ impl Settings {
             choice: None,
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
+            ethernet: super::ethernet::Ethernet::new(),
         };
         settings.compose(None, None, None);
         settings
@@ -396,12 +408,25 @@ impl Settings {
         self.rows().get(self.row_index())
     }
 
+    /// The page's name in the column: its own, or the port's.
+    pub fn page_label(&self) -> String {
+        match self.page() {
+            Some(Page::Ethernet) => self.ethernet.title().to_string(),
+            Some(page) => page.title().to_string(),
+            None => String::new(),
+        }
+    }
+
     /// What the right-hand side is headed with.
     pub fn heading(&self) -> (String, String) {
         match self.page() {
             Some(Page::Output) if self.output.advanced() => {
                 ("Gelişmiş ekran ayarları".into(), self.output.sink_line())
             }
+            Some(Page::Ethernet) => (
+                self.ethernet.title().to_string(),
+                format!("Adres ayarı · {}", self.ethernet.port()),
+            ),
             Some(page) => (page.title().into(), page.blurb().into()),
             None => self
                 .groups
@@ -472,6 +497,14 @@ impl Settings {
                     super::output::Nav::Moved => true,
                     super::output::Nav::Unchanged => false,
                     super::output::Nav::Leave => {
+                        self.close_page();
+                        true
+                    }
+                },
+                Some(Page::Ethernet) => match self.ethernet.step(dx, dy) {
+                    super::ethernet::Nav::Moved => true,
+                    super::ethernet::Nav::Unchanged => false,
+                    super::ethernet::Nav::Leave => {
                         self.close_page();
                         true
                     }
@@ -572,6 +605,15 @@ impl Settings {
                 }
                 self.cooling.enter();
             }
+            Page::Ethernet => {
+                let Some(row) = self.focused().filter(|row| row.page == Some(Page::Ethernet)) else {
+                    return false;
+                };
+                let (port, title) = (row.port.clone().unwrap_or_default(), row.label.clone());
+                if !self.ethernet.open(&port, &title) {
+                    return false;
+                }
+            }
             Page::Playback | Page::Account => {}
         }
         self.page = Some(page);
@@ -616,6 +658,7 @@ impl Settings {
     ) {
         self.cooling.load(fan_status(status));
         self.output.load(output_status(status));
+        self.ethernet.load(ethernet_status(status));
         self.leds = led_mode(status);
         // Lights that stopped answering have nothing left to choose.
         if self.leds.is_none() {
@@ -643,6 +686,7 @@ impl Settings {
         match self.page() {
             Some(Page::Output) if !self.output.available() => self.close_page(),
             Some(Page::Cooling) if !self.cooling.available() => self.close_page(),
+            Some(Page::Ethernet) if !self.ethernet.available() => self.close_page(),
             _ => {}
         }
         if self.pane == Pane::Rows && !self.rows().iter().any(Row::selectable) {
@@ -675,6 +719,10 @@ fn output_status(status: Option<&Value>) -> Option<mediabox_core::OutputStatus> 
     serde_json::from_value(status?.get("output")?.clone()).ok()
 }
 
+fn ethernet_status(status: Option<&Value>) -> Option<mediabox_core::EthernetStatus> {
+    serde_json::from_value(status?.get("ethernet")?.clone()).ok()
+}
+
 impl Settings {
     /// Whether keys belong to the fan editor: its page, open.
     pub fn typing_cooling(&self) -> bool {
@@ -696,6 +744,45 @@ impl Settings {
     pub fn in_output(&self) -> bool {
         self.is_output()
     }
+
+    /// Whether the page on screen is a wired port's address.
+    pub fn is_ethernet(&self) -> bool {
+        self.page() == Some(Page::Ethernet)
+    }
+
+    /// Whether keys typed on a keyboard belong to the port's number pad.
+    pub fn typing_ethernet(&self) -> bool {
+        self.is_ethernet() && self.ethernet.typing()
+    }
+}
+
+/// A card per wired port, to set its address: as many as the daemon found,
+/// named as the "Ağ" rows name them.
+fn ethernet_cards(status: Option<&Value>) -> Vec<Row> {
+    let Some(ethernet) = ethernet_status(status) else {
+        return Vec::new();
+    };
+    let mut ports = ethernet.ports;
+    ports.sort_by(|a, b| a.name.cmp(&b.name));
+    let many = ports.len() > 1;
+    ports
+        .iter()
+        .enumerate()
+        .map(|(index, port)| {
+            let label = if many { format!("Ethernet {}", index + 1) } else { "Ethernet".into() };
+            let on_trial = ethernet.trial.as_ref().is_some_and(|trial| trial.interface == port.name);
+            Row {
+                label,
+                value: if on_trial { "Onay bekliyor".into() } else { port.config.label() },
+                tone: if on_trial { "warn".into() } else { String::new() },
+                hint: format!("Adres ayarı · {}", port.name),
+                icon: "network",
+                page: Some(Page::Ethernet),
+                port: Some(port.name.clone()),
+                ..Row::reading("", "")
+            }
+        })
+        .collect()
 }
 
 /// One network card, as the daemon found it on this board.
@@ -1069,7 +1156,7 @@ fn page_rows(page: Page, status: Option<&Value>, display: Option<&DisplayStatus>
     match page {
         Page::Playback => playback(status, display),
         Page::Account => account(status),
-        Page::Output | Page::Cooling => Vec::new(),
+        Page::Output | Page::Cooling | Page::Ethernet => Vec::new(),
     }
 }
 
@@ -1135,6 +1222,7 @@ fn compose(
                 bluetooth_row(diagnostics),
             ]
             .into_iter()
+            .chain(ethernet_cards(status))
             .chain(network(diagnostics))
             .collect(),
         },
@@ -1867,6 +1955,59 @@ mod tests {
             .rows;
         assert_eq!(value_of(&rows, "Durum"), "Okunuyor…");
         assert!(rows.iter().all(|row| !row.label.starts_with("Ethernet")));
+    }
+
+    fn two_ports() -> Value {
+        serde_json::json!({"ethernet": {"ports": [
+            {"name": "end1", "carrier": false, "config": {"mode": "dhcp"}},
+            {"name": "end0", "carrier": true, "addresses": ["192.0.2.50/24"],
+             "config": {"mode": "static", "address": "192.0.2.50", "prefix": 24}},
+        ]}})
+    }
+
+    /// A card per wired port the daemon found, numbered as the "Ağ" rows
+    /// number them, each saying how it takes its address.
+    #[test]
+    fn every_wired_port_has_a_card() {
+        let groups = compose(Some(&two_ports()), None, None);
+        let rows = &groups.iter().find(|g| g.title == "Bağlantılar").unwrap().rows;
+        let cards: Vec<(&str, &str, Option<&str>)> = rows
+            .iter()
+            .filter(|row| row.page == Some(Page::Ethernet))
+            .map(|row| (row.label.as_str(), row.value.as_str(), row.port.as_deref()))
+            .collect();
+        assert_eq!(
+            cards,
+            [
+                ("Ethernet 1", "Elle · 192.0.2.50/24", Some("end0")),
+                ("Ethernet 2", "Otomatik (DHCP)", Some("end1")),
+            ]
+        );
+        // A daemon that says nothing about ports: no cards, nothing invented.
+        let groups = compose(None, None, None);
+        let rows = &groups.iter().find(|g| g.title == "Bağlantılar").unwrap().rows;
+        assert!(rows.iter().all(|row| row.page != Some(Page::Ethernet)));
+    }
+
+    /// The card opens its own port's page, headed with its own name, and Left
+    /// comes back to it.
+    #[test]
+    fn a_port_card_opens_that_port() {
+        let mut settings = Settings::new();
+        settings.compose(Some(&two_ports()), None, None);
+        section(&mut settings, "Bağlantılar");
+        assert!(settings.step(1, 0)); // Wi-Fi
+        settings.step(0, 1); // Bluetooth
+        settings.step(0, 1); // Ethernet 1
+        settings.step(0, 1); // Ethernet 2
+        assert_eq!(settings.focused().and_then(|r| r.port.clone()).as_deref(), Some("end1"));
+        assert!(settings.open(Page::Ethernet));
+        assert!(settings.is_ethernet());
+        assert_eq!(settings.page_label(), "Ethernet 2");
+        assert_eq!(settings.heading(), ("Ethernet 2".into(), "Adres ayarı · end1".into()));
+        assert!(settings.step(-1, 0));
+        assert_eq!(settings.pane, Pane::Rows);
+        assert_eq!(settings.focused().and_then(|r| r.port.clone()).as_deref(), Some("end1"));
     }
 
     // ------------------------------------------------------------ the display

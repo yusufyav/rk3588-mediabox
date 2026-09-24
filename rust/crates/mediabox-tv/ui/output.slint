@@ -1,7 +1,7 @@
 import { Theme, Metrics } from "theme.slint";
 import {
     Icon, FocusRing, ValueBadge, StatusChip, SettingCard, ActionButton, ChoiceRow,
-    InfoPanel, InfoLine, Badge, Dialog, StateNote, ChoiceItem, ChoiceSheet,
+    InfoPanel, InfoLine, Badge, Dialog, StateNote, ChoiceItem, ChoiceSheet, TrialSheet,
 } from "kit.slint";
 
 // The display settings, in two faces.
@@ -734,111 +734,6 @@ component AdvancedFace inherits Rectangle {
 
 // --------------------------------------------------------------- the dialogs
 
-// "Bu görüntü kalsın mı?" The daemon holds the time and goes back by itself
-// when it runs out; this only asks, and shows how long is left.
-component TrialDialog inherits Dialog {
-    in property <OutputView> view;
-    panel-w: Metrics.dialog-w * 1.25;
-
-    Text {
-        text: "Bu görüntü kalsın mı?";
-        color: Theme.text;
-        font-size: Metrics.t-section * 1.05;
-        font-weight: 750;
-    }
-
-    HorizontalLayout {
-        spacing: Metrics.dialog-pad;
-
-        // The time left, as a ring that empties: calm, and legible across a
-        // room.
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: Metrics.t-page * 2.3;
-                height: self.width;
-                Path {
-                    width: 100%;
-                    height: 100%;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: "M 12 2 A 10 10 0 1 1 11.99 2";
-                    fill: transparent;
-                    stroke: Theme.s-line;
-                    stroke-width: parent.width * 0.06;
-                }
-                if view.arc != "": Path {
-                    width: 100%;
-                    height: 100%;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: view.arc;
-                    fill: transparent;
-                    stroke: Theme.focus;
-                    stroke-width: parent.width * 0.06;
-                    stroke-line-cap: round;
-                }
-                Text {
-                    text: view.seconds;
-                    color: Theme.text;
-                    font-size: Metrics.t-page * 0.9;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        VerticalLayout {
-            spacing: Metrics.row-gap * 0.9;
-            alignment: center;
-            horizontal-stretch: 1;
-            for line[i] in [
-                { label: "Yeni mod", value: view.trial },
-                { label: "Önceki mod", value: view.previous },
-            ]: VerticalLayout {
-                spacing: Metrics.t-meta * 0.15;
-                Text {
-                    text: line.label;
-                    color: Theme.muted;
-                    font-size: Metrics.t-meta;
-                    font-weight: 600;
-                }
-                Text {
-                    text: line.value;
-                    color: i == 0 ? Theme.text : #c3c8d2;
-                    font-size: Metrics.t-primary;
-                    font-weight: i == 0 ? 700 : 550;
-                    wrap: word-wrap;
-                }
-            }
-        }
-    }
-
-    Text {
-        text: "Yanıt verilmezse " + view.seconds + " saniye sonra önceki moda dönülür. Süreyi denetim düzlemi tutar; ekran görüntü alamasa ya da arayüz kapansa bile geri dönülür.";
-        color: Theme.muted;
-        font-size: Metrics.t-meta;
-        wrap: word-wrap;
-    }
-
-    HorizontalLayout {
-        padding-top: Metrics.row-gap * 0.6;
-        spacing: Metrics.row-gap * 1.4;
-        alignment: start;
-        ActionButton {
-            label: "Koru";
-            enabled: view.confirm-ready;
-            focused: view.confirm-focus == 0;
-            primary: true;
-        }
-        ActionButton {
-            label: "Geri dön";
-            focused: view.confirm-focus == 1;
-        }
-    }
-}
-
 component EdidDialog inherits Dialog {
     in property <OutputView> view;
     panel-w: Metrics.dialog-w * 1.3;
@@ -929,12 +824,21 @@ export component OutputPane inherits Rectangle {
         note: view.picker-note;
     }
 
-    if view.sheet == 1: TrialDialog {
+    if view.sheet == 1: TrialSheet {
         x: -root.x;
         y: -root.y;
         width: Metrics.vw;
         height: Metrics.vh;
-        view: view;
+        title: "Bu görüntü kalsın mı?";
+        new-label: "Yeni mod";
+        new-value: view.trial;
+        old-label: "Önceki mod";
+        old-value: view.previous;
+        seconds: view.seconds;
+        arc: view.arc;
+        ready: view.confirm-ready;
+        focus-at: view.confirm-focus;
+        message: "Yanıt verilmezse " + view.seconds + " saniye sonra önceki moda dönülür. Süreyi denetim düzlemi tutar; ekran görüntü alamasa ya da arayüz kapansa bile geri dönülür.";
     }
 
     if view.sheet == 2: EdidDialog {

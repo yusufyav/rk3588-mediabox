@@ -10,6 +10,7 @@ import { Settings } from "settings.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem } from "kit.slint";
+import { EthernetView } from "ethernet.slint";
 import { Account } from "account.slint";
 import { WifiScreen, BluetoothScreen, WifiRow, BtRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
@@ -22,7 +23,7 @@ export {
     RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
-    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine,
+    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView,
 }
 
 // What the television shows before there is anything to show.
@@ -244,6 +245,8 @@ export component MediaBoxWindow inherits Window {
     in property <CoolingView> settings-cooling-view;
     in property <bool> settings-output;
     in property <OutputView> settings-output-view;
+    in property <bool> settings-ethernet;
+    in property <EthernetView> settings-ethernet-view;
     // A short list opened from a settings card: the lights' mode.
     in property <bool> settings-choice-open;
     in property <string> settings-choice-title;
@@ -422,6 +425,8 @@ export component MediaBoxWindow inherits Window {
             cooling-view: root.settings-cooling-view;
             output: root.settings-output;
             output-view: root.settings-output-view;
+            ethernet: root.settings-ethernet;
+            ethernet-view: root.settings-ethernet-view;
             choice-open: root.settings-choice-open;
             choice-title: root.settings-choice-title;
             choice: root.settings-choice;
