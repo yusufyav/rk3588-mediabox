@@ -338,6 +338,9 @@ struct SplitDisplay {
     /// the film alone: a set that never declared ST 2084, or a link with no
     /// room for ten bits at this timing, cannot be sent HDR worth having.
     sink_video: Option<mediabox_platform::video::SinkVideo>,
+    /// What this source can send and how its driver is spoken to, resolved
+    /// once against the running system (`mediabox_platform::source`).
+    source: &'static mediabox_platform::source::SourceProfile,
     /// The mode in use, in the terms the colour rules are written in.
     timing: Cell<mediabox_platform::video::Timing>,
     /// The colour sent for everything but an HDR film: the one chosen for
@@ -502,7 +505,12 @@ impl SplitDisplay {
             eprintln!("mediabox-tv.platform atomic properties unavailable: {e}");
         }
 
-        let (connector, crtc, mode, offer, colour) = find_output(&kms, &wanted)?;
+        let static_signature = mediabox_platform::source::static_signature(
+            &mediabox_platform::Roots::from_env(),
+            &discovered,
+        );
+        let (connector, crtc, mode, offer, colour, source) =
+            find_output(&kms, &wanted, &static_signature)?;
         let gbm_device = gbm::Device::new(OwnedFd::from(render_file))
             .map_err(|e| format!("create GBM device on {render_path}: {e}"))?;
         if gbm_device.backend_name() != "armsoc" {
@@ -593,7 +601,7 @@ impl SplitDisplay {
                 sink.st2084,
                 sink.hlg,
                 sink.max_character_rate_khz,
-                sink.hdr10_fits(&timing_of(&mode))
+                sink.hdr10_fits_source(&timing_of(&mode), &source.caps)
             );
         }
 
@@ -603,6 +611,7 @@ impl SplitDisplay {
             crtc,
             mode: Cell::new(mode),
             sink_video,
+            source,
             timing: Cell::new(timing_of(&mode)),
             colour: Cell::new(colour),
             offer,
@@ -946,7 +955,7 @@ impl SplitDisplay {
         let fits = self
             .sink_video
             .as_ref()
-            .is_some_and(|sink| sink.hdr10_fits(&self.timing.get()));
+            .is_some_and(|sink| sink.hdr10_fits_source(&self.timing.get(), &self.source.caps));
         let wanted = match film {
             Some(hdr) if hdr.is_hdr() && fits => Some(hdr),
             _ => None,
@@ -977,8 +986,11 @@ impl SplitDisplay {
                 .colour
                 .get()
                 .filter(|mode| mode.carries_hdr())
-                .or_else(|| sink.best_for(&timing, true)),
-            None => self.colour.get().or_else(|| sink.best_for(&timing, false)),
+                .or_else(|| sink.best_for_source(&timing, true, &self.source.caps)),
+            None => self
+                .colour
+                .get()
+                .or_else(|| sink.best_for_source(&timing, false, &self.source.caps)),
         });
         if self.signalled.get() == wanted && self.applied.get() == format {
             return;
@@ -1005,9 +1017,11 @@ impl SplitDisplay {
             }
         }
 
-        // As this driver enumerates them: `Colorspace` Default=0,
-        // BT2020_RGB=9, BT2020_YCC=10; `color_depth` Automatic=0, 24bit=8,
-        // 30bit=10; `color_format` rgb=0, ycbcr444=1, ycbcr422=2, ycbcr420=3.
+        // `Colorspace` is the standard enum: Default=0, BT2020_RGB=9,
+        // BT2020_YCC=10. `color_depth` and `color_format` are the vendor's,
+        // and their values come from the source profile, which was matched
+        // against this driver's own enums -- under a profile with no vendor
+        // ABI they are left to the driver.
         use mediabox_core::ColorFormat;
         let (space, bits, layout) = match format {
             Some(mode) => (
@@ -1016,16 +1030,11 @@ impl SplitDisplay {
                     (Some(_), _) => 10,
                     (None, _) => 0,
                 },
-                u64::from(mode.bits),
-                Some(match mode.format {
-                    ColorFormat::Rgb => 0u64,
-                    ColorFormat::Ycbcr444 => 1,
-                    ColorFormat::Ycbcr422 => 2,
-                    ColorFormat::Ycbcr420 => 3,
-                }),
+                self.source.color_depth_value(mode.bits),
+                self.source.color_format_value(mode.format),
             ),
-            // No EDID to reason from: the driver's own choice.
-            None => (0, 0, None),
+            // No EDID to reason from: the driver's own choice (`Automatic`).
+            None => (0, self.source.abi.map(|_| 0), None),
         };
         let blob = match wanted {
             Some(hdr) => match self.kms.create_property_blob(&hdr.blob()) {
@@ -1053,7 +1062,7 @@ impl SplitDisplay {
         {
             eprintln!("mediabox-tv.platform Colorspace: {e}");
         }
-        if let Some(property) = depth
+        if let (Some(property), Some(bits)) = (depth, bits)
             && let Err(e) = self.kms.set_property(connector, property, bits)
         {
             eprintln!("mediabox-tv.platform color_depth: {e}");
@@ -1256,24 +1265,21 @@ impl SplitDisplay {
         ] {
             request.add_property(plane, property, value);
         }
-        // As this driver enumerates them: `color_format` rgb=0, ycbcr444=1,
-        // ycbcr422=2, ycbcr420=3; `color_depth` in bits; SDR is `Colorspace`
-        // Default and no HDR metadata.
+        // `color_format` and `color_depth` as the source profile's vendor ABI
+        // numbers them (on this driver rgb=0, ycbcr444=1, ycbcr422=2,
+        // ycbcr420=3; depth in bits); SDR is `Colorspace` Default and no HDR
+        // metadata. A profile with no vendor ABI writes neither vendor
+        // property: the driver's own choice is safer than a guessed number.
         if let Some(colour) = colour {
-            use mediabox_core::ColorFormat;
-            let layout = match colour.format {
-                ColorFormat::Rgb => 0u64,
-                ColorFormat::Ycbcr444 => 1,
-                ColorFormat::Ycbcr422 => 2,
-                ColorFormat::Ycbcr420 => 3,
-            };
             for (name, value) in [
-                ("color_format", layout),
-                ("color_depth", u64::from(colour.bits)),
-                ("Colorspace", 0),
-                ("HDR_OUTPUT_METADATA", 0),
+                ("color_format", self.source.color_format_value(colour.format)),
+                ("color_depth", self.source.color_depth_value(colour.bits)),
+                ("Colorspace", Some(0)),
+                ("HDR_OUTPUT_METADATA", Some(0)),
             ] {
-                if let Some(property) = find_property(&self.kms, connector, name) {
+                if let Some(value) = value
+                    && let Some(property) = find_property(&self.kms, connector, name)
+                {
                     request.add_property(connector, property, Value::UnsignedRange(value));
                 }
             }
@@ -1393,9 +1399,50 @@ fn connector_edid(kms: &SharedKms, connector: control::connector::Handle) -> Opt
     None
 }
 
+/// The connector's properties as the source profile compares them: the
+/// vendor `color_format` and `color_depth` enums, whole, and whether the
+/// standard HDR infoframe and colorimetry properties are there. Read on the
+/// descriptor this process holds as master; nothing is set.
+fn property_signature(
+    kms: &SharedKms,
+    connector: control::connector::Handle,
+) -> mediabox_platform::source::PropertySignature {
+    use mediabox_platform::source::EnumProperty;
+    let mut signature = mediabox_platform::source::PropertySignature::default();
+    let Ok(properties) = kms.get_properties(connector) else {
+        return signature;
+    };
+    for handle in properties.as_props_and_values().0.iter().copied() {
+        let Ok(info) = kms.get_property(handle) else {
+            continue;
+        };
+        let enums = || match info.value_type() {
+            control::property::ValueType::Enum(values) => EnumProperty {
+                present: true,
+                values: values
+                    .values()
+                    .1
+                    .iter()
+                    .map(|value| (value.name().to_string_lossy().into_owned(), value.value()))
+                    .collect(),
+            },
+            _ => EnumProperty::default(),
+        };
+        match info.name().to_str() {
+            Ok("color_format") => signature.color_format = enums(),
+            Ok("color_depth") => signature.color_depth = enums(),
+            Ok("Colorspace") => signature.colorspace = enums(),
+            Ok("HDR_OUTPUT_METADATA") => signature.hdr_output_metadata = true,
+            _ => {}
+        }
+    }
+    signature
+}
+
 fn find_output(
     kms: &SharedKms,
     wanted: &str,
+    static_signature: &mediabox_platform::source::StaticSignature,
 ) -> Result<
     (
         control::connector::Info,
@@ -1403,6 +1450,7 @@ fn find_output(
         control::Mode,
         Option<mediabox_core::OutputOffer>,
         Option<mediabox_core::ColorMode>,
+        &'static mediabox_platform::source::SourceProfile,
     ),
     PlatformError,
 > {
@@ -1440,16 +1488,30 @@ fn find_output(
     // refresh the link carries in any format; on the Sony's 300 MHz input that
     // is 2160p60 in 4:2:0, not the 1080p it lists as preferred, which is what
     // this interface once ran a 4K panel at.
+    //
+    // What the source can send is the source profile the running system
+    // matches: the product scope from sysfs and the device tree, the vendor
+    // ABI from this connector's own properties, read on the descriptor this
+    // process already holds. A system that is not the one a profile was
+    // written for gets the conservative one -- RGB, eight bits, SDR.
+    let resolved = mediabox_platform::source::resolve(&mediabox_platform::source::SourceSignature {
+        static_part: static_signature.clone(),
+        properties: Some(property_signature(kms, connector.handle())),
+    });
+    eprintln!("mediabox-tv.platform source profile {}", resolved.describe());
     let modes: Vec<control::Mode> = connector.modes().to_vec();
     let timings: Vec<mediabox_platform::video::Timing> = modes.iter().map(timing_of).collect();
     let edid = connector_edid(kms, connector.handle()).unwrap_or_default();
-    let offer = mediabox_platform::output::offer(
+    let mut offer = mediabox_platform::output::offer(
         &timings,
         &edid,
         wanted,
         mediabox_platform::output::edid_name(&edid),
-        &mediabox_platform::video::RK3588_HDMI,
+        &resolved.profile.caps,
     );
+    if let Some(offer) = offer.as_mut() {
+        offer.link.source_profile = resolved.describe();
+    }
     let (mode, colour) = match &offer {
         Some(offer) => {
             let setting = read_setting().for_sink(&offer.sink);
@@ -1551,7 +1613,7 @@ fn find_output(
             )));
         }
     };
-    Ok((connector, crtc, mode, offer, colour))
+    Ok((connector, crtc, mode, offer, colour, resolved.profile))
 }
 
 /// Whether a KMS mode is the one the offer names.

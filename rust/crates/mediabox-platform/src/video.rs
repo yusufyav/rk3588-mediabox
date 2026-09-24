@@ -30,24 +30,20 @@ use serde::{Deserialize, Serialize};
 use crate::cta_vics::{CTA_VICS, cta_mode, match_cea_mode};
 use crate::edid::{CtaCapabilities, Edid, cta_dtds, data_blocks, svd_to_vic};
 
-/// What this board's HDMI transmitter can send.
+/// What a source's HDMI transmitter can send: the link limits of a
+/// [`crate::source::SourceProfile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceCaps {
     pub max_tmds_khz: u32,
     pub max_bpc: u8,
     pub formats: &'static [ColorFormat],
 }
 
-/// RK3588 HDMI TX under the vendor kernel this product runs.
-pub const RK3588_HDMI: SourceCaps = SourceCaps {
-    max_tmds_khz: 600_000,
-    max_bpc: 10,
-    formats: &[
-        ColorFormat::Rgb,
-        ColorFormat::Ycbcr444,
-        ColorFormat::Ycbcr422,
-        ColorFormat::Ycbcr420,
-    ],
-};
+/// RK3588 HDMI TX under the vendor kernel this product runs: the link limits
+/// of [`crate::source::RK3588_VENDOR_61`]. Code that has a resolved profile
+/// passes its `caps`; this name is that profile's, for the callers that
+/// assume the shipping stack.
+pub const RK3588_HDMI: SourceCaps = crate::source::RK3588_VENDOR_61.caps;
 
 /// What one sink declared, on the port it is plugged into. Parsed the way
 /// `drm_edid.c` parses it.
@@ -367,7 +363,17 @@ impl SinkVideo {
     /// input (2160p24, YCbCr 4:2:2 12-bit). If nothing carries ten bits there
     /// is no HDR at this timing and the SDR answer is returned.
     pub fn best_for(&self, timing: &Timing, hdr: bool) -> Option<ColorMode> {
-        let modes = self.modes_for(timing);
+        self.best_for_source(timing, hdr, &RK3588_HDMI)
+    }
+
+    /// [`Self::best_for`] for a source other than the shipping one.
+    pub fn best_for_source(
+        &self,
+        timing: &Timing,
+        hdr: bool,
+        source: &SourceCaps,
+    ) -> Option<ColorMode> {
+        let modes = self.modes_for_source(timing, source);
         let has = |format: ColorFormat, bits: u8| {
             modes
                 .iter()
@@ -396,7 +402,16 @@ impl SinkVideo {
 
     /// Whether HDR10 can be both signalled and carried at this timing.
     pub fn hdr10_fits(&self, timing: &Timing) -> bool {
-        self.st2084 && self.modes_for(timing).iter().any(|mode| mode.carries_hdr())
+        self.hdr10_fits_source(timing, &RK3588_HDMI)
+    }
+
+    /// [`Self::hdr10_fits`] for a source other than the shipping one.
+    pub fn hdr10_fits_source(&self, timing: &Timing, source: &SourceCaps) -> bool {
+        self.st2084
+            && self
+                .modes_for_source(timing, source)
+                .iter()
+                .any(|mode| mode.carries_hdr())
     }
 }
 
@@ -408,12 +423,22 @@ impl SinkVideo {
 /// refresh the link carries in any format, progressive. On the 300 MHz input
 /// that is 2160p60 in 4:2:0 even though the preferred mode is 1080p.
 pub fn auto_timing(timings: &[Timing], sink: Option<&SinkVideo>) -> Option<Timing> {
+    auto_timing_source(timings, sink, &RK3588_HDMI)
+}
+
+/// [`auto_timing`] for a source other than the shipping one.
+pub fn auto_timing_source(
+    timings: &[Timing],
+    sink: Option<&SinkVideo>,
+    source: &SourceCaps,
+) -> Option<Timing> {
     let shape = timings
         .iter()
         .find(|timing| timing.preferred)
         .map(|timing| u32::from(timing.width) * 1000 / u32::from(timing.height).max(1));
     let carried = |timing: &&Timing| {
-        !timing.interlaced && sink.is_none_or(|sink| !sink.modes_for(timing).is_empty())
+        !timing.interlaced
+            && sink.is_none_or(|sink| !sink.modes_for_source(timing, source).is_empty())
     };
     let key = |timing: &&Timing| {
         let ratio = u32::from(timing.width) * 1000 / u32::from(timing.height).max(1);

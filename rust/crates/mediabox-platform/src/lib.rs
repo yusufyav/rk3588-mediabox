@@ -34,6 +34,7 @@ pub mod drm;
 pub mod dt;
 pub mod edid;
 pub mod roots;
+pub mod source;
 pub mod output;
 pub mod video;
 

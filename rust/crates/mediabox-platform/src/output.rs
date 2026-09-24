@@ -9,7 +9,7 @@ use mediabox_core::{
     ResolutionChoice, edid_checkvalue,
 };
 
-use crate::video::{SinkVideo, SourceCaps, Timing, auto_timing, parse_sink_video};
+use crate::video::{SinkVideo, SourceCaps, Timing, auto_timing_source, parse_sink_video};
 
 /// The offer for one display.
 ///
@@ -51,7 +51,7 @@ pub fn offer(
         }
     }
 
-    let auto = auto_timing(&unique, Some(&sink)).map(|timing| timing.label());
+    let auto = auto_timing_source(&unique, Some(&sink), source).map(|timing| timing.label());
 
     let mut groups: Vec<OutputGroup> = Vec::new();
     for timing in &unique {
@@ -104,7 +104,7 @@ pub fn offer(
 
 fn mode_offer(sink: &SinkVideo, timing: &Timing, source: &SourceCaps) -> OutputModeOffer {
     let auto_hdr = sink
-        .best_for(timing, true)
+        .best_for_source(timing, true, source)
         .filter(|mode| sink.st2084 && mode.carries_hdr());
     OutputModeOffer {
         label: timing.label(),
@@ -120,7 +120,7 @@ fn mode_offer(sink: &SinkVideo, timing: &Timing, source: &SourceCaps) -> OutputM
         timing_key: Some(timing.key()),
         timing: Some(timing.mode),
         cells: sink.cells_for(timing, source),
-        auto_sdr: sink.best_for(timing, false),
+        auto_sdr: sink.best_for_source(timing, false, source),
         auto_hdr,
     }
 }
@@ -146,6 +146,7 @@ fn link(sink: &SinkVideo, source: &SourceCaps) -> OutputLink {
         hlg: sink.hlg,
         source_max_khz: source.max_tmds_khz,
         source_max_bits: source.max_bpc,
+        source_profile: String::new(),
     }
 }
 

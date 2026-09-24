@@ -12,6 +12,7 @@
 //!   mediabox-platform alsa-card          that output's sound card id
 //!   mediabox-platform cec-device         that output's CEC adapter
 //!   mediabox-platform edid [--json]      that output's EDID, checked
+//!   mediabox-platform source [--json]    the source profile this system matches
 //!
 //! The one-word forms print nothing and exit non-zero when there is no answer,
 //! so `card="$(mediabox-platform alsa-card)" || exit` is the whole of a caller's
@@ -111,6 +112,30 @@ fn main() -> std::process::ExitCode {
         // The selected output's EDID as the checked parser reads it: its
         // status, its identity, what the CTA blocks declare and what was set
         // aside. Diagnostics; nothing reads this to decide anything.
+        // The source profile, from what can be read without opening the
+        // display device. The connector's properties are the interface's to
+        // read (it holds the device); here they are reported as unverified.
+        "source" => {
+            let signature = mediabox_platform::source::SourceSignature {
+                static_part: mediabox_platform::source::static_signature(
+                    &mediabox_platform::Roots::from_env(),
+                    &platform,
+                ),
+                properties: None,
+            };
+            let resolved = mediabox_platform::source::resolve(&signature);
+            if json {
+                let value = serde_json::json!({
+                    "profile": resolved.profile.name(),
+                    "match": resolved.matched,
+                    "signature": signature,
+                });
+                println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
+            } else {
+                println!("profile       {}", resolved.describe());
+            }
+            std::process::ExitCode::SUCCESS
+        }
         "edid" => {
             let Some(output) = platform.selected_output() else {
                 return std::process::ExitCode::FAILURE;
@@ -165,6 +190,7 @@ kullanım: mediabox-platform <komut> [--json]
   alsa-index     o kartın bu açılıştaki ALSA numarası (/proc/asound için)
   cec-device     o çıkışın CEC aygıtı
   edid           o çıkışın EDID'i: durum, SHA-256 kimlik, sorunlar
+  source         bu sistemin eşleştiği kaynak profili
 ";
 
 fn report(platform: &Platform) {

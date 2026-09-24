@@ -15,6 +15,8 @@ pub struct Roots {
     pub sys: PathBuf,
     /// `/dev`
     pub dev: PathBuf,
+    /// `/proc`
+    pub proc: PathBuf,
     /// Where the appliance remembers things across boots. The daemon's own
     /// `StateDirectory`; a remembered output choice lives beside the
     /// indicator-light mode rather than in a store of this crate's own.
@@ -33,6 +35,7 @@ impl Roots {
         Self {
             sys: PathBuf::from("/sys"),
             dev: PathBuf::from("/dev"),
+            proc: PathBuf::from("/proc"),
             state: PathBuf::from("/var/lib/mediabox"),
         }
     }
@@ -43,6 +46,7 @@ impl Roots {
         Self {
             sys: root.join("sys"),
             dev: root.join("dev"),
+            proc: root.join("proc"),
             state: root.join("var/lib/mediabox"),
         }
     }
@@ -58,6 +62,10 @@ impl Roots {
 
     pub fn sys(&self, rest: &str) -> PathBuf {
         self.sys.join(rest)
+    }
+
+    pub fn proc(&self, rest: &str) -> PathBuf {
+        self.proc.join(rest)
     }
 
     pub fn state(&self, rest: &str) -> PathBuf {

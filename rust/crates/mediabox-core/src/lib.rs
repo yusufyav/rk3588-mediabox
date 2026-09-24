@@ -453,6 +453,11 @@ pub struct OutputLink {
     pub hlg: bool,
     pub source_max_khz: u32,
     pub source_max_bits: u8,
+    /// The source profile the limits above are from, and how it was matched
+    /// (`rk3588-vendor61-dw-hdmi-qp@1 (matched)`). Empty from an interface
+    /// older than profiles.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_profile: String,
 }
 
 /// Everything the display screen draws, computed from the modes the kernel
