@@ -1,5 +1,6 @@
 pub mod output;
 pub mod daemon;
+pub mod ethernet;
 pub mod fan;
 pub mod kodi;
 pub mod leds;

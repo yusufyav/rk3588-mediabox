@@ -96,6 +96,9 @@ ReadWritePaths=-/sys/devices/platform/gpio-leds
 # /etc read-only, so without the first line a viewer can pick a network, type
 # a password and watch it fail with "Read-only file system".
 ReadWritePaths=/etc/netplan /var/lib/mediabox
+# A wired port's address on trial lives under /run/netplan, so a reboot takes
+# it back; netplan generate renders into /run/systemd/network.
+ReadWritePaths=-/run/netplan -/run/systemd/network
 # The fan's curve for the next boot, and nothing else under /boot.
 #
 # The kernel's pwm-fan drives the fan; a curve chosen in the settings screen is

@@ -165,7 +165,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mediaboxd_rs::output::SUMMARY_FILE,
         ),
         fan: FanController::system(),
+        ethernet: mediaboxd_rs::ethernet::Ethernet::system(),
     });
+    // An address left on trial by a run of this daemon that did not finish
+    // is taken back before anything else is asked of the network.
+    state.ethernet.recover().await;
 
     let stop = Arc::new(AtomicBool::new(false));
     // What wakes the receiver to stop. It sleeps in poll() with no timeout,
