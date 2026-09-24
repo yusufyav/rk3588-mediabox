@@ -1555,8 +1555,15 @@ fn find_output(
 }
 
 /// Whether a KMS mode is the one the offer names.
+/// Whether a kernel mode is the one offered: by the timing's key when the
+/// offer carries one -- two modes can share a size, a clock and totals and
+/// still be two timings -- and by those numbers for an offer from before the
+/// key.
 fn same_mode(mode: &control::Mode, offered: &mediabox_core::OutputModeOffer) -> bool {
     let timing = timing_of(mode);
+    if let Some(key) = offered.timing_key {
+        return timing.key() == key;
+    }
     timing.width == offered.width
         && timing.height == offered.height
         && timing.pixel_clock_khz == offered.pixel_clock_khz
