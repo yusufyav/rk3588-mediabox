@@ -202,31 +202,32 @@ impl FanController {
         Ok(self.status())
     }
 
-    /// Go back to the board's own curve from the next boot on.
+    /// Go back to this product's default curve from the next boot on
+    /// ([`FanCurve::product_default`]).
     ///
-    /// Removes this module's overlay and nothing else. The Plus's carrier fix
-    /// is a different file with a different job, and `user_overlays` is not
-    /// touched at all: an entry whose file is absent is skipped at boot.
+    /// It is saved like any other curve: the same overlay file, nothing else.
+    /// The Plus's carrier fix is a different file with a different job and
+    /// is not touched, and neither is `user_overlays`.
     pub fn reset(&self) -> Result<FanStatus, FanError> {
-        let _writing = self.writing.lock().expect("fan write mutex");
-        let file = self.paths.overlay_file();
-        let had_file = file.exists();
-        let had_curve = read_state(&self.paths.state).is_some_and(|state| state.curve.is_some());
-        if !had_file && !had_curve {
-            return Ok(self.status());
+        let status = self.set(FanCurve::product_default())?;
+        eprintln!("mediaboxd.fan curve reset to the product default");
+        Ok(status)
+    }
+
+    /// Give a board that has never had a curve saved this product's default.
+    ///
+    /// A clean install has no saved curve, and without this it would run
+    /// whatever its vendor device tree says -- a different policy on every
+    /// board, and on the golden board whatever was last saved there. A saved
+    /// curve, the default or anybody's own, is never replaced. Takes effect
+    /// on the next boot, like every curve.
+    pub fn seed_default(&self) -> Result<Option<FanStatus>, FanError> {
+        if read_state(&self.paths.state).is_some_and(|state| state.curve.is_some()) {
+            return Ok(None);
         }
-        if had_file {
-            fs::remove_file(&file)
-                .map_err(|error| FanError::Write(format!("fan eğrisi kaldırılamadı: {error}")))?;
-            sync_dir(&self.paths.overlay_dir);
-        }
-        write_state(&self.paths, None).map_err(|error| {
-            FanError::Write(format!(
-                "fan eğrisi kaldırıldı ama kaydı tutulamadı: {error}"
-            ))
-        })?;
-        eprintln!("mediaboxd.fan curve reset");
-        Ok(self.status())
+        let status = self.set(FanCurve::product_default())?;
+        eprintln!("mediaboxd.fan no saved curve: product default written for the next boot");
+        Ok(Some(status))
     }
 }
 
@@ -1090,10 +1091,11 @@ mod tests {
 
     // ------------------------------------------------------------ resetting
 
-    /// Resetting the curve is not removing the board's carrier fix, and it
-    /// touches no other overlay and no boot configuration.
+    /// Resetting is saving the product default: the curve overlay is
+    /// rewritten, the board's carrier fix and every other overlay and the
+    /// boot configuration are not touched.
     #[test]
-    fn reset_removes_the_curve_and_nothing_else() {
+    fn reset_saves_the_product_default_and_nothing_else() {
         let board = Board::plus();
         let fix = board
             .paths
@@ -1107,26 +1109,74 @@ mod tests {
         let controller = board.controller();
         controller.set(custom()).unwrap();
         let status = controller.reset().unwrap();
-        assert!(!board.paths.overlay_file().exists());
-        assert_eq!(status.configured, None);
+        assert_eq!(status.configured, Some(FanCurve::product_default()));
         assert!(status.pending_reboot);
+        assert!(board.paths.overlay_file().exists());
         assert_eq!(fs::read(&fix).unwrap(), b"fix");
         assert_eq!(fs::read(&hdmi).unwrap(), b"hdmi");
         assert_eq!(fs::read(&board.paths.boot_env).unwrap(), env_before);
 
-        // After the reboot the board's own curve is running and nothing is
-        // pending.
-        board.reboot_into(&FanCurve::board());
+        board.reboot_into(&FanCurve::product_default());
         let status = controller.status();
         assert!(!status.pending_reboot);
+        assert_eq!(status.curve, Some(FanCurve::product_default()));
         assert_eq!(status.board_fix, FanBoardFix::Active);
     }
 
+    /// Two boards installed clean, with nothing saved on either, get the same
+    /// curve, byte for byte, and it is this product's, not the vendor's.
     #[test]
-    fn resetting_nothing_changes_nothing() {
+    fn a_clean_plus_and_a_clean_ultra_start_from_the_same_default() {
+        let plus = Board::plus();
+        let ultra = Board::new("RK3588 OPi 5 Ultra", 3, 1, &PLUS_PWMS_50HZ);
+        for board in [&plus, &ultra] {
+            let controller = board.controller();
+            assert_eq!(controller.status().curve, Some(FanCurve::board()));
+            let status = controller.seed_default().unwrap().unwrap();
+            assert_eq!(status.configured, Some(FanCurve::product_default()));
+            assert!(status.pending_reboot);
+            board.reboot_into(&FanCurve::product_default());
+            let status = controller.status();
+            assert_eq!(status.curve, Some(FanCurve::product_default()));
+            assert!(!status.pending_reboot);
+            assert_eq!(status.warning, None);
+        }
+        assert_eq!(
+            fs::read(plus.paths.overlay_file()).unwrap(),
+            fs::read(ultra.paths.overlay_file()).unwrap()
+        );
+    }
+
+    /// A curve somebody saved is theirs: seeding the default never replaces
+    /// it, and it survives the reboot it was saved for.
+    #[test]
+    fn the_default_never_replaces_a_saved_curve() {
         let board = Board::plus();
-        let status = board.controller().reset().unwrap();
-        assert!(!status.pending_reboot);
+        let controller = board.controller();
+        controller.set(custom()).unwrap();
+        let before = fs::read(board.paths.overlay_file()).unwrap();
+        assert!(controller.seed_default().unwrap().is_none());
+        assert_eq!(fs::read(board.paths.overlay_file()).unwrap(), before);
+        board.reboot_into(&custom());
+        assert!(controller.seed_default().unwrap().is_none());
+        assert_eq!(controller.status().curve, Some(custom()));
+    }
+
+    /// A board whose boot configuration does not load the curve is left
+    /// alone: the default is not a reason to touch /boot.
+    #[test]
+    fn no_default_without_the_boot_entry() {
+        let board = Board::plus();
+        fs::write(
+            &board.paths.boot_env,
+            "user_overlays=mediabox-hdmi-any-vp\n",
+        )
+        .unwrap();
+        assert_eq!(
+            board.controller().seed_default().unwrap_err().code(),
+            "FAN_BOOT_CONFIG"
+        );
+        assert!(!board.paths.overlay_file().exists());
         assert!(!board.paths.state.exists());
     }
 

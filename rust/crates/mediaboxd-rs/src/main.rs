@@ -190,6 +190,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An address left on trial by a run of this daemon that did not finish
     // is taken back before anything else is asked of the network.
     state.ethernet.recover().await;
+    // A board nobody has saved a curve on gets this product's default for its
+    // next boot, instead of whatever its vendor tree says.
+    if let Err(error) = state.fan.seed_default() {
+        eprintln!("mediaboxd.fan default curve not written: {error}");
+    }
 
     // A display setting on trial belongs to the owner it was sent to.
     transitions.on_begin({

@@ -124,7 +124,7 @@ enum FanCommand {
         #[arg(long = "point", value_parser = parse_fan_point)]
         points: Vec<FanPoint>,
     },
-    /// Go back to the board's own curve from the next boot on
+    /// Go back to the product's default curve from the next boot on
     Reset,
 }
 

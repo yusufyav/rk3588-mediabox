@@ -195,10 +195,10 @@ impl Cooling {
         self.settle();
     }
 
-    /// The daemon removed the saved curve: the board's own is what the next
-    /// boot runs, which on the boards this ships on is the vendor curve.
+    /// The daemon saved this product's default curve: it is what the next
+    /// boot runs, on every board.
     pub fn reset_done(&mut self, pending: bool) {
-        let own = FanCurve::board();
+        let own = FanCurve::product_default();
         self.base = Some(own.clone());
         self.draft = Some(own);
         self.edit = None;
@@ -1571,15 +1571,21 @@ mod tests {
         assert!(cooling.view().previous_line.is_empty());
     }
 
-    /// Back to the board's own curve: its steps, under its own name.
+    /// Back to this product's default curve, the same on every board.
     #[test]
-    fn the_board_s_own_curve_comes_back_after_a_reset() {
+    fn the_product_default_comes_back_after_a_reset() {
         let mut cooling = editor();
         cooling.reset_done(true);
-        assert_eq!(cooling.draft().cloned(), Some(FanCurve::board()));
+        assert_eq!(cooling.draft().cloned(), Some(FanCurve::product_default()));
         let view = cooling.view();
-        assert_eq!(view.profile, "Kartın eğrisi");
-        assert!(view.chips.iter().all(|chip| !chip.on));
+        assert_eq!(view.profile, "Özel");
+        let on: Vec<&str> = view
+            .chips
+            .iter()
+            .filter(|chip| chip.on)
+            .map(|chip| chip.label.as_str())
+            .collect();
+        assert_eq!(on, ["Özel"]);
     }
 
     /// A poll does not undo an edit.

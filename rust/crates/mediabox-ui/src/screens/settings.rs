@@ -1568,10 +1568,10 @@ fn Cooling(fan: RwSignal<Option<FanStatus>>) -> impl IntoView {
                 Ok(status) => {
                     prompt.set(status.pending_reboot);
                     fan.set(Some(status));
-                    base.set(Some(FanCurve::board()));
-                    draft.set(Some(FanCurve::board()));
+                    base.set(Some(FanCurve::product_default()));
+                    draft.set(Some(FanCurve::product_default()));
                     selected.set(0);
-                    toaster.say("Kartın kendi fan eğrisine dönülecek");
+                    toaster.say("Varsayılan fan eğrisine dönülecek");
                 }
                 Err(error) => toaster.warn(format!("Varsayılana dönülemedi: {}", error.message)),
             }

@@ -582,6 +582,22 @@ impl FanCurve {
         Self::preset(FanProfile::Balanced).expect("balanced is a preset")
     }
 
+    /// This product's fan policy: what every board runs from a clean install
+    /// on and after "Varsayılana dön", whatever board it is. It is the curve
+    /// accepted on the Plus on 2026-09-23 and is written here, not read off
+    /// any board, so that no installation depends on another one's saved
+    /// state. The Plus's 50 Hz carrier correction is a separate overlay and
+    /// has nothing to do with it.
+    pub fn product_default() -> Self {
+        Self {
+            profile: FanProfile::Custom,
+            points: [(45, 50), (55, 75), (65, 150), (75, 255)]
+                .iter()
+                .map(|&(t, p)| FanPoint::new(t, p))
+                .collect(),
+        }
+    }
+
     /// The vendor's curve, which is what a board with no curve of this
     /// product's has.
     pub fn board() -> Self {
