@@ -171,7 +171,12 @@ echo "  integration files differing from the repository: $drift"
 # ------------------------------------------------------------ the inventory
 
 say "inventory, closure and capability baseline"
-mediabox_ssh "PREFIX='$MEDIABOX_PREFIX' STAGE='$stage' VERSION='$version' \
+# The face the television's interface asks fontconfig for, read out of the
+# interface itself rather than written down a second time here.
+ui_font="$(sed -n 's/.*default-font-family: *"\([^"]*\)".*/\1/p' \
+  "$here/rust/crates/mediabox-tv/ui/app.slint" | head -1)"
+[ -n "$ui_font" ] || die "rust/crates/mediabox-tv/ui/app.slint names no default-font-family"
+mediabox_ssh "PREFIX='$MEDIABOX_PREFIX' STAGE='$stage' VERSION='$version' UI_FONT='$ui_font' \
   GOLDEN_KERNEL='$g_kernel' GOLDEN_OS='$g_os' GOLDEN_ARCH='$g_arch' GOLDEN_MODEL='$g_model' \
   GOLDEN_HOST='$MEDIABOX_HOST' bash -s" <<'REMOTE_EOF'
 set -euo pipefail
@@ -319,9 +324,17 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   # as empty boxes. So the packages behind the body face and behind the emoji
   # coverage are read off this board and named, rather than assumed to be part
   # of a base image.
-  for ch in 0041 1F4BE 1F464 1F1F9; do
-    fc-list ":charset=$ch" file 2>/dev/null | head -1 | cut -d: -f1
-  done | sed '/^$/d' | sort -u |
+  #
+  # The body face is the family the interface names, not "a font with an A in
+  # it": that question was answered by DejaVu on the golden board, fonts-inter
+  # never reached the manifest, and a clean Ultra drew the whole interface in
+  # DejaVu Sans. The gate below fails the capture if the face is not there.
+  {
+    fc-match -f '%{file}\n' "$UI_FONT" 2>/dev/null
+    for ch in 0041 1F4BE 1F464 1F1F9; do
+      fc-list ":charset=$ch" file 2>/dev/null | head -1 | cut -d: -f1
+    done
+  } | sed '/^$/d' | sort -u |
     while read -r f; do dpkg-query -S "$f" 2>/dev/null | cut -d: -f1; done |
     tr ',' '\n' | tr -d ' '
 } | sed '/^$/d' | sort -u >"$M/runtime-packages.txt"
@@ -454,6 +467,15 @@ done <"$M/artifact-manifest.tsv"
 leak="$( { grep -rIlE 'authKey|"password"|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' \
   "$STAGE/rootfs/etc" 2>/dev/null || true; } | wc -l)"
 [ "$leak" -eq 0 ] && g "credentials in integration ($leak)" PASS || g "credentials in integration ($leak)" FAIL
+
+# And the interface's own face, from a package the installer will put down.
+ui_face="$(fc-match -f '%{family[0]}' "$UI_FONT" 2>/dev/null || true)"
+ui_face_pkg="$(dpkg-query -S "$(fc-match -f '%{file}' "$UI_FONT" 2>/dev/null)" 2>/dev/null | cut -d: -f1 || true)"
+if [ "$ui_face" = "$UI_FONT" ] && [ -n "$ui_face_pkg" ] && grep -qx "$ui_face_pkg" "$M/runtime-packages.txt"; then
+  g "interface font $UI_FONT ($ui_face_pkg)" PASS
+else
+  g "interface font $UI_FONT (matched '${ui_face:-nothing}', package '${ui_face_pkg:-none}')" FAIL
+fi
 
 # And no compiler in the runtime package list.
 bad="$(grep -cE '^(build-essential|gcc|g\+\+|rustc|cargo|cmake|meson|ninja-build|.*-dev)$' "$M/runtime-packages.txt" || true)"
