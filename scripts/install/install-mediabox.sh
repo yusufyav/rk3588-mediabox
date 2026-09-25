@@ -624,8 +624,9 @@ if [ "$headless" -eq 1 ]; then
       $prefix/bin/mediabox-product-verify
       $prefix/bin/mediabox-playback-smoke
 EOF
-  [ "$reboot_needed" -eq 1 ] && \
+  if [ "$reboot_needed" -eq 1 ]; then
     note "the video port overlay is loaded by U-Boot and needs a restart"
+  fi
 else
   "$here/packaging/mediabox-playback-smoke" \
     || die "the appliance's own player did not play.
@@ -640,10 +641,15 @@ else
   on the display's own video plane
   nothing was compiled on this board
 EOF
-  [ "$reboot_needed" -eq 1 ] && cat <<'EOF'
+  # An if, not `[ ... ] && cat`: as the script's last command, a false test
+  # was its exit status, and a board that needed no restart printed PASS and
+  # exited 1.
+  if [ "$reboot_needed" -eq 1 ]; then
+    cat <<'EOF'
 
   One thing is waiting for a restart: the video port overlay is loaded by
   U-Boot, so until this board is rebooted each HDMI socket still reaches only
   the port its device tree pinned it to.
 EOF
+  fi
 fi
