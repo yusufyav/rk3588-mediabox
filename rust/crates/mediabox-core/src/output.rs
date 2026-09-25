@@ -664,22 +664,44 @@ pub struct ObservedOutput {
 
 impl ObservedOutput {
     /// Whether the driver's report of the mode is `applied`'s timing, as far
-    /// as the report can say: it names the size, the scan and the refresh
-    /// rounded to a whole hertz (`3840x2160p60` for 59.94 as well).
+    /// as the report can say: it names the size, the scan and the refresh.
+    ///
+    /// The refresh is written two ways by the vendor drivers this runs on:
+    /// rounded to a whole hertz (6.1.115: `3840x2160p60`, for 59.94 as well)
+    /// or with two decimals (6.1.172: `3840x2160p60.00`, `3840x2160p23.98`).
+    /// Either is read as the number it is and held to the precision it was
+    /// written with -- never told apart by kernel version.
     pub fn confirms(&self, applied: &AppliedOutput) -> bool {
         let Some(reported) = self.mode.as_known() else {
             return false;
         };
         let timing = applied.timing_key.timing();
         let scan = if timing.interlaced() { "i" } else { "p" };
-        *reported
-            == format!(
-                "{}x{}{}{}",
-                timing.hdisplay,
-                timing.vdisplay,
-                scan,
-                timing.refresh().hertz_rounded()
-            )
+        let size = format!("{}x{}{}", timing.hdisplay, timing.vdisplay, scan);
+        let Some(hertz) = reported.strip_prefix(&size) else {
+            return false;
+        };
+        let refresh = timing.refresh();
+        match hertz.split_once('.') {
+            None => hertz.parse::<u32>().ok() == Some(refresh.hertz_rounded()),
+            Some((whole, fraction))
+                if !fraction.is_empty()
+                    && fraction.len() <= 3
+                    && fraction.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                let Ok(whole) = whole.parse::<u64>() else {
+                    return false;
+                };
+                let scale = 10u64.pow(3 - fraction.len() as u32);
+                let reported_mhz =
+                    whole * 1000 + fraction.parse::<u64>().unwrap_or_default() * scale;
+                // Half the last written digit, plus the millihertz the
+                // timing's own value is rounded down by.
+                let tolerance = scale / 2 + 1;
+                reported_mhz.abs_diff(u64::from(refresh.millihertz())) <= tolerance
+            }
+            Some(_) => false,
+        }
     }
 }
 
@@ -874,5 +896,13 @@ mod tests {
         // The driver says something else: that is what is on the wire.
         status.observed = Some(observed(Observed::Known("1920x1080p60".into())));
         assert_eq!(status.wire_mode().as_deref(), Some("1920x1080p60"));
+        // A driver that writes two decimals (6.1.172) confirms the same
+        // timing, and tells 59.94 from 60 where it can.
+        status.observed = Some(observed(Observed::Known("3840x2160p59.94".into())));
+        assert_eq!(status.wire_mode().as_deref(), Some("3840x2160p59.94"));
+        status.observed = Some(observed(Observed::Known("3840x2160p60.00".into())));
+        assert_eq!(status.wire_mode().as_deref(), Some("3840x2160p60.00"));
+        status.observed = Some(observed(Observed::Known("3840x2160p59.9x".into())));
+        assert_eq!(status.wire_mode().as_deref(), Some("3840x2160p59.9x"));
     }
 }
