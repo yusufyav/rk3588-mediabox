@@ -136,7 +136,9 @@ birimi sway'in modunu yalnız `mediabox-platform plan`/`sway-output` üzerinden,
 plan şu anki ekran içinse alır. Kodi (`patches/kodi/0013`) her mod için SDR ve
 HDR renk biçimini aynı dosyadaki
 `colour <G>x<Y>[i]@<saat kHz>/<htoplam>x<vtoplam> <sdr> <hdr|none>` satırlarından
-okur. Ayrıntı ve ölçümler: [`display-pipeline.md`](display-pipeline.md) § 9–11, 14.
+okur; planı her kararda kendisi doğrular (boot, gözlemcinin generation'ı ve
+sink'i, sürdüğü bağlayıcı ve o anki EDID'in SHA-256'sı, iki kez okunarak) ve
+tutmayan planı kullanmaz. Ayrıntı ve ölçümler: [`display-pipeline.md`](display-pipeline.md) § 9–11, 14.
 
 ## Input routing
 

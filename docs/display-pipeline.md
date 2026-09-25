@@ -330,7 +330,14 @@ with `schema`, `boot_id`, `generation`, `connector`, `transmitter`,
 that is not the generation. `mediabox-platform plan` prints it only when all of
 that is still true, checked against the observer and against the connector and
 EDID read then; `mediabox-hdmi-prepare` takes it only that way, and without a
-current plan starts Kodi on the mode already on the wire (`DESKTOP`). When
+current plan starts Kodi on the mode already on the wire (`DESKTOP`). Kodi
+reads the plan's colour lines itself (`patches/kodi/0013`) and holds the plan
+to the same test on its own, at every colour decision: this boot, the
+observer's current generation and sink, the connector Kodi drives and the
+SHA-256 of the EDID the kernel has on it at that moment -- read, checked and
+read again, and taken only if neither the display nor the plan moved in
+between. A plan that fails any of it is not used; Kodi then chooses the link by
+its own rule, never by another display's plan. When
 Kodi or the browser owns the display and the sink changes, the recovery waits
 briefly for the new sink's plan before handing the display over. With a
 current plan `mediabox-hdmi-prepare` gives Kodi the chosen

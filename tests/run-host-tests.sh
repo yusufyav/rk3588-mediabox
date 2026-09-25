@@ -636,6 +636,39 @@ else
   failures=$((failures + 1))
 fi
 
+echo "-- Kodi takes the display plan only for the display there now"
+# patches/kodi/0013 reads /run/mediabox/output-plan. Between a sink changing
+# and the control plane reacting, that file still names the last sink, and its
+# colour lines are that sink's; so Kodi checks the plan's provenance itself --
+# boot, the observer's generation and sink, its own connector and the EDID on
+# it now -- and reads everything twice. The reader is built here from the
+# patch itself, so what is tested is what Kodi is built with.
+plan_patch="$here/patches/kodi/0013-gbm-send-the-colour-the-display-setting-names.patch"
+plan_dir="$(mktemp -d)"
+for f in OutputPlan.h OutputPlan.cpp; do
+  awk -v file="+++ b/xbmc/windowing/gbm/$f" '
+    $0 == file { on = 1; next }
+    on && /^diff --git / { on = 0 }
+    on && /^@@ / { next }
+    on { print substr($0, 2) }' "$plan_patch" >"$plan_dir/$f"
+done
+if "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$plan_dir" -o "$plan_dir/test" \
+     "$here/tests/kodi-output-plan-test.cpp" "$plan_dir/OutputPlan.cpp" >"$plan_dir/build.log" 2>&1 &&
+   "$plan_dir/test" >"$plan_dir/run.log" 2>&1; then
+  echo "ok   KODI_OUTPUT_PLAN_PROVENANCE=PASS ($(grep -c '^ok' "$plan_dir/run.log") checks)"
+else
+  echo "FAIL Kodi's output-plan reader:"
+  cat "$plan_dir/build.log" "$plan_dir/run.log" 2>/dev/null | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
+rm -rf "$plan_dir"
+plan_text="$(cat "$plan_patch")"
+contains "every colour decision goes through the check" "$plan_text" 'OUTPUTPLAN::Read('
+lacks "and nothing reads the colour lines around it"   "$plan_text" '+  std::ifstream file("/run/mediabox/output-plan");'
+contains "the EDID is Kodi's own, read live"            "$plan_text" 'ReadLiveConnectorProperty("EDID")'
+contains "the observer's snapshot must be recent"       "$plan_text" 'OBSERVER_STALE_AFTER_NS'
+contains "format and depth come from one plan"          "$plan_text" 'plan.provenance != m_colourPlan'
+
 echo "-- the archive can be checked on the image the product is installed on"
 # A clean Armbian Minimal carries no binutils, and the archive is verified
 # before the runtime packages are installed, so the verifier had better not

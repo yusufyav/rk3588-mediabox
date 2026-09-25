@@ -1,8 +1,349 @@
+diff --git a/xbmc/windowing/gbm/CMakeLists.txt b/xbmc/windowing/gbm/CMakeLists.txt
+index 4bf4d12..171525c 100644
+--- a/xbmc/windowing/gbm/CMakeLists.txt
++++ b/xbmc/windowing/gbm/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ add_subdirectory(drm)
+ 
+ set(SOURCES OptionalsReg.cpp
++            OutputPlan.cpp
+             WinSystemGbm.cpp
+             VideoSyncGbm.cpp
+             GBMUtils.cpp
+@@ -8,6 +9,7 @@ set(SOURCES OptionalsReg.cpp
+             GBMDPMSSupport.cpp)
+ 
+ set(HEADERS OptionalsReg.h
++            OutputPlan.h
+             WinSystemGbm.h
+             VideoSyncGbm.h
+             GBMUtils.h
+diff --git a/xbmc/windowing/gbm/OutputPlan.cpp b/xbmc/windowing/gbm/OutputPlan.cpp
+new file mode 100644
+index 0000000..f6bd3a2
+--- /dev/null
++++ b/xbmc/windowing/gbm/OutputPlan.cpp
+@@ -0,0 +1,181 @@
++/*
++ *  Copyright (C) 2026 MediaBox
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "OutputPlan.h"
++
++#include <map>
++#include <sstream>
++
++namespace KODI::WINDOWING::GBM::OUTPUTPLAN
++{
++namespace
++{
++bool Digits(const std::string& text)
++{
++  return !text.empty() && text.size() <= 19 &&
++         text.find_first_not_of("0123456789") == std::string::npos;
++}
++
++std::string Short(const std::string& sha)
++{
++  return sha.substr(0, 12);
++}
++
++std::optional<Colour> ParseColour(const std::string& token)
++{
++  const size_t colon = token.find(':');
++  if (token == "none" || colon == std::string::npos || colon == 0)
++    return {};
++  const std::string bits = token.substr(colon + 1);
++  if (!Digits(bits) || bits.size() > 2)
++    return {};
++  return Colour{token.substr(0, colon), std::stoi(bits)};
++}
++} // namespace
++
++std::string Plan::Provenance() const
++{
++  return bootId + ":" + std::to_string(generation) + " " + connector + " " + Short(edidSha256);
++}
++
++std::optional<Plan> Parse(const std::string& text, std::string& why)
++{
++  std::map<std::string, std::string> values;
++  Plan plan;
++  std::istringstream lines(text);
++  std::string line;
++  while (std::getline(lines, line))
++  {
++    if (line.starts_with("colour "))
++      plan.colours.push_back(line);
++    else if (const size_t equals = line.find('='); equals != std::string::npos)
++      values[line.substr(0, equals)] = line.substr(equals + 1);
++  }
++  auto get = [&values](const char* key) -> std::optional<std::string> {
++    auto it = values.find(key);
++    if (it == values.end() || it->second.empty())
++      return {};
++    return it->second;
++  };
++
++  const std::optional<std::string> schema = get("schema");
++  if (!schema)
++  {
++    why = "the plan has no schema: one from before plans carried their provenance";
++    return {};
++  }
++  if (*schema != std::to_string(SCHEMA))
++  {
++    why = "the plan is schema " + *schema + ", this reader takes " + std::to_string(SCHEMA);
++    return {};
++  }
++  for (const char* key : {"boot_id", "generation", "connector", "edid_sha256"})
++  {
++    if (!get(key))
++    {
++      why = std::string("the plan has no ") + key;
++      return {};
++    }
++  }
++  if (!Digits(*get("generation")))
++  {
++    why = "the plan's generation is not a number";
++    return {};
++  }
++  plan.bootId = *get("boot_id");
++  plan.generation = std::stoull(*get("generation"));
++  plan.connector = *get("connector");
++  plan.edidSha256 = *get("edid_sha256");
++  return plan;
++}
++
++std::optional<std::string> Stale(const Plan& plan, const Display& now)
++{
++  // This boot.
++  if (now.bootId.empty())
++    return "the kernel's boot id cannot be read";
++  if (plan.bootId != now.bootId)
++    return "the plan is from boot " + plan.bootId + ", this is " + now.bootId;
++
++  // The observer's current generation, and the sink it sees.
++  if (!now.observed)
++    return "no recent observer snapshot to check the plan against";
++  if (now.observerBootId != now.bootId)
++    return "the observer's snapshot is from boot " + now.observerBootId;
++  if (plan.generation != now.generation)
++    return "the plan is for generation " + std::to_string(plan.generation) +
++           ", the display is at " + std::to_string(now.generation);
++  if (!now.connected)
++    return "the observer sees no connected sink";
++  if (plan.connector != now.observerConnector || plan.edidSha256 != now.observerEdidSha256)
++    return "the plan is for " + plan.connector + " " + Short(plan.edidSha256) +
++           ", the observer sees " + now.observerConnector + " " + Short(now.observerEdidSha256);
++
++  // And the hardware Kodi drives, read by Kodi now: its connector, and the
++  // EDID the kernel has on it. This is what catches a sink that changed
++  // before the observer looked.
++  if (now.connector.empty())
++    return "Kodi drives no connector";
++  if (plan.connector != now.connector)
++    return "the plan is for " + plan.connector + ", Kodi drives " + now.connector;
++  if (now.edidSha256.empty())
++    return "no EDID on " + now.connector + " now";
++  if (plan.edidSha256 != now.edidSha256)
++    return "the plan is for EDID " + Short(plan.edidSha256) + ", " + now.connector + " has " +
++           Short(now.edidSha256) + " now";
++  return {};
++}
++
++std::optional<Colours> ColoursAt(const Plan& plan, const std::string& mode)
++{
++  // colour <w>x<h>[i]@<clock kHz>/<htotal>x<vtotal> <sdr format:bits> <hdr format:bits|none>
++  for (const std::string& line : plan.colours)
++  {
++    std::istringstream words(line);
++    std::string tag, key, sdr, hdr;
++    if (!(words >> tag >> key >> sdr >> hdr) || key != mode)
++      continue;
++    return Colours{ParseColour(sdr), ParseColour(hdr)};
++  }
++  return {};
++}
++
++Decision Read(const std::function<std::optional<std::string>()>& readPlan,
++              const std::function<Display()>& readDisplay,
++              const std::string& mode)
++{
++  Decision decision;
++  const Display before = readDisplay();
++  const std::optional<std::string> text = readPlan();
++  if (!text)
++  {
++    decision.why = "there is no plan";
++    return decision;
++  }
++  const std::optional<Plan> plan = Parse(*text, decision.why);
++  if (!plan)
++    return decision;
++  if (std::optional<std::string> stale = Stale(*plan, before))
++  {
++    decision.why = *stale;
++    return decision;
++  }
++  // The check above held for one instant. Look again: a generation that
++  // ended, or a plan rewritten, while it ran is not the one that was checked.
++  if (readDisplay() != before || readPlan() != text)
++  {
++    decision.why = "the display or its plan changed while the plan was checked";
++    return decision;
++  }
++  decision.accepted = true;
++  decision.provenance = plan->Provenance();
++  decision.colours = ColoursAt(*plan, mode);
++  return decision;
++}
++
++} // namespace KODI::WINDOWING::GBM::OUTPUTPLAN
+diff --git a/xbmc/windowing/gbm/OutputPlan.h b/xbmc/windowing/gbm/OutputPlan.h
+new file mode 100644
+index 0000000..92d192f
+--- /dev/null
++++ b/xbmc/windowing/gbm/OutputPlan.h
+@@ -0,0 +1,120 @@
++/*
++ *  Copyright (C) 2026 MediaBox
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++// MediaBox's display setting, as Kodi takes it: /run/mediabox/output-plan,
++// used only when it was made for the display that is there now.
++//
++// The appliance's control plane writes the plan for one display generation
++// of its observer -- one boot, one connector, one sink by the SHA-256 of its
++// EDID -- and removes it when that generation ends. Removal is not enough on
++// its own: between a sink changing and the control plane reacting, the file
++// still names the last sink, and its colour lines are that sink's. So nothing
++// here trusts the file. A plan is used only when its provenance matches what
++// is there now, by three accounts that do not depend on each other: the
++// kernel's boot, the observer's current generation and sink, and the
++// connector Kodi itself drives with the EDID the kernel has on it now.
++//
++// No Kodi types in here, so it can be tested on its own.
++
++#include <cstdint>
++#include <functional>
++#include <optional>
++#include <string>
++#include <vector>
++
++namespace KODI::WINDOWING::GBM::OUTPUTPLAN
++{
++
++// The plan version this reader understands. A plan without it -- an older
++// one that carried no provenance -- is not a plan.
++constexpr int SCHEMA = 2;
++
++// A colour by this driver's `color_format` enum name, and a depth.
++struct Colour
++{
++  std::string format;
++  int bits = 8;
++
++  bool operator==(const Colour&) const = default;
++};
++
++// The colour sent at one mode: for SDR, and for an HDR film (none where
++// nothing carries HDR10 there).
++struct Colours
++{
++  std::optional<Colour> sdr;
++  std::optional<Colour> hdr;
++
++  bool operator==(const Colours&) const = default;
++};
++
++// The display now.
++struct Display
++{
++  // The kernel's boot id.
++  std::string bootId;
++  // The observer's published snapshot, when there is a recent one.
++  bool observed = false;
++  std::string observerBootId;
++  uint64_t generation = 0;
++  bool connected = false;
++  std::string observerConnector;
++  std::string observerEdidSha256;
++  // The connector Kodi drives, and the SHA-256 of the EDID the kernel has on
++  // it now.
++  std::string connector;
++  std::string edidSha256;
++
++  bool operator==(const Display&) const = default;
++};
++
++// What a plan was made for, and its colour lines.
++struct Plan
++{
++  std::string bootId;
++  uint64_t generation = 0;
++  std::string connector;
++  std::string edidSha256;
++  std::vector<std::string> colours;
++
++  // `<boot>:<generation> <connector> <edid, short>`, for the log.
++  std::string Provenance() const;
++};
++
++// A plan file, whole, or why it is not one.
++std::optional<Plan> Parse(const std::string& text, std::string& why);
++
++// Why this plan is not for the display now; nothing when it is.
++std::optional<std::string> Stale(const Plan& plan, const Display& now);
++
++// The colour line for a mode, keyed `<w>x<h>[i]@<clock kHz>/<htotal>x<vtotal>`.
++std::optional<Colours> ColoursAt(const Plan& plan, const std::string& mode);
++
++// The outcome of one read: whether a current plan was found, the colours it
++// names at the mode (none when it has no line for it), and either its
++// provenance or why it was not used.
++struct Decision
++{
++  bool accepted = false;
++  std::optional<Colours> colours;
++  std::string provenance;
++  std::string why;
++};
++
++// Reads the display and the plan, checks one against the other, then reads
++// both again and takes the plan only if neither moved in between. What is
++// used is what was checked: the colour lines come from the same bytes as the
++// provenance, and nothing is kept for the next caller -- every decision reads
++// again.
++Decision Read(const std::function<std::optional<std::string>()>& readPlan,
++              const std::function<Display()>& readDisplay,
++              const std::string& mode);
++
++} // namespace KODI::WINDOWING::GBM::OUTPUTPLAN
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.cpp b/xbmc/windowing/gbm/WinSystemGbm.cpp
-index b35bb2c..57d4401 100644
+index b35bb2c..49d08d5 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.cpp
 +++ b/xbmc/windowing/gbm/WinSystemGbm.cpp
-@@ -29,7 +29,9 @@
+@@ -23,14 +23,19 @@
+ #include "settings/lib/Setting.h"
+ #include "utils/DRMHelpers.h"
+ #include "utils/DisplayInfo.h"
++#include "utils/Digest.h"
+ #include "utils/HDRUtils.h"
++#include "utils/JSONVariantParser.h"
+ #include "utils/Map.h"
+ #include "utils/StringUtils.h"
  #include "utils/log.h"
  #include "windowing/GraphicContext.h"
  
@@ -10,9 +351,24 @@ index b35bb2c..57d4401 100644
  #include <mutex>
 +#include <sstream>
  #include <string.h>
++#include <time.h>
  
  #include <drm_fourcc.h>
-@@ -514,24 +516,33 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
+ 
+@@ -428,6 +433,12 @@ bool CWinSystemGbm::SetVideoOutput(const VideoPicture* videoPicture)
+ }
+ 
+ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
++{
++  ApplyColorimetry(videoPicture, PlannedOutput());
++}
++
++void CWinSystemGbm::ApplyColorimetry(const VideoPicture* videoPicture,
++                                     const OUTPUTPLAN::Decision& plan)
+ {
+   LogColorState(videoPicture ? "SetColorimetry:enter:picture" : "SetColorimetry:enter:null");
+ 
+@@ -514,24 +525,35 @@ void CWinSystemGbm::SetColorimetry(const VideoPicture* videoPicture)
    // On a link that cannot carry HDR, the whole BT.2020 signal is given up --
    // not just the transfer function.
    //
@@ -32,6 +388,8 @@ index b35bb2c..57d4401 100644
 -  // The picture is converted in hardware and transmitted as what it has become,
 -  // which is exactly what the vendor Android stack does on this same socket:
 -  // 4K kept, HDR dropped, eight bits, never 4:2:2.
+-  const bool hdrFits = HdrLinkFits();
+-  const bool rgbFits = RgbLinkFits(hdrFits ? 10 : 8);
 +  // Where it does fit, the format is named, not left to the driver. This used
 +  // to ask for RGB, or for 4:4:4, and let the driver negotiate down to the
 +  // 4:2:2 that fits -- a 4:2:2 link nobody had asked for, whose colours came
@@ -43,26 +401,30 @@ index b35bb2c..57d4401 100644
 +  //
 +  // So the format and depth come from the appliance's display setting
 +  // (PlannedOutput): the same HDMI rules and the same per-mode choice the
-+  // appliance's own player uses. Without a plan the earlier behaviour stands.
-   const bool hdrFits = HdrLinkFits();
--  const bool rgbFits = RgbLinkFits(hdrFits ? 10 : 8);
++  // appliance's own player uses -- when the plan is for this display now.
++  // Otherwise the earlier behaviour stands, never another display's plan.
++  const bool hdrFits = HdrLinkFits(plan);
    if (!hdrFits)
      CLog::LogF(LOGDEBUG, "this link cannot carry HDR; transmitting BT.709 SDR");
 -  const std::optional<bool> rgbOutput = RequestRgbOutput(rgbFits);
 +  const bool hdrContent = videoPicture && (videoPicture->color_transfer == AVCOL_TRC_SMPTE2084 ||
 +                                           videoPicture->color_transfer == AVCOL_TRC_ARIB_STD_B67);
-+  const std::optional<OutputPlan> plan = PlannedOutput();
-+  const std::optional<PlannedColour> planned =
-+      plan ? (hdrContent && hdrFits ? plan->hdr : plan->sdr) : std::nullopt;
++  const std::optional<OUTPUTPLAN::Colour> planned =
++      plan.colours ? (hdrContent && hdrFits ? plan.colours->hdr : plan.colours->sdr)
++                   : std::nullopt;
++  m_colourPlan = plan.provenance;
 +  const std::optional<bool> rgbOutput = planned
 +                                            ? RequestOutputFormat(planned->format)
 +                                            : RequestRgbOutput(RgbLinkFits(hdrFits ? 10 : 8));
  
    // What the link will carry. Prefer what was just asked for; fall back to
    // observing the driver, and only then to guessing from the plane.
-@@ -856,32 +867,120 @@ bool CWinSystemGbm::RgbLinkFits(int bpc) const
+@@ -854,34 +876,185 @@ bool CWinSystemGbm::RgbLinkFits(int bpc) const
+   return fits;
+ }
  
- bool CWinSystemGbm::HdrLinkFits() const
+-bool CWinSystemGbm::HdrLinkFits() const
++bool CWinSystemGbm::HdrLinkFits(const OUTPUTPLAN::Decision& plan) const
  {
 -  // HDR needs ten bits, and on this hardware it needs them at full chroma.
 -  //
@@ -91,12 +453,91 @@ index b35bb2c..57d4401 100644
 +  // Which formats those are is the appliance's display setting's answer, by
 +  // the HDMI rules: on a 300 MHz input at 4K24 that is 4:2:2, at 4K60 there is
 +  // none. Without a plan, only ten-bit RGB is trusted, as before.
-+  if (const std::optional<OutputPlan> plan = PlannedOutput())
-+    return plan->hdr.has_value();
++  if (plan.colours)
++    return plan.colours->hdr.has_value();
    return RgbLinkFits(10);
  }
  
-+std::optional<CWinSystemGbm::OutputPlan> CWinSystemGbm::PlannedOutput() const
++namespace
++{
++constexpr const char* OUTPUT_PLAN = "/run/mediabox/output-plan";
++constexpr const char* OBSERVER_SNAPSHOT = "/run/mediabox-display-observer/snapshot.json";
++constexpr int64_t OBSERVER_SCHEMA = 2;
++// The observer's own rule (STALE_AFTER): a snapshot older than this is not
++// the display now -- the observer has stopped looking.
++constexpr uint64_t OBSERVER_STALE_AFTER_NS = 10'000'000'000ULL;
++
++std::optional<std::string> ReadFile(const char* path)
++{
++  std::ifstream file(path, std::ios::binary);
++  if (!file)
++    return {};
++  std::ostringstream text;
++  text << file.rdbuf();
++  if (file.bad())
++    return {};
++  return text.str();
++}
++
++std::string Spell(const std::optional<OUTPUTPLAN::Colour>& colour)
++{
++  return colour ? colour->format + ":" + std::to_string(colour->bits) : "none";
++}
++} // namespace
++
++OUTPUTPLAN::Display CWinSystemGbm::CurrentDisplay() const
++{
++  OUTPUTPLAN::Display now;
++  if (std::optional<std::string> boot = ReadFile("/proc/sys/kernel/random/boot_id"))
++    now.bootId = StringUtils::Trim(*boot);
++
++  // The observer's generation and the sink it sees, if it is still looking.
++  CVariant snapshot;
++  if (std::optional<std::string> text = ReadFile(OBSERVER_SNAPSHOT);
++      text && CJSONVariantParser::Parse(*text, snapshot) && snapshot.isObject() &&
++      snapshot["schema"].asInteger() == OBSERVER_SCHEMA)
++  {
++    timespec clock{};
++    clock_gettime(CLOCK_BOOTTIME, &clock);
++    const uint64_t nowNs = static_cast<uint64_t>(clock.tv_sec) * 1'000'000'000ULL +
++                           static_cast<uint64_t>(clock.tv_nsec);
++    const uint64_t at = snapshot["boottime_ns"].asUnsignedInteger();
++    const CVariant& generation = snapshot["generation"];
++    const CVariant& material = snapshot["material"];
++    const CVariant& seq = generation["seq"];
++    now.observed = at > 0 && at <= nowNs && nowNs - at <= OBSERVER_STALE_AFTER_NS &&
++                   generation["boot_id"].isString() &&
++                   (seq.isInteger() || seq.isUnsignedInteger()) &&
++                   material["connected"].isBoolean();
++    now.observerBootId = generation["boot_id"].asString();
++    now.generation = seq.asUnsignedInteger();
++    now.connected = material["connected"].asBoolean();
++    now.observerConnector = material["connector"].asString();
++    now.observerEdidSha256 = material["edid_sha256"].asString();
++  }
++
++  // The connector this player drives, and the EDID the kernel has on it now:
++  // read live, not the copy taken when Kodi started, which names whatever
++  // sink was there then.
++  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
++  CDRMConnector* connector = drm ? drm->GetConnector() : nullptr;
++  if (!connector)
++    return now;
++  now.connector = connector->GetName();
++  const std::optional<uint64_t> blobId = ReadLiveConnectorProperty("EDID");
++  if (!blobId || *blobId == 0)
++    return now;
++  drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(drm->GetFileDescriptor(), *blobId);
++  if (!blob)
++    return now;
++  if (blob->length > 0)
++    now.edidSha256 = KODI::UTILITY::CDigest::Calculate(KODI::UTILITY::CDigest::Type::SHA256,
++                                                       blob->data, blob->length);
++  drmModeFreePropertyBlob(blob);
++  return now;
++}
++
++OUTPUTPLAN::Decision CWinSystemGbm::PlannedOutput() const
 +{
 +  auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
 +  if (!drm)
@@ -114,33 +555,17 @@ index b35bb2c..57d4401 100644
 +                          std::to_string(drm->GetCurrentModeHTotal()) + "x" +
 +                          std::to_string(drm->GetCurrentModeVTotal());
 +
-+  std::ifstream file("/run/mediabox/output-plan");
-+  if (!file)
-+    return {};
-+
-+  auto parse = [](const std::string& token) -> std::optional<PlannedColour> {
-+    const size_t colon = token.find(':');
-+    if (token == "none" || colon == std::string::npos)
-+      return {};
-+    const std::string bits = token.substr(colon + 1);
-+    if (bits.empty() || bits.find_first_not_of("0123456789") != std::string::npos)
-+      return {};
-+    return PlannedColour{token.substr(0, colon), std::stoi(bits)};
-+  };
-+
-+  // colour <w>x<h>[i]@<clock kHz>/<htotal>x<vtotal> <sdr format:bits> <hdr format:bits|none>
-+  std::string line;
-+  while (std::getline(file, line))
-+  {
-+    std::istringstream words(line);
-+    std::string tag, mode, sdr, hdr;
-+    if (!(words >> tag >> mode >> sdr >> hdr) || tag != "colour" || mode != key)
-+      continue;
-+    CLog::LogF(LOGDEBUG, "display setting at {}: SDR {} HDR {}", key, sdr, hdr);
-+    return OutputPlan{parse(sdr), parse(hdr)};
-+  }
-+  CLog::LogF(LOGDEBUG, "no display setting for {}", key);
-+  return {};
++  OUTPUTPLAN::Decision plan = OUTPUTPLAN::Read([] { return ReadFile(OUTPUT_PLAN); },
++                                               [this] { return CurrentDisplay(); }, key);
++  if (!plan.accepted)
++    CLog::LogF(LOGWARNING, "output plan rejected: {}; the link is chosen by this player's own rule",
++               plan.why);
++  else if (!plan.colours)
++    CLog::LogF(LOGINFO, "output plan accepted: {}; it has no line for {}", plan.provenance, key);
++  else
++    CLog::LogF(LOGINFO, "output plan accepted: {} at {}: SDR {} HDR {}", plan.provenance, key,
++               Spell(plan.colours->sdr), Spell(plan.colours->hdr));
++  return plan;
 +}
 +
 +std::optional<bool> CWinSystemGbm::RequestOutputFormat(const std::string& name)
@@ -204,67 +629,106 @@ index b35bb2c..57d4401 100644
  bool CWinSystemGbm::IsHdOrLargerMode() const
  {
    auto drm = std::dynamic_pointer_cast<CDRMAtomic>(m_DRM);
-@@ -1022,7 +1121,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+@@ -1006,6 +1179,17 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+   if (!connector)
+     return false;
+ 
++  // One plan for everything below. The output format was chosen from a plan
++  // a moment ago, in SetColorimetry; if the display has moved on since, the
++  // format is chosen again from this one, so what is committed together
++  // comes from one plan, and never from one that is no longer current.
++  const OUTPUTPLAN::Decision plan = PlannedOutput();
++  if (plan.provenance != m_colourPlan)
++  {
++    CLog::LogF(LOGINFO, "the display's plan changed since the output format was chosen");
++    ApplyColorimetry(videoPicture, plan);
++  }
++
+   if (!videoPicture)
+   {
+     if (connector->SupportsProperty("HDR_OUTPUT_METADATA"))
+@@ -1022,7 +1206,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
      // previously committed link was 8 bit or already 4:2:2 -- so a link that
      // never drops to 8 bit never trips the rule, and HDR arrives as RGB at
      // full chroma and full depth.
 -    SetDeepColor(true);
-+    if (const std::optional<OutputPlan> plan = PlannedOutput(); plan && plan->sdr)
-+      SetColourDepth(plan->sdr->bits);
++    if (plan.colours && plan.colours->sdr)
++      SetColourDepth(plan.colours->sdr->bits);
 +    else
 +      SetDeepColor(true);
      m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
      LogColorState("SetHDR:exit:cleared");
      return false;
-@@ -1055,7 +1157,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+@@ -1042,7 +1229,7 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+   // `0008` gives it, and VOP2 converts in hardware -- which is what the vendor
+   // Android stack does on a socket that cannot take HDR, and what this box
+   // used to fail to do while reporting HDR on screen.
+-  if (!HdrLinkFits())
++  if (!HdrLinkFits(plan))
+   {
+     CLog::LogF(LOGDEBUG, "this link cannot carry HDR at this mode; leaving the connector SDR");
+     if (connector->SupportsProperty("HDR_OUTPUT_METADATA"))
+@@ -1055,7 +1242,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
      // but that only works where ten-bit RGB fits. Where it does not, holding
      // ten is what *causes* the 4:2:2 link, because the driver keeps the depth
      // and gives up the chroma instead. So depth is what gets given up here.
 -    SetDeepColor(false);
-+    if (const std::optional<OutputPlan> plan = PlannedOutput(); plan && plan->sdr)
-+      SetColourDepth(plan->sdr->bits);
++    if (plan.colours && plan.colours->sdr)
++      SetColourDepth(plan.colours->sdr->bits);
 +    else
 +      SetDeepColor(false);
      m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
      drm->SetActive(true);
      LogColorState("SetHDR:exit:link-cannot-carry-hdr");
-@@ -1140,7 +1245,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
+@@ -1140,7 +1330,10 @@ bool CWinSystemGbm::SetHDR(const VideoPicture* videoPicture)
      }
  
      drm->AddProperty(connector, "HDR_OUTPUT_METADATA", m_hdrBlob.Get());
 -    SetDeepColor(true);
-+    if (const std::optional<OutputPlan> plan = PlannedOutput(); plan && plan->hdr)
-+      SetColourDepth(plan->hdr->bits);
++    if (plan.colours && plan.colours->hdr)
++      SetColourDepth(plan.colours->hdr->bits);
 +    else
 +      SetDeepColor(true);
      drm->SetActive(true);
      LogColorState("SetHDR:exit:hdr");
    }
 diff --git a/xbmc/windowing/gbm/WinSystemGbm.h b/xbmc/windowing/gbm/WinSystemGbm.h
-index b0b395d..a2276c6 100644
+index b0b395d..96b7927 100644
 --- a/xbmc/windowing/gbm/WinSystemGbm.h
 +++ b/xbmc/windowing/gbm/WinSystemGbm.h
-@@ -109,6 +109,31 @@ public:
-   // Whether HDR can be put on this link at all, at the mode currently set.
-   bool HdrLinkFits() const;
+@@ -8,6 +8,7 @@
  
+ #pragma once
+ 
++#include "OutputPlan.h"
+ #include "VideoLayerBridge.h"
+ #include "drm/DRMObject.h"
+ #include "drm/DRMUtils.h"
+@@ -106,8 +107,32 @@ public:
+   // a missing declaration is not evidence of a narrow link.
+   bool RgbLinkFits(int bpc) const;
+ 
+-  // Whether HDR can be put on this link at all, at the mode currently set.
+-  bool HdrLinkFits() const;
++  // Whether HDR can be put on this link at all, at the mode currently set,
++  // by this plan or, without one, by this player's own rule.
++  bool HdrLinkFits(const OUTPUTPLAN::Decision& plan) const;
++
 +  // The colour MediaBox's display setting sends at the mode currently set --
 +  // a format by this driver's own enum name and a depth -- for SDR and for an
 +  // HDR film. Read from /run/mediabox/output-plan, which the appliance's
 +  // control plane writes from the HDMI rules and the person's choice, so this
 +  // player sends what the appliance's own player sends at the same mode.
-+  // Empty when there is no plan, or no line for this mode.
-+  struct PlannedColour
-+  {
-+    std::string format;
-+    int bits = 8;
-+  };
-+  struct OutputPlan
-+  {
-+    std::optional<PlannedColour> sdr;
-+    std::optional<PlannedColour> hdr;
-+  };
-+  std::optional<OutputPlan> PlannedOutput() const;
++  // Taken only when it was made for the display there now (OutputPlan.h);
++  // read again for every decision, never kept. No colours when there is no
++  // current plan, or no line for this mode.
++  OUTPUTPLAN::Decision PlannedOutput() const;
++
++  // What the display is now, for PlannedOutput to check a plan against.
++  OUTPUTPLAN::Display CurrentDisplay() const;
++
++  // SetColorimetry with the plan already read.
++  void ApplyColorimetry(const VideoPicture* videoPicture, const OUTPUTPLAN::Decision& plan);
 +
 +  // Ask for one output pixel format by its enum name. Returns whether it is
 +  // RGB, or nothing when the driver cannot be asked.
@@ -272,10 +736,19 @@ index b0b395d..a2276c6 100644
 +
 +  // Ask for a depth in bits per component.
 +  void SetColourDepth(int bits);
-+
+ 
    // A connector property's CURRENT value, read from the kernel rather than
    // from CDRMObject's cache, which only tracks values Kodi itself set.
-   std::optional<uint64_t> ReadLiveConnectorProperty(const char* name) const;
+@@ -164,6 +189,9 @@ private:
+   KODI::UTILS::Eotf m_eotf = KODI::UTILS::Eotf::TRADITIONAL_SDR;
+ 
+   KODI::UTILS::Colorimetry m_colorimetry = KODI::UTILS::Colorimetry::DEFAULT;
++  // The provenance of the plan the output format was last chosen from, empty
++  // when it was chosen without one.
++  std::string m_colourPlan;
+ 
+   std::unique_ptr<UTILS::CDisplayInfo> m_info;
+ };
 diff --git a/xbmc/windowing/gbm/drm/DRMUtils.h b/xbmc/windowing/gbm/drm/DRMUtils.h
 index 558cf86..426b3c8 100644
 --- a/xbmc/windowing/gbm/drm/DRMUtils.h
