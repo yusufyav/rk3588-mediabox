@@ -347,10 +347,13 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   awk '/^ *[0-9]+ \[/{print "alsa-card\t" $0}' /proc/asound/cards 2>/dev/null || true
   printf 'platform-inspect\t%s\n' \
     "$("$PREFIX/bin/mediabox-platform" inspect >/dev/null 2>&1 && echo ok || echo unavailable)"
+  # grep reads to the end rather than -q: under pipefail, a grep that leaves
+  # on the first match can cost the writer a SIGPIPE, and the pipeline fails
+  # on a binary that has what was looked for. See the RUNPATH gates.
   printf 'mpv-vo-mediabox\t%s\n' \
-    "$("$PREFIX/player/bin/mpv" --vo=help 2>/dev/null | grep -qw mediabox && echo present || echo absent)"
+    "$("$PREFIX/player/bin/mpv" --vo=help 2>/dev/null | grep -w mediabox >/dev/null && echo present || echo absent)"
   printf 'mpv-hwdec-rkmpp\t%s\n' \
-    "$("$PREFIX/player/bin/mpv" --hwdec=help 2>/dev/null | grep -q rkmpp && echo present || echo absent)"
+    "$("$PREFIX/player/bin/mpv" --hwdec=help 2>/dev/null | grep rkmpp >/dev/null && echo present || echo absent)"
 } >"$M/capability-baseline.txt"
 
 rm -f "$elf_list"
@@ -403,10 +406,13 @@ g() { printf '  %-34s %s\n' "$1" "$2"; [ "$2" = PASS ] || fail=$((fail + 1)); }
 test -x "$PREFIX/player/bin/mpv" && g "mpv present" PASS || g "mpv present" GOLDEN_RELEASE_NOT_READY
 grep -q '^mpv-vo-mediabox	present$'  "$M/capability-baseline.txt" && g "mpv vo_mediabox" PASS || g "mpv vo_mediabox" FAIL
 grep -q '^mpv-hwdec-rkmpp	present$' "$M/capability-baseline.txt" && g "mpv hwdec rkmpp" PASS || g "mpv hwdec rkmpp" FAIL
-readelf -d "$PREFIX/player/bin/mpv" 2>/dev/null | grep -q "$PREFIX/media-runtime/lib" \
+# Not grep -q. RUNPATH is near the top of readelf's output; under pipefail a
+# grep that leaves on the match can SIGPIPE readelf, and the gate then failed
+# an unchanged mpv 14 times in 40 on the golden Plus.
+readelf -d "$PREFIX/player/bin/mpv" 2>/dev/null | grep "$PREFIX/media-runtime/lib" >/dev/null \
   && g "mpv RUNPATH" PASS || g "mpv RUNPATH" FAIL
 test -x "$PREFIX/kodi/lib/kodi/kodi-gbm" && g "kodi present" PASS || g "kodi present" FAIL
-readelf -d "$PREFIX/kodi/lib/kodi/kodi-gbm" 2>/dev/null | grep -q "$PREFIX/media-runtime/lib" \
+readelf -d "$PREFIX/kodi/lib/kodi/kodi-gbm" 2>/dev/null | grep "$PREFIX/media-runtime/lib" >/dev/null \
   && g "kodi RUNPATH" PASS || g "kodi RUNPATH" FAIL
 
 grep -q "^player/bin/mpv	.*$PREFIX/media-runtime/lib" "$M/runpath.tsv" \
