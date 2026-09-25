@@ -1,5 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
-import { Rail, RailModel, AppIcon, AppTile, Vitals, VitalsModel } from "components.slint";
+import { AppIcon, AppTile, Vitals, VitalsModel } from "components.slint";
 
 // The home screen of the appliance, which is not a media screen.
 //
@@ -15,17 +15,12 @@ import { Rail, RailModel, AppIcon, AppTile, Vitals, VitalsModel } from "componen
 // comment above the same layout, and the two surfaces are meant to be the same
 // product seen from two rooms.
 //
-// Row 0 is the bar, row 1 is the launcher, row 2 is the one shelf that belongs
-// here: what the viewer had not finished.
+// The launcher and nothing under it. "Devam Et" is inside the catalogue, with
+// the rest of what the account carries, so this screen asks the network for
+// nothing and is there the moment the interface is.
 export component Home inherits Rectangle {
     in property <[AppTile]> apps;
     in property <VitalsModel> vitals;
-    in property <RailModel> recent;
-    // -1 when there is nothing half-watched, which is a box nobody has used
-    // yet rather than an error.
-    in property <int> recent-row: -1;
-
-    in property <int> focus-row;
     in property <int> focus-col;
 
     property <length> pad-top: max(14px, min(60px, Metrics.vh * 0.026));
@@ -94,18 +89,7 @@ export component Home inherits Rectangle {
 
         for tile[i] in apps: AppIcon {
             tile: tile;
-            focused: focus-row == 0 && i == focus-col;
+            focused: i == focus-col;
         }
-    }
-
-    // What was left half-watched, and nothing else. The rest of the catalogue
-    // is behind the "Filmler ve Diziler" tile above.
-    if recent-row > 0: Rail {
-        x: main-x - Metrics.gutter;
-        y: Metrics.topbar + pad-top + tile-h + main-gap;
-        width: main-w + Metrics.gutter;
-        rail: recent;
-        focus-col: focus-col;
-        active: focus-row == recent-row;
     }
 }

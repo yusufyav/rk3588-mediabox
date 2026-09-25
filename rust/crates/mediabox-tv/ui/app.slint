@@ -93,9 +93,6 @@ export component MediaBoxWindow inherits Window {
 
     // ---- home
     in property <[AppTile]> apps;
-    in property <RailModel> recent;
-    in property <int> recent-row: -1;
-    in property <int> focus-row;
     in property <int> focus-col;
 
     // ---- the catalogue
@@ -313,9 +310,6 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             apps: root.apps;
             vitals: root.vitals;
-            recent: root.recent;
-            recent-row: root.recent-row;
-            focus-row: root.focus-row;
             focus-col: root.focus-col;
         }
 

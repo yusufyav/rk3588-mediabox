@@ -101,6 +101,13 @@ struct App {
     stack: route::Stack,
 
     home: state::Home,
+    /// Everything the media core last answered with, for the catalogue, the
+    /// library and "Devam Et". Asked for each time "Filmler ve Diziler" is
+    /// opened, and never by the home screen.
+    shelves: Vec<state::Shelf>,
+    /// A loader is out asking; opening the catalogue again does not send a
+    /// second one.
+    loading: bool,
     media: screens::media::Media,
     search: screens::search::Search,
     library: screens::library::Library,
@@ -380,33 +387,18 @@ impl App {
 
     fn act_on_home(&mut self, intent: Intent) {
         match intent {
-            Intent::Move(dx, dy) => {
-                if self.home.step(dx as isize, dy as isize) {
+            Intent::Move(dx, _) => {
+                if self.home.step(dx as isize) {
                     self.paint();
                 }
             }
-            Intent::Select => self.choose_on_home(),
-            // There is no screen behind this one — the television was turned on
-            // here — so Back goes back up to the launcher, which is the top of
-            // it. From the launcher itself Back does nothing, on purpose: a
-            // home screen that reacts to Back by changing is a home screen
-            // nobody can tell they have reached.
-            Intent::Dismiss => {
-                if self.home.row != 0 {
-                    self.home.row = 0;
-                    self.paint();
-                }
-            }
+            Intent::Select => self.launch(),
+            // There is no screen behind this one -- the television was turned on
+            // here -- so Back does nothing, on purpose: a home screen that
+            // reacts to Back by changing is a home screen nobody can tell they
+            // have reached.
             _ => {}
         }
-    }
-
-    fn choose_on_home(&mut self) {
-        if self.home.focused_app().is_some() {
-            self.launch();
-            return;
-        }
-        self.open_detail();
     }
 
     /// One of this interface's own screens, from wherever it was chosen.
@@ -666,9 +658,20 @@ impl App {
 
     // ---------------------------------------------------------- the catalogue
 
+    /// The catalogue, asked for afresh every time it is opened, as the
+    /// Stremio clients do. What arrived last time is shown until the answer
+    /// is in, and the answer replaces it without a word: the remote stays on
+    /// the title it was on.
     fn open_media(&mut self) {
-        self.media.set_shelves(self.home.shelves.clone());
+        self.media.set_shelves(self.shelves.clone());
+        if let Some(window) = self.window.upgrade() {
+            window.set_media_rails(slint::ModelRc::from(self.media.rails.clone()));
+        }
         self.open(Route::Media);
+        if !self.loading {
+            self.loading = true;
+            spawn_loader();
+        }
     }
 
     fn act_on_media(&mut self, intent: Intent) {
@@ -756,7 +759,7 @@ impl App {
     // ------------------------------------------------------------ the library
 
     fn open_library(&mut self) {
-        self.library.build(&self.home.shelves);
+        self.library.build(&self.shelves);
         self.open(Route::Library);
     }
 
@@ -792,13 +795,6 @@ impl App {
     }
 
     // ------------------------------------------------------------- the detail
-
-    fn open_detail(&mut self) {
-        let Some(item) = self.home.focused().cloned() else {
-            return;
-        };
-        self.open_detail_for(&item);
-    }
 
     fn open_detail_for(&mut self, item: &state::Item) {
         let detail = detail::Detail::seeded(item);
@@ -2103,7 +2099,6 @@ impl App {
     fn remember(&mut self) {
         let snapshot = session::Snapshot {
             screen: self.route().name().into(),
-            home_row: self.home.row,
             home_col: self.home.column(),
             detail_kind: self
                 .detail
@@ -2231,24 +2226,16 @@ impl App {
             window.set_failed(false);
         }
 
-        self.home.set_shelves(shelves);
-        self.library.build(&self.home.shelves);
+        self.shelves = shelves;
+        self.library.build(&self.shelves);
 
-        self.media.set_shelves(self.home.shelves.clone());
+        self.media.set_shelves(self.shelves.clone());
 
         if let Some(window) = self.window.upgrade() {
             window.set_media_rails(slint::ModelRc::from(self.media.rails.clone()));
-            window.set_recent(RailModel {
-                title: "Devam Et".into(),
-                source: String::new().into(),
-                items: slint::ModelRc::from(self.home.recent_tiles()),
-            });
         }
-        if self.route() == Route::Boot {
-            self.stack.reset(Route::Home);
-        }
+        self.loading = !from_catalogue;
         self.paint();
-        self.restore();
         if !from_catalogue {
             eprintln!(
                 "mediabox-tv.load only this board's own library so far; still asking for the catalogue"
@@ -2257,35 +2244,11 @@ impl App {
         from_catalogue
     }
 
-    /// The catalogue has not arrived yet, and the loader is going to ask again.
-    ///
-    /// Said plainly on the boot screen rather than as a failure: on a cold boot
-    /// this is the network coming up, and a television that says "nothing could
-    /// be fetched" and then quietly fixes itself has told the viewer a lie
-    /// either way.
-    fn still_waiting(&mut self, attempt: u32) {
-        let Some(window) = self.window.upgrade() else {
-            return;
-        };
-        if self.route() != Route::Boot {
-            return;
-        }
-        window.set_failed(false);
-        window.set_status(
-            if attempt <= 2 {
-                "Raflar getiriliyor…".to_string()
-            } else {
-                format!("Raflar getiriliyor… ({attempt}. deneme)")
-            }
-            .into(),
-        );
-    }
-
     /// Puts the remote back where it was before the display changed hands.
     /// What the appliance comes back to after a restart.
     ///
     /// The home screen, always. It is this product's opening screen — the
-    /// launcher, the board's own vital signs, the shelf — and an appliance
+    /// launcher and the board's own vital signs — and an appliance
     /// that reappears three screens deep in a settings tree, or on a detail
     /// page for a film somebody finished last night, is not an appliance that
     /// has started: it is one that never finished what it was doing.
@@ -2406,10 +2369,7 @@ impl App {
     }
 
     fn paint_home(&mut self, window: &MediaBoxWindow) {
-        self.home.sync_artwork(&mut self.images);
-        window.set_focus_row(self.home.row as i32);
         window.set_focus_col(self.home.column() as i32);
-        window.set_recent_row(self.home.recent_row().map(|r| r as i32).unwrap_or(-1));
         self.remember();
     }
 
@@ -3455,6 +3415,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window: window.as_weak(),
         stack: route::Stack::new(),
         home: state::Home::new(),
+        shelves: Vec::new(),
+        loading: false,
         media: screens::media::Media::new(),
         search: screens::search::Search::new(),
         library: screens::library::Library::new(),
@@ -3578,11 +3540,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Everything the daemon normalises — the CEC remote, the phone remote, an
     // injected action — arrives on its event stream.
     spawn_bus_listener();
-    spawn_loader();
-    // The launcher and the machine's vitals. Started beside the catalogue
-    // rather than after it: the applications this box can run do not depend on
-    // a third-party addon answering, and the home screen should not look empty
-    // while one is being waited for.
+    // The launcher and the machine's vitals, which are all the home screen is.
+    // The catalogue is not asked for here: it is asked for when "Filmler ve
+    // Diziler" is opened, so starting this interface -- which every return
+    // from Kodi does -- asks nothing of the network.
     spawn_machine_poll();
 
     let reporter = slint::Timer::default();
@@ -3612,7 +3573,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    window.set_status("Raflar getiriliyor…".into());
+    // Straight to the home screen: it has nothing to wait for.
+    with_app(|app| {
+        app.stack.reset(Route::Home);
+        app.restore();
+    });
     window.run()?;
     Ok(())
 }
@@ -4310,7 +4275,8 @@ fn spawn_open(url: String) {
     });
 }
 
-/// Asks the control plane for the home surface, until it answers with one.
+/// Asks the control plane for the catalogue and the account's library, until
+/// it answers with the catalogue. Sent when "Filmler ve Diziler" is opened.
 ///
 /// The two calls go out together on purpose: the library is this appliance's
 /// own and answers in milliseconds, while the catalogues are a fan-out over
@@ -4396,9 +4362,6 @@ fn spawn_loader() {
                         4 => 8,
                         _ => 15,
                     };
-                    let _ = slint::invoke_from_event_loop(move || {
-                        with_app(|app| app.still_waiting(attempt));
-                    });
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                 }
             });

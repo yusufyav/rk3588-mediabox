@@ -31,8 +31,6 @@ pub struct Snapshot {
     #[serde(default)]
     pub screen: String,
     #[serde(default)]
-    pub home_row: usize,
-    #[serde(default)]
     pub home_col: usize,
     #[serde(default)]
     pub detail_kind: String,

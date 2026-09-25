@@ -13,28 +13,10 @@
 
 use std::rc::Rc;
 
-use slint::{Model, ModelRc, VecModel};
+use slint::VecModel;
 
-use crate::images::{ImageManager, Key};
+use crate::AppTile;
 use crate::model::{LibraryListing, MetaPreview};
-use crate::{AppTile, PosterItem, RailModel};
-
-/// How far either side of the focused poster is worth having ready.
-///
-/// Asymmetric was wrong, and the reason is where the rail puts the focus. It
-/// pins the focused poster to the left edge and scrolls the strip under it --
-/// so everything visible is ahead of the focus, and two behind was plenty --
-/// *until the end of the strip*, where the scroll clamps and the focus walks
-/// rightwards across a stationary rail instead. At the far end of a long
-/// catalogue the focus sits at the right of the screen with seven posters
-/// visible to its left, of which five were outside the window and had their
-/// artwork taken away: the row emptied itself as the viewer arrived at it.
-///
-/// About eight posters fit across a 16:9 panel at this card width, so the
-/// window is eight either way. That is one screenful behind and one ahead,
-/// which is what "nearly visible" means on a rail that can scroll both ways.
-const BEHIND: usize = 8;
-const AHEAD: usize = 8;
 
 /// Shelves are capped so one addon with forty catalogues cannot make the home
 /// screen its own. The media core caps them too; this is the interface saying
@@ -303,96 +285,45 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
-/// The whole home surface, and the remote's place in it.
-/// The home surface, and the remote's place in it.
+/// The home surface: what this box can be used for, and the remote's place on
+/// it.
 ///
-/// Two rows, and the order is the product's argument about what this box is:
-/// what the box can be used for, and then the one shelf that belongs on an
-/// appliance's front page — what somebody had not finished watching.
-///
-/// The catalogue is not here. It is behind the "Filmler ve Diziler" tile, on
-/// the library screen, which is where a catalogue belongs: MediaBox is an
-/// environment for this board rather than a player with a menu, and a home
-/// screen printed full of posters is a video shop's front page with an
-/// operating system behind it.
+/// Nothing from the catalogue or the account is on this screen, "Devam Et"
+/// included -- that is inside "Filmler ve Diziler", with the rest of what the
+/// account carries. MediaBox is an environment for this board rather than a
+/// player with a menu, and a home screen that waited for a streaming account
+/// before it could be drawn was the account's screen, not the board's: every
+/// return from Kodi restarts this interface, and each one opened on "Raflar
+/// getiriliyor" while the account was asked again.
 pub struct Home {
-    /// Everything the media core answered with. Not drawn here — the library
-    /// screen is built from it — but held here because this is where it lands.
-    pub shelves: Vec<Shelf>,
-    /// The one shelf this screen draws: titles left part-way through.
-    pub recent: Vec<Item>,
     /// What this box can be used for.
     pub apps: Vec<AppEntryTile>,
-
-    /// Row 0 is the launcher, row 1 the unfinished shelf.
-    pub row: usize,
-    /// One remembered column per row.
-    columns: Vec<usize>,
-
-    /// The Slint side of the same thing, kept beside the data rather than
-    /// rebuilt from it, so a picture arriving changes one tile rather than the
-    /// whole shelf.
-    tiles: Rc<VecModel<PosterItem>>,
+    column: usize,
     pub app_tiles: Rc<VecModel<AppTile>>,
 }
-
-/// The row the unfinished shelf is on, when there is one.
-const RECENT_ROW: usize = 1;
 
 impl Home {
     pub fn new() -> Self {
         Self {
-            shelves: Vec::new(),
-            recent: Vec::new(),
             apps: Vec::new(),
-            // The launcher. The web interface autofocuses its first application
-            // tile and so does this: the first thing a person meets is what the
-            // box can do.
-            row: 0,
-            columns: vec![0; 2],
-            tiles: Rc::new(VecModel::default()),
+            // The web interface autofocuses its first application tile and so
+            // does this: the first thing a person meets is what the box can do.
+            column: 0,
             app_tiles: Rc::new(VecModel::default()),
         }
     }
 
     pub fn column(&self) -> usize {
-        self.columns.get(self.row).copied().unwrap_or(0)
+        self.column
     }
 
-    /// The shelf's Slint model, for the window to hold.
-    pub fn recent_tiles(&self) -> Rc<VecModel<PosterItem>> {
-        self.tiles.clone()
-    }
-
-    /// The row the unfinished shelf is on, or none when nothing is unfinished.
-    pub fn recent_row(&self) -> Option<usize> {
-        (!self.recent.is_empty()).then_some(RECENT_ROW)
-    }
-
-    fn row_len(&self, row: usize) -> usize {
-        match row {
-            0 => self.apps.len(),
-            _ if Some(row) == self.recent_row() => self.recent.len(),
-            _ => 0,
-        }
-    }
-
-    pub fn rows(&self) -> usize {
-        RECENT_ROW + usize::from(!self.recent.is_empty())
-    }
-
-    /// The focused title, when the remote is on the shelf.
-    pub fn focused(&self) -> Option<&Item> {
-        (Some(self.row) == self.recent_row()).then(|| self.recent.get(self.column()))?
-    }
-
-    /// The focused application, when the remote is on the launcher.
+    /// The focused application.
     pub fn focused_app(&self) -> Option<&AppEntryTile> {
-        (self.row == 0).then(|| self.apps.get(self.column()))?
+        self.apps.get(self.column)
     }
 
     /// Replaces the launcher's tiles, keeping the remote on the same
-    /// application if it is still there — the list is re-read every few
+    /// application if it is still there -- the list is re-read every few
     /// seconds, and focus that jumped each time would be unusable.
     pub fn set_apps(&mut self, apps: Vec<AppEntryTile>) {
         let holding = self.focused_app().map(|tile| tile.id.clone());
@@ -412,131 +343,20 @@ impl Home {
                 .collect::<Vec<_>>(),
         );
 
-        if self.row == 0 {
-            let landed = holding
-                .and_then(|id| self.apps.iter().position(|tile| tile.id == id))
-                .unwrap_or_else(|| self.column().min(self.apps.len().saturating_sub(1)));
-            self.columns[0] = landed;
-        }
+        self.column = holding
+            .and_then(|id| self.apps.iter().position(|tile| tile.id == id))
+            .unwrap_or_else(|| self.column.min(self.apps.len().saturating_sub(1)));
     }
 
-    pub fn step(&mut self, dx: isize, dy: isize) -> bool {
-        let mut moved = false;
-
-        if dy != 0 {
-            let mut row = self.row as isize + dy;
-            // A row with nothing on it is stepped over rather than landed on.
-            while row >= 0 && (row as usize) < self.rows() && self.row_len(row as usize) == 0 {
-                row += dy;
-            }
-            if row >= 0 && (row as usize) < self.rows() {
-                self.row = row as usize;
-                moved = true;
-            }
+    /// Along the launcher. There is one row, so up and down go nowhere.
+    pub fn step(&mut self, dx: isize) -> bool {
+        if self.apps.is_empty() || dx == 0 {
+            return false;
         }
-
-        if dx != 0 {
-            let len = self.row_len(self.row);
-            if len > 0 {
-                let current = self.column() as isize;
-                let next = (current + dx).clamp(0, len as isize - 1);
-                if next != current {
-                    self.columns[self.row] = next as usize;
-                    moved = true;
-                }
-            }
-        }
-
-        // A row's remembered column may be past the end of a shorter row.
-        let len = self.row_len(self.row);
-        if len > 0 {
-            let column = self.column().min(len - 1);
-            self.columns[self.row] = column;
-        }
-
+        let next = (self.column as isize + dx).clamp(0, self.apps.len() as isize - 1) as usize;
+        let moved = next != self.column;
+        self.column = next;
         moved
-    }
-
-    /// Takes the whole catalogue, and keeps the part of it this screen draws.
-    pub fn set_shelves(&mut self, shelves: Vec<Shelf>) {
-        self.shelves = shelves;
-
-        // The account's "Devam Et", wherever it is shelved.
-        let mut seen = std::collections::HashSet::new();
-        self.recent = self
-            .shelves
-            .iter()
-            .flat_map(|shelf| shelf.items.iter())
-            .filter(|item| item.continuing)
-            .filter(|item| seen.insert(item.id.clone()))
-            .take(RAIL_LIMIT)
-            .cloned()
-            .collect();
-
-        self.tiles.set_vec(
-            self.recent
-                .iter()
-                .map(|item| PosterItem {
-                    id: item.id.clone().into(),
-                    kind: item.kind.clone().into(),
-                    title: item.title.clone().into(),
-                    subtitle: item.year.clone().unwrap_or_default().into(),
-                    art: slint::Image::default(),
-                    hue: item.hue,
-                    progress: item.progress,
-                    local: item.local,
-                })
-                .collect::<Vec<_>>(),
-        );
-
-        self.columns.resize(2, 0);
-        if self.row_len(self.row) == 0 {
-            self.row = 0;
-        }
-    }
-
-    /// Asks for the pictures this screen is showing and about to show, and
-    /// hands over whatever has arrived. Everything outside the window is given
-    /// an empty image, which is what keeps the catalogue off the GPU.
-    pub fn sync_artwork(&mut self, images: &mut ImageManager) {
-        if self.recent.is_empty() {
-            return;
-        }
-        let centre = self.columns.get(RECENT_ROW).copied().unwrap_or(0);
-        let last = self.recent.len() - 1;
-        let from = centre.saturating_sub(BEHIND);
-        let to = (centre + AHEAD).min(last);
-
-        for (column, item) in self.recent.iter().enumerate() {
-            let Some(mut tile) = self.tiles.row_data(column) else {
-                continue;
-            };
-
-            let wanted = (column >= from && column <= to)
-                .then(|| {
-                    item.poster
-                        .as_deref()
-                        .map(|url| Key::new(url, POSTER_WIDTH))
-                })
-                .flatten();
-
-            let art = match &wanted {
-                Some(key) => {
-                    images.want(key);
-                    images.get(key).unwrap_or_default()
-                }
-                None => slint::Image::default(),
-            };
-
-            // Only write back when it actually changed: set_row_data is what
-            // makes Slint redraw the tile.
-            let had = tile.art.size().width > 0;
-            let has = art.size().width > 0;
-            if had != has {
-                tile.art = art;
-                self.tiles.set_row_data(column, tile);
-            }
-        }
     }
 }
 
@@ -652,21 +472,6 @@ fn hue_of(name: &str) -> f32 {
 mod tests {
     use super::*;
 
-    fn shelf(name: &str, count: usize, progress: f32) -> Shelf {
-        Shelf {
-            title: name.into(),
-            source: String::new(),
-            items: (0..count)
-                .map(|i| {
-                    let mut item = Item::stub(&format!("{name}-{i}"));
-                    item.progress = progress;
-                    item.continuing = progress > 0.0 && progress < 0.95;
-                    item
-                })
-                .collect(),
-        }
-    }
-
     fn launcher() -> Vec<AppEntryTile> {
         vec![
             tile("media", "Filmler ve Diziler", true, "", AppAction::Shelves),
@@ -687,37 +492,16 @@ mod tests {
         ]
     }
 
-    /// The home screen opens on the launcher. MediaBox is an environment for
-    /// this board rather than a player with a menu.
+    /// The home screen opens on the launcher, and the launcher is all of it:
+    /// up and down go nowhere, and nothing from the catalogue or the account
+    /// is on it -- the media tile is where that is.
     #[test]
-    fn focus_starts_on_the_launcher() {
+    fn the_home_screen_is_the_launcher_and_nothing_else() {
         let mut home = Home::new();
         home.set_apps(launcher());
-        home.set_shelves(vec![shelf("a", 5, 0.4)]);
-        assert_eq!(home.row, 0);
+        assert_eq!(home.column(), 0);
         assert!(home.focused_app().is_some());
-        assert!(home.focused().is_none());
-    }
-
-    /// The catalogue is not printed onto the home screen. It is behind a tile.
-    #[test]
-    fn the_catalogue_is_not_on_the_home_screen() {
-        let mut home = Home::new();
-        home.set_apps(launcher());
-        home.set_shelves(vec![
-            shelf("finished", 4, 0.0),
-            shelf("popular", 20, 0.0),
-            shelf("half", 3, 0.5),
-        ]);
-        // Two rows at most: the launcher, and what was left unfinished.
-        // Twenty-seven titles arrived; three are on this screen.
-        assert_eq!(home.rows(), 2);
-        assert_eq!(home.recent.len(), 3);
-        assert_eq!(
-            home.shelves.len(),
-            3,
-            "the catalogue is still held for the library"
-        );
+        assert!(!home.step(0));
 
         let media = home
             .apps
@@ -728,16 +512,17 @@ mod tests {
     }
 
     #[test]
-    fn nothing_unfinished_means_one_row() {
+    fn the_launcher_ends_where_its_tiles_do() {
         let mut home = Home::new();
         home.set_apps(launcher());
-        home.set_shelves(vec![shelf("popular", 6, 0.0)]);
-        assert_eq!(home.rows(), 1);
-        assert_eq!(home.recent_row(), None);
-        for _ in 0..5 {
-            home.step(0, 1);
+        for _ in 0..8 {
+            home.step(1);
         }
-        assert_eq!(home.row, 0, "there is nowhere below the launcher to go");
+        assert_eq!(home.column(), home.apps.len() - 1);
+        for _ in 0..8 {
+            home.step(-1);
+        }
+        assert_eq!(home.column(), 0);
     }
 
     /// "Devam Et" is the media core's list, as it came: a series episode
@@ -769,66 +554,13 @@ mod tests {
         };
         assert_eq!(ids("Devam Et"), ["episode", "tail"]);
         assert_eq!(ids("Kitaplığım"), ["kept"]);
-
-        let mut home = Home::new();
-        home.set_shelves(shelves);
-        assert_eq!(home.recent.len(), 2);
-    }
-
-    #[test]
-    fn the_same_title_on_two_shelves_is_one_tile() {
-        let mut home = Home::new();
-        let mut one = shelf("a", 1, 0.5);
-        let two = Shelf {
-            title: "b".into(),
-            source: String::new(),
-            items: one.items.clone(),
-        };
-        one.items[0].progress = 0.5;
-        one.items[0].continuing = true;
-        home.set_shelves(vec![one, two]);
-        assert_eq!(home.recent.len(), 1);
-    }
-
-    /// The launcher is the top of this screen and there is nothing above it.
-    /// Searching for a film is not a thing one does on a launcher; it is a
-    /// thing one does inside the catalogue.
-    #[test]
-    fn the_launcher_is_the_top_and_the_shelf_is_the_bottom() {
-        let mut home = Home::new();
-        home.set_apps(launcher());
-        home.set_shelves(vec![shelf("a", 3, 0.3)]);
-        for _ in 0..8 {
-            home.step(0, -1);
-        }
-        assert_eq!(home.row, 0);
-        assert!(home.focused_app().is_some());
-        for _ in 0..8 {
-            home.step(0, 1);
-        }
-        assert_eq!(home.row, RECENT_ROW);
-        assert!(home.focused().is_some());
-    }
-
-    #[test]
-    fn each_row_remembers_its_own_column() {
-        let mut home = Home::new();
-        home.set_apps(launcher());
-        home.set_shelves(vec![shelf("a", 8, 0.4)]);
-        home.step(1, 0);
-        home.step(1, 0);
-        assert_eq!(home.column(), 2);
-        home.step(0, 1);
-        assert_eq!(home.column(), 0);
-        home.step(0, -1);
-        assert_eq!(home.column(), 2);
     }
 
     #[test]
     fn a_relaunched_list_keeps_the_remote_on_the_same_application() {
         let mut home = Home::new();
         home.set_apps(launcher());
-        home.step(1, 0);
+        home.step(1);
         let id = home.focused_app().unwrap().id.clone();
         let mut shuffled = launcher();
         shuffled.insert(
@@ -843,20 +575,6 @@ mod tests {
         );
         home.set_apps(shuffled);
         assert_eq!(home.focused_app().unwrap().id, id);
-    }
-
-    #[test]
-    fn the_column_never_points_past_a_shorter_row() {
-        let mut home = Home::new();
-        home.set_apps(launcher());
-        home.set_shelves(vec![shelf("a", 2, 0.4)]);
-        home.row = 0;
-        for _ in 0..8 {
-            home.step(1, 0);
-        }
-        home.step(0, 1);
-        assert!(home.column() < 2);
-        assert!(home.focused().is_some());
     }
 
     /// Settings has a screen now; the launcher must not still say "yakında".
