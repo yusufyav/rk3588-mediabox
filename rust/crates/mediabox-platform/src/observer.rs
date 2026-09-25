@@ -666,25 +666,34 @@ impl Uevents {
     /// Wait up to `timeout` for a DRM uevent. Other subsystems' messages are
     /// read and dropped. A burst is coalesced: after the first, anything
     /// arriving within a short settle time is folded into it.
+    ///
+    /// Only a display uevent extends the settle time, and nothing extends it
+    /// past the period. It used to be a quiet quarter second on the socket,
+    /// and the Ultra's HDMI receiver with nothing plugged in announces
+    /// `SUBSYSTEM=extcon` every 63 ms: the first DRM uevent after that was
+    /// never followed by a quiet quarter second, the observer stopped
+    /// looking, and its snapshot went stale under a running display.
     pub fn wait(&self, timeout: Duration) -> Wake {
+        const SETTLE: Duration = Duration::from_millis(250);
         let deadline = std::time::Instant::now() + timeout;
-        let mut heard = false;
+        let mut heard: Option<std::time::Instant> = None;
         loop {
             let now = std::time::Instant::now();
-            let left = if heard {
-                Duration::from_millis(250)
-            } else if now >= deadline {
-                return Wake::Timeout;
-            } else {
-                deadline - now
+            let until = match heard {
+                Some(last) => (last + SETTLE).min(deadline + SETTLE),
+                None => deadline,
             };
+            if now >= until {
+                return if heard.is_some() { Wake::Hint } else { Wake::Timeout };
+            }
+            let left = until - now;
             let mut poll = libc::pollfd {
                 fd: std::os::fd::AsRawFd::as_raw_fd(&self.fd),
                 events: libc::POLLIN,
                 revents: 0,
             };
             // SAFETY: one live pollfd.
-            let ready = unsafe { libc::poll(&mut poll, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+            let ready = unsafe { libc::poll(&mut poll, 1, left.as_millis().clamp(1, i32::MAX as u128) as i32) };
             if ready < 0 {
                 if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                     if crate::observer::stop_requested() {
@@ -698,7 +707,7 @@ impl Uevents {
                 return Wake::Stop;
             }
             if ready == 0 {
-                return if heard { Wake::Hint } else { Wake::Timeout };
+                continue;
             }
             let mut buffer = [0u8; 8192];
             loop {
@@ -715,7 +724,7 @@ impl Uevents {
                     break;
                 }
                 if is_display_uevent(&buffer[..read as usize]) {
-                    heard = true;
+                    heard = Some(std::time::Instant::now());
                 }
             }
         }
@@ -737,4 +746,74 @@ pub fn request_stop() {
 
 pub fn stop_requested() -> bool {
     STOP.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::time::Instant;
+
+    const DRM: &[u8] = b"change@/devices/platform/display-subsystem/drm/card0\0ACTION=change\0SUBSYSTEM=drm\0HOTPLUG=1\0";
+    const EXTCON: &[u8] = b"change@/devices/platform/fdee0000.hdmirx-controller/extcon/extcon5\0ACTION=change\0SUBSYSTEM=extcon\0STATE=VIDEO-IN=0\0";
+
+    /// A datagram pair standing in for the uevent socket: the waiting end,
+    /// and the end the test announces on.
+    fn pair() -> (Uevents, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: a two-element array for the two descriptors.
+        let made = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) };
+        assert_eq!(made, 0);
+        // SAFETY: both descriptors were just created and are owned here.
+        unsafe { (Uevents { fd: OwnedFd::from_raw_fd(fds[0]) }, OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    fn send(to: &OwnedFd, message: &[u8]) {
+        // SAFETY: a live descriptor and a buffer of the stated size.
+        unsafe { libc::send(to.as_raw_fd(), message.as_ptr() as *const libc::c_void, message.len(), 0) };
+    }
+
+    /// `first`, then the Ultra's receiver announcing itself every 63 ms.
+    fn announce(to: OwnedFd, first: Option<&'static [u8]>, every: &'static [u8], for_: Duration) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            if let Some(first) = first {
+                send(&to, first);
+            }
+            let end = Instant::now() + for_;
+            while Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(63));
+                send(&to, every);
+            }
+        })
+    }
+
+    #[test]
+    fn a_drm_uevent_among_other_subsystems_is_a_hint_after_the_settle_time() {
+        let (uevents, other) = pair();
+        let storm = announce(other, Some(DRM), EXTCON, Duration::from_secs(3));
+        let start = Instant::now();
+        assert_eq!(uevents.wait(PERIOD), Wake::Hint);
+        assert!(start.elapsed() < Duration::from_secs(1), "took {:?}", start.elapsed());
+        storm.join().unwrap();
+    }
+
+    #[test]
+    fn other_subsystems_alone_end_in_the_period() {
+        let (uevents, other) = pair();
+        let storm = announce(other, None, EXTCON, Duration::from_millis(1500));
+        let start = Instant::now();
+        assert_eq!(uevents.wait(Duration::from_millis(500)), Wake::Timeout);
+        assert!(start.elapsed() < Duration::from_millis(900), "took {:?}", start.elapsed());
+        storm.join().unwrap();
+    }
+
+    #[test]
+    fn a_drm_uevent_storm_is_a_hint_no_later_than_the_period_and_the_settle_time() {
+        let (uevents, other) = pair();
+        let storm = announce(other, Some(DRM), DRM, Duration::from_millis(2000));
+        let start = Instant::now();
+        assert_eq!(uevents.wait(Duration::from_millis(500)), Wake::Hint);
+        assert!(start.elapsed() < Duration::from_millis(1100), "took {:?}", start.elapsed());
+        storm.join().unwrap();
+    }
 }
