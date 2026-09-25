@@ -7,7 +7,7 @@ come from. It is a small JSON-RPC-ish surface:
     POST /api/logout                {authKey}
     POST /api/getUser               {authKey}                -> user
     POST /api/addonCollectionGet    {authKey|null, update}   -> addons
-    POST /api/datastoreGet          {authKey, collection}    -> library items
+    POST /api/datastoreGet          {authKey, collection, all} -> library items
 
 `authKey: null` is a supported, documented call: it returns the default addon
 collection, which is why the media core works out of the box without anybody
@@ -181,15 +181,16 @@ class StremioAPI:
     # ------------------------------------------------------------------ library
 
     def library(self, collection: str = "libraryItem") -> list[dict[str, Any]]:
+        """Every record in the account's library, the removed ones included.
+
+        All of it, because the official clients work from all of it: this used
+        to ask for the first 500 ids datastoreMeta listed, in whatever order it
+        listed them, and an account with 893 records lost titles it was still
+        watching. Removed records are kept too; which of them count as what is
+        the adapter's decision, and "Devam Et" does count some of them.
+        """
         session = self.store.get()
         if not session.auth_key:
-            return []
-        ids = self._call(
-            "datastoreMeta",
-            {"type": "DatastoreMeta", "authKey": session.auth_key, "collection": collection},
-        )
-        wanted = [entry[0] for entry in ids if isinstance(entry, list) and entry] if isinstance(ids, list) else []
-        if not wanted:
             return []
         result = self._call(
             "datastoreGet",
@@ -197,8 +198,8 @@ class StremioAPI:
                 "type": "DatastoreGet",
                 "authKey": session.auth_key,
                 "collection": collection,
-                "all": False,
-                "ids": wanted[:500],
+                "all": True,
+                "ids": [],
             },
         )
         return [entry for entry in result if isinstance(entry, dict)] if isinstance(result, list) else []

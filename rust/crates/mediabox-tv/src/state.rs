@@ -236,6 +236,9 @@ pub struct Item {
     pub rating: Option<String>,
     pub genres: Vec<String>,
     pub progress: f32,
+    /// On the account's "Devam Et". Said by the media core, not worked out
+    /// here from the progress: a title can be on it with no duration at all.
+    pub continuing: bool,
     pub local: bool,
     pub hue: f32,
 }
@@ -267,6 +270,7 @@ impl Item {
             rating: None,
             genres: Vec::new(),
             progress: 0.0,
+            continuing: false,
             local: false,
             hue: 0.0,
         }
@@ -286,6 +290,7 @@ impl Item {
             rating: some(&preview.imdb_rating),
             genres: preview.genres.clone(),
             progress,
+            continuing: false,
             local: preview.is_library(),
         }
     }
@@ -456,15 +461,13 @@ impl Home {
     pub fn set_shelves(&mut self, shelves: Vec<Shelf>) {
         self.shelves = shelves;
 
-        // Unfinished titles, wherever they came from. The media core labels a
-        // shelf "Devam Et", but the property that matters is the watch state,
-        // not the shelf's name.
+        // The account's "Devam Et", wherever it is shelved.
         let mut seen = std::collections::HashSet::new();
         self.recent = self
             .shelves
             .iter()
             .flat_map(|shelf| shelf.items.iter())
-            .filter(|item| item.progress > 0.0 && item.progress < 0.95)
+            .filter(|item| item.continuing)
             .filter(|item| seen.insert(item.id.clone()))
             .take(RAIL_LIMIT)
             .cloned()
@@ -546,25 +549,31 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
     let mut shelves = Vec::new();
 
     if let Some(library) = library {
+        // As the media core ordered it, and all of it: this is the list the
+        // phone shows, and dropping or re-sorting any of it here is what made
+        // the two disagree.
         let unfinished: Vec<Item> = library
-            .stremio
+            .continue_watching
             .iter()
-            .filter(|item| item.state.as_ref().map(|s| s.unfinished()).unwrap_or(false))
-            .take(RAIL_LIMIT)
-            .map(Item::from_preview)
+            .map(|preview| Item {
+                continuing: true,
+                ..Item::from_preview(preview)
+            })
             .collect();
+        let continuing: std::collections::HashSet<&str> =
+            unfinished.iter().map(|item| item.id.as_str()).collect();
         if !unfinished.is_empty() {
             shelves.push(Shelf {
                 title: "Devam Et".into(),
                 source: String::new(),
-                items: unfinished,
+                items: unfinished.clone(),
             });
         }
 
         let mine: Vec<Item> = library
             .stremio
             .iter()
-            .filter(|item| !item.state.as_ref().map(|s| s.unfinished()).unwrap_or(false))
+            .filter(|item| !continuing.contains(item.id.as_str()))
             .take(RAIL_LIMIT)
             .map(Item::from_preview)
             .collect();
@@ -651,6 +660,7 @@ mod tests {
                 .map(|i| {
                     let mut item = Item::stub(&format!("{name}-{i}"));
                     item.progress = progress;
+                    item.continuing = progress > 0.0 && progress < 0.95;
                     item
                 })
                 .collect(),
@@ -730,11 +740,39 @@ mod tests {
         assert_eq!(home.row, 0, "there is nowhere below the launcher to go");
     }
 
+    /// "Devam Et" is the media core's list, as it came: a series episode
+    /// with no duration and a film near its end are on it, in the order it
+    /// gave, and neither is repeated under "Kitaplığım".
     #[test]
-    fn a_finished_title_is_not_unfinished() {
+    fn devam_et_is_the_account_list_as_it_came() {
+        let listing: LibraryListing = serde_json::from_value(serde_json::json!({
+            "stremio": [
+                {"id": "kept", "name": "Kept"},
+                {"id": "tail", "name": "Tail"}
+            ],
+            "continueWatching": [
+                {"id": "episode", "type": "series", "name": "Episode",
+                 "state": {"timeOffset": 1000, "duration": 0}},
+                {"id": "tail", "name": "Tail",
+                 "state": {"timeOffset": 98, "duration": 100}}
+            ]
+        }))
+        .unwrap();
+        let shelves = shelves_from(&crate::model::HomeRows { rows: Vec::new() }, Some(&listing));
+
+        let ids = |title: &str| -> Vec<String> {
+            shelves
+                .iter()
+                .find(|shelf| shelf.title == title)
+                .map(|shelf| shelf.items.iter().map(|item| item.id.clone()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(ids("Devam Et"), ["episode", "tail"]);
+        assert_eq!(ids("Kitaplığım"), ["kept"]);
+
         let mut home = Home::new();
-        home.set_shelves(vec![shelf("credits", 3, 0.98)]);
-        assert!(home.recent.is_empty());
+        home.set_shelves(shelves);
+        assert_eq!(home.recent.len(), 2);
     }
 
     #[test]
@@ -747,6 +785,7 @@ mod tests {
             items: one.items.clone(),
         };
         one.items[0].progress = 0.5;
+        one.items[0].continuing = true;
         home.set_shelves(vec![one, two]);
         assert_eq!(home.recent.len(), 1);
     }

@@ -53,22 +53,6 @@ pub struct WatchState {
 }
 
 impl WatchState {
-    /// Whether this is a title to carry on with, rather than one finished or
-    /// never started.
-    ///
-    /// The tail of a film is credits, and a title left there is done rather
-    /// than interrupted; ninety-five percent is where Stremio itself draws
-    /// that line. A position without a duration is meaningless, because there
-    /// is nothing to be a fraction of.
-    pub fn unfinished(&self) -> bool {
-        match (self.time_offset, self.duration) {
-            (Some(offset), Some(duration)) if duration > 0 && offset > 0 => {
-                (offset as f64) < (duration as f64) * 0.95
-            }
-            _ => false,
-        }
-    }
-
     /// How far in, as a fraction, for a progress bar.
     pub fn progress(&self) -> f64 {
         match (self.time_offset, self.duration) {
@@ -143,6 +127,10 @@ pub struct LibraryListing {
     /// The account's library, which follows the operator between devices.
     #[serde(default)]
     pub stremio: Vec<MetaPreview>,
+    /// The account's "Devam Et", in order, as every Stremio client shows it.
+    /// Worked out by the media core with stremio-core's rule; taken as it is.
+    #[serde(rename = "continueWatching", default)]
+    pub continue_watching: Vec<MetaPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

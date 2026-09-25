@@ -250,8 +250,9 @@ class MediaCore:
                 # allowed to fail without taking the manifest down with it: a
                 # box with no network still shows what is on it.
                 stremio: list[dict[str, Any]] = []
+                continue_watching: list[dict[str, Any]] = []
                 try:
-                    stremio = self.stremio.library_previews()
+                    stremio, continue_watching = self.stremio.library_listing()
                 except UpstreamError as exc:
                     LOG.info("Stremio library unavailable: %s", exc.message)
                 return json_response(
@@ -260,6 +261,9 @@ class MediaCore:
                         "configured": self.library.configured,
                         "items": [item.as_preview() for item in self.library.items()],
                         "stremio": stremio,
+                        # The account's "Devam Et", as every Stremio client
+                        # shows it; see HeadlessStremio.library_listing.
+                        "continueWatching": continue_watching,
                     },
                 )
             if len(parts) == 2:

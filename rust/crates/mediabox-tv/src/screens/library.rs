@@ -74,7 +74,7 @@ impl Library {
 
         for shelf in shelves {
             for item in &shelf.items {
-                let bucket = if item.progress > 0.0 && item.progress < 0.95 {
+                let bucket = if item.continuing {
                     0
                 } else if item.local {
                     3
@@ -245,6 +245,7 @@ mod tests {
     fn an_unfinished_title_is_the_first_section() {
         let mut item = film("a");
         item.progress = 0.4;
+        item.continuing = true;
         let mut library = Library::new();
         library.build(&[shelf(vec![item])]);
         assert_eq!(library.sections[0].items.len(), 1);

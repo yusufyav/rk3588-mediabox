@@ -17,7 +17,7 @@ use leptos::task::spawn_local;
 
 use crate::app::{Nav, Route};
 use crate::components::{Failure, Load};
-use crate::model::{CatalogItems, LibraryListing, MetaPreview, WatchState};
+use crate::model::{CatalogItems, LibraryListing, MetaPreview};
 use crate::{LIBRARY_ADDON_ID, api};
 
 /// The shelves that are not catalogues, named where a catalogue's addon id
@@ -40,16 +40,19 @@ pub fn Collection(addon: String, kind: String, catalog: String, title: String) -
                     .await
                     .map(|listing| match source.as_str() {
                         LIBRARY_ADDON_ID => listing.items,
-                        CONTINUE_SOURCE => listing
-                            .stremio
-                            .into_iter()
-                            .filter(|item| item.state.as_ref().is_some_and(WatchState::unfinished))
-                            .collect(),
-                        _ => listing
-                            .stremio
-                            .into_iter()
-                            .filter(|item| !item.state.as_ref().is_some_and(WatchState::unfinished))
-                            .collect(),
+                        CONTINUE_SOURCE => listing.continue_watching,
+                        _ => {
+                            let carried: std::collections::HashSet<String> = listing
+                                .continue_watching
+                                .iter()
+                                .map(|item| item.id.clone())
+                                .collect();
+                            listing
+                                .stremio
+                                .into_iter()
+                                .filter(|item| !carried.contains(&item.id))
+                                .collect()
+                        }
                     })
             }
             addon_id => api::typed::<CatalogItems>(api::media_catalog(

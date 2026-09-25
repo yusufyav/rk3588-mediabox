@@ -80,6 +80,50 @@ def _as_millis(value: Any) -> int | None:
     return millis if millis >= 0 else None
 
 
+# stremio-core's CATALOG_PREVIEW_SIZE, which is what its continue-watching
+# preview is cut to.
+CONTINUE_WATCHING_SIZE = 100
+
+
+def _in_continue_watching(record: dict[str, Any], removed: bool, temp: bool) -> bool:
+    """stremio-core's `LibraryItem::is_in_continue_watching`, and its `!is_live()`."""
+    kind = record.get("type")
+    hints = record.get("behaviorHints") if isinstance(record.get("behaviorHints"), dict) else {}
+    if kind == "other" or kind == "tv" or hints.get("isLive") is True:
+        return False
+    state = record.get("state") if isinstance(record.get("state"), dict) else {}
+    return (not removed or temp) and (_as_millis(state.get("timeOffset")) or 0) > 0
+
+
+def _library_preview(record: Any) -> dict[str, Any] | None:
+    """One library record in the catalogue preview shape, or nothing."""
+    if not isinstance(record, dict):
+        return None
+    item_id = record.get("_id") or record.get("id")
+    name = record.get("name")
+    if not item_id or not name:
+        return None
+    state = record.get("state") if isinstance(record.get("state"), dict) else {}
+    return {
+        "id": str(item_id),
+        "type": record.get("type") or "movie",
+        "name": str(name),
+        "poster": record.get("poster"),
+        "background": record.get("background"),
+        "logo": record.get("logo"),
+        "description": None,
+        "releaseInfo": _text(record.get("year")),
+        "imdbRating": None,
+        "genres": [],
+        "addonId": STREMIO_LIBRARY_ADDON_ID,
+        "state": {
+            "timeOffset": _as_millis(state.get("timeOffset")),
+            "duration": _as_millis(state.get("duration")),
+            "lastWatched": _text(state.get("lastWatched")),
+        },
+    }
+
+
 LOG = logging.getLogger(__name__)
 
 #: How many addons may be asked for streams at the same time.
@@ -623,56 +667,45 @@ class HeadlessStremio:
     def library(self) -> list[dict[str, Any]]:
         return self.api.library()
 
-    def library_previews(self) -> list[dict[str, Any]]:
-        """The operator's own Stremio library, in the catalogue preview shape.
+    def library_listing(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """The account's library and its "Devam Et", from one read of it.
 
-        This is the list the account carries between devices: what was added to
-        the library on a phone, and how far a film was watched on the
+        The library is the list the account carries between devices: what was
+        added to the library on a phone, and how far a film was watched on the
         television. It is not the appliance's own manifest, which is a
-        different thing wearing the same word — those titles are the ones the
+        different thing wearing the same word -- those titles are the ones the
         operator put on this box and are marked with the library addon's id so
         they resolve from disk rather than through an addon. These carry their
-        real type instead, because that is how they resolve.
+        real type instead, because that is how they resolve. Records the
+        account has removed are dropped from it, and so are the temporary ones
+        a client writes for a title that was played without being added.
+        Ordered by when each was last watched, most recent first.
 
-        Records the account has removed are dropped: Stremio keeps a tombstone
-        rather than deleting, so a removed title comes back on every sync
-        unless it is filtered here. So are the temporary entries Stremio writes
-        while something is merely being previewed, which were never in the
-        library to begin with.
-
-        Ordered by when each was last watched, most recent first, so the rows
-        built from this need no opinion of their own about order.
+        "Devam Et" is the official clients' continue-watching list, worked out
+        the way stremio-core works it out, so that it is the same list on this
+        television as on the phone, the desktop and the web:
+        `is_in_continue_watching` -- not "other", not live, `(!removed ||
+        temp)`, a position past zero -- newest `_mtime` first, 100 of them.
+        That keeps the temporary records the library drops, because a film
+        played without being added to the library is still one being watched,
+        and it asks nothing of the duration. It leaves out the series with new
+        episodes the official clients add from their notifications, which this
+        appliance does not fetch.
         """
-        previews: list[dict[str, Any]] = []
+        library: list[tuple[str, dict[str, Any]]] = []
+        watching: list[tuple[str, dict[str, Any]]] = []
         for record in self.library():
-            if not isinstance(record, dict):
+            preview = _library_preview(record)
+            if preview is None:
                 continue
-            if record.get("removed") or record.get("temp"):
-                continue
-            item_id = record.get("_id") or record.get("id")
-            name = record.get("name")
-            if not item_id or not name:
-                continue
-            state = record.get("state") if isinstance(record.get("state"), dict) else {}
-            previews.append(
-                {
-                    "id": str(item_id),
-                    "type": record.get("type") or "movie",
-                    "name": str(name),
-                    "poster": record.get("poster"),
-                    "background": record.get("background"),
-                    "logo": record.get("logo"),
-                    "description": None,
-                    "releaseInfo": _text(record.get("year")),
-                    "imdbRating": None,
-                    "genres": [],
-                    "addonId": STREMIO_LIBRARY_ADDON_ID,
-                    "state": {
-                        "timeOffset": _as_millis(state.get("timeOffset")),
-                        "duration": _as_millis(state.get("duration")),
-                        "lastWatched": _text(state.get("lastWatched")),
-                    },
-                }
-            )
-        previews.sort(key=lambda item: item["state"]["lastWatched"] or "", reverse=True)
-        return previews
+            removed, temp = bool(record.get("removed")), bool(record.get("temp"))
+            if not removed and not temp:
+                library.append((preview["state"]["lastWatched"] or "", preview))
+            if _in_continue_watching(record, removed, temp):
+                watching.append((_text(record.get("_mtime")) or "", preview))
+        library.sort(key=lambda entry: entry[0], reverse=True)
+        watching.sort(key=lambda entry: entry[0], reverse=True)
+        return (
+            [preview for _, preview in library],
+            [preview for _, preview in watching[:CONTINUE_WATCHING_SIZE]],
+        )

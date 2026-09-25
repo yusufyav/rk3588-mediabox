@@ -18,7 +18,7 @@ use crate::app::{Nav, Recent, Route, recents};
 /// and every shelf now has a door to it.
 const RAIL_LIMIT: usize = 20;
 use crate::components::{Action, Failure, Load, Rail, RailSkeleton, meta_line};
-use crate::model::{HomeRows, LibraryIds, LibraryListing, MetaPreview, WatchState};
+use crate::model::{HomeRows, LibraryIds, LibraryListing, MetaPreview};
 use crate::screens::collection::{ACCOUNT_LIBRARY_SOURCE, CONTINUE_SOURCE};
 use crate::{LIBRARY_ADDON_ID, api};
 use leptos::context::Provider;
@@ -46,6 +46,7 @@ pub fn Media() -> impl IntoView {
     // The account's own library, which is a different thing from the shelf
     // above it: those titles live on this box, these follow the operator.
     let mine = RwSignal::new(cached_mine());
+    let watching = RwSignal::new(cached_watching());
     let recent = RwSignal::new(recents());
     spawn_local(async move {
         match api::typed::<HomeRows>(api::media_home()).await {
@@ -85,6 +86,10 @@ pub fn Media() -> impl IntoView {
                     .set(listing.stremio.iter().map(|item| item.id.clone()).collect());
                 if mine.with_untracked(|seen| seen != &listing.stremio) {
                     mine.set(listing.stremio);
+                }
+                remember_watching(&listing.continue_watching);
+                if watching.with_untracked(|seen| seen != &listing.continue_watching) {
+                    watching.set(listing.continue_watching);
                 }
             }
             Err(error) => library_error.set(Some(error.message)),
@@ -135,11 +140,7 @@ pub fn Media() -> impl IntoView {
             // the operator uses, so it is asked first; the titles this box
             // itself remembers are the answer only until the account replies,
             // and when there is no account at all.
-            let carried: Vec<MetaPreview> = mine
-                .get()
-                .into_iter()
-                .filter(|item| item.state.as_ref().is_some_and(WatchState::unfinished))
-                .collect();
+            let carried: Vec<MetaPreview> = watching.get();
             let entries: Vec<MetaPreview> = if carried.is_empty() {
                 recent.get().into_iter().map(Recent::into).collect()
             } else {
@@ -161,10 +162,12 @@ pub fn Media() -> impl IntoView {
         {move || {
             // Whatever is being carried on with is on the shelf above; a
             // library that repeats it is the same eight posters twice.
+            let carried: std::collections::HashSet<String> =
+                watching.with(|items| items.iter().map(|item| item.id.clone()).collect());
             let items: Vec<MetaPreview> = mine
                 .get()
                 .into_iter()
-                .filter(|item| !item.state.as_ref().is_some_and(WatchState::unfinished))
+                .filter(|item| !carried.contains(&item.id))
                 .take(RAIL_LIMIT)
                 .collect();
             let all = Callback::new(move |()| {
@@ -327,6 +330,14 @@ fn cached_mine() -> Vec<MetaPreview> {
 
 fn remember_mine(items: &[MetaPreview]) {
     keep("mediabox.mine", &items.to_vec());
+}
+
+fn cached_watching() -> Vec<MetaPreview> {
+    kept("mediabox.watching").unwrap_or_default()
+}
+
+fn remember_watching(items: &[MetaPreview]) {
+    keep("mediabox.watching", &items.to_vec());
 }
 
 fn remember_library(items: &[MetaPreview]) {
