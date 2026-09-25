@@ -8,7 +8,7 @@
   },
   {
     "id": "kodi",
-    "name": "Oynatıcı",
+    "name": "KODI",
     "summary": "Donanım hızlandırmalı yerel oynatma (Kodi)",
     "unit": "kodi.service",
     "owns_display": true
