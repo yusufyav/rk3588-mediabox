@@ -1,38 +1,159 @@
+diff --git a/xbmc/windowing/gbm/drm/AtomicRehearsal.h b/xbmc/windowing/gbm/drm/AtomicRehearsal.h
+new file mode 100644
+index 0000000..7271f18
+--- /dev/null
++++ b/xbmc/windowing/gbm/drm/AtomicRehearsal.h
+@@ -0,0 +1,65 @@
++/*
++ *  Copyright (C) 2026 Team Kodi
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <string_view>
++
++namespace KODI
++{
++namespace WINDOWING
++{
++namespace GBM
++{
++namespace ATOMIC
++{
++
++// The connector properties the output colour is worked out from: the pixel
++// encoding, its depth (the vendor's enum and the standard property), the
++// colorimetry and the HDR metadata, whose EOTF decides whether the vendor
++// driver prefers YCbCr 4:2:2. These are the properties a TEST_ONLY rehearsal
++// must not see; see RehearseWithTestOnly.
++constexpr std::array<std::string_view, 5> CONNECTOR_COLOUR_PROPERTIES = {
++    "color_format", "color_depth", "max bpc", "Colorspace", "HDR_OUTPUT_METADATA"};
++
++constexpr bool IsConnectorColourProperty(std::string_view name)
++{
++  return std::ranges::find(CONNECTOR_COLOUR_PROPERTIES, name) !=
++         CONNECTOR_COLOUR_PROPERTIES.end();
++}
++
++// Whether a commit is rehearsed with TEST_ONLY first, given the names of the
++// connector properties the caller put in the request -- before the commit
++// adds the connector's CRTC_ID for a modeset of its own.
++//
++// A request that changes the connector's colour is not rehearsed. The vendor
++// RK3588 HDMI driver's atomic_check is not free of side effects: it stores the
++// output bus format it works out in the driver itself, and the 6.1.172 driver
++// decides whether the colour changed by comparing against that stored value
++// instead of the old state. After a rehearsal the real commit therefore sees
++// no change and never rewrites the AVI infoframe -- YCbCr 4:2:2 on the wire,
++// "RGB, BT.709" in the infoframe, and the television shows black as blue.
++// Measured on 6.1.172; the 6.1.115 driver compares states and was unaffected.
++//
++// Everything else keeps its rehearsal: page flips, and modesets too. A
++// modeset that leaves the colour alone reaches the same check, but the bus
++// format it works out is the one already in place, and the full enable the
++// modeset goes through writes the infoframe regardless.
++template<typename Names>
++constexpr bool RehearseWithTestOnly(const Names& connectorProperties)
++{
++  return std::ranges::none_of(connectorProperties, [](const auto& name)
++                              { return IsConnectorColourProperty(name); });
++}
++
++} // namespace ATOMIC
++} // namespace GBM
++} // namespace WINDOWING
++} // namespace KODI
+diff --git a/xbmc/windowing/gbm/drm/CMakeLists.txt b/xbmc/windowing/gbm/drm/CMakeLists.txt
+index 8bd07ea..f143874 100644
+--- a/xbmc/windowing/gbm/drm/CMakeLists.txt
++++ b/xbmc/windowing/gbm/drm/CMakeLists.txt
+@@ -8,7 +8,8 @@ set(SOURCES DRMAtomic.cpp
+             DRMUtils.cpp
+             OffScreenModeSetting.cpp)
+ 
+-set(HEADERS DRMAtomic.h
++set(HEADERS AtomicRehearsal.h
++            DRMAtomic.h
+             DRMConnector.h
+             DRMCrtc.h
+             DRMEncoder.h
 diff --git a/xbmc/windowing/gbm/drm/DRMAtomic.cpp b/xbmc/windowing/gbm/drm/DRMAtomic.cpp
-index 7a6f87c2db..73b35eecf2 100644
+index 7a6f87c..c38b718 100644
 --- a/xbmc/windowing/gbm/drm/DRMAtomic.cpp
 +++ b/xbmc/windowing/gbm/drm/DRMAtomic.cpp
-@@ -133,7 +133,20 @@ void CDRMAtomic::DrmAtomicCommit(int fb_id, int flags, bool rendered, bool video
+@@ -8,6 +8,7 @@
+ 
+ #include "DRMAtomic.h"
+ 
++#include "AtomicRehearsal.h"
+ #include "ServiceBroker.h"
+ #include "application/ApplicationComponents.h"
+ #include "application/ApplicationPlayer.h"
+@@ -36,6 +37,10 @@ void CDRMAtomic::DrmAtomicCommit(int fb_id, int flags, bool rendered, bool video
+   // referencing an invalid id and the kernel rejects with EINVAL.
+   CDRMPropertyBlob modeBlob;
+ 
++  // Decided from what the caller put on the connector, before the modeset
++  // below adds the connector's CRTC_ID: a modeset alone is still rehearsed.
++  const bool rehearse = ATOMIC::RehearseWithTestOnly(m_req->PropertyNames(m_connector));
++
+   if (m_old_crtc != nullptr)
+   {
+     if (m_old_crtc->GetId() != m_crtc->GetId())
+@@ -133,7 +138,9 @@ void CDRMAtomic::DrmAtomicCommit(int fb_id, int flags, bool rendered, bool video
    if (CServiceBroker::GetLogging().CanLogComponent(LOGWINDOWING))
      m_req->LogAtomicRequest();
  
 -  auto ret = drmModeAtomicCommit(m_fd, m_req->Get(), flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr);
-+  // A request that sets a connector property is not rehearsed with
-+  // TEST_ONLY first. The vendor RK3588 HDMI driver's atomic_check is not free
-+  // of side effects: it stores the output bus format it works out in the
-+  // driver itself, and the 6.1.172 driver decides whether the colour format
-+  // changed by comparing against that stored value instead of the old state.
-+  // After a rehearsal the real commit therefore sees no change and never
-+  // rewrites the AVI infoframe -- YCbCr 4:2:2 on the wire, "RGB, BT.709" in the
-+  // infoframe, and the television shows black as blue. Measured on the Ultra
-+  // (6.1.172); the 6.1.115 driver compares states and was unaffected.
-+  // Page flips carry no connector property and keep their rehearsal.
-+  const bool rehearse = !m_req->Sets(m_connector);
 +  auto ret = rehearse ? drmModeAtomicCommit(m_fd, m_req->Get(),
 +                                            flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr)
 +                      : 0;
    if (ret < 0)
    {
      CLog::LogF(LOGERROR,
+@@ -335,6 +342,18 @@ bool CDRMAtomic::CDRMAtomicRequest::AddProperty(CDRMObject* object,
+   return true;
+ }
+ 
++std::vector<std::string> CDRMAtomic::CDRMAtomicRequest::PropertyNames(CDRMObject* object) const
++{
++  std::vector<std::string> names;
++  if (auto properties = m_atomicRequestItems.find(object);
++      properties != m_atomicRequestItems.end())
++  {
++    for (const auto& property : properties->second)
++      names.emplace_back(object->GetPropertyName(property.first));
++  }
++  return names;
++}
++
+ void CDRMAtomic::CDRMAtomicRequest::CacheProperties()
+ {
+   for (const auto& [object, properties] : m_atomicRequestItems)
 diff --git a/xbmc/windowing/gbm/drm/DRMAtomic.h b/xbmc/windowing/gbm/drm/DRMAtomic.h
-index c20531b682..a50583be86 100644
+index c20531b..a5c58cf 100644
 --- a/xbmc/windowing/gbm/drm/DRMAtomic.h
 +++ b/xbmc/windowing/gbm/drm/DRMAtomic.h
-@@ -58,6 +58,7 @@ private:
+@@ -15,6 +15,8 @@
+ #include <deque>
+ #include <map>
+ #include <memory>
++#include <string>
++#include <vector>
+ 
+ namespace KODI
+ {
+@@ -58,6 +60,7 @@ private:
      bool AddProperty(CDRMObject* object, const char* name, uint64_t value);
      void CacheProperties();
      void LogAtomicRequest();
-+    bool Sets(CDRMObject* object) const { return m_atomicRequestItems.contains(object); }
++    std::vector<std::string> PropertyNames(CDRMObject* object) const;
  
      static void LogAtomicDiff(CDRMAtomicRequest* current, CDRMAtomicRequest* old);
  

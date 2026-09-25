@@ -669,6 +669,38 @@ contains "the EDID is Kodi's own, read live"            "$plan_text" 'ReadLiveCo
 contains "the observer's snapshot must be recent"       "$plan_text" 'OBSERVER_STALE_AFTER_NS'
 contains "format and depth come from one plan"          "$plan_text" 'plan.provenance != m_colourPlan'
 
+echo "-- Kodi rehearses every commit but a colour change"
+# patches/kodi/0014. The vendor HDMI driver's atomic_check stores the bus
+# format it works out, so on 6.1.172 a TEST_ONLY rehearsal of a colour change
+# leaves the real commit seeing none and the AVI infoframe saying RGB over a
+# YCbCr 4:2:2 wire. Only those commits skip the rehearsal; a modeset alone,
+# whose CRTC_ID the commit puts on the connector itself, keeps it.
+rehearsal_patch="$here/patches/kodi/0014-gbm-do-not-rehearse-a-connector-colour-change.patch"
+rehearsal_dir="$(mktemp -d)"
+awk -v file="+++ b/xbmc/windowing/gbm/drm/AtomicRehearsal.h" '
+  $0 == file { on = 1; next }
+  on && /^diff --git / { on = 0 }
+  on && /^@@ / { next }
+  on { print substr($0, 2) }' "$rehearsal_patch" >"$rehearsal_dir/AtomicRehearsal.h"
+if "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -I "$rehearsal_dir" -o "$rehearsal_dir/test" \
+     "$here/tests/kodi-atomic-rehearsal-test.cpp" >"$rehearsal_dir/build.log" 2>&1 &&
+   "$rehearsal_dir/test" >"$rehearsal_dir/run.log" 2>&1; then
+  echo "ok   KODI_TEST_ONLY_SCOPE=PASS ($(grep -c '^ok' "$rehearsal_dir/run.log") checks)"
+else
+  echo "FAIL Kodi's TEST_ONLY rehearsal decision:"
+  cat "$rehearsal_dir/build.log" "$rehearsal_dir/run.log" 2>/dev/null | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
+rm -rf "$rehearsal_dir"
+rehearsal_text="$(cat "$rehearsal_patch")"
+contains "the decision is taken before the modeset adds CRTC_ID" "$rehearsal_text" \
+  '+  const bool rehearse = ATOMIC::RehearseWithTestOnly(m_req->PropertyNames(m_connector));
++
+   if (m_old_crtc != nullptr)'
+contains "and only the rehearsal is skipped" "$rehearsal_text" '+  auto ret = rehearse ? drmModeAtomicCommit('
+lacks "not every request that sets a connector property" "$rehearsal_text" 'Sets(m_connector)'
+lacks "the fallback to the last good request stays"      "$rehearsal_text" '-    m_req = oldRequest;'
+
 echo "-- the archive can be checked on the image the product is installed on"
 # A clean Armbian Minimal carries no binutils, and the archive is verified
 # before the runtime packages are installed, so the verifier had better not
