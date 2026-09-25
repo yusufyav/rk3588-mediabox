@@ -143,9 +143,13 @@ fn hdr_at_4k24_on_the_slow_input_is_4_2_2_as_on_the_android_box() {
 }
 
 #[test]
-fn hdr_at_4k24_on_the_fast_input_is_rgb_ten_bit() {
+fn hdr_at_4k24_on_the_fast_input_is_4_2_2_as_the_driver_sends_it() {
+    // Ten-bit RGB fits 600 MHz at 4K24, and was asked for: the vendor driver
+    // put YUYV10_1X20 on the wire from the eight-bit SDR link (the Plus,
+    // 2026-09-25). `Auto` names what goes out.
     let sink = parse_sink_video(&edid(SONY_HDMI3)).expect("EDID");
-    assert_eq!(sink.best_for(&uhd24(), true), Some(ColorMode::new(ColorFormat::Rgb, 10)));
+    assert!(sink.modes_for(&uhd24()).contains(&ColorMode::new(ColorFormat::Rgb, 10)));
+    assert_eq!(sink.best_for(&uhd24(), true), Some(ColorMode::new(ColorFormat::Ycbcr422, 10)));
 }
 
 #[test]

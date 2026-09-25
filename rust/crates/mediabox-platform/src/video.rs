@@ -40,6 +40,13 @@ pub struct SourceCaps {
     /// The source signals HDR10: the HDR infoframe and BT.2020 colorimetry
     /// can be asked of its driver.
     pub hdr10: bool,
+    /// The driver sends ten-bit BT.2020 as YCbCr 4:2:2 whenever the link it
+    /// leaves was eight bits or 4:2:2, whatever format was asked for
+    /// (Rockchip's `dw_hdmi_qp-rockchip.c`: "We prefer use YCbCr422 to send
+    /// hdr 10bit"). From the eight-bit SDR link `Auto` holds, that is every
+    /// HDR film: measured on the Plus at 2160p23.976 on a 600 MHz input,
+    /// `rgb` and ten bits asked, `YUYV10_1X20` on the wire.
+    pub hdr10_ycbcr422: bool,
 }
 
 /// RK3588 HDMI TX under the vendor kernel this product runs: the link limits
@@ -396,17 +403,20 @@ impl SinkVideo {
         has(ColorFormat::Rgb, 8).or_else(|| has(ColorFormat::Ycbcr420, 8))
     }
 
-    /// The cell HDR10 goes out in at this timing, or `None`.
+    /// The cell HDR10 goes out in at this timing, or `None`: the one that
+    /// gives up least -- RGB, then 4:4:4, then 4:2:2, then 4:2:0 -- except on
+    /// a source whose driver sends HDR10 as 4:2:2 from an SDR link
+    /// ([`SourceCaps::hdr10_ycbcr422`]), where it is 4:2:2 wherever that
+    /// carries it: `Auto` names what goes out, not a cell the driver changes.
     pub fn best_hdr10(&self, timing: &Timing, source: &SourceCaps) -> Option<ColorMode> {
         let modes = self.modes_for_source(timing, source);
-        [
-            ColorFormat::Rgb,
-            ColorFormat::Ycbcr444,
-            ColorFormat::Ycbcr422,
-            ColorFormat::Ycbcr420,
-        ]
-        .into_iter()
-        .find_map(|format| {
+        use ColorFormat::*;
+        let order = if source.hdr10_ycbcr422 {
+            [Ycbcr422, Rgb, Ycbcr444, Ycbcr420]
+        } else {
+            [Rgb, Ycbcr444, Ycbcr422, Ycbcr420]
+        };
+        order.into_iter().find_map(|format| {
             modes
                 .iter()
                 .copied()

@@ -810,14 +810,14 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
                     connected: edid.map(|_| true),
                     edid_sha256: report.as_ref().and_then(|r| r.sha256.clone()).map(|id| id.0),
                     transmitter: Some("fdea0000.hdmi".into()),
-                    source_profile: "rk3588-vendor61-dw-hdmi-qp@1".into(),
+                    source_profile: "rk3588-vendor61-dw-hdmi-qp@2".into(),
                     ..Default::default()
                 },
                 primary_minor: Some(0),
                 physical_address: None,
                 edid_status: report.as_ref().map(|r| r.status),
                 edid_legacy_checkvalue: report.as_ref().map(|r| r.legacy_checkvalue.clone()),
-                source_profile: "rk3588-vendor61-dw-hdmi-qp@1 (matched)".into(),
+                source_profile: "rk3588-vendor61-dw-hdmi-qp@2 (matched)".into(),
                 topology_evidence: Vec::new(),
                 audio: Route::default(),
                 cec: Route::default(),
@@ -1215,7 +1215,7 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         assert_eq!(plan.provenance.generation.seq, 4);
         assert_eq!(plan.provenance.identity, identity(&sony));
         assert_eq!(plan.provenance.transmitter, "fdea0000.hdmi");
-        assert_eq!(plan.provenance.source_profile, "rk3588-vendor61-dw-hdmi-qp@1");
+        assert_eq!(plan.provenance.source_profile, "rk3588-vendor61-dw-hdmi-qp@2");
         assert_eq!(plan.timing_key, sony.mode("3840x2160p60").unwrap().timing_key);
 
         // A generation that moved for any reason: the plan is rewritten for it.

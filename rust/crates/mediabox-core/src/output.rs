@@ -461,7 +461,7 @@ pub struct OutputLink {
     #[serde(default)]
     pub source_hdr10: bool,
     /// The source profile the limits above are from, and how it was matched
-    /// (`rk3588-vendor61-dw-hdmi-qp@1 (matched)`).
+    /// (`rk3588-vendor61-dw-hdmi-qp@2 (matched)`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_profile: String,
 }

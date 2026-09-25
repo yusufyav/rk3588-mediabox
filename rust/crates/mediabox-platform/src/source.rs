@@ -67,7 +67,7 @@ pub struct SourceProfile {
 }
 
 impl SourceProfile {
-    /// `rk3588-vendor61-dw-hdmi-qp@1`.
+    /// `rk3588-vendor61-dw-hdmi-qp@2`.
     pub fn name(&self) -> String {
         format!("{}@{}", self.id, self.version)
     }
@@ -101,7 +101,7 @@ impl SourceProfile {
 /// component at most; `color_format` offers RGB, 4:4:4, 4:2:2 and 4:2:0.
 pub const RK3588_VENDOR_61: SourceProfile = SourceProfile {
     id: "rk3588-vendor61-dw-hdmi-qp",
-    version: 1,
+    version: 2,
     scope: Some(ProductScope {
         soc_compatible: "rockchip,rk3588",
         kernel_series: "6.1.",
@@ -129,6 +129,7 @@ pub const RK3588_VENDOR_61: SourceProfile = SourceProfile {
             ColorFormat::Ycbcr420,
         ],
         hdr10: true,
+        hdr10_ycbcr422: true,
     },
 };
 
@@ -146,6 +147,7 @@ pub const CONSERVATIVE: SourceProfile = SourceProfile {
         max_bpc: 8,
         formats: &[ColorFormat::Rgb],
         hdr10: false,
+        hdr10_ycbcr422: false,
     },
 };
 
@@ -219,7 +221,7 @@ pub struct Resolved {
 }
 
 impl Resolved {
-    /// `rk3588-vendor61-dw-hdmi-qp@1 (matched)`: for logs and the offer.
+    /// `rk3588-vendor61-dw-hdmi-qp@2 (matched)`: for logs and the offer.
     pub fn describe(&self) -> String {
         let how = match &self.matched {
             ProfileMatch::Matched => "matched".to_string(),
@@ -418,7 +420,7 @@ mod tests {
         });
         assert_eq!(resolved.profile, &RK3588_VENDOR_61);
         assert_eq!(resolved.matched, ProfileMatch::Matched);
-        assert_eq!(resolved.profile.name(), "rk3588-vendor61-dw-hdmi-qp@1");
+        assert_eq!(resolved.profile.name(), "rk3588-vendor61-dw-hdmi-qp@2");
         // The limits the display screen has always used.
         assert_eq!(resolved.profile.caps.max_tmds_khz, 600_000);
         assert_eq!(resolved.profile.caps.max_bpc, 10);

@@ -122,7 +122,7 @@ pub struct Snapshot {
     pub physical_address: Option<String>,
     pub edid_status: Option<crate::edid::EdidStatus>,
     pub edid_legacy_checkvalue: Option<String>,
-    /// The profile and how it was matched: `rk3588-vendor61-dw-hdmi-qp@1 (matched)`.
+    /// The profile and how it was matched: `rk3588-vendor61-dw-hdmi-qp@2 (matched)`.
     pub source_profile: String,
     pub topology_evidence: Vec<String>,
     pub audio: Route,

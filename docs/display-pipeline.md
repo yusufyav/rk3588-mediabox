@@ -293,7 +293,11 @@ Sony: the largest mode in the shape of the sink's preferred one, at the fastest
 refresh the link carries **in any format**. On the 300 MHz input that is
 2160p60 in 4:2:0 eight-bit, not the 1080p the set marks preferred; `Auto`
 colour is RGB 8 bit where it fits and 4:2:0 8 bit otherwise, and for an HDR
-film the first format that carries ten bits (RGB, 4:4:4, 4:2:2, 4:2:0).
+film the first format that carries ten bits (RGB, 4:4:4, 4:2:2, 4:2:0) -- on
+this vendor driver 4:2:2 first (source profile `rk3588-vendor61-dw-hdmi-qp@2`):
+from the eight-bit link `Auto` holds it sends ten-bit BT.2020 as 4:2:2 whatever
+was asked, so an RGB answer would be a request it rewrites (measured on the
+Plus, 2160p23.976 on the 600 MHz input: `rgb` asked, `YUYV10_1X20` sent).
 
 A person can choose another mode and another colour at it. The choice is one
 record (`/var/lib/mediabox/output.json`, schema 2), bound to the display it was

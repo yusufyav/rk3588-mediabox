@@ -136,7 +136,7 @@ fn provenance(offer: &mediabox_core::OutputOffer, seq: u64) -> Provenance {
             edid_sha256: offer.edid_sha256.clone(),
         },
         transmitter: "fdea0000.hdmi".into(),
-        source_profile: "rk3588-vendor61-dw-hdmi-qp@1".into(),
+        source_profile: "rk3588-vendor61-dw-hdmi-qp@2".into(),
     }
 }
 
@@ -496,7 +496,7 @@ fn the_plan_carries_what_it_was_made_for_and_reads_back_whole() {
         "generation=7",
         "connector=HDMI-A-2",
         "transmitter=fdea0000.hdmi",
-        "source_profile=rk3588-vendor61-dw-hdmi-qp@1",
+        "source_profile=rk3588-vendor61-dw-hdmi-qp@2",
         "kodi_screenmode=0384002160060.00000pstd",
     ] {
         assert!(text.lines().any(|have| have == line), "{line} in\n{text}");

@@ -10,7 +10,11 @@ use mediabox_core::{ColorFormat, ColorMode, Refusal};
 use mediabox_platform::edid::{
     CtaCapabilities, Edid, EdidIssue, EdidReport, EdidStatus, ForumBlock,
 };
-use mediabox_platform::video::{HdrRefusal, RK3588_HDMI, Timing, parse_sink_video, parse_timings};
+use mediabox_platform::video::{HdrRefusal, RK3588_HDMI, SourceCaps, Timing, parse_sink_video, parse_timings};
+
+/// The shipping source's link, with a driver that sends the HDR10 cell it is
+/// asked for: where the order `Auto` prefers is visible on its own.
+const PLAIN: SourceCaps = SourceCaps { hdr10_ycbcr422: false, ..RK3588_HDMI };
 
 // ------------------------------------------------------------ the builder
 
@@ -515,8 +519,11 @@ fn an_hdr10_capable_sink_takes_hdr10_where_every_condition_holds() {
         .build()]);
     let sink = parse_sink_video(&bytes).unwrap();
     assert!(sink.st2084 && sink.static_metadata_type1 && sink.bt2020_rgb && sink.bt2020_ycc);
-    // 4K24: RGB at ten bits fits 600 MHz, and that is what HDR10 goes out in.
-    assert_eq!(sink.best_hdr10(&uhd24(), &RK3588_HDMI), Some(ColorMode::new(ColorFormat::Rgb, 10)));
+    // 4K24: RGB at ten bits fits 600 MHz, and gives up least -- on a source
+    // that sends what it is asked for.
+    assert_eq!(sink.best_hdr10(&uhd24(), &PLAIN), Some(ColorMode::new(ColorFormat::Rgb, 10)));
+    // This vendor driver sends ten-bit BT.2020 as 4:2:2 from an SDR link.
+    assert_eq!(sink.best_hdr10(&uhd24(), &RK3588_HDMI), Some(ColorMode::new(ColorFormat::Ycbcr422, 10)));
     // 4K60 RGB10 needs 742.5 MHz: not RGB, and the refusal says the link.
     assert_eq!(
         sink.hdr10_refusal(&uhd60(), ColorMode::new(ColorFormat::Rgb, 10), &RK3588_HDMI),
@@ -578,7 +585,7 @@ fn pq_alone_is_not_hdr10_without_static_metadata_type1_or_bt2020() {
         sink.hdr10_refusal(&uhd24(), ColorMode::new(ColorFormat::Rgb, 10), &RK3588_HDMI),
         Some(HdrRefusal::NoBt2020 { format: ColorFormat::Rgb })
     );
-    assert_eq!(sink.best_hdr10(&uhd24(), &RK3588_HDMI), Some(ColorMode::new(ColorFormat::Ycbcr444, 10)));
+    assert_eq!(sink.best_hdr10(&uhd24(), &PLAIN), Some(ColorMode::new(ColorFormat::Ycbcr444, 10)));
 
     // No colorimetry block at all: no HDR10.
     let none = edid(&[Cta::new()
