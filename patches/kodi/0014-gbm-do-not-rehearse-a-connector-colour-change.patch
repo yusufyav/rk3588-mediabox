@@ -1,0 +1,38 @@
+diff --git a/xbmc/windowing/gbm/drm/DRMAtomic.cpp b/xbmc/windowing/gbm/drm/DRMAtomic.cpp
+index 7a6f87c2db..73b35eecf2 100644
+--- a/xbmc/windowing/gbm/drm/DRMAtomic.cpp
++++ b/xbmc/windowing/gbm/drm/DRMAtomic.cpp
+@@ -133,7 +133,20 @@ void CDRMAtomic::DrmAtomicCommit(int fb_id, int flags, bool rendered, bool video
+   if (CServiceBroker::GetLogging().CanLogComponent(LOGWINDOWING))
+     m_req->LogAtomicRequest();
+ 
+-  auto ret = drmModeAtomicCommit(m_fd, m_req->Get(), flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr);
++  // A request that sets a connector property is not rehearsed with
++  // TEST_ONLY first. The vendor RK3588 HDMI driver's atomic_check is not free
++  // of side effects: it stores the output bus format it works out in the
++  // driver itself, and the 6.1.172 driver decides whether the colour format
++  // changed by comparing against that stored value instead of the old state.
++  // After a rehearsal the real commit therefore sees no change and never
++  // rewrites the AVI infoframe -- YCbCr 4:2:2 on the wire, "RGB, BT.709" in the
++  // infoframe, and the television shows black as blue. Measured on the Ultra
++  // (6.1.172); the 6.1.115 driver compares states and was unaffected.
++  // Page flips carry no connector property and keep their rehearsal.
++  const bool rehearse = !m_req->Sets(m_connector);
++  auto ret = rehearse ? drmModeAtomicCommit(m_fd, m_req->Get(),
++                                            flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr)
++                      : 0;
+   if (ret < 0)
+   {
+     CLog::LogF(LOGERROR,
+diff --git a/xbmc/windowing/gbm/drm/DRMAtomic.h b/xbmc/windowing/gbm/drm/DRMAtomic.h
+index c20531b682..a50583be86 100644
+--- a/xbmc/windowing/gbm/drm/DRMAtomic.h
++++ b/xbmc/windowing/gbm/drm/DRMAtomic.h
+@@ -58,6 +58,7 @@ private:
+     bool AddProperty(CDRMObject* object, const char* name, uint64_t value);
+     void CacheProperties();
+     void LogAtomicRequest();
++    bool Sets(CDRMObject* object) const { return m_atomicRequestItems.contains(object); }
+ 
+     static void LogAtomicDiff(CDRMAtomicRequest* current, CDRMAtomicRequest* old);
+ 
