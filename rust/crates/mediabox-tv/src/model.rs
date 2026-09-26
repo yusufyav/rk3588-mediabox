@@ -59,6 +59,14 @@ pub struct WatchState {
     pub duration: Option<u64>,
     #[serde(rename = "lastWatched", default)]
     pub last_watched: Option<String>,
+    #[serde(rename = "timesWatched", default)]
+    pub times_watched: u64,
+    /// When the title was first put on the account.
+    #[serde(default)]
+    pub added: Option<String>,
+    /// In the account's library, as opposed to only in "Devam Et".
+    #[serde(rename = "inLibrary", default)]
+    pub in_library: bool,
 }
 
 impl WatchState {

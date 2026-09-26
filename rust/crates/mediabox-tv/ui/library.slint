@@ -1,15 +1,28 @@
 import { Theme, Metrics } from "theme.slint";
 import { GridPoster, PosterItem, TitlePreview } from "components.slint";
 
-// Everything the box can show, as a grid.
+// The account's library, as a grid.
 //
-// The home screen is for browsing and this screen is for finding: four
-// sections across the top and a poster grid under them, every title named.
+// The home screen is for browsing and this screen is for finding: the sections
+// across the top with the order at their end, a poster grid under them, every
+// title named, and beside it the focused title's record and what can be done
+// with it.
 export component Library inherits Rectangle {
     in property <[string]> tabs;
     in property <[string]> notes;
     in property <int> tab;
     in property <bool> on-tabs;
+    // The remote is on the order at the end of the tabs.
+    in property <bool> on-sort;
+    in property <bool> sortable;
+    in property <string> sort;
+    in property <[string]> sorts;
+    // The order's list when it is down: the highlighted one, or -1.
+    in property <int> sort-open: -1;
+    // What can be done with the focused title, and whether the remote is there.
+    in property <[string]> actions;
+    in property <bool> on-actions;
+    in property <int> action;
 
     in property <[PosterItem]> items;
     in property <int> index;
@@ -40,49 +53,6 @@ export component Library inherits Rectangle {
 
     background: Theme.bg;
     clip: true;
-
-    // The sections.
-    HorizontalLayout {
-        x: Metrics.gutter;
-        y: Metrics.topbar;
-        width: root.width - Metrics.gutter * 2;
-        height: tabs-h;
-        spacing: Metrics.root-font * 0.5;
-        alignment: start;
-
-        for label[i] in tabs: Rectangle {
-            property <bool> chosen: i == tab;
-            property <bool> focused: on-tabs && chosen;
-            width: caption.preferred-width + Metrics.root-font * 2.0;
-            border-radius: Theme.radius * 0.8;
-            background: focused ? Theme.focus-fill : (chosen ? #ffffff16 : transparent);
-            border-width: focused ? 2px : 1px;
-            border-color: focused ? Theme.focus-ring : (chosen ? Theme.line : transparent);
-
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-            caption := Text {
-                text: label;
-                color: focused ? #0a0c10 : (chosen ? Theme.text : Theme.muted);
-                font-size: Metrics.root-font * 1.02;
-                font-weight: 700;
-                vertical-alignment: center;
-                horizontal-alignment: center;
-                width: 100%;
-                height: 100%;
-            }
-        }
-
-        Rectangle { horizontal-stretch: 1; }
-
-        Text {
-            text: notes[tab];
-            color: Theme.dim;
-            font-size: Metrics.text-label;
-            font-weight: 640;
-            vertical-alignment: center;
-        }
-    }
 
     // The grid.
     // Widened by the ring's room on every side, so a focused poster on the
@@ -117,20 +87,150 @@ export component Library inherits Rectangle {
                 x: Math.mod(i, columns) * cell-w;
                 y: Math.floor(i / columns) * cell-h;
                 item: item;
-                focused: !on-tabs && i == index;
+                // One focus on the panel: not while the remote is on the actions.
+                focused: !on-tabs && !on-actions && i == index;
             }
         }
     }
 
-    // The record of whatever the remote is on.
-    if title != "": TitlePreview {
+    // The record of whatever the remote is on, and what can be done with it.
+    if title != "": VerticalLayout {
         x: root.width - Metrics.gutter - panel-w;
         y: grid-top;
         width: panel-w;
-        art: root.art;
-        title: root.title;
-        facts: root.facts;
-        summary: root.summary;
-        genres: root.genres;
+        spacing: Metrics.root-font * 0.8;
+        alignment: start;
+
+        TitlePreview {
+            art: root.art;
+            title: root.title;
+            facts: root.facts;
+            summary: root.summary;
+            genres: root.genres;
+        }
+
+        VerticalLayout {
+            spacing: Metrics.root-font * 0.3;
+            for label[i] in actions: Rectangle {
+                property <bool> focused: on-actions && i == action;
+                height: Metrics.root-font * 2.3;
+                border-radius: Theme.radius * 0.6;
+                background: focused ? Theme.focus-fill : #ffffff0d;
+                border-width: focused ? 2px : 0px;
+                border-color: Theme.focus-ring;
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                Text {
+                    x: Metrics.root-font * 0.9;
+                    width: parent.width - Metrics.root-font * 1.8;
+                    height: 100%;
+                    text: label;
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: Metrics.text-meta * 0.9;
+                    font-weight: 650;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+
+    // The sections, last in the file so the order's list is drawn over the grid.
+    HorizontalLayout {
+        x: Metrics.gutter;
+        y: Metrics.topbar;
+        width: root.width - Metrics.gutter * 2;
+        height: tabs-h;
+        spacing: Metrics.root-font * 0.5;
+        alignment: start;
+
+        for label[i] in tabs: Rectangle {
+            property <bool> chosen: i == tab;
+            property <bool> focused: on-tabs && !on-sort && chosen;
+            width: caption.preferred-width + Metrics.root-font * 2.0;
+            border-radius: Theme.radius * 0.8;
+            background: focused ? Theme.focus-fill : (chosen ? #ffffff16 : transparent);
+            border-width: focused ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : (chosen ? Theme.line : transparent);
+
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            caption := Text {
+                text: label;
+                color: focused ? #0a0c10 : (chosen ? Theme.text : Theme.muted);
+                font-size: Metrics.root-font * 1.02;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Text {
+            text: notes[tab];
+            color: Theme.dim;
+            font-size: Metrics.text-label;
+            font-weight: 640;
+            vertical-alignment: center;
+        }
+
+        // The order, the reference's dropdown. Only the account's library has
+        // one; the other sections are in the order they come in.
+        sort-chip := Rectangle {
+            property <bool> focused: on-tabs && on-sort;
+            width: sort-words.preferred-width + Metrics.root-font * 2.0;
+            opacity: sortable ? 1.0 : 0.35;
+            border-radius: Theme.radius * 0.8;
+            background: focused ? Theme.focus-fill : #ffffff10;
+            border-width: focused ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : #ffffff1a;
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            sort-words := Text {
+                width: 100%;
+                height: 100%;
+                text: "Sıra: " + sort + "  ▾";
+                color: sort-chip.focused ? #0a0c10 : Theme.text;
+                font-size: Metrics.root-font * 0.92;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+            }
+
+            if sort-open >= 0: Rectangle {
+                property <length> line-h: Metrics.root-font * 2.3;
+                x: parent.width - self.width;
+                y: parent.height + Metrics.root-font * 0.3;
+                width: max(parent.width, Metrics.root-font * 14);
+                height: sorts.length * line-h + Metrics.root-font * 0.8;
+                border-radius: Theme.radius * 0.7;
+                background: #141a29;
+                border-width: 1px;
+                border-color: #ffffff1f;
+
+                for option[k] in sorts: Rectangle {
+                    x: Metrics.root-font * 0.4;
+                    y: Metrics.root-font * 0.4 + k * line-h;
+                    width: parent.width - Metrics.root-font * 0.8;
+                    height: line-h;
+                    border-radius: Theme.radius * 0.5;
+                    background: k == sort-open ? #ffffff26 : transparent;
+
+                    Text {
+                        x: Metrics.root-font * 0.7;
+                        width: parent.width - Metrics.root-font * 1.4;
+                        height: 100%;
+                        text: (option == sort ? "✓  " : "") + option;
+                        color: Theme.text;
+                        font-size: Metrics.text-meta * 0.92;
+                        font-weight: option == sort ? 750 : 560;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
     }
 }

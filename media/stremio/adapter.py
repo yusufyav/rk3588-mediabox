@@ -125,6 +125,10 @@ def _library_preview(record: Any) -> dict[str, Any] | None:
             "timeOffset": _as_millis(state.get("timeOffset")),
             "duration": _as_millis(state.get("duration")),
             "lastWatched": _text(state.get("lastWatched")),
+            # What the reference's library sorts by: how often, and since when.
+            "timesWatched": _as_millis(state.get("timesWatched")) or 0,
+            "added": _text(record.get("_ctime")),
+            "inLibrary": not bool(record.get("removed")) and not bool(record.get("temp")),
         },
     }
 

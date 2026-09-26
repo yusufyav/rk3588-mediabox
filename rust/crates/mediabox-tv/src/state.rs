@@ -235,6 +235,9 @@ pub struct Item {
     pub continuing: bool,
     pub local: bool,
     pub hue: f32,
+    /// The account's record of the title, for a title from the account's
+    /// library: what the library sorts by and what its actions depend on.
+    pub record: Option<crate::model::WatchState>,
 }
 
 /// An addon that has no answer sends an empty string as often as it omits the
@@ -267,6 +270,7 @@ impl Item {
             continuing: false,
             local: false,
             hue: 0.0,
+            record: None,
         }
     }
 
@@ -286,6 +290,7 @@ impl Item {
             progress,
             continuing: false,
             local: preview.is_library(),
+            record: preview.state.clone(),
         }
     }
 }

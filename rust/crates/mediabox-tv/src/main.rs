@@ -180,6 +180,10 @@ struct App {
     /// A shelf entry from the account's library carries a name and a poster
     /// and little else.
     hero_meta: std::collections::HashMap<String, model::Meta>,
+    /// The account's library as the media core last listed it, all of it: the
+    /// library screen is built from this, not from the shelves, which carry
+    /// only the first few titles of it.
+    library_listing: Option<model::LibraryListing>,
     /// The title the film playing here belongs to, and what the account has
     /// been told about it.
     watching: Option<Watching>,
@@ -1036,11 +1040,30 @@ impl App {
     // ------------------------------------------------------------ the library
 
     fn open_library(&mut self) {
-        self.library.build(&self.shelves);
+        self.build_library();
         self.open(Route::Library);
     }
 
+    fn build_library(&mut self) {
+        let Some(listing) = self.library_listing.as_ref() else {
+            self.library.build(&[], &[], &[]);
+            return;
+        };
+        let account: Vec<state::Item> = listing.stremio.iter().map(state::Item::from_preview).collect();
+        let continuing: Vec<state::Item> = listing
+            .continue_watching
+            .iter()
+            .map(|preview| state::Item {
+                continuing: true,
+                ..state::Item::from_preview(preview)
+            })
+            .collect();
+        let local: Vec<state::Item> = listing.items.iter().map(state::Item::from_preview).collect();
+        self.library.build(&account, &continuing, &local);
+    }
+
     fn act_on_library(&mut self, intent: Intent) {
+        use screens::library::{Act, Zone};
         match intent {
             Intent::Move(dx, dy) => {
                 if self.library.step(dx, dy) {
@@ -1049,26 +1072,97 @@ impl App {
                 }
             }
             Intent::Select => {
-                if self.library.on_tabs {
-                    if self.library.step(0, 1) {
-                        self.paint();
-                    }
+                if self.library.sort_open.is_some() {
+                    self.library.pick_sort();
+                    self.paint();
                     return;
                 }
-                let item = self.library.focused().cloned();
-                if let Some(item) = item {
-                    self.open_detail_for(&item);
+                match self.library.zone {
+                    Zone::Tabs => {
+                        let changed = if self.library.on_sort() {
+                            self.library.open_sort()
+                        } else {
+                            self.library.step(0, 1)
+                        };
+                        if changed {
+                            self.paint();
+                        }
+                    }
+                    Zone::Grid => {
+                        let item = self.library.focused().cloned();
+                        if let Some(item) = item {
+                            self.open_detail_for(&item);
+                        }
+                    }
+                    Zone::Actions => {
+                        let (Some(act), Some(item)) =
+                            (self.library.focused_act(), self.library.focused().cloned())
+                        else {
+                            return;
+                        };
+                        let mut change = serde_json::json!({
+                            "type": item.kind,
+                            "id": item.id,
+                            "name": item.title,
+                            "poster": item.poster,
+                        });
+                        match act {
+                            Act::Open => self.open_detail_for(&item),
+                            Act::MarkWatched | Act::MarkUnwatched => {
+                                change["watched"] = serde_json::json!(act == Act::MarkWatched);
+                                spawn_library_change("watched", item.id.clone(), change);
+                            }
+                            Act::RemoveFromLibrary => {
+                                change["inLibrary"] = serde_json::json!(false);
+                                self.library.drop_from(&item.id, true, false);
+                                spawn_library_change("library", item.id.clone(), change);
+                                self.paint();
+                            }
+                            Act::RemoveFromContinuing => {
+                                self.library.drop_from(&item.id, false, true);
+                                spawn_library_change("rewind", item.id.clone(), change);
+                                self.paint();
+                            }
+                        }
+                    }
                 }
             }
             Intent::Dismiss => {
-                if !self.library.on_tabs {
-                    self.library.on_tabs = true;
+                // One press, one step: the list, the actions, the grid, out.
+                if self.library.close_sort() {
+                    self.paint();
+                } else if self.library.zone == Zone::Actions {
+                    self.library.zone = Zone::Grid;
+                    self.paint();
+                } else if self.library.zone == Zone::Grid {
+                    self.library.zone = Zone::Tabs;
+                    self.library.tab_focus = self.library.tab;
                     self.paint();
                 } else {
                     self.back();
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The account after a change from the library screen: read again, so the
+    /// grid, the shelves and "Devam Et" all say what the account now says.
+    fn library_changed(&mut self, answer: Result<model::TitleState, String>) {
+        if let Err(why) = answer {
+            self.say(format!("Stremio hesabına yazılamadı — {why}"));
+        }
+        spawn_library_reload();
+        if self.route() == Route::Library {
+            self.paint();
+        }
+    }
+
+    fn library_reloaded(&mut self, listing: model::LibraryListing) {
+        self.library_listing = Some(listing);
+        self.build_library();
+        if self.route() == Route::Library {
+            self.paint();
         }
     }
 
@@ -2664,6 +2758,9 @@ impl App {
     ) -> bool {
         let rows = home.unwrap_or(model::HomeRows { rows: Vec::new() });
         let shelves = state::shelves_from(&rows, library.as_ref());
+        if library.is_some() {
+            self.library_listing = library.clone();
+        }
 
         if shelves.is_empty() {
             return false;
@@ -2698,7 +2795,7 @@ impl App {
         }
 
         self.shelves = shelves;
-        self.library.build(&self.shelves);
+        self.build_library();
 
         self.media.set_shelves(self.shelves.clone());
 
@@ -2898,25 +2995,29 @@ impl App {
     }
 
     fn paint_library(&mut self, window: &MediaBoxWindow) {
-        window.set_library_tabs(strings(
-            self.library
-                .sections
-                .iter()
-                .map(|section| section.title.clone()),
-        ));
-        window.set_library_notes(strings(
-            self.library
-                .sections
-                .iter()
-                .map(|section| section.note.clone()),
-        ));
-        window.set_library_tab(self.library.tab as i32);
-        window.set_library_on_tabs(self.library.on_tabs);
-        window.set_library_index(self.library.index() as i32);
+        use screens::library::{Zone, SORTS};
+        let library = &self.library;
+        window.set_library_tabs(strings(library.sections.iter().map(|s| s.title.clone())));
+        window.set_library_notes(strings(library.sections.iter().map(|s| s.note.clone())));
+        window.set_library_tab(library.tab as i32);
+        window.set_library_on_tabs(library.zone == Zone::Tabs);
+        window.set_library_on_sort(library.on_sort());
+        window.set_library_sortable(library.sortable());
+        window.set_library_sort(library.sort.label().into());
+        window.set_library_sorts(strings(SORTS.iter().map(|s| s.label().to_string())));
+        window.set_library_sort_open(library.sort_open.map(|i| i as i32).unwrap_or(-1));
+        window.set_library_actions(strings(library.actions().iter().map(|a| a.label().to_string())));
+        window.set_library_on_actions(library.zone == Zone::Actions);
+        window.set_library_action(library.action as i32);
+        window.set_library_index(library.index() as i32);
         window.set_library_columns(screens::library::COLUMNS as i32);
 
-        let items = self.library.items().to_vec();
-        let tiles = posters(&mut self.images, &items);
+        let tiles = grid_posters(
+            &mut self.images,
+            self.library.items(),
+            self.library.index(),
+            screens::library::COLUMNS,
+        );
         window.set_library_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
 
         let focused = self.library.focused().cloned();
@@ -4040,6 +4141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         handing_over: false,
         here: None,
         hero_meta: std::collections::HashMap::new(),
+        library_listing: None,
         watching: None,
         detail_backdrop: None,
         notice_until: None,
@@ -4379,6 +4481,29 @@ fn spawn_discover_page(page: screens::discover::Request) {
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.discover_page_arrived(generation, answer));
         });
+    });
+}
+
+/// A change made from the library screen.
+fn spawn_library_change(action: &'static str, _id: String, change: serde_json::Value) {
+    detached("mediabox-tv-library-change", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.account(action, change).await.map_err(|e| e.to_string());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.library_changed(answer));
+        });
+    });
+}
+
+/// The account's library, read again.
+fn spawn_library_reload() {
+    detached("mediabox-tv-library", async move {
+        let client = rpc::Client::new(socket_path());
+        if let Ok(listing) = client.library().await {
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.library_reloaded(listing));
+            });
+        }
     });
 }
 
