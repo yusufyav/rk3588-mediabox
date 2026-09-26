@@ -564,6 +564,7 @@ fn to_request(command: &Command) -> Request {
                 id: id.clone(),
                 addon_id: addon.clone(),
                 limit: *limit,
+                extra: Default::default(),
             },
             MediaCommand::Meta { media_type, id } => Request::MediaMeta {
                 media_type: media_type.clone(),

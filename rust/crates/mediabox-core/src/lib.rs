@@ -1365,7 +1365,13 @@ pub enum Request {
         addon_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
+        /// The catalogue's extras: a genre, a year, and `skip` for the next
+        /// page. Empty is the catalogue as it opens.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        extra: std::collections::BTreeMap<String, String>,
     },
+    /// The catalogues Discover can browse, and the filters each one takes.
+    MediaDiscover,
     MediaMeta {
         media_type: String,
         id: String,

@@ -161,6 +161,29 @@ impl Client {
             .await
     }
 
+    pub async fn discover(&self) -> Result<crate::model::DiscoverCatalogs> {
+        self.typed(json!({"command": "media_discover"})).await
+    }
+
+    /// One page of a catalogue, with its extras: the filters chosen and, past
+    /// the first page, `skip`.
+    pub async fn catalog(
+        &self,
+        kind: &str,
+        id: &str,
+        addon_id: &str,
+        extra: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::model::CatalogItems> {
+        self.typed(json!({
+            "command": "media_catalog",
+            "media_type": kind,
+            "id": id,
+            "addon_id": addon_id,
+            "extra": extra,
+        }))
+        .await
+    }
+
     pub async fn suggest(&self, query: &str) -> Result<crate::model::Suggestions> {
         self.typed(json!({"command": "media_suggest", "query": query}))
             .await

@@ -21,10 +21,19 @@ class AddonCatalog:
     #: Extra properties the catalogue accepts, e.g. `search`, `genre`, `skip`.
     extra_supported: tuple[str, ...] = ()
     extra_required: tuple[str, ...] = ()
+    #: The values an extra can take, where the manifest lists them: the
+    #: genres a catalogue can be filtered by, the years, and so on.
+    extra_options: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @property
     def supports_search(self) -> bool:
         return "search" in self.extra_supported
+
+    def options_for(self, name: str) -> tuple[str, ...]:
+        for extra_name, options in self.extra_options:
+            if extra_name == name:
+                return options
+        return ()
 
     def as_dict(self) -> dict[str, Any]:
         return {

@@ -10,6 +10,7 @@ pub mod cooling;
 pub mod ethernet;
 pub mod output;
 pub mod diagnostics;
+pub mod discover;
 pub mod library;
 pub mod media;
 pub mod now_playing;

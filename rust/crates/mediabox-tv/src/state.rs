@@ -52,16 +52,20 @@ pub const BACKDROP_WIDTH: u32 = 1920;
 /// network, and the time. None of those is focusable: they are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Nav {
+    Discover,
     Search,
     Library,
     Settings,
 }
 
-pub const NAV: [Nav; 2] = [Nav::Search, Nav::Library];
+/// The catalogue's bar: the reference's Discover, then search, then the
+/// library.
+pub const NAV: [Nav; 3] = [Nav::Discover, Nav::Search, Nav::Library];
 
 impl Nav {
     pub fn label(self) -> &'static str {
         match self {
+            Nav::Discover => "Keşfet",
             Nav::Search => "Ara",
             Nav::Library => "Kitaplık",
             Nav::Settings => "Ayarlar",

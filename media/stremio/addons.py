@@ -97,6 +97,7 @@ def parse_manifest(transport_url: str, manifest: dict[str, Any]) -> Addon:
             continue
         supported = list(_strings(entry.get("extraSupported")))
         required = list(_strings(entry.get("extraRequired")))
+        options: list[tuple[str, tuple[str, ...]]] = []
         for extra in entry.get("extra", []) or []:
             if isinstance(extra, dict):
                 name = _text(extra.get("name"))
@@ -105,6 +106,9 @@ def parse_manifest(transport_url: str, manifest: dict[str, Any]) -> Addon:
                 supported.append(name)
                 if extra.get("isRequired"):
                     required.append(name)
+                values = _strings(extra.get("options"))
+                if values:
+                    options.append((name, tuple(dict.fromkeys(values))))
         catalogs.append(
             AddonCatalog(
                 type=catalog_type,
@@ -112,6 +116,7 @@ def parse_manifest(transport_url: str, manifest: dict[str, Any]) -> Addon:
                 name=_text(entry.get("name")),
                 extra_supported=tuple(dict.fromkeys(supported)),
                 extra_required=tuple(dict.fromkeys(required)),
+                extra_options=tuple(options),
             )
         )
 

@@ -144,9 +144,10 @@ mod tests {
         assert_eq!(media.row(), BAR_ROW + 2);
     }
 
-    /// Searching is inside the catalogue, on its own bar, above the shelves.
+    /// Discover, searching and the library are inside the catalogue, on its
+    /// own bar, above the shelves -- in the reference's order.
     #[test]
-    fn the_bar_is_above_the_shelves_and_carries_search() {
+    fn the_bar_is_above_the_shelves_and_carries_discover_search_and_the_library() {
         let mut media = Media::new();
         media.set_shelves(vec![shelf("a", 3)]);
         assert!(media.focused_nav().is_none());
@@ -154,6 +155,8 @@ mod tests {
             media.step(0, -1);
         }
         assert_eq!(media.row(), 0);
+        assert_eq!(media.focused_nav(), Some(Nav::Discover));
+        assert!(media.step(1, 0));
         assert_eq!(media.focused_nav(), Some(Nav::Search));
         assert!(media.step(1, 0));
         assert_eq!(media.focused_nav(), Some(Nav::Library));

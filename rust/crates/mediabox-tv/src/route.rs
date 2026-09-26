@@ -15,6 +15,8 @@ pub enum Route {
     /// The catalogue, behind the "Filmler ve Diziler" tile.
     Media,
     Search,
+    /// Every installed catalogue, browsed with its own filters.
+    Discover,
     Library,
     Detail,
     NowPlaying,
@@ -39,6 +41,7 @@ impl Route {
             Route::Home => "home",
             Route::Media => "media",
             Route::Search => "search",
+            Route::Discover => "discover",
             Route::Library => "library",
             Route::Detail => "detail",
             Route::NowPlaying => "now-playing",
@@ -55,6 +58,7 @@ impl Route {
             "home" => Route::Home,
             "media" => Route::Media,
             "search" => Route::Search,
+            "discover" => Route::Discover,
             "library" => Route::Library,
             "detail" => Route::Detail,
             "now-playing" => Route::NowPlaying,

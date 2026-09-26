@@ -525,6 +525,51 @@ class HeadlessStremio:
             )
         return rows
 
+    def discover_catalogs(self) -> list[dict[str, Any]]:
+        """What Discover can browse: stremio-core's `CatalogWithFilters` selectables.
+
+        Every installed catalogue whose required extras can all be given a
+        value -- the first of their options, which is the default -- in the
+        order the addons are installed. A catalogue that requires an extra
+        with no options (a search catalogue needs a query) is not one that can
+        be browsed. Each carries the extras that can be chosen: those with
+        options, less `skip`, which is the paging and not a filter.
+        """
+        found: list[dict[str, Any]] = []
+        for addon in self.addons():
+            for catalog in addon.catalogs:
+                defaults: dict[str, str] = {}
+                browsable = True
+                for name in catalog.extra_required:
+                    options = catalog.options_for(name)
+                    if not options:
+                        browsable = False
+                        break
+                    defaults[name] = options[0]
+                if not browsable:
+                    continue
+                found.append(
+                    {
+                        "addonId": addon.id,
+                        "addonName": addon.name,
+                        "type": catalog.type,
+                        "id": catalog.id,
+                        "name": catalog.name or catalog.id,
+                        "pages": "skip" in catalog.extra_supported,
+                        "defaults": defaults,
+                        "extra": [
+                            {
+                                "name": name,
+                                "required": name in catalog.extra_required,
+                                "options": list(options),
+                            }
+                            for name, options in catalog.extra_options
+                            if name != "skip" and options
+                        ],
+                    }
+                )
+        return found
+
     def suggest(self, query: str) -> list[dict[str, Any]]:
         """What the search box offers while it is being typed into; no addon is asked."""
         if not isinstance(query, str):

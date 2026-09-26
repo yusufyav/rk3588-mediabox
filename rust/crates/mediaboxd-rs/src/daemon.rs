@@ -182,11 +182,13 @@ impl AppState {
                 id,
                 addon_id,
                 limit,
+                extra,
             } => media_result(
                 self.media
-                    .catalog(&media_type, &id, addon_id.as_deref(), limit)
+                    .catalog(&media_type, &id, addon_id.as_deref(), limit, &extra)
                     .await,
             ),
+            Request::MediaDiscover => media_result(self.media.discover().await),
             Request::MediaMeta { media_type, id } => {
                 media_result(self.media.meta(&media_type, &id).await)
             }

@@ -3,6 +3,7 @@ import { Home } from "home.slint";
 import { Media } from "media.slint";
 import { Search, SearchEntry } from "search.slint";
 import { Library } from "library.slint";
+import { Discover, DiscoverFilter } from "discover.slint";
 import { Detail, SourceRow, EpisodeRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
 import { Player, MenuRow } from "player.slint";
@@ -24,7 +25,7 @@ export {
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
     OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, SearchEntry,
-    EpisodeRow,
+    EpisodeRow, DiscoverFilter,
 }
 
 // What the television shows before there is anything to show.
@@ -104,6 +105,18 @@ export component MediaBoxWindow inherits Window {
     in property <image> media-logo;
     in property <string> media-facts;
     in property <string> media-summary;
+
+    // ---- discover
+    in property <[DiscoverFilter]> discover-filters;
+    in property <int> discover-filter;
+    in property <bool> discover-on-filters;
+    in property <int> discover-picker: -1;
+    in property <[PosterItem]> discover-items;
+    in property <int> discover-index;
+    in property <int> discover-columns: 5;
+    in property <bool> discover-loading;
+    in property <bool> discover-ended;
+    in property <string> discover-note;
 
     // ---- search
     in property <string> search-query;
@@ -358,6 +371,26 @@ export component MediaBoxWindow inherits Window {
             rail-col: root.search-rail-col;
         }
 
+        if screen == "discover": Discover {
+            width: 100%;
+            height: 100%;
+            filters: root.discover-filters;
+            filter: root.discover-filter;
+            on-filters: root.discover-on-filters;
+            picker: root.discover-picker;
+            items: root.discover-items;
+            index: root.discover-index;
+            columns: root.discover-columns;
+            loading: root.discover-loading;
+            ended: root.discover-ended;
+            note: root.discover-note;
+            art: root.library-art;
+            title: root.library-title;
+            facts: root.library-facts;
+            summary: root.library-summary;
+            genres: root.library-genres;
+        }
+
         if screen == "library": Library {
             width: 100%;
             height: 100%;
@@ -544,6 +577,7 @@ export component MediaBoxWindow inherits Window {
             vitals: root.vitals;
             heading: screen == "media" ? "Filmler ve Diziler"
                 : screen == "search" ? "Ara"
+                : screen == "discover" ? "Keşfet"
                 : screen == "library" ? "Kitaplık"
                 : screen == "account" ? "Hesap"
                 : screen == "wifi" ? "Wi-Fi"

@@ -64,6 +64,7 @@ impl MediaClient {
         id: &str,
         addon_id: Option<&str>,
         limit: Option<u32>,
+        extra: &std::collections::BTreeMap<String, String>,
     ) -> Result<Value, MediaError> {
         let limit = limit.map(|value| value.to_string());
         let mut query: Vec<(&str, &str)> = Vec::new();
@@ -72,6 +73,12 @@ impl MediaClient {
         }
         if let Some(limit) = limit.as_deref() {
             query.push(("limit", limit));
+        }
+        // The media core reads every other parameter as an extra.
+        for (name, value) in extra {
+            if name != "addon" && name != "limit" {
+                query.push((name.as_str(), value.as_str()));
+            }
         }
         self.get(&["media", "catalog", media_type, id], &query)
             .await
@@ -136,6 +143,10 @@ impl MediaClient {
 
     pub async fn search(&self, query: &str) -> Result<Value, MediaError> {
         self.get(&["media", "search"], &[("q", query)]).await
+    }
+
+    pub async fn discover(&self) -> Result<Value, MediaError> {
+        self.get(&["media", "discover"], &[]).await
     }
 
     pub async fn suggest(&self, query: &str) -> Result<Value, MediaError> {

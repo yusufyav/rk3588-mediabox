@@ -111,6 +111,7 @@ struct App {
     loading: bool,
     media: screens::media::Media,
     search: screens::search::Search,
+    discover: screens::discover::Discover,
     library: screens::library::Library,
     settings: screens::settings::Settings,
     account: screens::account::Account,
@@ -234,6 +235,7 @@ impl App {
                 Route::Home | Route::Boot => self.act_on_home(intent),
                 Route::Media => self.act_on_media(intent),
                 Route::Search => self.act_on_search(intent),
+                Route::Discover => self.act_on_discover(intent),
                 Route::Library => self.act_on_library(intent),
                 Route::Detail => self.act_on_detail(intent),
                 Route::NowPlaying => self.act_on_now_playing(intent),
@@ -413,6 +415,12 @@ impl App {
     /// One of this interface's own screens, from wherever it was chosen.
     fn open_screen(&mut self, nav: state::Nav) {
         match nav {
+            state::Nav::Discover => {
+                self.open(Route::Discover);
+                // The catalogues are asked for every time, as the catalogue
+                // screen's are; what is shown stays until they answer.
+                spawn_discover_catalogs();
+            }
             state::Nav::Search => {
                 // The index the box suggests from is fetched by the media core
                 // on first use; asking for nothing now means it is there by the
@@ -718,6 +726,7 @@ impl App {
     fn want_hero(&mut self) {
         let item = match self.route() {
             Route::Library => self.library.focused(),
+            Route::Discover => self.discover.focused(),
             _ => self.media.focused(),
         };
         let Some(item) = item else {
@@ -742,6 +751,7 @@ impl App {
         let focused = match self.route() {
             Route::Media => self.media.focused(),
             Route::Library => self.library.focused(),
+            Route::Discover => self.discover.focused(),
             _ => None,
         }
         .is_some_and(|item| item.id == meta.id);
@@ -853,6 +863,173 @@ impl App {
         self.search.take_suggestions(generation, &query, found);
         if self.route() == Route::Search {
             self.paint();
+        }
+    }
+
+    // ------------------------------------------------------------- discover
+
+    fn act_on_discover(&mut self, intent: Intent) {
+        use screens::discover::Zone;
+        match intent {
+            Intent::Move(dx, dy) => {
+                let (moved, page) = self.discover.step(dx, dy);
+                if let Some(page) = page {
+                    spawn_discover_page(page);
+                }
+                if moved {
+                    self.want_hero();
+                    self.paint();
+                }
+            }
+            Intent::Select => {
+                if self.discover.picker.is_some() {
+                    if let Some(page) = self.discover.pick() {
+                        spawn_discover_page(page);
+                    }
+                    self.paint();
+                    return;
+                }
+                if self.discover.zone == Zone::Filters {
+                    if self.discover.open_picker() {
+                        self.paint();
+                    }
+                    return;
+                }
+                // A page that failed is tried again from wherever the remote is.
+                if self.discover.error.is_some() && self.discover.items.is_empty() {
+                    if let Some(page) = self.discover.retry() {
+                        spawn_discover_page(page);
+                        self.paint();
+                    }
+                    return;
+                }
+                let item = self.discover.focused().cloned();
+                if let Some(item) = item {
+                    self.open_detail_for(&item);
+                }
+            }
+            Intent::Dismiss => {
+                // One press, one step: the list, then the filters, then out.
+                if self.discover.close_picker() {
+                    self.paint();
+                } else if self.discover.zone == Zone::Grid && !self.discover.items.is_empty() {
+                    self.discover.zone = Zone::Filters;
+                    self.paint();
+                } else {
+                    self.back();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn discover_catalogs_arrived(&mut self, answer: Result<Vec<model::DiscoverCatalog>, String>) {
+        match answer {
+            Ok(catalogs) => {
+                if let Some(page) = self.discover.take_catalogs(catalogs) {
+                    spawn_discover_page(page);
+                }
+            }
+            Err(why) => {
+                if self.discover.catalogs.is_empty() {
+                    self.discover.error = Some(why);
+                }
+            }
+        }
+        if self.route() == Route::Discover {
+            self.paint();
+        }
+    }
+
+    fn discover_page_arrived(&mut self, generation: u64, answer: Result<Vec<state::Item>, String>) {
+        match answer {
+            Ok(items) => self.discover.take_page(generation, items),
+            Err(why) => self.discover.fail(generation, &why),
+        }
+        if self.route() == Route::Discover {
+            self.want_hero();
+            self.paint();
+        }
+    }
+
+    fn paint_discover(&mut self, window: &MediaBoxWindow) {
+        use screens::discover::Zone;
+        let discover = &self.discover;
+        let filters: Vec<DiscoverFilter> = discover
+            .filters()
+            .into_iter()
+            .map(|filter| DiscoverFilter {
+                value: filter.value().into(),
+                label: filter.label.into(),
+                selected: filter.selected as i32,
+                options: strings(filter.options.into_iter()),
+            })
+            .collect();
+        window.set_discover_filters(slint::ModelRc::new(slint::VecModel::from(filters)));
+        window.set_discover_filter(discover.filter as i32);
+        window.set_discover_on_filters(discover.zone == Zone::Filters);
+        window.set_discover_picker(discover.picker.map(|p| p as i32).unwrap_or(-1));
+        window.set_discover_index(discover.index as i32);
+        window.set_discover_columns(screens::discover::COLUMNS as i32);
+        window.set_discover_loading(discover.loading);
+        window.set_discover_ended(discover.ended);
+        let note = match (&discover.error, discover.ended, discover.items.is_empty()) {
+            (Some(why), _, true) => format!("Katalog yüklenemedi — {why}. Tamam ile yeniden deneyin."),
+            (Some(why), _, false) => format!("Sonraki sayfa yüklenemedi — {why}"),
+            (None, true, true) => "Bu filtrede başlık yok. Başka bir tür ya da katalog seçin.".into(),
+            (None, true, false) => "Katalog sonu".into(),
+            _ if discover.catalogs.is_empty() => "Kataloglar yükleniyor…".into(),
+            _ => String::new(),
+        };
+        window.set_discover_note(note.into());
+        let tiles = grid_posters(
+            &mut self.images,
+            &self.discover.items,
+            self.discover.index,
+            screens::discover::COLUMNS,
+        );
+        window.set_discover_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
+
+        let focused = self.discover.focused().cloned();
+        self.paint_preview(window, focused.as_ref());
+    }
+
+    /// The record beside a grid: the library's and Discover's.
+    fn paint_preview(&mut self, window: &MediaBoxWindow, focused: Option<&state::Item>) {
+        if let Some(url) = focused.and_then(|item| item.background.clone().or_else(|| item.poster.clone())) {
+            let key = images::Key::new(&url, state::BACKDROP_WIDTH);
+            self.images.want(&key);
+            if let Some(art) = self.images.get(&key) {
+                window.set_library_art(art);
+            }
+        }
+        match focused {
+            Some(item) => {
+                let meta = self.hero_meta.get(&item.id);
+                window.set_library_title(item.title.clone().into());
+                window.set_library_facts(hero_facts(item, meta).into());
+                window.set_library_summary(
+                    item.summary
+                        .clone()
+                        .or_else(|| meta.and_then(|m| m.description.clone()))
+                        .unwrap_or_default()
+                        .into(),
+                );
+                let genres = if item.genres.is_empty() {
+                    meta.map(|m| m.genres.clone()).unwrap_or_default()
+                } else {
+                    item.genres.clone()
+                };
+                window.set_library_genres(strings(
+                    genres.iter().take(4).map(|g| detail::genre_in_turkish(g)),
+                ));
+            }
+            None => {
+                window.set_library_title("".into());
+                window.set_library_facts("".into());
+                window.set_library_summary("".into());
+                window.set_library_genres(strings(std::iter::empty()));
+            }
         }
     }
 
@@ -2606,6 +2783,7 @@ impl App {
             Route::Home => self.paint_home(&window),
             Route::Media => self.paint_media(&window),
             Route::Search => self.paint_search(&window),
+            Route::Discover => self.paint_discover(&window),
             Route::Library => self.paint_library(&window),
             Route::Detail => self.paint_detail(&window),
             Route::NowPlaying => self.paint_now_playing(&window),
@@ -2742,38 +2920,7 @@ impl App {
         window.set_library_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
 
         let focused = self.library.focused().cloned();
-        if let Some(url) = focused
-            .as_ref()
-            .and_then(|item| item.background.clone().or_else(|| item.poster.clone()))
-        {
-            let key = images::Key::new(&url, state::BACKDROP_WIDTH);
-            self.images.want(&key);
-            if let Some(art) = self.images.get(&key) {
-                window.set_library_art(art);
-            }
-        }
-
-        match self.library.focused() {
-            Some(item) => {
-                window.set_library_title(item.title.clone().into());
-                let meta = self.hero_meta.get(&item.id);
-                window.set_library_facts(hero_facts(item, meta).into());
-                window.set_library_summary(
-                    item.summary
-                        .clone()
-                        .or_else(|| meta.and_then(|m| m.description.clone()))
-                        .unwrap_or_default()
-                        .into(),
-                );
-                window.set_library_genres(strings(item.genres.iter().take(4).cloned()));
-            }
-            None => {
-                window.set_library_title("".into());
-                window.set_library_facts("".into());
-                window.set_library_summary("".into());
-                window.set_library_genres(strings(std::iter::empty()));
-            }
-        }
+        self.paint_preview(window, focused.as_ref());
     }
 
     fn paint_detail(&mut self, window: &MediaBoxWindow) {
@@ -3640,6 +3787,43 @@ impl App {
 /// all of it is on the panel. The shelves have their own window instead — a
 /// shelf is longer than the television, and decoding the whole catalogue to
 /// draw eight of it is how an image cache becomes the resident size.
+/// A grid's posters, with artwork only for the rows around the remote: a
+/// catalogue browsed for long enough is hundreds of titles, and all of their
+/// pictures on the GPU at once is the catalogue on the GPU.
+fn grid_posters(
+    images: &mut images::ImageManager,
+    items: &[state::Item],
+    focus: usize,
+    columns: usize,
+) -> Vec<PosterItem> {
+    let row = focus / columns.max(1);
+    let near = |index: usize| (index / columns.max(1)).abs_diff(row) <= 3;
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let art = match item.poster.as_deref().filter(|_| near(index)) {
+                Some(url) => {
+                    let key = images::Key::new(url, state::POSTER_WIDTH);
+                    images.want(&key);
+                    images.get(&key).unwrap_or_default()
+                }
+                None => slint::Image::default(),
+            };
+            PosterItem {
+                id: item.id.clone().into(),
+                kind: item.kind.clone().into(),
+                title: item.title.clone().into(),
+                subtitle: item.year.clone().unwrap_or_default().into(),
+                art,
+                hue: item.hue,
+                progress: item.progress,
+                local: item.local,
+            }
+        })
+        .collect()
+}
+
 fn posters(images: &mut images::ImageManager, items: &[state::Item]) -> Vec<PosterItem> {
     items
         .iter()
@@ -3823,6 +4007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         loading: false,
         media: screens::media::Media::new(),
         search: screens::search::Search::new(),
+        discover: screens::discover::Discover::new(),
         library: screens::library::Library::new(),
         settings: screens::settings::Settings::new(),
         account: screens::account::Account::new(),
@@ -4163,6 +4348,37 @@ fn spawn_detail_load(epoch: u64, kind: String, id: String) {
         if let Ok(watch) = client.watch_state(&kind, &id).await {
             answer(Ok(DetailAnswer::Watch(Box::new(watch))));
         }
+    });
+}
+
+/// The catalogues Discover can browse.
+fn spawn_discover_catalogs() {
+    detached("mediabox-tv-discover", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client
+            .discover()
+            .await
+            .map(|found| found.catalogs)
+            .map_err(|e| e.to_string());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.discover_catalogs_arrived(answer));
+        });
+    });
+}
+
+/// One page of the catalogue Discover is showing.
+fn spawn_discover_page(page: screens::discover::Request) {
+    detached("mediabox-tv-discover-page", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client
+            .catalog(&page.kind, &page.id, &page.addon_id, &page.extra)
+            .await
+            .map(|found| found.items.iter().map(state::Item::from_preview).collect())
+            .map_err(|e| e.to_string());
+        let generation = page.generation;
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.discover_page_arrived(generation, answer));
+        });
     });
 }
 

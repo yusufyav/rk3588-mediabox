@@ -1,0 +1,215 @@
+import { Theme, Metrics } from "theme.slint";
+import { GridPoster, PosterItem, TitlePreview } from "components.slint";
+
+// One of the dropdowns along the top of Discover.
+export struct DiscoverFilter {
+    label: string,
+    value: string,
+    options: [string],
+    selected: int,
+}
+
+// Discover: every installed catalogue, browsed with its own filters.
+//
+// The reference's layout turned for a television: the filters along the top as
+// a row the remote walks, a grid of posters under them, and the record of the
+// focused title beside the grid.
+export component Discover inherits Rectangle {
+    in property <[DiscoverFilter]> filters;
+    in property <int> filter;
+    in property <bool> on-filters;
+    // The open dropdown's highlighted option, or -1.
+    in property <int> picker;
+
+    in property <[PosterItem]> items;
+    in property <int> index;
+    in property <int> columns;
+    in property <bool> loading;
+    in property <bool> ended;
+    // Said in place of the grid, or under it: nothing here, a page that failed.
+    in property <string> note;
+
+    in property <image> art;
+    in property <string> title;
+    in property <string> facts;
+    in property <string> summary;
+    in property <[string]> genres;
+
+    property <length> bar-h: Metrics.root-font * 3.2;
+    property <length> grid-top: Metrics.topbar + bar-h + Metrics.block-gap * 1.2;
+    property <length> cell-w: Metrics.card-w + Metrics.grid-gap;
+    property <length> cell-h: Metrics.card-h + Metrics.text-card * 3.4 + Metrics.grid-gap;
+    property <length> viewport-h: root.height - grid-top;
+    property <length> panel-w: max(240px, min(620px, root.width * 0.28));
+    property <length> grid-w: columns * cell-w;
+    property <int> rows: Math.ceil(items.length / columns) + (loading ? 1 : 0);
+    property <length> scroll: on-filters
+        ? 0px
+        : clamp(Math.floor(index / columns) * cell-h - Metrics.top-inset * 0.4,
+                0px,
+                max(0px, rows * cell-h - viewport-h));
+    property <length> chip-h: bar-h * 0.86;
+
+    background: Theme.bg;
+    clip: true;
+
+    // ---------------------------------------------------------------- the grid
+    Rectangle {
+        x: Metrics.gutter - Metrics.focus-room;
+        y: grid-top - Metrics.focus-room;
+        width: grid-w + Metrics.focus-room * 2;
+        height: viewport-h + Metrics.focus-room;
+        clip: true;
+        background: transparent;
+
+        if items.length == 0: Text {
+            x: Metrics.focus-room;
+            y: Metrics.root-font * 2;
+            width: grid-w;
+            text: loading ? "Katalog yükleniyor…" : note;
+            color: Theme.dim;
+            font-size: Metrics.text-meta;
+            font-weight: 640;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            x: Metrics.focus-room;
+            y: Metrics.focus-room - scroll;
+            width: grid-w;
+            height: max(1px, rows * cell-h);
+            background: transparent;
+
+            animate y { duration: Theme.glide; easing: Theme.ease; }
+
+            for item[i] in items: GridPoster {
+                x: Math.mod(i, columns) * cell-w;
+                y: Math.floor(i / columns) * cell-h;
+                item: item;
+                focused: !on-filters && i == index;
+            }
+
+            // The next page on its way: a row of empty frames where it lands.
+            if loading && items.length > 0: Rectangle {
+                y: Math.ceil(items.length / columns) * cell-h;
+                width: grid-w;
+                height: Metrics.card-h;
+
+                for slot in [0, 1, 2, 3, 4]: Rectangle {
+                    x: slot * cell-w;
+                    width: Metrics.card-w;
+                    height: Metrics.card-h;
+                    border-radius: Theme.radius-art;
+                    background: #ffffff0a;
+                }
+            }
+
+            if !loading && items.length > 0 && note != "": Text {
+                y: Math.ceil(items.length / columns) * cell-h;
+                width: grid-w;
+                text: note;
+                color: Theme.dim;
+                font-size: Metrics.text-meta * 0.9;
+                font-weight: 640;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    // The record of whatever the remote is on.
+    if title != "": TitlePreview {
+        x: root.width - Metrics.gutter - panel-w;
+        y: grid-top;
+        width: panel-w;
+        art: root.art;
+        title: root.title;
+        facts: root.facts;
+        summary: root.summary;
+        genres: root.genres;
+    }
+
+    // ------------------------------------------------------------ the filters
+    // Last in the file, so an open list is drawn over the grid.
+    HorizontalLayout {
+        x: Metrics.gutter;
+        y: Metrics.topbar;
+        height: bar-h;
+        spacing: Metrics.root-font * 0.5;
+        alignment: start;
+
+        for f[i] in filters: Rectangle {
+            property <bool> focused: on-filters && i == filter;
+            y: (parent.height - chip-h) / 2;
+            height: chip-h;
+            width: max(Metrics.root-font * 8, words.preferred-width + Metrics.root-font * 2.4);
+            border-radius: Theme.radius * 0.7;
+            background: focused ? Theme.focus-fill : #ffffff10;
+            border-width: focused ? 2px : 1px;
+            border-color: focused ? Theme.focus-ring : #ffffff1a;
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            words := VerticalLayout {
+                x: Metrics.root-font * 0.9;
+                width: parent.width - Metrics.root-font * 1.8;
+                alignment: center;
+                spacing: 0px;
+
+                Text {
+                    text: f.label;
+                    color: focused ? #3b4250 : Theme.muted;
+                    font-size: Metrics.text-label * 0.78;
+                    font-weight: 700;
+                    letter-spacing: Metrics.text-label * 0.08;
+                }
+                Text {
+                    text: f.value + (f.options.length > 1 ? "  ▾" : "");
+                    color: focused ? #0a0c10 : Theme.text;
+                    font-size: Metrics.text-meta * 0.92;
+                    font-weight: 700;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
+
+            // The open list, under its own filter. Nine lines at most, kept
+            // around the highlighted one.
+            if focused && picker >= 0: Rectangle {
+                property <length> line-h: Metrics.root-font * 2.3;
+                property <int> shown: min(f.options.length, 9);
+                property <int> first: max(0, min(picker - 4, f.options.length - shown));
+                x: 0;
+                y: parent.height + Metrics.root-font * 0.3;
+                width: max(parent.width, Metrics.root-font * 16);
+                height: shown * line-h + Metrics.root-font * 0.8;
+                border-radius: Theme.radius * 0.7;
+                background: #141a29;
+                border-width: 1px;
+                border-color: #ffffff1f;
+                clip: true;
+
+                for option[k] in f.options: Rectangle {
+                    x: Metrics.root-font * 0.4;
+                    y: Metrics.root-font * 0.4 + (k - first) * line-h;
+                    width: parent.width - Metrics.root-font * 0.8;
+                    height: line-h;
+                    visible: k >= first && k < first + shown;
+                    border-radius: Theme.radius * 0.5;
+                    background: k == picker ? #ffffff26 : transparent;
+
+                    Text {
+                        x: Metrics.root-font * 0.7;
+                        width: parent.width - Metrics.root-font * 1.4;
+                        height: 100%;
+                        text: (k == f.selected ? "✓  " : "") + option;
+                        color: Theme.text;
+                        font-size: Metrics.text-meta * 0.92;
+                        font-weight: k == f.selected ? 750 : 560;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -357,6 +357,35 @@ class AdapterTests(unittest.TestCase):
         rows = adapter.search("x")
         self.assertEqual([row.addon_id for row in rows], ["a0", "a1", "a2", "a3"])
 
+    def test_discover_offers_what_can_be_browsed_with_its_filters(self):
+        manifest = {
+            "id": "a",
+            "name": "A",
+            "resources": ["catalog"],
+            "types": ["movie", "series"],
+            "catalogs": [
+                {"type": "movie", "id": "top", "name": "Popular", "extra": [
+                    {"name": "genre", "options": ["Action", "Drama"]},
+                    {"name": "skip"},
+                    {"name": "search"},
+                ]},
+                # Needs a query: not something Discover can browse.
+                {"type": "movie", "id": "find", "extra": [{"name": "search", "isRequired": True}]},
+                # Needs a year, and says which: browsable, on its first one.
+                {"type": "series", "id": "year", "name": "By year", "extra": [
+                    {"name": "genre", "isRequired": True, "options": ["2026", "2025"]},
+                ]},
+            ],
+        }
+        adapter = self._adapter([manifest], {})
+        found = adapter.discover_catalogs()
+        self.assertEqual([(c["type"], c["id"]) for c in found], [("movie", "top"), ("series", "year")])
+        self.assertTrue(found[0]["pages"])
+        self.assertEqual(found[0]["extra"], [{"name": "genre", "required": False, "options": ["Action", "Drama"]}])
+        self.assertEqual(found[0]["defaults"], {})
+        self.assertFalse(found[1]["pages"])
+        self.assertEqual(found[1]["defaults"], {"genre": "2026"})
+
     def test_search_needs_a_query(self):
         adapter = self._adapter([], {})
         for value in ("", "   ", None):

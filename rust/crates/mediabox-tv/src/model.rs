@@ -113,6 +113,44 @@ pub struct CatalogItems {
     pub items: Vec<MetaPreview>,
 }
 
+/// A catalogue Discover can browse, as the media core describes it: the
+/// reference's selectable catalogue, with the filters it takes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DiscoverCatalog {
+    #[serde(rename = "addonId", default)]
+    pub addon_id: String,
+    #[serde(rename = "addonName", default)]
+    pub addon_name: String,
+    #[serde(rename = "type", default = "default_movie")]
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// Whether it pages, with `skip`.
+    #[serde(default)]
+    pub pages: bool,
+    /// The value each required extra opens on.
+    #[serde(default)]
+    pub defaults: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub extra: Vec<DiscoverExtra>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DiscoverExtra {
+    pub name: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DiscoverCatalogs {
+    #[serde(default)]
+    pub catalogs: Vec<DiscoverCatalog>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LibraryListing {
     #[serde(default)]
