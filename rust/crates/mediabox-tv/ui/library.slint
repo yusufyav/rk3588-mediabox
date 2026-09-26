@@ -85,11 +85,13 @@ export component Library inherits Rectangle {
     }
 
     // The grid.
+    // Widened by the ring's room on every side, so a focused poster on the
+    // edge of the grid keeps its whole ring.
     Rectangle {
-        x: Metrics.gutter;
-        y: grid-top;
-        width: grid-w;
-        height: viewport-h;
+        x: Metrics.gutter - Metrics.focus-room;
+        y: grid-top - Metrics.focus-room;
+        width: grid-w + Metrics.focus-room * 2;
+        height: viewport-h + Metrics.focus-room;
         clip: true;
         background: transparent;
 
@@ -103,8 +105,8 @@ export component Library inherits Rectangle {
         }
 
         Rectangle {
-            x: 0;
-            y: -scroll;
+            x: Metrics.focus-room;
+            y: Metrics.focus-room - scroll;
             width: 100%;
             height: max(1px, Math.ceil(items.length / columns) * cell-h);
             background: transparent;

@@ -297,76 +297,109 @@ export component Fallback inherits Rectangle {
 
 // The artwork of one title, with its focus ring. Shared by the shelves and by
 // both grids, so a poster is the same object everywhere in the product.
+//
+// Focus is the reference's, measured off it rather than remembered: the frame
+// does not grow. A white ring appears around the outside of it, touching it,
+// and the picture inside zooms by 5% behind the same rounded edge. The
+// progress bar and the badges stay where they are. An earlier version grew the
+// whole card by 7.5%, which the reference does not do and which pushed the
+// ring into whatever clipped the shelf.
 export component Art inherits Rectangle {
     in property <PosterItem> item;
     in property <bool> focused;
     in property <length> art-w: Metrics.card-w;
     in property <length> art-h: Metrics.card-h;
 
-    // Grown about its own centre rather than laid out larger, so the
-    // neighbours do not shuffle when focus lands.
-    width: art-w * (focused ? 1.075 : 1.0);
-    height: art-h * (focused ? 1.075 : 1.0);
-    border-radius: Theme.radius-art;
-    clip: true;
+    width: art-w;
+    height: art-h;
 
-    animate width, height { duration: Theme.focus-in; easing: Theme.ease; }
-
-    Fallback {
+    picture := Rectangle {
         width: 100%;
         height: 100%;
-        title: item.title;
-        hue: item.hue;
-    }
+        border-radius: Theme.radius-art;
+        clip: true;
 
-    if item.art.width > 0: Image {
-        width: 100%;
-        height: 100%;
-        source: item.art;
-        image-fit: cover;
-    }
-
-    // The appliance's own copy, which is certain to play.
-    if item.local: Rectangle {
-        x: parent.width * 0.045;
-        y: parent.width * 0.045;
-        width: Metrics.text-chip * 2.6;
-        height: Metrics.text-chip * 1.5;
-        border-radius: self.height / 3;
-        background: Theme.accent;
-        Text {
-            text: "YEREL";
-            color: Theme.accent-ink;
-            font-size: Metrics.text-chip * 0.72;
-            font-weight: 750;
-            letter-spacing: 0.12 * Metrics.text-chip * 0.72;
-        }
-    }
-
-    if item.progress > 0.0: Rectangle {
-        x: 0;
-        y: parent.height - self.height;
-        width: 100%;
-        height: 4px;
-        background: #ffffff38;
+        // The picture and the name painted under it, as one layer: that is
+        // what zooms.
         Rectangle {
-            x: 0;
-            width: max(3px, parent.width * item.progress);
-            height: 100%;
+            property <float> zoom: focused ? 1.05 : 1.0;
+            width: parent.width * zoom;
+            height: parent.height * zoom;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            animate width, height, x, y { duration: Theme.poster-zoom; easing: ease-out; }
+
+            Fallback {
+                width: 100%;
+                height: 100%;
+                title: item.title;
+                hue: item.hue;
+            }
+
+            if item.art.width > 0: Image {
+                width: 100%;
+                height: 100%;
+                source: item.art;
+                image-fit: cover;
+            }
+        }
+
+        // The appliance's own copy, which is certain to play.
+        if item.local: Rectangle {
+            x: parent.width * 0.045;
+            y: parent.width * 0.045;
+            width: Metrics.text-chip * 2.6;
+            height: Metrics.text-chip * 1.5;
+            border-radius: self.height / 3;
             background: Theme.accent;
+            Text {
+                text: "YEREL";
+                color: Theme.accent-ink;
+                font-size: Metrics.text-chip * 0.72;
+                font-weight: 750;
+                letter-spacing: 0.12 * Metrics.text-chip * 0.72;
+            }
+        }
+
+        if item.progress > 0.0: Rectangle {
+            x: 0;
+            y: parent.height - self.height;
+            width: 100%;
+            height: max(3px, Metrics.card-w * 0.018);
+            background: #ffffff38;
+            Rectangle {
+                x: 0;
+                width: max(3px, parent.width * item.progress);
+                height: 100%;
+                background: Theme.film;
+            }
+        }
+
+        // The edge an unfocused poster keeps, so a dark poster on the dark
+        // ground still has one.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: parent.border-radius;
+            border-width: 1px;
+            border-color: #ffffff14;
+            background: transparent;
         }
     }
 
-    // The focus ring, drawn rather than shadowed: one rectangle is cheaper
-    // than a blur this board would pay for on every frame.
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        border-radius: parent.border-radius;
-        border-width: focused ? 3px : 1px;
-        border-color: focused ? Theme.focus-ring : #ffffff14;
+    // The ring, outside the frame and touching it. Drawn rather than shadowed:
+    // one rectangle is cheaper than a blur this board would pay for on every
+    // frame.
+    if focused: Rectangle {
+        x: -Metrics.ring-w;
+        y: -Metrics.ring-w;
+        width: parent.width + Metrics.ring-w * 2;
+        height: parent.height + Metrics.ring-w * 2;
+        border-radius: Theme.radius-art + Metrics.ring-w;
+        border-width: Metrics.ring-w;
+        border-color: Theme.focus-ring;
         background: transparent;
-        animate border-width { duration: Theme.focus-in; easing: Theme.ease; }
     }
 }
 
@@ -380,8 +413,8 @@ export component Poster inherits Rectangle {
     height: Metrics.card-h + Metrics.text-card * 2.6;
 
     Art {
-        x: (parent.width - self.width) / 2;
-        y: (Metrics.card-h - self.height) / 2;
+        x: 0;
+        y: 0;
         item: item;
         focused: focused;
     }
@@ -416,8 +449,8 @@ export component GridPoster inherits Rectangle {
     height: Metrics.card-h + Metrics.text-card * 3.4;
 
     Art {
-        x: (parent.width - self.width) / 2;
-        y: (Metrics.card-h - self.height) / 2;
+        x: 0;
+        y: 0;
         item: item;
         focused: focused;
     }
@@ -512,7 +545,7 @@ export component Rail inherits Rectangle {
 
             for item[i] in rail.items: Poster {
                 x: i * parent.step;
-                y: 0;
+                y: Metrics.focus-room;
                 item: item;
                 focused: active && i == focus-col;
             }

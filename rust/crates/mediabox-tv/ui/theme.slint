@@ -9,9 +9,10 @@
 // Two rules run through all of it. Content first: artwork is as large as the
 // panel affords and chrome is as small as it can be while still being readable
 // from a sofa. And a focus language per kind of screen: what is browsed — the
-// posters, the launcher — takes a white ring and a small growth; what is
-// operated — the settings and everything opened from them — takes the warm
-// outline below, and nothing there grows.
+// posters, the launcher — takes a white ring (a poster's frame keeps its size
+// and the picture zooms inside it); what is operated — the settings and
+// everything opened from them — takes the warm outline below, and nothing
+// there grows.
 
 export global Theme {
     // Ground and surfaces. Near-black rather than black — a television's own
@@ -52,6 +53,9 @@ export global Theme {
     out property <duration> focus-in: 130ms;
     out property <duration> glide: 160ms;
     out property <duration> crossfade: 280ms;
+    // A focused poster's picture zooms in this long, ease-out: the
+    // reference's own figure (stremio-web MetaItem, `transition: 100ms`).
+    out property <duration> poster-zoom: 100ms;
     out property <easing> ease: cubic-bezier(0.2, 0.7, 0.3, 1);
 
     // A verdict word to a colour, in one place. Rust sends "good"/"warn"/"bad"
@@ -152,6 +156,12 @@ export global Metrics {
     // A poster is 2:3 and as wide as the panel affords, within bounds.
     out property <length> card-w: max(118px, min(470px, vw * 0.124));
     out property <length> card-h: card-w * 1.5;
+
+    // The ring around a focused poster: the reference's 0.2rem, which is 1.7%
+    // of its poster's width. And the room left around anything that clips a
+    // row of posters, so the ring is never cut off by its own shelf.
+    out property <length> ring-w: max(2px, card-w * 0.017);
+    out property <length> focus-room: ring-w * 2;
 
     // The screen's inset, the gap between posters, and the height of the bar
     // every screen starts below.
