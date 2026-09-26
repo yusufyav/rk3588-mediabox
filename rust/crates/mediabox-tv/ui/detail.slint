@@ -252,6 +252,44 @@ component ChipSection inherits Rectangle {
 }
 
 // One thing that can be done with the title, along the bottom of the record.
+// One mark in the reference's group of two: the library and watched buttons
+// share one pill, each a round stop in it, its mark faded until the remote
+// is on it.
+component GroupStop inherits Rectangle {
+    in property <string> mark;
+    in property <string> cut;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+
+    width: self.height;
+    border-radius: self.height / 2;
+    opacity: enabled ? 1.0 : 0.38;
+    background: focused ? Theme.focus-fill : transparent;
+
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: parent.height * 0.46;
+        height: self.width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: mark;
+        fill: focused ? #0a0c10 : #ffffffb3;
+    }
+    if cut != "": Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: parent.height * 0.46;
+        height: self.width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: cut;
+        fill: focused ? Theme.focus-fill : #1b2029;
+    }
+}
+
 // Round, marked and named — the reference's shape, and the shape that survives
 // being read from a sofa.
 component Action inherits Rectangle {
@@ -310,7 +348,7 @@ component Action inherits Rectangle {
             visible: label != "";
             text: label;
             color: focused ? #0a0c10 : Theme.text;
-            font-size: Metrics.vh * 0.0165;
+            font-size: Metrics.vh * 0.0145;
             font-weight: 500;
             vertical-alignment: center;
             wrap: no-wrap;
@@ -529,21 +567,26 @@ export component Detail inherits Rectangle {
         // large when it does not. The reference leads with the logo and it is
         // the single thing that makes a page look like the film rather than
         // like a database row.
-        if logo.width > 0: Image {
-            source: logo;
-            image-fit: contain;
-            horizontal-alignment: left;
-            height: Metrics.vh * 0.118;
-        }
-        if logo.width == 0: Text {
-            text: title;
-            color: Theme.text;
-            font-size: Metrics.vh * 0.052;
-            font-weight: 800;
-            letter-spacing: -0.03 * Metrics.vh * 0.052;
-            wrap: word-wrap;
-            overflow: elide;
-            max-height: Metrics.vh * 0.12;
+        // The reference's facts are centred 25.2% down, 1.9% further under the
+        // logo than the gap between the blocks under them.
+        VerticalLayout {
+            padding-bottom: Metrics.vh * 0.019;
+            if logo.width > 0: Image {
+                source: logo;
+                image-fit: contain;
+                horizontal-alignment: left;
+                height: Metrics.vh * 0.118;
+            }
+            if logo.width == 0: Text {
+                text: title;
+                color: Theme.text;
+                font-size: Metrics.vh * 0.052;
+                font-weight: 800;
+                letter-spacing: -0.03 * Metrics.vh * 0.052;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: Metrics.vh * 0.12;
+            }
         }
 
         // How long, when, and what it scored — in the reference's order, with
@@ -556,7 +599,7 @@ export component Detail inherits Rectangle {
             alignment: start;
 
             for fact[i] in facts: HorizontalLayout {
-                spacing: Metrics.vw * 0.004;
+                spacing: Metrics.vw * 0.011;
                 Text {
                     text: fact;
                     color: Theme.text;
@@ -565,9 +608,10 @@ export component Detail inherits Rectangle {
                     vertical-alignment: center;
                     wrap: no-wrap;
                 }
+                // The reference's badge: 1.87% of the width by 1.62% of the height.
                 if imdb && i == facts.length - 1: Rectangle {
-                    width: badge.preferred-width + Metrics.vh * 0.01;
-                    height: Metrics.vh * 0.02;
+                    width: Metrics.vw * 0.0187;
+                    height: Metrics.vh * 0.0162;
                     y: (parent.height - self.height) / 2;
                     border-radius: Metrics.vh * 0.003;
                     background: #f5c518;
@@ -577,7 +621,7 @@ export component Detail inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                         text: "IMDb";
                         color: #0a0c10;
-                        font-size: Metrics.vh * 0.012;
+                        font-size: Metrics.vh * 0.0098;
                         font-weight: 800;
                     }
                 }
@@ -597,36 +641,60 @@ export component Detail inherits Rectangle {
             items: directors;
         }
 
-        if summary != "": SectionLabel {
-            text: "ÖZET";
-        }
-        if summary != "": Text {
-            text: summary;
-            color: Theme.text;
-            font-size: Metrics.vw * 0.0078;
-            font-weight: 400;
-            wrap: word-wrap;
-            overflow: elide;
-            max-height: Metrics.vh * 0.1;
+        // The heading sits on its paragraph, as the reference's does.
+        if summary != "": VerticalLayout {
+            spacing: Metrics.vh * 0.006;
+            SectionLabel {
+                text: "ÖZET";
+            }
+            Text {
+                text: summary;
+                color: Theme.text;
+                font-size: Metrics.vw * 0.0078;
+                font-weight: 400;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: Metrics.vh * 0.1;
+            }
         }
     }
 
     // The actions, along the bottom of the record.
     HorizontalLayout {
         x: record-x;
-        y: root.height - self.height - Metrics.vh * 0.05;
+        y: root.height - self.height - Metrics.vh * 0.04;
         width: record-w;
         height: Metrics.vh * 0.056;
         spacing: Metrics.vw * 0.011;
         alignment: start;
 
-        for label[i] in actions: Action {
-            label: label;
-            mark: marks[i];
-            cut: cuts[i];
-            enabled: enabled[i];
+        // "Fragman" in words, then the library and watched marks together in
+        // one pill, as the reference groups them.
+        if actions.length > 0: Action {
+            label: actions[0];
+            mark: marks[0];
+            cut: cuts[0];
+            enabled: enabled[0];
             // One focus on the panel: not while the remote is in the column.
-            focused: !on-sources && !on-episodes && i == focus-col;
+            focused: !on-sources && !on-episodes && focus-col == 0;
+        }
+        if actions.length > 1: Rectangle {
+            width: self.height * (actions.length - 1);
+            border-radius: self.height / 2;
+            background: #ffffff14;
+            border-width: 1px;
+            border-color: #ffffff33;
+
+            HorizontalLayout {
+                for label[i] in actions: GroupStop {
+                    visible: label == "";
+                    width: label == "" ? self.height : 0px;
+                    mark: marks[i];
+                    cut: cuts[i];
+                    enabled: enabled[i];
+                    focused: !on-sources && !on-episodes && i == focus-col;
+                }
+            }
         }
     }
 

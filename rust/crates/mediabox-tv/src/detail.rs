@@ -32,17 +32,26 @@ impl Action {
                 "M3 5h18v14H3z",
                 "M5 7h2v2H5zM5 11h2v2H5zM5 15h2v2H5zM17 7h2v2h-2zM17 11h2v2h-2zM17 15h2v2h-2zM10 9l5 3-5 3z",
             ),
-            // A bookmark, filled when the title is in the library.
-            Action::Library if on => ("M6 3h12v18l-6-4-6 4z", ""),
-            Action::Library => ("M6 3h12v18l-6-4-6 4zM8 5v12.3l4-2.7 4 2.7V5z", ""),
-            // An eye, open when watched.
+            // Drawn here rather than taken from the reference's icon set: a
+            // card with one stacked behind it, a plus on it to add, a tick
+            // once the title is in the library.
+            Action::Library if on => (
+                "M3 7h14v14H3zM7 3h14v14h-2V5H7z",
+                "M6.2 13.6l1.4-1.4 2.1 2.1 4.6-4.6 1.4 1.4-6 6z",
+            ),
+            Action::Library => (
+                "M3 7h14v14H3zM7 3h14v14h-2V5H7z",
+                "M9 10h2v3h3v2h-3v3H9v-3H6v-2h3z",
+            ),
+            // As the reference: an eye to mark it watched, the eye struck
+            // through once it is.
             Action::Watched if on => (
                 "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5z",
-                "M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7z",
+                "M3.5 2.1l18.4 18.4-1.4 1.4L2.1 3.5z",
             ),
             Action::Watched => (
-                "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5zM12 7c4.2 0 7.3 3.1 8.4 5-1.1 1.9-4.2 5-8.4 5s-7.3-3.1-8.4-5C4.7 10.1 7.8 7 12 7z",
-                "",
+                "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5z",
+                "M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7zM12 10.5a1.5 1.5 0 1 1 0 3a1.5 1.5 0 1 1 0-3z",
             ),
         }
     }
@@ -843,12 +852,10 @@ impl Detail {
             .collect()
     }
 
+    /// The reference's buttons, a series' as a film's: stremio-core's
+    /// `MarkAsWatched` marks the title as a whole either way.
     pub fn actions(&self) -> Vec<Action> {
-        let mut actions = vec![Action::Trailer, Action::Library];
-        if !self.is_series() {
-            actions.push(Action::Watched);
-        }
-        actions
+        vec![Action::Trailer, Action::Library, Action::Watched]
     }
 
     pub fn focused_action(&self) -> Option<Action> {
@@ -1527,10 +1534,10 @@ mod series_tests {
     }
 
     #[test]
-    fn a_film_offers_library_and_watched_and_a_series_only_library() {
+    fn a_film_and_a_series_both_offer_library_and_watched() {
         let film = Detail::seeded(&crate::state::Item::stub("tt1"));
         assert_eq!(film.actions(), vec![Action::Trailer, Action::Library, Action::Watched]);
-        assert_eq!(breaking_bad().actions(), vec![Action::Trailer, Action::Library]);
+        assert_eq!(breaking_bad().actions(), vec![Action::Trailer, Action::Library, Action::Watched]);
         // Before the account has answered, neither can be pressed.
         assert_eq!(film.enabled(), vec![false, false, false]);
     }

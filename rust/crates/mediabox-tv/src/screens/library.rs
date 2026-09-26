@@ -320,12 +320,12 @@ impl Library {
         if item.continuing || item.progress > 0.0 {
             acts.push(Act::RemoveFromContinuing);
         }
-        if item.kind != "series" {
-            if record.is_some_and(|r| r.times_watched > 0) {
-                acts.push(Act::MarkUnwatched);
-            } else {
-                acts.push(Act::MarkWatched);
-            }
+        // A series as a film: stremio-core's `LibraryItemMarkAsWatched`
+        // marks the title as a whole.
+        if record.is_some_and(|r| r.times_watched > 0) {
+            acts.push(Act::MarkUnwatched);
+        } else {
+            acts.push(Act::MarkWatched);
         }
         if record.is_some_and(|r| r.in_library) {
             acts.push(Act::RemoveFromLibrary);
