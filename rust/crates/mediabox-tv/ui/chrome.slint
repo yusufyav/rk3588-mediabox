@@ -70,24 +70,46 @@ export component Chrome inherits Rectangle {
         }
     }
 
+    // Each place as the reference's tab button, off its stylesheet: a
+    // 4.8rem box, rounded 0.75rem, the mark 2.2rem with its name under it in
+    // 0.8rem. The name shows on the place the remote is on, over a faint
+    // fill; the page this is wears the accent.
     for mark[i] in places: Rectangle {
         property <bool> focused: on-places && i == place;
-        property <length> box: root.width * 0.0245;
+        property <length> rem: root.width / 128;
+        // The measured centre of the mark: 2.06% in, 9.86% down, one every
+        // 7.05%. The box is laid out around it, name and all.
+        property <length> mark-y: root.height * (0.0986 + 0.0705 * i);
+        width: rem * 4.8;
+        height: rem * 4.8;
         x: root.width * 0.0206 - self.width / 2;
-        y: root.height * (0.0986 + 0.0705 * i) - self.height / 2;
-        width: box;
-        height: box;
-        border-radius: box * 0.28;
-        background: focused ? Theme.focus-fill : transparent;
+        y: mark-y - rem * 1.67;
+        border-radius: rem * 0.75;
+        background: focused ? #ffffff14 : transparent;
         animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
         Icon {
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: parent.rem * 0.57;
             name: mark;
             size: root.width * 0.0175;
             // The board is where this is; the others are where it could go.
-            ink: focused ? #0a0c10 : (i == current ? Theme.film : #60606a);
+            ink: i == current ? Theme.film : #60606a;
+        }
+        if focused: Text {
+            x: 0;
+            y: parent.rem * (0.57 + 2.2 + 0.5);
+            width: parent.width;
+            text: mark == "home" ? "Pano"
+                : mark == "compass" ? "Keşfet"
+                : mark == "library" ? "Kitaplık"
+                : mark == "gear" ? "Ayarlar"
+                : "";
+            color: i == current ? Theme.film : #ffffff99;
+            font-size: parent.rem * 0.8;
+            font-weight: 500;
+            horizontal-alignment: center;
+            wrap: no-wrap;
         }
     }
 }

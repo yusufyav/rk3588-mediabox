@@ -723,8 +723,8 @@ impl App {
                 match self.media.zone {
                     Zone::Search => self.open_screen(state::Nav::Search),
                     Zone::Places => match self.media.focused_place() {
-                        Some(Place::Discover) => self.open_screen(state::Nav::Discover),
-                        Some(Place::Library) => self.open_screen(state::Nav::Library),
+                        Some(Place::Discover) => self.open_tab(Route::Discover),
+                        Some(Place::Library) => self.open_tab(Route::Library),
                         Some(Place::Settings) => self.open_screen(state::Nav::Settings),
                         // The board is this screen.
                         Some(Place::Board) | None => {
@@ -858,9 +858,9 @@ impl App {
                     }
                     Pane::Places => {
                         match self.search.place {
-                            0 => self.open_media(),
-                            1 => self.open_screen(state::Nav::Discover),
-                            2 => self.open_screen(state::Nav::Library),
+                            0 => self.open_tab(Route::Media),
+                            1 => self.open_tab(Route::Discover),
+                            2 => self.open_tab(Route::Library),
                             _ => self.open_screen(state::Nav::Settings),
                         }
                         return;
@@ -964,8 +964,8 @@ impl App {
                     }
                     Zone::Places => {
                         match self.discover.place {
-                            0 => self.open_media(),
-                            2 => self.open_screen(state::Nav::Library),
+                            0 => self.open_tab(Route::Media),
+                            2 => self.open_tab(Route::Library),
                             3 => self.open_screen(state::Nav::Settings),
                             // Discover is this screen.
                             _ => {
@@ -995,12 +995,12 @@ impl App {
                 }
             }
             Intent::Dismiss => {
-                // As the reference: Back closes an open list, and otherwise
-                // leaves the page. There is no step through the filters.
-                if self.discover.close_picker() {
+                // The list, the top of the page, the page's mark down the
+                // left, and from there the board.
+                if self.discover.back_step() {
                     self.paint();
                 } else {
-                    self.back();
+                    self.open_tab(Route::Media);
                 }
             }
             _ => {}
@@ -1268,8 +1268,8 @@ impl App {
                     }
                     Zone::Search => self.open_screen(state::Nav::Search),
                     Zone::Places => match self.library.place {
-                        0 => self.open_media(),
-                        1 => self.open_screen(state::Nav::Discover),
+                        0 => self.open_tab(Route::Media),
+                        1 => self.open_tab(Route::Discover),
                         3 => self.open_screen(state::Nav::Settings),
                         // The library is this screen.
                         _ => {
@@ -1319,16 +1319,12 @@ impl App {
                 }
             }
             Intent::Dismiss => {
-                // As the reference: Back closes an open list or a poster's
-                // menu, and otherwise leaves the page. There is no step
-                // through the filters.
-                if self.library.close_types() {
-                    self.paint();
-                } else if self.library.zone == Zone::Menu {
-                    self.library.zone = Zone::Grid;
+                // The list or the menu, the top of the page, the page's mark
+                // down the left, and from there the board.
+                if self.library.back_step() {
                     self.paint();
                 } else {
-                    self.back();
+                    self.open_tab(Route::Media);
                 }
             }
             _ => {}
@@ -2854,6 +2850,27 @@ impl App {
     }
 
     // ------------------------------------------------------------- navigation
+
+    /// The pages down the left -- the board, Discover, the library -- are
+    /// side by side rather than stacked, as the reference's tabs are: going
+    /// to one replaces whichever is showing, and each sits on the board, so
+    /// Back from a page's own mark is the board and Back on the board leaves
+    /// "Filmler ve Diziler".
+    fn open_tab(&mut self, route: Route) {
+        while matches!(self.route(), Route::Discover | Route::Library | Route::Search) {
+            if !self.stack.pop() {
+                break;
+            }
+        }
+        if route == Route::Media || self.route() != Route::Media {
+            self.open_media();
+        }
+        match route {
+            Route::Discover => self.open_screen(state::Nav::Discover),
+            Route::Library => self.open_screen(state::Nav::Library),
+            _ => {}
+        }
+    }
 
     fn open(&mut self, route: Route) {
         self.stack.push(route);

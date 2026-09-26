@@ -255,6 +255,30 @@ impl Library {
         self.clamp();
     }
 
+    /// Back on this page: an open list or menu closes, then the remote goes
+    /// to the top of the page, then to the page's own mark down the left.
+    /// False from the mark, which is the board's to answer.
+    pub fn back_step(&mut self) -> bool {
+        if self.close_types() {
+            return true;
+        }
+        match self.zone {
+            Zone::Places => false,
+            Zone::Menu => {
+                self.zone = Zone::Grid;
+                true
+            }
+            Zone::Grid if self.index() > 0 => {
+                if let Some(slot) = self.positions.get_mut(self.tab) {
+                    *slot = 0;
+                }
+                self.action = 0;
+                true
+            }
+            _ => self.to_places(),
+        }
+    }
+
     /// Coming to the library from anywhere else: on the grid, or on the
     /// filters while the section is empty, with nothing left open.
     pub fn arrive(&mut self) {
@@ -759,5 +783,21 @@ mod tests {
         library.tab = 2;
         library.zone = Zone::Grid;
         assert_eq!(library.actions(), vec![Act::Open]);
+    }
+
+    /// Back as the user set it out: the top of the page, the page's mark,
+    /// then the board.
+    #[test]
+    fn back_goes_to_the_top_then_to_the_mark_then_hands_over_to_the_board() {
+        let mut library = built((0..30).map(|i| film(&format!("a{i}"))).collect());
+        library.step(0, 1);
+        library.step(0, 1);
+        library.step(0, 1);
+        assert!(library.index() > 0);
+        assert!(library.back_step());
+        assert_eq!((library.zone, library.index()), (Zone::Grid, 0));
+        assert!(library.back_step());
+        assert_eq!((library.zone, library.place), (Zone::Places, 2));
+        assert!(!library.back_step(), "the board is next, not this page's");
     }
 }

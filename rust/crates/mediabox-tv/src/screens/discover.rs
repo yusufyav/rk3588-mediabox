@@ -175,6 +175,24 @@ impl Discover {
     /// Opens a particular catalogue: the reference's "Tümünü Gör" on a board
     /// shelf. Returns its first page when the catalogues are known; otherwise
     /// it is opened when they arrive.
+    /// Back on this page: an open list closes, then the remote goes to the
+    /// top of the page, then to the page's own mark down the left. False
+    /// from the mark, which is the board's to answer.
+    pub fn back_step(&mut self) -> bool {
+        if self.close_picker() {
+            return true;
+        }
+        match self.zone {
+            Zone::Places => false,
+            Zone::Grid | Zone::Panel if self.index > 0 => {
+                self.index = 0;
+                self.zone = Zone::Grid;
+                true
+            }
+            _ => self.to_places(),
+        }
+    }
+
     /// Coming to Discover from anywhere else: on the grid, or on the filters
     /// while it is empty, never on the place that led away from it.
     pub fn arrive(&mut self) {
