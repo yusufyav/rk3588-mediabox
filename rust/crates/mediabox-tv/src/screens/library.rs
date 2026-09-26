@@ -7,23 +7,25 @@
 //! - last watched first (the default), by name, by name backwards, most
 //!   watched first, watched first, not watched first.
 //!
-//! Two more sections are this television's own: "Devam Et", in the order
-//! every Stremio client shows it, and the titles this appliance holds itself.
+//! Laid out as the reference's library page: the board's column of places and
+//! search box, then a type dropdown and the orders as chips, and a grid of
+//! posters under them, nine across. Two more choices in the dropdown are this
+//! television's own: "İzlemeye devam edin", in the order every Stremio client
+//! shows it, and the titles this appliance holds itself.
 //!
-//! Beside the grid is the focused title's record and what can be done with
-//! it: open it, mark a film watched, take a title out of the library, or take
-//! it out of "Devam Et". The focus model is the structural one: a row of
-//! sections with the order at its end, the grid, and the actions, with a
-//! remembered position per section.
+//! Ok on a poster is the reference's menu for it -- its details, "Vazgeç" off
+//! "İzlemeye devam edin", watched or not, "Kaldır" from the library -- since a
+//! remote has no second button to open it with. The focus model is the
+//! structural one, with a remembered position per section.
 
 use std::cmp::Ordering;
 
 use crate::state::Item;
 
-/// How many posters fit across the grid once the panel on the right has its
-/// room. Fixed rather than measured: the focus model is a grid, and a grid that
-/// reflowed would move a title out from under the remote.
-pub const COLUMNS: usize = 4;
+/// The reference's grid at its 1920-pixel layout: nine across. Fixed rather
+/// than measured: the focus model is a grid, and a grid that reflowed would
+/// move a title out from under the remote.
+pub const COLUMNS: usize = 9;
 
 /// stremio-core's `Sort`, in its order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +50,13 @@ pub const SORTS: [Sort; 6] = [
 impl Sort {
     pub fn label(self) -> &'static str {
         match self {
-            Sort::LastWatched => "Son izlenen",
-            Sort::Name => "A–Z",
-            Sort::NameReverse => "Z–A",
-            Sort::TimesWatched => "En çok izlenen",
-            Sort::Watched => "İzlenenler önce",
-            Sort::NotWatched => "İzlenmeyenler önce",
+            // The reference's SORT_ strings, capitalised as its chips are.
+            Sort::LastWatched => "Son İzlenen",
+            Sort::Name => "A-Z",
+            Sort::NameReverse => "Z-A",
+            Sort::TimesWatched => "En Çok İzlenen",
+            Sort::Watched => "İzlenen",
+            Sort::NotWatched => "İzlenmeyen",
         }
     }
 
@@ -85,7 +88,7 @@ impl Sort {
 pub enum SectionKind {
     /// The account's library, of one type or of all of them.
     Account(Option<&'static str>),
-    /// "Devam Et", as the media core ordered it.
+    /// "İzlemeye devam edin", as the media core ordered it.
     Continuing,
     /// This appliance's own titles.
     Local,
@@ -100,12 +103,17 @@ pub struct Section {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zone {
-    Tabs,
+    Places,
+    Search,
+    /// The type dropdown and the order chips.
+    Filters,
     Grid,
-    Actions,
+    /// The focused poster's menu.
+    Menu,
 }
 
-/// What can be done with the focused title, from the panel beside the grid.
+/// What can be done with the focused title, from its menu, in the
+/// reference's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
     Open,
@@ -119,10 +127,10 @@ impl Act {
     pub fn label(self) -> &'static str {
         match self {
             Act::Open => "Ayrıntılar",
+            Act::RemoveFromContinuing => "Vazgeç",
             Act::MarkWatched => "İzlendi olarak işaretle",
             Act::MarkUnwatched => "İzlenmedi olarak işaretle",
-            Act::RemoveFromLibrary => "Kütüphaneden çıkar",
-            Act::RemoveFromContinuing => "Devam Et'ten çıkar",
+            Act::RemoveFromLibrary => "Kaldır",
         }
     }
 }
@@ -132,12 +140,15 @@ pub struct Library {
     /// Which section is open.
     pub tab: usize,
     pub zone: Zone,
-    /// Where the remote is on the tab row: a section, or the order at its end.
+    /// Where the remote is on the filters: 0 the dropdown, then the chips.
     pub tab_focus: usize,
     pub sort: Sort,
-    /// The order's list, when it is down: the highlighted one.
-    pub sort_open: Option<usize>,
+    /// The dropdown's list, when it is down: the highlighted section.
+    pub type_open: Option<usize>,
     pub action: usize,
+    /// The place the remote is on, down the left; 2 is the library.
+    pub place: usize,
+    returns_to: Zone,
     /// One remembered position per section.
     positions: Vec<usize>,
 }
@@ -147,11 +158,13 @@ impl Library {
         Self {
             sections: Vec::new(),
             tab: 0,
-            zone: Zone::Tabs,
+            zone: Zone::Filters,
             tab_focus: 0,
             sort: Sort::LastWatched,
-            sort_open: None,
+            type_open: None,
             action: 0,
+            place: 2,
+            returns_to: Zone::Grid,
             positions: Vec::new(),
         }
     }
@@ -191,22 +204,15 @@ impl Library {
             items: Vec::new(),
         }];
         for kind in kinds {
-            let title = match kind {
-                "movie" => "Filmler",
-                "series" => "Diziler",
-                "channel" => "Kanallar",
-                "tv" => "TV",
-                _ => "Diğer",
-            };
             sections.push(Section {
-                title: title.into(),
+                title: crate::state::type_name(kind),
                 note: String::new(),
                 kind: SectionKind::Account(Some(kind)),
                 items: Vec::new(),
             });
         }
         sections.push(Section {
-            title: "Devam Et".into(),
+            title: "İzlemeye devam edin".into(),
             note: String::new(),
             kind: SectionKind::Continuing,
             items: continuing.to_vec(),
@@ -249,7 +255,7 @@ impl Library {
         self.clamp();
     }
 
-    /// Opens "Devam Et", with the remote in the grid: where the board's
+    /// Opens "İzlemeye devam edin", with the remote in the grid: where the board's
     /// "Tümünü Gör" on "İzlemeye devam edin" leads.
     pub fn show_continuing(&mut self) {
         if let Some(index) = self
@@ -258,8 +264,8 @@ impl Library {
             .position(|s| s.kind == SectionKind::Continuing)
         {
             self.tab = index;
-            self.tab_focus = index;
-            self.zone = if self.items().is_empty() { Zone::Tabs } else { Zone::Grid };
+            self.tab_focus = 0;
+            self.zone = if self.items().is_empty() { Zone::Filters } else { Zone::Grid };
             self.clamp();
         }
     }
@@ -286,7 +292,7 @@ impl Library {
     }
 
     pub fn focused(&self) -> Option<&Item> {
-        if self.zone == Zone::Tabs {
+        if !matches!(self.zone, Zone::Grid | Zone::Menu) {
             return None;
         }
         self.items().get(self.index())
@@ -310,6 +316,10 @@ impl Library {
             return acts;
         }
         let record = item.record.as_ref();
+        // The reference offers "Vazgeç" on any poster with progress on it.
+        if item.continuing || item.progress > 0.0 {
+            acts.push(Act::RemoveFromContinuing);
+        }
         if item.kind != "series" {
             if record.is_some_and(|r| r.times_watched > 0) {
                 acts.push(Act::MarkUnwatched);
@@ -319,9 +329,6 @@ impl Library {
         }
         if record.is_some_and(|r| r.in_library) {
             acts.push(Act::RemoveFromLibrary);
-        }
-        if item.continuing {
-            acts.push(Act::RemoveFromContinuing);
         }
         acts
     }
@@ -335,54 +342,89 @@ impl Library {
         if let Some(slot) = self.positions.get_mut(self.tab) {
             *slot = (*slot).min(len.saturating_sub(1));
         }
-        if len == 0 && self.zone != Zone::Tabs {
-            self.zone = Zone::Tabs;
-            self.tab_focus = self.tab;
+        if len == 0 && matches!(self.zone, Zone::Grid | Zone::Menu) {
+            self.zone = Zone::Filters;
         }
+        self.tab_focus = self.tab_focus.min(self.filter_stops() - 1);
         self.action = self.action.min(self.actions().len().saturating_sub(1));
     }
 
-    /// The tab row's stops: the sections, then the order.
-    fn tab_stops(&self) -> usize {
-        self.sections.len() + 1
+    /// The filters' stops: the dropdown, then an order chip each where the
+    /// open section is the account's.
+    fn filter_stops(&self) -> usize {
+        if self.sortable() { 1 + SORTS.len() } else { 1 }
     }
 
-    pub fn on_sort(&self) -> bool {
-        self.zone == Zone::Tabs && self.tab_focus == self.sections.len()
+    /// The chip the remote is on, if it is on one.
+    pub fn focused_chip(&self) -> Option<usize> {
+        (self.zone == Zone::Filters && self.tab_focus > 0).then(|| self.tab_focus - 1)
+    }
+
+    pub fn on_types(&self) -> bool {
+        self.zone == Zone::Filters && self.tab_focus == 0
+    }
+
+    fn to_places(&mut self) -> bool {
+        self.returns_to = self.zone;
+        self.zone = Zone::Places;
+        self.place = 2;
+        true
     }
 
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
-        if let Some(open) = self.sort_open {
-            let next = (open as i32 + dy).clamp(0, SORTS.len() as i32 - 1) as usize;
-            self.sort_open = Some(next);
+        if let Some(open) = self.type_open {
+            let next = (open as i32 + dy).clamp(0, self.sections.len() as i32 - 1) as usize;
+            self.type_open = Some(next);
             return next != open;
         }
         match self.zone {
-            Zone::Tabs => {
+            Zone::Places => {
+                if dx > 0 {
+                    self.zone = self.returns_to;
+                    if self.zone == Zone::Grid && self.items().is_empty() {
+                        self.zone = Zone::Filters;
+                    }
+                    return true;
+                }
+                let next = (self.place as i32 + dy).clamp(0, 3) as usize;
+                let moved = next != self.place;
+                self.place = next;
+                moved
+            }
+            Zone::Search => {
+                if dx < 0 {
+                    return self.to_places();
+                }
+                if dy > 0 {
+                    self.zone = Zone::Filters;
+                    return true;
+                }
+                false
+            }
+            Zone::Filters => {
                 if dy > 0 && !self.items().is_empty() {
                     self.zone = Zone::Grid;
                     return true;
                 }
-                if dy != 0 {
+                if dy < 0 {
+                    self.zone = Zone::Search;
+                    return true;
+                }
+                if dx < 0 && self.tab_focus == 0 {
+                    return self.to_places();
+                }
+                if dx == 0 {
                     return false;
                 }
                 let next =
-                    (self.tab_focus as i32 + dx).clamp(0, self.tab_stops() as i32 - 1) as usize;
-                if next == self.tab_focus {
-                    return false;
-                }
+                    (self.tab_focus as i32 + dx).clamp(0, self.filter_stops() as i32 - 1) as usize;
+                let moved = next != self.tab_focus;
                 self.tab_focus = next;
-                // Walking the sections opens them; the order is only a stop.
-                if next < self.sections.len() {
-                    self.tab = next;
-                    self.clamp();
-                }
-                true
+                moved
             }
-            Zone::Actions => {
-                if dx < 0 {
-                    self.zone = Zone::Grid;
-                    return true;
+            Zone::Menu => {
+                if dy == 0 {
+                    return false;
                 }
                 let count = self.actions().len();
                 let next = (self.action as i32 + dy).clamp(0, count as i32 - 1) as usize;
@@ -397,27 +439,22 @@ impl Library {
     fn step_grid(&mut self, dx: i32, dy: i32) -> bool {
         let items = self.items().len();
         if items == 0 {
-            self.zone = Zone::Tabs;
+            self.zone = Zone::Filters;
             return true;
         }
         let index = self.index();
         let column = index % COLUMNS;
 
         if dy < 0 && index < COLUMNS {
-            // Up from the first row goes to the section strip, which is the one
-            // thing above the grid.
-            self.zone = Zone::Tabs;
-            self.tab_focus = self.tab;
+            // Up from the first row is the filters, the one thing above it.
+            self.zone = Zone::Filters;
             return true;
+        }
+        if dx < 0 && column == 0 {
+            return self.to_places();
         }
         let row_start = index - column;
         let width = COLUMNS.min(items - row_start);
-        if dx > 0 && column + 1 >= width {
-            // Right off the end of a row is the panel beside the grid.
-            self.zone = Zone::Actions;
-            self.action = 0;
-            return true;
-        }
         let next = if dy == 0 {
             row_start + (column as i32 + dx).clamp(0, width as i32 - 1) as usize
         } else {
@@ -446,31 +483,52 @@ impl Library {
         true
     }
 
-    /// Ok on the order opens its list, on the order in use. It can be chosen
-    /// from any section and applies to the account's; the chip is dimmed on
-    /// the sections it does not order.
-    pub fn open_sort(&mut self) -> bool {
-        if !self.on_sort() {
+    /// Ok on a poster: its menu, on its first line.
+    pub fn open_menu(&mut self) -> bool {
+        if self.zone != Zone::Grid || self.focused().is_none() {
             return false;
         }
-        self.sort_open = SORTS.iter().position(|s| *s == self.sort);
-        self.sort_open.is_some()
+        self.zone = Zone::Menu;
+        self.action = 0;
+        true
     }
 
-    /// Ok in the list: that order, and the list goes up.
-    pub fn pick_sort(&mut self) -> bool {
-        let Some(open) = self.sort_open.take() else {
+    /// Ok on the dropdown opens its list, on the section showing.
+    pub fn open_types(&mut self) -> bool {
+        if !self.on_types() {
+            return false;
+        }
+        self.type_open = Some(self.tab);
+        true
+    }
+
+    /// Ok in the list: that section, and the list goes up.
+    pub fn pick_type(&mut self) -> bool {
+        let Some(open) = self.type_open.take() else {
             return false;
         };
-        self.sort = SORTS[open];
+        self.tab = open;
+        self.clamp();
+        true
+    }
+
+    pub fn close_types(&mut self) -> bool {
+        self.type_open.take().is_some()
+    }
+
+    /// Ok on a chip: that order, as the reference's chips are chosen.
+    pub fn choose_sort(&mut self) -> bool {
+        let Some(chip) = self.focused_chip() else {
+            return false;
+        };
+        if SORTS[chip] == self.sort {
+            return false;
+        }
+        self.sort = SORTS[chip];
         self.apply_sort();
         // A new order starts at the top: the first title is the point of it.
         self.positions.iter_mut().for_each(|p| *p = 0);
         true
-    }
-
-    pub fn close_sort(&mut self) -> bool {
-        self.sort_open.take().is_some()
     }
 
     /// Takes a title out of a section at once, rather than waiting for the
@@ -540,7 +598,7 @@ mod tests {
     fn the_sections_are_all_then_each_type_then_devam_et_and_this_device() {
         let library = built(vec![series("b"), film("a")]);
         let titles: Vec<&str> = library.sections.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, vec!["Tümü", "Filmler", "Diziler", "Devam Et", "Bu cihazda"]);
+        assert_eq!(titles, vec!["Tümü", "Film", "Dizi", "İzlemeye devam edin", "Bu cihazda"]);
         assert_eq!(library.sections[0].items.len(), 2);
         assert_eq!(library.sections[1].items.len(), 1);
     }
@@ -582,29 +640,47 @@ mod tests {
     }
 
     #[test]
-    fn the_order_is_chosen_from_its_list_at_the_end_of_the_tabs() {
-        let mut library = built(vec![film("a"), film("b")]);
-        for _ in 0..10 {
-            library.step(1, 0);
-        }
-        assert!(library.on_sort());
-        assert!(library.open_sort());
-        library.step(0, 1);
-        assert!(library.pick_sort());
+    fn an_order_is_chosen_from_its_chip_and_a_section_from_the_dropdown() {
+        let mut library = built(vec![film("a"), series("b")]);
+        assert!(library.on_types());
+        assert!(library.step(1, 0));
+        assert!(library.step(1, 0));
+        assert_eq!(library.focused_chip(), Some(1));
+        assert!(library.choose_sort());
         assert_eq!(library.sort, Sort::Name);
+
+        library.tab_focus = 0;
+        assert!(library.open_types());
+        library.step(0, 1);
+        assert!(library.pick_type());
+        assert_eq!(library.sections[library.tab].title, "Film");
+    }
+
+    /// The board's frame: Up off the filters is the search box, Left off the
+    /// first poster the places.
+    #[test]
+    fn the_places_and_the_search_box_are_the_boards() {
+        let mut library = built((0..3).map(|i| film(&format!("a{i}"))).collect());
+        library.step(0, 1);
+        assert_eq!(library.zone, Zone::Grid);
+        assert!(library.step(-1, 0));
+        assert_eq!(library.zone, Zone::Places);
+        assert_eq!(library.place, 2);
+        assert!(library.step(1, 0));
+        assert_eq!(library.zone, Zone::Grid);
+        library.step(0, -1);
+        assert!(library.step(0, -1));
+        assert_eq!(library.zone, Zone::Search);
     }
 
     #[test]
-    fn right_off_the_end_of_a_row_is_the_actions_and_left_comes_back() {
-        let mut library = built((0..6).map(|i| film(&format!("a{i}"))).collect());
+    fn ok_on_a_poster_is_its_menu() {
+        let mut library = built(vec![film("a")]);
         library.step(0, 1);
-        for _ in 0..COLUMNS {
-            library.step(1, 0);
-        }
-        assert_eq!(library.zone, Zone::Actions);
+        assert!(library.open_menu());
         assert_eq!(library.focused_act(), Some(Act::Open));
-        assert!(library.step(-1, 0));
-        assert_eq!(library.zone, Zone::Grid);
+        assert!(library.step(0, 1));
+        assert_eq!(library.focused_act(), Some(Act::MarkWatched));
     }
 
     #[test]
@@ -628,7 +704,7 @@ mod tests {
         assert!(library.actions().contains(&Act::RemoveFromContinuing));
         library.drop_from("w", false, true);
         assert!(library.items().is_empty());
-        assert_eq!(library.zone, Zone::Tabs, "an emptied section leaves nothing to stand on");
+        assert_eq!(library.zone, Zone::Filters, "an emptied section leaves nothing to stand on");
     }
 
     #[test]

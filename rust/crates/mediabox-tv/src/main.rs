@@ -1213,45 +1213,6 @@ impl App {
         window.set_discover_art(art);
     }
 
-    /// The record beside a grid: the library's and Discover's.
-    fn paint_preview(&mut self, window: &MediaBoxWindow, focused: Option<&state::Item>) {
-        if let Some(url) = focused.and_then(|item| item.background.clone().or_else(|| item.poster.clone())) {
-            let key = images::Key::new(&url, state::BACKDROP_WIDTH);
-            self.images.want(&key);
-            if let Some(art) = self.images.get(&key) {
-                window.set_library_art(art);
-            }
-        }
-        match focused {
-            Some(item) => {
-                let meta = self.hero_meta.get(&item.id);
-                window.set_library_title(item.title.clone().into());
-                window.set_library_facts(hero_facts(item, meta).into());
-                window.set_library_summary(
-                    item.summary
-                        .clone()
-                        .or_else(|| meta.and_then(|m| m.description.clone()))
-                        .unwrap_or_default()
-                        .into(),
-                );
-                let genres = if item.genres.is_empty() {
-                    meta.map(|m| m.genres.clone()).unwrap_or_default()
-                } else {
-                    item.genres.clone()
-                };
-                window.set_library_genres(strings(
-                    genres.iter().take(4).map(|g| detail::genre_in_turkish(g)),
-                ));
-            }
-            None => {
-                window.set_library_title("".into());
-                window.set_library_facts("".into());
-                window.set_library_summary("".into());
-                window.set_library_genres(strings(std::iter::empty()));
-            }
-        }
-    }
-
     // ------------------------------------------------------------ the library
 
     fn open_library(&mut self) {
@@ -1282,39 +1243,49 @@ impl App {
         match intent {
             Intent::Move(dx, dy) => {
                 if self.library.step(dx, dy) {
-                    self.want_hero();
                     self.paint();
                 }
             }
             Intent::Select => {
-                if self.library.sort_open.is_some() {
-                    self.library.pick_sort();
+                if self.library.type_open.is_some() {
+                    self.library.pick_type();
                     self.paint();
                     return;
                 }
                 match self.library.zone {
-                    Zone::Tabs => {
-                        let changed = if self.library.on_sort() {
-                            self.library.open_sort()
+                    Zone::Filters => {
+                        let changed = if self.library.on_types() {
+                            self.library.open_types()
                         } else {
-                            self.library.step(0, 1)
+                            self.library.choose_sort()
                         };
                         if changed {
                             self.paint();
                         }
                     }
+                    Zone::Search => self.open_screen(state::Nav::Search),
+                    Zone::Places => match self.library.place {
+                        0 => self.open_media(),
+                        1 => self.open_screen(state::Nav::Discover),
+                        3 => self.open_screen(state::Nav::Settings),
+                        // The library is this screen.
+                        _ => {
+                            self.library.step(1, 0);
+                            self.paint();
+                        }
+                    },
                     Zone::Grid => {
-                        let item = self.library.focused().cloned();
-                        if let Some(item) = item {
-                            self.open_detail_for(&item);
+                        if self.library.open_menu() {
+                            self.paint();
                         }
                     }
-                    Zone::Actions => {
+                    Zone::Menu => {
                         let (Some(act), Some(item)) =
                             (self.library.focused_act(), self.library.focused().cloned())
                         else {
                             return;
                         };
+                        self.library.zone = Zone::Grid;
                         let mut change = serde_json::json!({
                             "type": item.kind,
                             "id": item.id,
@@ -1322,7 +1293,10 @@ impl App {
                             "poster": item.poster,
                         });
                         match act {
-                            Act::Open => self.open_detail_for(&item),
+                            Act::Open => {
+                                self.open_detail_for(&item);
+                                return;
+                            }
                             Act::MarkWatched | Act::MarkUnwatched => {
                                 change["watched"] = serde_json::json!(act == Act::MarkWatched);
                                 spawn_library_change("watched", item.id.clone(), change);
@@ -1331,27 +1305,25 @@ impl App {
                                 change["inLibrary"] = serde_json::json!(false);
                                 self.library.drop_from(&item.id, true, false);
                                 spawn_library_change("library", item.id.clone(), change);
-                                self.paint();
                             }
                             Act::RemoveFromContinuing => {
                                 self.library.drop_from(&item.id, false, true);
                                 spawn_library_change("rewind", item.id.clone(), change);
-                                self.paint();
                             }
                         }
+                        self.paint();
                     }
                 }
             }
             Intent::Dismiss => {
-                // One press, one step: the list, the actions, the grid, out.
-                if self.library.close_sort() {
+                // One press, one step: the list or the menu, the grid, out.
+                if self.library.close_types() {
                     self.paint();
-                } else if self.library.zone == Zone::Actions {
+                } else if self.library.zone == Zone::Menu {
                     self.library.zone = Zone::Grid;
                     self.paint();
-                } else if self.library.zone == Zone::Grid {
-                    self.library.zone = Zone::Tabs;
-                    self.library.tab_focus = self.library.tab;
+                } else if self.library.zone != Zone::Filters {
+                    self.library.zone = Zone::Filters;
                     self.paint();
                 } else {
                     self.back();
@@ -3228,17 +3200,22 @@ impl App {
         use screens::library::{Zone, SORTS};
         let library = &self.library;
         window.set_library_tabs(strings(library.sections.iter().map(|s| s.title.clone())));
-        window.set_library_notes(strings(library.sections.iter().map(|s| s.note.clone())));
         window.set_library_tab(library.tab as i32);
-        window.set_library_on_tabs(library.zone == Zone::Tabs);
-        window.set_library_on_sort(library.on_sort());
-        window.set_library_sortable(library.sortable());
-        window.set_library_sort(library.sort.label().into());
+        window.set_library_type_open(library.type_open.map(|i| i as i32).unwrap_or(-1));
         window.set_library_sorts(strings(SORTS.iter().map(|s| s.label().to_string())));
-        window.set_library_sort_open(library.sort_open.map(|i| i as i32).unwrap_or(-1));
+        window.set_library_sort(SORTS.iter().position(|s| *s == library.sort).unwrap_or(0) as i32);
+        window.set_library_sortable(library.sortable());
+        window.set_library_zone(match library.zone {
+            Zone::Filters => 0,
+            Zone::Grid => 1,
+            Zone::Menu => 2,
+            Zone::Places => 3,
+            Zone::Search => 4,
+        });
+        window.set_library_filter(library.tab_focus as i32);
         window.set_library_actions(strings(library.actions().iter().map(|a| a.label().to_string())));
-        window.set_library_on_actions(library.zone == Zone::Actions);
         window.set_library_action(library.action as i32);
+        window.set_library_place(library.place as i32);
         window.set_library_index(library.index() as i32);
         window.set_library_columns(screens::library::COLUMNS as i32);
 
@@ -3249,9 +3226,6 @@ impl App {
             screens::library::COLUMNS,
         );
         window.set_library_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
-
-        let focused = self.library.focused().cloned();
-        self.paint_preview(window, focused.as_ref());
     }
 
     fn paint_detail(&mut self, window: &MediaBoxWindow) {
@@ -4179,35 +4153,6 @@ fn posters(images: &mut images::ImageManager, items: &[state::Item]) -> Vec<Post
             }
         })
         .collect()
-}
-
-/// Year, rating and a genre or two, as one line. The same shape the detail
-/// screen's own facts line has, so a title reads the same wherever it is shown.
-/// The line under a title over the shelves: when it came out, how long it
-/// runs, what it scored and what it is -- from the shelf where the shelf has
-/// it, from the full record where it does not -- and, on "Devam Et", how far
-/// it was watched.
-fn hero_facts(item: &state::Item, meta: Option<&model::Meta>) -> String {
-    let mut facts: Vec<String> = Vec::new();
-    if let Some(year) = item.year.clone().or_else(|| meta.and_then(|m| m.release_info.clone())) {
-        facts.push(year);
-    }
-    if let Some(runtime) = meta.and_then(|m| m.runtime.clone()).filter(|r| !r.is_empty()) {
-        facts.push(runtime);
-    }
-    if let Some(rating) = item.rating.clone().or_else(|| meta.and_then(|m| m.imdb_rating.clone())) {
-        facts.push(format!("IMDb {rating}"));
-    }
-    let genres = if item.genres.is_empty() {
-        meta.map(|m| m.genres.clone()).unwrap_or_default()
-    } else {
-        item.genres.clone()
-    };
-    facts.extend(genres.iter().take(3).map(|g| detail::genre_in_turkish(g)));
-    if item.continuing && item.progress > 0.0 {
-        facts.push(format!("%{} izlendi", (item.progress * 100.0).round() as u32));
-    }
-    facts.join("  ·  ")
 }
 
 /// The full record of a title the remote has rested on, a moment after it

@@ -186,25 +186,19 @@ export component MediaBoxWindow inherits Window {
 
     // ---- library
     in property <[string]> library-tabs;
-    in property <[string]> library-notes;
     in property <int> library-tab;
-    in property <bool> library-on-tabs: true;
-    in property <bool> library-on-sort;
-    in property <bool> library-sortable;
-    in property <string> library-sort;
+    in property <int> library-type-open: -1;
     in property <[string]> library-sorts;
-    in property <int> library-sort-open: -1;
+    in property <int> library-sort;
+    in property <bool> library-sortable;
+    in property <int> library-zone;
+    in property <int> library-filter;
     in property <[string]> library-actions;
-    in property <bool> library-on-actions;
     in property <int> library-action;
+    in property <int> library-place: 2;
     in property <[PosterItem]> library-items;
     in property <int> library-index;
-    in property <int> library-columns: 4;
-    in property <image> library-art;
-    in property <string> library-title;
-    in property <string> library-facts;
-    in property <string> library-summary;
-    in property <[string]> library-genres;
+    in property <int> library-columns: 9;
 
     // ---- detail
     in property <image> detail-art-a;
@@ -438,25 +432,20 @@ export component MediaBoxWindow inherits Window {
             width: 100%;
             height: 100%;
             tabs: root.library-tabs;
-            notes: root.library-notes;
             tab: root.library-tab;
-            on-tabs: root.library-on-tabs;
-            on-sort: root.library-on-sort;
-            sortable: root.library-sortable;
-            sort: root.library-sort;
+            type-open: root.library-type-open;
             sorts: root.library-sorts;
-            sort-open: root.library-sort-open;
+            sort: root.library-sort;
+            sortable: root.library-sortable;
+            zone: root.library-zone;
+            filter: root.library-filter;
             actions: root.library-actions;
-            on-actions: root.library-on-actions;
             action: root.library-action;
+            place: root.library-place;
+            places: root.media-places;
             items: root.library-items;
             index: root.library-index;
             columns: root.library-columns;
-            art: root.library-art;
-            title: root.library-title;
-            facts: root.library-facts;
-            summary: root.library-summary;
-            genres: root.library-genres;
         }
 
         if screen == "detail": Detail {
@@ -620,7 +609,7 @@ export component MediaBoxWindow inherits Window {
         // The catalogue carries the reference's own chrome instead: its
         // places down the left and its search box across the top.
         if screen != "boot" && screen != "film" && screen != "detail" && screen != "media"
-            && screen != "discover" && screen != "search"
+            && screen != "discover" && screen != "search" && screen != "library"
             && screen != "settings" && screen != "diagnostics": TopBar {
             x: 0;
             y: 0;

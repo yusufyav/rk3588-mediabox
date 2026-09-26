@@ -1,234 +1,242 @@
 import { Theme, Metrics } from "theme.slint";
-import { GridPoster, PosterItem, TitlePreview } from "components.slint";
+import { GridPoster, PosterItem } from "components.slint";
+import { Chrome } from "chrome.slint";
 
-// The account's library, as a grid.
+// The account's library, laid out as the reference's library page and
+// measured off its own stylesheet at its 1920-pixel layout (a rem is 15 px):
 //
-// The home screen is for browsing and this screen is for finding: the sections
-// across the top with the order at their end, a poster grid under them, every
-// title named, and beside it the focused title's record and what can be done
-// with it.
+// - the board's column of places and search box;
+// - 1.5rem in and down from them, the type dropdown, 15rem by 2.75rem, then
+//   the orders as pill chips 1rem apart, the chosen one in the reference's
+//   blue, the rest faded;
+// - the grid 1.5rem under them, nine across, a poster 8.42% of the width with
+//   its name under it, one every 10.37% across and 30.9% down;
+// - Ok on a poster is its menu, where the reference opens it from the poster.
 export component Library inherits Rectangle {
+    // The dropdown's sections, the one showing, and its list when it is down.
     in property <[string]> tabs;
-    in property <[string]> notes;
     in property <int> tab;
-    in property <bool> on-tabs;
-    // The remote is on the order at the end of the tabs.
-    in property <bool> on-sort;
-    in property <bool> sortable;
-    in property <string> sort;
+    in property <int> type-open: -1;
+    // The orders, the chosen one, and whether the section showing has them.
     in property <[string]> sorts;
-    // The order's list when it is down: the highlighted one, or -1.
-    in property <int> sort-open: -1;
-    // What can be done with the focused title, and whether the remote is there.
+    in property <int> sort;
+    in property <bool> sortable;
+    // 0 the filters, 1 the grid, 2 the menu, 3 the places, 4 the search box.
+    in property <int> zone;
+    // On the filters: 0 the dropdown, then the chips.
+    in property <int> filter;
     in property <[string]> actions;
-    in property <bool> on-actions;
     in property <int> action;
+    in property <int> place;
+    in property <[string]> places;
 
     in property <[PosterItem]> items;
     in property <int> index;
     in property <int> columns;
 
-    // What the remote is on, beside the grid. The reference puts the record of
-    // the focused title down the right of the same screen, and it is the thing
-    // that makes a wall of posters navigable: a year, a rating and two lines of
-    // what it is, without opening anything.
-    in property <image> art;
-    in property <string> title;
-    in property <string> facts;
-    in property <string> summary;
-    in property <[string]> genres;
-
-    property <length> tabs-h: Metrics.root-font * 3.4;
-    property <length> grid-top: Metrics.topbar + tabs-h + Metrics.block-gap;
-    property <length> cell-w: Metrics.card-w + Metrics.grid-gap;
-    property <length> cell-h: Metrics.card-h + Metrics.text-card * 3.4 + Metrics.grid-gap;
-    property <length> viewport-h: root.height - grid-top - Metrics.gutter * 0.5;
-    property <length> panel-w: max(240px, min(620px, root.width * 0.3));
-    property <length> grid-w: root.width - Metrics.gutter * 2 - panel-w - Metrics.block-gap;
-    property <length> scroll: on-tabs
+    property <length> rem: root.width / 128;
+    property <length> filters-x: root.width * 0.0586;
+    property <length> filters-y: root.height * 0.0972;
+    property <length> filters-h: root.height * 0.0382;
+    property <length> grid-x: root.width * 0.0664;
+    property <length> grid-top: root.height * 0.170;
+    property <length> art-w: root.width * 0.0842;
+    property <length> cell-w: root.width * 0.1037;
+    property <length> cell-h: root.height * 0.309;
+    property <length> viewport-h: root.height - grid-top;
+    property <bool> on-grid: zone == 1 || zone == 2;
+    property <length> scroll: !on-grid
         ? 0px
-        : clamp(Math.floor(index / columns) * cell-h - Metrics.top-inset * 0.4,
+        : clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
                 0px,
                 max(0px, Math.ceil(items.length / columns) * cell-h - viewport-h));
 
     background: Theme.catalog-bg;
     clip: true;
 
-    // The grid.
-    // Widened by the ring's room on every side, so a focused poster on the
-    // edge of the grid keeps its whole ring.
-    Rectangle {
-        x: Metrics.gutter - Metrics.focus-room;
+    // ---------------------------------------------------------------- the grid
+    grid := Rectangle {
+        x: grid-x - Metrics.focus-room;
         y: grid-top - Metrics.focus-room;
-        width: grid-w + Metrics.focus-room * 2;
+        width: root.width - self.x;
         height: viewport-h + Metrics.focus-room;
         clip: true;
-        background: transparent;
 
         if items.length == 0: Text {
-            x: 0;
-            y: Metrics.root-font * 2;
-            text: "Bu bölümde henüz bir şey yok";
-            color: Theme.dim;
-            font-size: Metrics.text-meta;
-            font-weight: 640;
+            x: Metrics.focus-room;
+            y: rem * 3;
+            width: root.width - grid-x * 2;
+            text: "Boş Kitaplık";
+            color: Theme.text;
+            font-size: rem * 2;
+            horizontal-alignment: center;
         }
 
         Rectangle {
             x: Metrics.focus-room;
             y: Metrics.focus-room - scroll;
-            width: 100%;
+            width: columns * cell-w;
             height: max(1px, Math.ceil(items.length / columns) * cell-h);
-            background: transparent;
 
             animate y { duration: Theme.glide; easing: Theme.ease; }
 
             for item[i] in items: GridPoster {
                 x: Math.mod(i, columns) * cell-w;
                 y: Math.floor(i / columns) * cell-h;
+                art-w: root.art-w;
+                name-size: root.width * 0.0072;
                 item: item;
-                // One focus on the panel: not while the remote is on the actions.
-                focused: !on-tabs && !on-actions && i == index;
+                focused: on-grid && i == index;
             }
         }
     }
 
-    // The record of whatever the remote is on, and what can be done with it.
-    if title != "": VerticalLayout {
-        x: root.width - Metrics.gutter - panel-w;
-        y: grid-top;
-        width: panel-w;
-        spacing: Metrics.root-font * 0.8;
+    // ---------------------------------------------------------------- the menu
+    //
+    // Over the focused poster's lower half, as the reference's menu opens
+    // from the poster's corner; kept on the screen at the right edge.
+    if zone == 2 && actions.length > 0: Rectangle {
+        property <length> line-h: rem * 3.2;
+        property <length> poster-x: grid-x + Math.mod(index, columns) * cell-w;
+        property <length> poster-y: grid-top + Math.floor(index / columns) * cell-h - scroll;
+        width: rem * 16;
+        height: actions.length * line-h;
+        x: min(poster-x + art-w * 0.45, root.width - self.width - rem);
+        y: min(poster-y + art-w * 1.461 * 0.55, root.height - self.height - rem);
+        border-radius: rem * 0.75;
+        background: #1e1c2f;
+        border-width: 1px;
+        border-color: #ffffff1f;
+        drop-shadow-blur: rem;
+        drop-shadow-color: #00000080;
+        clip: true;
+
+        for label[k] in actions: Rectangle {
+            y: k * parent.line-h;
+            height: parent.line-h;
+            background: k == action ? Theme.focus-fill : transparent;
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+            Text {
+                x: rem * 1.5;
+                width: parent.width - rem * 3;
+                height: 100%;
+                text: label;
+                color: k == action ? #0a0c10 : Theme.text;
+                font-size: rem;
+                font-weight: 500;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+    }
+
+    Chrome {
+        width: 100%;
+        height: 100%;
+        on-search: zone == 4;
+        on-places: zone == 3;
+        place: place;
+        current: 2;
+        places: places;
+    }
+
+    // ------------------------------------------------------------ the filters
+    //
+    // Last in the file, so the dropdown's list is drawn over the grid.
+    HorizontalLayout {
+        x: filters-x;
+        y: filters-y;
+        height: filters-h;
+        spacing: rem * 1.5;
         alignment: start;
 
-        TitlePreview {
-            art: root.art;
-            title: root.title;
-            facts: root.facts;
-            summary: root.summary;
-            genres: root.genres;
-        }
+        types := Rectangle {
+            property <bool> focused: zone == 0 && filter == 0;
+            width: rem * 15;
+            border-radius: self.height * 0.28;
+            background: focused ? Theme.focus-fill : #ffffff0d;
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-        VerticalLayout {
-            spacing: Metrics.root-font * 0.3;
-            for label[i] in actions: Rectangle {
-                property <bool> focused: on-actions && i == action;
-                height: Metrics.root-font * 2.3;
-                border-radius: Theme.radius * 0.6;
-                background: focused ? Theme.focus-fill : #ffffff0d;
-                border-width: focused ? 2px : 0px;
-                border-color: Theme.focus-ring;
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+            Text {
+                x: parent.height * 0.42;
+                width: parent.width - parent.height * 1.3;
+                height: 100%;
+                text: tabs[tab];
+                color: types.focused ? #0a0c10 : Theme.text;
+                font-size: rem;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            Path {
+                x: parent.width - parent.height * 0.62;
+                y: parent.height * 0.44;
+                width: parent.height * 0.2;
+                height: parent.height * 0.12;
+                viewbox-width: 10;
+                viewbox-height: 6;
+                commands: "M0 0L10 0L5 6z";
+                fill: types.focused ? #0a0c10 : #ffffffb0;
+            }
 
-                Text {
-                    x: Metrics.root-font * 0.9;
-                    width: parent.width - Metrics.root-font * 1.8;
-                    height: 100%;
-                    text: label;
-                    color: focused ? #0a0c10 : Theme.text;
-                    font-size: Metrics.text-meta * 0.9;
-                    font-weight: 650;
-                    vertical-alignment: center;
-                    overflow: elide;
+            if type-open >= 0: Rectangle {
+                property <length> line-h: rem * 3.2;
+                x: 0;
+                y: parent.height + rem * 0.3;
+                width: parent.width;
+                height: tabs.length * line-h;
+                border-radius: parent.border-radius;
+                background: #1e1c2f;
+                border-width: 1px;
+                border-color: #ffffff1f;
+                clip: true;
+
+                for option[k] in tabs: Rectangle {
+                    y: k * parent.line-h;
+                    height: parent.line-h;
+                    background: k == type-open ? #ffffff26 : transparent;
+
+                    Text {
+                        x: rem * 1.5;
+                        width: parent.width - rem * 3;
+                        height: 100%;
+                        text: option;
+                        color: Theme.text;
+                        font-size: rem;
+                        font-weight: k == tab ? 700 : 500;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
                 }
             }
         }
-    }
 
-    // The sections, last in the file so the order's list is drawn over the grid.
-    HorizontalLayout {
-        x: Metrics.gutter;
-        y: Metrics.topbar;
-        width: root.width - Metrics.gutter * 2;
-        height: tabs-h;
-        spacing: Metrics.root-font * 0.5;
-        alignment: start;
+        // The orders, as the reference's chips.
+        if sortable: HorizontalLayout {
+            spacing: rem;
 
-        for label[i] in tabs: Rectangle {
-            property <bool> chosen: i == tab;
-            property <bool> focused: on-tabs && !on-sort && chosen;
-            width: caption.preferred-width + Metrics.root-font * 2.0;
-            border-radius: Theme.radius * 0.8;
-            background: focused ? Theme.focus-fill : (chosen ? #ffffff16 : transparent);
-            border-width: focused ? 2px : 1px;
-            border-color: focused ? Theme.focus-ring : (chosen ? Theme.line : transparent);
+            for label[k] in sorts: Rectangle {
+                property <bool> focused: zone == 0 && filter == k + 1;
+                property <bool> chosen: k == sort;
+                width: words.preferred-width + rem * 3.5;
+                border-radius: self.height / 2;
+                background: focused ? Theme.focus-fill : (chosen ? #1245a6 : transparent);
+                opacity: focused || chosen ? 1.0 : 0.6;
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-            caption := Text {
-                text: label;
-                color: focused ? #0a0c10 : (chosen ? Theme.text : Theme.muted);
-                font-size: Metrics.root-font * 1.02;
-                font-weight: 700;
-                vertical-alignment: center;
-                horizontal-alignment: center;
-                width: 100%;
-                height: 100%;
-            }
-        }
-
-        Rectangle { horizontal-stretch: 1; }
-
-        Text {
-            text: notes[tab];
-            color: Theme.dim;
-            font-size: Metrics.text-label;
-            font-weight: 640;
-            vertical-alignment: center;
-        }
-
-        // The order, the reference's dropdown. Only the account's library has
-        // one; the other sections are in the order they come in.
-        sort-chip := Rectangle {
-            property <bool> focused: on-tabs && on-sort;
-            width: sort-words.preferred-width + Metrics.root-font * 2.0;
-            opacity: sortable ? 1.0 : 0.35;
-            border-radius: Theme.radius * 0.8;
-            background: focused ? Theme.focus-fill : #ffffff10;
-            border-width: focused ? 2px : 1px;
-            border-color: focused ? Theme.focus-ring : #ffffff1a;
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-            sort-words := Text {
-                width: 100%;
-                height: 100%;
-                text: "Sıra: " + sort + "  ▾";
-                color: sort-chip.focused ? #0a0c10 : Theme.text;
-                font-size: Metrics.root-font * 0.92;
-                font-weight: 700;
-                vertical-alignment: center;
-                horizontal-alignment: center;
-            }
-
-            if sort-open >= 0: Rectangle {
-                property <length> line-h: Metrics.root-font * 2.3;
-                x: parent.width - self.width;
-                y: parent.height + Metrics.root-font * 0.3;
-                width: max(parent.width, Metrics.root-font * 14);
-                height: sorts.length * line-h + Metrics.root-font * 0.8;
-                border-radius: Theme.radius * 0.7;
-                background: #141a29;
-                border-width: 1px;
-                border-color: #ffffff1f;
-
-                for option[k] in sorts: Rectangle {
-                    x: Metrics.root-font * 0.4;
-                    y: Metrics.root-font * 0.4 + k * line-h;
-                    width: parent.width - Metrics.root-font * 0.8;
-                    height: line-h;
-                    border-radius: Theme.radius * 0.5;
-                    background: k == sort-open ? #ffffff26 : transparent;
-
-                    Text {
-                        x: Metrics.root-font * 0.7;
-                        width: parent.width - Metrics.root-font * 1.4;
-                        height: 100%;
-                        text: (option == sort ? "✓  " : "") + option;
-                        color: Theme.text;
-                        font-size: Metrics.text-meta * 0.92;
-                        font-weight: option == sort ? 750 : 560;
-                        vertical-alignment: center;
-                    }
+                words := Text {
+                    width: 100%;
+                    height: 100%;
+                    text: label;
+                    color: parent.focused ? #0a0c10 : Theme.text;
+                    font-size: rem;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    wrap: no-wrap;
                 }
             }
         }
