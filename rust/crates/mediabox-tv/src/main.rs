@@ -422,6 +422,7 @@ impl App {
     fn open_screen(&mut self, nav: state::Nav) {
         match nav {
             state::Nav::Discover => {
+                self.discover.arrive();
                 self.open(Route::Discover);
                 // The catalogues are asked for every time, as the catalogue
                 // screen's are; what is shown stays until they answer.
@@ -695,6 +696,7 @@ impl App {
     /// the title it was on.
     fn open_media(&mut self) {
         self.media.set_shelves(self.shelves.clone());
+        self.media.arrive();
         if let Some(window) = self.window.upgrade() {
             window.set_media_rails(slint::ModelRc::from(self.media.rails()));
         }
@@ -1217,6 +1219,7 @@ impl App {
 
     fn open_library(&mut self) {
         self.build_library();
+        self.library.arrive();
         self.open(Route::Library);
     }
 

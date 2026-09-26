@@ -113,6 +113,13 @@ impl Media {
         }
     }
 
+    /// Coming to the board from anywhere else: on the shelves, where the
+    /// remote last was on them, not on the place that led away from it.
+    pub fn arrive(&mut self) {
+        self.zone = if self.shelves.is_empty() { Zone::Search } else { Zone::Shelves };
+        self.place = 0;
+    }
+
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
         self.moved = true;
         match self.zone {
@@ -291,5 +298,21 @@ mod tests {
         assert_eq!(media.zone, Zone::Search);
         media.set_shelves(vec![shelf("a", 3)]);
         assert!(media.focused().is_some());
+    }
+
+    /// Left for another place from the column down the left, and back: the
+    /// remote is on the shelves again, where it was.
+    #[test]
+    fn arriving_again_is_on_the_shelves_not_the_place_that_led_away() {
+        let mut media = Media::new();
+        media.set_shelves(vec![shelf("a", 3)]);
+        media.step(1, 0);
+        media.step(-1, 0);
+        media.step(-1, 0);
+        media.step(0, 2);
+        assert_eq!(media.zone, Zone::Places);
+        media.arrive();
+        assert_eq!(media.zone, Zone::Shelves);
+        assert_eq!(media.column(), 0);
     }
 }

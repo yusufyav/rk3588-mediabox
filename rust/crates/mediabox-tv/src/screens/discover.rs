@@ -175,6 +175,14 @@ impl Discover {
     /// Opens a particular catalogue: the reference's "Tümünü Gör" on a board
     /// shelf. Returns its first page when the catalogues are known; otherwise
     /// it is opened when they arrive.
+    /// Coming to Discover from anywhere else: on the grid, or on the filters
+    /// while it is empty, never on the place that led away from it.
+    pub fn arrive(&mut self) {
+        self.picker = None;
+        self.zone = if self.items.is_empty() { Zone::Filters } else { Zone::Grid };
+        self.place = 1;
+    }
+
     pub fn show(&mut self, addon_id: &str, kind: &str, id: &str) -> Option<Request> {
         self.zone = Zone::Grid;
         self.picker = None;

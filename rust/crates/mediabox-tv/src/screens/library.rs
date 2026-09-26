@@ -255,6 +255,14 @@ impl Library {
         self.clamp();
     }
 
+    /// Coming to the library from anywhere else: on the grid, or on the
+    /// filters while the section is empty, with nothing left open.
+    pub fn arrive(&mut self) {
+        self.type_open = None;
+        self.zone = if self.items().is_empty() { Zone::Filters } else { Zone::Grid };
+        self.place = 2;
+    }
+
     /// Opens "İzlemeye devam edin", with the remote in the grid: where the board's
     /// "Tümünü Gör" on "İzlemeye devam edin" leads.
     pub fn show_continuing(&mut self) {
