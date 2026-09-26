@@ -1526,7 +1526,14 @@ impl App {
 
         self.remember();
         self.store.flush();
-        self.here = Some(Playing::new());
+        self.here = Some(Playing {
+            grace: if start > 0 {
+                FIRST_FRAME_GRACE_RESUMED
+            } else {
+                FIRST_FRAME_GRACE
+            },
+            ..Playing::new()
+        });
         self.now.film = true;
         // Between here and the first frame there is nothing on the panel: the
         // decoder has to open the source, and on a torrent behind a debrid
@@ -1672,13 +1679,13 @@ impl App {
             }
             return;
         }
-        if !playing.seen && playing.asked.elapsed() < FIRST_FRAME_GRACE {
+        if !playing.seen && playing.asked.elapsed() < playing.grace {
             return;
         }
 
         let gave_up = !playing.seen;
         if gave_up {
-            eprintln!("mediabox-tv.play here gave up: no frame in {FIRST_FRAME_GRACE:?}");
+            eprintln!("mediabox-tv.play here gave up: no frame in {:?}", playing.grace);
             spawn_here(HereCommand::Stop);
         }
         self.here = None;
@@ -1978,6 +1985,11 @@ impl App {
                 Transport::Stop => {
                     self.here = None;
                     spawn_here(HereCommand::Stop);
+                    // Closed by the viewer: the account is told where, which
+                    // is what the next "Devam Et" starts from.
+                    self.tell_the_account(true);
+                    self.watching = None;
+                    self.refresh_watch();
                 }
                 Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
             }
@@ -4668,6 +4680,8 @@ struct Playing {
     /// Kodi — so a film played with no way to pause, seek or stop it, over a
     /// home screen showing through its own letterbox.
     seen: bool,
+    /// How long to wait for that first frame before calling the source dead.
+    grace: Duration,
 }
 
 impl Playing {
@@ -4677,6 +4691,7 @@ impl Playing {
             controls_until: None,
             polled: None,
             seen: false,
+            grace: FIRST_FRAME_GRACE,
         }
     }
 }
@@ -4727,6 +4742,13 @@ impl Watching {
 /// interface stops waiting for it. Measured on the appliance: a local file is
 /// on screen in under a second, a stream over the network in two to four.
 const FIRST_FRAME_GRACE: Duration = Duration::from_secs(25);
+
+/// The same, for a film started where the account says it was left: opening a
+/// remote file part of the way in is more round trips than opening it at the
+/// start. Measured on the Plus with a 56 GB UHD remux behind a debrid link:
+/// first frame at 21.6 s from the start and 26.4 s from 17:52 -- past the
+/// plain grace, so a resumed film was stopped a second before it appeared.
+const FIRST_FRAME_GRACE_RESUMED: Duration = Duration::from_secs(45);
 
 /// How long a line along the bottom of the screen stays up.
 ///
