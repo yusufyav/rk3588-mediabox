@@ -723,7 +723,8 @@ impl Detail {
         }
     }
 
-    /// The season bar's words: "1. Sezon", and "Özel" for season 0.
+    /// The season bar's words, the reference's SEASON_NUMBER and SPECIAL:
+    /// "Sezon 1", and "Özel" for season 0.
     pub fn season_labels(&self) -> Vec<String> {
         self.seasons()
             .into_iter()
@@ -731,7 +732,7 @@ impl Detail {
                 if season == 0 {
                     "Özel".to_string()
                 } else {
-                    format!("{season}. Sezon")
+                    format!("Sezon {season}")
                 }
             })
             .collect()
@@ -1045,11 +1046,11 @@ fn date_prefix(released: &str) -> Option<String> {
     shaped.then(|| date.to_string())
 }
 
-/// "22 Mart 2009".
+/// "22 Mar 2009".
 fn turkish_date(date: &str) -> String {
+    // tr-TR's short months, as the reference's toLocaleString writes them.
     const MONTHS: [&str; 12] = [
-        "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül",
-        "Ekim", "Kasım", "Aralık",
+        "Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara",
     ];
     let year = &date[0..4];
     let month: usize = date[5..7].parse().unwrap_or(0);
@@ -1411,7 +1412,7 @@ mod series_tests {
     #[test]
     fn seasons_come_from_the_episodes_with_the_specials_last_and_no_gaps_filled() {
         assert_eq!(breaking_bad().seasons(), vec![1, 2, 4, 0]);
-        assert_eq!(breaking_bad().season_labels(), vec!["1. Sezon", "2. Sezon", "4. Sezon", "Özel"]);
+        assert_eq!(breaking_bad().season_labels(), vec!["Sezon 1", "Sezon 2", "Sezon 4", "Özel"]);
     }
 
     #[test]
@@ -1502,7 +1503,7 @@ mod series_tests {
         assert!((rows[1].progress - 0.25).abs() < 1e-6);
         assert!(!rows[1].upcoming && rows[2].upcoming, "the 22nd is after the 16th");
         assert_eq!(rows[2].title.as_str(), "3. Episode tt:2:3");
-        assert_eq!(rows[2].date.as_str(), "22 Mart 2009");
+        assert_eq!(rows[2].date.as_str(), "22 Mar 2009");
     }
 
     #[test]

@@ -26,29 +26,32 @@ export struct EpisodeRow {
     art: image,
 }
 
+// An episode, as the reference's video row, off its stylesheet: an 8rem by
+// 5rem still with the progress along its foot, then the numbered title and,
+// under it, the date faded and the reference's flags -- "İZLENDİ" on yellow
+// with an eye, "YAKLAŞAN" on green.
 component EpisodeLine inherits Rectangle {
     in property <EpisodeRow> entry;
     in property <bool> focused;
     // The remote is on the row's watched button rather than on the row.
     in property <bool> marking;
+    property <length> rem: Metrics.vw / 128;
 
-    border-radius: Metrics.vh * 0.008;
-    background: focused ? #ffffff26 : transparent;
-    border-width: focused ? 2px : 0px;
+    border-radius: rem * 0.75;
+    background: focused ? #ffffff1f : transparent;
+    border-width: focused ? max(2px, rem * 0.15) : 0px;
     border-color: Theme.focus-ring;
     clip: true;
 
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
     HorizontalLayout {
-        padding: Metrics.vh * 0.01;
-        spacing: Metrics.vh * 0.014;
+        padding: rem * 0.5;
 
-        // The episode's still, 16:9, with how far into it the account got.
         Rectangle {
-            width: (root.height - Metrics.vh * 0.02) * 16 / 9;
-            border-radius: Metrics.vh * 0.006;
-            background: #ffffff12;
+            width: rem * 8;
+            border-radius: rem * 0.3;
+            background: #ffffff0d;
             clip: true;
 
             if entry.art.width > 0: Image {
@@ -56,61 +59,94 @@ component EpisodeLine inherits Rectangle {
                 height: 100%;
                 source: entry.art;
                 image-fit: cover;
+                opacity: 0.9;
             }
             if entry.progress > 0.0: Rectangle {
-                x: 0;
-                y: parent.height - self.height;
-                width: 100%;
-                height: max(3px, Metrics.vh * 0.004);
-                background: #ffffff38;
+                x: rem * 0.5;
+                y: parent.height - rem * 0.9;
+                width: parent.width - rem;
+                height: rem * 0.4;
+                background: #ffffff33;
                 Rectangle {
                     x: 0;
                     width: max(3px, parent.width * entry.progress);
                     height: 100%;
-                    background: Theme.film;
+                    background: #7b5bf5;
                 }
             }
         }
 
         VerticalLayout {
+            padding-left: rem * 1.5;
+            padding-right: rem * 0.5;
             alignment: center;
-            spacing: Metrics.vh * 0.004;
+            spacing: rem * 0.6;
 
             Text {
                 text: entry.title;
                 color: Theme.text;
-                font-size: Metrics.vh * 0.0158;
-                font-weight: 600;
+                font-size: rem;
                 wrap: word-wrap;
                 overflow: elide;
-                max-height: Metrics.vh * 0.042;
+                max-height: rem * 2.5;
             }
             HorizontalLayout {
-                spacing: Metrics.vh * 0.01;
-                alignment: start;
+                height: rem * 1.6;
+                spacing: rem * 0.5;
 
                 Text {
                     text: entry.date;
-                    color: #ffffff8c;
-                    font-size: Metrics.vh * 0.0135;
+                    color: #ffffff70;
+                    font-size: rem * 0.8;
                     font-weight: 500;
                     vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    wrap: no-wrap;
                 }
-                if entry.upcoming: Text {
-                    text: "YAKINDA";
-                    color: Theme.badge-hdr;
-                    font-size: Metrics.vh * 0.012;
-                    font-weight: 700;
-                    letter-spacing: Metrics.vh * 0.001;
-                    vertical-alignment: center;
+                if entry.upcoming && !entry.watched: Rectangle {
+                    horizontal-stretch: 0;
+                    border-radius: rem * 0.3;
+                    background: #22b365;
+                    HorizontalLayout {
+                        padding-left: rem * 0.5;
+                        padding-right: rem * 0.5;
+                        Text {
+                            text: "YAKLAŞAN";
+                            color: #0c0b11;
+                            font-size: rem * 0.8;
+                            font-weight: 800;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
-                if entry.watched: Text {
-                    text: "İZLENDİ";
-                    color: Theme.badge-good;
-                    font-size: Metrics.vh * 0.012;
-                    font-weight: 700;
-                    letter-spacing: Metrics.vh * 0.001;
-                    vertical-alignment: center;
+                if entry.watched: Rectangle {
+                    horizontal-stretch: 0;
+                    border-radius: rem * 0.3;
+                    background: #f6c700;
+                    HorizontalLayout {
+                        padding-left: rem * 0.5;
+                        padding-right: rem * 0.5;
+                        spacing: rem * 0.25;
+                        VerticalLayout {
+                            alignment: center;
+                            Path {
+                                width: rem * 1.15;
+                                height: rem * 1.15;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: "M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z";
+                                fill: #0c0b11;
+                            }
+                        }
+                        Text {
+                            text: "İZLENDİ";
+                            color: #0c0b11;
+                            font-size: rem * 0.8;
+                            font-weight: 800;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
         }
@@ -793,60 +829,116 @@ export component Detail inherits Rectangle {
             width: 100%;
             height: 100%;
 
-            // The season bar: the reference's previous / season / next, walked
-            // with Left and Right.
-            Rectangle {
+            // The season bar: the reference's "‹ Önceki", the season with its
+            // caret, "Sonraki ›". Left and Right walk the seasons from the
+            // season, which is where the remote stands.
+            bar := Rectangle {
+                property <length> rem: Metrics.vw / 128;
+                property <bool> focused: on-episodes && on-seasons;
                 x: panel-pad;
                 y: panel-pad;
                 width: parent.width - panel-pad * 2;
-                height: Metrics.vh * 0.052;
-                border-radius: Metrics.vh * 0.008;
-                background: (on-episodes && on-seasons) ? Theme.focus-fill : #ffffff0f;
-                border-width: (on-episodes && on-seasons) ? 2px : 0px;
-                border-color: Theme.focus-ring;
+                height: rem * 3;
 
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-                HorizontalLayout {
-                    padding-left: Metrics.vh * 0.016;
-                    padding-right: Metrics.vh * 0.016;
-                    spacing: Metrics.vh * 0.01;
-
-                    Path {
-                        width: Metrics.vh * 0.014;
-                        viewbox-width: 24;
-                        viewbox-height: 24;
-                        commands: "M15.5 4L7.5 12l8 8";
-                        stroke: (on-episodes && on-seasons) ? #0a0c10 : #ffffffb0;
-                        stroke-width: 2.4px;
-                        opacity: season-index > 0 ? 1.0 : 0.25;
+                Rectangle {
+                    x: 0;
+                    width: bar.rem * 6.5;
+                    opacity: season-index > 0 ? 1.0 : 0.5;
+                    HorizontalLayout {
+                        padding: bar.rem * 0.5;
+                        spacing: bar.rem * 0.5;
+                        VerticalLayout {
+                            alignment: center;
+                            Path {
+                                width: bar.rem * 1.5;
+                                height: self.width;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: "M15 5L8 12l7 7";
+                                stroke: Theme.text;
+                                stroke-width: 2px;
+                            }
+                        }
+                        Text {
+                            text: "Önceki";
+                            color: Theme.text;
+                            font-size: bar.rem;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            horizontal-stretch: 1;
+                        }
                     }
-                    Text {
-                        text: seasons.length > 0 ? seasons[season-index] : "";
-                        color: (on-episodes && on-seasons) ? #0a0c10 : Theme.text;
-                        font-size: Metrics.vh * 0.018;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
-                        horizontal-stretch: 1;
+                }
+
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    width: season-label.preferred-width + bar.rem * 4;
+                    border-radius: self.height / 2;
+                    background: bar.focused ? Theme.focus-fill : transparent;
+                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: bar.rem * 0.6;
+                        season-label := Text {
+                            text: seasons.length > 0 ? seasons[season-index] : "";
+                            color: bar.focused ? #0a0c10 : Theme.text;
+                            font-size: bar.rem;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Path {
+                                width: bar.rem * 0.7;
+                                height: self.width * 0.6;
+                                viewbox-width: 10;
+                                viewbox-height: 6;
+                                commands: "M0 0L10 0L5 6z";
+                                fill: bar.focused ? #0a0c10 : Theme.text;
+                            }
+                        }
                     }
-                    Path {
-                        width: Metrics.vh * 0.014;
-                        viewbox-width: 24;
-                        viewbox-height: 24;
-                        commands: "M8.5 4l8 8-8 8";
-                        stroke: (on-episodes && on-seasons) ? #0a0c10 : #ffffffb0;
-                        stroke-width: 2.4px;
-                        opacity: season-index + 1 < seasons.length ? 1.0 : 0.25;
+                }
+
+                Rectangle {
+                    x: parent.width - self.width;
+                    width: bar.rem * 6.5;
+                    opacity: season-index + 1 < seasons.length ? 1.0 : 0.5;
+                    HorizontalLayout {
+                        padding: bar.rem * 0.5;
+                        spacing: bar.rem * 0.5;
+                        Text {
+                            text: "Sonraki";
+                            color: Theme.text;
+                            font-size: bar.rem;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Path {
+                                width: bar.rem * 1.5;
+                                height: self.width;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: "M9 5l7 7-7 7";
+                                stroke: Theme.text;
+                                stroke-width: 2px;
+                            }
+                        }
                     }
                 }
             }
 
             episode-list := Rectangle {
-                property <length> row-h: Metrics.vh * 0.092;
-                property <length> gap: Metrics.vh * 0.006;
+                property <length> row-h: Metrics.vw / 128 * 6;
+                property <length> gap: Metrics.vw / 128 * 0.5;
                 x: panel-pad;
-                y: panel-pad + Metrics.vh * 0.064;
+                y: panel-pad + Metrics.vw / 128 * 3.75;
                 width: parent.width - panel-pad * 2;
                 height: parent.height - self.y;
                 clip: true;
