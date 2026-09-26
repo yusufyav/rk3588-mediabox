@@ -1,36 +1,49 @@
 import { Theme, Metrics } from "theme.slint";
-import { GridPoster, PosterItem, KeyRow, KeyCap, Keyboard } from "components.slint";
+import { Rail, RailModel, KeyRow, KeyCap, Keyboard } from "components.slint";
+
+// One line of the list beside the letters: a suggestion, or an earlier search.
+export struct SearchEntry {
+    text: string,
+    detail: string,
+    earlier: bool,
+}
 
 // Searching from the sofa.
 //
-// The letters on the left, the results on the right, and one rule for crossing
-// between them: Right off the edge of the grid goes to the posters, Left from
-// the first column comes back. A keyboard, if there is one, types into the same
-// box without moving the focus.
+// The letters on the left and, on the right, whatever the box has for what has
+// been typed: while typing, suggestions and the earlier searches; once Ara is
+// pressed, a row per catalogue. One rule for crossing between them: Right off
+// the edge of the grid goes across, Left from the first column comes back. A
+// keyboard, if there is one, types into the same box without moving the focus.
 export component Search inherits Rectangle {
     in property <string> query;
     in property <string> note;
+    in property <bool> searching;
     in property <[KeyRow]> keys;
     in property <int> key-row;
     in property <int> key-col;
-    in property <bool> on-keys;
+    // 0 the letters, 1 the list, 2 the results.
+    in property <int> pane;
 
-    in property <[PosterItem]> results;
-    in property <int> index;
-    in property <int> columns;
+    in property <bool> showing-results;
+    in property <[SearchEntry]> entries;
+    in property <int> list-index;
+    in property <[RailModel]> rails;
+    in property <int> rail-row;
+    in property <int> rail-col;
 
     // Ten columns, the grid's own width.
     property <length> keys-w: Metrics.key-w * 10 + Metrics.key-gap * 9;
     property <length> pane-x: Metrics.gutter + keys-w + Metrics.gutter;
-    property <length> cell-w: Metrics.card-w + Metrics.grid-gap;
-    property <length> cell-h: Metrics.card-h + Metrics.text-card * 3.4 + Metrics.grid-gap;
-    property <length> grid-top: Metrics.topbar + Metrics.block-gap * 1.8;
-    property <length> viewport-h: root.height - grid-top - Metrics.gutter;
-    // The focused row is kept on the panel and the grid slides under it.
-    property <length> scroll: clamp(
-        Math.floor(index / columns) * cell-h - Metrics.top-inset,
-        0px,
-        max(0px, Math.ceil(results.length / columns) * cell-h - viewport-h));
+    property <length> pane-top: Metrics.topbar + Metrics.block-gap * 1.8;
+    property <length> viewport-h: root.height - pane-top;
+    property <length> rail-h: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
+    // The focused row is kept on the panel and the rows slide under it.
+    property <length> scroll: clamp(rail-row * rail-h - Metrics.top-inset * 0.25,
+                                    0px,
+                                    max(0px, rails.length * rail-h - viewport-h));
+    property <bool> on-keys: pane == 0;
+    property <length> line-h: Metrics.root-font * 2.4;
 
     background: Theme.bg;
     clip: true;
@@ -71,7 +84,7 @@ export component Search inherits Rectangle {
                 y: parent.height * 0.26;
                 width: 2px;
                 height: parent.height * 0.48;
-                background: Theme.accent;
+                background: Theme.film;
             }
         }
 
@@ -83,56 +96,114 @@ export component Search inherits Rectangle {
         }
     }
 
-    // ------------------------------------------------------------- the results
+    // ----------------------------------------------------------- the right side
     Text {
         x: pane-x;
         y: Metrics.topbar + Metrics.block-gap * 0.3;
-        text: note;
+        text: searching ? "Aranıyor…" : note;
         color: Theme.muted;
         font-size: Metrics.text-label;
         font-weight: 660;
     }
 
-    // Before there is anything to show, the pane says what it is for rather
+    // Before anything is typed or searched, the side says what it is for rather
     // than standing empty: half a television of black beside a letter grid
     // reads as a screen that has failed.
-    if results.length == 0: Text {
+    if !showing-results && entries.length == 0: Text {
         x: pane-x;
         y: root.height * 0.4;
         width: root.width - pane-x - Metrics.gutter;
         text: query == ""
-            ? "Kumandayla harfleri seçin ya da klavyeden yazın"
-            : "";
+            ? "Harfleri seçip Ara’ya basın ya da klavyeden yazıp Enter’a basın"
+            : "Ara’ya basınca kurulu eklentilerin arama katalogları sorulur";
         color: Theme.dim;
         font-size: Metrics.text-meta;
         font-weight: 620;
         wrap: word-wrap;
     }
 
-    // Widened by the ring's room on every side, so a focused poster on the
-    // edge of the grid keeps its whole ring.
-    Rectangle {
-        x: pane-x - Metrics.focus-room;
-        y: grid-top - Metrics.focus-room;
-        width: root.width - pane-x - Metrics.gutter + Metrics.focus-room * 2;
-        height: viewport-h + Metrics.focus-room;
+    // While typing: what the index suggests, then the earlier searches.
+    if !showing-results: VerticalLayout {
+        x: pane-x;
+        y: pane-top;
+        width: min(root.width - pane-x - Metrics.gutter, Metrics.card-w * 3.4);
+        spacing: Metrics.root-font * 0.2;
+        alignment: start;
+
+        for entry[i] in entries: VerticalLayout {
+            spacing: Metrics.root-font * 0.2;
+
+            // A heading where the kind of line changes.
+            if i == 0 || entries[i - 1].earlier != entry.earlier: Text {
+                height: Metrics.root-font * 2.0;
+                text: entry.earlier ? "SON ARAMALAR" : "ÖNERİLER";
+                color: #ffffff8c;
+                font-size: Metrics.text-label * 0.86;
+                font-weight: 650;
+                letter-spacing: Metrics.text-label * 0.1;
+                vertical-alignment: bottom;
+            }
+
+            Rectangle {
+                property <bool> focused: pane == 1 && i == list-index;
+                height: line-h;
+                border-radius: line-h * 0.24;
+                background: focused ? Theme.focus-fill : transparent;
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                HorizontalLayout {
+                    padding-left: Metrics.root-font * 0.8;
+                    padding-right: Metrics.root-font * 0.8;
+                    spacing: Metrics.root-font * 0.7;
+
+                    Text {
+                        text: entry.text;
+                        color: focused ? #0b0d12 : Theme.text;
+                        font-size: Metrics.text-meta * 1.02;
+                        font-weight: 650;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
+                    Text {
+                        text: entry.detail;
+                        color: focused ? #3b4250 : Theme.dim;
+                        font-size: Metrics.text-label;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 0;
+                        wrap: no-wrap;
+                    }
+                }
+            }
+        }
+    }
+
+    // Once searched: a row per catalogue, the reference's shape.
+    if showing-results: Rectangle {
+        x: pane-x - Metrics.gutter;
+        y: pane-top;
+        width: root.width - self.x;
+        height: viewport-h;
         clip: true;
         background: transparent;
 
         Rectangle {
-            x: Metrics.focus-room;
-            y: Metrics.focus-room - scroll;
+            x: 0;
+            y: -scroll;
             width: 100%;
-            height: max(1px, Math.ceil(results.length / columns) * cell-h);
+            height: max(1px, rails.length * rail-h);
             background: transparent;
 
             animate y { duration: Theme.glide; easing: Theme.ease; }
 
-            for item[i] in results: GridPoster {
-                x: Math.mod(i, columns) * cell-w;
-                y: Math.floor(i / columns) * cell-h;
-                item: item;
-                focused: !on-keys && i == index;
+            for rail[r] in rails: Rail {
+                x: 0;
+                y: r * rail-h;
+                width: parent.width;
+                rail: rail;
+                focus-col: rail-col;
+                active: pane == 2 && rail-row == r;
             }
         }
     }

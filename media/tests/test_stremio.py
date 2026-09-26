@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 import unittest
 from typing import Any
 
@@ -15,7 +16,7 @@ from ..stremio.addons import (
     parse_stream,
 )
 from ..stremio.adapter import HeadlessStremio, video_id_for
-from ..stremio.models import StreamKind
+from ..stremio.models import MetaPreview, StreamKind
 from ..stremio.server import StreamingServer
 
 
@@ -301,6 +302,60 @@ class AdapterTests(unittest.TestCase):
         adapter.search("dune")
         asked = [call[3] for call in adapter.addons_client.calls]
         self.assertEqual(asked, ["searchable"])
+
+    def test_search_keeps_the_installed_order_and_the_row_that_failed(self):
+        movie = MetaPreview(id="tt1", type="movie", name="Dune")
+        first = {
+            "id": "a",
+            "name": "A",
+            "resources": ["catalog"],
+            "types": ["movie"],
+            "catalogs": [
+                {"type": "movie", "id": "top", "extra": [{"name": "search"}]},
+                {"type": "series", "id": "top", "extra": [{"name": "search"}]},
+            ],
+        }
+        second = {
+            "id": "b",
+            "name": "B",
+            "resources": ["catalog"],
+            "types": ["movie"],
+            "catalogs": [{"type": "movie", "id": "found", "extra": [{"name": "search"}]}],
+        }
+        adapter = self._adapter(
+            [first, second],
+            {("catalog", "a", "movie", "top"): [movie]},
+            failing={"b"},
+        )
+        rows = adapter.search("dune")
+        # The series catalogue answered with nothing and has no row; the one
+        # that failed keeps its row and says why, after the one that answered.
+        self.assertEqual([(row.addon_id, row.type, row.error) for row in rows],
+                         [("a", "movie", None), ("b", "movie", "yanıt vermedi")])
+        self.assertEqual(rows[0].items, (movie,))
+
+    def test_search_asks_every_catalogue_at_once(self):
+        manifests = [
+            {
+                "id": f"a{index}",
+                "name": f"A{index}",
+                "resources": ["catalog"],
+                "types": ["movie"],
+                "catalogs": [{"type": "movie", "id": "top", "extra": [{"name": "search"}]}],
+            }
+            for index in range(4)
+        ]
+        adapter = self._adapter(manifests, {})
+        started = threading.Barrier(4, timeout=2.0)
+
+        def catalog(addon, type_name, catalog_id, extra=None):
+            # Every one of them has to be in flight for any of them to pass.
+            started.wait()
+            return [MetaPreview(id=addon.id, type="movie", name=addon.name)]
+
+        adapter.addons_client.catalog = catalog
+        rows = adapter.search("x")
+        self.assertEqual([row.addon_id for row in rows], ["a0", "a1", "a2", "a3"])
 
     def test_search_needs_a_query(self):
         adapter = self._adapter([], {})

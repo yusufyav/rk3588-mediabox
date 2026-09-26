@@ -26,6 +26,9 @@ export struct PosterItem {
 export struct RailModel {
     title: string,
     source: string,
+    // Said in place of the posters when there are none: a catalogue that did
+    // not answer keeps its row and says so.
+    note: string,
     items: [PosterItem],
 }
 
@@ -515,6 +518,15 @@ export component Rail inherits Rectangle {
             font-weight: 600;
             vertical-alignment: center;
         }
+    }
+
+    if rail.items.length == 0 && rail.note != "": Text {
+        x: Metrics.gutter;
+        y: Metrics.title-rail * 2.2;
+        text: rail.note;
+        color: Theme.dim;
+        font-size: Metrics.text-meta;
+        font-weight: 620;
     }
 
     // The window the strip moves behind. It never moves itself.

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -35,6 +36,7 @@ from typing import Any, Iterable
 from ..errors import InvalidRequest, NotFound, UpstreamError
 from .addons import AddonClient, addons_supporting, parse_manifest
 from .api import DEFAULT_API_URL, SessionStore, StremioAPI
+from .local_search import LocalSearch
 from .models import (
     Addon,
     Meta,
@@ -160,6 +162,11 @@ HOME_FAN_OUT = 8
 HOME_DEADLINE = 6.0
 
 SEARCH_RESULTS_PER_CATALOG = 20
+#: A search asks every searchable catalogue at once, as the home surface does
+#: and for the same reason: asked one after another, the wait was the sum of
+#: every catalogue, fifteen seconds for each one whose host had gone away.
+SEARCH_FAN_OUT = 8
+SEARCH_DEADLINE = 8.0
 
 #: A series episode id is `{seriesId}:{season}:{episode}`. Composing it here
 #: keeps the shape in one place.
@@ -175,6 +182,9 @@ class CatalogRow:
     type: str
     name: str
     items: tuple[MetaPreview, ...]
+    #: Why this catalogue has nothing to show, when it failed rather than
+    #: answered with nothing. The reference keeps such a row and says so.
+    error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -184,6 +194,7 @@ class CatalogRow:
             "type": self.type,
             "name": self.name,
             "items": [item.as_dict() for item in self.items],
+            "error": self.error,
         }
 
 
@@ -204,6 +215,12 @@ class HeadlessStremio:
         )
         self.addons_client = AddonClient(timeout=timeout)
         self.server = StreamingServer(streaming_server_url, timeout=timeout)
+        # The feed the search box suggests from, kept beside the session file.
+        self.local_search = LocalSearch(
+            os.path.join(os.path.dirname(session_path), "search-feed.json")
+            if session_path
+            else None
+        )
         self._clock = clock
         self._lock = threading.Lock()
         self._addons: tuple[Addon, ...] = ()
@@ -376,24 +393,11 @@ class HeadlessStremio:
                 jobs.append((addon, catalog))
                 taken += 1
 
-        results: list[list[MetaPreview] | None] = [None] * len(jobs)
-        answered = [False] * len(jobs)
-
-        def ask(index: int, addon: Addon, catalog: Any) -> None:
+        def ask(addon: Addon, catalog: Any) -> list[MetaPreview]:
             began = self._clock()
             try:
-                results[index] = self.addons_client.catalog(addon, catalog.type, catalog.id)
-            except UpstreamError as exc:
-                LOG.info("Home row %s/%s unavailable: %s", addon.id, catalog.id, exc.message)
-            except Exception as exc:  # a broken addon is not a broken appliance
-                LOG.info("Home row %s/%s failed: %s", addon.id, catalog.id, exc)
+                return self.addons_client.catalog(addon, catalog.type, catalog.id)
             finally:
-                # Answered, even if the answer was "no". A refusal that came
-                # back in eighty milliseconds is not a reason to stop asking —
-                # only a host that hangs is, and that is caught at the deadline
-                # below. Penalising a fast error took thirteen shelves down to
-                # twelve for five minutes because one catalogue 404ed once.
-                answered[index] = True
                 LOG.info(
                     "Home row %s/%s took %.0f ms",
                     addon.id,
@@ -401,37 +405,13 @@ class HeadlessStremio:
                     (self._clock() - began) * 1000.0,
                 )
 
-        # A fixed number of daemon threads taking work off a shared counter,
-        # rather than one thread per catalogue. There are more catalogues than
-        # there are addons — fourteen on this box — and threading only the first
-        # eight would leave the rest to be fetched one after another on this
-        # thread, which is the wait being removed.
-        #
-        # They are joined with a deadline and never shut down: a pool's shutdown
-        # joins every worker, and a straggler must not be able to hold the home
-        # screen.
-        next_job = itertools.count()
+        results, answered = self._fan_out(jobs, ask, HOME_FAN_OUT, HOME_DEADLINE)
 
-        def work() -> None:
-            for index in next_job:
-                if index >= len(jobs):
-                    return
-                addon, catalog = jobs[index]
-                ask(index, addon, catalog)
-
-        deadline = self._clock() + HOME_DEADLINE
-        threads = []
-        for slot in range(min(HOME_FAN_OUT, len(jobs))):
-            thread = threading.Thread(target=work, name=f"home-{slot}", daemon=True)
-            thread.start()
-            threads.append(thread)
-
-        for thread in threads:
-            thread.join(timeout=max(0.0, deadline - self._clock()))
-
-        # Read once, so a straggler answering during the walk below cannot make
-        # two calls with the same answers produce different screens.
-        collected = list(results)
+        collected: list[list[MetaPreview] | None] = []
+        for (addon, catalog), result in zip(jobs, results):
+            if isinstance(result, BaseException):
+                LOG.info("Home row %s/%s unavailable: %s", addon.id, catalog.id, result)
+            collected.append(result if isinstance(result, list) else None)
 
         # Whoever was still hanging when the deadline came is the one worth not
         # asking again for a while: it is the addon that costs the home screen
@@ -464,39 +444,112 @@ class HeadlessStremio:
         return rows
 
     def search(self, query: str, *, types: Iterable[str] | None = None) -> list[CatalogRow]:
+        """Every searchable catalogue asked once, all at the same time.
+
+        stremio-core's `CatalogsWithExtra` with a `search` extra: one row per
+        catalogue that supports the extra, in the order the addons are
+        installed and the catalogues listed. A catalogue that answered with
+        nothing is left out; one that failed keeps its row with the reason, as
+        the reference's search page does.
+        """
         if not isinstance(query, str) or not query.strip():
             raise InvalidRequest("a search needs a query")
         text = query.strip()[:200]
         wanted = set(types) if types else None
+        jobs: list[tuple[Addon, Any]] = [
+            (addon, catalog)
+            for addon in self.addons()
+            for catalog in addon.catalogs
+            if catalog.supports_search and (not wanted or catalog.type in wanted)
+        ]
+
+        def ask(addon: Addon, catalog: Any) -> list[MetaPreview]:
+            return self.addons_client.catalog(addon, catalog.type, catalog.id, {"search": text})
+
+        results, answered = self._fan_out(jobs, ask, SEARCH_FAN_OUT, SEARCH_DEADLINE)
+
         rows: list[CatalogRow] = []
-        for addon in self.addons():
-            for catalog in addon.catalogs:
-                if not catalog.supports_search:
-                    continue
-                if wanted and catalog.type not in wanted:
-                    continue
-                try:
-                    items = self.addons_client.catalog(
-                        addon, catalog.type, catalog.id, {"search": text}
-                    )
-                except UpstreamError as exc:
-                    LOG.info("Search on %s/%s failed: %s", addon.id, catalog.id, exc.message)
-                    continue
-                if not items:
-                    continue
-                rows.append(
-                    CatalogRow(
-                        addon_id=addon.id,
-                        addon_name=addon.name,
-                        catalog_id=catalog.id,
-                        type=catalog.type,
-                        name=catalog.name or f"{addon.name} {catalog.type}",
-                        items=tuple(items[:SEARCH_RESULTS_PER_CATALOG]),
-                    )
+        for (addon, catalog), result, done in zip(jobs, results, answered):
+            error: str | None = None
+            items: list[MetaPreview] = []
+            if not done:
+                error = "yanıt vermedi"
+            elif isinstance(result, BaseException):
+                LOG.info("Search on %s/%s failed: %s", addon.id, catalog.id, result)
+                error = "yanıt vermedi"
+            elif result:
+                items = result
+            if not items and error is None:
+                continue
+            rows.append(
+                CatalogRow(
+                    addon_id=addon.id,
+                    addon_name=addon.name,
+                    catalog_id=catalog.id,
+                    type=catalog.type,
+                    name=catalog.name or f"{addon.name} {catalog.type}",
+                    items=tuple(items[:SEARCH_RESULTS_PER_CATALOG]),
+                    error=error,
                 )
+            )
         return rows
 
-    # --------------------------------------------------------------------- meta
+    def suggest(self, query: str) -> list[dict[str, Any]]:
+        """What the search box offers while it is being typed into; no addon is asked."""
+        if not isinstance(query, str):
+            raise InvalidRequest("a suggestion needs a query")
+        return [found.as_dict() for found in self.local_search.suggest(query[:200])]
+
+    def _fan_out(
+        self,
+        jobs: list[tuple[Addon, Any]],
+        ask: Any,
+        width: int,
+        deadline_seconds: float,
+    ) -> tuple[list[Any], list[bool]]:
+        """Runs `ask(addon, catalog)` for every job, `width` at a time, until the deadline.
+
+        Each result is what `ask` returned, or the exception it raised. A job
+        that had not finished by the deadline is `None` with `answered` false.
+
+        A fixed number of daemon threads take work off a shared counter, rather
+        than one thread per catalogue: there are more catalogues than addons,
+        and threading only the first few would leave the rest to be fetched one
+        after another. They are joined with a deadline and never shut down --
+        a pool's shutdown joins every worker, and a straggler must not be able
+        to hold the screen. It finishes into a list nobody reads any more.
+        """
+        results: list[Any] = [None] * len(jobs)
+        answered = [False] * len(jobs)
+        next_job = itertools.count()
+
+        def work() -> None:
+            for index in next_job:
+                if index >= len(jobs):
+                    return
+                addon, catalog = jobs[index]
+                try:
+                    results[index] = ask(addon, catalog)
+                except Exception as exc:  # a broken addon is not a broken appliance
+                    results[index] = exc
+                finally:
+                    # Answered, even if the answer was "no". A refusal that
+                    # came back in eighty milliseconds is not a reason to stop
+                    # asking -- only a host that hangs is, and that is caught
+                    # at the deadline.
+                    answered[index] = True
+
+        deadline = self._clock() + deadline_seconds
+        threads = []
+        for slot in range(min(width, len(jobs))):
+            thread = threading.Thread(target=work, name=f"fan-out-{slot}", daemon=True)
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - self._clock()))
+        # Read once, so a straggler answering after this cannot make two calls
+        # with the same answers produce different screens.
+        return list(results), list(answered)
 
     def meta(self, type_name: str, item_id: str) -> Meta:
         candidates = addons_supporting(self.addons(), "meta", type_name, item_id)

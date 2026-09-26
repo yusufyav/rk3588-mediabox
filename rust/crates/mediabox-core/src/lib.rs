@@ -1368,6 +1368,12 @@ pub enum Request {
     MediaSearch {
         query: String,
     },
+    /// What the search box offers while it is being typed into. Answered from
+    /// the media core's local index: no addon is asked until the search itself
+    /// is made, which is how every Stremio client behaves.
+    MediaSuggest {
+        query: String,
+    },
     MediaInspect {
         url: String,
     },

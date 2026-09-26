@@ -52,11 +52,9 @@ const CACHE_DIR: &str = "/var/lib/mediabox-ui/tv-imgcache";
 const STATE_FILE: &str = "/var/lib/mediabox-ui/tv-state.json";
 const SNAPSHOT_DIR: &str = "/var/lib/mediabox-ui/snapshots";
 
-/// How long after the last keystroke a search is actually sent. A remote types
-/// one letter at a time and the media core fans a search out over every addon;
-/// asking on each letter would put four searches in flight for a four-letter
-/// word and draw the answer to the shortest one last.
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
+/// How long after the last keystroke the search box asks for suggestions:
+/// stremio-web's own 250 ms. The search itself is never sent while typing.
+const SUGGEST_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// The appliance is the only place this runs in earnest, and there the defaults
 /// above are right. The overrides exist so the interface can be driven against
@@ -246,8 +244,8 @@ impl App {
         }
         match self.route() {
             Route::Search => {
-                if self.search.typed('\u{8}') {
-                    self.search_soon();
+                if self.search.typed('\u{8}') == screens::search::Press::Edited {
+                    self.suggest_soon();
                     self.paint();
                 }
             }
@@ -293,8 +291,8 @@ impl App {
         }
         match self.route() {
             Route::Search => {
-                if self.search.typed(c) {
-                    self.search_soon();
+                if self.search.typed(c) == screens::search::Press::Edited {
+                    self.suggest_soon();
                     self.paint();
                 }
             }
@@ -404,7 +402,13 @@ impl App {
     /// One of this interface's own screens, from wherever it was chosen.
     fn open_screen(&mut self, nav: state::Nav) {
         match nav {
-            state::Nav::Search => self.open(Route::Search),
+            state::Nav::Search => {
+                // The index the box suggests from is fetched by the media core
+                // on first use; asking for nothing now means it is there by the
+                // first letter.
+                spawn_suggest(self.search.suggest_generation, String::new());
+                self.open(Route::Search);
+            }
             state::Nav::Library => self.open_library(),
             state::Nav::Settings => self.open(Route::Settings),
         }
@@ -665,7 +669,7 @@ impl App {
     fn open_media(&mut self) {
         self.media.set_shelves(self.shelves.clone());
         if let Some(window) = self.window.upgrade() {
-            window.set_media_rails(slint::ModelRc::from(self.media.rails.clone()));
+            window.set_media_rails(slint::ModelRc::from(self.media.rails()));
         }
         self.open(Route::Media);
         if !self.loading {
@@ -698,7 +702,7 @@ impl App {
 
     fn paint_media(&mut self, window: &MediaBoxWindow) {
         self.media.sync_artwork(&mut self.images);
-        window.set_media_row(self.media.row as i32);
+        window.set_media_row(self.media.row() as i32);
         window.set_media_col(self.media.column() as i32);
 
         let (title, facts, summary) = match self.media.focused() {
@@ -717,6 +721,7 @@ impl App {
     // ------------------------------------------------------------- the search
 
     fn act_on_search(&mut self, intent: Intent) {
+        use screens::search::{Pane, Press};
         match intent {
             Intent::Move(dx, dy) => {
                 if self.search.step(dx, dy) {
@@ -724,33 +729,63 @@ impl App {
                 }
             }
             Intent::Select => {
-                if self.search.pane == screens::search::Pane::Results {
-                    let item = self.search.focused_result().cloned();
-                    if let Some(item) = item {
-                        self.open_detail_for(&item);
+                let press = match self.search.pane {
+                    Pane::Results => {
+                        let item = self.search.focused_result().cloned();
+                        if let Some(item) = item {
+                            self.open_detail_for(&item);
+                        }
+                        return;
                     }
-                } else if self.search.press() {
-                    self.search_soon();
-                    self.paint();
+                    Pane::List => self.search.choose_entry(),
+                    // A keyboard's Enter is the remote's Ok. While text is
+                    // coming from the keyboard it means what it means there.
+                    Pane::Keys if self.search.typing => self.search.search(),
+                    Pane::Keys => self.search.press(),
+                };
+                match press {
+                    Press::Nothing => {}
+                    Press::Edited => {
+                        self.suggest_soon();
+                        self.paint();
+                    }
+                    Press::Search => {
+                        spawn_search(self.search.generation, self.search.query.clone());
+                        self.remember();
+                        self.paint();
+                    }
                 }
             }
-            Intent::Dismiss => self.back(),
+            Intent::Dismiss => {
+                // Back out of the right-hand side before backing out of the
+                // screen: one press, one step.
+                if self.search.pane != Pane::Keys {
+                    self.search.pane = Pane::Keys;
+                    self.paint();
+                } else {
+                    self.back();
+                }
+            }
             _ => {}
         }
     }
 
-    fn search_soon(&mut self) {
-        if self.search.query.trim().is_empty() {
-            return;
-        }
-        spawn_search(self.search.generation, self.search.query.clone());
+    fn suggest_soon(&mut self) {
+        spawn_suggest(self.search.suggest_generation, self.search.query.trim().to_string());
     }
 
-    fn searched(&mut self, generation: u64, answer: Result<Vec<state::Item>, String>) {
+    fn searched(&mut self, generation: u64, answer: Result<Vec<state::Shelf>, String>) {
         match answer {
-            Ok(items) => self.search.take(generation, items),
+            Ok(rows) => self.search.take(generation, rows),
             Err(why) => self.search.fail(generation, &why),
         }
+        if self.route() == Route::Search {
+            self.paint();
+        }
+    }
+
+    fn suggested(&mut self, generation: u64, query: String, found: Vec<model::Suggestion>) {
+        self.search.take_suggestions(generation, &query, found);
         if self.route() == Route::Search {
             self.paint();
         }
@@ -2110,6 +2145,7 @@ impl App {
                 .as_ref()
                 .map(|d| d.id.clone())
                 .unwrap_or_default(),
+            search_history: self.search.history.clone(),
         };
         self.store.put(snapshot);
     }
@@ -2232,7 +2268,7 @@ impl App {
         self.media.set_shelves(self.shelves.clone());
 
         if let Some(window) = self.window.upgrade() {
-            window.set_media_rails(slint::ModelRc::from(self.media.rails.clone()));
+            window.set_media_rails(slint::ModelRc::from(self.media.rails()));
         }
         self.loading = !from_catalogue;
         self.paint();
@@ -2374,16 +2410,20 @@ impl App {
     }
 
     fn paint_search(&mut self, window: &MediaBoxWindow) {
-        window.set_search_query(self.search.query.clone().into());
-        window.set_search_note(self.search.note.clone().into());
-        window.set_search_on_keys(self.search.pane == screens::search::Pane::Keys);
-        window.set_search_key_row(self.search.key_row as i32);
-        window.set_search_key_col(self.search.key_col as i32);
-        window.set_search_index(self.search.index as i32);
-        window.set_search_columns(screens::search::COLUMNS as i32);
+        use screens::search::Pane;
+        let search = &mut self.search;
+        window.set_search_query(search.query.clone().into());
+        window.set_search_note(search.note.clone().into());
+        window.set_search_searching(search.searching);
+        window.set_search_pane(match search.pane {
+            Pane::Keys => 0,
+            Pane::List => 1,
+            Pane::Results => 2,
+        });
+        window.set_search_key_row(search.key_row as i32);
+        window.set_search_key_col(search.key_col as i32);
 
-        let keys: Vec<KeyRow> = self
-            .search
+        let keys: Vec<KeyRow> = search
             .keys()
             .iter()
             .map(|row| KeyRow {
@@ -2399,8 +2439,25 @@ impl App {
             .collect();
         window.set_search_keys(slint::ModelRc::new(slint::VecModel::from(keys)));
 
-        let tiles = posters(&mut self.images, &self.search.results);
-        window.set_search_results(slint::ModelRc::new(slint::VecModel::from(tiles)));
+        let showing = search.showing_results();
+        window.set_search_showing_results(showing);
+        let entries: Vec<SearchEntry> = search
+            .entries()
+            .into_iter()
+            .map(|entry| SearchEntry {
+                text: entry.text.into(),
+                detail: entry.detail.into(),
+                earlier: entry.earlier,
+            })
+            .collect();
+        window.set_search_entries(slint::ModelRc::new(slint::VecModel::from(entries)));
+        window.set_search_list_index(search.list_index as i32);
+
+        let anchor = search.results.row as i32;
+        search.results.sync_artwork(&mut self.images, anchor);
+        window.set_search_rails(slint::ModelRc::from(search.results.rails.clone()));
+        window.set_search_rail_row(search.results.row as i32);
+        window.set_search_rail_col(search.results.column() as i32);
     }
 
     fn paint_library(&mut self, window: &MediaBoxWindow) {
@@ -3457,6 +3514,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         resume: session::read(state_file()),
     }));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
+    // The earlier searches outlive the process, as they do in the reference.
+    {
+        let mut app = app.borrow_mut();
+        if let Some(history) = app.resume.as_ref().map(|r| r.search_history.clone()) {
+            app.search.history = history;
+        }
+    }
 
     window.set_nav(strings(state::NAV.iter().map(|n| n.label().to_string())));
 
@@ -3747,45 +3811,48 @@ fn spawn_detail_load(epoch: u64, kind: String, id: String) {
     });
 }
 
-/// One search, after the typing has stopped.
+/// One search, made when it was asked for: Ara, Enter, or a suggestion chosen.
 ///
-/// The debounce is here rather than on a timer in the interface: the thread is
-/// cheap, and a search that is already stale when it is sent costs the media
-/// core a fan-out over every addon for an answer nobody will see.
+/// Not debounced and not made while typing. Every searchable catalogue is asked
+/// once, at the same time, by the media core.
 fn spawn_search(generation: u64, query: String) {
-    // What the box is currently typing, readable from a thread that has no
-    // access to the interface. The screen's own generation counter is the
-    // authority; this is a copy of it kept where the debounce can see it.
-    static TYPING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    TYPING.store(generation, std::sync::atomic::Ordering::Relaxed);
-
     detached("mediabox-tv-search", async move {
-        tokio::time::sleep(SEARCH_DEBOUNCE).await;
-        if TYPING.load(std::sync::atomic::Ordering::Relaxed) != generation {
-            // A later keystroke already owns the screen; this query was never
-            // what the viewer was asking for.
-            return;
-        }
-
         let client = rpc::Client::new(socket_path());
         let answer = client
             .search(&query)
             .await
-            .map(|results| {
-                let mut seen = std::collections::HashSet::new();
-                results
-                    .rows
-                    .iter()
-                    .flat_map(|row| row.items.iter())
-                    .filter(|preview| seen.insert(preview.id.clone()))
-                    .map(state::Item::from_preview)
-                    .take(60)
-                    .collect::<Vec<_>>()
-            })
+            .map(|results| state::search_shelves(&results))
             .map_err(|e| e.to_string());
 
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.searched(generation, answer));
+        });
+    });
+}
+
+/// Suggestions for what is in the box, a quarter of a second after the last
+/// key -- stremio-web's figure for the same thing. They come from the media
+/// core's local index, so nothing here reaches an addon.
+fn spawn_suggest(generation: u64, query: String) {
+    // What the box is currently typing, readable from a thread that has no
+    // access to the interface. The screen's own counter is the authority; this
+    // is a copy of it kept where the wait can see it.
+    static TYPING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    TYPING.store(generation, std::sync::atomic::Ordering::Relaxed);
+
+    detached("mediabox-tv-suggest", async move {
+        if !query.is_empty() {
+            tokio::time::sleep(SUGGEST_DEBOUNCE).await;
+            if TYPING.load(std::sync::atomic::Ordering::Relaxed) != generation {
+                return;
+            }
+        }
+        let client = rpc::Client::new(socket_path());
+        let Ok(found) = client.suggest(&query).await else {
+            return;
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.suggested(generation, query, found.items));
         });
     });
 }

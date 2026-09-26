@@ -36,6 +36,10 @@ pub struct Snapshot {
     pub detail_kind: String,
     #[serde(default)]
     pub detail_id: String,
+    /// The searches made on this television, newest first. The reference
+    /// keeps them per device, not in the account, and so does this.
+    #[serde(default)]
+    pub search_history: Vec<String>,
 }
 
 pub struct Store {

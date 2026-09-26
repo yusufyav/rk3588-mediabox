@@ -93,6 +93,10 @@ pub struct CatalogRow {
     pub name: String,
     #[serde(default)]
     pub items: Vec<MetaPreview>,
+    /// Why the catalogue has nothing to show, when it failed rather than
+    /// answered with nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -129,6 +133,42 @@ pub struct LibraryListing {
 pub struct SearchResults {
     #[serde(default)]
     pub rows: Vec<CatalogRow>,
+}
+
+/// A title the search box suggests while it is typed into.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Suggestion {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "type", default = "default_movie")]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "releaseInfo", default)]
+    pub release_info: Option<String>,
+}
+
+impl Suggestion {
+    /// "Film · 2021", beside the name.
+    pub fn detail(&self) -> String {
+        let kind = match self.kind.as_str() {
+            "movie" => "Film",
+            "series" => "Dizi",
+            _ => "",
+        };
+        [Some(kind), self.release_info.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Suggestions {
+    #[serde(default)]
+    pub items: Vec<Suggestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

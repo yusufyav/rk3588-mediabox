@@ -219,6 +219,7 @@ mod tests {
         Shelf {
             title: "x".into(),
             source: String::new(),
+            note: String::new(),
             items,
         }
     }

@@ -9,244 +9,106 @@
 //!
 //! The focus model is the same structural one as everywhere else: a row, a
 //! column, and one remembered column per row, so walking down a shelf and back
-//! up again lands where it started.
+//! up again lands where it started. Row 0 is the bar above the shelves.
 
 use std::rc::Rc;
 
-use slint::{Model, ModelRc, VecModel};
+use slint::VecModel;
 
-use crate::images::{ImageManager, Key};
-use crate::state::{Item, NAV, Nav, POSTER_WIDTH, Shelf};
-use crate::{PosterItem, RailModel};
-
-/// How far either side of the focused poster is worth having ready.
-///
-/// Asymmetric was wrong, and the reason is where the rail puts the focus. It
-/// pins the focused poster to the left edge and scrolls the strip under it --
-/// so everything visible is ahead of the focus, and two behind was plenty --
-/// *until the end of the strip*, where the scroll clamps and the focus walks
-/// rightwards across a stationary rail instead. At the far end of a long
-/// catalogue the focus sits at the right of the screen with seven posters
-/// visible to its left, of which five were outside the window and had their
-/// artwork taken away: the row emptied itself as the viewer arrived at it.
-///
-/// About eight posters fit across a 16:9 panel at this card width, so the
-/// window is eight either way. That is one screenful behind and one ahead,
-/// which is what "nearly visible" means on a rail that can scroll both ways.
-const BEHIND: usize = 8;
-const AHEAD: usize = 8;
+use crate::RailModel;
+use crate::images::ImageManager;
+use crate::screens::shelves::Shelves;
+use crate::state::{Item, NAV, Nav, Shelf};
 
 /// The one row above the shelves.
 const BAR_ROW: usize = 1;
 
 pub struct Media {
-    pub shelves: Vec<Shelf>,
-    pub row: usize,
-    columns: Vec<usize>,
-
-    /// The Slint side, kept beside the data rather than rebuilt from it, so a
-    /// picture arriving changes one tile rather than every shelf on the panel.
-    pub rails: Rc<VecModel<RailModel>>,
-    tiles: Vec<Rc<VecModel<PosterItem>>>,
+    shelves: Shelves,
+    on_bar: bool,
+    bar_column: usize,
 }
 
 impl Media {
     pub fn new() -> Self {
         Self {
-            shelves: Vec::new(),
-            row: 0,
-            columns: Vec::new(),
-            rails: Rc::new(VecModel::default()),
-            tiles: Vec::new(),
+            shelves: Shelves::new(),
+            on_bar: false,
+            bar_column: 0,
         }
     }
 
-    /// The bar, then a row per shelf. Searching and the library are on the bar
-    /// because they are things one does inside a catalogue — the home screen is
-    /// a launcher and has neither.
-    pub fn rows(&self) -> usize {
-        BAR_ROW + self.shelves.len()
+    pub fn rails(&self) -> Rc<VecModel<RailModel>> {
+        self.shelves.rails.clone()
+    }
+
+    /// Where the remote is, counting the bar as row 0.
+    pub fn row(&self) -> usize {
+        if self.on_bar { 0 } else { self.shelves.row + BAR_ROW }
     }
 
     pub fn column(&self) -> usize {
-        self.columns.get(self.row).copied().unwrap_or(0)
+        if self.on_bar { self.bar_column } else { self.shelves.column() }
     }
 
     pub fn focused(&self) -> Option<&Item> {
-        let shelf = self.shelves.get(self.row.checked_sub(BAR_ROW)?)?;
-        shelf.items.get(self.column())
+        if self.on_bar {
+            return None;
+        }
+        self.shelves.focused()
     }
 
     /// Which screen the bar would open, when the remote is on it.
     pub fn focused_nav(&self) -> Option<Nav> {
-        (self.row == 0).then(|| NAV.get(self.column()).copied())?
-    }
-
-    fn row_len(&self, row: usize) -> usize {
-        if row == 0 {
-            return NAV.len();
-        }
-        self.shelves
-            .get(row - BAR_ROW)
-            .map(|shelf| shelf.items.len())
-            .unwrap_or(0)
+        self.on_bar.then(|| NAV.get(self.bar_column).copied())?
     }
 
     /// Rebuilds the shelves, keeping the remote on the same title if it is
-    /// still there. The catalogue is re-read when the screen is opened, and
-    /// focus that jumped each time would be unusable.
+    /// still there, and landing on the first shelf that has anything on it:
+    /// the bar is a place to leave from, not the place this screen opens.
     pub fn set_shelves(&mut self, shelves: Vec<Shelf>) {
-        let holding = self.focused().map(|item| item.id.clone());
-
-        self.shelves = shelves;
-        self.columns.resize(self.rows().max(BAR_ROW + 1), 0);
-        self.tiles.clear();
-
-        let mut rails: Vec<RailModel> = Vec::with_capacity(self.shelves.len());
-        for shelf in &self.shelves {
-            let tiles: Vec<PosterItem> = shelf
-                .items
-                .iter()
-                .map(|item| PosterItem {
-                    id: item.id.clone().into(),
-                    kind: item.kind.clone().into(),
-                    title: item.title.clone().into(),
-                    subtitle: item.year.clone().unwrap_or_default().into(),
-                    art: slint::Image::default(),
-                    hue: item.hue,
-                    progress: item.progress,
-                    local: item.local,
-                })
-                .collect();
-            let model = Rc::new(VecModel::from(tiles));
-            rails.push(RailModel {
-                title: shelf.title.clone().into(),
-                source: shelf.source.clone().into(),
-                items: ModelRc::from(model.clone()),
-            });
-            self.tiles.push(model);
-        }
-        self.rails.set_vec(rails);
-
-        // Land on the first shelf that has anything on it. The bar is a place
-        // to leave from, not the place this screen opens.
-        if self.row == 0 || self.row_len(self.row) == 0 {
-            self.row = (BAR_ROW..self.rows())
-                .find(|row| self.row_len(*row) > 0)
-                .unwrap_or(0);
-        }
-        if let Some(id) = holding {
-            if let Some(column) = self
-                .shelves
-                .get(self.row.saturating_sub(BAR_ROW))
-                .and_then(|shelf| shelf.items.iter().position(|item| item.id == id))
-            {
-                self.columns[self.row] = column;
-            }
-        }
-        self.clamp();
-    }
-
-    fn clamp(&mut self) {
-        let len = self.row_len(self.row);
-        if len > 0 {
-            if let Some(slot) = self.columns.get_mut(self.row) {
-                *slot = (*slot).min(len - 1);
-            }
-        }
+        self.shelves.set(shelves);
+        self.on_bar = self.shelves.is_empty();
     }
 
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
         let mut moved = false;
 
         if dy != 0 {
-            let mut row = self.row as i32 + dy;
-            // A shelf that arrived empty is stepped over rather than landed on.
-            while row >= 0 && (row as usize) < self.rows() && self.row_len(row as usize) == 0 {
-                row += dy;
-            }
-            if row >= 0 && (row as usize) < self.rows() {
-                self.row = row as usize;
+            if self.on_bar {
+                if dy > 0 {
+                    if let Some(first) = self.shelves.first_filled() {
+                        self.shelves.row = first;
+                        self.on_bar = false;
+                        moved = true;
+                    }
+                }
+            } else if self.shelves.step_row(dy) {
+                moved = true;
+            } else if dy < 0 {
+                self.on_bar = true;
                 moved = true;
             }
         }
 
         if dx != 0 {
-            let len = self.row_len(self.row);
-            if len > 0 {
-                let current = self.column() as i32;
-                let next = (current + dx).clamp(0, len as i32 - 1);
-                if next != current {
-                    self.columns[self.row] = next as usize;
+            if self.on_bar {
+                let next = (self.bar_column as i32 + dx).clamp(0, NAV.len() as i32 - 1) as usize;
+                if next != self.bar_column {
+                    self.bar_column = next;
                     moved = true;
                 }
+            } else if self.shelves.step_column(dx) {
+                moved = true;
             }
         }
 
-        self.clamp();
         moved
     }
 
-    /// Asks for what the panel is showing and what it is about to, and hands
-    /// over whatever has arrived. Everything outside the window is given an
-    /// empty image, which is what keeps the whole catalogue off the GPU.
     pub fn sync_artwork(&mut self, images: &mut ImageManager) {
-        for (index, shelf) in self.shelves.iter().enumerate() {
-            if shelf.items.is_empty() {
-                continue;
-            }
-            // This shelf and the two either side of it. Further than that is
-            // not about to be on the panel, and holding it would be holding
-            // the catalogue.
-            //
-            // One either side was not enough for the same reason eight
-            // posters are needed behind the focus: the screen shows three
-            // rails at once, and at the bottom of the list the focus stops
-            // moving the strip and walks down it, so the rail two above the
-            // focused one is still in front of the viewer when its artwork is
-            // taken away.
-            let nearby = (index as i32 - (self.row as i32 - BAR_ROW as i32)).abs() <= 2;
-            let centre = self.columns.get(index + BAR_ROW).copied().unwrap_or(0);
-            let last = shelf.items.len() - 1;
-            let from = centre.saturating_sub(BEHIND);
-            let to = (centre + AHEAD).min(last);
-
-            let Some(tiles) = self.tiles.get(index) else {
-                continue;
-            };
-
-            for (column, item) in shelf.items.iter().enumerate() {
-                let inside = nearby && column >= from && column <= to;
-                let Some(mut tile) = tiles.row_data(column) else {
-                    continue;
-                };
-
-                let wanted = if inside {
-                    item.poster
-                        .as_deref()
-                        .map(|url| Key::new(url, POSTER_WIDTH))
-                } else {
-                    None
-                };
-
-                let art = match &wanted {
-                    Some(key) => {
-                        images.want(key);
-                        images.get(key).unwrap_or_default()
-                    }
-                    None => slint::Image::default(),
-                };
-
-                // Only write back when it actually changed: set_row_data is
-                // what makes Slint redraw the tile.
-                let had = tile.art.size().width > 0;
-                let has = art.size().width > 0;
-                if had != has {
-                    tile.art = art;
-                    tiles.set_row_data(column, tile);
-                }
-            }
-        }
+        let anchor = if self.on_bar { -1 } else { self.shelves.row as i32 };
+        self.shelves.sync_artwork(images, anchor);
     }
 }
 
@@ -258,6 +120,7 @@ mod tests {
         Shelf {
             title: name.into(),
             source: String::new(),
+            note: String::new(),
             items: (0..count)
                 .map(|i| Item::stub(&format!("{name}-{i}")))
                 .collect(),
@@ -268,7 +131,7 @@ mod tests {
     fn focus_starts_on_the_first_shelf_that_has_anything() {
         let mut media = Media::new();
         media.set_shelves(vec![shelf("empty", 0), shelf("a", 4)]);
-        assert_eq!(media.row, BAR_ROW + 1);
+        assert_eq!(media.row(), BAR_ROW + 1);
         assert!(media.focused().is_some());
     }
 
@@ -276,9 +139,9 @@ mod tests {
     fn an_empty_shelf_is_stepped_over() {
         let mut media = Media::new();
         media.set_shelves(vec![shelf("a", 3), shelf("empty", 0), shelf("c", 3)]);
-        assert_eq!(media.row, BAR_ROW);
+        assert_eq!(media.row(), BAR_ROW);
         assert!(media.step(0, 1));
-        assert_eq!(media.row, BAR_ROW + 2);
+        assert_eq!(media.row(), BAR_ROW + 2);
     }
 
     /// Searching is inside the catalogue, on its own bar, above the shelves.
@@ -290,7 +153,7 @@ mod tests {
         for _ in 0..5 {
             media.step(0, -1);
         }
-        assert_eq!(media.row, 0);
+        assert_eq!(media.row(), 0);
         assert_eq!(media.focused_nav(), Some(Nav::Search));
         assert!(media.step(1, 0));
         assert_eq!(media.focused_nav(), Some(Nav::Library));
@@ -330,11 +193,11 @@ mod tests {
         for _ in 0..10 {
             media.step(0, 1);
         }
-        assert_eq!(media.row, BAR_ROW + 1);
+        assert_eq!(media.row(), BAR_ROW + 1);
         for _ in 0..10 {
             media.step(0, -1);
         }
-        assert_eq!(media.row, 0, "the bar is the top of this screen");
+        assert_eq!(media.row(), 0, "the bar is the top of this screen");
     }
 
     #[test]

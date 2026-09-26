@@ -15,15 +15,15 @@
 pub enum Cap {
     Letter(char),
     Space,
-    /// Space on a grid that has no Shift; six columns rather than four, so
-    /// the last row still spans ten.
-    WideSpace,
     Backspace,
     Clear,
     /// Upper case for the next letter and every one after it, until pressed
     /// again. Passwords are case-sensitive, so a grid without this can only
     /// enter half of them.
     Shift,
+    /// Makes the search. Only the search grid has it: typing there suggests,
+    /// and the addons are asked once, when this is pressed.
+    Search,
 }
 
 impl Cap {
@@ -38,10 +38,11 @@ impl Cap {
                     c.to_string()
                 }
             }
-            Cap::Space | Cap::WideSpace => "Boşluk".into(),
+            Cap::Space => "Boşluk".into(),
             Cap::Backspace => "Sil".into(),
             Cap::Clear => "Temizle".into(),
             Cap::Shift => "Büyük".into(),
+            Cap::Search => "Ara".into(),
         }
     }
 
@@ -52,9 +53,8 @@ impl Cap {
             Cap::Letter(_) => 1,
             // Two, two, two and four: one row of ten, like every other row,
             // so the columns line up all the way down.
-            Cap::Shift | Cap::Backspace | Cap::Clear => 2,
+            Cap::Shift | Cap::Backspace | Cap::Clear | Cap::Search => 2,
             Cap::Space => 4,
-            Cap::WideSpace => 6,
         }
     }
 }
@@ -97,11 +97,11 @@ pub fn layout() -> Vec<Vec<Cap>> {
 ///
 /// The search box is the only one: a catalogue lookup is case-insensitive, so
 /// a Shift there is a key that changes nothing and one more thing for the
-/// remote to walk past. Space takes the width it frees, so every row is still
-/// ten columns wide.
+/// remote to walk past. Its place is taken by Ara, which makes the search:
+/// typing only suggests, as it does in every Stremio client.
 pub fn layout_without_shift() -> Vec<Vec<Cap>> {
     let mut rows = letters();
-    rows.push(vec![Cap::WideSpace, Cap::Backspace, Cap::Clear]);
+    rows.push(vec![Cap::Space, Cap::Backspace, Cap::Clear, Cap::Search]);
     rows
 }
 
@@ -263,13 +263,14 @@ impl Grid {
                     Edit::Insert(c)
                 }
             }
-            Cap::Space | Cap::WideSpace => Edit::Insert(' '),
+            Cap::Space => Edit::Insert(' '),
             Cap::Backspace => Edit::Backspace,
             Cap::Clear => Edit::Clear,
             Cap::Shift => {
                 self.shifted = !self.shifted;
                 Edit::Handled
             }
+            Cap::Search => Edit::Handled,
         })
     }
 }

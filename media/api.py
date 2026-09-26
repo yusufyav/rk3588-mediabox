@@ -289,6 +289,14 @@ class MediaCore:
                 200, {"query": query, "rows": [row.as_dict() for row in rows]}
             )
 
+        if head == "suggest" and len(parts) == 1:
+            # The search box's suggestions while it is typed into. Answered
+            # from a local index; no addon is asked until the search is made.
+            query = _one(params, "q") or ""
+            return json_response(
+                200, {"query": query, "items": self.stremio.suggest(query)}
+            )
+
         if head == "catalog" and len(parts) == 3:
             extra = {
                 key: values[0]

@@ -288,6 +288,9 @@ impl Item {
 pub struct Shelf {
     pub title: String,
     pub source: String,
+    /// Said in place of the posters when there are none: a catalogue that did
+    /// not answer keeps its row and says so, rather than vanishing.
+    pub note: String,
     pub items: Vec<Item>,
 }
 
@@ -392,6 +395,7 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
             shelves.push(Shelf {
                 title: "Devam Et".into(),
                 source: String::new(),
+                note: String::new(),
                 items: unfinished.clone(),
             });
         }
@@ -407,6 +411,7 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
             shelves.push(Shelf {
                 title: "Kitaplığım".into(),
                 source: "Stremio hesabın".into(),
+                note: String::new(),
                 items: mine,
             });
         }
@@ -421,6 +426,7 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
             shelves.push(Shelf {
                 title: "Kitaplık".into(),
                 source: "Bu cihazda".into(),
+                note: String::new(),
                 items: local,
             });
         }
@@ -433,6 +439,7 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
         shelves.push(Shelf {
             title: rail_title(&row.name, &row.kind),
             source: row.addon_name.clone(),
+            note: String::new(),
             items: row
                 .items
                 .iter()
@@ -443,6 +450,41 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
     }
 
     shelves
+}
+
+/// A search's answer as shelves: a row per catalogue, in the order the media
+/// core gave them, which is the order the addons are installed in. The row is
+/// named for what it holds and the addon it came from, as the reference names
+/// a search row after its catalogue.
+pub fn search_shelves(results: &crate::model::SearchResults) -> Vec<Shelf> {
+    results
+        .rows
+        .iter()
+        .map(|row| {
+            let noun = match row.kind.as_str() {
+                "series" => "Diziler",
+                "movie" => "Filmler",
+                other => other,
+            };
+            let catalogue = row.name.trim();
+            let source = if catalogue.is_empty()
+                || matches!(catalogue, "Popular" | "Top" | "Search")
+            {
+                row.addon_name.clone()
+            } else {
+                format!("{} · {catalogue}", row.addon_name)
+            };
+            Shelf {
+                title: noun.to_string(),
+                source,
+                note: match &row.error {
+                    Some(why) => format!("Bu katalog {why}"),
+                    None => String::new(),
+                },
+                items: row.items.iter().map(Item::from_preview).collect(),
+            }
+        })
+        .collect()
 }
 
 /// An addon's catalogue names are English and terse — "Popular", "New" — and

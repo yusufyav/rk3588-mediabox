@@ -268,6 +268,7 @@ impl AppState {
             }
             Request::MediaLogout => media_result(self.media.logout().await),
             Request::MediaSearch { query } => media_result(self.media.search(&query).await),
+            Request::MediaSuggest { query } => media_result(self.media.suggest(&query).await),
             Request::MediaInspect { url } => media_result(self.media.inspect(&url).await),
             Request::MediaStreams { media_type, id } => {
                 media_result(self.media.streams(&media_type, &id).await)

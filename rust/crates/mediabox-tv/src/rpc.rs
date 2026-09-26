@@ -139,6 +139,11 @@ impl Client {
             .await
     }
 
+    pub async fn suggest(&self, query: &str) -> Result<crate::model::Suggestions> {
+        self.typed(json!({"command": "media_suggest", "query": query}))
+            .await
+    }
+
     pub async fn plan_for_stream(&self, stream: &Value) -> Result<crate::model::Plan> {
         self.typed(json!({"command": "media_stream_plan", "stream": stream}))
             .await

@@ -1,7 +1,7 @@
 import { Theme, Metrics } from "theme.slint";
 import { Home } from "home.slint";
 import { Media } from "media.slint";
-import { Search } from "search.slint";
+import { Search, SearchEntry } from "search.slint";
 import { Library } from "library.slint";
 import { Detail, SourceRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
@@ -23,7 +23,7 @@ export {
     RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
-    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView,
+    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, SearchEntry,
 }
 
 // What the television shows before there is anything to show.
@@ -141,10 +141,14 @@ export component MediaBoxWindow inherits Window {
     in property <string> bt-press-label;
     in property <int> search-key-row;
     in property <int> search-key-col;
-    in property <bool> search-on-keys: true;
-    in property <[PosterItem]> search-results;
-    in property <int> search-index;
-    in property <int> search-columns: 5;
+    in property <int> search-pane;
+    in property <bool> search-searching;
+    in property <bool> search-showing-results;
+    in property <[SearchEntry]> search-entries;
+    in property <int> search-list-index;
+    in property <[RailModel]> search-rails;
+    in property <int> search-rail-row;
+    in property <int> search-rail-col;
 
     // ---- library
     in property <[string]> library-tabs;
@@ -332,10 +336,14 @@ export component MediaBoxWindow inherits Window {
             keys: root.search-keys;
             key-row: root.search-key-row;
             key-col: root.search-key-col;
-            on-keys: root.search-on-keys;
-            results: root.search-results;
-            index: root.search-index;
-            columns: root.search-columns;
+            pane: root.search-pane;
+            searching: root.search-searching;
+            showing-results: root.search-showing-results;
+            entries: root.search-entries;
+            list-index: root.search-list-index;
+            rails: root.search-rails;
+            rail-row: root.search-rail-row;
+            rail-col: root.search-rail-col;
         }
 
         if screen == "library": Library {

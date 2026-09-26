@@ -16,4 +16,5 @@ pub mod now_playing;
 pub mod power;
 pub mod search;
 pub mod settings;
+pub mod shelves;
 pub mod wireless;

@@ -138,6 +138,10 @@ impl MediaClient {
         self.get(&["media", "search"], &[("q", query)]).await
     }
 
+    pub async fn suggest(&self, query: &str) -> Result<Value, MediaError> {
+        self.get(&["media", "suggest"], &[("q", query)]).await
+    }
+
     pub async fn inspect(&self, url: &str) -> Result<Value, MediaError> {
         self.post(&["media", "inspect"], json!({"url": url})).await
     }
