@@ -386,7 +386,18 @@ impl AppState {
         &self,
         target: Surface,
     ) -> Result<mediabox_core::SurfaceStatus, crate::lifecycle::LifecycleError> {
+        let from_kodi = target == Surface::Ui && self.surface.status().await.kodi_active;
         let status = self.surface.switch(target).await?;
+        // Back from Kodi, nothing it was playing is left running: a session
+        // the media core opened for it (a remux, an audio transcode) would
+        // otherwise go on until its idle timeout, and a player of ours that
+        // somehow outlived the handover would hold the video plane.
+        if from_kodi {
+            self.stop_all_sessions().await;
+            if self.player.playing().await.is_some() {
+                self.player.stop().await;
+            }
+        }
         // Taking the panel is choosing to be the board's display owner, so it
         // is recorded. Idle is not that choice: it puts nothing on the screen
         // and leaves the recorded answer alone for whoever comes back to it.

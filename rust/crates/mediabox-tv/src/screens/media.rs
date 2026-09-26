@@ -32,13 +32,13 @@ pub enum Place {
 pub const PLACES: [Place; 4] = [Place::Board, Place::Discover, Place::Library, Place::Settings];
 
 impl Place {
-    /// The mark, by the name the interface draws it under.
+    /// The mark, by its name in the reference's icon set.
     pub fn icon(self) -> &'static str {
         match self {
             Place::Board => "home",
-            Place::Discover => "compass",
+            Place::Discover => "discover",
             Place::Library => "library",
-            Place::Settings => "gear",
+            Place::Settings => "settings",
         }
     }
 }

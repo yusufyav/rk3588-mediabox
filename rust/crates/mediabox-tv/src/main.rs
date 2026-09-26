@@ -75,6 +75,40 @@ fn cache_dir() -> String {
     std::env::var("MEDIABOX_TV_CACHE").unwrap_or_else(|_| CACHE_DIR.to_string())
 }
 
+/// Where this interface notes, when it hands a film to Kodi, which title the
+/// film was, for the interface Kodi hands the television back to. Beside the
+/// session file, because the runtime directory goes when the unit stops.
+fn kodi_return_file() -> std::path::PathBuf {
+    std::path::Path::new(&state_file()).with_file_name("handed-to-kodi")
+}
+
+fn boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|id| id.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn mark_kodi_return(kind: &str, id: &str) {
+    let _ = std::fs::write(kodi_return_file(), format!("{}\n{kind}\n{id}\n", boot_id()));
+}
+
+/// The title handed to Kodi in this boot, once: read and removed. A note
+/// from an earlier boot is removed and ignored -- starting the box is
+/// always the home screen.
+fn take_kodi_return() -> Option<(String, String)> {
+    let path = kodi_return_file();
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    parse_kodi_return(&text, &boot_id())
+}
+
+fn parse_kodi_return(text: &str, boot: &str) -> Option<(String, String)> {
+    let mut lines = text.lines();
+    let (written, kind, id) = (lines.next()?, lines.next()?, lines.next()?);
+    (!boot.is_empty() && written == boot && !kind.is_empty() && !id.is_empty())
+        .then(|| (kind.to_string(), id.to_string()))
+}
+
 fn state_file() -> String {
     std::env::var("MEDIABOX_TV_STATE").unwrap_or_else(|_| STATE_FILE.to_string())
 }
@@ -207,6 +241,9 @@ struct App {
     epoch: u64,
     /// What to restore once the shelves land, read from disk at startup.
     resume: Option<session::Snapshot>,
+    /// Where the remote is on the account mark at the top right: 0 not on
+    /// it, 1 the mark, 2 the button in its menu.
+    account_focus: i32,
 }
 
 impl App {
@@ -239,6 +276,9 @@ impl App {
             self.act_on_sheet(intent);
             return;
         }
+        if self.act_on_account_mark(intent) {
+            return;
+        }
         match intent {
             Intent::GoHome => self.go_home(),
             Intent::OfferPower => self.open_sheet(Sheet::power()),
@@ -259,6 +299,56 @@ impl App {
                 Route::Bluetooth => self.act_on_bluetooth(intent),
             },
         }
+    }
+
+    /// Whether the remote is on the search box of a page that draws the
+    /// reference's frame: the one place the account mark is reached from.
+    fn on_search_box(&self) -> bool {
+        match self.route() {
+            Route::Media => self.media.zone == screens::media::Zone::Search,
+            Route::Discover => self.discover.zone == screens::discover::Zone::Search,
+            Route::Library => self.library.zone == screens::library::Zone::Search,
+            Route::Search => {
+                self.search.pane == screens::search::Pane::Box && !self.search.editing
+            }
+            _ => false,
+        }
+    }
+
+    /// The account mark at the top right, right of the search box. Returns
+    /// whether the press was its.
+    fn act_on_account_mark(&mut self, intent: Intent) -> bool {
+        if !self.on_search_box() {
+            self.account_focus = 0;
+            return false;
+        }
+        match (self.account_focus, intent) {
+            (0, Intent::Move(1, 0)) => self.account_focus = 1,
+            (0, _) => return false,
+            (1, Intent::Move(-1, 0)) | (_, Intent::Dismiss) => self.account_focus = 0,
+            (1, Intent::Move(0, 1)) | (1, Intent::Select) => self.account_focus = 2,
+            (2, Intent::Move(0, -1)) => self.account_focus = 1,
+            // Down off the menu is the page under it, as it is from the box.
+            (2, Intent::Move(0, 1)) => {
+                self.account_focus = 0;
+                return false;
+            }
+            (2, Intent::Select) => {
+                let signed = screens::account::Session::from_status(self.status.as_ref()).authenticated;
+                self.account_focus = 0;
+                if signed {
+                    self.say("Oturum kapatılıyor…".into());
+                    spawn_media_logout();
+                } else {
+                    self.account.open(self.status.as_ref());
+                    self.open(Route::Account);
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        self.paint();
+        true
     }
 
     /// Backspace, which is a deletion on a screen that holds text and the way
@@ -1926,6 +2016,9 @@ impl App {
         self.now.note = "Kodi'ye aktarılıyor…".into();
         self.remember();
         self.store.flush();
+        if let Some(detail) = self.detail.as_ref() {
+            mark_kodi_return(&detail.kind, &detail.id);
+        }
         self.paint();
         spawn_handoff();
     }
@@ -3140,6 +3233,17 @@ impl App {
         // carries more than a screen name, but the screen name no longer
         // decides anything.
         let _ = self.resume.take();
+        // One exception, and it is not a word left in a file from another
+        // session: this interface handed a film to Kodi in this boot, and Kodi
+        // has given the television back. The viewer returns to that title's
+        // page -- the catalogue under it, so Back is the board -- as they
+        // would to any page they had left for a moment.
+        if let Some((kind, id)) = take_kodi_return() {
+            eprintln!("mediabox-tv.kodi back from kodi: {kind} {id}");
+            self.open_media();
+            self.open_detail_for(&state::Item::bare(&kind, &id));
+            return;
+        }
         self.paint();
     }
 
@@ -3157,6 +3261,13 @@ impl App {
             return;
         };
         let route = self.route();
+        {
+            let session = screens::account::Session::from_status(self.status.as_ref());
+            let chip = window.global::<AccountChip>();
+            chip.set_signed(session.authenticated);
+            chip.set_email(session.email.into());
+            chip.set_focus(if self.on_search_box() { self.account_focus } else { 0 });
+        }
         // A film is drawn by the display controller on the window under this
         // one, so while one is playing this surface is transparent and carries
         // the film's own controls and nothing else. No screen answers to
@@ -4447,6 +4558,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         detail_fade: 0.0,
         epoch: 0,
         resume: session::read(state_file()),
+        account_focus: 0,
     }));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
     // The earlier searches outlive the process, as they do in the reference.
@@ -5669,7 +5781,21 @@ fn deliver(line: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::play_refusal;
+    use super::{parse_kodi_return, play_refusal};
+
+    /// Back from Kodi in the same boot is the title's page; a note left by
+    /// an earlier boot is not, which keeps a cold start on the home screen.
+    #[test]
+    fn only_a_handover_in_this_boot_brings_the_title_back() {
+        let note = "boot-a\nseries\ntt33049767\n";
+        assert_eq!(
+            parse_kodi_return(note, "boot-a"),
+            Some(("series".into(), "tt33049767".into()))
+        );
+        assert_eq!(parse_kodi_return(note, "boot-b"), None);
+        assert_eq!(parse_kodi_return(note, ""), None);
+        assert_eq!(parse_kodi_return("boot-a\n", "boot-a"), None);
+    }
 
     /// The screenshot of 2026-09-26: the worker's 409 body is not what the
     /// viewer reads.

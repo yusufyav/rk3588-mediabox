@@ -285,6 +285,33 @@ impl Item {
         }
     }
 
+    /// A title known only by its kind and id, whose page fills itself in
+    /// from its full record: the one Kodi was playing, coming back from it.
+    pub fn bare(kind: &str, id: &str) -> Self {
+        let local = kind == "library";
+        Self {
+            id: id.to_string(),
+            kind: if local { "movie".into() } else { kind.to_string() },
+            title: String::new(),
+            poster: None,
+            background: None,
+            summary: None,
+            year: None,
+            rating: None,
+            genres: Vec::new(),
+            logo: None,
+            runtime: None,
+            cast: Vec::new(),
+            director: Vec::new(),
+            trailer: None,
+            progress: 0.0,
+            continuing: false,
+            local,
+            hue: 0.0,
+            record: None,
+        }
+    }
+
     pub fn from_preview(preview: &MetaPreview) -> Self {
         let progress = preview.state.as_ref().map(|s| s.progress()).unwrap_or(0.0) as f32;
         Self {
