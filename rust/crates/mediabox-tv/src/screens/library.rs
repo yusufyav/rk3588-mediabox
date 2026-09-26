@@ -249,6 +249,21 @@ impl Library {
         self.clamp();
     }
 
+    /// Opens "Devam Et", with the remote in the grid: where the board's
+    /// "Tümünü Gör" on "İzlemeye devam edin" leads.
+    pub fn show_continuing(&mut self) {
+        if let Some(index) = self
+            .sections
+            .iter()
+            .position(|s| s.kind == SectionKind::Continuing)
+        {
+            self.tab = index;
+            self.tab_focus = index;
+            self.zone = if self.items().is_empty() { Zone::Tabs } else { Zone::Grid };
+            self.clamp();
+        }
+    }
+
     fn apply_sort(&mut self) {
         let sort = self.sort;
         for section in &mut self.sections {

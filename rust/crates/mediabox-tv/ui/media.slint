@@ -1,127 +1,146 @@
 import { Theme, Metrics } from "theme.slint";
 import { Rail, RailModel } from "components.slint";
+import { Icon } from "kit.slint";
 
-// The catalogue: what is behind the "Filmler ve Diziler" tile.
+// The catalogue: what is behind the "Filmler ve Diziler" tile, laid out as
+// the reference's board and measured off a 4K screenshot of it:
 //
-// A shelf per catalogue, every poster named, the unfinished titles first — the
-// shape the reference uses and the shape anybody who has used a streaming box
-// already knows. The line above the shelves is what the focused title is, so
-// scanning a row tells you something without opening anything.
+// - a column of places down the left, marks only, the current one in the
+//   accent: centred 2.06% in, the first at 9.86% down, one every 7.05%;
+// - the search box across the top, centred, 23% of the width, 3.9% high;
+// - a shelf per catalogue, the first poster 5.47% in, the heading's top 8.75%
+//   down, a shelf every 36.6% of the height, "Tümünü Gör ›" at the right end
+//   of each heading.
 export component Media inherits Rectangle {
     in property <[RailModel]> rails;
     in property <int> focus-row;
     in property <int> focus-col;
+    // 0 the shelves, 1 the places, 2 the search box.
+    in property <int> zone;
+    in property <int> place;
+    in property <[string]> places;
 
-    in property <string> title;
-    in property <image> logo;
-    in property <string> facts;
-    in property <string> summary;
-
-    property <length> rail-h: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
-    // The logo or the name, the facts, two lines of summary and the gaps
-    // between them. Measured on the panel: at the old height the second line
-    // of summary ran under the first shelf's heading.
-    property <length> head-h: Metrics.title-screen * 1.3 + Metrics.text-meta * 4.6
-                              + Metrics.root-font * 1.2;
-    property <length> top: Metrics.topbar + Metrics.block-gap * 0.4;
-    property <length> viewport-h: root.height - top - head-h;
+    property <length> content-x: root.width * 0.0547;
+    property <length> right-x: root.width * 0.0185;
+    property <length> rails-top: root.height * 0.0875;
+    property <length> rail-h: root.height * 0.3662;
+    // The heading's band: the reference's posters start 3.7% of the height
+    // under the heading's top.
+    property <length> head: root.height * 0.037 - Metrics.focus-room;
+    property <length> viewport-h: root.height - rails-top;
     property <length> content-h: max(1px, rail-h * rails.length);
-    // The focused shelf's heading at the top of the window, and nothing of the
-    // shelf above it: a sliver of the last one's captions read as stray words.
-    property <length> scroll: clamp(max(0, focus-row - 1) * rail-h,
-                                    0px,
-                                    max(0px, content-h - viewport-h));
+    property <length> scroll: clamp(focus-row * rail-h, 0px, max(0px, content-h - viewport-h));
 
-    background: Theme.bg;
+    background: Theme.catalog-bg;
     clip: true;
 
-    // A quiet ground rather than a photograph. The posters are the picture on
-    // this screen, and a full-screen still behind two hundred of them is both
-    // noise and, at this size, the most expensive thing the renderer does.
+    // ------------------------------------------------------------ the shelves
+    //
+    // Clipped at the column of places, so a shelf scrolled along passes under
+    // it rather than over it.
     Rectangle {
-        width: 100%;
-        height: 100%;
-        background: @linear-gradient(175deg, #0d1119 0%, #080a10 58%, #05070b 100%);
-    }
-    Rectangle {
-        x: root.width * 0.3;
-        y: -root.height * 0.3;
-        width: root.width;
-        height: root.height * 0.7;
-        background: @radial-gradient(circle, #5e4aa845 0%, #5e4aa800 62%);
-    }
-
-    // What the remote is on. Fixed above the shelves rather than scrolling with
-    // them: it is the answer to "what is this one", and an answer that slides
-    // off the top of the panel as you walk along a row is no answer.
-    VerticalLayout {
-        x: Metrics.gutter;
-        y: top;
-        width: min(root.width * 0.62, 1300px);
-        height: head-h;
-        spacing: Metrics.root-font * 0.3;
-        alignment: start;
-
-        if logo.width > 0: Image {
-            source: logo;
-            image-fit: contain;
-            horizontal-alignment: left;
-            height: Metrics.title-screen * 1.25;
-        }
-        if logo.width == 0: Text {
-            text: title;
-            color: Theme.text;
-            font-size: Metrics.title-screen;
-            font-weight: 800;
-            letter-spacing: -0.03 * Metrics.title-screen;
-            overflow: elide;
-            wrap: no-wrap;
-        }
-        Text {
-            text: facts;
-            color: Theme.accent;
-            font-size: Metrics.text-meta * 0.9;
-            font-weight: 700;
-            overflow: elide;
-            wrap: no-wrap;
-        }
-        Text {
-            text: summary;
-            color: Theme.muted;
-            font-size: Metrics.text-meta * 0.9;
-            wrap: word-wrap;
-            overflow: elide;
-            max-height: Metrics.text-meta * 2.2;
-        }
-    }
-
-    // The shelves.
-    Rectangle {
-        x: 0;
-        y: top + head-h;
-        width: 100%;
-        height: viewport-h;
+        x: content-x - Metrics.focus-room;
+        y: rails-top - Metrics.focus-room;
+        // Nine posters and the margin after them, as the reference's row
+        // ends; nothing of a tenth peeks in at the edge.
+        width: root.width - self.x - right-x + Metrics.focus-room;
+        height: viewport-h + Metrics.focus-room;
         clip: true;
-        background: transparent;
 
         Rectangle {
             x: 0;
-            y: -scroll;
+            y: Metrics.focus-room - scroll;
             width: 100%;
             height: content-h;
-            background: transparent;
 
             animate y { duration: Theme.glide; easing: Theme.ease; }
 
             for rail[r] in rails: Rail {
                 x: 0;
                 y: r * rail-h;
-                width: root.width;
+                width: parent.width;
+                height: rail-h;
                 rail: rail;
+                inset: Metrics.focus-room;
+                right-inset: Metrics.focus-room;
+                head: head;
                 focus-col: focus-col;
-                // Row 0 is the bar; the shelves start at 1.
-                active: focus-row == r + 1;
+                active: zone == 0 && focus-row == r;
             }
+        }
+    }
+
+    // ------------------------------------------------------- the search box
+    Rectangle {
+        property <bool> focused: zone == 2;
+        width: root.width * 0.2307;
+        height: root.height * 0.0389;
+        x: (root.width - self.width) / 2;
+        y: root.height * 0.0139;
+        border-radius: self.height / 2;
+        background: focused ? Theme.focus-fill : #28253c;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+        Text {
+            x: parent.height * 0.62;
+            width: parent.width - parent.height * 1.8;
+            height: 100%;
+            text: "Film veya dizi arayın";
+            color: parent.focused ? #3b4250 : #918f9b;
+            font-size: parent.height * 0.36;
+            vertical-alignment: center;
+        }
+        Icon {
+            x: parent.width - parent.height * 0.62 - self.width;
+            y: (parent.height - self.height) / 2;
+            name: "search";
+            size: parent.height * 0.44;
+            ink: parent.focused ? #0a0c10 : #d9d8df;
+        }
+    }
+
+    // ------------------------------------------------------ the places, left
+    //
+    // The product's own mark at the top rather than the reference's: a play
+    // mark in the accent.
+    Rectangle {
+        x: root.width * 0.0206 - self.width / 2;
+        y: root.height * 0.0181;
+        width: root.width * 0.0169;
+        height: self.width;
+        border-radius: self.width * 0.28;
+        background: Theme.film;
+
+        Path {
+            x: parent.width * 0.3;
+            y: parent.height * 0.26;
+            width: parent.width * 0.46;
+            height: parent.height * 0.48;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M1 0L10 5L1 10z";
+            fill: #ffffff;
+        }
+    }
+
+    for mark[i] in places: Rectangle {
+        property <bool> focused: zone == 1 && i == place;
+        property <length> box: root.width * 0.0245;
+        x: root.width * 0.0206 - self.width / 2;
+        y: root.height * (0.0986 + 0.0705 * i) - self.height / 2;
+        width: box;
+        height: box;
+        border-radius: box * 0.28;
+        background: focused ? Theme.focus-fill : transparent;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: mark;
+            size: root.width * 0.0175;
+            // The board is where this is; the others are where it could go.
+            ink: focused ? #0a0c10 : (i == 0 ? Theme.film : #60606a);
         }
     }
 }

@@ -26,11 +26,13 @@ use crate::{PosterItem, RailModel};
 /// visible to its left, of which five were outside the window and had their
 /// artwork taken away: the row emptied itself as the viewer arrived at it.
 ///
-/// About eight posters fit across a 16:9 panel at this card width, so the
-/// window is eight either way. That is one screenful behind and one ahead,
-/// which is what "nearly visible" means on a rail that can scroll both ways.
-const BEHIND: usize = 8;
-const AHEAD: usize = 8;
+/// Nine posters fit across the panel at the reference's card width, and at
+/// the end of a shelf -- on its "Tümünü Gör" -- the nine before it are all on
+/// the panel, so the window is ten either way. That is one screenful behind
+/// and one ahead, which is what "nearly visible" means on a rail that can
+/// scroll both ways.
+const BEHIND: usize = 10;
+const AHEAD: usize = 10;
 
 pub struct Shelves {
     pub shelves: Vec<Shelf>,
@@ -65,6 +67,20 @@ impl Shelves {
         self.columns.get(self.row).copied().unwrap_or(0)
     }
 
+    /// The stops along a shelf: its titles, and "Tümünü Gör" after them when
+    /// the shelf has one.
+    fn stops(&self, row: usize) -> usize {
+        let len = self.row_len(row);
+        let more = self.shelves.get(row).is_some_and(|s| s.more.is_some());
+        len + usize::from(more && len > 0)
+    }
+
+    /// Where "Tümünü Gör" leads, when the remote is on it.
+    pub fn focused_more(&self) -> Option<&crate::state::More> {
+        let shelf = self.shelves.get(self.row)?;
+        (self.column() == shelf.items.len()).then_some(shelf.more.as_ref())?
+    }
+
     pub fn focused(&self) -> Option<&Item> {
         self.shelves.get(self.row)?.items.get(self.column())
     }
@@ -96,6 +112,7 @@ impl Shelves {
                 title: shelf.title.clone().into(),
                 source: shelf.source.clone().into(),
                 note: shelf.note.clone().into(),
+                more: if shelf.more.is_some() { "Tümünü Gör".into() } else { Default::default() },
                 items: ModelRc::from(model.clone()),
             });
             self.tiles.push(model);
@@ -126,7 +143,7 @@ impl Shelves {
     }
 
     fn clamp(&mut self) {
-        let len = self.row_len(self.row);
+        let len = self.stops(self.row);
         if len > 0 {
             if let Some(slot) = self.columns.get_mut(self.row) {
                 *slot = (*slot).min(len - 1);
@@ -152,7 +169,7 @@ impl Shelves {
 
     /// Along the shelf. False at either end.
     pub fn step_column(&mut self, dx: i32) -> bool {
-        let len = self.row_len(self.row);
+        let len = self.stops(self.row);
         if len == 0 {
             return false;
         }
@@ -252,6 +269,7 @@ pub mod tests {
         Shelf {
             title: name.into(),
             source: String::new(),
+            more: None,
             note: String::new(),
             items: (0..count)
                 .map(|i| Item::stub(&format!("{name}-{i}")))
@@ -290,5 +308,19 @@ pub mod tests {
         shelves.clear();
         shelves.set(vec![shelf("x", 4), shelf("y", 4)]);
         assert_eq!((shelves.row, shelves.column()), (0, 0));
+    }
+
+    #[test]
+    fn right_past_the_last_title_is_see_all() {
+        let mut shelves = Shelves::new();
+        let mut row = shelf("a", 2);
+        row.more = Some(crate::state::More::Continuing);
+        shelves.set(vec![row]);
+        assert!(shelves.step_column(1));
+        assert!(shelves.focused_more().is_none());
+        assert!(shelves.step_column(1));
+        assert_eq!(shelves.focused_more(), Some(&crate::state::More::Continuing));
+        assert!(shelves.focused().is_none());
+        assert!(!shelves.step_column(1), "nothing past it");
     }
 }

@@ -141,6 +141,9 @@ pub struct Discover {
     /// The open dropdown's highlighted option.
     pub picker: Option<usize>,
     pub index: usize,
+    /// A catalogue asked for by "Tümünü Gör" before the list of catalogues
+    /// has arrived: opened as soon as it does.
+    wanted: Option<(String, String, String)>,
 }
 
 impl Discover {
@@ -160,6 +163,33 @@ impl Discover {
             filter: 0,
             picker: None,
             index: 0,
+            wanted: None,
+        }
+    }
+
+    /// Opens a particular catalogue: the reference's "Tümünü Gör" on a board
+    /// shelf. Returns its first page when the catalogues are known; otherwise
+    /// it is opened when they arrive.
+    pub fn show(&mut self, addon_id: &str, kind: &str, id: &str) -> Option<Request> {
+        self.zone = Zone::Grid;
+        self.picker = None;
+        let found = self
+            .catalogs
+            .iter()
+            .position(|c| c.addon_id == addon_id && c.kind == kind && c.id == id);
+        match found {
+            Some(index) => {
+                self.wanted = None;
+                if index == self.catalog && !self.items.is_empty() {
+                    return None;
+                }
+                self.kind = kind.to_string();
+                self.open_catalog(index)
+            }
+            None => {
+                self.wanted = Some((addon_id.into(), kind.into(), id.into()));
+                None
+            }
         }
     }
 
@@ -193,6 +223,11 @@ impl Discover {
             .current()
             .map(|c| (c.addon_id.clone(), c.kind.clone(), c.id.clone()));
         self.catalogs = catalogs;
+        if let Some((addon, kind, id)) = self.wanted.take() {
+            if self.catalogs.iter().any(|c| c.addon_id == addon && c.kind == kind && c.id == id) {
+                return self.show(&addon, &kind, &id);
+            }
+        }
         if let Some((addon, kind, id)) = shown {
             if let Some(index) = self
                 .catalogs
@@ -654,5 +689,19 @@ mod tests {
         assert!(discover.error.is_some());
         let again = discover.retry().expect("the same page");
         assert_eq!(again.extra, first.extra);
+    }
+
+    #[test]
+    fn see_all_opens_that_catalogue_whenever_the_list_arrives() {
+        let mut discover = Discover::new();
+        assert!(discover.show("c", "movie", "new").is_none(), "nothing known yet");
+        let request = discover
+            .take_catalogs(vec![
+                catalog("a", "movie", "top", &[], true),
+                catalog("c", "movie", "new", &[], false),
+            ])
+            .expect("the wanted catalogue's first page");
+        assert_eq!((request.addon_id.as_str(), request.id.as_str()), ("c", "new"));
+        assert_eq!(discover.filters()[1].selected, 1);
     }
 }

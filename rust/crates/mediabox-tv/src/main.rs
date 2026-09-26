@@ -175,10 +175,9 @@ struct App {
     /// else: the two are never both running, and asking the control plane what
     /// is playing would answer a frame too late.
     here: Option<Playing>,
-    /// Full records of titles the remote has rested on in the catalogue, so
-    /// the line above the shelves can say what a title is without opening it.
-    /// A shelf entry from the account's library carries a name and a poster
-    /// and little else.
+    /// Full records of titles the remote has rested on in a grid, so the
+    /// record beside it can say what a title is without opening it. An entry
+    /// from the account's library carries a name and a poster and little else.
     hero_meta: std::collections::HashMap<String, model::Meta>,
     /// The account's library as the media core last listed it, all of it: the
     /// library screen is built from this, not from the shelves, which carry
@@ -695,7 +694,6 @@ impl App {
             window.set_media_rails(slint::ModelRc::from(self.media.rails()));
         }
         self.open(Route::Media);
-        self.want_hero();
         if !self.loading {
             self.loading = true;
             spawn_loader();
@@ -706,18 +704,34 @@ impl App {
         match intent {
             Intent::Move(dx, dy) => {
                 if self.media.step(dx, dy) {
-                    self.want_hero();
                     self.paint();
                 }
             }
             Intent::Select => {
-                if let Some(nav) = self.media.focused_nav() {
-                    self.open_screen(nav);
-                    return;
-                }
-                let item = self.media.focused().cloned();
-                if let Some(item) = item {
-                    self.open_detail_for(&item);
+                use screens::media::{Place, Zone};
+                match self.media.zone {
+                    Zone::Search => self.open_screen(state::Nav::Search),
+                    Zone::Places => match self.media.focused_place() {
+                        Some(Place::Discover) => self.open_screen(state::Nav::Discover),
+                        Some(Place::Library) => self.open_screen(state::Nav::Library),
+                        Some(Place::Settings) => self.open_screen(state::Nav::Settings),
+                        // The board is this screen.
+                        Some(Place::Board) | None => {
+                            if self.media.step(1, 0) {
+                                self.paint();
+                            }
+                        }
+                    },
+                    Zone::Shelves => {
+                        if let Some(more) = self.media.focused_more().cloned() {
+                            self.see_all(more);
+                            return;
+                        }
+                        let item = self.media.focused().cloned();
+                        if let Some(item) = item {
+                            self.open_detail_for(&item);
+                        }
+                    }
                 }
             }
             Intent::Dismiss => self.back(),
@@ -725,13 +739,35 @@ impl App {
         }
     }
 
+    /// "Tümünü Gör" at the end of a board shelf: the catalogue in Discover, or
+    /// "İzlemeye devam edin" in the library, as the reference does.
+    fn see_all(&mut self, more: state::More) {
+        match more {
+            state::More::Continuing => {
+                self.open_library();
+                self.library.show_continuing();
+                self.paint();
+            }
+            state::More::Catalogue { addon_id, kind, id } => {
+                self.open(Route::Discover);
+                if let Some(page) = self.discover.show(&addon_id, &kind, &id) {
+                    spawn_discover_page(page);
+                }
+                spawn_discover_catalogs();
+                self.paint();
+            }
+        }
+    }
+
     /// Asks for the focused title's full record once the remote has rested
     /// on it, if the shelf did not carry enough to say what it is.
     fn want_hero(&mut self) {
+        // The board shows nothing but the shelves, as the reference's does;
+        // only the grids have a record beside them.
         let item = match self.route() {
             Route::Library => self.library.focused(),
             Route::Discover => self.discover.focused(),
-            _ => self.media.focused(),
+            _ => None,
         };
         let Some(item) = item else {
             return;
@@ -753,7 +789,6 @@ impl App {
             self.hero_meta.clear();
         }
         let focused = match self.route() {
-            Route::Media => self.media.focused(),
             Route::Library => self.library.focused(),
             Route::Discover => self.discover.focused(),
             _ => None,
@@ -766,35 +801,17 @@ impl App {
     }
 
     fn paint_media(&mut self, window: &MediaBoxWindow) {
+        use screens::media::{Zone, PLACES};
         self.media.sync_artwork(&mut self.images);
         window.set_media_row(self.media.row() as i32);
         window.set_media_col(self.media.column() as i32);
-
-        let focused = self.media.focused().cloned();
-        let meta = focused.as_ref().and_then(|item| self.hero_meta.get(&item.id));
-        let (title, facts, summary) = match &focused {
-            Some(item) => (
-                item.title.clone(),
-                hero_facts(item, meta),
-                item.summary
-                    .clone()
-                    .or_else(|| meta.and_then(|m| m.description.clone()))
-                    .unwrap_or_default(),
-            ),
-            None => (String::new(), String::new(), String::new()),
-        };
-        // The title's own logo, when the record has one: the reference's
-        // detail page leads with it, and so does the line over the shelves.
-        let mut logo = slint::Image::default();
-        if let Some(url) = meta.and_then(|m| m.logo.clone()).filter(|url| !url.is_empty()) {
-            let key = images::Key::new(&url, state::POSTER_WIDTH);
-            self.images.want(&key);
-            logo = self.images.get(&key).unwrap_or_default();
-        }
-        window.set_media_logo(logo);
-        window.set_media_title(title.into());
-        window.set_media_facts(facts.into());
-        window.set_media_summary(summary.into());
+        window.set_media_zone(match self.media.zone {
+            Zone::Shelves => 0,
+            Zone::Places => 1,
+            Zone::Search => 2,
+        });
+        window.set_media_place(self.media.place as i32);
+        window.set_media_places(strings(PLACES.iter().map(|p| p.icon().to_string())));
     }
 
     // ------------------------------------------------------------- the search
@@ -2814,7 +2831,6 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_media_rails(slint::ModelRc::from(self.media.rails()));
         }
-        self.want_hero();
         self.loading = !from_catalogue;
         self.paint();
         if !from_catalogue {

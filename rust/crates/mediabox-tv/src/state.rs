@@ -299,6 +299,8 @@ impl Item {
 pub struct Shelf {
     pub title: String,
     pub source: String,
+    /// Where "Tümünü Gör" at the end of the row leads, when it has one.
+    pub more: Option<More>,
     /// Said in place of the posters when there are none: a catalogue that did
     /// not answer keeps its row and says so, rather than vanishing.
     pub note: String,
@@ -380,11 +382,23 @@ impl Home {
     }
 }
 
-/// The shelves the home screen is made of, in the order the product shows them.
-///
-/// The appliance's own library and the operator's account come first because
-/// they are the two answers to "what was I doing", and they are local or nearly
-/// so; the catalogues follow in the order the media core returned them.
+/// Where a shelf's "Tümünü Gör" goes: the reference opens the catalogue in
+/// Discover, and "İzlemeye devam edin" in the library.
+#[derive(Clone, Debug, PartialEq)]
+pub enum More {
+    Continuing,
+    Catalogue {
+        addon_id: String,
+        kind: String,
+        id: String,
+    },
+}
+
+/// The board's shelves, as the reference's board has them: "İzlemeye devam
+/// edin" first, then a shelf per installed catalogue in the order the media
+/// core returned them. The account's library and this device's own titles
+/// are not on the board -- they are in the library, where the reference keeps
+/// them.
 pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListing>) -> Vec<Shelf> {
     let mut shelves = Vec::new();
 
@@ -400,45 +414,13 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
                 ..Item::from_preview(preview)
             })
             .collect();
-        let continuing: std::collections::HashSet<&str> =
-            unfinished.iter().map(|item| item.id.as_str()).collect();
         if !unfinished.is_empty() {
             shelves.push(Shelf {
-                title: "Devam Et".into(),
+                title: "İzlemeye devam edin".into(),
                 source: String::new(),
+                more: Some(More::Continuing),
                 note: String::new(),
-                items: unfinished.clone(),
-            });
-        }
-
-        let mine: Vec<Item> = library
-            .stremio
-            .iter()
-            .filter(|item| !continuing.contains(item.id.as_str()))
-            .take(RAIL_LIMIT)
-            .map(Item::from_preview)
-            .collect();
-        if !mine.is_empty() {
-            shelves.push(Shelf {
-                title: "Kitaplığım".into(),
-                source: "Stremio hesabın".into(),
-                note: String::new(),
-                items: mine,
-            });
-        }
-
-        let local: Vec<Item> = library
-            .items
-            .iter()
-            .take(RAIL_LIMIT)
-            .map(Item::from_preview)
-            .collect();
-        if !local.is_empty() {
-            shelves.push(Shelf {
-                title: "Kitaplık".into(),
-                source: "Bu cihazda".into(),
-                note: String::new(),
-                items: local,
+                items: unfinished,
             });
         }
     }
@@ -448,8 +430,13 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
             continue;
         }
         shelves.push(Shelf {
-            title: rail_title(&row.name, &row.kind),
-            source: row.addon_name.clone(),
+            title: catalog_title(&row.addon_id, &row.catalog_id, &row.name, &row.kind),
+            source: String::new(),
+            more: Some(More::Catalogue {
+                addon_id: row.addon_id.clone(),
+                kind: row.kind.clone(),
+                id: row.catalog_id.clone(),
+            }),
             note: String::new(),
             items: row
                 .items
@@ -463,58 +450,60 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
     shelves
 }
 
+/// A catalogue's title as the reference writes it: stremio-web's
+/// `catalogTitle`, "{catalogue} - {type}", with the catalogue translated by
+/// the key `CATALOG_{addon id, dots as underscores}_{catalogue id}` and the
+/// type by `TYPE_{type}`, in the reference's own Turkish (stremio-translations,
+/// tr-TR). A catalogue with no translation keeps its own name.
+pub fn catalog_title(addon_id: &str, catalog_id: &str, name: &str, kind: &str) -> String {
+    let key = format!("{}_{catalog_id}", addon_id.replace('.', "_"));
+    let catalogue = match key.as_str() {
+        "com_linvo_cinemeta_top" => "Beğenilenler".to_string(),
+        "com_linvo_cinemeta_imdbRating" => "Öne Çıkanlar".to_string(),
+        "com_linvo_cinemeta_year" => "Yeniler".to_string(),
+        "org_stremio_pubdomainmovies_publicdomainmovies" => "Kamu Malı Filmler".to_string(),
+        _ if !name.trim().is_empty() => name.trim().to_string(),
+        _ => capitalised(catalog_id),
+    };
+    let kind = match kind {
+        "movie" => "Film".to_string(),
+        "series" => "Dizi".to_string(),
+        "tv" => "TV kanalı".to_string(),
+        "channel" => "Kanal".to_string(),
+        "other" => "Diğer".to_string(),
+        other => capitalised(other),
+    };
+    format!("{catalogue} - {kind}")
+}
+
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// A search's answer as shelves: a row per catalogue, in the order the media
-/// core gave them, which is the order the addons are installed in. The row is
-/// named for what it holds and the addon it came from, as the reference names
-/// a search row after its catalogue.
+/// core gave them, which is the order the addons are installed in, each named
+/// as the reference names it.
 pub fn search_shelves(results: &crate::model::SearchResults) -> Vec<Shelf> {
     results
         .rows
         .iter()
-        .map(|row| {
-            let noun = match row.kind.as_str() {
-                "series" => "Diziler",
-                "movie" => "Filmler",
-                other => other,
-            };
-            let catalogue = row.name.trim();
-            let source = if catalogue.is_empty()
-                || matches!(catalogue, "Popular" | "Top" | "Search")
-            {
-                row.addon_name.clone()
-            } else {
-                format!("{} · {catalogue}", row.addon_name)
-            };
-            Shelf {
-                title: noun.to_string(),
-                source,
-                note: match &row.error {
-                    Some(why) => format!("Bu katalog {why}"),
-                    None => String::new(),
-                },
-                items: row.items.iter().map(Item::from_preview).collect(),
-            }
+        .map(|row| Shelf {
+            title: catalog_title(&row.addon_id, &row.catalog_id, &row.name, &row.kind),
+            source: String::new(),
+            more: None,
+            note: match &row.error {
+                Some(why) => format!("Bu katalog {why}"),
+                None => String::new(),
+            },
+            items: row.items.iter().map(Item::from_preview).collect(),
         })
         .collect()
 }
 
-/// An addon's catalogue names are English and terse — "Popular", "New" — and
-/// the product is Turkish. Anything not recognised keeps its own name with the
-/// provider's word in front of it.
-fn rail_title(name: &str, kind: &str) -> String {
-    let noun = if kind == "series" {
-        "Diziler"
-    } else {
-        "Filmler"
-    };
-    match name.trim() {
-        "Popular" => format!("Popüler {noun}"),
-        "Featured" => format!("Öne Çıkan {noun}"),
-        "New" | "Latest" => format!("Yeni {noun}"),
-        other if other.is_empty() => noun.to_string(),
-        other => format!("{noun} · {other}"),
-    }
-}
 
 /// A stable colour for a title, so the same film's fallback tile is the same
 /// colour wherever it turns up. The web interface uses this hash; matching it
@@ -611,8 +600,16 @@ mod tests {
                 .map(|shelf| shelf.items.iter().map(|item| item.id.clone()).collect())
                 .unwrap_or_default()
         };
-        assert_eq!(ids("Devam Et"), ["episode", "tail"]);
-        assert_eq!(ids("Kitaplığım"), ["kept"]);
+        assert_eq!(ids("İzlemeye devam edin"), ["episode", "tail"]);
+        // The library is not on the board; the reference keeps it in the library.
+        assert_eq!(shelves.len(), 1);
+    }
+
+    #[test]
+    fn a_catalogue_is_titled_as_the_reference_titles_it() {
+        assert_eq!(catalog_title("com.linvo.cinemeta", "top", "Popular", "movie"), "Beğenilenler - Film");
+        assert_eq!(catalog_title("com.linvo.cinemeta", "imdbRating", "Featured", "series"), "Öne Çıkanlar - Dizi");
+        assert_eq!(catalog_title("org.example", "trending", "Trending", "anime"), "Trending - Anime");
     }
 
     #[test]

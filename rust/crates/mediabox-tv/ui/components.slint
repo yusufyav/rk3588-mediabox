@@ -29,6 +29,8 @@ export struct RailModel {
     // Said in place of the posters when there are none: a catalogue that did
     // not answer keeps its row and says so.
     note: string,
+    // "Tümünü Gör" at the end of the heading, or empty for a row without one.
+    more: string,
     items: [PosterItem],
 }
 
@@ -280,7 +282,7 @@ export component Fallback inherits Rectangle {
     in property <string> title;
     in property <float> hue;
 
-    border-radius: Theme.radius-art;
+    border-radius: Metrics.poster-radius;
     background: @linear-gradient(160deg,
         Colors.hsv(hue, 0.42, 0.30) 0%,
         Colors.hsv(hue, 0.55, 0.13) 100%);
@@ -319,7 +321,7 @@ export component Art inherits Rectangle {
     picture := Rectangle {
         width: 100%;
         height: 100%;
-        border-radius: Theme.radius-art;
+        border-radius: Metrics.poster-radius;
         clip: true;
 
         // The picture and the name painted under it, as one layer: that is
@@ -365,17 +367,22 @@ export component Art inherits Rectangle {
             }
         }
 
+        // The reference's bar, measured off its board: inside the poster, in
+        // from both sides by 7.4% of the width and up from the bottom by 8%,
+        // 3% thick, white on a faint white track, ends rounded.
         if item.progress > 0.0: Rectangle {
-            x: 0;
-            y: parent.height - self.height;
-            width: 100%;
-            height: max(3px, Metrics.card-w * 0.018);
-            background: #ffffff38;
+            x: parent.width * 0.074;
+            y: parent.height - parent.width * 0.08 - self.height;
+            width: parent.width * 0.852;
+            height: max(3px, parent.width * 0.03);
+            border-radius: self.height / 2;
+            background: #ffffff45;
             Rectangle {
                 x: 0;
-                width: max(3px, parent.width * item.progress);
+                width: max(parent.height, parent.width * item.progress);
                 height: 100%;
-                background: Theme.film;
+                border-radius: parent.border-radius;
+                background: #ffffff;
             }
         }
 
@@ -399,7 +406,7 @@ export component Art inherits Rectangle {
         y: -Metrics.ring-w;
         width: parent.width + Metrics.ring-w * 2;
         height: parent.height + Metrics.ring-w * 2;
-        border-radius: Theme.radius-art + Metrics.ring-w;
+        border-radius: Metrics.poster-radius + Metrics.ring-w;
         border-width: Metrics.ring-w;
         border-color: Theme.focus-ring;
         background: transparent;
@@ -428,17 +435,17 @@ export component Poster inherits Rectangle {
     // this is. The reference names them all.
     Text {
         x: Metrics.card-w * 0.04;
-        y: Metrics.card-h + Metrics.text-card * 0.7;
+        y: Metrics.card-h + Metrics.vh * 0.016;
         width: Metrics.card-w * 0.92;
         height: Metrics.text-card * 2.6;
+        // White, every one, as the reference names them.
         text: item.title;
-        color: focused ? Theme.text : Theme.muted;
+        color: Theme.text;
         font-size: Metrics.text-card;
-        font-weight: 640;
+        font-weight: focused ? 600 : 500;
         horizontal-alignment: center;
         wrap: word-wrap;
         overflow: elide;
-        animate color { duration: Theme.focus-in; easing: Theme.ease; }
     }
 }
 
@@ -466,9 +473,9 @@ export component GridPoster inherits Rectangle {
 
         Text {
             text: item.title;
-            color: focused ? Theme.text : Theme.muted;
+            color: Theme.text;
             font-size: Metrics.text-card;
-            font-weight: 640;
+            font-weight: focused ? 600 : 500;
             horizontal-alignment: center;
             overflow: elide;
             wrap: no-wrap;
@@ -489,40 +496,53 @@ export component Rail inherits Rectangle {
     in property <RailModel> rail;
     in property <int> focus-col;
     in property <bool> active;
+    // Where the first poster starts and how far in from the right the heading's
+    // "Tümünü Gör" ends: the screen's gutter, unless the screen says otherwise.
+    in property <length> inset: Metrics.gutter;
+    in property <length> right-inset: Metrics.gutter;
+    // The band the heading sits in, above the posters.
+    in property <length> head: Metrics.title-rail * 2.0;
 
     // Head plus artwork plus the room a focused poster grows into. Fixed, so
     // the vertical arithmetic above has nothing to measure.
     height: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
 
-    HorizontalLayout {
+    property <bool> on-more: active && rail.more != "" && focus-col == rail.items.length;
+
+    Text {
+        x: inset;
         y: 0;
-        height: Metrics.title-rail * 2.0;
-        padding-left: Metrics.gutter;
-        padding-right: Metrics.gutter;
-        spacing: Metrics.rail-gap;
-        alignment: start;
+        height: head;
+        text: rail.title;
+        color: Theme.text;
+        font-size: Metrics.title-rail;
+        font-weight: 500;
+        vertical-alignment: top;
+    }
 
-        Text {
-            text: rail.title;
-            color: active ? Theme.text : Theme.muted;
-            font-size: Metrics.title-rail;
-            font-weight: 720;
-            vertical-alignment: center;
-            animate color { duration: Theme.focus-in; easing: Theme.ease; }
-        }
+    // The reference's "Tümünü Gör ›" at the right end of the heading. Right
+    // past the last poster reaches it.
+    if rail.more != "": Rectangle {
+        x: parent.width - right-inset - self.width;
+        y: -Metrics.title-rail * 0.2;
+        width: see-all.preferred-width + Metrics.title-rail * 1.2;
+        height: Metrics.title-rail * 1.6;
+        border-radius: self.height / 2;
+        background: on-more ? Theme.focus-fill : transparent;
 
-        if rail.source != "": Text {
-            text: rail.source;
-            color: Theme.dim;
-            font-size: Metrics.text-chip;
-            font-weight: 600;
-            vertical-alignment: center;
+        see-all := Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: rail.more + "  ›";
+            color: on-more ? #0a0c10 : #9997a7;
+            font-size: Metrics.title-rail * 0.72;
+            font-weight: 500;
         }
     }
 
     if rail.items.length == 0 && rail.note != "": Text {
-        x: Metrics.gutter;
-        y: Metrics.title-rail * 2.2;
+        x: inset;
+        y: head;
         text: rail.note;
         color: Theme.dim;
         font-size: Metrics.text-meta;
@@ -531,7 +551,7 @@ export component Rail inherits Rectangle {
 
     // The window the strip moves behind. It never moves itself.
     track := Rectangle {
-        y: Metrics.title-rail * 2.0;
+        y: head;
         width: 100%;
         height: parent.height - self.y;
         clip: true;
@@ -540,14 +560,14 @@ export component Rail inherits Rectangle {
         strip := Rectangle {
             property <length> step: Metrics.card-w + Metrics.rail-gap;
             property <length> span: step * rail.items.length;
-            // The focused poster parks at the left gutter and the shelf slides
-            // under it, which is what makes a long shelf feel like one row
-            // rather than a page.
+            // The focused poster parks at the left and the shelf slides under
+            // it, which is what makes a long shelf feel like one row rather
+            // than a page.
             property <length> wanted: active
-                ? clamp(focus-col * step, 0px, max(0px, span - track.width + Metrics.gutter * 2))
+                ? clamp(focus-col * step, 0px, max(0px, span - track.width + inset + right-inset))
                 : 0px;
 
-            x: Metrics.gutter - wanted;
+            x: inset - wanted;
             y: 0;
             width: span;
             height: 100%;

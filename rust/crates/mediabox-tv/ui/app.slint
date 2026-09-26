@@ -101,10 +101,9 @@ export component MediaBoxWindow inherits Window {
     in property <[RailModel]> media-rails;
     in property <int> media-row;
     in property <int> media-col;
-    in property <string> media-title;
-    in property <image> media-logo;
-    in property <string> media-facts;
-    in property <string> media-summary;
+    in property <int> media-zone;
+    in property <int> media-place;
+    in property <[string]> media-places;
 
     // ---- discover
     in property <[DiscoverFilter]> discover-filters;
@@ -355,10 +354,9 @@ export component MediaBoxWindow inherits Window {
             rails: root.media-rails;
             focus-row: root.media-row;
             focus-col: root.media-col;
-            title: root.media-title;
-            logo: root.media-logo;
-            facts: root.media-facts;
-            summary: root.media-summary;
+            zone: root.media-zone;
+            place: root.media-place;
+            places: root.media-places;
         }
 
         if screen == "search": Search {
@@ -582,7 +580,9 @@ export component MediaBoxWindow inherits Window {
         // are answered the same way everywhere.
         // The settings screens and the diagnostics carry their own heading and
         // clock in the corner, in the settings language.
-        if screen != "boot" && screen != "film" && screen != "detail"
+        // The catalogue carries the reference's own chrome instead: its
+        // places down the left and its search box across the top.
+        if screen != "boot" && screen != "film" && screen != "detail" && screen != "media"
             && screen != "settings" && screen != "diagnostics": TopBar {
             x: 0;
             y: 0;

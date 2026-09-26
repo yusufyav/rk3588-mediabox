@@ -42,6 +42,10 @@ export global Theme {
     // #7b5bf5, because that surface is the one held to it.
     out property <brush> film: #7b5bf5;
 
+    // The ground of "Filmler ve Diziler": the reference's dark violet, lighter
+    // to the top right, measured off its board (#1f1c3e to #141318).
+    out property <brush> catalog-bg: @linear-gradient(225deg, #1f1c3e 0%, #191728 50%, #141318 100%);
+
     out property <brush> focus-ring: #ffffff;
     out property <brush> focus-fill: #ffffff;
 
@@ -138,6 +142,10 @@ export global Icons {
              : name == "refresh" ? "M4 12a8 8 0 0 1 13.7-5.6l2 2 M19.8 4v4.5h-4.5 M20 12a8 8 0 0 1-13.7 5.6l-2-2 M4.2 20v-4.5h4.5"
              : name == "palette" ? "M12 3a9 9 0 1 0 0 18c1.1 0 1.7-.8 1.7-1.6 0-1.3-1.1-1.6-1.1-2.8 0-1 .8-1.6 1.8-1.6h2.7a3.9 3.9 0 0 0 3.9-3.9C21 6.7 17 3 12 3z M7.2 11.8a1 1 0 1 0 2 0a1 1 0 1 0-2 0 M10.6 7.6a1 1 0 1 0 2 0a1 1 0 1 0-2 0 M15 9.2a1 1 0 1 0 2 0a1 1 0 1 0-2 0"
              : name == "sliders" ? "M4 7h9 M17 7h3 M15 4.8v4.4 M4 17h3 M11 17h9 M9 14.8v4.4"
+             : name == "home" ? "M3.5 11L12 3.8l8.5 7.2v9a.6.6 0 0 1-.6.6H14.6v-6.2H9.4v6.2H4.1a.6.6 0 0 1-.6-.6z"
+             : name == "compass" ? "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M15.6 8.4l-2.1 5.1-5.1 2.1 2.1-5.1z"
+             : name == "library" ? "M4.5 9h15v11h-15z M6.5 6h11 M8.5 3h7"
+             : name == "search" ? "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13z M15.3 15.3l5.2 5.2"
              : name == "chevron" ? "M9 5l7 7-7 7"
              : name == "back" ? "M15 5l-7 7 7 7"
              : name == "check" ? "M5 12.5l4.5 4.5 9.5-9.5"
@@ -154,19 +162,23 @@ export global Metrics {
     in property <length> vh: 1080px;
 
     // A poster is 2:3 and as wide as the panel affords, within bounds.
-    out property <length> card-w: max(118px, min(470px, vw * 0.124));
-    out property <length> card-h: card-w * 1.5;
+    // The reference's poster, measured off a 4K screenshot of Stremio's
+    // board: 9.09% of the width, 1:1.461, nine across a row.
+    out property <length> card-w: max(100px, min(470px, vw * 0.0909));
+    out property <length> card-h: card-w * 1.461;
 
     // The ring around a focused poster: the reference's 0.2rem, which is 1.7%
     // of its poster's width. And the room left around anything that clips a
     // row of posters, so the ring is never cut off by its own shelf.
     out property <length> ring-w: max(2px, card-w * 0.017);
     out property <length> focus-room: ring-w * 2;
+    // The reference's poster corners: 5.5% of the poster's width.
+    out property <length> poster-radius: card-w * 0.055;
 
     // The screen's inset, the gap between posters, and the height of the bar
     // every screen starts below.
     out property <length> gutter: max(16px, min(104px, vw * 0.027));
-    out property <length> rail-gap: max(9px, min(40px, vw * 0.0105));
+    out property <length> rail-gap: max(9px, min(60px, vw * 0.0137));
     out property <length> topbar: max(50px, min(128px, vh * 0.064));
 
     // The type scale's root. Everything else is a multiple of it.
@@ -175,8 +187,11 @@ export global Metrics {
     out property <length> title-hero: max(38px, min(86px, vw * 0.048));
     out property <length> title-screen: max(30px, min(62px, vw * 0.034));
     out property <length> title-detail: max(27px, min(51px, vw * 0.029));
-    out property <length> title-rail: root-font * 1.16;
-    out property <length> text-card: root-font * 0.82;
+    // The reference's row heading and poster name, off the same screenshot.
+    // Sized so the same words are as wide as the reference's: its face is not
+    // Inter, and Inter set at its measured cap height ran 1.2 times as wide.
+    out property <length> title-rail: max(15px, vw * 0.0109);
+    out property <length> text-card: max(11px, vw * 0.0063);
     out property <length> text-meta: root-font;
     out property <length> text-chip: root-font * 0.72;
     out property <length> text-label: root-font * 0.74;
