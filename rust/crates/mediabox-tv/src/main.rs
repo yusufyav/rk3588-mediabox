@@ -167,6 +167,10 @@ struct App {
     /// adopts it — which would put the interface back on the now-playing
     /// screen in the middle of handing the television to Kodi.
     handing_over: bool,
+    /// When a film on our own player was last closed from here. The plane
+    /// can still show its last frame for a moment after, and that frame is
+    /// not a film someone else started.
+    left_film: Option<Instant>,
 
     /// The film this interface started on its own video plane, if there is
     /// one.
@@ -1812,7 +1816,8 @@ impl App {
         // front of the television should be able to pause it without being
         // told which device asked for it.
         if self.here.is_none() {
-            if self.handing_over || !platform::video_showing() {
+            let just_left = self.left_film.is_some_and(|at| at.elapsed() < LEFT_FILM_QUIET);
+            if self.handing_over || just_left || !platform::video_showing() {
                 return;
             }
             eprintln!("mediabox-tv.play adopted a film this interface did not start");
@@ -1878,25 +1883,37 @@ impl App {
             eprintln!("mediabox-tv.play here gave up: no frame in {:?}", playing.grace);
             spawn_here(HereCommand::Stop);
         }
-        self.here = None;
         // The film is closed: the account is told where it ended, which is
         // what moves a finished episode on to the next one.
         if !gave_up {
             self.tell_the_account(true);
         }
+        self.leave_film(gave_up.then(|| "Kaynak açılamadı: görüntü gelmedi. Başka bir kaynak seçin.".to_string()));
+    }
+
+    /// The film on our own player is over -- stopped, refused, or given up
+    /// on -- and the viewer is back on the page it was started from, told
+    /// why when it did not play. Our player has no screen besides the film
+    /// and its controls: the now-playing page pushed under it when it
+    /// started is taken away with it, never left standing at 0:00.
+    fn leave_film(&mut self, notice: Option<String>) {
+        self.here = None;
         self.watching = None;
         self.refresh_watch();
-        // Through `say`, so it goes away by itself. Written straight to the
-        // window it had no lifetime, and one source that failed left "Kaynak
-        // açılamadı" sitting in the corner of the panel — through the next
-        // attempt, which worked, and over the film that was then playing.
-        if gave_up {
-            self.say("Kaynak açılamadı".into());
-        }
+        self.left_film = Some(Instant::now());
         self.now.film = false;
+        self.now.state = None;
         self.now.close_menu();
         if self.route() == Route::NowPlaying {
             self.back();
+        }
+        if let Some(window) = self.window.upgrade() {
+            window.set_detail_note("".into());
+        }
+        // Through `say`, so it goes away by itself and never sits over the
+        // next film.
+        if let Some(notice) = notice {
+            self.say(notice);
         }
         self.paint();
     }
@@ -2173,13 +2190,12 @@ impl App {
                     spawn_here(HereCommand::SeekTo(seconds));
                 }
                 Transport::Stop => {
-                    self.here = None;
                     spawn_here(HereCommand::Stop);
                     // Closed by the viewer: the account is told where, which
                     // is what the next "Devam Et" starts from.
                     self.tell_the_account(true);
-                    self.watching = None;
-                    self.refresh_watch();
+                    self.leave_film(None);
+                    return;
                 }
                 Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
             }
@@ -4325,6 +4341,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         display: None,
         controls_were_open: false,
         handing_over: false,
+        left_film: None,
         here: None,
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
@@ -4935,6 +4952,9 @@ const FIRST_FRAME_GRACE: Duration = Duration::from_secs(25);
 /// first frame at 21.6 s from the start and 26.4 s from 17:52 -- past the
 /// plain grace, so a resumed film was stopped a second before it appeared.
 const FIRST_FRAME_GRACE_RESUMED: Duration = Duration::from_secs(45);
+/// How long after closing a film here a picture still on the plane is taken
+/// for its last frame rather than a film someone else started.
+const LEFT_FILM_QUIET: Duration = Duration::from_secs(3);
 
 /// How long a line along the bottom of the screen stays up.
 ///
@@ -5052,18 +5072,34 @@ fn spawn_play_here(
             Ok(_) => eprintln!("mediabox-tv.play started here=true"),
             Err(e) => {
                 eprintln!("mediabox-tv.play here failed: {e}");
-                let message = e.to_string();
+                let notice = play_refusal(&e.to_string());
                 let _ = slint::invoke_from_event_loop(move || {
                     with_app(|app| {
-                        app.here = None;
-                        if let Some(window) = app.window.upgrade() {
-                            window.set_detail_note(format!("Oynatılamadı — {message}").into());
+                        // Only the film that was being opened: a refusal that
+                        // arrives after it is already showing is not its.
+                        if app.here.as_ref().is_some_and(|playing| !playing.seen) {
+                            app.leave_film(Some(notice));
                         }
                     });
                 });
             }
         }
     });
+}
+
+/// What the viewer is told when the player refuses a source, in words rather
+/// than the worker's error body.
+fn play_refusal(error: &str) -> String {
+    if error.contains("SOURCE_NOT_PREFERRED") {
+        return "Bu kaynak açılamadı: yalnızca yedek olarak oynatılabiliyor. Başka bir kaynak seçin.".into();
+    }
+    // The worker's own sentence when it wrote one, not the JSON around it.
+    let reason = error
+        .split("\"message\": \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or(error);
+    format!("Kaynak açılamadı: {reason}")
 }
 
 /// The few things this interface asks the control plane to do that are not
@@ -5516,4 +5552,22 @@ fn deliver(line: &str) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::play_refusal;
+
+    /// The screenshot of 2026-09-26: the worker's 409 body is not what the
+    /// viewer reads.
+    #[test]
+    fn a_refused_source_is_told_in_words_not_the_workers_json() {
+        let error = r#"media worker HTTP 409 Conflict: {"error": {"code": "SOURCE_NOT_PREFERRED", "message": "this source is only playable as a fallback; resolve a safer rendition first"}}"#;
+        let text = play_refusal(error);
+        assert!(text.starts_with("Bu kaynak açılamadı"), "{text}");
+        assert!(!text.contains('{'));
+
+        let other = r#"media worker HTTP 502 Bad Gateway: {"error": {"code": "UPSTREAM", "message": "debrid timed out"}}"#;
+        assert_eq!(play_refusal(other), "Kaynak açılamadı: debrid timed out");
+    }
 }
