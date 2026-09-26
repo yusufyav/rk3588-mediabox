@@ -666,7 +666,11 @@ ls -l /proc/$(systemctl show -p MainPID --value mediabox-display-observer)/fd | 
 mediaboxctl display status
 ```
 
-## 15. Above 340 MHz a replugged television forgets scrambling (open, Plus)
+## 15. Above 340 MHz a replugged television forgets scrambling (known kernel limitation, Plus)
+
+**Stock 6.1.115 userspace recovery attempt rejected; high-TMDS replug remains a
+documented kernel limitation.** The work is closed; the decision is at the end
+of this section.
 
 HDMI 2.0 puts two bits in the sink's SCDC -- scrambling and the 1/40 TMDS clock
 ratio -- that the source must set before it sends a scrambled signal (HDMI 2.0
@@ -699,13 +703,103 @@ it was not re-measured.
 
 `mediabox-display-changed` does not cover it: a replug short enough for its
 settle loop to read the same sink twice ends at `[ "$now" = "$was" ] && exit 0`
-without looking at the link. A longer one restarts the owner, and the owner's
-modeset happens to repair it.
+without looking at the link. A longer one restarts the owner. This section
+first said the owner's modeset then happens to repair it; measured on
+2026-09-26 17:04 it does not: the interface was stopped, prepared for and
+started again on the same mode, and the sink stayed at `0x20 = 0x00`,
+`0x40 = 0x01`, with no picture, until the next replug.
 
-**Open.** No fix is applied. The Plus stays on 6.1.115 (Armbian's stable
-vendor package, 26.8.3 included, is 6.1.115; 6.1.172 exists only as a
-nightly). The choices are the kernel line that has Rockchip's fix, a backport
-of that commit, or the i915/vc4 check from userspace; none is chosen.
+### The stock-kernel userspace attempt (2026-09-26)
+
+The kernel stayed `6.1.115-vendor-rk35xx` (`rk-6.1-rkr5.1`) throughout: no
+kernel change, no patch, no backport.
+
+The failure was reproduced again after a clean reboot, with nothing reading
+the display controller's debugfs `summary` (see the caveat below) and
+`mediabox-display-changed` disabled for the run:
+
+| | Before the replug | After the replug |
+|---|---|---|
+| Output | HDMI-A-2, selected; transmitter `fdea0000.hdmi` (measured, CEC 3.0.0.0) | the same connector |
+| Sink | EDID `1175a696…` | the same EDID |
+| Mode | 3840x2160p60 RGB 8-bit, `final tmdsclk = 594000000` | unchanged; the owner (`mediabox-tv-ui`) kept running, no modeset |
+| SCDC `0x20` | `0x03` | `0x00`: scrambling 0, 1/40 ratio 0 |
+| SCDC `0x21` | `0x01` | `0x00` |
+| SCDC `0x40` | `0x0f` | `0x01`: clock present, channel locks 000 |
+| Transmitter | scrambling | still scrambling (`SCRAMB_CONFIG0 = 1`, read in the earlier runs) |
+| Picture | yes | none |
+
+The source and the sink disagree about scrambling: the source still sends a
+scrambled signal at 1/40 and the sink no longer expects one.
+
+Earlier runs measured what brings it back: a full modeset -- the 1080p trial
+and revert above, or the owner stopped and the connector taken `off` and back
+with `detect`, which the framebuffer then modesets -- restores `0x20 = 0x03`,
+`0x21 = 0x01`, all channel locks (`0x40 = 0x0f`) and the picture.
+
+The attempt was to get that modeset from the kernel's own path, with no SCDC
+write from userspace: on the selected connector only,
+
+```sh
+echo off > /sys/class/drm/card0-HDMI-A-2/status
+sleep 1
+echo detect > /sys/class/drm/card0-HDMI-A-2/status
+```
+
+On the clean kernel this took the connector to `disconnected` and back to
+`connected`, and nothing else. The interface held DRM master and kept the CRTC
+lit, so the kernel did not modeset: no `Update mode`, `final tmdsclk`,
+`lane locked` or `vop enable` in the kernel log, SCDC `00/00/01` before and
+`00/00/01` after, and no picture. The same result was measured once earlier the
+same day, before the debugfs fault below.
+
+**Same-mode `off`/`detect` is not a recovery mechanism on stock 6.1.115 while
+a DRM owner holds the display.**
+
+The modeset does come when the owner lets go of DRM master: stopped, the
+connector taken off and brought back, then started. That was measured to
+restore the link and the picture, but it is not a transparent link recovery:
+it restarts the application that owns the display, costs a few seconds the
+person sees, and puts a missing kernel step in userspace. It was not taken as
+the product fix.
+
+Rockchip's fix is the reference: `122ffa74f5b50c4b1798f6411206f8d418604ac9`,
+`dw_hdmi_qp_handle_hpd()`, in the newer `rk-6.1-rkr6.1` / `rk-6.1-rkr7.2`
+lines. On unplug it turns the signal off; on replug it writes the SCDC high
+ratio and scrambling, restores the PHY and link, then turns the signal on --
+the HDMI 2.0 ordering, in the kernel. On the Ultra's 6.1.172 the replug was
+tested physically and showed no problem.
+
+**Decision.** The Orange Pi 5 Plus stays on Armbian's official, stable
+`6.1.115-vendor-rk35xx`, and the high-TMDS physical unplug/replug is accepted
+as a **known kernel limitation**. No SCDC write from userspace, no owner
+restart workaround in production, no kernel backport, no nightly or newer
+kernel. If the kernel policy changes, the fix to take is Rockchip's kernel fix
+or a stable kernel line that contains it.
+
+### Diagnostic caveat: debugfs `summary` can oops the vendor kernel
+
+During the attempt, a measurement script read
+`/sys/kernel/debug/dri/0/summary` every 100 ms. On 2026-09-26 17:09:57, while
+the display was being handed from one connector to the other, that read hit a
+NULL pointer dereference in `vop2_crtc_debugfs_dump` (`Unable to handle kernel
+NULL pointer dereference at virtual address 0000000000000038`,
+`Comm: python3`, call trace through `seq_read`). After it the kernel logged no
+modeset at all.
+
+- The oops is not the cause of the HDMI failure: the failure was measured
+  before it and again after a clean reboot.
+- It happened while debugfs `summary` was being read during the experiment.
+- The HDMI-A-2 relink results taken after it were rejected as unreliable.
+- The box was rebooted and the experiment repeated without any `summary`
+  reader; `off`/`detect` failed there too (above).
+
+Production code reads the same file: `mediabox-platform`
+(`Platform::inspect()`) and `mediabox-display-observer`.
+
+**Open risk.** Vendor 6.1.115 debugfs `summary` diagnostic interface can OOPS
+while display state is transitioning. Production must not treat debugfs as an
+authoritative or safety-critical source.
 
 **Check:**
 
