@@ -128,10 +128,22 @@ impl Client {
     /// Kept as a raw value as well as a parsed one: the exact stream descriptor
     /// an addon sent is what has to be handed back when the viewer picks it,
     /// and a round trip through our own struct would drop the fields we do not
-    /// model.
-    pub async fn streams(&self, kind: &str, id: &str) -> Result<Value> {
-        self.call(json!({"command": "media_streams", "media_type": kind, "id": id}))
+    /// model. A series is asked about the episode's own id, never about itself.
+    pub async fn streams(&self, kind: &str, id: &str, video_id: Option<&str>) -> Result<Value> {
+        let mut request = json!({"command": "media_streams", "media_type": kind, "id": id});
+        if let Some(video) = video_id {
+            request["video_id"] = json!(video);
+        }
+        self.call(request)
             .await
+    }
+
+    pub async fn watch_state(&self, kind: &str, id: &str) -> Result<crate::model::TitleState> {
+        self.typed::<crate::model::TitleStateEnvelope>(
+            json!({"command": "media_watch_state", "media_type": kind, "id": id}),
+        )
+        .await
+        .map(|envelope| envelope.state)
     }
 
     pub async fn search(&self, query: &str) -> Result<crate::model::SearchResults> {

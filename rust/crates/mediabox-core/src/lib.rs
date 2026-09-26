@@ -1380,6 +1380,17 @@ pub enum Request {
     MediaStreams {
         media_type: String,
         id: String,
+        /// The episode, for a series. An addon is asked about the episode's own
+        /// id (`tt0903747:2:3`), not about the series: asked about the series
+        /// it answers with nothing, or with the wrong thing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_id: Option<String>,
+    },
+    /// How far a title has been watched, as the account records it: the last
+    /// episode played, where in it, and which episodes are watched.
+    MediaWatchState {
+        media_type: String,
+        id: String,
     },
     MediaPolicy {
         url: String,
@@ -1704,6 +1715,36 @@ mod tests {
     #[test]
     fn unknown_commands_are_rejected() {
         assert!(serde_json::from_str::<Request>(r#"{"command":"shell","argv":["id"]}"#).is_err());
+    }
+
+    /// A series is asked about its episode, and a film is still asked the way
+    /// it always was: an old caller that sends no episode must keep working.
+    #[test]
+    fn a_streams_request_carries_the_episode_only_when_there_is_one() {
+        let episode: Request = serde_json::from_str(
+            r#"{"command":"media_streams","media_type":"series","id":"tt0903747","video_id":"tt0903747:2:3"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            episode,
+            Request::MediaStreams {
+                media_type: "series".into(),
+                id: "tt0903747".into(),
+                video_id: Some("tt0903747:2:3".into()),
+            }
+        );
+        let film: Request =
+            serde_json::from_str(r#"{"command":"media_streams","media_type":"movie","id":"tt1"}"#)
+                .unwrap();
+        assert_eq!(
+            film,
+            Request::MediaStreams {
+                media_type: "movie".into(),
+                id: "tt1".into(),
+                video_id: None,
+            }
+        );
+        assert!(!serde_json::to_string(&film).unwrap().contains("video_id"));
     }
 
     // ------------------------------------------------------------- the fan

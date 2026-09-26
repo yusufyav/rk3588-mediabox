@@ -201,6 +201,59 @@ pub struct Meta {
     /// The title's trailer, as a YouTube id.
     #[serde(default)]
     pub trailer: Option<String>,
+    /// A series' episodes, as the addon lists them.
+    #[serde(default)]
+    pub videos: Vec<Video>,
+}
+
+/// One episode of a series.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Video {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub season: Option<i64>,
+    #[serde(default)]
+    pub episode: Option<i64>,
+    /// ISO 8601, when the addon knows.
+    #[serde(default)]
+    pub released: Option<String>,
+    #[serde(default)]
+    pub overview: Option<String>,
+    #[serde(default)]
+    pub thumbnail: Option<String>,
+}
+
+/// How far a title has been watched, as the account records it.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct TitleState {
+    /// Whether the account has any record of the title at all.
+    #[serde(default)]
+    pub known: bool,
+    #[serde(rename = "inLibrary", default)]
+    pub in_library: bool,
+    /// The episode last played, for a series; the title itself for a film.
+    #[serde(rename = "videoId", default)]
+    pub video_id: Option<String>,
+    /// Milliseconds, as the account stores them.
+    #[serde(rename = "timeOffset", default)]
+    pub time_offset: Option<u64>,
+    #[serde(default)]
+    pub duration: Option<u64>,
+    #[serde(rename = "timesWatched", default)]
+    pub times_watched: u64,
+    #[serde(rename = "flaggedWatched", default)]
+    pub flagged_watched: bool,
+    /// The episodes watched, by id.
+    #[serde(default)]
+    pub watched: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TitleStateEnvelope {
+    #[serde(default)]
+    pub state: TitleState,
 }
 
 impl MetaPreview {
@@ -227,6 +280,7 @@ impl MetaPreview {
             cast: Vec::new(),
             director: Vec::new(),
             trailer: None,
+            videos: Vec::new(),
         }
     }
 }

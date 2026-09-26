@@ -7,9 +7,9 @@
 
 use serde_json::Value;
 
-use crate::model::{LibraryItemEnvelope, Meta, Plan, Stream, StreamListing};
+use crate::model::{LibraryItemEnvelope, Meta, Plan, Stream, StreamListing, TitleState, Video};
 use crate::state::Item;
-use crate::{SourceRow, TechRow};
+use crate::{EpisodeRow, SourceRow, TechRow};
 
 /// What the marks are drawn from. SVG path data in a 24x24 box, in two layers:
 /// the shape, and what is cut out of it in the button's own colour.
@@ -37,6 +37,10 @@ pub const ACTION_TRAILER: usize = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Record,
+    /// A series' seasons and episodes, in the column the sources use. The
+    /// reference puts them there and swaps the column over to the sources when
+    /// an episode is chosen.
+    Episodes,
     Sources,
 }
 
@@ -84,6 +88,21 @@ pub struct Detail {
 
     pub loading: bool,
     pub note: String,
+
+    /// How far the title has been watched, once the account has said.
+    pub watch: Option<TitleState>,
+    /// The season the viewer chose. Until they choose one, `season()` picks it
+    /// by the reference's rule.
+    chosen_season: Option<i64>,
+    /// Where the remote is in the episodes of the season shown.
+    pub episode_focus: usize,
+    /// True while the remote is on the season bar above the episodes.
+    pub on_seasons: bool,
+    /// The episode the source column is about, for a series.
+    pub episode: Option<String>,
+    /// Whether the viewer has moved in the episode list yet. Until they have,
+    /// the focus follows the account's last-played episode as it arrives.
+    episodes_touched: bool,
 }
 
 impl Detail {
@@ -111,6 +130,7 @@ impl Detail {
                 cast: Vec::new(),
                 director: Vec::new(),
                 trailer: None,
+                videos: Vec::new(),
             },
             sources: Vec::new(),
             plan: None,
@@ -122,9 +142,24 @@ impl Detail {
             on_filter: false,
             filter_open: false,
             filter_focus: 0,
-            loading: true,
-            note: "Kaynaklar aranıyor…".into(),
+            loading: item.kind != "series",
+            note: if item.kind == "series" {
+                String::new()
+            } else {
+                "Kaynaklar aranıyor…".into()
+            },
+            watch: None,
+            chosen_season: None,
+            episode_focus: 0,
+            on_seasons: false,
+            episode: None,
+            episodes_touched: false,
         }
+    }
+
+    /// A series is browsed by episode; its own id has no sources.
+    pub fn is_series(&self) -> bool {
+        self.kind == "series"
     }
 
     /// Who is offering the sources, in the order they first appear.
@@ -230,6 +265,7 @@ impl Detail {
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
         match self.pane {
             Pane::Record => self.step_record(dx, dy),
+            Pane::Episodes => self.step_episodes(dx, dy),
             Pane::Sources => self.step_sources(dx, dy),
         }
     }
@@ -238,7 +274,14 @@ impl Detail {
         if dx > 0 {
             let enabled = self.enabled();
             let last = enabled.iter().rposition(|ok| *ok).unwrap_or(0);
-            if self.action >= last {
+            if self.action >= last || !enabled.iter().any(|ok| *ok) {
+                if self.is_series() {
+                    if self.meta.videos.is_empty() {
+                        return false;
+                    }
+                    self.pane = Pane::Episodes;
+                    return true;
+                }
                 if self.sources.is_empty() {
                     return false;
                 }
@@ -393,6 +436,7 @@ impl Detail {
             background,
             ..meta
         };
+        self.follow_last_played();
     }
 
     pub fn take_streams(&mut self, listing: StreamListing, raw: Vec<Value>) {
@@ -459,6 +503,241 @@ impl Detail {
         self.selected = None;
         self.note = why.to_string();
         self.settle();
+    }
+
+    // -------------------------------------------------------------- episodes
+    //
+    // The rules are stremio-web's `VideosList`, read rather than guessed:
+    //
+    // - the seasons are the season numbers the episodes carry, in order, with
+    //   season 0 -- the specials -- last. A season the addon did not list is
+    //   not there, and neither is an episode it did not list;
+    // - the season shown is the one the viewer chose; before they choose, the
+    //   season of the episode the account says was played last; failing that
+    //   the first season that is not the specials; failing that the first;
+    // - a season's episodes are in episode order.
+
+    /// The seasons, specials last.
+    pub fn seasons(&self) -> Vec<i64> {
+        let mut seasons: Vec<i64> = self.meta.videos.iter().filter_map(|v| v.season).collect();
+        seasons.sort_by_key(|season| if *season == 0 { i64::MAX } else { *season });
+        seasons.dedup();
+        seasons
+    }
+
+    /// The season on the panel.
+    pub fn season(&self) -> Option<i64> {
+        let seasons = self.seasons();
+        if let Some(chosen) = self.chosen_season.filter(|s| seasons.contains(s)) {
+            return Some(chosen);
+        }
+        let last_played = self
+            .watch
+            .as_ref()
+            .and_then(|watch| watch.video_id.as_deref())
+            .and_then(|id| self.meta.videos.iter().find(|v| v.id == id))
+            .and_then(|video| video.season)
+            .filter(|season| *season != 0 && seasons.contains(season));
+        last_played
+            .or_else(|| seasons.iter().copied().find(|season| *season != 0))
+            .or_else(|| seasons.first().copied())
+    }
+
+    /// The episodes of the season on the panel, in episode order.
+    pub fn episodes(&self) -> Vec<&Video> {
+        let season = self.season();
+        let mut episodes: Vec<&Video> = self
+            .meta
+            .videos
+            .iter()
+            .filter(|video| season.is_none() || video.season == season)
+            .collect();
+        episodes.sort_by_key(|video| video.episode.unwrap_or(0));
+        episodes
+    }
+
+    pub fn focused_episode(&self) -> Option<&Video> {
+        self.episodes().get(self.episode_focus).copied()
+    }
+
+    /// The account's word on this title, once it arrives. Until the viewer has
+    /// moved, the remote goes to the episode that was played last.
+    pub fn take_watch(&mut self, watch: TitleState) {
+        self.watch = Some(watch);
+        self.follow_last_played();
+    }
+
+    fn follow_last_played(&mut self) {
+        if self.episodes_touched {
+            return;
+        }
+        let last = self.watch.as_ref().and_then(|watch| watch.video_id.clone());
+        self.episode_focus = last
+            .and_then(|id| self.episodes().iter().position(|video| video.id == id))
+            .unwrap_or(0);
+    }
+
+    fn step_episodes(&mut self, dx: i32, dy: i32) -> bool {
+        self.episodes_touched = true;
+        if self.on_seasons {
+            if dx != 0 {
+                let seasons = self.seasons();
+                let Some(current) = self.season() else {
+                    return false;
+                };
+                let at = seasons.iter().position(|s| *s == current).unwrap_or(0) as i32;
+                let next = at + dx;
+                if next < 0 {
+                    return self.leave_for_record();
+                }
+                let Some(season) = seasons.get(next as usize).copied() else {
+                    return false;
+                };
+                self.chosen_season = Some(season);
+                self.episode_focus = 0;
+                return true;
+            }
+            if dy > 0 && !self.episodes().is_empty() {
+                self.on_seasons = false;
+                return true;
+            }
+            return false;
+        }
+        if dx < 0 {
+            return self.leave_for_record();
+        }
+        if dy < 0 {
+            if self.episode_focus == 0 {
+                self.on_seasons = true;
+                return true;
+            }
+            self.episode_focus -= 1;
+            return true;
+        }
+        if dy > 0 && self.episode_focus + 1 < self.episodes().len() {
+            self.episode_focus += 1;
+            return true;
+        }
+        false
+    }
+
+    fn leave_for_record(&mut self) -> bool {
+        if !self.enabled().iter().any(|ok| *ok) {
+            return false;
+        }
+        self.pane = Pane::Record;
+        self.settle();
+        true
+    }
+
+    /// Ok on an episode: the column turns over to its sources, which are asked
+    /// for by the episode's own id. Returns that id.
+    pub fn choose_episode(&mut self) -> Option<String> {
+        let id = self.focused_episode()?.id.clone();
+        self.episode = Some(id.clone());
+        self.sources.clear();
+        self.selected = None;
+        self.plan = None;
+        self.loading = true;
+        self.note = "Kaynaklar aranıyor…".into();
+        self.pane = Pane::Sources;
+        self.on_filter = false;
+        self.filter_open = false;
+        self.provider = 0;
+        self.source_focus = 0;
+        Some(id)
+    }
+
+    /// Back out of an episode's sources: the column turns back over to the
+    /// episodes, with the remote on the one that was opened.
+    pub fn back_to_episodes(&mut self) -> bool {
+        if !self.is_series() || self.pane != Pane::Sources {
+            return false;
+        }
+        self.pane = Pane::Episodes;
+        self.on_seasons = false;
+        self.filter_open = false;
+        true
+    }
+
+    /// The episode as the header over its sources names it: "S2E3 · Title".
+    pub fn episode_heading(&self) -> String {
+        let Some(id) = self.episode.as_deref() else {
+            return String::new();
+        };
+        let Some(video) = self.meta.videos.iter().find(|video| video.id == id) else {
+            return id.to_string();
+        };
+        let code = match (video.season, video.episode) {
+            (Some(season), Some(episode)) => format!("S{season}E{episode}"),
+            _ => String::new(),
+        };
+        match non_empty(&video.title) {
+            Some(title) if !code.is_empty() => format!("{code} · {title}"),
+            Some(title) => title,
+            None => code,
+        }
+    }
+
+    /// The season bar's words: "1. Sezon", and "Özel" for season 0.
+    pub fn season_labels(&self) -> Vec<String> {
+        self.seasons()
+            .into_iter()
+            .map(|season| {
+                if season == 0 {
+                    "Özel".to_string()
+                } else {
+                    format!("{season}. Sezon")
+                }
+            })
+            .collect()
+    }
+
+    pub fn season_index(&self) -> usize {
+        let current = self.season();
+        self.seasons()
+            .iter()
+            .position(|season| Some(*season) == current)
+            .unwrap_or(0)
+    }
+
+    /// The episode rows, as the reference draws them: "3. Title", when it was
+    /// released (or that it has not been yet), whether it was watched, and how
+    /// far into it the account got, for the episode that was played last.
+    /// Artwork is filled in by the painter.
+    pub fn episode_rows(&self, today: &str) -> Vec<EpisodeRow> {
+        let watch = self.watch.as_ref();
+        self.episodes()
+            .into_iter()
+            .map(|video| {
+                let number = video.episode.map(|n| format!("{n}. ")).unwrap_or_default();
+                let title = non_empty(&video.title).unwrap_or_else(|| video.id.clone());
+                let date = video.released.as_deref().and_then(date_prefix);
+                let upcoming = date.as_deref().is_some_and(|date| date > today);
+                let watched = watch.is_some_and(|w| w.watched.iter().any(|id| *id == video.id));
+                let progress = watch
+                    .filter(|w| w.video_id.as_deref() == Some(video.id.as_str()))
+                    .and_then(|w| match (w.time_offset, w.duration) {
+                        (Some(at), Some(of)) if of > 0 && at > 0 => {
+                            Some((at as f32 / of as f32).clamp(0.0, 1.0))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(0.0);
+                EpisodeRow {
+                    title: format!("{number}{title}").into(),
+                    date: date
+                        .as_deref()
+                        .map(turkish_date)
+                        .unwrap_or_else(|| "Tarih belli değil".into())
+                        .into(),
+                    watched,
+                    upcoming,
+                    progress,
+                    art: slint::Image::default(),
+                }
+            })
+            .collect()
     }
 
     // ------------------------------------------------------------- rendering
@@ -642,6 +921,52 @@ fn tech(label: &str, value: &str, tone: &str) -> TechRow {
         value: value.into(),
         tone: tone.into(),
     }
+}
+
+/// The date part of an ISO 8601 timestamp, "2009-03-22".
+fn date_prefix(released: &str) -> Option<String> {
+    let date = released.get(..10)?;
+    let bytes = date.as_bytes();
+    let shaped = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes.iter().enumerate().all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+    shaped.then(|| date.to_string())
+}
+
+/// "22 Mart 2009".
+fn turkish_date(date: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül",
+        "Ekim", "Kasım", "Aralık",
+    ];
+    let year = &date[0..4];
+    let month: usize = date[5..7].parse().unwrap_or(0);
+    let day: u32 = date[8..10].parse().unwrap_or(0);
+    match MONTHS.get(month.wrapping_sub(1)) {
+        Some(name) => format!("{day} {name} {year}"),
+        None => date.to_string(),
+    }
+}
+
+/// Today, as the date part of an ISO 8601 timestamp, in UTC -- which is what
+/// the addons write their release dates in.
+pub fn today() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // Howard Hinnant's days-to-civil.
+    let z = seconds.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {
@@ -931,4 +1256,147 @@ fn genre_in_turkish(genre: &str) -> String {
         other => return other.to_string(),
     };
     turkish.to_string()
+}
+
+#[cfg(test)]
+mod series_tests {
+    use super::*;
+
+    fn video(id: &str, season: i64, episode: i64, released: &str) -> Video {
+        Video {
+            id: id.into(),
+            title: Some(format!("Episode {id}")),
+            season: Some(season),
+            episode: Some(episode),
+            released: Some(released.into()),
+            overview: None,
+            thumbnail: None,
+        }
+    }
+
+    fn series(videos: Vec<Video>) -> Detail {
+        let mut item = crate::state::Item::stub("tt0903747");
+        item.kind = "series".into();
+        let mut detail = Detail::seeded(&item);
+        let mut meta = detail.meta.clone();
+        meta.videos = videos;
+        detail.take_meta(meta);
+        detail
+    }
+
+    fn breaking_bad() -> Detail {
+        series(vec![
+            // Deliberately out of order, with the specials first and a gap
+            // where season 3 would be.
+            video("tt:2:2", 2, 2, "2009-03-15T00:00:00.000Z"),
+            video("tt:0:1", 0, 1, "2009-02-17T00:00:00.000Z"),
+            video("tt:1:1", 1, 1, "2008-01-20T00:00:00.000Z"),
+            video("tt:2:1", 2, 1, "2009-03-08T00:00:00.000Z"),
+            video("tt:4:1", 4, 1, "2011-07-17T00:00:00.000Z"),
+            video("tt:2:3", 2, 3, "2009-03-22T00:00:00.000Z"),
+        ])
+    }
+
+    #[test]
+    fn seasons_come_from_the_episodes_with_the_specials_last_and_no_gaps_filled() {
+        assert_eq!(breaking_bad().seasons(), vec![1, 2, 4, 0]);
+        assert_eq!(breaking_bad().season_labels(), vec!["1. Sezon", "2. Sezon", "4. Sezon", "Özel"]);
+    }
+
+    #[test]
+    fn a_new_series_opens_on_its_first_real_season() {
+        assert_eq!(breaking_bad().season(), Some(1));
+        let specials_only = series(vec![video("tt:0:1", 0, 1, "2009-01-01")]);
+        assert_eq!(specials_only.season(), Some(0));
+    }
+
+    #[test]
+    fn a_series_being_watched_opens_on_the_last_played_episode() {
+        let mut detail = breaking_bad();
+        detail.take_watch(TitleState {
+            video_id: Some("tt:2:3".into()),
+            ..TitleState::default()
+        });
+        assert_eq!(detail.season(), Some(2));
+        assert_eq!(detail.focused_episode().unwrap().id, "tt:2:3");
+    }
+
+    #[test]
+    fn a_seasons_episodes_are_in_episode_order() {
+        let mut detail = breaking_bad();
+        detail.chosen_season = Some(2);
+        let ids: Vec<&str> = detail.episodes().iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["tt:2:1", "tt:2:2", "tt:2:3"]);
+    }
+
+    #[test]
+    fn the_season_bar_walks_the_seasons_there_are() {
+        let mut detail = breaking_bad();
+        detail.pane = Pane::Episodes;
+        detail.on_seasons = true;
+        assert!(detail.step(1, 0));
+        assert_eq!(detail.season(), Some(2));
+        assert!(detail.step(1, 0));
+        assert_eq!(detail.season(), Some(4), "season 3 does not exist and is not stepped onto");
+        assert!(detail.step(1, 0));
+        assert_eq!(detail.season(), Some(0));
+        assert!(!detail.step(1, 0));
+    }
+
+    /// The fault this is for: a series was asked for sources by its own id.
+    #[test]
+    fn an_episode_is_asked_for_by_its_own_id() {
+        let mut detail = breaking_bad();
+        detail.chosen_season = Some(2);
+        detail.pane = Pane::Episodes;
+        detail.step(0, 1);
+        detail.step(0, 1);
+        assert_eq!(detail.choose_episode().as_deref(), Some("tt:2:3"));
+        assert_eq!(detail.pane, Pane::Sources);
+        assert_eq!(detail.episode_heading(), "S2E3 · Episode tt:2:3");
+    }
+
+    #[test]
+    fn back_from_an_episodes_sources_lands_on_that_episode() {
+        let mut detail = breaking_bad();
+        detail.chosen_season = Some(2);
+        detail.pane = Pane::Episodes;
+        detail.step(0, 1);
+        let opened = detail.choose_episode().unwrap();
+        assert!(detail.back_to_episodes());
+        assert_eq!(detail.pane, Pane::Episodes);
+        assert_eq!(detail.focused_episode().unwrap().id, opened);
+    }
+
+    #[test]
+    fn a_film_has_no_episodes_and_is_asked_for_sources_straight_away() {
+        let detail = Detail::seeded(&crate::state::Item::stub("tt1"));
+        assert!(!detail.is_series());
+        assert!(detail.loading);
+    }
+
+    #[test]
+    fn rows_say_watched_progress_and_upcoming() {
+        let mut detail = breaking_bad();
+        detail.chosen_season = Some(2);
+        detail.take_watch(TitleState {
+            video_id: Some("tt:2:2".into()),
+            time_offset: Some(600_000),
+            duration: Some(2_400_000),
+            watched: vec!["tt:2:1".into()],
+            ..TitleState::default()
+        });
+        let rows = detail.episode_rows("2009-03-16");
+        assert!(rows[0].watched && !rows[1].watched);
+        assert!((rows[1].progress - 0.25).abs() < 1e-6);
+        assert!(!rows[1].upcoming && rows[2].upcoming, "the 22nd is after the 16th");
+        assert_eq!(rows[2].title.as_str(), "3. Episode tt:2:3");
+        assert_eq!(rows[2].date.as_str(), "22 Mart 2009");
+    }
+
+    #[test]
+    fn today_is_an_iso_date() {
+        let today = today();
+        assert_eq!(date_prefix(&today).as_deref(), Some(today.as_str()));
+    }
 }

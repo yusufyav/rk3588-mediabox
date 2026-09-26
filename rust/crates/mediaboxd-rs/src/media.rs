@@ -146,8 +146,18 @@ impl MediaClient {
         self.post(&["media", "inspect"], json!({"url": url})).await
     }
 
-    pub async fn streams(&self, media_type: &str, id: &str) -> Result<Value, MediaError> {
-        self.get(&["media", "streams", media_type, id], &[]).await
+    pub async fn streams(
+        &self,
+        media_type: &str,
+        id: &str,
+        video_id: Option<&str>,
+    ) -> Result<Value, MediaError> {
+        let query: Vec<(&str, &str)> = video_id.map(|v| ("videoId", v)).into_iter().collect();
+        self.get(&["media", "streams", media_type, id], &query).await
+    }
+
+    pub async fn watch_state(&self, media_type: &str, id: &str) -> Result<Value, MediaError> {
+        self.get(&["media", "state", media_type, id], &[]).await
     }
 
     pub async fn policy(&self, url: &str) -> Result<Value, MediaError> {

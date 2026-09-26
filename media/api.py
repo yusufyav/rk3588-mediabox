@@ -315,6 +315,10 @@ class MediaCore:
         if head == "meta" and len(parts) == 3:
             return json_response(200, {"meta": self.stremio.meta(parts[1], parts[2]).as_dict()})
 
+        if head == "state" and len(parts) == 3:
+            # How far a title has been watched, from the account's record of it.
+            return json_response(200, {"state": self.stremio.watch_state(parts[1], parts[2])})
+
         if head == "streams" and len(parts) == 3:
             streams = self.stremio.streams(parts[1], parts[2], _one(params, "videoId"))
             return json_response(

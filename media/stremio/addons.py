@@ -189,6 +189,7 @@ def _video(entry: dict[str, Any]) -> Video | None:
         episode=_int(entry.get("episode")) or _int(entry.get("number")),
         released=_text(entry.get("released")),
         overview=_text(entry.get("overview")) or _text(entry.get("description")),
+        thumbnail=_text(entry.get("thumbnail")),
     )
 
 

@@ -15,6 +15,106 @@ export struct SourceRow {
     playable: bool,
 }
 
+// One episode in a series' column, as the reference lists them: its picture,
+// "3. Title", when it came out, and whether it was watched or how far.
+export struct EpisodeRow {
+    title: string,
+    date: string,
+    watched: bool,
+    upcoming: bool,
+    progress: float,
+    art: image,
+}
+
+component EpisodeLine inherits Rectangle {
+    in property <EpisodeRow> entry;
+    in property <bool> focused;
+
+    border-radius: Metrics.vh * 0.008;
+    background: focused ? #ffffff26 : transparent;
+    border-width: focused ? 2px : 0px;
+    border-color: Theme.focus-ring;
+    clip: true;
+
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    HorizontalLayout {
+        padding: Metrics.vh * 0.01;
+        spacing: Metrics.vh * 0.014;
+
+        // The episode's still, 16:9, with how far into it the account got.
+        Rectangle {
+            width: (root.height - Metrics.vh * 0.02) * 16 / 9;
+            border-radius: Metrics.vh * 0.006;
+            background: #ffffff12;
+            clip: true;
+
+            if entry.art.width > 0: Image {
+                width: 100%;
+                height: 100%;
+                source: entry.art;
+                image-fit: cover;
+            }
+            if entry.progress > 0.0: Rectangle {
+                x: 0;
+                y: parent.height - self.height;
+                width: 100%;
+                height: max(3px, Metrics.vh * 0.004);
+                background: #ffffff38;
+                Rectangle {
+                    x: 0;
+                    width: max(3px, parent.width * entry.progress);
+                    height: 100%;
+                    background: Theme.film;
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Metrics.vh * 0.004;
+
+            Text {
+                text: entry.title;
+                color: Theme.text;
+                font-size: Metrics.vh * 0.0158;
+                font-weight: 600;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: Metrics.vh * 0.042;
+            }
+            HorizontalLayout {
+                spacing: Metrics.vh * 0.01;
+                alignment: start;
+
+                Text {
+                    text: entry.date;
+                    color: #ffffff8c;
+                    font-size: Metrics.vh * 0.0135;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                }
+                if entry.upcoming: Text {
+                    text: "YAKINDA";
+                    color: Theme.badge-hdr;
+                    font-size: Metrics.vh * 0.012;
+                    font-weight: 700;
+                    letter-spacing: Metrics.vh * 0.001;
+                    vertical-alignment: center;
+                }
+                if entry.watched: Text {
+                    text: "İZLENDİ";
+                    color: Theme.badge-good;
+                    font-size: Metrics.vh * 0.012;
+                    font-weight: 700;
+                    letter-spacing: Metrics.vh * 0.001;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 // A rounded label: a genre, a name, a director. The reference's own shape —
 // white text on a faint white fill, ends fully rounded.
 component Pill inherits Rectangle {
@@ -256,6 +356,17 @@ export component Detail inherits Rectangle {
     in property <int> filter-focus;
     in property <int> source-focus;
 
+    // A series: its seasons and episodes, in the column the sources use until
+    // an episode is chosen. The heading names the episode over its sources.
+    in property <bool> show-episodes;
+    in property <bool> on-episodes;
+    in property <[string]> seasons;
+    in property <int> season-index;
+    in property <bool> on-seasons;
+    in property <[EpisodeRow]> episodes;
+    in property <int> episode-focus;
+    in property <string> episode-heading;
+
     // The measurements are the reference's own, read off it and kept as
     // fractions of the panel: the source column is 23% of the width, the record
     // starts 13.8% down and is inset 4.8% from the left.
@@ -458,150 +569,274 @@ export component Detail inherits Rectangle {
         background: #21242ed4;
         clip: true;
 
-        // The provider filter. Walked with Left and Right, the way the
-        // reference's dropdown is opened and picked through.
-        Rectangle {
+        // An episode's sources are headed by the episode, as the reference
+        // heads them.
+        property <length> head-h: episode-heading == "" ? 0px : Metrics.vh * 0.05;
+
+        if !show-episodes && episode-heading != "": Text {
             x: panel-pad;
             y: panel-pad;
             width: parent.width - panel-pad * 2;
-            height: Metrics.vh * 0.052;
-            border-radius: Metrics.vh * 0.008;
-            background: (on-sources && on-filter) ? Theme.focus-fill : #ffffff0f;
-            border-width: (on-sources && on-filter) ? 2px : 0px;
-            border-color: Theme.focus-ring;
+            height: Metrics.vh * 0.042;
+            text: "‹  " + episode-heading;
+            color: Theme.text;
+            font-size: Metrics.vh * 0.0175;
+            font-weight: 650;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
 
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+            visible: !show-episodes;
 
-            HorizontalLayout {
-                x: 0;
-                y: 0;
-                width: 100%;
-                height: 100%;
-                padding-left: Metrics.vh * 0.016;
-                padding-right: Metrics.vh * 0.016;
-                spacing: Metrics.vh * 0.01;
+            // The provider filter. Walked with Left and Right, the way the
+            // reference's dropdown is opened and picked through.
+            Rectangle {
+                x: panel-pad;
+                y: panel-pad + head-h;
+                width: parent.width - panel-pad * 2;
+                height: Metrics.vh * 0.052;
+                border-radius: Metrics.vh * 0.008;
+                background: (on-sources && on-filter) ? Theme.focus-fill : #ffffff0f;
+                border-width: (on-sources && on-filter) ? 2px : 0px;
+                border-color: Theme.focus-ring;
 
-                Text {
-                    text: providers[provider];
-                    color: (on-sources && on-filter) ? #0a0c10 : Theme.text;
-                    font-size: Metrics.vh * 0.018;
-                    font-weight: 500;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    wrap: no-wrap;
-                    horizontal-stretch: 1;
-                }
-                // The reference's dropdown caret, and it points the way the
-                // remote moves: Left and Right walk the providers.
-                Path {
-                    width: Metrics.vh * 0.014;
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                HorizontalLayout {
+                    x: 0;
+                    y: 0;
+                    width: 100%;
                     height: 100%;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: providers.length <= 1 ? ""
-                        : (filter-open ? "M4 16l8-9 8 9z" : "M4 8l8 9 8-9z");
-                    fill: (on-sources && on-filter) ? #0a0c10 : #ffffffb0;
-                }
-            }
-        }
+                    padding-left: Metrics.vh * 0.016;
+                    padding-right: Metrics.vh * 0.016;
+                    spacing: Metrics.vh * 0.01;
 
-        if sources-note != "": Text {
-            x: panel-pad;
-            y: panel-pad + Metrics.vh * 0.052 + Metrics.vh * 0.008;
-            text: sources-note;
-            color: #ffffff8c;
-            font-size: Metrics.vh * 0.0135;
-            font-weight: 500;
-        }
-
-        list := Rectangle {
-            property <length> row-h: Metrics.vh * 0.096;
-            x: panel-pad;
-            y: panel-pad + Metrics.vh * (sources-note == "" ? 0.064 : 0.082);
-            width: parent.width - panel-pad * 2;
-            height: parent.height - self.y;
-            clip: true;
-            background: transparent;
-
-            VerticalLayout {
-                x: 0;
-                // The focused row is kept on the panel and the list slides
-                // under it, which is what makes forty releases usable with
-                // five keys.
-                y: -clamp(source-focus * (list.row-h + Metrics.vh * 0.004)
-                            - list.height * 0.4,
-                          0px,
-                          max(0px, sources.length * (list.row-h + Metrics.vh * 0.004)
-                                     - list.height));
-                width: 100%;
-                height: max(1px, sources.length * (list.row-h + Metrics.vh * 0.004));
-                spacing: Metrics.vh * 0.004;
-                alignment: start;
-
-                animate y { duration: Theme.glide; easing: Theme.ease; }
-
-                for source[i] in sources: SourceLine {
-                    entry: source;
-                    height: list.row-h;
-                    name-w: (list.width - Metrics.vh * 0.052) * 0.38;
-                    focused: on-sources && !on-filter && !filter-open && i == source-focus;
-                }
-            }
-        }
-
-        if filter-open: Rectangle {
-            x: panel-pad;
-            y: panel-pad + Metrics.vh * 0.052 + Metrics.vh * 0.006;
-            width: parent.width - panel-pad * 2;
-            height: providers.length * Metrics.vh * 0.052 + Metrics.vh * 0.012;
-            border-radius: Metrics.vh * 0.008;
-            background: #141a29;
-            border-width: 1px;
-            border-color: #ffffff1f;
-
-            VerticalLayout {
-                x: 0;
-                y: Metrics.vh * 0.006;
-                width: 100%;
-                spacing: 0px;
-                alignment: start;
-
-                for name[i] in providers: Rectangle {
-                    height: Metrics.vh * 0.052;
-                    background: i == filter-focus ? #ffffff1f : transparent;
-
-                    HorizontalLayout {
-                        x: 0;
-                        y: 0;
-                        width: 100%;
+                    Text {
+                        text: providers[provider];
+                        color: (on-sources && on-filter) ? #0a0c10 : Theme.text;
+                        font-size: Metrics.vh * 0.018;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    // The reference's dropdown caret, and it points the way the
+                    // remote moves: Left and Right walk the providers.
+                    Path {
+                        width: Metrics.vh * 0.014;
                         height: 100%;
-                        padding-left: Metrics.vh * 0.016;
-                        padding-right: Metrics.vh * 0.016;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: providers.length <= 1 ? ""
+                            : (filter-open ? "M4 16l8-9 8 9z" : "M4 8l8 9 8-9z");
+                        fill: (on-sources && on-filter) ? #0a0c10 : #ffffffb0;
+                    }
+                }
+            }
 
-                        Text {
-                            text: name;
-                            color: Theme.text;
-                            font-size: Metrics.vh * 0.018;
-                            font-weight: 500;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            wrap: no-wrap;
-                            horizontal-stretch: 1;
-                        }
-                        // Which one the column is showing.
-                        Rectangle {
-                            width: Metrics.vh * 0.01;
+            if sources-note != "": Text {
+                x: panel-pad;
+                y: panel-pad + head-h + Metrics.vh * 0.052 + Metrics.vh * 0.008;
+                text: sources-note;
+                color: #ffffff8c;
+                font-size: Metrics.vh * 0.0135;
+                font-weight: 500;
+            }
+
+            list := Rectangle {
+                property <length> row-h: Metrics.vh * 0.096;
+                x: panel-pad;
+                y: panel-pad + head-h + Metrics.vh * (sources-note == "" ? 0.064 : 0.082);
+                width: parent.width - panel-pad * 2;
+                height: parent.height - self.y;
+                clip: true;
+                background: transparent;
+
+                VerticalLayout {
+                    x: 0;
+                    // The focused row is kept on the panel and the list slides
+                    // under it, which is what makes forty releases usable with
+                    // five keys.
+                    y: -clamp(source-focus * (list.row-h + Metrics.vh * 0.004)
+                                - list.height * 0.4,
+                              0px,
+                              max(0px, sources.length * (list.row-h + Metrics.vh * 0.004)
+                                         - list.height));
+                    width: 100%;
+                    height: max(1px, sources.length * (list.row-h + Metrics.vh * 0.004));
+                    spacing: Metrics.vh * 0.004;
+                    alignment: start;
+
+                    animate y { duration: Theme.glide; easing: Theme.ease; }
+
+                    for source[i] in sources: SourceLine {
+                        entry: source;
+                        height: list.row-h;
+                        name-w: (list.width - Metrics.vh * 0.052) * 0.38;
+                        focused: on-sources && !on-filter && !filter-open && i == source-focus;
+                    }
+                }
+            }
+
+            if filter-open: Rectangle {
+                x: panel-pad;
+                y: panel-pad + head-h + Metrics.vh * 0.052 + Metrics.vh * 0.006;
+                width: parent.width - panel-pad * 2;
+                height: providers.length * Metrics.vh * 0.052 + Metrics.vh * 0.012;
+                border-radius: Metrics.vh * 0.008;
+                background: #141a29;
+                border-width: 1px;
+                border-color: #ffffff1f;
+
+                VerticalLayout {
+                    x: 0;
+                    y: Metrics.vh * 0.006;
+                    width: 100%;
+                    spacing: 0px;
+                    alignment: start;
+
+                    for name[i] in providers: Rectangle {
+                        height: Metrics.vh * 0.052;
+                        background: i == filter-focus ? #ffffff1f : transparent;
+
+                        HorizontalLayout {
+                            x: 0;
+                            y: 0;
+                            width: 100%;
                             height: 100%;
+                            padding-left: Metrics.vh * 0.016;
+                            padding-right: Metrics.vh * 0.016;
 
-                            if i == provider: Rectangle {
-                                x: 0;
-                                y: (parent.height - self.height) / 2;
+                            Text {
+                                text: name;
+                                color: Theme.text;
+                                font-size: Metrics.vh * 0.018;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                wrap: no-wrap;
+                                horizontal-stretch: 1;
+                            }
+                            // Which one the column is showing.
+                            Rectangle {
                                 width: Metrics.vh * 0.01;
-                                height: Metrics.vh * 0.01;
-                                border-radius: self.height / 2;
-                                background: #6fd97f;
+                                height: 100%;
+
+                                if i == provider: Rectangle {
+                                    x: 0;
+                                    y: (parent.height - self.height) / 2;
+                                    width: Metrics.vh * 0.01;
+                                    height: Metrics.vh * 0.01;
+                                    border-radius: self.height / 2;
+                                    background: #6fd97f;
+                                }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------ the episodes
+        if show-episodes: Rectangle {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+
+            // The season bar: the reference's previous / season / next, walked
+            // with Left and Right.
+            Rectangle {
+                x: panel-pad;
+                y: panel-pad;
+                width: parent.width - panel-pad * 2;
+                height: Metrics.vh * 0.052;
+                border-radius: Metrics.vh * 0.008;
+                background: (on-episodes && on-seasons) ? Theme.focus-fill : #ffffff0f;
+                border-width: (on-episodes && on-seasons) ? 2px : 0px;
+                border-color: Theme.focus-ring;
+
+                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                HorizontalLayout {
+                    padding-left: Metrics.vh * 0.016;
+                    padding-right: Metrics.vh * 0.016;
+                    spacing: Metrics.vh * 0.01;
+
+                    Path {
+                        width: Metrics.vh * 0.014;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M15.5 4L7.5 12l8 8";
+                        stroke: (on-episodes && on-seasons) ? #0a0c10 : #ffffffb0;
+                        stroke-width: 2.4px;
+                        opacity: season-index > 0 ? 1.0 : 0.25;
+                    }
+                    Text {
+                        text: seasons.length > 0 ? seasons[season-index] : "";
+                        color: (on-episodes && on-seasons) ? #0a0c10 : Theme.text;
+                        font-size: Metrics.vh * 0.018;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Path {
+                        width: Metrics.vh * 0.014;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: "M8.5 4l8 8-8 8";
+                        stroke: (on-episodes && on-seasons) ? #0a0c10 : #ffffffb0;
+                        stroke-width: 2.4px;
+                        opacity: season-index + 1 < seasons.length ? 1.0 : 0.25;
+                    }
+                }
+            }
+
+            episode-list := Rectangle {
+                property <length> row-h: Metrics.vh * 0.092;
+                property <length> gap: Metrics.vh * 0.006;
+                x: panel-pad;
+                y: panel-pad + Metrics.vh * 0.064;
+                width: parent.width - panel-pad * 2;
+                height: parent.height - self.y;
+                clip: true;
+
+                if episodes.length == 0: Text {
+                    x: 0;
+                    y: Metrics.vh * 0.01;
+                    width: parent.width;
+                    text: sources-note != "" ? sources-note : "Bölümler yükleniyor…";
+                    color: #ffffff8c;
+                    font-size: Metrics.vh * 0.0145;
+                    wrap: word-wrap;
+                }
+
+                VerticalLayout {
+                    x: 0;
+                    y: -clamp(episode-focus * (episode-list.row-h + episode-list.gap)
+                                - episode-list.height * 0.4,
+                              0px,
+                              max(0px, episodes.length * (episode-list.row-h + episode-list.gap)
+                                         - episode-list.height));
+                    width: 100%;
+                    height: max(1px, episodes.length * (episode-list.row-h + episode-list.gap));
+                    spacing: episode-list.gap;
+                    alignment: start;
+
+                    animate y { duration: Theme.glide; easing: Theme.ease; }
+
+                    for episode[i] in episodes: EpisodeLine {
+                        entry: episode;
+                        height: episode-list.row-h;
+                        focused: on-episodes && !on-seasons && i == episode-focus;
                     }
                 }
             }

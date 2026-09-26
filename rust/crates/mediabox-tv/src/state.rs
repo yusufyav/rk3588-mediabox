@@ -34,6 +34,8 @@ const SHELF_ROW: usize = 1;
 /// The width posters are decoded at. The card is about 238 logical pixels wide
 /// at the 1920-pixel design, and twice that on a 4K panel at integer scale two.
 pub const POSTER_WIDTH: u32 = 480;
+/// An episode's still in a series' column.
+pub const THUMBNAIL_WIDTH: u32 = 320;
 /// Backdrops are decoded once and drawn across the panel. The hosts serve about
 /// a thousand pixels; nothing is upscaled past what arrives.
 pub const BACKDROP_WIDTH: u32 = 1920;

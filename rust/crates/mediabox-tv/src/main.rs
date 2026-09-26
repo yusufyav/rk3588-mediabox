@@ -886,12 +886,22 @@ impl App {
                     self.paint();
                     return;
                 }
+                // Out of an episode's sources is back to the episodes, on the
+                // one that was opened.
+                if self
+                    .detail
+                    .as_mut()
+                    .is_some_and(detail::Detail::back_to_episodes)
+                {
+                    self.paint();
+                    return;
+                }
                 // Back out of the source column before backing out of the
                 // screen: one press, one step, and never two things at once.
                 let left = self
                     .detail
                     .as_mut()
-                    .filter(|detail| detail.pane == detail::Pane::Sources)
+                    .filter(|detail| detail.pane != detail::Pane::Record)
                     .map(|detail| {
                         detail.pane = detail::Pane::Record;
                         detail.settle();
@@ -911,6 +921,20 @@ impl App {
         let Some(detail) = self.detail.as_mut() else {
             return;
         };
+
+        // On an episode, Ok turns the column over to its sources, asked for by
+        // the episode's own id.
+        if detail.pane == detail::Pane::Episodes {
+            if detail.on_seasons {
+                return;
+            }
+            if let Some(episode) = detail.choose_episode() {
+                let (kind, id) = (detail.kind.clone(), detail.id.clone());
+                spawn_sources(self.epoch, kind, id, Some(episode));
+                self.paint();
+            }
+            return;
+        }
 
         // In the source column, Ok is "play this one". The reference plays on
         // the click rather than selecting and waiting for a second decision,
@@ -954,11 +978,29 @@ impl App {
 
         match answer {
             Ok(DetailAnswer::Library(envelope)) => detail.take_library(*envelope),
-            Ok(DetailAnswer::Catalogue { meta, listing, raw }) => {
-                detail.take_meta(*meta);
+            Ok(DetailAnswer::Meta(meta)) => detail.take_meta(*meta),
+            Ok(DetailAnswer::Sources {
+                episode,
+                listing,
+                raw,
+            }) => {
+                // An episode's sources arriving after the viewer went on to
+                // another episode are the wrong episode's.
+                if episode != detail.episode {
+                    return;
+                }
                 detail.take_streams(*listing, raw);
             }
-            Err(why) => detail.fail(&why),
+            Ok(DetailAnswer::NoSources { episode, why }) => {
+                if episode != detail.episode {
+                    return;
+                }
+                detail.fail(&why);
+            }
+            Ok(DetailAnswer::Watch(watch)) => detail.take_watch(*watch),
+            // The record did not come. The seed stays on the panel, which is
+            // the point of having one.
+            Err(why) => eprintln!("mediabox-tv.detail record unavailable: {why}"),
         }
 
         self.analyse();
@@ -1012,7 +1054,11 @@ impl App {
         let name = detail.meta.name.clone();
         let runtime = detail.runtime_seconds();
 
-        self.now.title = detail.meta.name.clone();
+        // An episode is named with its series, the way it is spoken of.
+        self.now.title = match detail.episode_heading() {
+            heading if heading.is_empty() => detail.meta.name.clone(),
+            heading => format!("{} · {heading}", detail.meta.name),
+        };
         self.now.artwork = detail.meta.poster.clone();
         self.now.backdrop = detail.meta.background.clone();
         self.now.logo = detail.meta.logo.clone().filter(|url| !url.is_empty());
@@ -2536,6 +2582,41 @@ impl App {
         window.set_detail_note(detail.note.clone().into());
         window.set_detail_col(detail.action as i32);
         window.set_detail_on_sources(detail.pane == detail::Pane::Sources);
+
+        // A series: the seasons and episodes, in the column, until an episode
+        // is chosen.
+        let series = detail.is_series();
+        window.set_detail_show_episodes(series && detail.pane != detail::Pane::Sources);
+        window.set_detail_on_episodes(detail.pane == detail::Pane::Episodes);
+        window.set_detail_on_seasons(detail.on_seasons);
+        window.set_detail_seasons(strings(detail.season_labels().into_iter()));
+        window.set_detail_season_index(detail.season_index() as i32);
+        window.set_detail_episode_focus(detail.episode_focus as i32);
+        window.set_detail_episode_heading(
+            if series { detail.episode_heading() } else { String::new() }.into(),
+        );
+        let mut rows = detail.episode_rows(&detail::today());
+        // Stills for the episodes near the remote, and none for the rest:
+        // a season of twenty is twenty pictures nobody is looking at.
+        let episodes = detail.episodes();
+        for (index, row) in rows.iter_mut().enumerate() {
+            if index.abs_diff(detail.episode_focus) > 6 {
+                continue;
+            }
+            let Some(url) = episodes
+                .get(index)
+                .and_then(|video| video.thumbnail.clone())
+                .filter(|url| !url.is_empty())
+            else {
+                continue;
+            };
+            let key = images::Key::new(&url, state::THUMBNAIL_WIDTH);
+            self.images.want(&key);
+            if let Some(art) = self.images.get(&key) {
+                row.art = art;
+            }
+        }
+        window.set_detail_episodes(slint::ModelRc::new(slint::VecModel::from(rows)));
         window.set_detail_on_filter(detail.on_filter);
         window.set_detail_filter_open(detail.filter_open);
         window.set_detail_filter_focus(detail.filter_focus as i32);
@@ -3420,11 +3501,21 @@ fn strings(values: impl Iterator<Item = String>) -> slint::ModelRc<slint::Shared
 /// the record and its sources together; a catalogue title takes two calls.
 enum DetailAnswer {
     Library(Box<model::LibraryItemEnvelope>),
-    Catalogue {
-        meta: Box<model::Meta>,
+    /// The title's full record, over the shelf's seed.
+    Meta(Box<model::Meta>),
+    /// The sources, for the title or, on a series, for `episode`.
+    Sources {
+        episode: Option<String>,
         listing: Box<model::StreamListing>,
         raw: Vec<serde_json::Value>,
     },
+    /// The sources could not be had. Everything else on the page stays.
+    NoSources {
+        episode: Option<String>,
+        why: String,
+    },
+    /// How far the title has been watched, from the account.
+    Watch(Box<model::TitleState>),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -3768,45 +3859,88 @@ fn detached(name: &str, work: impl std::future::Future<Output = ()> + Send + 'st
 }
 
 fn spawn_detail_load(epoch: u64, kind: String, id: String) {
-    detached("mediabox-tv-detail", async move {
-        let client = rpc::Client::new(socket_path());
-
-        let answer = if kind == "library" || id.starts_with("library:") {
-            client
-                .library_item(&id)
-                .await
-                .map(|envelope| DetailAnswer::Library(Box::new(envelope)))
-                .map_err(|e| e.to_string())
-        } else {
-            // Together rather than one after the other: the record comes from
-            // one addon and the sources from every addon that has any, and the
-            // screen is already drawn from the shelf's seed either way.
-            let (meta, streams) = tokio::join!(client.meta(&kind, &id), client.streams(&kind, &id));
-
-            match (meta, streams) {
-                (Ok(meta), Ok(streams)) => {
-                    // The parsed listing is what the rows are laid out from;
-                    // the raw array is what goes back when one is chosen.
-                    let raw = streams
-                        .get("streams")
-                        .and_then(|value| value.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    match serde_json::from_value::<model::StreamListing>(streams) {
-                        Ok(listing) => Ok(DetailAnswer::Catalogue {
-                            meta: Box::new(meta.meta),
-                            listing: Box::new(listing),
-                            raw,
-                        }),
-                        Err(e) => Err(format!("kaynak listesi çözülemedi: {e}")),
-                    }
-                }
-                (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
-            }
-        };
-
+    let answer = move |answer: Result<DetailAnswer, String>| {
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.detail_loaded(epoch, answer));
+        });
+    };
+
+    if kind == "library" || id.starts_with("library:") {
+        detached("mediabox-tv-detail", async move {
+            let client = rpc::Client::new(socket_path());
+            answer(
+                client
+                    .library_item(&id)
+                    .await
+                    .map(|envelope| DetailAnswer::Library(Box::new(envelope)))
+                    .map_err(|e| e.to_string()),
+            );
+        });
+        return;
+    }
+
+    // Three questions, each answered on its own as soon as it can be: the
+    // record comes from one addon, the sources from every addon that has any,
+    // and how far it was watched from the account. The screen is already drawn
+    // from the shelf's seed, and one of them failing takes nothing else down.
+    {
+        let (kind, id) = (kind.clone(), id.clone());
+        detached("mediabox-tv-detail-meta", async move {
+            let client = rpc::Client::new(socket_path());
+            answer(
+                client
+                    .meta(&kind, &id)
+                    .await
+                    .map(|envelope| DetailAnswer::Meta(Box::new(envelope.meta)))
+                    .map_err(|e| e.to_string()),
+            );
+        });
+    }
+    // A series has no sources of its own: they are asked for per episode.
+    if kind != "series" {
+        spawn_sources(epoch, kind.clone(), id.clone(), None);
+    }
+    detached("mediabox-tv-detail-watch", async move {
+        let client = rpc::Client::new(socket_path());
+        if let Ok(watch) = client.watch_state(&kind, &id).await {
+            answer(Ok(DetailAnswer::Watch(Box::new(watch))));
+        }
+    });
+}
+
+/// The ways to watch a title, or one episode of a series, by the episode's
+/// own id.
+fn spawn_sources(epoch: u64, kind: String, id: String, episode: Option<String>) {
+    detached("mediabox-tv-detail-sources", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = match client.streams(&kind, &id, episode.as_deref()).await {
+            Ok(streams) => {
+                // The parsed listing is what the rows are laid out from; the
+                // raw array is what goes back when one is chosen.
+                let raw = streams
+                    .get("streams")
+                    .and_then(|value| value.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                match serde_json::from_value::<model::StreamListing>(streams) {
+                    Ok(listing) => DetailAnswer::Sources {
+                        episode,
+                        listing: Box::new(listing),
+                        raw,
+                    },
+                    Err(e) => DetailAnswer::NoSources {
+                        episode,
+                        why: format!("kaynak listesi çözülemedi: {e}"),
+                    },
+                }
+            }
+            Err(e) => DetailAnswer::NoSources {
+                episode,
+                why: e.to_string(),
+            },
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.detail_loaded(epoch, Ok(answer)));
         });
     });
 }

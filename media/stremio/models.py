@@ -122,6 +122,7 @@ class Video:
     episode: int | None = None
     released: str | None = None
     overview: str | None = None
+    thumbnail: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +132,7 @@ class Video:
             "episode": self.episode,
             "released": self.released,
             "overview": self.overview,
+            "thumbnail": self.thumbnail,
         }
 
 

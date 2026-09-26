@@ -37,6 +37,7 @@ from ..errors import InvalidRequest, NotFound, UpstreamError
 from .addons import AddonClient, addons_supporting, parse_manifest
 from .api import DEFAULT_API_URL, SessionStore, StremioAPI
 from .local_search import LocalSearch
+from .watched import WatchedBitField, ordered_video_ids
 from .models import (
     Addon,
     Meta,
@@ -126,6 +127,28 @@ def _library_preview(record: Any) -> dict[str, Any] | None:
     }
 
 
+def _watch_state(record: dict[str, Any] | None, meta: Meta | None) -> dict[str, Any]:
+    state = record.get("state") if isinstance(record, dict) and isinstance(record.get("state"), dict) else {}
+    removed = bool(record.get("removed")) if isinstance(record, dict) else True
+    temp = bool(record.get("temp")) if isinstance(record, dict) else False
+    watched: list[str] = []
+    if meta is not None and meta.videos:
+        watched = WatchedBitField.parse(
+            state.get("watched"), ordered_video_ids(meta.videos)
+        ).watched_ids()
+    return {
+        "known": record is not None,
+        "inLibrary": record is not None and not removed and not temp,
+        "videoId": _text(state.get("video_id")),
+        "timeOffset": _as_millis(state.get("timeOffset")),
+        "duration": _as_millis(state.get("duration")),
+        "timesWatched": _as_millis(state.get("timesWatched")) or 0,
+        "flaggedWatched": bool(_as_millis(state.get("flaggedWatched"))),
+        "lastWatched": _text(state.get("lastWatched")),
+        "watched": watched,
+    }
+
+
 LOG = logging.getLogger(__name__)
 
 #: How many addons may be asked for streams at the same time.
@@ -162,6 +185,11 @@ HOME_FAN_OUT = 8
 HOME_DEADLINE = 6.0
 
 SEARCH_RESULTS_PER_CATALOG = 20
+#: A title's record is asked for twice when its page opens -- once for the page
+#: and once to read which of its episodes were watched -- and again whenever
+#: the page is reopened. Kept briefly, so that is one request to the addon.
+META_CACHE_SECONDS = 600.0
+META_CACHE_SIZE = 64
 #: A search asks every searchable catalogue at once, as the home surface does
 #: and for the same reason: asked one after another, the wait was the sum of
 #: every catalogue, fifteen seconds for each one whose host had gone away.
@@ -235,6 +263,7 @@ class HeadlessStremio:
         # and one table would mean each surface penalising the other's addons
         # for failures it never saw.
         self._home_failures: dict[str, float] = {}
+        self._meta_cache: dict[tuple[str, str], tuple[float, Meta]] = {}
 
     # ------------------------------------------------------------------ session
 
@@ -552,6 +581,59 @@ class HeadlessStremio:
         return list(results), list(answered)
 
     def meta(self, type_name: str, item_id: str) -> Meta:
+        key = (type_name, item_id)
+        with self._lock:
+            cached = self._meta_cache.get(key)
+            if cached and self._clock() - cached[0] < META_CACHE_SECONDS:
+                return cached[1]
+        found = self._meta_uncached(type_name, item_id)
+        with self._lock:
+            self._meta_cache[key] = (self._clock(), found)
+            if len(self._meta_cache) > META_CACHE_SIZE:
+                oldest = min(self._meta_cache, key=lambda k: self._meta_cache[k][0])
+                self._meta_cache.pop(oldest, None)
+        return found
+
+    def watch_state(self, type_name: str, item_id: str) -> dict[str, Any]:
+        """How far this title has been watched, as the account records it.
+
+        The account's own record of the title -- which episode was last
+        played, where in it, and, for a series, which episodes are watched --
+        read the way stremio-core reads it. The watched episodes are decoded
+        against the title's episode list, which is why the record is asked for
+        as well: the account stores bits, and bits mean nothing without the
+        list they index.
+        """
+        record: dict[str, Any] | None = None
+        meta: Meta | None = None
+        errors: list[str] = []
+
+        def read_record() -> None:
+            nonlocal record
+            try:
+                record = self.api.library_item(item_id)
+            except UpstreamError as exc:
+                errors.append(exc.message)
+
+        def read_meta() -> None:
+            nonlocal meta
+            if type_name != "series":
+                return
+            try:
+                meta = self.meta(type_name, item_id)
+            except (UpstreamError, NotFound) as exc:
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=job, daemon=True) for job in (read_record, read_meta)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=self.api._timeout + 1.0)
+        if record is None and errors:
+            raise UpstreamError("the account's record of this title is unavailable", {"errors": errors})
+        return _watch_state(record, meta)
+
+    def _meta_uncached(self, type_name: str, item_id: str) -> Meta:
         candidates = addons_supporting(self.addons(), "meta", type_name, item_id)
         errors: list[str] = []
         for addon in candidates:

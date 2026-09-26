@@ -270,8 +270,17 @@ impl AppState {
             Request::MediaSearch { query } => media_result(self.media.search(&query).await),
             Request::MediaSuggest { query } => media_result(self.media.suggest(&query).await),
             Request::MediaInspect { url } => media_result(self.media.inspect(&url).await),
-            Request::MediaStreams { media_type, id } => {
-                media_result(self.media.streams(&media_type, &id).await)
+            Request::MediaStreams {
+                media_type,
+                id,
+                video_id,
+            } => media_result(
+                self.media
+                    .streams(&media_type, &id, video_id.as_deref())
+                    .await,
+            ),
+            Request::MediaWatchState { media_type, id } => {
+                media_result(self.media.watch_state(&media_type, &id).await)
             }
             Request::MediaPolicy { url } => media_result(self.media.policy(&url).await),
             Request::MediaSessions => media_result(self.media.sessions().await),

@@ -203,3 +203,25 @@ class StremioAPI:
             },
         )
         return [entry for entry in result if isinstance(entry, dict)] if isinstance(result, list) else []
+
+    def library_item(self, item_id: str, collection: str = "libraryItem") -> dict[str, Any] | None:
+        """One title's record in the account's library, removed or not; None if it has none."""
+        session = self.store.get()
+        if not session.auth_key:
+            return None
+        result = self._call(
+            "datastoreGet",
+            {
+                "type": "DatastoreGet",
+                "authKey": session.auth_key,
+                "collection": collection,
+                "all": False,
+                "ids": [item_id],
+            },
+        )
+        if not isinstance(result, list):
+            return None
+        for entry in result:
+            if isinstance(entry, dict) and (entry.get("_id") or entry.get("id")) == item_id:
+                return entry
+        return None

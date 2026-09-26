@@ -404,6 +404,9 @@ enum MediaCommand {
     Streams {
         media_type: String,
         id: String,
+        /// The episode, for a series: `tt0903747:2:3`.
+        #[arg(long)]
+        video_id: Option<String>,
     },
     Policy {
         url: String,
@@ -586,9 +589,14 @@ fn to_request(command: &Command) -> Request {
                 query: query.clone(),
             },
             MediaCommand::Inspect { url } => Request::MediaInspect { url: url.clone() },
-            MediaCommand::Streams { media_type, id } => Request::MediaStreams {
+            MediaCommand::Streams {
+                media_type,
+                id,
+                video_id,
+            } => Request::MediaStreams {
                 media_type: media_type.clone(),
                 id: id.clone(),
+                video_id: video_id.clone(),
             },
             MediaCommand::Policy { url } => Request::MediaPolicy { url: url.clone() },
             MediaCommand::Sessions => Request::MediaSessions,

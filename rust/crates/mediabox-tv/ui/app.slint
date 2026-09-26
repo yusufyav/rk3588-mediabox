@@ -3,7 +3,7 @@ import { Home } from "home.slint";
 import { Media } from "media.slint";
 import { Search, SearchEntry } from "search.slint";
 import { Library } from "library.slint";
-import { Detail, SourceRow } from "detail.slint";
+import { Detail, SourceRow, EpisodeRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
 import { Player, MenuRow } from "player.slint";
 import { Settings } from "settings.slint";
@@ -24,6 +24,7 @@ export {
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
     OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, SearchEntry,
+    EpisodeRow,
 }
 
 // What the television shows before there is anything to show.
@@ -190,6 +191,14 @@ export component MediaBoxWindow inherits Window {
     in property <bool> detail-filter-open;
     in property <int> detail-filter-focus;
     in property <int> detail-source-focus;
+    in property <bool> detail-show-episodes;
+    in property <bool> detail-on-episodes;
+    in property <[string]> detail-seasons;
+    in property <int> detail-season-index;
+    in property <bool> detail-on-seasons;
+    in property <[EpisodeRow]> detail-episodes;
+    in property <int> detail-episode-focus;
+    in property <string> detail-episode-heading;
     in property <int> detail-col;
 
     // ---- now playing
@@ -390,6 +399,14 @@ export component MediaBoxWindow inherits Window {
             on-filter: root.detail-on-filter;
             filter-open: root.detail-filter-open;
             filter-focus: root.detail-filter-focus;
+            show-episodes: root.detail-show-episodes;
+            on-episodes: root.detail-on-episodes;
+            seasons: root.detail-seasons;
+            season-index: root.detail-season-index;
+            on-seasons: root.detail-on-seasons;
+            episodes: root.detail-episodes;
+            episode-focus: root.detail-episode-focus;
+            episode-heading: root.detail-episode-heading;
             source-focus: root.detail-source-focus;
             focus-col: root.detail-col;
         }
