@@ -1335,7 +1335,7 @@ mod tests {
 
 /// Cinemeta's genre list, in Turkish. Closed on purpose: a genre outside it is
 /// drawn as the catalogue wrote it rather than mistranslated.
-fn genre_in_turkish(genre: &str) -> String {
+pub fn genre_in_turkish(genre: &str) -> String {
     let turkish = match genre.trim() {
         "Action" => "Aksiyon",
         "Adventure" => "Macera",

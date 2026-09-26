@@ -56,6 +56,9 @@ const SNAPSHOT_DIR: &str = "/var/lib/mediabox-ui/snapshots";
 /// stremio-web's own 250 ms. The search itself is never sent while typing.
 const SUGGEST_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// How long the remote rests on a poster before its full record is asked for.
+const HERO_DWELL: Duration = Duration::from_millis(350);
+
 /// The appliance is the only place this runs in earnest, and there the defaults
 /// above are right. The overrides exist so the interface can be driven against
 /// a forwarded socket from a developer's machine — which is how a shelf layout
@@ -171,6 +174,11 @@ struct App {
     /// else: the two are never both running, and asking the control plane what
     /// is playing would answer a frame too late.
     here: Option<Playing>,
+    /// Full records of titles the remote has rested on in the catalogue, so
+    /// the line above the shelves can say what a title is without opening it.
+    /// A shelf entry from the account's library carries a name and a poster
+    /// and little else.
+    hero_meta: std::collections::HashMap<String, model::Meta>,
     /// The title the film playing here belongs to, and what the account has
     /// been told about it.
     watching: Option<Watching>,
@@ -675,6 +683,7 @@ impl App {
             window.set_media_rails(slint::ModelRc::from(self.media.rails()));
         }
         self.open(Route::Media);
+        self.want_hero();
         if !self.loading {
             self.loading = true;
             spawn_loader();
@@ -685,6 +694,7 @@ impl App {
         match intent {
             Intent::Move(dx, dy) => {
                 if self.media.step(dx, dy) {
+                    self.want_hero();
                     self.paint();
                 }
             }
@@ -703,19 +713,71 @@ impl App {
         }
     }
 
+    /// Asks for the focused title's full record once the remote has rested
+    /// on it, if the shelf did not carry enough to say what it is.
+    fn want_hero(&mut self) {
+        let item = match self.route() {
+            Route::Library => self.library.focused(),
+            _ => self.media.focused(),
+        };
+        let Some(item) = item else {
+            return;
+        };
+        if item.local || self.hero_meta.contains_key(&item.id) {
+            return;
+        }
+        let complete = item.summary.is_some() && item.year.is_some() && !item.genres.is_empty();
+        if complete {
+            return;
+        }
+        spawn_hero(item.kind.clone(), item.id.clone());
+    }
+
+    fn hero_arrived(&mut self, meta: model::Meta) {
+        // Bounded: this is a courtesy for the titles in front of the viewer,
+        // not a second copy of the catalogue.
+        if self.hero_meta.len() >= 256 {
+            self.hero_meta.clear();
+        }
+        let focused = match self.route() {
+            Route::Media => self.media.focused(),
+            Route::Library => self.library.focused(),
+            _ => None,
+        }
+        .is_some_and(|item| item.id == meta.id);
+        self.hero_meta.insert(meta.id.clone(), meta);
+        if focused {
+            self.paint();
+        }
+    }
+
     fn paint_media(&mut self, window: &MediaBoxWindow) {
         self.media.sync_artwork(&mut self.images);
         window.set_media_row(self.media.row() as i32);
         window.set_media_col(self.media.column() as i32);
 
-        let (title, facts, summary) = match self.media.focused() {
+        let focused = self.media.focused().cloned();
+        let meta = focused.as_ref().and_then(|item| self.hero_meta.get(&item.id));
+        let (title, facts, summary) = match &focused {
             Some(item) => (
                 item.title.clone(),
-                hero_facts(item),
-                item.summary.clone().unwrap_or_default(),
+                hero_facts(item, meta),
+                item.summary
+                    .clone()
+                    .or_else(|| meta.and_then(|m| m.description.clone()))
+                    .unwrap_or_default(),
             ),
             None => (String::new(), String::new(), String::new()),
         };
+        // The title's own logo, when the record has one: the reference's
+        // detail page leads with it, and so does the line over the shelves.
+        let mut logo = slint::Image::default();
+        if let Some(url) = meta.and_then(|m| m.logo.clone()).filter(|url| !url.is_empty()) {
+            let key = images::Key::new(&url, state::POSTER_WIDTH);
+            self.images.want(&key);
+            logo = self.images.get(&key).unwrap_or_default();
+        }
+        window.set_media_logo(logo);
         window.set_media_title(title.into());
         window.set_media_facts(facts.into());
         window.set_media_summary(summary.into());
@@ -805,6 +867,7 @@ impl App {
         match intent {
             Intent::Move(dx, dy) => {
                 if self.library.step(dx, dy) {
+                    self.want_hero();
                     self.paint();
                 }
             }
@@ -2465,6 +2528,7 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_media_rails(slint::ModelRc::from(self.media.rails()));
         }
+        self.want_hero();
         self.loading = !from_catalogue;
         self.paint();
         if !from_catalogue {
@@ -2692,8 +2756,15 @@ impl App {
         match self.library.focused() {
             Some(item) => {
                 window.set_library_title(item.title.clone().into());
-                window.set_library_facts(hero_facts(item).into());
-                window.set_library_summary(item.summary.clone().unwrap_or_default().into());
+                let meta = self.hero_meta.get(&item.id);
+                window.set_library_facts(hero_facts(item, meta).into());
+                window.set_library_summary(
+                    item.summary
+                        .clone()
+                        .or_else(|| meta.and_then(|m| m.description.clone()))
+                        .unwrap_or_default()
+                        .into(),
+                );
                 window.set_library_genres(strings(item.genres.iter().take(4).cloned()));
             }
             None => {
@@ -3597,16 +3668,52 @@ fn posters(images: &mut images::ImageManager, items: &[state::Item]) -> Vec<Post
 
 /// Year, rating and a genre or two, as one line. The same shape the detail
 /// screen's own facts line has, so a title reads the same wherever it is shown.
-fn hero_facts(item: &state::Item) -> String {
+/// The line under a title over the shelves: when it came out, how long it
+/// runs, what it scored and what it is -- from the shelf where the shelf has
+/// it, from the full record where it does not -- and, on "Devam Et", how far
+/// it was watched.
+fn hero_facts(item: &state::Item, meta: Option<&model::Meta>) -> String {
     let mut facts: Vec<String> = Vec::new();
-    if let Some(year) = &item.year {
-        facts.push(year.clone());
+    if let Some(year) = item.year.clone().or_else(|| meta.and_then(|m| m.release_info.clone())) {
+        facts.push(year);
     }
-    if let Some(rating) = &item.rating {
+    if let Some(runtime) = meta.and_then(|m| m.runtime.clone()).filter(|r| !r.is_empty()) {
+        facts.push(runtime);
+    }
+    if let Some(rating) = item.rating.clone().or_else(|| meta.and_then(|m| m.imdb_rating.clone())) {
         facts.push(format!("IMDb {rating}"));
     }
-    facts.extend(item.genres.iter().take(2).cloned());
+    let genres = if item.genres.is_empty() {
+        meta.map(|m| m.genres.clone()).unwrap_or_default()
+    } else {
+        item.genres.clone()
+    };
+    facts.extend(genres.iter().take(3).map(|g| detail::genre_in_turkish(g)));
+    if item.continuing && item.progress > 0.0 {
+        facts.push(format!("%{} izlendi", (item.progress * 100.0).round() as u32));
+    }
     facts.join("  ·  ")
+}
+
+/// The full record of a title the remote has rested on, a moment after it
+/// stopped there: walking along a shelf is not a request per poster.
+fn spawn_hero(kind: String, id: String) {
+    static RESTING: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    if let Ok(mut resting) = RESTING.lock() {
+        resting.clone_from(&id);
+    }
+    detached("mediabox-tv-hero", async move {
+        tokio::time::sleep(HERO_DWELL).await;
+        if RESTING.lock().map(|r| *r != id).unwrap_or(true) {
+            return;
+        }
+        let client = rpc::Client::new(socket_path());
+        if let Ok(envelope) = client.meta(&kind, &id).await {
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.hero_arrived(envelope.meta));
+            });
+        }
+    });
 }
 
 /// The settings rows as the panel takes them, each with how many rows of each
@@ -3747,6 +3854,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         controls_were_open: false,
         handing_over: false,
         here: None,
+        hero_meta: std::collections::HashMap::new(),
         watching: None,
         detail_backdrop: None,
         notice_until: None,

@@ -101,6 +101,7 @@ export component MediaBoxWindow inherits Window {
     in property <int> media-row;
     in property <int> media-col;
     in property <string> media-title;
+    in property <image> media-logo;
     in property <string> media-facts;
     in property <string> media-summary;
 
@@ -334,6 +335,7 @@ export component MediaBoxWindow inherits Window {
             focus-row: root.media-row;
             focus-col: root.media-col;
             title: root.media-title;
+            logo: root.media-logo;
             facts: root.media-facts;
             summary: root.media-summary;
         }

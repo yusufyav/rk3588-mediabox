@@ -164,14 +164,17 @@ export component Search inherits Rectangle {
                         vertical-alignment: center;
                         overflow: elide;
                         wrap: no-wrap;
+                        horizontal-stretch: 1;
                     }
+                    // In a column of its own, so the kinds and years line up.
                     Text {
+                        width: Metrics.root-font * 6.5;
                         text: entry.detail;
                         color: focused ? #3b4250 : Theme.dim;
                         font-size: Metrics.text-label;
                         font-weight: 600;
                         vertical-alignment: center;
-                        horizontal-stretch: 0;
+                        horizontal-alignment: right;
                         wrap: no-wrap;
                     }
                 }
@@ -180,8 +183,10 @@ export component Search inherits Rectangle {
     }
 
     // Once searched: a row per catalogue, the reference's shape.
+    // Clipped just outside the first poster, so the ring has its room and the
+    // posters scrolled past do not show over the letters.
     if showing-results: Rectangle {
-        x: pane-x - Metrics.gutter;
+        x: pane-x - Metrics.focus-room;
         y: pane-top;
         width: root.width - self.x;
         height: viewport-h;
@@ -198,9 +203,9 @@ export component Search inherits Rectangle {
             animate y { duration: Theme.glide; easing: Theme.ease; }
 
             for rail[r] in rails: Rail {
-                x: 0;
+                x: Metrics.focus-room - Metrics.gutter;
                 y: r * rail-h;
-                width: parent.width;
+                width: parent.width + Metrics.gutter - Metrics.focus-room;
                 rail: rail;
                 focus-col: rail-col;
                 active: pane == 2 && rail-row == r;

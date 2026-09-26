@@ -588,7 +588,8 @@ export component Detail inherits Rectangle {
             mark: marks[i];
             cut: cuts[i];
             enabled: enabled[i];
-            focused: !on-sources && i == focus-col;
+            // One focus on the panel: not while the remote is in the column.
+            focused: !on-sources && !on-episodes && i == focus-col;
         }
     }
 

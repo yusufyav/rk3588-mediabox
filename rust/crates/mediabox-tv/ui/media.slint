@@ -13,15 +13,22 @@ export component Media inherits Rectangle {
     in property <int> focus-col;
 
     in property <string> title;
+    in property <image> logo;
     in property <string> facts;
     in property <string> summary;
 
     property <length> rail-h: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
-    property <length> head-h: Metrics.title-screen * 1.25 + Metrics.text-meta * 3.0;
+    // The logo or the name, the facts, two lines of summary and the gaps
+    // between them. Measured on the panel: at the old height the second line
+    // of summary ran under the first shelf's heading.
+    property <length> head-h: Metrics.title-screen * 1.3 + Metrics.text-meta * 4.6
+                              + Metrics.root-font * 1.2;
     property <length> top: Metrics.topbar + Metrics.block-gap * 0.4;
     property <length> viewport-h: root.height - top - head-h;
     property <length> content-h: max(1px, rail-h * rails.length);
-    property <length> scroll: clamp(max(0, focus-row - 1) * rail-h - Metrics.top-inset * 0.25,
+    // The focused shelf's heading at the top of the window, and nothing of the
+    // shelf above it: a sliver of the last one's captions read as stray words.
+    property <length> scroll: clamp(max(0, focus-row - 1) * rail-h,
                                     0px,
                                     max(0px, content-h - viewport-h));
 
@@ -55,7 +62,13 @@ export component Media inherits Rectangle {
         spacing: Metrics.root-font * 0.3;
         alignment: start;
 
-        Text {
+        if logo.width > 0: Image {
+            source: logo;
+            image-fit: contain;
+            horizontal-alignment: left;
+            height: Metrics.title-screen * 1.25;
+        }
+        if logo.width == 0: Text {
             text: title;
             color: Theme.text;
             font-size: Metrics.title-screen;
