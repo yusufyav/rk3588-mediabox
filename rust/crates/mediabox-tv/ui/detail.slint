@@ -29,6 +29,8 @@ export struct EpisodeRow {
 component EpisodeLine inherits Rectangle {
     in property <EpisodeRow> entry;
     in property <bool> focused;
+    // The remote is on the row's watched button rather than on the row.
+    in property <bool> marking;
 
     border-radius: Metrics.vh * 0.008;
     background: focused ? #ffffff26 : transparent;
@@ -109,6 +111,36 @@ component EpisodeLine inherits Rectangle {
                     font-weight: 700;
                     letter-spacing: Metrics.vh * 0.001;
                     vertical-alignment: center;
+                }
+            }
+        }
+
+        // The watched button, on the focused row only: Right reaches it, Ok
+        // turns the episode watched or not, as the reference's row menu does.
+        Rectangle {
+            width: focused ? Metrics.vh * 0.05 : 0px;
+            visible: focused;
+
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: parent.width;
+                height: parent.width;
+                border-radius: self.height / 2;
+                background: marking ? Theme.focus-fill : #ffffff1a;
+                border-width: marking ? 2px : 0px;
+                border-color: Theme.focus-ring;
+
+                Path {
+                    x: parent.width * 0.2;
+                    y: parent.height * 0.2;
+                    width: parent.width * 0.6;
+                    height: parent.height * 0.6;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: entry.watched
+                        ? "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5zM12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7z"
+                        : "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5zM12 7c4.2 0 7.3 3.1 8.4 5-1.1 1.9-4.2 5-8.4 5s-7.3-3.1-8.4-5C4.7 10.1 7.8 7 12 7z";
+                    fill: marking ? #0a0c10 : (entry.watched ? Theme.badge-good : #ffffffb0);
                 }
             }
         }
@@ -365,6 +397,7 @@ export component Detail inherits Rectangle {
     in property <bool> on-seasons;
     in property <[EpisodeRow]> episodes;
     in property <int> episode-focus;
+    in property <bool> on-mark;
     in property <string> episode-heading;
 
     // The measurements are the reference's own, read off it and kept as
@@ -837,6 +870,7 @@ export component Detail inherits Rectangle {
                         entry: episode;
                         height: episode-list.row-h;
                         focused: on-episodes && !on-seasons && i == episode-focus;
+                        marking: on-mark;
                     }
                 }
             }

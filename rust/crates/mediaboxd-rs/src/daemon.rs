@@ -282,6 +282,9 @@ impl AppState {
             Request::MediaWatchState { media_type, id } => {
                 media_result(self.media.watch_state(&media_type, &id).await)
             }
+            Request::MediaAccount { action, change } => {
+                media_result(self.media.account(action.path(), change).await)
+            }
             Request::MediaPolicy { url } => media_result(self.media.policy(&url).await),
             Request::MediaSessions => media_result(self.media.sessions().await),
             Request::MediaSessionStart { url } => {

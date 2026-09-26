@@ -171,6 +171,9 @@ struct App {
     /// else: the two are never both running, and asking the control plane what
     /// is playing would answer a frame too late.
     here: Option<Playing>,
+    /// The title the film playing here belongs to, and what the account has
+    /// been told about it.
+    watching: Option<Watching>,
 
     detail_backdrop: Option<String>,
     /// When the line along the bottom stops being true. See `say`.
@@ -928,6 +931,22 @@ impl App {
             if detail.on_seasons {
                 return;
             }
+            // The row's watched button: this episode, watched or not.
+            if detail.on_mark {
+                let Some(video) = detail.focused_episode().map(|v| v.id.clone()) else {
+                    return;
+                };
+                let body = serde_json::json!({
+                    "type": detail.kind,
+                    "id": detail.id,
+                    "videoId": video,
+                    "watched": !detail.episode_watched(&video),
+                    "name": detail.meta.name,
+                    "poster": detail.meta.poster,
+                });
+                spawn_account("watched", detail.id.clone(), body);
+                return;
+            }
             if let Some(episode) = detail.choose_episode() {
                 let (kind, id) = (detail.kind.clone(), detail.id.clone());
                 spawn_sources(self.epoch, kind, id, Some(episode));
@@ -961,10 +980,29 @@ impl App {
             return;
         }
 
-        // The record carries one button, and it is the trailer. A film is
-        // played by choosing where it comes from, which is Ok in the column.
-        if detail.action == detail::ACTION_TRAILER {
-            self.trailer();
+        // The record's buttons. A film is played by choosing where it comes
+        // from, which is Ok in the column.
+        let change = |detail: &detail::Detail| {
+            serde_json::json!({
+                "type": detail.kind,
+                "id": detail.id,
+                "name": detail.meta.name,
+                "poster": detail.meta.poster,
+            })
+        };
+        match detail.focused_action() {
+            Some(detail::Action::Trailer) => self.trailer(),
+            Some(detail::Action::Library) if detail.watch.is_some() => {
+                let mut body = change(detail);
+                body["inLibrary"] = serde_json::json!(!detail.in_library());
+                spawn_account("library", detail.id.clone(), body);
+            }
+            Some(detail::Action::Watched) if detail.watch.is_some() => {
+                let mut body = change(detail);
+                body["watched"] = serde_json::json!(!detail.watched());
+                spawn_account("watched", detail.id.clone(), body);
+            }
+            _ => {}
         }
     }
 
@@ -1005,6 +1043,71 @@ impl App {
 
         self.analyse();
         self.paint();
+    }
+
+    /// The account's word on a title after a change to it: the page, if it is
+    /// that title's, shows it at once.
+    fn title_changed(&mut self, id: String, answer: Result<model::TitleState, String>) {
+        match answer {
+            Ok(state) => {
+                if let Some(detail) = self.detail.as_mut().filter(|d| d.id == id) {
+                    detail.take_watch(state);
+                    if self.route() == Route::Detail {
+                        self.paint();
+                    }
+                }
+            }
+            Err(why) => {
+                eprintln!("mediabox-tv.account change refused: {why}");
+                if self.route() == Route::Detail {
+                    self.say(format!("Stremio hesabına yazılamadı — {why}"));
+                    self.paint();
+                }
+            }
+        }
+    }
+
+    /// Asks the account again how the page's title stands, after watching some
+    /// of it: the episode that was playing may be watched now, and "Devam Et"
+    /// may point at the next one.
+    fn refresh_watch(&mut self) {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let (epoch, kind, id) = (self.epoch, detail.kind.clone(), detail.id.clone());
+        detached("mediabox-tv-detail-watch", async move {
+            // After the closing write, which is on its way on another thread.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let client = rpc::Client::new(socket_path());
+            if let Ok(watch) = client.watch_state(&kind, &id).await {
+                let _ = slint::invoke_from_event_loop(move || {
+                    with_app(|app| app.detail_loaded(epoch, Ok(DetailAnswer::Watch(Box::new(watch)))));
+                });
+            }
+        });
+    }
+
+    /// Tells the account where the film playing here has got to, when it is
+    /// time to.
+    fn tell_the_account(&mut self, closed: bool) {
+        let Some(watching) = self.watching.as_mut() else {
+            return;
+        };
+        if watching.duration == 0 {
+            return;
+        }
+        let due = closed
+            || watching.jumped
+            || watching
+                .told_at
+                .is_none_or(|at| at.elapsed() >= TELL_THE_ACCOUNT_EVERY);
+        if !due {
+            return;
+        }
+        let change = watching.change(closed);
+        watching.told_at = Some(std::time::Instant::now());
+        watching.jumped = false;
+        spawn_account("progress", watching.id.clone(), change);
     }
 
     /// Asks the media core what it would do with the chosen source.
@@ -1053,6 +1156,22 @@ impl App {
         // mutably: the film's name and its length go to the player with it.
         let name = detail.meta.name.clone();
         let runtime = detail.runtime_seconds();
+        // Where the account says it was left, if it was left in this film or
+        // this episode: every Stremio client starts there.
+        let video = detail.episode.clone();
+        let start = detail.resume_seconds(video.as_deref().unwrap_or(&detail.id));
+        self.watching = Some(Watching {
+            kind: detail.kind.clone(),
+            id: detail.id.clone(),
+            video,
+            name: detail.meta.name.clone(),
+            poster: detail.meta.poster.clone(),
+            position: start,
+            duration: 0,
+            seen_at: std::time::Instant::now(),
+            told_at: None,
+            jumped: false,
+        });
 
         // An episode is named with its series, the way it is spoken of.
         self.now.title = match detail.episode_heading() {
@@ -1089,7 +1208,7 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_detail_note("Oynatılıyor…".into());
         }
-        spawn_play_here(url, raw, name, runtime);
+        spawn_play_here(url, raw, name, runtime, start);
         // The film covers the panel — the video window sits above the primary —
         // so the screen behind it is the one a remote should already be on when
         // it comes back.
@@ -1125,6 +1244,26 @@ impl App {
             return;
         }
         self.now.take_here(&status);
+        let (position, duration) = (self.now.elapsed_seconds, self.now.duration_seconds);
+        let paused = matches!(
+            self.now.state,
+            Some(mediabox_core::PlaybackState::Paused)
+        );
+        if let Some(watching) = self.watching.as_mut() {
+            if duration > 0 {
+                // Where playback should be by the clock since the last look,
+                // and where it is. Far apart is a jump the viewer made.
+                let expected = watching.position as i64
+                    + if paused { 0 } else { watching.seen_at.elapsed().as_secs() as i64 };
+                if watching.told_at.is_some() && (position as i64 - expected).abs() > JUMP_SECONDS {
+                    watching.jumped = true;
+                }
+                watching.position = position;
+                watching.duration = duration;
+                watching.seen_at = std::time::Instant::now();
+            }
+        }
+        self.tell_the_account(false);
         if self.controls_open() {
             self.paint();
         }
@@ -1209,6 +1348,13 @@ impl App {
             spawn_here(HereCommand::Stop);
         }
         self.here = None;
+        // The film is closed: the account is told where it ended, which is
+        // what moves a finished episode on to the next one.
+        if !gave_up {
+            self.tell_the_account(true);
+        }
+        self.watching = None;
+        self.refresh_watch();
         // Through `say`, so it goes away by itself. Written straight to the
         // window it had no lifetime, and one source that failed left "Kaynak
         // açılamadı" sitting in the corner of the panel — through the next
@@ -1240,6 +1386,9 @@ impl App {
             return;
         }
         self.handing_over = true;
+        // Kodi carries on from here; the account is told where it took over.
+        self.tell_the_account(false);
+        self.watching = None;
         self.here = None;
         self.now.film = false;
         self.now.close_menu();
@@ -2569,12 +2718,12 @@ impl App {
         window.set_detail_cast(strings(detail.meta.cast.iter().take(4).cloned()));
         window.set_detail_directors(strings(detail.meta.director.iter().take(3).cloned()));
 
-        window.set_detail_actions(strings(detail::ACTIONS.iter().map(|a| a.to_string())));
-        window.set_detail_marks(strings(detail::MARKS.iter().map(|m| m.0.to_string())));
-        window.set_detail_cuts(strings(detail::MARKS.iter().map(|m| m.1.to_string())));
-        window.set_detail_enabled(slint::ModelRc::new(slint::VecModel::from(
-            detail.enabled().to_vec(),
-        )));
+        let faces = detail.action_faces();
+        window.set_detail_actions(strings(faces.iter().map(|f| f.0.clone())));
+        window.set_detail_marks(strings(faces.iter().map(|f| f.1.to_string())));
+        window.set_detail_cuts(strings(faces.iter().map(|f| f.2.to_string())));
+        window.set_detail_enabled(slint::ModelRc::new(slint::VecModel::from(detail.enabled())));
+        window.set_detail_on_mark(detail.on_mark);
 
         window.set_detail_sources(slint::ModelRc::new(slint::VecModel::from(
             detail.rows_for_display(),
@@ -3598,6 +3747,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         controls_were_open: false,
         handing_over: false,
         here: None,
+        watching: None,
         detail_backdrop: None,
         notice_until: None,
         detail_fade: 0.0,
@@ -3908,6 +4058,17 @@ fn spawn_detail_load(epoch: u64, kind: String, id: String) {
     });
 }
 
+/// A change to the account's record of a title, and the title's standing after it.
+fn spawn_account(action: &'static str, id: String, change: serde_json::Value) {
+    detached("mediabox-tv-account", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.account(action, change).await.map_err(|e| e.to_string());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.title_changed(id, answer));
+        });
+    });
+}
+
 /// The ways to watch a title, or one episode of a series, by the episode's
 /// own id.
 fn spawn_sources(epoch: u64, kind: String, id: String, episode: Option<String>) {
@@ -4071,6 +4232,48 @@ impl Playing {
     }
 }
 
+/// A film this interface started, as the account knows it: which title, which
+/// episode, and where playback was when the account was last told.
+///
+/// The account is told the way stremio-core tells it: on starting, every 90
+/// seconds (`PUSH_TO_LIBRARY_EVERY`), at once when the viewer jumps, and on
+/// closing. The rules that turn a position into "watched" or "next episode"
+/// are the media core's, not this struct's.
+struct Watching {
+    kind: String,
+    id: String,
+    video: Option<String>,
+    name: String,
+    poster: Option<String>,
+    position: u64,
+    duration: u64,
+    seen_at: std::time::Instant,
+    told_at: Option<std::time::Instant>,
+    jumped: bool,
+}
+
+/// stremio-core's `PUSH_TO_LIBRARY_EVERY`.
+const TELL_THE_ACCOUNT_EVERY: Duration = Duration::from_secs(90);
+/// A position this far from where the clock says it should be is a jump the
+/// viewer made, not playback.
+const JUMP_SECONDS: i64 = 15;
+
+impl Watching {
+    fn change(&self, closed: bool) -> Value {
+        serde_json::json!({
+            "type": self.kind,
+            "id": self.id,
+            "videoId": self.video,
+            "timeMs": self.position * 1000,
+            "durationMs": self.duration * 1000,
+            "seek": self.jumped,
+            "closed": closed,
+            "name": self.name,
+            "poster": self.poster,
+        })
+    }
+}
+
 /// How long a film may take to put its first frame on the plane before the
 /// interface stops waiting for it. Measured on the appliance: a local file is
 /// on screen in under a second, a stream over the network in two to four.
@@ -4180,12 +4383,13 @@ fn spawn_play_here(
     raw: serde_json::Value,
     title: String,
     runtime: Option<u64>,
+    start: u64,
 ) {
     detached("mediabox-tv-play-here", async move {
         let client = rpc::Client::new(socket_path());
         let stream = url.is_none().then_some(&raw);
         match client
-            .play_here(url.as_deref(), stream, 0, Some(title.as_str()), runtime)
+            .play_here(url.as_deref(), stream, start, Some(title.as_str()), runtime)
             .await
         {
             Ok(_) => eprintln!("mediabox-tv.play started here=true"),

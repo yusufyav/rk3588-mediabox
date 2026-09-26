@@ -156,6 +156,10 @@ impl MediaClient {
         self.get(&["media", "streams", media_type, id], &query).await
     }
 
+    pub async fn account(&self, action: &str, change: Value) -> Result<Value, MediaError> {
+        self.post(&["media", "account", action], change).await
+    }
+
     pub async fn watch_state(&self, media_type: &str, id: &str) -> Result<Value, MediaError> {
         self.get(&["media", "state", media_type, id], &[]).await
     }

@@ -385,6 +385,53 @@ class MediaCore:
     # -------------------------------------------------------------------- POST
 
     def _post(self, parts: list[str], body: dict[str, Any]) -> Response:
+        if parts and parts[0] == "account" and len(parts) == 2:
+            return self._account(parts[1], body)
+        return self._post_other(parts, body)
+
+    def _account(self, action: str, body: dict[str, Any]) -> Response:
+        """Changes to the account's record of a title, as every Stremio client makes them."""
+        type_name = body.get("type")
+        item_id = body.get("id")
+        if not isinstance(type_name, str) or not isinstance(item_id, str) or not item_id:
+            raise InvalidRequest("type and id are required")
+        name = body.get("name") if isinstance(body.get("name"), str) else ""
+        poster = body.get("poster") if isinstance(body.get("poster"), str) else None
+        video_id = body.get("videoId") if isinstance(body.get("videoId"), str) else None
+        if action == "progress":
+            state = self.stremio.record_progress(
+                type_name,
+                item_id,
+                video_id=video_id,
+                time_ms=_as_millis_body(body.get("timeMs")),
+                duration_ms=_as_millis_body(body.get("durationMs")),
+                seek=bool(body.get("seek")),
+                closed=bool(body.get("closed")),
+                name=name,
+                poster=poster,
+            )
+        elif action == "watched":
+            season = body.get("season")
+            state = self.stremio.mark_watched(
+                type_name,
+                item_id,
+                watched=bool(body.get("watched")),
+                video_id=video_id,
+                season=season if isinstance(season, int) and not isinstance(season, bool) else None,
+                name=name,
+                poster=poster,
+            )
+        elif action == "library":
+            state = self.stremio.set_in_library(
+                type_name, item_id, in_library=bool(body.get("inLibrary")), name=name, poster=poster
+            )
+        elif action == "rewind":
+            state = self.stremio.rewind(type_name, item_id)
+        else:
+            raise NotFound("no such account action")
+        return json_response(200, {"state": state})
+
+    def _post_other(self, parts: list[str], body: dict[str, Any]) -> Response:
         if not parts:
             raise NotFound("no such media-core endpoint")
         head = parts[0]
@@ -574,6 +621,12 @@ def _int_param(params: dict[str, list[str]], key: str) -> int | None:
     except ValueError as exc:
         raise InvalidRequest(f"{key} must be an integer") from exc
     return parsed if parsed > 0 else None
+
+
+def _as_millis_body(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidRequest("times are milliseconds, as numbers")
+    return int(value)
 
 
 def _as_float(value: Any) -> float | None:

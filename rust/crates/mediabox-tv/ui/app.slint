@@ -198,6 +198,7 @@ export component MediaBoxWindow inherits Window {
     in property <bool> detail-on-seasons;
     in property <[EpisodeRow]> detail-episodes;
     in property <int> detail-episode-focus;
+    in property <bool> detail-on-mark;
     in property <string> detail-episode-heading;
     in property <int> detail-col;
 
@@ -406,6 +407,7 @@ export component MediaBoxWindow inherits Window {
             on-seasons: root.detail-on-seasons;
             episodes: root.detail-episodes;
             episode-focus: root.detail-episode-focus;
+            on-mark: root.detail-on-mark;
             episode-heading: root.detail-episode-heading;
             source-focus: root.detail-source-focus;
             focus-col: root.detail-col;

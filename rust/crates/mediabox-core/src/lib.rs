@@ -50,6 +50,27 @@ pub enum InputAction {
     Power,
 }
 
+/// What a change to the account's record of a title is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountAction {
+    Progress,
+    Watched,
+    Library,
+    Rewind,
+}
+
+impl AccountAction {
+    pub fn path(self) -> &'static str {
+        match self {
+            AccountAction::Progress => "progress",
+            AccountAction::Watched => "watched",
+            AccountAction::Library => "library",
+            AccountAction::Rewind => "rewind",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum InputMode {
@@ -1391,6 +1412,15 @@ pub enum Request {
     MediaWatchState {
         media_type: String,
         id: String,
+    },
+    /// A change to the account's record of a title, made the way every
+    /// Stremio client makes it: where playback got to (`progress`), a film,
+    /// an episode or a season marked watched (`watched`), in or out of the
+    /// library (`library`), or out of "Devam Et" (`rewind`). `change` carries
+    /// the title and what changed; the media core applies stremio-core's rules.
+    MediaAccount {
+        action: AccountAction,
+        change: Value,
     },
     MediaPolicy {
         url: String,

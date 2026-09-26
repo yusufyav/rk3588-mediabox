@@ -138,6 +138,16 @@ impl Client {
             .await
     }
 
+    /// A change to the account's record of a title; the media core applies
+    /// stremio-core's rules to it and answers with how the title now stands.
+    pub async fn account(&self, action: &str, change: Value) -> Result<crate::model::TitleState> {
+        self.typed::<crate::model::TitleStateEnvelope>(
+            json!({"command": "media_account", "action": action, "change": change}),
+        )
+        .await
+        .map(|envelope| envelope.state)
+    }
+
     pub async fn watch_state(&self, kind: &str, id: &str) -> Result<crate::model::TitleState> {
         self.typed::<crate::model::TitleStateEnvelope>(
             json!({"command": "media_watch_state", "media_type": kind, "id": id}),

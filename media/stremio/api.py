@@ -8,6 +8,7 @@ come from. It is a small JSON-RPC-ish surface:
     POST /api/getUser               {authKey}                -> user
     POST /api/addonCollectionGet    {authKey|null, update}   -> addons
     POST /api/datastoreGet          {authKey, collection, all} -> library items
+    POST /api/datastorePut          {authKey, collection, changes}
 
 `authKey: null` is a supported, documented call: it returns the default addon
 collection, which is why the media core works out of the box without anybody
@@ -203,6 +204,26 @@ class StremioAPI:
             },
         )
         return [entry for entry in result if isinstance(entry, dict)] if isinstance(result, list) else []
+
+    def datastore_put(self, changes: list[dict[str, Any]], collection: str = "libraryItem") -> None:
+        """Writes records back to the account, as every Stremio client does.
+
+        Nothing is written for somebody who is not signed in: there is no
+        account to write to, and the official clients keep such a library on
+        the device only.
+        """
+        session = self.store.get()
+        if not session.auth_key:
+            raise InvalidRequest("nobody is signed in to a Stremio account")
+        self._call(
+            "datastorePut",
+            {
+                "type": "DatastorePut",
+                "authKey": session.auth_key,
+                "collection": collection,
+                "changes": changes,
+            },
+        )
 
     def library_item(self, item_id: str, collection: str = "libraryItem") -> dict[str, Any] | None:
         """One title's record in the account's library, removed or not; None if it has none."""

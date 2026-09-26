@@ -11,22 +11,42 @@ use crate::model::{LibraryItemEnvelope, Meta, Plan, Stream, StreamListing, Title
 use crate::state::Item;
 use crate::{EpisodeRow, SourceRow, TechRow};
 
-/// What the marks are drawn from. SVG path data in a 24x24 box, in two layers:
-/// the shape, and what is cut out of it in the button's own colour.
-///
-/// One mark, because there is one button. The reference's record carries the
-/// trailer and nothing else: a film is played by choosing where it comes from,
-/// in the column on the right, and Back is a key on the remote rather than a
-/// word taking up the row.
-pub const MARKS: [(&str, &str); 1] = [(
-    // The trailer.
-    "M3 5h18v14H3z",
-    "M5 7h2v2H5zM5 11h2v2H5zM5 15h2v2H5zM17 7h2v2h-2zM17 11h2v2h-2zM17 15h2v2h-2zM10 9l5 3-5 3z",
-)];
+/// What can be done with the title, along the bottom of its record: the
+/// reference's trailer, library and watched buttons. A film is played by
+/// choosing where it comes from, in the column on the right, and Back is a key
+/// on the remote rather than a word taking up the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Trailer,
+    Library,
+    /// A film only; a series' episodes are marked one at a time, in the column.
+    Watched,
+}
 
-pub const ACTIONS: [&str; 1] = ["Fragman"];
-
-pub const ACTION_TRAILER: usize = 0;
+impl Action {
+    /// The mark, as SVG path data in a 24x24 box, in two layers: the shape,
+    /// and what is cut out of it in the button's own colour.
+    pub fn mark(self, on: bool) -> (&'static str, &'static str) {
+        match self {
+            Action::Trailer => (
+                "M3 5h18v14H3z",
+                "M5 7h2v2H5zM5 11h2v2H5zM5 15h2v2H5zM17 7h2v2h-2zM17 11h2v2h-2zM17 15h2v2h-2zM10 9l5 3-5 3z",
+            ),
+            // A bookmark, filled when the title is in the library.
+            Action::Library if on => ("M6 3h12v18l-6-4-6 4z", ""),
+            Action::Library => ("M6 3h12v18l-6-4-6 4zM8 5v12.3l4-2.7 4 2.7V5z", ""),
+            // An eye, open when watched.
+            Action::Watched if on => (
+                "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5z",
+                "M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7z",
+            ),
+            Action::Watched => (
+                "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5zM12 7c4.2 0 7.3 3.1 8.4 5-1.1 1.9-4.2 5-8.4 5s-7.3-3.1-8.4-5C4.7 10.1 7.8 7 12 7z",
+                "",
+            ),
+        }
+    }
+}
 
 /// Which half of the screen the remote is in.
 ///
@@ -64,7 +84,8 @@ pub struct Detail {
 
     /// Which half of the screen the remote is in.
     pub pane: Pane,
-    /// Which button on the action row the remote is on.
+    /// Which button on the action row the remote is on, as an index into
+    /// `actions()`.
     pub action: usize,
     /// Which source the play button and the technical panel are about, as an
     /// index into `sources`.
@@ -98,6 +119,9 @@ pub struct Detail {
     pub episode_focus: usize,
     /// True while the remote is on the season bar above the episodes.
     pub on_seasons: bool,
+    /// True while the remote is on the focused episode's watched button, at
+    /// the end of its row: Right from the row, Left back to it.
+    pub on_mark: bool,
     /// The episode the source column is about, for a series.
     pub episode: Option<String>,
     /// Whether the viewer has moved in the episode list yet. Until they have,
@@ -135,7 +159,7 @@ impl Detail {
             sources: Vec::new(),
             plan: None,
             pane: Pane::Record,
-            action: ACTION_TRAILER,
+            action: 0,
             selected: None,
             source_focus: 0,
             provider: 0,
@@ -152,6 +176,7 @@ impl Detail {
             chosen_season: None,
             episode_focus: 0,
             on_seasons: false,
+            on_mark: false,
             episode: None,
             episodes_touched: false,
         }
@@ -300,10 +325,10 @@ impl Detail {
         // A button that cannot be pressed — no trailer, no playable source —
         // is stepped over rather than landed on.
         let enabled = self.enabled();
-        while next >= 0 && (next as usize) < ACTIONS.len() && !enabled[next as usize] {
+        while next >= 0 && (next as usize) < enabled.len() && !enabled[next as usize] {
             next += dx.signum();
         }
-        if next < 0 || next as usize >= ACTIONS.len() || next as usize == self.action {
+        if next < 0 || next as usize >= enabled.len() || next as usize == self.action {
             return false;
         }
         self.action = next as usize;
@@ -407,7 +432,7 @@ impl Detail {
         if enabled.get(self.action).copied().unwrap_or(false) {
             return;
         }
-        self.action = enabled.iter().position(|ok| *ok).unwrap_or(ACTION_TRAILER);
+        self.action = enabled.iter().position(|ok| *ok).unwrap_or(0);
     }
 
     /// Ok in the source column: this is the one it plays from now.
@@ -603,9 +628,21 @@ impl Detail {
             }
             return false;
         }
+        if dx > 0 {
+            if self.on_mark || self.watch.is_none() || self.focused_episode().is_none() {
+                return false;
+            }
+            self.on_mark = true;
+            return true;
+        }
         if dx < 0 {
+            if self.on_mark {
+                self.on_mark = false;
+                return true;
+            }
             return self.leave_for_record();
         }
+        self.on_mark = false;
         if dy < 0 {
             if self.episode_focus == 0 {
                 self.on_seasons = true;
@@ -628,6 +665,13 @@ impl Detail {
         self.pane = Pane::Record;
         self.settle();
         true
+    }
+
+    /// Whether the focused episode is watched, as the account has it.
+    pub fn episode_watched(&self, video_id: &str) -> bool {
+        self.watch
+            .as_ref()
+            .is_some_and(|w| w.watched.iter().any(|id| id == video_id))
     }
 
     /// Ok on an episode: the column turns over to its sources, which are asked
@@ -785,8 +829,75 @@ impl Detail {
     /// A title with no trailer has none, and the record then has nothing to
     /// focus — which is why Left out of the source column checks this before
     /// it moves the remote anywhere.
-    pub fn enabled(&self) -> [bool; 1] {
-        [non_empty(&self.meta.trailer).is_some()]
+    pub fn enabled(&self) -> Vec<bool> {
+        self.actions()
+            .into_iter()
+            .map(|action| match action {
+                Action::Trailer => non_empty(&self.meta.trailer).is_some(),
+                // Only once the account has answered: until then there is no
+                // telling which way the button would go.
+                Action::Library | Action::Watched => self.watch.is_some(),
+            })
+            .collect()
+    }
+
+    pub fn actions(&self) -> Vec<Action> {
+        let mut actions = vec![Action::Trailer, Action::Library];
+        if !self.is_series() {
+            actions.push(Action::Watched);
+        }
+        actions
+    }
+
+    pub fn focused_action(&self) -> Option<Action> {
+        self.actions().get(self.action).copied()
+    }
+
+    pub fn in_library(&self) -> bool {
+        self.watch.as_ref().is_some_and(|w| w.in_library)
+    }
+
+    /// A film counts as watched once the account has counted a viewing.
+    pub fn watched(&self) -> bool {
+        self.watch
+            .as_ref()
+            .is_some_and(|w| w.times_watched > 0 || w.flagged_watched)
+    }
+
+    /// The row's words and marks, as the account currently has it.
+    pub fn action_faces(&self) -> Vec<(String, &'static str, &'static str)> {
+        self.actions()
+            .into_iter()
+            .map(|action| {
+                let (label, on) = match action {
+                    Action::Trailer => ("Fragman", false),
+                    Action::Library if self.in_library() => ("Kütüphanede", true),
+                    Action::Library => ("Kütüphaneye ekle", false),
+                    Action::Watched if self.watched() => ("İzlendi", true),
+                    Action::Watched => ("İzlendi say", false),
+                };
+                let (mark, cut) = action.mark(on);
+                (label.to_string(), mark, cut)
+            })
+            .collect()
+    }
+
+    /// Where a film or an episode should start: where the account says it was
+    /// left, if it was left in this one. A position of a millisecond is the
+    /// reference's way of pointing "Devam Et" at the next episode, not a place
+    /// in it.
+    pub fn resume_seconds(&self, video_id: &str) -> u64 {
+        let Some(watch) = self.watch.as_ref() else {
+            return 0;
+        };
+        if watch.video_id.as_deref() != Some(video_id) {
+            return 0;
+        }
+        match (watch.time_offset, watch.duration) {
+            (Some(at), Some(of)) if at > 1_000 && (of == 0 || at < of) => at / 1_000,
+            (Some(at), None) if at > 1_000 => at / 1_000,
+            _ => 0,
+        }
     }
 
     /// How long the film is, in seconds, if the catalogue said.
@@ -1398,5 +1509,46 @@ mod series_tests {
     fn today_is_an_iso_date() {
         let today = today();
         assert_eq!(date_prefix(&today).as_deref(), Some(today.as_str()));
+    }
+
+    #[test]
+    fn right_on_an_episode_reaches_its_watched_button_and_left_comes_back() {
+        let mut detail = breaking_bad();
+        detail.take_watch(TitleState::default());
+        detail.pane = Pane::Episodes;
+        assert!(detail.step(1, 0));
+        assert!(detail.on_mark);
+        assert!(!detail.step(1, 0), "nothing further right");
+        assert!(detail.step(-1, 0));
+        assert!(!detail.on_mark);
+        assert_eq!(detail.pane, Pane::Episodes, "back on the row, not out of the column");
+    }
+
+    #[test]
+    fn a_film_offers_library_and_watched_and_a_series_only_library() {
+        let film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        assert_eq!(film.actions(), vec![Action::Trailer, Action::Library, Action::Watched]);
+        assert_eq!(breaking_bad().actions(), vec![Action::Trailer, Action::Library]);
+        // Before the account has answered, neither can be pressed.
+        assert_eq!(film.enabled(), vec![false, false, false]);
+    }
+
+    #[test]
+    fn a_film_resumes_where_the_account_says_and_not_from_a_pointer() {
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_watch(TitleState {
+            video_id: Some("tt1".into()),
+            time_offset: Some(754_000),
+            duration: Some(7_200_000),
+            ..TitleState::default()
+        });
+        assert_eq!(film.resume_seconds("tt1"), 754);
+        assert_eq!(film.resume_seconds("tt2"), 0);
+        film.take_watch(TitleState {
+            video_id: Some("tt1".into()),
+            time_offset: Some(1),
+            ..TitleState::default()
+        });
+        assert_eq!(film.resume_seconds("tt1"), 0, "1 ms points at the episode, not into it");
     }
 }

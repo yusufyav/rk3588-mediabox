@@ -26,6 +26,7 @@ The contract:
 from __future__ import annotations
 
 import itertools
+from datetime import datetime, timezone
 import logging
 import os
 import threading
@@ -37,6 +38,7 @@ from ..errors import InvalidRequest, NotFound, UpstreamError
 from .addons import AddonClient, addons_supporting, parse_manifest
 from .api import DEFAULT_API_URL, SessionStore, StremioAPI
 from .local_search import LocalSearch
+from . import library_state
 from .watched import WatchedBitField, ordered_video_ids
 from .models import (
     Addon,
@@ -631,6 +633,126 @@ class HeadlessStremio:
             thread.join(timeout=self.api._timeout + 1.0)
         if record is None and errors:
             raise UpstreamError("the account's record of this title is unavailable", {"errors": errors})
+        return _watch_state(record, meta)
+
+    # -------------------------------------------------- the account's record
+
+    def record_progress(
+        self,
+        type_name: str,
+        item_id: str,
+        *,
+        video_id: str | None,
+        time_ms: int,
+        duration_ms: int,
+        seek: bool = False,
+        closed: bool = False,
+        name: str = "",
+        poster: str | None = None,
+    ) -> dict[str, Any]:
+        """Where playback has got to, written to the account as stremio-core writes it."""
+        if time_ms < 0 or duration_ms < 0:
+            raise InvalidRequest("a position cannot be negative")
+
+        def change(record: dict[str, Any], meta: Meta | None, now: Any) -> None:
+            library_state.progress(
+                record, meta, video_id or item_id, int(time_ms), int(duration_ms), seek=seek, now=now
+            )
+            if closed:
+                library_state.closed(record, meta, now)
+
+        return self._change_record(type_name, item_id, name, poster, change)
+
+    def mark_watched(
+        self,
+        type_name: str,
+        item_id: str,
+        *,
+        watched: bool,
+        video_id: str | None = None,
+        season: int | None = None,
+        name: str = "",
+        poster: str | None = None,
+    ) -> dict[str, Any]:
+        """A film, an episode, or a whole season, marked watched or not."""
+
+        def change(record: dict[str, Any], meta: Meta | None, now: Any) -> None:
+            if meta is None or (video_id is None and season is None):
+                library_state.mark_title_watched(record, watched, now)
+                return
+            if season is not None:
+                videos = [v for v in meta.videos if v.season == season]
+                library_state.mark_videos_watched(record, meta, videos, watched, now, season=season)
+                return
+            video = next((v for v in meta.videos if v.id == video_id), None)
+            if video is None:
+                raise NotFound(f"{item_id} has no episode {video_id}")
+            library_state.mark_videos_watched(record, meta, [video], watched, now)
+
+        return self._change_record(type_name, item_id, name, poster, change)
+
+    def set_in_library(
+        self, type_name: str, item_id: str, *, in_library: bool, name: str = "", poster: str | None = None
+    ) -> dict[str, Any]:
+        return self._change_record(
+            type_name,
+            item_id,
+            name,
+            poster,
+            lambda record, meta, now: library_state.set_in_library(record, in_library),
+            needs_meta=False,
+        )
+
+    def rewind(self, type_name: str, item_id: str) -> dict[str, Any]:
+        """Out of "Devam Et": the position is cleared and nothing else is."""
+        return self._change_record(
+            type_name,
+            item_id,
+            "",
+            None,
+            lambda record, meta, now: library_state.rewind(record),
+            needs_meta=False,
+            create=False,
+        )
+
+    def _change_record(
+        self,
+        type_name: str,
+        item_id: str,
+        name: str,
+        poster: str | None,
+        change: Any,
+        *,
+        needs_meta: bool = True,
+        create: bool = True,
+    ) -> dict[str, Any]:
+        """Read the title's record, change it, write it back, and say how it now stands.
+
+        A title the account has never seen gets the record stremio-core makes
+        for one: temporary and removed, so it is in "Devam Et" once something
+        of it has been watched, and not in the library until it is added.
+        """
+        if not isinstance(item_id, str) or not item_id:
+            raise InvalidRequest("a title id is required")
+        record = self.api.library_item(item_id)
+        meta: Meta | None = None
+        if needs_meta and type_name == "series":
+            meta = self.meta(type_name, item_id)
+        now = datetime.now(timezone.utc)
+        if record is None:
+            if not create:
+                raise NotFound(f"the account has no record of {item_id}")
+            if meta is not None:
+                name, poster = name or meta.name, poster or meta.poster
+            record = library_state.new_record(item_id, type_name, name or item_id, poster, now)
+        change(record, meta, now)
+        library_state.touched(record, now)
+        self.api.datastore_put([record])
+        if type_name == "series" and meta is None:
+            try:
+                meta = self.meta(type_name, item_id)
+            except (UpstreamError, NotFound):
+                meta = None
         return _watch_state(record, meta)
 
     def _meta_uncached(self, type_name: str, item_id: str) -> Meta:
