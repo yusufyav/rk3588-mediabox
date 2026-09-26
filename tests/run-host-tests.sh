@@ -573,6 +573,26 @@ else
   echo "ok   the seed carries no per-box identity"
 fi
 contains "the capture reports Kodi drift" "$capture" 'settings differing from config/kodi/guisettings-appliance.xml'
+# Each script the capture runs on the board is its own `bash -s` under
+# `set -u`, so a variable one of them reads has to be handed to that one. The
+# font gate once read UI_FONT in the gate script while only the inventory
+# script was given it, and the first real capture stopped there.
+unpassed="$(awk '
+  /mediabox_ssh ".*bash -s" <<.REMOTE_EOF./ { inv = $0; body = ""; on = 1; next }
+  on && /^REMOTE_EOF$/ {
+    n = split("PREFIX STAGE VERSION UI_FONT GOLDEN_KERNEL GOLDEN_OS GOLDEN_ARCH GOLDEN_MODEL GOLDEN_HOST", v, " ")
+    for (i = 1; i <= n; i++)
+      if (index(body, "$" v[i]) && !index(inv, v[i] "=")) print v[i] " at: " substr(inv, 1, 60)
+    on = 0; next
+  }
+  on { body = body "\n" $0 }' "$here/scripts/release/create-mediabox-release.sh")"
+if [ -z "$unpassed" ]; then
+  echo "ok   every script the capture runs on the board is given what it reads"
+else
+  echo "FAIL a capture script on the board reads a variable it is not given:"
+  printf '%s\n' "$unpassed" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
 # The browser's enterprise policy is product, it lives under /etc, and it was
 # on the working board while no script in this repository installed it.
 contains "the browser policy is installed" "$capture" 'etc/chromium/policies/managed/mediabox.json'

@@ -410,7 +410,7 @@ mediabox_ssh "printf 'packaging_repo_head=%s\norigin_main=%s\n' '$repo_head' '$o
 
 say "release gates"
 gate_rc=0
-gate_report="$(mediabox_ssh "PREFIX='$MEDIABOX_PREFIX' STAGE='$stage' bash -s" <<'REMOTE_EOF'
+gate_report="$(mediabox_ssh "PREFIX='$MEDIABOX_PREFIX' STAGE='$stage' UI_FONT='$ui_font' bash -s" <<'REMOTE_EOF'
 set -euo pipefail
 M="$STAGE/meta"
 fail=0
