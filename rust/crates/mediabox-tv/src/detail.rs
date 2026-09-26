@@ -869,12 +869,12 @@ impl Detail {
         self.actions()
             .into_iter()
             .map(|action| {
+                // The reference's buttons: "Fragman" in words, the library and
+                // watched ones as marks alone, filled when they are on.
                 let (label, on) = match action {
                     Action::Trailer => ("Fragman", false),
-                    Action::Library if self.in_library() => ("Kütüphanede", true),
-                    Action::Library => ("Kütüphaneye ekle", false),
-                    Action::Watched if self.watched() => ("İzlendi", true),
-                    Action::Watched => ("İzlendi say", false),
+                    Action::Library => ("", self.in_library()),
+                    Action::Watched => ("", self.watched()),
                 };
                 let (mark, cut) = action.mark(on);
                 (label.to_string(), mark, cut)

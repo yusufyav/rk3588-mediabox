@@ -152,7 +152,7 @@ component EpisodeLine inherits Rectangle {
 component Pill inherits Rectangle {
     in property <string> text;
 
-    height: Metrics.vh * 0.037;
+    height: Metrics.vh * 0.03;
     width: caption.preferred-width + self.height * 0.9;
     border-radius: self.height / 2;
     background: #ffffff1c;
@@ -164,7 +164,7 @@ component Pill inherits Rectangle {
         height: 100%;
         text: root.text;
         color: Theme.text;
-        font-size: Metrics.vh * 0.0155;
+        font-size: Metrics.vw * 0.0078;
         font-weight: 500;
         vertical-alignment: center;
         horizontal-alignment: center;
@@ -207,7 +207,7 @@ component ChipSection inherits Rectangle {
         x: 0;
         y: label-h;
         width: 100%;
-        height: Metrics.vh * 0.037;
+        height: Metrics.vh * 0.03;
         spacing: Metrics.vw * 0.008;
         alignment: start;
 
@@ -228,7 +228,9 @@ component Action inherits Rectangle {
     in property <bool> enabled: true;
 
     height: Metrics.vh * 0.056;
-    width: caption.preferred-width + self.height * 1.9;
+    // The reference's trailer button carries its word; its library and
+    // watched buttons are marks alone.
+    width: label == "" ? self.height : caption.preferred-width + self.height * 1.9;
     border-radius: self.height / 2;
     opacity: enabled ? 1.0 : 0.38;
     background: focused ? Theme.focus-fill : #ffffff14;
@@ -238,8 +240,8 @@ component Action inherits Rectangle {
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
     HorizontalLayout {
-        padding-left: root.height * 0.42;
-        padding-right: root.height * 0.5;
+        padding-left: label == "" ? 0px : root.height * 0.42;
+        padding-right: label == "" ? 0px : root.height * 0.5;
         spacing: root.height * 0.24;
         alignment: center;
 
@@ -269,6 +271,7 @@ component Action inherits Rectangle {
         }
 
         caption := Text {
+            visible: label != "";
             text: label;
             color: focused ? #0a0c10 : Theme.text;
             font-size: Metrics.vh * 0.0165;
@@ -400,13 +403,14 @@ export component Detail inherits Rectangle {
     in property <bool> on-mark;
     in property <string> episode-heading;
 
-    // The measurements are the reference's own, read off it and kept as
-    // fractions of the panel: the source column is 23% of the width, the record
-    // starts 13.8% down and is inset 4.8% from the left.
-    property <length> column-w: max(300px, min(980px, root.width * 0.232));
-    property <length> column-x: root.width - column-w - Metrics.gutter * 0.6;
-    property <length> record-x: max(Metrics.gutter, root.width * 0.048);
-    property <length> record-w: column-x - record-x - Metrics.gutter * 0.6;
+    // The measurements are the reference's own, read off a 4K screenshot of
+    // its detail page and kept as fractions of the panel: the source column
+    // runs from 76.5% of the width to the edge and from 7.7% of the height to
+    // the bottom; the record starts 7.6% down and 3.15% in.
+    property <length> column-x: root.width * 0.765;
+    property <length> column-w: root.width - column-x;
+    property <length> record-x: root.width * 0.0315;
+    property <length> record-w: column-x - record-x - root.width * 0.02;
     property <length> panel-pad: Metrics.vh * 0.018;
 
     background: Theme.bg;
@@ -470,10 +474,10 @@ export component Detail inherits Rectangle {
     // The way back. The reference puts a chevron here and nothing else — no
     // brand, no clock — and this screen is the film's, not the box's.
     Path {
-        x: record-x;
-        y: Metrics.vh * 0.055;
-        width: Metrics.vh * 0.03;
-        height: Metrics.vh * 0.03;
+        x: root.width * 0.018;
+        y: root.height * 0.03;
+        width: Metrics.vh * 0.024;
+        height: Metrics.vh * 0.024;
         viewbox-width: 24;
         viewbox-height: 24;
         commands: "M15.5 3.2L6.7 12l8.8 8.8";
@@ -484,8 +488,8 @@ export component Detail inherits Rectangle {
     // ------------------------------------------------------------ the record
     VerticalLayout {
         x: record-x;
-        y: root.height * 0.138;
-        width: record-w * 0.75;
+        y: root.height * 0.076;
+        width: record-w;
         spacing: Metrics.vh * 0.019;
         alignment: start;
 
@@ -497,7 +501,7 @@ export component Detail inherits Rectangle {
             source: logo;
             image-fit: contain;
             horizontal-alignment: left;
-            height: Metrics.vh * 0.12;
+            height: Metrics.vh * 0.118;
         }
         if logo.width == 0: Text {
             text: title;
@@ -512,37 +516,38 @@ export component Detail inherits Rectangle {
 
         // How long, when, and what it scored — in the reference's order, with
         // the rating wearing IMDb's badge rather than their name.
+        // Spread as the reference spreads them -- 100 min, 2011, 7.8 -- with
+        // IMDb's badge beside the rating rather than spaced off like a fact.
         if facts.length > 0: HorizontalLayout {
             height: Metrics.vh * 0.04;
-            spacing: Metrics.vw * 0.013;
+            spacing: Metrics.vw * 0.024;
             alignment: start;
 
-            for fact in facts: Text {
-                text: fact;
-                color: Theme.text;
-                font-size: Metrics.vh * 0.023;
-                font-weight: 600;
-                vertical-alignment: center;
-                wrap: no-wrap;
-            }
-            if imdb: Rectangle {
-                width: badge.preferred-width + Metrics.vh * 0.018;
-                height: Metrics.vh * 0.028;
-                y: (parent.height - self.height) / 2;
-                border-radius: Metrics.vh * 0.005;
-                background: #f5c518;
-
-                badge := Text {
-                    x: 0;
-                    y: 0;
-                    width: 100%;
-                    height: 100%;
-                    text: "IMDb";
-                    color: #0a0c10;
-                    font-size: Metrics.vh * 0.016;
-                    font-weight: 800;
+            for fact[i] in facts: HorizontalLayout {
+                spacing: Metrics.vw * 0.004;
+                Text {
+                    text: fact;
+                    color: Theme.text;
+                    font-size: Metrics.vw * 0.01;
+                    font-weight: 500;
                     vertical-alignment: center;
-                    horizontal-alignment: center;
+                    wrap: no-wrap;
+                }
+                if imdb && i == facts.length - 1: Rectangle {
+                    width: badge.preferred-width + Metrics.vh * 0.01;
+                    height: Metrics.vh * 0.02;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Metrics.vh * 0.003;
+                    background: #f5c518;
+
+                    badge := Text {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        text: "IMDb";
+                        color: #0a0c10;
+                        font-size: Metrics.vh * 0.012;
+                        font-weight: 800;
+                    }
                 }
             }
         }
@@ -566,7 +571,7 @@ export component Detail inherits Rectangle {
         if summary != "": Text {
             text: summary;
             color: Theme.text;
-            font-size: Metrics.vh * 0.0165;
+            font-size: Metrics.vw * 0.0078;
             font-weight: 400;
             wrap: word-wrap;
             overflow: elide;
@@ -594,13 +599,16 @@ export component Detail inherits Rectangle {
     }
 
     // ----------------------------------------------------------- the sources
+    // The reference's column: to the edge and the bottom, rounded only where
+    // it meets the picture, the backdrop darkened under it rather than a card
+    // laid over it.
     Rectangle {
         x: column-x;
-        y: root.height * 0.138;
+        y: root.height * 0.077;
         width: column-w;
-        height: root.height - self.y - Metrics.gutter * 0.5;
-        border-radius: Theme.radius;
-        background: #21242ed4;
+        height: root.height - self.y;
+        border-top-left-radius: root.width * 0.009;
+        background: #00000073;
         clip: true;
 
         // An episode's sources are headed by the episode, as the reference
