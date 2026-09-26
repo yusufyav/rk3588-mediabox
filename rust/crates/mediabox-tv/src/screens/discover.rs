@@ -22,9 +22,10 @@ use std::collections::BTreeMap;
 use crate::model::DiscoverCatalog;
 use crate::state::Item;
 
-/// Across the grid. Fixed rather than measured: the focus model is a grid, and
-/// a grid that reflowed would move a title out from under the remote.
-pub const COLUMNS: usize = 5;
+/// Across the grid: the reference's seven, measured off its Discover at 4K.
+/// Fixed rather than measured on the panel: the focus model is a grid, and a
+/// grid that reflowed would move a title out from under the remote.
+pub const COLUMNS: usize = 7;
 
 /// stremio-core's `TYPE_PRIORITIES`: films, series, channels, TV, then the
 /// rest, and "other" last of all.
@@ -39,29 +40,7 @@ fn priority(kind: &str) -> i32 {
     }
 }
 
-pub fn kind_label(kind: &str) -> String {
-    match kind {
-        "movie" => "Film".into(),
-        "series" => "Dizi".into(),
-        "channel" => "Kanal".into(),
-        "tv" => "TV".into(),
-        "anime" => "Anime".into(),
-        "other" => "Diğer".into(),
-        other => other.to_string(),
-    }
-}
 
-/// A catalogue's name in the product's language, where it is one of the few
-/// every addon uses; anything else as the addon wrote it.
-fn catalog_label(name: &str) -> String {
-    match name.trim() {
-        "Popular" => "Popüler".into(),
-        "Featured" => "Öne Çıkanlar".into(),
-        "New" | "Latest" => "Yeni".into(),
-        "Top" => "En İyiler".into(),
-        other => other.to_string(),
-    }
-}
 
 fn extra_label(name: &str) -> String {
     match name {
@@ -91,9 +70,26 @@ fn option_label(extra: &str, value: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Zone {
+    /// The places down the left.
+    Places,
+    /// The search box across the top.
+    Search,
     Filters,
     Grid,
+    /// The buttons along the bottom of the record beside the grid.
+    Panel,
 }
+
+/// The buttons under the focused title's record, in the reference's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Trailer,
+    Library,
+    Watched,
+    Show,
+}
+
+pub const BUTTONS: [Button; 4] = [Button::Trailer, Button::Library, Button::Watched, Button::Show];
 
 /// One of the dropdowns along the top, as it is drawn.
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +137,12 @@ pub struct Discover {
     /// The open dropdown's highlighted option.
     pub picker: Option<usize>,
     pub index: usize,
+    /// The place the remote is on, down the left; 1 is Discover.
+    pub place: usize,
+    /// The button the remote is on, under the record.
+    pub button: usize,
+    /// Where Right off the places goes back to.
+    returns_to: Zone,
     /// A catalogue asked for by "Tümünü Gör" before the list of catalogues
     /// has arrived: opened as soon as it does.
     wanted: Option<(String, String, String)>,
@@ -163,6 +165,9 @@ impl Discover {
             filter: 0,
             picker: None,
             index: 0,
+            place: 1,
+            button: 3,
+            returns_to: Zone::Grid,
             wanted: None,
         }
     }
@@ -336,7 +341,7 @@ impl Discover {
         let types = self.types();
         filters.push(Filter {
             label: "İçerik".into(),
-            options: types.iter().map(|kind| kind_label(kind)).collect(),
+            options: types.iter().map(|kind| crate::state::type_name(kind)).collect(),
             selected: types.iter().position(|kind| *kind == self.kind).unwrap_or(0),
         });
         let of_kind = self.of_kind();
@@ -346,7 +351,7 @@ impl Discover {
                 .iter()
                 .map(|index| {
                     let catalog = &self.catalogs[*index];
-                    format!("{} · {}", catalog_label(&catalog.name), catalog.addon_name)
+                    crate::state::catalog_name(&catalog.addon_id, &catalog.id, &catalog.name)
                 })
                 .collect(),
             selected: of_kind.iter().position(|index| *index == self.catalog).unwrap_or(0),
@@ -420,10 +425,21 @@ impl Discover {
     }
 
     pub fn focused(&self) -> Option<&Item> {
-        if self.zone != Zone::Grid {
+        if !matches!(self.zone, Zone::Grid | Zone::Panel) {
             return None;
         }
         self.items.get(self.index)
+    }
+
+    pub fn focused_button(&self) -> Option<Button> {
+        (self.zone == Zone::Panel).then(|| BUTTONS.get(self.button).copied())?
+    }
+
+    fn to_places(&mut self) -> bool {
+        self.returns_to = self.zone.clone();
+        self.zone = Zone::Places;
+        self.place = 1;
+        true
     }
 
     /// Moves the remote. Returns whether anything changed, and the next page
@@ -437,10 +453,54 @@ impl Discover {
             return (moved, None);
         }
         match self.zone {
+            Zone::Places => {
+                if dx > 0 {
+                    self.zone = self.returns_to.clone();
+                    if self.zone == Zone::Grid && self.items.is_empty() {
+                        self.zone = Zone::Filters;
+                    }
+                    return (true, None);
+                }
+                let next = (self.place as i32 + dy).clamp(0, 3) as usize;
+                let moved = next != self.place;
+                self.place = next;
+                (moved, None)
+            }
+            Zone::Search => {
+                if dx < 0 {
+                    return (self.to_places(), None);
+                }
+                if dy > 0 {
+                    self.zone = Zone::Filters;
+                    return (true, None);
+                }
+                (false, None)
+            }
+            Zone::Panel => {
+                if dx != 0 {
+                    let next = self.button as i32 + dx;
+                    if next < 0 {
+                        self.zone = Zone::Grid;
+                        return (true, None);
+                    }
+                    let next = (next as usize).min(BUTTONS.len() - 1);
+                    let moved = next != self.button;
+                    self.button = next;
+                    return (moved, None);
+                }
+                (false, None)
+            }
             Zone::Filters => {
                 if dy > 0 && !self.items.is_empty() {
                     self.zone = Zone::Grid;
                     return (true, None);
+                }
+                if dy < 0 {
+                    self.zone = Zone::Search;
+                    return (true, None);
+                }
+                if dx < 0 && self.filter == 0 {
+                    return (self.to_places(), None);
                 }
                 if dx != 0 {
                     let count = self.filters().len() as i32;
@@ -459,6 +519,17 @@ impl Discover {
                     return (true, None);
                 }
                 let column = self.index % COLUMNS;
+                let row_end = (self.index - column + COLUMNS).min(len) - 1;
+                if dx < 0 && column == 0 {
+                    return (self.to_places(), None);
+                }
+                if dx > 0 && self.index == row_end {
+                    // Right off the end of a row: the record's buttons, on
+                    // "Göster", which is what Ok on the poster would do.
+                    self.zone = Zone::Panel;
+                    self.button = BUTTONS.len() - 1;
+                    return (true, None);
+                }
                 let moved = if dy < 0 && self.index < COLUMNS {
                     self.zone = Zone::Filters;
                     true
@@ -662,12 +733,13 @@ mod tests {
     #[test]
     fn down_into_a_short_last_row_lands_on_its_last_title() {
         let (mut discover, first) = opened();
-        discover.take_page(first.generation, items("g", 7));
+        // A full row and two over, whatever COLUMNS happens to be.
+        discover.take_page(first.generation, items("g", COLUMNS + 2));
         discover.ended = true;
         discover.zone = Zone::Grid;
-        discover.index = 4;
+        discover.index = COLUMNS - 1;
         assert!(discover.step(0, 1).0);
-        assert_eq!(discover.index, 6);
+        assert_eq!(discover.index, COLUMNS + 1);
     }
 
     #[test]
@@ -703,5 +775,26 @@ mod tests {
             .expect("the wanted catalogue's first page");
         assert_eq!((request.addon_id.as_str(), request.id.as_str()), ("c", "new"));
         assert_eq!(discover.filters()[1].selected, 1);
+    }
+
+    #[test]
+    fn the_places_search_and_record_buttons_are_reached_as_on_the_board() {
+        let (mut discover, first) = opened();
+        discover.take_page(first.generation, items("g", 12));
+        discover.zone = Zone::Grid;
+        assert!(discover.step(-1, 0).0);
+        assert_eq!(discover.zone, Zone::Places);
+        assert!(discover.step(1, 0).0);
+        assert_eq!(discover.zone, Zone::Grid);
+        for _ in 0..COLUMNS {
+            discover.step(1, 0);
+        }
+        assert_eq!(discover.focused_button(), Some(Button::Show));
+        assert!(discover.focused().is_some(), "the record is still the focused title's");
+        discover.step(-1, 0);
+        assert_eq!(discover.focused_button(), Some(Button::Watched));
+        discover.zone = Zone::Filters;
+        assert!(discover.step(0, -1).0);
+        assert_eq!(discover.zone, Zone::Search);
     }
 }

@@ -116,6 +116,24 @@ export component MediaBoxWindow inherits Window {
     in property <bool> discover-loading;
     in property <bool> discover-ended;
     in property <string> discover-note;
+    in property <bool> discover-on-grid;
+    in property <int> discover-zone;
+    in property <int> discover-place;
+    in property <int> discover-button;
+    in property <image> discover-art;
+    in property <image> discover-logo;
+    in property <string> discover-title;
+    in property <[string]> discover-facts;
+    in property <bool> discover-imdb;
+    in property <string> discover-summary;
+    in property <[string]> discover-genres;
+    in property <[string]> discover-cast;
+    in property <[string]> discover-directors;
+    in property <bool> discover-has-trailer;
+    in property <bool> discover-known;
+    in property <bool> discover-in-library;
+    in property <bool> discover-watched;
+    in property <bool> discover-series;
 
     // ---- search
     in property <string> search-query;
@@ -390,11 +408,25 @@ export component MediaBoxWindow inherits Window {
             loading: root.discover-loading;
             ended: root.discover-ended;
             note: root.discover-note;
-            art: root.library-art;
-            title: root.library-title;
-            facts: root.library-facts;
-            summary: root.library-summary;
-            genres: root.library-genres;
+            on-grid: root.discover-on-grid;
+            zone: root.discover-zone;
+            place: root.discover-place;
+            places: root.media-places;
+            button: root.discover-button;
+            art: root.discover-art;
+            logo: root.discover-logo;
+            title: root.discover-title;
+            facts: root.discover-facts;
+            imdb: root.discover-imdb;
+            summary: root.discover-summary;
+            genres: root.discover-genres;
+            cast: root.discover-cast;
+            directors: root.discover-directors;
+            has-trailer: root.discover-has-trailer;
+            known: root.discover-known;
+            in-library: root.discover-in-library;
+            watched: root.discover-watched;
+            series: root.discover-series;
         }
 
         if screen == "library": Library {
@@ -583,6 +615,7 @@ export component MediaBoxWindow inherits Window {
         // The catalogue carries the reference's own chrome instead: its
         // places down the left and its search box across the top.
         if screen != "boot" && screen != "film" && screen != "detail" && screen != "media"
+            && screen != "discover"
             && screen != "settings" && screen != "diagnostics": TopBar {
             x: 0;
             y: 0;

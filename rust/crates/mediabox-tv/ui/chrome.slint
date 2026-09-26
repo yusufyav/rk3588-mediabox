@@ -1,0 +1,88 @@
+import { Theme, Metrics } from "theme.slint";
+import { Icon } from "kit.slint";
+
+// The reference's frame around "Filmler ve Diziler": its places down the
+// left, marks only, and its search box across the top. The board, Discover
+// and the library each draw it; measured off a 4K screenshot of the board.
+export component Chrome inherits Rectangle {
+    in property <bool> on-search;
+    in property <bool> on-places;
+    // The place the remote is on, and the place this screen is.
+    in property <int> place;
+    in property <int> current;
+    in property <[string]> places;
+
+    // ------------------------------------------------------- the search box
+    Rectangle {
+        property <bool> focused: on-search;
+        width: root.width * 0.2307;
+        height: root.height * 0.0389;
+        x: (root.width - self.width) / 2;
+        y: root.height * 0.0139;
+        border-radius: self.height / 2;
+        background: focused ? Theme.focus-fill : #28253c;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+        Text {
+            x: parent.height * 0.62;
+            width: parent.width - parent.height * 1.8;
+            height: 100%;
+            text: "Arayın";
+            color: parent.focused ? #3b4250 : #918f9b;
+            font-size: parent.height * 0.36;
+            vertical-alignment: center;
+        }
+        Icon {
+            x: parent.width - parent.height * 0.62 - self.width;
+            y: (parent.height - self.height) / 2;
+            name: "search";
+            size: parent.height * 0.44;
+            ink: parent.focused ? #0a0c10 : #d9d8df;
+        }
+    }
+
+    // ------------------------------------------------------ the places, left
+    //
+    // The product's own mark at the top rather than the reference's: a play
+    // mark in the accent.
+    Rectangle {
+        x: root.width * 0.0206 - self.width / 2;
+        y: root.height * 0.0181;
+        width: root.width * 0.0169;
+        height: self.width;
+        border-radius: self.width * 0.28;
+        background: Theme.film;
+
+        Path {
+            x: parent.width * 0.3;
+            y: parent.height * 0.26;
+            width: parent.width * 0.46;
+            height: parent.height * 0.48;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M1 0L10 5L1 10z";
+            fill: #ffffff;
+        }
+    }
+
+    for mark[i] in places: Rectangle {
+        property <bool> focused: on-places && i == place;
+        property <length> box: root.width * 0.0245;
+        x: root.width * 0.0206 - self.width / 2;
+        y: root.height * (0.0986 + 0.0705 * i) - self.height / 2;
+        width: box;
+        height: box;
+        border-radius: box * 0.28;
+        background: focused ? Theme.focus-fill : transparent;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: mark;
+            size: root.width * 0.0175;
+            // The board is where this is; the others are where it could go.
+            ink: focused ? #0a0c10 : (i == current ? Theme.film : #60606a);
+        }
+    }
+}

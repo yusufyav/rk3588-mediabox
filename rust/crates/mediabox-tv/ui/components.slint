@@ -321,7 +321,7 @@ export component Art inherits Rectangle {
     picture := Rectangle {
         width: 100%;
         height: 100%;
-        border-radius: Metrics.poster-radius;
+        border-radius: art-w * 0.055;
         clip: true;
 
         // The picture and the name painted under it, as one layer: that is
@@ -406,7 +406,7 @@ export component Art inherits Rectangle {
         y: -Metrics.ring-w;
         width: parent.width + Metrics.ring-w * 2;
         height: parent.height + Metrics.ring-w * 2;
-        border-radius: Metrics.poster-radius + Metrics.ring-w;
+        border-radius: art-w * 0.055 + Metrics.ring-w;
         border-width: Metrics.ring-w;
         border-color: Theme.focus-ring;
         background: transparent;
@@ -454,41 +454,36 @@ export component Poster inherits Rectangle {
 export component GridPoster inherits Rectangle {
     in property <PosterItem> item;
     in property <bool> focused;
+    // The poster's width: the shelves' by default, the grid's own where it
+    // has one (the reference's Discover is seven to a row).
+    in property <length> art-w: Metrics.card-w;
+    in property <length> name-size: Metrics.text-card;
 
-    width: Metrics.card-w;
-    height: Metrics.card-h + Metrics.text-card * 3.4;
+    width: art-w;
+    height: art-w * 1.461 + name-size * 3.4;
 
     Art {
         x: 0;
         y: 0;
+        art-w: root.art-w;
+        art-h: root.art-w * 1.461;
         item: item;
         focused: focused;
     }
 
-    VerticalLayout {
+    // The name, on up to two lines, as the reference names a grid's posters.
+    Text {
         x: 0;
-        y: Metrics.card-h + Metrics.text-card * 0.6;
+        y: art-w * 1.461 + Metrics.vh * 0.012;
         width: 100%;
-        spacing: Metrics.text-card * 0.15;
-
-        Text {
-            text: item.title;
-            color: Theme.text;
-            font-size: Metrics.text-card;
-            font-weight: focused ? 600 : 500;
-            horizontal-alignment: center;
-            overflow: elide;
-            wrap: no-wrap;
-        }
-        Text {
-            text: item.subtitle;
-            color: Theme.dim;
-            font-size: Metrics.text-card * 0.84;
-            font-weight: 600;
-            horizontal-alignment: center;
-            overflow: elide;
-            wrap: no-wrap;
-        }
+        height: name-size * 2.7;
+        text: item.title;
+        color: Theme.text;
+        font-size: name-size;
+        font-weight: focused ? 600 : 500;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+        overflow: elide;
     }
 }
 

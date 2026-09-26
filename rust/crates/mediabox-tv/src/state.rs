@@ -456,24 +456,33 @@ pub fn shelves_from(home: &crate::model::HomeRows, library: Option<&LibraryListi
 /// type by `TYPE_{type}`, in the reference's own Turkish (stremio-translations,
 /// tr-TR). A catalogue with no translation keeps its own name.
 pub fn catalog_title(addon_id: &str, catalog_id: &str, name: &str, kind: &str) -> String {
+    format!("{} - {}", catalog_name(addon_id, catalog_id, name), type_name(kind))
+}
+
+/// The catalogue half of `catalog_title`: what the reference's Discover calls
+/// it in its dropdown.
+pub fn catalog_name(addon_id: &str, catalog_id: &str, name: &str) -> String {
     let key = format!("{}_{catalog_id}", addon_id.replace('.', "_"));
-    let catalogue = match key.as_str() {
+    match key.as_str() {
         "com_linvo_cinemeta_top" => "Beğenilenler".to_string(),
         "com_linvo_cinemeta_imdbRating" => "Öne Çıkanlar".to_string(),
         "com_linvo_cinemeta_year" => "Yeniler".to_string(),
         "org_stremio_pubdomainmovies_publicdomainmovies" => "Kamu Malı Filmler".to_string(),
         _ if !name.trim().is_empty() => name.trim().to_string(),
         _ => capitalised(catalog_id),
-    };
-    let kind = match kind {
+    }
+}
+
+/// A type as the reference names it, `TYPE_{type}` in its tr-TR strings.
+pub fn type_name(kind: &str) -> String {
+    match kind {
         "movie" => "Film".to_string(),
         "series" => "Dizi".to_string(),
         "tv" => "TV kanalı".to_string(),
         "channel" => "Kanal".to_string(),
         "other" => "Diğer".to_string(),
         other => capitalised(other),
-    };
-    format!("{catalogue} - {kind}")
+    }
 }
 
 fn capitalised(text: &str) -> String {

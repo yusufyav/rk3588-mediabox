@@ -179,6 +179,9 @@ struct App {
     /// record beside it can say what a title is without opening it. An entry
     /// from the account's library carries a name and a poster and little else.
     hero_meta: std::collections::HashMap<String, model::Meta>,
+    /// And the account's record of those titles, for Discover's library and
+    /// watched buttons.
+    hero_state: std::collections::HashMap<String, model::TitleState>,
     /// The account's library as the media core last listed it, all of it: the
     /// library screen is built from this, not from the shelves, which carry
     /// only the first few titles of it.
@@ -766,7 +769,11 @@ impl App {
         // only the grids have a record beside them.
         let item = match self.route() {
             Route::Library => self.library.focused(),
-            Route::Discover => self.discover.focused(),
+            // Discover's record shows a title whatever the remote is on.
+            Route::Discover => self
+                .discover
+                .focused()
+                .or_else(|| self.discover.items.get(self.discover.index)),
             _ => None,
         };
         let Some(item) = item else {
@@ -775,18 +782,21 @@ impl App {
         if item.local || self.hero_meta.contains_key(&item.id) {
             return;
         }
-        let complete = item.summary.is_some() && item.year.is_some() && !item.genres.is_empty();
-        if complete {
-            return;
-        }
-        spawn_hero(item.kind.clone(), item.id.clone());
+        // Discover's record has the title's library and watched buttons, and
+        // those need the account's word on it.
+        let with_state = self.route() == Route::Discover;
+        spawn_hero(item.kind.clone(), item.id.clone(), with_state);
     }
 
-    fn hero_arrived(&mut self, meta: model::Meta) {
+    fn hero_arrived(&mut self, meta: model::Meta, state: Option<model::TitleState>) {
         // Bounded: this is a courtesy for the titles in front of the viewer,
         // not a second copy of the catalogue.
         if self.hero_meta.len() >= 256 {
             self.hero_meta.clear();
+            self.hero_state.clear();
+        }
+        if let Some(state) = state {
+            self.hero_state.insert(meta.id.clone(), state);
         }
         let focused = match self.route() {
             Route::Library => self.library.focused(),
@@ -910,11 +920,35 @@ impl App {
                     self.paint();
                     return;
                 }
-                if self.discover.zone == Zone::Filters {
-                    if self.discover.open_picker() {
-                        self.paint();
+                match self.discover.zone {
+                    Zone::Filters => {
+                        if self.discover.open_picker() {
+                            self.paint();
+                        }
+                        return;
                     }
-                    return;
+                    Zone::Search => {
+                        self.open_screen(state::Nav::Search);
+                        return;
+                    }
+                    Zone::Places => {
+                        match self.discover.place {
+                            0 => self.open_media(),
+                            2 => self.open_screen(state::Nav::Library),
+                            3 => self.open_screen(state::Nav::Settings),
+                            // Discover is this screen.
+                            _ => {
+                                self.discover.step(1, 0);
+                                self.paint();
+                            }
+                        }
+                        return;
+                    }
+                    Zone::Panel => {
+                        self.press_discover_button();
+                        return;
+                    }
+                    Zone::Grid => {}
                 }
                 // A page that failed is tried again from wherever the remote is.
                 if self.discover.error.is_some() && self.discover.items.is_empty() {
@@ -933,6 +967,9 @@ impl App {
                 // One press, one step: the list, then the filters, then out.
                 if self.discover.close_picker() {
                     self.paint();
+                } else if matches!(self.discover.zone, Zone::Panel | Zone::Places | Zone::Search) {
+                    self.discover.zone = if self.discover.items.is_empty() { Zone::Filters } else { Zone::Grid };
+                    self.paint();
                 } else if self.discover.zone == Zone::Grid && !self.discover.items.is_empty() {
                     self.discover.zone = Zone::Filters;
                     self.paint();
@@ -941,6 +978,53 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Ok on one of the buttons under Discover's record.
+    fn press_discover_button(&mut self) {
+        use screens::discover::Button;
+        let (Some(button), Some(item)) = (self.discover.focused_button(), self.discover.focused().cloned())
+        else {
+            return;
+        };
+        let meta = self.hero_meta.get(&item.id);
+        let state = self.hero_state.get(&item.id);
+        let mut change = serde_json::json!({
+            "type": item.kind,
+            "id": item.id,
+            "name": item.title,
+            "poster": item.poster,
+        });
+        match button {
+            Button::Show => self.open_detail_for(&item),
+            Button::Trailer => {
+                if let Some(id) = meta.and_then(|m| m.trailer.clone()).filter(|t| !t.is_empty()) {
+                    spawn_open(format!("https://www.youtube.com/tv#/watch?v={id}"));
+                }
+            }
+            Button::Library => {
+                let Some(state) = state else { return };
+                change["inLibrary"] = serde_json::json!(!state.in_library);
+                spawn_preview_change("library", item.id.clone(), change);
+            }
+            Button::Watched => {
+                let Some(state) = state else { return };
+                change["watched"] = serde_json::json!(!(state.times_watched > 0 || state.flagged_watched));
+                spawn_preview_change("watched", item.id.clone(), change);
+            }
+        }
+    }
+
+    fn preview_changed(&mut self, id: String, answer: Result<model::TitleState, String>) {
+        match answer {
+            Ok(state) => {
+                self.hero_state.insert(id, state);
+            }
+            Err(why) => self.say(format!("Stremio hesabına yazılamadı — {why}")),
+        }
+        if self.route() == Route::Discover {
+            self.paint();
         }
     }
 
@@ -980,7 +1064,14 @@ impl App {
             .filters()
             .into_iter()
             .map(|filter| DiscoverFilter {
-                value: filter.value().into(),
+                // A filter left open shows its own name, as the reference's
+                // "Tür" dropdown does.
+                value: if filter.selected == 0 && filter.options.first().is_some_and(|o| o == "Tümü") {
+                    filter.label.clone()
+                } else {
+                    filter.value()
+                }
+                .into(),
                 label: filter.label.into(),
                 selected: filter.selected as i32,
                 options: strings(filter.options.into_iter()),
@@ -989,6 +1080,15 @@ impl App {
         window.set_discover_filters(slint::ModelRc::new(slint::VecModel::from(filters)));
         window.set_discover_filter(discover.filter as i32);
         window.set_discover_on_filters(discover.zone == Zone::Filters);
+        window.set_discover_on_grid(discover.zone == Zone::Grid);
+        window.set_discover_zone(match discover.zone {
+            Zone::Places => 1,
+            Zone::Search => 2,
+            Zone::Panel => 3,
+            Zone::Filters | Zone::Grid => 0,
+        });
+        window.set_discover_place(discover.place as i32);
+        window.set_discover_button(discover.button as i32);
         window.set_discover_picker(discover.picker.map(|p| p as i32).unwrap_or(-1));
         window.set_discover_index(discover.index as i32);
         window.set_discover_columns(screens::discover::COLUMNS as i32);
@@ -998,7 +1098,7 @@ impl App {
             (Some(why), _, true) => format!("Katalog yüklenemedi — {why}. Tamam ile yeniden deneyin."),
             (Some(why), _, false) => format!("Sonraki sayfa yüklenemedi — {why}"),
             (None, true, true) => "Bu filtrede başlık yok. Başka bir tür ya da katalog seçin.".into(),
-            (None, true, false) => "Katalog sonu".into(),
+            (None, true, false) => String::new(),
             _ if discover.catalogs.is_empty() => "Kataloglar yükleniyor…".into(),
             _ => String::new(),
         };
@@ -1011,8 +1111,81 @@ impl App {
         );
         window.set_discover_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
 
-        let focused = self.discover.focused().cloned();
-        self.paint_preview(window, focused.as_ref());
+        // The record: the grid's focused title, or the first while the remote
+        // is up in the filters, as the reference always shows one.
+        let item = self
+            .discover
+            .focused()
+            .or_else(|| self.discover.items.get(self.discover.index))
+            .cloned();
+        let Some(item) = item else {
+            window.set_discover_title("".into());
+            return;
+        };
+        let meta = self.hero_meta.get(&item.id).cloned();
+        let state = self.hero_state.get(&item.id).cloned();
+        window.set_discover_title(item.title.clone().into());
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(runtime) = meta.as_ref().and_then(|m| m.runtime.clone()).filter(|r| !r.is_empty()) {
+            facts.push(runtime);
+        }
+        if let Some(year) = item.year.clone().or_else(|| meta.as_ref().and_then(|m| m.release_info.clone())) {
+            facts.push(year);
+        }
+        let rating = item.rating.clone().or_else(|| meta.as_ref().and_then(|m| m.imdb_rating.clone()));
+        if let Some(rating) = rating.clone() {
+            facts.push(rating);
+        }
+        window.set_discover_facts(strings(facts.into_iter()));
+        window.set_discover_imdb(rating.is_some());
+        window.set_discover_summary(
+            item.summary
+                .clone()
+                .or_else(|| meta.as_ref().and_then(|m| m.description.clone()))
+                .unwrap_or_default()
+                .into(),
+        );
+        let genres = if item.genres.is_empty() {
+            meta.as_ref().map(|m| m.genres.clone()).unwrap_or_default()
+        } else {
+            item.genres.clone()
+        };
+        window.set_discover_genres(strings(genres.iter().take(3).map(|g| detail::genre_in_turkish(g))));
+        window.set_discover_cast(strings(
+            meta.as_ref().map(|m| m.cast.clone()).unwrap_or_default().into_iter().take(3),
+        ));
+        window.set_discover_directors(strings(
+            meta.as_ref().map(|m| m.director.clone()).unwrap_or_default().into_iter().take(2),
+        ));
+        window.set_discover_has_trailer(
+            meta.as_ref().and_then(|m| m.trailer.as_ref()).is_some_and(|t| !t.is_empty()),
+        );
+        window.set_discover_known(state.is_some());
+        window.set_discover_in_library(state.as_ref().is_some_and(|s| s.in_library));
+        window.set_discover_watched(
+            state.as_ref().is_some_and(|s| s.times_watched > 0 || s.flagged_watched),
+        );
+        window.set_discover_series(item.kind == "series");
+
+        let mut logo = slint::Image::default();
+        if let Some(url) = meta.as_ref().and_then(|m| m.logo.clone()).filter(|u| !u.is_empty()) {
+            let key = images::Key::new(&url, state::POSTER_WIDTH);
+            self.images.want(&key);
+            logo = self.images.get(&key).unwrap_or_default();
+        }
+        window.set_discover_logo(logo);
+        let mut art = slint::Image::default();
+        if let Some(url) = item
+            .background
+            .clone()
+            .or_else(|| meta.as_ref().and_then(|m| m.background.clone()))
+            .filter(|u| !u.is_empty())
+        {
+            let key = images::Key::new(&url, state::BACKDROP_WIDTH);
+            self.images.want(&key);
+            art = self.images.get(&key).unwrap_or_default();
+        }
+        window.set_discover_art(art);
     }
 
     /// The record beside a grid: the library's and Discover's.
@@ -4010,7 +4183,7 @@ fn hero_facts(item: &state::Item, meta: Option<&model::Meta>) -> String {
 
 /// The full record of a title the remote has rested on, a moment after it
 /// stopped there: walking along a shelf is not a request per poster.
-fn spawn_hero(kind: String, id: String) {
+fn spawn_hero(kind: String, id: String, with_state: bool) {
     static RESTING: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     if let Ok(mut resting) = RESTING.lock() {
         resting.clone_from(&id);
@@ -4021,9 +4194,17 @@ fn spawn_hero(kind: String, id: String) {
             return;
         }
         let client = rpc::Client::new(socket_path());
-        if let Ok(envelope) = client.meta(&kind, &id).await {
+        let state = async {
+            if with_state {
+                client.watch_state(&kind, &id).await.ok()
+            } else {
+                None
+            }
+        };
+        let (meta, state) = tokio::join!(client.meta(&kind, &id), state);
+        if let Ok(envelope) = meta {
             let _ = slint::invoke_from_event_loop(move || {
-                with_app(|app| app.hero_arrived(envelope.meta));
+                with_app(|app| app.hero_arrived(envelope.meta, state));
             });
         }
     });
@@ -4169,6 +4350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         handing_over: false,
         here: None,
         hero_meta: std::collections::HashMap::new(),
+        hero_state: std::collections::HashMap::new(),
         library_listing: None,
         watching: None,
         detail_backdrop: None,
@@ -4508,6 +4690,17 @@ fn spawn_discover_page(page: screens::discover::Request) {
         let generation = page.generation;
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.discover_page_arrived(generation, answer));
+        });
+    });
+}
+
+/// A change made from Discover's record.
+fn spawn_preview_change(action: &'static str, id: String, change: serde_json::Value) {
+    detached("mediabox-tv-preview-change", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.account(action, change).await.map_err(|e| e.to_string());
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.preview_changed(id, answer));
         });
     });
 }
