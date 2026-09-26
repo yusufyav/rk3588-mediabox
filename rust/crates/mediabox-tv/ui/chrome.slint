@@ -11,6 +11,9 @@ export component Chrome inherits Rectangle {
     in property <int> place;
     in property <int> current;
     in property <[string]> places;
+    // What is in the search box, on the search page; the placeholder until
+    // something is.
+    in property <string> query;
 
     // ------------------------------------------------------- the search box
     Rectangle {
@@ -27,15 +30,17 @@ export component Chrome inherits Rectangle {
             x: parent.height * 0.62;
             width: parent.width - parent.height * 1.8;
             height: 100%;
-            text: "Arayın";
-            color: parent.focused ? #3b4250 : #918f9b;
+            text: query == "" ? "Arayın" : query;
+            color: query != "" ? (parent.focused ? #0a0c10 : Theme.text)
+                : (parent.focused ? #3b4250 : #918f9b);
             font-size: parent.height * 0.36;
             vertical-alignment: center;
         }
         Icon {
             x: parent.width - parent.height * 0.62 - self.width;
             y: (parent.height - self.height) / 2;
-            name: "search";
+            // The reference's box carries a cross once it has a query.
+            name: query == "" ? "search" : "close";
             size: parent.height * 0.44;
             ink: parent.focused ? #0a0c10 : #d9d8df;
         }

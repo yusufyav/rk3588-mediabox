@@ -432,6 +432,8 @@ impl App {
                 // on first use; asking for nothing now means it is there by the
                 // first letter.
                 spawn_suggest(self.search.suggest_generation, String::new());
+                // Coming from a search box, the letters are what is wanted.
+                self.search.open_editing();
                 self.open(Route::Search);
             }
             state::Nav::Library => self.open_library(),
@@ -843,6 +845,20 @@ impl App {
                         }
                         return;
                     }
+                    Pane::Box => {
+                        self.search.open_editing();
+                        self.paint();
+                        return;
+                    }
+                    Pane::Places => {
+                        match self.search.place {
+                            0 => self.open_media(),
+                            1 => self.open_screen(state::Nav::Discover),
+                            2 => self.open_screen(state::Nav::Library),
+                            _ => self.open_screen(state::Nav::Settings),
+                        }
+                        return;
+                    }
                     Pane::List => self.search.choose_entry(),
                     // A keyboard's Enter is the remote's Ok. While text is
                     // coming from the keyboard it means what it means there.
@@ -863,13 +879,22 @@ impl App {
                 }
             }
             Intent::Dismiss => {
-                // Back out of the right-hand side before backing out of the
-                // screen: one press, one step.
-                if self.search.pane != Pane::Keys {
-                    self.search.pane = Pane::Keys;
-                    self.paint();
-                } else {
-                    self.back();
+                // One press, one step: the list back to the letters, the panel
+                // closed, then out.
+                match self.search.pane {
+                    Pane::List => {
+                        self.search.pane = Pane::Keys;
+                        self.paint();
+                    }
+                    Pane::Keys if self.search.showing_results() => {
+                        self.search.close_editing();
+                        self.paint();
+                    }
+                    Pane::Places => {
+                        self.search.pane = Pane::Box;
+                        self.paint();
+                    }
+                    _ => self.back(),
                 }
             }
             _ => {}
@@ -3154,7 +3179,11 @@ impl App {
             Pane::Keys => 0,
             Pane::List => 1,
             Pane::Results => 2,
+            Pane::Box => 3,
+            Pane::Places => 4,
         });
+        window.set_search_editing(search.editing);
+        window.set_search_place(search.place as i32);
         window.set_search_key_row(search.key_row as i32);
         window.set_search_key_col(search.key_col as i32);
 

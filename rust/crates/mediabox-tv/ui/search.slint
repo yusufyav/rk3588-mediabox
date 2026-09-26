@@ -1,5 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { Rail, RailModel, KeyRow, KeyCap, Keyboard } from "components.slint";
+import { Chrome } from "chrome.slint";
 
 // One line of the list beside the letters: a suggestion, or an earlier search.
 export struct SearchEntry {
@@ -8,13 +9,12 @@ export struct SearchEntry {
     earlier: bool,
 }
 
-// Searching from the sofa.
-//
-// The letters on the left and, on the right, whatever the box has for what has
-// been typed: while typing, suggestions and the earlier searches; once Ara is
-// pressed, a row per catalogue. One rule for crossing between them: Right off
-// the edge of the grid goes across, Left from the first column comes back. A
-// keyboard, if there is one, types into the same box without moving the focus.
+// Searching, laid out as the reference's search page: the board's frame, the
+// query in the search box, and the answer as the board's shelves under it --
+// a row per catalogue. The reference drops its suggestions and earlier
+// searches down under the box while it is typed into; a television has no
+// keyboard of its own, so its letters are in that panel too, and it closes
+// when the search is made.
 export component Search inherits Rectangle {
     in property <string> query;
     in property <string> note;
@@ -22,8 +22,9 @@ export component Search inherits Rectangle {
     in property <[KeyRow]> keys;
     in property <int> key-row;
     in property <int> key-col;
-    // 0 the letters, 1 the list, 2 the results.
+    // 0 the letters, 1 the list, 2 the results, 3 the box, 4 the places.
     in property <int> pane;
+    in property <bool> editing;
 
     in property <bool> showing-results;
     in property <[SearchEntry]> entries;
@@ -31,184 +32,169 @@ export component Search inherits Rectangle {
     in property <[RailModel]> rails;
     in property <int> rail-row;
     in property <int> rail-col;
+    in property <int> place;
+    in property <[string]> places;
 
-    // Ten columns, the grid's own width.
-    property <length> keys-w: Metrics.key-w * 10 + Metrics.key-gap * 9;
-    property <length> pane-x: Metrics.gutter + keys-w + Metrics.gutter;
-    property <length> pane-top: Metrics.topbar + Metrics.block-gap * 1.8;
-    property <length> viewport-h: root.height - pane-top;
-    property <length> rail-h: Metrics.card-h + Metrics.text-card * 2.6 + Metrics.title-rail * 2.6;
-    // The focused row is kept on the panel and the rows slide under it.
-    property <length> scroll: clamp(rail-row * rail-h - Metrics.top-inset * 0.25,
-                                    0px,
-                                    max(0px, rails.length * rail-h - viewport-h));
-    property <bool> on-keys: pane == 0;
-    property <length> line-h: Metrics.root-font * 2.4;
+    // The board's shelf geometry, so a search's rows are the board's rows.
+    property <length> content-x: root.width * 0.0547;
+    property <length> right-x: root.width * 0.0185;
+    property <length> rails-top: root.height * 0.0875;
+    property <length> rail-h: root.height * 0.3662;
+    property <length> head: root.height * 0.037 - Metrics.focus-room;
+    property <length> viewport-h: root.height - rails-top;
+    property <length> content-h: max(1px, rail-h * rails.length);
+    property <length> scroll: clamp(rail-row * rail-h, 0px, max(0px, content-h - viewport-h));
+    property <length> line-h: Metrics.root-font * 2.2;
 
     background: Theme.catalog-bg;
     clip: true;
 
-    // ------------------------------------------------------------- the letters
-    VerticalLayout {
-        x: Metrics.gutter;
-        y: Metrics.topbar;
-        width: keys-w;
-        spacing: Metrics.block-gap * 0.7;
-        alignment: start;
-
-        // What has been typed, as a box rather than as a heading: a viewer
-        // should be able to see that the remote is going somewhere.
-        Rectangle {
-            height: Metrics.root-font * 3.0;
-            border-radius: Theme.radius * 0.8;
-            background: #ffffff0d;
-            border-width: 1px;
-            border-color: on-keys ? #ffffff2e : Theme.line;
-
-            Text {
-                x: Metrics.root-font * 0.8;
-                width: parent.width - Metrics.root-font * 1.6;
-                height: 100%;
-                text: query == "" ? "Film veya dizi ara" : query;
-                color: query == "" ? Theme.dim : Theme.text;
-                font-size: Metrics.root-font * 1.06;
-                font-weight: 700;
-                vertical-alignment: center;
-                overflow: elide;
-                wrap: no-wrap;
-            }
-
-            // A caret, so an empty box still reads as one that is listening.
-            if query != "": Rectangle {
-                x: parent.width - Metrics.root-font * 0.8;
-                y: parent.height * 0.26;
-                width: 2px;
-                height: parent.height * 0.48;
-                background: Theme.film;
-            }
-        }
-
-        Keyboard {
-            keys: root.keys;
-            key-row: root.key-row;
-            key-col: root.key-col;
-            active: root.on-keys;
-        }
-    }
-
-    // ----------------------------------------------------------- the right side
-    Text {
-        x: pane-x;
-        y: Metrics.topbar + Metrics.block-gap * 0.3;
-        text: searching ? "Aranıyor…" : note;
-        color: Theme.muted;
-        font-size: Metrics.text-label;
-        font-weight: 660;
-    }
-
-    // Before anything is typed or searched, the side says what it is for rather
-    // than standing empty: half a television of black beside a letter grid
-    // reads as a screen that has failed.
-    if !showing-results && entries.length == 0: Text {
-        x: pane-x;
-        y: root.height * 0.4;
-        width: root.width - pane-x - Metrics.gutter;
-        text: query == ""
-            ? "Harfleri seçip Ara’ya basın ya da klavyeden yazıp Enter’a basın"
-            : "Ara’ya basınca kurulu eklentilerin arama katalogları sorulur";
-        color: Theme.dim;
-        font-size: Metrics.text-meta;
-        font-weight: 620;
-        wrap: word-wrap;
-    }
-
-    // While typing: what the index suggests, then the earlier searches.
-    if !showing-results: VerticalLayout {
-        x: pane-x;
-        y: pane-top;
-        width: min(root.width - pane-x - Metrics.gutter, Metrics.card-w * 3.4);
-        spacing: Metrics.root-font * 0.2;
-        alignment: start;
-
-        for entry[i] in entries: VerticalLayout {
-            spacing: Metrics.root-font * 0.2;
-
-            // A heading where the kind of line changes.
-            if i == 0 || entries[i - 1].earlier != entry.earlier: Text {
-                height: Metrics.root-font * 2.0;
-                text: entry.earlier ? "SON ARAMALAR" : "ÖNERİLER";
-                color: #ffffff8c;
-                font-size: Metrics.text-label * 0.86;
-                font-weight: 650;
-                letter-spacing: Metrics.text-label * 0.1;
-                vertical-alignment: bottom;
-            }
-
-            Rectangle {
-                property <bool> focused: pane == 1 && i == list-index;
-                height: line-h;
-                border-radius: line-h * 0.24;
-                background: focused ? Theme.focus-fill : transparent;
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-                HorizontalLayout {
-                    padding-left: Metrics.root-font * 0.8;
-                    padding-right: Metrics.root-font * 0.8;
-                    spacing: Metrics.root-font * 0.7;
-
-                    Text {
-                        text: entry.text;
-                        color: focused ? #0b0d12 : Theme.text;
-                        font-size: Metrics.text-meta * 1.02;
-                        font-weight: 650;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        wrap: no-wrap;
-                        horizontal-stretch: 1;
-                    }
-                    // In a column of its own, so the kinds and years line up.
-                    Text {
-                        width: Metrics.root-font * 6.5;
-                        text: entry.detail;
-                        color: focused ? #3b4250 : Theme.dim;
-                        font-size: Metrics.text-label;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-alignment: right;
-                        wrap: no-wrap;
-                    }
-                }
-            }
-        }
-    }
-
-    // Once searched: a row per catalogue, the reference's shape.
-    // Clipped just outside the first poster, so the ring has its room and the
-    // posters scrolled past do not show over the letters.
+    // ------------------------------------------------------------ the results
     if showing-results: Rectangle {
-        x: pane-x - Metrics.focus-room;
-        y: pane-top;
-        width: root.width - self.x;
-        height: viewport-h;
+        x: content-x - Metrics.focus-room;
+        y: rails-top - Metrics.focus-room;
+        width: root.width - self.x - right-x + Metrics.focus-room;
+        height: viewport-h + Metrics.focus-room;
         clip: true;
-        background: transparent;
 
         Rectangle {
             x: 0;
-            y: -scroll;
+            y: Metrics.focus-room - scroll;
             width: 100%;
-            height: max(1px, rails.length * rail-h);
-            background: transparent;
+            height: content-h;
 
             animate y { duration: Theme.glide; easing: Theme.ease; }
 
             for rail[r] in rails: Rail {
-                x: Metrics.focus-room - Metrics.gutter;
+                x: 0;
                 y: r * rail-h;
-                width: parent.width + Metrics.gutter - Metrics.focus-room;
+                width: parent.width;
+                height: rail-h;
                 rail: rail;
+                inset: Metrics.focus-room;
+                right-inset: Metrics.focus-room;
+                head: head;
                 focus-col: rail-col;
                 active: pane == 2 && rail-row == r;
+            }
+        }
+    }
+
+    // What the page is waiting for, or why it has nothing.
+    if searching || (rails.length == 0 && note != ""): Text {
+        x: content-x;
+        y: rails-top + Metrics.root-font;
+        width: root.width - content-x - right-x;
+        text: searching ? "Aranıyor…" : note;
+        color: Theme.muted;
+        font-size: Metrics.text-meta;
+        wrap: word-wrap;
+    }
+
+    Chrome {
+        width: 100%;
+        height: 100%;
+        on-search: pane == 3;
+        on-places: pane == 4;
+        place: place;
+        // No place down the left is this page.
+        current: -1;
+        places: places;
+        query: query;
+    }
+
+    // --------------------------------------------------------------- the panel
+    //
+    // Under the search box, over the page: the letters, and beside them the
+    // reference's suggestions and earlier searches.
+    if editing: Rectangle {
+        property <length> keys-w: Metrics.key-w * 10 + Metrics.key-gap * 9;
+        property <length> pad: Metrics.root-font * 1.1;
+        property <length> list-w: root.width * 0.2;
+        width: keys-w + list-w + pad * 3;
+        height: keyboard.preferred-height + pad * 2;
+        x: (root.width - self.width) / 2;
+        y: root.height * 0.0139 + root.height * 0.0389 + Metrics.root-font * 0.5;
+        border-radius: Metrics.root-font * 0.9;
+        background: #1e1c2f;
+        border-width: 1px;
+        border-color: #ffffff1a;
+
+        keyboard := Keyboard {
+            x: pad;
+            y: pad;
+            width: keys-w;
+            keys: root.keys;
+            key-row: root.key-row;
+            key-col: root.key-col;
+            active: root.pane == 0;
+        }
+
+        VerticalLayout {
+            x: pad * 2 + keys-w;
+            y: pad;
+            width: list-w;
+            spacing: Metrics.root-font * 0.15;
+            alignment: start;
+
+            if entries.length == 0: Text {
+                text: query == ""
+                    ? "Harfleri seçip Ara’ya basın ya da klavyeden yazıp Enter’a basın"
+                    : "Ara’ya basınca kurulu eklentilerin arama katalogları sorulur";
+                color: Theme.dim;
+                font-size: Metrics.text-label;
+                wrap: word-wrap;
+            }
+
+            for entry[i] in entries: VerticalLayout {
+                spacing: Metrics.root-font * 0.15;
+
+                // A heading where the kind of line changes.
+                if i == 0 || entries[i - 1].earlier != entry.earlier: Text {
+                    height: Metrics.root-font * 1.8;
+                    text: entry.earlier ? "SON ARAMALAR" : "ÖNERİLER";
+                    color: #ffffff8c;
+                    font-size: Metrics.text-label * 0.86;
+                    font-weight: 650;
+                    letter-spacing: Metrics.text-label * 0.1;
+                    vertical-alignment: bottom;
+                }
+
+                Rectangle {
+                    property <bool> focused: pane == 1 && i == list-index;
+                    height: line-h;
+                    border-radius: line-h * 0.24;
+                    background: focused ? Theme.focus-fill : transparent;
+                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+                    HorizontalLayout {
+                        padding-left: Metrics.root-font * 0.7;
+                        padding-right: Metrics.root-font * 0.7;
+                        spacing: Metrics.root-font * 0.5;
+
+                        Text {
+                            text: entry.text;
+                            color: focused ? #0b0d12 : Theme.text;
+                            font-size: Metrics.text-meta * 0.95;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            wrap: no-wrap;
+                            horizontal-stretch: 1;
+                        }
+                        // In a column of its own, so the kinds and years line up.
+                        Text {
+                            width: Metrics.root-font * 5.5;
+                            text: entry.detail;
+                            color: focused ? #3b4250 : Theme.dim;
+                            font-size: Metrics.text-label;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            wrap: no-wrap;
+                        }
+                    }
+                }
             }
         }
     }

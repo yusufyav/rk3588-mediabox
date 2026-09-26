@@ -181,6 +181,8 @@ export component MediaBoxWindow inherits Window {
     in property <[RailModel]> search-rails;
     in property <int> search-rail-row;
     in property <int> search-rail-col;
+    in property <bool> search-editing;
+    in property <int> search-place;
 
     // ---- library
     in property <[string]> library-tabs;
@@ -393,6 +395,9 @@ export component MediaBoxWindow inherits Window {
             rails: root.search-rails;
             rail-row: root.search-rail-row;
             rail-col: root.search-rail-col;
+            editing: root.search-editing;
+            place: root.search-place;
+            places: root.media-places;
         }
 
         if screen == "discover": Discover {
@@ -615,7 +620,7 @@ export component MediaBoxWindow inherits Window {
         // The catalogue carries the reference's own chrome instead: its
         // places down the left and its search box across the top.
         if screen != "boot" && screen != "film" && screen != "detail" && screen != "media"
-            && screen != "discover"
+            && screen != "discover" && screen != "search"
             && screen != "settings" && screen != "diagnostics": TopBar {
             x: 0;
             y: 0;

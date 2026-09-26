@@ -41,10 +41,16 @@ fn layout() -> Vec<Vec<Cap>> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
+    /// The letters, in the panel under the search box while it is open.
     Keys,
-    /// The suggestions and the earlier searches.
+    /// The suggestions and the earlier searches, beside the letters.
     List,
+    /// The rows of results, as the board's shelves.
     Results,
+    /// The search box itself, with its panel closed.
+    Box,
+    /// The places down the left.
+    Places,
 }
 
 /// One line of the list beside the letters.
@@ -97,6 +103,13 @@ pub struct Search {
     /// same key as the remote's Ok, and on a keyboard it means "search"; the
     /// first move of the remote hands Ok back to the grid.
     pub typing: bool,
+    /// Whether the panel under the search box -- the letters, the suggestions
+    /// and the earlier searches -- is open. The reference's search box drops
+    /// its suggestions down under itself while it is typed into; on a
+    /// television the letters go there too.
+    pub editing: bool,
+    /// The place the remote is on, down the left.
+    pub place: usize,
 }
 
 impl Search {
@@ -118,7 +131,25 @@ impl Search {
             history: Vec::new(),
             list_index: 0,
             typing: false,
+            editing: true,
+            place: 0,
         }
+    }
+
+    /// Opens the panel under the search box, on the letters.
+    pub fn open_editing(&mut self) {
+        self.editing = true;
+        self.pane = Pane::Keys;
+    }
+
+    /// Closes it, onto the results if there are any and the box otherwise.
+    pub fn close_editing(&mut self) {
+        self.editing = false;
+        self.pane = if self.showing_results() && !self.results.is_empty() {
+            Pane::Results
+        } else {
+            Pane::Box
+        };
     }
 
     pub fn keys(&self) -> &[Vec<Cap>] {
@@ -168,24 +199,13 @@ impl Search {
         entries
     }
 
-    fn side_has_anything(&self) -> bool {
-        if self.showing_results() {
-            !self.results.is_empty()
-        } else {
-            !self.entries().is_empty()
-        }
-    }
-
     fn enter_side(&mut self) -> bool {
-        if !self.side_has_anything() {
+        let count = self.entries().len();
+        if count == 0 {
             return false;
         }
-        if self.showing_results() {
-            self.pane = Pane::Results;
-        } else {
-            self.pane = Pane::List;
-            self.list_index = self.list_index.min(self.entries().len() - 1);
-        }
+        self.pane = Pane::List;
+        self.list_index = self.list_index.min(count - 1);
         true
     }
 
@@ -196,6 +216,28 @@ impl Search {
             Pane::Keys => self.step_keys(dx, dy),
             Pane::List => self.step_list(dx, dy),
             Pane::Results => self.step_results(dx, dy),
+            Pane::Box => {
+                if dy > 0 && self.showing_results() && !self.results.is_empty() {
+                    self.pane = Pane::Results;
+                    return true;
+                }
+                if dx < 0 {
+                    self.pane = Pane::Places;
+                    self.place = 0;
+                    return true;
+                }
+                false
+            }
+            Pane::Places => {
+                if dx > 0 {
+                    self.pane = Pane::Box;
+                    return true;
+                }
+                let next = (self.place as i32 + dy).clamp(0, 3) as usize;
+                let moved = next != self.place;
+                self.place = next;
+                moved
+            }
         }
     }
 
@@ -257,18 +299,26 @@ impl Search {
 
     fn step_results(&mut self, dx: i32, dy: i32) -> bool {
         if self.results.is_empty() {
-            self.pane = Pane::Keys;
+            self.pane = Pane::Box;
             return true;
         }
         if dx < 0 && self.results.column() == 0 {
-            self.pane = Pane::Keys;
+            self.pane = Pane::Places;
+            self.place = 0;
             return true;
         }
         if dx != 0 {
             return self.results.step_column(dx);
         }
         if dy != 0 {
-            return self.results.step_row(dy);
+            if self.results.step_row(dy) {
+                return true;
+            }
+            if dy < 0 {
+                // Up off the first row is the search box, as on the board.
+                self.pane = Pane::Box;
+                return true;
+            }
         }
         false
     }
@@ -330,6 +380,8 @@ impl Search {
     fn after_edit(&mut self) {
         self.suggest_generation += 1;
         self.list_index = 0;
+        // Typing opens the panel, wherever the remote was.
+        self.editing = true;
         if self.pane != Pane::Keys {
             self.pane = Pane::Keys;
         }
@@ -357,7 +409,10 @@ impl Search {
         self.searching = true;
         self.note = "Aranıyor…".into();
         self.results.clear();
-        self.pane = Pane::Keys;
+        // The panel closes onto the box; the results take the remote when
+        // they land.
+        self.editing = false;
+        self.pane = Pane::Box;
         self.remember(&query);
         Press::Search
     }
@@ -375,6 +430,9 @@ impl Search {
         }
         self.searching = false;
         self.results.set(rows);
+        if !self.editing && self.pane == Pane::Box && !self.results.is_empty() {
+            self.pane = Pane::Results;
+        }
         self.note = if self.results.is_empty() {
             match self.results.len() {
                 0 => format!("“{}” için sonuç yok", self.searched.as_deref().unwrap_or("")),
@@ -579,21 +637,34 @@ mod tests {
         assert!(search.showing_results(), "the box says what was searched again");
     }
 
+    /// The reference's search page: the results are the board's shelves under
+    /// the search box, and the letters are in a panel that closes when the
+    /// search is made.
     #[test]
-    fn results_are_reached_from_the_right_edge_and_left_comes_back() {
+    fn a_search_closes_the_panel_and_the_results_take_the_remote() {
+        let search = with_results(2, 12);
+        assert!(!search.editing);
+        assert_eq!(search.pane, Pane::Results);
+    }
+
+    #[test]
+    fn up_off_the_results_is_the_box_and_ok_there_opens_the_letters() {
         let mut search = with_results(2, 12);
-        for _ in 0..10 {
-            search.step(1, 0);
-        }
-        assert_eq!(search.pane, Pane::Results);
-        search.step(1, 0);
-        search.step(1, 0);
-        assert_eq!(search.results.column(), 2);
-        search.step(-1, 0);
-        search.step(-1, 0);
-        assert_eq!(search.pane, Pane::Results);
-        search.step(-1, 0);
-        assert_eq!(search.pane, Pane::Keys);
+        assert!(search.step(0, -1));
+        assert_eq!(search.pane, Pane::Box);
+        search.open_editing();
+        assert_eq!((search.pane, search.editing), (Pane::Keys, true));
+        search.close_editing();
+        assert_eq!(search.pane, Pane::Results, "Back closes it onto the results");
+    }
+
+    #[test]
+    fn left_off_the_first_poster_is_the_places() {
+        let mut search = with_results(2, 12);
+        assert!(search.step(-1, 0));
+        assert_eq!(search.pane, Pane::Places);
+        assert!(search.step(1, 0));
+        assert_eq!(search.pane, Pane::Box);
     }
 
     #[test]
