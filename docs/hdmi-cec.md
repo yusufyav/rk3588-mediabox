@@ -60,3 +60,22 @@ CEC RC passthrough kernelin `rc0 -> eventN` yolunu da etkin tutar. Daemon hiçbi
 evdev aygıtını grab etmediği için Kodi'nin bugünkü doğrudan input davranışı
 bozulmaz. Varsayılan `Ui` modunda raw CEC medya olayları da Kodi'ye tekrar
 gönderilmez; böylece çift yürütme oluşmaz.
+
+## Açık sorun: açılışta mantıksal adres alınamazsa adaptör bir daha açılmıyor
+
+2026-09-25, Plus (6.1.115): Açılışta `/dev/cec1` için Playback adresi alınamadı
+(`CEC /dev/cec1: … Playback mantıksal adresi alınamadı`). dmesg'de
+`cec-dw_hdmi_qp: message 44 timed out` ve `message 88 timed out` görüldü;
+bunlar adres 4 ve 8 için yapılan claim yoklamaları, sonuç NACK değil gönderim
+zaman aşımı. Kernel adres 8'i sonradan kendisi aldı, ama daemon o adaptörü
+listeye hiç almadı ve bir sonraki açılışa kadar her komutu
+`seçili çıkışın CEC bağdaştırıcısı /dev/cec1 açık değil` diye reddetti.
+
+Kod yolu:
+- `mediabox-cec/src/lib.rs`: fiziksel adres geçerliyken mantıksal adres 15
+  dönerse `CecError::Busy`.
+- `mediaboxd-rs/src/main.rs`: adaptörler açılışta bir kez `Adapter::open_all()`
+  ile açılıyor; açılamayan listeye girmiyor, sonra yeniden denenmiyor.
+
+Bir sonraki açılışta CEC normal çalıştı. Yoklamaların neden zaman aşımına
+uğradığı ölçülmedi. Düzeltme uygulanmadı.

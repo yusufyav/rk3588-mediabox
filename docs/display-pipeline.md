@@ -666,6 +666,54 @@ ls -l /proc/$(systemctl show -p MainPID --value mediabox-display-observer)/fd | 
 mediaboxctl display status
 ```
 
+## 15. Above 340 MHz a replugged television forgets scrambling (open, Plus)
+
+HDMI 2.0 puts two bits in the sink's SCDC -- scrambling and the 1/40 TMDS clock
+ratio -- that the source must set before it sends a scrambled signal (HDMI 2.0
+6.1.3.1). The sink clears them when it is unplugged, and KMS does not modeset
+on its own when it comes back, so the driver has to put them back. Linux says
+so in `drivers/gpu/drm/display/drm_scdc_helper.c` (DOC: scdc helpers); i915
+(`intel_hdmi_reset_link`) and vc4 (`vc4_hdmi_reset_link`) read the sink's
+`SCDC_TMDS_CONFIG` on hotplug and modeset when it disagrees. Rockchip did it in
+its vendor tree with `dw_hdmi_qp_handle_hpd` (commit `122ffa74f5b5`,
+2024-10-31): output off on unplug, SCDC written on plug, output on.
+
+`rk-6.1-rkr5.1` -- the Plus's 6.1.115 -- does not have it: its HPD work only
+tells CEC. `rk-6.1-rkr6.1` and `rk-6.1-rkr7.2` -- the Ultra's 6.1.172 -- do.
+
+Measured on 2026-09-25/26, Sony KD-65XE9005 HDMI 3 (600 MHz), 4K60 RGB
+(594 MHz), sink SCDC read over the transmitter's DDC:
+
+| Plus kernel | Cable out and back in | Modeset | Sink SCDC | Picture |
+|---|---|---|---|---|
+| 6.1.115 | 21:54:40 | none | `scr=0 r40=0`, no channel locked | none |
+| 6.1.172 (temporary) | 3 times, 01:40–01:43, `mediabox-display-changed` disabled | none | `0x03`, all locked | yes |
+
+A full modeset (`mediaboxctl display set 1920x1080@60` then `display revert`)
+brings the 6.1.115 link back in 250 ms. Switching the television off and on
+over CEC did not drop HPD or clear SCDC on this set. Below 340 MHz -- the
+300 MHz sockets, 4K60 4:2:0 at 297 MHz -- there is no scrambling and nothing
+to lose. The Plus replug that stayed black at 1440p@120 on 2026-09-23 (the
+note in `mediabox-display-changed`) was above 340 MHz too and is probably this;
+it was not re-measured.
+
+`mediabox-display-changed` does not cover it: a replug short enough for its
+settle loop to read the same sink twice ends at `[ "$now" = "$was" ] && exit 0`
+without looking at the link. A longer one restarts the owner, and the owner's
+modeset happens to repair it.
+
+**Open.** No fix is applied. The Plus stays on 6.1.115 (Armbian's stable
+vendor package, 26.8.3 included, is 6.1.115; 6.1.172 exists only as a
+nightly). The choices are the kernel line that has Rockchip's fix, a backport
+of that commit, or the i915/vc4 check from userspace; none is chosen.
+
+**Check:**
+
+```sh
+uname -r
+# sink SCDC 0x20: bit0 scrambling, bit1 1/40; 0x40: bit0 clock, bits1-3 channel locks
+```
+
 ## The smoke test
 
 `packaging/mediabox-kiosk-smoke` checks rules 1 and 2 on every deploy, and
