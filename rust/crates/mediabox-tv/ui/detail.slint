@@ -318,71 +318,67 @@ component Action inherits Rectangle {
     }
 }
 
-// One row of the source column: what the addon calls itself down the left, and
-// what it says about the file down the right.
+// One row of the source column, as the reference's stream row, off its
+// stylesheet: what the addon calls itself in a 7rem column at 1.1rem, and
+// what it says about the file beside it, line for line as the addon wrote
+// it, three lines at most; the green play mark on the row the remote is on.
 component SourceLine inherits Rectangle {
     // `entry` rather than `row`: every Rectangle already has a `row`, for grid
     // layout, and a property cannot shadow it.
     in property <SourceRow> entry;
     in property <bool> focused;
-    in property <length> name-w;
+    property <length> rem: Metrics.vw / 128;
 
-    border-radius: Metrics.vh * 0.008;
-    background: focused ? #ffffff26 : transparent;
-    border-width: focused ? 2px : 0px;
+    border-radius: rem * 0.75;
+    background: focused ? #ffffff1f : transparent;
+    border-width: focused ? max(2px, rem * 0.15) : 0px;
     border-color: Theme.focus-ring;
     clip: true;
 
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
     HorizontalLayout {
-        x: 0;
-        y: 0;
-        width: 100%;
-        height: 100%;
-        padding-left: Metrics.vh * 0.018;
-        padding-right: Metrics.vh * 0.018;
-        padding-top: Metrics.vh * 0.014;
-        padding-bottom: Metrics.vh * 0.014;
-        spacing: Metrics.vh * 0.016;
+        padding-left: rem;
+        padding-right: rem;
+        padding-top: rem * 0.5;
+        padding-bottom: rem * 0.5;
+        spacing: rem * 0.5;
 
         Text {
-            width: name-w;
+            width: rem * 7;
             text: entry.name;
             color: Theme.text;
-            font-size: Metrics.vh * 0.0155;
-            font-weight: 400;
+            font-size: rem * 1.1;
             wrap: word-wrap;
             overflow: elide;
-            vertical-alignment: top;
+            vertical-alignment: center;
         }
-        // The release on one line and what the addon says about it under it,
-        // which is the reference's own arrangement: a release name is long and
-        // the same for pages at a time, and the line that tells two of them
-        // apart — how big, how many are sharing it, where it came from — is
-        // the one that must not be pushed off the row.
-        VerticalLayout {
+        Text {
             horizontal-stretch: 1;
-            alignment: start;
-            spacing: 0px;
-
-            Text {
-                text: entry.title;
-                color: Theme.text;
-                font-size: Metrics.vh * 0.0155;
-                font-weight: 400;
-                wrap: no-wrap;
-                overflow: elide;
-                vertical-alignment: top;
-            }
-            if entry.meta != "": Text {
-                text: entry.meta;
-                color: Theme.text;
-                font-size: Metrics.vh * 0.0155;
-                font-weight: 400;
-                wrap: word-wrap;
-                overflow: elide;
-                vertical-alignment: top;
+            text: entry.meta == "" ? entry.title : entry.title + "\n" + entry.meta;
+            color: Theme.text;
+            font-size: rem;
+            wrap: no-wrap;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        if focused: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: rem * 3;
+                height: rem * 3;
+                border-radius: self.height / 2;
+                background: #22b365;
+                Path {
+                    x: parent.width * 0.36;
+                    y: parent.height * 0.3;
+                    width: parent.width * 0.36;
+                    height: parent.height * 0.4;
+                    viewbox-width: 9;
+                    viewbox-height: 10;
+                    commands: "M0 0L9 5L0 10z";
+                    fill: Theme.text;
+                }
             }
         }
     }
@@ -647,22 +643,41 @@ export component Detail inherits Rectangle {
         background: #00000073;
         clip: true;
 
-        // An episode's sources are headed by the episode, as the reference
-        // heads them.
-        property <length> head-h: episode-heading == "" ? 0px : Metrics.vh * 0.05;
+        // The reference's first line over the streams: the way back and the
+        // episode's "S1E3 Title" where there is an episode, then the addon
+        // dropdown in the rest of the line.
+        property <length> rem: Metrics.vw / 128;
+        property <length> head-h: rem * 3;
+        property <length> title-w: episode-heading == "" ? 0px : (self.width - panel-pad * 2) * 0.5;
 
-        if !show-episodes && episode-heading != "": Text {
+        if !show-episodes && episode-heading != "": HorizontalLayout {
             x: panel-pad;
             y: panel-pad;
-            width: parent.width - panel-pad * 2;
-            height: Metrics.vh * 0.042;
-            text: "‹  " + episode-heading;
-            color: Theme.text;
-            font-size: Metrics.vh * 0.0175;
-            font-weight: 650;
-            vertical-alignment: center;
-            overflow: elide;
-            wrap: no-wrap;
+            width: title-w;
+            height: head-h;
+            spacing: rem * 0.75;
+
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: rem * 1.5;
+                    height: rem * 1.5;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: "M15 5L8 12l7 7";
+                    stroke: Theme.text;
+                    stroke-width: 2px;
+                }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: episode-heading;
+                color: Theme.text;
+                font-size: rem;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
         }
 
         Rectangle {
@@ -672,56 +687,49 @@ export component Detail inherits Rectangle {
             height: 100%;
             visible: !show-episodes;
 
-            // The provider filter. Walked with Left and Right, the way the
+            // The addon dropdown. Walked with Left and Right, the way the
             // reference's dropdown is opened and picked through.
-            Rectangle {
-                x: panel-pad;
-                y: panel-pad + head-h;
-                width: parent.width - panel-pad * 2;
-                height: Metrics.vh * 0.052;
-                border-radius: Metrics.vh * 0.008;
-                background: (on-sources && on-filter) ? Theme.focus-fill : #ffffff0f;
-                border-width: (on-sources && on-filter) ? 2px : 0px;
-                border-color: Theme.focus-ring;
+            select := Rectangle {
+                x: panel-pad + title-w + (title-w > 0 ? rem * 0.5 : 0px);
+                y: panel-pad;
+                width: parent.width - self.x - panel-pad;
+                height: head-h;
+                border-radius: self.height * 0.28;
+                background: (on-sources && on-filter) ? Theme.focus-fill : #ffffff0d;
 
                 animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
                 HorizontalLayout {
-                    x: 0;
-                    y: 0;
-                    width: 100%;
-                    height: 100%;
-                    padding-left: Metrics.vh * 0.016;
-                    padding-right: Metrics.vh * 0.016;
-                    spacing: Metrics.vh * 0.01;
+                    padding-left: rem;
+                    padding-right: rem;
+                    spacing: rem * 0.5;
 
                     Text {
                         text: providers[provider];
                         color: (on-sources && on-filter) ? #0a0c10 : Theme.text;
-                        font-size: Metrics.vh * 0.018;
-                        font-weight: 500;
+                        font-size: rem;
                         vertical-alignment: center;
                         overflow: elide;
                         wrap: no-wrap;
                         horizontal-stretch: 1;
                     }
-                    // The reference's dropdown caret, and it points the way the
-                    // remote moves: Left and Right walk the providers.
-                    Path {
-                        width: Metrics.vh * 0.014;
-                        height: 100%;
-                        viewbox-width: 24;
-                        viewbox-height: 24;
-                        commands: providers.length <= 1 ? ""
-                            : (filter-open ? "M4 16l8-9 8 9z" : "M4 8l8 9 8-9z");
-                        fill: (on-sources && on-filter) ? #0a0c10 : #ffffffb0;
+                    VerticalLayout {
+                        alignment: center;
+                        Path {
+                            width: rem * 0.7;
+                            height: rem * 0.42;
+                            viewbox-width: 10;
+                            viewbox-height: 6;
+                            commands: providers.length <= 1 ? "" : "M0 0L10 0L5 6z";
+                            fill: (on-sources && on-filter) ? #0a0c10 : Theme.text;
+                        }
                     }
                 }
             }
 
             if sources-note != "": Text {
                 x: panel-pad;
-                y: panel-pad + head-h + Metrics.vh * 0.052 + Metrics.vh * 0.008;
+                y: panel-pad + head-h + rem * 0.6;
                 text: sources-note;
                 color: #ffffff8c;
                 font-size: Metrics.vh * 0.0135;
@@ -729,9 +737,11 @@ export component Detail inherits Rectangle {
             }
 
             list := Rectangle {
-                property <length> row-h: Metrics.vh * 0.096;
+                // Three lines of the addon's name at 1.1rem and the padding: the
+                // reference's row at its tallest, so no row is cut short.
+                property <length> row-h: rem * 5.2;
                 x: panel-pad;
-                y: panel-pad + head-h + Metrics.vh * (sources-note == "" ? 0.064 : 0.082);
+                y: panel-pad + head-h + (sources-note == "" ? rem : rem * 2.6);
                 width: parent.width - panel-pad * 2;
                 height: parent.height - self.y;
                 clip: true;
@@ -742,14 +752,14 @@ export component Detail inherits Rectangle {
                     // The focused row is kept on the panel and the list slides
                     // under it, which is what makes forty releases usable with
                     // five keys.
-                    y: -clamp(source-focus * (list.row-h + Metrics.vh * 0.004)
+                    y: -clamp(source-focus * (list.row-h + rem * 0.5)
                                 - list.height * 0.4,
                               0px,
-                              max(0px, sources.length * (list.row-h + Metrics.vh * 0.004)
+                              max(0px, sources.length * (list.row-h + rem * 0.5)
                                          - list.height));
                     width: 100%;
-                    height: max(1px, sources.length * (list.row-h + Metrics.vh * 0.004));
-                    spacing: Metrics.vh * 0.004;
+                    height: max(1px, sources.length * (list.row-h + rem * 0.5));
+                    spacing: rem * 0.5;
                     alignment: start;
 
                     animate y { duration: Theme.glide; easing: Theme.ease; }
@@ -757,16 +767,15 @@ export component Detail inherits Rectangle {
                     for source[i] in sources: SourceLine {
                         entry: source;
                         height: list.row-h;
-                        name-w: (list.width - Metrics.vh * 0.052) * 0.38;
                         focused: on-sources && !on-filter && !filter-open && i == source-focus;
                     }
                 }
             }
 
             if filter-open: Rectangle {
-                x: panel-pad;
-                y: panel-pad + head-h + Metrics.vh * 0.052 + Metrics.vh * 0.006;
-                width: parent.width - panel-pad * 2;
+                x: select.x;
+                y: panel-pad + head-h + rem * 0.3;
+                width: select.width;
                 height: providers.length * Metrics.vh * 0.052 + Metrics.vh * 0.012;
                 border-radius: Metrics.vh * 0.008;
                 background: #141a29;

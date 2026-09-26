@@ -704,7 +704,7 @@ impl Detail {
         true
     }
 
-    /// The episode as the header over its sources names it: "S2E3 · Title".
+    /// The episode as the header over its sources names it: "S2E3 Title".
     pub fn episode_heading(&self) -> String {
         let Some(id) = self.episode.as_deref() else {
             return String::new();
@@ -717,7 +717,8 @@ impl Detail {
             _ => String::new(),
         };
         match non_empty(&video.title) {
-            Some(title) if !code.is_empty() => format!("{code} · {title}"),
+            // The reference's own: "S1E3 Trent Crimm: The Independent".
+            Some(title) if !code.is_empty() => format!("{code} {title}"),
             Some(title) => title,
             None => code,
         }
@@ -1465,7 +1466,7 @@ mod series_tests {
         detail.step(0, 1);
         assert_eq!(detail.choose_episode().as_deref(), Some("tt:2:3"));
         assert_eq!(detail.pane, Pane::Sources);
-        assert_eq!(detail.episode_heading(), "S2E3 · Episode tt:2:3");
+        assert_eq!(detail.episode_heading(), "S2E3 Episode tt:2:3");
     }
 
     #[test]
