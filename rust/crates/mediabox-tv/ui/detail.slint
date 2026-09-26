@@ -434,6 +434,8 @@ export component Detail inherits Rectangle {
     in property <float> fade;
     in property <image> poster;
     in property <image> logo;
+    // A logo is on its way: neither it nor the name is drawn meanwhile.
+    in property <bool> logo-pending;
 
     in property <string> title;
     in property <[string]> facts;
@@ -483,7 +485,9 @@ export component Detail inherits Rectangle {
     property <length> record-w: column-x - record-x - root.width * 0.02;
     property <length> panel-pad: Metrics.vh * 0.018;
 
-    background: Theme.bg;
+    // The interface's own background, as the reference's page has its own
+    // under a backdrop that has not loaded yet.
+    background: Theme.catalog-bg;
     clip: true;
 
     // ---------------------------------------------------------- the backdrop
@@ -577,7 +581,10 @@ export component Detail inherits Rectangle {
                 horizontal-alignment: left;
                 height: Metrics.vh * 0.118;
             }
-            if logo.width == 0: Text {
+            if logo.width == 0 && logo-pending: Rectangle {
+                height: Metrics.vh * 0.118;
+            }
+            if logo.width == 0 && !logo-pending: Text {
                 text: title;
                 color: Theme.text;
                 font-size: Metrics.vh * 0.052;

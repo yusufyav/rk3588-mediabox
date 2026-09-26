@@ -114,6 +114,8 @@ export component Discover inherits Rectangle {
     // The record of the focused title.
     in property <image> art;
     in property <image> logo;
+    // A logo is on its way: neither it nor the name is drawn meanwhile.
+    in property <bool> logo-pending;
     in property <string> title;
     in property <[string]> facts;
     in property <bool> imdb;
@@ -242,7 +244,10 @@ export component Discover inherits Rectangle {
                 image-fit: contain;
                 height: root.height * 0.088;
             }
-            if logo.width == 0: Text {
+            if logo.width == 0 && logo-pending: Rectangle {
+                height: root.height * 0.088;
+            }
+            if logo.width == 0 && !logo-pending: Text {
                 text: title;
                 color: Theme.text;
                 font-size: root.width * 0.014;

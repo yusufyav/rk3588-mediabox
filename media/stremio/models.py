@@ -104,6 +104,13 @@ class MetaPreview:
     imdb_rating: str | None = None
     genres: tuple[str, ...] = ()
     addon_id: str | None = None
+    #: What a catalogue that carries them says of the title beyond a row --
+    #: Cinemeta's do. The reference draws its Discover preview from these
+    #: alone, at once, rather than asking for the full record.
+    runtime: str | None = None
+    cast: tuple[str, ...] = ()
+    director: tuple[str, ...] = ()
+    trailer: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +125,10 @@ class MetaPreview:
             "imdbRating": self.imdb_rating,
             "genres": list(self.genres),
             "addonId": self.addon_id,
+            "runtime": self.runtime,
+            "cast": list(self.cast),
+            "director": list(self.director),
+            "trailer": self.trailer,
         }
 
 

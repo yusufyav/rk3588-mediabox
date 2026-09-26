@@ -171,6 +171,9 @@ struct App {
     /// can still show its last frame for a moment after, and that frame is
     /// not a film someone else started.
     left_film: Option<Instant>,
+    /// Ok held down where a hold means something of its own, and not yet
+    /// let go.
+    ok_hold: Option<OkHold>,
 
     /// The film this interface started on its own video plane, if there is
     /// one.
@@ -1014,7 +1017,6 @@ impl App {
         else {
             return;
         };
-        let meta = self.hero_meta.get(&item.id);
         let state = self.hero_state.get(&item.id);
         let mut change = serde_json::json!({
             "type": item.kind,
@@ -1025,7 +1027,7 @@ impl App {
         match button {
             Button::Show => self.open_detail_for(&item),
             Button::Trailer => {
-                if let Some(id) = meta.and_then(|m| m.trailer.clone()).filter(|t| !t.is_empty()) {
+                if let Some(id) = item.trailer.clone() {
                     spawn_open(format!("https://www.youtube.com/tv#/watch?v={id}"));
                 }
             }
@@ -1149,44 +1151,30 @@ impl App {
             window.set_discover_title("".into());
             return;
         };
-        let meta = self.hero_meta.get(&item.id).cloned();
+        // Drawn from what the catalogue said of the title and nothing else,
+        // as the reference draws its preview: asking for the full record and
+        // drawing it when it came laid the panel out twice for every title
+        // the remote rested on -- the name, then the logo; no runtime or
+        // cast, then both. The account's record only sets the buttons.
         let state = self.hero_state.get(&item.id).cloned();
         window.set_discover_title(item.title.clone().into());
         let mut facts: Vec<String> = Vec::new();
-        if let Some(runtime) = meta.as_ref().and_then(|m| m.runtime.clone()).filter(|r| !r.is_empty()) {
+        if let Some(runtime) = item.runtime.clone() {
             facts.push(runtime);
         }
-        if let Some(year) = item.year.clone().or_else(|| meta.as_ref().and_then(|m| m.release_info.clone())) {
+        if let Some(year) = item.year.clone() {
             facts.push(year);
         }
-        let rating = item.rating.clone().or_else(|| meta.as_ref().and_then(|m| m.imdb_rating.clone()));
-        if let Some(rating) = rating.clone() {
+        if let Some(rating) = item.rating.clone() {
             facts.push(rating);
         }
         window.set_discover_facts(strings(facts.into_iter()));
-        window.set_discover_imdb(rating.is_some());
-        window.set_discover_summary(
-            item.summary
-                .clone()
-                .or_else(|| meta.as_ref().and_then(|m| m.description.clone()))
-                .unwrap_or_default()
-                .into(),
-        );
-        let genres = if item.genres.is_empty() {
-            meta.as_ref().map(|m| m.genres.clone()).unwrap_or_default()
-        } else {
-            item.genres.clone()
-        };
-        window.set_discover_genres(strings(genres.iter().take(3).map(|g| detail::genre_in_turkish(g))));
-        window.set_discover_cast(strings(
-            meta.as_ref().map(|m| m.cast.clone()).unwrap_or_default().into_iter().take(3),
-        ));
-        window.set_discover_directors(strings(
-            meta.as_ref().map(|m| m.director.clone()).unwrap_or_default().into_iter().take(2),
-        ));
-        window.set_discover_has_trailer(
-            meta.as_ref().and_then(|m| m.trailer.as_ref()).is_some_and(|t| !t.is_empty()),
-        );
+        window.set_discover_imdb(item.rating.is_some());
+        window.set_discover_summary(item.summary.clone().unwrap_or_default().into());
+        window.set_discover_genres(strings(item.genres.iter().take(3).map(|g| detail::genre_in_turkish(g))));
+        window.set_discover_cast(strings(item.cast.iter().take(3).cloned()));
+        window.set_discover_directors(strings(item.director.iter().take(2).cloned()));
+        window.set_discover_has_trailer(item.trailer.is_some());
         window.set_discover_known(state.is_some());
         window.set_discover_in_library(state.as_ref().is_some_and(|s| s.in_library));
         window.set_discover_watched(
@@ -1194,20 +1182,18 @@ impl App {
         );
         window.set_discover_series(item.kind == "series");
 
+        // A title with a logo waits for it rather than showing its name and
+        // then swapping the name for the logo.
         let mut logo = slint::Image::default();
-        if let Some(url) = meta.as_ref().and_then(|m| m.logo.clone()).filter(|u| !u.is_empty()) {
+        if let Some(url) = item.logo.clone() {
             let key = images::Key::new(&url, state::POSTER_WIDTH);
             self.images.want(&key);
             logo = self.images.get(&key).unwrap_or_default();
         }
+        window.set_discover_logo_pending(item.logo.is_some() && logo.size().width == 0);
         window.set_discover_logo(logo);
         let mut art = slint::Image::default();
-        if let Some(url) = item
-            .background
-            .clone()
-            .or_else(|| meta.as_ref().and_then(|m| m.background.clone()))
-            .filter(|u| !u.is_empty())
-        {
+        if let Some(url) = item.background.clone() {
             let key = images::Key::new(&url, state::BACKDROP_WIDTH);
             self.images.want(&key);
             art = self.images.get(&key).unwrap_or_default();
@@ -1277,9 +1263,12 @@ impl App {
                             self.paint();
                         }
                     },
+                    // As the reference: Ok opens the title, and holding it
+                    // opens the poster's menu (see `ok_held_long`).
                     Zone::Grid => {
-                        if self.library.open_menu() {
-                            self.paint();
+                        let item = self.library.focused().cloned();
+                        if let Some(item) = item {
+                            self.open_detail_for(&item);
                         }
                     }
                     Zone::Menu => {
@@ -2872,6 +2861,81 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------ holding Ok down
+
+    /// Whether a hold of Ok means something here other than a press: on a
+    /// library poster, where the reference opens the poster's menu.
+    fn wants_ok_hold(&self) -> bool {
+        self.here.is_none()
+            && self.route() == Route::Library
+            && self.library.zone == screens::library::Zone::Grid
+            && self.library.focused().is_some()
+    }
+
+    /// Ok went down on a road that also says when it comes up. Returns
+    /// whether it is held for now rather than acted on: where a hold means
+    /// something, the press is only a press once it is let go in time.
+    fn ok_down(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(hold) = self.ok_hold.as_mut() {
+            // The remote repeats the press while the key is held.
+            if hold.seen.elapsed() < OK_HOLD_LOST {
+                hold.seen = now;
+                return true;
+            }
+        }
+        if !self.wants_ok_hold() {
+            self.ok_hold = None;
+            return false;
+        }
+        self.ok_hold = Some(OkHold { at: now, seen: now, fired: false });
+        slint::Timer::single_shot(OK_HOLD, || with_app(|app| app.ok_held_long()));
+        true
+    }
+
+    /// Ok came up. Let go before the hold was long enough, it is a press.
+    fn ok_up(&mut self) {
+        if let Some(hold) = self.ok_hold.take() {
+            if !hold.fired {
+                self.act(InputAction::Ok);
+            }
+        }
+    }
+
+    fn ok_held_long(&mut self) {
+        let Some(hold) = self.ok_hold.as_mut() else {
+            return;
+        };
+        if hold.fired || hold.at.elapsed() + Duration::from_millis(20) < OK_HOLD {
+            return;
+        }
+        hold.fired = true;
+        if self.wants_ok_hold() && self.library.open_menu() {
+            self.paint();
+        }
+    }
+
+    /// A press or a release from the daemon's bus.
+    fn bus_input(&mut self, action: InputAction, pressed: bool, source: mediabox_core::InputSource) {
+        // Only the remote says when a key comes up; a press from anywhere
+        // else is acted on as it arrives, as it always was.
+        if action == InputAction::Ok && source == mediabox_core::InputSource::Cec {
+            if !pressed {
+                self.ok_up();
+                return;
+            }
+            if self.ok_down() {
+                return;
+            }
+        }
+        if !pressed {
+            return;
+        }
+        if let Some(action) = self.dispatcher.accept(action, input::Origin::Bus) {
+            self.act(action);
+        }
+    }
+
     fn open(&mut self, route: Route) {
         self.stack.push(route);
         self.paint();
@@ -3337,13 +3401,18 @@ impl App {
         window.set_detail_providers(strings(providers.into_iter()));
         window.set_detail_provider(detail.provider as i32);
 
+        // A title with a logo waits for it, rather than showing its name
+        // and swapping the name for the logo a moment later.
+        let mut logo_pending = false;
         if let Some(url) = detail.meta.logo.clone().filter(|url| !url.is_empty()) {
             let key = images::Key::new(&url, state::POSTER_WIDTH);
             self.images.want(&key);
-            if let Some(art) = self.images.get(&key) {
-                window.set_detail_logo(art);
+            match self.images.get(&key) {
+                Some(art) => window.set_detail_logo(art),
+                None => logo_pending = true,
             }
         }
+        window.set_detail_logo_pending(logo_pending);
 
         // The poster is almost always a cache hit: the shelf this screen was
         // opened from decoded it at the same width a moment ago.
@@ -3355,27 +3424,32 @@ impl App {
             }
         }
 
+        // The backdrop is the full record's own, faded in once it is decoded;
+        // until then the page is on the interface's own background, as the
+        // reference's is. Never the catalogue's picture or the poster in the
+        // meantime -- that was a second picture swapped in a moment later.
         if let Some(url) = detail
             .meta
             .background
             .clone()
-            .or_else(|| detail.meta.poster.clone())
+            .filter(|url| detail.record_loaded && !url.is_empty())
         {
-            if self.detail_backdrop.as_deref() != Some(url.as_str()) {
-                self.detail_backdrop = Some(url.clone());
-                self.detail_fade = if self.detail_fade > 0.5 { 0.0 } else { 1.0 };
-            }
             let key = images::Key::new(&url, state::BACKDROP_WIDTH);
             self.images.want(&key);
-            if let Some(art) = self.images.get(&key) {
-                if self.detail_fade > 0.5 {
-                    window.set_detail_art_b(art);
-                } else {
-                    window.set_detail_art_a(art);
+            if self.detail_backdrop.as_deref() != Some(url.as_str()) {
+                if let Some(art) = self.images.get(&key) {
+                    self.detail_backdrop = Some(url);
+                    // Into the slot the fade goes to, so it fades in.
+                    self.detail_fade = if self.detail_fade > 0.5 { 0.0 } else { 1.0 };
+                    if self.detail_fade > 0.5 {
+                        window.set_detail_art_b(art);
+                    } else {
+                        window.set_detail_art_a(art);
+                    }
                 }
             }
-            window.set_detail_fade(self.detail_fade);
         }
+        window.set_detail_fade(self.detail_fade);
 
         self.remember();
     }
@@ -4362,6 +4436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         controls_were_open: false,
         handing_over: false,
         left_film: None,
+        ok_hold: None,
         here: None,
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
@@ -4441,10 +4516,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keys from the appliance's own keyboards, through libinput. The remote
     // does not come this way — the daemon is the authority for it — and the
     // dispatcher drops a press that arrives on both roads.
+    // Enter's release, for a hold of it to be told from a press, as the
+    // remote's is.
+    window.on_key_released(move |text| {
+        if input::action_for_key(text.as_str()) == Some(InputAction::Ok) {
+            with_app(|app| app.ok_up());
+        }
+    });
     window.on_key_pressed(move |text| {
         let Some(first) = text.chars().next() else {
             return;
         };
+        if input::action_for_key(text.as_str()) == Some(InputAction::Ok) {
+            let mut held = false;
+            with_app(|app| held = app.ok_down());
+            if held {
+                return;
+            }
+        }
         // Backspace is a deletion where there is text and Back where there is
         // not; only the screen knows which, so it is not routed as an action.
         if input::is_backspace(text.as_str()) {
@@ -4975,6 +5064,17 @@ const FIRST_FRAME_GRACE_RESUMED: Duration = Duration::from_secs(45);
 /// How long after closing a film here a picture still on the plane is taken
 /// for its last frame rather than a film someone else started.
 const LEFT_FILM_QUIET: Duration = Duration::from_secs(3);
+/// How long Ok is held for the hold to be its own gesture.
+const OK_HOLD: Duration = Duration::from_millis(500);
+/// A held key the remote has stopped repeating and never released: taken as
+/// let go, so one lost release does not swallow every press after it.
+const OK_HOLD_LOST: Duration = Duration::from_millis(1500);
+
+struct OkHold {
+    at: Instant,
+    seen: Instant,
+    fired: bool,
+}
 
 /// How long a line along the bottom of the screen stays up.
 ///
@@ -5558,19 +5658,12 @@ fn deliver(line: &str) {
         return;
     };
 
-    // Only the press edge. Through CEC the press, the hold and the release each
-    // arrive as their own event.
-    if !event.pressed {
-        return;
-    }
-
-    let action = event.action;
+    // Through CEC the press, the hold and the release each arrive as their
+    // own event. The release matters only to Ok, whose hold means something
+    // on a library poster; `bus_input` drops the rest.
+    let (action, pressed, source) = (event.action, event.pressed, event.source);
     let _ = slint::invoke_from_event_loop(move || {
-        with_app(|app| {
-            if let Some(action) = app.dispatcher.accept(action, input::Origin::Bus) {
-                app.act(action);
-            }
-        });
+        with_app(|app| app.bus_input(action, pressed, source));
     });
 }
 

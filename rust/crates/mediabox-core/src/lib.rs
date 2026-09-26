@@ -79,6 +79,10 @@ pub enum InputMode {
     KodiPlayback,
 }
 
+fn pressed_by_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputSource {
@@ -1539,6 +1543,15 @@ pub enum Request {
     },
     InputInject {
         action: InputAction,
+        /// The release of a key as well as its press, for a hold to be
+        /// injected the way a remote sends it. A caller that sends neither
+        /// field injects a press, as it always did.
+        #[serde(default = "pressed_by_default")]
+        pressed: bool,
+        /// Which road the press is to look as if it came down. Api unless
+        /// said otherwise.
+        #[serde(default)]
+        source: Option<InputSource>,
     },
     InputMonitor,
     /// Restart or shut the appliance down.

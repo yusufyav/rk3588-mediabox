@@ -121,6 +121,7 @@ export component MediaBoxWindow inherits Window {
     in property <int> discover-place;
     in property <int> discover-button;
     in property <image> discover-art;
+    in property <bool> discover-logo-pending;
     in property <image> discover-logo;
     in property <string> discover-title;
     in property <[string]> discover-facts;
@@ -217,6 +218,7 @@ export component MediaBoxWindow inherits Window {
     in property <[string]> detail-cuts;
     in property <[bool]> detail-enabled;
     in property <image> detail-logo;
+    in property <bool> detail-logo-pending;
     in property <[SourceRow]> detail-sources;
     in property <string> detail-note;
     in property <bool> detail-on-sources;
@@ -338,12 +340,17 @@ export component MediaBoxWindow inherits Window {
     // the focus model is deterministic and structural, and splitting it between
     // two languages is how it stops being either.
     callback key-pressed(string);
+    callback key-released(string);
 
     forward-focus: scope;
 
     scope := FocusScope {
         key-pressed(event) => {
             root.key-pressed(event.text);
+            accept
+        }
+        key-released(event) => {
+            root.key-released(event.text);
             accept
         }
 
@@ -414,6 +421,7 @@ export component MediaBoxWindow inherits Window {
             button: root.discover-button;
             art: root.discover-art;
             logo: root.discover-logo;
+            logo-pending: root.discover-logo-pending;
             title: root.discover-title;
             facts: root.discover-facts;
             imdb: root.discover-imdb;
@@ -460,6 +468,7 @@ export component MediaBoxWindow inherits Window {
             imdb: root.detail-imdb;
             summary: root.detail-summary;
             logo: root.detail-logo;
+            logo-pending: root.detail-logo-pending;
             genres: root.detail-genres;
             cast: root.detail-cast;
             directors: root.detail-directors;

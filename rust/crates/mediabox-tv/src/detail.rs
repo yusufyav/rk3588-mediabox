@@ -118,6 +118,10 @@ pub struct Detail {
 
     pub loading: bool,
     pub note: String,
+    /// Whether the full record has come. Until it has, the page shows the
+    /// backdrop of none: a catalogue's picture or the poster standing in
+    /// for a moment is a second picture swapped in front of the viewer.
+    pub record_loaded: bool,
 
     /// How far the title has been watched, once the account has said.
     pub watch: Option<TitleState>,
@@ -154,15 +158,17 @@ impl Detail {
                 name: item.title.clone(),
                 poster: item.poster.clone(),
                 background: item.background.clone(),
-                logo: None,
+                // All the catalogue said, so the page is laid out once: the
+                // full record fills in only what a catalogue left out.
+                logo: item.logo.clone(),
                 description: item.summary.clone(),
                 release_info: item.year.clone(),
-                runtime: None,
+                runtime: item.runtime.clone(),
                 imdb_rating: item.rating.clone(),
                 genres: item.genres.clone(),
-                cast: Vec::new(),
-                director: Vec::new(),
-                trailer: None,
+                cast: item.cast.clone(),
+                director: item.director.clone(),
+                trailer: item.trailer.clone(),
                 videos: Vec::new(),
             },
             sources: Vec::new(),
@@ -176,6 +182,7 @@ impl Detail {
             filter_open: false,
             filter_focus: 0,
             loading: item.kind != "series",
+            record_loaded: false,
             note: if item.kind == "series" {
                 String::new()
             } else {
@@ -470,6 +477,7 @@ impl Detail {
             background,
             ..meta
         };
+        self.record_loaded = true;
         self.follow_last_played();
     }
 

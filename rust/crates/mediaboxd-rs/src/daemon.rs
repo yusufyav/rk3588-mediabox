@@ -293,8 +293,9 @@ impl AppState {
                 media_result(self.media.session_start(&url).await)
             }
             Request::MediaSessionStop { id } => media_result(self.media.session_stop(&id).await),
-            Request::InputInject { action } => {
-                let decision = self.input.publish(action, InputSource::Api, true, None);
+            Request::InputInject { action, pressed, source } => {
+                let source = source.unwrap_or(InputSource::Api);
+                let decision = self.input.publish(action, source, pressed, None);
                 if let Err(error) = apply_kodi_route(&self.kodi, decision).await {
                     return Response::failure("INPUT_ROUTE_ERROR", error);
                 }

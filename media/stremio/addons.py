@@ -180,6 +180,10 @@ def _meta_preview(entry: dict[str, Any], addon_id: str | None) -> MetaPreview | 
         imdb_rating=_text(entry.get("imdbRating")),
         genres=_strings(entry.get("genres")) or _strings(entry.get("genre")),
         addon_id=addon_id,
+        runtime=_text(entry.get("runtime")),
+        cast=_strings(entry.get("cast")),
+        director=_strings(entry.get("director")),
+        trailer=_trailer(entry),
     )
 
 

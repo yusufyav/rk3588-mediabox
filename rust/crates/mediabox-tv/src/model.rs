@@ -44,6 +44,16 @@ pub struct MetaPreview {
     pub genres: Vec<String>,
     #[serde(rename = "addonId", default)]
     pub addon_id: Option<String>,
+    /// What a catalogue that carries them says beyond a row (Cinemeta's do):
+    /// the reference's Discover preview is drawn from these alone.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub cast: Vec<String>,
+    #[serde(default)]
+    pub director: Vec<String>,
+    #[serde(default)]
+    pub trailer: Option<String>,
     /// How far this title was watched, when it comes from the account's own
     /// library. Titles from a catalogue have none.
     #[serde(default)]
