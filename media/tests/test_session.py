@@ -485,12 +485,14 @@ class SessionLifecycleTests(unittest.TestCase):
         with self.assertRaises(SessionError):
             manager.create("https://cdn.example.com/a.mkv", decide(info, PROFILE))
 
-    def test_a_risky_source_cannot_become_a_session(self):
+    def test_a_risky_source_the_viewer_chose_is_played_not_refused(self):
+        # As Stremio plays it: the risk ranks the source last, and a chosen
+        # one is opened the way it would have been had nothing been risky.
         manager = self._manager("pass")
-        with self.assertRaises(SessionError):
-            manager.create(
-                "https://cdn.example.com/dv.mkv", decide(F.dolby_vision_profile5(), PROFILE)
-            )
+        session = manager.create(
+            "https://cdn.example.com/dv.mkv", decide(F.dolby_vision_profile5(), PROFILE)
+        )
+        self.assertEqual(session.mode, SessionMode.DIRECT)
 
     def test_an_unknown_session_id_is_not_found(self):
         manager = self._manager("pass")

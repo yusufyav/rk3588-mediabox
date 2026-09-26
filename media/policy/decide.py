@@ -74,6 +74,24 @@ def _container_supported(info: MediaInfo, profile: CapabilityProfile) -> bool:
     return any(part in profile.container.direct for part in name.split(","))
 
 
+def mode_when_chosen(decision: PlaybackDecision) -> PlaybackMode:
+    """How a source is played once the viewer has chosen it.
+
+    ``FALLBACK_SOURCE_PREFERRED`` is advice for ranking -- another rendition
+    of the same title is likely to look better -- not a refusal. Stremio plays
+    whatever source the viewer picks, a Dolby Vision Profile 5 file included,
+    green and magenta as it then is, and so does this appliance: the choice
+    is played the way it would have been had nothing about it been risky.
+    """
+    if decision.mode is not PlaybackMode.FALLBACK_SOURCE_PREFERRED:
+        return decision.mode
+    if decision.audio.requires_encoder:
+        return PlaybackMode.DIRECT_WITH_AUDIO_TRANSCODE
+    if any(note.code == R.CONTAINER_REMUX_REQUIRED for note in decision.reasons):
+        return PlaybackMode.REMUX
+    return PlaybackMode.DIRECT
+
+
 def decide(
     info: MediaInfo,
     profile: CapabilityProfile | None = None,

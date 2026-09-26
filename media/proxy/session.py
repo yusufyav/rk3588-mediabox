@@ -35,7 +35,7 @@ from enum import Enum
 from typing import Any, Iterator
 
 from ..errors import MediaError, NotFound, SessionError
-from ..policy.decide import PlaybackDecision, PlaybackMode
+from ..policy.decide import PlaybackDecision, PlaybackMode, mode_when_chosen
 from .ffmpeg import FFmpegConfig, build_argv
 from .security import SourcePolicy, validate_session_id, validate_source_url
 
@@ -232,13 +232,9 @@ class SessionManager:
             raise SessionError(
                 "SOURCE_UNSUPPORTED", "this source cannot be played by this appliance", 422
             )
-        mode = _MODE_FOR_DECISION.get(decision.mode)
-        if mode is None:
-            raise SessionError(
-                "SOURCE_NOT_PREFERRED",
-                "this source is only playable as a fallback; resolve a safer rendition first",
-                409,
-            )
+        # The viewer's choice is played, as Stremio plays it; a risky
+        # rendition is ranked last, never refused here.
+        mode = _MODE_FOR_DECISION[mode_when_chosen(decision)]
 
         key = (source, mode.value)
         now = self._clock()

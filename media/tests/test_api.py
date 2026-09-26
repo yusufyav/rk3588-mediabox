@@ -206,12 +206,12 @@ class PlanAndRankTests(unittest.TestCase):
         self.assertIsNone(payload["pid"])
         self.assertEqual(payload["playbackUrl"], "https://cdn.example/hdr10.mkv")
 
-    def test_a_dolby_vision_profile5_source_cannot_be_made_into_a_session(self):
-        response = self.core.handle(
-            "POST", "/media/session", body=json.dumps({"url": "https://cdn.example/dv5.mkv"}).encode()
-        )
-        self.assertEqual(response.status, 409)
-        self.assertEqual(body_of(response)["error"]["code"], "SOURCE_NOT_PREFERRED")
+    def test_a_dolby_vision_profile5_source_is_played_when_it_is_chosen(self):
+        # Stremio opens it, green and magenta as it then is; the risk is for
+        # ranking, not a refusal.
+        payload = self._post("/media/session", {"url": "https://cdn.example/dv5.mkv"})
+        self.assertEqual(payload["mode"], "Direct")
+        self.assertEqual(payload["playbackUrl"], "https://cdn.example/dv5.mkv")
 
     def test_a_session_carries_everything_a_handoff_needs(self):
         payload = self._post("/media/session", {"url": "https://cdn.example/atmos.mkv"})
