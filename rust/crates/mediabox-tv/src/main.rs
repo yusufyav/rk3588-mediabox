@@ -995,14 +995,9 @@ impl App {
                 }
             }
             Intent::Dismiss => {
-                // One press, one step: the list, then the filters, then out.
+                // As the reference: Back closes an open list, and otherwise
+                // leaves the page. There is no step through the filters.
                 if self.discover.close_picker() {
-                    self.paint();
-                } else if matches!(self.discover.zone, Zone::Panel | Zone::Places | Zone::Search) {
-                    self.discover.zone = if self.discover.items.is_empty() { Zone::Filters } else { Zone::Grid };
-                    self.paint();
-                } else if self.discover.zone == Zone::Grid && !self.discover.items.is_empty() {
-                    self.discover.zone = Zone::Filters;
                     self.paint();
                 } else {
                     self.back();
@@ -1142,8 +1137,9 @@ impl App {
         );
         window.set_discover_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
 
-        // The record: the grid's focused title, or the first while the remote
-        // is up in the filters, as the reference always shows one.
+        // The record: the grid's focused title, or the one the remote was last
+        // on while it is elsewhere, as the reference always shows one. The
+        // grid stays scrolled to that same row, so it is always in view.
         let item = self
             .discover
             .focused()
@@ -1323,14 +1319,13 @@ impl App {
                 }
             }
             Intent::Dismiss => {
-                // One press, one step: the list or the menu, the grid, out.
+                // As the reference: Back closes an open list or a poster's
+                // menu, and otherwise leaves the page. There is no step
+                // through the filters.
                 if self.library.close_types() {
                     self.paint();
                 } else if self.library.zone == Zone::Menu {
                     self.library.zone = Zone::Grid;
-                    self.paint();
-                } else if self.library.zone != Zone::Filters {
-                    self.library.zone = Zone::Filters;
                     self.paint();
                 } else {
                     self.back();
@@ -2870,6 +2865,14 @@ impl App {
         if self.stack.pop() {
             if self.route() != Route::Detail {
                 self.detail = None;
+            }
+            // Coming back to a page is arriving at it: the remote is on its
+            // posters where it last was, not on the place that led away.
+            match self.route() {
+                Route::Media => self.media.arrive(),
+                Route::Discover => self.discover.arrive(),
+                Route::Library => self.library.arrive(),
+                _ => {}
             }
             self.paint();
             self.remember();

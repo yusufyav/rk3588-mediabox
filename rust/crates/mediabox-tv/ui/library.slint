@@ -45,9 +45,10 @@ export component Library inherits Rectangle {
     property <length> cell-h: root.height * 0.309;
     property <length> viewport-h: root.height - grid-top;
     property <bool> on-grid: zone == 1 || zone == 2;
-    property <length> scroll: !on-grid
-        ? 0px
-        : clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
+    // Kept on the row the remote was last on whichever zone it is in, as
+    // the reference's page does not scroll when the focus leaves the grid;
+    // the posters are loaded around that same row.
+    property <length> scroll: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
                 0px,
                 max(0px, Math.ceil(items.length / columns) * cell-h - viewport-h));
 

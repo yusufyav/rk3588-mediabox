@@ -137,9 +137,10 @@ export component Discover inherits Rectangle {
     property <length> pad: root.width * 0.02;
     property <length> viewport-h: root.height - grid-top;
     property <int> rows: Math.ceil(items.length / columns) + (loading ? 1 : 0);
-    property <length> scroll: !on-grid
-        ? 0px
-        : clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
+    // Kept on the row the remote was last on whichever zone it is in, as
+    // the reference's page does not scroll when the focus leaves the grid;
+    // the posters are loaded around that same row.
+    property <length> scroll: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
                 0px,
                 max(0px, rows * cell-h - viewport-h));
 
