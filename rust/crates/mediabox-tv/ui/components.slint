@@ -1,5 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { Dialog, ActionButton, SettingCard } from "kit.slint";
+import { ReferenceIcon } from "reference-icons.slint";
 
 // One shelf item, as the interface needs it. Everything expensive — the
 // artwork, the progress, the fallback's hue — is decided in Rust and arrives
@@ -21,6 +22,9 @@ export struct PosterItem {
     progress: float,
     // Held by this appliance rather than fetched over the network.
     local: bool,
+    // Watched, as stremio-core's LibraryItem::watched says it: watched at
+    // least once. The reference marks such a poster with a check.
+    watched: bool,
 }
 
 export struct RailModel {
@@ -278,25 +282,26 @@ component LinkLine inherits HorizontalLayout {
 // Addon posters 404 in practice — often enough that an empty frame would be a
 // regular sight — so the name is always painted on a ground of its own and the
 // picture covers it when it arrives.
+// A poster with no picture, as the reference draws one (MetaItem's
+// renderPosterFallback): a grey tile with its type's mark in the middle,
+// 80% by 50% of it, colours measured off its library.
 export component Fallback inherits Rectangle {
     in property <string> title;
     in property <float> hue;
+    in property <string> kind;
 
     border-radius: Metrics.poster-radius;
-    background: @linear-gradient(160deg,
-        Colors.hsv(hue, 0.42, 0.30) 0%,
-        Colors.hsv(hue, 0.55, 0.13) 100%);
+    background: #44434c;
 
-    Text {
-        x: parent.width * 0.10;
-        y: parent.height * 0.10;
-        width: parent.width * 0.80;
-        text: title;
-        color: #ffffffcc;
-        font-size: Metrics.text-card * 1.07;
-        font-weight: 700;
-        wrap: word-wrap;
-        overflow: elide;
+    ReferenceIcon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: kind == "series" ? "series"
+            : kind == "channel" ? "channels"
+            : kind == "tv" ? "tv"
+            : "movies";
+        size: min(parent.width * 0.8, parent.height * 0.5);
+        ink: #1a1925;
     }
 }
 
@@ -342,6 +347,7 @@ export component Art inherits Rectangle {
                 height: 100%;
                 title: item.title;
                 hue: item.hue;
+                kind: item.kind;
             }
 
             if item.art.width > 0: Image {
@@ -349,6 +355,25 @@ export component Art inherits Rectangle {
                 height: 100%;
                 source: item.art;
                 image-fit: cover;
+            }
+        }
+
+        // The reference's watched mark: a 1.5rem circle in its accent, 0.5rem
+        // in from the corner, a 0.75rem check in it.
+        if item.watched: Rectangle {
+            property <length> rem: Metrics.vw / 146.6;
+            x: rem * 0.5;
+            y: rem * 0.5;
+            width: rem * 1.5;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: #7b5bf5;
+            ReferenceIcon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                name: "checkmark";
+                size: parent.width * 0.5;
+                ink: #ffffff;
             }
         }
 

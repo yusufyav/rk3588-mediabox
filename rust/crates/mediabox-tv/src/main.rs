@@ -4383,6 +4383,7 @@ fn grid_posters(
                 hue: item.hue,
                 progress: item.progress,
                 local: item.local,
+                watched: item.record.as_ref().is_some_and(|r| r.times_watched > 0),
             }
         })
         .collect()
@@ -4409,6 +4410,7 @@ fn posters(images: &mut images::ImageManager, items: &[state::Item]) -> Vec<Post
                 hue: item.hue,
                 progress: item.progress,
                 local: item.local,
+                watched: item.record.as_ref().is_some_and(|r| r.times_watched > 0),
             }
         })
         .collect()

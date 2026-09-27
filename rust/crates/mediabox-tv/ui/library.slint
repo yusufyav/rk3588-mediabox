@@ -34,15 +34,19 @@ export component Library inherits Rectangle {
     in property <int> index;
     in property <int> columns;
 
-    property <length> rem: root.width / 128;
-    property <length> filters-x: root.width * 0.0586;
-    property <length> filters-y: root.height * 0.0972;
-    property <length> filters-h: root.height * 0.0382;
-    property <length> grid-x: root.width * 0.0664;
-    property <length> grid-top: root.height * 0.170;
-    property <length> art-w: root.width * 0.0842;
-    property <length> cell-w: root.width * 0.1037;
-    property <length> cell-h: root.height * 0.309;
+    // Measured off a 4K capture of the reference's desktop library: its rem
+    // there is 2.75rem = 3.33% of the height, so W/146.6; the dropdown 5.13%
+    // in and 8.52% down, 8.8% by 3.33%; the chips 2.4rem after it; the grid
+    // the same as its Discover's.
+    property <length> rem: root.width / 146.6;
+    property <length> filters-x: root.width * 0.0513;
+    property <length> filters-y: root.height * 0.0852;
+    property <length> filters-h: root.height * 0.0333;
+    property <length> grid-x: root.width * 0.0586;
+    property <length> grid-top: root.height * 0.153;
+    property <length> art-w: root.width * 0.087;
+    property <length> cell-w: root.width * 0.1047;
+    property <length> cell-h: root.height * 0.307;
     property <length> viewport-h: root.height - grid-top;
     property <bool> on-grid: zone == 1 || zone == 2;
     // Kept on the row the remote was last on whichever zone it is in, as
@@ -85,7 +89,7 @@ export component Library inherits Rectangle {
                 x: Math.mod(i, columns) * cell-w;
                 y: Math.floor(i / columns) * cell-h;
                 art-w: root.art-w;
-                name-size: root.width * 0.0072;
+                name-size: root.width * 0.0078;
                 item: item;
                 focused: on-grid && i == index;
             }
@@ -150,66 +154,81 @@ export component Library inherits Rectangle {
         x: filters-x;
         y: filters-y;
         height: filters-h;
-        spacing: rem * 1.5;
+        spacing: rem * 2.4;
         alignment: start;
 
+        // The reference's dropdown: #1d1c2e, its caret turned up while its
+        // list is down. The remote on it is a light ring, the reference's
+        // focus outline, rather than a white fill.
         types := Rectangle {
             property <bool> focused: zone == 0 && filter == 0;
-            width: rem * 15;
-            border-radius: self.height * 0.28;
-            background: focused ? Theme.focus-fill : #ffffff0d;
-            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+            property <bool> open: type-open >= 0;
+            width: root.width * 0.088;
+            border-radius: open ? 0px : self.height * 0.28;
+            border-top-left-radius: self.height * 0.28;
+            border-top-right-radius: self.height * 0.28;
+            background: #1d1c2e;
+            border-width: (focused && !open) ? max(2px, rem * 0.1) : 0px;
+            border-color: #e8e8ec;
 
             Text {
-                x: parent.height * 0.42;
-                width: parent.width - parent.height * 1.3;
+                x: rem;
+                width: parent.width - rem * 3;
                 height: 100%;
                 text: tabs[tab];
-                color: types.focused ? #0a0c10 : Theme.text;
+                color: Theme.text;
                 font-size: rem;
                 vertical-alignment: center;
                 overflow: elide;
                 wrap: no-wrap;
             }
             Path {
-                x: parent.width - parent.height * 0.62;
-                y: parent.height * 0.44;
-                width: parent.height * 0.2;
-                height: parent.height * 0.12;
+                x: parent.width - rem * 1.6;
+                y: (parent.height - self.height) / 2;
+                width: rem * 0.6;
+                height: rem * 0.36;
                 viewbox-width: 10;
                 viewbox-height: 6;
-                commands: "M0 0L10 0L5 6z";
-                fill: types.focused ? #0a0c10 : #ffffffb0;
+                commands: types.open ? "M0 6L10 6L5 0z" : "M0 0L10 0L5 6z";
+                fill: #ffffffb0;
             }
 
-            if type-open >= 0: Rectangle {
-                property <length> line-h: rem * 3.2;
+            // The list, right under the box and as wide, #0f0d20; the section
+            // showing has the reference's green dot at its right.
+            if open: Rectangle {
+                property <length> line-h: root.height * 0.0363;
                 x: 0;
-                y: parent.height + rem * 0.3;
+                y: parent.height;
                 width: parent.width;
-                height: tabs.length * line-h;
-                border-radius: parent.border-radius;
-                background: #1e1c2f;
-                border-width: 1px;
-                border-color: #ffffff1f;
+                height: tabs.length * line-h + rem * 0.3;
+                border-bottom-left-radius: types.height * 0.28;
+                border-bottom-right-radius: types.height * 0.28;
+                background: #0f0d20;
                 clip: true;
 
                 for option[k] in tabs: Rectangle {
                     y: k * parent.line-h;
                     height: parent.line-h;
-                    background: k == type-open ? #ffffff26 : transparent;
+                    background: k == type-open ? #ffffff14 : transparent;
 
                     Text {
-                        x: rem * 1.5;
+                        x: rem * 0.9;
                         width: parent.width - rem * 3;
                         height: 100%;
                         text: option;
                         color: Theme.text;
                         font-size: rem;
-                        font-weight: k == tab ? 700 : 500;
                         vertical-alignment: center;
                         overflow: elide;
                         wrap: no-wrap;
+                    }
+                    if k == tab: Rectangle {
+                        x: parent.width - rem * 1.3;
+                        y: (parent.height - self.height) / 2;
+                        width: rem * 0.4;
+                        height: self.width;
+                        border-radius: self.width / 2;
+                        background: #22b365;
                     }
                 }
             }
@@ -224,15 +243,16 @@ export component Library inherits Rectangle {
                 property <bool> chosen: k == sort;
                 width: words.preferred-width + rem * 3.5;
                 border-radius: self.height / 2;
-                background: focused ? Theme.focus-fill : (chosen ? #1245a6 : transparent);
+                background: chosen ? #1245a6 : (focused ? #ffffff0d : transparent);
                 opacity: focused || chosen ? 1.0 : 0.6;
-                animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                border-width: focused ? max(2px, rem * 0.1) : 0px;
+                border-color: #e8e8ec;
 
                 words := Text {
                     width: 100%;
                     height: 100%;
                     text: label;
-                    color: parent.focused ? #0a0c10 : Theme.text;
+                    color: Theme.text;
                     font-size: rem;
                     font-weight: 500;
                     vertical-alignment: center;

@@ -274,6 +274,7 @@ fn tile(item: &Item) -> PosterItem {
         hue: item.hue,
         progress: item.progress,
         local: item.local,
+        watched: item.record.as_ref().is_some_and(|r| r.times_watched > 0),
     }
 }
 
