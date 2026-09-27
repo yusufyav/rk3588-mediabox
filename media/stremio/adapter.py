@@ -171,6 +171,9 @@ ADDON_PENALTY_SECONDS = 300.0
 #: fetching it on every catalogue request would put api.strem.io in the path of
 #: every screen.
 ADDON_CACHE_SECONDS = 300.0
+#: How long the account's picture is kept before Stremio is asked again. It
+#: changes when somebody changes it, on another device, rarely.
+AVATAR_CACHE_SECONDS = 3600.0
 
 #: Catalogues shown on the home surface, per addon, so one addon with forty
 #: catalogues cannot fill the screen by itself.
@@ -257,6 +260,8 @@ class HeadlessStremio:
         )
         self._clock = clock
         self._lock = threading.Lock()
+        # The account's picture, when it was read, and for which sign-in.
+        self._avatar: tuple[str | None, float, str] | None = None
         self._addons: tuple[Addon, ...] = ()
         self._addons_fetched_at: float | None = None
         # Addons that have just failed to answer, and when. An addon whose host
@@ -298,12 +303,35 @@ class HeadlessStremio:
             authenticated=bool(stored.auth_key),
             user_id=stored.user_id,
             email=stored.email,
+            avatar=self._account_avatar(stored.auth_key),
             addon_count=len(addons),
             streaming_server_reachable=version is not None,
             streaming_server_version=version,
             api_reachable=api_reachable,
             notes=tuple(notes),
         )
+
+    def _account_avatar(self, auth_key: str | None) -> str | None:
+        """The account's picture, read from Stremio at most once an hour."""
+        if not auth_key:
+            with self._lock:
+                self._avatar = None
+            return None
+        now = self._clock()
+        with self._lock:
+            cached = self._avatar
+        if cached and cached[2] == auth_key and now - cached[1] < AVATAR_CACHE_SECONDS:
+            return cached[0]
+        try:
+            user = self.api.get_user() or {}
+            value = user.get("avatar")
+            avatar = value.strip() if isinstance(value, str) and value.strip() else None
+        except UpstreamError:
+            # Unreachable is not "no picture": keep what was read before.
+            avatar = cached[0] if cached and cached[2] == auth_key else None
+        with self._lock:
+            self._avatar = (avatar, now, auth_key)
+        return avatar
 
     def login(self, email: str, password: str) -> SessionStatus:
         self.api.login(email, password)

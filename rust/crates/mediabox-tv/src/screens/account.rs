@@ -49,6 +49,8 @@ pub struct Session {
     pub authenticated: bool,
     pub email: String,
     pub addons: u64,
+    /// The account's own picture on Stremio, when it has one.
+    pub avatar: Option<String>,
 }
 
 impl Session {
@@ -73,6 +75,12 @@ impl Session {
                 .and_then(|p| p.get("addonCount"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
+            avatar: provider
+                .and_then(|p| p.get("avatar"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(str::to_string),
         }
     }
 }

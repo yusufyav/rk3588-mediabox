@@ -3266,6 +3266,13 @@ impl App {
             let chip = window.global::<AccountChip>();
             chip.set_signed(session.authenticated);
             chip.set_email(session.email.into());
+            let mut avatar = slint::Image::default();
+            if let Some(url) = session.avatar.as_deref().filter(|_| session.authenticated) {
+                let key = images::Key::new(url, state::POSTER_WIDTH);
+                self.images.want(&key);
+                avatar = self.images.get(&key).unwrap_or_default();
+            }
+            chip.set_avatar(avatar);
             chip.set_focus(if self.on_search_box() { self.account_focus } else { 0 });
         }
         // A film is drawn by the display controller on the window under this

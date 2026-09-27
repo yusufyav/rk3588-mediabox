@@ -319,12 +319,16 @@ class SessionStatus:
     streaming_server_version: str | None = None
     api_reachable: bool = False
     notes: tuple[str, ...] = ()
+    #: The picture the account has on Stremio, when it has one: the
+    #: reference's profile mark shows it.
+    avatar: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "authenticated": self.authenticated,
             "userId": self.user_id,
             "email": self.email,
+            "avatar": self.avatar,
             "addonCount": self.addon_count,
             "streamingServer": {
                 "reachable": self.streaming_server_reachable,

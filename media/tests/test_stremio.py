@@ -538,3 +538,35 @@ class AdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AccountAvatarTests(unittest.TestCase):
+    """The reference's profile mark shows the account's own picture."""
+
+    def _adapter(self, users, now):
+        from ..stremio.adapter import HeadlessStremio
+        from ..stremio.api import StoredSession
+
+        adapter = HeadlessStremio(clock=lambda: now[0])
+        adapter.api.store.set(StoredSession(auth_key="k", user_id="u", email="e@x"))
+        calls = []
+
+        def get_user():
+            calls.append(1)
+            return users[0]
+
+        adapter.api.get_user = get_user
+        return adapter, calls
+
+    def test_the_picture_is_read_once_an_hour_and_empty_is_none(self):
+        users = [{"avatar": "https://img.example/a.png"}]
+        now = [0.0]
+        adapter, calls = self._adapter(users, now)
+        self.assertEqual(adapter._account_avatar("k"), "https://img.example/a.png")
+        users[0] = {"avatar": ""}
+        now[0] = 60.0
+        self.assertEqual(adapter._account_avatar("k"), "https://img.example/a.png")
+        self.assertEqual(len(calls), 1)
+        now[0] = 4000.0
+        self.assertIsNone(adapter._account_avatar("k"))
+        self.assertIsNone(adapter._account_avatar(None))
