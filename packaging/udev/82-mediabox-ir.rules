@@ -1,0 +1,9 @@
+# The board's infrared receiver gets the remote's keymap, and nothing else does.
+#
+# Matched by the driver of the rc device's parent -- the `gpio-ir-receiver`
+# platform device (packaging/overlays/mediabox-ir-opi5plus.dts) -- so the HDMI
+# transmitters' CEC rc devices keep the kernel's own CEC map. `-c` clears the
+# receiver's empty default map first; the keymap names the protocol it needs,
+# which ir-keytable turns on.
+ACTION=="add", SUBSYSTEM=="rc", DRIVERS=="gpio_ir_recv", \
+  RUN+="/usr/bin/ir-keytable -c -w /etc/rc_keymaps/mediabox-remote.toml -s $name"

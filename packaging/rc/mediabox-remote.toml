@@ -1,0 +1,35 @@
+# The Ugoos UR-02's infrared keys, for the board's receiver (rc-core,
+# gpio-ir-receiver). Every code here was measured off the remote itself on the
+# Orange Pi 5 Plus with `ir-keytable -p all -t` on 2026-09-27 -- none is copied
+# from a table.
+#
+# The remote speaks NEC with address 0x19, and its command byte is the Linux key
+# code of the key: grouped presses (three of one key, a pause, three of the
+# next) gave 0x73 for Volume+ (KEY_VOLUMEUP = 115), 0x72 Volume- (114), 0x71
+# Mute (113), 0xa4 Play/Pause (164), 0x74 Power (116) and 0x8b Menu (139). The
+# other codes below are the ones the remote sent during the sequential rounds,
+# named by the same rule. One exception: 0x61 is 97 (KEY_RIGHTCTRL), which is
+# the remote's centre key -- Ok here, as Android's key layout makes it
+# DPAD_CENTER.
+#
+# A key the remote sends only over Bluetooth -- it stops sending infrared once
+# it is connected to a host -- is not here; see docs/remote.md.
+[[protocols]]
+name = "mediabox-remote"
+protocol = "nec"
+[protocols.scancodes]
+0x1967 = "KEY_UP"
+0x196c = "KEY_DOWN"
+0x1969 = "KEY_LEFT"
+0x196a = "KEY_RIGHT"
+0x1961 = "KEY_OK"
+0x199e = "KEY_BACK"
+0x198b = "KEY_MENU"
+0x1973 = "KEY_VOLUMEUP"
+0x1972 = "KEY_VOLUMEDOWN"
+0x1971 = "KEY_MUTE"
+0x19a4 = "KEY_PLAYPAUSE"
+0x19a3 = "KEY_NEXTSONG"
+0x19a5 = "KEY_PREVIOUSSONG"
+0x1974 = "KEY_POWER"
+0x19d9 = "KEY_SEARCH"

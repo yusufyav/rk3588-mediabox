@@ -1,0 +1,56 @@
+// The Orange Pi 5 Plus's infrared receiver, on the kernel's own IR stack.
+//
+// The board has an IR receiver on GPIO4_B3 (pin 11 of bank 4), active low. The
+// vendor device tree gives that pin to pwm15 (`pwm@febf0030`, pwm15m1-pins)
+// under `rockchip,remotectl-pwm`: Rockchip's own decoder, which is an input
+// driver rather than an rc-core one. It decodes NEC only, and only for the
+// user codes written into the tree (`ir_key1`, usercode 0x04fb, the board
+// vendor's remote); every other remote's presses are dropped in the driver.
+// Measured on the Plus, 2026-09-27: `febf0030.pwm` in /proc/bus/input/devices,
+// no rc device for it under /sys/class/rc, `rc0`/`rc1` being the two HDMI
+// transmitters' CEC.
+//
+// This overlay puts the same pin under `gpio-ir-receiver` instead: rc-core,
+// every protocol decoder the kernel has, a keymap loaded by `ir-keytable` from
+// /etc/rc_keymaps, and the remote's own scan codes measured with
+// `ir-keytable -t` -- nothing copied from a table. It changes nothing else:
+// pwm15 is disabled because it holds the pin, and nobody muxes the pin away
+// from its reset function, which is the GPIO.
+//
+// No pinctrl group of its own, and that is measured, not an omission: a group
+// added under &pinctrl by an overlay is not one this vendor pinctrl driver
+// knows, and asking for it oopsed the probe on the Plus (2026-09-27,
+// `__pi_strcmp` in `pinmux_map_to_setting` from `gpio_ir_recv_driver_init`).
+//
+// It is a property of the board and installed only where /proc/device-tree/
+// model is the Plus; see packaging/mediabox-ir-setup.
+//
+// Rebuild with:  dtc -@ -I dts -O dtb -o mediabox-ir-opi5plus.dtbo mediabox-ir-opi5plus.dts
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "rockchip,rk3588";
+
+	fragment@0 {
+		target = <&pwm15>;
+
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@1 {
+		target-path = "/";
+
+		__overlay__ {
+			mediabox-ir-receiver {
+				compatible = "gpio-ir-receiver";
+				/* GPIO_ACTIVE_LOW = 1 */
+				gpios = <&gpio4 11 1>;
+				linux,rc-map-name = "rc-empty";
+				status = "okay";
+			};
+		};
+	};
+};

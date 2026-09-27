@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# Put the board's infrared receiver on the kernel's own IR stack, and give it
+# the remote's keys. Run as root, by the installer and by the deploy script;
+# safe to run again at any time.
+#
+#   mediabox-ir-opi5plus    the Orange Pi 5 Plus's receiver (GPIO4_B3, active
+#                           low) as `gpio-ir-receiver` instead of the vendor
+#                           tree's pwm15 remotectl decoder, which drops every
+#                           remote but the board vendor's own. A property of
+#                           the board: installed on the Plus only, and taken
+#                           off a disk that has been moved to another board.
+#                           See packaging/overlays/mediabox-ir-opi5plus.dts.
+#
+#   /etc/rc_keymaps/mediabox-remote.toml
+#                           the remote's scan codes, measured off the remote
+#                           itself with `ir-keytable -t`, to the key codes the
+#                           interface normalises (docs/remote.md). Loaded by
+#                           ir-keytable for the receiver alone, by a udev
+#                           rule of this product's
+#                           (packaging/udev/82-mediabox-ir.rules); the CEC
+#                           adapters' rc devices keep their own map.
+#
+# /boot/armbianEnv.txt is treated the way mediabox-fan-setup treats it: one
+# line changed, every other overlay kept in its order, nothing added twice, one
+# copy of the original kept, written beside and renamed over.
+set -euo pipefail
+
+prefix=/opt/rk3588-mediabox
+boot_env="${MEDIABOX_BOOT_ENV:-/boot/armbianEnv.txt}"
+overlay_dir="${MEDIABOX_OVERLAY_DIR:-/boot/overlay-user}"
+dt="${MEDIABOX_DT_ROOT:-/proc/device-tree}"
+src="${MEDIABOX_IR_DTBO:-$prefix/share/overlays/mediabox-ir-opi5plus.dtbo}"
+keymap_src="${MEDIABOX_IR_KEYMAP:-$prefix/share/rc/mediabox-remote.toml}"
+keymap_dir="${MEDIABOX_RC_KEYMAPS:-/etc/rc_keymaps}"
+
+overlay=mediabox-ir-opi5plus
+
+say() { printf 'ir-setup: %s\n' "$*"; }
+
+if [ -f "$keymap_src" ]; then
+  mkdir -p "$keymap_dir"
+  if cmp -s "$keymap_src" "$keymap_dir/mediabox-remote.toml"; then
+    say "keymap present"
+  else
+    install -m 0644 "$keymap_src" "$keymap_dir/mediabox-remote.toml"
+    say "keymap installed ($keymap_dir/mediabox-remote.toml)"
+  fi
+fi
+
+if [ ! -f "$boot_env" ]; then
+  say "no $boot_env; this board does not load user overlays, nothing more to do"
+  exit 0
+fi
+
+model=""
+[ -r "$dt/model" ] && model="$(tr -d '\0' <"$dt/model")"
+
+add=""
+drop=""
+changed=0
+case "$model" in
+  "")
+    say "board model unreadable; receiver overlay neither added nor removed"
+    exit 0
+    ;;
+  *"Orange Pi 5 Plus")
+    if [ ! -f "$src" ]; then
+      say "receiver overlay needed but $src is missing; not listed"
+      exit 0
+    fi
+    mkdir -p "$overlay_dir"
+    if cmp -s "$src" "$overlay_dir/$overlay.dtbo"; then
+      say "receiver overlay present ($overlay)"
+    else
+      cp "$src" "$overlay_dir/.$overlay.dtbo.next"
+      chmod 0644 "$overlay_dir/.$overlay.dtbo.next"
+      sync "$overlay_dir/.$overlay.dtbo.next" 2>/dev/null || sync
+      mv -f "$overlay_dir/.$overlay.dtbo.next" "$overlay_dir/$overlay.dtbo"
+      say "receiver overlay installed ($overlay)"
+      changed=1
+    fi
+    add="$overlay"
+    ;;
+  *)
+    drop="$overlay"
+    say "board is '$model'; no receiver overlay"
+    ;;
+esac
+
+wanted="$(awk -v add="$add" -v drop="$drop" '
+  function join_to(list, item) { return list == "" ? item : list " " item }
+  /^user_overlays=/ && !seen {
+    seen = 1
+    n = split(substr($0, 15), ENTRY, " ")
+    out = ""
+    for (i = 1; i <= n; i++) {
+      entry = ENTRY[i]
+      if (entry == drop) continue
+      if (entry == add && (entry in HAVE)) continue
+      HAVE[entry] = 1
+      out = join_to(out, entry)
+    }
+    if (add != "" && !(add in HAVE)) out = join_to(out, add)
+    print "user_overlays=" out
+    next
+  }
+  { print }
+  END { if (!seen && add != "") print "user_overlays=" add }' "$boot_env")"
+
+if [ "$wanted" = "$(cat "$boot_env")" ]; then
+  say "boot configuration current: $(grep -m1 '^user_overlays=' "$boot_env" || true)"
+else
+  [ -f "$boot_env.mediabox-ir" ] || cp -a "$boot_env" "$boot_env.mediabox-ir"
+  next="$boot_env.mediabox-ir-next"
+  printf '%s\n' "$wanted" >"$next"
+  chmod --reference="$boot_env" "$next" 2>/dev/null || true
+  sync "$next" 2>/dev/null || sync
+  mv -f "$next" "$boot_env"
+  sync
+  say "boot configuration updated: $(grep -m1 '^user_overlays=' "$boot_env")"
+  changed=1
+fi
+
+if [ "$changed" -eq 1 ]; then
+  say "reboot needed"
+fi
