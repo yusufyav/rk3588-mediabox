@@ -559,10 +559,12 @@ export component Rail inherits Rectangle {
             property <length> span: step * rail.items.length;
             // The focused poster parks at the left and the shelf slides under
             // it, which is what makes a long shelf feel like one row rather
-            // than a page.
-            property <length> wanted: active
-                ? clamp(focus-col * step, 0px, max(0px, span - track.width + inset + right-inset))
-                : 0px;
+            // than a page. A shelf the remote has left stays where it was, as
+            // the reference's rows do: rolled back to its start it showed
+            // posters whose pictures were not loaded -- they are loaded
+            // around where the shelf was left.
+            property <length> wanted: clamp(focus-col * step, 0px,
+                max(0px, span - track.width + inset + right-inset));
 
             x: inset - wanted;
             y: 0;
