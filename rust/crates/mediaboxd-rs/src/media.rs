@@ -124,7 +124,7 @@ impl MediaClient {
     ) -> Result<Value, MediaError> {
         self.post(
             &["media", "session"],
-            json!({"stream": stream, "startSeconds": start_seconds}),
+            json!({"stream": stream, "startSeconds": start_seconds, "owner": "kodi"}),
         )
         .await
     }
@@ -136,7 +136,7 @@ impl MediaClient {
     ) -> Result<Value, MediaError> {
         self.post(
             &["media", "session"],
-            json!({"url": url, "startSeconds": start_seconds}),
+            json!({"url": url, "startSeconds": start_seconds, "owner": "kodi"}),
         )
         .await
     }
@@ -150,7 +150,9 @@ impl MediaClient {
         stream: Option<Value>,
         start_seconds: u64,
     ) -> Result<Value, MediaError> {
-        let mut body = json!({"startSeconds": start_seconds, "audio": "player"});
+        // Held by the player until the control plane lets it go: a paused
+        // film reads nothing and still needs its address.
+        let mut body = json!({"startSeconds": start_seconds, "audio": "player", "owner": "player"});
         match (url, stream) {
             (Some(url), _) => body["url"] = json!(url),
             (None, Some(stream)) => body["stream"] = stream,

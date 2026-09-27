@@ -105,6 +105,11 @@ pub struct AppState {
     /// Sound: the kept setting, checked against the devices found now, and
     /// put into effect on the playing film and the softvol control.
     pub audio: Arc<crate::audio::Audio>,
+    /// How each film ends, here or in Kodi: the one authority on it, and the
+    /// one writer of where it got to on the account (`crate::playback`).
+    pub playback: Arc<crate::playback::Supervisor>,
+    /// Where Kodi sends its JSON-RPC notifications (TCP, loopback).
+    pub kodi_events: std::net::SocketAddr,
 }
 
 impl AppState {
@@ -255,28 +260,35 @@ impl AppState {
                 url,
                 stream,
                 start_seconds,
-            } => self.play_on_kodi(url, stream, start_seconds).await,
+                watch,
+            } => self.play_on_kodi(url, stream, start_seconds, watch).await,
             Request::MediaPlayHere {
                 url,
                 stream,
                 start_seconds,
                 title,
                 duration_seconds,
+                watch,
             } => {
-                self.play_here(url, stream, start_seconds, title, duration_seconds)
+                self.play_here(url, stream, start_seconds, title, duration_seconds, watch)
                     .await
             }
             Request::MediaHandoffToKodi => self.handoff_to_kodi().await,
-            Request::MediaStatusHere => Response::success(self.player.status().await),
+            Request::MediaStatusHere => {
+                // The player's own answer, and the control plane's on which
+                // film this is and how the last one ended.
+                let mut status = self.player.status().await;
+                let playback = self.playback.status();
+                status["film"] = playback["film"].clone();
+                status["finished"] = playback["finished"].clone();
+                Response::success(status)
+            }
             Request::MediaTransportHere { action } => {
                 let moved = self.player.transport(action).await;
                 Response::success(json!({"moved": moved}))
             }
             Request::MediaStopHere => {
-                let stopped = self.player.stop().await;
-                if let Some(playing) = &stopped {
-                    self.stop_session(&playing.session_id).await;
-                }
+                let stopped = self.stop_here(crate::playback::Intent::Stop).await;
                 Response::success(json!({"stopped": stopped.is_some()}))
             }
             Request::SurfaceStatus => Response::success(self.surface.status().await),
@@ -527,14 +539,13 @@ impl AppState {
         start_seconds: u64,
         title: Option<String>,
         duration_seconds: Option<u64>,
+        watch: Option<mediabox_core::WatchRef>,
     ) -> Response {
         if url.is_none() && stream.is_none() {
             return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
         }
         // Whatever was playing is over, here or on Kodi.
-        if let Some(previous) = self.player.stop().await {
-            self.stop_session(&previous.session_id).await;
-        }
+        self.stop_here(crate::playback::Intent::Replace).await;
         self.stop_all_sessions().await;
 
         let created = self
@@ -584,6 +595,19 @@ impl AppState {
             self.stop_session(&session_id).await;
             return Response::failure("PLAYER_FAILED", error);
         }
+        let film = self.playback.begin(crate::playback::Start {
+            player: crate::playback::PlayerKind::Here,
+            watch,
+            session: Some(session_id.clone()),
+            duration: duration_seconds,
+            position: start_seconds,
+        });
+        tokio::spawn(crate::playback::follow_mpv(
+            Arc::clone(&self.playback),
+            Arc::clone(&self.player),
+            film,
+            self.player.film(),
+        ));
         tokio::spawn(follow_film(
             Arc::clone(&self.player),
             Arc::clone(&self.output),
@@ -591,6 +615,7 @@ impl AppState {
         ));
         Response::success(json!({
             "playing": "here",
+            "film": film,
             "sessionId": session_id,
             "startSeconds": start_seconds,
         }))
@@ -667,9 +692,13 @@ impl AppState {
         };
 
         // Nothing here belongs to Kodi, so all of it goes: the player and the
-        // transform it was reading.
-        self.player.stop().await;
-        self.stop_session(&playing.session_id).await;
+        // transform it was reading. The film itself goes on, and so does what
+        // the account is told about it.
+        let watch = self
+            .playback
+            .current(crate::playback::PlayerKind::Here)
+            .and_then(|film| self.playback.watch(film));
+        self.stop_here(crate::playback::Intent::Handover).await;
 
         let surface = match self.switch_surface(Surface::Kodi).await {
             Ok(status) => status,
@@ -683,12 +712,15 @@ impl AppState {
             return Response::failure("KODI_UNAVAILABLE", error);
         }
         match self.kodi.open(&address, at).await {
-            Ok(_) => Response::success(json!({
-                "playing": "kodi",
-                "surface": surface,
-                "playbackUrl": address,
-                "startSeconds": at,
-            })),
+            Ok(_) => {
+                self.follow_kodi(watch, None, playing.duration, at);
+                Response::success(json!({
+                    "playing": "kodi",
+                    "surface": surface,
+                    "playbackUrl": address,
+                    "startSeconds": at,
+                }))
+            }
             Err(error) => {
                 let _ = self.switch_surface(Surface::Ui).await;
                 Response::failure("KODI_ERROR", error.to_string())
@@ -701,6 +733,7 @@ impl AppState {
         url: Option<String>,
         stream: Option<Value>,
         start_seconds: u64,
+        watch: Option<mediabox_core::WatchRef>,
     ) -> Response {
         if url.is_none() && stream.is_none() {
             return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
@@ -751,6 +784,7 @@ impl AppState {
             .and_then(Value::as_str)
             .filter(|address| !address.is_empty())
             .map(str::to_owned);
+        let kept = resolved.is_none().then(|| session_id.clone());
         let playback_url = match resolved {
             Some(address) => {
                 // Nothing will read the transform, so it does not run.
@@ -785,12 +819,15 @@ impl AppState {
             return Response::failure("KODI_UNAVAILABLE", error);
         }
         match self.kodi.open(&playback_url, start_seconds).await {
-            Ok(_) => Response::success(json!({
-                "session": session,
-                "surface": surface,
-                "playbackUrl": playback_url,
-                "startSeconds": start_seconds,
-            })),
+            Ok(_) => {
+                self.follow_kodi(watch, kept, None, start_seconds);
+                Response::success(json!({
+                    "session": session,
+                    "surface": surface,
+                    "playbackUrl": playback_url,
+                    "startSeconds": start_seconds,
+                }))
+            }
             Err(error) => {
                 self.stop_session(&session_id).await;
                 Response::failure("KODI_ERROR", error.to_string())
@@ -825,6 +862,50 @@ impl AppState {
         {
             let _ = self.media.session_stop(id).await;
         }
+    }
+
+    /// End the film playing here, for `intent`: the player, and then the
+    /// film's record -- which writes the account and lets the session go.
+    /// Decided here rather than waiting for the player's own word, which may
+    /// never come from a player that is already gone.
+    async fn stop_here(&self, intent: crate::playback::Intent) -> Option<crate::player::Playing> {
+        let film = self.playback.current(crate::playback::PlayerKind::Here);
+        if let Some(film) = film {
+            self.playback.intend(film, intent);
+        }
+        let stopped = self.player.stop().await;
+        match (film, &stopped) {
+            (Some(film), _) => {
+                self.playback.finish(film, crate::playback::Signal::Gone);
+            }
+            // A player nobody is following: its session still goes.
+            (None, Some(playing)) => self.stop_session(&playing.session_id).await,
+            (None, None) => {}
+        }
+        stopped
+    }
+
+    /// A film has started in Kodi: follow it until Kodi says how it ended.
+    fn follow_kodi(
+        &self,
+        watch: Option<mediabox_core::WatchRef>,
+        session: Option<String>,
+        duration: Option<u64>,
+        position: u64,
+    ) {
+        let film = self.playback.begin(crate::playback::Start {
+            player: crate::playback::PlayerKind::Kodi,
+            watch,
+            session,
+            duration,
+            position,
+        });
+        tokio::spawn(crate::playback::follow_kodi(
+            Arc::clone(&self.playback),
+            Arc::clone(&self.kodi),
+            self.kodi_events,
+            film,
+        ));
     }
 
     async fn stop_session(&self, id: &str) {
@@ -1213,6 +1294,8 @@ mod tests {
                 false,
             ),
             audio: Arc::new(crate::audio::Audio::new(dir.path().join("audio.json"), Vec::new, |_| {})),
+            playback: Arc::new(crate::playback::Supervisor::new(|_| {})),
+            kodi_events: "127.0.0.1:9".parse().unwrap(),
             applications: ApplicationManager::load(
                 None,
                 "kodi.service",

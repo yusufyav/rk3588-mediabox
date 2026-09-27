@@ -60,6 +60,22 @@ pub enum InputAction {
     Menu,
 }
 
+/// The title a film belongs to, as the account knows it: what the control
+/// plane needs to write where playback got to, and how it ended, without
+/// asking the interface that started it. See `mediaboxd_rs::playback`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchRef {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: String,
+    #[serde(default, rename = "videoId", skip_serializing_if = "Option::is_none")]
+    pub video_id: Option<String>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster: Option<String>,
+}
+
 /// What a change to the account's record of a title is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1487,6 +1503,9 @@ pub enum Request {
         stream: Option<Value>,
         #[serde(default)]
         start_seconds: u64,
+        /// The title it belongs to, when the account should hear about it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<WatchRef>,
     },
     /// Play it here, in the interface's own player.
     ///
@@ -1519,6 +1538,11 @@ pub enum Request {
         /// forty-five seconds, with a progress bar nearly full at 3:15.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_seconds: Option<u64>,
+        /// The title it belongs to. With it, the control plane tells the
+        /// account where the film got to and how it ended -- for this player
+        /// and for Kodi if it is handed over -- and nobody else does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<WatchRef>,
     },
     /// Hand what is playing here to Kodi, at the position it had reached.
     ///

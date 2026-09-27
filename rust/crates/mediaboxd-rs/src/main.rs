@@ -28,6 +28,10 @@ struct Args {
     http: Option<SocketAddr>,
     #[arg(long, default_value = "http://127.0.0.1:8080/jsonrpc")]
     kodi_endpoint: String,
+    /// Kodi's JSON-RPC over TCP, where its notifications arrive
+    /// (`services.esenabled`; loopback only unless `services.esallinterfaces`).
+    #[arg(long, default_value = "127.0.0.1:9090")]
+    kodi_events: SocketAddr,
     #[arg(long, default_value = "kodi.service")]
     kodi_unit: String,
     /// The unit that puts the product UI on the television. Only ever started
@@ -129,6 +133,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // of these would be two gates, which is the bug it exists to prevent.
     let handovers = DisplayTransition::new();
     let transitions = handovers.clone();
+    let media = Arc::new(MediaClient::new(&args.media_endpoint, Duration::from_secs(30))?);
+    // The film's record does its writing on the runtime, never under its own
+    // lock: the account's progress and the worker's session let go.
+    let playback = {
+        let media = Arc::clone(&media);
+        Arc::new(mediaboxd_rs::playback::Supervisor::new(move |effect| {
+            let media = Arc::clone(&media);
+            tokio::spawn(async move {
+                use mediaboxd_rs::playback::Effect;
+                match effect {
+                    Effect::Account(change) => {
+                        if let Err(error) = media.account("progress", change).await {
+                            eprintln!("mediaboxd-rs: account progress: {error}");
+                        }
+                    }
+                    Effect::Release(session) => {
+                        let _ = media.session_stop(&session).await;
+                    }
+                }
+            });
+        }))
+    };
     let state = Arc::new(AppState {
         kodi: kodi.clone(),
         lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
@@ -161,10 +187,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         },
         input: input.clone(),
-        media: Arc::new(MediaClient::new(
-            &args.media_endpoint,
-            Duration::from_secs(30),
-        )?),
+        media,
+        playback,
+        kodi_events: args.kodi_events,
         // Constructed here rather than lazily, because constructing it is what
         // re-applies the remembered mode: the kernel puts the device tree's
         // heartbeat back on every boot, and this is the earliest the daemon can

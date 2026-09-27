@@ -657,6 +657,7 @@ fn to_request(command: &Command) -> Request {
                 url: Some(url.clone()),
                 stream: None,
                 start_seconds: *start,
+                watch: None,
             },
             MediaCommand::Search { query } => Request::MediaSearch {
                 query: query.clone(),

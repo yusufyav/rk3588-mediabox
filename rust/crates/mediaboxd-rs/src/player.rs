@@ -74,6 +74,11 @@ impl PlayerManager {
         }
     }
 
+    /// The player's IPC socket.
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
     /// The number of the film playing now; it changes when the film does.
     pub fn film(&self) -> u64 {
         self.film.load(Ordering::SeqCst)

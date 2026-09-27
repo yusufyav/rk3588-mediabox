@@ -9,6 +9,7 @@ pub mod leds;
 pub mod lifecycle;
 pub mod media;
 pub mod owner;
+pub mod playback;
 pub mod player;
 pub mod system;
 pub mod transition;

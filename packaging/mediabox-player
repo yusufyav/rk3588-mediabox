@@ -117,6 +117,11 @@ if [ "${MEDIABOX_PLAYER_HOLD:-}" = 1 ]; then
     hold="--pause"
 fi
 
+# At the end of the file the player holds its last frame rather than exiting:
+# the control plane reads where it stopped and decides whether that was the
+# end of the film or a read that failed short of it, then closes the player
+# itself. Exiting at once left nobody to ask (see rust/crates/mediaboxd-rs/
+# src/playback.rs).
 # shellcheck disable=SC2086  # $ipc, $hold and $audio are empty or known flags.
 exec /opt/rk3588-mediabox/player/bin/mpv \
     $ipc \
@@ -129,7 +134,7 @@ exec /opt/rk3588-mediabox/player/bin/mpv \
     --vo=mediabox \
     --hwdec=rkmpp \
     --start="$START" \
-    --keep-open=no \
+    --keep-open=yes \
     --osc=no \
     --input-default-bindings=yes \
     --no-ytdl \

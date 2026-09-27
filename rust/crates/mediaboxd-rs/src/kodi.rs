@@ -256,6 +256,18 @@ fn seconds_to_kodi_time(seconds: u64) -> Value {
     json!({"hours":seconds/3600,"minutes":(seconds%3600)/60,"seconds":seconds%60,"milliseconds":0})
 }
 
+impl KodiClient {
+    /// Where the film playing in Kodi is, how long it is, and whether it is
+    /// paused. Nothing when Kodi is playing nothing.
+    pub async fn progress(&self) -> Option<(f64, f64, bool)> {
+        let status = self.status().await;
+        status.active_player_id?;
+        let position = kodi_time_seconds(status.time.as_ref())?;
+        let duration = kodi_time_seconds(status.total_time.as_ref())?;
+        Some((position as f64, duration as f64, status.speed == Some(0)))
+    }
+}
+
 fn kodi_time_seconds(value: Option<&Value>) -> Option<i64> {
     let value = value?;
     Some(
@@ -286,6 +298,28 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// Kodi itself, asked at run time whether `Player.OnStop` still carries
+    /// `data.end` -- the flag `crate::playback` reads to tell an end from a
+    /// stop. Needs a running Kodi:
+    ///
+    ///   MEDIABOX_KODI_JSONRPC=http://<box>:8080/jsonrpc \
+    ///     cargo test -p mediaboxd-rs a_running_kodi -- --ignored
+    #[tokio::test]
+    #[ignore = "needs a running Kodi"]
+    async fn a_running_kodi_declares_whether_a_stop_reached_the_end() {
+        let endpoint = std::env::var("MEDIABOX_KODI_JSONRPC")
+            .unwrap_or_else(|_| "http://127.0.0.1:8080/jsonrpc".into());
+        let kodi = KodiClient::new(&endpoint, Duration::from_secs(5)).unwrap();
+        let schema = kodi
+            .call(
+                "JSONRPC.Introspect",
+                Some(json!({"getdescriptions": false, "filter": {"id": "Player.OnStop", "type": "notification"}})),
+            )
+            .await
+            .unwrap();
+        assert!(crate::playback::stop_carries_end(&schema), "{schema}");
+    }
 
     #[test]
     fn an_absolute_seek_names_its_union_member() {
