@@ -74,16 +74,20 @@ pub enum Film {
     Audio,
     Speed,
     Scale,
+    /// The film's settings: the refresh it is shown at, and the sound. A
+    /// button of its own, beside the choice of player and not inside it.
+    Settings,
     Player,
 }
 
-pub const FILM_CONTROLS: [Film; 7] = [
+pub const FILM_CONTROLS: [Film; 8] = [
     Film::PlayPause,
     Film::Restart,
     Film::Subtitles,
     Film::Audio,
     Film::Speed,
     Film::Scale,
+    Film::Settings,
     Film::Player,
 ];
 
@@ -110,6 +114,7 @@ impl Film {
             }
             Film::Speed => "M11.1 13.6l4.3-4.9 1.2 1-3.6 5.3z",
             Film::Scale => "",
+            Film::Settings => "",
             Film::Player => "M10.9 8.6l4.6 3.1-4.6 3.1z",
         }
     }
@@ -121,6 +126,9 @@ impl Film {
             Film::Speed => "M3.4 17.6a8.6 8.6 0 1 1 17.2 0z",
             Film::Scale => {
                 "M13.4 10.6l6.4-6.4M14.6 3.6h5.6v5.6M10.6 13.4l-6.4 6.4M9.4 20.4H3.8v-5.6"
+            }
+            Film::Settings => {
+                "M12 8.6a3.4 3.4 0 1 0 0 6.8a3.4 3.4 0 1 0 0-6.8z M10.3 2.8h3.4l.5 2.6a7.2 7.2 0 0 1 1.9 1.1l2.5-.9 1.7 2.9-2 1.7a7.4 7.4 0 0 1 0 2.2l2 1.7-1.7 2.9-2.5-.9a7.2 7.2 0 0 1-1.9 1.1l-.5 2.6h-3.4l-.5-2.6a7.2 7.2 0 0 1-1.9-1.1l-2.5.9-1.7-2.9 2-1.7a7.4 7.4 0 0 1 0-2.2l-2-1.7 1.7-2.9 2.5.9a7.2 7.2 0 0 1 1.9-1.1z"
             }
             Film::Player => "M3.6 6.4h16.8v11.2H3.6z",
             _ => "",
@@ -136,6 +144,8 @@ pub enum Menu {
     Subtitles,
     Audio,
     Speed,
+    /// The film's settings: the refresh and the sound.
+    Settings,
     Player,
 }
 
@@ -153,6 +163,9 @@ pub const SPEEDS: [f64; 10] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25,
 
 #[derive(Default)]
 pub struct NowPlaying {
+    /// How many rows the settings panel carries: the refresh and the sound,
+    /// as the daemon last described them.
+    pub player_settings: usize,
     pub title: String,
     pub subtitle: String,
     pub artwork: Option<String>,
@@ -398,6 +411,7 @@ impl NowPlaying {
                 .iter()
                 .position(|value| (value - self.speed).abs() < 0.01)
                 .unwrap_or(3),
+            Menu::Settings => 0,
             Menu::Player => 0,
             Menu::None => 0,
         };
@@ -429,6 +443,7 @@ impl NowPlaying {
             Menu::Subtitles => self.languages().len() + 1,
             Menu::Audio => self.languages().len(),
             Menu::Speed => SPEEDS.len(),
+            Menu::Settings => self.player_settings,
             Menu::Player => 2,
             Menu::None => 0,
         }

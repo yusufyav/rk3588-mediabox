@@ -186,7 +186,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         fan: FanController::system(),
         ethernet: mediaboxd_rs::ethernet::Ethernet::system(),
+        audio: Arc::new(mediaboxd_rs::audio::Audio::system()),
     });
+    // The kept volume, back on the softvol control of the card it is on.
+    {
+        let audio = Arc::clone(&state.audio);
+        tokio::task::spawn_blocking(move || audio.restore());
+    }
     // An address left on trial by a run of this daemon that did not finish
     // is taken back before anything else is asked of the network.
     state.ethernet.recover().await;

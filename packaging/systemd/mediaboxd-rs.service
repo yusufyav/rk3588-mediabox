@@ -75,6 +75,11 @@ DeviceAllow=char-cec rw
 # non-zero, the daemon reports "powered: null", and the settings screen can
 # show the state of a radio it cannot touch. Measured on the Plus.
 DeviceAllow=/dev/rfkill rw
+# The sound cards' control devices, and nothing else of ALSA's: the ELD a
+# display's sink publishes is read from a card's `ELD` control, and the box's
+# own volume is written to the softvol control mediabox-hdmi-prepare defines
+# ("MediaBox", through amixer). The daemon opens no PCM.
+DeviceAllow=char-alsa rw
 # The browser's address drop. This interface chooses a web address and the
 # daemon leaves it here for the browser to read once at start; with
 # ProtectSystem=strict and nothing else named, that write failed with

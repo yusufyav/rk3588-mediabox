@@ -54,6 +54,9 @@ pub enum Action {
     /// The appliance itself.
     Restart,
     Shutdown,
+    /// Whether a film's frame rate chooses the display's refresh: turned to
+    /// the other state.
+    SetRefreshMatching(bool),
 }
 
 impl Action {
@@ -102,6 +105,8 @@ pub enum Page {
     Output,
     /// The fan curve editor.
     Cooling,
+    /// The sound editor.
+    Audio,
     /// One wired port's address. Last, because the list pages index arrays by
     /// their place and this is not one of them.
     Ethernet,
@@ -114,6 +119,7 @@ impl Page {
             Page::Account => "Hesap",
             Page::Output => OUTPUT,
             Page::Cooling => COOLING,
+            Page::Audio => AUDIO,
             Page::Ethernet => "Ethernet",
         }
     }
@@ -124,6 +130,7 @@ impl Page {
             Page::Account => "Stremio hesabı ve eklentileri",
             Page::Output => "Çözünürlük, yenileme hızı ve renk",
             Page::Cooling => "Fan eğrisi ve işlemci sıcaklığı",
+            Page::Audio => "Ses çıkışı, biçim ve ses seviyesi",
             Page::Ethernet => "Adres ayarı",
         }
     }
@@ -134,6 +141,7 @@ impl Page {
             Page::Account => "user",
             Page::Output => "monitor",
             Page::Cooling => "fan",
+            Page::Audio => "speaker",
             Page::Ethernet => "network",
         }
     }
@@ -310,7 +318,7 @@ pub enum Pane {
     Page,
 }
 
-const PAGES: usize = 4;
+const PAGES: usize = 5;
 
 /// A short list opened from a card, as the screen draws it.
 #[derive(Debug, Clone, PartialEq)]
@@ -352,6 +360,11 @@ pub struct Settings {
     pub output: super::output::Output,
     /// One wired port's address editor: the "Ethernet" pages.
     pub ethernet: super::ethernet::Ethernet,
+    /// The sound editor, the whole of the "Ses" page.
+    pub audio: super::audio::Audio,
+    /// A press the sound editor made while moving -- Left and Right on the
+    /// volume -- for the application to send.
+    audio_press: Option<super::audio::Press>,
 }
 
 impl Settings {
@@ -369,6 +382,8 @@ impl Settings {
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
             ethernet: super::ethernet::Ethernet::new(),
+            audio: super::audio::Audio::new(),
+            audio_press: None,
         };
         settings.compose(None, None, None);
         settings
@@ -509,6 +524,18 @@ impl Settings {
                         true
                     }
                 },
+                Some(Page::Audio) => match self.audio.step(dx, dy) {
+                    super::audio::Nav::Moved => true,
+                    super::audio::Nav::Unchanged => false,
+                    super::audio::Nav::Leave => {
+                        self.close_page();
+                        true
+                    }
+                    super::audio::Nav::Send(press) => {
+                        self.audio_press = Some(press);
+                        false
+                    }
+                },
                 Some(Page::Cooling) => match self.cooling.step(dx, dy) {
                     super::cooling::Nav::Moved => true,
                     super::cooling::Nav::Unchanged => false,
@@ -605,6 +632,12 @@ impl Settings {
                 }
                 self.cooling.enter();
             }
+            Page::Audio => {
+                if !self.audio.available() {
+                    return false;
+                }
+                self.audio.enter();
+            }
             Page::Ethernet => {
                 let Some(row) = self.focused().filter(|row| row.page == Some(Page::Ethernet)) else {
                     return false;
@@ -659,6 +692,7 @@ impl Settings {
         self.cooling.load(fan_status(status));
         self.output.load(output_status(status));
         self.ethernet.load(ethernet_status(status));
+        self.audio.load(audio_status(status));
         self.leds = led_mode(status);
         // Lights that stopped answering have nothing left to choose.
         if self.leds.is_none() {
@@ -686,6 +720,7 @@ impl Settings {
         match self.page() {
             Some(Page::Output) if !self.output.available() => self.close_page(),
             Some(Page::Cooling) if !self.cooling.available() => self.close_page(),
+            Some(Page::Audio) if !self.audio.available() => self.close_page(),
             Some(Page::Ethernet) if !self.ethernet.available() => self.close_page(),
             _ => {}
         }
@@ -719,6 +754,10 @@ fn output_status(status: Option<&Value>) -> Option<mediabox_core::OutputStatus> 
     serde_json::from_value(status?.get("output")?.clone()).ok()
 }
 
+fn audio_status(status: Option<&Value>) -> Option<mediabox_core::AudioStatus> {
+    serde_json::from_value(status?.get("audio")?.clone()).ok()
+}
+
 fn ethernet_status(status: Option<&Value>) -> Option<mediabox_core::EthernetStatus> {
     serde_json::from_value(status?.get("ethernet")?.clone()).ok()
 }
@@ -743,6 +782,16 @@ impl Settings {
     /// Whether the remote belongs to the display editor.
     pub fn in_output(&self) -> bool {
         self.is_output()
+    }
+
+    /// Whether the page on screen is the sound editor.
+    pub fn is_audio(&self) -> bool {
+        self.page() == Some(Page::Audio)
+    }
+
+    /// The press the sound editor made while moving, once.
+    pub fn take_audio_press(&mut self) -> Option<super::audio::Press> {
+        self.audio_press.take()
     }
 
     /// Whether the page on screen is a wired port's address.
@@ -943,6 +992,45 @@ fn output(status: Option<&Value>) -> Row {
 }
 
 /// The fan editor's page.
+pub const AUDIO: &str = "Ses";
+
+/// The refresh a film is shown at: its own frame rate's, or the kept mode's.
+fn refresh_matching(status: Option<&Value>) -> Row {
+    let on = output_status(status).is_none_or(|output| output.content_matching);
+    Row {
+        value: if on { "Açık".into() } else { "Kapalı".into() },
+        tone: if on { "good".into() } else { String::new() },
+        ..Row::act(
+            "Yenileme hızını içeriğe eşle",
+            "Film kendi kare hızına uyan modda oynar; bitince ekran geri döner",
+            "refresh",
+            Action::SetRefreshMatching(!on),
+        )
+    }
+}
+
+/// The sound card: the device and the form, or why there is no page.
+fn audio(status: Option<&Value>) -> Row {
+    match audio_status(status) {
+        Some(audio) => {
+            let plan = audio.plan.clone().unwrap_or_else(|| mediabox_core::audio::plan(&audio.setting, &audio.devices));
+            let device = plan
+                .device
+                .as_ref()
+                .map(|device| device.connector.clone().unwrap_or_else(|| device.kind.label().to_string()))
+                .unwrap_or_else(|| "Yok".into());
+            let now = format!(
+                "{} · {}{}",
+                device,
+                audio.setting.mode.label(),
+                if audio.setting.muted { " · sessiz" } else { "" }
+            );
+            Row::link(Page::Audio, Page::Audio.blurb(), now, if plan.device.is_none() { "warn" } else { "" })
+        }
+        None => Row::reading(AUDIO, "Okunuyor…"),
+    }
+}
+
 pub const COOLING: &str = "Soğutma";
 
 /// The card that opens the fan editor, or a reading that says why there is no
@@ -1156,7 +1244,7 @@ fn page_rows(page: Page, status: Option<&Value>, display: Option<&DisplayStatus>
     match page {
         Page::Playback => playback(status, display),
         Page::Account => account(status),
-        Page::Output | Page::Cooling | Page::Ethernet => Vec::new(),
+        Page::Output | Page::Cooling | Page::Audio | Page::Ethernet => Vec::new(),
     }
 }
 
@@ -1204,13 +1292,8 @@ fn compose(
             icon: "monitor",
             rows: vec![
                 output(status),
-                Row::header("Ses"),
-                Row::reading(
-                    "Çıkış",
-                    text(diagnostics, "/audio/default").unwrap_or_else(|| "HDMI".into()),
-                ),
-                Row::reading("Geçirgen kodekler", "AC-3 · E-AC-3 · DTS"),
-                Row::reading("Nesne tabanlı ses", "AC-3'e çevrilir"),
+                refresh_matching(status),
+                audio(status),
             ],
         },
         Group {
@@ -1376,6 +1459,7 @@ mod tests {
             "leds": {"available": true, "mode": "off", "leds": []},
             "fan": fan_answer()["fan"],
             "output": output_answer(),
+            "audio": serde_json::to_value(mediabox_core::AudioStatus::default()).unwrap(),
         });
         let mut settings = Settings::new();
         settings.compose(Some(&status), Some(&plus_like(true)), None);
@@ -1394,10 +1478,12 @@ mod tests {
         ] {
             assert!(actions.contains(&wanted), "{wanted:?} is not reachable");
         }
-        for wanted in [Page::Playback, Page::Account, Page::Output, Page::Cooling] {
+        for wanted in [Page::Playback, Page::Account, Page::Output, Page::Cooling, Page::Audio] {
             assert!(pages.contains(&wanted), "{wanted:?} is not reachable");
         }
-        // And the readings the old sections showed are still somewhere.
+        // And the readings the old sections showed are still somewhere. The
+        // sound's two -- a fixed "HDMI" and a fixed codec list -- were never
+        // readings of anything; the "Ses" page says what is true instead.
         let labels: Vec<&str> = settings
             .groups
             .iter()
@@ -1407,7 +1493,7 @@ mod tests {
             .collect();
         for wanted in [
             "Oynatıcı", "Ekranı tutan", "Ağ geçidi", "Uzaktan kumanda", "CEC",
-            "Bağdaştırıcı", "Fiziksel adres", "Çıkış", "Geçirgen kodekler", "Kırmızı led",
+            "Bağdaştırıcı", "Fiziksel adres", "Ses", "Kırmızı led",
             "Sürüm", "Makine", "Açık kalma",
         ] {
             assert!(labels.contains(&wanted), "{wanted} is gone");

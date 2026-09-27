@@ -330,6 +330,8 @@ struct SplitDisplay {
     /// list and the EDID.
     offer: Option<mediabox_core::OutputOffer>,
     presentation: RefCell<Presentation>,
+    /// The interface's own plane, found once it is showing a frame.
+    primary: Cell<Option<control::plane::Handle>>,
     released: Cell<bool>,
     /// Whether the television is currently away, so the journal says so once
     /// rather than sixty times a second.
@@ -633,6 +635,7 @@ impl SplitDisplay {
             video,
             sink: RefCell::new(sink),
             presentation: RefCell::new(Presentation::default()),
+            primary: Cell::new(None),
             released: Cell::new(false),
             dark: Cell::new(false),
         });
@@ -880,24 +883,20 @@ impl SplitDisplay {
                 .map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
             state.current = Some(frame);
         } else {
-            // Only one flip may be outstanding on a CRTC. When the wait in
+            // Only one commit may be outstanding on a CRTC. When the wait in
             // `swap_buffers` was skipped because a free buffer was available,
             // this is where the pace is kept.
             if state.waiting_for_flip {
                 drop(state);
                 self.wait_for_page_flip()?;
-                state = self.presentation.borrow_mut();
+            } else {
+                drop(state);
             }
-            self.kms
-                .page_flip(
-                    self.crtc,
-                    frame.framebuffer,
-                    control::PageFlipFlags::EVENT,
-                    None,
-                )
-                .map_err(|e| format!("DRM_IOCTL_MODE_PAGE_FLIP: {e}"))?;
-            state.pending_previous = state.current.replace(frame);
-            state.waiting_for_flip = true;
+            // Whatever film frame is waiting goes out with this one, in the
+            // same commit, on the same vblank.
+            self.pump_video_socket();
+            self.commit_frames(Some(frame))?;
+            state = self.presentation.borrow_mut();
         }
         if !state.first_frame_logged {
             let current = state.current.as_ref().unwrap();
@@ -927,6 +926,23 @@ impl SplitDisplay {
         if self.released.get() {
             return;
         }
+        self.pump_video_socket();
+        // Nothing in flight: the frame goes out now, on its own. Otherwise it
+        // waits for the vblank that ends the commit in flight, or rides with
+        // the interface's next frame, whichever comes first -- and a newer
+        // frame arriving in the meantime replaces it.
+        if !self.presentation.borrow().waiting_for_flip
+            && self.presentation.borrow().current.is_some()
+            && self.sink.borrow().has_pending()
+            && let Err(error) = self.commit_frames(None)
+        {
+            eprintln!("mediabox-tv.video {error}");
+        }
+    }
+
+    /// Takes whatever the player has sent: a frame becomes the waiting one,
+    /// a stop takes the film off the panel.
+    fn pump_video_socket(&self) {
         let (width, height) = self.mode.get().size();
         let into = crate::video::Rect {
             x: 0,
@@ -934,10 +950,115 @@ impl SplitDisplay {
             width: width.into(),
             height: height.into(),
         };
-        let mut sink = self.sink.borrow_mut();
-        sink.pump(&self.kms, self.crtc, &self.video, into);
-        self.signal_output_colour(sink.hdr());
-        VIDEO.with(|cell| cell.set(sink.showing()));
+        let hdr = {
+            let mut sink = self.sink.borrow_mut();
+            sink.pump(&self.kms, self.crtc, &self.video, into);
+            VIDEO.with(|cell| cell.set(sink.showing() || sink.has_pending()));
+            sink.hdr()
+        };
+        self.signal_output_colour(hdr);
+    }
+
+    /// A commit ended: its vblank has passed. Read without waiting -- the
+    /// event loop only calls this once the device is readable -- and send
+    /// the waiting film frame if the interface is not about to.
+    fn flip_done(&self, redraw_due: bool) {
+        let finished = match self.kms.receive_events() {
+            Ok(mut events) => events.any(|event| matches!(event, control::Event::PageFlip(_))),
+            Err(_) => false,
+        };
+        if !finished {
+            return;
+        }
+        let old = {
+            let mut state = self.presentation.borrow_mut();
+            state.waiting_for_flip = false;
+            state.pending_previous.take()
+        };
+        drop(old);
+        // With an interface frame about to be drawn, the film frame goes out
+        // with it, in one commit. Sending it on its own first was measured
+        // too (Plus, 24p, ten presses) and was worse: the interface's frame
+        // then missed the next vblank and pushed the film's after it -- 2 to
+        // 5 frames late per five seconds against 0 to 3.
+        if !redraw_due
+            && self.sink.borrow().has_pending()
+            && let Err(error) = self.commit_frames(None)
+        {
+            eprintln!("mediabox-tv.video {error}");
+        }
+    }
+
+    /// The interface's plane: the one on this CRTC showing its frame.
+    fn primary_plane(&self) -> Option<control::plane::Handle> {
+        if let Some(plane) = self.primary.get() {
+            return Some(plane);
+        }
+        let current = self.presentation.borrow().current.as_ref().map(|frame| frame.framebuffer)?;
+        let plane = self.kms.plane_handles().ok()?.into_iter().find(|handle| {
+            self.kms
+                .get_plane(*handle)
+                .is_ok_and(|plane| plane.crtc() == Some(self.crtc) && plane.framebuffer() == Some(current))
+        })?;
+        self.primary.set(Some(plane));
+        Some(plane)
+    }
+
+    /// One commit for this vblank: the interface's new frame if there is one,
+    /// the waiting film frame if there is one, or both. Nonblocking, with an
+    /// event when the vblank has passed; nothing else is committed until it
+    /// has.
+    ///
+    /// This replaces a legacy page flip for the interface and a legacy
+    /// `SetPlane` for the film, each waiting for a vblank of its own on the
+    /// same thread. See `VideoPlane::stage` for what that cost.
+    fn commit_frames(&self, ui: Option<PresentedFrame>) -> Result<(), String> {
+        use control::property::Value;
+        let mut request = control::atomic::AtomicModeReq::new();
+        if let Some(frame) = &ui {
+            let plane = self.primary_plane().ok_or("the interface's plane is not on the panel")?;
+            let fb = find_property(&self.kms, plane, "FB_ID").ok_or("no FB_ID on the interface's plane")?;
+            request.add_property(plane, fb, Value::Framebuffer(Some(frame.framebuffer)));
+        }
+        let staged = self
+            .sink
+            .borrow_mut()
+            .stage(&self.kms, self.crtc, &self.video, &mut request);
+        if ui.is_none() && staged.is_none() {
+            return Ok(());
+        }
+        let flags = control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT;
+        let committed = self.kms.atomic_commit(flags, request);
+        let committed = match (committed, staged, &ui) {
+            (Ok(()), _, _) => Ok(staged),
+            // The film's part refused it: the interface's frame goes on its
+            // own rather than the panel freezing on the last one.
+            (Err(error), Some(_), Some(frame)) => {
+                self.sink.borrow_mut().refused_commit(&error.to_string());
+                let plane = self.primary_plane().ok_or("the interface's plane is not on the panel")?;
+                let fb = find_property(&self.kms, plane, "FB_ID").ok_or("no FB_ID")?;
+                let mut alone = control::atomic::AtomicModeReq::new();
+                alone.add_property(plane, fb, Value::Framebuffer(Some(frame.framebuffer)));
+                self.kms.atomic_commit(flags, alone).map(|()| None)
+            }
+            (Err(error), _, _) => {
+                if staged.is_some() {
+                    self.sink.borrow_mut().refused_commit(&error.to_string());
+                }
+                Err(error)
+            }
+        };
+        let staged = committed.map_err(|e| format!("atomic commit: {e}"))?;
+        if let Some(index) = staged {
+            self.sink.borrow_mut().committed(&self.video, index);
+            VIDEO.with(|cell| cell.set(true));
+        }
+        let mut state = self.presentation.borrow_mut();
+        state.waiting_for_flip = true;
+        if let Some(frame) = ui {
+            state.pending_previous = state.current.replace(frame);
+        }
+        Ok(())
     }
 
     /// Tell the television what it is being sent.
@@ -2178,7 +2299,7 @@ struct SplitPlatform {
     ///
     /// Keyed by the kernel's own name for the device ("event3"), because that
     /// is what libinput hands back and what /sys is organised by.
-    remotes: RefCell<std::collections::HashMap<String, bool>>,
+    remotes: RefCell<std::collections::HashMap<String, crate::input::Device>>,
     /// Whether a shift key is down.
     ///
     /// libinput hands over key codes, not characters: there is no xkb here and
@@ -2211,21 +2332,23 @@ impl SplitPlatform {
         })
     }
 
-    /// Whether a device is a remote control rather than a keyboard.
+    /// What a device on the seat is: the CEC adapter's rc-core double, an
+    /// infrared receiver, or anything else.
     ///
-    /// The daemon owns the remote: it holds the CEC adapter, decodes the user-control
-    /// codes and publishes them as normalised actions, and this interface
-    /// listens to that. The kernel *also* registers the same remote as an
-    /// rc-core input device, so without this every press of the television
-    /// remote reaches the interface twice — once here as an ordinary key and
-    /// once as an action. A compositor used to switch that device off; there is
-    /// no compositor any more.
+    /// The daemon owns the television's remote: it holds the CEC adapter,
+    /// decodes the user-control codes and publishes them as normalised
+    /// actions, and this interface listens to that. The kernel *also*
+    /// registers each HDMI transmitter's CEC as an rc-core input device, so
+    /// without this every press of the television remote reaches the
+    /// interface twice.
     ///
-    /// Decided on what the device is attached to rather than on its name. The
-    /// CEC remote on this board is called "dw_hdmi_qp", which contains neither
-    /// "cec" nor "remote", and the name check that came before this let every
-    /// press through.
-    fn remote_control(&self, device: &input::Device) -> bool {
+    /// That used to be decided by "the event node is under /rc/", which was
+    /// right while CEC was the only rc device on the board. The board's own
+    /// infrared receiver is an rc-core device too (gpio-ir-receiver, see
+    /// packaging/overlays/mediabox-ir-opi5plus.dts), and that rule silenced
+    /// it. The rc device says which it is: CEC's protocol is `cec` and its
+    /// parent is an HDMI transmitter; see `input::classify`.
+    fn device_kind(&self, device: &input::Device) -> crate::input::Device {
         let sysname = device.sysname().to_string();
         if let Some(answer) = self.remotes.borrow().get(&sysname) {
             return *answer;
@@ -2235,15 +2358,28 @@ impl SplitPlatform {
         let path = std::fs::canonicalize(format!("/sys/class/input/{sysname}"))
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let answer = path.contains("/rc/rc")
-            || device.name().to_ascii_lowercase().contains("cec")
-            || device.name() == "dw_hdmi_qp";
+        let rc_dir = path.find("/rc/rc").map(|at| {
+            let rest = &path[at + 4..];
+            let end = rest.find('/').map_or(path.len(), |slash| at + 4 + slash);
+            std::path::PathBuf::from(&path[..end])
+        });
+        let protocols = rc_dir
+            .as_ref()
+            .and_then(|dir| std::fs::read_to_string(dir.join("protocols")).ok());
+        let driver = rc_dir.as_ref().and_then(|dir| {
+            std::fs::read_link(dir.join("device/driver"))
+                .ok()
+                .and_then(|link| link.file_name().map(|name| name.to_string_lossy().into_owned()))
+        });
+        let answer = crate::input::classify(&path, &device.name(), protocols.as_deref(), driver.as_deref());
 
         eprintln!(
-            "mediabox-tv.input device {} name={:?} remote={}",
+            "mediabox-tv.input device {} name={:?} kind={:?} rc={:?} driver={:?}",
             sysname,
             device.name(),
-            answer
+            answer,
+            protocols.as_deref().map(str::trim),
+            driver
         );
         self.remotes.borrow_mut().insert(sysname, answer);
         answer
@@ -2268,7 +2404,25 @@ impl SplitPlatform {
             let input::Event::Keyboard(input::event::KeyboardEvent::Key(key)) = event else {
                 continue;
             };
-            if self.remote_control(&key.device()) {
+            let kind = self.device_kind(&key.device());
+            if kind == crate::input::Device::CecDuplicate {
+                continue;
+            }
+            // A remote's keys -- all of the receiver's, and the Back, Home,
+            // Menu, transport and volume keys of anything else -- are
+            // actions, not text.
+            let keyboard = kind == crate::input::Device::Other;
+            if let Some(action) = crate::input::action_for_evdev(key.key(), keyboard) {
+                let pressed = matches!(key.key_state(), KeyState::Pressed);
+                let origin = if keyboard {
+                    crate::input::Origin::Keyboard
+                } else {
+                    crate::input::Origin::Infrared
+                };
+                crate::with_app(|app| app.remote_key(action, pressed, origin));
+                continue;
+            }
+            if !keyboard {
                 continue;
             }
             // Either shift, held. Tracked before anything else looks at the
@@ -2338,6 +2492,13 @@ impl Platform for SplitPlatform {
             // while nothing is playing and the player itself once something is,
             // so it is read again on every pass rather than kept.
             let video = self.window.display.sink.borrow().poll_fd();
+            // The display device, while a commit is in flight: its vblank is
+            // when the next waiting film frame can go.
+            let drm = if self.window.display.presentation.borrow().waiting_for_flip {
+                self.window.display.kms.as_fd().as_raw_fd()
+            } else {
+                -1
+            };
             let mut pollfds = [
                 libc::pollfd {
                     fd: self.proxy.wake.as_raw_fd(),
@@ -2351,6 +2512,11 @@ impl Platform for SplitPlatform {
                 },
                 libc::pollfd {
                     fd: video,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: drm,
                     events: libc::POLLIN,
                     revents: 0,
                 },
@@ -2371,6 +2537,9 @@ impl Platform for SplitPlatform {
             }
             if pollfds[1].revents & libc::POLLIN != 0 {
                 self.dispatch_input(&mut libinput)?;
+            }
+            if pollfds[3].revents & libc::POLLIN != 0 {
+                self.window.display.flip_done(self.window.redraw.get());
             }
             if pollfds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                 self.window.display.pump_video();

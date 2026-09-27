@@ -93,6 +93,7 @@ packaging/udev/80-mediabox-no-power-switch.rules	etc/udev/rules.d/80-mediabox-no
 packaging/udev/81-mediabox-display-hotplug.rules	etc/udev/rules.d/81-mediabox-display-hotplug.rules
 config/sway-browser.conf	etc/mediabox/sway-browser.conf
 config/alsa/60-mediabox-unrouted.conf	etc/alsa/conf.d/60-mediabox-unrouted.conf
+config/alsa/61-mediabox-volume.conf	etc/alsa/conf.d/61-mediabox-volume.conf
 config/mediabox-applications.json	etc/mediabox-applications.json
 config/mediabox-library.json	etc/mediabox-library.json
 packaging/chromium-policies.json	etc/chromium/policies/managed/mediabox.json

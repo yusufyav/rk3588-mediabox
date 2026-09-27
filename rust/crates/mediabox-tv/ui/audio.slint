@@ -1,0 +1,122 @@
+import { Theme, Metrics } from "theme.slint";
+import {
+    SettingCard, InfoPanel, InfoLine, Badge, StateNote, ChoiceItem, ChoiceSheet,
+} from "kit.slint";
+
+export struct AudioCard {
+    icon: string,
+    label: string,
+    hint: string,
+    value: string,
+    kind: string,
+    focused: bool,
+    enabled: bool,
+}
+
+// The sound page: the display page's shape. Cards for what can be chosen, the
+// device and its receiver as they are now beside them, a short list for the
+// choices, and the volume as a bar under its card.
+//
+// Drawn from one AudioView composed in Rust (src/screens/audio.rs), where the
+// focus and the lists live and are tested.
+
+export struct AudioView {
+    available: bool,
+    message: string,
+    cards: [AudioCard],
+    note: string,
+    current-title: string,
+    current-line: string,
+    current-badges: [Badge],
+    current-rows: [InfoLine],
+    picker-open: bool,
+    picker-title: string,
+    picker: [ChoiceItem],
+    picker-focus: int,
+    volume: int,
+    muted: bool,
+    volume-focused: bool,
+}
+
+export component AudioPane inherits Rectangle {
+    in property <AudioView> view;
+    in property <bool> active-pane;
+
+    property <length> gap: Metrics.row-gap;
+    property <length> info-x: Metrics.list-w + Metrics.card-pad * 1.6;
+
+    if !view.available: StateNote {
+        x: 0;
+        y: 0;
+        width: min(root.width, Metrics.list-w);
+        kind: "unavailable";
+        title: "Ses okunamıyor";
+        message: view.message;
+    }
+
+    if view.available: VerticalLayout {
+        x: 0;
+        y: 0;
+        width: Metrics.list-w;
+        spacing: gap;
+        alignment: start;
+
+        for card[i] in view.cards: VerticalLayout {
+            spacing: gap * 0.5;
+            // The volume stands apart from the choices above it.
+            if i == 4: Rectangle { height: gap * 0.6; }
+            SettingCard {
+                icon: card.icon;
+                label: card.label;
+                hint: card.hint;
+                value: card.value;
+                kind: card.kind;
+                enabled: card.enabled;
+                focused: active-pane && card.focused && !view.picker-open;
+            }
+            // The level, drawn: a bar the remote's Left and Right move.
+            if i == 4: Rectangle {
+                height: max(4px, Metrics.focus-w * 1.6);
+                border-radius: self.height / 2;
+                background: Theme.s-line;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * view.volume / 100;
+                    height: parent.height;
+                    border-radius: parent.border-radius;
+                    background: view.muted ? Theme.dim : (view.volume-focused && active-pane ? Theme.focus : #c9ced8);
+                    animate width { duration: Theme.t-focus; easing: Theme.ease; }
+                }
+            }
+        }
+
+        Text {
+            text: view.note;
+            color: Theme.muted;
+            font-size: Metrics.t-meta;
+            wrap: word-wrap;
+        }
+    }
+
+    if view.available && root.width - info-x > Metrics.t-primary * 9: InfoPanel {
+        x: info-x;
+        y: 0;
+        width: root.width - info-x;
+        caption: "Şu an";
+        icon: "speaker";
+        title: view.current-title;
+        line: view.current-line;
+        badges: view.current-badges;
+        rows: view.current-rows;
+    }
+
+    if view.picker-open: ChoiceSheet {
+        x: -root.x;
+        y: -root.y;
+        width: Metrics.vw;
+        height: Metrics.vh;
+        title: view.picker-title;
+        items: view.picker;
+        focus-at: view.picker-focus;
+    }
+}

@@ -141,6 +141,24 @@ impl MediaClient {
         .await
     }
 
+    /// A session for the interface's own player, which handles sound itself
+    /// by the appliance's sound setting: the core copies the sound rather
+    /// than encoding it to AC-3 first (`for_a_player_that_does_its_own_audio`).
+    pub async fn session_start_here(
+        &self,
+        url: Option<&str>,
+        stream: Option<Value>,
+        start_seconds: u64,
+    ) -> Result<Value, MediaError> {
+        let mut body = json!({"startSeconds": start_seconds, "audio": "player"});
+        match (url, stream) {
+            (Some(url), _) => body["url"] = json!(url),
+            (None, Some(stream)) => body["stream"] = stream,
+            (None, None) => {}
+        }
+        self.post(&["media", "session"], body).await
+    }
+
     pub async fn search(&self, query: &str) -> Result<Value, MediaError> {
         self.get(&["media", "search"], &[("q", query)]).await
     }

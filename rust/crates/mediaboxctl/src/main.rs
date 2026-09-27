@@ -67,6 +67,39 @@ enum Command {
         #[command(subcommand)]
         command: EthernetCommand,
     },
+    /// Sound: the device, the form, Dolby Digital transcoding and the volume
+    Audio {
+        #[command(subcommand)]
+        command: AudioCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AudioCommand {
+    /// Every device, what its receiver declares, the setting and what is playing
+    Status,
+    /// `auto` (the picture's display) or a device id from the status
+    Device { id: String },
+    /// `auto`, `pcm` or `passthrough`
+    Mode {
+        #[arg(value_parser = ["auto", "pcm", "passthrough"])]
+        mode: String,
+    },
+    /// The formats passed through, by hand: `ac3,eac3` (sets passthrough)
+    Formats { list: String },
+    /// Dolby Digital transcoding of multichannel sound: `on` or `off`
+    Transcode {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// `40` sets it, `+5` and `-5` step it
+    #[command(allow_hyphen_values = true)]
+    Volume { level: String },
+    /// `on`, `off` or `toggle`
+    Mute {
+        #[arg(value_parser = ["on", "off", "toggle"])]
+        state: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -188,6 +221,11 @@ enum DisplayCommand {
     Keep,
     /// Take the mode on trial back now
     Revert,
+    /// Whether a film's frame rate chooses the refresh: `on` or `off`
+    Matching {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
 }
 
 /// The formats a person may name.
@@ -424,6 +462,16 @@ enum MediaCommand {
 async fn main() {
     let args = Args::parse();
     let mut request = to_request(&args.command);
+    if let Command::Audio { command } = &args.command {
+        match audio_request(&args.socket, command).await {
+            Ok(Some(resolved)) => request = resolved,
+            Ok(None) => {}
+            Err(message) => {
+                eprintln!("Hata: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Command::Display { command } = &args.command {
         match display_request(&args.socket, command).await {
             Ok(Some(resolved)) => request = resolved,
@@ -518,6 +566,7 @@ fn to_request(command: &Command) -> Request {
             | DisplayCommand::Set { .. }
             | DisplayCommand::Keep
             | DisplayCommand::Revert => Request::OutputStatus,
+            DisplayCommand::Matching { state } => Request::OutputContentMatching { enabled: state == "on" },
         },
         Command::Ethernet { command } => match command {
             EthernetCommand::Status => Request::EthernetStatus,
@@ -535,6 +584,29 @@ fn to_request(command: &Command) -> Request {
             },
             EthernetCommand::Keep => Request::EthernetKeep,
             EthernetCommand::Revert => Request::EthernetRevert,
+        },
+        // A change to the setting is made against the kept one, read first
+        // (`audio_request`); this is what is asked when nothing needs reading.
+        Command::Audio { command } => match command {
+            AudioCommand::Volume { level } if level.starts_with(['+', '-']) => Request::AudioVolume {
+                volume: None,
+                step: level.parse().ok(),
+                muted: None,
+                toggle_mute: false,
+            },
+            AudioCommand::Volume { level } => Request::AudioVolume {
+                volume: level.parse().ok(),
+                step: None,
+                muted: None,
+                toggle_mute: false,
+            },
+            AudioCommand::Mute { state } => Request::AudioVolume {
+                volume: None,
+                step: None,
+                muted: (state != "toggle").then(|| state == "on"),
+                toggle_mute: state == "toggle",
+            },
+            _ => Request::AudioStatus,
         },
         Command::Fan { command } => match command {
             FanCommand::Status => Request::FanStatus,
@@ -612,8 +684,55 @@ fn to_request(command: &Command) -> Request {
 
 /// A display command that names something of the daemon's -- a mode of the
 /// display plugged in, the trial running now -- as the request that names it.
+/// A sound setting changed in one respect, made against the kept one.
+async fn audio_request(path: &PathBuf, command: &AudioCommand) -> Result<Option<Request>, String> {
+    use mediabox_core::{AudioCodec, AudioDeviceChoice, AudioMode, AudioStatus};
+    if matches!(command, AudioCommand::Status | AudioCommand::Volume { .. } | AudioCommand::Mute { .. }) {
+        return Ok(None);
+    }
+    let answer = execute(path, Request::AudioStatus)
+        .await
+        .map_err(|error| format!("mediaboxd kullanılamıyor: {error}"))?;
+    let status: AudioStatus = answer
+        .into_iter()
+        .next()
+        .and_then(|value| value.get("result").cloned())
+        .and_then(|result| serde_json::from_value(result).ok())
+        .ok_or("daemon ses durumunu vermedi")?;
+    let mut setting = status.setting;
+    match command {
+        AudioCommand::Device { id } if id == "auto" => setting.device = AudioDeviceChoice::Auto,
+        AudioCommand::Device { id } => setting.device = AudioDeviceChoice::Device { id: id.clone() },
+        AudioCommand::Mode { mode } => {
+            setting.mode = match mode.as_str() {
+                "pcm" => AudioMode::Pcm,
+                "passthrough" => AudioMode::Passthrough,
+                _ => AudioMode::Auto,
+            }
+        }
+        AudioCommand::Formats { list } => {
+            let mut formats = Vec::new();
+            for name in list.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+                let codec = AudioCodec::ALL
+                    .into_iter()
+                    .find(|codec| codec.mpv() == name)
+                    .ok_or_else(|| format!("bilinmeyen biçim: {name} (ac3, eac3, dts, dts-hd, truehd)"))?;
+                formats.push(codec);
+            }
+            setting.mode = AudioMode::Passthrough;
+            setting.formats = Some(formats);
+        }
+        AudioCommand::Transcode { state } => setting.ac3_transcode = state == "on",
+        AudioCommand::Status | AudioCommand::Volume { .. } | AudioCommand::Mute { .. } => {}
+    }
+    Ok(Some(Request::AudioSet { setting }))
+}
+
 async fn display_request(path: &PathBuf, command: &DisplayCommand) -> Result<Option<Request>, String> {
-    if matches!(command, DisplayCommand::Status | DisplayCommand::Modes { .. }) {
+    if matches!(
+        command,
+        DisplayCommand::Status | DisplayCommand::Modes { .. } | DisplayCommand::Matching { .. }
+    ) {
         return Ok(None);
     }
     let answer = execute(path, Request::OutputStatus)
@@ -645,7 +764,7 @@ async fn display_request(path: &PathBuf, command: &DisplayCommand) -> Result<Opt
         }
         DisplayCommand::Keep => Request::OutputKeep { trial: trial()? },
         DisplayCommand::Revert => Request::OutputRevert { trial: trial()? },
-        DisplayCommand::Status | DisplayCommand::Modes { .. } => return Ok(None),
+        DisplayCommand::Status | DisplayCommand::Modes { .. } | DisplayCommand::Matching { .. } => return Ok(None),
     }))
 }
 

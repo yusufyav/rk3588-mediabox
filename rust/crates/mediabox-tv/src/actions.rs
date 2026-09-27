@@ -43,6 +43,8 @@ pub enum Intent {
     Transport(Transport),
     /// The Power key. Opens the power sheet; it never acts on its own.
     OfferPower,
+    /// The Menu key: the options of what is on screen, where it has any.
+    Options,
     /// Not this interface's to answer.
     Ignore,
 }
@@ -120,6 +122,7 @@ pub fn intent_for(_route: Route, modal: bool, action: InputAction) -> Intent {
         // Offering, not doing. The sheet this opens starts with the remote on
         // "Vazgeç", and the destructive rows need a second, deliberate press.
         InputAction::Power => Intent::OfferPower,
+        InputAction::Menu => Intent::Options,
         // Answered above, before the modal gate. Listed rather than left to a
         // wildcard so an action added to the core vocabulary has to be given a
         // meaning here instead of silently doing nothing.
@@ -148,7 +151,7 @@ pub fn effect_of(intent: Intent) -> SystemEffect {
 
 /// Every action the appliance's vocabulary has. Used by the tests, and by the
 /// diagnostics screen to show what the remote can send.
-pub const ALL_ACTIONS: [InputAction; 17] = [
+pub const ALL_ACTIONS: [InputAction; 18] = [
     InputAction::Up,
     InputAction::Down,
     InputAction::Left,
@@ -166,6 +169,7 @@ pub const ALL_ACTIONS: [InputAction; 17] = [
     InputAction::VolumeDown,
     InputAction::Mute,
     InputAction::Power,
+    InputAction::Menu,
 ];
 
 #[cfg(test)]

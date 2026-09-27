@@ -36,6 +36,7 @@ pub mod dt;
 pub mod drm_query;
 pub mod edid;
 pub mod roots;
+pub mod sound;
 pub mod source;
 pub mod topology;
 pub mod observer;

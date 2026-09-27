@@ -49,6 +49,8 @@ pub enum Origin {
     Keyboard,
     /// From mediaboxd-rs, already normalised.
     Bus,
+    /// From the board's own infrared receiver, through rc-core.
+    Infrared,
 }
 
 impl Origin {
@@ -56,8 +58,91 @@ impl Origin {
         match self {
             Origin::Keyboard => "wl",
             Origin::Bus => "sse",
+            Origin::Infrared => "ir",
         }
     }
+}
+
+/// What an input device on the seat is, for reading it or not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Device {
+    /// The rc-core device the kernel registers for an HDMI transmitter's CEC
+    /// adapter. The daemon already reads that remote from the adapter and
+    /// publishes it normalised; reading it here too is every press twice.
+    CecDuplicate,
+    /// An infrared receiver's rc-core device: this interface's to read.
+    Infrared,
+    /// Anything else: a keyboard, a Bluetooth or USB remote, a mouse.
+    Other,
+}
+
+/// Decide what a device is from where the kernel put it.
+///
+/// `path` is the event node's canonical sysfs path; `rc_protocols` the
+/// `protocols` of the rc device it hangs under, when it hangs under one; and
+/// `rc_driver` the driver of that rc device's parent. Both HDMI transmitters'
+/// CEC and a `gpio-ir-receiver` register an rc device, so "under /rc/" is not
+/// an answer: CEC is the rc device whose protocol is `cec`, or whose parent
+/// is an HDMI transmitter. A name check is kept for a CEC device that is not
+/// under rc-core at all -- the name this board's gives itself is
+/// `dw_hdmi_qp`.
+pub fn classify(path: &str, name: &str, rc_protocols: Option<&str>, rc_driver: Option<&str>) -> Device {
+    let under_rc = path.contains("/rc/rc");
+    let cec_protocol = rc_protocols.is_some_and(|protocols| {
+        protocols
+            .split_whitespace()
+            .any(|protocol| protocol.trim_matches(|c| c == '[' || c == ']') == "cec")
+    });
+    let hdmi_parent = rc_driver.is_some_and(|driver| driver.contains("hdmi") || driver.contains("cec"));
+    if cec_protocol
+        || (under_rc && hdmi_parent)
+        || name == "dw_hdmi_qp"
+        || name.to_ascii_lowercase().contains("cec")
+    {
+        return Device::CecDuplicate;
+    }
+    if under_rc {
+        return Device::Infrared;
+    }
+    Device::Other
+}
+
+/// A key code from a remote, as the appliance's vocabulary names it.
+///
+/// Every key a television remote has that a keyboard does not -- Back, Home,
+/// Menu, the transport and the volume -- in the codes the kernel gives them
+/// (include/uapi/linux/input-event-codes.h), whichever way the remote reaches
+/// the box: a Bluetooth HID remote's consumer page, or an infrared remote
+/// through the keymap in /etc/rc_keymaps. `keyboard` is false for the board's
+/// infrared receiver, where the four arrows, Ok and Power are the remote's
+/// too; on a keyboard those stay the keyboard's (typing, and no power key).
+pub fn action_for_evdev(code: u32, keyboard: bool) -> Option<InputAction> {
+    let remote_only = match code {
+        158 | 174 => InputAction::Back,           // KEY_BACK, KEY_EXIT
+        172 => InputAction::Home,                 // KEY_HOMEPAGE
+        139 | 127 | 357 | 438 => InputAction::Menu, // KEY_MENU, KEY_COMPOSE, KEY_OPTION, KEY_CONTEXT_MENU
+        352 | 353 => InputAction::Ok,             // KEY_OK, KEY_SELECT
+        164 => InputAction::PlayPause,            // KEY_PLAYPAUSE
+        207 | 200 => InputAction::Play,           // KEY_PLAY, KEY_PLAYCD
+        201 => InputAction::Pause,                // KEY_PAUSECD
+        166 | 128 => InputAction::Stop,           // KEY_STOPCD, KEY_STOP
+        208 | 163 => InputAction::SeekForward,    // KEY_FASTFORWARD, KEY_NEXTSONG
+        168 | 165 => InputAction::SeekBackward,   // KEY_REWIND, KEY_PREVIOUSSONG
+        115 => InputAction::VolumeUp,
+        114 => InputAction::VolumeDown,
+        113 => InputAction::Mute,
+        _ if keyboard => return None,
+        103 => InputAction::Up,
+        108 => InputAction::Down,
+        105 => InputAction::Left,
+        106 => InputAction::Right,
+        28 | 96 => InputAction::Ok,               // KEY_ENTER, KEY_KPENTER
+        1 => InputAction::Back,                   // KEY_ESC
+        102 => InputAction::Home,                 // KEY_HOME
+        116 => InputAction::Power,                // KEY_POWER: offers the sheet
+        _ => return None,
+    };
+    Some(remote_only)
 }
 
 pub struct Dispatcher {
@@ -256,5 +341,47 @@ mod tests {
     fn no_key_becomes_power_or_home_by_accident() {
         assert_eq!(action_for_key("q"), None);
         assert_eq!(action_for_key(""), None);
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+
+    #[test]
+    fn the_cec_rc_device_is_a_duplicate_and_the_ir_receiver_is_not() {
+        // Measured on the Plus, 2026-09-27: both transmitters' CEC under
+        // rc-core with protocol [cec], parent driver dwhdmi-rockchip; the
+        // receiver under the overlay's platform device, driver gpio_ir_recv.
+        let cec = "/sys/devices/platform/fdea0000.hdmi/rc/rc1/input1/event1";
+        assert_eq!(classify(cec, "dw_hdmi_qp", Some("[cec]"), Some("dwhdmi-rockchip")), Device::CecDuplicate);
+        assert_eq!(classify(cec, "anything", Some("[cec]"), None), Device::CecDuplicate);
+        assert_eq!(classify(cec, "anything", None, Some("dwhdmi-rockchip")), Device::CecDuplicate);
+        let ir = "/sys/devices/platform/mediabox-ir-receiver/rc/rc2/input11/event11";
+        assert_eq!(
+            classify(ir, "gpio_ir_recv", Some("rc-5 nec [nec] rc-6"), Some("gpio_ir_recv")),
+            Device::Infrared
+        );
+        let keyboard = "/sys/devices/virtual/misc/uhid/0005:1D5A:C081.0003/input/input12/event12";
+        assert_eq!(classify(keyboard, "UR-02", None, None), Device::Other);
+    }
+
+    #[test]
+    fn a_remote_s_keys_are_actions_and_a_keyboard_keeps_its_own() {
+        assert_eq!(action_for_evdev(158, true), Some(InputAction::Back));
+        assert_eq!(action_for_evdev(172, true), Some(InputAction::Home));
+        assert_eq!(action_for_evdev(139, true), Some(InputAction::Menu));
+        assert_eq!(action_for_evdev(164, true), Some(InputAction::PlayPause));
+        assert_eq!(action_for_evdev(115, true), Some(InputAction::VolumeUp));
+        assert_eq!(action_for_evdev(352, true), Some(InputAction::Ok));
+        // On a keyboard the arrows, Enter, Escape and Power are the keyboard's.
+        for code in [103, 108, 105, 106, 28, 1, 116] {
+            assert_eq!(action_for_evdev(code, true), None, "{code}");
+        }
+        // On the infrared receiver they are the remote's; Power only offers.
+        assert_eq!(action_for_evdev(103, false), Some(InputAction::Up));
+        assert_eq!(action_for_evdev(28, false), Some(InputAction::Ok));
+        assert_eq!(action_for_evdev(116, false), Some(InputAction::Power));
+        assert_eq!(action_for_evdev(30, false), None, "a letter is not a remote key");
     }
 }

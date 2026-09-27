@@ -6,6 +6,7 @@
 //! testable — and the focus model is the product on a television.
 
 pub mod account;
+pub mod audio;
 pub mod cooling;
 pub mod ethernet;
 pub mod output;

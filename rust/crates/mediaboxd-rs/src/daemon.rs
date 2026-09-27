@@ -102,6 +102,9 @@ pub struct AppState {
     /// The wired ports and an address written by hand on trial. Here for the
     /// radio's reason: /etc/netplan and networkd are root's.
     pub ethernet: Arc<crate::ethernet::Ethernet>,
+    /// Sound: the kept setting, checked against the devices found now, and
+    /// put into effect on the playing film and the softvol control.
+    pub audio: Arc<crate::audio::Audio>,
 }
 
 impl AppState {
@@ -160,12 +163,53 @@ impl AppState {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("OUTPUT_REFUSED", error),
             },
+            Request::OutputContentMatching { enabled } => match self.output.set_matching(enabled) {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("OUTPUT_REFUSED", error),
+            },
             Request::EthernetStatus => Response::success(self.ethernet.status()),
             Request::EthernetTry { interface, config } => {
                 ethernet_result(self.ethernet.try_config(&interface, config).await)
             }
             Request::EthernetKeep => ethernet_result(self.ethernet.keep().await),
             Request::EthernetRevert => ethernet_result(self.ethernet.revert().await),
+            Request::AudioStatus => Response::success(self.audio_status().await),
+            Request::AudioSet { setting } => {
+                let audio = Arc::clone(&self.audio);
+                match tokio::task::spawn_blocking(move || audio.set(setting)).await {
+                    Ok(Ok((before, after))) => {
+                        self.player.apply_audio(&before, &after).await;
+                        Response::success(self.audio_status().await)
+                    }
+                    Ok(Err(why)) => Response::failure("AUDIO_REFUSED", why),
+                    Err(error) => Response::failure("INTERNAL_ERROR", error.to_string()),
+                }
+            }
+            Request::AudioVolume { volume, step, muted, toggle_mute } => {
+                use crate::audio::VolumeChange;
+                let change = match (volume, step, muted, toggle_mute) {
+                    (Some(volume), None, None, false) => VolumeChange::Set(volume),
+                    (None, Some(step), None, false) => VolumeChange::Step(step),
+                    (None, None, Some(muted), false) => VolumeChange::Mute(muted),
+                    (None, None, None, true) => VolumeChange::ToggleMute,
+                    _ => {
+                        return Response::failure(
+                            "INVALID_REQUEST",
+                            "volume, step, muted ya da toggle_mute: yalnızca biri",
+                        );
+                    }
+                };
+                let audio = Arc::clone(&self.audio);
+                let before = self.audio.now().2;
+                match tokio::task::spawn_blocking(move || audio.volume(change)).await {
+                    Ok(Ok(after)) => {
+                        self.player.apply_audio(&before, &after).await;
+                        Response::success(self.audio_status().await)
+                    }
+                    Ok(Err(why)) => Response::failure("AUDIO_REFUSED", why),
+                    Err(error) => Response::failure("INTERNAL_ERROR", error.to_string()),
+                }
+            }
             Request::FanStatus => Response::success(self.fan.status()),
             Request::FanCurveSet { profile, points } => {
                 match mediabox_core::FanCurve::resolve(profile, points) {
@@ -493,11 +537,10 @@ impl AppState {
         }
         self.stop_all_sessions().await;
 
-        let created = match (url.as_deref(), stream) {
-            (Some(url), _) => self.media.session_start_at(url, start_seconds).await,
-            (None, Some(stream)) => self.media.session_start_stream(stream, start_seconds).await,
-            (None, None) => unreachable!("guarded above"),
-        };
+        let created = self
+            .media
+            .session_start_here(url.as_deref(), stream, start_seconds)
+            .await;
         let session = match created {
             Ok(value) => value,
             Err(error) => return Response::failure("MEDIA_WORKER_ERROR", error.to_string()),
@@ -541,6 +584,11 @@ impl AppState {
             self.stop_session(&session_id).await;
             return Response::failure("PLAYER_FAILED", error);
         }
+        tokio::spawn(follow_film(
+            Arc::clone(&self.player),
+            Arc::clone(&self.output),
+            self.player.film(),
+        ));
         Response::success(json!({
             "playing": "here",
             "sessionId": session_id,
@@ -860,6 +908,29 @@ impl AppState {
             output: self.output.status(),
             fan: self.fan.status(),
             ethernet: self.ethernet.status(),
+            audio: self.audio_status().await,
+        }
+    }
+
+    /// Sound as it is now: the devices, the kept setting and its plan, and
+    /// what the film playing is sending.
+    async fn audio_status(&self) -> mediabox_core::AudioStatus {
+        let audio = Arc::clone(&self.audio);
+        let (setting, devices, plan) = match tokio::task::spawn_blocking(move || audio.now()).await {
+            Ok(now) => now,
+            Err(error) => {
+                return mediabox_core::AudioStatus {
+                    error: Some(error.to_string()),
+                    ..Default::default()
+                };
+            }
+        };
+        mediabox_core::AudioStatus {
+            setting,
+            devices,
+            plan: Some(plan),
+            stream: self.player.audio_stream().await,
+            error: None,
         }
     }
 }
@@ -1132,6 +1203,7 @@ mod tests {
                     trial: dir.path().join("output-trial.json"),
                     plan: dir.path().join("output-plan"),
                     observer: dir.path().join("observer"),
+                    matching: dir.path().join("output-content-matching"),
                 },
                 || {},
             ),
@@ -1140,6 +1212,7 @@ mod tests {
                 crate::ethernet::EthernetPaths::under(dir.path()),
                 false,
             ),
+            audio: Arc::new(crate::audio::Audio::new(dir.path().join("audio.json"), Vec::new, |_| {})),
             applications: ApplicationManager::load(
                 None,
                 "kodi.service",
@@ -1244,4 +1317,103 @@ async fn unit_active(unit: &str) -> bool {
         .await
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+/// The display for the length of one film: matched to its frame rate before a
+/// frame moves, and put back when it ends.
+///
+/// The player opens paused (`MEDIABOX_PLAYER_HOLD`). Its own reading of the
+/// container -- `container-fps` -- is there as soon as the file is open,
+/// before the first frame is shown, and the refresh is chosen from it by the
+/// same offer every other display decision comes from
+/// ([`mediabox_core::OutputOffer::content_mode`]); the interface, which holds
+/// the display, commits it. The film is let go once the owner has reported
+/// the mode committed and the television has had a moment to lock to it.
+///
+/// A container that does not say (a raw elementary stream, a live source) is
+/// let go at once and measured instead: `estimated-vf-fps`, from frames the
+/// player has actually shown, once a few seconds of them exist. The display
+/// then changes under a playing film -- rarer, and later, but right.
+///
+/// Whatever happens, the film is let go: a player never stays held because
+/// the display could not be matched.
+async fn follow_film(
+    player: Arc<PlayerManager>,
+    output: Arc<crate::output::Output>,
+    film: u64,
+) {
+    use std::time::Duration;
+    let tick = Duration::from_millis(100);
+    let rate = |value: Option<Value>| value.and_then(|value| value.as_f64()).and_then(mediabox_core::Cadence::from_fps);
+
+    let mut cadence = None;
+    for _ in 0..80 {
+        if player.film() != film {
+            return;
+        }
+        if let Some(found) = rate(player.property("container-fps").await) {
+            cadence = Some((found, "container-fps"));
+            break;
+        }
+        tokio::time::sleep(tick).await;
+    }
+    if cadence.is_none() {
+        player.release(film).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        for _ in 0..40 {
+            if player.film() != film {
+                return;
+            }
+            if let Some(found) = rate(player.property("estimated-vf-fps").await) {
+                cadence = Some((found, "estimated-vf-fps"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    match cadence {
+        Some((cadence, from)) => {
+            eprintln!("mediaboxd-rs: film {film}: {} fps from {from}", cadence.label());
+            match output.content_start(film, cadence) {
+                Ok(chosen) if !chosen.applied => {
+                    // The owner commits on its next frame; the television
+                    // then re-locks, which is a second or two of black.
+                    for _ in 0..50 {
+                        if player.film() != film || output.content_applied(film) {
+                            break;
+                        }
+                        tokio::time::sleep(tick).await;
+                    }
+                    if output.content_applied(film) {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                    } else {
+                        eprintln!("mediaboxd-rs: film {film}: the owner did not report the matched mode");
+                    }
+                }
+                Ok(_) => {}
+                Err(why) => eprintln!("mediaboxd-rs: film {film}: display not matched: {why}"),
+            }
+        }
+        None => eprintln!("mediaboxd-rs: film {film}: no frame rate to match"),
+    }
+    player.release(film).await;
+
+    // Until it ends. The player going quiet twice running is the end too:
+    // a film that finishes exits by itself and nobody calls stop.
+    let mut silent = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if player.film() != film {
+            break;
+        }
+        if player.answers().await {
+            silent = 0;
+        } else {
+            silent += 1;
+            if silent >= 2 {
+                break;
+            }
+        }
+    }
+    output.content_end(film);
 }

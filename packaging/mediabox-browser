@@ -86,9 +86,17 @@ esac
 # card's config, `plughw:` where it has not, and ALSA's `null` when nothing
 # resolves -- a silent page is better than no browser, and better than one
 # playing on another television.
+#
+# And the sound setting over all of that: the device it chose, through
+# `mediabox_volume` so the box's own volume applies -- the player and Kodi
+# play to the same device.
 audio=""
 platform=/opt/rk3588-mediabox/bin/mediabox-platform
-if [ -x "$platform" ]; then
+audio_volume_pcm=""
+[ -x "$platform" ] && eval "$("$platform" audio-shell 2>/dev/null)" || true
+if [ -n "$audio_volume_pcm" ] && [ -f /etc/alsa/conf.d/61-mediabox-volume.conf ]; then
+  audio="--alsa-output-device=$audio_volume_pcm"
+elif [ -x "$platform" ]; then
   card="$("$platform" alsa-card 2>/dev/null || true)"
   driver="$("$platform" alsa-driver 2>/dev/null || true)"
   if [ -n "$card" ] && [ -n "$driver" ] && [ -f "/usr/share/alsa/cards/$driver.conf" ]; then

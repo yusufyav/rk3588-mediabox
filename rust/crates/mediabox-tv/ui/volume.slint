@@ -1,0 +1,93 @@
+import { Theme, Metrics } from "theme.slint";
+import { Icon } from "kit.slint";
+
+// The box's volume, the way the reference Android box shows its own -- over
+// everything, the film included, for a moment after it changes.
+//
+// Measured off the Ugoos SK1 (Android 14) at 3840x2160 with one screencap
+// after a Volume Up: a vertical pill on the right edge, centred top to
+// bottom, 144 x 822 px, 73 px in from the edge, #1D2128; a 104 px circle at
+// the top with the level in it and one at the bottom with the speaker, both
+// #24282F; between them a 12 x 455 px track, #303439, filled from the bottom
+// in #DADCE0. Every length below is that measurement over the panel height.
+//
+// Muted, as the reference shows it (the same box, its own remote's Mute): the
+// number reads 0, the track empties to a dot at the bottom, and the speaker is
+// struck through; the colours stay as they are. While a bitstream is playing
+// the kept level is shown with a grey fill, because it is the receiver that
+// sets how loud a bitstream is -- the one thing the reference has no case for.
+export component VolumeOsd inherits Rectangle {
+    in property <int> level;
+    in property <bool> muted;
+    in property <bool> bitstream;
+    in property <bool> shown;
+
+    property <length> unit: Metrics.vh / 2160;
+    property <length> circle: 104 * unit;
+    property <length> inset: 20 * unit;
+    property <length> track-h: 455 * unit;
+    property <int> shown-level: muted ? 0 : max(0, min(100, level));
+
+    width: 144 * unit;
+    height: 822 * unit;
+    border-radius: self.width / 2;
+    background: #1D2128f2;
+    opacity: shown ? 1 : 0;
+    animate opacity { duration: shown ? 120ms : 300ms; easing: ease-out; }
+
+    // The level.
+    Rectangle {
+        x: (parent.width - circle) / 2;
+        y: inset;
+        width: circle;
+        height: circle;
+        border-radius: circle / 2;
+        background: #24282F;
+        Text {
+            text: root.shown-level;
+            color: #DADCE0;
+            font-size: 40 * unit;
+            font-weight: 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // The track, and the level filled from the bottom.
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 12 * unit;
+        height: track-h;
+        border-radius: self.width / 2;
+        background: #303439;
+        Rectangle {
+            x: 0;
+            width: parent.width;
+            // Never less than a dot: the reference keeps one at the bottom
+            // when it is empty.
+            height: max(parent.width, parent.height * root.shown-level / 100);
+            y: parent.height - self.height;
+            border-radius: parent.border-radius;
+            background: root.bitstream && !root.muted ? #7f848c : #DADCE0;
+            animate height { duration: 90ms; easing: ease-out; }
+        }
+    }
+
+    // The speaker.
+    Rectangle {
+        x: (parent.width - circle) / 2;
+        y: parent.height - circle - inset;
+        width: circle;
+        height: circle;
+        border-radius: circle / 2;
+        background: #24282F;
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: root.muted || root.shown-level == 0 ? "speaker-muted" : "speaker";
+            size: 48 * unit;
+            ink: #DADCE0;
+        }
+    }
+}

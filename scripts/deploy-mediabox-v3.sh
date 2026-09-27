@@ -286,13 +286,15 @@ say "templates that are filled in from the board"
 # HDMI sockets neither is the same in both. mediabox-hdmi-prepare renders them
 # before anything draws, from mediabox-platform's answer.
 cp_ "$here/config/alsa/mediabox-hdmi.conf.in" "$here/config/alsa/60-mediabox-unrouted.conf" \
+    "$here/config/alsa/61-mediabox-volume.conf" \
     "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/config/kodi/guisettings-appliance.xml" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "set -e
   mkdir -p $prefix/share/alsa /var/tmp/kodi-home/.kodi/userdata
   install -m 0644 /var/tmp/mediabox-hdmi.conf.in $prefix/share/alsa/mediabox-hdmi.conf.in
   install -D -m 0644 /var/tmp/60-mediabox-unrouted.conf /etc/alsa/conf.d/60-mediabox-unrouted.conf
-  rm -f /var/tmp/60-mediabox-unrouted.conf
+  install -D -m 0644 /var/tmp/61-mediabox-volume.conf /etc/alsa/conf.d/61-mediabox-volume.conf
+  rm -f /var/tmp/60-mediabox-unrouted.conf /var/tmp/61-mediabox-volume.conf
   test -f /var/tmp/kodi-home/.kodi/userdata/guisettings.xml \
     || install -m 0644 /var/tmp/guisettings-appliance.xml /var/tmp/kodi-home/.kodi/userdata/guisettings.xml
   rm -f /var/tmp/mediabox-hdmi.conf.in /var/tmp/guisettings-appliance.xml"
@@ -336,6 +338,31 @@ sh_ "set -e
     $prefix/share/overlays/mediabox-fan-opi5plus-50hz.dtbo
   rm -f /var/tmp/mediabox-fan-setup /var/tmp/mediabox-fan-opi5plus-50hz.dtbo
   $prefix/bin/mediabox-fan-setup"
+
+say "infrared receiver -> /boot, keymap -> /etc/rc_keymaps"
+# On an Orange Pi 5 Plus, the board's receiver on rc-core instead of the vendor
+# pwm decoder, and the remote's measured keymap for it alone; see
+# packaging/mediabox-ir-setup. A board that is not a Plus is left alone.
+cp_ "$here/packaging/mediabox-ir-setup" \
+    "$here/packaging/overlays/mediabox-ir-opi5plus.dtbo" \
+    "$here/packaging/rc/mediabox-remote.toml" \
+    "$here/packaging/udev/82-mediabox-ir.rules" "$MEDIABOX_TARGET:/var/tmp/"
+sh_ "set -e
+  install -m 0755 /var/tmp/mediabox-ir-setup $prefix/bin/mediabox-ir-setup
+  install -D -m 0644 /var/tmp/mediabox-ir-opi5plus.dtbo $prefix/share/overlays/mediabox-ir-opi5plus.dtbo
+  install -D -m 0644 /var/tmp/mediabox-remote.toml $prefix/share/rc/mediabox-remote.toml
+  install -m 0644 /var/tmp/82-mediabox-ir.rules /etc/udev/rules.d/82-mediabox-ir.rules
+  rm -f /var/tmp/mediabox-ir-setup /var/tmp/mediabox-ir-opi5plus.dtbo /var/tmp/mediabox-remote.toml \
+        /var/tmp/82-mediabox-ir.rules
+  command -v ir-keytable >/dev/null || {
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ir-keytable >/dev/null
+  }
+  $prefix/bin/mediabox-ir-setup
+  udevadm control --reload
+  for rc in /sys/class/rc/rc*; do
+    [ \"\$(basename \"\$(readlink -f \$rc/device/driver)\")\" = gpio_ir_recv ] || continue
+    ir-keytable -c -w /etc/rc_keymaps/mediabox-remote.toml -s \"\$(basename \$rc)\" >/dev/null
+  done"
 
 say "units"
 cp_ "$here/packaging/systemd/mediaboxd-rs.service" \

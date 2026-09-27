@@ -12,6 +12,7 @@
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
@@ -54,6 +55,12 @@ pub struct PlayerManager {
     launcher: PathBuf,
     socket: PathBuf,
     playing: Mutex<Option<Playing>>,
+    /// Which film this is: moved on every start and every stop, so whatever
+    /// follows one film can tell it has ended or been replaced.
+    film: AtomicU64,
+    /// The player was started paused and is held there until the display
+    /// has been matched to the film (see `Daemon::follow_film`).
+    holding: AtomicBool,
 }
 
 impl PlayerManager {
@@ -62,7 +69,89 @@ impl PlayerManager {
             launcher: launcher.into(),
             socket: socket.into(),
             playing: Mutex::new(None),
+            film: AtomicU64::new(0),
+            holding: AtomicBool::new(false),
         }
+    }
+
+    /// The number of the film playing now; it changes when the film does.
+    pub fn film(&self) -> u64 {
+        self.film.load(Ordering::SeqCst)
+    }
+
+    /// Let film `film` go, if it is still held. Asked of the player itself,
+    /// and only once: a press of Pause since then is the viewer's, and is
+    /// not undone here.
+    pub async fn release(&self, film: u64) {
+        if self.film() != film || !self.holding.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let _ = self
+            .ask(json!({"command": ["set_property", "pause", false], "request_id": 20}))
+            .await;
+    }
+
+    /// One property of the running player, as mpv gives it.
+    pub async fn property(&self, name: &str) -> Option<Value> {
+        self.ask(json!({"command": ["get_property", name], "request_id": 21}))
+            .await?
+            .get("data")
+            .cloned()
+            .filter(|value| !value.is_null())
+    }
+
+    /// Put a changed sound plan into the running film: the volume always,
+    /// and the device, the passthrough formats and the encoder when they
+    /// moved -- mpv reopens its output for those, a moment of silence rather
+    /// than a restart. Nothing when nothing is playing: the next film is
+    /// started from the plan anyway.
+    pub async fn apply_audio(&self, before: &mediabox_core::AudioPlan, after: &mediabox_core::AudioPlan) {
+        if self.playing().await.is_none() {
+            return;
+        }
+        let set = |name: &str, value: Value| json!({"command": ["set_property", name, value], "request_id": 30});
+        if before.mpv_device() != after.mpv_device() && after.device.is_some() {
+            let _ = self.ask(set("audio-device", json!(after.mpv_device()))).await;
+        }
+        if before.mpv_spdif() != after.mpv_spdif() {
+            let _ = self.ask(set("audio-spdif", json!(after.mpv_spdif()))).await;
+        }
+        if before.mpv_af() != after.mpv_af() {
+            let _ = self.ask(set("af", json!(after.mpv_af()))).await;
+        }
+        let _ = self.ask(set("volume", json!(after.volume))).await;
+        let _ = self.ask(set("mute", json!(after.muted))).await;
+    }
+
+    /// What the film's sound is and what leaves the box, as mpv says.
+    pub async fn audio_stream(&self) -> Option<mediabox_core::StreamAudio> {
+        self.playing().await?;
+        let codec = self
+            .property("audio-codec-name")
+            .await
+            .and_then(|value| value.as_str().map(str::to_owned));
+        let params = self.property("audio-params").await;
+        let out = self.property("audio-out-params").await;
+        let encoding = self
+            .property("af")
+            .await
+            .and_then(|value| value.as_array().cloned())
+            .is_some_and(|filters| {
+                filters
+                    .iter()
+                    .any(|filter| filter.get("name").and_then(Value::as_str) == Some("lavcac3enc"))
+            });
+        if codec.is_none() && out.is_none() {
+            return None;
+        }
+        Some(mediabox_core::StreamAudio::from_mpv(codec, params.as_ref(), out.as_ref(), encoding))
+    }
+
+    /// Whether a player answers on the socket.
+    pub async fn answers(&self) -> bool {
+        self.ask(json!({"command": ["get_property", "pid"], "request_id": 22}))
+            .await
+            .is_some_and(|answer| answer.get("error").and_then(Value::as_str) == Some("success"))
     }
 
     pub async fn playing(&self) -> Option<Playing> {
@@ -77,6 +166,8 @@ impl PlayerManager {
         playing: Playing,
     ) -> Result<(), String> {
         self.stop().await;
+        self.film.fetch_add(1, Ordering::SeqCst);
+        self.holding.store(true, Ordering::SeqCst);
         // A socket left behind by a player that did not exit cleanly would be
         // answered by nobody; mpv replaces it, but only if it is not there.
         let _ = tokio::fs::remove_file(&self.socket).await;
@@ -124,6 +215,11 @@ impl PlayerManager {
                 "--setenv=MEDIABOX_PLAYER_IPC={}",
                 self.socket.display()
             ))
+            // Opened paused: the film's frame rate is read before a frame
+            // moves, the display is matched to it, and only then is it let
+            // go -- the television re-locks once, on the first frame, not
+            // three seconds into the film with the sound already running.
+            .arg("--setenv=MEDIABOX_PLAYER_HOLD=1")
             .arg(self.launcher.as_os_str())
             .arg(url)
             .arg(start_seconds.to_string())
@@ -134,6 +230,7 @@ impl PlayerManager {
             .await
             .map_err(|error| format!("oynatıcı başlatılamadı: {error}"))?;
         if !output.status.success() {
+            self.holding.store(false, Ordering::SeqCst);
             return Err(format!(
                 "oynatıcı başlatılamadı: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -180,10 +277,13 @@ impl PlayerManager {
             self.ask(json!({"command": ["get_property", "duration"], "request_id": 2}))
                 .await,
         );
+        // Held while the display is matched to the film: not a pause anybody
+        // asked for, and not drawn as one.
         let paused = self
             .ask(json!({"command": ["get_property", "pause"], "request_id": 3}))
             .await
-            .and_then(|answer| answer.get("data").and_then(Value::as_bool));
+            .and_then(|answer| answer.get("data").and_then(Value::as_bool))
+            .map(|paused| paused && !self.holding.load(Ordering::SeqCst));
 
         // What the caller said, over what the decoder guessed. A proxied
         // session has no duration in it and mpv's estimate from a partial
@@ -237,7 +337,13 @@ impl PlayerManager {
     /// playing: a remote pressed at the wrong moment is not an error.
     pub async fn transport(&self, action: mediabox_core::TransportAction) -> bool {
         use mediabox_core::TransportAction;
+        // Play/Pause during the hold is the viewer taking over. The film
+        // looks as if it were playing, so the press means Pause: it stays
+        // where it is and is no longer the hold's to let go.
+        let held = matches!(action, TransportAction::PlayPause)
+            && self.holding.swap(false, Ordering::SeqCst);
         let request = match action {
+            TransportAction::PlayPause if held => json!({"command": ["set_property", "pause", true]}),
             TransportAction::PlayPause => json!({"command": ["cycle", "pause"]}),
             TransportAction::Seek { seconds } => {
                 json!({"command": ["seek", seconds, "relative"]})
@@ -284,6 +390,8 @@ impl PlayerManager {
     /// Stop the player and forget it. Quiet if nothing is playing.
     pub async fn stop(&self) -> Option<Playing> {
         let playing = self.playing.lock().await.take();
+        self.film.fetch_add(1, Ordering::SeqCst);
+        self.holding.store(false, Ordering::SeqCst);
         // Ask first: mpv exits cleanly and gives back the decoder and the
         // compositor surface. systemd stops the unit either way.
         let _ = self.ask(json!({"command": ["quit"]})).await;

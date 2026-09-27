@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cadence::{Cadence, CadenceFit};
 use crate::{ColorMode, ModeTiming, Refresh, TimingKey};
 
 /// Which mode the television is driven at, as a person has decided it.
@@ -533,6 +534,43 @@ impl OutputOffer {
             .or(mode.auto_sdr)
     }
 
+    /// The mode a film at `cadence` is shown at under `setting`: the refresh
+    /// the display lists at the size `setting` resolves to that repeats every
+    /// frame the same number of times -- fewest repeats first -- and, when
+    /// there is none, 3:2 pulldown of the same family. `None` when nothing at
+    /// that size fits, and the display is left as it is.
+    ///
+    /// Only the chosen size, and only progressive timings the display lists
+    /// and something can be sent at: matching the film never changes the
+    /// resolution a person chose, and never tries a timing the EDID did not
+    /// offer. Among timings that fit equally well the one already chosen
+    /// wins, then a CTA-861 one, then the display's preferred one.
+    pub fn content_mode(&self, setting: &OutputSetting, cadence: Cadence) -> Option<ContentMatch> {
+        let base = self.resolve(setting.resolution)?;
+        self.modes()
+            .filter(|mode| {
+                mode.width == base.width
+                    && mode.height == base.height
+                    && !mode.interlaced
+                    && mode.allowed().next().is_some()
+            })
+            .filter_map(|mode| Some((mode, crate::cadence::fit(cadence, mode.refresh())?)))
+            .min_by_key(|(mode, fit)| {
+                (
+                    fit.rank(),
+                    mode.timing_key != base.timing_key,
+                    mode.vic.is_none(),
+                    !mode.preferred,
+                    mode.label.clone(),
+                )
+            })
+            .map(|(mode, fit)| ContentMatch {
+                timing_key: mode.timing_key,
+                label: mode.label.clone(),
+                fit,
+            })
+    }
+
     /// Policy: what `setting` puts on the wire here.
     pub fn select(&self, setting: &OutputSetting) -> Option<SelectedOutput> {
         let mode = self.resolve(setting.resolution)?;
@@ -543,6 +581,35 @@ impl OutputOffer {
             hdr: self.hdr_colour(setting, mode),
         })
     }
+}
+
+/// The mode a film's frame rate is matched to, and how it fits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentMatch {
+    pub timing_key: TimingKey,
+    pub label: String,
+    pub fit: CadenceFit,
+}
+
+/// The display while a film is playing: the film's frame rate, what it was
+/// matched to, and the setting put on the wire for it. The kept setting is
+/// not touched; this is taken back when the film ends, and never outlives
+/// the player, the owner or the sink it was made for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentOutput {
+    pub cadence: Cadence,
+    /// `23.976`: the frame rate as a mode label spells it.
+    pub cadence_label: String,
+    /// The mode it is shown at, and how it fits. `None`: nothing at the
+    /// chosen size fits it, and the kept mode stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<ContentMatch>,
+    /// What is on the wire for the film: the kept setting at the matched
+    /// mode. Equal to the kept setting when nothing had to change.
+    pub setting: OutputSetting,
+    /// The owner reported the matched mode committed.
+    #[serde(default)]
+    pub applied: bool,
 }
 
 /// A display generation, as the observer numbers it: `seq` moves when what it
@@ -765,11 +832,22 @@ pub struct OutputStatus {
     /// Driver observed, and the PHY.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed: Option<ObservedOutput>,
+    /// A film is playing and its frame rate chose the refresh: what is on the
+    /// wire until it ends. The kept setting above is what comes back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentOutput>,
+    /// Whether a film's frame rate chooses the refresh.
+    #[serde(default = "matching_default")]
+    pub content_matching: bool,
     /// What a record written before this version could not carry over.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+fn matching_default() -> bool {
+    true
 }
 
 /// What the daemon tells the interfaces about the display, on the event
@@ -786,6 +864,10 @@ pub enum OutputEvent {
         trial: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trial_seconds: Option<u32>,
+        /// Set while a film's frame rate chose this: the setting is the kept
+        /// one at the matched mode, for the length of the film.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        content: bool,
     },
     /// The trial was kept.
     Kept { trial: u64 },
@@ -842,6 +924,113 @@ mod tests {
             0,
             mode_flags::PHSYNC | mode_flags::PVSYNC,
         )
+    }
+
+    fn offered(timing: ModeTiming, preferred: bool) -> OutputModeOffer {
+        let colour = ColorMode::new(ColorFormat::Rgb, 8);
+        OutputModeOffer {
+            label: timing.label(),
+            width: timing.hdisplay,
+            height: timing.vdisplay,
+            refresh_mhz: timing.refresh().millihertz(),
+            interlaced: timing.interlaced(),
+            pixel_clock_khz: timing.clock_khz,
+            htotal: timing.htotal,
+            vtotal: timing.vtotal,
+            preferred,
+            vic: Some(1),
+            timing_key: timing.key(),
+            timing,
+            cells: vec![ColourCell { mode: colour, rate_khz: timing.clock_khz, refused: None, hdr10: false }],
+            auto_sdr: Some(colour),
+            auto_hdr: None,
+        }
+    }
+
+    fn hd(clock_khz: u32, htotal: u16) -> ModeTiming {
+        ModeTiming::new(clock_khz, 1920, 2008, 2052, htotal, 0, 1080, 1084, 1089, 1125, 0, mode_flags::PHSYNC | mode_flags::PVSYNC)
+    }
+
+    /// The Sony KD-65XE9005's 4K and 1080p lists, as the kernel gives them:
+    /// no 48 Hz anywhere, and 1080p stops at 30 for the NTSC and 24 families.
+    fn sony() -> OutputOffer {
+        let uhd_modes = vec![
+            offered(uhd(594_000, 4400), true),
+            offered(uhd(593_407, 4400), false),
+            offered(uhd(594_000, 5280), false),
+            offered(uhd(297_000, 4400), false),
+            offered(uhd(296_703, 4400), false),
+            offered(uhd(297_000, 5280), false),
+            offered(uhd(297_000, 5500), false),
+            offered(uhd(296_703, 5500), false),
+        ];
+        let hd_modes = vec![
+            offered(hd(148_500, 2200), false),
+            offered(hd(148_352, 2200), false),
+            offered(hd(148_500, 2640), false),
+            offered(hd(74_250, 2200), false),
+            offered(hd(74_176, 2200), false),
+            offered(hd(74_250, 2750), false),
+            offered(hd(74_176, 2750), false),
+        ];
+        let auto = uhd_modes[0].label.clone();
+        OutputOffer {
+            edid_sha256: "ab".repeat(32),
+            connector: "HDMI-A-2".into(),
+            auto,
+            groups: vec![
+                OutputGroup { width: 3840, height: 2160, name: "4K UHD".into(), computer: false, modes: uhd_modes },
+                OutputGroup { width: 1920, height: 1080, name: "Full HD".into(), computer: false, modes: hd_modes },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_film_is_shown_at_a_multiple_of_its_rate_at_the_chosen_size() {
+        let offer = sony();
+        let auto = OutputSetting { edid_sha256: offer.edid_sha256.clone(), ..Default::default() };
+        let at = |setting: &OutputSetting, fps: f64| {
+            offer
+                .content_mode(setting, Cadence::from_fps(fps).unwrap())
+                .map(|found| (found.label, found.fit))
+        };
+        let exact = |repeats| CadenceFit::Exact { repeats };
+        assert_eq!(at(&auto, 23.976), Some(("3840x2160p23.976".into(), exact(1))));
+        assert_eq!(at(&auto, 24.0), Some(("3840x2160p24".into(), exact(1))));
+        assert_eq!(at(&auto, 25.0), Some(("3840x2160p25".into(), exact(1))));
+        assert_eq!(at(&auto, 29.97), Some(("3840x2160p29.97".into(), exact(1))));
+        assert_eq!(at(&auto, 30.0), Some(("3840x2160p30".into(), exact(1))));
+        assert_eq!(at(&auto, 50.0), Some(("3840x2160p50".into(), exact(1))));
+        assert_eq!(at(&auto, 59.94), Some(("3840x2160p59.94".into(), exact(1))));
+        assert_eq!(at(&auto, 60.0), Some(("3840x2160p60".into(), exact(1))));
+        // Nothing at 4K repeats 12.5 fps evenly but 25 and 50; fewest first.
+        assert_eq!(at(&auto, 12.5), Some(("3840x2160p25".into(), exact(2))));
+        // 15 fps: 30 and 60 both fit; 30 repeats fewer times.
+        assert_eq!(at(&auto, 15.0), Some(("3840x2160p30".into(), exact(2))));
+        // Nothing fits at all: the display is left alone.
+        assert_eq!(at(&auto, 23.0), None);
+
+        // A person who chose 1080p keeps 1080p.
+        let full_hd = OutputSetting {
+            resolution: ResolutionChoice::Timing { key: hd(148_500, 2200).key() },
+            ..auto.clone()
+        };
+        assert_eq!(at(&full_hd, 23.976), Some(("1920x1080p23.976".into(), exact(1))));
+        assert_eq!(at(&full_hd, 50.0), Some(("1920x1080p50".into(), exact(1))));
+    }
+
+    #[test]
+    fn without_a_multiple_pulldown_of_the_same_family_is_the_fallback() {
+        let mut offer = sony();
+        // A display that lists only 59.94 and 60 at 4K.
+        offer.groups[0].modes.retain(|mode| mode.refresh_mhz > 59_000);
+        let auto = OutputSetting { edid_sha256: offer.edid_sha256.clone(), ..Default::default() };
+        let at = |fps: f64| offer.content_mode(&auto, Cadence::from_fps(fps).unwrap()).map(|found| (found.label, found.fit));
+        assert_eq!(at(23.976), Some(("3840x2160p59.94".into(), CadenceFit::Pulldown32)));
+        assert_eq!(at(24.0), Some(("3840x2160p60".into(), CadenceFit::Pulldown32)));
+        assert_eq!(at(29.97), Some(("3840x2160p59.94".into(), CadenceFit::Exact { repeats: 2 })));
+        assert_eq!(at(25.0), None, "50 Hz is not offered; 25p on 60 is neither even nor pulldown");
     }
 
     #[test]

@@ -392,6 +392,18 @@ export component Player inherits Rectangle {
                         wrap: no-wrap;
                         horizontal-stretch: 1;
                     }
+                    // What a settings row is doing now: the film's frame
+                    // rate and the mode it is on, the sound leaving the box.
+                    if entry.detail != "" && !grouped: Text {
+                        text: entry.detail;
+                        color: #ffffff99;
+                        font-size: Metrics.vh * 0.016;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        max-width: parent.width * 0.5;
+                    }
                     Rectangle {
                         width: Metrics.vh * 0.028;
                         height: 100%;

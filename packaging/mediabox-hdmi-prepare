@@ -217,14 +217,58 @@ fi
 # ALSA's default, which is card 0 -- on a board with two HDMI sockets, possibly
 # the other television. So it is given `mediabox_unrouted`, a PCM that discards
 # everything (config/alsa/60-mediabox-unrouted.conf): silence, said out loud.
+# The sound setting's device, and a volume on it.
+#
+# The viewer chooses where sound goes in the settings -- the picture's own
+# HDMI by default, or a USB DAC, or the analog output -- and the player, the
+# browser and Kodi all follow that one choice: `mediabox-platform
+# audio-shell` resolves it on the devices found now, by stable identity,
+# never by card number.
+#
+# The box's own volume, for PCM, is `mediabox_volume:CARD=<id>,DEV=<n>`
+# (config/alsa/61-mediabox-volume.conf): ALSA's softvol on that device, whose
+# control ("MediaBox", 0-100) mediaboxd-rs sets from the kept setting. A
+# compressed burst never goes through it -- Kodi's passthrough device below is
+# the card's raw `hdmi:` PCM -- so a bitstream is never volume-scaled.
+audio_device=""; audio_card=""; audio_pcm=""; audio_volume_pcm=""
+audio_bitstream=no; audio_volume=100; audio_muted=no
+eval "$("$PLATFORM" audio-shell 2>/dev/null)" || true
+volume_ctl=skipped
+if [ -n "$audio_volume_pcm" ] && [ -f /etc/alsa/conf.d/61-mediabox-volume.conf ]; then
+  # softvol creates its control on the first stream through it. One stream of
+  # nothing, so the control exists before Kodi or a page plays, and the kept
+  # level on it.
+  /usr/bin/aplay -q -D "$audio_volume_pcm" -t raw -f S16_LE -c 2 -r 48000 /dev/null >/dev/null 2>&1 || true
+  level="$audio_volume"
+  [ "$audio_muted" = yes ] && level=0
+  if /usr/bin/amixer -q -c "$audio_card" cset name=MediaBox "$level" >/dev/null 2>&1; then
+    volume_ctl="$level"
+  else
+    volume_ctl=absent
+  fi
+else
+  audio_volume_pcm=""
+fi
+
 kodi_profile=absent
 profile="${MEDIABOX_KODI_PROFILE:-/var/tmp/kodi-home/.kodi/userdata/guisettings.xml}"
 device=""
-if [ -n "$alsa_card" ] && [ -n "$alsa_driver" ]; then
+passthrough_device=""
+if [ -n "$audio_volume_pcm" ]; then
+  # PCM through the volume; a burst straight to the card's `hdmi:` PCM, whose
+  # name is what Kodi reads passthrough capability off.
+  device="ALSA:$audio_volume_pcm|MediaBox"
+  if [ "$audio_bitstream" = yes ]; then
+    passthrough_device="ALSA:$audio_pcm|${alsa_driver:-$audio_card}"
+  else
+    passthrough_device="$device"
+  fi
+elif [ -n "$alsa_card" ] && [ -n "$alsa_driver" ]; then
   device="ALSA:hdmi:CARD=$alsa_card,DEV=0|$alsa_driver"
 elif [ -n "$connector" ]; then
   device="ALSA:mediabox_unrouted|MediaBox"
 fi
+passthrough_device="${passthrough_device:-$device}"
 if [ -n "$device" ] && [ -f "$profile" ]; then
   kodi_profile=written
   # `#` as the delimiter, not `|`: an ALSA device string has a `|` in it, which
@@ -242,7 +286,7 @@ if [ -n "$device" ] && [ -f "$profile" ]; then
   # films", which is exactly how it was reported.
   sed -i \
     -e "s#\(<setting id=\"audiooutput.audiodevice\"\)[^>]*>[^<]*\(</setting>\)#\1>$device\2#" \
-    -e "s#\(<setting id=\"audiooutput.passthroughdevice\"\)[^>]*>[^<]*\(</setting>\)#\1>$device\2#" \
+    -e "s#\(<setting id=\"audiooutput.passthroughdevice\"\)[^>]*>[^<]*\(</setting>\)#\1>$passthrough_device\2#" \
     "$profile" || kodi_profile=failed
 fi
 
@@ -261,6 +305,7 @@ fi
 # Anything that did not happen says so by name; a silent preparation step is
 # how a wrong sound card survives a deploy.
 echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-unrouted}" \
+     "audio=${audio_device:-none} volume=$volume_ctl" \
      "driver=${alsa_driver:-none} alsa-conf=$alsa_conf kodi-profile=$kodi_profile" \
      "plan=$plan_state kodi-whitelist=$kodi_whitelist gui=$kodi_screenmode" \
      "boot-video=$boot_mode${video_arg:+ ($video_arg)}" >&2

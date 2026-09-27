@@ -3,16 +3,23 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod audio;
+mod cadence;
 mod ethernet;
 mod output;
 mod timing;
 pub use output::{
-    AppliedOutput, ColourCell, DisplayGeneration, DisplayIdentity, DisplayState, LegacyResolution,
+    AppliedOutput, ColourCell, ContentMatch, ContentOutput, DisplayGeneration, DisplayIdentity, DisplayState, LegacyResolution,
     LegacySetting, OUTPUT_SETTING_SCHEMA, OUTPUT_TRIAL_SECONDS, Observed, ObservedOutput,
     OutputEvent, OutputGroup, OutputLink, OutputModeOffer, OutputOffer, OutputSetting,
     OutputStatus, OutputTrial, OwnerReport, Refusal, ResolutionChoice, Route, SelectedOutput,
     StoredSetting,
 };
+pub use audio::{
+    AUDIO_SETTING_SCHEMA, Ac3Encode, AudioCodec, AudioDevice, AudioDeviceChoice, AudioKind,
+    AudioMode, AudioPlan, AudioSetting, AudioStatus, CapsSource, SadEntry, SinkAudio, StreamAudio,
+};
+pub use cadence::{Cadence, CadenceFit};
 pub use timing::{ModeTiming, Refresh, TimingKey, mode_flags};
 pub use ethernet::{
     ETHERNET_DNS_MAX, ETHERNET_TRIAL_SECONDS, EthernetConfig, EthernetPort, EthernetStatus,
@@ -48,6 +55,9 @@ pub enum InputAction {
     VolumeDown,
     Mute,
     Power,
+    /// A remote's Menu key: the options of what is on screen -- the film's
+    /// settings panel, a poster's menu.
+    Menu,
 }
 
 /// What a change to the account's record of a title is.
@@ -1283,6 +1293,10 @@ pub struct SystemStatus {
     /// The wired ports, what each is set to, and a change waiting to be kept.
     #[serde(default)]
     pub ethernet: EthernetStatus,
+    /// Sound: the devices, what the sink declares, what is chosen and what
+    /// is playing.
+    #[serde(default)]
+    pub audio: AudioStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1331,6 +1345,9 @@ pub enum Request {
     OutputKeep { trial: u64 },
     /// Take the setting on trial `trial` back now.
     OutputRevert { trial: u64 },
+    /// Whether a film's frame rate chooses the display's refresh, from now
+    /// on and for the film playing now.
+    OutputContentMatching { enabled: bool },
     /// The wired ports and what each is set to.
     EthernetStatus,
     /// Put an address on a wired port on trial. It is taken back after
@@ -1343,6 +1360,24 @@ pub enum Request {
     EthernetKeep,
     /// Take the address on trial back now.
     EthernetRevert,
+    /// Sound: every device found now, what each sink declares, the kept
+    /// setting and what it means, and what the player is sending.
+    AudioStatus,
+    /// Keep a sound setting and put it into effect, playing film included.
+    /// Refused, with the reason, for a format the sink does not declare or a
+    /// device that is not there.
+    AudioSet { setting: AudioSetting },
+    /// The volume alone: a level, a step, a mute, or a toggle of it.
+    AudioVolume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        volume: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<i16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        muted: Option<bool>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        toggle_mute: bool,
+    },
     /// The fan as the kernel is running it, and the curve chosen for it.
     FanStatus,
     /// Choose the curve the kernel is given from the next boot on.

@@ -6,12 +6,14 @@ import { Library } from "library.slint";
 import { Discover, DiscoverFilter } from "discover.slint";
 import { Detail, SourceRow, EpisodeRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
+import { VolumeOsd } from "volume.slint";
 import { Player, MenuRow } from "player.slint";
 import { Settings } from "settings.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem } from "kit.slint";
 import { EthernetView } from "ethernet.slint";
+import { AudioView, AudioCard } from "audio.slint";
 import { Account } from "account.slint";
 import { WifiScreen, BluetoothScreen, WifiRow, BtRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
@@ -26,7 +28,7 @@ export {
     RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
-    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, SearchEntry,
+    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
     EpisodeRow, DiscoverFilter,
 }
 
@@ -92,6 +94,11 @@ export component MediaBoxWindow inherits Window {
     in property <string> status: "Başlatılıyor…";
     in property <bool> failed: false;
     in property <string> notice;
+    // The volume indicator, over everything.
+    in property <bool> volume-shown;
+    in property <int> volume-level;
+    in property <bool> volume-muted;
+    in property <bool> volume-bitstream;
     in property <[string]> nav;
     in property <VitalsModel> vitals;
 
@@ -302,6 +309,8 @@ export component MediaBoxWindow inherits Window {
     in property <OutputView> settings-output-view;
     in property <bool> settings-ethernet;
     in property <EthernetView> settings-ethernet-view;
+    in property <bool> settings-audio;
+    in property <AudioView> settings-audio-view;
     // A short list opened from a settings card: the lights' mode.
     in property <bool> settings-choice-open;
     in property <string> settings-choice-title;
@@ -543,6 +552,8 @@ export component MediaBoxWindow inherits Window {
             output-view: root.settings-output-view;
             ethernet: root.settings-ethernet;
             ethernet-view: root.settings-ethernet-view;
+            audio: root.settings-audio;
+            audio-view: root.settings-audio-view;
             choice-open: root.settings-choice-open;
             choice-title: root.settings-choice-title;
             choice: root.settings-choice;
@@ -695,6 +706,18 @@ export component MediaBoxWindow inherits Window {
             menu-side-label: root.np-menu-side-label;
             menu-side-value: root.np-menu-side-value;
             pill: root.np-pill;
+        }
+
+        // Last, so it is over the film and over every sheet.
+        VolumeOsd {
+            // 73 px in from the right edge of a 2160-line panel, centred top
+            // to bottom: the reference's own place for it.
+            x: root.width - self.width - root.height * 73 / 2160;
+            y: (root.height - self.height) / 2;
+            level: root.volume-level;
+            muted: root.volume-muted;
+            bitstream: root.volume-bitstream;
+            shown: root.volume-shown;
         }
     }
 

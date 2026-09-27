@@ -132,6 +132,17 @@ fn with_app(f: impl FnOnce(&mut App)) {
     }
 }
 
+/// How long the volume indicator stays up after the last change.
+const VOLUME_OSD_LINGER: Duration = Duration::from_millis(2200);
+
+#[derive(Clone, Copy)]
+struct VolumeOsd {
+    until: Instant,
+    level: u8,
+    muted: bool,
+    bitstream: bool,
+}
+
 struct App {
     window: slint::Weak<MediaBoxWindow>,
     stack: route::Stack,
@@ -235,6 +246,8 @@ struct App {
     detail_backdrop: Option<String>,
     /// When the line along the bottom stops being true. See `say`.
     notice_until: Option<Instant>,
+    /// The volume indicator: until when it is up, and what it shows.
+    volume_osd: Option<VolumeOsd>,
     detail_fade: f32,
     /// Bumped every time a detail screen is opened, so an answer for a title
     /// the viewer has already left is dropped instead of overwriting the one
@@ -283,6 +296,7 @@ impl App {
         match intent {
             Intent::GoHome => self.go_home(),
             Intent::OfferPower => self.open_sheet(Sheet::power()),
+            Intent::Options => self.options(),
             Intent::Transport(transport) => self.transport(transport),
             Intent::Ignore => {}
             _ => match self.route() {
@@ -593,6 +607,70 @@ impl App {
     /// "Televizyon uyandırılıyor…" and then stood there saying it, over
     /// whatever the viewer did next, until something happened to replace it.
     /// Called from the same quarter-second tick that watches the film.
+    /// Put the volume indicator up, over whatever is on screen, for a moment.
+    fn show_volume(&mut self, level: u8, muted: bool, bitstream: bool) {
+        self.volume_osd = Some(VolumeOsd {
+            until: Instant::now() + VOLUME_OSD_LINGER,
+            level,
+            muted,
+            bitstream,
+        });
+        self.paint_volume();
+    }
+
+    /// A volume key: the indicator moves at once, from the level last known,
+    /// and the daemon's answer puts the level it kept on it.
+    fn volume_key(&mut self, transport: Transport) {
+        let (step, toggle_mute) = match transport {
+            Transport::VolumeUp => (Some(screens::audio::VOLUME_STEP), false),
+            Transport::VolumeDown => (Some(-screens::audio::VOLUME_STEP), false),
+            _ => (None, true),
+        };
+        if let Some(audio) = self.audio_status() {
+            let mut level = audio.setting.volume;
+            let mut muted = audio.setting.muted;
+            match step {
+                Some(step) => {
+                    level = (i16::from(level) + step).clamp(0, 100) as u8;
+                    if step > 0 {
+                        muted = false;
+                    }
+                }
+                None => muted = !muted,
+            }
+            let bitstream = audio.stream.as_ref().is_some_and(|stream| stream.bitstream);
+            // Kept here too, so a second press before the answer steps on.
+            if let Some(status) = self.status.as_mut().and_then(|status| status.get_mut("audio"))
+                && let Some(setting) = status.get_mut("setting")
+            {
+                setting["volume"] = level.into();
+                setting["muted"] = muted.into();
+            }
+            self.show_volume(level, muted, bitstream);
+        }
+        spawn_audio(mediabox_core::Request::AudioVolume { volume: None, step, muted: None, toggle_mute });
+    }
+
+    fn paint_volume(&self) {
+        let Some(window) = self.window.upgrade() else { return };
+        match self.volume_osd {
+            Some(osd) => {
+                window.set_volume_level(i32::from(osd.level));
+                window.set_volume_muted(osd.muted);
+                window.set_volume_bitstream(osd.bitstream);
+                window.set_volume_shown(true);
+            }
+            None => window.set_volume_shown(false),
+        }
+    }
+
+    fn expire_volume(&mut self) {
+        if self.volume_osd.is_some_and(|osd| osd.until <= Instant::now()) {
+            self.volume_osd = None;
+            self.paint_volume();
+        }
+    }
+
     fn expire_notice(&mut self) {
         if self
             .notice_until
@@ -674,7 +752,11 @@ impl App {
                 setting,
                 trial,
                 trial_seconds,
+                content,
             } => {
+                if content {
+                    eprintln!("mediabox-tv.output the film's frame rate chose the next mode");
+                }
                 // For this output and sink only: a setting made for another
                 // display is never tried on this one.
                 if platform::identity().as_ref() != Some(&identity) {
@@ -2190,6 +2272,7 @@ impl App {
                             spawn_here(HereCommand::Scale(mode));
                             self.paint();
                         }
+                        Film::Settings => self.open_menu(Menu::Settings),
                         Film::Player => self.open_menu(Menu::Player),
                     }
                     return;
@@ -2232,7 +2315,22 @@ impl App {
         }
     }
 
+    fn audio_status(&self) -> Option<mediabox_core::AudioStatus> {
+        serde_json::from_value(self.status.as_ref()?.get("audio")?.clone()).ok()
+    }
+
+    fn output_status(&self) -> Option<mediabox_core::OutputStatus> {
+        serde_json::from_value(self.status.as_ref()?.get("output")?.clone()).ok()
+    }
+
+    /// The film's settings rows in the player panel, as the daemon last
+    /// described the display and the sound.
+    fn player_settings(&self) -> Vec<screens::audio::PlayerRow> {
+        screens::audio::player_panel(self.output_status().as_ref(), self.audio_status().as_ref())
+    }
+
     fn open_menu(&mut self, menu: screens::now_playing::Menu) {
+        self.now.player_settings = self.player_settings().len();
         if self.now.open_menu(menu) {
             self.open_controls();
             self.paint();
@@ -2291,6 +2389,27 @@ impl App {
                 let value = SPEEDS[focus.min(SPEEDS.len() - 1)];
                 self.now.speed = value;
                 spawn_here(HereCommand::Speed(value));
+            }
+            // Each setting applies at once, in the film, and the panel stays
+            // open on it so the answer can be read where it was asked.
+            Menu::Settings => {
+                {
+                    let rows = self.player_settings();
+                    let Some(row) = rows.get(focus) else { return };
+                    use screens::audio::PlayerAct;
+                    match row.act {
+                        PlayerAct::RefreshMatching => spawn_output(mediabox_core::Request::OutputContentMatching {
+                            enabled: !row.active,
+                        }),
+                        act => {
+                            if let Some(audio) = self.audio_status() {
+                                let setting = screens::audio::player_choose(&audio, act);
+                                spawn_audio(mediabox_core::Request::AudioSet { setting });
+                            }
+                        }
+                    }
+                    return;
+                }
             }
             Menu::Player => {
                 self.now.close_menu();
@@ -2353,7 +2472,10 @@ impl App {
                     self.leave_film(None);
                     return;
                 }
-                Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
+                Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => {
+                    self.volume_key(transport);
+                    return;
+                }
             }
             if self.now.active() && self.route() != Route::NowPlaying {
                 self.open(Route::NowPlaying);
@@ -2371,9 +2493,12 @@ impl App {
                 self.now.elapsed_seconds = seconds;
                 spawn_kodi(KodiCommand::Seek(seconds as i64 - from));
             }
-            // Volume is the television's, over CEC, and the daemon owns that
-            // adapter. Nothing to do here until there is a mixer to move.
-            Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => return,
+            // The box's own volume: the player's gain and the softvol the
+            // browser and Kodi play through, kept by the daemon.
+            Transport::VolumeUp | Transport::VolumeDown | Transport::Mute => {
+                self.volume_key(transport);
+                return;
+            }
         }
         // A transport key pressed anywhere opens the screen it belongs to. It
         // is the one place the position and the state are visible.
@@ -2389,6 +2514,9 @@ impl App {
             Intent::Move(dx, dy) => {
                 if self.settings.step(dx, dy) {
                     self.paint();
+                }
+                if let Some(press) = self.settings.take_audio_press() {
+                    self.audio_pressed(press);
                 }
             }
             Intent::Select => {
@@ -2418,6 +2546,11 @@ impl App {
                 if self.settings.is_ethernet() {
                     let press = self.settings.ethernet.press();
                     self.ethernet_pressed(press);
+                    return;
+                }
+                if self.settings.is_audio() {
+                    let press = self.settings.audio.press();
+                    self.audio_pressed(press);
                     return;
                 }
                 let Some(row) = self.settings.focused() else {
@@ -2456,6 +2589,10 @@ impl App {
                         self.ethernet_pressed(press);
                         return;
                     }
+                }
+                if self.settings.is_audio() && self.settings.audio.back() {
+                    self.paint();
+                    return;
                 }
                 // One level up: a page to its card, a card to the column,
                 // and from the column out of the screen.
@@ -2511,6 +2648,50 @@ impl App {
             Press::Keep(trial) => spawn_output(mediabox_core::Request::OutputKeep { trial }),
             Press::Revert(trial) => spawn_output(mediabox_core::Request::OutputRevert { trial }),
         }
+    }
+
+    /// A choice on the sound page, or the volume: sent at once, and the
+    /// daemon's answer is what the page shows next.
+    fn audio_pressed(&mut self, press: screens::audio::Press) {
+        use screens::audio::Press;
+        match press {
+            Press::Nothing => {}
+            Press::Changed => self.paint(),
+            Press::Set(setting) => spawn_audio(mediabox_core::Request::AudioSet { setting }),
+            Press::Step(step) => spawn_audio(mediabox_core::Request::AudioVolume {
+                volume: None,
+                step: Some(step),
+                muted: None,
+                toggle_mute: false,
+            }),
+            Press::ToggleMute => spawn_audio(mediabox_core::Request::AudioVolume {
+                volume: None,
+                step: None,
+                muted: None,
+                toggle_mute: true,
+            }),
+        }
+    }
+
+    /// The daemon's account of sound, or its refusal in its own words.
+    fn audio_answered(&mut self, answer: Result<Value, String>, announce: bool) {
+        match answer {
+            Ok(audio) => {
+                self.settings.audio.answered();
+                if announce && let Ok(status) = serde_json::from_value::<mediabox_core::AudioStatus>(audio.clone()) {
+                    let bitstream = status.stream.as_ref().is_some_and(|stream| stream.bitstream);
+                    self.show_volume(status.setting.volume, status.setting.muted, bitstream);
+                }
+                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("audio".into(), audio);
+                }
+            }
+            Err(error) => {
+                self.settings.audio.refused(error.clone());
+                self.say(error);
+            }
+        }
+        self.recompose_settings();
     }
 
     /// Ok or Back on a wired port's page. Typing stays in this process; a
@@ -2934,6 +3115,9 @@ impl App {
     /// The one place a settings decision leaves this process.
     fn run(&mut self, action: Action) {
         match action {
+            Action::SetRefreshMatching(enabled) => {
+                spawn_output(mediabox_core::Request::OutputContentMatching { enabled });
+            }
             Action::OpenAccount => {
                 self.account.open(self.status.as_ref());
                 self.open(Route::Account);
@@ -3104,6 +3288,50 @@ impl App {
         };
         if opened {
             self.paint();
+        }
+    }
+
+    /// The Menu key. During a film, the film's own settings panel -- the
+    /// refresh, the sound; on a shelf that has one, the poster's menu, as a
+    /// long Ok opens it. Nothing anywhere else.
+    fn options(&mut self) {
+        if self.here.is_some() {
+            if self.route() != Route::NowPlaying {
+                self.open(Route::NowPlaying);
+            }
+            self.open_menu(screens::now_playing::Menu::Settings);
+            return;
+        }
+        if self.wants_ok_hold() {
+            let opened = match self.route() {
+                Route::Media => self.media.open_menu(),
+                _ => self.library.open_menu(),
+            };
+            if opened {
+                self.paint();
+            }
+        }
+    }
+
+    /// A key from a remote this interface reads itself -- the board's
+    /// infrared receiver, a Bluetooth or USB remote's Back, Home, Menu and
+    /// media keys -- already normalised. Ok says when it comes up, as the
+    /// television's remote does, so a hold of it is told from a press.
+    pub fn remote_key(&mut self, action: InputAction, pressed: bool, origin: input::Origin) {
+        if action == InputAction::Ok {
+            if !pressed {
+                self.ok_up();
+                return;
+            }
+            if self.ok_down() {
+                return;
+            }
+        }
+        if !pressed {
+            return;
+        }
+        if let Some(action) = self.dispatcher.accept(action, origin) {
+            self.act(action);
         }
     }
 
@@ -3673,6 +3901,7 @@ impl App {
     }
 
     fn paint_now_playing(&mut self, window: &MediaBoxWindow) {
+        self.now.player_settings = self.player_settings().len();
         let now = &self.now;
         window.set_np_title(now.title.clone().into());
         window.set_np_subtitle(now.subtitle.clone().into());
@@ -3810,6 +4039,18 @@ impl App {
                     .collect(),
                 None,
             ),
+            Menu::Settings => (
+                "settings",
+                self.player_settings()
+                    .into_iter()
+                    .map(|row| MenuRow {
+                        label: row.label.into(),
+                        detail: row.detail.into(),
+                        active: row.active,
+                    })
+                    .collect(),
+                None,
+            ),
             Menu::Player => (
                 "player",
                 ["MediaBox", "Kodi"]
@@ -3832,6 +4073,7 @@ impl App {
                 Menu::Subtitles => "Altyazılar",
                 Menu::Audio => "Ses",
                 Menu::Speed => "Oynatma Hızı",
+                Menu::Settings => "Ayarlar",
                 Menu::Player => "Oynatıcı",
                 Menu::None => "",
             }
@@ -3925,6 +4167,73 @@ impl App {
         self.paint_cooling(window);
         self.paint_output(window);
         self.paint_ethernet(window);
+        self.paint_audio(window);
+    }
+
+    fn paint_audio(&self, window: &MediaBoxWindow) {
+        let on = self.settings.is_audio();
+        window.set_settings_audio(on);
+        if !on {
+            return;
+        }
+        let view = self.settings.audio.view();
+        fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+            slint::ModelRc::new(slint::VecModel::from(items))
+        }
+        window.set_settings_audio_view(AudioView {
+            available: view.available,
+            message: view.message.into(),
+            cards: model(
+                view.cards
+                    .into_iter()
+                    .map(|card| AudioCard {
+                        icon: card.icon.into(),
+                        label: card.label.into(),
+                        hint: card.hint.into(),
+                        value: card.value.into(),
+                        kind: card.kind.into(),
+                        focused: card.focused,
+                        enabled: card.enabled,
+                    })
+                    .collect(),
+            ),
+            note: view.note.into(),
+            current_title: view.current_title.into(),
+            current_line: view.current_line.into(),
+            current_badges: model(
+                view.current_badges
+                    .into_iter()
+                    .map(|(text, tone)| Badge { text: text.into(), tone: tone.into() })
+                    .collect(),
+            ),
+            current_rows: model(
+                view.current_rows
+                    .into_iter()
+                    .map(|(label, value)| InfoLine { label: label.into(), value: value.into(), tone: "".into() })
+                    .collect(),
+            ),
+            picker_open: view.picker_open,
+            picker_title: view.picker_title.into(),
+            picker: model(
+                view.picker
+                    .into_iter()
+                    .map(|option| ChoiceItem {
+                        title: option.title.into(),
+                        sub: option.sub.into(),
+                        selected: option.selected,
+                        focused: option.focused,
+                        enabled: true,
+                        badge: "".into(),
+                        badge_tone: "".into(),
+                        now: false,
+                    })
+                    .collect(),
+            ),
+            picker_focus: view.picker_focus as i32,
+            volume: view.volume,
+            muted: view.muted,
+            volume_focused: view.volume_focused,
+        });
     }
 
     fn paint_ethernet(&self, window: &MediaBoxWindow) {
@@ -4666,6 +4975,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         watching: None,
         detail_backdrop: None,
         notice_until: None,
+        volume_osd: None,
         detail_fade: 0.0,
         epoch: 0,
         resume: session::read(state_file()),
@@ -4787,7 +5097,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         with_app(|app| {
             let held = app.images.held_mb();
             if let Some(line) = app.meter.report_due() {
-                eprintln!("{line} art_cpu_mb={held}");
+                let film = match crate::video::pace::drain() {
+                    Some((frames, median, max, late)) => format!(
+                        " film_frames={frames} film_gap_median_ms={median:.1} film_gap_max_ms={max:.1} film_late={late}"
+                    ),
+                    None => String::new(),
+                };
+                eprintln!("{line} art_cpu_mb={held}{film}");
             }
         });
     });
@@ -4803,6 +5119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             with_app(|app| {
                 app.watch_the_film();
                 app.expire_notice();
+                app.expire_volume();
                 app.tick_output();
                 app.tick_ethernet();
             });
@@ -5563,6 +5880,21 @@ fn spawn_ethernet(request: mediabox_core::Request) {
     });
 }
 
+/// One call about sound; the answer comes back to the event loop.
+fn spawn_audio(request: mediabox_core::Request) {
+    let announce = matches!(request, mediabox_core::Request::AudioVolume { .. });
+    detached("mediabox-tv-audio", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.request(&request).await.map_err(|error| {
+            eprintln!("mediabox-tv.audio {request:?} failed: {error}");
+            error.to_string()
+        });
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.audio_answered(answer, announce));
+        });
+    });
+}
+
 fn spawn_output(request: mediabox_core::Request) {
     detached("mediabox-tv-output", async move {
         let client = rpc::Client::new(socket_path());
@@ -5601,9 +5933,12 @@ fn follow_output(output: &Value) {
     if status.display.as_ref().and_then(|display| display.identity()) != Some(ours.clone()) {
         return;
     }
-    let (wanted, trial) = match &status.trial {
-        Some(trial) => (trial.setting.clone(), Some(trial.id)),
-        None => (status.setting.clone(), None),
+    // A trial first, then a film's frame rate, then what is kept: the same
+    // order the daemon puts them on the wire in.
+    let (wanted, trial) = match (&status.trial, &status.content) {
+        (Some(trial), _) => (trial.setting.clone(), Some(trial.id)),
+        (None, Some(content)) => (content.setting.clone(), None),
+        (None, None) => (status.setting.clone(), None),
     };
     if wanted.edid_sha256 != ours.edid_sha256 {
         return;

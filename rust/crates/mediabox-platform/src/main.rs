@@ -128,6 +128,82 @@ fn main() -> std::process::ExitCode {
             .and_then(|audio| audio.card_index)
             .map(|index| index.to_string())),
         "alsa-driver" => one(devices.alsa_driver),
+        // Sound, as the settings chose it: every device found, and what the
+        // kept setting means on them. The player, the browser and Kodi are
+        // started from this and decide nothing of their own.
+        "audio-devices" | "audio-plan" | "audio-args" | "audio-shell" => {
+            let roots = mediabox_platform::roots::Roots::from_env();
+            let found = mediabox_platform::sound::devices(
+                &platform,
+                &roots,
+                std::path::Path::new(mediabox_platform::sound::ALSA_CARDS),
+            );
+            let setting = std::fs::read_to_string(roots.state("audio.json"))
+                .ok()
+                .and_then(|text| mediabox_core::AudioSetting::parse(&text))
+                .unwrap_or_default();
+            let plan = mediabox_core::audio::plan(&setting, &found);
+            match command.as_str() {
+                "audio-devices" if json => println!("{}", serde_json::to_string_pretty(&found).unwrap_or_default()),
+                "audio-devices" => {
+                    for device in &found {
+                        let codecs = mediabox_core::audio::declared(device)
+                            .iter()
+                            .map(|codec| codec.mpv())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}{}",
+                            device.id,
+                            device.label,
+                            device.pcm,
+                            device.sink.as_ref().map(|sink| format!("{:?}", sink.source).to_lowercase()).unwrap_or_else(|| "-".into()),
+                            if codecs.is_empty() { "pcm".into() } else { format!("pcm,{codecs}") },
+                            if device.display { "\t*" } else { "" }
+                        );
+                    }
+                }
+                "audio-plan" => println!("{}", serde_json::to_string_pretty(&plan).unwrap_or_default()),
+                "audio-args" => {
+                    for arg in plan.mpv_args() {
+                        println!("{arg}");
+                    }
+                    for note in &plan.notes {
+                        eprintln!("mediabox-platform: {note}");
+                    }
+                }
+                _ => {
+                    // For a shell: `eval "$(mediabox-platform audio-shell)"`.
+                    // Values are ALSA ids and names, quoted all the same.
+                    let quote = |value: &str| format!("'{}'", value.replace('\'', ""));
+                    let device = plan.device.as_ref();
+                    println!("audio_device={}", quote(device.map(|d| d.id.as_str()).unwrap_or("")));
+                    println!("audio_card={}", quote(device.map(|d| d.card_id.as_str()).unwrap_or("")));
+                    println!("audio_pcm={}", quote(device.map(|d| d.pcm.as_str()).unwrap_or("")));
+                    // The same device through the box's own volume
+                    // (config/alsa/61-mediabox-volume.conf).
+                    let volume_pcm = device
+                        .map(|d| {
+                            let dev = d.pcm.rsplit_once("DEV=").map(|(_, n)| n).unwrap_or("0");
+                            format!("mediabox_volume:CARD={},DEV={dev}", d.card_id)
+                        })
+                        .unwrap_or_default();
+                    println!("audio_volume_pcm={}", quote(&volume_pcm));
+                    println!("audio_bitstream={}", quote(if device.is_some_and(|d| d.bitstream) { "yes" } else { "no" }));
+                    println!(
+                        "audio_passthrough={}",
+                        quote(&plan.passthrough.iter().map(|codec| codec.mpv()).collect::<Vec<_>>().join(","))
+                    );
+                    println!("audio_ac3_encode={}", quote(if plan.ac3_encode.is_some() { "yes" } else { "no" }));
+                    println!("audio_volume={}", plan.volume);
+                    println!("audio_muted={}", quote(if plan.muted { "yes" } else { "no" }));
+                }
+            }
+            if plan.device.is_none() {
+                return std::process::ExitCode::FAILURE;
+            }
+            std::process::ExitCode::SUCCESS
+        }
         "connector-path" => one(devices
             .connector_sysfs
             .map(|path| path.display().to_string())),
@@ -291,6 +367,10 @@ kullanım: mediabox-platform <komut> [--json]
   alsa-card      o çıkışın ALSA kart kimliği
   alsa-index     o kartın bu açılıştaki ALSA numarası (/proc/asound için)
   cec-device     o çıkışın CEC aygıtı
+  audio-devices  sesin gidebileceği her cihaz: kimlik, ad, PCM, yetenek kaynağı, biçimler
+  audio-plan     kayıtlı ses ayarının bu cihazlardaki anlamı (JSON)
+  audio-args     oynatıcının (mpv) ses argümanları, satır başına bir tane
+  audio-shell    aynı plan, kabuk değişkenleri olarak
   plan           şu anki ekran için yazılmış plan (değilse hata) [--wait <sn>]
   sway-output    tarayıcı kompozitörünün çıkış satırı
   dri-debugfs    mod kuran DRM aygıtının debugfs dizini (doğrulanmış)

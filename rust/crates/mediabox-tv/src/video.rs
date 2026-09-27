@@ -46,6 +46,15 @@ pub struct Frame {
     pub colour: Colour,
 }
 
+/// What staging a frame needs to know about it once its buffers are imported.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameInfo {
+    pub fourcc: DrmFourcc,
+    pub width: u32,
+    pub height: u32,
+    pub colour: Colour,
+}
+
 /// The two plane properties that decide how a frame is converted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Colour {
@@ -282,6 +291,35 @@ fn zpos<D: ControlDevice>(
     None
 }
 
+/// The handles an atomic update of a plane writes: which framebuffer, on
+/// which CRTC, from where in the frame to where on the panel.
+#[derive(Clone, Copy)]
+struct PlaneProps {
+    fb: control::property::Handle,
+    crtc: control::property::Handle,
+    src: [control::property::Handle; 4],
+    dst: [control::property::Handle; 4],
+}
+
+fn plane_props<D: ControlDevice>(device: &D, plane: control::plane::Handle) -> Option<PlaneProps> {
+    let properties = device.get_properties(plane).ok()?;
+    let mut named = std::collections::HashMap::new();
+    for handle in properties.as_props_and_values().0.iter().copied() {
+        if let Ok(info) = device.get_property(handle)
+            && let Ok(name) = info.name().to_str()
+        {
+            named.insert(name.to_string(), handle);
+        }
+    }
+    let get = |name: &str| named.get(name).copied();
+    Some(PlaneProps {
+        fb: get("FB_ID")?,
+        crtc: get("CRTC_ID")?,
+        src: [get("SRC_X")?, get("SRC_Y")?, get("SRC_W")?, get("SRC_H")?],
+        dst: [get("CRTC_X")?, get("CRTC_Y")?, get("CRTC_W")?, get("CRTC_H")?],
+    })
+}
+
 /// `COLOR_ENCODING`, `COLOR_RANGE` and `EOTF` on one plane, by name.
 ///
 /// By name because these are the DRM properties whose identifiers differ
@@ -342,6 +380,9 @@ pub struct VideoPlane {
     eotf: Option<control::property::Handle>,
     /// `zpos`, so the film can be put under the interface rather than over it.
     depth: Option<control::property::Handle>,
+    /// What an atomic update of this plane writes. `None` on a plane that does
+    /// not publish them, which is then never used.
+    props: Option<PlaneProps>,
     sunk: std::cell::Cell<bool>,
     /// What was last set, so a property is not written on every frame.
     applied: std::cell::Cell<Option<Colour>>,
@@ -402,6 +443,9 @@ impl VideoPlane {
             }
             let (encoding, range, eotf) = colour_properties(device, handle);
             let depth = zpos(device, handle).map(|(property, _)| property);
+            let Some(props) = plane_props(device, handle) else {
+                continue;
+            };
             found.push(Self {
                 plane: handle,
                 formats,
@@ -409,6 +453,7 @@ impl VideoPlane {
                 range,
                 eotf,
                 depth,
+                props: Some(props),
                 sunk: std::cell::Cell::new(false),
                 applied: std::cell::Cell::new(None),
                 name: format!("{handle:?}"),
@@ -497,33 +542,63 @@ impl VideoPlane {
         }
     }
 
-    /// Puts an imported frame on the panel.
+    /// Puts an imported frame into an atomic request: the framebuffer, the
+    /// scaler's source and destination, and -- when they differ from what the
+    /// plane last carried -- the colour properties and the stacking order.
     ///
-    /// `drmModeSetPlane` rather than an atomic commit: the interface's own
-    /// presentation is a legacy page flip on the primary, and mixing the two
-    /// ways of driving one CRTC is how a display pipeline stops being
-    /// explicable. The scaler is in the call — `src` is the frame, `dst` is
-    /// where the interface wants it, and the display controller does the rest.
-    pub fn show<D: ControlDevice>(
+    /// Atomic rather than `drmModeSetPlane`, and in the same request as the
+    /// interface's own frame whenever the interface has one: a legacy
+    /// `SetPlane` waits for its own vblank, and so did the interface's page
+    /// flip, one after the other on the one thread that holds master. Measured
+    /// on the Plus with a 24p film at 24 Hz, ten remote presses: 8 frames late,
+    /// the longest gap 110 ms. One commit per vblank carries both.
+    pub fn stage<D: ControlDevice>(
         &self,
-        device: &D,
+        request: &mut control::atomic::AtomicModeReq,
         crtc: control::crtc::Handle,
         imported: &Imported<D>,
-        frame: &Frame,
+        frame: &FrameInfo,
         dst: Rect,
-    ) -> Result<(), String> {
-        self.apply_colour(device, frame.colour);
-        self.sink_below_the_interface(device);
-        device
-            .set_plane(
-                self.plane,
-                crtc,
-                Some(imported.framebuffer),
-                0,
-                (dst.x, dst.y, dst.width, dst.height),
-                (0, 0, frame.width << 16, frame.height << 16),
-            )
-            .map_err(|e| format!("DRM_IOCTL_MODE_SETPLANE(video): {e}"))
+    ) -> bool {
+        use control::property::Value;
+        let Some(props) = self.props else { return false };
+        request.add_property(self.plane, props.fb, Value::Framebuffer(Some(imported.framebuffer)));
+        request.add_property(self.plane, props.crtc, Value::CRTC(Some(crtc)));
+        let src = [0, 0, u64::from(frame.width) << 16, u64::from(frame.height) << 16];
+        for (handle, value) in props.src.iter().zip(src) {
+            request.add_property(self.plane, *handle, Value::UnsignedRange(value));
+        }
+        request.add_property(self.plane, props.dst[0], Value::SignedRange(dst.x.into()));
+        request.add_property(self.plane, props.dst[1], Value::SignedRange(dst.y.into()));
+        request.add_property(self.plane, props.dst[2], Value::UnsignedRange(dst.width.into()));
+        request.add_property(self.plane, props.dst[3], Value::UnsignedRange(dst.height.into()));
+        if self.applied.get() != Some(frame.colour) {
+            for (property, value) in [
+                (self.encoding, frame.colour.encoding),
+                (self.range, frame.colour.range),
+                // Written even when it is zero: a film that is not HDR has
+                // to say so, or it is shown through the last film's curve.
+                (self.eotf, frame.colour.eotf),
+            ] {
+                if let Some(property) = property {
+                    request.add_property(self.plane, property, Value::UnsignedRange(value));
+                }
+            }
+        }
+        if !self.sunk.get()
+            && let Some(depth) = self.depth
+        {
+            request.add_property(self.plane, depth, Value::UnsignedRange(0));
+        }
+        true
+    }
+
+    /// The request that carried `stage`'s properties was committed.
+    fn staged(&self, colour: Colour) {
+        self.applied.set(Some(colour));
+        if self.depth.is_some() {
+            self.sunk.set(true);
+        }
     }
 
     /// The bottom of the stack, so the interface is drawn over the film.
@@ -907,6 +982,13 @@ impl Drop for Server {
     }
 }
 
+struct Pending<D: ControlDevice> {
+    id: u64,
+    imported: Imported<D>,
+    info: FrameInfo,
+    dst: Rect,
+}
+
 /// The film on the panel: the socket, the plane it settled on, and the frames
 /// the display controller has not finished with.
 pub struct Sink<D: ControlDevice + Clone> {
@@ -915,6 +997,10 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// using it — see `VideoPlane::candidates`.
     chosen: Option<usize>,
     shown: VecDeque<(u64, Imported<D>)>,
+    /// The newest frame, imported and not yet committed. A newer one arriving
+    /// first replaces it, and the replaced one goes straight back to the
+    /// player: it was never on the panel.
+    pending: Option<Pending<D>>,
     on: bool,
     refused: bool,
     frames: u64,
@@ -930,6 +1016,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
             server: Server::bind(path)?,
             chosen: None,
             shown: VecDeque::new(),
+            pending: None,
             on: false,
             refused: false,
             frames: 0,
@@ -987,7 +1074,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
     fn present(
         &mut self,
         device: &D,
-        crtc: control::crtc::Handle,
+        _crtc: control::crtc::Handle,
         planes: &[VideoPlane],
         frame: &Frame,
         display: (u32, u32),
@@ -998,45 +1085,26 @@ impl<D: ControlDevice + Clone> Sink<D> {
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
         let dst = fit(display, frame, into);
 
+        // The framebuffer does not depend on the plane, only on the plane
+        // taking the format; which plane the port drives is settled when the
+        // frame is first committed (`stage`).
         let order: Vec<usize> = match self.chosen {
             Some(index) => vec![index],
             None => (0..planes.len()).collect(),
         };
-
         let mut last = String::from("no plane on this video port would take the frame");
         for index in order {
-            let plane = &planes[index];
-            let imported = match plane.import(device, frame, &borrowed) {
-                Ok(imported) => imported,
-                Err(error) => {
-                    last = error;
-                    continue;
-                }
-            };
-            match plane.show(device, crtc, &imported, frame, dst) {
-                Ok(()) => {
-                    if self.chosen != Some(index) {
-                        eprintln!(
-                            "mediabox-tv.video settled on {} {:?} {}x{} -> {}x{}+{}+{}",
-                            plane.name,
-                            frame.fourcc,
-                            frame.width,
-                            frame.height,
-                            dst.width,
-                            dst.height,
-                            dst.x,
-                            dst.y
-                        );
-                    }
-                    self.chosen = Some(index);
-                    self.on = true;
+            match planes[index].import(device, frame, &borrowed) {
+                Ok(imported) => {
                     self.refused = false;
-                    self.frames += 1;
-                    self.shown.push_back((id, imported));
-                    while self.shown.len() > IN_FLIGHT {
-                        if let Some((old, _)) = self.shown.pop_front() {
-                            self.server.release(old);
-                        }
+                    let info = FrameInfo {
+                        fourcc: frame.fourcc,
+                        width: frame.width,
+                        height: frame.height,
+                        colour: frame.colour,
+                    };
+                    if let Some(old) = self.pending.replace(Pending { id, imported, info, dst }) {
+                        self.server.release(old.id);
                     }
                     return;
                 }
@@ -1054,9 +1122,98 @@ impl<D: ControlDevice + Clone> Sink<D> {
         self.server.release(id);
     }
 
+    /// Whether a frame is waiting to be committed.
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Adds the waiting frame, if there is one, to `request`, on the plane
+    /// the port drives -- found the first time by asking the kernel
+    /// (`TEST_ONLY`) about each candidate in turn. Returns the plane staged
+    /// on, for `committed` to be told.
+    pub fn stage(
+        &mut self,
+        device: &D,
+        crtc: control::crtc::Handle,
+        planes: &[VideoPlane],
+        request: &mut control::atomic::AtomicModeReq,
+    ) -> Option<usize> {
+        let pending = self.pending.as_ref()?;
+        if self.chosen.is_none() {
+            for (index, plane) in planes.iter().enumerate() {
+                if !plane.accepts(pending.info.fourcc) {
+                    continue;
+                }
+                let mut test = control::atomic::AtomicModeReq::new();
+                if !plane.stage(&mut test, crtc, &pending.imported, &pending.info, pending.dst) {
+                    continue;
+                }
+                let flags = control::AtomicCommitFlags::TEST_ONLY;
+                if device.atomic_commit(flags, test).is_ok() {
+                    eprintln!(
+                        "mediabox-tv.video settled on {} {:?} {}x{} -> {}x{}+{}+{}",
+                        plane.name,
+                        pending.info.fourcc,
+                        pending.info.width,
+                        pending.info.height,
+                        pending.dst.width,
+                        pending.dst.height,
+                        pending.dst.x,
+                        pending.dst.y
+                    );
+                    self.chosen = Some(index);
+                    break;
+                }
+            }
+        }
+        let Some(index) = self.chosen else {
+            if !self.refused {
+                eprintln!("mediabox-tv.video no plane on this video port would take the frame");
+                self.refused = true;
+            }
+            let old = self.pending.take()?;
+            self.server.release(old.id);
+            return None;
+        };
+        planes[index]
+            .stage(request, crtc, &pending.imported, &pending.info, pending.dst)
+            .then_some(index)
+    }
+
+    /// The request `stage` added the waiting frame to was committed: it is on
+    /// its way to the panel, and the frames before the one the panel shows
+    /// now go back to the player.
+    pub fn committed(&mut self, planes: &[VideoPlane], index: usize) {
+        let Some(pending) = self.pending.take() else { return };
+        planes[index].staged(pending.info.colour);
+        self.on = true;
+        self.frames += 1;
+        pace::presented();
+        self.shown.push_back((pending.id, pending.imported));
+        while self.shown.len() > IN_FLIGHT {
+            if let Some((old, _)) = self.shown.pop_front() {
+                self.server.release(old);
+            }
+        }
+    }
+
+    /// The commit carrying the waiting frame was refused: it goes back.
+    pub fn refused_commit(&mut self, error: &str) {
+        if let Some(pending) = self.pending.take() {
+            if !self.refused {
+                eprintln!("mediabox-tv.video the frame's commit was refused: {error}");
+                self.refused = true;
+            }
+            self.server.release(pending.id);
+        }
+    }
+
     /// Take the film off the panel and give every buffer back.
     pub fn clear(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
         self.hdr = None;
+        if let Some(pending) = self.pending.take() {
+            self.server.release(pending.id);
+        }
         if let Some(index) = self.chosen
             && let Some(plane) = planes.get(index)
         {
@@ -1186,5 +1343,52 @@ mod tests {
         assert_eq!(MESSAGE, 88);
         assert_eq!(REPLY, 16);
         assert_eq!(MAGIC, u32::from_le_bytes(*b"MBV1"));
+    }
+}
+
+/// How evenly film frames reach the panel: the gaps between consecutive
+/// frames put on the plane, as the interface measured them. The player's own
+/// counters cannot see this -- it hands a frame over and considers it shown --
+/// and a frame that waits on the interface's own drawing is exactly what a
+/// viewer sees as a stutter.
+pub mod pace {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    struct Pace {
+        last: Option<Instant>,
+        frames: u64,
+        gaps_us: Vec<u64>,
+    }
+
+    static PACE: Mutex<Pace> = Mutex::new(Pace { last: None, frames: 0, gaps_us: Vec::new() });
+
+    pub fn presented() {
+        let mut pace = PACE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if let Some(last) = pace.last.replace(now) {
+            let gap = now.duration_since(last).as_micros() as u64;
+            // A pause or a seek is not a stutter.
+            if gap < 2_000_000 {
+                pace.gaps_us.push(gap);
+            }
+        }
+        pace.frames += 1;
+    }
+
+    /// Frames, the median gap, the longest gap, and how many gaps were more
+    /// than half as long again as the median, since the last call. `None`
+    /// while no film is moving.
+    pub fn drain() -> Option<(u64, f64, f64, usize)> {
+        let mut pace = PACE.lock().unwrap_or_else(|e| e.into_inner());
+        let frames = std::mem::take(&mut pace.frames);
+        let mut gaps = std::mem::take(&mut pace.gaps_us);
+        if gaps.is_empty() {
+            return None;
+        }
+        gaps.sort_unstable();
+        let median = gaps[gaps.len() / 2];
+        let late = gaps.iter().filter(|gap| **gap * 2 > median * 3).count();
+        Some((frames, median as f64 / 1000.0, *gaps.last().unwrap() as f64 / 1000.0, late))
     }
 }

@@ -338,7 +338,8 @@ fi
 # unit only where the archive carries the observer.
 for pair in \
   "packaging/systemd/mediabox-display-observer.service:etc/systemd/system/mediabox-display-observer.service:bin/mediabox-display-observer" \
-  "config/alsa/60-mediabox-unrouted.conf:etc/alsa/conf.d/60-mediabox-unrouted.conf:"; do
+  "config/alsa/60-mediabox-unrouted.conf:etc/alsa/conf.d/60-mediabox-unrouted.conf:" \
+  "config/alsa/61-mediabox-volume.conf:etc/alsa/conf.d/61-mediabox-volume.conf:"; do
   src="${pair%%:*}"; rest="${pair#*:}"; rel="${rest%%:*}"; needs="${rest#*:}"
   [ -e "/$rel" ] && continue
   [ -z "$needs" ] || [ -e "$prefix/$needs" ] || continue
