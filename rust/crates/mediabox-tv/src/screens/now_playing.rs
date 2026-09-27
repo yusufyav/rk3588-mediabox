@@ -221,9 +221,11 @@ pub struct NowPlaying {
     /// can go, and Left and Right on it are a scrub that accelerates.
     pub row: Row,
     /// Where the scrub has got to, in seconds, while one is in progress. The
-    /// film keeps playing behind it; nothing is asked of the player until the
-    /// scrub is confirmed.
+    /// first press of a run is sent to the player at once; the rest are drawn
+    /// as they come and sent when the run settles (`scrub_to_send`).
     pub scrub: Option<u64>,
+    /// What of this run has been sent to the player already.
+    sent: Option<u64>,
     /// How many scrub presses have arrived in a row, which is what decides how
     /// far the next one moves.
     run: u32,
@@ -241,6 +243,12 @@ pub enum Row {
 
 /// Two presses of the same direction inside this belong to one movement.
 const SCRUB_RUN: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// How long after the last press of a run the film goes where the run got
+/// to. Kodi waits 750 ms (`seekdelay`); a held key's repeats come every 33 to
+/// 125 ms, so this is well past the gap between two of them and short enough
+/// to feel like the film moved when the key came up.
+const SCRUB_SETTLE: std::time::Duration = std::time::Duration::from_millis(450);
 
 /// How far one press moves the scrub, by how many came before it.
 ///
@@ -599,6 +607,7 @@ impl NowPlaying {
         let target = self.scrub.take()?;
         self.run = 0;
         self.last_scrub = None;
+        self.sent = None;
         Some(target)
     }
 
@@ -606,7 +615,28 @@ impl NowPlaying {
     pub fn cancel_scrub(&mut self) -> bool {
         self.run = 0;
         self.last_scrub = None;
+        self.sent = None;
         self.scrub.take().is_some()
+    }
+
+    /// Where to send the film now, if anywhere: the first press of a run at
+    /// once, so a single press moves the film when it is pressed, and the
+    /// run's end once it has settled, so a key held down scrubs the bar and
+    /// seeks once rather than on every repeat.
+    pub fn scrub_to_send(&mut self, now: std::time::Instant) -> Option<u64> {
+        let target = self.scrub?;
+        if self.sent.is_none() {
+            self.sent = Some(target);
+            self.elapsed_seconds = target;
+            return Some(target);
+        }
+        if self.last_scrub.is_some_and(|last| now.duration_since(last) < SCRUB_SETTLE) {
+            return None;
+        }
+        let sent = self.sent;
+        self.take_scrub();
+        self.elapsed_seconds = target;
+        (sent != Some(target)).then_some(target)
     }
 
     /// One `media_status_here` answer: the interface's own player, not Kodi.
@@ -910,6 +940,34 @@ mod tests {
     }
 
     /// Confirming hands the target over once; abandoning gives nothing back.
+    #[test]
+    fn a_press_moves_the_film_at_once_and_a_held_key_when_it_settles() {
+        let mut now = NowPlaying::new();
+        now.duration_seconds = 3600;
+        now.elapsed_seconds = 600;
+        let t0 = std::time::Instant::now();
+        // One press: the film goes ten seconds on, now, and not again.
+        now.step(1, 0);
+        assert_eq!(now.scrub_to_send(t0), Some(610));
+        assert_eq!(now.scrub_to_send(t0 + std::time::Duration::from_millis(100)), None);
+        assert_eq!(now.scrub_to_send(t0 + SCRUB_SETTLE * 2), None);
+        assert_eq!(now.scrub, None);
+        assert_eq!(now.elapsed_seconds, 610);
+
+        // A held key: the first repeat is sent, the rest are drawn, and the
+        // film goes where they got to once they stop.
+        now.step(1, 0);
+        assert_eq!(now.scrub_to_send(std::time::Instant::now()), Some(620));
+        for _ in 0..8 {
+            now.step(1, 0);
+            assert_eq!(now.scrub_to_send(std::time::Instant::now()), None);
+        }
+        let reached = now.scrub.expect("a scrub in progress");
+        assert!(reached > 700, "a held key accelerates: {reached}");
+        assert_eq!(now.scrub_to_send(std::time::Instant::now() + SCRUB_SETTLE), Some(reached));
+        assert_eq!(now.scrub, None);
+    }
+
     #[test]
     fn a_scrub_is_taken_once_or_abandoned() {
         let mut now = NowPlaying::new();

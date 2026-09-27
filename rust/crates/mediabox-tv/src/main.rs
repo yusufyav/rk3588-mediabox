@@ -1989,7 +1989,17 @@ impl App {
             return;
         };
         playing.controls_until = None;
+        // The next key on a bare film starts on the bar, so Left and Right
+        // there move the film, as they do on every television.
+        self.now.row = screens::now_playing::Row::Bar;
         self.paint();
+    }
+
+    /// Where the scrub says to send the film, now, if anywhere.
+    fn send_scrub(&mut self) {
+        if let Some(seconds) = self.now.scrub_to_send(std::time::Instant::now()) {
+            self.transport(Transport::SeekTo(seconds));
+        }
     }
 
     /// Where the film has got to, as the player itself answers it.
@@ -2243,6 +2253,9 @@ impl App {
         match intent {
             Intent::Move(dx, dy) => {
                 if self.now.step(dx, dy) {
+                    // Left and Right on the bar move the film, not only the
+                    // bar: the first press at once, a held key when it lets go.
+                    self.send_scrub();
                     self.paint();
                 }
             }
@@ -5116,6 +5129,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_millis(250),
         || {
             with_app(|app| {
+                // A scrub that has settled goes to the player, here or Kodi.
+                if app.now.scrub.is_some() {
+                    app.send_scrub();
+                }
                 app.watch_the_film();
                 app.expire_notice();
                 app.expire_volume();

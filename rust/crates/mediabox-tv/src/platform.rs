@@ -2307,6 +2307,48 @@ struct SplitPlatform {
     /// arrived lower case and half of ASCII could not be typed at all. A film
     /// title did not care. A password does.
     shift: std::cell::Cell<bool>,
+    /// The key being held down, repeated at its own device's rate.
+    ///
+    /// libinput hands over the press and the release and never the kernel's
+    /// repeats: repeating a held key is the job of whatever owns the seat --
+    /// a Wayland compositor, Kodi -- and on this appliance that is this
+    /// process. Without it a held arrow moved one row, and a held volume key
+    /// moved the volume one step.
+    held: RefCell<Option<HeldKey>>,
+    /// Each device's own repeat delay and period (`EVIOCGREP`), read once:
+    /// the same numbers Kodi reads, so a remote held down behaves alike in
+    /// both.
+    rates: RefCell<std::collections::HashMap<String, (Duration, Duration)>>,
+}
+
+/// A press being repeated.
+struct HeldKey {
+    code: u32,
+    sysname: String,
+    press: HeldPress,
+    next: std::time::Instant,
+    period: Duration,
+}
+
+enum HeldPress {
+    Action(mediabox_core::InputAction, crate::input::Origin),
+    Text(slint::SharedString),
+}
+
+/// What a device does not say, Android's: a key held for 400 ms repeats every
+/// 100 ms.
+const REPEAT_WHEN_UNSAID: (Duration, Duration) = (Duration::from_millis(400), Duration::from_millis(100));
+
+/// `EVIOCGREP`: the device's repeat delay and period, in milliseconds.
+fn device_repeat(sysname: &str) -> Option<(Duration, Duration)> {
+    const EVIOCGREP: libc::c_ulong = 0x8008_4503;
+    let file = File::open(format!("/dev/input/{sysname}")).ok()?;
+    let mut rate = [0u32; 2];
+    let rc = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGREP as _, rate.as_mut_ptr()) };
+    if rc < 0 || rate[0] == 0 || rate[1] == 0 {
+        return None;
+    }
+    Some((Duration::from_millis(rate[0].into()), Duration::from_millis(rate[1].into())))
 }
 
 impl SplitPlatform {
@@ -2328,6 +2370,8 @@ impl SplitPlatform {
             receiver: RefCell::new(receiver),
             proxy: Proxy { sender, wake },
             remotes: RefCell::new(std::collections::HashMap::new()),
+            held: RefCell::new(None),
+            rates: RefCell::new(std::collections::HashMap::new()),
             shift: std::cell::Cell::new(false),
         })
     }
@@ -2401,6 +2445,17 @@ impl SplitPlatform {
             .dispatch()
             .map_err(|e| format!("libinput dispatch: {e}"))?;
         for event in libinput {
+            // A remote in its pointer mode -- the UR-02's, with the gyroscope
+            // -- clicks where it would otherwise press Ok. There is no pointer
+            // on this interface, so the click is the press of what has focus,
+            // as Android takes it. Moving the pointer means nothing here.
+            if let input::Event::Pointer(input::event::PointerEvent::Button(button)) = &event {
+                if button.button() == BTN_LEFT {
+                    let pressed = matches!(button.button_state(), input::event::pointer::ButtonState::Pressed);
+                    crate::with_app(|app| app.remote_key(mediabox_core::InputAction::Ok, pressed, crate::input::Origin::Keyboard));
+                }
+                continue;
+            }
             let input::Event::Keyboard(input::event::KeyboardEvent::Key(key)) = event else {
                 continue;
             };
@@ -2408,17 +2463,33 @@ impl SplitPlatform {
             if kind == crate::input::Device::CecDuplicate {
                 continue;
             }
+            let pressed = matches!(key.key_state(), KeyState::Pressed);
+            let sysname = key.device().sysname().to_string();
+            if !pressed
+                && self
+                    .held
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|held| held.code == key.key() && held.sysname == sysname)
+            {
+                self.held.replace(None);
+            } else if pressed {
+                // Another key down ends the repeat of the last one.
+                self.held.replace(None);
+            }
             // A remote's keys -- all of the receiver's, and the Back, Home,
             // Menu, transport and volume keys of anything else -- are
             // actions, not text.
             let keyboard = kind == crate::input::Device::Other;
             if let Some(action) = crate::input::action_for_evdev(key.key(), keyboard) {
-                let pressed = matches!(key.key_state(), KeyState::Pressed);
                 let origin = if keyboard {
                     crate::input::Origin::Keyboard
                 } else {
                     crate::input::Origin::Infrared
                 };
+                if pressed && crate::input::repeats(action) {
+                    self.hold(key.key(), sysname, HeldPress::Action(action, origin));
+                }
                 crate::with_app(|app| app.remote_key(action, pressed, origin));
                 continue;
             }
@@ -2435,6 +2506,9 @@ impl SplitPlatform {
             let Some(text) = key_text(key.key(), self.shift.get()) else {
                 continue;
             };
+            if pressed && crate::input::text_repeats(text.as_str()) {
+                self.hold(key.key(), sysname, HeldPress::Text(text.clone()));
+            }
             let event = match key.key_state() {
                 KeyState::Pressed => WindowEvent::KeyPressed { text },
                 KeyState::Released => WindowEvent::KeyReleased { text },
@@ -2442,6 +2516,48 @@ impl SplitPlatform {
             self.window.window.dispatch_event(event);
         }
         Ok(())
+    }
+
+    /// Start repeating a press after its device's delay.
+    fn hold(&self, code: u32, sysname: String, press: HeldPress) {
+        let (delay, period) = *self
+            .rates
+            .borrow_mut()
+            .entry(sysname.clone())
+            .or_insert_with(|| device_repeat(&sysname).unwrap_or(REPEAT_WHEN_UNSAID));
+        self.held.replace(Some(HeldKey {
+            code,
+            sysname,
+            press,
+            next: std::time::Instant::now() + delay,
+            period,
+        }));
+    }
+
+    /// The held key's next repeat, if it is due; and how long until the one
+    /// after, for the loop to wake for it.
+    fn repeat_held(&self) -> Option<Duration> {
+        let now = std::time::Instant::now();
+        let due = {
+            let mut held = self.held.borrow_mut();
+            let held = held.as_mut()?;
+            if held.next > now {
+                return Some(held.next - now);
+            }
+            held.next = now + held.period;
+            match &held.press {
+                HeldPress::Action(action, origin) => Ok((*action, *origin)),
+                HeldPress::Text(text) => Err(text.clone()),
+            }
+        };
+        match due {
+            Ok((action, origin)) => crate::with_app(|app| app.remote_key(action, true, origin)),
+            Err(text) => self
+                .window
+                .window
+                .dispatch_event(WindowEvent::KeyPressed { text }),
+        }
+        self.held.borrow().as_ref().map(|held| held.period)
     }
 }
 
@@ -2480,12 +2596,14 @@ impl Platform for SplitPlatform {
                 self.window.sync_size();
             }
 
+            let repeat = self.repeat_held();
             let timeout = if self.window.redraw.get() {
                 0
             } else {
                 slint::platform::duration_until_next_timer_update()
                     .unwrap_or(Duration::from_millis(250))
                     .min(Duration::from_millis(250))
+                    .min(repeat.unwrap_or(Duration::MAX))
                     .as_millis() as i32
             };
             // The third is the player's socket. Its descriptor is the door
@@ -2565,6 +2683,7 @@ impl Platform for SplitPlatform {
 /// that stops systemd-logind from acting on them first.
 /// The two shift keys, by the kernel's code.
 const KEY_LEFTSHIFT: u32 = 42;
+const BTN_LEFT: u32 = 0x110;
 const KEY_RIGHTSHIFT: u32 = 54;
 
 fn key_text(code: u32, shift: bool) -> Option<slint::SharedString> {

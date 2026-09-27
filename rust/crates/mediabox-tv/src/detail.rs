@@ -122,6 +122,10 @@ pub struct Detail {
     /// Whether the viewer has moved in the episode list yet. Until they have,
     /// the focus follows the account's last-played episode as it arrives.
     episodes_touched: bool,
+    /// Whether the viewer has moved on the page yet. Until they have, a film
+    /// whose sources arrive has the remote on the first one that plays --
+    /// what the page is for -- rather than on the trailer button.
+    touched: bool,
 }
 
 impl Detail {
@@ -173,6 +177,7 @@ impl Detail {
             watch: None,
             chosen_season: None,
             episode_focus: 0,
+            touched: false,
             on_seasons: false,
             on_mark: false,
             episode: None,
@@ -286,6 +291,7 @@ impl Detail {
     /// there: inside the record they walk the action row, and inside the column
     /// they change the provider filter when the remote is on it.
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
+        self.touched = true;
         match self.pane {
             Pane::Record => self.step_record(dx, dy),
             Pane::Episodes => self.step_episodes(dx, dy),
@@ -491,6 +497,9 @@ impl Detail {
             .selected
             .and_then(|index| self.shown().iter().position(|shown| *shown == index))
             .unwrap_or(0);
+        if !self.touched && !self.is_series() && self.selected.is_some() {
+            self.pane = Pane::Sources;
+        }
         self.settle();
     }
 
@@ -1233,6 +1242,28 @@ mod filter_tests {
             parsed: serde_json::from_value(raw.clone()).expect("a stream"),
             raw,
         }
+    }
+
+    #[test]
+    fn a_film_opens_on_its_first_playable_source_unless_the_viewer_has_moved() {
+        let raws = vec![
+            json!({"addonName": "a", "name": "not playable", "playable": false}),
+            json!({"addonName": "a", "name": "plays", "playable": true}),
+        ];
+        let listing = || -> StreamListing { serde_json::from_value(json!({"streams": raws.clone()})).expect("a listing") };
+
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        assert_eq!(film.pane, Pane::Record);
+        film.take_streams(listing(), raws.clone());
+        assert_eq!(film.pane, Pane::Sources);
+        assert_eq!(film.selected, Some(1));
+        assert_eq!(film.shown()[film.source_focus], 1);
+
+        // Moved before they came: left where the viewer put it.
+        let mut moved = Detail::seeded(&crate::state::Item::stub("tt1"));
+        moved.step(1, 0);
+        moved.take_streams(listing(), raws.clone());
+        assert_eq!(moved.pane, Pane::Record);
     }
 
     fn with(sources: Vec<Source>) -> Detail {

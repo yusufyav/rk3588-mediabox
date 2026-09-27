@@ -205,6 +205,18 @@ impl Dispatcher {
     }
 }
 
+/// Whether a held press of this repeats: moving and the volume, as on every
+/// television. Ok, Back and Home do not -- a held Ok is a long press.
+pub fn repeats(action: InputAction) -> bool {
+    is_step(action) || matches!(action, InputAction::VolumeUp | InputAction::VolumeDown)
+}
+
+/// The same for a keyboard's keys, which arrive as text: the arrows, and
+/// Backspace in a field.
+pub fn text_repeats(text: &str) -> bool {
+    is_backspace(text) || action_for_key(text).is_some_and(is_step)
+}
+
 fn is_step(action: InputAction) -> bool {
     matches!(
         action,
@@ -251,6 +263,21 @@ pub fn action_for_key(text: &str) -> Option<InputAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_arrow_or_volume_repeats_and_a_held_ok_does_not() {
+        for action in [InputAction::Left, InputAction::Right, InputAction::Up, InputAction::Down, InputAction::VolumeUp] {
+            assert!(repeats(action), "{action:?}");
+        }
+        for action in [InputAction::Ok, InputAction::Back, InputAction::Home, InputAction::Mute] {
+            assert!(!repeats(action), "{action:?}");
+        }
+        let key = |k: slint::platform::Key| char::from(k).to_string();
+        assert!(text_repeats(&key(slint::platform::Key::RightArrow)));
+        assert!(text_repeats(&key(slint::platform::Key::Backspace)));
+        assert!(!text_repeats(&key(slint::platform::Key::Return)));
+        assert!(!text_repeats("a"));
+    }
 
     /// Reported from the account form: a mistyped character could not be
     /// deleted, because Backspace left the screen and took the address with it.
