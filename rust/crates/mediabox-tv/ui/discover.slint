@@ -2,6 +2,7 @@ import { Theme, Metrics } from "theme.slint";
 import { GridPoster, PosterItem } from "components.slint";
 import { Chrome } from "chrome.slint";
 import { ReferenceIcon } from "reference-icons.slint";
+import { Tip } from "tip.slint";
 
 // One of the dropdowns along the top of Discover.
 export struct DiscoverFilter {
@@ -51,20 +52,43 @@ component Section inherits VerticalLayout {
     }
 }
 
-// A round button under the record.
+// A button under the record, as the reference's ActionButton: an icon
+// alone in a circle -- the remote on it is a white ring round it and its
+// tooltip above -- or the green "Göster" pill, filled with the reference's
+// secondary accent while the remote is on it. A button with its word on it
+// has no tooltip: the one under "Göster" in the recording is the browser's
+// own `title`, which a remote never raises.
 component RoundButton inherits Rectangle {
     in property <string> mark;
     in property <bool> focused;
-    in property <bool> on;
     in property <bool> enabled: true;
     in property <string> label;
-    width: label == "" ? self.height : words.preferred-width + self.height * 1.4;
+    in property <string> tip;
+    width: label == "" ? self.height : measure.preferred-width + self.height * 1.4;
     border-radius: self.height / 2;
     opacity: enabled ? 1.0 : 0.35;
-    background: focused ? Theme.focus-fill : #ffffff1f;
+    background: (focused && label != "") ? #22b365 : #ffffff14;
+    border-width: (focused && label == "") ? max(2px, Metrics.vw * 0.0009) : 0px;
+    border-color: #e8e8ec;
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-    HorizontalLayout {
+    // The word's width, measured apart from the layout that draws it.
+    measure := Text {
+        visible: false;
+        text: label;
+        font-size: root.height * 0.25;
+    }
+
+    // An icon alone sits in the middle of its circle; a word adds itself
+    // beside it. The empty word used to take room and push the icon aside.
+    if label == "": ReferenceIcon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: mark;
+        size: root.height * 0.42;
+        ink: #ffffffc0;
+    }
+    if label != "": HorizontalLayout {
         alignment: center;
         spacing: root.height * 0.2;
         VerticalLayout {
@@ -72,17 +96,24 @@ component RoundButton inherits Rectangle {
             ReferenceIcon {
                 name: mark;
                 size: root.height * 0.42;
-                ink: focused ? #0a0c10 : #ffffffd9;
+                ink: focused ? #ffffff : #ffffffc0;
             }
         }
-        words := Text {
+        Text {
             text: label;
-            visible: label != "";
-            color: focused ? #0a0c10 : Theme.text;
+            color: #ffffff;
             font-size: root.height * 0.25;
             font-weight: 400;
             vertical-alignment: center;
         }
+    }
+
+    if tip != "": Tip {
+        text: tip;
+        shown: focused;
+        below: label != "";
+        anchor-w: root.width;
+        anchor-h: root.height;
     }
 }
 
@@ -92,18 +123,24 @@ component GroupStop inherits Rectangle {
     in property <string> mark;
     in property <bool> focused;
     in property <bool> enabled: true;
+    in property <string> tip;
     width: self.height;
-    border-radius: self.height / 2;
     opacity: enabled ? 1.0 : 0.35;
-    background: focused ? Theme.focus-fill : transparent;
-    animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
+    // The reference's group marks at 70% brighten when the remote is on
+    // them; nothing is drawn round them.
     ReferenceIcon {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         name: mark;
         size: root.height * 0.42;
-        ink: focused ? #0a0c10 : #ffffffd9;
+        ink: focused ? #ffffff : #ffffffc0;
+    }
+    Tip {
+        text: tip;
+        shown: focused;
+        anchor-w: root.width;
+        anchor-h: root.height;
     }
 }
 
@@ -361,6 +398,7 @@ export component Discover inherits Rectangle {
             // the library or take out of it, mark watched or not.
             RoundButton {
                 mark: "trailer";
+                tip: "Fragman";
                 enabled: has-trailer;
                 focused: zone == 3 && button == 0;
             }
@@ -369,13 +407,17 @@ export component Discover inherits Rectangle {
                 border-radius: self.height / 2;
                 background: #ffffff1f;
                 HorizontalLayout {
+                    // The reference's ADD_TO_LIB / REMOVE_FROM_LIB and
+                    // CTX_MARK_WATCHED / CTX_MARK_UNWATCHED, as it words them.
                     GroupStop {
                         mark: in-library ? "remove-from-library" : "add-to-library";
+                        tip: in-library ? "Kitaplıktan Kaldır" : "Kitaplığa Ekle";
                         enabled: known;
                         focused: zone == 3 && button == 1;
                     }
                     GroupStop {
                         mark: watched ? "eye-off" : "eye";
+                        tip: watched ? "izlenmedi olarak işaretle" : "İzlendi olarak işaretle";
                         enabled: known;
                         focused: zone == 3 && button == 2;
                     }

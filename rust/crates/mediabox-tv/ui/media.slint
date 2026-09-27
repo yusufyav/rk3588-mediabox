@@ -15,6 +15,11 @@ export component Media inherits Rectangle {
     in property <[RailModel]> rails;
     in property <int> focus-row;
     in property <int> focus-col;
+    // Each shelf's own remembered column. A shelf is scrolled to its own,
+    // which is where its artwork is loaded: scrolled to the focused shelf's
+    // column instead, every other shelf slid to posters it held no picture
+    // for, and a walk to the end of one and down emptied the rest.
+    in property <[int]> columns;
     // 0 the shelves, 1 the places, 2 the search box.
     in property <int> zone;
     in property <int> place;
@@ -64,7 +69,7 @@ export component Media inherits Rectangle {
                 inset: Metrics.focus-room;
                 right-inset: Metrics.focus-room;
                 head: head;
-                focus-col: focus-col;
+                focus-col: r < columns.length ? columns[r] : 0;
                 active: zone == 0 && focus-row == r;
             }
         }

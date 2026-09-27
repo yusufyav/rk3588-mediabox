@@ -82,6 +82,10 @@ impl Media {
         self.shelves.column()
     }
 
+    pub fn columns(&self) -> Vec<i32> {
+        self.shelves.columns()
+    }
+
     pub fn focused(&self) -> Option<&Item> {
         if self.zone != Zone::Shelves {
             return None;
@@ -111,6 +115,19 @@ impl Media {
         } else if !self.shelves.is_empty() && !self.moved {
             self.zone = Zone::Shelves;
         }
+    }
+
+    /// Back on the board: the remote goes to its top, on the first poster.
+    /// False when it is already there, which is the board's way out.
+    pub fn back_step(&mut self) -> bool {
+        if self.shelves.is_empty() {
+            return false;
+        }
+        let moved = self.shelves.to_top();
+        let elsewhere = self.zone != Zone::Shelves;
+        self.zone = Zone::Shelves;
+        self.place = 0;
+        moved || elsewhere
     }
 
     /// Coming to the board from anywhere else: on the shelves, where the
@@ -314,5 +331,23 @@ mod tests {
         media.arrive();
         assert_eq!(media.zone, Zone::Shelves);
         assert_eq!(media.column(), 0);
+    }
+
+    /// The viewer's rule: Back anywhere on the board goes to its top first,
+    /// and only Back at the top leaves.
+    #[test]
+    fn back_goes_to_the_top_of_the_board_before_it_leaves() {
+        let mut media = Media::new();
+        media.set_shelves(vec![shelf("a", 9), shelf("b", 9)]);
+        media.step(1, 0);
+        media.step(1, 0);
+        media.step(0, 1);
+        media.step(1, 0);
+        assert!(media.back_step());
+        assert_eq!((media.row(), media.column(), media.zone), (0, 0, Zone::Shelves));
+        media.step(0, 1);
+        assert_eq!(media.column(), 0, "every shelf is back at its start");
+        media.step(0, -1);
+        assert!(!media.back_step(), "at the top, Back is the way out");
     }
 }

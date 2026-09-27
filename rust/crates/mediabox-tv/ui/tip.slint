@@ -1,0 +1,36 @@
+import { Metrics } from "theme.slint";
+
+// The reference's tooltip over a button the remote is on, measured off a
+// recording of its desktop Discover at 4K: a dark box (#100f22) with a faint
+// edge and a violet glow, its word in white, 1.77rem high, 27 px clear of
+// the button above it -- or touching it below, as "Göster"'s -- fading in.
+export component Tip inherits Rectangle {
+    in property <string> text;
+    in property <bool> shown;
+    in property <bool> below;
+    // The button it belongs to, whose child it is.
+    in property <length> anchor-w;
+    in property <length> anchor-h;
+    property <length> rem: Metrics.vw / 128;
+    width: words.preferred-width + rem * 2;
+    height: rem * 1.77;
+    x: (anchor-w - self.width) / 2;
+    y: below ? anchor-h : -self.height - rem * 0.9;
+    border-radius: rem * 0.27;
+    background: #100f22;
+    border-width: 1px;
+    border-color: #ffffff29;
+    drop-shadow-blur: rem * 0.5;
+    drop-shadow-color: #7b5bf533;
+    opacity: shown ? 1 : 0;
+    animate opacity { duration: 150ms; easing: ease-out; }
+
+    words := Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.text;
+        color: #ffffff;
+        font-size: rem * 0.87;
+        wrap: no-wrap;
+    }
+}

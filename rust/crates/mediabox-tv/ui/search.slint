@@ -32,6 +32,8 @@ export component Search inherits Rectangle {
     in property <[RailModel]> rails;
     in property <int> rail-row;
     in property <int> rail-col;
+    // Each row's own remembered column, as on the board.
+    in property <[int]> rail-cols;
     in property <int> place;
     in property <[string]> places;
 
@@ -74,7 +76,7 @@ export component Search inherits Rectangle {
                 inset: Metrics.focus-room;
                 right-inset: Metrics.focus-room;
                 head: head;
-                focus-col: rail-col;
+                focus-col: r < rail-cols.length ? rail-cols[r] : 0;
                 active: pane == 2 && rail-row == r;
             }
         }

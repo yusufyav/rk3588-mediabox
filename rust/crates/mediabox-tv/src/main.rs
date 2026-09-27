@@ -839,7 +839,15 @@ impl App {
                     }
                 }
             }
-            Intent::Dismiss => self.back(),
+            // Back on the board: to its top -- the first shelf, its first
+            // poster -- and from the top, out of "Filmler ve Diziler".
+            Intent::Dismiss => {
+                if self.media.back_step() {
+                    self.paint();
+                } else {
+                    self.back();
+                }
+            }
             _ => {}
         }
     }
@@ -917,6 +925,7 @@ impl App {
         self.media.sync_artwork(&mut self.images);
         window.set_media_row(self.media.row() as i32);
         window.set_media_col(self.media.column() as i32);
+        window.set_media_columns(slint::ModelRc::new(slint::VecModel::from(self.media.columns())));
         window.set_media_zone(match self.media.zone {
             Zone::Shelves => 0,
             Zone::Places => 1,
@@ -3433,6 +3442,7 @@ impl App {
         window.set_search_rails(slint::ModelRc::from(search.results.rails.clone()));
         window.set_search_rail_row(search.results.row as i32);
         window.set_search_rail_col(search.results.column() as i32);
+        window.set_search_rail_cols(slint::ModelRc::new(slint::VecModel::from(search.results.columns())));
     }
 
     fn paint_library(&mut self, window: &MediaBoxWindow) {

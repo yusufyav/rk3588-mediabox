@@ -1,5 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { ReferenceIcon } from "reference-icons.slint";
+import { Tip } from "tip.slint";
 
 // One source the viewer can choose.
 //
@@ -263,19 +264,26 @@ component GroupStop inherits Rectangle {
     in property <bool> enabled: true;
 
     width: self.height;
-    border-radius: self.height / 2;
     opacity: enabled ? 1.0 : 0.38;
-    background: focused ? Theme.focus-fill : transparent;
 
-    animate background { duration: Theme.focus-in; easing: Theme.ease; }
-
-    // The reference's mark, by name.
+    // As the reference's group: its marks at 70% brighten when the remote
+    // is on them, and its tooltip says what pressing does.
     ReferenceIcon {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         name: mark;
         size: parent.height * 0.46;
-        ink: focused ? #0a0c10 : #ffffffb3;
+        ink: focused ? #ffffff : #ffffffb3;
+    }
+    Tip {
+        text: mark == "add-to-library" ? "Kitaplığa Ekle"
+            : mark == "remove-from-library" ? "Kitaplıktan Kaldır"
+            : mark == "eye" ? "İzlendi olarak işaretle"
+            : mark == "eye-off" ? "izlenmedi olarak işaretle"
+            : "";
+        shown: focused;
+        anchor-w: root.width;
+        anchor-h: root.height;
     }
 }
 
@@ -296,11 +304,11 @@ component Action inherits Rectangle {
     width: label == "" ? self.height : caption.preferred-width + self.height * 1.9;
     border-radius: self.height / 2;
     opacity: enabled ? 1.0 : 0.38;
-    background: focused ? Theme.focus-fill : #ffffff14;
-    border-width: focused ? 2px : 1px;
-    border-color: focused ? Theme.focus-ring : #ffffff33;
-
-    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    // As the reference's ActionButton: the remote on it is a white ring
+    // round it, not a fill.
+    background: #ffffff14;
+    border-width: focused ? max(2px, Metrics.vw * 0.0009) : 1px;
+    border-color: focused ? #e8e8ec : #ffffff33;
 
     HorizontalLayout {
         padding-left: label == "" ? 0px : root.height * 0.42;
@@ -314,14 +322,14 @@ component Action inherits Rectangle {
             ReferenceIcon {
                 name: mark;
                 size: Metrics.vh * 0.026;
-                ink: focused ? #0a0c10 : Theme.text;
+                ink: Theme.text;
             }
         }
 
         caption := Text {
             visible: label != "";
             text: label;
-            color: focused ? #0a0c10 : Theme.text;
+            color: Theme.text;
             font-size: Metrics.vh * 0.0145;
             font-weight: 500;
             vertical-alignment: center;

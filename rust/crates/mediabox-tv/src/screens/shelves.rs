@@ -67,6 +67,22 @@ impl Shelves {
         self.columns.get(self.row).copied().unwrap_or(0)
     }
 
+    /// Back to the top: the first shelf with anything on it, and every shelf
+    /// at its start. False when that is where the remote already is.
+    pub fn to_top(&mut self) -> bool {
+        let first = self.first_filled().unwrap_or(0);
+        let at_top = self.row == first && self.columns.iter().all(|&column| column == 0);
+        self.row = first;
+        self.columns.iter_mut().for_each(|column| *column = 0);
+        !at_top
+    }
+
+    /// Every shelf's own remembered column, for each to be scrolled to its
+    /// own: the one its artwork is loaded around.
+    pub fn columns(&self) -> Vec<i32> {
+        self.columns.iter().map(|&column| column as i32).collect()
+    }
+
     /// The stops along a shelf: its titles, and "Tümünü Gör" after them when
     /// the shelf has one.
     fn stops(&self, row: usize) -> usize {
