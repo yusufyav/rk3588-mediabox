@@ -236,6 +236,21 @@ sh_ "set -e
   # rebuilt from udev's tags at the same time.
   systemctl kill -s HUP systemd-logind.service 2>/dev/null || systemctl restart systemd-logind.service"
 
+# A remote's Ok, the HID usage "Menu Pick", as KEY_OK for every reader: Kodi
+# has no meaning for the KEY_SELECT the kernel names it by default. See the
+# file. Applied to the devices already connected, not only to the next one.
+say "remote Ok -> KEY_OK"
+cp_ "$here/packaging/udev/61-mediabox-remote-ok.hwdb" "$MEDIABOX_TARGET:/var/tmp/"
+sh_ "set -e
+  mkdir -p /etc/udev/hwdb.d
+  install -m 0644 /var/tmp/61-mediabox-remote-ok.hwdb /etc/udev/hwdb.d/61-mediabox-remote-ok.hwdb
+  rm -f /var/tmp/61-mediabox-remote-ok.hwdb
+  systemd-hwdb update
+  # udevd keeps the database it opened; without a reload the trigger applies
+  # the old one.
+  udevadm control --reload
+  udevadm trigger --subsystem-match=input --action=change"
+
 say "television browser application"
 # The browser is an application of the box in its own right: its own unit, its
 # own compositor config, its own profile. The exit script is what gives the

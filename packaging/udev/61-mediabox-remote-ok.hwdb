@@ -1,0 +1,26 @@
+# A remote's Ok is Ok, whoever reads it.
+#
+# A Bluetooth or USB HID remote in its D-pad mode sends Ok as the HID consumer
+# usage "Menu Pick" (page 0x0C, usage 0x41), which the kernel names KEY_SELECT.
+# Measured on the Ugoos UR-02 (2026-09-28, /sys/kernel/debug/hid): normal mode
+# Ok = Consumer.0041, the arrows Consumer.0042-0045; pointer mode Ok = the left
+# button.
+#
+# KEY_SELECT has no meaning in Kodi. Its libinput keyboard maps KEY_OK to
+# XBMCK_OK -- bound to Select everywhere in its keyboard.xml -- and has no
+# entry for KEY_SELECT at all (xbmc/platform/linux/input/EvdevKeyMapping.cpp,
+# master included), so the press reached it as "<unicode> (0xfffe) pressed,
+# action is" and did nothing. Android reads the same usage as the centre of the
+# D-pad. This gives the usage the name every player here understands: KEY_OK
+# is Ok to the television interface (mediabox-tv input.rs) and Select to Kodi.
+#
+# Matched by bus and by the usage, not by a remote's vendor and product: any
+# HID remote that sends Menu Pick means Ok by it.
+
+# Bluetooth
+evdev:input:b0005*
+ KEYBOARD_KEY_c0041=ok
+
+# USB
+evdev:input:b0003*
+ KEYBOARD_KEY_c0041=ok
