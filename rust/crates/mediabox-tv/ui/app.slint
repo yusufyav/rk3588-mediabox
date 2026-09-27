@@ -102,6 +102,8 @@ export component MediaBoxWindow inherits Window {
     // ---- the catalogue
     in property <[RailModel]> media-rails;
     in property <int> media-row;
+    in property <[string]> media-menu;
+    in property <int> media-menu-line: -1;
     in property <int> media-col;
     // Every shelf's own column, which is where each is scrolled to.
     in property <[int]> media-columns;
@@ -379,6 +381,8 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             rails: root.media-rails;
             focus-row: root.media-row;
+            menu: root.media-menu;
+            menu-line: root.media-menu-line;
             focus-col: root.media-col;
             columns: root.media-columns;
             zone: root.media-zone;

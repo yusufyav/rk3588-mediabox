@@ -275,6 +275,7 @@ fn tile(item: &Item) -> PosterItem {
         progress: item.progress,
         local: item.local,
         watched: item.record.as_ref().is_some_and(|r| r.times_watched > 0),
+        dismissable: item.continuing,
     }
 }
 

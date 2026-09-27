@@ -25,6 +25,9 @@ export struct PosterItem {
     // Watched, as stremio-core's LibraryItem::watched says it: watched at
     // least once. The reference marks such a poster with a check.
     watched: bool,
+    // On "İzlemeye devam edin": the reference marks the focused one with a
+    // cross on the poster and its menu mark beside the name.
+    dismissable: bool,
 }
 
 export struct RailModel {
@@ -473,6 +476,35 @@ export component Poster inherits Rectangle {
         horizontal-alignment: center;
         wrap: word-wrap;
         overflow: elide;
+    }
+
+    // On "İzlemeye devam edin", as the reference's focused poster: a cross in
+    // its top-left corner and the menu's mark just right of the name, both
+    // measured off its board.
+    if focused && item.dismissable: Path {
+        x: Metrics.card-w * 0.085;
+        y: Metrics.card-w * 0.085;
+        width: Metrics.card-w * 0.058;
+        height: self.width;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: "M1 1L9 9M9 1L1 9";
+        stroke: #ffffffd0;
+        stroke-width: max(1.5px, Metrics.card-w * 0.009);
+        stroke-line-cap: round;
+    }
+    if focused && item.dismissable: VerticalLayout {
+        x: Metrics.card-w * 1.0;
+        y: Metrics.card-h + Metrics.vh * 0.016 + (Metrics.text-card * 1.3 - self.height) / 2;
+        width: Metrics.card-w * 0.03;
+        height: Metrics.card-w * 0.1;
+        alignment: space-between;
+        for dot in [0, 1, 2]: Rectangle {
+            height: self.width;
+            width: Metrics.card-w * 0.022;
+            border-radius: self.width / 2;
+            background: #9291a0;
+        }
     }
 }
 

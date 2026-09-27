@@ -24,6 +24,10 @@ export component Media inherits Rectangle {
     in property <int> zone;
     in property <int> place;
     in property <[string]> places;
+    // The focused poster's menu: its lines, and the one the remote is on
+    // (-1 while it is shut).
+    in property <[string]> menu;
+    in property <int> menu-line: -1;
 
     property <length> content-x: root.width * 0.0547;
     property <length> right-x: root.width * 0.0185;
@@ -71,6 +75,49 @@ export component Media inherits Rectangle {
                 head: head;
                 focus-col: r < columns.length ? columns[r] : 0;
                 active: zone == 0 && focus-row == r;
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- the menu
+    //
+    // The reference's, measured off its board: just right of the focused
+    // poster's name, 0.96 of a poster in from its left, 80% of one wide,
+    // a line every 0.29 of its width, #0f0d20 with a faint violet edge.
+    if menu-line >= 0 && rails.length > focus-row: Rectangle {
+        property <length> step: Metrics.card-w + Metrics.rail-gap;
+        property <length> x0: content-x - Metrics.focus-room;
+        property <length> track-w: root.width - x0 - right-x + Metrics.focus-room;
+        property <length> span: step * rails[focus-row].items.length;
+        property <int> column: focus-row < columns.length ? columns[focus-row] : 0;
+        property <length> wanted: clamp(column * step, 0px,
+            max(0px, span - track-w + Metrics.focus-room * 2));
+        property <length> poster-x: x0 + Metrics.focus-room - wanted + column * step;
+        property <length> poster-y: rails-top - scroll + focus-row * rail-h + head + Metrics.focus-room;
+        property <length> line-h: Metrics.card-w * 0.29;
+        x: poster-x + Metrics.card-w * 0.96;
+        y: poster-y + Metrics.card-h + Metrics.card-w * 0.37;
+        width: Metrics.card-w * 0.8;
+        height: menu.length * line-h;
+        border-radius: Metrics.card-w * 0.04;
+        background: #0f0d20;
+        border-width: 1px;
+        border-color: #7b5bf540;
+        drop-shadow-blur: Metrics.card-w * 0.05;
+        drop-shadow-color: #7b5bf533;
+
+        for label[k] in menu: Rectangle {
+            y: k * parent.line-h;
+            height: parent.line-h;
+            border-radius: parent.border-radius;
+            background: k == menu-line ? #ffffff1a : transparent;
+            Text {
+                x: Metrics.card-w * 0.13;
+                height: 100%;
+                text: label;
+                color: Theme.text;
+                font-size: Metrics.card-w * 0.09;
+                vertical-alignment: center;
             }
         }
     }

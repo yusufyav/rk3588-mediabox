@@ -806,6 +806,10 @@ impl App {
     }
 
     fn act_on_media(&mut self, intent: Intent) {
+        if self.media.menu.is_some() {
+            self.act_on_media_menu(intent);
+            return;
+        }
         match intent {
             Intent::Move(dx, dy) => {
                 if self.media.step(dx, dy) {
@@ -920,6 +924,56 @@ impl App {
         }
     }
 
+    /// The menu of a poster on "İzlemeye devam edin".
+    fn act_on_media_menu(&mut self, intent: Intent) {
+        use screens::media::MenuAct;
+        match intent {
+            Intent::Move(dx, dy) => {
+                if self.media.step(dx, dy) {
+                    self.paint();
+                }
+            }
+            Intent::Dismiss => {
+                self.media.close_menu();
+                self.paint();
+            }
+            Intent::Select => {
+                let (act, item) = (self.media.focused_menu_act(), self.media.focused().cloned());
+                self.media.close_menu();
+                let Some(item) = item else {
+                    self.paint();
+                    return;
+                };
+                match act {
+                    Some(MenuAct::Details) => self.open_detail_for(&item),
+                    Some(MenuAct::Dismiss) => {
+                        // Off the shelf at once, as the reference's
+                        // RewindLibraryItem takes it off; the account is told.
+                        for shelf in &mut self.shelves {
+                            if shelf.more == Some(state::More::Continuing) {
+                                shelf.items.retain(|other| other.id != item.id);
+                            }
+                        }
+                        self.media.set_shelves(self.shelves.clone());
+                        if let Some(window) = self.window.upgrade() {
+                            window.set_media_rails(slint::ModelRc::from(self.media.rails()));
+                        }
+                        let change = serde_json::json!({
+                            "type": item.kind,
+                            "id": item.id,
+                            "name": item.title,
+                            "poster": item.poster,
+                        });
+                        spawn_library_change("rewind", item.id.clone(), change);
+                        self.paint();
+                    }
+                    None => self.paint(),
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn paint_media(&mut self, window: &MediaBoxWindow) {
         use screens::media::{Zone, PLACES};
         self.media.sync_artwork(&mut self.images);
@@ -933,6 +987,8 @@ impl App {
         });
         window.set_media_place(self.media.place as i32);
         window.set_media_places(strings(PLACES.iter().map(|p| p.icon().to_string())));
+        window.set_media_menu(strings(screens::media::MENU.iter().map(|act| act.label().to_string())));
+        window.set_media_menu_line(self.media.menu.map(|line| line as i32).unwrap_or(-1));
     }
 
     // ------------------------------------------------------------- the search
@@ -2986,10 +3042,19 @@ impl App {
     /// Whether a hold of Ok means something here other than a press: on a
     /// library poster, where the reference opens the poster's menu.
     fn wants_ok_hold(&self) -> bool {
-        self.here.is_none()
-            && self.route() == Route::Library
-            && self.library.zone == screens::library::Zone::Grid
-            && self.library.focused().is_some()
+        if self.here.is_some() {
+            return false;
+        }
+        match self.route() {
+            Route::Library => {
+                self.library.zone == screens::library::Zone::Grid && self.library.focused().is_some()
+            }
+            // The reference's board has a menu on "İzlemeye devam edin" only.
+            Route::Media => {
+                self.media.menu.is_none() && self.media.focused().is_some_and(|item| item.continuing)
+            }
+            _ => false,
+        }
     }
 
     /// Ok went down on a road that also says when it comes up. Returns
@@ -3030,7 +3095,14 @@ impl App {
             return;
         }
         hold.fired = true;
-        if self.wants_ok_hold() && self.library.open_menu() {
+        if !self.wants_ok_hold() {
+            return;
+        }
+        let opened = match self.route() {
+            Route::Media => self.media.open_menu(),
+            _ => self.library.open_menu(),
+        };
+        if opened {
             self.paint();
         }
     }
@@ -4384,6 +4456,7 @@ fn grid_posters(
                 progress: item.progress,
                 local: item.local,
                 watched: item.record.as_ref().is_some_and(|r| r.times_watched > 0),
+                dismissable: item.continuing,
             }
         })
         .collect()
@@ -4411,6 +4484,7 @@ fn posters(images: &mut images::ImageManager, items: &[state::Item]) -> Vec<Post
                 progress: item.progress,
                 local: item.local,
                 watched: item.record.as_ref().is_some_and(|r| r.times_watched > 0),
+                dismissable: item.continuing,
             }
         })
         .collect()

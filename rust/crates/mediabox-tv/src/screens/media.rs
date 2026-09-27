@@ -57,6 +57,28 @@ pub struct Media {
     /// Whether the viewer has moved yet. Until they have, the remote is put
     /// on the first poster the moment there is one.
     moved: bool,
+    /// The focused poster's menu, when it is open: the line the remote is on.
+    pub menu: Option<usize>,
+}
+
+/// What the menu of a poster on "İzlemeye devam edin" offers, as the
+/// reference's board does for it (LibItem, with no player link and not
+/// removable there): its details, and "Vazgeç" -- off the shelf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAct {
+    Details,
+    Dismiss,
+}
+
+pub const MENU: [MenuAct; 2] = [MenuAct::Details, MenuAct::Dismiss];
+
+impl MenuAct {
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuAct::Details => "Ayrıntılar",
+            MenuAct::Dismiss => "Vazgeç",
+        }
+    }
 }
 
 impl Media {
@@ -66,6 +88,7 @@ impl Media {
             zone: Zone::Shelves,
             place: 0,
             moved: false,
+            menu: None,
         }
     }
 
@@ -137,7 +160,30 @@ impl Media {
         self.place = 0;
     }
 
+    /// Ok held on a poster of "İzlemeye devam edin": its menu, on its first
+    /// line. No other poster on the board has one.
+    pub fn open_menu(&mut self) -> bool {
+        if self.focused().is_some_and(|item| item.continuing) {
+            self.menu = Some(0);
+            return true;
+        }
+        false
+    }
+
+    pub fn close_menu(&mut self) -> bool {
+        self.menu.take().is_some()
+    }
+
+    pub fn focused_menu_act(&self) -> Option<MenuAct> {
+        self.menu.and_then(|line| MENU.get(line).copied())
+    }
+
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
+        if let Some(line) = self.menu {
+            let next = (line as i32 + dy).clamp(0, MENU.len() as i32 - 1) as usize;
+            self.menu = Some(next);
+            return next != line;
+        }
         self.moved = true;
         match self.zone {
             Zone::Places => {
@@ -349,5 +395,22 @@ mod tests {
         assert_eq!(media.column(), 0, "every shelf is back at its start");
         media.step(0, -1);
         assert!(!media.back_step(), "at the top, Back is the way out");
+    }
+
+    /// The reference's long press on a "İzlemeye devam edin" poster.
+    #[test]
+    fn only_a_poster_on_the_continuing_shelf_has_a_menu() {
+        let mut media = Media::new();
+        let mut continuing = shelf("c", 2);
+        continuing.items.iter_mut().for_each(|item| item.continuing = true);
+        media.set_shelves(vec![continuing, shelf("a", 3)]);
+        assert!(media.open_menu());
+        assert_eq!(media.focused_menu_act(), Some(MenuAct::Details));
+        assert!(media.step(0, 1));
+        assert_eq!(media.focused_menu_act(), Some(MenuAct::Dismiss));
+        assert!(!media.step(0, 1));
+        assert!(media.close_menu());
+        media.step(0, 1);
+        assert!(!media.open_menu());
     }
 }
