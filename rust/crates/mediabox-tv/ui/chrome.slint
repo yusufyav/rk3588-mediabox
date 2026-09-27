@@ -42,7 +42,8 @@ export component Chrome inherits Rectangle {
             x: parent.height * 0.62;
             width: parent.width - parent.height * 1.8;
             height: 100%;
-            text: query == "" ? "Arayın" : query;
+            // The reference's SEARCH_OR_PASTE_LINK.
+            text: query == "" ? "Arayın ya da bağlantıyı yapıştırın" : query;
             color: query != "" ? (parent.focused ? #0a0c10 : Theme.text)
                 : (parent.focused ? #3b4250 : #918f9b);
             font-size: parent.height * 0.36;

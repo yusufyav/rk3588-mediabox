@@ -1,7 +1,7 @@
 import { Theme, Metrics } from "theme.slint";
 import { GridPoster, PosterItem } from "components.slint";
 import { Chrome } from "chrome.slint";
-import { Icon } from "kit.slint";
+import { ReferenceIcon } from "reference-icons.slint";
 
 // One of the dropdowns along the top of Discover.
 export struct DiscoverFilter {
@@ -14,7 +14,7 @@ export struct DiscoverFilter {
 // A rounded label in the record: a genre, a name.
 component Chip inherits Rectangle {
     in property <string> text;
-    property <length> chip-h: Metrics.vh * 0.04;
+    property <length> chip-h: Metrics.vh * 0.025;
     height: chip-h;
     width: words.preferred-width + chip-h * 0.9;
     border-radius: chip-h / 2;
@@ -25,7 +25,7 @@ component Chip inherits Rectangle {
         y: (parent.height - self.height) / 2;
         text: root.text;
         color: Theme.text;
-        font-size: Metrics.vw * 0.0076;
+        font-size: Metrics.vw * 0.0069;
         font-weight: 500;
     }
 }
@@ -34,21 +34,20 @@ component Chip inherits Rectangle {
 // onto a line of its own rather than off the edge of the panel.
 component Section inherits VerticalLayout {
     in property <string> label;
-    in property <[string]> items;
+    in property <[[string]]> lines;
     spacing: Metrics.vh * 0.009;
 
     Text {
         text: label;
         color: #ffffff80;
-        font-size: Metrics.vw * 0.0064;
+        font-size: Metrics.vw * 0.0062;
         font-weight: 600;
         letter-spacing: Metrics.vw * 0.0004;
     }
-    for line in Math.ceil(items.length / 2): HorizontalLayout {
+    for line in lines: HorizontalLayout {
         spacing: Metrics.vw * 0.004;
         alignment: start;
-        Chip { text: items[line * 2]; }
-        if line * 2 + 1 < items.length: Chip { text: items[line * 2 + 1]; }
+        for item in line: Chip { text: item; }
     }
 }
 
@@ -68,20 +67,43 @@ component RoundButton inherits Rectangle {
     HorizontalLayout {
         alignment: center;
         spacing: root.height * 0.2;
-        Icon {
-            y: (root.height - self.height) / 2;
-            name: mark;
-            size: root.height * 0.42;
-            ink: focused ? #0a0c10 : (on ? Theme.film : Theme.text);
+        VerticalLayout {
+            alignment: center;
+            ReferenceIcon {
+                name: mark;
+                size: root.height * 0.42;
+                ink: focused ? #0a0c10 : #ffffffd9;
+            }
         }
         words := Text {
             text: label;
             visible: label != "";
             color: focused ? #0a0c10 : Theme.text;
-            font-size: root.height * 0.3;
-            font-weight: 600;
+            font-size: root.height * 0.25;
+            font-weight: 400;
             vertical-alignment: center;
         }
+    }
+}
+
+// One stop in the reference's group of two -- the library and watched
+// marks share one pill (its ActionsGroup), each a round stop in it.
+component GroupStop inherits Rectangle {
+    in property <string> mark;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    width: self.height;
+    border-radius: self.height / 2;
+    opacity: enabled ? 1.0 : 0.35;
+    background: focused ? Theme.focus-fill : transparent;
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    ReferenceIcon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: mark;
+        size: root.height * 0.42;
+        ink: focused ? #0a0c10 : #ffffffd9;
     }
 }
 
@@ -119,24 +141,31 @@ export component Discover inherits Rectangle {
     in property <string> title;
     in property <[string]> facts;
     in property <bool> imdb;
-    in property <string> summary;
-    in property <[string]> genres;
-    in property <[string]> cast;
-    in property <[string]> directors;
+    // Its lines, broken in Rust: the reference sets it with more room
+    // between lines than Slint's Text has a property for.
+    in property <[string]> summary;
+    // Chips, as the lines they wrap into.
+    in property <[[string]]> genres;
+    in property <[[string]]> cast;
+    in property <[[string]]> directors;
     in property <bool> has-trailer;
     in property <bool> known;
     in property <bool> in-library;
     in property <bool> watched;
     in property <bool> series;
 
-    property <length> grid-x: root.width * 0.068;
-    property <length> grid-top: root.height * 0.171;
-    property <length> art-w: root.width * 0.079;
-    property <length> cell-w: root.width * 0.0984;
-    property <length> cell-h: root.height * 0.295;
-    property <length> panel-x: root.width * 0.7726;
-    property <length> panel-y: root.height * 0.076;
-    property <length> pad: root.width * 0.02;
+    // Measured off a 4K capture of the reference's desktop Discover, which
+    // the viewer compared this against: the first poster 5.86% in and 15.3%
+    // down, 8.70% of the width across, one every 10.47% across and 30.7%
+    // down; the record from 80.2% across and 6.67% down, its content 1.7% in.
+    property <length> grid-x: root.width * 0.0586;
+    property <length> grid-top: root.height * 0.153;
+    property <length> art-w: root.width * 0.087;
+    property <length> cell-w: root.width * 0.1047;
+    property <length> cell-h: root.height * 0.307;
+    property <length> panel-x: root.width * 0.802;
+    property <length> panel-y: root.height * 0.0667;
+    property <length> pad: root.width * 0.017;
     property <length> viewport-h: root.height - grid-top;
     property <int> rows: Math.ceil(items.length / columns) + (loading ? 1 : 0);
     // Kept on the row the remote was last on whichever zone it is in, as
@@ -179,7 +208,7 @@ export component Discover inherits Rectangle {
                 x: Math.mod(i, columns) * cell-w;
                 y: Math.floor(i / columns) * cell-h;
                 art-w: root.art-w;
-                name-size: root.width * 0.0072;
+                name-size: root.width * 0.0078;
                 item: item;
                 focused: on-grid && i == index;
             }
@@ -221,39 +250,49 @@ export component Discover inherits Rectangle {
         width: root.width - self.x;
         height: root.height - self.y;
         border-radius: root.width * 0.009;
-        background: #41424e;
+        // The reference's --modal-background-color; the grey it reads as is
+        // the backdrop over it at 30%.
+        background: #0f0d20;
         clip: true;
 
+        // The reference's backdrop behind its record: blur(10px) at 30%.
+        // The picture comes decoded a few dozen pixels wide, and drawn over
+        // the panel it is that blur.
         if art.width > 0: Image {
             width: 100%;
             height: 100%;
             source: art;
             image-fit: cover;
-            opacity: 0.22;
+            opacity: 0.3;
         }
 
         if title != "": VerticalLayout {
             x: pad;
             y: root.height * 0.024;
             width: parent.width - pad * 2;
-            spacing: root.height * 0.022;
+            spacing: root.height * 0.024;
             alignment: start;
 
-            if logo.width > 0: Image {
-                source: logo;
-                image-fit: contain;
-                height: root.height * 0.088;
-            }
-            if logo.width == 0 && logo-pending: Rectangle {
-                height: root.height * 0.088;
-            }
-            if logo.width == 0 && !logo-pending: Text {
-                text: title;
-                color: Theme.text;
-                font-size: root.width * 0.014;
-                font-weight: 800;
-                horizontal-alignment: center;
-                wrap: word-wrap;
+            // The logo's room, and under it the capture's extra 0.8% before
+            // the facts.
+            VerticalLayout {
+                padding-bottom: root.height * 0.008;
+                if logo.width > 0: Image {
+                    source: logo;
+                    image-fit: contain;
+                    height: root.height * 0.077;
+                }
+                if logo.width == 0 && logo-pending: Rectangle {
+                    height: root.height * 0.077;
+                }
+                if logo.width == 0 && !logo-pending: Text {
+                    text: title;
+                    color: Theme.text;
+                    font-size: root.width * 0.014;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
             }
 
             // Runtime, year, and the rating with IMDb's badge beside it, spread
@@ -268,8 +307,12 @@ export component Discover inherits Rectangle {
                         font-size: root.width * 0.0098;
                         font-weight: 500;
                     }
-                    if imdb && i == facts.length - 1: Rectangle {
-                    width: badge.preferred-width + root.width * 0.004;
+                    // The capture's badge: 1.67% by 1.3%.
+                    if imdb && i == facts.length - 1: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                    width: root.width * 0.0167;
+                    height: root.height * 0.013;
                     border-radius: root.width * 0.001;
                     background: #f5c518;
                     badge := Text {
@@ -277,25 +320,30 @@ export component Discover inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                         text: "IMDb";
                         color: #0a0c10;
-                        font-size: root.width * 0.0055;
+                        font-size: root.height * 0.0095;
                         font-weight: 800;
+                    }
                     }
                     }
                 }
             }
 
-            if summary != "": Text {
-                text: summary;
-                color: #ffffffd9;
-                font-size: root.width * 0.0092;
-                wrap: word-wrap;
-                overflow: elide;
-                max-height: root.width * 0.0092 * 1.4 * 5;
+            // A line every 2.45% of the height, as the capture sets it.
+            if summary.length > 0: VerticalLayout {
+                for line in summary: Text {
+                    height: root.height * 0.0245;
+                    text: line;
+                    color: #ffffffd9;
+                    font-size: root.width * 0.0068;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
             }
 
-            if genres.length > 0: Section { label: "TÜRÜ"; items: genres; }
-            if cast.length > 0: Section { label: "OYUNCULAR"; items: cast; }
-            if directors.length > 0: Section { label: "YÖNETMENLER"; items: directors; }
+            if genres.length > 0: Section { label: "TÜRÜ"; lines: genres; }
+            if cast.length > 0: Section { label: "OYUNCULAR"; lines: cast; }
+            if directors.length > 0: Section { label: "YÖNETMENLER"; lines: directors; }
         }
 
         // The buttons, along the bottom: trailer, library, watched and the
@@ -304,26 +352,34 @@ export component Discover inherits Rectangle {
             x: pad;
             y: parent.height - self.height - root.height * 0.035;
             width: parent.width - pad * 2;
-            height: root.height * 0.052;
+            // The capture's buttons: 4.86% of the height.
+            height: root.height * 0.0486;
             spacing: root.width * 0.0045;
             alignment: start;
 
+            // The reference's marks, which say what pressing does: add to
+            // the library or take out of it, mark watched or not.
             RoundButton {
-                mark: "film";
+                mark: "trailer";
                 enabled: has-trailer;
                 focused: zone == 3 && button == 0;
             }
-            RoundButton {
-                mark: "bookmark";
-                on: in-library;
-                enabled: known;
-                focused: zone == 3 && button == 1;
-            }
-            if !series: RoundButton {
-                mark: "eye";
-                on: watched;
-                enabled: known;
-                focused: zone == 3 && button == 2;
+            Rectangle {
+                width: self.height * 2;
+                border-radius: self.height / 2;
+                background: #ffffff1f;
+                HorizontalLayout {
+                    GroupStop {
+                        mark: in-library ? "remove-from-library" : "add-to-library";
+                        enabled: known;
+                        focused: zone == 3 && button == 1;
+                    }
+                    GroupStop {
+                        mark: watched ? "eye-off" : "eye";
+                        enabled: known;
+                        focused: zone == 3 && button == 2;
+                    }
+                }
             }
             Rectangle { horizontal-stretch: 1; }
             RoundButton {
@@ -349,15 +405,15 @@ export component Discover inherits Rectangle {
     // The reference's three dropdowns, value only, a caret at the right. Last
     // in the file, so an open list is drawn over the grid.
     HorizontalLayout {
-        x: root.width * 0.0589;
-        y: root.height * 0.0968;
-        height: root.height * 0.0444;
-        spacing: root.width * 0.012;
+        x: root.width * 0.051;
+        y: root.height * 0.0833;
+        height: root.height * 0.0417;
+        spacing: root.width * 0.0109;
         alignment: start;
 
         for f[i] in filters: Rectangle {
             property <bool> focused: on-filters && i == filter;
-            width: root.width * 0.117;
+            width: root.width * 0.1026;
             border-radius: self.height * 0.28;
             background: focused ? Theme.focus-fill : #1e1c2f;
             animate background { duration: Theme.focus-in; easing: Theme.ease; }

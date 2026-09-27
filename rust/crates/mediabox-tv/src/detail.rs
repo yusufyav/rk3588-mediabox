@@ -24,36 +24,18 @@ pub enum Action {
 }
 
 impl Action {
-    /// The mark, as SVG path data in a 24x24 box, in two layers: the shape,
-    /// and what is cut out of it in the button's own colour.
+    /// The mark, by its name in the reference's icon set, and nothing cut
+    /// out of it: as the reference's buttons, the mark says what pressing
+    /// does -- add to the library or take out, mark watched or not.
     pub fn mark(self, on: bool) -> (&'static str, &'static str) {
-        match self {
-            Action::Trailer => (
-                "M3 5h18v14H3z",
-                "M5 7h2v2H5zM5 11h2v2H5zM5 15h2v2H5zM17 7h2v2h-2zM17 11h2v2h-2zM17 15h2v2h-2zM10 9l5 3-5 3z",
-            ),
-            // Drawn here rather than taken from the reference's icon set: a
-            // card with one stacked behind it, a plus on it to add, a tick
-            // once the title is in the library.
-            Action::Library if on => (
-                "M3 7h14v14H3zM7 3h14v14h-2V5H7z",
-                "M6.2 13.6l1.4-1.4 2.1 2.1 4.6-4.6 1.4 1.4-6 6z",
-            ),
-            Action::Library => (
-                "M3 7h14v14H3zM7 3h14v14h-2V5H7z",
-                "M9 10h2v3h3v2h-3v3H9v-3H6v-2h3z",
-            ),
-            // As the reference: an eye to mark it watched, the eye struck
-            // through once it is.
-            Action::Watched if on => (
-                "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5z",
-                "M3.5 2.1l18.4 18.4-1.4 1.4L2.1 3.5z",
-            ),
-            Action::Watched => (
-                "M12 5C6.5 5 2.7 9.4 1.5 12c1.2 2.6 5 7 10.5 7s9.3-4.4 10.5-7C21.3 9.4 17.5 5 12 5z",
-                "M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7zM12 10.5a1.5 1.5 0 1 1 0 3a1.5 1.5 0 1 1 0-3z",
-            ),
-        }
+        let name = match self {
+            Action::Trailer => "trailer",
+            Action::Library if on => "remove-from-library",
+            Action::Library => "add-to-library",
+            Action::Watched if on => "eye-off",
+            Action::Watched => "eye",
+        };
+        (name, "")
     }
 }
 

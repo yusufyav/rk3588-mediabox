@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { ReferenceIcon } from "reference-icons.slint";
 
 // One source the viewer can choose.
 //
@@ -268,25 +269,13 @@ component GroupStop inherits Rectangle {
 
     animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
-    Path {
+    // The reference's mark, by name.
+    ReferenceIcon {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: parent.height * 0.46;
-        height: self.width;
-        viewbox-width: 24;
-        viewbox-height: 24;
-        commands: mark;
-        fill: focused ? #0a0c10 : #ffffffb3;
-    }
-    if cut != "": Path {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: parent.height * 0.46;
-        height: self.width;
-        viewbox-width: 24;
-        viewbox-height: 24;
-        commands: cut;
-        fill: focused ? Theme.focus-fill : #1b2029;
+        name: mark;
+        size: parent.height * 0.46;
+        ink: focused ? #0a0c10 : #ffffffb3;
     }
 }
 
@@ -319,28 +308,13 @@ component Action inherits Rectangle {
         spacing: root.height * 0.24;
         alignment: center;
 
-        Rectangle {
-            width: Metrics.vh * 0.026;
-
-            Path {
-                x: 0;
-                width: 100%;
-                height: Metrics.vh * 0.026;
-                y: (parent.height - self.height) / 2;
-                viewbox-width: 24;
-                viewbox-height: 24;
-                commands: mark;
-                fill: focused ? #0a0c10 : Theme.text;
-            }
-            if cut != "": Path {
-                x: 0;
-                width: 100%;
-                height: Metrics.vh * 0.026;
-                y: (parent.height - self.height) / 2;
-                viewbox-width: 24;
-                viewbox-height: 24;
-                commands: cut;
-                fill: focused ? Theme.focus-fill : #1b2029;
+        // The reference's mark, by name.
+        VerticalLayout {
+            alignment: center;
+            ReferenceIcon {
+                name: mark;
+                size: Metrics.vh * 0.026;
+                ink: focused ? #0a0c10 : Theme.text;
             }
         }
 

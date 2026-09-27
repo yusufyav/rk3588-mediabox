@@ -10,6 +10,7 @@
 //! here is the wiring: which screen is on the panel, what a chosen intent does
 //! about it, and how an answer from the control plane reaches the right one.
 
+mod textfit;
 mod actions;
 mod detail;
 mod fdstore;
@@ -1260,10 +1261,22 @@ impl App {
         }
         window.set_discover_facts(strings(facts.into_iter()));
         window.set_discover_imdb(item.rating.is_some());
-        window.set_discover_summary(item.summary.clone().unwrap_or_default().into());
-        window.set_discover_genres(strings(item.genres.iter().take(3).map(|g| detail::genre_in_turkish(g))));
-        window.set_discover_cast(strings(item.cast.iter().take(3).cloned()));
-        window.set_discover_directors(strings(item.director.iter().take(2).cloned()));
+        // Set as the reference sets them, in fractions of the width: the
+        // record is 16.4% wide inside its padding, the summary 0.68% high a
+        // line, the chips 0.69% with 1.57% of padding, 0.4% apart.
+        let summary = item.summary.clone().unwrap_or_default();
+        window.set_discover_summary(strings(
+            textfit::wrap_words(&summary, 0.164 / 0.0068, 6).into_iter(),
+        ));
+        let chips = |items: Vec<String>| {
+            let lines = textfit::chip_lines(&items, 0.164 / 0.0069, 0.0157 / 0.0069, 0.004 / 0.0069);
+            let rows: Vec<slint::ModelRc<slint::SharedString>> =
+                lines.into_iter().map(|line| strings(line.into_iter())).collect();
+            slint::ModelRc::new(slint::VecModel::from(rows))
+        };
+        window.set_discover_genres(chips(item.genres.iter().take(3).map(|g| detail::genre_in_turkish(g)).collect()));
+        window.set_discover_cast(chips(item.cast.iter().take(3).cloned().collect()));
+        window.set_discover_directors(chips(item.director.iter().take(2).cloned().collect()));
         window.set_discover_has_trailer(item.trailer.is_some());
         window.set_discover_known(state.is_some());
         window.set_discover_in_library(state.as_ref().is_some_and(|s| s.in_library));
@@ -1283,8 +1296,13 @@ impl App {
         window.set_discover_logo_pending(item.logo.is_some() && logo.size().width == 0);
         window.set_discover_logo(logo);
         let mut art = slint::Image::default();
-        if let Some(url) = item.background.clone() {
-            let key = images::Key::new(&url, state::BACKDROP_WIDTH);
+        // The poster, as the reference's desktop Discover passes it
+        // (`background={selectedMetaItem.poster}`), not the scene.
+        if let Some(url) = item.poster.clone() {
+            // Decoded a few dozen pixels wide on purpose: drawn across the
+            // panel it is the reference's blur(10px), which Slint has no
+            // filter for.
+            let key = images::Key::new(&url, DISCOVER_BLUR_WIDTH);
             self.images.want(&key);
             art = self.images.get(&key).unwrap_or_default();
         }
@@ -5183,6 +5201,9 @@ const FIRST_FRAME_GRACE_RESUMED: Duration = Duration::from_secs(45);
 /// How long after closing a film here a picture still on the plane is taken
 /// for its last frame rather than a film someone else started.
 const LEFT_FILM_QUIET: Duration = Duration::from_secs(3);
+/// The width Discover's backdrop is decoded at, so that drawn across the
+/// record it is as soft as the reference's blur(10px).
+const DISCOVER_BLUR_WIDTH: u32 = 48;
 /// How long Ok is held for the hold to be its own gesture.
 const OK_HOLD: Duration = Duration::from_millis(500);
 /// A held key the remote has stopped repeating and never released: taken as
