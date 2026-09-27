@@ -426,8 +426,6 @@ pub async fn follow_mpv(
     film: u64,
     here: u64,
 ) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
     let mut stream = None;
     for _ in 0..150 {
         if player.film() != here {
@@ -451,71 +449,80 @@ pub async fn follow_mpv(
         supervisor.finish(film, signal);
         return;
     };
+    let signal = read_mpv(stream, &supervisor, film).await;
+    // Held on its last frame at an end, early or not: the film is over, and
+    // so is the player.
+    if supervisor.finish(film, signal).is_some() && player.film() == here {
+        player.stop().await;
+    }
+}
+
+/// Read one film's mpv socket until the player says it has stopped.
+///
+/// Where the film had got to is taken only from answers given before the
+/// end of the file. Measured on the Plus (2026-09-27): a seek whose range was
+/// refused (410) put mpv at the end of the file, and `time-pos` asked after
+/// that answered the film's full length, 480 of 480 s -- a failed read that
+/// looked exactly like the end. So every poll asks `eof-reached` first, and
+/// a poll that finds the end is not read for a position.
+async fn read_mpv(stream: tokio::net::UnixStream, supervisor: &Supervisor, film: u64) -> Signal {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
     let ask = |command: Value| format!("{command}\n");
+    // Answered in the order asked: the end first, then the position.
     let polls = [
+        ask(json!({"command": ["get_property", "eof-reached"], "request_id": 100})),
         ask(json!({"command": ["get_property", "time-pos"], "request_id": 101})),
         ask(json!({"command": ["get_property", "duration"], "request_id": 102})),
         ask(json!({"command": ["get_property", "pause"], "request_id": 103})),
     ]
     .concat();
     let observe = ask(json!({"command": ["observe_property", 1, "eof-reached"]}));
-    let signal = if writer.write_all(observe.as_bytes()).await.is_err() {
-        Signal::Gone
-    } else {
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-        let (mut position, mut duration, mut eof) = (None, None, false);
-        loop {
-            tokio::select! {
-                line = lines.next_line() => {
-                    let Ok(Some(line)) = line else { break Signal::Gone };
-                    let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
-                    match message.get("event").and_then(Value::as_str) {
-                        Some("end-file") => break Signal::EndFile {
-                            reason: message.get("reason").and_then(Value::as_str).unwrap_or("unknown").to_string(),
-                            error: message.get("file_error").and_then(Value::as_str).map(str::to_owned),
-                        },
-                        Some("property-change")
-                            if message.get("name").and_then(Value::as_str) == Some("eof-reached")
-                                && message.get("data").and_then(Value::as_bool) == Some(true) =>
-                        {
-                            // Where it stopped is asked now, not a second ago.
-                            eof = true;
-                            if writer.write_all(polls.as_bytes()).await.is_err() {
-                                break Signal::Gone;
-                            }
-                        }
-                        _ => {}
+    if writer.write_all(observe.as_bytes()).await.is_err() {
+        return Signal::Gone;
+    }
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let (mut position, mut duration) = (None, None);
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let Ok(Some(line)) = line else { return Signal::Gone };
+                let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
+                let at_the_end = message.get("data").and_then(Value::as_bool) == Some(true);
+                match message.get("event").and_then(Value::as_str) {
+                    Some("end-file") => return Signal::EndFile {
+                        reason: message.get("reason").and_then(Value::as_str).unwrap_or("unknown").to_string(),
+                        error: message.get("file_error").and_then(Value::as_str).map(str::to_owned),
+                    },
+                    Some("property-change")
+                        if message.get("name").and_then(Value::as_str) == Some("eof-reached") && at_the_end =>
+                    {
+                        return Signal::EndOfFile;
                     }
-                    let number = |message: &Value| message.get("data").and_then(Value::as_f64).filter(|value| value.is_finite());
-                    match message.get("request_id").and_then(Value::as_u64) {
-                        Some(101) => position = number(&message),
-                        Some(102) => duration = number(&message),
-                        Some(103) => {
-                            let paused = message.get("data").and_then(Value::as_bool).unwrap_or(false);
-                            if let Some(seconds) = position {
-                                supervisor.observe(film, seconds, duration, paused, Instant::now());
-                            }
-                            if eof {
-                                break Signal::EndOfFile;
-                            }
-                        }
-                        _ => {}
-                    }
+                    _ => {}
                 }
-                _ = tick.tick() => {
-                    if writer.write_all(polls.as_bytes()).await.is_err() {
-                        break Signal::Gone;
+                let number = |message: &Value| message.get("data").and_then(Value::as_f64).filter(|value| value.is_finite());
+                match message.get("request_id").and_then(Value::as_u64) {
+                    Some(100) if at_the_end => return Signal::EndOfFile,
+                    Some(101) => position = number(&message),
+                    Some(102) => duration = number(&message),
+                    Some(103) => {
+                        let paused = message.get("data").and_then(Value::as_bool).unwrap_or(false);
+                        if let Some(seconds) = position.take() {
+                            supervisor.observe(film, seconds, duration, paused, Instant::now());
+                        }
                     }
+                    _ => {}
+                }
+            }
+            _ = tick.tick() => {
+                if writer.write_all(polls.as_bytes()).await.is_err() {
+                    return Signal::Gone;
                 }
             }
         }
-    };
-    // Held on its last frame at an end, early or not: the film is over, and
-    // so is the player.
-    if supervisor.finish(film, signal).is_some() && player.film() == here {
-        player.stop().await;
     }
 }
 
@@ -829,6 +836,80 @@ mod tests {
         supervisor.observe(film, 10.0, Some(100.0), false, Instant::now());
         supervisor.finish(film, Signal::EndOfFile);
         assert_eq!(*effects.lock().unwrap(), vec![Effect::Release("a306b91d".into())]);
+    }
+
+    /// A stand-in for mpv on the other end of the socket: answers each poll
+    /// from `answer`, which is given how many polls it has answered.
+    async fn fake_mpv(
+        stream: tokio::net::UnixStream,
+        answer: impl Fn(u64, usize) -> Option<Value> + Send + 'static,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        let mut polls = 0;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let Some(id) = request.get("request_id").and_then(Value::as_u64) else { continue };
+            if id == 100 {
+                polls += 1;
+            }
+            let Some(data) = answer(id, polls) else { continue };
+            let reply = json!({"request_id": id, "error": "success", "data": data});
+            if writer.write_all(format!("{reply}\n").as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_position_read_after_the_end_of_the_file_is_not_believed() {
+        // What the Plus did: 26 s into a 480 s film, a seek's range was
+        // refused, mpv was at the end of the file, and time-pos said 480.
+        let (supervisor, _) = rig();
+        let film = supervisor.begin(Start { duration: None, ..start(PlayerKind::Here) });
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(fake_mpv(theirs, |id, polls| {
+            let ended = polls >= 3;
+            Some(match id {
+                100 => json!(ended),
+                101 => json!(if ended { 480.0 } else { 26.0 }),
+                102 => json!(480.0),
+                _ => json!(false),
+            })
+        }));
+        let signal = read_mpv(ours, &supervisor, film).await;
+        assert_eq!(signal, Signal::EndOfFile);
+        let finished = supervisor.finish(film, signal).unwrap();
+        assert_eq!(finished.outcome, Outcome::Failed);
+        assert_eq!(finished.position, 26.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_real_end_of_the_file_is_the_end() {
+        let (supervisor, _) = rig();
+        let film = supervisor.begin(Start { duration: None, ..start(PlayerKind::Here) });
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(fake_mpv(theirs, |id, polls| {
+            Some(match id {
+                100 => json!(polls >= 3),
+                101 => json!(477.0 + polls as f64),
+                102 => json!(480.0),
+                _ => json!(false),
+            })
+        }));
+        let signal = read_mpv(ours, &supervisor, film).await;
+        let finished = supervisor.finish(film, signal).unwrap();
+        assert_eq!(finished.outcome, Outcome::Ended);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_player_that_closes_its_socket_is_gone() {
+        let (supervisor, _) = rig();
+        let film = supervisor.begin(start(PlayerKind::Here));
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        drop(theirs);
+        assert_eq!(read_mpv(ours, &supervisor, film).await, Signal::Gone);
     }
 
     /// Kodi's own schema entry, as `xbmc/interfaces/json-rpc/schema/
