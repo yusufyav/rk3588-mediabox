@@ -22,6 +22,7 @@ addon transport URL unless it asks for one, and above all never parses a page.
     GET    /media/session                    list sessions
     GET    /media/session/{id}               the session's bytes
     GET    /media/session/{id}/status        one session
+    POST   /media/session/{id}/release       its holder is done with it
     DELETE /media/session/{id}               stop it
     POST   /media/login, /media/logout       optional Stremio account
 
@@ -32,11 +33,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote
 
-from .errors import InvalidRequest, MediaError, NotFound, UpstreamError
+from .errors import InvalidRequest, MediaError, NotFound, SessionError, UpstreamError
 from .proxy.relay import relay
 from .inspector import FFprobeConfig, MediaInfo, inspect
 from .library import Library
@@ -353,6 +355,15 @@ class MediaCore:
 
     def _serve_session(self, session_id: str, range_header: str | None = None) -> Response:
         session = self.sessions.get(session_id)
+        if session.state.value not in ("created", "running"):
+            # An address that has been let go is an error for the player to
+            # report, never an end of file for it to mistake for the end of
+            # the film.
+            raise SessionError(
+                "SESSION_STOPPED",
+                f"this media session has ended ({session.stop_reason or 'stopped'})",
+                410,
+            )
         if session.mode.value == "Direct":
             # A direct session has nothing to transcode, but it still has
             # somewhere to be read from.
@@ -368,7 +379,9 @@ class MediaCore:
             # copy through this process and buys a player that can open
             # anything the worker can.
             status, headers, chunks = relay(session.playback_url, range_header)
-            return Response(status, headers, stream=chunks)
+            return Response(
+                status, headers, stream=self.sessions.read_direct(session_id, chunks)
+            )
         stream = self.sessions.attach(session_id)
         content_type = (
             "video/x-matroska" if "matroska" in " ".join(session.argv) else "video/mp4"
@@ -468,6 +481,9 @@ class MediaCore:
         if head == "session" and len(parts) == 1:
             return json_response(201, self._create_session(body))
 
+        if head == "session" and len(parts) == 3 and parts[2] == "release":
+            return json_response(200, self.sessions.release(parts[1]))
+
         if head == "session" and len(parts) == 3 and parts[2] == "stop":
             return json_response(200, self.sessions.stop(parts[1], "requested"))
 
@@ -566,6 +582,7 @@ class MediaCore:
             url,
             decision,
             start_seconds=_as_float(body.get("startSeconds")),
+            owner=_owner(body.get("owner")),
         )
         preview = decide_preview(info, self.profile)
         payload = session.as_dict()
@@ -635,6 +652,15 @@ def _as_millis_body(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidRequest("times are milliseconds, as numbers")
     return int(value)
+
+
+def _owner(value: Any) -> str | None:
+    """Who holds a session: a short name, or nobody."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", value):
+        raise InvalidRequest("owner must be a short lower-case name")
+    return value
 
 
 def _as_float(value: Any) -> float | None:

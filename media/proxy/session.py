@@ -13,7 +13,8 @@ So a session owns its child completely:
   it started;
 * stop is idempotent, and runs the same path whether it was asked for, timed
   out, or reached at shutdown;
-* the reaper ends sessions nobody has read from within the TTL;
+* the reaper ends only a session nobody holds and nobody is reading, once
+  its TTL has passed since the last of either (see `reap_once`);
 * `stop()` does not return until the child has been waited on, so a stopped
   session leaves no zombie.
 
@@ -100,6 +101,11 @@ class MediaSession:
     #: been read from cannot be handed to a second reader as it stands: see
     #: `SessionRegistry._rewind_for_a_new_reader`.
     served: bool = False
+    #: Who holds the session open: the player it was created for, until that
+    #: player lets it go. A held session is never reaped, however long it has
+    #: gone unread -- a film paused for an hour reads nothing and still needs
+    #: its address when it resumes.
+    owner: str | None = None
 
     def selected_tracks(self) -> dict[str, Any]:
         video = self.decision.video.track
@@ -145,6 +151,7 @@ class MediaSession:
             "createdAt": self.created_at,
             "startedAt": self.started_at,
             "lastSeen": self.last_seen,
+            "owner": self.owner,
             "stoppedAt": self.stopped_at,
             "exitCode": self.exit_code,
             "stopReason": self.stop_reason,
@@ -221,6 +228,7 @@ class SessionManager:
         *,
         start_seconds: float | None = None,
         container: str | None = None,
+        owner: str | None = None,
     ) -> MediaSession:
         """Create a session, or return the live one for the same source and mode.
 
@@ -247,6 +255,8 @@ class SessionManager:
                     SessionState.RUNNING,
                 ):
                     existing.last_seen = now
+                    if owner is not None:
+                        existing.owner = owner
                     return existing
                 self._by_source.pop(key, None)
 
@@ -257,6 +267,7 @@ class SessionManager:
                 decision=decision,
                 created_at=now,
                 last_seen=now,
+                owner=owner,
             )
             if mode is SessionMode.DIRECT:
                 session.state = SessionState.RUNNING
@@ -311,6 +322,33 @@ class SessionManager:
             session.clients += 1
             session.last_seen = self._clock()
         return self._relay(session)
+
+    def read_direct(self, session_id: str, chunks: Iterator[bytes]) -> Iterator[bytes]:
+        """Count a reader of a direct session for as long as it reads.
+
+        A direct relay starts no process, and for that reason it used to
+        count for nothing: the session's idleness was measured from the
+        moment it was created, and a film that played on from one long
+        response was reaped under the player that was reading it.
+        """
+        session = self.get(session_id)
+        with self._lock:
+            session.clients += 1
+            session.last_seen = self._clock()
+        return _CountedStream(self, session, chunks)
+
+    def touch(self, session: MediaSession) -> None:
+        with self._lock:
+            session.last_seen = self._clock()
+
+    def release(self, session_id: str) -> dict[str, Any]:
+        """The holder is done with the session. It is kept for its TTL from
+        now, for any reader still on it, and reaped after that."""
+        session = self.get(session_id)
+        with self._lock:
+            session.owner = None
+            session.last_seen = self._clock()
+        return {"released": True, "sessionId": session_id}
 
     def _rewind_for_a_new_reader(self, session: MediaSession) -> None:
         """Give a reader that arrives on its own the stream from the start.
@@ -486,19 +524,25 @@ class SessionManager:
             self._reaper.start()
 
     def reap_once(self) -> list[str]:
-        """End every session whose deadline has passed. Returns their ids."""
+        """End every session whose deadline has passed. Returns their ids.
+
+        Idleness is counted only for a session nobody holds and nobody is
+        reading. The Stremio streaming server keeps its streams the same way:
+        a stream's inactivity timer starts when its last reader closes.
+        """
         now = self._clock()
         doomed: list[tuple[str, str]] = []
         with self._lock:
             for session in self._sessions.values():
                 if session.state not in (SessionState.CREATED, SessionState.RUNNING):
                     continue
+                held = session.owner is not None or session.clients > 0
                 if session.mode is SessionMode.DIRECT:
                     # Nothing is running; the record expires but costs nothing.
-                    if now - session.last_seen > self._idle_timeout * 4:
+                    if not held and now - session.last_seen > self._idle_timeout * 4:
                         doomed.append((session.session_id, "idle"))
                     continue
-                if session.clients == 0 and now - session.last_seen > self._idle_timeout:
+                if not held and now - session.last_seen > self._idle_timeout:
                     doomed.append((session.session_id, "idle"))
                 elif session.process is not None and session.process.poll() is not None:
                     doomed.append((session.session_id, "child-exited"))
@@ -552,3 +596,40 @@ def _close(process: subprocess.Popen[bytes]) -> None:
                 stream.close()
             except OSError:
                 pass
+
+
+class _CountedStream:
+    """One reader of a direct session: counted while open, let go once.
+
+    A class rather than a generator because a generator that was never
+    started does not run its `finally` when it is closed, and a reader that
+    was counted must be uncounted however its response ended.
+    """
+
+    def __init__(self, manager: SessionManager, session: MediaSession, chunks: Iterator[bytes]):
+        self._manager = manager
+        self._session = session
+        self._chunks = iter(chunks)
+        self._source = chunks
+        self._open = True
+
+    def __iter__(self) -> "_CountedStream":
+        return self
+
+    def __next__(self) -> bytes:
+        try:
+            block = next(self._chunks)
+        except BaseException:
+            self.close()
+            raise
+        self._manager.touch(self._session)
+        return block
+
+    def close(self) -> None:
+        if not self._open:
+            return
+        self._open = False
+        close = getattr(self._source, "close", None)
+        if close is not None:
+            close()
+        self._manager.detach(self._session.session_id)

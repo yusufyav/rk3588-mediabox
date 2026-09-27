@@ -282,5 +282,119 @@ class PlanAndRankTests(unittest.TestCase):
         self.assertEqual(b"".join(response.stream), b"bytes")
 
 
+class _Clock:
+    """A monotonic clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _upstream(asked: list):
+    """A source that answers every range with a body that has not ended."""
+
+    def fake_relay(url, range_header, timeout=30.0):
+        asked.append(range_header)
+        return 206, [("Content-Type", "video/x-matroska")], iter([b"a", b"b", b"c"])
+
+    return fake_relay
+
+
+class SessionLifetimeTests(unittest.TestCase):
+    """The film that closed itself on a seek, 2026-09-27.
+
+    The appliance's own player read a direct session through this proxy. The
+    reaper had measured the session's idleness from the moment it was
+    created, because nothing a direct relay did ever touched it, and stopped
+    it two minutes into the film. Ten minutes later the viewer seeked, the
+    new range got a 404, and the player took the failed read for the end of
+    the film:
+
+        20:04:38  media session a306b91d... stopped (idle)
+        20:14:25  GET /media/session/a306b91d... 404
+                  Seek failed (to 5820343187, size 68)
+
+    A session is kept while the player it was opened for holds it, or while
+    anybody is reading it; only one that nobody holds or reads expires.
+    """
+
+    def setUp(self):
+        from ..proxy.session import SessionManager
+
+        self.clock = _Clock()
+        self.core = _FakeProbeCore({"https://cdn.example/hdr10.mkv": F.hdr10_hevc_eac3()})
+        self.core.sessions.shutdown()
+        self.core.sessions = SessionManager(
+            source_policy=self.core.source_policy,
+            idle_timeout_seconds=45.0,
+            base_url="http://box:8790",
+            clock=self.clock,
+        )
+        self.addCleanup(self.core.shutdown)
+        self.asked: list = []
+        patcher = mock.patch("media.api.relay", _upstream(self.asked))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _create(self, **extra) -> str:
+        response = self.core.handle(
+            "POST",
+            "/media/session",
+            body=json.dumps({"url": "https://cdn.example/hdr10.mkv", **extra}).encode(),
+        )
+        self.assertEqual(response.status, 201)
+        return body_of(response)["sessionId"]
+
+    def _get(self, session_id: str, at: str):
+        return self.core.handle(
+            "GET", f"/media/session/{session_id}", headers={"range": f"bytes={at}-"}
+        )
+
+    def test_a_held_direct_session_still_seeks_after_ten_minutes(self):
+        session_id = self._create(owner="player")
+        first = self._get(session_id, "0")
+        self.assertEqual(first.status, 206)
+        next(iter(first.stream))
+        # The player's cache is full; it reads nothing for a while.
+        first.stream.close()
+        self.clock.now += 11 * 60
+        self.assertEqual(self.core.sessions.reap_once(), [])
+        seek = self._get(session_id, "5820343187")
+        self.assertEqual(seek.status, 206)
+        self.assertEqual(self.asked[-1], "bytes=5820343187-")
+        seek.stream.close()
+
+    def test_a_session_being_read_is_kept_whoever_opened_it(self):
+        session_id = self._create()
+        reading = self._get(session_id, "0")
+        next(iter(reading.stream))
+        self.clock.now += 11 * 60
+        self.assertEqual(self.core.sessions.reap_once(), [])
+        reading.stream.close()
+        self.assertEqual(self._get(session_id, "100").status, 206)
+
+    def test_a_released_session_nobody_reads_is_cleaned_up_after_its_ttl(self):
+        session_id = self._create(owner="player")
+        released = self.core.handle("POST", f"/media/session/{session_id}/release", body=b"{}")
+        self.assertEqual(released.status, 200)
+        self.clock.now += 45.0 * 4 - 1
+        self.assertEqual(self.core.sessions.reap_once(), [])
+        self.clock.now += 2
+        self.assertEqual(self.core.sessions.reap_once(), [session_id])
+        gone = self._get(session_id, "100")
+        self.assertEqual(gone.status, 410)
+        self.assertEqual(body_of(gone)["error"]["code"], "SESSION_STOPPED")
+
+    def test_an_owner_is_a_short_name(self):
+        response = self.core.handle(
+            "POST",
+            "/media/session",
+            body=json.dumps({"url": "https://cdn.example/hdr10.mkv", "owner": "x" * 200}).encode(),
+        )
+        self.assertEqual(response.status, 400)
+
+
 if __name__ == "__main__":
     unittest.main()
