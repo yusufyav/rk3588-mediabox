@@ -294,11 +294,24 @@ impl App {
             return;
         }
         match intent {
-            Intent::GoHome => self.go_home(),
+            // Home is out of the film, as on every television: the film is
+            // closed -- its place kept on the account -- and the home screen
+            // is what is on the panel. It used to reset the screens under a
+            // film that went on playing, and every key after it went to a
+            // home screen nobody could see.
+            Intent::GoHome => {
+                if self.here.is_some() {
+                    self.transport(Transport::Stop);
+                }
+                self.go_home();
+            }
             Intent::OfferPower => self.open_sheet(Sheet::power()),
             Intent::Options => self.options(),
             Intent::Transport(transport) => self.transport(transport),
             Intent::Ignore => {}
+            // While a film is on the panel the panel is the film and its
+            // controls, whatever screen is under it: that is where the keys go.
+            _ if self.here.is_some() => self.act_on_now_playing(intent),
             _ => match self.route() {
                 Route::Home | Route::Boot => self.act_on_home(intent),
                 Route::Media => self.act_on_media(intent),
