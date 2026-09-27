@@ -206,8 +206,12 @@ impl Client {
         start_seconds: u64,
         title: Option<&str>,
         duration_seconds: Option<u64>,
+        watch: Option<&Value>,
     ) -> Result<Value> {
         let mut request = json!({"command": "media_play_here", "start_seconds": start_seconds});
+        if let Some(watch) = watch {
+            request["watch"] = watch.clone();
+        }
         // What the catalogue knows and the player cannot: see the request's own
         // documentation. Sent at the start rather than asked for later, because
         // by the time anything is playing the answer is already needed.

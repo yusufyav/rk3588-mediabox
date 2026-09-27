@@ -239,9 +239,6 @@ struct App {
     /// library screen is built from this, not from the shelves, which carry
     /// only the first few titles of it.
     library_listing: Option<model::LibraryListing>,
-    /// The title the film playing here belongs to, and what the account has
-    /// been told about it.
-    watching: Option<Watching>,
 
     detail_backdrop: Option<String>,
     /// When the line along the bottom stops being true. See `say`.
@@ -1863,29 +1860,6 @@ impl App {
         });
     }
 
-    /// Tells the account where the film playing here has got to, when it is
-    /// time to.
-    fn tell_the_account(&mut self, closed: bool) {
-        let Some(watching) = self.watching.as_mut() else {
-            return;
-        };
-        if watching.duration == 0 {
-            return;
-        }
-        let due = closed
-            || watching.jumped
-            || watching
-                .told_at
-                .is_none_or(|at| at.elapsed() >= TELL_THE_ACCOUNT_EVERY);
-        if !due {
-            return;
-        }
-        let change = watching.change(closed);
-        watching.told_at = Some(std::time::Instant::now());
-        watching.jumped = false;
-        spawn_account("progress", watching.id.clone(), change);
-    }
-
     /// Asks the media core what it would do with the chosen source.
     fn analyse(&mut self) {
         let Some(detail) = self.detail.as_ref() else {
@@ -1936,17 +1910,14 @@ impl App {
         // this episode: every Stremio client starts there.
         let video = detail.episode.clone();
         let start = detail.resume_seconds(video.as_deref().unwrap_or(&detail.id));
-        self.watching = Some(Watching {
-            kind: detail.kind.clone(),
-            id: detail.id.clone(),
-            video,
-            name: detail.meta.name.clone(),
-            poster: detail.meta.poster.clone(),
-            position: start,
-            duration: 0,
-            seen_at: std::time::Instant::now(),
-            told_at: None,
-            jumped: false,
+        // Where it got to and how it ended are the control plane's to tell
+        // the account; it is told whose film this is.
+        let watch = serde_json::json!({
+            "type": detail.kind,
+            "id": detail.id,
+            "videoId": video,
+            "name": detail.meta.name,
+            "poster": detail.meta.poster,
         });
 
         // An episode is named with its series, the way it is spoken of.
@@ -1991,7 +1962,7 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_detail_note("Oynatılıyor…".into());
         }
-        spawn_play_here(url, raw, name, runtime, start);
+        spawn_play_here(url, raw, name, runtime, start, watch);
         // The film covers the panel — the video window sits above the primary —
         // so the screen behind it is the one a remote should already be on when
         // it comes back.
@@ -2026,27 +1997,25 @@ impl App {
         if self.here.is_none() {
             return;
         }
-        self.now.take_here(&status);
-        let (position, duration) = (self.now.elapsed_seconds, self.now.duration_seconds);
-        let paused = matches!(
-            self.now.state,
-            Some(mediabox_core::PlaybackState::Paused)
-        );
-        if let Some(watching) = self.watching.as_mut() {
-            if duration > 0 {
-                // Where playback should be by the clock since the last look,
-                // and where it is. Far apart is a jump the viewer made.
-                let expected = watching.position as i64
-                    + if paused { 0 } else { watching.seen_at.elapsed().as_secs() as i64 };
-                if watching.told_at.is_some() && (position as i64 - expected).abs() > JUMP_SECONDS {
-                    watching.jumped = true;
-                }
-                watching.position = position;
-                watching.duration = duration;
-                watching.seen_at = std::time::Instant::now();
-            }
+        // Which film this is, and how the last one ended, are the control
+        // plane's to say. A film this interface adopted learns its number
+        // here; one it started learned it from the answer to starting it.
+        let current = status.get("film").and_then(Value::as_u64);
+        if let Some(playing) = self.here.as_mut()
+            && playing.film.is_none()
+        {
+            playing.film = current;
         }
-        self.tell_the_account(false);
+        let film = self.here.as_ref().and_then(|playing| playing.film);
+        if let Some(finished) = ending_of(&status, film) {
+            self.film_finished(&finished);
+            return;
+        }
+        if current.is_none() || current != film {
+            // Between films: nothing to draw from this answer.
+            return;
+        }
+        self.now.take_here(&status);
         if self.controls_open() {
             self.paint();
         }
@@ -2054,10 +2023,11 @@ impl App {
 
     /// Whether the film this interface started is still on the panel.
     ///
-    /// Called four times a second, and it is the only thing that clears the
-    /// film state: a film that ends by itself, a player that dies, and a source
-    /// that never opens all look the same from here — no picture — and are told
-    /// apart by whether there ever was one.
+    /// Called four times a second. It asks the control plane where the film
+    /// is and whether it has ended -- which is the control plane's to decide,
+    /// not a dark plane's (`mediaboxd_rs::playback`). What it decides itself
+    /// is only what the control plane cannot see: a source that never put a
+    /// picture up, and a control plane that has stopped answering.
     fn watch_the_film(&mut self) {
         // A film this interface did not start is still a film on this
         // interface's plane: the web interface can open one, and a viewer in
@@ -2086,22 +2056,23 @@ impl App {
             return;
         };
         let showing = platform::video_showing();
+        // Where the film is, and whether it has ended, are the control
+        // plane's to answer, and it is asked for as long as there is a film.
+        let due = playing
+            .polled
+            .is_none_or(|last| last.elapsed() >= POSITION_INTERVAL);
+        if due {
+            playing.polled = Some(std::time::Instant::now());
+            spawn_here_status();
+        }
 
         if showing {
+            playing.dark_since = None;
             // The frame that ends the wait. Noticed on the edge, because the
             // note belongs to the player from here on and repainting on every
             // tick would be a frame's work for nothing.
             let first = !playing.seen;
             playing.seen = true;
-            // The position and whether it is paused are the player's to answer,
-            // and it is asked only while it is up.
-            let due = playing
-                .polled
-                .is_none_or(|last| last.elapsed() >= POSITION_INTERVAL);
-            if due {
-                playing.polled = Some(std::time::Instant::now());
-                spawn_here_status();
-            }
             if first {
                 self.now.note = String::new();
                 self.paint();
@@ -2122,21 +2093,40 @@ impl App {
             }
             return;
         }
-        if !playing.seen && playing.asked.elapsed() < playing.grace {
-            return;
-        }
-
-        let gave_up = !playing.seen;
-        if gave_up {
+        if !playing.seen {
+            if playing.asked.elapsed() < playing.grace {
+                return;
+            }
             eprintln!("mediabox-tv.play here gave up: no frame in {:?}", playing.grace);
             spawn_here(HereCommand::Stop);
+            self.leave_film(Some("Kaynak açılamadı: görüntü gelmedi. Başka bir kaynak seçin.".to_string()));
+            return;
         }
-        // The film is closed: the account is told where it ended, which is
-        // what moves a finished episode on to the next one.
-        if !gave_up {
-            self.tell_the_account(true);
+        // A dark plane after a picture is not an ending: the control plane
+        // says how the film ended, and the answer comes with the position.
+        // Only a control plane that says nothing at all for this long is
+        // left behind -- the picture is gone and the remote must work.
+        let dark = *playing.dark_since.get_or_insert_with(std::time::Instant::now);
+        if dark.elapsed() >= DARK_WITHOUT_AN_ANSWER {
+            eprintln!("mediabox-tv.play the plane is dark and the control plane has not said why");
+            self.leave_film(Some("Oynatıcıdan yanıt alınamadı.".to_string()));
         }
-        self.leave_film(gave_up.then(|| "Kaynak açılamadı: görüntü gelmedi. Başka bir kaynak seçin.".to_string()));
+    }
+
+    /// The control plane has decided how the film ended. Stopped and ended
+    /// close the player; a failure closes it too, and says so, with where
+    /// the film was kept.
+    fn film_finished(&mut self, finished: &Value) {
+        let outcome = finished.get("outcome").and_then(Value::as_str).unwrap_or("stopped");
+        eprintln!("mediabox-tv.play finished: {finished}");
+        let notice = (outcome == "failed").then(|| {
+            let why = finished
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Oynatma kesildi.");
+            format!("{why} Kaldığınız yer kaydedildi.")
+        });
+        self.leave_film(notice);
     }
 
     /// The film on our own player is over -- stopped, refused, or given up
@@ -2146,7 +2136,6 @@ impl App {
     /// started is taken away with it, never left standing at 0:00.
     fn leave_film(&mut self, notice: Option<String>) {
         self.here = None;
-        self.watching = None;
         self.refresh_watch();
         self.left_film = Some(Instant::now());
         self.now.film = false;
@@ -2182,9 +2171,8 @@ impl App {
             return;
         }
         self.handing_over = true;
-        // Kodi carries on from here; the account is told where it took over.
-        self.tell_the_account(false);
-        self.watching = None;
+        // Kodi carries on from here, and the control plane goes on telling
+        // the account where it has got to.
         self.here = None;
         self.now.film = false;
         self.now.close_menu();
@@ -2478,10 +2466,9 @@ impl App {
                     spawn_here(HereCommand::SeekTo(seconds));
                 }
                 Transport::Stop => {
+                    // Closed by the viewer: the control plane tells the
+                    // account where, which is what "Devam Et" starts from.
                     spawn_here(HereCommand::Stop);
-                    // Closed by the viewer: the account is told where, which
-                    // is what the next "Devam Et" starts from.
-                    self.tell_the_account(true);
                     self.leave_film(None);
                     return;
                 }
@@ -4985,7 +4972,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
         library_listing: None,
-        watching: None,
         detail_backdrop: None,
         notice_until: None,
         volume_osd: None,
@@ -5537,16 +5523,18 @@ struct Playing {
     polled: Option<std::time::Instant>,
     /// Whether a frame has actually reached the plane.
     ///
-    /// This is the whole reason this is a struct rather than a flag. The
-    /// watcher below reads "no picture" as "the film has ended", and for the
-    /// first seconds of every film that is exactly wrong: the interface
-    /// believed the film was already over before its first frame arrived, went
-    /// back to the home screen, and sent every transport key from then on to
-    /// Kodi — so a film played with no way to pause, seek or stop it, over a
-    /// home screen showing through its own letterbox.
+    /// "No picture" is not "the film has ended", and for the first seconds of
+    /// every film it is exactly wrong: an interface that read it that way
+    /// believed the film was over before its first frame arrived, went back
+    /// to the home screen, and sent every transport key from then on to Kodi
+    /// -- a film played with no way to pause, seek or stop it.
     seen: bool,
     /// How long to wait for that first frame before calling the source dead.
     grace: Duration,
+    /// The control plane's number for this film: how its ending is known.
+    film: Option<u64>,
+    /// Since when the plane has been dark after a picture.
+    dark_since: Option<std::time::Instant>,
 }
 
 impl Playing {
@@ -5557,49 +5545,9 @@ impl Playing {
             polled: None,
             seen: false,
             grace: FIRST_FRAME_GRACE,
+            film: None,
+            dark_since: None,
         }
-    }
-}
-
-/// A film this interface started, as the account knows it: which title, which
-/// episode, and where playback was when the account was last told.
-///
-/// The account is told the way stremio-core tells it: on starting, every 90
-/// seconds (`PUSH_TO_LIBRARY_EVERY`), at once when the viewer jumps, and on
-/// closing. The rules that turn a position into "watched" or "next episode"
-/// are the media core's, not this struct's.
-struct Watching {
-    kind: String,
-    id: String,
-    video: Option<String>,
-    name: String,
-    poster: Option<String>,
-    position: u64,
-    duration: u64,
-    seen_at: std::time::Instant,
-    told_at: Option<std::time::Instant>,
-    jumped: bool,
-}
-
-/// stremio-core's `PUSH_TO_LIBRARY_EVERY`.
-const TELL_THE_ACCOUNT_EVERY: Duration = Duration::from_secs(90);
-/// A position this far from where the clock says it should be is a jump the
-/// viewer made, not playback.
-const JUMP_SECONDS: i64 = 15;
-
-impl Watching {
-    fn change(&self, closed: bool) -> Value {
-        serde_json::json!({
-            "type": self.kind,
-            "id": self.id,
-            "videoId": self.video,
-            "timeMs": self.position * 1000,
-            "durationMs": self.duration * 1000,
-            "seek": self.jumped,
-            "closed": closed,
-            "name": self.name,
-            "poster": self.poster,
-        })
     }
 }
 
@@ -5614,6 +5562,11 @@ const FIRST_FRAME_GRACE: Duration = Duration::from_secs(25);
 /// first frame at 21.6 s from the start and 26.4 s from 17:52 -- past the
 /// plain grace, so a resumed film was stopped a second before it appeared.
 const FIRST_FRAME_GRACE_RESUMED: Duration = Duration::from_secs(45);
+/// How long the plane may stay dark after a picture, with the control plane
+/// not saying how the film ended, before the interface stops waiting for it.
+/// The control plane answers within a second of a player stopping; this is
+/// for one that does not answer at all.
+const DARK_WITHOUT_AN_ANSWER: Duration = Duration::from_secs(10);
 /// How long after closing a film here a picture still on the plane is taken
 /// for its last frame rather than a film someone else started.
 const LEFT_FILM_QUIET: Duration = Duration::from_secs(3);
@@ -5670,6 +5623,16 @@ fn spawn_here_status() {
             with_app(|app| app.film_moved(status));
         });
     });
+}
+
+/// How the control plane says this film ended, if it has: only ever the
+/// ending of the film with this number, never the last film's.
+fn ending_of(status: &Value, film: Option<u64>) -> Option<Value> {
+    let film = film?;
+    status
+        .get("finished")
+        .filter(|finished| finished.get("film").and_then(Value::as_u64) == Some(film))
+        .cloned()
 }
 
 fn spawn_here(command: HereCommand) {
@@ -5737,15 +5700,29 @@ fn spawn_play_here(
     title: String,
     runtime: Option<u64>,
     start: u64,
+    watch: serde_json::Value,
 ) {
     detached("mediabox-tv-play-here", async move {
         let client = rpc::Client::new(socket_path());
         let stream = url.is_none().then_some(&raw);
         match client
-            .play_here(url.as_deref(), stream, start, Some(title.as_str()), runtime)
+            .play_here(url.as_deref(), stream, start, Some(title.as_str()), runtime, Some(&watch))
             .await
         {
-            Ok(_) => eprintln!("mediabox-tv.play started here=true"),
+            Ok(answer) => {
+                eprintln!("mediabox-tv.play started here=true");
+                // The control plane's number for this film: how its ending
+                // will be recognised.
+                if let Some(film) = answer.get("film").and_then(serde_json::Value::as_u64) {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_app(|app| {
+                            if let Some(playing) = app.here.as_mut() {
+                                playing.film = Some(film);
+                            }
+                        });
+                    });
+                }
+            }
             Err(e) => {
                 eprintln!("mediabox-tv.play here failed: {e}");
                 let notice = play_refusal(&e.to_string());
@@ -6243,7 +6220,21 @@ fn deliver(line: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_kodi_return, play_refusal};
+    use super::{ending_of, parse_kodi_return, play_refusal};
+
+    #[test]
+    fn a_film_ends_only_when_the_control_plane_says_that_film_ended() {
+        let status = serde_json::json!({
+            "film": 8,
+            "finished": {"film": 7, "outcome": "failed", "message": "Oynatma 0:40:00 konumunda kesildi"},
+        });
+        // The last film's ending is not this one's.
+        assert!(ending_of(&status, Some(8)).is_none());
+        // Nor anything before this film has a number.
+        assert!(ending_of(&status, None).is_none());
+        assert_eq!(ending_of(&status, Some(7)).unwrap()["outcome"], "failed");
+        assert!(ending_of(&serde_json::json!({"film": 8, "finished": null}), Some(8)).is_none());
+    }
 
     /// Back from Kodi in the same boot is the title's page; a note left by
     /// an earlier boot is not, which keeps a cold start on the home screen.
