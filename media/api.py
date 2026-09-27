@@ -45,6 +45,7 @@ from .policy import (
     PlaybackMode,
     decide,
     decide_preview,
+    for_a_player_that_does_its_own_audio,
     get_profile,
     rank_sources,
 )
@@ -558,6 +559,9 @@ class MediaCore:
         url = self._source_from_body(body)
         info = self.inspect_url(url)
         decision = decide(info, self.profile, preferred_language=body.get("language"))
+        # The appliance's own player handles sound itself; see the function.
+        if body.get("audio") == "player":
+            decision = for_a_player_that_does_its_own_audio(decision)
         session = self.sessions.create(
             url,
             decision,

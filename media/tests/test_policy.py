@@ -10,7 +10,7 @@ from ..policy import decide, decide_preview, decide_video, get_profile, select_a
 from ..policy import reasons as R
 from ..policy.audio import AudioAction, ac3_target, decide_track
 from ..policy.capabilities import RK3588_ORANGEPI5_PRODUCTION
-from ..policy.decide import PlaybackMode
+from ..policy.decide import PlaybackMode, for_a_player_that_does_its_own_audio
 from ..policy.preview import PreviewMode
 from ..policy.video import VideoVerdict
 from . import fixtures as F
@@ -321,6 +321,25 @@ class PlaybackDecisionTests(unittest.TestCase):
         self.assertTrue(decision.needs_session)
         self.assertTrue(decision.video_is_copied)
         self.assertIs(decision.video.verdict, VideoVerdict.DIRECT)
+
+    def test_the_appliance_s_own_player_is_given_the_sound_as_it_is(self):
+        # The player encodes to Dolby Digital itself when the viewer asks, and
+        # passes through what the receiver declares; the core does neither.
+        decision = for_a_player_that_does_its_own_audio(decide(F.hdr10_hevc_truehd_atmos(), PROFILE))
+        self.assertIs(decision.mode, PlaybackMode.DIRECT)
+        self.assertFalse(decision.needs_session)
+        self.assertIn(R.AUDIO_HANDLED_BY_PLAYER, codes(decision.reasons))
+        # A container that still needs remuxing is remuxed, sound copied.
+        info = F.media(
+            [F.video_stream(), F.audio_stream(codec_name="dts", channels=6, channel_layout="5.1")],
+            format_name="rawvideo",
+        )
+        decision = for_a_player_that_does_its_own_audio(decide(info, PROFILE))
+        self.assertIs(decision.mode, PlaybackMode.REMUX)
+        self.assertTrue(decision.needs_session)
+        # Nothing to change for a source that needed no encoder.
+        plain = decide(F.hdr10_hevc_eac3(), PROFILE)
+        self.assertIs(for_a_player_that_does_its_own_audio(plain), plain)
 
     def test_an_unopenable_container_is_remuxed_not_re_encoded(self):
         info = F.media(

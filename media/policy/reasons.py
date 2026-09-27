@@ -91,6 +91,9 @@ AUDIO_CHANNELS_REDUCED = "AUDIO_CHANNELS_REDUCED"
 AUDIO_CODEC_UNKNOWN = "AUDIO_CODEC_UNKNOWN"
 AUDIO_TRACK_MISSING = "AUDIO_TRACK_MISSING"
 AUDIO_SAMPLE_RATE_UNSUPPORTED = "AUDIO_SAMPLE_RATE_UNSUPPORTED"
+#: The player decodes, passes through or encodes the sound itself, by the
+#: appliance's sound setting; the media core copies it.
+AUDIO_HANDLED_BY_PLAYER = "AUDIO_HANDLED_BY_PLAYER"
 
 # -- container / delivery -----------------------------------------------------
 CONTAINER_SUPPORTED = "CONTAINER_SUPPORTED"

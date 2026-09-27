@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -90,6 +90,35 @@ def mode_when_chosen(decision: PlaybackDecision) -> PlaybackMode:
     if any(note.code == R.CONTAINER_REMUX_REQUIRED for note in decision.reasons):
         return PlaybackMode.REMUX
     return PlaybackMode.DIRECT
+
+
+def for_a_player_that_does_its_own_audio(decision: PlaybackDecision) -> PlaybackDecision:
+    """The decision for the appliance's own player, which handles sound itself.
+
+    The embedded player passes through what the receiver declares, encodes
+    multichannel sound to Dolby Digital itself (mpv's ``lavcac3enc``) when the
+    viewer has turned that on, and decodes the rest -- by the appliance's
+    sound setting, which this core does not know. An AC-3 encode here as well
+    would decide for it, and against a receiver that takes DTS as it is. So
+    the sound is copied: the transform becomes a remux when the container
+    still needs one, and nothing at all when it does not.
+    """
+    mode = mode_when_chosen(decision)
+    if mode is not PlaybackMode.DIRECT_WITH_AUDIO_TRANSCODE:
+        return decision
+    remux = any(note.code == R.CONTAINER_REMUX_REQUIRED for note in decision.reasons)
+    return replace(
+        decision,
+        mode=PlaybackMode.REMUX if remux else PlaybackMode.DIRECT,
+        needs_session=remux,
+        reasons=decision.reasons
+        + (
+            R.info(
+                R.AUDIO_HANDLED_BY_PLAYER,
+                "the player handles the sound by the appliance's sound setting; it is copied",
+            ),
+        ),
+    )
 
 
 def decide(

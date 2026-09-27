@@ -9,7 +9,7 @@ from .capabilities import (
     CapabilityProfile,
     get_profile,
 )
-from .decide import PlaybackDecision, PlaybackMode, decide
+from .decide import PlaybackDecision, PlaybackMode, decide, for_a_player_that_does_its_own_audio
 from .preview import PreviewDecision, PreviewMode, decide_preview
 from .ranking import RankedSource, RankTier, rank_sources
 from .reasons import Reason, Severity
@@ -34,6 +34,7 @@ __all__ = [
     "ac3_target",
     "decide",
     "decide_preview",
+    "for_a_player_that_does_its_own_audio",
     "decide_track",
     "decide_video",
     "get_profile",
