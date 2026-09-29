@@ -71,7 +71,10 @@ The question is `video = f(subtitle)`:
 
 **Evidence.** Sampled 30 s windows of the film's audio, decoded by ffmpeg to
 8 kHz mono in the speech band, and an energy detector with an adaptive floor
-and hysteresis (`audio.py`). Language-independent; no ASR.
+and hysteresis (`audio.py`). Language-independent; no ASR. A track whose probe
+gives it a centre channel (5.1, 7.1, …) is heard from that channel alone
+(`pan=mono|c0=FC`), where the dialogue is mixed; anything else is downmixed
+(`-ac 1`). Stereo has no centre and taking one hears silence.
 
 **Per window.** The Pearson correlation of the speech indicator and the shifted
 cue indicator at every shift in ±150 s. Both are interval unions, so the
@@ -97,7 +100,10 @@ significance, scaled so about six agreeing windows read as certain, times the
 share of strong windows the model explains. A subtitle for another film scores
 ≈0; its windows each have a best shift, but they do not agree.
 
-**Refusals.** Beyond the confidence threshold, an answer is not applied when:
+**Refusals.** A subtitle whose last line comes before a quarter of the film
+is refused before anything is listened to (`does-not-cover-film`):
+OpenSubtitles files trailers' subtitles under the film's id. Beyond the
+confidence threshold, an answer is not applied when:
 two windows the model does not explain agree with each other with nothing it
 explains between them (an unmodelled region); a strong window at either end
 disagrees and nothing has been heard beyond it; or more than 20 % of the film
@@ -119,8 +125,8 @@ the worker also relays film bytes and must not wait on the interpreter lock.
 ffmpeg runs at nice 10 with one thread. One analysis at a time.
 
 **Cache.** Results by (video identity, subtitle hash, `ALGORITHM`); speech
-windows by video identity, so a second subtitle for the same film costs no
-listening; corrected files by (video, subtitle, algorithm). Video identity is
+windows by video identity and how they were heard (centre or downmix), so a
+second subtitle for the same film costs no listening; corrected files by (video, subtitle, algorithm). Video identity is
 the OpenSubtitles hash and size when known, else the torrent's info hash and
 file index, else file name and size, else the URL without its query.
 
@@ -156,6 +162,8 @@ corrected 12 / 20 times, still with none wrong.
 | one alignment round, 16 / 24 / 40 windows | 0.69 / 0.53 / 0.74 s (0.74 / 0.62 / 0.81 s in the child process) |
 | a whole staged sync, synthetic, 6 films | 1.4–3.7 s CPU per subtitle |
 | a real film: *The Shawshank Redemption*, 1080p x264 MP4 over Real-Debrid, OpenSubtitles Turkish | offset +13.84 s, confidence 0.92, 21 windows (12 agreeing), 117 s wall clock while the film played |
+| the same, `mbsync-2` (AC-3 5.1, heard from the centre), 2026-09-30 | offset +13.76 s, confidence 0.85, 16 windows (11 agreeing), 57 s; ffmpeg 3.1–4.4 s wall and ~1.1 s CPU per window; a transcript puts the lines within −0.15…+0.5 s of the speech at 4, 70 and 125 min; the same film again: `cache=hit`, nothing heard |
+| *Avengers: Endgame* (DTS 5.1) and *The Social Network* (DTS 5.1), OpenSubtitles Turkish | not applied: the right answer was the engine's best guess both times (scale 1.001 / −6.6 s; −2.0 s against a transcript's −2.1 s) but too few windows agreed (2 of 24; 5 of 31) — dense dialogue under music peaks within ±0.5 s but with little prominence |
 
 ## Behaviour
 
@@ -177,7 +185,7 @@ corrected 12 / 20 times, still with none wrong.
 * The viewer's choice during a film is final: nothing automatic replaces it.
   An automatic choice whose timing is rejected is replaced by the next
   candidate of its language (at most three), and if all are rejected the
-  best-ranked stays on untimed.
+  best-ranked of those that cover the film stays on untimed.
 * A delay moved by hand is kept; a timing that arrives afterwards waits
   ("Otomatik eşitleme hazır"), and Ok on the delay puts it on.
 * The panel shows, under the delay, `Otomatik eşitleme · +1,82 sn · %97` or

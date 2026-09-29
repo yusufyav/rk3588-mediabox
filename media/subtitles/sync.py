@@ -44,7 +44,9 @@ from typing import Any, Iterable, Sequence
 
 #: Changes whenever a change here could change an answer. Part of every cache
 #: key, so a better algorithm is never served a worse one's conclusions.
-ALGORITHM = "mbsync-1"
+#: mbsync-2: a subtitle that ends early is refused, and 5.1 is heard from its
+#: centre channel -- answers of mbsync-1 for those films are not these.
+ALGORITHM = "mbsync-2"
 
 #: Subtitle timing bases that differ from the video's by a whole frame-rate
 #: conversion. Each is tried as the scale before the offset is searched, which
@@ -152,6 +154,11 @@ class Params:
     #: The smallest residual drift worth calling linear rather than offset:
     #: the change of offset across the evidence, in seconds.
     min_drift: float = 0.25
+    #: A subtitle whose last line comes before this share of the film is not
+    #: the film's. OpenSubtitles files a trailer's subtitle under the film's
+    #: id: for *Avengers: Endgame* (3 h 01 min) two of the three Turkish ones
+    #: offered ended at 2 min 19 s.
+    min_coverage: float = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,6 +622,19 @@ def _trim(cues: Sequence[Interval]) -> list[Interval]:
     ]
 
 
+def covers(cues: Sequence[Interval], duration: float, params: Params | None = None) -> bool:
+    """Whether the subtitle reaches far enough into the film to be the film's.
+
+    Asked before anything is listened to: a trailer's two minutes of lines
+    are more than ±`search_range` from every window past the first few
+    minutes, so each one is heard, none says anything, and the answer after
+    all of that listening is "no evidence".
+    """
+    params = params or Params()
+    last = max((end for _, end in cues), default=0.0)
+    return last >= params.min_coverage * duration
+
+
 def align(
     cues: Sequence[Interval],
     windows: Sequence[Window],
@@ -630,6 +650,8 @@ def align(
     original = [(start, end) for start, end in cues if end > start]
     if len(original) < 2 * params.min_cues_in_window:
         return SyncResult("rejected", "reject", 0.0, reason="too-few-cues")
+    if duration and not covers(original, duration, params):
+        return SyncResult("rejected", "reject", 0.0, reason="does-not-cover-film")
     cues = _trim(original)
 
     # Which timing base: the scale under which the windows agree best. Asked

@@ -129,8 +129,13 @@ class SubtitleStore:
 
     # --------------------------------------------------------------- speech
 
-    def speech(self, video: str) -> list[Window]:
-        payload = self._load_json(self.root / "speech" / f"{digest('speech', video)}.json")
+    def _speech_path(self, video: str, evidence: str) -> Path:
+        """`evidence` names how it was heard; "" is the downmix, as it always was."""
+        parts = ("speech", video, evidence) if evidence else ("speech", video)
+        return self.root / "speech" / f"{digest(*parts)}.json"
+
+    def speech(self, video: str, evidence: str = "") -> list[Window]:
+        payload = self._load_json(self._speech_path(video, evidence))
         if not isinstance(payload, dict):
             return []
         windows = []
@@ -147,9 +152,9 @@ class SubtitleStore:
                 continue
         return windows
 
-    def keep_speech(self, video: str, windows: list[Window]) -> None:
+    def keep_speech(self, video: str, windows: list[Window], evidence: str = "") -> None:
         self._save_json(
-            self.root / "speech" / f"{digest('speech', video)}.json",
+            self._speech_path(video, evidence),
             {
                 "video": video,
                 "windows": [

@@ -12,11 +12,13 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from media.api import MediaCore, MediaCoreConfig
 from media.stremio.addons import AddonClient, parse_stream
 from media.stremio.models import Subtitle, SubtitleSource
+from media.subtitles.audio import ListenConfig, ffmpeg_argv, has_centre
 from media.subtitles.service import SubtitleService, opensubtitles_hash, rank
 from media.subtitles.sync import align
 
@@ -88,9 +90,11 @@ class Harness(unittest.TestCase):
         self.core.stremio.subtitles = subtitles
         self.film = film(1)
         self.heard_calls: list[tuple[float, float]] = []
+        self.heard_centre: list[bool] = []
 
-        def listener(url, start, length, **_):
+        def listener(url, start, length, **options):
             self.heard_calls.append((start, start + length))
+            self.heard_centre.append(options.get("centre", False))
             return listen(self.film.heard, [(start, start + length)])[0], 0
 
         service: SubtitleService = self.core.subtitles
@@ -108,8 +112,8 @@ class Harness(unittest.TestCase):
         payload = json.loads(response.body) if response.headers[0][1].startswith("application/json") else response.body
         return response.status, payload
 
-    def register(self, session, *, stream=None, source=None):
-        self.core.subtitles.register(session, source or f"{self.origin}/{'a' * 40}/0", None, stream)
+    def register(self, session, *, stream=None, source=None, info=None):
+        self.core.subtitles.register(session, source or f"{self.origin}/{'a' * 40}/0", info, stream)
 
     def wait(self, job):
         deadline = time.monotonic() + 120
@@ -264,11 +268,11 @@ class LoadAndSync(Harness):
     #: A file on the box: seekable, nothing to download, no budget.
     FILM = "file:///srv/films/Film.2012.1080p.BluRay.x264-GRP.mkv"
 
-    def prepared(self, subtitle_bytes, *, language="tur", session=None, source=FILM):
+    def prepared(self, subtitle_bytes, *, language="tur", session=None, source=FILM, info=None):
         session = session or self.SESSION
         Files.files["/sub.srt"] = subtitle_bytes
         self.addon_subtitles = [Subtitle("x", f"{self.origin}/sub.srt", language, "opensubtitles")]
-        self.register(session, source=source)
+        self.register(session, source=source, info=info)
         _, answer = self.call("POST", "/media/subtitles/prepare", {"sessionId": session, "type": "movie", "id": "tt3"})
         status, loaded = self.call(
             "POST", "/media/subtitles/load", {"sessionId": session, "candidate": answer["candidates"][0]["id"]}
@@ -365,6 +369,36 @@ class LoadAndSync(Harness):
         self.assertNotEqual(answer["result"]["decision"], "apply")
         self.assertIsNone(answer["apply"])
 
+    def test_a_subtitle_that_ends_early_is_refused_without_listening(self):
+        trailer = [cue for cue in self.film.reference if cue[1] <= 0.1 * self.film.duration]
+        loaded = self.prepared(srt(trailer))
+        answer = self.sync(loaded["key"])
+        self.assertEqual(answer["state"], "done")
+        self.assertEqual(answer["result"]["decision"], "reject")
+        self.assertEqual(answer["result"]["reason"], "does-not-cover-film")
+        self.assertIsNone(answer["apply"])
+        self.assertEqual(self.heard_calls, [])
+
+    def test_five_one_is_heard_from_its_centre_and_kept_apart(self):
+        def probed(channels, layout):
+            track = SimpleNamespace(channels=channels, channel_layout=layout)
+            return SimpleNamespace(container=SimpleNamespace(duration_seconds=None, size_bytes=None), audio=(track,))
+
+        sub = srt(invert(self.film.reference, lambda v: v - 4.2))
+        loaded = self.prepared(sub, info=probed(6, "5.1(side)"))
+        self.assertEqual(self.sync(loaded["key"])["result"]["decision"], "apply")
+        self.assertTrue(self.heard_centre and all(self.heard_centre))
+        centre = len(self.heard_calls)
+
+        # The same film probed as stereo: nothing heard from the centre is
+        # served to it, and it is not heard from a centre it does not have.
+        self.core.subtitles.store.keep_result = lambda *_: None
+        self.core.subtitles.store.result = lambda *_: None
+        loaded = self.prepared(sub, session="e" * 32, info=probed(2, "stereo"))
+        self.sync(loaded["key"], session="e" * 32)
+        self.assertGreater(len(self.heard_calls), centre)
+        self.assertFalse(any(self.heard_centre[centre:]))
+
     def test_a_torrent_is_only_listened_to_behind_the_film(self):
         sub = invert(self.film.reference, lambda v: v - 4.2)
         loaded = self.prepared(srt(sub), source=f"{self.origin}/{'c' * 40}/0")
@@ -406,3 +440,25 @@ class LoadAndSync(Harness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Listening(unittest.TestCase):
+    def test_dialogue_is_taken_from_the_centre_when_there_is_one(self):
+        self.assertTrue(has_centre(6, "5.1"))
+        self.assertTrue(has_centre(8, "7.1"))
+        self.assertTrue(has_centre(6, None))
+        self.assertFalse(has_centre(2, "stereo"))
+        self.assertFalse(has_centre(4, "quad"))
+        self.assertFalse(has_centre(None, None))
+
+    def test_the_argument_vector(self):
+        centre = ffmpeg_argv("https://x/f.mkv", 600.0, 30.0, ListenConfig(), None, centre=True)
+        self.assertNotIn("-ac", centre)
+        self.assertEqual(centre[centre.index("-af") + 1], "pan=mono|c0=FC,highpass=f=200,lowpass=f=3400")
+        mixed = ffmpeg_argv("https://x/f.mkv", 600.0, 30.0, ListenConfig(), None)
+        self.assertEqual(mixed[mixed.index("-ac") + 1], "1")
+        self.assertEqual(mixed[mixed.index("-af") + 1], "highpass=f=200,lowpass=f=3400")
+        for argv in (centre, mixed):
+            for flag, value in (("-ss", "600.000"), ("-t", "30.000"), ("-ar", "8000"), ("-f", "s16le"), ("-threads", "1")):
+                self.assertEqual(argv[argv.index(flag) + 1], value)
+            self.assertTrue({"-vn", "-sn", "-dn"} <= set(argv))

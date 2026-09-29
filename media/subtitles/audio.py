@@ -1,9 +1,11 @@
 """When somebody is speaking in one stretch of a film.
 
 One ffmpeg per window: seek, decode the audio of `length` seconds, fold it to
-8 kHz mono in the speech band, and hand back 16-bit samples. The detection
-itself is energy with an adaptive floor and hysteresis -- the same family as
-auditok, which ffsubsync falls back to -- in plain Python over 20 ms frames.
+8 kHz mono in the speech band -- from the centre channel alone when the track
+has one, which is where a film's dialogue is mixed -- and hand back 16-bit
+samples. The detection itself is energy with an adaptive floor and
+hysteresis -- the same family as auditok, which ffsubsync falls back to -- in
+plain Python over 20 ms frames.
 
 It is deliberately not a neural detector and not speech recognition. It has
 to run beside a 4K film on the same board, and what the sync engine needs is
@@ -37,6 +39,29 @@ RATE = 8000
 FRAME = 160  # 20 ms
 MAX_SECONDS = 120.0
 
+#: Layouts with a front-centre channel beside others. A downmix of 5.1 lays
+#: the score and the effects of four more channels over the dialogue; the
+#: centre channel alone does not. Measured on *Avengers: Endgame* (DTS 5.1),
+#: the same 40 windows: downmixed, 1 of them agreed with the subtitle; from
+#: the centre, 7 did, on the line an independent transcript gives
+#: (scale 1.001, -6.6 s).
+CENTRE_LAYOUTS = frozenset({
+    "3.0", "4.0", "5.0", "5.0(side)", "5.1", "5.1(side)", "6.0", "6.1", "6.1(back)",
+    "7.0", "7.1", "7.1(wide)", "7.1(wide-side)", "hexagonal", "octagonal",
+})
+
+
+def has_centre(channels: int | None, layout: str | None) -> bool:
+    """Whether a track's dialogue can be heard from its centre channel.
+
+    Asked of the probe's answer, never guessed from the file name. Without a
+    layout, six and eight channels are ffmpeg's 5.1 and 7.1. A stereo track
+    has no centre: taking one would hear silence.
+    """
+    if layout:
+        return layout in CENTRE_LAYOUTS
+    return channels in (6, 8)
+
 
 @dataclass(frozen=True, slots=True)
 class ListenConfig:
@@ -53,7 +78,9 @@ class ListenError(RuntimeError):
     pass
 
 
-def ffmpeg_argv(url: str, start: float, length: float, config: ListenConfig, audio_index: int | None) -> list[str]:
+def ffmpeg_argv(
+    url: str, start: float, length: float, config: ListenConfig, audio_index: int | None, centre: bool = False
+) -> list[str]:
     argv = [config.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1"]
     if url.startswith(("http://", "https://")):
         argv += ["-user_agent", config.user_agent, "-rw_timeout", "20000000"]
@@ -63,8 +90,8 @@ def ffmpeg_argv(url: str, start: float, length: float, config: ListenConfig, aud
         "-t", f"{min(length, MAX_SECONDS):.3f}",
         "-map", f"0:a:{audio_index}" if audio_index is not None else "0:a:0?",
         "-vn", "-sn", "-dn",
-        "-ac", "1",
-        "-af", "highpass=f=200,lowpass=f=3400",
+        *(["-af", "pan=mono|c0=FC,highpass=f=200,lowpass=f=3400"] if centre
+          else ["-ac", "1", "-af", "highpass=f=200,lowpass=f=3400"]),
         "-ar", str(RATE),
         "-f", "s16le",
         "-",
@@ -79,6 +106,7 @@ def listen(
     *,
     config: ListenConfig | None = None,
     audio_index: int | None = None,
+    centre: bool = False,
     cancelled: Callable[[], bool] = lambda: False,
 ) -> tuple[Window, int]:
     """The speech in [start, start + length), and how many bytes were read.
@@ -87,7 +115,7 @@ def listen(
     how much of the container it read -- and is only used for the log.
     """
     config = config or ListenConfig()
-    argv = ffmpeg_argv(url, start, length, config, audio_index)
+    argv = ffmpeg_argv(url, start, length, config, audio_index, centre)
     try:
         process = subprocess.Popen(
             argv,

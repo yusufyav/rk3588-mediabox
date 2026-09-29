@@ -443,8 +443,17 @@ impl Subtitles {
                 self.try_external(number, next).await;
             } else if automatic {
                 // Every one tried was rejected: the best-ranked stays on, as
-                // it came, rather than none at all.
-                let first = self.with_film(number, |film| film.tried.first().cloned()).flatten();
+                // it came, rather than none at all -- the best-ranked of the
+                // film's own, that is. A trailer's two minutes of lines were
+                // ranked first once and stayed on for a three-hour film.
+                let first = self
+                    .with_film(number, |film| {
+                        film.tried
+                            .iter()
+                            .find(|tried| !not_the_films(film.timing.get(tried.as_str())))
+                            .cloned()
+                    })
+                    .flatten();
                 if let Some(first) = first.filter(|first| first != id) {
                     let manual = self.with_film(number, |film| film.manual).unwrap_or(true);
                     if !manual {
@@ -738,6 +747,12 @@ fn next_candidate(candidates: &[Candidate], tried: &[String], current: &str) -> 
         .take(ATTEMPTS.saturating_sub(tried.len()))
         .map(|c| c.id.clone())
         .next()
+}
+
+/// Whether the worker said this subtitle is some other video's (it ends long
+/// before the film does).
+fn not_the_films(timing: Option<&Timing>) -> bool {
+    timing.and_then(|timing| timing.reason.as_deref()) == Some("does-not-cover-film")
 }
 
 fn timing_from(job: &Value, state: &str) -> Timing {
@@ -1095,6 +1110,8 @@ mod flows {
         apply: Value,
         /// Polls answered "running" before "done".
         polls_before_done: usize,
+        /// The candidate whose subtitle ends long before the film.
+        misfit: Option<&'static str>,
     }
 
     async fn serve_worker(listener: TcpListener, worker: Worker, seen: Arc<StdMutex<Vec<String>>>) {
@@ -1134,17 +1151,25 @@ mod flows {
                     let id = candidate["candidate"].as_str().unwrap().trim_start_matches("ext:");
                     json!({"key": format!("{id:0>32}"), "url": format!("http://127.0.0.1:8790/media/subtitles/file/{id}.srt"), "format": "srt"})
                 } else if line.starts_with("POST /media/subtitles/sync") {
-                    json!({"job": "j1", "state": "running"})
+                    let request: Value = serde_json::from_str(&body).unwrap();
+                    json!({"job": request["key"], "state": "running"})
                 } else if line.starts_with("GET /media/subtitles/sync/") {
+                    let path = line.split_whitespace().nth(1).unwrap().split('?').next().unwrap();
+                    let job = path.rsplit('/').next().unwrap().to_owned();
+                    let reason = match worker.misfit {
+                        Some(misfit) if job.ends_with(misfit) => "does-not-cover-film",
+                        _ => "unexplained-region",
+                    };
                     let mut count = polls.lock().unwrap();
                     *count += 1;
                     if *count <= worker.polls_before_done {
-                        json!({"job": "j1", "state": "running"})
+                        json!({"job": job, "state": "running"})
                     } else {
                         let decision = if worker.apply.is_null() { "reject" } else { "apply" };
-                        json!({"job": "j1", "state": "done", "apply": worker.apply,
+                        json!({"job": job, "state": "done", "apply": worker.apply,
                                "result": {"model": if worker.apply["kind"] == "file" {"piecewise"} else {"offset"},
-                                          "decision": decision, "offset": 1.82, "scale": 1.0, "confidence": 0.97}})
+                                          "decision": decision, "offset": 1.82, "scale": 1.0, "confidence": 0.97,
+                                          "reason": if worker.apply.is_null() { Some(reason) } else { None }}})
                     }
                 } else {
                     json!({})
@@ -1227,7 +1252,7 @@ mod flows {
 
     #[tokio::test]
     async fn an_addon_subtitle_reaches_the_player_and_is_timed() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 0 }, turkish()).await;
+        let rig = rig(Worker { apply: properties(), polls_before_done: 0, misfit: None }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the Turkish subtitle is on", || {
@@ -1257,7 +1282,7 @@ mod flows {
     async fn the_viewers_choice_is_not_overwritten_by_a_late_answer() {
         // The worker takes a few polls to answer; meanwhile the viewer picks
         // the file's English track.
-        let rig = rig(Worker { apply: properties(), polls_before_done: 2 }, turkish()).await;
+        let rig = rig(Worker { apply: properties(), polls_before_done: 2, misfit: None }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the automatic choice is on", || mpv.lock().unwrap().sid == Some(3)).await;
@@ -1273,7 +1298,7 @@ mod flows {
 
     #[tokio::test]
     async fn a_delay_set_by_hand_is_kept_until_auto_sync_is_asked_for() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 1 }, turkish()).await;
+        let rig = rig(Worker { apply: properties(), polls_before_done: 1, misfit: None }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the automatic choice is on", || mpv.lock().unwrap().sid == Some(3)).await;
@@ -1290,7 +1315,7 @@ mod flows {
     #[tokio::test]
     async fn a_different_cut_swaps_in_the_corrected_file_and_removes_the_original() {
         let corrected = json!({"kind": "file", "key": "c".repeat(32), "url": "http://127.0.0.1:8790/media/subtitles/file/corrected.srt"});
-        let rig = rig(Worker { apply: corrected, polls_before_done: 0 }, turkish()).await;
+        let rig = rig(Worker { apply: corrected, polls_before_done: 0, misfit: None }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the corrected file is on and the original gone", || {
@@ -1307,7 +1332,7 @@ mod flows {
 
     #[tokio::test]
     async fn a_rejected_automatic_choice_moves_to_the_next_of_its_language() {
-        let rig = rig(Worker { apply: Value::Null, polls_before_done: 0 }, turkish()).await;
+        let rig = rig(Worker { apply: Value::Null, polls_before_done: 0, misfit: None }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let seen = Arc::clone(&rig.seen);
         until("the second Turkish candidate is loaded", || {
@@ -1319,8 +1344,34 @@ mod flows {
     }
 
     #[tokio::test]
+    async fn a_subtitle_that_is_not_the_films_is_not_the_one_left_on() {
+        // The first Turkish one is a trailer's; the second is the film's but
+        // is not timed either. The film's stays on, untimed.
+        let rig = rig(Worker { apply: Value::Null, polls_before_done: 0, misfit: Some("tr1") }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let subtitles = Arc::clone(&rig.subtitles);
+        let mut settled = false;
+        for _ in 0..100 {
+            let tracks = subtitles.player.tracks().await;
+            let list = subtitles.unified(&tracks);
+            if list[3]["sync"]["state"] == "rejected" {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(settled, "the second candidate was never answered");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let tracks = rig.subtitles.player.tracks().await;
+        let list = rig.subtitles.unified(&tracks);
+        assert_eq!(list[2]["sync"]["reason"], "does-not-cover-film");
+        assert_eq!(list[3]["selected"], true, "{list:?}");
+        assert_eq!(rig.mpv.lock().unwrap().sid, Some(4));
+    }
+
+    #[tokio::test]
     async fn the_preference_set_during_a_film_is_kept_and_put_on() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 0 }, Preferences::default()).await;
+        let rig = rig(Worker { apply: properties(), polls_before_done: 0, misfit: None }, Preferences::default()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let seen = Arc::clone(&rig.seen);
         until("the candidates are known", || {
@@ -1349,7 +1400,7 @@ mod flows {
 
     #[tokio::test]
     async fn choosing_off_and_an_unloaded_external() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 0 }, Preferences::default()).await;
+        let rig = rig(Worker { apply: properties(), polls_before_done: 0, misfit: None }, Preferences::default()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         tokio::time::sleep(Duration::from_millis(300)).await;
         // Nobody chose before: nothing was put on.

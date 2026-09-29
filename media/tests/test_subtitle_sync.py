@@ -171,6 +171,19 @@ class WrongSubtitle(unittest.TestCase):
         self.assertEqual(result.decision, "reject")
         self.assertEqual(result.reason, "too-few-cues")
 
+    def test_a_trailers_subtitle_is_not_the_films(self):
+        # Measured: two of the three Turkish subtitles offered for a three
+        # hour film were a trailer's, ending at 2 min 19 s.
+        f = film(1)
+        trailer = [cue for cue in f.reference if cue[1] <= 0.1 * f.duration]
+        self.assertGreater(len(trailer), 2 * Params().min_cues_in_window)
+        windows = listen(f.heard, plan_windows(f.duration, count=16, length=30))
+        result = align(trailer, windows, duration=f.duration)
+        self.assertEqual(result.decision, "reject")
+        self.assertEqual(result.reason, "does-not-cover-film")
+        # The whole subtitle is not refused on the same film.
+        self.assertNotEqual(align(list(f.reference), windows, duration=f.duration).reason, "does-not-cover-film")
+
     def test_no_evidence_is_not_a_correction(self):
         f = film(1)
         silent = [Window(a, b, ()) for a, b in plan_windows(f.duration, count=16, length=30)]

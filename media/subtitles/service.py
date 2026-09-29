@@ -33,7 +33,7 @@ from ..http import request
 from ..proxy.security import SourcePolicy, validate_source_url
 from ..stremio.models import Stream, Subtitle, SubtitleSource
 from . import sync as engine
-from .audio import ListenConfig, ListenError, listen
+from .audio import ListenConfig, ListenError, has_centre, listen
 from .formats import SubtitleFormatError, parse
 from .runner import align_isolated
 from .languages import canonical
@@ -76,6 +76,9 @@ class VideoContext:
     candidates: dict[str, Subtitle] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
     loaded: dict[str, str] = field(default_factory=dict)
+    #: (channels, layout) of each audio track, in the order `0:a:N` counts
+    #: them; from the probe the session was created with.
+    audio: tuple[tuple[int | None, str | None], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -180,6 +183,10 @@ class SubtitleService:
             kind=kind,
             duration=getattr(container, "duration_seconds", None),
             size=getattr(container, "size_bytes", None),
+            audio=tuple(
+                (getattr(track, "channels", None), getattr(track, "channel_layout", None))
+                for track in getattr(info, "audio", ()) or ()
+            ),
         )
         if isinstance(stream, dict):
             from ..stremio.addons import parse_stream
@@ -454,6 +461,17 @@ class SubtitleService:
         duration = context.duration or (max(end for _, end in cues) + 60.0)
         seekable = context.kind != "torrent"
 
+        if context.duration and not engine.covers(cues, context.duration):
+            # Somebody else's subtitle -- a trailer's, most often. Said at
+            # once, so the next candidate is tried now and not after every
+            # window has been heard for nothing.
+            job.result = engine.SyncResult(
+                "rejected", "reject", 0.0, reason="does-not-cover-film"
+            ).as_dict()
+            job.state = "done"
+            self._log(job, context, "miss")
+            return
+
         most = 40
         if context.kind == "http":
             if context.size and context.duration:
@@ -467,7 +485,11 @@ class SubtitleService:
                 self._log(job, context, "miss")
                 return
 
-        heard = self.store.speech(context.identity)
+        track = audio_index or 0
+        centre = track < len(context.audio) and has_centre(*context.audio[track])
+        # Heard from the centre is not heard from a downmix: kept apart.
+        evidence = "centre" if centre else ""
+        heard = self.store.speech(context.identity, evidence)
         result: engine.SyncResult | None = self._align(cues, heard, duration) if heard else None
         with self._analysis:
             while not job.cancel.is_set():
@@ -496,6 +518,7 @@ class SubtitleService:
                             end - start,
                             config=self.listen_config,
                             audio_index=audio_index,
+                            centre=centre,
                             cancelled=job.cancel.is_set,
                         )
                     except ListenError as exc:
@@ -504,7 +527,7 @@ class SubtitleService:
                         window = engine.Window(start, end, ())
                     heard.append(window)
                     job.heard = len(heard)
-                self.store.keep_speech(context.identity, heard)
+                self.store.keep_speech(context.identity, heard, evidence)
                 result = self._align(cues, heard, duration)
         if job.cancel.is_set():
             job.state = "cancelled"
