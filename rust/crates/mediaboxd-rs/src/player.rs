@@ -152,6 +152,84 @@ impl PlayerManager {
         Some(mediabox_core::StreamAudio::from_mpv(codec, params.as_ref(), out.as_ref(), encoding))
     }
 
+    /// One mpv command, and whether it succeeded.
+    pub async fn command(&self, args: Value) -> bool {
+        self.ask(json!({"command": args, "request_id": 40}))
+            .await
+            .is_some_and(|answer| answer.get("error").and_then(Value::as_str) == Some("success"))
+    }
+
+    /// What the film is made of, as mpv lists it.
+    pub async fn tracks(&self) -> Vec<Value> {
+        self.property("track-list")
+            .await
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+    }
+
+    /// Add a subtitle from `url` without selecting it, and answer the track
+    /// number mpv gave it.
+    ///
+    /// `url` is always the worker's loopback address: this player's ffmpeg
+    /// has no TLS. mpv loads the file before it answers, so this waits longer
+    /// than an ordinary request -- a large ASS file is parsed in the reply.
+    pub async fn sub_add(&self, url: &str, title: &str, language: Option<&str>) -> Option<i64> {
+        let mut args = vec![json!("sub-add"), json!(url), json!("auto"), json!(title)];
+        if let Some(language) = language {
+            args.push(json!(language));
+        }
+        let answer = self
+            .ask_within(
+                json!({"command": args, "request_id": 41}),
+                std::time::Duration::from_secs(10),
+            )
+            .await?;
+        if answer.get("error").and_then(Value::as_str) != Some("success") {
+            return None;
+        }
+        self.tracks()
+            .await
+            .iter()
+            .filter(|track| {
+                track.get("type").and_then(Value::as_str) == Some("sub")
+                    && track.get("external-filename").and_then(Value::as_str) == Some(url)
+            })
+            .filter_map(|track| track.get("id").and_then(Value::as_i64))
+            .max()
+    }
+
+    /// Take a subtitle track out of the film.
+    pub async fn sub_remove(&self, id: i64) -> bool {
+        self.command(json!(["sub-remove", id])).await
+    }
+
+    /// Which subtitle track is on; None turns them off.
+    pub async fn select_subtitle(&self, id: Option<i64>) -> bool {
+        let value = id.map(|id| json!(id)).unwrap_or_else(|| json!("no"));
+        self.command(json!(["set_property", "sid", value])).await
+    }
+
+    /// Where the subtitle's lines go: `video = speed * subtitle + delay`,
+    /// which is exactly how mpv applies `sub-speed` and `sub-delay`
+    /// (measured with mpv 0.41: a line at 2-4 s with speed 2 and delay 1
+    /// shows from 5 s to 9 s).
+    pub async fn subtitle_timing(&self, delay: f64, speed: f64) -> bool {
+        let delay = self
+            .command(json!(["set_property", "sub-delay", delay.clamp(-600.0, 600.0)]))
+            .await;
+        let speed = self
+            .command(json!(["set_property", "sub-speed", speed.clamp(0.5, 2.0)]))
+            .await;
+        delay && speed
+    }
+
+    /// The subtitle line on screen now, plain.
+    pub async fn subtitle_text(&self) -> Option<String> {
+        self.property("sub-text")
+            .await
+            .and_then(|value| value.as_str().map(str::to_owned))
+    }
+
     /// Whether a player answers on the socket.
     pub async fn answers(&self) -> bool {
         self.ask(json!({"command": ["get_property", "pid"], "request_id": 22}))
@@ -365,6 +443,11 @@ impl PlayerManager {
             TransportAction::Audio { id } => {
                 json!({"command": ["set_property", "aid", id]})
             }
+            // Chosen by meaning, and put back on time: both are the subtitle
+            // manager's (`crate::subtitles`), which knows what an id means.
+            TransportAction::SubtitleChoose { .. } | TransportAction::SubtitleAutoSync => {
+                return false;
+            }
             TransportAction::SubtitleDelay { seconds } => {
                 json!({"command": ["set_property", "sub-delay", seconds.clamp(-60.0, 60.0)]})
             }
@@ -413,6 +496,10 @@ impl PlayerManager {
 
     /// One request on mpv's IPC socket, and its answer.
     async fn ask(&self, request: Value) -> Option<Value> {
+        self.ask_within(request, std::time::Duration::from_millis(800)).await
+    }
+
+    async fn ask_within(&self, request: Value, patience: std::time::Duration) -> Option<Value> {
         if !Path::new(&self.socket).exists() {
             return None;
         }
@@ -434,10 +521,7 @@ impl PlayerManager {
         // before the answer; the reply carries the request id back.
         for _ in 0..16 {
             buffer.clear();
-            let read = tokio::time::timeout(
-                std::time::Duration::from_millis(800),
-                reader.read_line(&mut buffer),
-            )
+            let read = tokio::time::timeout(patience, reader.read_line(&mut buffer))
             .await
             .ok()?
             .ok()?;

@@ -15,6 +15,7 @@ from .models import (
     Stream,
     StreamKind,
     Subtitle,
+    SubtitleSource,
     Video,
 )
 from .server import StreamingServer, TorrentStats
@@ -35,6 +36,7 @@ __all__ = [
     "StreamingServer",
     "StremioAPI",
     "Subtitle",
+    "SubtitleSource",
     "TorrentStats",
     "Video",
     "parse_manifest",

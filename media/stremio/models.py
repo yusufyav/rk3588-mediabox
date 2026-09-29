@@ -239,6 +239,10 @@ class Stream:
     external_url: str | None = None
     announce: tuple[str, ...] = ()
     behavior_hints: dict[str, Any] = field(default_factory=dict)
+    #: Subtitles the addon attached to this very stream. Stremio's protocol
+    #: allows them and some addons send them; they are the best candidates
+    #: there are, because they were made for this file.
+    subtitles: tuple["Subtitle", ...] = ()
 
     @property
     def identity(self) -> str:
@@ -274,6 +278,9 @@ class Stream:
             "externalUrl": self.external_url,
             "behaviorHints": dict(self.behavior_hints),
             "playable": self.is_playable,
+            # The wire shape, so a descriptor a client hands back to be played
+            # still carries them.
+            "subtitles": [subtitle.as_wire() for subtitle in self.subtitles],
         }
 
 
@@ -298,15 +305,53 @@ class ResolvedStream:
         }
 
 
+class SubtitleSource(str, Enum):
+    """Where an external subtitle came from.
+
+    Kept apart because they are not equally likely to fit: one the stream
+    itself carries was made for that exact file, one a subtitle addon found
+    was made for the title and maybe for another release of it.
+    """
+
+    #: `stream.subtitles` on the stream descriptor.
+    STREAM = "stream_external"
+    #: A subtitle addon's `/subtitles/` answer.
+    ADDON = "addon_external"
+    #: A file on the appliance.
+    LOCAL = "local"
+
+
 @dataclass(frozen=True, slots=True)
 class Subtitle:
     id: str
     url: str
     language: str | None = None
     addon_id: str | None = None
+    source: SubtitleSource = SubtitleSource.ADDON
+    #: What the addon calls it, when it calls it anything: a release name, a
+    #: provider, "Forced".
+    label: str | None = None
+    #: The addon said this was matched to the file by its hash. Only ever what
+    #: the addon said; never inferred here.
+    hash_match: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "url": self.url, "language": self.language, "addonId": self.addon_id}
+        return {
+            "id": self.id,
+            "url": self.url,
+            "language": self.language,
+            "addonId": self.addon_id,
+            "source": self.source.value,
+            "label": self.label,
+            "hashMatch": self.hash_match,
+        }
+
+    def as_wire(self) -> dict[str, Any]:
+        """The Stremio shape, for putting back on a stream descriptor."""
+        wire: dict[str, Any] = {"id": self.id, "url": self.url, "lang": self.language}
+        if self.label:
+            wire["label"] = self.label
+        return wire
 
 
 @dataclass(frozen=True, slots=True)

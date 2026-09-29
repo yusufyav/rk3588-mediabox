@@ -14,6 +14,11 @@ addon transport URL unless it asks for one, and above all never parses a page.
     GET    /media/meta/{type}/{id}           one item
     GET    /media/streams/{type}/{id}        ways to watch it
     GET    /media/subtitles/{type}/{id}      subtitle tracks
+    POST   /media/subtitles/prepare          a playing film's external subtitles, ranked
+    POST   /media/subtitles/load             one of them, fetched and kept
+    POST   /media/subtitles/sync             where its lines belong (background)
+    GET    /media/subtitles/sync/{job}       how that is going
+    GET    /media/subtitles/file/{key}.{ext} a kept subtitle, for the player
     POST   /media/resolve                    stream descriptor -> playable URL
     POST   /media/inspect                    URL -> MediaInfo
     POST   /media/plan                       URL -> MediaInfo + decision + preview
@@ -53,6 +58,7 @@ from .policy import (
 )
 from .proxy import FFmpegConfig, SessionManager, SourcePolicy, validate_source_url
 from .stremio import HeadlessStremio, ResolvedStream
+from .subtitles.service import DEFAULT_MAX_BYTES, SubtitleService
 
 
 LOG = logging.getLogger(__name__)
@@ -104,6 +110,10 @@ class MediaCoreConfig:
     #: Operator-declared library manifest. Absent means this appliance has
     #: no library of its own, which is a normal configuration.
     library_path: str | None = None
+    #: Where fetched subtitles, corrected timelines and sync answers are kept.
+    #: Unset means a private temporary directory.
+    subtitle_cache_dir: str | None = None
+    subtitle_sync_max_bytes: int = DEFAULT_MAX_BYTES
 
 
 class MediaCore:
@@ -127,6 +137,22 @@ class MediaCore:
             idle_timeout_seconds=self.config.idle_timeout_seconds,
             base_url=self.config.base_url,
         )
+        self.subtitles = SubtitleService(
+            self.stremio,
+            self.source_policy,
+            root=self.config.subtitle_cache_dir,
+            base_url=self.config.loopback_base_url or self.config.base_url,
+            streaming_server_url=self.config.streaming_server_url,
+            ffmpeg=self.config.ffmpeg.binary,
+            max_bytes=self.config.subtitle_sync_max_bytes,
+            alive=self._session_alive,
+        )
+
+    def _session_alive(self, session_id: str) -> bool:
+        try:
+            return self.sessions.get(session_id).state.value in ("created", "running")
+        except MediaError:
+            return False
 
     # ------------------------------------------------------------------ helpers
 
@@ -134,6 +160,7 @@ class MediaCore:
         return path == MOUNT or path.startswith(MOUNT + "/")
 
     def shutdown(self) -> None:
+        self.subtitles.shutdown()
         self.sessions.shutdown()
 
     def inspect_url(self, url: str) -> MediaInfo:
@@ -336,6 +363,22 @@ class MediaCore:
                 },
             )
 
+        if head == "subtitles" and len(parts) == 3 and parts[1] == "file":
+            body, extension = self.subtitles.file(parts[2])
+            return Response(
+                200,
+                [
+                    ("Content-Type", _SUBTITLE_TYPES.get(extension, "text/plain") + "; charset=utf-8"),
+                    ("Content-Length", str(len(body))),
+                    ("X-Content-Type-Options", "nosniff"),
+                    ("Cache-Control", "no-store"),
+                ],
+                body=body,
+            )
+
+        if head == "subtitles" and len(parts) == 3 and parts[1] == "sync":
+            return json_response(200, self.subtitles.job(parts[2]))
+
         if head == "subtitles" and len(parts) == 3:
             extra = {key: values[0] for key, values in params.items() if key != "videoId" and values}
             subtitles = self.stremio.subtitles(
@@ -481,16 +524,27 @@ class MediaCore:
         if head == "session" and len(parts) == 1:
             return json_response(201, self._create_session(body))
 
+        if head == "subtitles" and len(parts) == 2 and parts[1] == "prepare":
+            return json_response(200, self.subtitles.prepare(body))
+
+        if head == "subtitles" and len(parts) == 2 and parts[1] == "load":
+            return json_response(200, self.subtitles.load(body))
+
+        if head == "subtitles" and len(parts) == 2 and parts[1] == "sync":
+            return json_response(202, self.subtitles.sync(body))
+
         if head == "session" and len(parts) == 3 and parts[2] == "release":
             return json_response(200, self.sessions.release(parts[1]))
 
         if head == "session" and len(parts) == 3 and parts[2] == "stop":
+            self.subtitles.forget(parts[1])
             return json_response(200, self.sessions.stop(parts[1], "requested"))
 
         raise NotFound("no such media-core endpoint")
 
     def _delete(self, parts: list[str]) -> Response:
         if len(parts) == 2 and parts[0] == "session":
+            self.subtitles.forget(parts[1])
             return json_response(200, self.sessions.stop(parts[1], "requested"))
         raise NotFound("no such media-core endpoint")
 
@@ -590,6 +644,10 @@ class MediaCore:
         payload["playback"] = decision.as_dict()
         payload["preview"] = preview.as_dict()
         payload["handoff"] = self._handoff_payload(session, decision, preview, info)
+        # What the subtitle system will need to know about this film, noted
+        # now while the source and its probe are at hand.
+        stream = body.get("stream") if isinstance(body.get("stream"), dict) else None
+        self.subtitles.register(session.session_id, url, info, stream)
         return payload
 
     def _handoff_payload(
@@ -623,6 +681,14 @@ class MediaCore:
                 for reason in (*decision.reasons, *decision.video.reasons, *decision.audio.reasons)
             ],
         }
+
+
+_SUBTITLE_TYPES = {
+    "srt": "application/x-subrip",
+    "vtt": "text/vtt",
+    "ass": "text/x-ssa",
+    "ssa": "text/x-ssa",
+}
 
 
 def _one(params: dict[str, list[str]], key: str) -> str | None:

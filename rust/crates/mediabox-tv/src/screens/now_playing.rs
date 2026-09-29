@@ -156,6 +156,54 @@ pub struct Track {
     pub label: String,
     pub detail: String,
     pub selected: bool,
+    /// The control plane's id for a subtitle -- `emb:3`, `ext:…` -- which is
+    /// what a choice is sent as. Empty for audio, and for a control plane
+    /// that sends only the player's own list.
+    pub key: String,
+    /// How this subtitle was timed, in the words the panel shows; empty when
+    /// there is nothing worth saying.
+    pub note: String,
+    /// The subtitle's timing has just been put right: said once, in the pill.
+    pub fresh: bool,
+    /// Canonical language code (`tr`, `en`), empty when the track has none.
+    pub language: String,
+}
+
+/// The languages "Tercih edilen altyazı dili" offers, in order, after
+/// "Kapalı".
+pub const PREFERRED_LANGUAGES: [&str; 17] = [
+    "tr", "en", "de", "fr", "es", "it", "pt", "pt-br", "ru", "ar", "nl", "pl", "sv", "el", "ja", "ko", "zh",
+];
+
+/// How a preference reads on the settings panel.
+pub fn preference_name(language: Option<&str>) -> String {
+    language.map(language_name).unwrap_or_else(|| "Kapalı".into())
+}
+
+/// The preference `step` places along "Kapalı", then `PREFERRED_LANGUAGES`,
+/// round again.
+pub fn next_preference(current: Option<&str>, step: i32) -> Option<String> {
+    let at = current
+        .and_then(|code| PREFERRED_LANGUAGES.iter().position(|l| *l == code))
+        .map(|index| index as i32 + 1)
+        .unwrap_or(0);
+    let count = PREFERRED_LANGUAGES.len() as i32 + 1;
+    let next = (at + step).rem_euclid(count);
+    (next > 0).then(|| PREFERRED_LANGUAGES[next as usize - 1].to_string())
+}
+
+/// How many rows of a panel's column are drawn at once. The sheet has room
+/// for about eleven; a film with thirty subtitle languages scrolls.
+pub const MENU_VISIBLE: usize = 9;
+
+/// The first row drawn of a column of `total` with the remote on `focus`:
+/// the focus stays on screen, with a row of what is next below it while
+/// there is one.
+pub fn menu_window(total: usize, focus: usize) -> usize {
+    if total <= MENU_VISIBLE {
+        return 0;
+    }
+    (focus + 2).saturating_sub(MENU_VISIBLE).min(total - MENU_VISIBLE)
 }
 
 /// The speeds the reference offers, in its order.
@@ -202,6 +250,9 @@ pub struct NowPlaying {
     pub menu_track_focus: usize,
 
     pub subtitles: Vec<Track>,
+    /// The settings panel's "Tercih edilen altyazı dili", as the control
+    /// plane keeps it. None is "Kapalı".
+    pub subtitle_preference: Option<String>,
     pub audio: Vec<Track>,
     pub speed: f64,
     pub sub_delay: f64,
@@ -524,6 +575,21 @@ impl NowPlaying {
         (mode, name)
     }
 
+    /// How the subtitle that is on was timed, for the subtitle panel.
+    pub fn subtitle_note(&self) -> String {
+        self.subtitles
+            .iter()
+            .find(|track| track.selected)
+            .map(|track| track.note.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether a subtitle is on at all: the line on screen is only asked for
+    /// then.
+    pub fn subtitle_on(&self) -> bool {
+        self.subtitles.iter().any(|track| track.selected)
+    }
+
     /// Whether the pill under the picture has had its moment.
     pub fn pill_expired(&mut self) -> bool {
         if self
@@ -697,7 +763,32 @@ impl NowPlaying {
         self.audio_delay = number("audio_delay", 0.0);
 
         if let Some(tracks) = status.get("tracks").and_then(Value::as_array) {
-            self.subtitles = read_tracks(tracks, "sub");
+            // Carried and fetched subtitles, one list, when the control plane
+            // offers it; the player's own list otherwise.
+            let subtitles = match status.get("subtitles").and_then(Value::as_array) {
+                Some(unified) => read_subtitles(unified),
+                None => read_tracks(tracks, "sub"),
+            };
+            // A timing put on since the last answer is announced once.
+            let before: Vec<(String, String)> =
+                self.subtitles.iter().map(|t| (t.key.clone(), t.note.clone())).collect();
+            self.subtitles = subtitles;
+            for track in self.subtitles.iter_mut() {
+                track.fresh = track.selected
+                    && track.note.starts_with("Otomatik eşitleme ·")
+                    && !before.iter().any(|(key, note)| *key == track.key && *note == track.note);
+            }
+            if let Some(preferred) = status.get("subtitle_preference") {
+                self.subtitle_preference = preferred.as_str().map(str::to_owned);
+            }
+            // The preferred language leads the panel when the film has it.
+            if let Some(preferred) = self.subtitle_preference.clone() {
+                self.subtitles.sort_by_key(|track| track.language != preferred);
+            }
+            if let Some(fresh) = self.subtitles.iter().find(|t| t.fresh) {
+                self.pill = fresh.note.clone();
+                self.pill_until = Some(std::time::Instant::now() + PILL_LINGER * 2);
+            }
             self.audio = read_tracks(tracks, "audio");
         }
     }
@@ -811,6 +902,109 @@ pub fn timecode(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_title_that_only_repeats_the_language_is_not_shown() {
+        let mut now = NowPlaying::new();
+        let entry = |id: &str, language: &str, title: &str| serde_json::json!({
+            "id": id, "mpv_id": 1, "source": "embedded", "language": language, "title": title, "selected": false});
+        now.take_here(&serde_json::json!({"tracks": [], "subtitles": [
+            entry("emb:38", "tr", "T"), entry("emb:1", "en", "English"), entry("emb:10", "en", "English [SDH]"),
+            entry("emb:15", "fr", "French Canadian"), entry("emb:3", "bg", "Bulgarian")]}));
+        let details: Vec<&str> = now.subtitles.iter().map(|t| t.detail.as_str()).collect();
+        assert_eq!(details, ["Orjinal", "Orjinal", "Orjinal · English [SDH]", "Orjinal · French Canadian", "Orjinal"]);
+        assert_eq!(now.subtitles[4].label, "Български");
+    }
+
+
+    #[test]
+    fn the_preference_cycles_through_off_and_the_languages() {
+        assert_eq!(next_preference(None, 1).as_deref(), Some("tr"));
+        assert_eq!(next_preference(Some("tr"), 1).as_deref(), Some("en"));
+        assert_eq!(next_preference(Some("tr"), -1), None);
+        assert_eq!(next_preference(None, -1).as_deref(), Some("zh"));
+        assert_eq!(preference_name(None), "Kapalı");
+        assert_eq!(preference_name(Some("tr")), "Türkçe");
+    }
+
+    #[test]
+    fn a_long_panel_keeps_the_remote_on_screen() {
+        assert_eq!(menu_window(5, 4), 0);
+        assert_eq!(menu_window(30, 0), 0);
+        assert_eq!(menu_window(30, 7), 0);
+        assert_eq!(menu_window(30, 8), 1);
+        for focus in 0..30 {
+            let first = menu_window(30, focus);
+            assert!(focus >= first && focus < first + MENU_VISIBLE, "{focus}");
+        }
+        assert_eq!(menu_window(30, 29), 30 - MENU_VISIBLE);
+    }
+
+    #[test]
+    fn the_preferred_language_leads_the_subtitle_panel() {
+        let mut now = NowPlaying::new();
+        let entry = |id: &str, language: &str, selected: bool| serde_json::json!({
+            "id": id, "mpv_id": null, "source": "addon_external", "language": language, "selected": selected});
+        now.take_here(&serde_json::json!({"tracks": [], "subtitle_preference": "tr", "subtitles": [
+            entry("emb:1", "en", false), entry("ext:a", "de", false), entry("ext:b", "tr", true)]}));
+        assert!(now.open_menu(Menu::Subtitles));
+        assert_eq!(now.languages()[0], "Türkçe");
+        // Opened on it: "Etkisizleştirildi" is row 0, the preference row 1.
+        assert_eq!(now.menu_focus, 1);
+        // A film without it does not list it.
+        now.take_here(&serde_json::json!({"tracks": [], "subtitle_preference": "tr", "subtitles": [
+            entry("emb:1", "en", false)]}));
+        assert!(!now.languages().contains(&"Türkçe".to_string()));
+    }
+
+
+    #[test]
+    fn carried_and_fetched_subtitles_share_the_panel_by_language() {
+        let mut now = NowPlaying::new();
+        now.take_here(&serde_json::json!({
+            "position": 10.0, "duration": 100.0, "paused": false,
+            "tracks": [],
+            "subtitles": [
+                {"id": "emb:1", "mpv_id": 1, "source": "embedded", "language": "en", "title": "SDH", "selected": false, "forced": false},
+                {"id": "emb:2", "mpv_id": 2, "source": "embedded", "language": "tr", "title": null, "selected": false, "forced": true},
+                {"id": "ext:a", "mpv_id": 3, "source": "addon_external", "language": "tr", "title": "WEB-DL", "selected": true,
+                 "sync": {"state": "applied", "model": "offset", "offset": 1.82, "scale": 1.0, "confidence": 0.97}},
+                {"id": "ext:b", "mpv_id": null, "source": "stream_external", "language": "tr", "title": null, "selected": false, "sync": null},
+            ],
+        }));
+        assert_eq!(now.subtitles.len(), 4);
+        assert!(now.open_menu(Menu::Subtitles));
+        assert_eq!(now.languages(), vec!["English".to_string(), "Türkçe".to_string()]);
+        // Opened on the language in use; its column lists all three.
+        assert_eq!(now.menu_focus, 2);
+        let rows: Vec<String> = now.tracks_of_language().iter().map(|i| now.subtitles[*i].detail.clone()).collect();
+        assert_eq!(rows, ["Orjinal · Zorunlu", "Harici · WEB-DL", "Kaynakla gelen"]);
+        assert_eq!(now.subtitles[2].key, "ext:a");
+        assert_eq!(now.subtitle_note(), "Otomatik eşitleme · +1,82 sn · %97");
+        // Announced once, in the pill, and not again for the same result.
+        assert_eq!(now.pill, "Otomatik eşitleme · +1,82 sn · %97");
+        now.pill.clear();
+        now.take_here(&serde_json::json!({"tracks": [], "subtitles": [
+            {"id": "ext:a", "mpv_id": 3, "source": "addon_external", "language": "tr", "selected": true,
+             "sync": {"state": "applied", "model": "offset", "offset": 1.82, "scale": 1.0, "confidence": 0.97}}]}));
+        assert_eq!(now.pill, "");
+    }
+
+    #[test]
+    fn a_different_cut_is_named_and_an_analysis_is_not() {
+        let note = |sync: serde_json::Value| sync_note(Some(&sync));
+        assert_eq!(
+            note(serde_json::json!({"state": "applied", "model": "piecewise", "offset": 0.0, "confidence": 0.9})),
+            "Otomatik eşitleme · sürüm zamanlaması düzeltildi"
+        );
+        assert_eq!(note(serde_json::json!({"state": "analysing"})), "");
+        assert_eq!(note(serde_json::json!({"state": "rejected", "model": "rejected"})), "");
+        assert_eq!(
+            note(serde_json::json!({"state": "applied", "model": "offset", "offset": -0.5, "confidence": 0.804})),
+            "Otomatik eşitleme · -0,50 sn · %80"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -1066,9 +1260,159 @@ fn read_tracks(tracks: &[Value], kind: &str) -> Vec<Track> {
                 .get("selected")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            ..Track::default()
         });
     }
     out
+}
+
+/// The control plane's one list of subtitles: carried, fetched with the
+/// stream, fetched by an addon. Grouped by language like the player's own,
+/// with where each came from beside it.
+fn read_subtitles(list: &[Value]) -> Vec<Track> {
+    list.iter()
+        .filter_map(|entry| {
+            let key = entry.get("id").and_then(Value::as_str)?.to_string();
+            let id = entry.get("mpv_id").and_then(Value::as_i64).unwrap_or(-1);
+            let code = entry
+                .get("language")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default()
+                .to_string();
+            let language = (!code.is_empty()).then(|| language_name(&code));
+            let title = entry
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| telling_title(value, &code))
+                .map(str::to_string);
+            let origin = match entry.get("source").and_then(Value::as_str) {
+                Some("embedded") => "Orjinal",
+                Some("stream_external") => "Kaynakla gelen",
+                Some("local") => "Yerel",
+                _ => "Harici",
+            };
+            let label = language
+                .clone()
+                .or_else(|| title.clone())
+                .unwrap_or_else(|| "Bilinmeyen dil".into());
+            let mut detail = match title.filter(|_| language.is_some()) {
+                Some(title) => format!("{origin} · {title}"),
+                None => origin.to_string(),
+            };
+            if entry.get("forced").and_then(Value::as_bool).unwrap_or(false) {
+                detail.push_str(" · Zorunlu");
+            }
+            // A picture subtitle has no text for this interface to draw.
+            if matches!(
+                entry.get("codec").and_then(Value::as_str),
+                Some("hdmv_pgs_subtitle" | "dvd_subtitle" | "dvb_subtitle" | "xsub")
+            ) {
+                detail.push_str(" · Resim (gösterilemez)");
+            }
+            Some(Track {
+                id,
+                label,
+                detail,
+                selected: entry.get("selected").and_then(Value::as_bool).unwrap_or(false),
+                key,
+                note: sync_note(entry.get("sync")),
+                fresh: false,
+                language: code,
+            })
+        })
+        .collect()
+}
+
+/// Whether a track's title says anything its language does not already.
+///
+/// Muxers write the language again ("Turkish", "Türkçe", "tur") or a stub of
+/// it -- a Ted Lasso release carries its Turkish track as "T". Beside the
+/// language that reads as a fault, so only titles that tell two tracks apart
+/// ("English [SDH]", "French Canadian", "Forced") are shown.
+fn telling_title(title: &str, code: &str) -> bool {
+    let lower = title.trim().to_lowercase();
+    if lower.chars().count() <= 2 {
+        return false;
+    }
+    if code.is_empty() {
+        return true;
+    }
+    let names = [
+        code.to_lowercase(),
+        language_name(code).to_lowercase(),
+        english_name(code).to_lowercase(),
+    ];
+    !names.iter().any(|name| *name == lower)
+}
+
+/// The English name of a language, which is what muxers most often write
+/// as a track's title.
+fn english_name(code: &str) -> &'static str {
+    match code {
+        "tr" => "turkish",
+        "en" => "english",
+        "de" => "german",
+        "fr" => "french",
+        "es" => "spanish",
+        "it" => "italian",
+        "pt" => "portuguese",
+        "pt-br" => "portuguese brazilian",
+        "ru" => "russian",
+        "ar" => "arabic",
+        "nl" => "dutch",
+        "pl" => "polish",
+        "sv" => "swedish",
+        "da" => "danish",
+        "no" => "norwegian",
+        "fi" => "finnish",
+        "el" => "greek",
+        "he" => "hebrew",
+        "hu" => "hungarian",
+        "cs" => "czech",
+        "ro" => "romanian",
+        "bg" => "bulgarian",
+        "uk" => "ukrainian",
+        "ja" => "japanese",
+        "ko" => "korean",
+        "zh" => "chinese",
+        "hi" => "hindi",
+        _ => "",
+    }
+}
+
+/// What the panel says about a subtitle's automatic timing. Only results a
+/// viewer can use: an analysis in progress or a subtitle that did not fit is
+/// the log's business, not the television's.
+fn sync_note(sync: Option<&Value>) -> String {
+    let Some(sync) = sync.filter(|value| !value.is_null()) else {
+        return String::new();
+    };
+    let state = sync.get("state").and_then(Value::as_str).unwrap_or_default();
+    let model = sync.get("model").and_then(Value::as_str).unwrap_or_default();
+    let offset = sync.get("offset").and_then(Value::as_f64).unwrap_or(0.0);
+    let confidence = sync.get("confidence").and_then(Value::as_f64).unwrap_or(0.0);
+    match state {
+        "applied" if model == "piecewise" => "Otomatik eşitleme · sürüm zamanlaması düzeltildi".into(),
+        "applied" if model == "linear" => format!(
+            "Otomatik eşitleme · {} sn · kare hızı düzeltildi · %{}",
+            signed_seconds(offset),
+            (confidence * 100.0).round() as i64
+        ),
+        "applied" => format!(
+            "Otomatik eşitleme · {} sn · %{}",
+            signed_seconds(offset),
+            (confidence * 100.0).round() as i64
+        ),
+        "ready" => "Otomatik eşitleme hazır · Tamam ile uygula".into(),
+        _ => String::new(),
+    }
+}
+
+fn signed_seconds(seconds: f64) -> String {
+    let text = format!("{:+.2}", seconds);
+    text.replace('.', ",")
 }
 
 /// The languages a film actually carries, in the interface's own language.
@@ -1082,6 +1426,7 @@ fn language_name(code: &str) -> String {
         "fre" | "fra" | "fr" => "Français",
         "ger" | "deu" | "de" => "Deutsch",
         "ita" | "it" => "Italiano",
+        "pob" | "pt-br" => "Português (Brasil)",
         "por" | "pt" => "Português",
         "rus" | "ru" => "Русский",
         "ara" | "ar" => "العربية",
@@ -1101,6 +1446,23 @@ fn language_name(code: &str) -> String {
         "hun" | "hu" => "Magyar",
         "rum" | "ron" | "ro" => "Română",
         "ukr" | "uk" => "Українська",
+        "bul" | "bg" => "Български",
+        "est" | "et" => "Eesti",
+        "lit" | "lt" => "Lietuvių",
+        "lav" | "lv" => "Latviešu",
+        "may" | "msa" | "ms" => "Bahasa Melayu",
+        "ind" | "id" => "Bahasa Indonesia",
+        "slo" | "slk" | "sk" => "Slovenčina",
+        "slv" | "sl" => "Slovenščina",
+        "hrv" | "hr" => "Hrvatski",
+        "srp" | "sr" => "Српски",
+        "tam" | "ta" => "தமிழ்",
+        "tel" | "te" => "తెలుగు",
+        "tha" | "th" => "ไทย",
+        "vie" | "vi" => "Tiếng Việt",
+        "per" | "fas" | "fa" => "فارسی",
+        "cat" | "ca" => "Català",
+        "ice" | "isl" | "is" => "Íslenska",
         other => return other.to_string(),
     };
     name.to_string()

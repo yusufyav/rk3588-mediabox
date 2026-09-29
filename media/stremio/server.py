@@ -197,6 +197,28 @@ class StreamingServer:
             else "this stream descriptor offers nothing playable"
         )
 
+    def opensub_hash(self, video_url: str) -> tuple[str, int] | None:
+        """The OpenSubtitles hash and size of a file the server is serving.
+
+        Asked of the server rather than computed here for a torrent: the hash
+        reads the file's last 64 KiB, which for a torrent is a piece the
+        engine has to fetch, and the server is the one that knows how to ask
+        for it without disturbing the pieces the film is playing from. This is
+        the endpoint the official clients use for the same reason.
+        """
+        url = f"{self.base_url}/opensubHash?videoUrl={quote(video_url, safe='')}"
+        try:
+            payload = get_json(url, timeout=self._timeout)
+        except UpstreamError:
+            return None
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            return None
+        digest, size = result.get("hash"), result.get("size")
+        if not isinstance(digest, str) or not isinstance(size, int) or isinstance(size, bool):
+            return None
+        return digest.lower(), size
+
     def probe_reachable(self, url: str, *, timeout: float | None = None) -> tuple[bool, int | None]:
         """One bounded range request, to see whether a resolved URL answers."""
         try:

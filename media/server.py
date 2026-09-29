@@ -121,6 +121,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="path to the appliance library manifest (JSON)",
     )
+    parser.add_argument(
+        "--subtitle-cache",
+        default=None,
+        help="directory for fetched and corrected subtitles (default: beside --state)",
+    )
+    parser.add_argument(
+        "--subtitle-sync-max-bytes",
+        type=int,
+        default=None,
+        help="the most one subtitle sync may download of an HTTP source",
+    )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--idle-timeout", type=float, default=45.0)
     parser.add_argument(
@@ -155,6 +166,13 @@ def main(argv: list[str] | None = None) -> int:
             idle_timeout_seconds=arguments.idle_timeout,
             torrent_network_status=arguments.torrent_network_status,
             library_path=arguments.library,
+            subtitle_cache_dir=arguments.subtitle_cache
+            or (os.path.join(os.path.dirname(arguments.state), "subtitles") if arguments.state else None),
+            **(
+                {"subtitle_sync_max_bytes": arguments.subtitle_sync_max_bytes}
+                if arguments.subtitle_sync_max_bytes
+                else {}
+            ),
         )
     )
 

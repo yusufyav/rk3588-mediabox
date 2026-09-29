@@ -284,6 +284,13 @@ export component MediaBoxWindow inherits Window {
     in property <string> np-menu-side-label;
     in property <string> np-menu-side-value;
     in property <string> np-pill;
+    /// The subtitle line on screen now, drawn here because the player draws
+    /// nothing of its own; and how the subtitle that is on was timed.
+    in property <string> np-caption;
+    in property <string> np-menu-note;
+    /// The panel's list goes on above or below what is drawn.
+    in property <bool> np-menu-above;
+    in property <bool> np-menu-below;
     in property <int> np-focus;
     /// Which row the remote is on while a film is playing: 0 the rule, 1 the
     /// words.
@@ -705,7 +712,11 @@ export component MediaBoxWindow inherits Window {
             menu-column: root.np-menu-column;
             menu-side-label: root.np-menu-side-label;
             menu-side-value: root.np-menu-side-value;
+            menu-note: root.np-menu-note;
+            menu-above: root.np-menu-above;
+            menu-below: root.np-menu-below;
             pill: root.np-pill;
+            caption: root.np-caption;
         }
 
         // Last, so it is over the film and over every sheet.

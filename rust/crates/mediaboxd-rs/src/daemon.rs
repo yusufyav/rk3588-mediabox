@@ -87,6 +87,8 @@ pub struct AppState {
     /// The interface's own player: a film inside the application rather than
     /// another application in front of it.
     pub player: Arc<PlayerManager>,
+    /// What subtitles that film has, which one is on, and its timing.
+    pub subtitles: Arc<crate::subtitles::Subtitles>,
     /// The board's two indicator lights. Here rather than in the interface
     /// because `/sys/class/leds` is root's, and the unit that draws the
     /// television mounts /sys read-only.
@@ -281,10 +283,39 @@ impl AppState {
                 let playback = self.playback.status();
                 status["film"] = playback["film"].clone();
                 status["finished"] = playback["finished"].clone();
+                // Carried and fetched subtitles in one list, each saying
+                // where it came from and how it is timed.
+                let tracks = status["tracks"].as_array().cloned().unwrap_or_default();
+                status["subtitles"] = self.subtitles.unified(&tracks);
+                // The settings panel's "Tercih edilen altyazı dili".
+                let preferences = self.subtitles.preferences();
+                status["subtitle_preference"] = json!(match preferences.enabled {
+                    Some(true) => preferences.language,
+                    _ => None,
+                });
                 Response::success(status)
             }
+            Request::SubtitlePreferenceSet { language } => {
+                let applied = self.subtitles.set_preference(language).await;
+                Response::success(json!({"applied": applied}))
+            }
+            Request::MediaSubtitleTextHere => Response::success(self.subtitles.text().await),
             Request::MediaTransportHere { action } => {
-                let moved = self.player.transport(action).await;
+                use mediabox_core::TransportAction;
+                let moved = match action {
+                    TransportAction::SubtitleChoose { ref id } => self.subtitles.choose(id).await,
+                    TransportAction::SubtitleAutoSync => self.subtitles.auto_sync().await,
+                    TransportAction::Subtitle { id } => {
+                        let moved = self.player.transport(action).await;
+                        self.subtitles.chose_track(id).await;
+                        moved
+                    }
+                    TransportAction::SubtitleDelay { .. } => {
+                        self.subtitles.delay_moved();
+                        self.player.transport(action).await
+                    }
+                    _ => self.player.transport(action).await,
+                };
                 Response::success(json!({"moved": moved}))
             }
             Request::MediaStopHere => {
@@ -584,6 +615,7 @@ impl AppState {
             .unwrap_or_default();
 
         let local = self.media.session_url(&session_id);
+        let subtitle_watch = watch.clone();
         let playing = Playing {
             session_id: session_id.clone(),
             source: source.clone(),
@@ -613,6 +645,8 @@ impl AppState {
             Arc::clone(&self.output),
             self.player.film(),
         ));
+        self.subtitles
+            .begin(self.player.film(), session_id.clone(), subtitle_watch, duration_seconds);
         Response::success(json!({
             "playing": "here",
             "film": film,
@@ -1250,6 +1284,8 @@ mod tests {
 
     /// A whole daemon state, pointed at `dir` for everything it keeps.
     fn test_state(dir: &tempfile::TempDir) -> Arc<AppState> {
+        let media = Arc::new(MediaClient::new("http://127.0.0.1:9", Duration::from_millis(20)).unwrap());
+        let player = Arc::new(PlayerManager::new("/bin/true", "/run/mediabox/player.sock"));
         Arc::new(AppState {
             kodi: Arc::new(
                 KodiClient::new("http://127.0.0.1:9/jsonrpc", Duration::from_millis(20)).unwrap(),
@@ -1264,9 +1300,7 @@ mod tests {
                 target: Arc::new(|| crate::cec::CecTarget::Refused("testte kapalı".into())),
             },
             input: InputManager::new(InputMode::Ui),
-            media: Arc::new(
-                MediaClient::new("http://127.0.0.1:9", Duration::from_millis(20)).unwrap(),
-            ),
+            media: Arc::clone(&media),
             surface: SurfaceManager::new(
                 "kodi.service",
                 "mediabox-tv-ui.service",
@@ -1274,7 +1308,8 @@ mod tests {
             )
             .unwrap(),
             // Never started in the tests; it exists so the state is whole.
-            player: Arc::new(PlayerManager::new("/bin/true", "/run/mediabox/player.sock")),
+            player: Arc::clone(&player),
+            subtitles: crate::subtitles::Subtitles::new(media, player, dir.path().join("subtitles.json")),
             // Pointed at the empty temporary directory, so the test never
             // reaches the machine's own sysfs and reports no lights.
             leds: LedController::new(dir.path(), dir.path().join("leds")),

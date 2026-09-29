@@ -22,7 +22,17 @@ from urllib.parse import quote
 
 from ..errors import UpstreamError
 from ..http import get_json
-from .models import Addon, AddonCatalog, Meta, MetaPreview, Stream, StreamKind, Subtitle, Video
+from .models import (
+    Addon,
+    AddonCatalog,
+    Meta,
+    MetaPreview,
+    Stream,
+    StreamKind,
+    Subtitle,
+    SubtitleSource,
+    Video,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -295,7 +305,51 @@ def parse_stream(entry: dict[str, Any], addon_id: str | None) -> Stream | None:
         external_url=external,
         announce=tuple(dict.fromkeys(announce)),
         behavior_hints=hints if isinstance(hints, dict) else {},
+        subtitles=tuple(parse_subtitles(entry.get("subtitles"), addon_id, SubtitleSource.STREAM)),
     )
+
+
+def parse_subtitle(
+    entry: Any, addon_id: str | None, source: SubtitleSource = SubtitleSource.ADDON
+) -> Subtitle | None:
+    """One subtitle descriptor: `{id, url, lang}` and whatever else it says.
+
+    `lang` is the protocol's field; `language` is accepted because addons
+    write it. The label is whatever the addon offers as a name -- `label`,
+    `name`, `title` or `origin`. A hash match is only recorded when the
+    addon said so (`m: "h"` in the OpenSubtitles addon's answers, or an
+    explicit `hashMatch`); nothing here guesses it.
+    """
+    if not isinstance(entry, dict):
+        return None
+    url = _text(entry.get("url"))
+    if not url:
+        return None
+    label = (
+        _text(entry.get("label"))
+        or _text(entry.get("name"))
+        or _text(entry.get("title"))
+        or _text(entry.get("origin"))
+    )
+    matched = entry.get("hashMatch") is True or entry.get("m") == "h"
+    return Subtitle(
+        id=_text(entry.get("id")) or url,
+        url=url,
+        language=_text(entry.get("lang")) or _text(entry.get("language")),
+        addon_id=addon_id,
+        source=source,
+        label=label,
+        hash_match=matched,
+    )
+
+
+def parse_subtitles(
+    entries: Any, addon_id: str | None, source: SubtitleSource = SubtitleSource.ADDON
+) -> list[Subtitle]:
+    if not isinstance(entries, list):
+        return []
+    found = [parse_subtitle(entry, addon_id, source) for entry in entries]
+    return [subtitle for subtitle in found if subtitle is not None]
 
 
 class AddonClient:
@@ -361,25 +415,7 @@ class AddonClient:
         payload = get_json(url, timeout=self._timeout)
         if not isinstance(payload, dict):
             return []
-        entries = payload.get("subtitles")
-        if not isinstance(entries, list):
-            return []
-        found: list[Subtitle] = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            subtitle_url = _text(entry.get("url"))
-            if not subtitle_url:
-                continue
-            found.append(
-                Subtitle(
-                    id=_text(entry.get("id")) or subtitle_url,
-                    url=subtitle_url,
-                    language=_text(entry.get("lang")) or _text(entry.get("language")),
-                    addon_id=addon.id,
-                )
-            )
-        return found
+        return parse_subtitles(payload.get("subtitles"), addon.id)
 
 
 def addons_supporting(

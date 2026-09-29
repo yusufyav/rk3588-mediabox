@@ -99,6 +99,30 @@ impl MediaClient {
             .await
     }
 
+    /// A playing film's external subtitles, ranked; see
+    /// `media/subtitles/service.py`.
+    pub async fn subtitles_prepare(&self, body: Value) -> Result<Value, MediaError> {
+        self.post(&["media", "subtitles", "prepare"], body).await
+    }
+
+    /// One of them, fetched by the worker and kept on its loopback.
+    pub async fn subtitles_load(&self, session: &str, candidate: &str) -> Result<Value, MediaError> {
+        self.post(
+            &["media", "subtitles", "load"],
+            json!({"sessionId": session, "candidate": candidate}),
+        )
+        .await
+    }
+
+    /// Start (or continue) working out where a loaded subtitle's lines go.
+    pub async fn subtitles_sync(&self, body: Value) -> Result<Value, MediaError> {
+        self.post(&["media", "subtitles", "sync"], body).await
+    }
+
+    pub async fn subtitles_job(&self, job: &str) -> Result<Value, MediaError> {
+        self.get(&["media", "subtitles", "sync", job], &[]).await
+    }
+
     pub async fn library(&self) -> Result<Value, MediaError> {
         self.get(&["media", "library"], &[]).await
     }

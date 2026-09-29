@@ -155,14 +155,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }))
     };
+    let player = Arc::new(PlayerManager::new(
+        "/opt/rk3588-mediabox/bin/mediabox-player",
+        "/run/mediabox/player.sock",
+    ));
     let state = Arc::new(AppState {
         kodi: kodi.clone(),
         lifecycle: KodiLifecycle::new(&args.kodi_unit)?,
         surface: SurfaceManager::new(&args.kodi_unit, &args.ui_unit, handovers.clone())?,
-        player: Arc::new(PlayerManager::new(
-            "/opt/rk3588-mediabox/bin/mediabox-player",
-            "/run/mediabox/player.sock",
-        )),
+        player: Arc::clone(&player),
+        subtitles: mediaboxd_rs::subtitles::Subtitles::new(
+            Arc::clone(&media),
+            Arc::clone(&player),
+            mediaboxd_rs::subtitles::PREFERENCES_FILE,
+        ),
         applications: ApplicationManager::load(
             args.applications.as_deref(),
             &args.kodi_unit,

@@ -248,6 +248,11 @@ impl Client {
         self.call(json!({"command": "media_status_here"})).await
     }
 
+    /// The subtitle line on screen now, asked several times a second.
+    pub async fn subtitle_text_here(&self) -> Result<Value> {
+        self.call(json!({"command": "media_subtitle_text_here"})).await
+    }
+
     pub async fn transport_here(&self, action: Value) -> Result<Value> {
         self.call(json!({"command": "media_transport_here", "action": action}))
             .await

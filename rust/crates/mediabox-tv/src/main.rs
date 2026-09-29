@@ -217,6 +217,8 @@ struct App {
     /// can still show its last frame for a moment after, and that frame is
     /// not a film someone else started.
     left_film: Option<Instant>,
+    /// The subtitle line drawn over the film now.
+    caption: String,
     /// Ok held down where a hold means something of its own, and not yet
     /// let go.
     ok_hold: Option<OkHold>,
@@ -2025,9 +2027,50 @@ impl App {
             // Between films: nothing to draw from this answer.
             return;
         }
+        let pill = self.now.pill.clone();
         self.now.take_here(&status);
-        if self.controls_open() {
+        if self.controls_open() || self.now.pill != pill {
             self.paint();
+        }
+    }
+
+    /// Ask for the subtitle line on screen, if a subtitle is on and no
+    /// answer is outstanding; clear it when none is.
+    fn poll_caption(&mut self) {
+        let wanted = self.here.as_ref().is_some_and(|playing| playing.seen) && self.now.subtitle_on();
+        if !wanted {
+            if !self.caption.is_empty() {
+                self.caption.clear();
+                if let Some(window) = self.window.upgrade() {
+                    window.set_np_caption("".into());
+                }
+            }
+            return;
+        }
+        if CAPTION_ASKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        detached("mediabox-tv-caption", async move {
+            let client = rpc::Client::new(socket_path());
+            let answer = client.subtitle_text_here().await;
+            CAPTION_ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
+            let Ok(answer) = answer else { return };
+            let text = answer.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.show_caption(text));
+            });
+        });
+    }
+
+    fn show_caption(&mut self, text: String) {
+        // ASS override blocks and the escaped line breaks mpv leaves in.
+        let text = clean_caption(&text);
+        if text == self.caption {
+            return;
+        }
+        self.caption = text;
+        if let Some(window) = self.window.upgrade() {
+            window.set_np_caption(self.caption.clone().into());
         }
     }
 
@@ -2236,6 +2279,18 @@ impl App {
                         self.nudge_delay(if dy < 0 { 0.1 } else { -0.1 });
                         return;
                     }
+                    // Left and Right on the preferred subtitle language step
+                    // through the languages, the way a value is changed.
+                    if self.now.menu == Menu::Settings && dx != 0 && dy == 0 {
+                        let on_language = self
+                            .player_settings()
+                            .get(self.now.menu_focus)
+                            .is_some_and(|row| row.act == screens::audio::PlayerAct::SubtitleLanguage);
+                        if on_language {
+                            self.step_subtitle_preference(dx.signum());
+                            return;
+                        }
+                    }
                     if self.now.step_menu(dx, dy) {
                         self.paint();
                     }
@@ -2340,7 +2395,25 @@ impl App {
     /// The film's settings rows in the player panel, as the daemon last
     /// described the display and the sound.
     fn player_settings(&self) -> Vec<screens::audio::PlayerRow> {
-        screens::audio::player_panel(self.output_status().as_ref(), self.audio_status().as_ref())
+        // The subtitle language a film starts with leads: it is the setting
+        // a viewer comes back to most, and the only one about the film.
+        let mut rows = vec![screens::audio::PlayerRow {
+            label: "Tercih edilen altyazı dili".into(),
+            detail: screens::now_playing::preference_name(self.now.subtitle_preference.as_deref()),
+            active: self.now.subtitle_preference.is_some(),
+            act: screens::audio::PlayerAct::SubtitleLanguage,
+        }];
+        rows.extend(screens::audio::player_panel(self.output_status().as_ref(), self.audio_status().as_ref()));
+        rows
+    }
+
+    /// Move "Tercih edilen altyazı dili" by `step` and put it into effect.
+    fn step_subtitle_preference(&mut self, step: i32) {
+        let next = screens::now_playing::next_preference(self.now.subtitle_preference.as_deref(), step);
+        self.now.subtitle_preference = next.clone();
+        spawn_here(HereCommand::SubtitlePreference(next));
+        self.open_controls();
+        self.paint();
     }
 
     fn open_menu(&mut self, menu: screens::now_playing::Menu) {
@@ -2364,13 +2437,25 @@ impl App {
         match self.now.menu {
             Menu::Subtitles | Menu::Audio => {
                 let subtitles = self.now.menu == Menu::Subtitles;
+                // Ok on the subtitle delay puts the automatic timing back,
+                // over whatever was set by hand, and stays on the panel so
+                // the value can be read where it was asked.
+                if subtitles && self.now.menu_column == 2 {
+                    spawn_here(HereCommand::SubtitleAutoSync);
+                    return;
+                }
                 // The subtitle panel's first row is "off" and belongs to no
                 // language.
                 if subtitles && self.now.menu_column == 0 && focus == 0 {
                     for track in self.now.subtitles.iter_mut() {
                         track.selected = false;
                     }
-                    spawn_here(HereCommand::Subtitle(-1));
+                    let unified = self.now.subtitles.iter().any(|track| !track.key.is_empty());
+                    spawn_here(if unified {
+                        HereCommand::SubtitleChoose("off".into())
+                    } else {
+                        HereCommand::Subtitle(-1)
+                    });
                 } else {
                     let of_language = self.now.tracks_of_language();
                     let wanted = if self.now.menu_column == 1 {
@@ -2386,13 +2471,17 @@ impl App {
                     } else {
                         &mut self.now.audio
                     };
-                    let Some(id) = tracks.get(index).map(|track| track.id) else {
+                    let Some((id, key)) = tracks.get(index).map(|track| (track.id, track.key.clone())) else {
                         return;
                     };
                     for (at, track) in tracks.iter_mut().enumerate() {
                         track.selected = at == index;
                     }
-                    spawn_here(if subtitles {
+                    // A subtitle is chosen by what it is: a fetched one has no
+                    // track number until the control plane has loaded it.
+                    spawn_here(if subtitles && !key.is_empty() {
+                        HereCommand::SubtitleChoose(key)
+                    } else if subtitles {
                         HereCommand::Subtitle(id)
                     } else {
                         HereCommand::Audio(id)
@@ -2412,6 +2501,7 @@ impl App {
                     let Some(row) = rows.get(focus) else { return };
                     use screens::audio::PlayerAct;
                     match row.act {
+                        PlayerAct::SubtitleLanguage => self.step_subtitle_preference(1),
                         PlayerAct::RefreshMatching => spawn_output(mediabox_core::Request::OutputContentMatching {
                             enabled: !row.active,
                         }),
@@ -3983,12 +4073,20 @@ impl App {
             FILM_RULES.iter().map(|at| *at as i32).collect::<Vec<_>>(),
         )));
         window.set_np_pill(now.pill.clone().into());
+        window.set_np_menu_note(
+            if now.menu == screens::now_playing::Menu::Subtitles {
+                now.subtitle_note()
+            } else {
+                String::new()
+            }
+            .into(),
+        );
 
         // The panels, grouped the way the reference groups them: the languages
         // in the first column and that language's own tracks in the second.
         // Four English audio tracks are one row saying "English" and four rows
         // beside it, not four rows all saying the same word.
-        let tracks_shown: Vec<MenuRow> = now
+        let tracks_all: Vec<MenuRow> = now
             .tracks_of_language()
             .into_iter()
             .filter_map(|index| now.tracks().get(index))
@@ -3997,6 +4095,14 @@ impl App {
                 detail: "".into(),
                 active: track.selected,
             })
+            .collect();
+        // Long columns scroll: only what fits is drawn, and the focus is
+        // given relative to it.
+        let track_first = screens::now_playing::menu_window(tracks_all.len(), now.menu_track_focus);
+        let tracks_shown: Vec<MenuRow> = tracks_all
+            .into_iter()
+            .skip(track_first)
+            .take(screens::now_playing::MENU_VISIBLE)
             .collect();
 
         let languages = |tracks: &[screens::now_playing::Track], lead: Option<&str>| {
@@ -4078,8 +4184,12 @@ impl App {
                 None,
             ),
         };
+        let first = screens::now_playing::menu_window(rows.len(), now.menu_focus);
+        window.set_np_menu_above(first > 0);
+        window.set_np_menu_below(first + screens::now_playing::MENU_VISIBLE < rows.len());
+        let rows: Vec<MenuRow> = rows.into_iter().skip(first).take(screens::now_playing::MENU_VISIBLE).collect();
         window.set_np_menu_tracks(slint::ModelRc::new(slint::VecModel::from(tracks_shown)));
-        window.set_np_menu_track_focus(now.menu_track_focus as i32);
+        window.set_np_menu_track_focus(now.menu_track_focus as i32 - track_first as i32);
         window.set_np_menu(name.into());
         window.set_np_menu_title(
             match now.menu {
@@ -4093,7 +4203,7 @@ impl App {
             .into(),
         );
         window.set_np_menu_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-        window.set_np_menu_focus(now.menu_focus as i32);
+        window.set_np_menu_focus(now.menu_focus as i32 - first as i32);
         window.set_np_menu_column(now.menu_column as i32);
         let (side_label, side_value) = side.unwrap_or_default();
         window.set_np_menu_side_label(side_label.into());
@@ -4980,6 +5090,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         controls_were_open: false,
         handing_over: false,
         left_film: None,
+        caption: String::new(),
         ok_hold: None,
         here: None,
         hero_meta: std::collections::HashMap::new(),
@@ -5118,6 +5229,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("{line} art_cpu_mb={held}{film}");
             }
         });
+    });
+
+    // The subtitle line. The player draws nothing over the film -- its frames
+    // go straight to the video plane -- so this interface asks for the line
+    // on screen and draws it. A tenth of a second is the whole of the error
+    // this adds to a line's timing, and it asks only while one is on.
+    let captions = slint::Timer::default();
+    captions.start(slint::TimerMode::Repeated, Duration::from_millis(100), || {
+        with_app(|app| app.poll_caption());
     });
 
     // A film ends by itself as often as it is stopped, and when it does the
@@ -5622,11 +5742,34 @@ enum HereCommand {
     Seek(i64),
     SeekTo(u64),
     Subtitle(i64),
+    SubtitleChoose(String),
+    SubtitleAutoSync,
+    SubtitlePreference(Option<String>),
     Audio(i64),
     SubtitleDelay(f64),
     AudioDelay(f64),
     Speed(f64),
     Scale(mediabox_core::ScaleMode),
+}
+
+/// A caption request is out; the next tick does not ask again until it is
+/// answered.
+static CAPTION_ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A subtitle line as mpv's `sub-text` gives it, made fit to draw: override
+/// blocks removed, `\N` as a line break.
+fn clean_caption(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for ch in text.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ").chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Asks the interface's own player where it has got to.
@@ -5670,6 +5813,19 @@ fn spawn_here(command: HereCommand) {
             HereCommand::Subtitle(id) => {
                 client
                     .transport_here(serde_json::json!({"subtitle": {"id": id}}))
+                    .await
+            }
+            HereCommand::SubtitleChoose(id) => {
+                client
+                    .transport_here(serde_json::json!({"subtitle_choose": {"id": id}}))
+                    .await
+            }
+            HereCommand::SubtitleAutoSync => {
+                client.transport_here(serde_json::json!("subtitle_auto_sync")).await
+            }
+            HereCommand::SubtitlePreference(language) => {
+                client
+                    .call(serde_json::json!({"command": "subtitle_preference_set", "language": language}))
                     .await
             }
             HereCommand::Audio(id) => {

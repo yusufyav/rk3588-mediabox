@@ -109,8 +109,18 @@ export component Player inherits Rectangle {
     in property <int> menu-column;
     in property <string> menu-side-label;
     in property <string> menu-side-value;
-    /// What the scale button last did, named under the picture for a moment.
+    /// What the scale button last did, named under the picture for a moment;
+    /// also where an automatic subtitle timing says it has been put on.
     in property <string> pill;
+    /// The subtitle line on screen now. The player hands its frames to this
+    /// interface and draws nothing itself, so the line is drawn here.
+    in property <string> caption;
+    /// How the subtitle that is on was timed, under the delay on the
+    /// subtitle panel: "Otomatik eşitleme · +1,82 sn · %97".
+    in property <string> menu-note;
+    /// The language column goes on above or below the rows drawn.
+    in property <bool> menu-above;
+    in property <bool> menu-below;
 
     background: transparent;
 
@@ -194,6 +204,31 @@ export component Player inherits Rectangle {
             font-weight: 800;
             opacity: opening.beat ? 1.0 : 0.2;
             animate opacity { duration: 375ms; easing: ease-in-out; }
+        }
+    }
+
+    // The subtitle. Above the row while the controls are up, low on the
+    // picture otherwise, on a dark band so it reads on a white frame. Plain
+    // text: styling carried by an ASS file is not drawn by this path.
+    if caption != "" && waiting == "": Rectangle {
+        property <length> line-width: min(caption-text.preferred-width, root.width * 0.8);
+        x: (root.width - self.width) / 2;
+        y: (open ? root.height * 0.76 : pill != "" ? root.height * 0.89 : root.height * 0.92) - self.height;
+        width: self.line-width + Metrics.vh * 0.03;
+        height: caption-text.preferred-height + Metrics.vh * 0.014;
+        border-radius: Metrics.vh * 0.008;
+        background: #000000a6;
+
+        caption-text := Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: parent.line-width;
+            text: caption;
+            color: #ffffff;
+            font-size: Metrics.vh * 0.040;
+            font-weight: 600;
+            wrap: word-wrap;
+            horizontal-alignment: center;
         }
     }
 
@@ -284,52 +319,54 @@ export component Player inherits Rectangle {
             height: Metrics.vh * 0.08;
             wrap: no-wrap;
         }
+    }
 
-        // What the scale button last did.
-        if pill != "": Rectangle {
-            x: (root.width - self.width) / 2;
-            y: root.height * 0.937 - self.height / 2;
-            width: pill-text.preferred-width + Metrics.vh * 0.06;
-            height: Metrics.vh * 0.05;
-            border-radius: self.height / 2;
-            background: #1c1f28e6;
+    // What the scale button last did, or that a subtitle's timing was put
+    // right. Outside the controls, so the second is said for a moment even
+    // while nobody is looking at the row.
+    if pill != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height * 0.937 - self.height / 2;
+        width: pill-text.preferred-width + Metrics.vh * 0.06;
+        height: Metrics.vh * 0.05;
+        border-radius: self.height / 2;
+        background: #1c1f28e6;
 
-            HorizontalLayout {
-                x: 0;
-                y: 0;
-                width: 100%;
-                height: 100%;
-                padding-left: Metrics.vh * 0.012;
-                padding-right: Metrics.vh * 0.02;
-                spacing: Metrics.vh * 0.01;
-                alignment: center;
+        HorizontalLayout {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+            padding-left: Metrics.vh * 0.012;
+            padding-right: Metrics.vh * 0.02;
+            spacing: Metrics.vh * 0.01;
+            alignment: center;
 
-                Rectangle {
-                    width: Metrics.vh * 0.028;
-                    height: Metrics.vh * 0.028;
+            Rectangle {
+                width: Metrics.vh * 0.028;
+                height: Metrics.vh * 0.028;
+                y: (parent.height - self.height) / 2;
+                border-radius: Metrics.vh * 0.006;
+                background: Theme.film;
+
+                Path {
+                    x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    border-radius: Metrics.vh * 0.006;
-                    background: Theme.film;
-
-                    Path {
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: Metrics.vh * 0.016;
-                        height: Metrics.vh * 0.016;
-                        viewbox-width: 24;
-                        viewbox-height: 24;
-                        commands: "M8 5l11.5 7L8 19z";
-                        fill: #ffffff;
-                    }
+                    width: Metrics.vh * 0.016;
+                    height: Metrics.vh * 0.016;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: "M8 5l11.5 7L8 19z";
+                    fill: #ffffff;
                 }
-                pill-text := Text {
-                    text: pill;
-                    color: #ffffff;
-                    font-size: Metrics.vh * 0.019;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    wrap: no-wrap;
-                }
+            }
+            pill-text := Text {
+                text: pill;
+                color: #ffffff;
+                font-size: Metrics.vh * 0.019;
+                font-weight: 600;
+                vertical-alignment: center;
+                wrap: no-wrap;
             }
         }
     }
@@ -360,6 +397,33 @@ export component Player inherits Rectangle {
         }
 
         property <bool> grouped: menu == "subtitles" || menu == "audio";
+
+        // More of the list above or below: a small mark at the column's
+        // edge, the way a television list says it scrolls.
+        if menu-above: Path {
+            x: Metrics.vh * 0.03 + (grouped ? parent.width * 0.28 : parent.width - Metrics.vh * 0.06) / 2 - self.width / 2;
+            y: Metrics.vh * 0.066;
+            width: Metrics.vh * 0.02;
+            height: Metrics.vh * 0.012;
+            viewbox-width: 24;
+            viewbox-height: 14;
+            commands: "M2 12L12 2l10 10";
+            fill: transparent;
+            stroke: #ffffff80;
+            stroke-width: 2px;
+        }
+        if menu-below: Path {
+            x: Metrics.vh * 0.03 + (grouped ? parent.width * 0.28 : parent.width - Metrics.vh * 0.06) / 2 - self.width / 2;
+            y: parent.height - Metrics.vh * 0.022;
+            width: Metrics.vh * 0.02;
+            height: Metrics.vh * 0.012;
+            viewbox-width: 24;
+            viewbox-height: 14;
+            commands: "M2 2l10 10L22 2";
+            fill: transparent;
+            stroke: #ffffff80;
+            stroke-width: 2px;
+        }
 
         // The languages.
         VerticalLayout {
@@ -476,6 +540,16 @@ export component Player inherits Rectangle {
                     }
                 }
             }
+        }
+
+        if menu-note != "" && menu-side-label != "": Text {
+            x: parent.width * 0.66 + Metrics.vh * 0.014;
+            y: Metrics.vh * 0.085 + Metrics.vh * 0.066;
+            width: parent.width * 0.3 - Metrics.vh * 0.028;
+            text: menu-note;
+            color: #ffffff99;
+            font-size: Metrics.vh * 0.016;
+            wrap: word-wrap;
         }
 
         // The delay, beside the list, on the panels that have one.

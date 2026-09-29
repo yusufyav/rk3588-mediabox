@@ -1555,6 +1555,20 @@ pub enum Request {
     /// it is paused. Answered by the player itself rather than remembered,
     /// because the person watching may have moved it.
     MediaStatusHere,
+    /// Which subtitle language a film starts with, from the player's own
+    /// settings panel. `None` is "Kapalı": films start with subtitles off.
+    /// Applied to the film playing now as well as to the next ones.
+    SubtitlePreferenceSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    /// The subtitle line on screen now, as the player's own timing puts it.
+    ///
+    /// The appliance's player hands its frames to the interface and draws
+    /// nothing itself, subtitles included, so the interface draws the line;
+    /// this is asked several times a second and answers with little more
+    /// than the text.
+    MediaSubtitleTextHere,
     /// Move what is playing here, without stopping it.
     ///
     /// A closed set rather than a pass-through to the player's own command
@@ -1679,7 +1693,7 @@ pub enum Request {
 }
 
 /// What a remote can do to a film that is already playing here.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportAction {
     PlayPause,
@@ -1702,6 +1716,17 @@ pub enum TransportAction {
     Audio {
         id: i64,
     },
+    /// Which subtitle is on, by the id the status's `subtitles` list gives
+    /// it: `emb:<track>` for one the file carries, `ext:<candidate>` for one
+    /// an addon or the stream offered, `off` for none. Chosen by meaning
+    /// rather than by the player's track number, which an external subtitle
+    /// does not have until it has been loaded.
+    SubtitleChoose {
+        id: String,
+    },
+    /// Put the automatic timing back on the subtitle that is on, over any
+    /// delay set by hand, or work it out if it has not been.
+    SubtitleAutoSync,
     /// How far the subtitles are moved against the picture, in seconds.
     SubtitleDelay {
         seconds: f64,

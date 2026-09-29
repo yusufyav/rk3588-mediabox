@@ -569,6 +569,8 @@ pub enum PlayerAct {
     CycleMode,
     Format(AudioCodec),
     Transcode,
+    /// "Tercih edilen altyazı dili": the language a film starts with.
+    SubtitleLanguage,
 }
 
 /// The sound rows of the film's panel: the form, each format the receiver
@@ -649,7 +651,7 @@ pub fn player_choose(status: &AudioStatus, act: PlayerAct) -> AudioSetting {
         }
         PlayerAct::Format(codec) => toggle_format(status, codec),
         PlayerAct::Transcode => AudioSetting { ac3_transcode: !setting.ac3_transcode, ..setting.clone() },
-        PlayerAct::RefreshMatching => setting.clone(),
+        PlayerAct::RefreshMatching | PlayerAct::SubtitleLanguage => setting.clone(),
     }
 }
 

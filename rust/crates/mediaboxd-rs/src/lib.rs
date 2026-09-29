@@ -11,6 +11,7 @@ pub mod media;
 pub mod owner;
 pub mod playback;
 pub mod player;
+pub mod subtitles;
 pub mod system;
 pub mod transition;
 pub mod web;

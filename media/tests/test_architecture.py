@@ -133,8 +133,8 @@ class NoWebApplicationDependency(unittest.TestCase):
     def test_the_media_core_has_no_third_party_dependency(self):
         """It runs on the appliance's stock Python; nothing is installed for it."""
         allowed_stdlib_prefixes = {
-            "argparse", "ast", "base64", "binascii", "bisect", "collections", "datetime", "dataclasses", "enum", "fractions",
-            "gzip", "http", "ipaddress", "json", "logging", "os", "pathlib", "queue",
+            "argparse", "array", "ast", "base64", "binascii", "bisect", "collections", "datetime", "dataclasses", "enum", "fractions",
+            "gzip", "hashlib", "http", "ipaddress", "json", "logging", "mimetypes", "os", "pathlib", "queue",
             "re", "secrets", "shutil", "signal", "socket", "stat", "subprocess", "sys",
             "tempfile", "textwrap", "threading", "time", "typing", "unittest",
             "urllib", "zlib", "math", "functools", "itertools", "contextlib", "io",
