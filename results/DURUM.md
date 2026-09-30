@@ -532,6 +532,32 @@ diğer iki belirtinin gittiğini, bunun **sürdüğünü** bildirdi. Yani nedeni
   sonra da var; yani bu çalışmanın getirdiği bir şey değil. Ölçülmedi. Bakılacak
   ilk yer düzlemin `XR24` olması, yani wlroots'un derliyor olması — direct
   scanout açıkken aynı şey oluyor mu, bilinmiyor.
+* **Oynatıcı, HTTP akışı yolda kesilip yeniden bağlandıktan sonra sesi yeniden
+  başlatmıyor (30 Eylül 2026, Plus).** 29,7 GB'lık bir remux 2,52 GB'da kesildi
+  (`Stream ends prematurely`), mpv yeniden bağlandı, önbellekte 34 s veri
+  varken ALSA'ya tek örnek yazmadı (`appl_ptr 0`); görüntü sese bağlı olduğu
+  için film dondu, birkaç dakika sonra kendiliğinden aktı. Relay artık kesintiyi
+  kaldığı bayttan sürdürüyor (`docs/media-session-proxy.md`), yani oynatıcı bu
+  duruma düşmemeli; mpv'nin kendi hatası ölçülmedi. Ses çıkışı o sırada USB
+  kulaklıktı (Arctis GameBuds); aygıt tarafında çekirdek hatasız.
+* **USB kulaklık seçiliyken ses ayarı değiştirilemiyor.** Kayıtlı ayarda
+  Dolby Digital aktarımı açık (`/var/lib/mediabox/audio.json`), kulaklık
+  bildirmiyor ve her `AudioSet` "Dolby Digital bu çıkışın alıcısında
+  bildirilmiyor; seçilemez" ile reddediliyor.
+* **Bazı kaynaklar 118 743 baytlık bir yer tutucu olarak geliyor** (Drive ve To
+  Rome with Love'ın birer kaynağı, aynı hash `51390742a48d798c`). Film
+  açılmıyor ve altyazı yüklemesi 404 alıyor. Büyük ihtimalle MediaFusion /
+  Real-Debrid'in "dosya hazır değil" yanıtı; ölçülmedi.
+* **Tüm adaylar reddedilince, reddedilen bir altyazı ekranda kalıyor.** Otomatik
+  seçimde kısmi olmayan en iyi aday eşitlenmeden bırakılıyor — başka bir kare
+  hızına ait olduğu kesinleşmiş olsa bile (To Rome with Love, 24 fps remux,
+  25/24'lük altyazı). Kapalı mı kalmalı, karar bekliyor.
+* **`mediabox-kiosk-smoke`'ta "home: data absent".** 30 Eylül 11:00 açılışından
+  beri, altyazı değişikliklerinden önceki ikililerle de; bir önceki açılışta
+  yoktu. Nedeni aranmadı.
+* **Tam deploy bu iş istasyonunda `wasm-bindgen` olmadan durur** (web arayüzü
+  adımı). 30 Eylül'de medya çekirdeği, `mediaboxd-rs` ve `mediabox-tv` betiğin
+  kendi adımlarıyla tek tek kuruldu; web arayüzü yeniden kurulmadı.
 * Tarayıcıda video kodlama (encode) yok — yalnız çözme.
 * Chromium'un VA-API render düğümü seçimi sıralama şansına bağlı
   (`Preferred drm_render_node not found`). sway altında doğrusunu alıyor,
