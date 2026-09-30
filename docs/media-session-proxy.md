@@ -23,9 +23,12 @@ on top of it.
 | `Remux` | ffmpeg, all copy | container has to change |
 | `AudioTranscode` | ffmpeg, video copy | audio has to become AC-3 |
 
-A `Direct` session is recorded and starts nothing: `GET /media/session/{id}`
-answers `409 SESSION_IS_DIRECT` with the source URL, because the media core is
-not in that media path at all.
+A `Direct` session is recorded and starts nothing. Its bytes still come
+through `GET /media/session/{id}`, relayed (`media/proxy/relay.py`): the
+player MediaBox owns is built against the Rockchip ffmpeg, which has no TLS,
+and every source worth playing is an HTTPS link. (It used to answer `409
+SESSION_IS_DIRECT`; Kodi can open HTTPS itself, the appliance's player
+cannot.)
 
 ## Lifecycle
 
@@ -62,6 +65,31 @@ Relaying uses `read1`, not `read`. `read` waits for a full 64 KiB buffer, which
 turns a live stream into one that starts late and stutters after that. A stop
 from another thread closing the pipe under a blocked read ends the stream
 cleanly rather than surfacing as an error to the client.
+
+## Relaying a remote source
+
+Ranges pass both ways, one request per connection: a player seeks by
+abandoning the reply it is reading and asking for a new range.
+
+A seek is a new request through the addon's resolver (a 302 from Torrentio or
+MediaFusion) and then the debrid host, and either can stumble once:
+
+* **Opening.** A failure that is the host's -- no answer, a timeout, 408,
+  425, 429 or 5xx -- is tried twice more, 0.5 s and 1.5 s later, before the
+  player is told `502`. 404 and 416 are the source's own answer and are passed
+  on at once; any other status is not retried. A `502` once ended a film at
+  28:26 during a seek ("kaynak okunamadı") that the next request played on.
+* **On the way.** When the upstream connection ends before the body it
+  promised (it was dropped, or went quiet past the read timeout), the rest is
+  asked for from the byte where it stopped (`Range: bytes=<start + sent>-`)
+  and the same reply carries on, up to five times (`MAX_RESUMES`). A resumed
+  answer that is not a `206` starting at that byte ends the reply instead: no
+  byte is sent that is not the file's. Before this, mpv saw "Stream ends
+  prematurely at 2522294964" of a 29.7 GB remux, reconnected, and did not
+  start its sound again; the film froze at that point.
+
+Every failure is logged with the host, the range and the cause -- never the
+URL, which carries an account token.
 
 ## State
 

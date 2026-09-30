@@ -19,6 +19,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,6 +41,18 @@ PASSED_BACK = ("content-type", "content-length", "content-range", "accept-ranges
 
 #: `bytes=START-END`, either end allowed to be absent.
 RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+#: How often an open that failed on the way is tried again before the player
+#: is told the source is gone, and how long is waited before each try. A seek
+#: is a new request through the addon's resolver and the debrid host; one of
+#: them answering 5xx or not at all once ended a film at 28:26 ("kaynak
+#: okunamadı") that the next request would have played on.
+RETRY_DELAYS = (0.5, 1.5)
+#: Upstream answers worth another try: the host was busy, not the request wrong.
+TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+#: How often one reply is picked up again after its upstream connection ended
+#: early, before it is let end and the player reconnects on its own.
+MAX_RESUMES = 5
 
 
 def _relay_file(url: str, range_header: str | None):
@@ -106,41 +119,73 @@ def _relay_file(url: str, range_header: str | None):
     return (206 if partial else 200), headers, chunks()
 
 
+def _open(url: str, range_header: str | None, timeout: float):
+    """The upstream response for `range_header`, tried again on a failure
+    that is the host's rather than the request's."""
+    host = urllib.parse.urlsplit(url).hostname or "?"
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        request = urllib.request.Request(url, method="GET")
+        if range_header:
+            request.add_header("Range", range_header)
+        # Some hosts answer differently, or not at all, without one.
+        request.add_header("User-Agent", "MediaBox/1.0")
+        last = attempt == len(RETRY_DELAYS)
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            error.close()
+            # A 416 or a 404 is the upstream's answer, not a failure of ours,
+            # and the player needs to see it rather than a made-up 502.
+            if error.code in (404, 416):
+                raise MediaError(
+                    "SOURCE_REFUSED",
+                    f"the source refused the request ({error.code})",
+                    error.code,
+                ) from error
+            # The URL carries an account token: only its host is logged.
+            LOG.warning(
+                "relay from %s range=%s answered %s (try %d)", host, range_header, error.code, attempt + 1
+            )
+            if last or error.code not in TRANSIENT_STATUS:
+                raise MediaError(
+                    "SOURCE_UNAVAILABLE", f"the source answered {error.code}", 502
+                ) from error
+        except Exception as exc:
+            LOG.warning(
+                "relay from %s range=%s failed: %s: %s (try %d)",
+                host, range_header, type(exc).__name__, exc, attempt + 1,
+            )
+            if last:
+                raise MediaError("SOURCE_UNREACHABLE", f"{url} is unreachable", 502) from exc
+        time.sleep(RETRY_DELAYS[attempt])
+    raise AssertionError("unreachable")
+
+
+def _start_of(range_header: str | None) -> tuple[int, str]:
+    """Where a `bytes=START-END` range starts, and its END part ("" if open)."""
+    match = RANGE.match((range_header or "").strip())
+    if not match or not match.group(1):
+        return 0, ""
+    return int(match.group(1)), match.group(2)
+
+
 def relay(url: str, range_header: str | None, timeout: float = 30.0):
     """Open `url` and return `(status, headers, chunks)` for a local reply.
 
     The generator owns the upstream connection and closes it when the client
     stops reading — which is what happens on every seek, because the player
     abandons the response and asks for a new range.
+
+    When the upstream connection ends before the body it promised -- the
+    debrid host dropped it, or it went quiet past `timeout` -- the rest is
+    asked for from where it stopped and the same reply carries on. The player
+    never sees the cut: a film that played on had once stopped at 2.52 GB of a
+    29.7 GB remux when mpv had to reconnect, and did not play on.
     """
     if urllib.parse.urlsplit(url).scheme == "file":
         return _relay_file(url, range_header)
 
-    request = urllib.request.Request(url, method="GET")
-    if range_header:
-        request.add_header("Range", range_header)
-    # Some hosts answer differently, or not at all, without one.
-    request.add_header("User-Agent", "MediaBox/1.0")
-
-    try:
-        response = urllib.request.urlopen(request, timeout=timeout)
-    except urllib.error.HTTPError as error:
-        # A 416 or a 404 is the upstream's answer, not a failure of ours, and
-        # the player needs to see it rather than a made-up 502.
-        if error.code in (404, 416):
-            error.close()
-            raise MediaError(
-                "SOURCE_REFUSED",
-                f"the source refused the request ({error.code})",
-                error.code,
-            ) from error
-        error.close()
-        raise MediaError(
-            "SOURCE_UNAVAILABLE", f"the source answered {error.code}", 502
-        ) from error
-    except Exception as exc:
-        raise MediaError("SOURCE_UNREACHABLE", f"{url} is unreachable", 502) from exc
-
+    response = _open(url, range_header, timeout)
     headers = [
         (name.title(), value)
         for name, value in response.headers.items()
@@ -158,14 +203,49 @@ def relay(url: str, range_header: str | None, timeout: float = 30.0):
     # exactly what the film did instead of starting.
     headers.append(("Connection", "close"))
 
+    length = response.headers.get("Content-Length")
+    expected = int(length) if length and length.isdigit() else None
+    # Resuming needs to know where the body starts in the file: a 206 is
+    # where it was asked to start; a 200 is the whole file, from 0.
+    first, last = _start_of(range_header) if response.status == 206 else (0, "")
+    host = urllib.parse.urlsplit(url).hostname or "?"
+
     def chunks() -> Iterator[bytes]:
+        current = response
+        sent = 0
+        resumes = 0
         try:
             while True:
-                block = response.read(CHUNK_BYTES)
-                if not block:
+                try:
+                    block = current.read(CHUNK_BYTES)
+                except Exception as exc:  # noqa: BLE001 -- the connection, not the data
+                    block, cause = b"", f"{type(exc).__name__}: {exc}"
+                else:
+                    cause = "ended early"
+                if block:
+                    sent += len(block)
+                    yield block
+                    continue
+                if expected is None or sent >= expected:
                     return
-                yield block
+                if resumes >= MAX_RESUMES:
+                    LOG.warning("relay from %s gave up after %d resumes at %d of %d", host, resumes, sent, expected)
+                    return
+                resumes += 1
+                LOG.warning(
+                    "relay from %s %s at %d of %d; resuming (%d)", host, cause, first + sent, first + expected, resumes
+                )
+                current.close()
+                try:
+                    current = _open(url, f"bytes={first + sent}-{last}", timeout)
+                except MediaError as exc:
+                    LOG.warning("relay from %s could not resume: %s", host, exc.message)
+                    return
+                answered = current.headers.get("Content-Range", "")
+                if current.status != 206 or not answered.startswith(f"bytes {first + sent}-"):
+                    LOG.warning("relay from %s resumed at the wrong place (%s)", host, answered or current.status)
+                    return
         finally:
-            response.close()
+            current.close()
 
     return response.status, headers, chunks()
