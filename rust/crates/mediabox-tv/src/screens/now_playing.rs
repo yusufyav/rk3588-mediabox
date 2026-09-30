@@ -253,6 +253,9 @@ pub struct NowPlaying {
     /// The settings panel's "Tercih edilen altyazı dili", as the control
     /// plane keeps it. None is "Kapalı".
     pub subtitle_preference: Option<String>,
+    /// Its "Otomatik eşitleme", as the control plane keeps it. None until it
+    /// has said, which reads as on -- its own default.
+    pub subtitle_auto_sync: Option<bool>,
     pub audio: Vec<Track>,
     pub speed: f64,
     pub sub_delay: f64,
@@ -781,6 +784,9 @@ impl NowPlaying {
             if let Some(preferred) = status.get("subtitle_preference") {
                 self.subtitle_preference = preferred.as_str().map(str::to_owned);
             }
+            if let Some(on) = status.get("subtitle_auto_sync").and_then(Value::as_bool) {
+                self.subtitle_auto_sync = Some(on);
+            }
             // The preferred language leads the panel when the film has it.
             if let Some(preferred) = self.subtitle_preference.clone() {
                 self.subtitles.sort_by_key(|track| track.language != preferred);
@@ -991,18 +997,33 @@ mod tests {
     }
 
     #[test]
-    fn a_different_cut_is_named_and_an_analysis_is_not() {
+    fn a_refused_subtitle_says_it_cannot_be_timed_and_an_analysis_says_nothing() {
         let note = |sync: serde_json::Value| sync_note(Some(&sync));
-        assert_eq!(
-            note(serde_json::json!({"state": "applied", "model": "piecewise", "offset": 0.0, "confidence": 0.9})),
-            "Otomatik eşitleme · sürüm zamanlaması düzeltildi"
-        );
+        // Why (another timebase, another cut) is not the television's to say.
+        for refusal in ["REJECT_TIMEBASE_MISMATCH", "REJECT_WRONG_RELEASE", "REJECT_PARTIAL", "INCONCLUSIVE"] {
+            assert_eq!(
+                note(serde_json::json!({"state": "rejected", "model": "rejected", "eligibility": refusal})),
+                "Otomatik eşitleme kullanılamıyor"
+            );
+        }
         assert_eq!(note(serde_json::json!({"state": "analysing"})), "");
+        // An older control plane's refusal, with no pre-filter answer.
         assert_eq!(note(serde_json::json!({"state": "rejected", "model": "rejected"})), "");
         assert_eq!(
             note(serde_json::json!({"state": "applied", "model": "offset", "offset": -0.5, "confidence": 0.804})),
             "Otomatik eşitleme · -0,50 sn · %80"
         );
+    }
+
+    #[test]
+    fn the_auto_sync_setting_is_read_from_the_status_and_is_on_until_said() {
+        let mut now = NowPlaying::new();
+        assert_eq!(now.subtitle_auto_sync, None);
+        now.take_here(&serde_json::json!({"tracks": [], "subtitle_auto_sync": false}));
+        assert_eq!(now.subtitle_auto_sync, Some(false));
+        // A status without it leaves what is known.
+        now.take_here(&serde_json::json!({"tracks": []}));
+        assert_eq!(now.subtitle_auto_sync, Some(false));
     }
 
     use super::*;
@@ -1382,24 +1403,20 @@ fn english_name(code: &str) -> &'static str {
     }
 }
 
-/// What the panel says about a subtitle's automatic timing. Only results a
-/// viewer can use: an analysis in progress or a subtitle that did not fit is
-/// the log's business, not the television's.
+/// What the panel says about a subtitle's automatic timing. Only what a
+/// viewer can use: an analysis in progress is the log's business, and why a
+/// subtitle was refused (its timebase, its cut) is too -- the television says
+/// only that it cannot be timed.
 fn sync_note(sync: Option<&Value>) -> String {
     let Some(sync) = sync.filter(|value| !value.is_null()) else {
         return String::new();
     };
     let state = sync.get("state").and_then(Value::as_str).unwrap_or_default();
-    let model = sync.get("model").and_then(Value::as_str).unwrap_or_default();
     let offset = sync.get("offset").and_then(Value::as_f64).unwrap_or(0.0);
     let confidence = sync.get("confidence").and_then(Value::as_f64).unwrap_or(0.0);
+    let judged = sync.get("eligibility").is_some_and(|value| !value.is_null());
     match state {
-        "applied" if model == "piecewise" => "Otomatik eşitleme · sürüm zamanlaması düzeltildi".into(),
-        "applied" if model == "linear" => format!(
-            "Otomatik eşitleme · {} sn · kare hızı düzeltildi · %{}",
-            signed_seconds(offset),
-            (confidence * 100.0).round() as i64
-        ),
+        "rejected" if judged => "Otomatik eşitleme kullanılamıyor".into(),
         "applied" => format!(
             "Otomatik eşitleme · {} sn · %{}",
             signed_seconds(offset),

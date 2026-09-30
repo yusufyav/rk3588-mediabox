@@ -1,7 +1,8 @@
 # Subtitles
 
 Embedded, stream-bound and addon subtitles in one menu, fetched through the
-worker, and timed automatically against the film's own sound.
+worker, checked against the film's own timeline and, when they belong to it,
+timed automatically by one constant offset.
 
 ```text
   mediabox-tv            mediaboxd-rs                 media worker                  mpv
@@ -9,9 +10,14 @@ worker, and timed automatically against the film's own sound.
   subtitle panel ──────▶ subtitles.rs ──prepare────▶ service.py ──addons (HTTPS)
   (one list,             (unified list,  ──load─────▶  fetch, decode, keep
    by language)           preferences,                  files/<key>.srt ◀─ GET ── sub-add
-                          selection)     ──sync─────▶  audio.py (ffmpeg, sparse)
-  caption line ◀──text── sub-text ◀───────────────────  sync.py  (offset/linear/
-  (drawn by the UI)       sub-delay/sub-speed ──────────────────  piecewise/reject)
+  settings panel:         selection,     ──sync─────▶  mkv.py (index: rate, embedded
+   "Otomatik eşitleme"    AutoSync on/off)               tracks' events; bounded reads)
+                                                        eligibility.py (pre-filter)
+                                                          │ ACCEPT only
+                                                          ▼
+                                                        audio.py + sync.py (offset)
+  caption line ◀──text── sub-text ◀─────────────────── sub-delay ──────────────────▶
+  (drawn by the UI)
 ```
 
 ## Why the interface draws the line
@@ -21,8 +27,8 @@ draws nothing, OSD and subtitles included (`control` answers `VO_NOTIMPL`).
 Selecting a subtitle track before this change put nothing on the television.
 The interface now asks the control plane for mpv's `sub-text` ten times a
 second while a subtitle is on (`MediaSubtitleTextHere`) and draws it on its own
-plane over the film. Timing therefore stays mpv's: `sub-delay`, `sub-speed` and
-a corrected timeline are all applied before `sub-text` is read.
+plane over the film. Timing therefore stays mpv's: `sub-delay` is applied
+before `sub-text` is read.
 
 What this path does not do: bitmap subtitles (PGS, VobSub) have no text and are
 not drawn; ASS styling (fonts, positions, karaoke) is not drawn — the ASS file
@@ -58,15 +64,108 @@ oldest first). mpv is given `http://127.0.0.1:8790/media/subtitles/file/<key>.<e
 with `sub-add … auto <title> <lang>`; it appears in `track-list` and is selected
 with `sid`, without restarting the film.
 
-## The sync engine (`media/subtitles/sync.py`)
+## Eligibility: the pre-filter (`media/subtitles/eligibility.py`)
 
-The question is `video = f(subtitle)`:
+AutoSync is not a system that tries to rescue every subtitle. It corrects one
+thing -- a constant offset between a subtitle made for this video's timeline
+and the video -- and everything else is refused before anything is timed:
+
+```text
+external subtitle selected (automatically, or by the viewer)
+    ↓  REJECT_PARTIAL           CD1/Part 1, a trailer's lines, half a film
+    ↓  REJECT_WRONG_RELEASE     a step in the offset, lines outside the video,
+    ↓                           broken timings -- whatever ratio also fits
+    ↓  REJECT_TIMEBASE_MISMATCH another canonical timebase, clearly and stably
+    ↓  INCONCLUSIVE             nothing anchored to the video explains it
+    ↓  ACCEPT_TIMELINE_COMPATIBLE
+    ↓
+the offset mechanism below (sound), offset only → mpv sub-delay
+```
+
+`REJECT_DUPLICATE` is the control plane's: a candidate that loads to the same
+file (content hash) as one already tried in this film is not sent again.
+The answers are one enum in the worker and one in the control plane
+(`Eligibility`), with the same strings on the wire and in the log.
+
+**The model** is always `t_video = ratio · t_subtitle + offset`, with
+`ratio = F_sub_equivalent / F_video`. `F_video` is the video's measured rate
+and is fixed; `F_sub_equivalent` is a *canonical timebase equivalent* --
+24000/1001, 24, 25, 30000/1001, 30 -- within 10 % of it. A subtitle file has
+no frame rate; "25/24" only says its timeline follows that conversion. For a
+24.000 video the hypotheses are 1, 23.976/24 and 25/24; for 23.976, 1,
+24/23.976 and 25/23.976. No pool of every rate pair is tried. A subtitle on a
+timebase other than 1 is refused, never scaled back: a false correction is
+worse than none.
+
+**The reference** is an embedded subtitle track of the same file, in any
+language, text or picture (PGS, VobSub): when its events are -- a text
+track's lines, a picture track's show and clear packets -- is when somebody
+speaks in *this* file's timeline. Nothing is matched cue to cue (another
+language splits and merges lines, and moves edges by a few frames); the two
+activity patterns are compared. No bitmap is decoded, no OCR. With two or
+more usable tracks the second checks the first (`confirmed`); one that tells
+another timeline makes the reference `ambiguous` and it is not used.
+
+**How it decides**, all numbers in `Thresholds`:
+
+1. *Partial*, never from one number: an early last line is normal where the
+   credits roll. It takes the subtitle stopping without thinning out while at
+   least a quarter of the reference's events are still to come and its
+   density carries on; or a "CD1"/"Part 1"/"1of2" name with the coverage to
+   match; or (the old rule) a last line before a quarter of the film.
+2. For each hypothesis, the offset over ±150 s at which most events meet
+   (±0.1 s, 20 ms grid), as a z-score above that search's own noise. Then
+   twelve windows of the subtitle's own time, each matched on its own around
+   that offset (±15 s).
+3. *Structure*, for every hypothesis that matches strongly, before any ratio
+   is believed: three or more lines outside the video once fitted; two or
+   more reversed timings; the window offsets forming two plateaus 1.5 s or
+   more apart that fit two constants at least twice as well as a line.
+4. *Timebase*: the best hypothesis must reach z 8 and lead the next by 3; it
+   must leave less than 1 s of drift across the windows and less than 0.6 s
+   of scatter. Ratio 1 is ACCEPT, another canonical ratio is TIMEBASE
+   MISMATCH, anything else is INCONCLUSIVE.
+
+**Without a reference** (MP4, no embedded subtitle, an index that cannot be
+read within budget) the sound answers the same question under the same
+rules: the engine below tries only this video's canonical ratios; its offset
+model at ratio 1 is ACCEPT, a linear model at a canonical ratio is TIMEBASE
+MISMATCH, a piecewise model or an unexplained region is WRONG RELEASE, the
+old trailer refusal is PARTIAL, and everything else INCONCLUSIVE.
+
+**Reading a remote file.** `mkv.py` reads the Matroska head (EBML, SeekHead,
+Info, Tracks: the video's `DefaultDuration`), then `Cues`, where mkvmerge
+indexes every subtitle block and the video's keyframes: the rate is the
+declared one only if the keyframes sit on its frame grid. Every read is a
+range with a client-side cap -- the body is read up to what was asked and the
+connection closed -- because one CDN answered `bytes=0-0` with `206`,
+`Content-Range: bytes 0-0/29159331995` and `Content-Length: 29159331995`.
+One video's index may cost at most 6 MiB (`INDEX_BUDGET`), one element at most
+4 MiB; past either, or on a server that ignores ranges, the reference is
+unavailable and the sound decides. Measured: a 29 GB remux, 1.3 MB; three UHD
+remuxes of 11–87 GB, 1.4–1.8 MB each. No full demux, no PGS extraction, no
+audio for this step.
+
+**Kept, once per file.** The index reading is kept per video identity
+(`reference/`, `REFERENCE_VERSION`), whichever subtitle asks; each answer per
+(video identity, subtitle content hash, `SYNC_VERSION` = engine + pre-filter
+version) in `sync/`. The same file offered twice under two addon ids has one
+key: the second `load` says `duplicateOf`, a second sync in the same film is
+the same job, and the next time the film is played the answer is read, not
+worked out. The evaluation runs in the engine's child process
+(`runner.py`), like alignment.
+
+## The offset mechanism (`media/subtitles/sync.py`)
+
+Run only for a subtitle the pre-filter accepted (at ratio 1 only), or, with
+no reference, as the pre-filter itself (at this video's canonical ratios).
+Only its `offset` answer is ever applied:
 
 | Model | Form | Applied as |
 | --- | --- | --- |
 | offset | `t + b` | mpv `sub-delay = b` |
-| linear | `a·t + b` (23.976/24/25 conversions and residual drift) | `sub-speed = a`, `sub-delay = b` (mpv: video = speed·sub + delay, measured on 0.41) |
-| piecewise | `a·t + b_k` on subtitle ranges | a corrected file (original untouched), swapped in for the track |
+| linear | `a·t + b` | nothing: a timebase mismatch (canonical `a`) or inconclusive |
+| piecewise | `a·t + b_k` on subtitle ranges | nothing: a wrong release |
 | rejected | — | nothing |
 
 **Evidence.** Sampled 30 s windows of the film's audio, decoded by ffmpeg to
@@ -83,9 +182,9 @@ on a 50 ms grid from their corners — O(pairs + grid), no numpy. Cue tails are
 trimmed by 0.4 s (lines stay on screen after they are said; untrimmed this
 pulls the answer 0.2 s early). The peak is refined on a 10 ms grid.
 
-**Rate.** Seven frame-rate ratios (1, 25/23.976, 24/23.976, 25/24 and their
-inverses) are tried on an even sample of ≤16 windows; the film's own rate is
-kept unless another scores ≥ 11 % better on all windows.
+**Rate.** The ratios it is given -- 1 alone after an ACCEPT, this video's
+canonical ratios otherwise -- are tried on an even sample of ≤16 windows; the
+film's own rate is kept unless another scores ≥ 11 % better on all windows.
 
 **Fitting.** Three explanations of the windows' best shifts: one constant
 offset, one line (residual slope ≤ 5·10⁻⁴, and only if it explains two more
@@ -124,9 +223,9 @@ a 4K remux does not, and is left untimed rather than half-timed.
 the worker also relays film bytes and must not wait on the interpreter lock.
 ffmpeg runs at nice 10 with one thread. One analysis at a time.
 
-**Cache.** Results by (video identity, subtitle hash, `ALGORITHM`); speech
+**Cache.** Results by (video identity, subtitle hash, `SYNC_VERSION`); speech
 windows by video identity and how they were heard (centre or downmix), so a
-second subtitle for the same film costs no listening; corrected files by (video, subtitle, algorithm). Video identity is
+second subtitle for the same film costs no listening. Video identity is
 the OpenSubtitles hash and size when known, else the torrent's info hash and
 file index, else file name and size, else the URL without its query.
 
@@ -154,6 +253,36 @@ out is the significance and the refusals above, not the threshold. With a
 cleaner detector (5 % missed, one false detection a minute) two-cut films are
 corrected 12 / 20 times, still with none wrong.
 
+## Eligibility, measured (2026-09-30)
+
+Four films, eight Turkish subtitles from OpenSubtitles, each compared with the
+file's own embedded track read through its index (`t_video = ratio · t_sub +
+offset`; drift is the regression slope of the window offsets at that ratio):
+
+| Film (video rate, reference) | Subtitle | Result | Evidence |
+| --- | --- | --- | --- |
+| *The Social Network* UHD (23.976, English SRT) | 3935585 | ACCEPT | ratio 1 z 18.3 (next 5.8); offset −1.0…−1.4 s; drift −0.0006 ± 0.027 s/1000 s; window RMS 0.17 s |
+| | 3921849 | WRONG RELEASE | best 24/23.976 z 11.2, but −81.7 s lead, 13 lines before the film, a +3.4 s step, three reversed timings |
+| *In the Mood for Love* (24.000, French PGS) | 65664 | TIMEBASE MISMATCH | 23.976/24 z 12.9 (ratio 1: 7.4); residual drift +0.03 s/1000 s |
+| | 67750 | INCONCLUSIVE | 25/24 z 8.7 but +0.96 s/1000 s left: best fit 1.0426, no F_sub/24 |
+| *To Rome with Love* (24.000, Hungarian PGS) | 4801898 | TIMEBASE MISMATCH | 25/24 z 11.4 (ratio 1: 4.0); residual +0.06 ± 0.09 s/1000 s |
+| | 4787827 | TIMEBASE MISMATCH | 23.976/24 z 11.2 (ratio 1: 4.4); residual +0.10 ± 0.08 s/1000 s |
+| | 4789706 | PARTIAL | ends at 49 %; 1308 of 2776 reference packets after it; its density does not fall |
+| *Pride & Prejudice* US cut (23.976, PGS SDH) | 3248655 | PARTIAL | ends at 49 % mid-conversation; ratio 1 at −7.7 s over its half |
+
+Measured first with diagnostic scripts, then with this module as deployed,
+on the board, against the same remote files: all eight came out as above
+(3921849 on its reversed timings, the first structural check). The index
+reads cost 257–704 kB and 2.4–3.2 s per film; one subtitle's evaluation 0.1–
+0.4 s in the child process.
+
+**Calibration needed.** Every threshold in `eligibility.Thresholds` (z 8,
+margin 3, twelve windows, window z 5, 1 s drift, 0.6 s scatter, a 1.5 s step,
+the partial shares) and `mkv.GRID_AGREEMENT` comes from these eight
+subtitles and the synthetic films in `media/tests/test_subtitle_eligibility.py`.
+They are starting values that lean towards INCONCLUSIVE, not measured
+constants; a wider sample should set them.
+
 ## Measured on the board (Orange Pi 5 Plus, 2026-09-29)
 
 | | |
@@ -173,6 +302,13 @@ corrected 12 / 20 times, still with none wrong.
   thing that writes the preference; a subtitle picked from the panel during a
   film is that film's choice and changes nothing else. Changing it during a
   film puts it into effect on that film at once.
+* **"Otomatik eşitleme"** is the second row of the Ayarlar panel, "Açık" or
+  "Kapalı" (Ok, Left or Right turns it over), independent of the language.
+  It is kept as `auto_sync_enabled` in `/var/lib/mediabox/subtitles.json`; a
+  file written before it existed has no such field and reads as on, which is
+  what those films had. Off: no external subtitle is checked or timed, and
+  nothing is ever applied on its own. Turned on during a film, the external
+  subtitle that is on is checked now.
 * When a film has a subtitle in the preferred language, that language is the
   first language on the subtitle panel (under "Etkisizleştirildi") and is on
   when the film starts: the file's own text track in that language (full
@@ -183,23 +319,31 @@ corrected 12 / 20 times, still with none wrong.
 * Long panels scroll: nine rows are drawn, the focus stays on screen, and a
   mark at the column's edge says there is more above or below.
 * The viewer's choice during a film is final: nothing automatic replaces it.
-  An automatic choice whose timing is rejected is replaced by the next
-  candidate of its language (at most three), and if all are rejected the
-  best-ranked of those that cover the film stays on untimed.
+  An external subtitle the viewer picks is checked (with AutoSync on) even
+  when the film has an embedded track in the preferred language -- that
+  track is then only the timing reference, and the viewer's pick stays on
+  whatever the answer. An automatic choice that is refused is replaced by the
+  next candidate of its language (at most three; a candidate that is the same
+  file as one tried is skipped as REJECT_DUPLICATE), and if all are refused
+  the best-ranked of those that are not partial stays on untimed.
 * A delay moved by hand is kept; a timing that arrives afterwards waits
-  ("Otomatik eşitleme hazır"), and Ok on the delay puts it on.
-* The panel shows, under the delay, `Otomatik eşitleme · +1,82 sn · %97` or
-  `Otomatik eşitleme · sürüm zamanlaması düzeltildi`, and the same once in the
-  pill when it is put on. Nothing else about the engine reaches the television.
+  ("Otomatik eşitleme hazır"), and Ok on the delay puts it on. Ok on the delay
+  is the viewer asking in so many words: it works with "Otomatik eşitleme"
+  off too, and a timing found then is put on.
+* The panel shows, under the delay, `Otomatik eşitleme · +1,82 sn · %97`, and
+  the same once in the pill when it is put on; for a refused subtitle,
+  `Otomatik eşitleme kullanılamıyor`. Why it was refused, and every number of
+  the pre-filter, stays in the control plane's list (`sync`: `eligibility`,
+  `reference`, `ratio`, `estimated_offset`, `cached`, `reason`) and the log.
 
 ## Observability
 
 One line per finished sync, from `media.subtitles` in the worker's journal:
 
 ```text
-subtitle sync video=osh:…:… subtitle=<key> source=torrent model=linear offset=+0.412
-scale=1.042708 windows=22 inliers=14 confidence=0.93 decision=apply seconds=11.8
-cache=miss reason=confident
+subtitle sync video=osh:…:… subtitle=<key> source=http eligibility=ACCEPT_TIMELINE_COMPATIBLE
+reference=embedded-picture ratio=1 model=offset offset=+13.760 scale=1.000000 windows=16
+inliers=11 confidence=0.85 decision=apply seconds=57.0 cache=miss reason=confident
 ```
 
 Per-window evidence is logged at DEBUG only. The control plane logs how many
@@ -212,8 +356,14 @@ external subtitles a film had and when an automatic choice moves on.
 * The caption is polled at 10 Hz: up to 0.1 s late on and off.
 * Energy VAD: a film scored wall to wall with music gives little evidence and
   is left untimed rather than guessed.
-* Two cuts or more are corrected only when the evidence is clean (see
-  Calibration); otherwise the subtitle is left as it came.
+* A subtitle for another cut or another timebase is not corrected at all: it
+  is refused and left as it came. The engine can still model both (see
+  Calibration); nothing it finds other than one offset is applied.
+* The embedded reference is read from Matroska indexes only; an MP4's
+  sample tables are not read, and such a film is decided by the sound.
+* After an ACCEPT the offset comes from the sound, which a source too heavy
+  for the download budget cannot give: the subtitle is then left untimed even
+  though the pre-filter's own offset estimate exists.
 * High-bitrate HTTP sources (4K remux) exceed the download budget and are not
   analysed.
 * Subtitles are not handed to Kodi on handover.

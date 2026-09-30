@@ -94,8 +94,14 @@ def request(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_JSON_BYTES,
     allow_redirects: bool = True,
+    truncate: bool = False,
 ) -> HttpResponse:
-    """Perform one request and return at most `max_bytes` of its body."""
+    """Perform one request and return at most `max_bytes` of its body.
+
+    A body longer than that is an error, unless `truncate` says the caller
+    asked for a span of something larger (a range of a film): then the first
+    `max_bytes` are returned and the connection is closed on the rest, however
+    much the server said it would send."""
     target = check_scheme(url)
     remaining_redirects = MAX_REDIRECTS if allow_redirects else 0
 
@@ -129,6 +135,8 @@ def request(
             # rather than being silently truncated into malformed JSON.
             raw = response.read(max_bytes + 1)
 
+        if len(raw) > max_bytes and truncate:
+            raw = raw[:max_bytes]
         if len(raw) > max_bytes:
             raise UpstreamError(
                 f"{target} returned more than {max_bytes} bytes", {"limit": max_bytes}

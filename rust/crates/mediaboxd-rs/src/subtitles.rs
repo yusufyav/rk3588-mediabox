@@ -9,14 +9,20 @@
 //! The last two are the worker's to find, fetch and time
 //! (`media/subtitles/`): it owns the network, and this player's ffmpeg has
 //! no TLS. This module decides what is on, tells mpv, and puts the worker's
-//! timing into effect with `sub-delay` and `sub-speed`, or by swapping in the
-//! corrected file the worker wrote for a different cut.
+//! timing into effect with `sub-delay`.
 //!
-//! Two rules shape what it may do on its own:
+//! The worker first asks whether an external subtitle belongs to this film's
+//! timeline at all (`Eligibility`); only one that does is timed, and only by
+//! a constant offset. A subtitle for another timebase or another cut is left
+//! as it came, never converted.
+//!
+//! Three rules shape what it may do on its own:
 //!
 //! * the viewer's choice is final for the film: once somebody has picked a
 //!   subtitle, or moved its delay, nothing automatic changes either until
 //!   they ask for it again (`SubtitleAutoSync`);
+//! * "Otomatik eşitleme" off means no external subtitle is analysed or timed
+//!   unless the viewer asks for it in so many words;
 //! * a choice is remembered by what it means -- on or off, which language,
 //!   carried or fetched -- and never by a track number, which means nothing
 //!   in the next episode.
@@ -55,6 +61,25 @@ pub enum Origin {
     External,
 }
 
+/// The worker's pre-filter answer for one external subtitle. The same
+/// strings as `media/subtitles/eligibility.py`'s `Eligibility`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Eligibility {
+    /// This film's timeline up to one offset: AutoSync may time it.
+    AcceptTimelineCompatible,
+    /// Only part of the film (CD1, a trailer's lines).
+    RejectPartial,
+    /// Another timebase (25/24, 23.976/24 ...): refused, not converted.
+    RejectTimebaseMismatch,
+    /// Another cut or release: a step, lines outside the film, broken timings.
+    RejectWrongRelease,
+    /// The same file as a candidate already tried.
+    RejectDuplicate,
+    /// Nothing could be told reliably: treated as a refusal.
+    Inconclusive,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Preferences {
     /// None until the viewer has chosen anything: the player's own default
@@ -68,6 +93,16 @@ pub struct Preferences {
     /// breaks a tie between the two in the same language.
     #[serde(default)]
     pub origin: Option<Origin>,
+    /// "Otomatik eşitleme". Absent in files written before it existed, and
+    /// then on: timing external subtitles is what those films had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_sync_enabled: Option<bool>,
+}
+
+impl Preferences {
+    pub fn auto_sync(&self) -> bool {
+        self.auto_sync_enabled.unwrap_or(true)
+    }
 }
 
 /// One external subtitle the worker offered for this film.
@@ -106,6 +141,17 @@ pub struct Timing {
     pub scale: f64,
     pub confidence: f64,
     pub reason: Option<String>,
+    /// The pre-filter's answer, once there is one.
+    pub eligibility: Option<Eligibility>,
+    /// What the timeline was compared with: embedded-picture, embedded-text,
+    /// audio, none.
+    pub reference: Option<String>,
+    /// The canonical timebase equivalent the timeline follows ("1", "25/24").
+    pub ratio: Option<String>,
+    /// The pre-filter's own estimate of the offset (seconds).
+    pub estimated_offset: Option<f64>,
+    /// Answered from what was kept, not worked out now.
+    pub cached: bool,
 }
 
 impl Timing {
@@ -117,7 +163,16 @@ impl Timing {
             "scale": self.scale,
             "confidence": self.confidence,
             "reason": self.reason,
+            "eligibility": self.eligibility,
+            "reference": self.reference,
+            "ratio": self.ratio,
+            "estimated_offset": self.estimated_offset,
+            "cached": self.cached,
         })
+    }
+
+    fn analysing() -> Self {
+        Timing { state: "analysing".into(), scale: 1.0, ..Timing::default() }
     }
 }
 
@@ -140,6 +195,9 @@ struct Film {
     manual: bool,
     /// The viewer has moved the delay of the subtitle that is on.
     manual_delay: bool,
+    /// The viewer asked for the automatic timing in so many words: it is put
+    /// on when it arrives, "Otomatik eşitleme" or not.
+    requested: bool,
     /// The unified id of what is on, as this module last set it.
     selected: Option<String>,
     /// Automatic candidates already tried, in order.
@@ -291,10 +349,11 @@ impl Subtitles {
         self.apply(number, auto_choice(&preferences, &tracks, &candidates)).await;
     }
 
-    /// Put an automatically chosen external subtitle on and time it.
+    /// Put an automatically chosen external subtitle on and, with
+    /// "Otomatik eşitleme" on, have it checked and timed.
     async fn try_external(self: &Arc<Self>, number: u64, id: String) {
         self.with_film(number, |film| film.tried.push(id.clone()));
-        if self.put_on(number, &id).await {
+        if self.put_on(number, &id).await && self.preferences().auto_sync() {
             spawn_timing(Arc::clone(self), number, id, true);
         }
     }
@@ -306,14 +365,8 @@ impl Subtitles {
         };
         let applied = self.with_film(number, |film| film.timing.get(id).cloned()).flatten();
         self.player.select_subtitle(Some(loaded.mpv)).await;
-        match applied.filter(|timing| timing.state == "applied") {
-            Some(timing) if timing.model.as_deref() != Some("piecewise") => {
-                self.player.subtitle_timing(timing.offset, timing.scale).await;
-            }
-            _ => {
-                self.player.subtitle_timing(0.0, 1.0).await;
-            }
-        }
+        let delay = applied.filter(|timing| timing.state == "applied").map_or(0.0, |timing| timing.offset);
+        self.player.subtitle_timing(delay, 1.0).await;
         self.with_film(number, |film| {
             film.selected = Some(id.to_owned());
             film.manual_delay = false;
@@ -364,7 +417,34 @@ impl Subtitles {
         let Some(session) = self.with_film(number, |film| film.session.clone()) else {
             return;
         };
-        self.set_timing(number, &id, Timing { state: "analysing".into(), scale: 1.0, ..Timing::default() });
+        if automatic {
+            // The same file as one already tried, under another addon's id:
+            // it was answered once and the answer would be the same.
+            let twin = self
+                .with_film(number, |film| {
+                    film.tried
+                        .iter()
+                        .filter(|tried| tried.as_str() != id)
+                        .any(|tried| film.loaded.get(tried).is_some_and(|l| l.key == key))
+                })
+                .unwrap_or(false);
+            if twin {
+                self.set_timing(
+                    number,
+                    &id,
+                    Timing {
+                        state: "rejected".into(),
+                        scale: 1.0,
+                        reason: Some("duplicate".into()),
+                        eligibility: Some(Eligibility::RejectDuplicate),
+                        ..Timing::default()
+                    },
+                );
+                self.move_on(number, &id, automatic).await;
+                return;
+            }
+        }
+        self.set_timing(number, &id, Timing::analysing());
         loop {
             if self.player.film() != number {
                 return;
@@ -386,7 +466,7 @@ impl Subtitles {
                 Ok(job) => job,
                 Err(error) => {
                     eprintln!("mediaboxd-rs: film {number}: subtitle sync not started: {error}");
-                    self.set_timing(number, &id, Timing { state: "failed".into(), scale: 1.0, ..Timing::default() });
+                    self.set_timing(number, &id, Timing { state: "failed".into(), ..Timing::analysing() });
                     return;
                 }
             };
@@ -426,87 +506,65 @@ impl Subtitles {
     }
 
     async fn settled(self: &Arc<Self>, number: u64, id: &str, job: &Value, automatic: bool) {
-        let apply = job.get("apply").filter(|value| !value.is_null()).cloned();
-        let Some(apply) = apply else {
+        // Only ever a delay: the worker answers nothing else for a subtitle
+        // it accepted, and nothing at all for one it did not.
+        let delay = job
+            .get("apply")
+            .filter(|apply| apply.get("kind").and_then(Value::as_str) == Some("properties"))
+            .and_then(|apply| apply.get("subDelay"))
+            .and_then(Value::as_f64);
+        let Some(delay) = delay else {
             self.set_timing(number, id, timing_from(job, "rejected"));
-            // A timing nobody could find is most often the wrong subtitle.
-            // An automatic choice moves on to the next of its language; one
-            // the viewer made stays exactly as it is.
-            let next = self.with_film(number, |film| {
-                if film.manual || film.selected.as_deref() != Some(id) {
-                    return None;
-                }
-                next_candidate(&film.candidates, &film.tried, id)
-            });
-            if let Some(Some(next)) = next.filter(|_| automatic) {
-                eprintln!("mediaboxd-rs: film {number}: subtitle {id} does not fit, trying {next}");
-                self.try_external(number, next).await;
-            } else if automatic {
-                // Every one tried was rejected: the best-ranked stays on, as
-                // it came, rather than none at all -- the best-ranked of the
-                // film's own, that is. A trailer's two minutes of lines were
-                // ranked first once and stayed on for a three-hour film.
-                let first = self
-                    .with_film(number, |film| {
-                        film.tried
-                            .iter()
-                            .find(|tried| !not_the_films(film.timing.get(tried.as_str())))
-                            .cloned()
-                    })
-                    .flatten();
-                if let Some(first) = first.filter(|first| first != id) {
-                    let manual = self.with_film(number, |film| film.manual).unwrap_or(true);
-                    if !manual {
-                        self.put_on(number, &first).await;
-                    }
-                }
-            }
+            self.move_on(number, id, automatic).await;
             return;
         };
-        let timing = timing_from(job, "applied");
-        let (on, by_hand) = self
-            .with_film(number, |film| (film.selected.as_deref() == Some(id), film.manual_delay))
-            .unwrap_or((false, true));
-        match apply.get("kind").and_then(Value::as_str) {
-            Some("file") => {
-                // A different cut: the corrected timeline replaces the track,
-                // and the original goes, so the menu still shows one entry.
-                let Some(url) = apply.get("url").and_then(Value::as_str) else { return };
-                let Some(key) = apply.get("key").and_then(Value::as_str) else { return };
-                let candidate = self
-                    .with_film(number, |film| film.candidates.iter().find(|c| c.id == id).cloned())
-                    .flatten();
-                let title = candidate.as_ref().map(title_for).unwrap_or_else(|| "Harici".into());
-                let language = candidate.as_ref().and_then(|c| c.language.clone());
-                let Some(mpv) = self.player.sub_add(url, &title, language.as_deref()).await else {
-                    return;
-                };
-                let old = self
-                    .with_film(number, |film| {
-                        film.loaded.insert(
-                            id.to_owned(),
-                            Loaded { key: key.to_owned(), url: url.to_owned(), mpv },
-                        )
-                    })
-                    .flatten();
-                if on {
-                    self.player.select_subtitle(Some(mpv)).await;
-                    if !by_hand {
-                        self.player.subtitle_timing(0.0, 1.0).await;
-                    }
-                }
-                if let Some(old) = old {
-                    self.player.sub_remove(old.mpv).await;
-                }
+        let timing = Timing { offset: delay, scale: 1.0, ..timing_from(job, "applied") };
+        let (on, by_hand, requested) = self
+            .with_film(number, |film| (film.selected.as_deref() == Some(id), film.manual_delay, film.requested))
+            .unwrap_or((false, true, false));
+        // Turned off while it was being worked out: kept, and put on only
+        // when asked for.
+        let allowed = self.preferences().auto_sync() || requested;
+        if on && !by_hand && allowed {
+            self.player.subtitle_timing(timing.offset, 1.0).await;
+        }
+        let state = if on && !by_hand && allowed { "applied" } else { "ready" };
+        self.set_timing(number, id, Timing { state: state.into(), ..timing });
+    }
+
+    /// A timing nobody could find, or a subtitle that does not fit this film:
+    /// an automatic choice moves on to the next of its language; one the
+    /// viewer made stays exactly as it is, untimed.
+    async fn move_on(self: &Arc<Self>, number: u64, id: &str, automatic: bool) {
+        let next = self.with_film(number, |film| {
+            if film.manual || film.selected.as_deref() != Some(id) {
+                return None;
             }
-            _ => {
-                if on && !by_hand {
-                    self.player.subtitle_timing(timing.offset, timing.scale).await;
+            next_candidate(&film.candidates, &film.tried, id)
+        });
+        if let Some(Some(next)) = next.filter(|_| automatic) {
+            eprintln!("mediaboxd-rs: film {number}: subtitle {id} does not fit, trying {next}");
+            self.try_external(number, next).await;
+        } else if automatic {
+            // Every one tried was refused: the best-ranked stays on, as it
+            // came, rather than none at all -- the best-ranked of the film's
+            // own, that is. A trailer's two minutes of lines were ranked first
+            // once and stayed on for a three-hour film.
+            let first = self
+                .with_film(number, |film| {
+                    film.tried
+                        .iter()
+                        .find(|tried| !not_the_films(film.timing.get(tried.as_str())))
+                        .cloned()
+                })
+                .flatten();
+            if let Some(first) = first.filter(|first| first != id) {
+                let manual = self.with_film(number, |film| film.manual).unwrap_or(true);
+                if !manual {
+                    self.put_on(number, &first).await;
                 }
             }
         }
-        let state = if on && by_hand { "ready" } else { "applied" };
-        self.set_timing(number, id, Timing { state: state.into(), ..timing });
     }
 
     // ------------------------------------------------------- the viewer
@@ -541,10 +599,14 @@ impl Subtitles {
         if !known || !self.put_on(number, id).await {
             return false;
         }
+        // The viewer's pick is final: it stays on whatever the answer is.
+        // Checked and timed only with "Otomatik eşitleme" on -- even when
+        // the film has an embedded track in the preferred language, which
+        // then serves as the timing reference and nothing more.
         let untimed = self
             .with_film(number, |film| !film.timing.contains_key(id))
             .unwrap_or(false);
-        if untimed {
+        if untimed && self.preferences().auto_sync() {
             spawn_timing(Arc::clone(self), number, id.to_owned(), false);
         }
         true
@@ -612,18 +674,42 @@ impl Subtitles {
         }
     }
 
+    /// "Otomatik eşitleme" was turned on or off in the settings panel: kept
+    /// for every film from now on. Turned on during a film, the external
+    /// subtitle that is on is checked and timed now.
+    pub async fn set_auto_sync(self: &Arc<Self>, enabled: bool) -> bool {
+        self.remember(|p| p.auto_sync_enabled = Some(enabled));
+        if !enabled {
+            return true;
+        }
+        let number = self.player.film();
+        let waiting = self
+            .with_film(number, |film| {
+                let selected = film.selected.clone().filter(|id| id.starts_with("ext:"))?;
+                (!film.timing.contains_key(&selected)).then(|| (selected, !film.manual))
+            })
+            .flatten();
+        if let Some((id, automatic)) = waiting {
+            spawn_timing(Arc::clone(self), number, id, automatic);
+        }
+        true
+    }
+
     /// The viewer moved the delay: automatic timing keeps off it from here.
     pub fn delay_moved(&self) {
         let number = self.player.film();
         self.with_film(number, |film| film.manual_delay = true);
     }
 
-    /// Put the automatic timing back on the subtitle that is on.
+    /// Put the automatic timing back on the subtitle that is on: the
+    /// viewer's own request, honoured whether "Otomatik eşitleme" is on or
+    /// not. A subtitle the worker refused stays as it is.
     pub async fn auto_sync(self: &Arc<Self>) -> bool {
         let number = self.player.film();
         let Some((selected, timing)) = self
             .with_film(number, |film| {
                 film.manual_delay = false;
+                film.requested = true;
                 let selected = film.selected.clone()?;
                 Some((selected.clone(), film.timing.get(&selected).cloned()))
             })
@@ -636,11 +722,7 @@ impl Subtitles {
         }
         match timing {
             Some(timing) if timing.state == "applied" || timing.state == "ready" => {
-                if timing.model.as_deref() != Some("piecewise") {
-                    self.player.subtitle_timing(timing.offset, timing.scale).await;
-                } else {
-                    self.player.subtitle_timing(0.0, 1.0).await;
-                }
+                self.player.subtitle_timing(timing.offset, 1.0).await;
                 self.set_timing(number, &selected, Timing { state: "applied".into(), ..timing });
                 true
             }
@@ -749,14 +831,18 @@ fn next_candidate(candidates: &[Candidate], tried: &[String], current: &str) -> 
         .next()
 }
 
-/// Whether the worker said this subtitle is some other video's (it ends long
-/// before the film does).
+/// Whether the worker said this subtitle covers only part of the film -- a
+/// trailer's lines, a CD1 -- or is a file already tried: not one to leave on.
 fn not_the_films(timing: Option<&Timing>) -> bool {
-    timing.and_then(|timing| timing.reason.as_deref()) == Some("does-not-cover-film")
+    timing.is_some_and(|timing| {
+        matches!(timing.eligibility, Some(Eligibility::RejectPartial | Eligibility::RejectDuplicate))
+            || timing.reason.as_deref() == Some("does-not-cover-film")
+    })
 }
 
 fn timing_from(job: &Value, state: &str) -> Timing {
     let result = job.get("result").cloned().unwrap_or(Value::Null);
+    let verdict = result.get("eligibility").cloned().unwrap_or(Value::Null);
     Timing {
         state: state.into(),
         model: result.get("model").and_then(Value::as_str).map(str::to_owned),
@@ -764,6 +850,11 @@ fn timing_from(job: &Value, state: &str) -> Timing {
         scale: result.get("scale").and_then(Value::as_f64).unwrap_or(1.0),
         confidence: result.get("confidence").and_then(Value::as_f64).unwrap_or(0.0),
         reason: result.get("reason").and_then(Value::as_str).map(str::to_owned),
+        eligibility: verdict.get("result").cloned().and_then(|v| serde_json::from_value(v).ok()),
+        reference: verdict.get("reference").and_then(Value::as_str).map(str::to_owned),
+        ratio: verdict.get("ratioLabel").and_then(Value::as_str).map(str::to_owned),
+        estimated_offset: verdict.get("offset").and_then(Value::as_f64),
+        cached: job.get("cache").and_then(Value::as_str) == Some("hit"),
     }
 }
 
@@ -897,7 +988,7 @@ mod tests {
     }
 
     fn on(language: &str, origin: Option<Origin>) -> Preferences {
-        Preferences { enabled: Some(true), language: Some(language.into()), origin }
+        Preferences { enabled: Some(true), language: Some(language.into()), origin, ..Preferences::default() }
     }
 
     #[test]
@@ -908,7 +999,7 @@ mod tests {
 
     #[test]
     fn off_stays_off() {
-        let preferences = Preferences { enabled: Some(false), language: Some("tr".into()), origin: None };
+        let preferences = Preferences { enabled: Some(false), language: Some("tr".into()), ..Preferences::default() };
         assert_eq!(auto_choice(&preferences, &[track(1, "tur", false)], &[]), Choice::Off);
     }
 
@@ -984,7 +1075,15 @@ mod tests {
         let mut timing = HashMap::new();
         timing.insert(
             "ext:a".to_string(),
-            Timing { state: "applied".into(), model: Some("offset".into()), offset: 1.82, scale: 1.0, confidence: 0.97, reason: None },
+            Timing {
+                state: "applied".into(),
+                model: Some("offset".into()),
+                offset: 1.82,
+                scale: 1.0,
+                confidence: 0.97,
+                eligibility: Some(Eligibility::AcceptTimelineCompatible),
+                ..Timing::default()
+            },
         );
         let list = unify(&tracks, Some((&candidates, &loaded, &timing)));
         let ids: Vec<&str> = list.iter().map(|t| t["id"].as_str().unwrap()).collect();
@@ -995,8 +1094,44 @@ mod tests {
         assert_eq!(list[2]["mpv_id"], 3);
         assert_eq!(list[2]["selected"], true);
         assert_eq!(list[2]["sync"]["offset"], 1.82);
+        assert_eq!(list[2]["sync"]["eligibility"], "ACCEPT_TIMELINE_COMPATIBLE");
         // Not loaded yet: listed, with no track number.
         assert!(list[3]["mpv_id"].is_null());
+    }
+
+    #[test]
+    fn a_preferences_file_from_before_auto_sync_keeps_it_on() {
+        let old: Preferences = serde_json::from_str(r#"{"enabled": true, "language": "tr", "origin": "embedded"}"#).unwrap();
+        assert!(old.auto_sync());
+        assert_eq!(old.language.as_deref(), Some("tr"));
+        let off = Preferences { auto_sync_enabled: Some(false), ..old.clone() };
+        let written = serde_json::to_value(&off).unwrap();
+        assert_eq!(written["auto_sync_enabled"], false);
+        assert!(!serde_json::from_value::<Preferences>(written).unwrap().auto_sync());
+        // A file that never said is written as it was.
+        assert!(serde_json::to_value(&old).unwrap().get("auto_sync_enabled").is_none());
+    }
+
+    #[test]
+    fn the_pre_filters_answers_are_the_workers_strings() {
+        for (name, value) in [
+            ("ACCEPT_TIMELINE_COMPATIBLE", Eligibility::AcceptTimelineCompatible),
+            ("REJECT_PARTIAL", Eligibility::RejectPartial),
+            ("REJECT_TIMEBASE_MISMATCH", Eligibility::RejectTimebaseMismatch),
+            ("REJECT_WRONG_RELEASE", Eligibility::RejectWrongRelease),
+            ("REJECT_DUPLICATE", Eligibility::RejectDuplicate),
+            ("INCONCLUSIVE", Eligibility::Inconclusive),
+        ] {
+            assert_eq!(serde_json::to_value(value).unwrap(), name);
+            assert_eq!(serde_json::from_value::<Eligibility>(json!(name)).unwrap(), value);
+        }
+        let job = json!({"cache": "hit", "result": {"model": "rejected", "reason": "canonical-timebase",
+            "eligibility": {"result": "REJECT_TIMEBASE_MISMATCH", "reference": "embedded-picture", "ratioLabel": "25/24", "offset": 0.4}}});
+        let timing = timing_from(&job, "rejected");
+        assert_eq!(timing.eligibility, Some(Eligibility::RejectTimebaseMismatch));
+        assert_eq!(timing.ratio.as_deref(), Some("25/24"));
+        assert_eq!(timing.reference.as_deref(), Some("embedded-picture"));
+        assert!(timing.cached);
     }
 
     #[test]
@@ -1105,13 +1240,17 @@ mod flows {
     }
 
     /// How the stand-in worker answers a sync.
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct Worker {
         apply: Value,
         /// Polls answered "running" before "done".
         polls_before_done: usize,
         /// The candidate whose subtitle ends long before the film.
         misfit: Option<&'static str>,
+        /// The pre-filter's answer for a refused one.
+        refusal: Option<&'static str>,
+        /// Candidates that are the same file as the first Turkish one.
+        twins: bool,
     }
 
     async fn serve_worker(listener: TcpListener, worker: Worker, seen: Arc<StdMutex<Vec<String>>>) {
@@ -1149,16 +1288,17 @@ mod flows {
                 } else if line.starts_with("POST /media/subtitles/load") {
                     let candidate: Value = serde_json::from_str(&body).unwrap();
                     let id = candidate["candidate"].as_str().unwrap().trim_start_matches("ext:");
-                    json!({"key": format!("{id:0>32}"), "url": format!("http://127.0.0.1:8790/media/subtitles/file/{id}.srt"), "format": "srt"})
+                    let same = if worker.twins && id == "tr2" { "tr1" } else { id };
+                    json!({"key": format!("{same:0>32}"), "url": format!("http://127.0.0.1:8790/media/subtitles/file/{id}.srt"), "format": "srt"})
                 } else if line.starts_with("POST /media/subtitles/sync") {
                     let request: Value = serde_json::from_str(&body).unwrap();
                     json!({"job": request["key"], "state": "running"})
                 } else if line.starts_with("GET /media/subtitles/sync/") {
                     let path = line.split_whitespace().nth(1).unwrap().split('?').next().unwrap();
                     let job = path.rsplit('/').next().unwrap().to_owned();
-                    let reason = match worker.misfit {
-                        Some(misfit) if job.ends_with(misfit) => "does-not-cover-film",
-                        _ => "unexplained-region",
+                    let (reason, eligibility) = match worker.misfit {
+                        Some(misfit) if job.ends_with(misfit) => ("does-not-cover-film", "REJECT_PARTIAL"),
+                        _ => ("canonical-timebase", worker.refusal.unwrap_or("REJECT_TIMEBASE_MISMATCH")),
                     };
                     let mut count = polls.lock().unwrap();
                     *count += 1;
@@ -1166,10 +1306,12 @@ mod flows {
                         json!({"job": job, "state": "running"})
                     } else {
                         let decision = if worker.apply.is_null() { "reject" } else { "apply" };
+                        let verdict = if worker.apply.is_null() { eligibility } else { "ACCEPT_TIMELINE_COMPATIBLE" };
                         json!({"job": job, "state": "done", "apply": worker.apply,
                                "result": {"model": if worker.apply["kind"] == "file" {"piecewise"} else {"offset"},
                                           "decision": decision, "offset": 1.82, "scale": 1.0, "confidence": 0.97,
-                                          "reason": if worker.apply.is_null() { Some(reason) } else { None }}})
+                                          "reason": if worker.apply.is_null() { Some(reason) } else { None },
+                                          "eligibility": {"result": verdict, "reference": "embedded-picture", "ratioLabel": "1"}}})
                     }
                 } else {
                     json!({})
@@ -1243,7 +1385,11 @@ mod flows {
     }
 
     fn turkish() -> Preferences {
-        Preferences { enabled: Some(true), language: Some("tr".into()), origin: None }
+        Preferences { enabled: Some(true), language: Some("tr".into()), ..Preferences::default() }
+    }
+
+    fn syncs(seen: &StdMutex<Vec<String>>) -> usize {
+        seen.lock().unwrap().iter().filter(|l| l.starts_with("POST /media/subtitles/sync")).count()
     }
 
     fn properties() -> Value {
@@ -1252,7 +1398,7 @@ mod flows {
 
     #[tokio::test]
     async fn an_addon_subtitle_reaches_the_player_and_is_timed() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 0, misfit: None }, turkish()).await;
+        let rig = rig(Worker { apply: properties(), ..Worker::default() }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the Turkish subtitle is on", || {
@@ -1282,7 +1428,7 @@ mod flows {
     async fn the_viewers_choice_is_not_overwritten_by_a_late_answer() {
         // The worker takes a few polls to answer; meanwhile the viewer picks
         // the file's English track.
-        let rig = rig(Worker { apply: properties(), polls_before_done: 2, misfit: None }, turkish()).await;
+        let rig = rig(Worker { apply: properties(), polls_before_done: 2, ..Worker::default() }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the automatic choice is on", || mpv.lock().unwrap().sid == Some(3)).await;
@@ -1298,7 +1444,7 @@ mod flows {
 
     #[tokio::test]
     async fn a_delay_set_by_hand_is_kept_until_auto_sync_is_asked_for() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 1, misfit: None }, turkish()).await;
+        let rig = rig(Worker { apply: properties(), polls_before_done: 1, ..Worker::default() }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the automatic choice is on", || mpv.lock().unwrap().sid == Some(3)).await;
@@ -1313,26 +1459,24 @@ mod flows {
     }
 
     #[tokio::test]
-    async fn a_different_cut_swaps_in_the_corrected_file_and_removes_the_original() {
+    async fn a_corrected_file_is_never_swapped_in() {
+        // An older worker's answer for a different cut: a remapped file. The
+        // rule now is to refuse such a subtitle, not to rescue it.
         let corrected = json!({"kind": "file", "key": "c".repeat(32), "url": "http://127.0.0.1:8790/media/subtitles/file/corrected.srt"});
-        let rig = rig(Worker { apply: corrected, polls_before_done: 0, misfit: None }, turkish()).await;
+        let rig = rig(Worker { apply: corrected, ..Worker::default() }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
-        let mpv = Arc::clone(&rig.mpv);
-        until("the corrected file is on and the original gone", || {
-            let mpv = mpv.lock().unwrap();
-            let on = mpv.tracks.iter().find(|t| t["type"] == "sub" && t["id"].as_i64() == mpv.sid);
-            on.is_some_and(|t| t["external-filename"] == "http://127.0.0.1:8790/media/subtitles/file/corrected.srt")
-                && !mpv.tracks.iter().any(|t| t["external-filename"] == "http://127.0.0.1:8790/media/subtitles/file/tr1.srt")
-        })
-        .await;
+        let seen = Arc::clone(&rig.seen);
+        until("the first answer is in", || syncs(&seen) >= 1).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
         let mpv = rig.mpv.lock().unwrap();
+        assert!(!mpv.tracks.iter().any(|t| t["external-filename"] == "http://127.0.0.1:8790/media/subtitles/file/corrected.srt"));
+        assert!(!mpv.log.iter().any(|c| c[0] == "sub-remove"));
         assert_eq!((mpv.delay, mpv.speed), (0.0, 1.0));
-        assert!(mpv.log.iter().any(|c| c[0] == "sub-remove" && c[1] == 3));
     }
 
     #[tokio::test]
     async fn a_rejected_automatic_choice_moves_to_the_next_of_its_language() {
-        let rig = rig(Worker { apply: Value::Null, polls_before_done: 0, misfit: None }, turkish()).await;
+        let rig = rig(Worker { apply: Value::Null, ..Worker::default() }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let seen = Arc::clone(&rig.seen);
         until("the second Turkish candidate is loaded", || {
@@ -1347,7 +1491,7 @@ mod flows {
     async fn a_subtitle_that_is_not_the_films_is_not_the_one_left_on() {
         // The first Turkish one is a trailer's; the second is the film's but
         // is not timed either. The film's stays on, untimed.
-        let rig = rig(Worker { apply: Value::Null, polls_before_done: 0, misfit: Some("tr1") }, turkish()).await;
+        let rig = rig(Worker { apply: Value::Null, misfit: Some("tr1"), ..Worker::default() }, turkish()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let subtitles = Arc::clone(&rig.subtitles);
         let mut settled = false;
@@ -1371,7 +1515,7 @@ mod flows {
 
     #[tokio::test]
     async fn the_preference_set_during_a_film_is_kept_and_put_on() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 0, misfit: None }, Preferences::default()).await;
+        let rig = rig(Worker { apply: properties(), ..Worker::default() }, Preferences::default()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let seen = Arc::clone(&rig.seen);
         until("the candidates are known", || {
@@ -1400,7 +1544,7 @@ mod flows {
 
     #[tokio::test]
     async fn choosing_off_and_an_unloaded_external() {
-        let rig = rig(Worker { apply: properties(), polls_before_done: 0, misfit: None }, Preferences::default()).await;
+        let rig = rig(Worker { apply: properties(), ..Worker::default() }, Preferences::default()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         tokio::time::sleep(Duration::from_millis(300)).await;
         // Nobody chose before: nothing was put on.
@@ -1413,5 +1557,105 @@ mod flows {
         assert_eq!(rig.subtitles.preferences().enabled, None);
         let text = rig.subtitles.text().await;
         assert_eq!(text["text"], "");
+    }
+
+    #[tokio::test]
+    async fn h_an_external_chosen_over_the_preferred_embedded_one_is_checked_and_kept() {
+        // The film has its own Turkish track, which is what comes on; the
+        // viewer picks a fetched Turkish one instead. It is checked (the
+        // embedded track is only the worker's timing reference), found to be
+        // another timebase, and stays on as the viewer's choice, untimed.
+        let rig = rig(Worker { apply: Value::Null, ..Worker::default() }, turkish()).await;
+        rig.mpv.lock().unwrap().tracks.push(json!({"id": 9, "type": "sub", "lang": "tur", "external": false, "codec": "subrip"}));
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let mpv = Arc::clone(&rig.mpv);
+        until("the embedded Turkish track is on", || mpv.lock().unwrap().sid == Some(9)).await;
+        assert_eq!(syncs(&rig.seen), 0, "an embedded choice is never analysed");
+        assert!(rig.subtitles.choose("ext:tr2").await);
+        let chosen = rig.mpv.lock().unwrap().sid;
+        assert!(chosen.is_some() && chosen != Some(9));
+        let seen = Arc::clone(&rig.seen);
+        until("the chosen one is analysed", || syncs(&seen) == 1).await;
+        let subtitles = Arc::clone(&rig.subtitles);
+        let mut refused = Value::Null;
+        for _ in 0..100 {
+            let tracks = subtitles.player.tracks().await;
+            let list = subtitles.unified(&tracks);
+            if let Some(entry) = list.as_array().unwrap().iter().find(|t| t["id"] == "ext:tr2") {
+                if entry["sync"]["state"] == "rejected" {
+                    refused = entry.clone();
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(refused["sync"]["eligibility"], "REJECT_TIMEBASE_MISMATCH", "{refused:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mpv = rig.mpv.lock().unwrap();
+        assert_eq!(mpv.sid, chosen, "the viewer's choice stays, embedded or not");
+        assert_eq!(mpv.delay, 0.0);
+        drop(mpv);
+        // And nothing else was tried in its place.
+        assert_eq!(syncs(&rig.seen), 1);
+    }
+
+    #[tokio::test]
+    async fn i_with_auto_sync_off_nothing_is_analysed_or_timed() {
+        let off = Preferences { auto_sync_enabled: Some(false), ..turkish() };
+        let rig = rig(Worker { apply: properties(), ..Worker::default() }, off).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let mpv = Arc::clone(&rig.mpv);
+        until("the Turkish subtitle is on", || mpv.lock().unwrap().sid == Some(3)).await;
+        assert!(rig.subtitles.choose("ext:tr2").await);
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert_eq!(syncs(&rig.seen), 0);
+        assert_eq!(rig.mpv.lock().unwrap().delay, 0.0);
+        // Asked for in so many words (Ok on the delay), it is done.
+        assert!(rig.subtitles.auto_sync().await);
+        let seen = Arc::clone(&rig.seen);
+        until("the requested analysis ran", || syncs(&seen) == 1).await;
+        let mpv = Arc::clone(&rig.mpv);
+        until("the requested timing is on", || (mpv.lock().unwrap().delay - 1.82).abs() < 1e-9).await;
+    }
+
+    #[tokio::test]
+    async fn turning_auto_sync_on_during_a_film_times_the_subtitle_that_is_on() {
+        let off = Preferences { auto_sync_enabled: Some(false), ..turkish() };
+        let rig = rig(Worker { apply: properties(), ..Worker::default() }, off).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let mpv = Arc::clone(&rig.mpv);
+        until("the Turkish subtitle is on", || mpv.lock().unwrap().sid == Some(3)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(syncs(&rig.seen), 0);
+        assert!(rig.subtitles.set_auto_sync(true).await);
+        let mpv = Arc::clone(&rig.mpv);
+        until("the timing is on", || (mpv.lock().unwrap().delay - 1.82).abs() < 1e-9).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let kept: Preferences = serde_json::from_slice(&std::fs::read(&rig.subtitles.preferences_file).unwrap()).unwrap();
+        assert_eq!(kept.auto_sync_enabled, Some(true));
+        assert_eq!(kept.language.as_deref(), Some("tr"), "the language is its own setting");
+    }
+
+    #[tokio::test]
+    async fn the_same_file_under_another_id_is_not_analysed_again() {
+        // ext:tr2 is the file ext:tr1 was: the first is refused, the second
+        // is skipped as a duplicate rather than sent to the worker again.
+        let rig = rig(Worker { apply: Value::Null, twins: true, ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let subtitles = Arc::clone(&rig.subtitles);
+        let mut duplicate = Value::Null;
+        for _ in 0..100 {
+            let tracks = subtitles.player.tracks().await;
+            let list = subtitles.unified(&tracks);
+            if let Some(entry) = list.as_array().unwrap().iter().find(|t| t["id"] == "ext:tr2") {
+                if !entry["sync"].is_null() && entry["sync"]["state"] == "rejected" {
+                    duplicate = entry.clone();
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(duplicate["sync"]["eligibility"], "REJECT_DUPLICATE", "{duplicate:?}");
+        assert_eq!(syncs(&rig.seen), 1);
     }
 }

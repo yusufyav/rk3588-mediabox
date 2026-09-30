@@ -4,8 +4,9 @@ For one playing film (one media session) it answers four questions:
 
     prepare   which external subtitles there are for it, best first
     load      one of them, fetched, checked and served on the loopback
-    sync      where that one's lines belong in this film, worked out in the
-              background and kept
+    sync      whether that one belongs to this film's timeline at all
+              (`eligibility`), and if it does, the offset its lines need --
+              worked out in the background and kept
     file      the bytes of a kept subtitle, for the player
 
 The network stays here. The player MediaBox owns is built against a Rockchip
@@ -32,10 +33,13 @@ from ..errors import InvalidRequest, MediaError, NotFound, UpstreamError
 from ..http import request
 from ..proxy.security import SourcePolicy, validate_source_url
 from ..stremio.models import Stream, Subtitle, SubtitleSource
+from . import eligibility
+from . import mkv
 from . import sync as engine
 from .audio import ListenConfig, ListenError, has_centre, listen
+from .eligibility import Eligibility, Reference, Verdict
 from .formats import SubtitleFormatError, parse
-from .runner import align_isolated
+from .runner import align_isolated, cross_check_isolated, evaluate_isolated
 from .languages import canonical
 from .store import SubtitleStore, digest, valid_key
 
@@ -58,6 +62,13 @@ WINDOW_SECONDS = 30.0
 #: Candidates offered per language: the menu is a television menu.
 PER_LANGUAGE = 3
 
+#: What a kept answer was worked out by: the pre-filter and the engine both.
+#: Part of every cache key, so a changed rule is never served an old answer.
+SYNC_VERSION = f"{engine.ALGORITHM}+{eligibility.VERSION}"
+
+#: How a video's own index is read; part of the key its reading is kept by.
+REFERENCE_VERSION = "mbidx-1"
+
 
 @dataclass(slots=True)
 class VideoContext:
@@ -79,6 +90,12 @@ class VideoContext:
     #: (channels, layout) of each audio track, in the order `0:a:N` counts
     #: them; from the probe the session was created with.
     audio: tuple[tuple[int | None, str | None], ...] = ()
+    #: From the same probe: the video's rate as a canonical one (or None),
+    #: the container's name, and how many subtitle tracks the file carries
+    #: (None when the probe did not say).
+    video_rate: float | None = None
+    container: str | None = None
+    embedded_subtitles: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +106,7 @@ class VideoContext:
             "videoSize": self.size,
             "filename": self.filename,
             "duration": self.duration,
+            "videoRate": self.video_rate,
         }
 
 
@@ -117,11 +135,51 @@ class SyncJob:
             "state": self.state,
             "cache": self.cache,
             "result": self.result,
+            "eligibility": (self.result or {}).get("eligibility"),
             "apply": self.apply,
             "error": self.error,
             "windows": self.heard,
             "seconds": round((self.finished or time.monotonic()) - self.started, 2),
         }
+
+
+@dataclass(slots=True)
+class ReferenceInfo:
+    """What a video's own index offers the pre-filter."""
+
+    reference: Reference | None
+    video_rate: float | None
+    #: Why there is no reference ("" when there is one).
+    reason: str = ""
+    bytes: int = 0
+    #: A reason that may not hold next time (the network): not kept on disk.
+    transient: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "version": REFERENCE_VERSION,
+            "videoRate": self.video_rate,
+            "reason": self.reason,
+            "bytes": self.bytes,
+            "reference": None
+            if self.reference is None
+            else {**self.reference.as_dict(), "times": [round(t, 3) for t in self.reference.times]},
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ReferenceInfo":
+        found = payload.get("reference")
+        reference = None
+        if isinstance(found, dict):
+            reference = Reference(
+                str(found["kind"]),
+                tuple(float(t) for t in found["times"]),
+                found.get("track"),
+                found.get("language"),
+                found.get("codec"),
+                str(found.get("quality", "single")),
+            )
+        return cls(reference, payload.get("videoRate"), str(payload.get("reason", "")), int(payload.get("bytes") or 0))
 
 
 def opensubtitles_hash(first: bytes, last: bytes, size: int) -> str:
@@ -149,6 +207,8 @@ class SubtitleService:
         alive: Callable[[str], bool] = lambda _: True,
         listener: Callable[..., tuple[engine.Window, int]] | None = None,
         aligner: Callable[..., engine.SyncResult] | None = None,
+        evaluator: Callable[..., Verdict] | None = None,
+        index_reader: Callable[["VideoContext"], mkv.ContainerIndex] | None = None,
     ) -> None:
         self.stremio = stremio
         self.policy = source_policy
@@ -160,6 +220,13 @@ class SubtitleService:
         self.alive = alive
         self._listen = listener or listen
         self._align = aligner or align_isolated
+        self._evaluate = evaluator or evaluate_isolated
+        self._cross_check = cross_check_isolated
+        self._read_index = index_reader or self._index
+        self._references: dict[str, ReferenceInfo] = {}
+        # One reading of a video's index at a time: two subtitles of the same
+        # film asked for together read it once.
+        self._reference_lock = threading.Lock()
         self._contexts: dict[str, VideoContext] = {}
         self._jobs: dict[str, SyncJob] = {}
         self._lock = threading.Lock()
@@ -177,6 +244,8 @@ class SubtitleService:
         elif self.streaming_server and source_url.startswith(self.streaming_server + "/"):
             kind = "torrent"
         container = getattr(info, "container", None)
+        video = getattr(info, "primary_video", None)
+        subtitles = getattr(info, "subtitles", None)
         context = VideoContext(
             session_id=session_id,
             source_url=source_url,
@@ -187,6 +256,9 @@ class SubtitleService:
                 (getattr(track, "channels", None), getattr(track, "channel_layout", None))
                 for track in getattr(info, "audio", ()) or ()
             ),
+            video_rate=eligibility.snap_rate(getattr(video, "fps", None)),
+            container=getattr(container, "format_name", None),
+            embedded_subtitles=len(subtitles) if isinstance(subtitles, (tuple, list)) else None,
         )
         if isinstance(stream, dict):
             from ..stremio.addons import parse_stream
@@ -357,8 +429,14 @@ class SubtitleService:
             raise MediaError("SUBTITLE_UNREADABLE", str(exc), 422) from exc
         key = self.store.put(document)
         with self._lock:
+            # The same file offered twice (two addons, two ids): the same key,
+            # and whoever asks to time the second is served the first's work.
+            twin = next((cid for cid, k in context.loaded.items() if k == key and cid != wanted), None)
             context.loaded[wanted or ""] = key
-        return self._loaded(key, document, subtitle)
+        answer = self._loaded(key, document, subtitle)
+        if twin:
+            answer["duplicateOf"] = twin
+        return answer
 
     def _loaded(self, key: str, document: Any, subtitle: Subtitle) -> dict[str, Any]:
         return {
@@ -443,11 +521,11 @@ class SubtitleService:
             job.finished = time.monotonic()
 
     def _analyse(self, job: SyncJob, context: VideoContext, audio_index: int | None, hash_match: bool) -> None:
-        cached = self.store.result(context.identity, job.key, engine.ALGORITHM)
+        cached = self.store.result(context.identity, job.key, SYNC_VERSION)
         if cached and cached.get("result", {}).get("decision") in ("apply", "reject"):
             job.cache = "hit"
             job.result = cached["result"]
-            job.apply = self._apply(cached["result"], context, job.key, cached.get("corrected"))
+            job.apply = self._apply(cached["result"])
             job.heard = int(cached["result"].get("windows", 0))
             job.state = "done"
             self._log(job, context, "hit")
@@ -460,17 +538,53 @@ class SubtitleService:
         cues = [(cue.start, cue.end) for cue in document.cues]
         duration = context.duration or (max(end for _, end in cues) + 60.0)
         seekable = context.kind != "torrent"
+        names = self._names(context, job.key)
 
-        if context.duration and not engine.covers(cues, context.duration):
-            # Somebody else's subtitle -- a trailer's, most often. Said at
-            # once, so the next candidate is tried now and not after every
-            # window has been heard for nothing.
-            job.result = engine.SyncResult(
-                "rejected", "reject", 0.0, reason="does-not-cover-film"
-            ).as_dict()
-            job.state = "done"
-            self._log(job, context, "miss")
+        # 1. Coverage, from the subtitle alone. Somebody else's subtitle -- a
+        # trailer's, most often -- is said at once, so the next candidate is
+        # tried now and not after every window has been heard for nothing.
+        found = eligibility.partial(cues, context.duration, None, (("1", 1.0),), names=names)
+        if found:
+            verdict = Verdict(Eligibility.REJECT_PARTIAL, found[0], metrics=found[1])
+            self._finish(job, context, verdict, None)
             return
+
+        # 2. The video's own subtitle tracks, from its index: a few range
+        # reads, bounded, once per video.
+        info = self._reference(context)
+        verdict: Verdict | None = None
+        if info.reference is not None:
+            verdict = self._evaluate(
+                cues,
+                info.reference,
+                info.video_rate,
+                context.duration,
+                reversed_cues=document.reversed_cues,
+                names=names,
+            )
+            verdict.metrics["referenceQuality"] = info.reference.quality
+            verdict.metrics["referenceBytes"] = info.bytes
+            if not verdict.result.accepted:
+                self._finish(job, context, verdict, None)
+                return
+        elif document.reversed_cues >= eligibility.DEFAULT.max_reversed_cues:
+            verdict = Verdict(
+                Eligibility.REJECT_WRONG_RELEASE,
+                "reversed-cues",
+                video_rate=info.video_rate,
+                metrics={"reversedCues": document.reversed_cues, "referenceUnavailable": info.reason},
+            )
+            self._finish(job, context, verdict, None)
+            return
+
+        # 3. The sound: the offset of a subtitle the reference accepted, or,
+        # with no reference, the whole question under the same rules -- the
+        # engine tries only this video's canonical ratios and nothing it
+        # finds other than one constant offset is put into effect.
+        if verdict is not None:
+            ratios: tuple[float, ...] = (1.0,)
+        else:
+            ratios = tuple(r for _, r in eligibility.canonical_ratios(info.video_rate))
 
         most = 40
         if context.kind == "http":
@@ -478,11 +592,10 @@ class SubtitleService:
                 per_window = context.size / context.duration * WINDOW_SECONDS
                 most = min(most, int(self.max_bytes / max(1.0, per_window)))
             if most < MIN_AFFORDABLE_WINDOWS:
-                job.result = engine.SyncResult(
-                    "rejected", "reject", 0.0, reason="source-too-heavy"
-                ).as_dict()
-                job.state = "done"
-                self._log(job, context, "miss")
+                heavy = engine.SyncResult("rejected", "reject", 0.0, reason="source-too-heavy")
+                if verdict is None:
+                    verdict = Verdict(Eligibility.INCONCLUSIVE, "source-too-heavy", reference="none", video_rate=info.video_rate)
+                self._finish(job, context, verdict, heavy)
                 return
 
         track = audio_index or 0
@@ -490,7 +603,7 @@ class SubtitleService:
         # Heard from the centre is not heard from a downmix: kept apart.
         evidence = "centre" if centre else ""
         heard = self.store.speech(context.identity, evidence)
-        result: engine.SyncResult | None = self._align(cues, heard, duration) if heard else None
+        result: engine.SyncResult | None = self._align(cues, heard, duration, ratios) if heard else None
         with self._analysis:
             while not job.cancel.is_set():
                 if not self.alive(context.session_id):
@@ -528,14 +641,13 @@ class SubtitleService:
                     heard.append(window)
                     job.heard = len(heard)
                 self.store.keep_speech(context.identity, heard, evidence)
-                result = self._align(cues, heard, duration)
+                result = self._align(cues, heard, duration, ratios)
         if job.cancel.is_set():
             job.state = "cancelled"
             return
         if result is None:
             result = engine.SyncResult("rejected", "gather", 0.0, reason="nothing-to-listen-to")
 
-        answer = result.as_dict()
         waiting = (
             not seekable
             and result.decision == "gather"
@@ -544,48 +656,162 @@ class SubtitleService:
         if result.decision == "gather" and not waiting:
             # Everything affordable has been listened to and it is still not
             # sure: that is a no.
-            answer["decision"] = "reject"
-            answer["model"] = "rejected"
-            answer["reason"] = f"unresolved-{result.reason}"
-        corrected = None
-        if answer["decision"] == "apply" and result.model == "piecewise":
-            corrected = self._correct(document, result, context, job.key)
+            result.decision, result.model, result.reason = "reject", "rejected", f"unresolved-{result.reason}"
+        if waiting:
+            job.result = result.as_dict()
+            if verdict is not None:
+                job.result["eligibility"] = verdict.as_dict()
+            job.apply = None
+            job.state = "waiting"
+            self._log(job, context, "miss", result)
+            return
+        if verdict is None:
+            verdict = eligibility.from_audio(result.as_dict(), info.video_rate)
+            verdict.metrics["referenceUnavailable"] = info.reason
+        self._finish(job, context, verdict, result)
+
+    def _finish(
+        self,
+        job: SyncJob,
+        context: VideoContext,
+        verdict: Verdict,
+        result: engine.SyncResult | None,
+    ) -> None:
+        """The answer as the control plane reads it, and kept.
+
+        Only an accepted timeline with one constant offset is ever applied: a
+        different timebase is refused, not converted, and a different cut is
+        refused, not remapped.
+        """
+        if result is None:
+            result = engine.SyncResult("rejected", "reject", 0.0, reason=verdict.reason)
+        answer = result.as_dict()
+        applicable = (
+            verdict.result.accepted
+            and answer["decision"] == "apply"
+            and answer["model"] == "offset"
+            and abs(float(answer["scale"]) - 1.0) < 1e-9
+        )
+        if not applicable and answer["decision"] == "apply":
+            # The sound found a model the pre-filter does not allow.
+            answer["decision"], answer["model"] = "reject", "rejected"
+            answer["reason"] = verdict.reason if not verdict.result.accepted else f"not-an-offset-{result.model}"
+        elif not verdict.result.accepted:
+            answer["reason"] = verdict.reason
+        answer["eligibility"] = verdict.as_dict()
         job.result = answer
-        job.apply = self._apply(answer, context, job.key, corrected)
-        job.state = "waiting" if waiting else "done"
-        if not waiting:
-            self.store.keep_result(
-                context.identity, job.key, engine.ALGORITHM, {"result": answer, "corrected": corrected}
-            )
+        job.apply = self._apply(answer)
+        job.state = "done"
+        self.store.keep_result(context.identity, job.key, SYNC_VERSION, {"result": answer})
         self._log(job, context, "miss", result)
 
-    def _correct(self, document: Any, result: engine.SyncResult, context: VideoContext, key: str) -> str:
-        """A new timeline for a different cut, kept beside the original."""
-        corrected_key = digest("corrected", context.identity, key, engine.ALGORITHM)
-        if self.store.path(corrected_key) is None:
-            mapper = result.mapping.cue_mapper([cue.start for cue in document.cues])
-            self.store.put_as(corrected_key, document.remap(mapper))
-        return corrected_key
-
-    def _apply(self, answer: dict[str, Any], context: VideoContext, key: str, corrected: str | None) -> dict[str, Any] | None:
-        """What the player has to be told, if anything."""
-        if answer.get("decision") != "apply":
+    def _apply(self, answer: dict[str, Any]) -> dict[str, Any] | None:
+        """What the player has to be told, if anything: a delay, nothing else."""
+        verdict = answer.get("eligibility") or {}
+        if (
+            answer.get("decision") != "apply"
+            or answer.get("model") != "offset"
+            or verdict.get("result") != Eligibility.ACCEPT_TIMELINE_COMPATIBLE.value
+        ):
             return None
-        if answer.get("model") == "piecewise" and corrected:
-            document = self.store.get(corrected)
-            if document is None:
-                return None
-            return {"kind": "file", "key": corrected, "url": self.file_url(corrected, document.extension)}
-        return {"kind": "properties", "subDelay": answer["offset"], "subSpeed": answer["scale"]}
+        return {"kind": "properties", "subDelay": answer["offset"], "subSpeed": 1.0}
+
+    def _names(self, context: VideoContext, key: str) -> tuple[str | None, ...]:
+        """What the subtitle was called where it was found: a "CD1" says a lot."""
+        with self._lock:
+            ids = [cid for cid, k in context.loaded.items() if k == key]
+            found = [context.candidates.get(cid) for cid in ids]
+        return tuple(subtitle.label for subtitle in found if subtitle is not None)
+
+    # ------------------------------------------------------------ reference
+
+    def _reference(self, context: VideoContext) -> ReferenceInfo:
+        # Without an identity nothing can be kept, or told apart from another
+        # film's: read, used, forgotten.
+        if not context.identity:
+            return self._read_reference(context)
+        with self._reference_lock:
+            with self._lock:
+                known = self._references.get(context.identity)
+            if known is not None:
+                return known
+            kept = self.store.reference(context.identity, REFERENCE_VERSION)
+            if kept is not None:
+                info = ReferenceInfo.from_dict(kept)
+            else:
+                info = self._read_reference(context)
+                if not info.transient:
+                    self.store.keep_reference(context.identity, REFERENCE_VERSION, info.as_dict())
+            with self._lock:
+                self._references[context.identity] = info
+                if len(self._references) > 16:
+                    self._references.pop(next(iter(self._references)))
+            return info
+
+    def _read_reference(self, context: VideoContext) -> ReferenceInfo:
+        rate = context.video_rate
+        if context.embedded_subtitles == 0:
+            return ReferenceInfo(None, rate, "no-embedded-subtitles")
+        if context.container and "matroska" not in context.container:
+            return ReferenceInfo(None, rate, "unsupported-container")
+        try:
+            index = self._read_index(context)
+        except mkv.IndexUnavailable as exc:
+            transient = exc.reason.startswith(("read-failed", "short-read"))
+            LOG.info("subtitle reference for %s: %s", context.identity, exc.reason)
+            return ReferenceInfo(None, rate, exc.reason, transient=transient)
+        except (MediaError, OSError) as exc:
+            return ReferenceInfo(None, rate, f"read-failed: {exc}", transient=True)
+        measured = mkv.video_rate(index, tuple(r for _, r in eligibility.CANONICAL_RATES))
+        if measured is not None:
+            rate = measured
+        elif rate is not None and any(t.type == mkv.VIDEO and t.default_duration_ns for t in index.tracks):
+            # The index contradicts the probe: neither is believed.
+            rate = None
+        tracks = []
+        for track in index.tracks:
+            kind = mkv.subtitle_kind(track.codec) if track.type == mkv.SUBTITLE else None
+            if kind is None:
+                continue
+            times = tuple(t for t in index.cues.get(track.number, []) if t > 0.5)
+            tracks.append(Reference(kind, times, track.number, canonical(track.language), track.codec))
+        tracks.sort(key=lambda r: len(r.times), reverse=True)
+        th = eligibility.DEFAULT
+        if not tracks or len(tracks[0].times) < th.min_reference_events:
+            return ReferenceInfo(None, rate, "no-indexed-subtitle-track", index.bytes_read)
+        primary = tracks[0]
+        quality = "single"
+        second = next((r for r in tracks[1:] if len(r.times) >= th.min_second_reference_events), None)
+        if second is not None:
+            try:
+                quality = self._cross_check(primary, second, rate)
+            except RuntimeError as exc:
+                LOG.info("subtitle reference cross-check failed: %s", exc)
+        if quality == "ambiguous":
+            return ReferenceInfo(None, rate, "ambiguous-embedded-reference", index.bytes_read)
+        reference = Reference(primary.kind, primary.times, primary.track, primary.language, primary.codec, quality)
+        return ReferenceInfo(reference, rate, "", index.bytes_read)
+
+    def _index(self, context: VideoContext) -> mkv.ContainerIndex:
+        """The video's index, read under `mkv.INDEX_BUDGET`."""
+        if context.kind == "file":
+            return mkv.read_index(mkv.FileRanges(urlsplit(context.source_url).path))
+        size = context.size or mkv.remote_size(context.source_url)
+        return mkv.read_index(mkv.HttpRanges(context.source_url, size))
 
     def _log(self, job: SyncJob, context: VideoContext, cache: str, result: engine.SyncResult | None = None) -> None:
         answer = job.result or {}
+        verdict = answer.get("eligibility") or {}
         LOG.info(
-            "subtitle sync video=%s subtitle=%s source=%s model=%s offset=%+.3f scale=%.6f "
-            "windows=%s inliers=%s confidence=%.2f decision=%s seconds=%.1f cache=%s reason=%s",
+            "subtitle sync video=%s subtitle=%s source=%s eligibility=%s reference=%s ratio=%s "
+            "model=%s offset=%+.3f scale=%.6f windows=%s inliers=%s confidence=%.2f decision=%s "
+            "seconds=%.1f cache=%s reason=%s",
             context.identity,
             job.key,
             context.kind,
+            verdict.get("result"),
+            verdict.get("reference"),
+            verdict.get("ratioLabel"),
             answer.get("model"),
             float(answer.get("offset") or 0.0),
             float(answer.get("scale") or 1.0),
@@ -597,6 +823,8 @@ class SubtitleService:
             cache,
             answer.get("reason"),
         )
+        if verdict.get("metrics"):
+            LOG.debug("subtitle sync %s eligibility %s", job.id, verdict["metrics"])
         if result is not None and result.evidence:
             LOG.debug("subtitle sync %s evidence %s", job.id, result.evidence)
 

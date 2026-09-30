@@ -62,6 +62,11 @@ class Document:
     #: For ASS/SSA: which comma-separated fields of a Dialogue line are the
     #: start and the end. Read from the file's own `Format:` line.
     ass_fields: tuple[int, int, int] | None = None
+    #: Timed lines that end before they start. They are not cues and are left
+    #: out of `cues`; how many there were says how the file was made -- a tool
+    #: that wrote "[ Skipped item nr. 129 ]" at 03:07:18 --> 00:20:46 did not
+    #: time it against this film.
+    reversed_cues: int = 0
 
     @property
     def extension(self) -> str:
@@ -163,6 +168,7 @@ def _hms(h: str, m: str, s: str, frac: str | None) -> float:
 
 def _parse_srt(lines: tuple[str, ...]) -> Document:
     cues: list[Cue] = []
+    reversed_cues = 0
     for index, line in enumerate(lines):
         match = _SRT_TIMING.match(line)
         if not match:
@@ -171,9 +177,11 @@ def _parse_srt(lines: tuple[str, ...]) -> Document:
         end = _hms(*match.group(5, 6, 7, 8))
         if end > start:
             cues.append(Cue(start, end, index))
+        elif end < start:
+            reversed_cues += 1
     if not cues:
         raise SubtitleFormatError("the SRT file has no cue with a valid time")
-    return Document("srt", lines, tuple(cues))
+    return Document("srt", lines, tuple(cues), reversed_cues=reversed_cues)
 
 
 def _srt_stamp(seconds: float, separator: str = ",") -> str:
@@ -192,6 +200,7 @@ _VTT_TIMING = re.compile(rf"^\s*{_VTT_TIME}\s*-->\s*{_VTT_TIME}(.*)$")
 
 def _parse_vtt(lines: tuple[str, ...]) -> Document:
     cues: list[Cue] = []
+    reversed_cues = 0
     for index, line in enumerate(lines):
         match = _VTT_TIMING.match(line)
         if not match:
@@ -200,9 +209,11 @@ def _parse_vtt(lines: tuple[str, ...]) -> Document:
         end = _hms(match.group(5) or "0", *match.group(6, 7, 8))
         if end > start:
             cues.append(Cue(start, end, index))
+        elif end < start:
+            reversed_cues += 1
     if not cues:
         raise SubtitleFormatError("the WebVTT file has no cue with a valid time")
-    return Document("vtt", lines, tuple(cues))
+    return Document("vtt", lines, tuple(cues), reversed_cues=reversed_cues)
 
 
 # ----------------------------------------------------------------- ASS/SSA
@@ -215,6 +226,7 @@ def _parse_ass(lines: tuple[str, ...]) -> Document:
     fields: tuple[int, int, int] | None = None
     in_events = False
     cues: list[Cue] = []
+    reversed_cues = 0
     for index, line in enumerate(lines):
         stripped = line.strip()
         if stripped.lower().startswith("scripttype:") and "+" in stripped:
@@ -237,11 +249,13 @@ def _parse_ass(lines: tuple[str, ...]) -> Document:
         start, end = _ass_seconds(parts[fields[0]]), _ass_seconds(parts[fields[1]])
         if start is not None and end is not None and end > start:
             cues.append(Cue(start, end, index))
+        elif start is not None and end is not None and end < start:
+            reversed_cues += 1
     if fields is None:
         raise SubtitleFormatError("the ASS/SSA file has no [Events] Format line")
     if not cues:
         raise SubtitleFormatError("the ASS/SSA file has no dialogue with a valid time")
-    return Document(fmt, lines, tuple(cues), fields)
+    return Document(fmt, lines, tuple(cues), fields, reversed_cues)
 
 
 def _ass_seconds(value: str) -> float | None:

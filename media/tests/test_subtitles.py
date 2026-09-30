@@ -20,8 +20,12 @@ from media.stremio.addons import AddonClient, parse_stream
 from media.stremio.models import Subtitle, SubtitleSource
 from media.subtitles.audio import ListenConfig, ffmpeg_argv, has_centre
 from media.subtitles.service import SubtitleService, opensubtitles_hash, rank
-from media.subtitles.sync import align
+from media.subtitles.sync import FRAME_RATE_RATIOS, align
 
+from media.subtitles import eligibility, mkv
+from media.subtitles.eligibility import Eligibility
+
+from . import eligibility_synth as synth
 from .subtitle_synth import cut, film, invert, listen
 
 
@@ -99,7 +103,9 @@ class Harness(unittest.TestCase):
 
         service: SubtitleService = self.core.subtitles
         service._listen = listener
-        service._align = lambda cues, windows, duration: align(cues, windows, duration=duration)
+        service._align = lambda cues, windows, duration, ratios=FRAME_RATE_RATIOS: align(
+            cues, windows, duration=duration, ratios=ratios
+        )
         # No real media session behind these: the film is always "playing".
         service.alive = lambda _: True
 
@@ -348,17 +354,14 @@ class LoadAndSync(Harness):
         repeated = set(self.heard_calls[:heard]) & set(self.heard_calls[heard:])
         self.assertEqual(repeated, set())
 
-    def test_a_different_cut_gets_a_corrected_file_and_the_original_is_kept(self):
+    def test_a_different_cut_is_refused_not_remapped(self):
         sub = cut(self.film.reference, [(1837.0, 45.0)])
         loaded = self.prepared(srt(sub))
         _, original = self.call("GET", loaded["url"][len("http://127.0.0.1:8790"):])
         answer = self.sync(loaded["key"])
-        self.assertEqual(answer["result"]["model"], "piecewise", answer)
-        self.assertEqual(answer["apply"]["kind"], "file")
-        self.assertNotEqual(answer["apply"]["key"], loaded["key"])
-        status, corrected = self.call("GET", answer["apply"]["url"][len("http://127.0.0.1:8790"):])
-        self.assertEqual(status, 200)
-        self.assertNotEqual(corrected, original)
+        self.assertEqual(answer["eligibility"]["result"], "REJECT_WRONG_RELEASE", answer)
+        self.assertEqual(answer["result"]["decision"], "reject")
+        self.assertIsNone(answer["apply"])
         _, still = self.call("GET", loaded["url"][len("http://127.0.0.1:8790"):])
         self.assertEqual(still, original)
 
@@ -462,3 +465,159 @@ class Listening(unittest.TestCase):
             for flag, value in (("-ss", "600.000"), ("-t", "30.000"), ("-ar", "8000"), ("-f", "s16le"), ("-threads", "1")):
                 self.assertEqual(argv[argv.index(flag) + 1], value)
             self.assertTrue({"-vn", "-sn", "-dn"} <= set(argv))
+
+
+class Eligible(Harness):
+    """The pre-filter in front of the sound: an embedded track of the file
+    (a Hungarian PGS, say) is the timing reference, read from its index."""
+
+    SESSION = "g" * 32
+    FILM = LoadAndSync.FILM
+
+    def setUp(self):
+        super().setUp()
+        service = self.core.subtitles
+        truth = list(self.film.reference)
+        self.pgs = synth.picture_events(synth.rendition(truth, 11))
+        # The Turkish subtitle as another author wrote the same dialogue.
+        self.turkish = synth.rendition(truth, 12, jitter=0.08, lag=0.2, scene_lag=0.2)
+        self.index_reads = 0
+        self.evaluations = 0
+        self.audio_ratios: list[tuple[float, ...]] = []
+
+        def index(context):
+            self.index_reads += 1
+            keyframes = [round(k * 2.0, 3) for k in range(int(self.film.duration / 2))]
+            return mkv.ContainerIndex(
+                self.film.duration,
+                [
+                    mkv.Track(1, mkv.VIDEO, "V_MPEG4/ISO/AVC", default_duration_ns=41666666),
+                    mkv.Track(5, mkv.SUBTITLE, "S_HDMV/PGS", language="hun"),
+                ],
+                {1: keyframes, 5: list(self.pgs)},
+                bytes_read=123_456,
+            )
+
+        def evaluate(*args, **kwargs):
+            self.evaluations += 1
+            return eligibility.evaluate(*args, **kwargs)
+
+        align_before = service._align
+
+        def aligned(cues, windows, duration, ratios):
+            self.audio_ratios.append(tuple(ratios))
+            return align_before(cues, windows, duration, ratios)
+
+        service._read_index = index
+        service._evaluate = evaluate
+        service._align = aligned
+
+    def probed(self):
+        return SimpleNamespace(
+            container=SimpleNamespace(duration_seconds=None, size_bytes=None, format_name="matroska,webm"),
+            audio=(),
+            subtitles=(SimpleNamespace(codec="hdmv_pgs_subtitle"),),
+            primary_video=SimpleNamespace(fps=24.0),
+        )
+
+    def loaded(self, subtitles, *, session=None):
+        """Candidates for one session, loaded; their answers in order."""
+        session = session or self.SESSION
+        self.addon_subtitles = []
+        for index, (name, body) in enumerate(subtitles):
+            Files.files[f"/{name}.srt"] = body
+            self.addon_subtitles.append(Subtitle(f"x{index}", f"{self.origin}/{name}.srt", "tur", "opensubtitles"))
+        self.register(session, source=self.FILM, info=self.probed())
+        _, answer = self.call("POST", "/media/subtitles/prepare", {"sessionId": session, "type": "movie", "id": "tt9"})
+        found = []
+        for candidate in answer["candidates"]:
+            status, body = self.call("POST", "/media/subtitles/load", {"sessionId": session, "candidate": candidate["id"]})
+            self.assertEqual(status, 200, body)
+            found.append(body)
+        return found
+
+    def sync(self, key, session=None):
+        status, job = self.call(
+            "POST",
+            "/media/subtitles/sync",
+            {"sessionId": session or self.SESSION, "key": key, "duration": self.film.duration},
+        )
+        self.assertEqual(status, 202, job)
+        return self.wait(job["job"])
+
+    def test_an_accepted_subtitle_is_timed_by_the_sound_as_an_offset_only(self):
+        # The subtitle the sound engine's own calibration is made of, against
+        # an embedded track another author wrote.
+        body = srt(invert(self.film.reference, lambda v: v - 4.2))
+        (loaded,) = self.loaded([("tr", body)])
+        answer = self.sync(loaded["key"])
+        verdict = answer["eligibility"]
+        self.assertEqual(verdict["result"], "ACCEPT_TIMELINE_COMPATIBLE", verdict)
+        self.assertEqual(verdict["reference"], "embedded-picture")
+        self.assertEqual(verdict["ratioLabel"], "1")
+        self.assertAlmostEqual(verdict["offset"], 4.2, delta=0.4)
+        # The sound was asked for the offset alone: no other rate.
+        self.assertTrue(self.heard_calls)
+        self.assertTrue(self.audio_ratios and all(r == (1.0,) for r in self.audio_ratios))
+        self.assertEqual(answer["apply"]["kind"], "properties")
+        self.assertAlmostEqual(answer["apply"]["subDelay"], 4.2, delta=0.3)
+        self.assertEqual(answer["apply"]["subSpeed"], 1.0)
+
+    def test_an_accepted_timeline_the_sound_cannot_confirm_is_left_alone(self):
+        # Looser authoring than the sound engine believes: the pre-filter says
+        # the timeline is this video's, the offset mechanism is not sure of
+        # the offset, and nothing is applied.
+        (loaded,) = self.loaded([("tr", srt(invert(self.turkish, lambda v: v - 4.2)))])
+        answer = self.sync(loaded["key"])
+        self.assertEqual(answer["eligibility"]["result"], "ACCEPT_TIMELINE_COMPATIBLE")
+        self.assertEqual(answer["result"]["decision"], "reject")
+        self.assertIsNone(answer["apply"])
+
+    def test_b_a_wrong_timebase_is_refused_without_listening(self):
+        body = srt(invert(self.turkish, lambda v: (v - 0.3) / (25 / 24)))
+        (loaded,) = self.loaded([("tr", body)])
+        answer = self.sync(loaded["key"])
+        self.assertEqual(answer["eligibility"]["result"], "REJECT_TIMEBASE_MISMATCH", answer["eligibility"])
+        self.assertEqual(answer["eligibility"]["ratioLabel"], "25/24")
+        self.assertEqual(answer["result"]["decision"], "reject")
+        self.assertIsNone(answer["apply"])
+        self.assertEqual(self.heard_calls, [])
+
+    def test_d_half_a_film_is_refused_without_listening(self):
+        half = [cue for cue in self.turkish if cue[1] < 0.49 * self.film.duration]
+        (loaded,) = self.loaded([("tr", srt(half))])
+        answer = self.sync(loaded["key"])
+        self.assertEqual(answer["eligibility"]["result"], "REJECT_PARTIAL", answer["eligibility"])
+        self.assertIsNone(answer["apply"])
+        self.assertEqual(self.heard_calls, [])
+
+    def test_g_the_same_file_is_analysed_once(self):
+        body = srt(invert(self.film.reference, lambda v: v - 4.2))
+        # The same file offered by two addons, under two ids.
+        first, second = self.loaded([("a", body), ("b", body)])
+        self.assertEqual(first["key"], second["key"])
+        self.assertIn("duplicateOf", second)
+        answer = self.sync(first["key"])
+        self.assertIsNotNone(answer["apply"])
+        heard = len(self.heard_calls)
+        self.assertEqual((self.index_reads, self.evaluations), (1, 1))
+        # The twin in the same film: the same job, nothing worked out again.
+        again = self.sync(second["key"])
+        self.assertEqual(again["job"], answer["job"])
+        # The next time the film is played, in a new session: kept answers.
+        (third,) = self.loaded([("c", body)], session="h" * 32)
+        later = self.sync(third["key"], session="h" * 32)
+        self.assertEqual(later["cache"], "hit")
+        self.assertEqual(later["eligibility"], answer["eligibility"])
+        self.assertEqual(later["apply"], answer["apply"])
+        self.assertEqual((self.index_reads, self.evaluations), (1, 1))
+        self.assertEqual(len(self.heard_calls), heard)
+
+    def test_the_index_is_read_once_per_video_whichever_subtitle_asks(self):
+        right = srt(invert(self.turkish, lambda v: v - 4.2))
+        wrong = srt(invert(self.turkish, lambda v: (v - 0.3) / (25 / 24)))
+        first, second = self.loaded([("r", right), ("w", wrong)])
+        self.sync(first["key"])
+        self.sync(second["key"])
+        self.assertEqual(self.index_reads, 1)
+        self.assertEqual(self.evaluations, 2)

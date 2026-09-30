@@ -1562,6 +1562,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         language: Option<String>,
     },
+    /// "Otomatik eşitleme" in the player's settings panel: whether an
+    /// external subtitle that is put on is checked against the film and, if
+    /// it fits, timed. Independent of the preferred language. Kept for every
+    /// film from now on.
+    SubtitleAutoSyncSet { enabled: bool },
     /// The subtitle line on screen now, as the player's own timing puts it.
     ///
     /// The appliance's player hands its frames to the interface and draws

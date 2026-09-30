@@ -290,14 +290,20 @@ impl AppState {
                 // The settings panel's "Tercih edilen altyazı dili".
                 let preferences = self.subtitles.preferences();
                 status["subtitle_preference"] = json!(match preferences.enabled {
-                    Some(true) => preferences.language,
+                    Some(true) => preferences.language.clone(),
                     _ => None,
                 });
+                // ... and its "Otomatik eşitleme".
+                status["subtitle_auto_sync"] = json!(preferences.auto_sync());
                 Response::success(status)
             }
             Request::SubtitlePreferenceSet { language } => {
                 let applied = self.subtitles.set_preference(language).await;
                 Response::success(json!({"applied": applied}))
+            }
+            Request::SubtitleAutoSyncSet { enabled } => {
+                let applied = self.subtitles.set_auto_sync(enabled).await;
+                Response::success(json!({"applied": applied, "enabled": enabled}))
             }
             Request::MediaSubtitleTextHere => Response::success(self.subtitles.text().await),
             Request::MediaTransportHere { action } => {

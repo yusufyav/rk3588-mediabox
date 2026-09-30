@@ -2282,12 +2282,15 @@ impl App {
                     // Left and Right on the preferred subtitle language step
                     // through the languages, the way a value is changed.
                     if self.now.menu == Menu::Settings && dx != 0 && dy == 0 {
-                        let on_language = self
-                            .player_settings()
-                            .get(self.now.menu_focus)
-                            .is_some_and(|row| row.act == screens::audio::PlayerAct::SubtitleLanguage);
-                        if on_language {
+                        let act = self.player_settings().get(self.now.menu_focus).map(|row| row.act);
+                        if act == Some(screens::audio::PlayerAct::SubtitleLanguage) {
                             self.step_subtitle_preference(dx.signum());
+                            return;
+                        }
+                        // On and off are the only two values: either way
+                        // turns it over.
+                        if act == Some(screens::audio::PlayerAct::SubtitleAutoSync) {
+                            self.toggle_subtitle_auto_sync();
                             return;
                         }
                     }
@@ -2397,14 +2400,34 @@ impl App {
     fn player_settings(&self) -> Vec<screens::audio::PlayerRow> {
         // The subtitle language a film starts with leads: it is the setting
         // a viewer comes back to most, and the only one about the film.
-        let mut rows = vec![screens::audio::PlayerRow {
-            label: "Tercih edilen altyazı dili".into(),
-            detail: screens::now_playing::preference_name(self.now.subtitle_preference.as_deref()),
-            active: self.now.subtitle_preference.is_some(),
-            act: screens::audio::PlayerAct::SubtitleLanguage,
-        }];
+        let auto_sync = self.now.subtitle_auto_sync.unwrap_or(true);
+        let mut rows = vec![
+            screens::audio::PlayerRow {
+                label: "Tercih edilen altyazı dili".into(),
+                detail: screens::now_playing::preference_name(self.now.subtitle_preference.as_deref()),
+                active: self.now.subtitle_preference.is_some(),
+                act: screens::audio::PlayerAct::SubtitleLanguage,
+            },
+            // Its own setting: which language a film starts with says nothing
+            // about whether a fetched subtitle is timed.
+            screens::audio::PlayerRow {
+                label: "Otomatik eşitleme".into(),
+                detail: if auto_sync { "Açık".into() } else { "Kapalı".into() },
+                active: auto_sync,
+                act: screens::audio::PlayerAct::SubtitleAutoSync,
+            },
+        ];
         rows.extend(screens::audio::player_panel(self.output_status().as_ref(), self.audio_status().as_ref()));
         rows
+    }
+
+    /// Turn "Otomatik eşitleme" over and keep it.
+    fn toggle_subtitle_auto_sync(&mut self) {
+        let next = !self.now.subtitle_auto_sync.unwrap_or(true);
+        self.now.subtitle_auto_sync = Some(next);
+        spawn_here(HereCommand::SubtitleAutoSyncSet(next));
+        self.open_controls();
+        self.paint();
     }
 
     /// Move "Tercih edilen altyazı dili" by `step` and put it into effect.
@@ -2502,6 +2525,7 @@ impl App {
                     use screens::audio::PlayerAct;
                     match row.act {
                         PlayerAct::SubtitleLanguage => self.step_subtitle_preference(1),
+                        PlayerAct::SubtitleAutoSync => self.toggle_subtitle_auto_sync(),
                         PlayerAct::RefreshMatching => spawn_output(mediabox_core::Request::OutputContentMatching {
                             enabled: !row.active,
                         }),
@@ -5745,6 +5769,7 @@ enum HereCommand {
     SubtitleChoose(String),
     SubtitleAutoSync,
     SubtitlePreference(Option<String>),
+    SubtitleAutoSyncSet(bool),
     Audio(i64),
     SubtitleDelay(f64),
     AudioDelay(f64),
@@ -5826,6 +5851,11 @@ fn spawn_here(command: HereCommand) {
             HereCommand::SubtitlePreference(language) => {
                 client
                     .call(serde_json::json!({"command": "subtitle_preference_set", "language": language}))
+                    .await
+            }
+            HereCommand::SubtitleAutoSyncSet(enabled) => {
+                client
+                    .call(serde_json::json!({"command": "subtitle_auto_sync_set", "enabled": enabled}))
                     .await
             }
             HereCommand::Audio(id) => {

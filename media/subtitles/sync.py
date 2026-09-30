@@ -46,12 +46,16 @@ from typing import Any, Iterable, Sequence
 #: key, so a better algorithm is never served a worse one's conclusions.
 #: mbsync-2: a subtitle that ends early is refused, and 5.1 is heard from its
 #: centre channel -- answers of mbsync-1 for those films are not these.
-ALGORITHM = "mbsync-2"
+#: mbsync-3: the rates tried are the caller's, anchored to the video's own
+#: (`eligibility.canonical_ratios`), not every pair of film rates.
+ALGORITHM = "mbsync-3"
 
 #: Subtitle timing bases that differ from the video's by a whole frame-rate
 #: conversion. Each is tried as the scale before the offset is searched, which
 #: is what turns a four per cent drift -- minutes by the end of a film -- into
-#: a constant offset the search can find.
+#: a constant offset the search can find. The service passes only the ratios
+#: that mean something for the video it is timing; this set is the engine's
+#: default for callers that know nothing of the video.
 FRAME_RATE_RATIOS: tuple[float, ...] = (
     1.0,
     25 / (24000 / 1001),
@@ -640,13 +644,16 @@ def align(
     windows: Sequence[Window],
     params: Params | None = None,
     duration: float | None = None,
+    ratios: Sequence[float] = FRAME_RATE_RATIOS,
 ) -> SyncResult:
     """How the subtitle's timeline maps onto the film, and how sure that is.
 
     `duration` is the film's, when known; without it the subtitle's last line
-    stands in for the end of the film.
+    stands in for the end of the film. `ratios` are the timebases tried, the
+    film's own (1.0) among them.
     """
     params = params or Params()
+    ratios = tuple(ratios) or (1.0,)
     original = [(start, end) for start, end in cues if end > start]
     if len(original) < 2 * params.min_cues_in_window:
         return SyncResult("rejected", "reject", 0.0, reason="too-few-cues")
@@ -661,7 +668,7 @@ def align(
     step = max(1, math.ceil(len(ordered) / params.scale_windows))
     sample = ordered[::step]
     values: dict[float, float] = {}
-    for scale in FRAME_RATE_RATIOS:
+    for scale in ratios:
         evidence = _evidence(sample, cues, scale, params)
         if not evidence:
             continue
@@ -719,7 +726,7 @@ def align(
     tolerance = params.inlier_tolerance
     band = 2 * tolerance
     reach = params.search_range
-    scales = len(FRAME_RATE_RATIOS)
+    scales = len(ratios)
     span = points[-1][0] - points[0][0]
 
     # Three explanations, each scored by how unlikely its agreement is.

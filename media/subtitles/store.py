@@ -39,6 +39,7 @@ LOG = logging.getLogger(__name__)
 DEFAULT_CEILING_BYTES = 64 * 1024 * 1024
 
 _KEY = re.compile(r"^[0-9a-f]{32}$")
+FOLDERS = ("files", "sync", "speech", "reference")
 EXTENSIONS = ("srt", "vtt", "ass", "ssa")
 
 
@@ -56,7 +57,7 @@ class SubtitleStore:
         self.ceiling = ceiling
         self._lock = threading.Lock()
         self._documents: dict[str, Document] = {}
-        for name in ("files", "sync", "speech"):
+        for name in FOLDERS:
             (self.root / name).mkdir(parents=True, exist_ok=True, mode=0o750)
 
     # ------------------------------------------------------------ subtitles
@@ -126,6 +127,17 @@ class SubtitleStore:
 
     def keep_result(self, video: str, subtitle: str, algorithm: str, answer: dict[str, Any]) -> None:
         self._save_json(self.root / "sync" / f"{digest(video, subtitle, algorithm)}.json", answer)
+
+    # ------------------------------------------------------------ reference
+
+    def reference(self, video: str, version: str) -> dict[str, Any] | None:
+        """What a video's own index said: its rate and its subtitle tracks'
+        events. Read once per video, whichever subtitle asks."""
+        payload = self._load_json(self.root / "reference" / f"{digest('reference', video, version)}.json")
+        return payload if isinstance(payload, dict) else None
+
+    def keep_reference(self, video: str, version: str, payload: dict[str, Any]) -> None:
+        self._save_json(self.root / "reference" / f"{digest('reference', video, version)}.json", payload)
 
     # --------------------------------------------------------------- speech
 
@@ -200,7 +212,7 @@ class SubtitleStore:
         """Oldest first, until the directory is under its ceiling."""
         entries = []
         total = 0
-        for folder in ("files", "sync", "speech"):
+        for folder in FOLDERS:
             for path in (self.root / folder).iterdir():
                 try:
                     stat = path.stat()
