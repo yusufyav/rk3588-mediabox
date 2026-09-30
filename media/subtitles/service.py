@@ -62,12 +62,19 @@ WINDOW_SECONDS = 30.0
 #: Candidates offered per language: the menu is a television menu.
 PER_LANGUAGE = 3
 
-#: What a kept answer was worked out by: the pre-filter and the engine both.
-#: Part of every cache key, so a changed rule is never served an old answer.
-SYNC_VERSION = f"{engine.ALGORITHM}+{eligibility.VERSION}"
 
-#: How a video's own index is read; part of the key its reading is kept by.
-REFERENCE_VERSION = "mbidx-1"
+#: How a video's own index is read and its reference chosen; part of the key
+#: its reading is kept by. mbidx-2: commentary and forced tracks are not
+#: references, and a contradicted track is passed over for the next.
+REFERENCE_VERSION = "mbidx-2"
+
+#: Dialogue tracks tried as the reference, busiest first.
+REFERENCE_TRIES = 3
+
+#: What a kept answer was worked out by: the engine, the pre-filter and the
+#: choice of reference. Part of every cache key, so a changed rule is never
+#: served an old answer.
+SYNC_VERSION = f"{engine.ALGORITHM}+{eligibility.VERSION}+{REFERENCE_VERSION}"
 
 
 @dataclass(slots=True)
@@ -564,9 +571,31 @@ class SubtitleService:
             )
             verdict.metrics["referenceQuality"] = info.reference.quality
             verdict.metrics["referenceBytes"] = info.bytes
+            LOG.info(
+                "subtitle eligibility video=%s subtitle=%s result=%s reason=%s reference=%s ratio=%s offset=%s",
+                context.identity, job.key, verdict.result.value, verdict.reason, verdict.reference,
+                verdict.ratio_label, verdict.offset,
+            )
             if not verdict.result.accepted:
                 self._finish(job, context, verdict, None)
                 return
+            # Accepted against the film's own track: that match is the offset,
+            # window by window. Nothing is listened to -- measured on The
+            # Social Network, the sound took 276 s to find -1.14 s and then
+            # doubted it; the reference had said -1.17 s in seconds.
+            windows = int(verdict.metrics.get("reliableWindows") or 0)
+            total = len(verdict.metrics.get("windows") or []) or 1
+            matched = engine.SyncResult(
+                "offset",
+                "apply",
+                min(1.0, windows / total),
+                offset=float(verdict.offset or 0.0),
+                windows=windows,
+                inliers=windows,
+                reason="embedded-reference",
+            )
+            self._finish(job, context, verdict, matched)
+            return
         elif document.reversed_cues >= eligibility.DEFAULT.max_reversed_cues:
             verdict = Verdict(
                 Eligibility.REJECT_WRONG_RELEASE,
@@ -577,14 +606,11 @@ class SubtitleService:
             self._finish(job, context, verdict, None)
             return
 
-        # 3. The sound: the offset of a subtitle the reference accepted, or,
-        # with no reference, the whole question under the same rules -- the
-        # engine tries only this video's canonical ratios and nothing it
-        # finds other than one constant offset is put into effect.
-        if verdict is not None:
-            ratios: tuple[float, ...] = (1.0,)
-        else:
-            ratios = tuple(r for _, r in eligibility.canonical_ratios(info.video_rate))
+        # 3. No reference: the sound answers the whole question under the
+        # same rules -- the engine tries only this video's canonical ratios
+        # and nothing it finds other than one constant offset is put into
+        # effect.
+        ratios = tuple(r for _, r in eligibility.canonical_ratios(info.video_rate))
 
         most = 40
         if context.kind == "http":
@@ -771,26 +797,42 @@ class SubtitleService:
         tracks = []
         for track in index.tracks:
             kind = mkv.subtitle_kind(track.codec) if track.type == mkv.SUBTITLE else None
-            if kind is None:
+            # Only the film's dialogue is a timing reference. A commentary
+            # track's lines are someone talking over the film: on Drive the
+            # busiest track was "Japanese (Commentary #2)" and no Turkish
+            # subtitle matched it, while all thirteen dialogue tracks agreed.
+            if kind is None or not mkv.is_dialogue(track):
                 continue
             times = tuple(t for t in index.cues.get(track.number, []) if t > 0.5)
             tracks.append(Reference(kind, times, track.number, canonical(track.language), track.codec))
         tracks.sort(key=lambda r: len(r.times), reverse=True)
         th = eligibility.DEFAULT
-        if not tracks or len(tracks[0].times) < th.min_reference_events:
+        usable = [r for r in tracks if len(r.times) >= th.min_reference_events]
+        if not usable:
             return ReferenceInfo(None, rate, "no-indexed-subtitle-track", index.bytes_read)
-        primary = tracks[0]
-        quality = "single"
-        second = next((r for r in tracks[1:] if len(r.times) >= th.min_second_reference_events), None)
-        if second is not None:
-            try:
-                quality = self._cross_check(primary, second, rate)
-            except RuntimeError as exc:
-                LOG.info("subtitle reference cross-check failed: %s", exc)
-        if quality == "ambiguous":
-            return ReferenceInfo(None, rate, "ambiguous-embedded-reference", index.bytes_read)
-        reference = Reference(primary.kind, primary.times, primary.track, primary.language, primary.codec, quality)
-        return ReferenceInfo(reference, rate, "", index.bytes_read)
+        # The busiest dialogue track that another one confirms; else the
+        # busiest that nothing contradicts. One track can be off on its own
+        # (Drive's German one sat 24 s from the rest), so a track another one
+        # calls ambiguous is passed over for the next.
+        fallback: Reference | None = None
+        for primary in usable[:REFERENCE_TRIES]:
+            second = next(
+                (r for r in tracks if r is not primary and len(r.times) >= th.min_second_reference_events), None
+            )
+            quality = "single"
+            if second is not None:
+                try:
+                    quality = self._cross_check(primary, second, rate)
+                except RuntimeError as exc:
+                    LOG.info("subtitle reference cross-check failed: %s", exc)
+            found = Reference(primary.kind, primary.times, primary.track, primary.language, primary.codec, quality)
+            if quality == "confirmed":
+                return ReferenceInfo(found, rate, "", index.bytes_read)
+            if quality == "single" and fallback is None:
+                fallback = found
+        if fallback is not None:
+            return ReferenceInfo(fallback, rate, "", index.bytes_read)
+        return ReferenceInfo(None, rate, "ambiguous-embedded-reference", index.bytes_read)
 
     def _index(self, context: VideoContext) -> mkv.ContainerIndex:
         """The video's index, read under `mkv.INDEX_BUDGET`."""

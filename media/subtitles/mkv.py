@@ -16,6 +16,7 @@ for a bounded span, takes at most that many bytes, and closes.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from array import array
 from dataclasses import dataclass, field
@@ -411,6 +412,20 @@ def video_rate(index: ContainerIndex, candidates: tuple[float, ...]) -> float | 
 #: Codec ids that are subtitles, and what their blocks mark.
 PICTURE_CODECS = ("S_HDMV/PGS", "S_VOBSUB", "S_DVBSUB")
 TEXT_CODECS = ("S_TEXT/", "S_ASS", "S_SSA")
+
+
+#: Track names that are not the film's dialogue, in the languages remuxes
+#: name them in: commentaries, forced-only tracks, signs and songs.
+_NOT_DIALOGUE = re.compile(
+    r"comment|kommentar|commentaire|commento|comentario|coment[aá]rio|forced|forc[ée]|zorunlu|signs?\b|songs?\b",
+    re.IGNORECASE,
+)
+
+
+def is_dialogue(track: Track) -> bool:
+    """Whether a subtitle track carries the film's dialogue, as far as its
+    flags and name say."""
+    return not track.forced and not (track.name and _NOT_DIALOGUE.search(track.name))
 
 
 def subtitle_kind(codec: str) -> str | None:

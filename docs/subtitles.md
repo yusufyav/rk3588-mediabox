@@ -13,9 +13,9 @@ timed automatically by one constant offset.
   settings panel:         selection,     ──sync─────▶  mkv.py (index: rate, embedded
    "Otomatik eşitleme"    AutoSync on/off)               tracks' events; bounded reads)
                                                         eligibility.py (pre-filter)
-                                                          │ ACCEPT only
-                                                          ▼
-                                                        audio.py + sync.py (offset)
+                                                          │ ACCEPT: its offset
+                                                          ▼  (no embedded track:
+                                                        audio.py + sync.py)
   caption line ◀──text── sub-text ◀─────────────────── sub-delay ──────────────────▶
   (drawn by the UI)
 ```
@@ -79,7 +79,8 @@ external subtitle selected (automatically, or by the viewer)
     ↓  INCONCLUSIVE             nothing anchored to the video explains it
     ↓  ACCEPT_TIMELINE_COMPATIBLE
     ↓
-the offset mechanism below (sound), offset only → mpv sub-delay
+the reference's own offset → mpv sub-delay
+(no embedded track: the sound decides, offset only)
 ```
 
 `REJECT_DUPLICATE` is the control plane's: a candidate that loads to the same
@@ -102,9 +103,19 @@ language, text or picture (PGS, VobSub): when its events are -- a text
 track's lines, a picture track's show and clear packets -- is when somebody
 speaks in *this* file's timeline. Nothing is matched cue to cue (another
 language splits and merges lines, and moves edges by a few frames); the two
-activity patterns are compared. No bitmap is decoded, no OCR. With two or
-more usable tracks the second checks the first (`confirmed`); one that tells
-another timeline makes the reference `ambiguous` and it is not used.
+activity patterns are compared. No bitmap is decoded, no OCR. The language
+of the reference does not matter and has nothing to do with the preferred
+subtitle language: on *Drive* the right Turkish subtitle came out at
+−18.2…−18.7 s against each of thirteen dialogue tracks in thirteen languages.
+
+Only dialogue tracks are references: a track flagged forced, or named as a
+commentary, forced, signs or songs (`mkv.is_dialogue`), is not -- on *Drive*
+the busiest track was "Japanese (Commentary #2)", and against it no subtitle
+matched at all. Of the rest, busiest first, the first that a second track
+confirms is used (`confirmed`); failing that, the first nothing contradicts
+(`single`); a track another one contradicts is passed over (one of Drive's,
+German, sat 24 s from all the others). Up to three are tried
+(`REFERENCE_TRIES`).
 
 **How it decides**, all numbers in `Thresholds`:
 
@@ -125,6 +136,12 @@ another timeline makes the reference `ambiguous` and it is not used.
    must leave less than 1 s of drift across the windows and less than 0.6 s
    of scatter. Ratio 1 is ACCEPT, another canonical ratio is TIMEBASE
    MISMATCH, anything else is INCONCLUSIVE.
+
+**The offset.** An ACCEPT against the reference carries its own offset, the
+median of its windows, and that is what is applied: nothing is listened to.
+Measured on *The Social Network*: the reference said −1.17 s in under a
+second; the sound, asked afterwards, listened for 276 s, found −1.14 s and
+then refused it for an "unexplained region", so nothing had been applied.
 
 **Without a reference** (MP4, no embedded subtitle, an index that cannot be
 read within budget) the sound answers the same question under the same
@@ -149,17 +166,16 @@ audio for this step.
 **Kept, once per file.** The index reading is kept per video identity
 (`reference/`, `REFERENCE_VERSION`), whichever subtitle asks; each answer per
 (video identity, subtitle content hash, `SYNC_VERSION` = engine + pre-filter
-version) in `sync/`. The same file offered twice under two addon ids has one
++ reference version) in `sync/`. The same file offered twice under two addon ids has one
 key: the second `load` says `duplicateOf`, a second sync in the same film is
 the same job, and the next time the film is played the answer is read, not
 worked out. The evaluation runs in the engine's child process
 (`runner.py`), like alignment.
 
-## The offset mechanism (`media/subtitles/sync.py`)
+## The sound (`media/subtitles/sync.py`)
 
-Run only for a subtitle the pre-filter accepted (at ratio 1 only), or, with
-no reference, as the pre-filter itself (at this video's canonical ratios).
-Only its `offset` answer is ever applied:
+Run only for a video with no usable embedded track, as the pre-filter itself
+(at this video's canonical ratios). Only its `offset` answer is ever applied:
 
 | Model | Form | Applied as |
 | --- | --- | --- |
@@ -361,9 +377,11 @@ external subtitles a film had and when an automatic choice moves on.
   Calibration); nothing it finds other than one offset is applied.
 * The embedded reference is read from Matroska indexes only; an MP4's
   sample tables are not read, and such a film is decided by the sound.
-* After an ACCEPT the offset comes from the sound, which a source too heavy
-  for the download budget cannot give: the subtitle is then left untimed even
-  though the pre-filter's own offset estimate exists.
+* Without an embedded track the sound decides, and a source too heavy for
+  the download budget cannot be listened to: such a subtitle is left untimed.
+* When every candidate of the language is refused, the best-ranked one that
+  is not partial stays on untimed -- a subtitle known to be on another
+  timebase included. Whether it should rather stay off is not decided yet.
 * High-bitrate HTTP sources (4K remux) exceed the download budget and are not
   analysed.
 * Subtitles are not handed to Kodi on handover.

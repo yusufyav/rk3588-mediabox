@@ -43,8 +43,9 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Sequence
 
-#: Part of every cache key an answer of this module goes into.
-VERSION = "mbelig-1"
+#: Part of every cache key an answer of this module goes into. mbelig-2: an
+#: accepted subtitle is timed by the reference's own offset.
+VERSION = "mbelig-2"
 
 
 class Eligibility(str, Enum):

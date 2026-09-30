@@ -485,18 +485,24 @@ class Eligible(Harness):
         self.evaluations = 0
         self.audio_ratios: list[tuple[float, ...]] = []
 
+        # A commentary track, busier than the dialogue: another film's worth
+        # of talk. Tests that want it set `self.commentary = True`.
+        self.commentary = False
+        chatter = synth.picture_events(synth.dialogue(77, duration=self.film.duration))
+        chatter = chatter + tuple(t + 0.7 for t in chatter)
+
         def index(context):
             self.index_reads += 1
             keyframes = [round(k * 2.0, 3) for k in range(int(self.film.duration / 2))]
-            return mkv.ContainerIndex(
-                self.film.duration,
-                [
-                    mkv.Track(1, mkv.VIDEO, "V_MPEG4/ISO/AVC", default_duration_ns=41666666),
-                    mkv.Track(5, mkv.SUBTITLE, "S_HDMV/PGS", language="hun"),
-                ],
-                {1: keyframes, 5: list(self.pgs)},
-                bytes_read=123_456,
-            )
+            tracks = [
+                mkv.Track(1, mkv.VIDEO, "V_MPEG4/ISO/AVC", default_duration_ns=41666666),
+                mkv.Track(5, mkv.SUBTITLE, "S_HDMV/PGS", language="hun"),
+            ]
+            cues = {1: keyframes, 5: list(self.pgs)}
+            if self.commentary:
+                tracks.append(mkv.Track(22, mkv.SUBTITLE, "S_HDMV/PGS", language="jpn", name="Japanese (Commentary #2)"))
+                cues[22] = sorted(chatter)
+            return mkv.ContainerIndex(self.film.duration, tracks, cues, bytes_read=123_456)
 
         def evaluate(*args, **kwargs):
             self.evaluations += 1
@@ -545,33 +551,31 @@ class Eligible(Harness):
         self.assertEqual(status, 202, job)
         return self.wait(job["job"])
 
-    def test_an_accepted_subtitle_is_timed_by_the_sound_as_an_offset_only(self):
-        # The subtitle the sound engine's own calibration is made of, against
-        # an embedded track another author wrote.
-        body = srt(invert(self.film.reference, lambda v: v - 4.2))
+    def test_an_accepted_subtitle_is_timed_by_the_reference_without_listening(self):
+        body = srt(invert(self.turkish, lambda v: v - 4.2))
         (loaded,) = self.loaded([("tr", body)])
         answer = self.sync(loaded["key"])
         verdict = answer["eligibility"]
         self.assertEqual(verdict["result"], "ACCEPT_TIMELINE_COMPATIBLE", verdict)
         self.assertEqual(verdict["reference"], "embedded-picture")
         self.assertEqual(verdict["ratioLabel"], "1")
-        self.assertAlmostEqual(verdict["offset"], 4.2, delta=0.4)
-        # The sound was asked for the offset alone: no other rate.
-        self.assertTrue(self.heard_calls)
-        self.assertTrue(self.audio_ratios and all(r == (1.0,) for r in self.audio_ratios))
+        # The offset is the reference's own; nothing of the film is heard.
+        self.assertEqual(self.heard_calls, [])
+        self.assertEqual(self.audio_ratios, [])
+        self.assertEqual(answer["result"]["decision"], "apply")
         self.assertEqual(answer["apply"]["kind"], "properties")
         self.assertAlmostEqual(answer["apply"]["subDelay"], 4.2, delta=0.3)
         self.assertEqual(answer["apply"]["subSpeed"], 1.0)
 
-    def test_an_accepted_timeline_the_sound_cannot_confirm_is_left_alone(self):
-        # Looser authoring than the sound engine believes: the pre-filter says
-        # the timeline is this video's, the offset mechanism is not sure of
-        # the offset, and nothing is applied.
+    def test_a_commentary_track_is_never_the_reference(self):
+        # Drive: the busiest subtitle track was the director's commentary,
+        # and matched against it no subtitle fitted.
+        self.commentary = True
         (loaded,) = self.loaded([("tr", srt(invert(self.turkish, lambda v: v - 4.2)))])
         answer = self.sync(loaded["key"])
-        self.assertEqual(answer["eligibility"]["result"], "ACCEPT_TIMELINE_COMPATIBLE")
-        self.assertEqual(answer["result"]["decision"], "reject")
-        self.assertIsNone(answer["apply"])
+        verdict = answer["eligibility"]
+        self.assertEqual(verdict["result"], "ACCEPT_TIMELINE_COMPATIBLE", verdict)
+        self.assertAlmostEqual(answer["apply"]["subDelay"], 4.2, delta=0.3)
 
     def test_b_a_wrong_timebase_is_refused_without_listening(self):
         body = srt(invert(self.turkish, lambda v: (v - 0.3) / (25 / 24)))
@@ -600,6 +604,7 @@ class Eligible(Harness):
         answer = self.sync(first["key"])
         self.assertIsNotNone(answer["apply"])
         heard = len(self.heard_calls)
+        self.assertEqual(heard, 0)
         self.assertEqual((self.index_reads, self.evaluations), (1, 1))
         # The twin in the same film: the same job, nothing worked out again.
         again = self.sync(second["key"])
