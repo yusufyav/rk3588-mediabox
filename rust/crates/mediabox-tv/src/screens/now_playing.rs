@@ -256,6 +256,9 @@ pub struct NowPlaying {
     /// Its "Otomatik eşitleme", as the control plane keeps it. None until it
     /// has said, which reads as on -- its own default.
     pub subtitle_auto_sync: Option<bool>,
+    /// Its "AutoSync uyumsuz altyazıları göster". None until the control
+    /// plane has said, which reads as off -- its own default.
+    pub subtitle_show_incompatible: Option<bool>,
     pub audio: Vec<Track>,
     pub speed: f64,
     pub sub_delay: f64,
@@ -787,6 +790,9 @@ impl NowPlaying {
             if let Some(on) = status.get("subtitle_auto_sync").and_then(Value::as_bool) {
                 self.subtitle_auto_sync = Some(on);
             }
+            if let Some(on) = status.get("subtitle_show_incompatible").and_then(Value::as_bool) {
+                self.subtitle_show_incompatible = Some(on);
+            }
             // The preferred language leads the panel when the film has it.
             if let Some(preferred) = self.subtitle_preference.clone() {
                 self.subtitles.sort_by_key(|track| track.language != preferred);
@@ -963,6 +969,40 @@ mod tests {
         assert!(!now.languages().contains(&"Türkçe".to_string()));
     }
 
+
+    #[test]
+    fn a_fetched_subtitle_is_named_by_the_provider_that_found_it() {
+        let mut now = NowPlaying::new();
+        now.take_here(&serde_json::json!({
+            "tracks": [],
+            "subtitle_show_incompatible": true,
+            "subtitles": [
+                {"id": "ext:c", "mpv_id": null, "source": "provider_external", "language": "tr", "title": "WEB-DL",
+                 "provider": "opensubtitles_com", "provider_name": "OpenSubtitles.com", "selected": false},
+                {"id": "ext:v", "mpv_id": null, "source": "addon_external", "language": "tr", "title": null,
+                 "provider": "opensubtitles_v3", "provider_name": "OpenSubtitles v3", "selected": false},
+                {"id": "ext:q", "mpv_id": null, "source": "provider_external", "language": "tr", "title": null,
+                 "provider_name": "OpenSubtitles.com", "unavailable": "quota-exhausted", "selected": false},
+                // The stream's own, whatever it claims, is not a provider's.
+                {"id": "ext:s", "mpv_id": null, "source": "stream_external", "language": "tr", "title": null,
+                 "provider_name": "OpenSubtitles.com", "selected": false},
+                {"id": "ext:x", "mpv_id": null, "source": "addon_external", "language": "tr", "title": null, "selected": false},
+            ],
+        }));
+        let details: Vec<&str> = now.subtitles.iter().map(|t| t.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            [
+                "OpenSubtitles.com · WEB-DL",
+                "OpenSubtitles v3",
+                "OpenSubtitles.com · İndirme kotası doldu",
+                "Kaynakla gelen",
+                "Harici",
+            ]
+        );
+        assert!(now.subtitles.iter().all(|t| t.label == "Türkçe"));
+        assert_eq!(now.subtitle_show_incompatible, Some(true));
+    }
 
     #[test]
     fn carried_and_fetched_subtitles_share_the_panel_by_language() {
@@ -1308,10 +1348,20 @@ fn read_subtitles(list: &[Value]) -> Vec<Track> {
                 .map(str::trim)
                 .filter(|value| telling_title(value, &code))
                 .map(str::to_string);
-            let origin = match entry.get("source").and_then(Value::as_str) {
-                Some("embedded") => "Orjinal",
-                Some("stream_external") => "Kaynakla gelen",
-                Some("local") => "Yerel",
+            // A fetched one is named by the provider that found it
+            // ("OpenSubtitles.com", "OpenSubtitles v3"); the rest by where
+            // they came from. Only what the control plane says: a subtitle
+            // the stream carried is never given a provider's name.
+            let provider = entry
+                .get("provider_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            let origin = match (entry.get("source").and_then(Value::as_str), provider) {
+                (Some("embedded"), _) => "Orjinal",
+                (Some("stream_external"), _) => "Kaynakla gelen",
+                (Some("local"), _) => "Yerel",
+                (_, Some(name)) => name,
                 _ => "Harici",
             };
             let label = language
@@ -1324,6 +1374,9 @@ fn read_subtitles(list: &[Value]) -> Vec<Track> {
             };
             if entry.get("forced").and_then(Value::as_bool).unwrap_or(false) {
                 detail.push_str(" · Zorunlu");
+            }
+            if entry.get("unavailable").and_then(Value::as_str) == Some("quota-exhausted") {
+                detail.push_str(" · İndirme kotası doldu");
             }
             // A picture subtitle has no text for this interface to draw.
             if matches!(

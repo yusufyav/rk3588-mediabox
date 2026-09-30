@@ -1,17 +1,22 @@
 # Subtitles
 
-Embedded, stream-bound and addon subtitles in one menu, fetched through the
-worker, checked against the film's own timeline and, when they belong to it,
-timed automatically by one constant offset.
+Embedded, stream-bound and fetched subtitles in one menu -- the fetched ones
+from two providers used together, **OpenSubtitles v3** (the Stremio subtitle
+addon) and **OpenSubtitles.com** (asked directly over its REST API) --
+fetched through the worker, checked against the film's own timeline and,
+when they belong to it, timed automatically by one constant offset.
 
 ```text
   mediabox-tv            mediaboxd-rs                 media worker                  mpv
   ───────────            ────────────                 ────────────                  ───
   subtitle panel ──────▶ subtitles.rs ──prepare────▶ service.py ──addons (HTTPS)
+                                                        opensubtitles.py ──api.opensubtitles.com
+                                                          (search only; /download on load)
   (one list,             (unified list,  ──load─────▶  fetch, decode, keep
    by language)           preferences,                  files/<key>.srt ◀─ GET ── sub-add
   settings panel:         selection,     ──sync─────▶  mkv.py (index: rate, embedded
-   "Otomatik eşitleme"    AutoSync on/off)               tracks' events; bounded reads)
+   "Otomatik eşitleme"    AutoSync on/off,               tracks' events; bounded reads)
+   "AutoSync uyumsuz …"   menu filter)
                                                         eligibility.py (pre-filter)
                                                           │ ACCEPT: its offset
                                                           ▼  (no embedded track:
@@ -43,6 +48,7 @@ plane; see "Limitations".
 | `embedded` | mpv `track-list`, `external: false` | `emb:<mpv id>` |
 | `stream_external` | Stremio `stream.subtitles` — kept by `parse_stream()` and carried back on the descriptor | `ext:<hash>` |
 | `addon_external` | `/subtitles/{type}/{id}/videoHash=…&videoSize=…&filename=….json` | `ext:<hash>` |
+| `provider_external` | OpenSubtitles.com `GET /api/v1/subtitles` (see below) | `ext:<hash>` |
 | `local` | an external file mpv already had | `emb:<mpv id>` |
 
 The addon request carries what is known of the file and nothing invented:
@@ -50,9 +56,129 @@ The addon request carries what is known of the file and nothing invented:
 `/opensubHash` for a torrent, or computed (OpenSubtitles hash, two 64 KiB range
 reads) for an HTTP or local file; `filename` from `behaviorHints` or the URL.
 
-Ranking: the stream's own first; then the viewer's languages in order; within a
-language an addon-declared hash match, then a label sharing words with the
-file name, then the addon's order. Three per language are offered.
+Every fetched candidate carries its provider: `provider` (`opensubtitles_com`,
+or for an addon one derived from its own manifest name -- the OpenSubtitles v3
+addon's "OpenSubtitles v3" is `opensubtitles_v3`) and `providerName`, which is
+what the menu shows ("Türkçe · OpenSubtitles.com · <release>", "Türkçe ·
+OpenSubtitles v3"). A subtitle the stream carried has no provider and reads
+"Kaynakla gelen"; "Harici" is left only for an addon with no name. No addon
+is named in code: its name is read from its manifest.
+
+Ranking is by evidence, never by provider: the stream's own first; then the
+viewer's languages in order; within a language, anything the providers'
+metadata already rules out last; a hash match (the addon's `m: "h"`, or
+OpenSubtitles.com's own `moviehash_match`); metadata that fits the video
+(OpenSubtitles.com's `fps` equal to the video's, one file); a release name
+sharing words with the file name; a trusted uploader and a human translation;
+then each provider's own order, the providers taking turns. Three per language
+are offered, and ones the metadata ruled out are counted apart, so they never
+push a possible one off the list.
+
+## OpenSubtitles.com (`media/subtitles/opensubtitles.py`)
+
+Used together with OpenSubtitles v3, not instead of it. Rules as the official
+API reference gives them (`opensubtitles.stoplight.io`, checked 2026-09-30):
+every request carries the application's `Api-Key` and a `User-Agent`
+("MediaBox v2.0"); search is free and rate-limited (5 requests a second per
+address), and the download quota is counted by `POST /download` alone.
+
+**Configuration.** Nothing is in the repository and nothing in a settings
+file. The worker reads, once at start, and then removes from its own
+environment (so neither the sync engine nor ffmpeg inherits them):
+
+```text
+OPENSUBTITLES_API_KEY    the application's key (required; without it the provider is off)
+OPENSUBTITLES_USERNAME   an account (optional)
+OPENSUBTITLES_PASSWORD   its password (optional)
+OPENSUBTITLES_USER_AGENT only if the key was registered under another app name
+```
+
+from `/etc/mediabox-opensubtitles.env` (root-owned, mode 0600), which the unit
+reads with `EnvironmentFile=-`. It is deliberately a file of its own: the
+worker's other `.env` is captured into releases from the golden board, this
+one never is (a host test holds that). The same values are also read from
+systemd credentials (`LoadCredential=opensubtitles_api_key:…`,
+`opensubtitles_username`, `opensubtitles_password` in a drop-in) when the
+environment does not have them. The key must be one registered for this
+application on opensubtitles.com -- never another application's.
+
+```sh
+install -m 600 -o root -g root /dev/null /etc/mediabox-opensubtitles.env
+cat >/etc/mediabox-opensubtitles.env <<'END'
+OPENSUBTITLES_API_KEY=...
+OPENSUBTITLES_USERNAME=...
+OPENSUBTITLES_PASSWORD=...
+END
+systemctl restart mediabox-media-worker
+```
+
+**Account.** Without one, downloads use the application's own per-address
+quota. With one, the worker logs in once (`POST /login`; limited to 1 a
+second, 10 a minute, 30 an hour), keeps the token until its own `exp` (the
+documented 24 hours when it has none) in memory and in
+`/var/lib/mediabox-media-worker/subtitles/opensubtitles-session.json` (0600,
+keyed to the account, never the password), and sends every later request to
+the `base_url` the login named. A 401 at login stops using those credentials
+until the worker restarts and downloads continue on the application's quota;
+a 429 waits five minutes. The token is never logged.
+
+**Search order** -- each step only for the languages the previous one left
+without a result:
+
+1. `moviehash` (+ `languages`): the file's exact identity, no title added. The
+   API's `moviehash_match` is carried as the candidate's hash match. (The API
+   has no `moviebytesize` parameter; the size stays in the video's identity.)
+2. The IMDb or TMDb identity: `imdb_id=1859650` for `tt1859650`, `tmdb_id`
+   for `tmdb:…`; an episode (`tt10986410:1:1`) as `parent_imdb_id=10986410`,
+   `season_number=1`, `episode_number=1` -- never the series' name.
+3. Only when there is no identity at all: the file name (or the title), with
+   season and episode when known.
+
+Parameters go sorted and lowercase, IDs as integers without `tt` or leading
+zeros, as the API asks. Redirects are followed only within
+`*.opensubtitles.com`, so the key never leaves the API's hosts.
+
+**Metadata, before anything is downloaded** (`eligibility.from_metadata`):
+cheap evidence, never the final word. It only refuses, and only when plain:
+
+* `nb_cd > 1` or several `files[]` → `REJECT_PARTIAL` (`metadata-multi-part`);
+* `foreign_parts_only` → `REJECT_PARTIAL` (`metadata-foreign-parts-only`);
+* an `fps` that is a canonical rate a plausible conversion away from the
+  video's (25 against 23.976, 4 %) → `REJECT_TIMEBASE_MISMATCH`
+  (`metadata-fps`) -- refused, never converted. 23.976 against 24 is a label
+  uploaders get wrong and is left to the timeline, as is a non-canonical rate
+  and anything on a hash-matched subtitle.
+
+A "CD1"/"Part 1" in a release name alone refuses nothing here (a film can be
+called "Part 1"); the timeline's partial check still reads it. The answer
+travels with the candidate (`eligibility`, `stage: "metadata"`); the control
+plane treats it like the worker's own refusal.
+
+**Lazy download.** Opening the subtitle panel downloads nothing: the list is
+search results. `POST /download` is made with the result's
+`files[].file_id` -- never the subtitle's own id -- only when a candidate is
+loaded: chosen by the viewer, or tried by the automatic choice (one at a
+time, the next only if the one before was refused). The temporary link it
+answers is fetched at once through the same bounded fetch as any subtitle,
+never logged and never kept; the file is, by the hash of its text, and the
+store remembers which file id it was (`provider/`), so the same film another
+night downloads nothing. The same text from both providers has the same key:
+the second is REJECT_DUPLICATE and is not analysed again. Cache identity stays
+video + subtitle text + algorithm, never a provider id.
+
+**Quota.** Read from the server, never assumed: `allowed_downloads`, `vip`,
+`level` from the login, `remaining_downloads` from `/infos/user`, then
+`remaining` and `reset_time_utc` from every `/download`. When it is used up
+(HTTP 406, or `remaining` below zero, or the last one spent) no download is
+asked until `reset_time_utc`; the load answers `SUBTITLE_QUOTA_EXHAUSTED`
+(429), the next list marks those candidates `unavailable: "quota-exhausted"`
+("İndirme kotası doldu" on the television), the automatic choice passes to the
+next candidate, and OpenSubtitles v3 goes on as before. Searching goes on
+too. `GET /media/subtitles/providers` (and `providers` in every prepare
+answer) gives the provider's `state` (`ready`, `not-configured`,
+`quota-exhausted`, `login-refused`, `rate-limited`, `refused`,
+`unavailable`), those quota numbers and how many search, download and login
+requests this worker has made -- no key, token, password or link.
 
 ## Delivery
 
@@ -111,11 +237,18 @@ subtitle language: on *Drive* the right Turkish subtitle came out at
 Only dialogue tracks are references: a track flagged forced, or named as a
 commentary, forced, signs or songs (`mkv.is_dialogue`), is not -- on *Drive*
 the busiest track was "Japanese (Commentary #2)", and against it no subtitle
-matched at all. Of the rest, busiest first, the first that a second track
-confirms is used (`confirmed`); failing that, the first nothing contradicts
-(`single`); a track another one contradicts is passed over (one of Drive's,
-German, sat 24 s from all the others). Up to three are tried
-(`REFERENCE_TRIES`).
+matched at all. Of the rest, the busiest three (`REFERENCE_TRIES`) are
+checked against each other **pair by pair** (three tracks, three questions),
+and the reference is the busiest track of the largest group that confirm one
+another at ratio 1 and one timeline (`confirmed`; a pair that agrees in shape
+but sits more than `CONSENSUS_OFFSET` = 1 s apart does not count). Failing
+that, the busiest track nothing contradicted serves alone (`single`); a track
+another one contradicts is never it (one of Drive's, German, sat 24 s from all
+the others); with no such track there is no reference (`ambiguous`) and the
+sound decides. Checking each track only against the busiest used to pick the
+wrong one when the busiest was the odd one out: B and C each found A
+ambiguous, A found B merely "single", and A became the reference; B and C
+were never asked about each other (`mbidx-3`).
 
 **How it decides**, all numbers in `Thresholds`:
 
@@ -338,10 +471,27 @@ constants; a wider sample should set them.
   An external subtitle the viewer picks is checked (with AutoSync on) even
   when the film has an embedded track in the preferred language -- that
   track is then only the timing reference, and the viewer's pick stays on
-  whatever the answer. An automatic choice that is refused is replaced by the
-  next candidate of its language (at most three; a candidate that is the same
-  file as one tried is skipped as REJECT_DUPLICATE), and if all are refused
-  the best-ranked of those that are not partial stays on untimed.
+  whatever the answer -- a subtitle shown not to fit included: it stays on,
+  and AutoSync is not put on it. An automatic choice that is refused is
+  replaced by the next candidate of its language (at most three; one the
+  metadata already refused, or whose provider's quota is used up, is passed
+  over without a download; a candidate that is the same file as one tried is
+  skipped as REJECT_DUPLICATE).
+* **When every automatic candidate is refused, none of them is left on**
+  if it was shown not to fit (`REJECT_PARTIAL`, `REJECT_TIMEBASE_MISMATCH`,
+  `REJECT_WRONG_RELEASE`, `REJECT_DUPLICATE`). What comes on instead: the
+  film's own text track in the language; else the best-ranked candidate
+  whose fit could not be told (`INCONCLUSIVE` -- not shown to be wrong), as
+  it came and untimed; else subtitles off.
+* **"AutoSync uyumsuz altyazıları göster"** is the third row of the Ayarlar
+  panel, "Açık" or "Kapalı" (default "Kapalı"), kept as
+  `show_incompatible_subtitles` in the same file (absent in older files, and
+  then off). Off, a fetched subtitle shown not to fit -- by the timeline, or
+  already by its provider's metadata -- is left out of the menu, unless it is
+  the one on. `INCONCLUSIVE` ones stay: nothing showed them to be wrong. On,
+  all are listed, each with its `sync.eligibility`. The filter never costs a
+  download: the metadata's refusals come with the search, and the rest are
+  known only for subtitles already loaded for another reason.
 * A delay moved by hand is kept; a timing that arrives afterwards waits
   ("Otomatik eşitleme hazır"), and Ok on the delay puts it on. Ok on the delay
   is the viewer asking in so many words: it works with "Otomatik eşitleme"
@@ -379,9 +529,13 @@ external subtitles a film had and when an automatic choice moves on.
   sample tables are not read, and such a film is decided by the sound.
 * Without an embedded track the sound decides, and a source too heavy for
   the download budget cannot be listened to: such a subtitle is left untimed.
-* When every candidate of the language is refused, the best-ranked one that
-  is not partial stays on untimed -- a subtitle known to be on another
-  timebase included. Whether it should rather stay off is not decided yet.
+* Uploader metadata is believed only where it is plain (several files,
+  foreign parts only, a 4 % rate gap); a subtitle it cannot rule out is only
+  checked once it is loaded, so with the setting off an unloaded subtitle
+  that would not fit can still be listed.
+* OpenSubtitles.com's regional codes are folded into the menu's languages
+  (`pt-PT` → Portuguese, `zh-CN`/`zh-TW` → Chinese); Brazilian Portuguese
+  stays its own.
 * High-bitrate HTTP sources (4K remux) exceed the download budget and are not
   analysed.
 * Subtitles are not handed to Kodi on handover.

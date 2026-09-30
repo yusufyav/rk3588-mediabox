@@ -525,6 +525,10 @@ contains "the product's build is the tail" "$worker" ':/opt/rk3588-mediabox/medi
 capture="$(cat "$here/scripts/release/create-mediabox-release.sh")"
 contains "and ffmpeg is a declared runtime dependency" "$capture" 'for c in python3 ffprobe ffmpeg'
 
+echo "-- the subtitle provider's secrets stay on the board they were put on"
+contains "the worker reads them from a file of their own" "$worker" 'EnvironmentFile=-/etc/mediabox-opensubtitles.env'
+lacks "a release never captures that file" "$(grep -E '^golden_integration=' "$here/scripts/release/create-mediabox-release.sh")" 'opensubtitles'
+
 echo "-- the playback smoke measures the things that were broken"
 smoke="$(cat "$here/packaging/mediabox-playback-smoke")"
 contains "it asks the daemon to play"     "$smoke" 'media_play_here'

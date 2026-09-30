@@ -4,9 +4,13 @@
 //!
 //! * `embedded` -- the tracks the file carries, which mpv already lists;
 //! * `stream_external` -- ones the addon attached to the stream itself;
-//! * `addon_external` -- ones a subtitle addon found for the title.
+//! * `addon_external` -- ones a subtitle addon found for the title;
+//! * `provider_external` -- ones a provider the worker asks itself found
+//!   (OpenSubtitles.com).
 //!
-//! The last two are the worker's to find, fetch and time
+//! A fetched one says which provider found it (`provider`, `provider_name`)
+//! and the menu shows that name. The last three are the worker's to find,
+//! fetch and time
 //! (`media/subtitles/`): it owns the network, and this player's ffmpeg has
 //! no TLS. This module decides what is on, tells mpv, and puts the worker's
 //! timing into effect with `sub-delay`.
@@ -26,6 +30,13 @@
 //! * a choice is remembered by what it means -- on or off, which language,
 //!   carried or fetched -- and never by a track number, which means nothing
 //!   in the next episode.
+//!
+//! And one about what is never done on its own: a subtitle shown not to fit
+//! the film (`known_bad`) is never put on automatically, not even as the
+//! last resort when every candidate was refused -- the film's own text
+//! track in the language is, or nothing. Chosen by hand it stays on,
+//! untimed. With "AutoSync uyumsuz altyazıları göster" off (the default)
+//! such subtitles are not in the menu at all.
 
 use crate::media::MediaClient;
 use crate::player::PlayerManager;
@@ -97,11 +108,19 @@ pub struct Preferences {
     /// then on: timing external subtitles is what those films had.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_sync_enabled: Option<bool>,
+    /// "AutoSync uyumsuz altyazıları göster". Absent in older files, and then
+    /// off: the menu carries only what may fit the film.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_incompatible_subtitles: Option<bool>,
 }
 
 impl Preferences {
     pub fn auto_sync(&self) -> bool {
         self.auto_sync_enabled.unwrap_or(true)
+    }
+
+    pub fn show_incompatible(&self) -> bool {
+        self.show_incompatible_subtitles.unwrap_or(false)
     }
 }
 
@@ -113,10 +132,24 @@ pub struct Candidate {
     pub language: Option<String>,
     pub label: Option<String>,
     pub hash_match: bool,
+    /// Who found it (`opensubtitles_com`, `opensubtitles_v3`), and the name
+    /// the menu shows for it. None for one the stream carried.
+    pub provider: Option<String>,
+    pub provider_name: Option<String>,
+    /// What the provider's own metadata already said against it, before
+    /// anything was downloaded: a refusal, or nothing.
+    pub metadata: Option<(Eligibility, Option<String>)>,
+    /// Why it cannot be had now ("quota-exhausted"), if it cannot.
+    pub unavailable: Option<String>,
 }
 
 impl Candidate {
     fn from_worker(value: &Value) -> Option<Self> {
+        let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+        let metadata = value.get("eligibility").and_then(|verdict| {
+            let result = serde_json::from_value(verdict.get("result")?.clone()).ok()?;
+            Some((result, verdict.get("reason").and_then(Value::as_str).map(str::to_owned)))
+        });
         Some(Self {
             id: value.get("id")?.as_str()?.to_owned(),
             source: value
@@ -127,6 +160,23 @@ impl Candidate {
             language: value.get("language").and_then(Value::as_str).map(str::to_owned),
             label: value.get("label").and_then(Value::as_str).map(str::to_owned),
             hash_match: value.get("hashMatch").and_then(Value::as_bool).unwrap_or(false),
+            provider: text("provider"),
+            provider_name: text("providerName"),
+            metadata: metadata.filter(|(result, _)| *result != Eligibility::AcceptTimelineCompatible),
+            unavailable: text("unavailable"),
+        })
+    }
+
+    /// The timing its metadata already settles: refused, from the metadata.
+    fn metadata_timing(&self) -> Option<Timing> {
+        let (eligibility, reason) = self.metadata.clone()?;
+        Some(Timing {
+            state: "rejected".into(),
+            scale: 1.0,
+            reason,
+            eligibility: Some(eligibility),
+            reference: Some("metadata".into()),
+            ..Timing::default()
         })
     }
 }
@@ -318,6 +368,9 @@ impl Subtitles {
                 "type": watch.kind,
                 "id": watch.id,
                 "videoId": watch.video_id,
+                // Only for a provider's last resort: a film with no IMDb or
+                // TMDb identity is searched by name.
+                "title": watch.name,
                 "duration": duration,
                 "languages": languages,
             });
@@ -333,13 +386,20 @@ impl Subtitles {
                         candidates.len(),
                         answer.pointer("/video/identity").and_then(Value::as_str).unwrap_or("?")
                     );
-                    self.with_film(number, |film| film.candidates = candidates);
+                    self.with_film(number, |film| {
+                        for candidate in &candidates {
+                            if let Some(timing) = candidate.metadata_timing() {
+                                film.timing.insert(candidate.id.clone(), timing);
+                            }
+                        }
+                        film.candidates = candidates;
+                    });
                 }
                 Err(error) => eprintln!("mediaboxd-rs: film {number}: no external subtitles: {error}"),
             }
         }
 
-        let (manual, candidates) = match self.with_film(number, |film| (film.manual, film.candidates.clone())) {
+        let (manual, candidates) = match self.with_film(number, |film| (film.manual, usable(film))) {
             Some(found) => found,
             None => return,
         };
@@ -350,11 +410,34 @@ impl Subtitles {
     }
 
     /// Put an automatically chosen external subtitle on and, with
-    /// "Otomatik eşitleme" on, have it checked and timed.
+    /// "Otomatik eşitleme" on, have it checked and timed. One that cannot be
+    /// had (the provider's quota, the network) is passed over for the next
+    /// of its language, as a refused one is.
     async fn try_external(self: &Arc<Self>, number: u64, id: String) {
-        self.with_film(number, |film| film.tried.push(id.clone()));
-        if self.put_on(number, &id).await && self.preferences().auto_sync() {
-            spawn_timing(Arc::clone(self), number, id, true);
+        let mut id = id;
+        loop {
+            self.with_film(number, |film| film.tried.push(id.clone()));
+            if self.put_on(number, &id).await {
+                if self.preferences().auto_sync() {
+                    spawn_timing(Arc::clone(self), number, id, true);
+                }
+                return;
+            }
+            let next = self
+                .with_film(number, |film| {
+                    if film.manual {
+                        return None;
+                    }
+                    next_candidate(&film.candidates, &film.tried, &film.timing, &id)
+                })
+                .flatten();
+            match next {
+                Some(next) => id = next,
+                None => {
+                    self.fall_back(number).await;
+                    return;
+                }
+            }
         }
     }
 
@@ -386,6 +469,14 @@ impl Subtitles {
             Ok(answer) => answer,
             Err(error) => {
                 eprintln!("mediaboxd-rs: film {number}: subtitle {id} not loaded: {error}");
+                // The provider's quota is used up: said beside it, not retried.
+                if error.to_string().contains("SUBTITLE_QUOTA_EXHAUSTED") {
+                    self.with_film(number, |film| {
+                        if let Some(candidate) = film.candidates.iter_mut().find(|c| c.id == id) {
+                            candidate.unavailable = Some("quota-exhausted".into());
+                        }
+                    });
+                }
                 return None;
             }
         };
@@ -536,34 +627,60 @@ impl Subtitles {
     /// an automatic choice moves on to the next of its language; one the
     /// viewer made stays exactly as it is, untimed.
     async fn move_on(self: &Arc<Self>, number: u64, id: &str, automatic: bool) {
-        let next = self.with_film(number, |film| {
+        if !automatic {
+            return;
+        }
+        let Some(Some(next)) = self.with_film(number, |film| {
             if film.manual || film.selected.as_deref() != Some(id) {
                 return None;
             }
-            next_candidate(&film.candidates, &film.tried, id)
-        });
-        if let Some(Some(next)) = next.filter(|_| automatic) {
-            eprintln!("mediaboxd-rs: film {number}: subtitle {id} does not fit, trying {next}");
-            self.try_external(number, next).await;
-        } else if automatic {
-            // Every one tried was refused: the best-ranked stays on, as it
-            // came, rather than none at all -- the best-ranked of the film's
-            // own, that is. A trailer's two minutes of lines were ranked first
-            // once and stayed on for a three-hour film.
-            let first = self
-                .with_film(number, |film| {
-                    film.tried
-                        .iter()
-                        .find(|tried| !not_the_films(film.timing.get(tried.as_str())))
-                        .cloned()
-                })
-                .flatten();
-            if let Some(first) = first.filter(|first| first != id) {
-                let manual = self.with_film(number, |film| film.manual).unwrap_or(true);
-                if !manual {
-                    self.put_on(number, &first).await;
-                }
+            Some(next_candidate(&film.candidates, &film.tried, &film.timing, id))
+        }) else {
+            return;
+        };
+        match next {
+            Some(next) => {
+                eprintln!("mediaboxd-rs: film {number}: subtitle {id} does not fit, trying {next}");
+                self.try_external(number, next).await;
             }
+            None => self.fall_back(number).await,
+        }
+    }
+
+    /// Every automatic candidate was tried and none was accepted. A subtitle
+    /// shown not to fit is never what is left on: the film's own text track
+    /// in the language, else one whose fit could not be told (untimed, as it
+    /// came), else nothing.
+    async fn fall_back(self: &Arc<Self>, number: u64) {
+        let Some((manual, undecided)) = self.with_film(number, |film| {
+            let undecided = film
+                .tried
+                .iter()
+                .find(|tried| film.loaded.contains_key(tried.as_str()) && !known_bad(film.timing.get(tried.as_str())))
+                .cloned();
+            (film.manual, undecided)
+        }) else {
+            return;
+        };
+        if manual {
+            return;
+        }
+        let tracks = self.player.tracks().await;
+        let preferences = self.preferences();
+        let choice = match (fallback_choice(&preferences, &tracks), undecided) {
+            (Choice::Embedded(track), _) => Choice::Embedded(track),
+            (_, Some(undecided)) => {
+                let on = self.with_film(number, |film| film.selected.as_deref() == Some(undecided.as_str()));
+                if on != Some(true) {
+                    self.put_on(number, &undecided).await;
+                }
+                return;
+            }
+            (choice, None) => choice,
+        };
+        eprintln!("mediaboxd-rs: film {number}: no fetched subtitle fits; {choice:?}");
+        if !self.with_film(number, |film| film.manual).unwrap_or(true) {
+            self.apply_own(number, choice).await;
         }
     }
 
@@ -646,7 +763,7 @@ impl Subtitles {
             // viewer's own again for this film.
             film.manual = false;
             film.tried.clear();
-            film.candidates.clone()
+            usable(film)
         }) else {
             return false;
         };
@@ -658,7 +775,15 @@ impl Subtitles {
 
     async fn apply(self: &Arc<Self>, number: u64, choice: Choice) {
         match choice {
-            Choice::Leave => {}
+            Choice::External(id) => self.try_external(number, id).await,
+            other => self.apply_own(number, other).await,
+        }
+    }
+
+    /// `apply` for everything but a fetched subtitle.
+    async fn apply_own(&self, number: u64, choice: Choice) {
+        match choice {
+            Choice::Leave | Choice::External(_) => {}
             Choice::Off => {
                 self.player.select_subtitle(None).await;
                 self.with_film(number, |film| film.selected = Some("off".into()));
@@ -667,9 +792,6 @@ impl Subtitles {
                 self.player.select_subtitle(Some(id)).await;
                 self.player.subtitle_timing(0.0, 1.0).await;
                 self.with_film(number, |film| film.selected = Some(format!("emb:{id}")));
-            }
-            Choice::External(id) => {
-                self.try_external(number, id).await;
             }
         }
     }
@@ -693,6 +815,12 @@ impl Subtitles {
             spawn_timing(Arc::clone(self), number, id, automatic);
         }
         true
+    }
+
+    /// "AutoSync uyumsuz altyazıları göster" was turned on or off: kept for
+    /// every film, and the menu reads it on its next look.
+    pub fn set_show_incompatible(&self, enabled: bool) {
+        self.remember(|p| p.show_incompatible_subtitles = Some(enabled));
     }
 
     /// The viewer moved the delay: automatic timing keeps off it from here.
@@ -721,6 +849,8 @@ impl Subtitles {
             return false;
         }
         match timing {
+            // Shown not to fit: stays on as the viewer's choice, untimed.
+            Some(timing) if known_bad(Some(&timing)) => false,
             Some(timing) if timing.state == "applied" || timing.state == "ready" => {
                 self.player.subtitle_timing(timing.offset, 1.0).await;
                 self.set_timing(number, &selected, Timing { state: "applied".into(), ..timing });
@@ -742,7 +872,13 @@ impl Subtitles {
         let number = self.player.film();
         let film = self.film.lock().unwrap();
         let film = film.as_ref().filter(|film| film.number == number);
-        Value::Array(unify(tracks, film.map(|film| (&film.candidates, &film.loaded, &film.timing))))
+        let show = self.preferences().show_incompatible();
+        Value::Array(unify(
+            tracks,
+            film.map(|film| (&film.candidates, &film.loaded, &film.timing)),
+            film.and_then(|film| film.selected.as_deref()),
+            show,
+        ))
     }
 
     /// The line on screen, for the interface to draw.
@@ -820,24 +956,63 @@ fn is_picture(track: &Value) -> bool {
     )
 }
 
-/// The next untried candidate in the same language as `current`.
-fn next_candidate(candidates: &[Candidate], tried: &[String], current: &str) -> Option<String> {
+/// The next untried candidate in the same language as `current`, passing
+/// over the ones already known not to fit or not to be had.
+fn next_candidate(
+    candidates: &[Candidate],
+    tried: &[String],
+    timing: &HashMap<String, Timing>,
+    current: &str,
+) -> Option<String> {
     let language = candidates.iter().find(|c| c.id == current)?.language.clone();
     candidates
         .iter()
         .filter(|c| c.language == language && !tried.contains(&c.id))
+        .filter(|c| c.unavailable.is_none() && !known_bad(timing.get(&c.id)))
         .take(ATTEMPTS.saturating_sub(tried.len()))
         .map(|c| c.id.clone())
         .next()
 }
 
-/// Whether the worker said this subtitle covers only part of the film -- a
-/// trailer's lines, a CD1 -- or is a file already tried: not one to leave on.
-fn not_the_films(timing: Option<&Timing>) -> bool {
+/// Whether this subtitle was shown not to fit the film: part of it (a CD1, a
+/// trailer's lines), another timebase, another cut, or a file already tried.
+/// Never put on automatically; left out of the menu unless asked for.
+/// INCONCLUSIVE is not among them: it says only that nothing could be told.
+fn known_bad(timing: Option<&Timing>) -> bool {
     timing.is_some_and(|timing| {
-        matches!(timing.eligibility, Some(Eligibility::RejectPartial | Eligibility::RejectDuplicate))
-            || timing.reason.as_deref() == Some("does-not-cover-film")
+        matches!(
+            timing.eligibility,
+            Some(
+                Eligibility::RejectPartial
+                    | Eligibility::RejectTimebaseMismatch
+                    | Eligibility::RejectWrongRelease
+                    | Eligibility::RejectDuplicate
+            )
+        ) || timing.reason.as_deref() == Some("does-not-cover-film")
     })
+}
+
+/// The candidates the automatic choice may take, in their order.
+fn usable(film: &Film) -> Vec<Candidate> {
+    film.candidates
+        .iter()
+        .filter(|c| c.unavailable.is_none() && !known_bad(film.timing.get(&c.id)))
+        .cloned()
+        .collect()
+}
+
+/// What is left when no fetched subtitle fits: the film's own text track in
+/// the language, or nothing. A picture track is not it -- this interface
+/// draws the line from text, and a picture subtitle has none.
+fn fallback_choice(preferences: &Preferences, tracks: &[Value]) -> Choice {
+    match auto_choice(preferences, tracks, &[]) {
+        Choice::Embedded(id)
+            if !tracks.iter().any(|t| t.get("id").and_then(Value::as_i64) == Some(id) && t.get("type").and_then(Value::as_str) == Some("sub") && is_picture(t)) =>
+        {
+            Choice::Embedded(id)
+        }
+        _ => Choice::Off,
+    }
 }
 
 fn timing_from(job: &Value, state: &str) -> Timing {
@@ -859,18 +1034,24 @@ fn timing_from(job: &Value, state: &str) -> Timing {
 }
 
 fn title_for(candidate: &Candidate) -> String {
-    candidate.label.clone().unwrap_or_else(|| {
+    let origin = candidate.provider_name.clone().unwrap_or_else(|| {
         match candidate.source.as_str() {
             "stream_external" => "Akış",
             _ => "Harici",
         }
         .into()
-    })
+    });
+    match candidate.label.as_deref() {
+        Some(label) => format!("{origin} · {label}"),
+        None => origin,
+    }
 }
 
 fn unify(
     tracks: &[Value],
     film: Option<(&Vec<Candidate>, &HashMap<String, Loaded>, &HashMap<String, Timing>)>,
+    selected: Option<&str>,
+    show_incompatible: bool,
 ) -> Vec<Value> {
     let mut out = Vec::new();
     let by_mpv: HashMap<i64, &String> = film
@@ -909,6 +1090,13 @@ fn unify(
                     && track.get("id").and_then(Value::as_i64) == Some(l.mpv)
             })
         });
+        let on = selected == Some(candidate.id.as_str())
+            || track.and_then(|t| t.get("selected")).and_then(Value::as_bool).unwrap_or(false);
+        // Shown not to fit: out of the menu unless asked for -- or unless it
+        // is the one on, which the menu always shows.
+        if !show_incompatible && !on && known_bad(timing.get(&candidate.id)) {
+            continue;
+        }
         out.push(json!({
             "id": candidate.id,
             "mpv_id": track.and_then(|t| t.get("id")).cloned().unwrap_or(Value::Null),
@@ -920,6 +1108,9 @@ fn unify(
             "forced": false,
             "default": false,
             "hash_match": candidate.hash_match,
+            "provider": candidate.provider,
+            "provider_name": candidate.provider_name,
+            "unavailable": candidate.unavailable,
             "sync": timing.get(&candidate.id).map(Timing::as_json).unwrap_or(Value::Null),
         }));
     }
@@ -984,7 +1175,15 @@ mod tests {
             language: Some(language.into()),
             label: None,
             hash_match: false,
+            provider: None,
+            provider_name: None,
+            metadata: None,
+            unavailable: None,
         }
+    }
+
+    fn refused(eligibility: Eligibility) -> Timing {
+        Timing { state: "rejected".into(), scale: 1.0, eligibility: Some(eligibility), ..Timing::default() }
     }
 
     fn on(language: &str, origin: Option<Origin>) -> Preferences {
@@ -1056,9 +1255,92 @@ mod tests {
             candidate("ext:3", "tr"),
             candidate("ext:4", "tr"),
         ];
-        assert_eq!(next_candidate(&candidates, &["ext:1".into()], "ext:1"), Some("ext:2".into()));
+        let none = HashMap::new();
+        assert_eq!(next_candidate(&candidates, &["ext:1".into()], &none, "ext:1"), Some("ext:2".into()));
         let tried: Vec<String> = ["ext:1", "ext:2", "ext:3"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(next_candidate(&candidates, &tried, "ext:3"), None);
+        assert_eq!(next_candidate(&candidates, &tried, &none, "ext:3"), None);
+        // One its metadata already refused, or one that cannot be had, is
+        // passed over without being downloaded.
+        let mut timing = HashMap::new();
+        timing.insert("ext:2".to_string(), refused(Eligibility::RejectTimebaseMismatch));
+        let mut candidates = candidates.to_vec();
+        candidates[3].unavailable = Some("quota-exhausted".into());
+        assert_eq!(next_candidate(&candidates, &["ext:1".into()], &timing, "ext:1"), Some("ext:4".into()));
+    }
+
+    #[test]
+    fn what_is_shown_not_to_fit_is_known_bad_and_inconclusive_is_not() {
+        for bad in [
+            Eligibility::RejectPartial,
+            Eligibility::RejectTimebaseMismatch,
+            Eligibility::RejectWrongRelease,
+            Eligibility::RejectDuplicate,
+        ] {
+            assert!(known_bad(Some(&refused(bad))), "{bad:?}");
+        }
+        assert!(!known_bad(Some(&refused(Eligibility::Inconclusive))));
+        assert!(!known_bad(Some(&refused(Eligibility::AcceptTimelineCompatible))));
+        assert!(!known_bad(None));
+    }
+
+    #[test]
+    fn with_nothing_fetched_fitting_the_films_own_text_or_nothing() {
+        let turkish = on("tr", None);
+        assert_eq!(fallback_choice(&turkish, &[track(1, "eng", false), track(4, "tur", false)]), Choice::Embedded(4));
+        let mut picture = track(2, "tur", false);
+        picture["codec"] = json!("hdmv_pgs_subtitle");
+        assert_eq!(fallback_choice(&turkish, &[picture]), Choice::Off);
+        assert_eq!(fallback_choice(&turkish, &[track(1, "eng", false)]), Choice::Off);
+    }
+
+    #[test]
+    fn the_menu_leaves_out_what_does_not_fit_unless_asked_or_on() {
+        let candidates: Vec<Candidate> = ["ext:p", "ext:t", "ext:w", "ext:d", "ext:i", "ext:ok", "ext:new"]
+            .iter()
+            .map(|id| candidate(id, "tr"))
+            .collect();
+        let mut timing = HashMap::new();
+        timing.insert("ext:p".to_string(), refused(Eligibility::RejectPartial));
+        timing.insert("ext:t".to_string(), refused(Eligibility::RejectTimebaseMismatch));
+        timing.insert("ext:w".to_string(), refused(Eligibility::RejectWrongRelease));
+        timing.insert("ext:d".to_string(), refused(Eligibility::RejectDuplicate));
+        timing.insert("ext:i".to_string(), refused(Eligibility::Inconclusive));
+        timing.insert(
+            "ext:ok".to_string(),
+            Timing { state: "applied".into(), eligibility: Some(Eligibility::AcceptTimelineCompatible), ..Timing::default() },
+        );
+        let loaded = HashMap::new();
+        let ids = |list: Vec<Value>| list.iter().map(|t| t["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let hidden = unify(&[], Some((&candidates, &loaded, &timing)), None, false);
+        assert_eq!(ids(hidden), ["ext:i", "ext:ok", "ext:new"]);
+        let all = unify(&[], Some((&candidates, &loaded, &timing)), None, true);
+        assert_eq!(all.len(), 7);
+        assert_eq!(all[1]["sync"]["eligibility"], "REJECT_TIMEBASE_MISMATCH");
+        // The one on is always listed.
+        let on = unify(&[], Some((&candidates, &loaded, &timing)), Some("ext:t"), false);
+        assert_eq!(ids(on), ["ext:t", "ext:i", "ext:ok", "ext:new"]);
+    }
+
+    #[test]
+    fn a_fetched_one_carries_its_providers_name_and_metadata() {
+        let found = Candidate::from_worker(&json!({
+            "id": "ext:c", "source": "provider_external", "language": "tr", "label": "WEB-DL",
+            "provider": "opensubtitles_com", "providerName": "OpenSubtitles.com",
+            "eligibility": {"result": "REJECT_PARTIAL", "reason": "metadata-multi-part", "stage": "metadata"},
+        }))
+        .unwrap();
+        assert_eq!(found.provider.as_deref(), Some("opensubtitles_com"));
+        assert_eq!(title_for(&found), "OpenSubtitles.com · WEB-DL");
+        let timing = found.metadata_timing().unwrap();
+        assert_eq!((timing.state.as_str(), timing.eligibility), ("rejected", Some(Eligibility::RejectPartial)));
+        assert_eq!(timing.reference.as_deref(), Some("metadata"));
+        let v3 = Candidate::from_worker(&json!({"id": "ext:v", "source": "addon_external", "language": "tr",
+            "provider": "opensubtitles_v3", "providerName": "OpenSubtitles v3"}))
+        .unwrap();
+        assert!(v3.metadata.is_none() && v3.metadata_timing().is_none());
+        assert_eq!(title_for(&v3), "OpenSubtitles v3");
+        let carried = Candidate::from_worker(&json!({"id": "ext:s", "source": "stream_external"})).unwrap();
+        assert_eq!(title_for(&carried), "Akış");
     }
 
     #[test]
@@ -1085,7 +1367,7 @@ mod tests {
                 ..Timing::default()
             },
         );
-        let list = unify(&tracks, Some((&candidates, &loaded, &timing)));
+        let list = unify(&tracks, Some((&candidates, &loaded, &timing)), None, false);
         let ids: Vec<&str> = list.iter().map(|t| t["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["emb:1", "emb:2", "ext:a", "ext:b"]);
         assert_eq!(list[1]["source"], "embedded");
@@ -1110,6 +1392,14 @@ mod tests {
         assert!(!serde_json::from_value::<Preferences>(written).unwrap().auto_sync());
         // A file that never said is written as it was.
         assert!(serde_json::to_value(&old).unwrap().get("auto_sync_enabled").is_none());
+        // Nor did it say anything of the incompatible ones: left out.
+        assert!(!old.show_incompatible());
+        assert!(serde_json::to_value(&old).unwrap().get("show_incompatible_subtitles").is_none());
+        let shown = Preferences { show_incompatible_subtitles: Some(true), ..old.clone() };
+        let written = serde_json::to_value(&shown).unwrap();
+        assert_eq!(written["show_incompatible_subtitles"], true);
+        let read: Preferences = serde_json::from_value(written).unwrap();
+        assert!(read.show_incompatible() && read.auto_sync());
     }
 
     #[test]
@@ -1251,6 +1541,11 @@ mod flows {
         refusal: Option<&'static str>,
         /// Candidates that are the same file as the first Turkish one.
         twins: bool,
+        /// The first Turkish one comes with its provider's metadata already
+        /// refusing it (another timebase).
+        metadata_refused: bool,
+        /// A candidate whose provider's download quota is used up.
+        quota: Option<&'static str>,
     }
 
     async fn serve_worker(listener: TcpListener, worker: Worker, seen: Arc<StdMutex<Vec<String>>>) {
@@ -1279,17 +1574,30 @@ mod flows {
                 };
                 let line = head.lines().next().unwrap().to_string();
                 seen.lock().unwrap().push(format!("{line} {body}"));
+                let mut status = "200 OK";
                 let answer = if line.starts_with("POST /media/subtitles/prepare") {
+                    let refused = worker.metadata_refused.then(|| {
+                        json!({"result": "REJECT_TIMEBASE_MISMATCH", "reason": "metadata-fps", "stage": "metadata"})
+                    });
                     json!({"video": {"identity": "osh:1:2"}, "candidates": [
-                        {"id": "ext:tr1", "source": "addon_external", "language": "tr", "label": "WEB-DL"},
-                        {"id": "ext:tr2", "source": "addon_external", "language": "tr"},
+                        {"id": "ext:tr1", "source": "provider_external", "language": "tr", "label": "WEB-DL",
+                         "provider": "opensubtitles_com", "providerName": "OpenSubtitles.com", "eligibility": refused},
+                        {"id": "ext:tr2", "source": "addon_external", "language": "tr",
+                         "provider": "opensubtitles_v3", "providerName": "OpenSubtitles v3"},
                         {"id": "ext:en1", "source": "stream_external", "language": "en"},
                     ]})
                 } else if line.starts_with("POST /media/subtitles/load") {
                     let candidate: Value = serde_json::from_str(&body).unwrap();
                     let id = candidate["candidate"].as_str().unwrap().trim_start_matches("ext:");
+                    if worker.quota == Some(id) {
+                        status = "429 Too Many Requests";
+                    }
                     let same = if worker.twins && id == "tr2" { "tr1" } else { id };
-                    json!({"key": format!("{same:0>32}"), "url": format!("http://127.0.0.1:8790/media/subtitles/file/{id}.srt"), "format": "srt"})
+                    if status == "200 OK" {
+                        json!({"key": format!("{same:0>32}"), "url": format!("http://127.0.0.1:8790/media/subtitles/file/{id}.srt"), "format": "srt"})
+                    } else {
+                        json!({"error": {"code": "SUBTITLE_QUOTA_EXHAUSTED", "message": "quota"}})
+                    }
                 } else if line.starts_with("POST /media/subtitles/sync") {
                     let request: Value = serde_json::from_str(&body).unwrap();
                     json!({"job": request["key"], "state": "running"})
@@ -1318,7 +1626,7 @@ mod flows {
                 };
                 let body = answer.to_string();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
@@ -1418,7 +1726,10 @@ mod flows {
         assert_eq!(ids, ["emb:1", "emb:2", "ext:tr1", "ext:tr2", "ext:en1"]);
         let on = &list[2];
         assert_eq!(on["selected"], true);
-        assert_eq!(on["source"], "addon_external");
+        assert_eq!(on["source"], "provider_external");
+        assert_eq!(on["provider_name"], "OpenSubtitles.com");
+        assert_eq!(list[3]["provider_name"], "OpenSubtitles v3");
+        assert!(list[4]["provider_name"].is_null(), "the stream's own is nobody's");
         assert_eq!(on["sync"]["state"], "applied");
         assert_eq!(list[0]["source"], "embedded");
         assert_eq!(list[4]["source"], "stream_external");
@@ -1487,30 +1798,108 @@ mod flows {
         assert!(!rig.seen.lock().unwrap().iter().any(|l| l.contains("ext:en1") && l.starts_with("POST /media/subtitles/load")));
     }
 
-    #[tokio::test]
-    async fn a_subtitle_that_is_not_the_films_is_not_the_one_left_on() {
-        // The first Turkish one is a trailer's; the second is the film's but
-        // is not timed either. The film's stays on, untimed.
-        let rig = rig(Worker { apply: Value::Null, misfit: Some("tr1"), ..Worker::default() }, turkish()).await;
-        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
-        let subtitles = Arc::clone(&rig.subtitles);
-        let mut settled = false;
+    /// The unified list, once `done` says it has settled.
+    async fn settled(subtitles: &Arc<Subtitles>, done: impl Fn(&Value) -> bool) -> Value {
         for _ in 0..100 {
             let tracks = subtitles.player.tracks().await;
             let list = subtitles.unified(&tracks);
-            if list[3]["sync"]["state"] == "rejected" {
-                settled = true;
-                break;
+            if done(&list) {
+                return list;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(settled, "the second candidate was never answered");
+        panic!("never settled");
+    }
+
+    fn entry<'a>(list: &'a Value, id: &str) -> Option<&'a Value> {
+        list.as_array().unwrap().iter().find(|t| t["id"] == id)
+    }
+
+    #[tokio::test]
+    async fn every_automatic_choice_refused_leaves_none_of_them_on() {
+        // The first Turkish one is a trailer's, the second another
+        // timebase: both shown not to fit. Neither is left on as a last
+        // resort, and the film has no Turkish text of its own: off.
+        let rig = rig(Worker { apply: Value::Null, misfit: Some("tr1"), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let seen = Arc::clone(&rig.seen);
+        until("both were answered", || syncs(&seen) >= 2).await;
+        let mpv = Arc::clone(&rig.mpv);
+        until("subtitles are off", || mpv.lock().unwrap().sid.is_none()).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(rig.mpv.lock().unwrap().sid, None);
+        // And the menu, with the setting off, does not offer them.
         let tracks = rig.subtitles.player.tracks().await;
         let list = rig.subtitles.unified(&tracks);
-        assert_eq!(list[2]["sync"]["reason"], "does-not-cover-film");
-        assert_eq!(list[3]["selected"], true, "{list:?}");
-        assert_eq!(rig.mpv.lock().unwrap().sid, Some(4));
+        assert!(entry(&list, "ext:tr1").is_none() && entry(&list, "ext:tr2").is_none(), "{list:?}");
+        assert!(entry(&list, "ext:en1").is_some());
+        // Asked for, they are there, each with why.
+        rig.subtitles.set_show_incompatible(true);
+        let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
+        assert_eq!(entry(&list, "ext:tr1").unwrap()["sync"]["eligibility"], "REJECT_PARTIAL");
+        assert_eq!(entry(&list, "ext:tr2").unwrap()["sync"]["eligibility"], "REJECT_TIMEBASE_MISMATCH");
+    }
+
+    #[tokio::test]
+    async fn when_nothing_could_be_told_the_first_stays_on_untimed() {
+        // INCONCLUSIVE is not "does not fit": the best-ranked stays on, as it
+        // came, and nothing is timed.
+        let rig = rig(Worker { apply: Value::Null, refusal: Some("INCONCLUSIVE"), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let subtitles = Arc::clone(&rig.subtitles);
+        let list = settled(&subtitles, |list| {
+            entry(list, "ext:tr2").is_some_and(|e| e["sync"]["state"] == "rejected")
+        })
+        .await;
+        assert_eq!(entry(&list, "ext:tr1").unwrap()["sync"]["eligibility"], "INCONCLUSIVE");
+        let mpv = Arc::clone(&rig.mpv);
+        until("the first is back on", || mpv.lock().unwrap().sid == Some(3)).await;
+        assert_eq!(rig.mpv.lock().unwrap().delay, 0.0);
+    }
+
+    #[tokio::test]
+    async fn one_its_metadata_refused_is_never_downloaded_automatically() {
+        let rig = rig(Worker { apply: properties(), metadata_refused: true, ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let mpv = Arc::clone(&rig.mpv);
+        until("the second Turkish one is timed", || (mpv.lock().unwrap().delay - 1.82).abs() < 1e-9).await;
+        let seen = rig.seen.lock().unwrap().clone();
+        assert!(!seen.iter().any(|l| l.contains("\"candidate\":\"ext:tr1\"")), "{seen:?}");
+        let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
+        // Out of the menu, and the one on is named by its provider.
+        assert!(entry(&list, "ext:tr1").is_none());
+        let on = entry(&list, "ext:tr2").unwrap();
+        assert_eq!((on["provider"].as_str(), on["provider_name"].as_str()), (Some("opensubtitles_v3"), Some("OpenSubtitles v3")));
+        assert_eq!(on["selected"], true);
+    }
+
+    #[tokio::test]
+    async fn chosen_by_hand_one_its_metadata_refused_stays_on_untimed() {
+        let rig = rig(Worker { apply: properties(), metadata_refused: true, ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let mpv = Arc::clone(&rig.mpv);
+        until("the automatic choice is timed", || (mpv.lock().unwrap().delay - 1.82).abs() < 1e-9).await;
+        let before = syncs(&rig.seen);
+        assert!(rig.subtitles.choose("ext:tr1").await);
+        // Downloaded now, because it was asked for; put on; never timed.
+        assert!(rig.seen.lock().unwrap().iter().any(|l| l.contains("\"candidate\":\"ext:tr1\"")));
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(!rig.subtitles.auto_sync().await);
+        assert_eq!(syncs(&rig.seen), before);
+        assert_eq!(rig.mpv.lock().unwrap().delay, 0.0);
+        let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
+        assert_eq!(entry(&list, "ext:tr1").unwrap()["selected"], true, "the one on is listed");
+    }
+
+    #[tokio::test]
+    async fn a_used_up_quota_passes_on_to_the_next() {
+        let rig = rig(Worker { apply: properties(), quota: Some("tr1"), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let mpv = Arc::clone(&rig.mpv);
+        until("the second Turkish one is timed", || (mpv.lock().unwrap().delay - 1.82).abs() < 1e-9).await;
+        let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
+        assert_eq!(entry(&list, "ext:tr1").unwrap()["unavailable"], "quota-exhausted");
+        assert_eq!(entry(&list, "ext:tr2").unwrap()["selected"], true);
     }
 
     #[tokio::test]
@@ -1640,7 +2029,9 @@ mod flows {
     async fn the_same_file_under_another_id_is_not_analysed_again() {
         // ext:tr2 is the file ext:tr1 was: the first is refused, the second
         // is skipped as a duplicate rather than sent to the worker again.
-        let rig = rig(Worker { apply: Value::Null, twins: true, ..Worker::default() }, turkish()).await;
+        // Shown in the menu for the test to read: it is left out by default.
+        let shown = Preferences { show_incompatible_subtitles: Some(true), ..turkish() };
+        let rig = rig(Worker { apply: Value::Null, twins: true, ..Worker::default() }, shown).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let subtitles = Arc::clone(&rig.subtitles);
         let mut duplicate = Value::Null;

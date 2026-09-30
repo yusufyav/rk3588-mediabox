@@ -317,8 +317,54 @@ class SubtitleSource(str, Enum):
     STREAM = "stream_external"
     #: A subtitle addon's `/subtitles/` answer.
     ADDON = "addon_external"
+    #: A subtitle provider the media core asks itself, over its own API.
+    PROVIDER = "provider_external"
     #: A file on the appliance.
     LOCAL = "local"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderDetails:
+    """A search result's own metadata, as the provider wrote it.
+
+    Uploaders fill most of it in; it is cheap evidence for ranking and for
+    refusing the obvious (a two-CD subtitle, a forced-only one) before a
+    download is spent, never a replacement for the timeline check.
+    """
+
+    subtitle_id: str | None = None
+    #: What a download is asked for by -- not the subtitle's id.
+    file_id: int | None = None
+    release: str | None = None
+    fps: float | None = None
+    #: How many files (CDs) the subtitle is split into.
+    nb_cd: int | None = None
+    #: How many files the result actually lists.
+    files: int = 1
+    hearing_impaired: bool = False
+    foreign_parts_only: bool = False
+    from_trusted: bool = False
+    ratings: float | None = None
+    download_count: int | None = None
+    ai_translated: bool = False
+    machine_translated: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "subtitleId": self.subtitle_id,
+            "fileId": self.file_id,
+            "release": self.release,
+            "fps": self.fps,
+            "nbCd": self.nb_cd,
+            "files": self.files,
+            "hearingImpaired": self.hearing_impaired,
+            "foreignPartsOnly": self.foreign_parts_only,
+            "fromTrusted": self.from_trusted,
+            "ratings": self.ratings,
+            "downloadCount": self.download_count,
+            "aiTranslated": self.ai_translated,
+            "machineTranslated": self.machine_translated,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +380,15 @@ class Subtitle:
     #: The addon said this was matched to the file by its hash. Only ever what
     #: the addon said; never inferred here.
     hash_match: bool = False
+    #: Who found it, when that is known: a subtitle provider's id
+    #: (`opensubtitles_com`) or one derived from the subtitle addon's own
+    #: manifest name, and that name as it is shown. None for a subtitle the
+    #: stream carried, which no provider found.
+    provider: str | None = None
+    provider_name: str | None = None
+    #: What a provider with a search API said about it before anything was
+    #: downloaded. None for an addon's subtitle, which says none of it.
+    details: "ProviderDetails | None" = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -344,6 +399,9 @@ class Subtitle:
             "source": self.source.value,
             "label": self.label,
             "hashMatch": self.hash_match,
+            "provider": self.provider,
+            "providerName": self.provider_name,
+            "details": None if self.details is None else self.details.as_dict(),
         }
 
     def as_wire(self) -> dict[str, Any]:

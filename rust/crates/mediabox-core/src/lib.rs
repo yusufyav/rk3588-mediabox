@@ -1567,6 +1567,11 @@ pub enum Request {
     /// it fits, timed. Independent of the preferred language. Kept for every
     /// film from now on.
     SubtitleAutoSyncSet { enabled: bool },
+    /// "AutoSync uyumsuz altyazıları göster" in the same panel: whether an
+    /// external subtitle shown not to fit the film (another timebase,
+    /// another cut, part of it, a file already tried) stays in the subtitle
+    /// menu. Off, the default, leaves it out. Kept for every film.
+    SubtitleShowIncompatibleSet { enabled: bool },
     /// The subtitle line on screen now, as the player's own timing puts it.
     ///
     /// The appliance's player hands its frames to the interface and draws

@@ -557,16 +557,23 @@ def evaluate(
 def cross_check(first: Reference, second: Reference, video_rate: float | None, th: Thresholds = DEFAULT) -> str:
     """Whether a second embedded track tells the same timeline: "confirmed",
     "ambiguous" (it does not), or "single" (it cannot say)."""
+    return cross_check_offset(first, second, video_rate, th)[0]
+
+
+def cross_check_offset(
+    first: Reference, second: Reference, video_rate: float | None, th: Thresholds = DEFAULT
+) -> tuple[str, float | None]:
+    """`cross_check`, with the offset a confirmed pair sits apart by."""
     if len(second.times) < th.min_second_reference_events:
-        return "single"
+        return "single", None
     pseudo = [(t, t + 0.001) for t in second.times]
     against = Reference(first.kind, first.times, first.track)
     verdict = evaluate(pseudo, against, video_rate, None, th=_second_thresholds(th, len(second.times)))
     if verdict.result.accepted:
-        return "confirmed"
+        return "confirmed", verdict.offset
     if verdict.result in (Eligibility.REJECT_TIMEBASE_MISMATCH, Eligibility.REJECT_WRONG_RELEASE):
-        return "ambiguous"
-    return "single"
+        return "ambiguous", None
+    return "single", None
 
 
 def _second_thresholds(th: Thresholds, events: int) -> Thresholds:
@@ -579,6 +586,54 @@ def _second_thresholds(th: Thresholds, events: int) -> Thresholds:
         partial_uncovered=1.1,
         partial_named_uncovered=1.1,
         min_coverage=0.0,
+    )
+
+
+#: How far uploader metadata's frame rate has to be from the video's to be
+#: believed at all: 23.976 against 24 (0.1 %) is a label uploaders get wrong
+#: all the time, 25 against 23.976 (4 %) is a different release.
+METADATA_MIN_RATE_GAP = 0.03
+
+
+def from_metadata(details: Any, video_rate: float | None, *, hash_match: bool = False) -> Verdict | None:
+    """What a provider's search metadata alone says against a subtitle, or
+    None when it says nothing certain.
+
+    Evidence of the cheapest kind, read before anything is downloaded: a
+    subtitle split over several files, one of the foreign-language parts
+    only, or one labelled for a rate that is a conversion away from this
+    video's. It only ever refuses, and only on metadata that is plain; every
+    other doubt is the timeline's to settle once the file is in hand. A hash
+    match (this exact file) is not refused on a frame-rate label.
+    """
+    if details is None:
+        return None
+    if getattr(details, "foreign_parts_only", False):
+        return Verdict(Eligibility.REJECT_PARTIAL, "metadata-foreign-parts-only", reference="metadata", video_rate=video_rate)
+    parts = max(int(getattr(details, "nb_cd", None) or 1), int(getattr(details, "files", 1) or 1))
+    if parts > 1:
+        return Verdict(
+            Eligibility.REJECT_PARTIAL, "metadata-multi-part", reference="metadata", video_rate=video_rate,
+            metrics={"parts": parts},
+        )
+    fps = getattr(details, "fps", None)
+    if hash_match or video_rate is None or not fps:
+        return None
+    labelled = snap_rate(float(fps))
+    if labelled is None or abs(labelled / video_rate - 1.0) < METADATA_MIN_RATE_GAP:
+        return None
+    ratio = next(((label, r) for label, r in canonical_ratios(video_rate) if abs(r - labelled / video_rate) < 1e-9), None)
+    if ratio is None:
+        # Not a conversion anybody makes of this video: a careless label.
+        return None
+    return Verdict(
+        Eligibility.REJECT_TIMEBASE_MISMATCH,
+        "metadata-fps",
+        reference="metadata",
+        ratio=ratio[1],
+        ratio_label=ratio[0],
+        video_rate=video_rate,
+        metrics={"fps": float(fps)},
     )
 
 

@@ -87,6 +87,14 @@ MediaFusion) and then the debrid host, and either can stumble once:
   byte is sent that is not the file's. Before this, mpv saw "Stream ends
   prematurely at 2522294964" of a 29.7 GB remux, reconnected, and did not
   start its sound again; the film froze at that point.
+* **How long a `206` is** comes from its `Content-Range` (`bytes S-E/T` is
+  `E - S + 1` bytes), never from its `Content-Length`: a CDN was measured
+  answering a one-byte probe with `Content-Range: bytes 0-0/29159331995` and
+  `Content-Length: 29159331995`. The length is only checked against the
+  range; when they disagree the range wins, the player is given its length,
+  and nothing past it is read or waited for. A `206` whose `Content-Range`
+  cannot be read is passed on as it came and never resumed -- nothing is
+  made up. A `200` is the whole file, as its `Content-Length` says.
 
 Every failure is logged with the host, the range and the cause -- never the
 URL, which carries an account token.

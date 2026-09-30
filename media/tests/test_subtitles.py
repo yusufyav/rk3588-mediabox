@@ -27,6 +27,14 @@ from media.subtitles.eligibility import Eligibility
 
 from . import eligibility_synth as synth
 from .subtitle_synth import cut, film, invert, listen
+from .test_opensubtitles import Api, result
+
+
+def addon(entries, name="OpenSubtitles v3"):
+    """Subtitles as a subtitle addon answers them, credited by its name."""
+    from media.stremio.addons import parse_subtitles
+
+    return parse_subtitles(entries, "an-addon", addon_name=name)
 
 
 def srt(cues) -> bytes:
@@ -490,6 +498,12 @@ class Eligible(Harness):
         self.commentary = False
         chatter = synth.picture_events(synth.dialogue(77, duration=self.film.duration))
         chatter = chatter + tuple(t + 0.7 for t in chatter)
+        # Three dialogue tracks, the busiest of them off on its own: another
+        # timebase, and twice the events. Tests that want it set `self.outlier`.
+        self.outlier = False
+        second = synth.picture_events(synth.rendition(truth, 13))
+        off = synth.picture_events(synth.on_timeline(synth.rendition(truth, 14), 25 / 24, 0.0))
+        off = tuple(sorted(off + tuple(t + 0.7 for t in off)))
 
         def index(context):
             self.index_reads += 1
@@ -502,6 +516,11 @@ class Eligible(Harness):
             if self.commentary:
                 tracks.append(mkv.Track(22, mkv.SUBTITLE, "S_HDMV/PGS", language="jpn", name="Japanese (Commentary #2)"))
                 cues[22] = sorted(chatter)
+            if self.outlier:
+                tracks.append(mkv.Track(6, mkv.SUBTITLE, "S_HDMV/PGS", language="eng"))
+                tracks.append(mkv.Track(7, mkv.SUBTITLE, "S_HDMV/PGS", language="ger"))
+                cues[6] = list(second)
+                cues[7] = list(off)
             return mkv.ContainerIndex(self.film.duration, tracks, cues, bytes_read=123_456)
 
         def evaluate(*args, **kwargs):
@@ -577,6 +596,21 @@ class Eligible(Harness):
         self.assertEqual(verdict["result"], "ACCEPT_TIMELINE_COMPATIBLE", verdict)
         self.assertAlmostEqual(answer["apply"]["subDelay"], 4.2, delta=0.3)
 
+    def test_two_tracks_that_agree_outvote_a_busier_one_that_is_off(self):
+        # A (the busiest) is off; B and C are the film's. Asked each only
+        # against A, B and C were never asked about each other and the
+        # reference was lost; paired every way, B and C confirm each other.
+        self.outlier = True
+        (loaded,) = self.loaded([("tr", srt(invert(self.turkish, lambda v: v - 4.2)))])
+        answer = self.sync(loaded["key"])
+        verdict = answer["eligibility"]
+        self.assertEqual(verdict["result"], "ACCEPT_TIMELINE_COMPATIBLE", verdict)
+        self.assertEqual(verdict["metrics"]["referenceQuality"], "confirmed")
+        self.assertAlmostEqual(answer["apply"]["subDelay"], 4.2, delta=0.3)
+        self.assertEqual(self.heard_calls, [])
+        info = self.core.subtitles._reference(self.core.subtitles.context(self.SESSION))
+        self.assertIn(info.reference.track, (5, 6))
+
     def test_b_a_wrong_timebase_is_refused_without_listening(self):
         body = srt(invert(self.turkish, lambda v: (v - 0.3) / (25 / 24)))
         (loaded,) = self.loaded([("tr", body)])
@@ -626,3 +660,108 @@ class Eligible(Harness):
         self.sync(second["key"])
         self.assertEqual(self.index_reads, 1)
         self.assertEqual(self.evaluations, 2)
+
+
+class TwoProviders(Harness):
+    """OpenSubtitles v3 (the addon) and OpenSubtitles.com (asked directly) in
+    one list, each still saying where it came from."""
+
+    SESSION = "p" * 32
+
+    def setUp(self):
+        super().setUp()
+        from media.subtitles.opensubtitles import Credentials, OpenSubtitlesCom
+
+        self.api = Api()
+        self.api.download["link"] = f"{self.origin}/com.srt"
+        self.core.subtitles.opensubtitles = OpenSubtitlesCom(
+            Credentials("an-application-key"), transport=self.api, sleep=lambda _: None
+        )
+        Files.files["/com.srt"] = srt([(10.0 * n, 10.0 * n + 2) for n in range(1, 300)])
+        Files.files["/v3.srt"] = srt([(11.0 * n, 11.0 * n + 2) for n in range(1, 300)])
+
+    def prepare(self, session=None, languages=("tur",)):
+        session = session or self.SESSION
+        self.register(session)
+        status, answer = self.call(
+            "POST", "/media/subtitles/prepare",
+            {"sessionId": session, "type": "movie", "id": "tt1859650", "languages": list(languages)},
+        )
+        self.assertEqual(status, 200, answer)
+        return answer
+
+    def test_both_providers_share_one_list_and_keep_their_names(self):
+        self.addon_subtitles = addon([{"id": "v1", "url": f"{self.origin}/v3.srt", "lang": "tur"}])
+        self.api.search = [[result(501, "tr", hash_match=True)]]
+        answer = self.prepare()
+        found = [(c["language"], c["provider"], c["providerName"], c["source"]) for c in answer["candidates"]]
+        self.assertEqual(found, [
+            ("tr", "opensubtitles_com", "OpenSubtitles.com", "provider_external"),
+            ("tr", "opensubtitles_v3", "OpenSubtitles v3", "addon_external"),
+        ])
+        # The list was made from searches alone: the quota is untouched.
+        self.assertNotIn("download", self.api.paths())
+        self.assertEqual(self.api.calls[0]["params"], {"languages": "tr", "moviehash": "00ff00ff00ff00ff"})
+        self.assertEqual(answer["providers"]["opensubtitles_com"]["requests"]["download"], 0)
+
+    def test_only_the_chosen_one_is_downloaded_and_only_once(self):
+        self.api.search = [[result(601, "tr", hash_match=True), result(602, "tr", hash_match=True),
+                            result(603, "tr", hash_match=True)]]
+        answer = self.prepare()
+        chosen = answer["candidates"][1]
+        status, loaded = self.call("POST", "/media/subtitles/load", {"sessionId": self.SESSION, "candidate": chosen["id"]})
+        self.assertEqual(status, 200, loaded)
+        downloads = [c["body"] for c in self.api.calls if c["path"].endswith("/download")]
+        self.assertEqual(downloads, [{"file_id": chosen["details"]["fileId"]}])
+        # The same film another night: the kept file, not another download.
+        self.api.search = [[result(601, "tr", hash_match=True), result(602, "tr", hash_match=True)]]
+        again = self.prepare(session="q" * 32)
+        same = next(c for c in again["candidates"] if c["details"]["fileId"] == chosen["details"]["fileId"])
+        status, reloaded = self.call("POST", "/media/subtitles/load", {"sessionId": "q" * 32, "candidate": same["id"]})
+        self.assertEqual(status, 200, reloaded)
+        self.assertEqual(reloaded["key"], loaded["key"])
+        self.assertEqual(self.api.paths().count("download"), 1)
+
+    def test_what_the_metadata_rules_out_is_said_and_ranked_last(self):
+        self.api.search = [[result(701, "tr", nb_cd=2, hash_match=True), result(702, "tr")]]
+        answer = self.prepare()
+        ids = [c["details"]["fileId"] for c in answer["candidates"]]
+        self.assertEqual(ids, [702, 701])
+        refused = answer["candidates"][1]["eligibility"]
+        self.assertEqual((refused["result"], refused["stage"]), ("REJECT_PARTIAL", "metadata"))
+        self.assertIsNone(answer["candidates"][0]["eligibility"])
+        self.assertNotIn("download", self.api.paths())
+
+    def test_the_evidence_orders_them_not_the_provider(self):
+        self.addon_subtitles = addon([{"id": "v1", "url": f"{self.origin}/v3.srt", "lang": "tur"}])
+        self.api.search = [[], [result(801, "tr", fps=None)]]
+        first = self.prepare()
+        self.assertEqual([c["provider"] for c in first["candidates"]], ["opensubtitles_v3", "opensubtitles_com"])
+        self.addon_subtitles = addon([{"id": "v1", "url": f"{self.origin}/v3.srt", "lang": "tur"}])
+        self.api.search = [[result(802, "tr", hash_match=True)]]
+        second = self.prepare(session="r" * 32)
+        self.assertEqual([c["provider"] for c in second["candidates"]], ["opensubtitles_com", "opensubtitles_v3"])
+
+    def test_a_used_up_quota_leaves_the_addon_working(self):
+        self.addon_subtitles = addon([{"id": "v1", "url": f"{self.origin}/v3.srt", "lang": "tur"}])
+        self.api.search = [[result(901, "tr", hash_match=True)]]
+        self.api.download_status = 406
+        self.api.download = {"remaining": -1, "requests": 21, "reset_time_utc": "2099-01-01T00:00:00.000Z"}
+        answer = self.prepare()
+        by_provider = {c["provider"]: c for c in answer["candidates"]}
+        status, refused = self.call(
+            "POST", "/media/subtitles/load", {"sessionId": self.SESSION, "candidate": by_provider["opensubtitles_com"]["id"]}
+        )
+        self.assertEqual(status, 429)
+        self.assertEqual(refused["error"]["code"], "SUBTITLE_QUOTA_EXHAUSTED")
+        status, loaded = self.call(
+            "POST", "/media/subtitles/load", {"sessionId": self.SESSION, "candidate": by_provider["opensubtitles_v3"]["id"]}
+        )
+        self.assertEqual(status, 200, loaded)
+        # The next list says so, before anybody tries.
+        self.api.search = [[result(901, "tr", hash_match=True)]]
+        again = self.prepare(session="s" * 32)
+        marked = {c["provider"]: c["unavailable"] for c in again["candidates"]}
+        self.assertEqual(marked, {"opensubtitles_com": "quota-exhausted", "opensubtitles_v3": None})
+        status, providers = self.call("GET", "/media/subtitles/providers")
+        self.assertEqual(providers["providers"]["opensubtitles_com"]["state"], "quota-exhausted")

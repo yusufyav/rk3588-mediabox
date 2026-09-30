@@ -17,6 +17,7 @@ web interface at all.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Iterable
 from urllib.parse import quote
 
@@ -310,7 +311,10 @@ def parse_stream(entry: dict[str, Any], addon_id: str | None) -> Stream | None:
 
 
 def parse_subtitle(
-    entry: Any, addon_id: str | None, source: SubtitleSource = SubtitleSource.ADDON
+    entry: Any,
+    addon_id: str | None,
+    source: SubtitleSource = SubtitleSource.ADDON,
+    addon_name: str | None = None,
 ) -> Subtitle | None:
     """One subtitle descriptor: `{id, url, lang}` and whatever else it says.
 
@@ -319,6 +323,9 @@ def parse_subtitle(
     `name`, `title` or `origin`. A hash match is only recorded when the
     addon said so (`m: "h"` in the OpenSubtitles addon's answers, or an
     explicit `hashMatch`); nothing here guesses it.
+
+    A subtitle addon's answer is credited to the addon by its own manifest
+    name (`provider_id`); one the stream carried is credited to nobody.
     """
     if not isinstance(entry, dict):
         return None
@@ -340,16 +347,35 @@ def parse_subtitle(
         source=source,
         label=label,
         hash_match=matched,
+        provider=provider_id(addon_name) if source is SubtitleSource.ADDON else None,
+        provider_name=_text(addon_name) if source is SubtitleSource.ADDON else None,
     )
 
 
 def parse_subtitles(
-    entries: Any, addon_id: str | None, source: SubtitleSource = SubtitleSource.ADDON
+    entries: Any,
+    addon_id: str | None,
+    source: SubtitleSource = SubtitleSource.ADDON,
+    addon_name: str | None = None,
 ) -> list[Subtitle]:
     if not isinstance(entries, list):
         return []
-    found = [parse_subtitle(entry, addon_id, source) for entry in entries]
+    found = [parse_subtitle(entry, addon_id, source, addon_name) for entry in entries]
     return [subtitle for subtitle in found if subtitle is not None]
+
+
+#: Provider ids the media core gives its own subtitle providers; an addon
+#: whose name reads the same is told apart from them.
+RESERVED_PROVIDERS = frozenset({"opensubtitles_com"})
+
+
+def provider_id(name: str | None) -> str | None:
+    """A subtitle addon's provider id, from the name its manifest gives it:
+    lowercase words joined by underscores ("Some Subs v3" -> "some_subs_v3")."""
+    words = re.sub(r"[^0-9a-z]+", "_", (name or "").strip().lower()).strip("_")
+    if not words:
+        return None
+    return f"addon_{words}" if words in RESERVED_PROVIDERS else words
 
 
 class AddonClient:
@@ -415,7 +441,7 @@ class AddonClient:
         payload = get_json(url, timeout=self._timeout)
         if not isinstance(payload, dict):
             return []
-        return parse_subtitles(payload.get("subtitles"), addon.id)
+        return parse_subtitles(payload.get("subtitles"), addon.id, addon_name=addon.name)
 
 
 def addons_supporting(

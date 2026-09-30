@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .api import MAX_BODY_BYTES, MediaCore, MediaCoreConfig
+from .subtitles.opensubtitles import Credentials
 
 
 LOG = logging.getLogger("media.server")
@@ -166,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
             idle_timeout_seconds=arguments.idle_timeout,
             torrent_network_status=arguments.torrent_network_status,
             library_path=arguments.library,
+            # Taken out of the environment as it is read: nothing the worker
+            # starts inherits it.
+            opensubtitles=Credentials.from_environment(consume=True),
             subtitle_cache_dir=arguments.subtitle_cache
             or (os.path.join(os.path.dirname(arguments.state), "subtitles") if arguments.state else None),
             **(

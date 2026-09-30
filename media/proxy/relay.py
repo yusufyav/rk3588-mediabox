@@ -41,6 +41,8 @@ PASSED_BACK = ("content-type", "content-length", "content-range", "accept-ranges
 
 #: `bytes=START-END`, either end allowed to be absent.
 RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+#: A 206's `Content-Range: bytes START-END/TOTAL` (TOTAL may be `*`).
+CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+|\*)$")
 
 #: How often an open that failed on the way is tried again before the player
 #: is told the source is gone, and how long is waited before each try. A seek
@@ -169,6 +171,17 @@ def _start_of(range_header: str | None) -> tuple[int, str]:
     return int(match.group(1)), match.group(2)
 
 
+def _range_length(content_range: str | None) -> tuple[int, int] | None:
+    """(start, length) from a 206's Content-Range, or None if it is not one."""
+    match = CONTENT_RANGE.match((content_range or "").strip())
+    if not match:
+        return None
+    start, end = int(match.group(1)), int(match.group(2))
+    if end < start or (match.group(3) != "*" and end >= int(match.group(3))):
+        return None
+    return start, end - start + 1
+
+
 def relay(url: str, range_header: str | None, timeout: float = 30.0):
     """Open `url` and return `(status, headers, chunks)` for a local reply.
 
@@ -204,11 +217,35 @@ def relay(url: str, range_header: str | None, timeout: float = 30.0):
     headers.append(("Connection", "close"))
 
     length = response.headers.get("Content-Length")
-    expected = int(length) if length and length.isdigit() else None
-    # Resuming needs to know where the body starts in the file: a 206 is
-    # where it was asked to start; a 200 is the whole file, from 0.
-    first, last = _start_of(range_header) if response.status == 206 else (0, "")
+    declared = int(length) if length and length.isdigit() else None
     host = urllib.parse.urlsplit(url).hostname or "?"
+    if response.status == 206:
+        # A 206's body is what its Content-Range says, and nothing else does.
+        # A CDN was seen answering a one-byte probe with
+        #     Content-Range: bytes 0-0/29159331995
+        #     Content-Length: 29159331995
+        # and one byte of body: believing the length, the relay "resumed"
+        # that byte towards 29 GB and the player waited on it. Content-Length
+        # is only checked against the range; a range that cannot be read
+        # means nothing is known, and nothing is resumed.
+        span = _range_length(response.headers.get("Content-Range"))
+        expected = span[1] if span else None
+        if span is None or declared != expected:
+            if declared is not None:
+                LOG.warning(
+                    "relay from %s: Content-Length %s disagrees with Content-Range %r; the range is believed",
+                    host, declared, response.headers.get("Content-Range"),
+                )
+            headers = [(name, value) for name, value in headers if name.lower() != "content-length"]
+            if expected is not None:
+                headers.append(("Content-Length", str(expected)))
+        # Resuming needs to know where the body starts in the file: where the
+        # range says it does; it ends where the player asked it to.
+        first, last = (span[0], _start_of(range_header)[1]) if span else (0, "")
+    else:
+        # A 200 is the whole file, from 0.
+        expected = declared
+        first, last = 0, ""
 
     def chunks() -> Iterator[bytes]:
         current = response
@@ -216,8 +253,13 @@ def relay(url: str, range_header: str | None, timeout: float = 30.0):
         resumes = 0
         try:
             while True:
+                if expected is not None and sent >= expected:
+                    # All the range promised: whatever the connection still
+                    # claims to have is not waited for.
+                    return
+                wanted = CHUNK_BYTES if expected is None else min(CHUNK_BYTES, expected - sent)
                 try:
-                    block = current.read(CHUNK_BYTES)
+                    block = current.read(wanted)
                 except Exception as exc:  # noqa: BLE001 -- the connection, not the data
                     block, cause = b"", f"{type(exc).__name__}: {exc}"
                 else:

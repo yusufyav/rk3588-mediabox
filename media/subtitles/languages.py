@@ -25,6 +25,8 @@ _CANONICAL = {
     "turkish": "tr", "english": "en", "german": "de", "french": "fr", "spanish": "es",
     "italian": "it", "portuguese": "pt", "russian": "ru", "arabic": "ar",
     "türkçe": "tr",
+    # OpenSubtitles.com's own regional codes.
+    "pt-pt": "pt", "zh-cn": "zh", "zh-tw": "zh",
 }
 
 

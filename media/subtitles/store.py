@@ -12,6 +12,9 @@ Three things, all under one directory in the worker's state:
     speech/  what was heard in each sampled stretch of a video. It depends on
              the video alone, so trying a second subtitle for the same film
              costs no listening at all.
+    provider/ which kept subtitle a provider's file became, so a file whose
+             download a quota counts is downloaded once. The subtitle's own
+             identity stays the hash of its text.
 
 The directory has a ceiling and the oldest entries go first. Nothing here is
 precious: every entry can be made again from the network and the film.
@@ -39,7 +42,7 @@ LOG = logging.getLogger(__name__)
 DEFAULT_CEILING_BYTES = 64 * 1024 * 1024
 
 _KEY = re.compile(r"^[0-9a-f]{32}$")
-FOLDERS = ("files", "sync", "speech", "reference")
+FOLDERS = ("files", "sync", "speech", "reference", "provider")
 EXTENSIONS = ("srt", "vtt", "ass", "ssa")
 
 
@@ -127,6 +130,17 @@ class SubtitleStore:
 
     def keep_result(self, video: str, subtitle: str, algorithm: str, answer: dict[str, Any]) -> None:
         self._save_json(self.root / "sync" / f"{digest(video, subtitle, algorithm)}.json", answer)
+
+    # ------------------------------------------------------------- provider
+
+    def provider_file(self, provider: str, file_id: str) -> str | None:
+        """The key a provider's file was kept under, if it still is."""
+        payload = self._load_json(self.root / "provider" / f"{digest('provider', provider, file_id)}.json")
+        key = payload.get("key") if isinstance(payload, dict) else None
+        return key if isinstance(key, str) and valid_key(key) and self.path(key) is not None else None
+
+    def keep_provider_file(self, provider: str, file_id: str, key: str) -> None:
+        self._save_json(self.root / "provider" / f"{digest('provider', provider, file_id)}.json", {"key": key})
 
     # ------------------------------------------------------------ reference
 

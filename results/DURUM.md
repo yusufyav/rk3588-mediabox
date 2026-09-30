@@ -548,10 +548,24 @@ diğer iki belirtinin gittiğini, bunun **sürdüğünü** bildirdi. Yani nedeni
   Rome with Love'ın birer kaynağı, aynı hash `51390742a48d798c`). Film
   açılmıyor ve altyazı yüklemesi 404 alıyor. Büyük ihtimalle MediaFusion /
   Real-Debrid'in "dosya hazır değil" yanıtı; ölçülmedi.
-* **Tüm adaylar reddedilince, reddedilen bir altyazı ekranda kalıyor.** Otomatik
-  seçimde kısmi olmayan en iyi aday eşitlenmeden bırakılıyor — başka bir kare
-  hızına ait olduğu kesinleşmiş olsa bile (To Rome with Love, 24 fps remux,
-  25/24'lük altyazı). Kapalı mı kalmalı, karar bekliyor.
+* ~~Tüm adaylar reddedilince, reddedilen bir altyazı ekranda kalıyor~~ —
+  **kapandı, 30 Eylül 2026.** Uyumsuz olduğu gösterilmiş bir aday
+  (`REJECT_PARTIAL`, `REJECT_TIMEBASE_MISMATCH`, `REJECT_WRONG_RELEASE`,
+  `REJECT_DUPLICATE`) otomatik seçimin son çaresi olmuyor: filmin o dildeki
+  metin izi, yoksa uygunluğu söylenemeyen (`INCONCLUSIVE`) ilk aday eşitlenmeden,
+  yoksa altyazı kapalı. Elle seçilen reddedilmiş aday kalıyor, AutoSync
+  uygulanmıyor. Aynı işte: altyazılar artık iki sağlayıcıdan (OpenSubtitles v3 +
+  OpenSubtitles.com, yalnız arama ile listeleniyor, indirme seçilince),
+  "AutoSync uyumsuz altyazıları göster" ayarı (varsayılan Kapalı), gömülü
+  referansta ikili uzlaşma (en yoğun iz tek başına sapınca artık o seçilmiyor)
+  ve relay'de 206 uzunluğunun `Content-Length` değil `Content-Range`'den
+  okunması — `docs/subtitles.md`, `docs/media-session-proxy.md`. Plus'ta
+  ölçüldü (The Love Hypothesis, 2160p WEB): 54 v3 adayı "OpenSubtitles v3"
+  etiketiyle geldi, otomatik seçim tek indirmeyle Türkçe'yi gömülü metin
+  referansına karşı kabul etti (−0,06 s), elle seçilen dört aday kaldı ve
+  zamanlandı. Bu filmde reddedilen aday çıkmadığı için menü gizlemesi
+  cihazda görülmedi; OpenSubtitles.com uygulama anahtarı olmadığından
+  `not-configured` (anahtarsız API 403 veriyor), istek sayısı 0.
 * **`mediabox-kiosk-smoke`'ta "home: data absent".** 30 Eylül 11:00 açılışından
   beri, altyazı değişikliklerinden önceki ikililerle de; bir önceki açılışta
   yoktu. Nedeni aranmadı.

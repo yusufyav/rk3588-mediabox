@@ -24,6 +24,14 @@ Environment=PYTHONPATH=/opt/rk3588-mediabox
 # invisible until someone tries to watch something.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/rk3588-mediabox/media-runtime/bin
 EnvironmentFile=-/etc/mediabox-media-worker.env
+# OpenSubtitles.com's application key and, optionally, an account
+# (OPENSUBTITLES_API_KEY, OPENSUBTITLES_USERNAME, OPENSUBTITLES_PASSWORD).
+# Secrets, so a file of their own: root-only (0600), never in the repository,
+# and not one of the files a release captures from the golden board -- unlike
+# the .env above, which is. The worker takes them out of its environment as it
+# starts, so nothing it runs inherits them. Absent, the provider is simply off.
+# docs/subtitles.md, "OpenSubtitles.com".
+EnvironmentFile=-/etc/mediabox-opensubtitles.env
 ExecStart=/usr/bin/python3 -m media.server --bind 127.0.0.1 --port 8790 --streaming-server http://127.0.0.1:11470 --state /var/lib/mediabox-media-worker/stremio-session.json --base-url http://127.0.0.1:8790 --loopback-base-url http://127.0.0.1:8790 --library /etc/mediabox-library.json --allow-file-prefix /opt/rk3588-mediabox/assets/
 Restart=on-failure
 RestartSec=2s

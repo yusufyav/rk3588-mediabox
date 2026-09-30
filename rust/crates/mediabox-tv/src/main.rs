@@ -2293,6 +2293,10 @@ impl App {
                             self.toggle_subtitle_auto_sync();
                             return;
                         }
+                        if act == Some(screens::audio::PlayerAct::SubtitleShowIncompatible) {
+                            self.toggle_subtitle_show_incompatible();
+                            return;
+                        }
                     }
                     if self.now.step_menu(dx, dy) {
                         self.paint();
@@ -2401,6 +2405,7 @@ impl App {
         // The subtitle language a film starts with leads: it is the setting
         // a viewer comes back to most, and the only one about the film.
         let auto_sync = self.now.subtitle_auto_sync.unwrap_or(true);
+        let show_incompatible = self.now.subtitle_show_incompatible.unwrap_or(false);
         let mut rows = vec![
             screens::audio::PlayerRow {
                 label: "Tercih edilen altyazı dili".into(),
@@ -2416,6 +2421,14 @@ impl App {
                 active: auto_sync,
                 act: screens::audio::PlayerAct::SubtitleAutoSync,
             },
+            // Whether a subtitle shown not to fit the film stays in the menu:
+            // off, it offers only what may fit.
+            screens::audio::PlayerRow {
+                label: "AutoSync uyumsuz altyazıları göster".into(),
+                detail: if show_incompatible { "Açık".into() } else { "Kapalı".into() },
+                active: show_incompatible,
+                act: screens::audio::PlayerAct::SubtitleShowIncompatible,
+            },
         ];
         rows.extend(screens::audio::player_panel(self.output_status().as_ref(), self.audio_status().as_ref()));
         rows
@@ -2426,6 +2439,15 @@ impl App {
         let next = !self.now.subtitle_auto_sync.unwrap_or(true);
         self.now.subtitle_auto_sync = Some(next);
         spawn_here(HereCommand::SubtitleAutoSyncSet(next));
+        self.open_controls();
+        self.paint();
+    }
+
+    /// Turn "AutoSync uyumsuz altyazıları göster" over and keep it.
+    fn toggle_subtitle_show_incompatible(&mut self) {
+        let next = !self.now.subtitle_show_incompatible.unwrap_or(false);
+        self.now.subtitle_show_incompatible = Some(next);
+        spawn_here(HereCommand::SubtitleShowIncompatibleSet(next));
         self.open_controls();
         self.paint();
     }
@@ -2526,6 +2548,7 @@ impl App {
                     match row.act {
                         PlayerAct::SubtitleLanguage => self.step_subtitle_preference(1),
                         PlayerAct::SubtitleAutoSync => self.toggle_subtitle_auto_sync(),
+                        PlayerAct::SubtitleShowIncompatible => self.toggle_subtitle_show_incompatible(),
                         PlayerAct::RefreshMatching => spawn_output(mediabox_core::Request::OutputContentMatching {
                             enabled: !row.active,
                         }),
@@ -5770,6 +5793,7 @@ enum HereCommand {
     SubtitleAutoSync,
     SubtitlePreference(Option<String>),
     SubtitleAutoSyncSet(bool),
+    SubtitleShowIncompatibleSet(bool),
     Audio(i64),
     SubtitleDelay(f64),
     AudioDelay(f64),
@@ -5856,6 +5880,11 @@ fn spawn_here(command: HereCommand) {
             HereCommand::SubtitleAutoSyncSet(enabled) => {
                 client
                     .call(serde_json::json!({"command": "subtitle_auto_sync_set", "enabled": enabled}))
+                    .await
+            }
+            HereCommand::SubtitleShowIncompatibleSet(enabled) => {
+                client
+                    .call(serde_json::json!({"command": "subtitle_show_incompatible_set", "enabled": enabled}))
                     .await
             }
             HereCommand::Audio(id) => {

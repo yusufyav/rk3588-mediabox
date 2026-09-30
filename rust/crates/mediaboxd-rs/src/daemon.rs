@@ -295,6 +295,8 @@ impl AppState {
                 });
                 // ... and its "Otomatik eşitleme".
                 status["subtitle_auto_sync"] = json!(preferences.auto_sync());
+                // ... and its "AutoSync uyumsuz altyazıları göster".
+                status["subtitle_show_incompatible"] = json!(preferences.show_incompatible());
                 Response::success(status)
             }
             Request::SubtitlePreferenceSet { language } => {
@@ -304,6 +306,10 @@ impl AppState {
             Request::SubtitleAutoSyncSet { enabled } => {
                 let applied = self.subtitles.set_auto_sync(enabled).await;
                 Response::success(json!({"applied": applied, "enabled": enabled}))
+            }
+            Request::SubtitleShowIncompatibleSet { enabled } => {
+                self.subtitles.set_show_incompatible(enabled);
+                Response::success(json!({"applied": true, "enabled": enabled}))
             }
             Request::MediaSubtitleTextHere => Response::success(self.subtitles.text().await),
             Request::MediaTransportHere { action } => {

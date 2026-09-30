@@ -19,6 +19,7 @@ addon transport URL unless it asks for one, and above all never parses a page.
     POST   /media/subtitles/sync             where its lines belong (background)
     GET    /media/subtitles/sync/{job}       how that is going
     GET    /media/subtitles/file/{key}.{ext} a kept subtitle, for the player
+    GET    /media/subtitles/providers        the direct subtitle providers' state
     POST   /media/resolve                    stream descriptor -> playable URL
     POST   /media/inspect                    URL -> MediaInfo
     POST   /media/plan                       URL -> MediaInfo + decision + preview
@@ -58,6 +59,7 @@ from .policy import (
 )
 from .proxy import FFmpegConfig, SessionManager, SourcePolicy, validate_source_url
 from .stremio import HeadlessStremio, ResolvedStream
+from .subtitles.opensubtitles import Credentials, OpenSubtitlesCom
 from .subtitles.service import DEFAULT_MAX_BYTES, SubtitleService
 
 
@@ -114,6 +116,10 @@ class MediaCoreConfig:
     #: Unset means a private temporary directory.
     subtitle_cache_dir: str | None = None
     subtitle_sync_max_bytes: int = DEFAULT_MAX_BYTES
+    #: OpenSubtitles.com's application key and, optionally, an account; from
+    #: the worker's environment, never from a file of its own. Unset is no
+    #: such provider.
+    opensubtitles: Credentials | None = None
 
 
 class MediaCore:
@@ -146,6 +152,10 @@ class MediaCore:
             ffmpeg=self.config.ffmpeg.binary,
             max_bytes=self.config.subtitle_sync_max_bytes,
             alive=self._session_alive,
+            opensubtitles_com=OpenSubtitlesCom(
+                self.config.opensubtitles or Credentials(),
+                state_dir=self.config.subtitle_cache_dir,
+            ),
         )
 
     def _session_alive(self, session_id: str) -> bool:
@@ -378,6 +388,9 @@ class MediaCore:
 
         if head == "subtitles" and len(parts) == 3 and parts[1] == "sync":
             return json_response(200, self.subtitles.job(parts[2]))
+
+        if head == "subtitles" and len(parts) == 2 and parts[1] == "providers":
+            return json_response(200, {"providers": self.subtitles.providers()})
 
         if head == "subtitles" and len(parts) == 3:
             extra = {key: values[0] for key, values in params.items() if key != "videoId" and values}

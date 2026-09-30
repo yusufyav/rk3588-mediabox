@@ -40,7 +40,8 @@ def main() -> int:
     request = json.load(sys.stdin)
     if request.get("task") == "cross_check":
         first, second = (_reference(r) for r in request["references"])
-        json.dump({"quality": eligibility.cross_check(first, second, request.get("videoRate"))}, sys.stdout)
+        quality, offset = eligibility.cross_check_offset(first, second, request.get("videoRate"))
+        json.dump({"quality": quality, "offset": offset}, sys.stdout)
         return 0
     if request.get("task") == "eligibility":
         verdict = eligibility.evaluate(
@@ -141,19 +142,21 @@ def cross_check_isolated(
     video_rate: float | None,
     *,
     timeout: float = 120.0,
-) -> str:
-    """`eligibility.cross_check`, run in a child process."""
+) -> tuple[str, float | None]:
+    """`eligibility.cross_check_offset`, run in a child process."""
     answer = _run(
         {"task": "cross_check", "references": [_reference_payload(first), _reference_payload(second)], "videoRate": video_rate},
         timeout,
     )
-    return str(answer["quality"])
+    offset = answer.get("offset")
+    return str(answer["quality"]), (float(offset) if isinstance(offset, (int, float)) else None)
 
 
 def _run(request: dict, timeout: float) -> dict:
     payload = json.dumps(request)
     package_root = str(Path(__file__).resolve().parents[2])
-    environment = dict(os.environ)
+    # Nothing of the worker's own secrets goes to the engine.
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("OPENSUBTITLES_")}
     environment["PYTHONPATH"] = os.pathsep.join(
         part for part in (package_root, environment.get("PYTHONPATH", "")) if part
     )

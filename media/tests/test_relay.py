@@ -4,6 +4,7 @@ source stumbles once."""
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
@@ -127,6 +128,75 @@ class Resume(unittest.TestCase):
         _, _, chunks = relay(self.url, "bytes=0-")
         self.assertEqual(b"".join(chunks), FILM)
         self.assertEqual(len(Cutting.requests), 1)
+
+
+class Bogus(BaseHTTPRequestHandler):
+    """A CDN's answer to a one-byte probe, as it was seen on the appliance:
+    the range is one byte, the length claims the whole 29 GB file, and the
+    connection is kept open after the byte."""
+
+    content_range = "bytes 0-0/29159331995"
+    requests: list[str] = []
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        Bogus.requests.append(self.headers.get("Range", ""))
+        self.send_response(206)
+        self.send_header("Content-Range", Bogus.content_range)
+        self.send_header("Content-Length", "29159331995")
+        self.end_headers()
+        self.wfile.write(b"\x1a")
+        self.wfile.flush()
+        # Held open, the way a keep-alive CDN connection is.
+        time.sleep(3)
+
+
+class ContentRange(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Bogus)
+        cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}/film.mkv"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        Bogus.requests = []
+        Bogus.content_range = "bytes 0-0/29159331995"
+
+    def test_a_206_is_as_long_as_its_range_whatever_its_length_says(self):
+        started = time.monotonic()
+        with self.assertLogs("media.proxy.relay", "WARNING") as logged:
+            status, headers, chunks = relay(self.url, "bytes=0-0", timeout=10.0)
+            body = b"".join(chunks)
+        # One byte, complete: no resume, no waiting on 29 GB that never come.
+        self.assertEqual(status, 206)
+        self.assertEqual(body, b"\x1a")
+        self.assertEqual(Bogus.requests, ["bytes=0-0"])
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertNotIn("resuming", "".join(logged.output))
+        # The player is told the length the range has.
+        passed = {name.lower(): value for name, value in headers}
+        self.assertEqual(passed["content-length"], "1")
+        self.assertEqual(passed["content-range"], "bytes 0-0/29159331995")
+
+    def test_a_range_that_cannot_be_read_is_never_resumed(self):
+        Bogus.content_range = "bytes nonsense"
+        with self.assertLogs("media.proxy.relay", "WARNING"):
+            status, headers, chunks = relay(self.url, "bytes=0-0", timeout=1.0)
+            body = b"".join(chunks)
+        self.assertEqual(status, 206)
+        # Nothing made up -- at most the byte that came -- and no second
+        # request for more.
+        self.assertIn(body, (b"", b"\x1a"))
+        self.assertEqual(Bogus.requests, ["bytes=0-0"])
+        self.assertNotIn("content-length", {name.lower() for name, _ in headers})
 
 
 class Relay(unittest.TestCase):

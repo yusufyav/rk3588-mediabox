@@ -35,6 +35,7 @@ from ..proxy.security import SourcePolicy, validate_source_url
 from ..stremio.models import Stream, Subtitle, SubtitleSource
 from . import eligibility
 from . import mkv
+from . import opensubtitles
 from . import sync as engine
 from .audio import ListenConfig, ListenError, has_centre, listen
 from .eligibility import Eligibility, Reference, Verdict
@@ -59,17 +60,28 @@ MIN_AFFORDABLE_WINDOWS = 12
 
 WINDOW_SECONDS = 30.0
 
-#: Candidates offered per language: the menu is a television menu.
+#: Candidates offered per language: the menu is a television menu. Ones the
+#: providers' own metadata already rules out are counted apart, so they never
+#: push a possible one off the list; they are only shown when asked for.
 PER_LANGUAGE = 3
+
+#: How long the list waits for a provider's search before going without it.
+PROVIDER_SEARCH_SECONDS = 20.0
 
 
 #: How a video's own index is read and its reference chosen; part of the key
 #: its reading is kept by. mbidx-2: commentary and forced tracks are not
 #: references, and a contradicted track is passed over for the next.
-REFERENCE_VERSION = "mbidx-2"
+#: mbidx-3: the reference is the busiest track of the largest group that
+#: confirm one another pairwise, at one timeline.
+REFERENCE_VERSION = "mbidx-3"
 
 #: Dialogue tracks tried as the reference, busiest first.
 REFERENCE_TRIES = 3
+
+#: Two embedded tracks of one file that "confirm" each other this far apart
+#: are not one timeline: one of them is off by itself.
+CONSENSUS_OFFSET = 1.0
 
 #: What a kept answer was worked out by: the engine, the pre-filter and the
 #: choice of reference. Part of every cache key, so a changed rule is never
@@ -91,6 +103,7 @@ class VideoContext:
     type_name: str | None = None
     item_id: str | None = None
     video_id: str | None = None
+    title: str | None = None
     candidates: dict[str, Subtitle] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
     loaded: dict[str, str] = field(default_factory=dict)
@@ -216,6 +229,7 @@ class SubtitleService:
         aligner: Callable[..., engine.SyncResult] | None = None,
         evaluator: Callable[..., Verdict] | None = None,
         index_reader: Callable[["VideoContext"], mkv.ContainerIndex] | None = None,
+        opensubtitles_com: "opensubtitles.OpenSubtitlesCom | None" = None,
     ) -> None:
         self.stremio = stremio
         self.policy = source_policy
@@ -229,6 +243,9 @@ class SubtitleService:
         self._align = aligner or align_isolated
         self._evaluate = evaluator or evaluate_isolated
         self._cross_check = cross_check_isolated
+        #: OpenSubtitles.com, asked directly; None or unconfigured is simply
+        #: one provider fewer.
+        self.opensubtitles = opensubtitles_com
         self._read_index = index_reader or self._index
         self._references: dict[str, ReferenceInfo] = {}
         # One reading of a video's index at a time: two subtitles of the same
@@ -309,6 +326,34 @@ class SubtitleService:
             context.duration = float(body["duration"])
         self._identify(context)
 
+        context.title = _text(body.get("title"))
+        languages = [code for code in (canonical(v) for v in body.get("languages") or []) if code]
+
+        # OpenSubtitles.com is searched alongside the addons: its search is
+        # free, and nothing of it is downloaded here.
+        direct: list[Subtitle] = []
+        searcher: threading.Thread | None = None
+        if self.opensubtitles is not None and self.opensubtitles.configured:
+            target = opensubtitles.target_for(
+                context.type_name,
+                context.item_id,
+                context.video_id,
+                moviehash=context.video_hash,
+                filename=context.filename,
+                title=context.title,
+            )
+
+            def search() -> None:
+                try:
+                    direct.extend(self.opensubtitles.search(target, languages))  # type: ignore[union-attr]
+                except MediaError as exc:
+                    LOG.info("%s unavailable: %s", opensubtitles.PROVIDER_NAME, exc.message)
+                except Exception:  # noqa: BLE001 -- a provider never takes the list down
+                    LOG.exception("%s search failed", opensubtitles.PROVIDER_NAME)
+
+            searcher = threading.Thread(target=search, name="subtitle-provider-search", daemon=True)
+            searcher.start()
+
         found: list[Subtitle] = list(context.stream.subtitles) if context.stream else []
         if context.type_name and context.item_id:
             extra: dict[str, Any] = {}
@@ -326,28 +371,51 @@ class SubtitleService:
                 )
             except MediaError as exc:
                 LOG.info("subtitle addons unavailable for %s: %s", context.item_id, exc.message)
+        if searcher is not None:
+            searcher.join(PROVIDER_SEARCH_SECONDS)
+            found.extend(list(direct))
 
-        languages = [code for code in (canonical(v) for v in body.get("languages") or []) if code]
-        ranked = rank(found, languages, context.filename)
+        metadata = {
+            candidate_id(s): verdict
+            for s in found
+            if (verdict := eligibility.from_metadata(s.details, context.video_rate, hash_match=s.hash_match)) is not None
+        }
+        ranked = rank(found, languages, context.filename, context.video_rate, metadata)
         offered: list[Subtitle] = []
-        per_language: dict[str | None, int] = {}
+        per_language: dict[tuple[str | None, bool], int] = {}
         seen_urls: set[str] = set()
         for subtitle in ranked:
             if subtitle.url in seen_urls:
                 continue
             seen_urls.add(subtitle.url)
-            code = canonical(subtitle.language)
-            if per_language.get(code, 0) >= PER_LANGUAGE:
+            slot = (canonical(subtitle.language), candidate_id(subtitle) in metadata)
+            if per_language.get(slot, 0) >= PER_LANGUAGE:
                 continue
-            per_language[code] = per_language.get(code, 0) + 1
+            per_language[slot] = per_language.get(slot, 0) + 1
             offered.append(subtitle)
         with self._lock:
             context.candidates = {candidate_id(s): s for s in offered}
             context.order = [candidate_id(s) for s in offered]
+        exhausted = self.opensubtitles is not None and self.opensubtitles.exhausted()
         return {
             "video": context.as_dict(),
-            "candidates": [describe(s, rank_index) for rank_index, s in enumerate(offered)],
+            "candidates": [
+                describe(
+                    s,
+                    rank_index,
+                    metadata.get(candidate_id(s)),
+                    unavailable="quota-exhausted" if exhausted and s.provider == opensubtitles.PROVIDER else None,
+                )
+                for rank_index, s in enumerate(offered)
+            ],
+            "providers": self.providers(),
         }
+
+    def providers(self) -> dict[str, Any]:
+        """The direct providers' state, for diagnostics: no credential in it."""
+        if self.opensubtitles is None:
+            return {}
+        return {opensubtitles.PROVIDER: self.opensubtitles.status()}
 
     def _identify(self, context: VideoContext) -> None:
         """Hash, size and name of the file, from what is known without guessing."""
@@ -426,15 +494,15 @@ class SubtitleService:
             document = self.store.get(already)
             if document is not None:
                 return self._loaded(already, document, subtitle)
-        url = validate_source_url(subtitle.url, self.policy)
-        response = request(url, timeout=15.0, max_bytes=8 * 1024 * 1024)
-        if response.status >= 400:
-            raise UpstreamError(f"the subtitle answered HTTP {response.status}")
-        try:
-            document = parse(response.body, subtitle.language)
-        except SubtitleFormatError as exc:
-            raise MediaError("SUBTITLE_UNREADABLE", str(exc), 422) from exc
+        file_id = opensubtitles.file_id_of(subtitle)
+        kept = self.store.provider_file(opensubtitles.PROVIDER, str(file_id)) if file_id is not None else None
+        document = self.store.get(kept) if kept else None
+        if document is None:
+            document = self._fetch(subtitle, file_id)
         key = self.store.put(document)
+        if file_id is not None:
+            # The file, not the link: the next film night asks nothing of the quota.
+            self.store.keep_provider_file(opensubtitles.PROVIDER, str(file_id), key)
         with self._lock:
             # The same file offered twice (two addons, two ids): the same key,
             # and whoever asks to time the second is served the first's work.
@@ -444,6 +512,29 @@ class SubtitleService:
         if twin:
             answer["duplicateOf"] = twin
         return answer
+
+    def _fetch(self, subtitle: Subtitle, file_id: int | None) -> Any:
+        """The subtitle's text, fetched once, checked to be a subtitle."""
+        if file_id is not None:
+            if self.opensubtitles is None:
+                raise NotFound("that subtitle's provider is not configured")
+            # The one call the quota counts, made for this one subtitle.
+            link = self.opensubtitles.download(file_id)
+            try:
+                url = validate_source_url(link, self.policy)
+                response = request(url, timeout=15.0, max_bytes=8 * 1024 * 1024)
+            except MediaError:
+                # The link is a temporary credential of sorts: not repeated.
+                raise UpstreamError("the subtitle file could not be fetched") from None
+        else:
+            url = validate_source_url(subtitle.url, self.policy)
+            response = request(url, timeout=15.0, max_bytes=8 * 1024 * 1024)
+        if response.status >= 400:
+            raise UpstreamError(f"the subtitle answered HTTP {response.status}")
+        try:
+            return parse(response.body, subtitle.language)
+        except SubtitleFormatError as exc:
+            raise MediaError("SUBTITLE_UNREADABLE", str(exc), 422) from exc
 
     def _loaded(self, key: str, document: Any, subtitle: Subtitle) -> dict[str, Any]:
         return {
@@ -810,29 +901,78 @@ class SubtitleService:
         usable = [r for r in tracks if len(r.times) >= th.min_reference_events]
         if not usable:
             return ReferenceInfo(None, rate, "no-indexed-subtitle-track", index.bytes_read)
-        # The busiest dialogue track that another one confirms; else the
-        # busiest that nothing contradicts. One track can be off on its own
-        # (Drive's German one sat 24 s from the rest), so a track another one
-        # calls ambiguous is passed over for the next.
-        fallback: Reference | None = None
+        return self._consensus(usable, tracks, rate, index.bytes_read)
+
+    def _consensus(
+        self, usable: list[Reference], tracks: list[Reference], rate: float | None, read: int
+    ) -> ReferenceInfo:
+        """The reference: the busiest track of the largest group of dialogue
+        tracks that confirm one another, pair by pair, at ratio 1 and one
+        timeline; else the busiest that nothing contradicts; else none.
+
+        One track can be off on its own (Drive's German one sat 24 s from
+        the rest). Asking every track only against the busiest went wrong
+        when the busiest was that one: B and C each called A ambiguous and
+        were never asked about each other, and A -- which B could not
+        contradict -- became the reference, or none did. The first
+        `REFERENCE_TRIES` tracks are paired every way instead -- three
+        tracks are three questions.
+        """
+        th = eligibility.DEFAULT
+        pool = [r for r in tracks if len(r.times) >= th.min_second_reference_events][:REFERENCE_TRIES]
         for primary in usable[:REFERENCE_TRIES]:
-            second = next(
-                (r for r in tracks if r is not primary and len(r.times) >= th.min_second_reference_events), None
-            )
-            quality = "single"
-            if second is not None:
+            if primary not in pool:
+                pool.append(primary)
+        quality: dict[tuple[int, int], str] = {}
+        for i in range(len(pool)):
+            for j in range(i + 1, len(pool)):
+                first, second = (pool[i], pool[j]) if len(pool[i].times) >= len(pool[j].times) else (pool[j], pool[i])
+                if len(first.times) < th.min_reference_events:
+                    continue
                 try:
-                    quality = self._cross_check(primary, second, rate)
+                    found, offset = self._cross_check(first, second, rate)
                 except RuntimeError as exc:
                     LOG.info("subtitle reference cross-check failed: %s", exc)
-            found = Reference(primary.kind, primary.times, primary.track, primary.language, primary.codec, quality)
-            if quality == "confirmed":
-                return ReferenceInfo(found, rate, "", index.bytes_read)
-            if quality == "single" and fallback is None:
-                fallback = found
-        if fallback is not None:
-            return ReferenceInfo(fallback, rate, "", index.bytes_read)
-        return ReferenceInfo(None, rate, "ambiguous-embedded-reference", index.bytes_read)
+                    found, offset = "single", None
+                if found == "confirmed" and (offset is None or abs(offset) > CONSENSUS_OFFSET):
+                    # Agreeing in shape but seconds apart: one of the two is
+                    # off, and nothing here says which.
+                    found = "ambiguous"
+                quality[(i, j)] = found
+        # Groups of tracks joined by confirmations.
+        group = list(range(len(pool)))
+
+        def root(n: int) -> int:
+            while group[n] != n:
+                n = group[n]
+            return n
+
+        for (i, j), found in quality.items():
+            if found == "confirmed":
+                group[root(j)] = root(i)
+        clusters: dict[int, list[int]] = {}
+        for n in range(len(pool)):
+            if any(found == "confirmed" and n in pair for pair, found in quality.items()):
+                clusters.setdefault(root(n), []).append(n)
+        best: list[int] | None = None
+        for members in clusters.values():
+            key = (len(members), sum(len(pool[n].times) for n in members))
+            if best is None or key > (len(best), sum(len(pool[n].times) for n in best)):
+                best = members
+        if best is not None:
+            chosen = max((pool[n] for n in best if pool[n] in usable), key=lambda r: len(r.times), default=None)
+            if chosen is not None:
+                found = Reference(chosen.kind, chosen.times, chosen.track, chosen.language, chosen.codec, "confirmed")
+                return ReferenceInfo(found, rate, "", read)
+        # No two agree. A track nothing contradicted still serves alone -- the
+        # busiest such; one that anything called ambiguous does not.
+        for primary in usable[:REFERENCE_TRIES]:
+            n = pool.index(primary)
+            said = [found for pair, found in quality.items() if n in pair]
+            if "ambiguous" not in said:
+                found = Reference(primary.kind, primary.times, primary.track, primary.language, primary.codec, "single")
+                return ReferenceInfo(found, rate, "", read)
+        return ReferenceInfo(None, rate, "ambiguous-embedded-reference", read)
 
     def _index(self, context: VideoContext) -> mkv.ContainerIndex:
         """The video's index, read under `mkv.INDEX_BUDGET`."""
@@ -877,7 +1017,14 @@ def candidate_id(subtitle: Subtitle) -> str:
     return "ext:" + digest("candidate", subtitle.url)[:16]
 
 
-def describe(subtitle: Subtitle, rank_index: int) -> dict[str, Any]:
+def describe(
+    subtitle: Subtitle,
+    rank_index: int,
+    metadata: Verdict | None = None,
+    *,
+    unavailable: str | None = None,
+) -> dict[str, Any]:
+    details = subtitle.details
     return {
         "id": candidate_id(subtitle),
         "source": subtitle.source.value,
@@ -885,31 +1032,68 @@ def describe(subtitle: Subtitle, rank_index: int) -> dict[str, Any]:
         "rawLanguage": subtitle.language,
         "label": subtitle.label,
         "addonId": subtitle.addon_id,
+        "provider": subtitle.provider,
+        "providerName": subtitle.provider_name,
         "hashMatch": subtitle.hash_match,
         "rank": rank_index,
+        "details": None if details is None else details.as_dict(),
+        # What the provider's metadata already said against it; the same
+        # shape as a sync's `eligibility`, from the metadata stage.
+        "eligibility": None if metadata is None else {**metadata.as_dict(), "stage": "metadata"},
+        # Why it cannot be had now (the provider's quota), if it cannot.
+        "unavailable": unavailable,
     }
 
 
-def rank(subtitles: list[Subtitle], languages: list[str], filename: str | None) -> list[Subtitle]:
-    """Best candidates first, cheapest evidence first.
+def rank(
+    subtitles: list[Subtitle],
+    languages: list[str],
+    filename: str | None,
+    video_rate: float | None = None,
+    metadata: dict[str, Verdict] | None = None,
+) -> list[Subtitle]:
+    """Best candidates first, by evidence, cheapest first -- never by which
+    provider found them.
 
     The file's own subtitles lead; then the viewer's languages in their
-    order; within a language a hash match (the addon matched this exact
-    file) first, then a release name that shares words with the file's, then
-    the addon's own order.
+    order. Within a language: anything the providers' metadata already rules
+    out last; a hash match (matched to this exact file); metadata that fits
+    this video (its rate, one file); a release name that shares words with
+    the file's; a trusted uploader, a human translation; then each
+    provider's own order, the providers taking turns.
     """
     tokens = _tokens(filename)
+    metadata = metadata or {}
+    positions: dict[str | None, int] = {}
+    within: list[int] = []
+    for subtitle in subtitles:
+        within.append(positions.get(subtitle.provider, 0))
+        positions[subtitle.provider] = within[-1] + 1
+
+    def fits(subtitle: Subtitle) -> int:
+        details = subtitle.details
+        if details is None or video_rate is None or not details.fps:
+            return 1
+        whole = (details.nb_cd or 1) == 1 and details.files == 1
+        same = eligibility.snap_rate(details.fps) == video_rate
+        return 0 if whole and same else 1
 
     def key(item: tuple[int, Subtitle]) -> tuple[Any, ...]:
         index, subtitle = item
         code = canonical(subtitle.language)
         language_rank = languages.index(code) if code in languages else len(languages)
         overlap = len(tokens & _tokens(subtitle.label)) if tokens else 0
+        details = subtitle.details
         return (
             subtitle.source is not SubtitleSource.STREAM,
             language_rank,
+            candidate_id(subtitle) in metadata,
             not subtitle.hash_match,
+            fits(subtitle),
             -overlap,
+            not (details is not None and details.from_trusted),
+            details is not None and (details.ai_translated or details.machine_translated),
+            within[index],
             index,
         )
 

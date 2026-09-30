@@ -574,6 +574,9 @@ pub enum PlayerAct {
     /// "Otomatik eşitleme": whether an external subtitle is checked and
     /// timed.
     SubtitleAutoSync,
+    /// "AutoSync uyumsuz altyazıları göster": whether a subtitle shown not to
+    /// fit the film stays in the subtitle menu.
+    SubtitleShowIncompatible,
 }
 
 /// The sound rows of the film's panel: the form, each format the receiver
@@ -654,7 +657,10 @@ pub fn player_choose(status: &AudioStatus, act: PlayerAct) -> AudioSetting {
         }
         PlayerAct::Format(codec) => toggle_format(status, codec),
         PlayerAct::Transcode => AudioSetting { ac3_transcode: !setting.ac3_transcode, ..setting.clone() },
-        PlayerAct::RefreshMatching | PlayerAct::SubtitleLanguage | PlayerAct::SubtitleAutoSync => setting.clone(),
+        PlayerAct::RefreshMatching
+        | PlayerAct::SubtitleLanguage
+        | PlayerAct::SubtitleAutoSync
+        | PlayerAct::SubtitleShowIncompatible => setting.clone(),
     }
 }
 
