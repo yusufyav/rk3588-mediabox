@@ -376,12 +376,26 @@ impl Supervisor {
         Some(finished)
     }
 
-    /// What the interface draws: the film playing now, and how the last one
-    /// ended.
+    /// What the interface draws: the film playing now, which title it is,
+    /// and how the last one ended.
+    ///
+    /// The title matters to a film the interface did not start (the web
+    /// interface's, `mediaboxctl`'s): without it Back from the player had
+    /// nowhere to go but the home screen.
     pub fn status(&self) -> Value {
         let inner = self.lock();
+        let watch = inner.film.as_ref().and_then(|playing| playing.watch.as_ref()).map(|watch| {
+            json!({
+                "type": watch.kind,
+                "id": watch.id,
+                "videoId": watch.video_id,
+                "name": watch.name,
+                "poster": watch.poster,
+            })
+        });
         json!({
             "film": inner.film.as_ref().map(|playing| playing.number),
+            "watch": watch,
             "finished": inner.finished,
         })
     }
@@ -791,6 +805,12 @@ mod tests {
     fn a_film_is_decided_once() {
         let (supervisor, _) = rig();
         let film = supervisor.begin(start(PlayerKind::Here));
+        // While it plays, the status says which title it is: the interface
+        // puts that title's page under a film it did not start.
+        let playing = supervisor.status();
+        assert_eq!(playing["film"], film);
+        assert_eq!(playing["watch"]["id"], watch().id.as_str());
+        assert_eq!(playing["watch"]["type"], watch().kind.as_str());
         supervisor.intend(film, Intent::Stop);
         assert!(supervisor.finish(film, Signal::Gone).is_some());
         // mpv's own end-file arrives after the stop: nothing changes.

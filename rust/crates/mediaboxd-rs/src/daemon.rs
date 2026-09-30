@@ -282,6 +282,9 @@ impl AppState {
                 let mut status = self.player.status().await;
                 let playback = self.playback.status();
                 status["film"] = playback["film"].clone();
+                // Which title it is: the interface puts its page under a film
+                // it did not start, for Back to land on.
+                status["watch"] = playback["watch"].clone();
                 status["finished"] = playback["finished"].clone();
                 // Carried and fetched subtitles in one list, each saying
                 // where it came from and how it is timed.

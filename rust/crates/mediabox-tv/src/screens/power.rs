@@ -61,7 +61,8 @@ pub const CHOICES: [Choice; 4] = [
     Choice::Shutdown,
 ];
 
-/// A sheet on the panel. Either the power menu, or a yes/no over one decision.
+/// A sheet on the panel: the power menu, a yes/no over one decision, or where
+/// a film the account was watching starts.
 pub enum Sheet {
     Power {
         index: usize,
@@ -71,6 +72,15 @@ pub enum Sheet {
         action: Action,
         /// False is "Vazgeç" and is where the remote starts.
         yes: bool,
+    },
+    /// A film the account left part-way: from there, or from the start.
+    /// The remote starts on carrying on, which is what a viewer coming back
+    /// to a film nearly always wants.
+    Resume {
+        /// Where it was left, in seconds.
+        at: u64,
+        /// 0 is "Kaldığın yerden devam et", 1 is "Baştan başla".
+        index: usize,
     },
 }
 
@@ -87,10 +97,15 @@ impl Sheet {
         }
     }
 
+    pub fn resume(at: u64) -> Self {
+        Sheet::Resume { at, index: 0 }
+    }
+
     pub fn title(&self) -> String {
         match self {
             Sheet::Power { .. } => "Güç".into(),
             Sheet::Confirm { question, .. } => question.clone(),
+            Sheet::Resume { .. } => "Nereden başlasın?".into(),
         }
     }
 
@@ -101,6 +116,17 @@ impl Sheet {
                     return false;
                 }
                 let next = (*index as i32 + dy).clamp(0, CHOICES.len() as i32 - 1) as usize;
+                if next == *index {
+                    return false;
+                }
+                *index = next;
+                true
+            }
+            Sheet::Resume { index, .. } => {
+                if dy == 0 {
+                    return false;
+                }
+                let next = (*index as i32 + dy).clamp(0, 1) as usize;
                 if next == *index {
                     return false;
                 }
@@ -143,6 +169,7 @@ impl Sheet {
                     Press::Close
                 }
             }
+            Sheet::Resume { at, index } => Press::Play(if *index == 0 { *at } else { 0 }),
         }
     }
 }
@@ -152,6 +179,8 @@ pub enum Press {
     Close,
     Ask(Action, String),
     Do(Action),
+    /// Start the film chosen on the page, from this second.
+    Play(u64),
 }
 
 #[cfg(test)]
@@ -162,6 +191,18 @@ mod tests {
     fn the_power_sheet_opens_on_the_harmless_row() {
         let sheet = Sheet::power();
         assert_eq!(sheet.press(), Press::Close);
+    }
+
+    #[test]
+    fn a_film_left_part_way_asks_and_starts_on_carrying_on() {
+        let mut sheet = Sheet::resume(754);
+        assert_eq!(sheet.press(), Press::Play(754));
+        assert!(!sheet.step(1, 0), "left and right are not its way");
+        assert!(sheet.step(0, 1));
+        assert_eq!(sheet.press(), Press::Play(0));
+        assert!(!sheet.step(0, 1), "two rows only");
+        assert!(sheet.step(0, -1));
+        assert_eq!(sheet.press(), Press::Play(754));
     }
 
     #[test]
@@ -185,6 +226,7 @@ mod tests {
                     assert!(!question.is_empty());
                 }
                 Press::Close => {}
+                Press::Play(_) => panic!("the power sheet never starts a film"),
             }
             sheet.step(0, 1);
         }

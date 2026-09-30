@@ -126,11 +126,26 @@ impl Stack {
     pub fn depth(&self) -> usize {
         self.entries.len()
     }
+
+    /// The screen under this one, if there is one.
+    pub fn below(&self) -> Option<Route> {
+        self.entries.len().checked_sub(2).map(|at| self.entries[at])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_is_under_the_screen_on_the_panel() {
+        let mut stack = Stack::new();
+        stack.reset(Route::Home);
+        assert_eq!(stack.below(), None);
+        stack.push(Route::Detail);
+        stack.push(Route::NowPlaying);
+        assert_eq!(stack.below(), Some(Route::Detail));
+    }
 
     #[test]
     fn home_is_the_floor() {

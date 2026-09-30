@@ -512,6 +512,10 @@ impl App {
                     self.close_sheet();
                     self.run(action);
                 }
+                Press::Play(start) => {
+                    self.close_sheet();
+                    self.start_here(start);
+                }
             },
             _ => {}
         }
@@ -1886,12 +1890,30 @@ impl App {
         }
     }
 
-    /// Starts the film here, in this interface's own player.
+    /// Starts the film chosen on the page here, in this interface's own
+    /// player -- after asking where from, when the account left it part-way.
+    fn play_here(&mut self) {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        if !detail.selected_source().is_some_and(|source| source.parsed.playable) {
+            return;
+        }
+        let video = detail.episode.clone();
+        let left_at = detail.resume_seconds(video.as_deref().unwrap_or(&detail.id));
+        if left_at > 0 {
+            self.open_sheet(Sheet::resume(left_at));
+            return;
+        }
+        self.start_here(0);
+    }
+
+    /// Starts the film here, from `start` seconds.
     ///
     /// Nothing is handed over: the decoder puts its frames on the video port's
     /// second window and this process keeps DRM master and keeps drawing
     /// underneath. Back stops it and the catalogue is still where it was.
-    fn play_here(&mut self) {
+    fn start_here(&mut self, start: u64) {
         let Some(detail) = self.detail.as_ref() else {
             return;
         };
@@ -1908,10 +1930,8 @@ impl App {
         // mutably: the film's name and its length go to the player with it.
         let name = detail.meta.name.clone();
         let runtime = detail.runtime_seconds();
-        // Where the account says it was left, if it was left in this film or
-        // this episode: every Stremio client starts there.
+        // Where it starts was the viewer's answer (`play_here`).
         let video = detail.episode.clone();
-        let start = detail.resume_seconds(video.as_deref().unwrap_or(&detail.id));
         // Where it got to and how it ended are the control plane's to tell
         // the account; it is told whose film this is.
         let watch = serde_json::json!({
@@ -2013,10 +2033,19 @@ impl App {
         // plane's to say. A film this interface adopted learns its number
         // here; one it started learned it from the answer to starting it.
         let current = status.get("film").and_then(Value::as_u64);
+        let mut learned = false;
         if let Some(playing) = self.here.as_mut()
             && playing.film.is_none()
+            && current.is_some()
         {
             playing.film = current;
+            learned = playing.adopted;
+        }
+        // An adopted film's page goes under the player the moment the film
+        // is known, so Back from it lands where it would have had the film
+        // been started here: on the film, not on the home screen.
+        if learned && let Some(item) = page_of_film(&status) {
+            self.put_page_under_film(&item);
         }
         let film = self.here.as_ref().and_then(|playing| playing.film);
         if let Some(finished) = ending_of(&status, film) {
@@ -2032,6 +2061,25 @@ impl App {
         if self.controls_open() || self.now.pill != pill {
             self.paint();
         }
+    }
+
+    /// Put `item`'s page under the player, unless it is already there.
+    ///
+    /// Read off the stack, not off `self.detail`: a page kept from an earlier
+    /// session can name the same film while nothing of it is under the player.
+    fn put_page_under_film(&mut self, item: &state::Item) {
+        if self.route() != Route::NowPlaying {
+            return;
+        }
+        let there = self.stack.below() == Some(Route::Detail)
+            && self.detail.as_ref().is_some_and(|detail| detail.id == item.id);
+        if there {
+            return;
+        }
+        eprintln!("mediabox-tv.play put the page of {} {} under the adopted film", item.kind, item.id);
+        self.stack.pop();
+        self.open_detail_for(item);
+        self.open(Route::NowPlaying);
     }
 
     /// Ask for the subtitle line on screen, if a subtitle is on and no
@@ -2094,6 +2142,7 @@ impl App {
             eprintln!("mediabox-tv.play adopted a film this interface did not start");
             self.here = Some(Playing {
                 seen: true,
+                adopted: true,
                 ..Playing::new()
             });
             // An adopted film is still this interface's own player, and it
@@ -2383,8 +2432,14 @@ impl App {
                         self.close_controls();
                         return;
                     }
+                    // Stopping leaves the film, and leaving it is one step
+                    // back already (`leave_film`): to the page it was started
+                    // from. A second step here went past that page too -- to
+                    // the catalogue, or home.
                     self.transport(Transport::Stop);
+                    return;
                 }
+                // Kodi's film, which this screen only mirrors: one step back.
                 self.back()
             }
             _ => {}
@@ -3814,6 +3869,23 @@ impl App {
                         })
                         .collect::<Vec<_>>(),
                 )));
+            }
+            Sheet::Resume { at, index } => {
+                // The power sheet's shape: rows, one under the other.
+                window.set_sheet_kind("power".into());
+                window.set_sheet_index(*index as i32);
+                window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+                    SheetRow {
+                        label: "Kaldığın yerden devam et".into(),
+                        hint: screens::now_playing::timecode(*at).into(),
+                        tone: "".into(),
+                    },
+                    SheetRow {
+                        label: "Baştan başla".into(),
+                        hint: "".into(),
+                        tone: "".into(),
+                    },
+                ])));
             }
             Sheet::Confirm { yes, .. } => {
                 window.set_sheet_kind("confirm".into());
@@ -5719,6 +5791,10 @@ struct Playing {
     film: Option<u64>,
     /// Since when the plane has been dark after a picture.
     dark_since: Option<std::time::Instant>,
+    /// Started by something else (the web interface, `mediaboxctl`) and
+    /// taken up here: there is no page of it under the player until one is
+    /// put there.
+    adopted: bool,
 }
 
 impl Playing {
@@ -5731,6 +5807,7 @@ impl Playing {
             grace: FIRST_FRAME_GRACE,
             film: None,
             dark_since: None,
+            adopted: false,
         }
     }
 }
@@ -5822,6 +5899,21 @@ fn clean_caption(text: &str) -> String {
 }
 
 /// Asks the interface's own player where it has got to.
+/// The page of the film playing, from the control plane's status: its kind
+/// and id, and the name and poster it was started with. None when it did not
+/// say (a bare URL played from a shell).
+fn page_of_film(status: &Value) -> Option<state::Item> {
+    let watch = status.get("watch")?;
+    let kind = watch.get("type").and_then(Value::as_str).filter(|kind| !kind.is_empty())?;
+    let id = watch.get("id").and_then(Value::as_str).filter(|id| !id.is_empty())?;
+    let mut item = state::Item::bare(kind, id);
+    if let Some(name) = watch.get("name").and_then(Value::as_str) {
+        item.title = name.to_string();
+    }
+    item.poster = watch.get("poster").and_then(Value::as_str).map(str::to_owned);
+    Some(item)
+}
+
 fn spawn_here_status() {
     detached("mediabox-tv-here-status", async move {
         let client = rpc::Client::new(socket_path());
@@ -6452,7 +6544,7 @@ fn deliver(line: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ending_of, parse_kodi_return, play_refusal};
+    use super::{ending_of, page_of_film, parse_kodi_return, play_refusal};
 
     #[test]
     fn a_film_ends_only_when_the_control_plane_says_that_film_ended() {
@@ -6466,6 +6558,20 @@ mod tests {
         assert!(ending_of(&status, None).is_none());
         assert_eq!(ending_of(&status, Some(7)).unwrap()["outcome"], "failed");
         assert!(ending_of(&serde_json::json!({"film": 8, "finished": null}), Some(8)).is_none());
+    }
+
+    /// A film started elsewhere is known by what the control plane says of
+    /// it: its page, so Back from the player goes there and not home.
+    #[test]
+    fn an_adopted_film_has_its_own_page_under_the_player() {
+        let status = serde_json::json!({"film": 3, "finished": null, "watch": {
+            "type": "movie", "id": "tt22526100", "videoId": null, "name": "The Love Hypothesis", "poster": "https://p/x.jpg"}});
+        let item = page_of_film(&status).unwrap();
+        assert_eq!((item.kind.as_str(), item.id.as_str(), item.title.as_str()), ("movie", "tt22526100", "The Love Hypothesis"));
+        assert_eq!(item.poster.as_deref(), Some("https://p/x.jpg"));
+        // A bare address played from a shell has no page.
+        assert!(page_of_film(&serde_json::json!({"film": 3, "watch": null})).is_none());
+        assert!(page_of_film(&serde_json::json!({"film": 3})).is_none());
     }
 
     /// Back from Kodi in the same boot is the title's page; a note left by
