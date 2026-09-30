@@ -1,4 +1,72 @@
 import { Theme, Metrics } from "theme.slint";
+// The subtitle face: Stremio's own (stremio-core `subtitles_font: "Roboto"`),
+// carried in the binary so a board draws it whatever fonts it has, in the four
+// styles a subtitle file can ask for. Apache 2.0, ui/fonts/Roboto-LICENSE.txt.
+import "fonts/Roboto-Regular.ttf";
+import "fonts/Roboto-Italic.ttf";
+import "fonts/Roboto-Bold.ttf";
+import "fonts/Roboto-BoldItalic.ttf";
+
+// One stretch of a subtitle line in one style: an SRT's <i> -- a voice off
+// screen, a song, a thought -- is a stretch of its own.
+export struct CaptionRun {
+    text: string,
+    italic: bool,
+    bold: bool,
+}
+
+// One line of the subtitle on screen, as the file broke it.
+export struct CaptionLine {
+    runs: [CaptionRun],
+}
+
+// One stretch of a subtitle, white with a black outline.
+//
+// The outline is Stremio's own (stremio-video `withHTMLSubtitles`): the text
+// eight times in black, moved a little in each direction, under the text in
+// white. Not a `stroke`: femtovg draws a stroked text as paths, glyph by
+// glyph, and on the board that path left white spikes off the letters -- the
+// junction of an "h", the foot of an "H". Every one of these nine is drawn the
+// way any text on the interface is, from the glyph atlas.
+component CaptionStretch {
+    in property <string> text;
+    in property <bool> italic;
+    in property <bool> bold;
+    in property <length> size;
+    // Stremio's 0.15rem against a 4vmin line: about 5 % of the letter.
+    property <length> o: max(1px, self.size * 0.05);
+    preferred-width: face.preferred-width;
+    preferred-height: face.preferred-height;
+    min-width: face.preferred-width;
+    min-height: face.preferred-height;
+
+    for d in [
+        { x: -1, y: -1 }, { x: 0, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 0 },
+        { x: 1, y: 0 }, { x: -1, y: 1 }, { x: 0, y: 1 }, { x: 1, y: 1 },
+    ]: Text {
+        x: d.x * root.o;
+        y: d.y * root.o;
+        text: root.text;
+        font-family: "Roboto";
+        font-size: root.size;
+        font-italic: root.italic;
+        font-weight: root.bold ? 700 : 400;
+        color: #000000;
+        wrap: no-wrap;
+    }
+
+    face := Text {
+        x: 0;
+        y: 0;
+        text: root.text;
+        font-family: "Roboto";
+        font-size: root.size;
+        font-italic: root.italic;
+        font-weight: root.bold ? 700 : 400;
+        color: #ffffff;
+        wrap: no-wrap;
+    }
+}
 
 // One row of an open panel: what it is, what else is known about it, and
 // whether it is the one in use.
@@ -115,6 +183,9 @@ export component Player inherits Rectangle {
     /// The subtitle line on screen now. The player hands its frames to this
     /// interface and draws nothing itself, so the line is drawn here.
     in property <string> caption;
+    /// The same, line by line and styled.
+    in property <[CaptionLine]> caption-lines;
+    property <length> caption-size: min(root.width, root.height) * 0.04;
     /// How the subtitle that is on was timed, under the delay on the
     /// subtitle panel: "Otomatik eşitleme · +1,82 sn · %97".
     in property <string> menu-note;
@@ -207,28 +278,29 @@ export component Player inherits Rectangle {
         }
     }
 
-    // The subtitle. Above the row while the controls are up, low on the
-    // picture otherwise, on a dark band so it reads on a white frame. Plain
-    // text: styling carried by an ASS file is not drawn by this path.
-    if caption != "" && waiting == "": Rectangle {
-        property <length> line-width: min(caption-text.preferred-width, root.width * 0.8);
-        x: (root.width - self.width) / 2;
-        y: (open ? root.height * 0.76 : pill != "" ? root.height * 0.89 : root.height * 0.92) - self.height;
-        width: self.line-width + Metrics.vh * 0.03;
-        height: caption-text.preferred-height + Metrics.vh * 0.014;
-        border-radius: Metrics.vh * 0.008;
-        background: #000000a6;
+    // The subtitle, the way Stremio draws it (stremio-video
+    // `withHTMLSubtitles`, stremio-core's default settings): Roboto at its
+    // regular weight, 4 % of the panel's short side, white with a black
+    // outline and no band behind it, its bottom 5 % above the picture's
+    // edge; lines as the file broke them, each stretch in its own style.
+    // Kodi's defaults are the same shape (an outlined face, no box, 4.95 %
+    // up). Above the row while the controls are up.
+    if caption != "" && waiting == "": VerticalLayout {
+        x: root.width * 0.05;
+        width: root.width * 0.9;
+        // As tall as its lines: outside a layout it would be the whole
+        // panel, and its lines would sit off the bottom of it.
+        height: self.preferred-height;
+        y: (open ? root.height * 0.76 : pill != "" ? root.height * 0.89 : root.height * 0.95) - self.height;
 
-        caption-text := Text {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: parent.line-width;
-            text: caption;
-            color: #ffffff;
-            font-size: Metrics.vh * 0.040;
-            font-weight: 600;
-            wrap: word-wrap;
-            horizontal-alignment: center;
+        for line in caption-lines: HorizontalLayout {
+            alignment: center;
+            for run in line.runs: CaptionStretch {
+                text: run.text;
+                italic: run.italic;
+                bold: run.bold;
+                size: root.caption-size;
+            }
         }
     }
 
@@ -396,7 +468,10 @@ export component Player inherits Rectangle {
             font-weight: 700;
         }
 
-        property <bool> grouped: menu == "subtitles" || menu == "audio";
+        property <bool> grouped: menu == "subtitles" || menu == "audio" || menu == "settings";
+        // The settings panel's second column is the settings themselves, each
+        // with what it is set to: wider than a column of tracks.
+        property <bool> sectioned: menu == "settings";
 
         // More of the list above or below: a small mark at the column's
         // edge, the way a television list says it scrolls.
@@ -494,7 +569,7 @@ export component Player inherits Rectangle {
         if grouped: VerticalLayout {
             x: parent.width * 0.32;
             y: Metrics.vh * 0.085;
-            width: parent.width * 0.32;
+            width: sectioned ? parent.width * 0.68 - Metrics.vh * 0.03 : parent.width * 0.32;
             spacing: 0px;
             alignment: start;
 
@@ -520,6 +595,18 @@ export component Player inherits Rectangle {
                         overflow: elide;
                         wrap: no-wrap;
                         horizontal-stretch: 1;
+                    }
+                    // What the setting is set to: "Açık", "Türkçe",
+                    // "24 fps → 3840x2160p24".
+                    if sectioned && entry.detail != "": Text {
+                        text: entry.detail;
+                        color: #ffffff99;
+                        font-size: Metrics.vh * 0.016;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        max-width: parent.width * 0.55;
                     }
                     Rectangle {
                         width: Metrics.vh * 0.028;

@@ -883,9 +883,27 @@ impl Subtitles {
 
     /// The line on screen, for the interface to draw.
     pub async fn text(&self) -> Value {
-        let text = self.player.subtitle_text().await.unwrap_or_default();
-        json!({"film": self.player.film(), "text": text})
+        // One question of mpv ten times a second: the styled line, and the
+        // plain one made from it for whoever only wants the words.
+        let ass = self.player.subtitle_ass().await.unwrap_or_default();
+        json!({"film": self.player.film(), "text": plain_caption(&ass), "ass": ass})
     }
+}
+
+/// A line as mpv's `sub-text/ass` gives it, without its styling: override
+/// blocks removed, `\N` a line break, `\h` a space.
+pub fn plain_caption(ass: &str) -> String {
+    let mut out = String::with_capacity(ass.len());
+    let mut depth = 0usize;
+    for ch in ass.replace("\\N", "\n").replace("\\n", " ").replace("\\h", " ").chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
 }
 
 /// `Subtitles::time` on the runtime. Boxed, because a rejected automatic
@@ -1425,6 +1443,15 @@ mod tests {
     }
 
     #[test]
+    fn a_styled_line_read_plain() {
+        // What mpv v0.41 answered for an SRT with <i> and <b> in it.
+        let ass = "{\\i1}Dış ses: Merhaba.{\\i0}\\Nİkinci satır {\\b1}kalın{\\b0} ve {\\i1}italik{\\i0}.";
+        assert_eq!(plain_caption(ass), "Dış ses: Merhaba.\nİkinci satır kalın ve italik.");
+        assert_eq!(plain_caption(""), "");
+        assert_eq!(plain_caption("a\\hb\\nc"), "a b c");
+    }
+
+    #[test]
     fn language_codes_compare() {
         assert_eq!(canonical(Some("tur")).as_deref(), Some("tr"));
         assert_eq!(canonical(Some("TR")).as_deref(), Some("tr"));
@@ -1478,6 +1505,7 @@ mod flows {
                     "duration" => ok(json!(5400.0)),
                     "time-pos" => ok(json!(120.0)),
                     "sub-text" => ok(json!(if self.sid.is_some() { "Merhaba" } else { "" })),
+                    "sub-text/ass" => ok(json!(if self.sid.is_some() { "{\\i1}Merhaba{\\i0}\\Nnasılsın" } else { "" })),
                     _ => ok(Value::Null),
                 },
                 "set_property" => {
@@ -1946,6 +1974,7 @@ mod flows {
         assert_eq!(rig.subtitles.preferences().enabled, None);
         let text = rig.subtitles.text().await;
         assert_eq!(text["text"], "");
+        assert_eq!(text["ass"], "");
     }
 
     #[tokio::test]

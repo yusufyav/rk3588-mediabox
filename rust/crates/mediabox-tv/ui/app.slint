@@ -7,7 +7,7 @@ import { Discover, DiscoverFilter } from "discover.slint";
 import { Detail, SourceRow, EpisodeRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
 import { VolumeOsd } from "volume.slint";
-import { Player, MenuRow } from "player.slint";
+import { Player, MenuRow, CaptionLine, CaptionRun } from "player.slint";
 import { Settings } from "settings.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
@@ -29,7 +29,7 @@ export {
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
     OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
-    EpisodeRow, DiscoverFilter,
+    EpisodeRow, DiscoverFilter, CaptionLine, CaptionRun,
 }
 
 // What the television shows before there is anything to show.
@@ -287,6 +287,7 @@ export component MediaBoxWindow inherits Window {
     /// The subtitle line on screen now, drawn here because the player draws
     /// nothing of its own; and how the subtitle that is on was timed.
     in property <string> np-caption;
+    in property <[CaptionLine]> np-caption-lines;
     in property <string> np-menu-note;
     /// The panel's list goes on above or below what is drawn.
     in property <bool> np-menu-above;
@@ -717,6 +718,7 @@ export component MediaBoxWindow inherits Window {
             menu-below: root.np-menu-below;
             pill: root.np-pill;
             caption: root.np-caption;
+            caption-lines: root.np-caption-lines;
         }
 
         // Last, so it is over the film and over every sheet.

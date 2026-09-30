@@ -2103,7 +2103,14 @@ impl App {
             let answer = client.subtitle_text_here().await;
             CAPTION_ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
             let Ok(answer) = answer else { return };
-            let text = answer.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+            // The styled line when the control plane gives it; an older one
+            // gives only the plain text, which is the same line unstyled.
+            let text = answer
+                .get("ass")
+                .and_then(Value::as_str)
+                .or_else(|| answer.get("text").and_then(Value::as_str))
+                .unwrap_or_default()
+                .to_string();
             let _ = slint::invoke_from_event_loop(move || {
                 with_app(|app| app.show_caption(text));
             });
@@ -2111,14 +2118,32 @@ impl App {
     }
 
     fn show_caption(&mut self, text: String) {
-        // ASS override blocks and the escaped line breaks mpv leaves in.
-        let text = clean_caption(&text);
+        // Compared as it came: the same words in another style are another
+        // line to draw.
         if text == self.caption {
             return;
         }
         self.caption = text;
+        let lines = caption_lines(&self.caption);
         if let Some(window) = self.window.upgrade() {
-            window.set_np_caption(self.caption.clone().into());
+            let plain = lines
+                .iter()
+                .map(|line| line.iter().map(|run| run.text.as_str()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            window.set_np_caption(plain.into());
+            window.set_np_caption_lines(slint::ModelRc::new(slint::VecModel::from(
+                lines
+                    .into_iter()
+                    .map(|line| CaptionLine {
+                        runs: slint::ModelRc::new(slint::VecModel::from(
+                            line.into_iter()
+                                .map(|run| CaptionRun { text: run.text.into(), italic: run.italic, bold: run.bold })
+                                .collect::<Vec<_>>(),
+                        )),
+                    })
+                    .collect::<Vec<_>>(),
+            )));
         }
     }
 
@@ -2330,22 +2355,13 @@ impl App {
                     }
                     // Left and Right on the preferred subtitle language step
                     // through the languages, the way a value is changed.
-                    if self.now.menu == Menu::Settings && dx != 0 && dy == 0 {
-                        let act = self.player_settings().get(self.now.menu_focus).map(|row| row.act);
-                        if act == Some(screens::audio::PlayerAct::SubtitleLanguage) {
-                            self.step_subtitle_preference(dx.signum());
-                            return;
+                    // Right on a setting changes it, as Ok does; Left goes back
+                    // to the groups (`step_menu`).
+                    if self.now.menu == Menu::Settings && self.now.menu_column == 1 && dx > 0 && dy == 0 {
+                        if let Some(row) = self.focused_setting() {
+                            self.act_on_setting(&row);
                         }
-                        // On and off are the only two values: either way
-                        // turns it over.
-                        if act == Some(screens::audio::PlayerAct::SubtitleAutoSync) {
-                            self.toggle_subtitle_auto_sync();
-                            return;
-                        }
-                        if act == Some(screens::audio::PlayerAct::SubtitleShowIncompatible) {
-                            self.toggle_subtitle_show_incompatible();
-                            return;
-                        }
+                        return;
                     }
                     if self.now.step_menu(dx, dy) {
                         self.paint();
@@ -2353,7 +2369,10 @@ impl App {
                 }
                 Intent::Select => self.choose_in_menu(),
                 Intent::Dismiss => {
-                    self.now.close_menu();
+                    // A group's settings go back to the groups first.
+                    if !self.now.menu_back() {
+                        self.now.close_menu();
+                    }
                     self.paint();
                 }
                 _ => {}
@@ -2489,6 +2508,39 @@ impl App {
         rows
     }
 
+    /// The film's settings by group, the way the panel lists them.
+    fn player_groups(&self) -> Vec<(screens::audio::PlayerGroup, Vec<screens::audio::PlayerRow>)> {
+        screens::audio::grouped(self.player_settings())
+    }
+
+    /// The setting the remote is on, inside a group.
+    fn focused_setting(&self) -> Option<screens::audio::PlayerRow> {
+        self.player_groups()
+            .into_iter()
+            .nth(self.now.menu_focus)
+            .and_then(|(_, rows)| rows.into_iter().nth(self.now.menu_track_focus))
+    }
+
+    /// Change one setting, at once, in the film. The panel stays open on it
+    /// so the answer can be read where it was asked.
+    fn act_on_setting(&mut self, row: &screens::audio::PlayerRow) {
+        use screens::audio::PlayerAct;
+        match row.act {
+            PlayerAct::SubtitleLanguage => self.step_subtitle_preference(1),
+            PlayerAct::SubtitleAutoSync => self.toggle_subtitle_auto_sync(),
+            PlayerAct::SubtitleShowIncompatible => self.toggle_subtitle_show_incompatible(),
+            PlayerAct::RefreshMatching => spawn_output(mediabox_core::Request::OutputContentMatching {
+                enabled: !row.active,
+            }),
+            act => {
+                if let Some(audio) = self.audio_status() {
+                    let setting = screens::audio::player_choose(&audio, act);
+                    spawn_audio(mediabox_core::Request::AudioSet { setting });
+                }
+            }
+        }
+    }
+
     /// Turn "Otomatik eşitleme" over and keep it.
     fn toggle_subtitle_auto_sync(&mut self) {
         let next = !self.now.subtitle_auto_sync.unwrap_or(true);
@@ -2517,7 +2569,7 @@ impl App {
     }
 
     fn open_menu(&mut self, menu: screens::now_playing::Menu) {
-        self.now.player_settings = self.player_settings().len();
+        self.now.player_groups = self.player_groups().iter().map(|(_, rows)| rows.len()).collect();
         if self.now.open_menu(menu) {
             self.open_controls();
             self.paint();
@@ -2595,27 +2647,18 @@ impl App {
             }
             // Each setting applies at once, in the film, and the panel stays
             // open on it so the answer can be read where it was asked.
+            // Ok on a group goes into it; on a setting, changes it.
             Menu::Settings => {
-                {
-                    let rows = self.player_settings();
-                    let Some(row) = rows.get(focus) else { return };
-                    use screens::audio::PlayerAct;
-                    match row.act {
-                        PlayerAct::SubtitleLanguage => self.step_subtitle_preference(1),
-                        PlayerAct::SubtitleAutoSync => self.toggle_subtitle_auto_sync(),
-                        PlayerAct::SubtitleShowIncompatible => self.toggle_subtitle_show_incompatible(),
-                        PlayerAct::RefreshMatching => spawn_output(mediabox_core::Request::OutputContentMatching {
-                            enabled: !row.active,
-                        }),
-                        act => {
-                            if let Some(audio) = self.audio_status() {
-                                let setting = screens::audio::player_choose(&audio, act);
-                                spawn_audio(mediabox_core::Request::AudioSet { setting });
-                            }
-                        }
+                if self.now.menu_column == 0 {
+                    if self.now.step_menu(1, 0) {
+                        self.paint();
                     }
                     return;
                 }
+                if let Some(row) = self.focused_setting() {
+                    self.act_on_setting(&row);
+                }
+                return;
             }
             Menu::Player => {
                 self.now.close_menu();
@@ -4123,7 +4166,7 @@ impl App {
     }
 
     fn paint_now_playing(&mut self, window: &MediaBoxWindow) {
-        self.now.player_settings = self.player_settings().len();
+        self.now.player_groups = self.player_groups().iter().map(|(_, rows)| rows.len()).collect();
         let now = &self.now;
         window.set_np_title(now.title.clone().into());
         window.set_np_subtitle(now.subtitle.clone().into());
@@ -4205,16 +4248,31 @@ impl App {
         // in the first column and that language's own tracks in the second.
         // Four English audio tracks are one row saying "English" and four rows
         // beside it, not four rows all saying the same word.
-        let tracks_all: Vec<MenuRow> = now
-            .tracks_of_language()
-            .into_iter()
-            .filter_map(|index| now.tracks().get(index))
-            .map(|track| MenuRow {
-                label: track.detail.clone().into(),
-                detail: "".into(),
-                active: track.selected,
-            })
-            .collect();
+        let settings_groups = if now.menu == Menu::Settings { self.player_groups() } else { Vec::new() };
+        let tracks_all: Vec<MenuRow> = if now.menu == Menu::Settings {
+            settings_groups
+                .get(now.menu_focus)
+                .map(|(_, rows)| {
+                    rows.iter()
+                        .map(|row| MenuRow {
+                            label: row.label.clone().into(),
+                            detail: row.detail.clone().into(),
+                            active: row.active,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            now.tracks_of_language()
+                .into_iter()
+                .filter_map(|index| now.tracks().get(index))
+                .map(|track| MenuRow {
+                    label: track.detail.clone().into(),
+                    detail: "".into(),
+                    active: track.selected,
+                })
+                .collect()
+        };
         // Long columns scroll: only what fits is drawn, and the focus is
         // given relative to it.
         let track_first = screens::now_playing::menu_window(tracks_all.len(), now.menu_track_focus);
@@ -4277,14 +4335,16 @@ impl App {
                     .collect(),
                 None,
             ),
+            // The groups; the settings of the one the remote is on are the
+            // second column (`tracks_shown`).
             Menu::Settings => (
                 "settings",
-                self.player_settings()
-                    .into_iter()
-                    .map(|row| MenuRow {
-                        label: row.label.into(),
-                        detail: row.detail.into(),
-                        active: row.active,
+                settings_groups
+                    .iter()
+                    .map(|(group, _)| MenuRow {
+                        label: group.label().into(),
+                        detail: "".into(),
+                        active: false,
                     })
                     .collect(),
                 None,
@@ -5882,23 +5942,97 @@ enum HereCommand {
 /// answered.
 static CAPTION_ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// A subtitle line as mpv's `sub-text` gives it, made fit to draw: override
-/// blocks removed, `\N` as a line break.
-fn clean_caption(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut depth = 0usize;
-    for ch in text.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ").chars() {
-        match ch {
-            '{' => depth += 1,
-            '}' if depth > 0 => depth -= 1,
-            _ if depth == 0 => out.push(ch),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
+/// One stretch of a subtitle line in one style.
+#[derive(Debug, Clone, PartialEq)]
+struct Run {
+    text: String,
+    italic: bool,
+    bold: bool,
 }
 
-/// Asks the interface's own player where it has got to.
+/// A subtitle as mpv's `sub-text/ass` gives it, as lines of styled stretches.
+///
+/// mpv hands every text subtitle over in ASS: an SRT's `<i>` is `{\i1}`,
+/// its `<b>` is `{\b1}`, a line break is `\N`, and two lines on screen at
+/// once are two lines of text. Italic and bold are kept -- a voice off
+/// screen is written in italics, and a subtitle that loses them says
+/// something else -- `\r` puts both back, a drawing (`\p1`) is not text,
+/// and every other tag (colour, position, fade) is left to a renderer that
+/// draws ASS.
+fn caption_lines(ass: &str) -> Vec<Vec<Run>> {
+    let mut lines: Vec<Vec<Run>> = vec![Vec::new()];
+    let (mut italic, mut bold, mut drawing) = (false, false, false);
+    let mut text = String::new();
+    let flush = |lines: &mut Vec<Vec<Run>>, text: &mut String, italic: bool, bold: bool| {
+        if text.is_empty() {
+            return;
+        }
+        let line = lines.last_mut().expect("there is always a line");
+        match line.last_mut() {
+            Some(last) if last.italic == italic && last.bold == bold => last.text.push_str(text),
+            _ => line.push(Run { text: std::mem::take(text), italic, bold }),
+        }
+        text.clear();
+    };
+    let mut chars = ass.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' => {
+                let mut block = String::new();
+                for inner in chars.by_ref() {
+                    if inner == '}' {
+                        break;
+                    }
+                    block.push(inner);
+                }
+                flush(&mut lines, &mut text, italic, bold);
+                for tag in block.split('\\').map(str::trim).filter(|tag| !tag.is_empty()) {
+                    if tag == "r" || tag.starts_with('r') && !tag.starts_with("rnd") {
+                        (italic, bold) = (false, false);
+                    } else if let Some(value) = tag.strip_prefix('i').filter(|v| v.chars().all(|c| c.is_ascii_digit())) {
+                        italic = value.parse::<u32>().is_ok_and(|v| v != 0);
+                    } else if let Some(value) = tag.strip_prefix('b').filter(|v| v.chars().all(|c| c.is_ascii_digit())) {
+                        // 1, or a weight: 700 is bold, 400 is not.
+                        bold = value.parse::<u32>().is_ok_and(|v| v == 1 || v >= 600);
+                    } else if let Some(value) = tag.strip_prefix('p').filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit())) {
+                        drawing = value.parse::<u32>().is_ok_and(|v| v != 0);
+                    }
+                }
+            }
+            '\\' if matches!(chars.peek(), Some('N' | 'n' | 'h')) => {
+                match chars.next() {
+                    Some('N') => {
+                        flush(&mut lines, &mut text, italic, bold);
+                        lines.push(Vec::new());
+                    }
+                    Some('h') if !drawing => text.push('\u{a0}'),
+                    Some('n') if !drawing => text.push(' '),
+                    _ => {}
+                }
+            }
+            '\n' => {
+                flush(&mut lines, &mut text, italic, bold);
+                lines.push(Vec::new());
+            }
+            _ if drawing => {}
+            _ => text.push(ch),
+        }
+    }
+    flush(&mut lines, &mut text, italic, bold);
+    // Edges of a line are the file's spacing, not the film's words.
+    for line in lines.iter_mut() {
+        if let Some(first) = line.first_mut() {
+            first.text = first.text.trim_start().to_string();
+        }
+        if let Some(last) = line.last_mut() {
+            last.text = last.text.trim_end().to_string();
+        }
+        line.retain(|run| !run.text.is_empty());
+    }
+    lines.retain(|line| !line.is_empty());
+    lines
+}
+
 /// The page of the film playing, from the control plane's status: its kind
 /// and id, and the name and poster it was started with. None when it did not
 /// say (a bare URL played from a shell).
@@ -5914,6 +6048,7 @@ fn page_of_film(status: &Value) -> Option<state::Item> {
     Some(item)
 }
 
+/// Asks the interface's own player where it has got to.
 fn spawn_here_status() {
     detached("mediabox-tv-here-status", async move {
         let client = rpc::Client::new(socket_path());
@@ -6558,6 +6693,36 @@ mod tests {
         assert!(ending_of(&status, None).is_none());
         assert_eq!(ending_of(&status, Some(7)).unwrap()["outcome"], "failed");
         assert!(ending_of(&serde_json::json!({"film": 8, "finished": null}), Some(8)).is_none());
+    }
+
+    /// What mpv v0.41 answered for an SRT with <i> and <b> in it: the voice
+    /// off screen stays italic, the bold word bold, the lines as they were.
+    #[test]
+    fn a_styled_subtitle_keeps_its_italics_and_its_lines() {
+        use super::{Run, caption_lines};
+        let run = |text: &str, italic: bool, bold: bool| Run { text: text.into(), italic, bold };
+        let lines = caption_lines("{\\i1}Dış ses: Merhaba.{\\i0}\\Nİkinci satır {\\b1}kalın{\\b0} ve {\\i1}italik{\\i0}.");
+        assert_eq!(
+            lines,
+            vec![
+                vec![run("Dış ses: Merhaba.", true, false)],
+                vec![
+                    run("İkinci satır ", false, false),
+                    run("kalın", false, true),
+                    run(" ve ", false, false),
+                    run("italik", true, false),
+                    run(".", false, false),
+                ],
+            ]
+        );
+        // Position and colour are dropped, the words kept; \\r resets; a
+        // drawing is not text; two events on screen are two lines.
+        let lines = caption_lines("{\\an8\\c&H00FFFF&\\i1}Üstte{\\r} düz\n{\\p1}m 0 0 l 10 10{\\p0}Alt\\hsatır");
+        assert_eq!(lines, vec![vec![run("Üstte", true, false), run(" düz", false, false)], vec![run("Alt\u{a0}satır", false, false)]]);
+        assert!(caption_lines("").is_empty());
+        assert!(caption_lines("{\\i1}{\\i0}  ").is_empty());
+        // A weight is bold from 600 up.
+        assert_eq!(caption_lines("{\\b700}A{\\b400}B"), vec![vec![run("A", false, true), run("B", false, false)]]);
     }
 
     /// A film started elsewhere is known by what the control plane says of

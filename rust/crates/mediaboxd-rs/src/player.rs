@@ -230,6 +230,15 @@ impl PlayerManager {
             .and_then(|value| value.as_str().map(str::to_owned))
     }
 
+    /// The same line with its styling, as ASS: `{\i1}` for an italic
+    /// stretch, `\N` between lines. An SRT's `<i>` -- how a voice off
+    /// screen is written -- arrives here and is gone from `sub-text`.
+    pub async fn subtitle_ass(&self) -> Option<String> {
+        self.property("sub-text/ass")
+            .await
+            .and_then(|value| value.as_str().map(str::to_owned))
+    }
+
     /// Whether a player answers on the socket.
     pub async fn answers(&self) -> bool {
         self.ask(json!({"command": ["get_property", "pid"], "request_id": 22}))

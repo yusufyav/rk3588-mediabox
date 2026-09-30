@@ -579,6 +579,51 @@ pub enum PlayerAct {
     SubtitleShowIncompatible,
 }
 
+/// The groups the film's settings panel is divided into, in the order it
+/// lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerGroup {
+    Audio,
+    Subtitles,
+    Video,
+}
+
+impl PlayerGroup {
+    pub const ALL: [PlayerGroup; 3] = [PlayerGroup::Audio, PlayerGroup::Subtitles, PlayerGroup::Video];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlayerGroup::Audio => "Ses",
+            PlayerGroup::Subtitles => "Altyazı",
+            PlayerGroup::Video => "Video",
+        }
+    }
+}
+
+impl PlayerAct {
+    /// Which group a setting is listed under.
+    pub fn group(self) -> PlayerGroup {
+        match self {
+            PlayerAct::RefreshMatching => PlayerGroup::Video,
+            PlayerAct::SubtitleLanguage | PlayerAct::SubtitleAutoSync | PlayerAct::SubtitleShowIncompatible => {
+                PlayerGroup::Subtitles
+            }
+            PlayerAct::CycleMode | PlayerAct::Format(_) | PlayerAct::Transcode => PlayerGroup::Audio,
+        }
+    }
+}
+
+/// The panel's rows by group, in `PlayerGroup::ALL`'s order and their own
+/// order inside it. A group with nothing in it -- the sound before the daemon
+/// has described it -- is not listed.
+pub fn grouped(rows: Vec<PlayerRow>) -> Vec<(PlayerGroup, Vec<PlayerRow>)> {
+    PlayerGroup::ALL
+        .iter()
+        .map(|group| (*group, rows.iter().filter(|row| row.act.group() == *group).cloned().collect::<Vec<_>>()))
+        .filter(|(_, rows)| !rows.is_empty())
+        .collect()
+}
+
 /// The sound rows of the film's panel: the form, each format the receiver
 /// declares, and Dolby Digital transcoding when the receiver takes it.
 pub fn player_rows(status: &AudioStatus) -> Vec<PlayerRow> {
@@ -704,6 +749,36 @@ pub struct View {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_film_settings_are_grouped_by_what_they_are_about() {
+        let row = |label: &str, act: PlayerAct| PlayerRow { label: label.into(), detail: String::new(), active: false, act };
+        let rows = vec![
+            row("Tercih edilen altyazı dili", PlayerAct::SubtitleLanguage),
+            row("Otomatik eşitleme", PlayerAct::SubtitleAutoSync),
+            row("AutoSync uyumsuz altyazıları göster", PlayerAct::SubtitleShowIncompatible),
+            row("Yenileme hızı", PlayerAct::RefreshMatching),
+            row("Ses", PlayerAct::CycleMode),
+            row("Dolby Digital dönüştürme", PlayerAct::Transcode),
+        ];
+        let groups = grouped(rows.clone());
+        let names: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|(group, rows)| (group.label(), rows.iter().map(|r| r.label.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("Ses", vec!["Ses", "Dolby Digital dönüştürme"]),
+                ("Altyazı", vec!["Tercih edilen altyazı dili", "Otomatik eşitleme", "AutoSync uyumsuz altyazıları göster"]),
+                ("Video", vec!["Yenileme hızı"]),
+            ]
+        );
+        // The sound not described yet: no empty "Ses" group.
+        let without_sound: Vec<PlayerRow> = rows.into_iter().filter(|r| r.act.group() != PlayerGroup::Audio).collect();
+        assert_eq!(grouped(without_sound).first().map(|(g, _)| *g), Some(PlayerGroup::Subtitles));
+    }
+
     use super::*;
     use mediabox_core::{AudioDevice, AudioKind, CapsSource, SadEntry, SinkAudio};
 

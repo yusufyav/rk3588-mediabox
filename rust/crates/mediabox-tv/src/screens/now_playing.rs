@@ -211,9 +211,9 @@ pub const SPEEDS: [f64; 10] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25,
 
 #[derive(Default)]
 pub struct NowPlaying {
-    /// How many rows the settings panel carries: the refresh and the sound,
-    /// as the daemon last described them.
-    pub player_settings: usize,
+    /// How many rows each group of the settings panel has, in the order the
+    /// panel lists the groups (Ses, Altyazı, Video).
+    pub player_groups: Vec<usize>,
     pub title: String,
     pub subtitle: String,
     pub artwork: Option<String>,
@@ -508,7 +508,7 @@ impl NowPlaying {
             Menu::Subtitles => self.languages().len() + 1,
             Menu::Audio => self.languages().len(),
             Menu::Speed => SPEEDS.len(),
-            Menu::Settings => self.player_settings,
+            Menu::Settings => self.player_groups.len(),
             Menu::Player => 2,
             Menu::None => 0,
         }
@@ -520,8 +520,56 @@ impl NowPlaying {
         matches!(self.menu, Menu::Subtitles | Menu::Audio)
     }
 
+    /// How many settings the group the remote is on has.
+    pub fn settings_in_group(&self) -> usize {
+        self.player_groups.get(self.menu_focus).copied().unwrap_or(0)
+    }
+
+    /// Back inside the open panel: from a group's settings to the groups.
+    /// False when Back is the panel's to close.
+    pub fn menu_back(&mut self) -> bool {
+        if self.menu == Menu::Settings && self.menu_column == 1 {
+            self.menu_column = 0;
+            return true;
+        }
+        false
+    }
+
     /// Moves the remote inside the open panel. Returns whether anything moved.
     pub fn step_menu(&mut self, dx: i32, dy: i32) -> bool {
+        // The settings panel: the groups, and the settings of the one the
+        // remote is on beside them. Right goes into a group, Left comes back.
+        if self.menu == Menu::Settings {
+            if dx != 0 {
+                let next = if dx > 0 && self.settings_in_group() > 0 { 1 } else { 0 };
+                if next == self.menu_column {
+                    return false;
+                }
+                self.menu_column = next;
+                self.menu_track_focus = 0;
+                return true;
+            }
+            if dy == 0 {
+                return false;
+            }
+            let (focus, rows) = if self.menu_column == 1 {
+                (&mut self.menu_track_focus, self.player_groups.get(self.menu_focus).copied().unwrap_or(0))
+            } else {
+                (&mut self.menu_focus, self.player_groups.len())
+            };
+            if rows == 0 {
+                return false;
+            }
+            let next = (*focus as i32 + dy).clamp(0, rows as i32 - 1) as usize;
+            if next == *focus {
+                return false;
+            }
+            *focus = next;
+            if self.menu_column == 0 {
+                self.menu_track_focus = 0;
+            }
+            return true;
+        }
         if dx != 0 {
             if !self.menu_has_delay() {
                 return false;
@@ -1053,6 +1101,37 @@ mod tests {
             note(serde_json::json!({"state": "applied", "model": "offset", "offset": -0.5, "confidence": 0.804})),
             "Otomatik eşitleme · -0,50 sn · %80"
         );
+    }
+
+    #[test]
+    fn the_settings_panel_is_groups_and_the_settings_of_one() {
+        let mut now = NowPlaying::new();
+        // Ses (4 rows), Altyazı (3), Video (1).
+        now.player_groups = vec![4, 3, 1];
+        assert!(now.open_menu(Menu::Settings));
+        assert_eq!((now.menu_focus, now.menu_column), (0, 0));
+        assert_eq!(now.menu_rows(), 3);
+        // Down the groups; the settings beside follow the group.
+        assert!(now.step_menu(0, 1));
+        assert_eq!((now.menu_focus, now.settings_in_group()), (1, 3));
+        // Right goes in, and moves among that group's settings only.
+        assert!(now.step_menu(1, 0));
+        assert_eq!((now.menu_column, now.menu_track_focus), (1, 0));
+        assert!(now.step_menu(0, 1) && now.step_menu(0, 1));
+        assert!(!now.step_menu(0, 1), "three settings in Altyazı");
+        assert_eq!(now.menu_track_focus, 2);
+        // No third column.
+        assert!(!now.step_menu(1, 0));
+        // Back, and Left, come out to the groups; Back there is the panel's.
+        assert!(now.menu_back());
+        assert_eq!(now.menu_column, 0);
+        assert!(!now.menu_back());
+        assert!(now.step_menu(1, 0) && now.step_menu(-1, 0));
+        assert_eq!(now.menu_column, 0);
+        // A group with nothing in it cannot be entered.
+        now.player_groups = vec![4, 0];
+        now.menu_focus = 1;
+        assert!(!now.step_menu(1, 0));
     }
 
     #[test]
