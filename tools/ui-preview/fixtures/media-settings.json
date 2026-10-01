@@ -1,0 +1,88 @@
+{
+  "screen": "media-settings",
+  "media-places": ["home", "discover", "library", "settings"],
+  "ms-place": 3,
+  "ms-zone": 1,
+  "ms-category": 2,
+  "ms-categories": [
+    { "icon": "play", "label": "Oynatıcı", "summary": "Oynatıcı sorulur · kaldığı yerden" },
+    { "icon": "monitor", "label": "Görüntü", "summary": "Kare hızına eşlenir" },
+    { "icon": "speaker", "label": "Ses", "summary": "Otomatik" },
+    { "icon": "captions", "label": "Altyazı", "summary": "Türkçe · AutoSync" },
+    { "icon": "user", "label": "Hesap", "summary": "izleyici@example.com" }
+  ],
+  "ms-surface": "audio",
+  "ms-title": "Ses",
+  "ms-blurb": "Her ses biçimi alıcıya olduğu gibi mi gider, burada mı çözülür.",
+  "ms-row": 4,
+  "ms-rows": [
+    {
+      "group": "", "heads": 0, "label": "Ses çıkışı", "hint": "Sesin gittiği cihaz",
+      "kind": "choice", "value": "Otomatik · HDMI 1 · DENON AVR-X1700H", "on": false,
+      "choices": ["Otomatik", "HDMI 1 · DENON AVR-X1700H", "HDMI 2 · LG OLED55C2", "Analog çıkış"],
+      "selected": 0, "enabled": true
+    },
+    {
+      "group": "", "heads": 0, "label": "Biçim", "hint": "Alıcının bildirdiği her biçim olduğu gibi gider",
+      "kind": "choice", "value": "Otomatik", "on": false,
+      "choices": ["Otomatik", "PCM", "Doğrudan geçiş"], "selected": 0, "enabled": true
+    },
+    {
+      "group": "Doğrudan geçen biçimler", "heads": 1, "label": "Dolby Digital", "hint": "Alıcıya olduğu gibi gider",
+      "kind": "toggle", "value": "Açık", "on": true, "choices": [], "selected": 0, "enabled": true
+    },
+    {
+      "group": "", "heads": 1, "label": "Dolby Digital Plus", "hint": "Alıcıya olduğu gibi gider",
+      "kind": "toggle", "value": "Açık", "on": true, "choices": [], "selected": 0, "enabled": true
+    },
+    {
+      "group": "", "heads": 1, "label": "DTS", "hint": "Alıcıya olduğu gibi gider",
+      "kind": "toggle", "value": "Açık", "on": true, "choices": [], "selected": 0, "enabled": true
+    },
+    {
+      "group": "", "heads": 1, "label": "DTS-HD", "hint": "Burada çözülür",
+      "kind": "toggle", "value": "Kapalı", "on": false, "choices": [], "selected": 0, "enabled": true
+    },
+    {
+      "group": "", "heads": 1, "label": "Dolby TrueHD", "hint": "Alıcıya olduğu gibi gider",
+      "kind": "toggle", "value": "Açık", "on": true, "choices": [], "selected": 0, "enabled": true
+    },
+    {
+      "group": "Dönüştürme", "heads": 2, "label": "Dolby Digital dönüştürme", "hint": "Çok kanallı ses AC-3 olarak gider",
+      "kind": "toggle", "value": "Kapalı", "on": false, "choices": [], "selected": 0, "enabled": true
+    }
+  ],
+  "ms-stream": {
+    "eyebrow": "MediaBox Player",
+    "title": "Oynatma yok",
+    "lines": ["Her biçimin gideceği yol aşağıda"],
+    "tone": ""
+  },
+  "ms-routes": [
+    { "codec": "Dolby Digital", "route": "Doğrudan → alıcı", "tone": "good" },
+    { "codec": "Dolby Digital Plus", "route": "Doğrudan → alıcı", "tone": "good" },
+    { "codec": "DTS", "route": "Doğrudan → alıcı", "tone": "good" },
+    { "codec": "DTS-HD", "route": "Çözülür → PCM (kapalı)", "tone": "" },
+    { "codec": "Dolby TrueHD", "route": "Doğrudan → alıcı", "tone": "good" },
+    { "codec": "Diğer biçimler", "route": "Çözülür → PCM", "tone": "" }
+  ],
+  "ms-device": {
+    "eyebrow": "Ses çıkışı",
+    "title": "HDMI 1 · DENON AVR-X1700H",
+    "lines": [
+      "HDMI",
+      "PCM 8 kanal",
+      "Bildirdiği: Dolby Digital, Dolby Digital Plus, DTS, DTS-HD, Dolby TrueHD"
+    ],
+    "tone": ""
+  },
+  "ms-note": "Doğrudan geçen ve dönüştürülen seste ses seviyesi alıcıdadır.",
+  "ms-addons": 7,
+  "ms-picker-open": false,
+  "ms-picker-title": "Biçim",
+  "ms-picker-options": ["Otomatik", "PCM", "Doğrudan geçiş"],
+  "ms-picker-focus": 0,
+  "ms-picker-selected": 0,
+  "ms-picker-above": false,
+  "ms-picker-below": false
+}

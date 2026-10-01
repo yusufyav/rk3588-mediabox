@@ -1,0 +1,58 @@
+{
+  "screen": "detail",
+  "detail-title": "Dune: Çöl Gezegeni",
+  "detail-facts": ["155 min", "2021", "8.0"],
+  "detail-imdb": true,
+  "detail-summary": "Soylu bir ailenin oğlu Paul Atreides, evreninin en değerli kaynağının tek kaynağı olan tehlikeli gezegen Arrakis'e gider. Ailesinin ve halkının geleceğini korumak için kendi korkularıyla yüzleşmek zorundadır.",
+  "detail-genres": ["Aksiyon", "Macera", "Dram", "Bilim Kurgu"],
+  "detail-cast": ["Timothée Chalamet", "Rebecca Ferguson", "Zendaya", "Oscar Isaac"],
+  "detail-directors": ["Denis Villeneuve"],
+  "detail-actions": ["Fragman", "", ""],
+  "detail-marks": ["trailer", "add-to-library", "eye"],
+  "detail-cuts": ["", "", ""],
+  "detail-enabled": [true, true, true],
+  "detail-col": 0,
+  "detail-logo-pending": false,
+  "detail-fade": 1,
+  "detail-on-sources": true,
+  "detail-source-focus": 0,
+  "detail-note": "",
+  "detail-providers": ["Tümü", "MediaFusion | ElfHosted RD", "Torrentio", "Comet | RD"],
+  "detail-provider": 0,
+  "detail-on-filter": false,
+  "detail-filter-open": false,
+  "detail-filter-focus": 0,
+  "detail-show-episodes": false,
+  "detail-sources": [
+    {
+      "name": "MediaFusion | ElfHosted RD ⚡\n4K",
+      "title": "Dune.Part.One.2021.2160p.UHD.BluRay.REMUX.HDR10.HEVC.DTS-HD.MA.7.1-FGT",
+      "meta": "🎞 BluRay REMUX 💾 27.16 GB\n🎥 AVC 🔊 DTS Lossless\n🔗 ElfCache",
+      "playable": true
+    },
+    {
+      "name": "MediaFusion | ElfHosted RD ⚡\n4K HDR",
+      "title": "Dune 2021 2160p UHD BluRay x265 10bit HDR TrueHD 7.1 Atmos-SWTYBLZ",
+      "meta": "🎞 BluRay 💾 21.31 GB\n🎥 HEVC 🔊 TrueHD Atmos 7.1\n🌐 English | Türkçe\n🔗 ElfCache",
+      "playable": true
+    },
+    {
+      "name": "Torrentio\n4k DV | HDR",
+      "title": "Dune.2021.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX",
+      "meta": "👤 290 💾 18.04 GB ⚙ ThePirateBay\n🇬🇧 / 🇹🇷",
+      "playable": true
+    },
+    {
+      "name": "Comet | RD\n1080p",
+      "title": "Dune (2021) 1080p BluRay x264 DTS-HD MA 7.1 [Türkçe Altyazılı]",
+      "meta": "💾 14.62 GB 🔎 Torrentio\n🎥 AVC 🔊 DTS-HD MA 7.1",
+      "playable": true
+    },
+    {
+      "name": "Torrentio\n720p",
+      "title": "Dune.2021.720p.HMAX.WEB-DL.DDP5.1.Atmos.x264-EVO",
+      "meta": "👤 41 💾 4.37 GB ⚙ 1337x",
+      "playable": false
+    }
+  ]
+}
