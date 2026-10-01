@@ -159,8 +159,8 @@ component Switch inherits Rectangle {
 }
 
 // One control. A row says what it is on the left and what it is set to on
-// the right, as the options themselves when there are few enough to see at
-// once: Ok -- or Right -- takes the next, and the chip moves.
+// the right. Moving never changes it: Ok turns a switch over, or opens the
+// list of a choice's options.
 component Control inherits Rectangle {
     in property <MsRow> line;
     in property <bool> focused;
@@ -198,37 +198,8 @@ component Control inherits Rectangle {
             }
         }
 
-        // Every option, the chosen one filled.
-        if root.line.enabled && root.line.kind == "choice" && root.line.choices.length > 0: HorizontalLayout {
-            horizontal-stretch: 0;
-            alignment: end;
-            spacing: root.chip-h * 0.22;
-            for choice[i] in root.line.choices: VerticalLayout {
-                alignment: center;
-                Rectangle {
-                    property <bool> chosen: i == root.line.selected;
-                    height: root.chip-h;
-                    width: label.preferred-width + root.chip-h * 0.9;
-                    border-radius: self.height / 2;
-                    background: chosen ? (root.focused ? Theme.film : #ffffff2b) : transparent;
-                    border-width: chosen ? 0px : 1px;
-                    border-color: root.focused ? #0d0b1826 : #ffffff1c;
-                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
-                    label := Text {
-                        text: choice;
-                        font-size: Metrics.t-meta;
-                        font-weight: parent.chosen ? 650 : 400;
-                        color: parent.chosen ? #ffffff : root.soft;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        wrap: no-wrap;
-                    }
-                }
-            }
-        }
-
-        // Too many to show: the value, and the mark that Ok takes the next.
-        if root.line.kind == "choice" && (root.line.choices.length == 0 || !root.line.enabled): HorizontalLayout {
+        // The value, and the mark that Ok opens every option.
+        if root.line.kind == "choice": HorizontalLayout {
             horizontal-stretch: 0;
             alignment: end;
             spacing: root.pad * 0.5;
@@ -391,6 +362,16 @@ export component MediaSettings inherits Rectangle {
     in property <MsNode> device;
     in property <string> note;
     in property <int> addons;
+    // A control's options, open over it: the ones in view, the one the
+    // remote is on and the one in force (both counted from the first in
+    // view; -1 when it is not), and whether more are above or below.
+    in property <bool> picker-open;
+    in property <string> picker-title;
+    in property <[string]> picker-options;
+    in property <int> picker-focus;
+    in property <int> picker-selected: -1;
+    in property <bool> picker-above;
+    in property <bool> picker-below;
 
     property <length> unit: root.width / 128;
     property <length> x0: root.width * 0.0547;
@@ -792,6 +773,102 @@ export component MediaSettings inherits Rectangle {
             font-size: Metrics.t-meta;
             color: Look.dim;
             wrap: word-wrap;
+        }
+    }
+
+    // ------------------------------------------------------ a control's options
+    //
+    // Over the control it belongs to, at its right where its value is, kept
+    // on the panel when the control is low. The option in force carries a
+    // tick; the remote's is white.
+    if root.picker-open: Rectangle {
+        property <length> opt-h: root.row-h * 0.82;
+        property <length> pad: root.row-h * 0.22;
+        property <length> head: root.head-h;
+        property <length> arrow: root.row-h * 0.32;
+        property <length> want-y: root.rows-y - root.scroll + root.focus-row * root.row-step
+            + (root.focus-row < root.rows.length ? root.rows[root.focus-row].heads : 0) * root.head-h;
+        width: root.left-w * 0.62;
+        height: pad * 2 + head + arrow * 2 + root.picker-options.length * opt-h;
+        x: root.x1 + root.left-w - self.width;
+        y: max(root.body-y, min(want-y, root.height * 0.97 - self.height));
+        border-radius: root.unit * 0.7;
+        background: #1b1830;
+        border-width: max(1px, root.unit * 0.08);
+        border-color: #7b5bf580;
+        drop-shadow-blur: root.unit * 1.2;
+        drop-shadow-color: #000000a0;
+
+        Text {
+            x: parent.pad;
+            y: parent.pad;
+            width: parent.width - parent.pad * 2;
+            height: parent.head;
+            text: root.picker-title;
+            font-size: Metrics.t-meta;
+            font-weight: 600;
+            color: Look.violet;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        if root.picker-above: Path {
+            x: (parent.width - self.width) / 2;
+            y: parent.pad + parent.head + (parent.arrow - self.height) / 2;
+            width: parent.arrow * 0.9;
+            height: parent.arrow * 0.5;
+            viewbox-width: 10;
+            viewbox-height: 6;
+            commands: "M1 5L5 1L9 5";
+            fill: transparent;
+            stroke: Look.soft;
+            stroke-width: max(1.5px, root.unit * 0.12);
+        }
+        for option[k] in root.picker-options: Rectangle {
+            property <bool> focused: k == root.picker-focus;
+            property <bool> current: k == root.picker-selected;
+            x: parent.pad;
+            y: parent.pad + parent.head + parent.arrow + k * parent.opt-h;
+            width: parent.width - parent.pad * 2;
+            height: parent.opt-h;
+            border-radius: self.height * 0.18;
+            background: focused ? #ffffff : transparent;
+            animate background { duration: Theme.focus-in; easing: Theme.ease; }
+            HorizontalLayout {
+                padding-left: parent.height * 0.3;
+                padding-right: parent.height * 0.3;
+                spacing: parent.height * 0.25;
+                Text {
+                    horizontal-stretch: 1;
+                    text: option;
+                    font-size: Metrics.t-secondary;
+                    font-weight: current ? 700 : 500;
+                    color: focused ? Look.ink : current ? Theme.text : Look.soft;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+                if current: VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        name: "check";
+                        size: root.row-h * 0.36;
+                        ink: focused ? Theme.film : Look.violet;
+                    }
+                }
+            }
+        }
+        if root.picker-below: Path {
+            x: (parent.width - self.width) / 2;
+            y: parent.height - parent.pad - parent.arrow + (parent.arrow - self.height) / 2;
+            width: parent.arrow * 0.9;
+            height: parent.arrow * 0.5;
+            viewbox-width: 10;
+            viewbox-height: 6;
+            commands: "M1 1L5 5L9 1";
+            fill: transparent;
+            stroke: Look.soft;
+            stroke-width: max(1.5px, root.unit * 0.12);
         }
     }
 

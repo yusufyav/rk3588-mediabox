@@ -22,8 +22,11 @@
 //!
 //! The remote: the places down the left, then the path of categories, then a
 //! category's controls. Up and Down move inside the column the remote is in;
-//! Right or Ok goes in, or changes the control it is on; Left comes back out
-//! one column; Back comes out one column too, and from the path it leaves.
+//! Right or Ok goes into the path's category; Left and Back come back out one
+//! layer, and from the path they leave. Moving never changes a setting: on a
+//! control only Ok does -- it turns a switch over, or opens the control's
+//! options with every one of them in view, where Up and Down move, Ok takes
+//! the one under the remote and Back or Left closes the list unchanged.
 
 use mediabox_core::{AudioCodec, AudioDeviceChoice, AudioMode, AudioSetting, AudioStatus, Cadence, OutputStatus};
 
@@ -33,7 +36,7 @@ use crate::prefs::{
 };
 use crate::screens::account::Session;
 use crate::screens::audio;
-use crate::screens::now_playing::preference_name;
+use crate::screens::now_playing::{PREFERRED_LANGUAGES, preference_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
@@ -129,7 +132,7 @@ pub enum Control {
 pub enum RowKind {
     /// On or off; Ok turns it over.
     Toggle,
-    /// One of a few; Ok takes the next, round again.
+    /// One of several; Ok opens the list of them.
     Choice,
     /// Does something or goes somewhere.
     Action,
@@ -156,8 +159,7 @@ pub struct Row {
     pub kind: RowKind,
     pub value: String,
     pub on: bool,
-    /// Every option, when there are few enough to show at once; empty when
-    /// only the value is shown.
+    /// Every option, in the order the list shows them.
     pub choices: Vec<String>,
     pub selected: usize,
     pub enabled: bool,
@@ -288,6 +290,8 @@ fn audio_rows(ctx: &Context) -> Vec<Row> {
     let declared = audio::declared(status);
 
     let device = plan.device.as_ref();
+    let mut choices = vec!["Otomatik".to_string()];
+    choices.extend(status.devices.iter().map(|device| device.label.clone()));
     let mut rows = vec![Row {
         value: match (&setting.device, device) {
             (AudioDeviceChoice::Auto, Some(device)) => format!("Otomatik · {}", device.label),
@@ -295,7 +299,14 @@ fn audio_rows(ctx: &Context) -> Vec<Row> {
             (_, Some(device)) => device.label.clone(),
             (_, None) => "Yok".into(),
         },
-        ..Row::new(Control::AudioDevice, RowKind::Choice, "Ses çıkışı", "Tamam ile sıradaki cihaz")
+        choices,
+        selected: match &setting.device {
+            AudioDeviceChoice::Auto => 0,
+            AudioDeviceChoice::Device { id } => {
+                status.devices.iter().position(|device| &device.id == id).map_or(0, |at| at + 1)
+            }
+        },
+        ..Row::new(Control::AudioDevice, RowKind::Choice, "Ses çıkışı", "Sesin gittiği cihaz")
     }];
 
     let mode = Row::choice(
@@ -343,6 +354,14 @@ fn subtitle_rows(ctx: &Context) -> Vec<Row> {
     let mut rows = vec![
         Row {
             value: preference_name(ctx.subtitle_language),
+            choices: std::iter::once(None)
+                .chain(PREFERRED_LANGUAGES.iter().map(|code| Some(*code)))
+                .map(preference_name)
+                .collect(),
+            selected: ctx
+                .subtitle_language
+                .and_then(|code| PREFERRED_LANGUAGES.iter().position(|known| *known == code))
+                .map_or(0, |at| at + 1),
             ..Row::new(
                 Control::SubtitleLanguage,
                 RowKind::Choice,
@@ -473,6 +492,28 @@ pub struct MediaSettings {
     /// Each category's own row, so leaving one and coming back lands where
     /// it was.
     rows: [usize; CATEGORIES.len()],
+    /// A control's options, open over it.
+    pub picker: Option<Picker>,
+}
+
+/// The options of one control, open: which control, and the option the
+/// remote is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Picker {
+    pub control: Control,
+    pub focus: usize,
+}
+
+/// How many options a list shows at once; a longer one scrolls.
+pub const PICKER_VISIBLE: usize = 7;
+
+/// The first option drawn of `total` with the remote on `focus`: the focus
+/// stays in view with one more below it while there is one.
+pub fn picker_first(total: usize, focus: usize) -> usize {
+    if total <= PICKER_VISIBLE {
+        return 0;
+    }
+    (focus + 2).saturating_sub(PICKER_VISIBLE).min(total - PICKER_VISIBLE)
 }
 
 /// The place this screen is, in the catalogue's column of places.
@@ -484,15 +525,17 @@ const PLACES: usize = 4;
 pub enum Step {
     Moved,
     Unchanged,
-    /// Change this control.
+    /// Turn this switch over, or do this action.
     Change(Control),
+    /// Set this control to its option at this index.
+    Pick(Control, usize),
     /// Go to this place of the catalogue.
     Place(usize),
 }
 
 impl MediaSettings {
     pub fn new() -> Self {
-        Self { zone: Zone::Categories, category: 0, place: HERE, rows: [0; CATEGORIES.len()] }
+        Self { zone: Zone::Categories, category: 0, place: HERE, rows: [0; CATEGORIES.len()], picker: None }
     }
 
     pub fn current(&self) -> Category {
@@ -508,6 +551,7 @@ impl MediaSettings {
     pub fn enter(&mut self) {
         self.zone = Zone::Categories;
         self.place = HERE;
+        self.picker = None;
     }
 
     /// Back on this screen from one it opened (the sign-in form): where it
@@ -529,6 +573,17 @@ impl MediaSettings {
         } else {
             self.rows[at] = self.rows[at].min(rows.len() - 1);
         }
+        // A list stays open only over the control it belongs to, while that
+        // control can still be changed.
+        if let Some(picker) = self.picker {
+            match rows.get(self.rows[at]) {
+                Some(row) if row.enabled && row.control == picker.control && !row.choices.is_empty() => {
+                    let focus = picker.focus.min(row.choices.len() - 1);
+                    self.picker = Some(Picker { focus, ..picker });
+                }
+                _ => self.picker = None,
+            }
+        }
         if self.zone == Zone::Controls && !rows.get(self.rows[at]).is_some_and(|row| row.enabled) {
             match nearest_enabled(rows, self.rows[at]) {
                 Some(row) => self.rows[at] = row,
@@ -539,6 +594,23 @@ impl MediaSettings {
 
     /// `rows` are the controls of the category the remote is on.
     pub fn step(&mut self, dx: i32, dy: i32, rows: &[Row]) -> Step {
+        if let Some(picker) = self.picker.as_mut() {
+            // Left is out of the list, unchanged; Right means nothing in it.
+            if dx < 0 {
+                self.picker = None;
+                return Step::Moved;
+            }
+            if dy == 0 {
+                return Step::Unchanged;
+            }
+            let total = rows.get(self.rows[self.category]).map_or(0, |row| row.choices.len());
+            let next = (picker.focus as i32 + dy.signum()).clamp(0, total.saturating_sub(1) as i32) as usize;
+            if next == picker.focus {
+                return Step::Unchanged;
+            }
+            picker.focus = next;
+            return Step::Moved;
+        }
         match self.zone {
             Zone::Places => {
                 if dx > 0 {
@@ -576,8 +648,9 @@ impl MediaSettings {
                     self.zone = Zone::Categories;
                     return Step::Moved;
                 }
+                // Right changes nothing: a setting is changed with Ok.
                 if dx > 0 {
-                    return self.change(rows);
+                    return Step::Unchanged;
                 }
                 if dy != 0 {
                     let at = self.category;
@@ -601,6 +674,9 @@ impl MediaSettings {
 
     /// Ok.
     pub fn select(&mut self, rows: &[Row]) -> Step {
+        if let Some(picker) = self.picker.take() {
+            return Step::Pick(picker.control, picker.focus);
+        }
         match self.zone {
             Zone::Places => Step::Place(self.place),
             Zone::Categories => self.enter_controls(rows),
@@ -608,9 +684,12 @@ impl MediaSettings {
         }
     }
 
-    /// Back: out of the controls to the path. False on the path or the
-    /// places, which is the screen's way out.
+    /// Back: an open list closes unchanged; the controls go back to the
+    /// path. False on the path or the places, which is the screen's way out.
     pub fn back(&mut self) -> bool {
+        if self.picker.take().is_some() {
+            return true;
+        }
         match self.zone {
             Zone::Controls => {
                 self.zone = Zone::Categories;
@@ -631,11 +710,26 @@ impl MediaSettings {
         Step::Moved
     }
 
-    fn change(&self, rows: &[Row]) -> Step {
+    /// Ok on a control: a switch turns over, an action is done, and a
+    /// choice opens its list on the option in force.
+    fn change(&mut self, rows: &[Row]) -> Step {
         match rows.get(self.row()) {
-            Some(row) if row.enabled => Step::Change(row.control),
+            Some(row) if row.enabled && row.kind == RowKind::Choice && !row.choices.is_empty() => {
+                self.picker = Some(Picker { control: row.control, focus: row.selected.min(row.choices.len() - 1) });
+                Step::Moved
+            }
+            Some(row) if row.enabled && row.kind != RowKind::Choice => Step::Change(row.control),
             _ => Step::Unchanged,
         }
+    }
+
+    /// The subtitle's look while a list of it is open: the option under the
+    /// remote, so the preview shows it before it is taken. What is kept
+    /// otherwise.
+    pub fn caption_preview(&self, prefs: &MediaPreferences) -> crate::prefs::CaptionStyle {
+        self.picker
+            .and_then(|picker| prefs_pick(prefs, picker.control, picker.focus))
+            .map_or(prefs.caption, |candidate| candidate.caption)
     }
 }
 
@@ -646,46 +740,52 @@ fn nearest_enabled(rows: &[Row], from: usize) -> Option<usize> {
 
 // ---------------------------------------------------------------- the changes
 
-/// The sound setting choosing `control` sends, the way the film's panel
-/// sends it, or `None` for a control that is not about sound.
-pub fn audio_change(status: &AudioStatus, control: Control) -> Option<AudioSetting> {
-    let setting = &status.setting;
+/// The sound setting a switch about sound sends when turned over, the way
+/// the film's panel sends it, or `None` for a control that is not one.
+pub fn audio_toggle(status: &AudioStatus, control: Control) -> Option<AudioSetting> {
     Some(match control {
-        Control::AudioDevice => AudioSetting { device: next_device(status), ..setting.clone() },
-        Control::AudioMode => audio::player_choose(status, audio::PlayerAct::CycleMode),
         Control::AudioFormat(codec) => audio::player_choose(status, audio::PlayerAct::Format(codec)),
         Control::Transcode => audio::player_choose(status, audio::PlayerAct::Transcode),
         _ => return None,
     })
 }
 
-/// Automatic, then every device found, round again.
-fn next_device(status: &AudioStatus) -> AudioDeviceChoice {
-    let devices = &status.devices;
-    let at = match &status.setting.device {
-        AudioDeviceChoice::Auto => 0,
-        AudioDeviceChoice::Device { id } => devices.iter().position(|device| &device.id == id).map_or(0, |at| at + 1),
-    };
-    let next = (at + 1) % (devices.len() + 1);
-    match next {
-        0 => AudioDeviceChoice::Auto,
-        n => AudioDeviceChoice::Device { id: devices[n - 1].id.clone() },
-    }
+/// The sound setting choosing option `index` of a sound list sends, or
+/// `None` for a control that is not one, or an option that is not there.
+pub fn audio_pick(status: &AudioStatus, control: Control, index: usize) -> Option<AudioSetting> {
+    let setting = &status.setting;
+    Some(match control {
+        Control::AudioDevice => AudioSetting {
+            device: match index {
+                0 => AudioDeviceChoice::Auto,
+                n => AudioDeviceChoice::Device { id: status.devices.get(n - 1)?.id.clone() },
+            },
+            ..setting.clone()
+        },
+        Control::AudioMode => audio::with_mode(setting, *AudioMode::ALL.get(index)?),
+        _ => return None,
+    })
 }
 
-/// `prefs` with `control` stepped on, or `None` for a control kept elsewhere.
-pub fn prefs_change(prefs: &MediaPreferences, control: Control) -> Option<MediaPreferences> {
-    use crate::prefs::next;
+/// The subtitle language option `index` of its list stands for: `None` is
+/// "Kapalı".
+pub fn language_pick(index: usize) -> Option<String> {
+    index.checked_sub(1).and_then(|at| PREFERRED_LANGUAGES.get(at)).map(|code| code.to_string())
+}
+
+/// `prefs` with `control` set to its option `index`, or `None` for a
+/// control kept elsewhere or an option that is not there.
+pub fn prefs_pick(prefs: &MediaPreferences, control: Control, index: usize) -> Option<MediaPreferences> {
     let mut prefs = *prefs;
     let caption = &mut prefs.caption;
     match control {
-        Control::DefaultPlayer => prefs.player = next(&PlayerChoice::ALL, prefs.player),
-        Control::Resume => prefs.resume = next(&ResumeChoice::ALL, prefs.resume),
-        Control::CaptionSize => caption.size = next(&CaptionSize::ALL, caption.size),
-        Control::CaptionColor => caption.color = next(&CaptionColor::ALL, caption.color),
-        Control::CaptionEdge => caption.edge = next(&CaptionEdge::ALL, caption.edge),
-        Control::CaptionBackground => caption.background = next(&CaptionBackground::ALL, caption.background),
-        Control::CaptionPosition => caption.position = next(&CaptionPosition::ALL, caption.position),
+        Control::DefaultPlayer => prefs.player = *PlayerChoice::ALL.get(index)?,
+        Control::Resume => prefs.resume = *ResumeChoice::ALL.get(index)?,
+        Control::CaptionSize => caption.size = *CaptionSize::ALL.get(index)?,
+        Control::CaptionColor => caption.color = *CaptionColor::ALL.get(index)?,
+        Control::CaptionEdge => caption.edge = *CaptionEdge::ALL.get(index)?,
+        Control::CaptionBackground => caption.background = *CaptionBackground::ALL.get(index)?,
+        Control::CaptionPosition => caption.position = *CaptionPosition::ALL.get(index)?,
         _ => return None,
     }
     Some(prefs)
@@ -1025,7 +1125,7 @@ mod tests {
     }
 
     /// The contract the remote is held to: up and down inside a column,
-    /// right or Ok in, left out, Back out one column and then away.
+    /// right or Ok into the path's category, left and Back out one layer.
     #[test]
     fn the_remote_goes_in_and_out_one_column_at_a_time() {
         let prefs = MediaPreferences::default();
@@ -1039,8 +1139,6 @@ mod tests {
         assert_eq!(screen.row(), 0);
         assert_eq!(screen.step(0, 1, &rows), Step::Moved);
         assert_eq!(screen.step(0, 1, &rows), Step::Unchanged, "two rows");
-        assert_eq!(screen.select(&rows), Step::Change(Control::Resume));
-        assert_eq!(screen.step(1, 0, &rows), Step::Change(Control::Resume), "right changes, as Ok does");
         assert_eq!(screen.step(-1, 0, &rows), Step::Moved);
         assert_eq!(screen.zone, Zone::Categories);
         assert_eq!(screen.step(-1, 0, &rows), Step::Moved);
@@ -1052,9 +1150,92 @@ mod tests {
         assert_eq!(screen.zone, Zone::Categories);
         // Back: the controls to the path, and from the path away.
         screen.select(&rows);
+        assert_eq!(screen.zone, Zone::Controls);
         assert!(screen.back());
         assert_eq!(screen.zone, Zone::Categories);
         assert!(!screen.back());
+    }
+
+    /// Moving never changes a setting, on the keyboard or the remote: only
+    /// Ok does. A choice opens its list on the option in force, every option
+    /// in it; Up and Down move in it, Ok takes one, Back and Left close it
+    /// with nothing changed.
+    #[test]
+    fn only_ok_changes_a_setting_and_a_choice_shows_every_option() {
+        let prefs = MediaPreferences::default();
+        let session = session(false);
+        let mut context = ctx(&prefs, &session);
+        context.subtitle_language = Some("tr");
+        context.subtitle_auto_sync = Some(true);
+        context.subtitle_show_incompatible = Some(false);
+        let rows = rows(Category::Subtitles, &context);
+        let mut screen = MediaSettings::new();
+        screen.category = 3;
+        screen.select(&rows);
+        assert_eq!(rows[screen.row()].control, Control::SubtitleLanguage);
+        // Left and right, on every row: nothing is changed.
+        for _ in 0..rows.len() {
+            assert!(!matches!(screen.step(1, 0, &rows), Step::Change(_) | Step::Pick(..)));
+            screen.step(0, 1, &rows);
+        }
+        while screen.row() > 0 {
+            screen.step(0, -1, &rows);
+        }
+        // Ok on the language: its list, on Türkçe, "Kapalı" first.
+        assert_eq!(rows[0].choices.len(), 1 + PREFERRED_LANGUAGES.len());
+        assert_eq!(rows[0].choices[0], "Kapalı");
+        assert_eq!(screen.select(&rows), Step::Moved);
+        assert_eq!(screen.picker, Some(Picker { control: Control::SubtitleLanguage, focus: 1 }));
+        assert_eq!(screen.step(1, 0, &rows), Step::Unchanged, "right means nothing in the list");
+        assert_eq!(screen.step(0, 1, &rows), Step::Moved);
+        assert_eq!(screen.select(&rows), Step::Pick(Control::SubtitleLanguage, 2));
+        assert_eq!(language_pick(2).as_deref(), Some("en"));
+        assert_eq!(language_pick(0), None, "Kapalı");
+        assert_eq!(screen.picker, None);
+        // Back closes a list unchanged, and stays on the row.
+        screen.select(&rows);
+        screen.step(0, 1, &rows);
+        assert!(screen.back());
+        assert_eq!((screen.picker, screen.zone), (None, Zone::Controls));
+        // Left closes it too.
+        screen.select(&rows);
+        assert_eq!(screen.step(-1, 0, &rows), Step::Moved);
+        assert_eq!((screen.picker, screen.zone), (None, Zone::Controls));
+        // A switch turns over on Ok, and has no list.
+        screen.step(0, 1, &rows);
+        assert_eq!(screen.select(&rows), Step::Change(Control::AutoSync));
+        assert_eq!(screen.picker, None);
+    }
+
+    /// The preview shows the option under the remote while a list of the
+    /// subtitle's look is open; nothing is kept until Ok.
+    #[test]
+    fn the_preview_follows_the_list_before_anything_is_kept() {
+        let prefs = MediaPreferences::default();
+        let session = session(false);
+        let rows = rows(Category::Subtitles, &ctx(&prefs, &session));
+        let mut screen = MediaSettings::new();
+        screen.category = 3;
+        screen.select(&rows);
+        assert_eq!(rows[screen.row()].control, Control::CaptionSize);
+        assert_eq!(screen.caption_preview(&prefs), prefs.caption);
+        screen.select(&rows);
+        screen.step(0, 1, &rows);
+        assert_eq!(screen.caption_preview(&prefs).size, CaptionSize::Large);
+        assert_eq!(prefs.caption.size, CaptionSize::Normal, "kept only on Ok");
+        screen.back();
+        assert_eq!(screen.caption_preview(&prefs), prefs.caption);
+        let picked = prefs_pick(&prefs, Control::CaptionSize, 2).unwrap();
+        assert_eq!(picked.caption.size, CaptionSize::Large);
+        assert!(prefs_pick(&prefs, Control::CaptionSize, 9).is_none(), "no such option");
+    }
+
+    #[test]
+    fn a_long_list_scrolls_with_the_remote() {
+        assert_eq!(picker_first(3, 2), 0);
+        assert_eq!(picker_first(18, 0), 0);
+        assert_eq!(picker_first(18, 6), 1);
+        assert_eq!(picker_first(18, 17), 11);
     }
 
     #[test]
@@ -1125,9 +1306,9 @@ mod tests {
         let rows = rows(Category::Player, &context);
         assert_eq!(rows[0].choices, ["MediaBox", "Kodi", "Sor"]);
         assert_eq!(rows[0].selected, 0);
-        let next = prefs_change(&prefs, Control::DefaultPlayer).unwrap();
+        let next = prefs_pick(&prefs, Control::DefaultPlayer, 1).unwrap();
         assert_eq!(next.player, PlayerChoice::Kodi);
-        assert!(prefs_change(&prefs, Control::RefreshMatching).is_none(), "kept by the display, not here");
+        assert!(prefs_pick(&prefs, Control::RefreshMatching, 0).is_none(), "kept by the display, not here");
         context.kodi = false;
         let rows = super::rows(Category::Player, &context);
         assert!(!rows[0].enabled);
@@ -1178,23 +1359,27 @@ mod tests {
         );
         assert!(rows.iter().all(|row| row.enabled));
         assert!(rows[0].value.starts_with("Otomatik · HDMI-A-2"));
+        assert_eq!(rows[0].choices, ["Otomatik", "HDMI-A-2 · SONY TV", "Analog · rockchip-es8388"]);
+        assert_eq!(rows[0].selected, 0);
         // Turning DTS off is what the film's panel sends for it.
-        let change = audio_change(&status, Control::AudioFormat(AudioCodec::Dts)).unwrap();
+        let change = audio_toggle(&status, Control::AudioFormat(AudioCodec::Dts)).unwrap();
         assert_eq!(change, audio::player_choose(&status, audio::PlayerAct::Format(AudioCodec::Dts)));
         assert_eq!(change.formats, Some(vec![AudioCodec::Ac3, AudioCodec::Eac3]));
-        // The device: automatic, the Sony, the analog output, and round.
-        let sony = audio_change(&status, Control::AudioDevice).unwrap();
+        // The device, chosen from its list.
+        let sony = audio_pick(&status, Control::AudioDevice, 1).unwrap();
         assert_eq!(sony.device, AudioDeviceChoice::Device { id: "display:fdea0000.hdmi".into() });
-        let analog_status = crate::screens::audio::tests::status_for_tests(sony);
-        let analog = audio_change(&analog_status, Control::AudioDevice).unwrap();
+        let analog = audio_pick(&status, Control::AudioDevice, 2).unwrap();
         assert_eq!(analog.device, AudioDeviceChoice::Device { id: "alsa:rockchipes8388".into() });
+        assert!(audio_pick(&status, Control::AudioDevice, 3).is_none(), "no such device");
+        assert_eq!(audio_pick(&status, Control::AudioMode, 1).unwrap().mode, AudioMode::Pcm);
         // PCM only: nothing to choose about the form, and it says why.
         let pcm_status = crate::screens::audio::tests::status_for_tests(analog);
         context.audio = Some(&pcm_status);
         let rows = super::rows(Category::Audio, &context);
         assert_eq!(controls(&rows), [Control::AudioDevice, Control::AudioMode, Control::Transcode]);
         assert!(!rows[1].enabled && !rows[2].enabled);
-        assert_eq!(audio_change(&pcm_status, Control::AudioDevice).unwrap().device, AudioDeviceChoice::Auto);
+        assert_eq!(rows[0].selected, 2, "the analog output, chosen by hand");
+        assert_eq!(audio_pick(&pcm_status, Control::AudioDevice, 0).unwrap().device, AudioDeviceChoice::Auto);
     }
 
     #[test]

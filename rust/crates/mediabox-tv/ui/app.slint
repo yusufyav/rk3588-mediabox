@@ -138,6 +138,13 @@ export component MediaBoxWindow inherits Window {
     in property <MsNode> ms-device;
     in property <string> ms-note;
     in property <int> ms-addons;
+    in property <bool> ms-picker-open;
+    in property <string> ms-picker-title;
+    in property <[string]> ms-picker-options;
+    in property <int> ms-picker-focus;
+    in property <int> ms-picker-selected: -1;
+    in property <bool> ms-picker-above;
+    in property <bool> ms-picker-below;
 
     // ---- discover
     in property <[DiscoverFilter]> discover-filters;
@@ -612,6 +619,13 @@ export component MediaBoxWindow inherits Window {
             device: root.ms-device;
             note: root.ms-note;
             addons: root.ms-addons;
+            picker-open: root.ms-picker-open;
+            picker-title: root.ms-picker-title;
+            picker-options: root.ms-picker-options;
+            picker-focus: root.ms-picker-focus;
+            picker-selected: root.ms-picker-selected;
+            picker-above: root.ms-picker-above;
+            picker-below: root.ms-picker-below;
         }
 
         if screen == "wifi": WifiScreen {

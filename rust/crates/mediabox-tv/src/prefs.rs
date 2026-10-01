@@ -281,12 +281,6 @@ where
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
-/// The value after `current` in `all`, round again.
-pub fn next<T: Copy + PartialEq>(all: &[T], current: T) -> T {
-    let at = all.iter().position(|value| *value == current).unwrap_or(0);
-    all[(at + 1) % all.len()]
-}
-
 pub fn read(path: impl AsRef<Path>) -> MediaPreferences {
     std::fs::read_to_string(path)
         .ok()
@@ -376,13 +370,6 @@ mod tests {
         write_now(&path, &prefs).unwrap();
         assert_eq!(read(&path), prefs);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_choice_steps_round() {
-        assert_eq!(next(&PlayerChoice::ALL, PlayerChoice::MediaBox), PlayerChoice::Kodi);
-        assert_eq!(next(&PlayerChoice::ALL, PlayerChoice::Ask), PlayerChoice::MediaBox);
-        assert_eq!(next(&CaptionSize::ALL, CaptionSize::Larger), CaptionSize::Small);
     }
 
     #[test]

@@ -2661,10 +2661,16 @@ impl App {
 
     /// Move "Tercih edilen altyazı dili" by `step` and put it into effect.
     fn step_subtitle_preference(&mut self, step: i32) {
-        self.subtitle_generation += 1;
         let next = screens::now_playing::next_preference(self.now.subtitle_preference.as_deref(), step);
-        self.now.subtitle_preference = next.clone();
-        spawn_here(HereCommand::SubtitlePreference(next));
+        self.set_subtitle_preference(next);
+    }
+
+    /// "Tercih edilen altyazı dili", kept by the control plane and put into
+    /// effect on the film there is one.
+    fn set_subtitle_preference(&mut self, language: Option<String>) {
+        self.subtitle_generation += 1;
+        self.now.subtitle_preference = language.clone();
+        spawn_here(HereCommand::SubtitlePreference(language));
         self.open_controls();
         self.paint();
     }
@@ -3158,10 +3164,14 @@ impl App {
             }
             _ => Step::Unchanged,
         };
+        // A list of the subtitle's look shows the option under the remote in
+        // the preview, and what is kept once it closes.
+        self.apply_caption_style();
         match step {
             Step::Unchanged => {}
             Step::Moved => self.paint(),
             Step::Change(control) => self.change_media_setting(control),
+            Step::Pick(control, index) => self.pick_media_setting(control, index),
             Step::Place(0) => self.open_tab(Route::Media),
             Step::Place(1) => self.open_tab(Route::Discover),
             Step::Place(2) => self.open_tab(Route::Library),
@@ -3173,29 +3183,52 @@ impl App {
         }
     }
 
-    /// One control changed, by whoever keeps it -- the same calls the film's
-    /// own panel makes for the same settings.
-    fn change_media_setting(&mut self, control: screens::media_settings::Control) {
-        use screens::media_settings::{Control, audio_change, prefs_change};
-        if let Some(prefs) = prefs_change(&self.prefs, control) {
-            self.prefs = prefs;
-            prefs::write(prefs_file(), prefs);
+    /// An option taken from a control's list, kept by whoever keeps it.
+    fn pick_media_setting(&mut self, control: screens::media_settings::Control, index: usize) {
+        use screens::media_settings::{Control, audio_pick, language_pick, prefs_pick};
+        if let Some(prefs) = prefs_pick(&self.prefs, control, index) {
+            if prefs != self.prefs {
+                self.prefs = prefs;
+                prefs::write(prefs_file(), prefs);
+            }
             self.apply_caption_style();
             self.paint();
             return;
         }
         match control {
+            Control::SubtitleLanguage => {
+                let language = language_pick(index);
+                if language != self.now.subtitle_preference {
+                    self.set_subtitle_preference(language);
+                }
+            }
+            other => {
+                let setting = self.audio_status().and_then(|audio| {
+                    audio_pick(&audio, other, index).filter(|setting| *setting != audio.setting)
+                });
+                if let Some(setting) = setting {
+                    spawn_audio(mediabox_core::Request::AudioSet { setting });
+                }
+            }
+        }
+        self.paint();
+    }
+
+    /// A switch turned over, or an action, by whoever keeps it -- the same
+    /// calls the film's own panel makes for the same settings.
+    fn change_media_setting(&mut self, control: screens::media_settings::Control) {
+        use screens::media_settings::{Control, audio_toggle};
+        match control {
             Control::RefreshMatching => {
                 let on = self.output_status().is_some_and(|output| output.content_matching);
                 spawn_output(mediabox_core::Request::OutputContentMatching { enabled: !on });
             }
-            Control::SubtitleLanguage => self.step_subtitle_preference(1),
             Control::AutoSync => self.toggle_subtitle_auto_sync(),
             Control::ShowIncompatible => self.toggle_subtitle_show_incompatible(),
             Control::SignIn => self.run(Action::OpenAccount),
             Control::SignOut => self.open_sheet(Sheet::confirm(Action::SignOut, Action::SignOut.question())),
             other => {
-                let setting = self.audio_status().and_then(|audio| audio_change(&audio, other));
+                let setting = self.audio_status().and_then(|audio| audio_toggle(&audio, other));
                 if let Some(setting) = setting {
                     spawn_audio(mediabox_core::Request::AudioSet { setting });
                 }
@@ -3209,7 +3242,11 @@ impl App {
         let Some(window) = self.window.upgrade() else {
             return;
         };
-        let caption = self.prefs.caption;
+        let caption = if self.route() == Route::MediaSettings {
+            self.media_settings.caption_preview(&self.prefs)
+        } else {
+            self.prefs.caption
+        };
         let style = window.global::<CaptionStyle>();
         style.set_scale(caption.size.scale());
         style.set_ink(slint::Color::from_argb_encoded(0xff00_0000 | caption.color.rgb()));
@@ -3266,6 +3303,7 @@ impl App {
         window.set_ms_surface(category.surface().into());
         window.set_ms_title(category.label().into());
         window.set_ms_blurb(category.blurb().into());
+        let rows_shown = rows.clone();
         let mut heads = 0;
         window.set_ms_rows(model(
             rows.into_iter()
@@ -3288,6 +3326,22 @@ impl App {
                 })
                 .collect(),
         ));
+
+        // A control's options, open over it.
+        let picker = self.media_settings.picker.and_then(|picker| {
+            let row = rows_shown.get(self.media_settings.row())?;
+            Some((picker, row.label.clone(), row.choices.clone(), row.selected))
+        });
+        window.set_ms_picker_open(picker.is_some());
+        if let Some((picker, title, choices, selected)) = picker {
+            let first = ms::picker_first(choices.len(), picker.focus);
+            window.set_ms_picker_title(title.into());
+            window.set_ms_picker_above(first > 0);
+            window.set_ms_picker_below(first + ms::PICKER_VISIBLE < choices.len());
+            window.set_ms_picker_focus((picker.focus - first) as i32);
+            window.set_ms_picker_selected(selected as i32 - first as i32);
+            window.set_ms_picker_options(strings(choices.into_iter().skip(first).take(ms::PICKER_VISIBLE)));
+        }
 
         let session = screens::account::Session::from_status(self.status.as_ref());
         let mut note = String::new();
