@@ -1,0 +1,808 @@
+import { Theme, Metrics } from "theme.slint";
+import { Icon } from "kit.slint";
+import { Chrome, AccountChip } from "chrome.slint";
+import { CaptionBlock, CaptionLine, CaptionStyle } from "player.slint";
+
+// "Filmler ve Diziler > Ayarlar": the catalogue's own settings, and the
+// player's -- not the box's settings screen, and not the reference's.
+//
+// The catalogue's frame stays round it (its places down the left, its violet
+// ground), and inside it the screen is a path rather than a list of
+// sections: the categories are the stops a film makes -- opened, drawn,
+// heard, read -- with a port each on one line, and each stop says where it
+// stands now. Beside the path is the stop the remote is on, and every stop
+// draws itself the way its subject is best read: the picture as the film's
+// frame rate against the modes this display offers, the sound as what
+// becomes of each format on its way to the receiver, the subtitle as the
+// subtitle itself, live, drawn by the film's own renderer.
+//
+// Sizes are fractions of the panel, as the catalogue's board measures them,
+// and type is the settings scale with its floors, so 720p, 1080p and a 4K
+// panel at its integer scale are one layout.
+
+export struct MsCategory {
+    icon: string,
+    label: string,
+    summary: string,
+}
+
+export struct MsRow {
+    // The heading of the group this row opens, if it opens one, and how
+    // many headings there are down to and including it.
+    group: string,
+    heads: int,
+    label: string,
+    hint: string,
+    // "toggle", "choice" or "action".
+    kind: string,
+    value: string,
+    on: bool,
+    choices: [string],
+    selected: int,
+    enabled: bool,
+}
+
+// One stop on a chain: the film, the player, the screen, the receiver.
+export struct MsNode {
+    eyebrow: string,
+    title: string,
+    lines: [string],
+    tone: string,
+}
+
+export struct MsRate {
+    film: string,
+    mode: string,
+    fit: string,
+    tone: string,
+}
+
+export struct MsRoute {
+    codec: string,
+    route: string,
+    tone: string,
+}
+
+global Look {
+    // Ink on a focused (white) surface.
+    out property <color> ink: #0d0b18;
+    out property <color> ink-soft: #4a4660;
+    // A label over a value: the catalogue's violet, lifted to be read.
+    out property <color> violet: #b2a6ff;
+    out property <color> soft: #b3aecb;
+    out property <color> dim: #7f7a98;
+    out property <color> card: #ffffff0d;
+    out property <color> card-line: #ffffff17;
+    out property <color> rail: #7b5bf55c;
+
+    public pure function tone(name: string) -> color {
+        return name == "good" ? #6ee7a0 : name == "warn" ? #f6c46a : #d9d5ea;
+    }
+}
+
+// A category on the path: its port on the line, its name and where it
+// stands. White when the remote is on it; marked in the film's accent while
+// the remote is in its controls.
+component Stop inherits Rectangle {
+    in property <MsCategory> item;
+    in property <bool> focused;
+    in property <bool> current;
+    in property <length> port;
+
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: root.port;
+        height: root.port;
+        border-radius: self.width / 2;
+        background: root.focused ? #ffffff : root.current ? Theme.film : #1d1a31;
+        border-width: root.focused || root.current ? 0px : 1px;
+        border-color: #ffffff30;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: root.item.icon;
+            size: root.port * 0.5;
+            ink: root.focused ? Look.ink : root.current ? #ffffff : #c9c3e6;
+        }
+    }
+
+    Rectangle {
+        x: root.port * 1.3;
+        width: parent.width - self.x;
+        height: 100%;
+        border-radius: self.height * 0.16;
+        background: root.focused ? #ffffff : root.current ? #ffffff12 : transparent;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+        VerticalLayout {
+            padding-left: root.port * 0.45;
+            padding-right: root.port * 0.45;
+            alignment: center;
+            spacing: parent.height * 0.05;
+            Text {
+                text: root.item.label;
+                font-size: Metrics.t-primary;
+                font-weight: 650;
+                color: root.focused ? Look.ink : Theme.text;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            Text {
+                text: root.item.summary;
+                font-size: Metrics.t-meta;
+                color: root.focused ? Look.ink-soft : Look.soft;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+    }
+}
+
+component Switch inherits Rectangle {
+    in property <bool> on;
+    in property <bool> focused;
+    width: self.height * 1.8;
+    border-radius: self.height / 2;
+    background: root.on ? Theme.film : root.focused ? #0d0b1838 : #ffffff2e;
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    Rectangle {
+        width: parent.height * 0.72;
+        height: self.width;
+        border-radius: self.width / 2;
+        y: (parent.height - self.height) / 2;
+        x: root.on ? parent.width - self.width - parent.height * 0.14 : parent.height * 0.14;
+        background: #ffffff;
+        animate x { duration: Theme.focus-in; easing: Theme.ease; }
+    }
+}
+
+// One control. A row says what it is on the left and what it is set to on
+// the right, as the options themselves when there are few enough to see at
+// once: Ok -- or Right -- takes the next, and the chip moves.
+component Control inherits Rectangle {
+    in property <MsRow> line;
+    in property <bool> focused;
+    property <color> ink: root.focused ? Look.ink : root.line.enabled ? Theme.text : Look.dim;
+    property <color> soft: root.focused ? Look.ink-soft : Look.dim;
+    property <length> pad: self.height * 0.3;
+    property <length> chip-h: self.height * 0.5;
+
+    border-radius: self.height * 0.16;
+    background: root.focused ? #ffffff : #ffffff0a;
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    HorizontalLayout {
+        padding-left: root.pad;
+        padding-right: root.pad;
+        spacing: root.pad;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: root.line.label;
+                font-size: Metrics.t-primary;
+                font-weight: 600;
+                color: root.ink;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if (root.focused || !root.line.enabled) && root.line.hint != "": Text {
+                text: root.line.hint;
+                font-size: Metrics.t-meta;
+                color: root.soft;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+
+        // Every option, the chosen one filled.
+        if root.line.enabled && root.line.kind == "choice" && root.line.choices.length > 0: HorizontalLayout {
+            horizontal-stretch: 0;
+            alignment: end;
+            spacing: root.chip-h * 0.22;
+            for choice[i] in root.line.choices: VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    property <bool> chosen: i == root.line.selected;
+                    height: root.chip-h;
+                    width: label.preferred-width + root.chip-h * 0.9;
+                    border-radius: self.height / 2;
+                    background: chosen ? (root.focused ? Theme.film : #ffffff2b) : transparent;
+                    border-width: chosen ? 0px : 1px;
+                    border-color: root.focused ? #0d0b1826 : #ffffff1c;
+                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                    label := Text {
+                        text: choice;
+                        font-size: Metrics.t-meta;
+                        font-weight: parent.chosen ? 650 : 400;
+                        color: parent.chosen ? #ffffff : root.soft;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                    }
+                }
+            }
+        }
+
+        // Too many to show: the value, and the mark that Ok takes the next.
+        if root.line.kind == "choice" && (root.line.choices.length == 0 || !root.line.enabled): HorizontalLayout {
+            horizontal-stretch: 0;
+            alignment: end;
+            spacing: root.pad * 0.5;
+            Text {
+                text: root.line.value;
+                font-size: Metrics.t-secondary;
+                color: root.focused ? Look.ink : root.line.enabled ? Look.violet : Look.dim;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if root.line.enabled: VerticalLayout {
+                alignment: center;
+                Icon {
+                    name: "chevron";
+                    size: root.chip-h * 0.7;
+                    ink: root.focused ? Look.ink : Look.soft;
+                }
+            }
+        }
+
+        if root.line.kind == "toggle": HorizontalLayout {
+            horizontal-stretch: 0;
+            spacing: root.pad * 0.6;
+            Text {
+                text: root.line.value;
+                font-size: Metrics.t-meta;
+                color: root.soft;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+            VerticalLayout {
+                alignment: center;
+                Switch {
+                    height: root.chip-h * 0.85;
+                    on: root.line.on;
+                    focused: root.focused;
+                    opacity: root.line.enabled ? 1.0 : 0.4;
+                }
+            }
+        }
+
+        if root.line.kind == "action": VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            Icon {
+                name: "chevron";
+                size: root.chip-h * 0.7;
+                ink: root.focused ? Look.ink : Look.soft;
+            }
+        }
+    }
+}
+
+// A stop on a chain, as a card: what it is, its name, what else is known.
+component NodeCard inherits Rectangle {
+    in property <MsNode> node;
+    in property <length> unit;
+    border-radius: root.unit * 0.7;
+    background: Look.card;
+    border-width: 1px;
+    border-color: root.node.tone == "good" ? #6ee7a05c : root.node.tone == "warn" ? #f6c46a5c : Look.card-line;
+
+    VerticalLayout {
+        padding: root.unit * 0.95;
+        spacing: root.unit * 0.25;
+        Text {
+            text: root.node.eyebrow;
+            font-size: Metrics.t-meta;
+            color: Look.violet;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+        Text {
+            text: root.node.title;
+            font-size: Metrics.t-primary;
+            font-weight: 650;
+            color: Theme.text;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+        for line in root.node.lines: Text {
+            text: line;
+            font-size: Metrics.t-meta;
+            color: Look.soft;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The way down a chain: a short line and a chevron, with what passes along
+// it when there is something to say.
+component Down inherits HorizontalLayout {
+    in property <length> unit;
+    in property <string> label;
+    height: root.unit * 2.0;
+    spacing: root.unit * 0.6;
+    padding-left: root.unit * 1.4;
+    VerticalLayout {
+        alignment: center;
+        Path {
+            width: root.unit * 1.0;
+            height: root.unit * 0.6;
+            viewbox-width: 10;
+            viewbox-height: 6;
+            commands: "M1 1L5 5L9 1";
+            fill: transparent;
+            stroke: Theme.film;
+            stroke-width: max(1.5px, root.unit * 0.14);
+        }
+    }
+    if root.label != "": Text {
+        text: root.label;
+        font-size: Metrics.t-meta;
+        color: Look.dim;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+}
+
+component Fit inherits Rectangle {
+    in property <string> text;
+    in property <string> tone;
+    in property <length> unit;
+    height: root.unit * 1.7;
+    width: fit-text.preferred-width + root.unit * 1.2;
+    border-radius: self.height / 2;
+    background: root.tone == "good" ? #6ee7a01f : root.tone == "warn" ? #f6c46a1f : #ffffff0f;
+    fit-text := Text {
+        text: root.text;
+        font-size: Metrics.t-meta;
+        color: Look.tone(root.tone);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+}
+
+export component MediaSettings inherits Rectangle {
+    // 0 the path, 1 a category's controls, 2 the places.
+    in property <int> zone;
+    in property <int> place;
+    in property <[string]> places;
+    in property <[MsCategory]> categories;
+    in property <int> category;
+    // "player", "video", "audio", "subtitles" or "account".
+    in property <string> surface;
+    in property <string> title;
+    in property <string> blurb;
+    in property <[MsRow]> rows;
+    in property <int> focus-row;
+    // The player's flow, or what the account brings.
+    in property <[MsNode]> flow;
+    in property <MsNode> film;
+    in property <MsNode> screen;
+    in property <[MsRate]> rates;
+    in property <MsNode> stream;
+    in property <[MsRoute]> routes;
+    in property <MsNode> device;
+    in property <string> note;
+    in property <int> addons;
+
+    property <length> unit: root.width / 128;
+    property <length> x0: root.width * 0.0547;
+    property <length> top: root.height * 0.17;
+    property <length> path-w: root.width * 0.235;
+    property <length> x1: x0 + path-w + root.width * 0.032;
+    property <length> surface-w: root.width - x1 - root.width * 0.035;
+    property <length> body-y: top + root.height * 0.105;
+    property <length> body-h: root.height * 0.945 - body-y;
+    property <length> gap: root.width * 0.022;
+    // The controls' column, and the column beside it.
+    property <length> left-w: surface-w * (surface == "subtitles" ? 0.56 : 0.6);
+    property <length> right-x: x1 + left-w + gap;
+    property <length> right-w: surface-w - left-w - gap;
+
+    property <length> row-h: root.height * 0.062;
+    property <length> row-step: row-h + root.height * 0.0075;
+    property <length> head-h: root.height * 0.038;
+    property <int> heads: rows.length > 0 ? rows[rows.length - 1].heads : 0;
+    property <length> rows-h: rows.length * row-step + heads * head-h;
+    // The account's card comes before its controls.
+    property <length> card-h: surface == "account" ? root.height * 0.2 : 0px;
+    property <length> rows-y: body-y + (card-h > 0 ? card-h + root.height * 0.025 : 0px);
+    property <length> rows-view: body-y + body-h - rows-y;
+    property <length> focus-bottom: focus-row < rows.length ? focus-row * row-step + rows[focus-row].heads * head-h + row-h : 0px;
+    property <length> scroll: zone == 1 ? clamp(focus-bottom - rows-view, 0px, max(0px, rows-h - rows-view)) : 0px;
+
+    property <length> node-h: root.height * 0.104;
+    property <length> node-gap: root.height * 0.03;
+    property <length> port: root.height * 0.052;
+
+    property <[CaptionLine]> sample: [
+        { runs: [{ text: "Altyazı filmde tam olarak böyle görünür.", italic: false, bold: false }] },
+        { runs: [
+            { text: "Bu satır ", italic: false, bold: false },
+            { text: "italik", italic: true, bold: false },
+            { text: " bir sözle biter.", italic: false, bold: false },
+        ] },
+    ];
+
+    background: Theme.catalog-bg;
+    clip: true;
+
+    // ------------------------------------------------------------ the heading
+    Text {
+        x: root.x0;
+        y: root.height * 0.05;
+        text: "FİLMLER VE DİZİLER";
+        font-size: Metrics.t-meta;
+        font-weight: 600;
+        letter-spacing: Metrics.t-meta * 0.12;
+        color: Look.violet;
+    }
+    Text {
+        x: root.x0;
+        y: root.height * 0.05 + Metrics.t-meta * 1.6;
+        text: "Ayarlar";
+        font-size: Metrics.t-page;
+        font-weight: 750;
+        color: Theme.text;
+    }
+
+    // --------------------------------------------------------------- the path
+    //
+    // One line through every port, as a film goes through every stop.
+    Rectangle {
+        x: root.x0 + root.port / 2 - self.width / 2;
+        y: root.top + root.node-h / 2;
+        width: max(2px, root.unit * 0.14);
+        height: (root.categories.length - 1) * (root.node-h + root.node-gap);
+        background: Look.rail;
+    }
+    for item[i] in root.categories: Stop {
+        x: root.x0;
+        y: root.top + i * (root.node-h + root.node-gap);
+        width: root.path-w;
+        height: root.node-h;
+        port: root.port;
+        item: item;
+        focused: root.zone == 0 && i == root.category;
+        current: root.zone != 0 && i == root.category;
+    }
+
+    // ------------------------------------------------------- the stop's page
+    Text {
+        x: root.x1;
+        y: root.top;
+        width: root.surface-w;
+        text: root.title;
+        font-size: Metrics.t-section;
+        font-weight: 700;
+        color: Theme.text;
+        wrap: no-wrap;
+    }
+    Text {
+        x: root.x1;
+        y: root.top + Metrics.t-section * 1.45;
+        width: root.surface-w;
+        text: root.blurb;
+        font-size: Metrics.t-secondary;
+        color: Look.soft;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+
+    // The account, before its controls.
+    if root.surface == "account": Rectangle {
+        x: root.x1;
+        y: root.body-y;
+        width: root.left-w;
+        height: root.card-h;
+        border-radius: root.unit * 0.8;
+        background: Look.card;
+        border-width: 1px;
+        border-color: Look.card-line;
+
+        HorizontalLayout {
+            padding: parent.height * 0.16;
+            spacing: parent.height * 0.14;
+            alignment: start;
+            Rectangle {
+                width: self.height;
+                border-radius: self.height / 2;
+                background: AccountChip.signed ? Theme.film : #ffffff24;
+                clip: true;
+                if AccountChip.avatar.width > 0: Image {
+                    width: 100%;
+                    height: 100%;
+                    source: AccountChip.avatar;
+                    image-fit: cover;
+                }
+                if AccountChip.avatar.width == 0: Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    name: "user";
+                    size: parent.height * 0.5;
+                    ink: #ffffff;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: root.unit * 0.3;
+                Text {
+                    text: AccountChip.signed ? "Stremio hesabı" : "Oturum açılmadı";
+                    font-size: Metrics.t-meta;
+                    color: Look.violet;
+                }
+                Text {
+                    text: AccountChip.signed ? AccountChip.email : "İsimsiz kullanıcı";
+                    font-size: Metrics.t-primary;
+                    font-weight: 650;
+                    color: Theme.text;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+                if AccountChip.signed: Text {
+                    text: root.addons + " eklenti";
+                    font-size: Metrics.t-meta;
+                    color: Look.soft;
+                }
+            }
+        }
+    }
+
+    // The controls, in their groups, scrolled only when they do not fit.
+    Rectangle {
+        x: root.x1;
+        y: root.rows-y;
+        width: root.left-w;
+        height: min(root.rows-view, root.rows-h + 2px);
+        clip: true;
+
+        Rectangle {
+            y: -root.scroll;
+            width: 100%;
+            height: root.rows-h;
+            animate y { duration: Theme.glide; easing: Theme.ease; }
+
+            for item[i] in root.rows: Rectangle {
+                y: i * root.row-step + item.heads * root.head-h - (item.group != "" ? root.head-h : 0px);
+                width: 100%;
+                height: root.row-h + (item.group != "" ? root.head-h : 0px);
+
+                if item.group != "": Text {
+                    x: 0;
+                    y: 0;
+                    width: 100%;
+                    height: root.head-h;
+                    text: item.group;
+                    font-size: Metrics.t-meta;
+                    font-weight: 600;
+                    color: Look.violet;
+                    vertical-alignment: center;
+                }
+                Control {
+                    y: item.group != "" ? root.head-h : 0px;
+                    width: 100%;
+                    height: root.row-h;
+                    line: item;
+                    focused: root.zone == 1 && i == root.focus-row;
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------- beside the controls
+
+    // The player: what a chosen source will do. The account: what it brings.
+    if root.surface == "player" || root.surface == "account": VerticalLayout {
+        x: root.right-x;
+        y: root.body-y;
+        width: root.right-w;
+        height: self.preferred-height;
+        for node[i] in root.flow: VerticalLayout {
+            if i > 0: Down {
+                unit: root.unit;
+            }
+            NodeCard {
+                node: node;
+                unit: root.unit;
+            }
+        }
+    }
+
+    // The picture: what is playing now, the player, the screen -- and below
+    // the toggle, every common frame rate against this display's modes.
+    if root.surface == "video": VerticalLayout {
+        x: root.right-x;
+        y: root.body-y;
+        width: root.right-w;
+        height: self.preferred-height;
+        NodeCard {
+            node: root.film;
+            unit: root.unit;
+        }
+        Down {
+            unit: root.unit;
+            label: "MediaBox Player";
+        }
+        NodeCard {
+            node: root.screen;
+            unit: root.unit;
+        }
+    }
+    if root.surface == "video": VerticalLayout {
+        x: root.x1;
+        y: root.rows-y + root.rows-h + root.height * 0.03;
+        width: root.left-w;
+        height: self.preferred-height;
+        spacing: root.height * 0.006;
+        if root.rates.length > 0: Text {
+            text: "Bu ekranda kare hızları";
+            font-size: Metrics.t-meta;
+            font-weight: 600;
+            color: Look.violet;
+            height: root.head-h;
+            vertical-alignment: center;
+        }
+        for rate in root.rates: HorizontalLayout {
+            height: root.height * 0.04;
+            spacing: root.unit * 0.8;
+            Text {
+                width: root.left-w * 0.24;
+                text: rate.film;
+                font-size: Metrics.t-secondary;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: rate.mode;
+                font-size: Metrics.t-meta;
+                color: Look.soft;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            VerticalLayout {
+                alignment: center;
+                Fit {
+                    text: rate.fit;
+                    tone: rate.tone;
+                    unit: root.unit;
+                }
+            }
+        }
+        if root.note != "": Text {
+            text: root.note;
+            font-size: Metrics.t-meta;
+            color: Look.dim;
+            wrap: word-wrap;
+        }
+    }
+
+    // The sound: what leaves the player, what becomes of each format, and
+    // the receiver at the end.
+    if root.surface == "audio": VerticalLayout {
+        x: root.right-x;
+        y: root.body-y;
+        width: root.right-w;
+        height: self.preferred-height;
+        NodeCard {
+            node: root.stream;
+            unit: root.unit;
+        }
+        Down {
+            unit: root.unit;
+        }
+        Rectangle {
+            border-radius: root.unit * 0.7;
+            background: Look.card;
+            border-width: 1px;
+            border-color: Look.card-line;
+            height: routes-list.preferred-height;
+            routes-list := VerticalLayout {
+                padding: root.unit * 0.8;
+                spacing: root.unit * 0.25;
+                for route in root.routes: HorizontalLayout {
+                    spacing: root.unit * 0.8;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: route.codec;
+                        font-size: Metrics.t-meta;
+                        font-weight: 600;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
+                    Fit {
+                        text: route.route;
+                        tone: route.tone;
+                        unit: root.unit;
+                    }
+                }
+            }
+        }
+        Down {
+            unit: root.unit;
+        }
+        NodeCard {
+            node: root.device;
+            unit: root.unit;
+        }
+        if root.note != "": Text {
+            text: root.note;
+            font-size: Metrics.t-meta;
+            color: Look.dim;
+            wrap: word-wrap;
+        }
+    }
+
+    // The subtitle: itself, drawn by the film's own renderer over a frame
+    // the shape of the panel, at the panel's proportions.
+    if root.surface == "subtitles": VerticalLayout {
+        x: root.right-x;
+        y: root.body-y;
+        width: root.right-w;
+        height: self.preferred-height;
+        spacing: root.unit * 0.6;
+        Rectangle {
+            height: root.right-w * root.height / root.width;
+            border-radius: root.unit * 0.6;
+            clip: true;
+            background: @linear-gradient(165deg, #3a4f6e 0%, #26344c 38%, #141a26 70%, #07080c 100%);
+            border-width: 1px;
+            border-color: Look.card-line;
+            // A horizon and a shape on it, so the outline and the band have
+            // something to stand out against, light and dark.
+            Rectangle {
+                x: 0;
+                y: parent.height * 0.52;
+                width: 100%;
+                height: parent.height * 0.48;
+                background: @linear-gradient(180deg, #d9a35a 0%, #6b4a2f 30%, #1b140f 100%);
+            }
+            Rectangle {
+                x: parent.width * 0.62;
+                y: parent.height * 0.3;
+                width: parent.width * 0.12;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: #ffe7b8;
+            }
+            CaptionBlock {
+                x: parent.width * 0.05;
+                width: parent.width * 0.9;
+                height: self.preferred-height;
+                y: parent.height * (1 - CaptionStyle.lift) - self.height;
+                frame-w: parent.width;
+                frame-h: parent.height;
+                lines: root.sample;
+            }
+        }
+        Text {
+            text: "Canlı önizleme · filmde altyazıyı çizen bileşenin aynısı";
+            font-size: Metrics.t-meta;
+            color: Look.dim;
+            wrap: word-wrap;
+        }
+    }
+
+    Chrome {
+        width: 100%;
+        height: 100%;
+        search: false;
+        on-search: false;
+        on-places: root.zone == 2;
+        place: root.place;
+        current: 3;
+        places: root.places;
+    }
+}

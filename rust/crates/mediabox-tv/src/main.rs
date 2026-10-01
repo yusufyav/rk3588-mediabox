@@ -20,6 +20,7 @@ mod keyboard;
 mod metrics;
 mod model;
 mod platform;
+mod prefs;
 mod route;
 mod rpc;
 mod screens;
@@ -114,6 +115,15 @@ fn state_file() -> String {
     std::env::var("MEDIABOX_TV_STATE").unwrap_or_else(|_| STATE_FILE.to_string())
 }
 
+/// What "Filmler ve Diziler > Ayarlar" keeps for itself (`prefs.rs`),
+/// beside the session file.
+fn prefs_file() -> std::path::PathBuf {
+    match std::env::var_os("MEDIABOX_TV_PREFERENCES") {
+        Some(path) => path.into(),
+        None => std::path::Path::new(&state_file()).with_file_name("media-preferences.json"),
+    }
+}
+
 fn snapshot_dir() -> String {
     std::env::var("MEDIABOX_TV_SNAPSHOTS").unwrap_or_else(|_| SNAPSHOT_DIR.to_string())
 }
@@ -160,6 +170,11 @@ struct App {
     discover: screens::discover::Discover,
     library: screens::library::Library,
     settings: screens::settings::Settings,
+    /// "Filmler ve Diziler > Ayarlar".
+    media_settings: screens::media_settings::MediaSettings,
+    /// What that screen keeps for itself: the player a source opens in,
+    /// where a film left part-way starts, how the subtitle looks.
+    prefs: prefs::MediaPreferences,
     account: screens::account::Account,
     wifi: screens::wireless::Wifi,
     bt: screens::wireless::Bluetooth,
@@ -219,6 +234,9 @@ struct App {
     left_film: Option<Instant>,
     /// The subtitle line drawn over the film now.
     caption: String,
+    /// Bumped by every change to the subtitle settings the control plane
+    /// keeps, so an answer read before the change cannot put it back.
+    subtitle_generation: u64,
     /// Ok held down where a hold means something of its own, and not yet
     /// let go.
     ok_hold: Option<OkHold>,
@@ -320,6 +338,7 @@ impl App {
                 Route::Detail => self.act_on_detail(intent),
                 Route::NowPlaying => self.act_on_now_playing(intent),
                 Route::Settings => self.act_on_settings(intent),
+                Route::MediaSettings => self.act_on_media_settings(intent),
                 Route::Account => self.act_on_account(intent),
                 Route::Diagnostics => self.act_on_diagnostics(intent),
                 Route::Wifi => self.act_on_wifi(intent),
@@ -512,9 +531,18 @@ impl App {
                     self.close_sheet();
                     self.run(action);
                 }
+                // Where it starts is answered; which player is next.
                 Press::Play(start) => {
                     self.close_sheet();
+                    self.choose_player(start);
+                }
+                Press::PlayHere(start) => {
+                    self.close_sheet();
                     self.start_here(start);
+                }
+                Press::PlayKodi(start) => {
+                    self.close_sheet();
+                    self.start_on_kodi(start);
                 }
             },
             _ => {}
@@ -921,7 +949,8 @@ impl App {
                     Zone::Places => match self.media.focused_place() {
                         Some(Place::Discover) => self.open_tab(Route::Discover),
                         Some(Place::Library) => self.open_tab(Route::Library),
-                        Some(Place::Settings) => self.open_screen(state::Nav::Settings),
+                        // The catalogue's own settings, not the box's.
+                        Some(Place::Settings) => self.open_tab(Route::MediaSettings),
                         // The board is this screen.
                         Some(Place::Board) | None => {
                             if self.media.step(1, 0) {
@@ -1118,7 +1147,7 @@ impl App {
                             0 => self.open_tab(Route::Media),
                             1 => self.open_tab(Route::Discover),
                             2 => self.open_tab(Route::Library),
-                            _ => self.open_screen(state::Nav::Settings),
+                            _ => self.open_tab(Route::MediaSettings),
                         }
                         return;
                     }
@@ -1223,7 +1252,7 @@ impl App {
                         match self.discover.place {
                             0 => self.open_tab(Route::Media),
                             2 => self.open_tab(Route::Library),
-                            3 => self.open_screen(state::Nav::Settings),
+                            3 => self.open_tab(Route::MediaSettings),
                             // Discover is this screen.
                             _ => {
                                 self.discover.step(1, 0);
@@ -1527,7 +1556,7 @@ impl App {
                     Zone::Places => match self.library.place {
                         0 => self.open_tab(Route::Media),
                         1 => self.open_tab(Route::Discover),
-                        3 => self.open_screen(state::Nav::Settings),
+                        3 => self.open_tab(Route::MediaSettings),
                         // The library is this screen.
                         _ => {
                             self.library.step(1, 0);
@@ -1901,11 +1930,80 @@ impl App {
         }
         let video = detail.episode.clone();
         let left_at = detail.resume_seconds(video.as_deref().unwrap_or(&detail.id));
-        if left_at > 0 {
-            self.open_sheet(Sheet::resume(left_at));
+        // "Yarıda kalan film", from the catalogue's settings: asked, or
+        // decided there once and for all.
+        match self.prefs.resume.start(left_at) {
+            Some(start) => self.choose_player(start),
+            None => self.open_sheet(Sheet::resume(left_at)),
+        }
+    }
+
+    /// Where the film starts is decided; which player it opens in is
+    /// "Varsayılan oynatıcı" -- asked when it says to ask, and this
+    /// interface's own whenever Kodi is not there to be chosen.
+    fn choose_player(&mut self, start: u64) {
+        use prefs::PlayerChoice;
+        match self.prefs.player {
+            PlayerChoice::Kodi if self.kodi_installed() => self.start_on_kodi(start),
+            PlayerChoice::Ask if self.kodi_installed() => self.open_sheet(Sheet::player(start)),
+            _ => self.start_here(start),
+        }
+    }
+
+    /// Whether Kodi is on this box, as the launcher last heard. Unknown --
+    /// the first answer not in yet -- is taken as there: the daemon refuses
+    /// in words if it is not.
+    fn kodi_installed(&self) -> bool {
+        self.display
+            .as_ref()
+            .is_none_or(|display| display.applications.iter().any(|app| app.id == "kodi" && app.installed))
+    }
+
+    /// Opens the source chosen on the page in Kodi, from `start` seconds.
+    ///
+    /// The control plane resolves it and hands Kodi the television in one
+    /// call, stopping this process on the way, so everything this interface
+    /// needs to come back to -- the page, under the catalogue -- is written
+    /// down first, exactly as a handover from our own player does it.
+    fn start_on_kodi(&mut self, start: u64) {
+        if self.handing_over {
             return;
         }
-        self.start_here(0);
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(source) = detail.selected_source().filter(|source| source.parsed.playable) else {
+            return;
+        };
+        let (url, raw) = (source.parsed.url.clone(), source.raw.clone());
+        let watch = serde_json::json!({
+            "type": detail.kind,
+            "id": detail.id,
+            "videoId": detail.episode,
+            "name": detail.meta.name,
+            "poster": detail.meta.poster,
+        });
+        mark_kodi_return(&detail.kind, &detail.id);
+        self.handing_over = true;
+        self.remember();
+        self.store.flush();
+        if let Some(window) = self.window.upgrade() {
+            window.set_detail_note("Kodi'de açılıyor…".into());
+        }
+        self.say("Kodi'de açılıyor…".into());
+        spawn_play_on_kodi(url, raw, start, watch);
+    }
+
+    /// Kodi did not take the film, in the control plane's own words; the
+    /// television is still this interface's.
+    fn kodi_refused(&mut self, why: String) {
+        self.handing_over = false;
+        let _ = std::fs::remove_file(kodi_return_file());
+        if let Some(window) = self.window.upgrade() {
+            window.set_detail_note("".into());
+        }
+        self.say(format!("Kodi'de açılamadı — {why}"));
+        self.paint();
     }
 
     /// Starts the film here, from `start` seconds.
@@ -2543,6 +2641,7 @@ impl App {
 
     /// Turn "Otomatik eşitleme" over and keep it.
     fn toggle_subtitle_auto_sync(&mut self) {
+        self.subtitle_generation += 1;
         let next = !self.now.subtitle_auto_sync.unwrap_or(true);
         self.now.subtitle_auto_sync = Some(next);
         spawn_here(HereCommand::SubtitleAutoSyncSet(next));
@@ -2552,6 +2651,7 @@ impl App {
 
     /// Turn "AutoSync uyumsuz altyazıları göster" over and keep it.
     fn toggle_subtitle_show_incompatible(&mut self) {
+        self.subtitle_generation += 1;
         let next = !self.now.subtitle_show_incompatible.unwrap_or(false);
         self.now.subtitle_show_incompatible = Some(next);
         spawn_here(HereCommand::SubtitleShowIncompatibleSet(next));
@@ -2561,6 +2661,7 @@ impl App {
 
     /// Move "Tercih edilen altyazı dili" by `step` and put it into effect.
     fn step_subtitle_preference(&mut self, step: i32) {
+        self.subtitle_generation += 1;
         let next = screens::now_playing::next_preference(self.now.subtitle_preference.as_deref(), step);
         self.now.subtitle_preference = next.clone();
         spawn_here(HereCommand::SubtitlePreference(next));
@@ -2990,6 +3091,251 @@ impl App {
         if self.settings.ethernet.due_for_status() {
             spawn_ethernet(mediabox_core::Request::EthernetStatus);
         }
+    }
+
+    // ------------------------------------------------- the catalogue's settings
+
+    /// "Filmler ve Diziler > Ayarlar", as one of the catalogue's places.
+    ///
+    /// The subtitle settings are asked of the control plane each time: they
+    /// are kept there, and a film's panel may have changed them since. The
+    /// display and the sound are the machine poll's, which every screen
+    /// reads; asking for the display here would put its setting back on the
+    /// wire (`follow_output`), which is not something opening a page should
+    /// ever do.
+    fn open_media_settings(&mut self) {
+        self.media_settings.enter();
+        self.open(Route::MediaSettings);
+        spawn_subtitle_preferences(self.subtitle_generation);
+    }
+
+    /// The subtitle settings the control plane keeps, as it answered. An
+    /// answer that left before a change made here is older than the change,
+    /// and a film's own poll is the authority while one plays.
+    fn subtitle_preferences_read(&mut self, generation: u64, status: Value) {
+        if generation != self.subtitle_generation || self.here.is_some() {
+            return;
+        }
+        self.now.take_subtitle_preferences(&status);
+        if self.route() == Route::MediaSettings {
+            self.paint();
+        }
+    }
+
+    /// The screen's rows and anything else it needs, built from the owners'
+    /// last answers.
+    fn with_media_context<R>(&self, f: impl FnOnce(&screens::media_settings::Context) -> R) -> R {
+        let audio = self.audio_status();
+        let output = self.output_status();
+        let session = screens::account::Session::from_status(self.status.as_ref());
+        f(&screens::media_settings::Context {
+            prefs: &self.prefs,
+            audio: audio.as_ref(),
+            output: output.as_ref(),
+            subtitle_language: self.now.subtitle_preference.as_deref(),
+            subtitle_auto_sync: self.now.subtitle_auto_sync,
+            subtitle_show_incompatible: self.now.subtitle_show_incompatible,
+            session: &session,
+            kodi: self.kodi_installed(),
+        })
+    }
+
+    fn act_on_media_settings(&mut self, intent: Intent) {
+        use screens::media_settings::Step;
+        let category = self.media_settings.current();
+        let rows = self.with_media_context(|context| screens::media_settings::rows(category, context));
+        let step = match intent {
+            Intent::Move(dx, dy) => self.media_settings.step(dx, dy, &rows),
+            Intent::Select => self.media_settings.select(&rows),
+            // The controls back to the path; from the path, the board, as
+            // from the catalogue's other places.
+            Intent::Dismiss => {
+                if !self.media_settings.back() {
+                    self.open_tab(Route::Media);
+                    return;
+                }
+                Step::Moved
+            }
+            _ => Step::Unchanged,
+        };
+        match step {
+            Step::Unchanged => {}
+            Step::Moved => self.paint(),
+            Step::Change(control) => self.change_media_setting(control),
+            Step::Place(0) => self.open_tab(Route::Media),
+            Step::Place(1) => self.open_tab(Route::Discover),
+            Step::Place(2) => self.open_tab(Route::Library),
+            // This screen's own mark: back onto the path.
+            Step::Place(_) => {
+                self.media_settings.enter();
+                self.paint();
+            }
+        }
+    }
+
+    /// One control changed, by whoever keeps it -- the same calls the film's
+    /// own panel makes for the same settings.
+    fn change_media_setting(&mut self, control: screens::media_settings::Control) {
+        use screens::media_settings::{Control, audio_change, prefs_change};
+        if let Some(prefs) = prefs_change(&self.prefs, control) {
+            self.prefs = prefs;
+            prefs::write(prefs_file(), prefs);
+            self.apply_caption_style();
+            self.paint();
+            return;
+        }
+        match control {
+            Control::RefreshMatching => {
+                let on = self.output_status().is_some_and(|output| output.content_matching);
+                spawn_output(mediabox_core::Request::OutputContentMatching { enabled: !on });
+            }
+            Control::SubtitleLanguage => self.step_subtitle_preference(1),
+            Control::AutoSync => self.toggle_subtitle_auto_sync(),
+            Control::ShowIncompatible => self.toggle_subtitle_show_incompatible(),
+            Control::SignIn => self.run(Action::OpenAccount),
+            Control::SignOut => self.open_sheet(Sheet::confirm(Action::SignOut, Action::SignOut.question())),
+            other => {
+                let setting = self.audio_status().and_then(|audio| audio_change(&audio, other));
+                if let Some(setting) = setting {
+                    spawn_audio(mediabox_core::Request::AudioSet { setting });
+                }
+            }
+        }
+    }
+
+    /// The subtitle's look, as the catalogue's settings keep it, on the one
+    /// renderer the film and the preview share.
+    fn apply_caption_style(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let caption = self.prefs.caption;
+        let style = window.global::<CaptionStyle>();
+        style.set_scale(caption.size.scale());
+        style.set_ink(slint::Color::from_argb_encoded(0xff00_0000 | caption.color.rgb()));
+        style.set_edge(caption.edge.width());
+        let band = caption.background.argb();
+        style.set_banded(band >> 24 != 0);
+        style.set_band(slint::Color::from_argb_encoded(band));
+        style.set_lift(caption.position.lift());
+    }
+
+    fn paint_media_settings(&mut self, window: &MediaBoxWindow) {
+        use screens::media_settings::{self as ms, CATEGORIES, Category, Zone};
+        fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+            slint::ModelRc::new(slint::VecModel::from(items))
+        }
+        fn node(node: ms::Node) -> MsNode {
+            MsNode {
+                eyebrow: node.eyebrow.into(),
+                title: node.title.into(),
+                lines: strings(node.lines.into_iter()),
+                tone: node.tone.into(),
+            }
+        }
+        let category = self.media_settings.current();
+        let (rows, summaries) = self.with_media_context(|context| {
+            (
+                ms::rows(category, context),
+                CATEGORIES.iter().map(|category| ms::summary(*category, context)).collect::<Vec<_>>(),
+            )
+        });
+        self.media_settings.settle(&rows);
+
+        let screen = &self.media_settings;
+        window.set_ms_zone(match screen.zone {
+            Zone::Categories => 0,
+            Zone::Controls => 1,
+            Zone::Places => 2,
+        });
+        window.set_ms_place(screen.place as i32);
+        window.set_media_places(strings(screens::media::PLACES.iter().map(|p| p.icon().to_string())));
+        window.set_ms_category(screen.category as i32);
+        window.set_ms_row(screen.row() as i32);
+        window.set_ms_categories(model(
+            CATEGORIES
+                .iter()
+                .zip(summaries)
+                .map(|(category, summary)| MsCategory {
+                    icon: category.icon().into(),
+                    label: category.label().into(),
+                    summary: summary.into(),
+                })
+                .collect(),
+        ));
+        window.set_ms_surface(category.surface().into());
+        window.set_ms_title(category.label().into());
+        window.set_ms_blurb(category.blurb().into());
+        let mut heads = 0;
+        window.set_ms_rows(model(
+            rows.into_iter()
+                .map(|row| {
+                    if !row.group.is_empty() {
+                        heads += 1;
+                    }
+                    MsRow {
+                        group: row.group.into(),
+                        heads,
+                        label: row.label.into(),
+                        hint: row.hint.into(),
+                        kind: row.kind.name().into(),
+                        value: row.value.into(),
+                        on: row.on,
+                        choices: strings(row.choices.into_iter()),
+                        selected: row.selected as i32,
+                        enabled: row.enabled,
+                    }
+                })
+                .collect(),
+        ));
+
+        let session = screens::account::Session::from_status(self.status.as_ref());
+        let mut note = String::new();
+        match category {
+            Category::Player => {
+                let flow = ms::player_flow(&self.prefs, self.kodi_installed());
+                window.set_ms_flow(model(flow.into_iter().map(node).collect()));
+            }
+            Category::Video => {
+                let view = ms::video_view(self.output_status().as_ref());
+                window.set_ms_film(node(view.film));
+                window.set_ms_screen(node(view.screen));
+                window.set_ms_rates(model(
+                    view.rates
+                        .into_iter()
+                        .map(|rate| MsRate {
+                            film: rate.film.into(),
+                            mode: rate.mode.into(),
+                            fit: rate.fit.into(),
+                            tone: rate.tone.into(),
+                        })
+                        .collect(),
+                ));
+                note = view.note;
+            }
+            Category::Audio => {
+                let view = ms::audio_view(self.audio_status().as_ref());
+                window.set_ms_stream(node(view.stream));
+                window.set_ms_device(node(view.device));
+                window.set_ms_routes(model(
+                    view.routes
+                        .into_iter()
+                        .map(|route| MsRoute {
+                            codec: route.codec.into(),
+                            route: route.route.into(),
+                            tone: route.tone.into(),
+                        })
+                        .collect(),
+                ));
+                note = view.note;
+            }
+            Category::Subtitles => {}
+            Category::Account => {
+                window.set_ms_addons(session.addons as i32);
+                window.set_ms_flow(model(ms::account_flow(&session).into_iter().map(node).collect()));
+            }
+        }
+        window.set_ms_note(note.into());
     }
 
     // -------------------------------------------------------------- the account
@@ -3454,7 +3800,7 @@ impl App {
     /// Back from a page's own mark is the board and Back on the board leaves
     /// "Filmler ve Diziler".
     fn open_tab(&mut self, route: Route) {
-        while matches!(self.route(), Route::Discover | Route::Library | Route::Search) {
+        while matches!(self.route(), Route::Discover | Route::Library | Route::Search | Route::MediaSettings) {
             if !self.stack.pop() {
                 break;
             }
@@ -3465,6 +3811,7 @@ impl App {
         match route {
             Route::Discover => self.open_screen(state::Nav::Discover),
             Route::Library => self.open_screen(state::Nav::Library),
+            Route::MediaSettings => self.open_media_settings(),
             _ => {}
         }
     }
@@ -3621,6 +3968,7 @@ impl App {
                 Route::Media => self.media.arrive(),
                 Route::Discover => self.discover.arrive(),
                 Route::Library => self.library.arrive(),
+                Route::MediaSettings => self.media_settings.arrive(),
                 _ => {}
             }
             self.paint();
@@ -3879,6 +4227,7 @@ impl App {
             Route::Detail => self.paint_detail(&window),
             Route::NowPlaying => self.paint_now_playing(&window),
             Route::Settings => self.paint_settings(&window),
+            Route::MediaSettings => self.paint_media_settings(&window),
             Route::Account => self.paint_account(&window),
             Route::Diagnostics => self.paint_diagnostics(&window),
             Route::Wifi => self.paint_wifi(&window),
@@ -3926,6 +4275,22 @@ impl App {
                     SheetRow {
                         label: "Baştan başla".into(),
                         hint: "".into(),
+                        tone: "".into(),
+                    },
+                ])));
+            }
+            Sheet::Player { index, .. } => {
+                window.set_sheet_kind("power".into());
+                window.set_sheet_index(*index as i32);
+                window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+                    SheetRow {
+                        label: "MediaBox".into(),
+                        hint: "Bu cihazın oynatıcısı, Ayarlar'daki altyazı ve ses ile".into(),
+                        tone: "".into(),
+                    },
+                    SheetRow {
+                        label: "Kodi".into(),
+                        hint: "Televizyon Kodi'ye geçer".into(),
                         tone: "".into(),
                     },
                 ])));
@@ -5240,6 +5605,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         discover: screens::discover::Discover::new(),
         library: screens::library::Library::new(),
         settings: screens::settings::Settings::new(),
+        media_settings: screens::media_settings::MediaSettings::new(),
+        prefs: prefs::read(prefs_file()),
         account: screens::account::Account::new(),
         wifi: screens::wireless::Wifi::new(),
         bt: screens::wireless::Bluetooth::new(),
@@ -5270,6 +5637,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         handing_over: false,
         left_film: None,
         caption: String::new(),
+        subtitle_generation: 0,
         ok_hold: None,
         here: None,
         hero_meta: std::collections::HashMap::new(),
@@ -5443,6 +5811,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Straight to the home screen: it has nothing to wait for.
     with_app(|app| {
+        app.apply_caption_style();
         app.stack.reset(Route::Home);
         app.restore();
     });
@@ -5806,6 +6175,27 @@ fn seconds_shown(seconds: f64) -> String {
     format!("{seconds:.1}s").replace('.', ",")
 }
 
+/// Opens a source in Kodi. A transport error is as likely to be the
+/// handover working -- the control plane stops this process while the call
+/// is in flight -- as it is to be a failure, so only a refusal the control
+/// plane answered with is reported, as `spawn_handoff` does.
+fn spawn_play_on_kodi(url: Option<String>, raw: serde_json::Value, start: u64, watch: serde_json::Value) {
+    detached("mediabox-tv-play-kodi", async move {
+        let client = rpc::Client::new(socket_path());
+        let stream = url.is_none().then_some(&raw);
+        match client.play_on_kodi(url.as_deref(), stream, start, Some(&watch)).await {
+            Ok(_) => eprintln!("mediabox-tv.play opened on kodi start={start}"),
+            Err(rpc::Error::Refused { message, .. }) => {
+                eprintln!("mediabox-tv.play kodi refused: {message}");
+                let _ = slint::invoke_from_event_loop(move || {
+                    with_app(|app| app.kodi_refused(message));
+                });
+            }
+            Err(e) => eprintln!("mediabox-tv.play kodi call ended: {e}"),
+        }
+    });
+}
+
 fn spawn_handoff() {
     detached("mediabox-tv-handoff", async move {
         let client = rpc::Client::new(socket_path());
@@ -6046,6 +6436,23 @@ fn page_of_film(status: &Value) -> Option<state::Item> {
     }
     item.poster = watch.get("poster").and_then(Value::as_str).map(str::to_owned);
     Some(item)
+}
+
+/// The subtitle settings the control plane keeps, for the catalogue's
+/// settings screen. The film's own status carries them and answers with no
+/// film playing too; nothing else in it is read here.
+fn spawn_subtitle_preferences(generation: u64) {
+    detached("mediabox-tv-subtitle-prefs", async move {
+        let client = rpc::Client::new(socket_path());
+        match client.status_here().await {
+            Ok(status) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    with_app(|app| app.subtitle_preferences_read(generation, status));
+                });
+            }
+            Err(e) => eprintln!("mediabox-tv.subtitles preferences unavailable: {e}"),
+        }
+    });
 }
 
 /// Asks the interface's own player where it has got to.

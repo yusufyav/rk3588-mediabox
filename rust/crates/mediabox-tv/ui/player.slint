@@ -20,6 +20,23 @@ export struct CaptionLine {
     runs: [CaptionRun],
 }
 
+// How the subtitle looks: "Filmler ve Diziler > Ayarlar > Altyazı", set from
+// Rust (`prefs.rs`). Every default is the subtitle as it was drawn before
+// there was a choice -- 4 % of the panel's short side, white, a black outline
+// 5 % of the letter, nothing behind it, its last line 5 % above the bottom --
+// so a box that never opened the screen draws exactly what it drew.
+export global CaptionStyle {
+    in property <float> scale: 1.0;
+    in property <color> ink: #ffffff;
+    // The outline, as a fraction of the letter's size; 0 is none.
+    in property <float> edge: 0.05;
+    // A band behind each line, when there is one.
+    in property <bool> banded: false;
+    in property <color> band: #00000000;
+    // How far above the bottom of the picture the last line sits.
+    in property <float> lift: 0.05;
+}
+
 // One stretch of a subtitle, white with a black outline.
 //
 // The outline is Stremio's own (stremio-video `withHTMLSubtitles`): the text
@@ -33,26 +50,29 @@ component CaptionStretch {
     in property <bool> italic;
     in property <bool> bold;
     in property <length> size;
-    // Stremio's 0.15rem against a 4vmin line: about 5 % of the letter.
-    property <length> o: max(1px, self.size * 0.05);
+    // Stremio's 0.15rem against a 4vmin line: about 5 % of the letter, by
+    // default (`CaptionStyle.edge`).
+    property <length> o: max(1px, self.size * CaptionStyle.edge);
     preferred-width: face.preferred-width;
     preferred-height: face.preferred-height;
     min-width: face.preferred-width;
     min-height: face.preferred-height;
 
-    for d in [
-        { x: -1, y: -1 }, { x: 0, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 0 },
-        { x: 1, y: 0 }, { x: -1, y: 1 }, { x: 0, y: 1 }, { x: 1, y: 1 },
-    ]: Text {
-        x: d.x * root.o;
-        y: d.y * root.o;
-        text: root.text;
-        font-family: "Roboto";
-        font-size: root.size;
-        font-italic: root.italic;
-        font-weight: root.bold ? 700 : 400;
-        color: #000000;
-        wrap: no-wrap;
+    if CaptionStyle.edge > 0: Rectangle {
+        for d in [
+            { x: -1, y: -1 }, { x: 0, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 0 },
+            { x: 1, y: 0 }, { x: -1, y: 1 }, { x: 0, y: 1 }, { x: 1, y: 1 },
+        ]: Text {
+            x: d.x * root.o;
+            y: d.y * root.o;
+            text: root.text;
+            font-family: "Roboto";
+            font-size: root.size;
+            font-italic: root.italic;
+            font-weight: root.bold ? 700 : 400;
+            color: #000000;
+            wrap: no-wrap;
+        }
     }
 
     face := Text {
@@ -63,8 +83,40 @@ component CaptionStretch {
         font-size: root.size;
         font-italic: root.italic;
         font-weight: root.bold ? 700 : 400;
-        color: #ffffff;
+        color: CaptionStyle.ink;
         wrap: no-wrap;
+    }
+}
+
+// The subtitle's lines over a picture `frame-w` by `frame-h`: the film's
+// own panel, or the settings screen's preview of it, drawn by the same
+// element so the preview is what the film will show, at its scale.
+export component CaptionBlock inherits VerticalLayout {
+    in property <[CaptionLine]> lines;
+    in property <length> frame-w;
+    in property <length> frame-h;
+    property <length> size: min(frame-w, frame-h) * 0.04 * CaptionStyle.scale;
+    property <length> pad-x: CaptionStyle.banded ? size * 0.3 : 0px;
+    property <length> pad-y: CaptionStyle.banded ? size * 0.06 : 0px;
+
+    for line in lines: HorizontalLayout {
+        alignment: center;
+        Rectangle {
+            background: CaptionStyle.banded ? CaptionStyle.band : transparent;
+            border-radius: CaptionStyle.banded ? root.size * 0.12 : 0px;
+            HorizontalLayout {
+                padding-left: root.pad-x;
+                padding-right: root.pad-x;
+                padding-top: root.pad-y;
+                padding-bottom: root.pad-y;
+                for run in line.runs: CaptionStretch {
+                    text: run.text;
+                    italic: run.italic;
+                    bold: run.bold;
+                    size: root.size;
+                }
+            }
+        }
     }
 }
 
@@ -185,7 +237,6 @@ export component Player inherits Rectangle {
     in property <string> caption;
     /// The same, line by line and styled.
     in property <[CaptionLine]> caption-lines;
-    property <length> caption-size: min(root.width, root.height) * 0.04;
     /// How the subtitle that is on was timed, under the delay on the
     /// subtitle panel: "Otomatik eşitleme · +1,82 sn · %97".
     in property <string> menu-note;
@@ -284,24 +335,20 @@ export component Player inherits Rectangle {
     // outline and no band behind it, its bottom 5 % above the picture's
     // edge; lines as the file broke them, each stretch in its own style.
     // Kodi's defaults are the same shape (an outlined face, no box, 4.95 %
-    // up). Above the row while the controls are up.
-    if caption != "" && waiting == "": VerticalLayout {
+    // up). Above the row while the controls are up. Each of those is a
+    // default the viewer can change (`CaptionStyle`); the pill and the row
+    // still push it up by what they always did.
+    if caption != "" && waiting == "": CaptionBlock {
+        property <float> bottom: 1 - CaptionStyle.lift;
         x: root.width * 0.05;
         width: root.width * 0.9;
         // As tall as its lines: outside a layout it would be the whole
         // panel, and its lines would sit off the bottom of it.
         height: self.preferred-height;
-        y: (open ? root.height * 0.76 : pill != "" ? root.height * 0.89 : root.height * 0.95) - self.height;
-
-        for line in caption-lines: HorizontalLayout {
-            alignment: center;
-            for run in line.runs: CaptionStretch {
-                text: run.text;
-                italic: run.italic;
-                bold: run.bold;
-                size: root.caption-size;
-            }
-        }
+        y: (open ? root.height * min(0.76, bottom) : pill != "" ? root.height * (bottom - 0.06) : root.height * bottom) - self.height;
+        frame-w: root.width;
+        frame-h: root.height;
+        lines: caption-lines;
     }
 
     if open: Rectangle {

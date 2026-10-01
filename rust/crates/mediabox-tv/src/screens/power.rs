@@ -82,6 +82,14 @@ pub enum Sheet {
         /// 0 is "Kaldığın yerden devam et", 1 is "Baştan başla".
         index: usize,
     },
+    /// Which player the film opens in, when "Filmler ve Diziler > Ayarlar"
+    /// says to ask. The remote starts on this interface's own.
+    Player {
+        /// Where it starts, already decided.
+        start: u64,
+        /// 0 is MediaBox, 1 is Kodi.
+        index: usize,
+    },
 }
 
 impl Sheet {
@@ -101,11 +109,16 @@ impl Sheet {
         Sheet::Resume { at, index: 0 }
     }
 
+    pub fn player(start: u64) -> Self {
+        Sheet::Player { start, index: 0 }
+    }
+
     pub fn title(&self) -> String {
         match self {
             Sheet::Power { .. } => "Güç".into(),
             Sheet::Confirm { question, .. } => question.clone(),
             Sheet::Resume { .. } => "Nereden başlasın?".into(),
+            Sheet::Player { .. } => "Hangi oynatıcıda açılsın?".into(),
         }
     }
 
@@ -122,7 +135,7 @@ impl Sheet {
                 *index = next;
                 true
             }
-            Sheet::Resume { index, .. } => {
+            Sheet::Resume { index, .. } | Sheet::Player { index, .. } => {
                 if dy == 0 {
                     return false;
                 }
@@ -170,6 +183,13 @@ impl Sheet {
                 }
             }
             Sheet::Resume { at, index } => Press::Play(if *index == 0 { *at } else { 0 }),
+            Sheet::Player { start, index } => {
+                if *index == 0 {
+                    Press::PlayHere(*start)
+                } else {
+                    Press::PlayKodi(*start)
+                }
+            }
         }
     }
 }
@@ -179,8 +199,13 @@ pub enum Press {
     Close,
     Ask(Action, String),
     Do(Action),
-    /// Start the film chosen on the page, from this second.
+    /// Start the film chosen on the page, from this second, in the player
+    /// the settings say.
     Play(u64),
+    /// Start it from this second in this interface's own player.
+    PlayHere(u64),
+    /// Start it from this second in Kodi.
+    PlayKodi(u64),
 }
 
 #[cfg(test)]
@@ -206,6 +231,15 @@ mod tests {
     }
 
     #[test]
+    fn asked_which_player_it_starts_on_this_one() {
+        let mut sheet = Sheet::player(754);
+        assert_eq!(sheet.press(), Press::PlayHere(754));
+        assert!(sheet.step(0, 1));
+        assert_eq!(sheet.press(), Press::PlayKodi(754));
+        assert!(!sheet.step(0, 1), "two rows only");
+    }
+
+    #[test]
     fn a_confirmation_opens_on_no() {
         let sheet = Sheet::confirm(Action::Restart, "?");
         assert_eq!(sheet.press(), Press::Close);
@@ -226,7 +260,9 @@ mod tests {
                     assert!(!question.is_empty());
                 }
                 Press::Close => {}
-                Press::Play(_) => panic!("the power sheet never starts a film"),
+                Press::Play(_) | Press::PlayHere(_) | Press::PlayKodi(_) => {
+                    panic!("the power sheet never starts a film")
+                }
             }
             sheet.step(0, 1);
         }

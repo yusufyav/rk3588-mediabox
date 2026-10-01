@@ -7,7 +7,8 @@ import { Discover, DiscoverFilter } from "discover.slint";
 import { Detail, SourceRow, EpisodeRow } from "detail.slint";
 import { NowPlaying } from "now_playing.slint";
 import { VolumeOsd } from "volume.slint";
-import { Player, MenuRow, CaptionLine, CaptionRun } from "player.slint";
+import { Player, MenuRow, CaptionLine, CaptionRun, CaptionStyle } from "player.slint";
+import { MediaSettings, MsCategory, MsRow, MsNode, MsRate, MsRoute } from "media_settings.slint";
 import { Settings } from "settings.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
@@ -18,7 +19,7 @@ import { Account } from "account.slint";
 import { WifiScreen, BluetoothScreen, WifiRow, BtRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
 import { AccountChip } from "chrome.slint";
-export { AccountChip }
+export { AccountChip, CaptionStyle }
 import {
     RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup,
     SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
@@ -29,7 +30,7 @@ export {
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
     OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
-    EpisodeRow, DiscoverFilter, CaptionLine, CaptionRun,
+    EpisodeRow, DiscoverFilter, CaptionLine, CaptionRun, MsCategory, MsRow, MsNode, MsRate, MsRoute,
 }
 
 // What the television shows before there is anything to show.
@@ -117,6 +118,26 @@ export component MediaBoxWindow inherits Window {
     in property <int> media-zone;
     in property <int> media-place;
     in property <[string]> media-places;
+
+    // ---- the catalogue's own settings
+    in property <int> ms-zone;
+    in property <int> ms-place;
+    in property <[MsCategory]> ms-categories;
+    in property <int> ms-category;
+    in property <string> ms-surface;
+    in property <string> ms-title;
+    in property <string> ms-blurb;
+    in property <[MsRow]> ms-rows;
+    in property <int> ms-row;
+    in property <[MsNode]> ms-flow;
+    in property <MsNode> ms-film;
+    in property <MsNode> ms-screen;
+    in property <[MsRate]> ms-rates;
+    in property <MsNode> ms-stream;
+    in property <[MsRoute]> ms-routes;
+    in property <MsNode> ms-device;
+    in property <string> ms-note;
+    in property <int> ms-addons;
 
     // ---- discover
     in property <[DiscoverFilter]> discover-filters;
@@ -569,6 +590,30 @@ export component MediaBoxWindow inherits Window {
             choice-note: root.settings-choice-note;
         }
 
+        if screen == "media-settings": MediaSettings {
+            width: 100%;
+            height: 100%;
+            zone: root.ms-zone;
+            place: root.ms-place;
+            places: root.media-places;
+            categories: root.ms-categories;
+            category: root.ms-category;
+            surface: root.ms-surface;
+            title: root.ms-title;
+            blurb: root.ms-blurb;
+            rows: root.ms-rows;
+            focus-row: root.ms-row;
+            flow: root.ms-flow;
+            film: root.ms-film;
+            screen: root.ms-screen;
+            rates: root.ms-rates;
+            stream: root.ms-stream;
+            routes: root.ms-routes;
+            device: root.ms-device;
+            note: root.ms-note;
+            addons: root.ms-addons;
+        }
+
         if screen == "wifi": WifiScreen {
             width: 100%;
             height: 100%;
@@ -649,7 +694,7 @@ export component MediaBoxWindow inherits Window {
         // places down the left and its search box across the top.
         if screen != "boot" && screen != "film" && screen != "detail" && screen != "media"
             && screen != "discover" && screen != "search" && screen != "library"
-            && screen != "settings" && screen != "diagnostics": TopBar {
+            && screen != "settings" && screen != "diagnostics" && screen != "media-settings": TopBar {
             x: 0;
             y: 0;
             width: 100%;

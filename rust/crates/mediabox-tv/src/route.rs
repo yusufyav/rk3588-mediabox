@@ -21,6 +21,9 @@ pub enum Route {
     Detail,
     NowPlaying,
     Settings,
+    /// "Filmler ve Diziler > Ayarlar": the catalogue's and the player's own
+    /// settings. Not the box's settings screen, which stays `Settings`.
+    MediaSettings,
     /// The Stremio sign-in form, opened from the settings screen.
     Account,
     Diagnostics,
@@ -46,6 +49,7 @@ impl Route {
             Route::Detail => "detail",
             Route::NowPlaying => "now-playing",
             Route::Settings => "settings",
+            Route::MediaSettings => "media-settings",
             Route::Account => "account",
             Route::Diagnostics => "diagnostics",
             Route::Wifi => "wifi",
@@ -63,6 +67,7 @@ impl Route {
             "detail" => Route::Detail,
             "now-playing" => Route::NowPlaying,
             "settings" => Route::Settings,
+            "media-settings" => Route::MediaSettings,
             "account" => Route::Account,
             "diagnostics" => Route::Diagnostics,
             "wifi" => Route::Wifi,
@@ -207,6 +212,7 @@ mod tests {
             Route::Detail,
             Route::NowPlaying,
             Route::Settings,
+            Route::MediaSettings,
             Route::Account,
             Route::Diagnostics,
         ] {

@@ -748,7 +748,7 @@ pub struct View {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     #[test]
     fn the_film_settings_are_grouped_by_what_they_are_about() {
@@ -820,6 +820,12 @@ mod tests {
         ];
         let plan = mediabox_core::audio::plan(&setting, &devices);
         AudioStatus { setting, devices, plan: Some(plan), stream: None, error: None }
+    }
+
+    /// The Sony and the analog output, as the daemon would report them, for
+    /// other screens' tests.
+    pub(crate) fn status_for_tests(setting: AudioSetting) -> AudioStatus {
+        status(setting)
     }
 
     fn down_to(audio: &mut Audio, card: Card) {

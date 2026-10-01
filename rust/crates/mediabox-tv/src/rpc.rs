@@ -229,6 +229,30 @@ impl Client {
         self.call(request).await
     }
 
+    /// Opens a chosen source in Kodi, from `start_seconds`: the daemon
+    /// resolves it and hands the television to Kodi at the same time, and
+    /// stops this process as part of that, so nothing after this call is
+    /// guaranteed to run. The same request the web interface's "Kodi'de oynat"
+    /// sends.
+    pub async fn play_on_kodi(
+        &self,
+        url: Option<&str>,
+        stream: Option<&Value>,
+        start_seconds: u64,
+        watch: Option<&Value>,
+    ) -> Result<Value> {
+        let mut request = json!({"command": "media_play_on_kodi", "start_seconds": start_seconds});
+        if let Some(watch) = watch {
+            request["watch"] = watch.clone();
+        }
+        if let Some(url) = url {
+            request["url"] = json!(url);
+        } else if let Some(stream) = stream {
+            request["stream"] = stream.clone();
+        }
+        self.call(request).await
+    }
+
     /// The interface's own player, while it is running. Stop first, because
     /// it is the one a remote reaches by pressing Back.
     /// Hands a film that is playing here over to Kodi, at the second it had

@@ -832,15 +832,7 @@ impl NowPlaying {
                     && track.note.starts_with("Otomatik eşitleme ·")
                     && !before.iter().any(|(key, note)| *key == track.key && *note == track.note);
             }
-            if let Some(preferred) = status.get("subtitle_preference") {
-                self.subtitle_preference = preferred.as_str().map(str::to_owned);
-            }
-            if let Some(on) = status.get("subtitle_auto_sync").and_then(Value::as_bool) {
-                self.subtitle_auto_sync = Some(on);
-            }
-            if let Some(on) = status.get("subtitle_show_incompatible").and_then(Value::as_bool) {
-                self.subtitle_show_incompatible = Some(on);
-            }
+            self.take_subtitle_preferences(status);
             // The preferred language leads the panel when the film has it.
             if let Some(preferred) = self.subtitle_preference.clone() {
                 self.subtitles.sort_by_key(|track| track.language != preferred);
@@ -850,6 +842,22 @@ impl NowPlaying {
                 self.pill_until = Some(std::time::Instant::now() + PILL_LINGER * 2);
             }
             self.audio = read_tracks(tracks, "audio");
+        }
+    }
+
+    /// The three subtitle settings the control plane keeps, from any answer
+    /// that carries them: the film's own status, or the same status asked
+    /// for with no film by "Filmler ve Diziler > Ayarlar". One copy of them
+    /// in this interface, read by the film's panel and that screen alike.
+    pub fn take_subtitle_preferences(&mut self, status: &Value) {
+        if let Some(preferred) = status.get("subtitle_preference") {
+            self.subtitle_preference = preferred.as_str().map(str::to_owned);
+        }
+        if let Some(on) = status.get("subtitle_auto_sync").and_then(Value::as_bool) {
+            self.subtitle_auto_sync = Some(on);
+        }
+        if let Some(on) = status.get("subtitle_show_incompatible").and_then(Value::as_bool) {
+            self.subtitle_show_incompatible = Some(on);
         }
     }
 
@@ -1050,6 +1058,23 @@ mod tests {
         );
         assert!(now.subtitles.iter().all(|t| t.label == "Türkçe"));
         assert_eq!(now.subtitle_show_incompatible, Some(true));
+    }
+
+    /// Asked with no film, the control plane's status carries no tracks but
+    /// still says what it keeps: the settings screen reads it the same way.
+    #[test]
+    fn the_kept_subtitle_settings_are_read_without_a_film() {
+        let mut now = NowPlaying::new();
+        assert_eq!(now.subtitle_auto_sync, None);
+        let idle = serde_json::json!({"subtitle_preference": "en", "subtitle_auto_sync": false,
+            "subtitle_show_incompatible": true});
+        now.take_subtitle_preferences(&idle);
+        assert_eq!(now.subtitle_preference.as_deref(), Some("en"));
+        assert_eq!((now.subtitle_auto_sync, now.subtitle_show_incompatible), (Some(false), Some(true)));
+        // "Kapalı" is a null, and it is an answer.
+        now.take_subtitle_preferences(&serde_json::json!({"subtitle_preference": null}));
+        assert_eq!(now.subtitle_preference, None);
+        assert_eq!(now.subtitle_auto_sync, Some(false), "what it did not say is kept");
     }
 
     #[test]
