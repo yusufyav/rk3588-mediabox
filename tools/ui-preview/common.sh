@@ -50,7 +50,9 @@ viewer() {
   fi
   # The appliance draws in Inter. Without it the viewer falls back to another
   # face, and every width that elides or wraps is measured in the wrong font.
-  if command -v fc-list >/dev/null && ! fc-list : family | grep -qx 'Inter'; then
+  # Not grep -q: it exits at the first match, fc-list dies of SIGPIPE, and
+  # under pipefail an installed font reads as a missing one.
+  if command -v fc-list >/dev/null && ! fc-list : family | grep -x 'Inter' >/dev/null; then
     echo "warning: the Inter font is not installed; text is measured in a fallback face" >&2
   fi
   printf '%s\n' "$bin"
