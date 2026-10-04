@@ -403,9 +403,11 @@ int main(int argc, char **argv)
 		       ms.total_weight_size / 1048576.0, ms.total_internal_size / 1048576.0,
 		       ms.total_dma_allocated_size / 1048576.0);
 
+	/* AISR_IN_STD: the graph takes codes / STD (rknn config std_values) */
+	float in_std = getenv("AISR_IN_STD") ? atof(getenv("AISR_IN_STD")) : 1.0f;
 	for (int q = 0; q < 256; q++) {
 		if (c.in.type == RKNN_TENSOR_INT8) {
-			long v = lrintf(q / c.in.scale) + c.in.zp;
+			long v = lrintf(q / in_std / c.in.scale) + c.in.zp;
 			c.qin[q] = v < -128 ? -128 : v > 127 ? 127 : v;
 		}
 		c.lut[q] = clamp_y(((int8_t)q - c.out.zp) * c.out.scale);
