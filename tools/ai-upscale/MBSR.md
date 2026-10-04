@@ -46,7 +46,7 @@ out  1x24x540x960  Y of the 4x4 output block (4a+b), U and V of its 2x2 samples
 The LR source is each frame through ffmpeg Lanczos or bicubic to 1080p
 NV12. Patches are 128x128 LR, flipped and transposed, with L1 loss on the 24
 output channels. Adam 3e-4 cosine, batch 48, gradient clip 1. Then QAT at
-5e-5. INT8 is calibrated on 22 training frames (`convert.py --int8 ...
+5e-5. INT8 is calibrated on 23 training frames (`convert.py --int8 ...
 --std 255`).
 
 Weights: `weights/mbsr-x2-c32d9-qat.pt` (998 kB, sha256 `99b9f8fe14a59650...`).

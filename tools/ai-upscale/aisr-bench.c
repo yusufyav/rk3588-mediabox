@@ -333,6 +333,7 @@ static void print_attr(const char *tag, rknn_tensor_attr *a)
 	       a->size, a->w_stride, a->size_with_stride);
 }
 
+#ifndef AISR_LIB
 int main(int argc, char **argv)
 {
 	if (argc < 5) {
@@ -494,3 +495,4 @@ int main(int argc, char **argv)
 	rknn_destroy(ctx);
 	return 0;
 }
+#endif
