@@ -80,6 +80,20 @@ static void pre_nv12(struct ctx *c, int r0, int r1)
 	rknn_tensor_attr *a = &c->in;
 	int f16 = a->type == RKNN_TENSOR_FLOAT16;
 	const uint8_t *uv = c->src + SW * SH;
+	if (!f16 && a->fmt == RKNN_TENSOR_NC1HWC2 && a->dims[1] == 1) {
+		/* the common case, INT8 (1,1,H,W,C2): six lanes of each pixel */
+		int C2 = a->dims[4];
+		for (int r = r0; r < r1; r++) {
+			const uint8_t *s0 = c->src + (size_t)(2 * r) * SW, *s1 = s0 + SW, *su = uv + (size_t)r * SW;
+			int8_t *d = (int8_t *)c->min->virt_addr + (size_t)r * (SW / 2) * C2;
+			for (int x = 0; x < SW / 2; x++, d += C2) {
+				d[0] = c->qin[s0[2 * x]]; d[1] = c->qin[s0[2 * x + 1]];
+				d[2] = c->qin[s1[2 * x]]; d[3] = c->qin[s1[2 * x + 1]];
+				d[4] = c->qin[su[2 * x]]; d[5] = c->qin[su[2 * x + 1]];
+			}
+		}
+		return;
+	}
 	for (int r = r0; r < r1; r++) {
 		const uint8_t *s0 = c->src + (size_t)(2 * r) * SW, *s1 = s0 + SW, *su = uv + (size_t)r * SW;
 		for (int x = 0; x < SW / 2; x++) {
@@ -156,6 +170,29 @@ static void post_nv12(struct ctx *c, int r0, int r1)
 	size_t plane = (size_t)a->dims[2] * W * C2;
 	int f16 = a->type == RKNN_TENSOR_FLOAT16;
 	uint8_t *duv = c->dst + (size_t)DW * DH;
+	if (!f16 && C2 == 16) {
+		/* INT8 (1,2,H,W,16): lanes 0-15 of plane 0 are the 4x4 Y block,
+		 * lanes 0-3 / 4-7 of plane 1 the 2x2 U / V samples */
+		const uint8_t *L = c->lut;
+		for (int r = r0; r < r1; r++) {
+			const uint8_t *p0 = (const uint8_t *)c->mout->virt_addr + (size_t)r * W * 16;
+			const uint8_t *p1 = p0 + plane;
+			uint8_t *y0 = c->dst + (size_t)(4 * r) * DW;
+			uint8_t *u0 = duv + (size_t)(2 * r) * DW;
+			for (int x = 0; x < W; x++, p0 += 16, p1 += 16) {
+				for (int k = 0; k < 4; k++) {
+					uint8_t *o = y0 + (size_t)k * DW + 4 * x;
+					o[0] = L[p0[4 * k]]; o[1] = L[p0[4 * k + 1]];
+					o[2] = L[p0[4 * k + 2]]; o[3] = L[p0[4 * k + 3]];
+				}
+				uint8_t *o = u0 + 4 * x;
+				o[0] = L[p1[0]]; o[1] = L[p1[4]]; o[2] = L[p1[1]]; o[3] = L[p1[5]];
+				o += DW;
+				o[0] = L[p1[2]]; o[1] = L[p1[6]]; o[2] = L[p1[3]]; o[3] = L[p1[7]];
+			}
+		}
+		return;
+	}
 	for (int r = r0; r < r1; r++) {
 		for (int ch = 0; ch < 24; ch++) {
 			uint8_t *o;
