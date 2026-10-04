@@ -2,7 +2,9 @@
 
 Follow-up with RT4KSR x2, a stronger model built for 1080p -> 4K:
 [RT4KSR.md](RT4KSR.md), AI_UPSCALE_PERFORMANCE_FAIL. SPAN x2, the NTIRE 2024
-efficient-SR winner: [SPAN.md](SPAN.md), SPAN_NPU_ARCH_FAIL.
+efficient-SR winner: [SPAN.md](SPAN.md), SPAN_NPU_ARCH_FAIL. QuickSRNet Small
+2x W8A8 from the AIMET model zoo: [QUICKSRNET.md](QUICKSRNET.md),
+QUICKSRNET_NPU_ARCH_FAIL.
 
 Can the RK3588 NPU turn a 1080p SDR frame into a 2160p frame with a 2x SR
 network, at video rate, and look better than VOP2's own upscale? Measured on
@@ -210,6 +212,7 @@ the quantisation pattern changes with the content under it.
 | `quality.py` | workstation | PSNR, SSIM, detail, hf, overshoot, geometry; `--temporal` |
 | `rt4ksr.py` | workstation, torch | RT4KSR x2 from its state dict: FP32 frames, NV12 deploy graph to ONNX |
 | `span.py` | workstation, torch | SPAN x2 eval graph (collapsed Conv3XC) from its state dict, to ONNX |
+| `quicksrnet.py` | workstation, torch | QuickSRNet Small 2x, official W8 grid, to ONNX; FP32 frames |
 
 ```sh
 # workstation
