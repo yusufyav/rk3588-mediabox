@@ -5,13 +5,16 @@
  *   pre   Y plane -> the model's native input tensor (CPU, zero-copy memory)
  *   npu   rknn_run; the driver's own figure is reported next to it
  *   post  native output tensor -> 3840x2160 Y (dequantise + pixel shuffle, CPU)
- *   uv    960x540 UV -> 1920x1080 UV, bilinear (CPU)
+ *   uv    960x540 UV -> 1920x1080 UV, bilinear (CPU); in nv12 mode the
+ *         model makes the chroma itself and this stage is empty
  *   e2e   all of the above, one frame after the other
  *
  * Research tool. Not part of the product, not installed, not run by it.
  *
- * aisr-bench MODEL plain|s2d CORE_MASK SRC.nv12 [-w warmup] [-n iters]
+ * aisr-bench MODEL plain|s2d|nv12 CORE_MASK SRC.nv12 [-w warmup] [-n iters]
  *            [-t threads] [-o out.nv12] [-s seconds] [-l log.csv]
+ * nv12: 6 channels in (Y of each 2x2 block, U, V at 540x960), 24 out (Y of
+ * the 4x4 block, U and V of its 2x2 chroma samples) -- rt4ksr.py's graph.
  * CORE_MASK: 0 auto, 1/2/4 one core, 3 cores 0+1, 7 cores 0+1+2.
  * SRC may hold several 1920x1080 frames; with -o each is converted once
  * after the timed run and written out (quality and temporal tests).
@@ -49,6 +52,7 @@ static void die(const char *what, int ret)
 
 struct ctx {
 	int s2d;                        /* 1: 4ch 540x960 in, 16ch out */
+	int nv12;                       /* 1: 6ch 540x960 in, 24ch out */
 	rknn_tensor_attr in, out;       /* native attrs */
 	rknn_tensor_mem *min, *mout;
 	uint8_t lut[256];               /* int8 output -> Y */
@@ -60,8 +64,43 @@ struct ctx {
 
 /* ---------- stages, each split over rows ---------- */
 
+/* element offset of (channel, row, col) in a native NHWC or NC1HWC2 tensor */
+static inline size_t nat(const rknn_tensor_attr *a, int ch, int r, int x)
+{
+	if (a->fmt == RKNN_TENSOR_NC1HWC2) {
+		size_t H = a->dims[2], W = a->dims[3], C2 = a->dims[4];
+		return (ch / C2) * H * W * C2 + ((size_t)r * W + x) * C2 + ch % C2;
+	}
+	size_t W = a->dims[2], C = a->dims[3];
+	return ((size_t)r * W + x) * C + ch;
+}
+
+static void pre_nv12(struct ctx *c, int r0, int r1)
+{
+	rknn_tensor_attr *a = &c->in;
+	int f16 = a->type == RKNN_TENSOR_FLOAT16;
+	const uint8_t *uv = c->src + SW * SH;
+	for (int r = r0; r < r1; r++) {
+		const uint8_t *s0 = c->src + (size_t)(2 * r) * SW, *s1 = s0 + SW, *su = uv + (size_t)r * SW;
+		for (int x = 0; x < SW / 2; x++) {
+			uint8_t v[6] = { s0[2 * x], s0[2 * x + 1], s1[2 * x], s1[2 * x + 1], su[2 * x], su[2 * x + 1] };
+			for (int ch = 0; ch < 6; ch++) {
+				size_t o = nat(a, ch, r, x);
+				if (f16)
+					((__fp16 *)c->min->virt_addr)[o] = v[ch];
+				else
+					((int8_t *)c->min->virt_addr)[o] = c->qin[v[ch]];
+			}
+		}
+	}
+}
+
 static void pre_rows(struct ctx *c, int r0, int r1)
 {
+	if (c->nv12) {
+		pre_nv12(c, r0, r1);
+		return;
+	}
 	const uint8_t *y = c->src;
 	rknn_tensor_attr *a = &c->in;
 	int f16 = a->type == RKNN_TENSOR_FLOAT16;
@@ -110,9 +149,46 @@ static inline uint8_t clamp_y(float v)
 	return (uint8_t)(v + 0.5f);
 }
 
+static void post_nv12(struct ctx *c, int r0, int r1)
+{
+	rknn_tensor_attr *a = &c->out;
+	int W = a->dims[3], C2 = a->dims[4];
+	size_t plane = (size_t)a->dims[2] * W * C2;
+	int f16 = a->type == RKNN_TENSOR_FLOAT16;
+	uint8_t *duv = c->dst + (size_t)DW * DH;
+	for (int r = r0; r < r1; r++) {
+		for (int ch = 0; ch < 24; ch++) {
+			uint8_t *o;
+			int step;
+			if (ch < 16) {
+				o = c->dst + (size_t)(4 * r + ch / 4) * DW + ch % 4;
+				step = 4;
+			} else {
+				int k = (ch - 16) % 4, comp = (ch - 16) / 4;
+				o = duv + (size_t)(2 * r + k / 2) * DW + 2 * (k % 2) + comp;
+				step = 4;
+			}
+			size_t base = (size_t)(ch / C2) * plane + (size_t)r * W * C2 + ch % C2;
+			if (f16) {
+				const __fp16 *s = (const __fp16 *)c->mout->virt_addr + base;
+				for (int x = 0; x < W; x++)
+					o[x * step] = clamp_y(s[(size_t)x * C2]);
+			} else {
+				const uint8_t *s = (const uint8_t *)c->mout->virt_addr + base;
+				for (int x = 0; x < W; x++)
+					o[x * step] = c->lut[s[(size_t)x * C2]];
+			}
+		}
+	}
+}
+
 /* rows are rows of the output tensor (1080 plain, 540 s2d) */
 static void post_rows(struct ctx *c, int r0, int r1)
 {
+	if (c->nv12) {
+		post_nv12(c, r0, r1);
+		return;
+	}
 	rknn_tensor_attr *a = &c->out;
 	int f = c->s2d ? 4 : 2;         /* output block per tensor pixel */
 	int C = f * f;
@@ -229,7 +305,7 @@ int main(int argc, char **argv)
 	const char *model = argv[1], *srcpath = argv[4], *outpath = NULL, *logpath = NULL;
 	int warm = 20, iters = 300, threads = 4, mask = atoi(argv[3]);
 	double sustain = 0;
-	struct ctx c = { .s2d = !strcmp(argv[2], "s2d") };
+	struct ctx c = { .s2d = !strcmp(argv[2], "s2d"), .nv12 = !strcmp(argv[2], "nv12") };
 	for (int i = 5; i + 1 < argc; i += 2) {
 		if (!strcmp(argv[i], "-w")) warm = atoi(argv[i + 1]);
 		else if (!strcmp(argv[i], "-n")) iters = atoi(argv[i + 1]);
@@ -263,7 +339,9 @@ int main(int argc, char **argv)
 	fclose(fp);
 
 	rknn_context ctx;
-	int ret = rknn_init(&ctx, mbuf, msz, 0, NULL);
+	/* AISR_PERF_DETAIL=1: per-op times from the runtime after the run */
+	int detail = getenv("AISR_PERF_DETAIL") != NULL;
+	int ret = rknn_init(&ctx, mbuf, msz, detail ? RKNN_FLAG_COLLECT_PERF_MASK : 0, NULL);
 	if (ret) die("rknn_init", ret);
 	rknn_sdk_version ver;
 	rknn_query(ctx, RKNN_QUERY_SDK_VERSION, &ver, sizeof(ver));
@@ -302,7 +380,8 @@ int main(int argc, char **argv)
 	if ((ret = rknn_set_io_mem(ctx, c.min, &c.in))) die("rknn_set_io_mem in", ret);
 	if ((ret = rknn_set_io_mem(ctx, c.mout, &c.out))) die("rknn_set_io_mem out", ret);
 
-	int in_rows = c.s2d ? SH / 2 : SH, out_rows = c.out.dims[2];
+	int in_rows = c.s2d || c.nv12 ? SH / 2 : SH, out_rows = c.out.dims[2];
+	int uv_n = c.nv12 ? 0 : DH / 2;
 	FILE *log = logpath ? fopen(logpath, "w") : NULL;
 	if (log) fprintf(log, "t_s,pre,npu,npu_drv,post,uv,e2e\n");
 
@@ -322,7 +401,8 @@ int main(int argc, char **argv)
 		rknn_mem_sync(ctx, c.mout, RKNN_MEMORY_SYNC_FROM_DEVICE);
 		par(&c, post_rows, out_rows);
 		double t3 = now_ms();
-		par(&c, uv_rows, DH / 2);
+		if (uv_n)
+			par(&c, uv_rows, uv_n);
 		double t4 = now_ms();
 		rknn_perf_run pr = { 0 };
 		rknn_query(ctx, RKNN_QUERY_PERF_RUN, &pr, sizeof(pr));
@@ -340,8 +420,13 @@ int main(int argc, char **argv)
 			break;
 	}
 	if (log) fclose(log);
+	if (detail) {
+		rknn_perf_detail pd;
+		if (!rknn_query(ctx, RKNN_QUERY_PERF_DETAIL, &pd, sizeof(pd)))
+			printf("%s\n", pd.perf_data);
+	}
 	printf("model %s variant %s core_mask %d threads %d frames %d (warm-up %d excluded)\n",
-	       model, c.s2d ? "s2d" : "plain", mask, threads, n, warm);
+	       model, c.nv12 ? "nv12" : c.s2d ? "s2d" : "plain", mask, threads, n, warm);
 	stats("pre", tp, n);
 	stats("npu", tn, n);
 	stats("drv", td, n);
@@ -358,7 +443,8 @@ int main(int argc, char **argv)
 			rknn_run(ctx, NULL);
 			rknn_mem_sync(ctx, c.mout, RKNN_MEMORY_SYNC_FROM_DEVICE);
 			par(&c, post_rows, out_rows);
-			par(&c, uv_rows, DH / 2);
+			if (uv_n)
+				par(&c, uv_rows, uv_n);
 			fwrite(c.dst, 1, (size_t)DW * DH * 3 / 2, o);
 		}
 		fclose(o);

@@ -1,5 +1,8 @@
 # NPU super resolution 1080p -> 2160p: AI_SR_QUALITY_NOT_USEFUL
 
+Follow-up with RT4KSR x2, a stronger model built for 1080p -> 4K:
+[RT4KSR.md](RT4KSR.md), AI_UPSCALE_PERFORMANCE_FAIL.
+
 Can the RK3588 NPU turn a 1080p SDR frame into a 2160p frame with a 2x SR
 network, at video rate, and look better than VOP2's own upscale? Measured on
 the Orange Pi 5 Plus, October 2026. **No.** The one configuration that fits a
@@ -204,6 +207,7 @@ the quantisation pattern changes with the content under it.
 | `telemetry.sh` | appliance | NPU/DDR/GPU/CPU/thermal once a second |
 | `reference.py` | workstation, torch | FP32 output of the same model, same chroma path |
 | `quality.py` | workstation | PSNR, SSIM, detail, hf, overshoot, geometry; `--temporal` |
+| `rt4ksr.py` | workstation, torch | RT4KSR x2 from its state dict: FP32 frames, NV12 deploy graph to ONNX |
 
 ```sh
 # workstation
