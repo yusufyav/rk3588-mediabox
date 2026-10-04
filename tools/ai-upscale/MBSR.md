@@ -1,6 +1,7 @@
 # MBSR: 1080p -> 2160p AI upscaling on the RK3588 NPU, in real time, better than VOP2
 
-**MBSR_AI_UPSCALE_PASS.** MBSR is a 2x super-resolution network trained here,
+**MBSR_AI_UPSCALE_PASS on clean downscales only. On a real 1080p release it
+does not beat VOP2: see [REAL_RELEASE.md](REAL_RELEASE.md).** MBSR is a 2x super-resolution network trained here,
 shaped by the measurements in this directory ([NPU_SHAPE.md](NPU_SHAPE.md)).
 On the Orange Pi 5 Plus it takes a 1080p NV12 frame to a 2160p NV12 frame:
 INT8, three NPU cores, no CPU fallback, end to end 29.2 ms median and 39.0 ms

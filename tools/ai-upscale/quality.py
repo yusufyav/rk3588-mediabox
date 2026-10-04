@@ -45,10 +45,13 @@ def luma(f):
     return f[:W * H].reshape(H, W).astype(np.float64)
 
 
+COLS = (8, W - 8)
+
+
 def active(ref):
-    """Rows that carry picture: the letterbox is flat Y=16."""
+    """Rows that carry picture: the letterbox is flat Y=16. Columns: --cols."""
     rows = np.where(ref.max(axis=1) > 20)[0]
-    return slice(max(rows[0], 0) + 8, rows[-1] - 7), slice(8, W - 8)
+    return slice(max(rows[0], 0) + 8, rows[-1] - 7), slice(*COLS)
 
 
 def hf_energy(x):
@@ -160,7 +163,11 @@ def main():
     ap.add_argument('--crops')
     ap.add_argument('--tag', default='f')
     ap.add_argument('--at', nargs='*', help='per frame: "y,x;y,x" crop origins')
+    ap.add_argument('--cols', help='A:B, columns to measure (pillarboxed pictures)')
     o = ap.parse_args()
+    if o.cols:
+        global COLS
+        COLS = tuple(map(int, o.cols.split(':')))
     (temporal if o.temporal else still)(o)
 
 

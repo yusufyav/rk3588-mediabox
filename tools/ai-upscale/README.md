@@ -8,6 +8,8 @@ QUICKSRNET_NPU_ARCH_FAIL. The shape that does fit, measured:
 [NPU_SHAPE.md](NPU_SHAPE.md). **A network trained to that shape passes:
 [MBSR.md](MBSR.md), real time on the NPU and better than VOP2.** Blind
 validation on unseen films with frozen weights: [VALIDATION.md](VALIDATION.md).
+**On a real 1080p release against its 2160p release MBSR does not beat VOP2:
+[REAL_RELEASE.md](REAL_RELEASE.md).**
 
 Can the RK3588 NPU turn a 1080p SDR frame into a 2160p frame with a 2x SR
 network, at video rate, and look better than VOP2's own upscale? Measured on
@@ -219,6 +221,7 @@ the quantisation pattern changes with the content under it.
 | `npu_sweep.py` | workstation, torch | random-weight NV12-native conv bodies, channels x depth, for timing |
 | `aisr-demo.c` | appliance | MBSR against VOP2 on the television, live, A/B every few seconds |
 | `mbsr.py` | workstation, torch + CUDA | MBSR: data prep, training, QAT, FP32 run, NV12 deploy ONNX |
+| `hdr_pairs.py` | workstation | matched SDR test pairs from a film's 1080p and 2160p HDR10 releases |
 | `fetch_xiph.py`, `text_frames.py` | workstation | 4K training frames: Xiph El Fuente by range request, synthetic text |
 
 ```sh
