@@ -311,7 +311,7 @@ impl AppState {
                 Response::success(json!({"applied": applied, "enabled": enabled}))
             }
             Request::SubtitleShowIncompatibleSet { enabled } => {
-                self.subtitles.set_show_incompatible(enabled);
+                self.subtitles.set_show_incompatible(enabled).await;
                 Response::success(json!({"applied": true, "enabled": enabled}))
             }
             Request::MediaSubtitleTextHere => Response::success(self.subtitles.text().await),

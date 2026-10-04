@@ -36,7 +36,11 @@
 //! last resort when every candidate was refused -- the film's own text
 //! track in the language is, or nothing. Chosen by hand it stays on,
 //! untimed. With "AutoSync uyumsuz altyazıları göster" off (the default)
-//! such subtitles are not in the menu at all.
+//! no subtitle AutoSync refused -- `INCONCLUSIVE` included -- is in the menu
+//! or on the screen; on, they are both.
+//!
+//! With "Otomatik eşitleme" on, every fetched subtitle in the preferred
+//! language is checked, not only the first that fits (`survey`).
 
 use crate::media::MediaClient;
 use crate::player::PlayerManager;
@@ -406,7 +410,13 @@ impl Subtitles {
         if manual {
             return;
         }
-        self.apply(number, auto_choice(&preferences, &tracks, &candidates)).await;
+        let choice = auto_choice(&preferences, &tracks, &candidates);
+        // An external choice surveys the rest once it has settled.
+        let external = matches!(choice, Choice::External(_));
+        self.apply(number, choice).await;
+        if !external {
+            spawn_survey(Arc::clone(&self), number);
+        }
     }
 
     /// Put an automatically chosen external subtitle on and, with
@@ -607,6 +617,7 @@ impl Subtitles {
         let Some(delay) = delay else {
             self.set_timing(number, id, timing_from(job, "rejected"));
             self.move_on(number, id, automatic).await;
+            self.withdraw(number, id).await;
             return;
         };
         let timing = Timing { offset: delay, scale: 1.0, ..timing_from(job, "applied") };
@@ -621,6 +632,69 @@ impl Subtitles {
         }
         let state = if on && !by_hand && allowed { "applied" } else { "ready" };
         self.set_timing(number, id, Timing { state: state.into(), ..timing });
+        if automatic {
+            spawn_survey(Arc::clone(self), number);
+        }
+    }
+
+    /// With "AutoSync uyumsuz altyazıları göster" off, a subtitle AutoSync
+    /// refused is not left on the screen, whoever put it on.
+    async fn withdraw(&self, number: u64, id: &str) {
+        if self.preferences().show_incompatible() {
+            return;
+        }
+        let on = self
+            .with_film(number, |film| film.selected.as_deref() == Some(id) && incompatible(film.timing.get(id)))
+            .unwrap_or(false);
+        if on {
+            eprintln!("mediaboxd-rs: film {number}: subtitle {id} is incompatible, taken off");
+            self.player.select_subtitle(None).await;
+            self.with_film(number, |film| film.selected = Some("off".into()));
+        }
+    }
+
+    /// With "Otomatik eşitleme" on, every fetched subtitle in the preferred
+    /// language is checked, not only the first that fits: the menu then says
+    /// of each whether it fits. One at a time, once the automatic choice has
+    /// settled; none of them is put on.
+    async fn survey(self: Arc<Self>, number: u64) {
+        let mut skipped: Vec<String> = Vec::new();
+        loop {
+            let preferences = self.preferences();
+            if !preferences.auto_sync() || preferences.enabled != Some(true) || self.player.film() != number {
+                return;
+            }
+            let Some(language) = preferences.language else {
+                return;
+            };
+            let next = self.with_film(number, |film| {
+                let busy = film.timing.values().any(|t| t.state == "analysing" || t.state == "waiting");
+                let next = film
+                    .candidates
+                    .iter()
+                    .find(|c| {
+                        c.language.as_deref() == Some(language.as_str())
+                            && c.unavailable.is_none()
+                            && !film.timing.contains_key(&c.id)
+                            && !film.tried.contains(&c.id)
+                            && !skipped.contains(&c.id)
+                    })
+                    .map(|c| c.id.clone());
+                (busy, next)
+            });
+            match next {
+                None | Some((_, None)) => return,
+                Some((true, Some(_))) => tokio::time::sleep(POLL).await,
+                Some((false, Some(id))) => {
+                    eprintln!("mediaboxd-rs: film {number}: checking subtitle {id} as well");
+                    if self.load(number, &id).await.is_some() {
+                        Arc::clone(&self).time(number, id, false).await;
+                    } else {
+                        skipped.push(id);
+                    }
+                }
+            }
+        }
     }
 
     /// A timing nobody could find, or a subtitle that does not fit this film:
@@ -649,14 +723,19 @@ impl Subtitles {
 
     /// Every automatic candidate was tried and none was accepted. A subtitle
     /// shown not to fit is never what is left on: the film's own text track
-    /// in the language, else one whose fit could not be told (untimed, as it
-    /// came), else nothing.
+    /// in the language, else -- only with "AutoSync uyumsuz altyazıları
+    /// göster" on -- one whose fit could not be told (untimed, as it came),
+    /// else nothing.
     async fn fall_back(self: &Arc<Self>, number: u64) {
+        // The automatic choice is over: the rest of the language is checked.
+        spawn_survey(Arc::clone(self), number);
+        let show = self.preferences().show_incompatible();
         let Some((manual, undecided)) = self.with_film(number, |film| {
             let undecided = film
                 .tried
                 .iter()
                 .find(|tried| film.loaded.contains_key(tried.as_str()) && !known_bad(film.timing.get(tried.as_str())))
+                .filter(|_| show)
                 .cloned();
             (film.manual, undecided)
         }) else {
@@ -713,7 +792,9 @@ impl Subtitles {
         let known = self
             .with_film(number, |film| film.candidates.iter().any(|c| c.id == id))
             .unwrap_or(false);
-        if !known || !self.put_on(number, id).await {
+        let hidden = !self.preferences().show_incompatible()
+            && self.with_film(number, |film| incompatible(film.timing.get(id))).unwrap_or(false);
+        if !known || hidden || !self.put_on(number, id).await {
             return false;
         }
         // The viewer's pick is final: it stays on whatever the answer is.
@@ -769,7 +850,11 @@ impl Subtitles {
         };
         let tracks = self.player.tracks().await;
         let choice = auto_choice(&self.preferences(), &tracks, &candidates);
+        let external = matches!(choice, Choice::External(_));
         self.apply(number, choice).await;
+        if !external {
+            spawn_survey(Arc::clone(self), number);
+        }
         true
     }
 
@@ -811,16 +896,29 @@ impl Subtitles {
                 (!film.timing.contains_key(&selected)).then(|| (selected, !film.manual))
             })
             .flatten();
+        let chained = matches!(waiting, Some((_, true)));
         if let Some((id, automatic)) = waiting {
             spawn_timing(Arc::clone(self), number, id, automatic);
+        }
+        // An automatic one surveys the rest once it has settled.
+        if !chained {
+            spawn_survey(Arc::clone(self), number);
         }
         true
     }
 
     /// "AutoSync uyumsuz altyazıları göster" was turned on or off: kept for
-    /// every film, and the menu reads it on its next look.
-    pub fn set_show_incompatible(&self, enabled: bool) {
+    /// every film, and the menu reads it on its next look. Turned off during
+    /// a film, an incompatible subtitle that is on is taken off.
+    pub async fn set_show_incompatible(&self, enabled: bool) {
         self.remember(|p| p.show_incompatible_subtitles = Some(enabled));
+        if enabled {
+            return;
+        }
+        let number = self.player.film();
+        if let Some(Some(id)) = self.with_film(number, |film| film.selected.clone()) {
+            self.withdraw(number, &id).await;
+        }
     }
 
     /// The viewer moved the delay: automatic timing keeps off it from here.
@@ -876,7 +974,6 @@ impl Subtitles {
         Value::Array(unify(
             tracks,
             film.map(|film| (&film.candidates, &film.loaded, &film.timing)),
-            film.and_then(|film| film.selected.as_deref()),
             show,
         ))
     }
@@ -912,6 +1009,13 @@ pub fn plain_caption(ass: &str) -> String {
 fn spawn_timing(this: Arc<Subtitles>, number: u64, id: String, automatic: bool) {
     let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
         Box::pin(async move { this.time(number, id, automatic).await });
+    tokio::spawn(future);
+}
+
+/// `Subtitles::survey` on the runtime, boxed for the same reason.
+fn spawn_survey(this: Arc<Subtitles>, number: u64) {
+    let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move { this.survey(number).await });
     tokio::spawn(future);
 }
 
@@ -1010,6 +1114,13 @@ fn known_bad(timing: Option<&Timing>) -> bool {
     })
 }
 
+/// Whether AutoSync refused this subtitle, for whatever reason --
+/// `INCONCLUSIVE` and the metadata's refusals included. What "AutoSync
+/// uyumsuz altyazıları göster" off keeps out of the menu and off the screen.
+fn incompatible(timing: Option<&Timing>) -> bool {
+    timing.is_some_and(|timing| timing.state == "rejected")
+}
+
 /// The candidates the automatic choice may take, in their order.
 fn usable(film: &Film) -> Vec<Candidate> {
     film.candidates
@@ -1068,7 +1179,6 @@ fn title_for(candidate: &Candidate) -> String {
 fn unify(
     tracks: &[Value],
     film: Option<(&Vec<Candidate>, &HashMap<String, Loaded>, &HashMap<String, Timing>)>,
-    selected: Option<&str>,
     show_incompatible: bool,
 ) -> Vec<Value> {
     let mut out = Vec::new();
@@ -1108,11 +1218,8 @@ fn unify(
                     && track.get("id").and_then(Value::as_i64) == Some(l.mpv)
             })
         });
-        let on = selected == Some(candidate.id.as_str())
-            || track.and_then(|t| t.get("selected")).and_then(Value::as_bool).unwrap_or(false);
-        // Shown not to fit: out of the menu unless asked for -- or unless it
-        // is the one on, which the menu always shows.
-        if !show_incompatible && !on && known_bad(timing.get(&candidate.id)) {
+        // Refused by AutoSync: out of the menu unless asked for.
+        if !show_incompatible && incompatible(timing.get(&candidate.id)) {
             continue;
         }
         out.push(json!({
@@ -1312,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_leaves_out_what_does_not_fit_unless_asked_or_on() {
+    fn the_menu_leaves_out_what_autosync_refused_unless_asked() {
         let candidates: Vec<Candidate> = ["ext:p", "ext:t", "ext:w", "ext:d", "ext:i", "ext:ok", "ext:new"]
             .iter()
             .map(|id| candidate(id, "tr"))
@@ -1329,14 +1436,13 @@ mod tests {
         );
         let loaded = HashMap::new();
         let ids = |list: Vec<Value>| list.iter().map(|t| t["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        let hidden = unify(&[], Some((&candidates, &loaded, &timing)), None, false);
-        assert_eq!(ids(hidden), ["ext:i", "ext:ok", "ext:new"]);
-        let all = unify(&[], Some((&candidates, &loaded, &timing)), None, true);
+        // INCONCLUSIVE is refused too; one not checked yet is not refused.
+        let hidden = unify(&[], Some((&candidates, &loaded, &timing)), false);
+        assert_eq!(ids(hidden), ["ext:ok", "ext:new"]);
+        let all = unify(&[], Some((&candidates, &loaded, &timing)), true);
         assert_eq!(all.len(), 7);
         assert_eq!(all[1]["sync"]["eligibility"], "REJECT_TIMEBASE_MISMATCH");
-        // The one on is always listed.
-        let on = unify(&[], Some((&candidates, &loaded, &timing)), Some("ext:t"), false);
-        assert_eq!(ids(on), ["ext:t", "ext:i", "ext:ok", "ext:new"]);
+        assert_eq!(all[4]["sync"]["eligibility"], "INCONCLUSIVE");
     }
 
     #[test]
@@ -1385,7 +1491,7 @@ mod tests {
                 ..Timing::default()
             },
         );
-        let list = unify(&tracks, Some((&candidates, &loaded, &timing)), None, false);
+        let list = unify(&tracks, Some((&candidates, &loaded, &timing)), false);
         let ids: Vec<&str> = list.iter().map(|t| t["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["emb:1", "emb:2", "ext:a", "ext:b"]);
         assert_eq!(list[1]["source"], "embedded");
@@ -1862,17 +1968,48 @@ mod flows {
         assert!(entry(&list, "ext:tr1").is_none() && entry(&list, "ext:tr2").is_none(), "{list:?}");
         assert!(entry(&list, "ext:en1").is_some());
         // Asked for, they are there, each with why.
-        rig.subtitles.set_show_incompatible(true);
+        rig.subtitles.set_show_incompatible(true).await;
         let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
         assert_eq!(entry(&list, "ext:tr1").unwrap()["sync"]["eligibility"], "REJECT_PARTIAL");
         assert_eq!(entry(&list, "ext:tr2").unwrap()["sync"]["eligibility"], "REJECT_TIMEBASE_MISMATCH");
     }
 
+    fn shown() -> Preferences {
+        Preferences { show_incompatible_subtitles: Some(true), ..turkish() }
+    }
+
+    fn language_of(mpv: &Mpv, sid: Option<i64>) -> Option<String> {
+        mpv.tracks
+            .iter()
+            .find(|t| t["type"] == "sub" && t["id"].as_i64() == sid)
+            .and_then(|t| t["lang"].as_str().map(str::to_owned))
+    }
+
+    #[tokio::test]
+    async fn an_inconclusive_one_is_never_shown_while_incompatible_ones_are_hidden() {
+        // The default: "AutoSync uyumsuz altyazıları göster" off. Both
+        // Turkish ones are INCONCLUSIVE; neither is left on, neither is in
+        // the menu, and the film has no Turkish text of its own: off.
+        let rig = rig(Worker { apply: Value::Null, refusal: Some("INCONCLUSIVE"), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let seen = Arc::clone(&rig.seen);
+        until("both were answered", || syncs(&seen) >= 2).await;
+        let mpv = Arc::clone(&rig.mpv);
+        until("subtitles are off", || mpv.lock().unwrap().sid.is_none()).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(rig.mpv.lock().unwrap().sid, None);
+        let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
+        assert!(entry(&list, "ext:tr1").is_none() && entry(&list, "ext:tr2").is_none(), "{list:?}");
+        // Picked anyway (an old menu), it is not put on.
+        assert!(!rig.subtitles.choose("ext:tr1").await);
+        assert_eq!(rig.mpv.lock().unwrap().sid, None);
+    }
+
     #[tokio::test]
     async fn when_nothing_could_be_told_the_first_stays_on_untimed() {
-        // INCONCLUSIVE is not "does not fit": the best-ranked stays on, as it
-        // came, and nothing is timed.
-        let rig = rig(Worker { apply: Value::Null, refusal: Some("INCONCLUSIVE"), ..Worker::default() }, turkish()).await;
+        // With incompatible ones shown, INCONCLUSIVE is not "does not fit":
+        // the best-ranked stays on, as it came, and nothing is timed.
+        let rig = rig(Worker { apply: Value::Null, refusal: Some("INCONCLUSIVE"), ..Worker::default() }, shown()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let subtitles = Arc::clone(&rig.subtitles);
         let list = settled(&subtitles, |list| {
@@ -1883,6 +2020,45 @@ mod flows {
         let mpv = Arc::clone(&rig.mpv);
         until("the first is back on", || mpv.lock().unwrap().sid == Some(3)).await;
         assert_eq!(rig.mpv.lock().unwrap().delay, 0.0);
+        // Turned off now, it comes off the screen and out of the menu.
+        rig.subtitles.set_show_incompatible(false).await;
+        assert_eq!(rig.mpv.lock().unwrap().sid, None);
+        let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
+        assert!(entry(&list, "ext:tr1").is_none() && entry(&list, "ext:tr2").is_none(), "{list:?}");
+    }
+
+    #[tokio::test]
+    async fn a_subtitle_picked_by_hand_and_refused_is_taken_off() {
+        let rig = rig(Worker { apply: Value::Null, refusal: Some("INCONCLUSIVE"), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let seen = Arc::clone(&rig.seen);
+        until("the automatic choice is answered", || syncs(&seen) >= 2).await;
+        assert!(rig.subtitles.choose("ext:en1").await);
+        {
+            let mpv = rig.mpv.lock().unwrap();
+            assert_eq!(language_of(&mpv, mpv.sid).as_deref(), Some("en"));
+        }
+        let mpv = Arc::clone(&rig.mpv);
+        until("the refused pick is off", || mpv.lock().unwrap().sid.is_none()).await;
+        let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
+        assert!(entry(&list, "ext:en1").is_none(), "{list:?}");
+    }
+
+    #[tokio::test]
+    async fn every_subtitle_of_the_language_is_checked_not_only_the_first_that_fits() {
+        let rig = rig(Worker { apply: properties(), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let subtitles = Arc::clone(&rig.subtitles);
+        let list = settled(&subtitles, |list| {
+            entry(list, "ext:tr2").is_some_and(|e| e["sync"]["state"] == "ready")
+        })
+        .await;
+        assert_eq!(entry(&list, "ext:tr1").unwrap()["sync"]["state"], "applied");
+        assert_eq!(entry(&list, "ext:tr2").unwrap()["sync"]["eligibility"], "ACCEPT_TIMELINE_COMPATIBLE");
+        // The first stays the one on; the other language is not touched.
+        assert_eq!(rig.mpv.lock().unwrap().sid, Some(3));
+        assert_eq!(syncs(&rig.seen), 2);
+        assert!(!rig.seen.lock().unwrap().iter().any(|l| l.contains("\"candidate\":\"ext:en1\"")));
     }
 
     #[tokio::test]
@@ -1903,7 +2079,8 @@ mod flows {
 
     #[tokio::test]
     async fn chosen_by_hand_one_its_metadata_refused_stays_on_untimed() {
-        let rig = rig(Worker { apply: properties(), metadata_refused: true, ..Worker::default() }, turkish()).await;
+        // With incompatible ones shown; hidden, it cannot be put on at all.
+        let rig = rig(Worker { apply: properties(), metadata_refused: true, ..Worker::default() }, shown()).await;
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the automatic choice is timed", || (mpv.lock().unwrap().delay - 1.82).abs() < 1e-9).await;
@@ -1947,7 +2124,11 @@ mod flows {
         // Turkish: only fetched ones exist, so one of those.
         assert!(rig.subtitles.set_preference(Some("tr".into())).await);
         let mpv = Arc::clone(&rig.mpv);
-        until("a Turkish one is on", || mpv.lock().unwrap().sid == Some(3)).await;
+        until("a Turkish one is on", || {
+            let mpv = mpv.lock().unwrap();
+            language_of(&mpv, mpv.sid).as_deref() == Some("tr")
+        })
+        .await;
         // Off.
         assert!(rig.subtitles.set_preference(None).await);
         assert_eq!(rig.mpv.lock().unwrap().sid, None);
@@ -1983,17 +2164,19 @@ mod flows {
         // viewer picks a fetched Turkish one instead. It is checked (the
         // embedded track is only the worker's timing reference), found to be
         // another timebase, and stays on as the viewer's choice, untimed.
-        let rig = rig(Worker { apply: Value::Null, ..Worker::default() }, turkish()).await;
+        // Shown, the refused one can be picked at all.
+        let rig = rig(Worker { apply: Value::Null, ..Worker::default() }, shown()).await;
         rig.mpv.lock().unwrap().tracks.push(json!({"id": 9, "type": "sub", "lang": "tur", "external": false, "codec": "subrip"}));
         rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
         let mpv = Arc::clone(&rig.mpv);
         until("the embedded Turkish track is on", || mpv.lock().unwrap().sid == Some(9)).await;
-        assert_eq!(syncs(&rig.seen), 0, "an embedded choice is never analysed");
+        // The fetched ones are checked beside it, and none is put on.
+        let seen = Arc::clone(&rig.seen);
+        until("both fetched Turkish ones are analysed", || syncs(&seen) == 2).await;
+        assert_eq!(rig.mpv.lock().unwrap().sid, Some(9));
         assert!(rig.subtitles.choose("ext:tr2").await);
         let chosen = rig.mpv.lock().unwrap().sid;
         assert!(chosen.is_some() && chosen != Some(9));
-        let seen = Arc::clone(&rig.seen);
-        until("the chosen one is analysed", || syncs(&seen) == 1).await;
         let subtitles = Arc::clone(&rig.subtitles);
         let mut refused = Value::Null;
         for _ in 0..100 {
@@ -2013,8 +2196,9 @@ mod flows {
         assert_eq!(mpv.sid, chosen, "the viewer's choice stays, embedded or not");
         assert_eq!(mpv.delay, 0.0);
         drop(mpv);
-        // And nothing else was tried in its place.
-        assert_eq!(syncs(&rig.seen), 1);
+        // Already answered, it is not analysed again, and nothing else is
+        // tried in its place.
+        assert_eq!(syncs(&rig.seen), 2);
     }
 
     #[tokio::test]

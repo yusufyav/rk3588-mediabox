@@ -470,9 +470,10 @@ constants; a wider sample should set them.
 * The viewer's choice during a film is final: nothing automatic replaces it.
   An external subtitle the viewer picks is checked (with AutoSync on) even
   when the film has an embedded track in the preferred language -- that
-  track is then only the timing reference, and the viewer's pick stays on
-  whatever the answer -- a subtitle shown not to fit included: it stays on,
-  and AutoSync is not put on it. An automatic choice that is refused is
+  track is then only the timing reference. With "AutoSync uyumsuz
+  altyazıları göster" on, the viewer's pick stays on whatever the answer --
+  a subtitle shown not to fit included: it stays on, and AutoSync is not put
+  on it. Off, a pick AutoSync refuses comes off the screen (subtitles off). An automatic choice that is refused is
   replaced by the next candidate of its language (at most three; one the
   metadata already refused, or whose provider's quota is used up, is passed
   over without a download; a candidate that is the same file as one tried is
@@ -480,18 +481,23 @@ constants; a wider sample should set them.
 * **When every automatic candidate is refused, none of them is left on**
   if it was shown not to fit (`REJECT_PARTIAL`, `REJECT_TIMEBASE_MISMATCH`,
   `REJECT_WRONG_RELEASE`, `REJECT_DUPLICATE`). What comes on instead: the
-  film's own text track in the language; else the best-ranked candidate
-  whose fit could not be told (`INCONCLUSIVE` -- not shown to be wrong), as
-  it came and untimed; else subtitles off.
+  film's own text track in the language; else -- only with "AutoSync
+  uyumsuz altyazıları göster" on -- the best-ranked candidate whose fit could
+  not be told (`INCONCLUSIVE`), as it came and untimed; else subtitles off.
+* **With "Otomatik eşitleme" on, every fetched subtitle in the preferred
+  language is checked**, not only the first that fits: once the automatic
+  choice has settled (or the film's own track was put on), the rest of the
+  language's candidates are loaded and analysed one at a time, and none of
+  them is put on. The menu then says of each whether it fits. Each one costs
+  a download, which on OpenSubtitles.com counts against the quota.
 * **"AutoSync uyumsuz altyazıları göster"** is the third row of the Ayarlar
   panel, "Açık" or "Kapalı" (default "Kapalı"), kept as
   `show_incompatible_subtitles` in the same file (absent in older files, and
-  then off). Off, a fetched subtitle shown not to fit -- by the timeline, or
-  already by its provider's metadata -- is left out of the menu, unless it is
-  the one on. `INCONCLUSIVE` ones stay: nothing showed them to be wrong. On,
-  all are listed, each with its `sync.eligibility`. The filter never costs a
-  download: the metadata's refusals come with the search, and the rest are
-  known only for subtitles already loaded for another reason.
+  then off). Off, no fetched subtitle AutoSync refused -- by the timeline,
+  `INCONCLUSIVE` included, or already by its provider's metadata -- is in the
+  menu or on the screen: the one on is no exception, and turning the setting
+  off during a film takes it off. On, all are listed, each with its
+  `sync.eligibility`. One not checked yet has no answer and is listed.
 * A delay moved by hand is kept; a timing that arrives afterwards waits
   ("Otomatik eşitleme hazır"), and Ok on the delay puts it on. Ok on the delay
   is the viewer asking in so many words: it works with "Otomatik eşitleme"
