@@ -1,20 +1,32 @@
 /*
- * aisr-demo: MBSR against VOP2 on the television, live.
+ * aisr-demo: MBSR against VOP2 on the television, live, under the viewer's control.
  *
- * Every frame goes through MBSR on the NPU (INT8, all three cores) into a
- * 3840x2160 NV12 buffer. The screen shows, alternating every AB seconds,
- * that buffer 1:1 (a white square top left marks it) or the same 1080p
- * frame scaled 2x by VOP2, as the product does today. Only Cluster0 and
- * Esmart0 can reach VP0 on the Plus and Cluster0 refuses NV12, so a split
- * screen over two planes is not possible: one plane, A/B in time.
- * Frames are paced at 1001/24 ms; the console prints per-second timings.
+ * Frames come from a file or from stdin (any decoder piping 1920x1080 NV12,
+ * e.g. ffmpeg with the RKMPP decoder on a film of the viewer's choosing).
+ * The screen shows one of:
+ *   ai    the frame through MBSR on the NPU (INT8, three cores) into a
+ *         3840x2160 buffer, scanned out 1:1; a white square marks it
+ *   vop2  the same 1080p frame scaled 2x by VOP2, as the product does today;
+ *         the NPU is not run at all, so its load drops to zero
+ *   ab N  alternate every N seconds
+ * and "zoom Z X Y" magnifies the same region by Z for both (X, Y in 0..1),
+ * so the comparison is of the upscale, not of the eye's acuity.
+ * The mode is read from MODEFILE (default /tmp/aisr/mode) while it runs.
+ *
+ * Only Cluster0 and Esmart0 reach VP0 on the Plus and Cluster0 refuses NV12,
+ * so a split screen over two planes is not possible: one plane, in time.
  *
  * Research tool, not part of the product. Needs DRM master: stop
  * mediabox-tv-ui first, start it again afterwards. No writeback is used.
  *
- * aisr-demo MODEL.rknn SRC.nv12 SECONDS [PLANE [AB_SECONDS]]
- *   SRC: one or more tightly packed 1920x1080 NV12 frames, looped
+ * aisr-demo MODEL.rknn SRC.nv12|- SECONDS [PLANE [MODEFILE]]
  *   AISR_IN_STD=255 as for aisr-bench
+ *   AISR_SRC_P010=WxH: stdin carries 10-bit HDR10 (PQ) yuv420p10le frames of WxH
+ *     (planar, low bits; this ffmpeg's nv15 -> p010le conversion is broken);
+ *     they are tone-mapped to SDR BT.709 NV12 and centred in 1920x1080 before
+ *     either path sees them. The mapping is a demo approximation (Y' as the
+ *     luminance proxy, 203-nit reference white, soft shoulder, chroma scaled
+ *     with luma, no BT.2020->709 matrix); MBSR and VOP2 get the same frame.
  */
 #define AISR_LIB
 #include "aisr-bench.c"
@@ -78,6 +90,59 @@ static void place(drmModeAtomicReq *q, int fd, uint32_t pl, uint32_t crtc, uint3
 	if (pr) drmModeAtomicAddProperty(q, pl, pr, rng);
 }
 
+/* ---- HDR10 P010 -> SDR NV12, for the demo only ---- */
+static uint8_t tm_y[1024];
+static float tm_s[1024];
+static const uint16_t *p010;
+static int pw, ph;
+
+static void tm_init(void)
+{
+	const double m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+	for (int v = 0; v < 1024; v++) {
+		double e = (v - 64) / 876.0;
+		e = e < 0 ? 0 : e > 1 ? 1 : e;
+		double p = pow(e, 1 / m2), L = 10000 * pow(fmax(p - c1, 0) / (c2 - c3 * p), 1 / m1);
+		double ls = L / 203.0, o = ls <= 0.8 ? ls : 0.8 + 0.2 * (1 - exp(-(ls - 0.8) / 0.2));
+		double V = pow(o, 1 / 2.4);
+		tm_y[v] = (uint8_t)lrint(16 + 219 * V);
+		tm_s[v] = e > 0.02 ? fmin(V / e, 2.5) : 1.0f;
+	}
+}
+
+static void tm_rows(struct ctx *c, int r0, int r1)
+{
+	uint8_t *d = (uint8_t *)c->src;                     /* the NV12 frame being filled */
+	int ox = (SW - pw) / 2 & ~1, oy = (SH - ph) / 2 & ~1;
+	for (int r = r0; r < r1; r++) {                      /* rows of chroma: 2 luma rows each */
+		for (int k = 0; k < 2; k++) {
+			int y = 2 * r + k;
+			uint8_t *o = d + (size_t)y * SW;
+			if (y < oy || y >= oy + ph) { memset(o, 16, SW); continue; }
+			const uint16_t *s = p010 + (size_t)(y - oy) * pw;
+			memset(o, 16, ox);
+			for (int x = 0; x < pw; x++)
+				o[ox + x] = tm_y[s[x] & 1023];
+			memset(o + ox + pw, 16, SW - ox - pw);
+		}
+		uint8_t *o = d + (size_t)SW * SH + (size_t)r * SW;
+		int cy = r - oy / 2;
+		if (cy < 0 || cy >= ph / 2) { memset(o, 128, SW); continue; }
+		const uint16_t *su = p010 + (size_t)pw * ph + (size_t)cy * (pw / 2);
+		const uint16_t *sv = su + (size_t)(pw / 2) * (ph / 2);
+		const uint16_t *yy = p010 + (size_t)(2 * cy) * pw;
+		memset(o, 128, ox);
+		for (int x = 0; x < pw / 2; x++) {
+			float f = tm_s[yy[2 * x] & 1023] * 0.25f;
+			int u = (int)lrintf(128 + ((su[x] & 1023) - 512) * f);
+			int v = (int)lrintf(128 + ((sv[x] & 1023) - 512) * f);
+			o[ox + 2 * x] = u < 16 ? 16 : u > 240 ? 240 : u;
+			o[ox + 2 * x + 1] = v < 16 ? 16 : v > 240 ? 240 : v;
+		}
+		memset(o + ox + pw, 128, SW - ox - pw);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 4) {
@@ -86,18 +151,54 @@ int main(int argc, char **argv)
 	}
 	double secs = atof(argv[3]);
 	uint32_t ai_pl = argc > 4 ? atoi(argv[4]) : 73;
-	double ab = argc > 5 ? atof(argv[5]) : 5.0;
+	const char *modefile = argc > 5 ? argv[5] : "/tmp/aisr/mode";
 
-	/* source frames */
-	FILE *fp = fopen(argv[2], "rb");
-	if (!fp) die("open src", errno);
-	fseek(fp, 0, SEEK_END);
-	long sz = ftell(fp);
-	fseek(fp, 0, SEEK_SET);
-	int nframes = sz / (SW * SH * 3 / 2);
-	uint8_t *frames = malloc(sz);
-	if (fread(frames, 1, sz, fp) != (size_t)sz) die("read src", errno);
-	fclose(fp);
+	/* source frames: a file (looped) or stdin (streamed) */
+	const size_t FS = (size_t)SW * SH * 3 / 2;
+	int live = !strcmp(argv[2], "-");
+	FILE *fp;
+	int nframes = 1;
+	uint8_t *frames;
+	const char *p010env = getenv("AISR_SRC_P010");
+	uint16_t *p010buf = NULL;
+	size_t PS = 0;
+	if (p010env && sscanf(p010env, "%dx%d", &pw, &ph) == 2) {
+		PS = (size_t)pw * ph * 3;                       /* bytes: Y + UV, 16 bit each */
+		p010buf = malloc(PS);
+		p010 = p010buf;
+		tm_init();
+		printf("source: HDR10 P010 %dx%d, tone-mapped to SDR NV12 for both paths\n", pw, ph);
+	}
+	if (live && p010buf && getenv("AISR_DUMP")) {
+		/* AISR_DUMP=FILE N: the N-th tone-mapped frame to FILE, no display */
+		char path[256];
+		int skip = 0;
+		sscanf(getenv("AISR_DUMP"), "%255s %d", path, &skip);
+		frames = malloc(FS);
+		struct ctx t = { .nthreads = 4, .src = frames };
+		for (int i = 0; i <= skip; i++)
+			if (fread(p010buf, 1, PS, stdin) != PS)
+				die("short stdin", 0);
+		par(&t, tm_rows, SH / 2);
+		FILE *o = fopen(path, "wb");
+		fwrite(frames, 1, FS, o);
+		fclose(o);
+		printf("dumped frame %d to %s\n", skip, path);
+		return 0;
+	}
+	if (live) {
+		frames = malloc(FS);
+	} else {
+		fp = fopen(argv[2], "rb");
+		if (!fp) die("open src", errno);
+		fseek(fp, 0, SEEK_END);
+		long sz = ftell(fp);
+		fseek(fp, 0, SEEK_SET);
+		nframes = sz / FS;
+		frames = malloc(sz);
+		if (fread(frames, 1, sz, fp) != (size_t)sz) die("read src", errno);
+		fclose(fp);
+	}
 
 	/* NPU, as aisr-bench */
 	fp = fopen(argv[1], "rb");
@@ -146,8 +247,8 @@ int main(int argc, char **argv)
 	drmModeEncoder *enc = drmModeGetEncoder(fd, disp->encoder_id);
 	drmModeCrtc *crtc = drmModeGetCrtc(fd, enc->crtc_id);
 	uint32_t MW = crtc->mode.hdisplay, MH = crtc->mode.vdisplay;
-	printf("display %ux%u@%u, plane %u, MBSR / VOP2 every %.0f s, MBSR first (white square)\n",
-	       MW, MH, crtc->mode.vrefresh, ai_pl, ab);
+	printf("display %ux%u@%u, plane %u, mode file %s (ai | vop2 | ab N) [zoom Z X Y]\n",
+	       MW, MH, crtc->mode.vrefresh, ai_pl, modefile);
 	if (MW != DW || MH != DH) die("needs a 3840x2160 mode", 0);
 
 	struct fb ai[2], src[2];
@@ -171,54 +272,101 @@ int main(int argc, char **argv)
 
 	const double period = 1001.0 / 24.0;
 	double t0 = now_ms(), next = t0, sec_t = t0, worst = 0, sum = 0;
-	int k = 0, shown = 0, late = 0, n_sec = 0;
+	int k = 0, shown = 0, late = 0, n_sec = 0, n_ai = 0;
+	char mode[16] = "ai";
+	double ab = 0, zoom = 1, zx = 0.5, zy = 0.5;
 	while (now_ms() - t0 < secs * 1000) {
+		if (k % 6 == 0) {                       /* the viewer's choice, 4x a second */
+			FILE *mf = fopen(modefile, "r");
+			char line[128] = "";
+			if (mf && fgets(line, sizeof(line), mf)) {
+				char m[16] = "", z[8] = "";
+				double a1 = 0, a2 = 1, a3 = 0.5, a4 = 0.5;
+				int n = sscanf(line, "%15s %lf %7s %lf %lf %lf", m, &a1, z, &a2, &a3, &a4);
+				if (!strcmp(m, "ab")) { strcpy(mode, "ab"); ab = a1 > 0 ? a1 : 5; }
+				else if (!strcmp(m, "ai") || !strcmp(m, "vop2")) {
+					strcpy(mode, m);
+					/* "ai zoom 4 0.5 0.5": no number after the mode */
+					n = sscanf(line, "%15s %7s %lf %lf %lf", m, z, &a2, &a3, &a4);
+					if (n < 2) z[0] = 0;
+				}
+				if (!strcmp(z, "zoom") && a2 >= 1) { zoom = a2; zx = a3; zy = a4; }
+				else zoom = 1;
+			}
+			if (mf)
+				fclose(mf);
+		}
+		int show_ai = !strcmp(mode, "ai") || (!strcmp(mode, "ab") && ((int)((now_ms() - t0) / 1000 / ab)) % 2 == 0);
 		int b = k & 1;
-		c.src = frames + (size_t)(k % nframes) * SW * SH * 3 / 2;
-		double a = now_ms();
-		par(&c, pre_rows, SH / 2);
-		rknn_mem_sync(ctx, c.min, RKNN_MEMORY_SYNC_TO_DEVICE);
-		if ((ret = rknn_run(ctx, NULL))) die("rknn_run", ret);
-		rknn_mem_sync(ctx, c.mout, RKNN_MEMORY_SYNC_FROM_DEVICE);
-		par(&c, post_rows, c.out.dims[2]);
-		double e2e = now_ms() - a;
-		/* into scan-out buffers */
-		for (uint32_t y = 0; y < DH * 3 / 2; y++)
-			memcpy(ai[b].map + (size_t)y * ai[b].pitch, c.dst + (size_t)y * DW, DW);
-		for (uint32_t y = 40; y < 140; y++)             /* the MBSR marker */
-			memset(ai[b].map + (size_t)y * ai[b].pitch + 40, 235, 100);
-		for (uint32_t y = 0; y < SH * 3 / 2; y++)
-			memcpy(src[b].map + (size_t)y * src[b].pitch, c.src + (size_t)y * SW, SW);
-		double busy = now_ms() - a;
-		/* pace to 23.976 */
+		if (live && p010buf) {
+			if (fread(p010buf, 1, PS, stdin) != PS)
+				break;
+			c.src = frames;
+			par(&c, tm_rows, SH / 2);
+		} else if (live) {
+			if (fread(frames, 1, FS, stdin) != FS)
+				break;
+			c.src = frames;
+		} else {
+			c.src = frames + (size_t)(k % nframes) * FS;
+		}
+		double a = now_ms(), e2e = 0;
+		/* the visible region, the same for both paths */
+		uint32_t cw = (uint32_t)(DW / zoom) & ~3u, ch = (uint32_t)(DH / zoom) & ~3u;
+		int cx = (int)(zx * DW) - (int)cw / 2, cy = (int)(zy * DH) - (int)ch / 2;
+		cx = cx < 0 ? 0 : cx > (int)(DW - cw) ? (int)(DW - cw) : cx;
+		cy = cy < 0 ? 0 : cy > (int)(DH - ch) ? (int)(DH - ch) : cy;
+		cx &= ~3; cy &= ~3;
+		if (show_ai) {
+			par(&c, pre_rows, SH / 2);
+			rknn_mem_sync(ctx, c.min, RKNN_MEMORY_SYNC_TO_DEVICE);
+			if ((ret = rknn_run(ctx, NULL))) die("rknn_run", ret);
+			rknn_mem_sync(ctx, c.mout, RKNN_MEMORY_SYNC_FROM_DEVICE);
+			par(&c, post_rows, c.out.dims[2]);
+			e2e = now_ms() - a;
+			for (uint32_t y = 0; y < DH * 3 / 2; y++)
+				memcpy(ai[b].map + (size_t)y * ai[b].pitch, c.dst + (size_t)y * DW, DW);
+			uint32_t m0 = 10 + (uint32_t)(30 / zoom), ms = (uint32_t)(100 / zoom) < 8 ? 8 : (uint32_t)(100 / zoom);
+			for (uint32_t y = cy + m0; y < cy + m0 + ms; y++)      /* the MBSR marker */
+				memset(ai[b].map + (size_t)y * ai[b].pitch + cx + m0, 235, ms);
+			n_ai++;
+		} else {
+			for (uint32_t y = 0; y < SH * 3 / 2; y++)
+				memcpy(src[b].map + (size_t)y * src[b].pitch, c.src + (size_t)y * SW, SW);
+		}
 		next += period;
 		double w = next - now_ms();
 		if (w > 0)
 			usleep((useconds_t)(w * 1000));
-		else
+		else {
 			late++;
+			if (w < -period)
+				next = now_ms();                /* a stalled source: do not race */
+		}
 		drmModeAtomicReq *q = drmModeAtomicAlloc();
-		int show_ai = ((int)((now_ms() - t0) / 1000 / ab)) % 2 == 0;
 		if (show_ai)
-			place(q, fd, ai_pl, crtc->crtc_id, ai[b].id, 0, 0, DW, DH, 0, DW, DH);
+			place(q, fd, ai_pl, crtc->crtc_id, ai[b].id, cx, cy, cw, ch, 0, DW, DH);
 		else
-			place(q, fd, ai_pl, crtc->crtc_id, src[b].id, 0, 0, SW, SH, 0, DW, DH);
+			place(q, fd, ai_pl, crtc->crtc_id, src[b].id, cx / 2, cy / 2, cw / 2, ch / 2, 0, DW, DH);
 		if (drmModeAtomicCommit(fd, q, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL)
 		    && drmModeAtomicCommit(fd, q, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL))
 			die("commit", errno);
 		drmModeAtomicFree(q);
 		k++;
 		shown++;
-		sum += e2e;
 		n_sec++;
-		worst = e2e > worst ? e2e : worst;
+		if (show_ai) {
+			sum += e2e;
+			worst = e2e > worst ? e2e : worst;
+		}
 		if (now_ms() - sec_t >= 1000) {
-			printf("%5.0f s  %2d frames  AI e2e mean %5.1f ms worst %5.1f ms  (frame+copy %5.1f ms)  late %d\n",
-			       (now_ms() - t0) / 1000, n_sec, sum / n_sec, worst, busy, late);
+			printf("%5.0f s  %2d frames  showing %-4s zoom %.0fx  MBSR e2e mean %5.1f ms worst %5.1f ms  late %d\n",
+			       (now_ms() - t0) / 1000, n_sec, show_ai ? "AI" : "VOP2", zoom,
+			       n_ai ? sum / n_ai : 0.0, worst, late);
 			fflush(stdout);
 			sec_t = now_ms();
 			sum = worst = 0;
-			n_sec = 0;
+			n_sec = n_ai = 0;
 		}
 	}
 	printf("shown %d frames, %d late\n", shown, late);

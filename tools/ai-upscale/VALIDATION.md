@@ -101,6 +101,23 @@ criteria.
 
 ## Television demo (`aisr-demo.c`)
 
+The viewer picks the film and controls the comparison. Any stream is
+remuxed (system ffmpeg, which has https and seeking), decoded by RKMPP and
+fed to the demo live: no prepared frames. A mode file switches `ai` /
+`vop2` / `ab N` instantly, with an optional `zoom Z X Y` applied identically
+to both. In `vop2` mode the NPU is not run, so its load drops to zero.
+That is the viewer's own proof that the AI picture comes from the NPU.
+
+An HDR10 source (a UHD Blu-ray 1080p release; tested with *In the Mood for
+Love*) is tone-mapped to SDR BT.709 inside the demo before either path sees
+it. The board has no Vulkan or OpenCL for libplacebo or tonemap_opencl, so
+this is a simple YUV-domain mapping and a demo approximation, not a
+product-grade tone mapper. The media runtime's nv15 -> p010le conversion is
+broken; yuv420p10le matches software decoding exactly. Playing that film at
+24 fps, MBSR took about 30 ms per frame with each NPU core about 55% busy.
+
+The earlier fixed demo:
+
 Live on the TV at 23.976 fps, a blind Sintel clip alternates every 5 s
 between MBSR's 4K output scanned out 1:1 (white square top left) and the
 same 1080p frame scaled by VOP2. 24 frames were shown every second, with
