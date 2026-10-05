@@ -514,6 +514,12 @@ contains "the playback smoke is a gate"   "$installer" 'packaging/mediabox-playb
 contains "and failing it stops the install" "$installer" "the appliance's own player did not play"
 contains "PASS says the player works"     "$installer" 'the default player is operational'
 
+echo "-- a clean install puts the remote's receiver on rc-core, as the deploy does"
+contains "the installer runs the IR setup"   "$installer" '"$prefix/bin/mediabox-ir-setup"'
+contains "and installs the receiver's keymap rule" "$installer" 'packaging/udev/82-mediabox-ir.rules'
+contains "and the overlay it lists"          "$installer" 'packaging/overlays/mediabox-ir-opi5plus.dtbo'
+contains "and the tool the rule runs"        "$installer" 'ir-keytable'
+
 echo "-- the media worker can find an ffprobe, and one that speaks TLS"
 worker="$(cat "$here/packaging/systemd/mediabox-media-worker.service")"
 contains "the unit names a PATH"           "$worker" 'Environment=PATH='

@@ -438,6 +438,32 @@ fan_out="$("$prefix/bin/mediabox-fan-setup")"
 printf '%s\n' "$fan_out" | sed 's/^fan-setup: /  --    /'
 case "$fan_out" in *"reboot needed"*) reboot_needed=1 ;; esac
 
+# ---------------------------------------------- 11d. the infrared receiver
+#
+# On an Orange Pi 5 Plus the vendor tree gives the receiver to the pwm15
+# remotectl decoder, which drops every remote but the board vendor's. The
+# setup script puts it on rc-core instead (gpio-ir-receiver) and installs the
+# remote's measured keymap, which the udev rule loads for the receiver alone;
+# see docs/remote.md. The deploy script did this and the installer did not, so
+# every board installed from a release stayed on remotectl and the remote did
+# nothing. A board that is not a Plus gets the keymap and no overlay.
+step "infrared receiver"
+command -v ir-keytable >/dev/null || {
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ir-keytable \
+    || die "could not install ir-keytable"
+}
+ok "ir-keytable present"
+install -D -m 0644 "$here/packaging/overlays/mediabox-ir-opi5plus.dtbo" \
+  "$prefix/share/overlays/mediabox-ir-opi5plus.dtbo"
+install -D -m 0644 "$here/packaging/rc/mediabox-remote.toml" \
+  "$prefix/share/rc/mediabox-remote.toml"
+install -D -m 0644 "$here/packaging/udev/82-mediabox-ir.rules" \
+  /etc/udev/rules.d/82-mediabox-ir.rules
+install -m 0755 "$here/packaging/mediabox-ir-setup" "$prefix/bin/mediabox-ir-setup"
+ir_out="$("$prefix/bin/mediabox-ir-setup")"
+printf '%s\n' "$ir_out" | sed 's/^ir-setup: /  --    /'
+case "$ir_out" in *"reboot needed"*) reboot_needed=1 ;; esac
+
 # Kodi's settings for this appliance, which kodi.service seeds on a first run.
 install -D -m 0644 "$here/config/kodi/guisettings-appliance.xml" \
   "$prefix/share/kodi/guisettings-appliance.xml"
