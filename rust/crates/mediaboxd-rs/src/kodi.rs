@@ -241,6 +241,14 @@ impl KodiClient {
                 "URL kontrol karakteri içeriyor".into(),
             ));
         }
+        // The link is also left as the only entry of Kodi's video playlist:
+        // once the player closes -- at the end, or a seek past it -- Kodi has
+        // no other way back to a stream it was handed. Playing a single file
+        // does not clear that playlist, so it stays there until the next one.
+        // `Player.Open` on the playlist itself would ignore `resume`.
+        if let Err(error) = self.keep_in_playlist(url).await {
+            eprintln!("mediaboxd-rs: Kodi playlist not updated: {error}");
+        }
         self.call_within(
             "Player.Open",
             Some(
@@ -251,6 +259,22 @@ impl KodiClient {
         .await
     }
 }
+
+impl KodiClient {
+    async fn keep_in_playlist(&self, url: &str) -> Result<(), KodiError> {
+        self.call("Playlist.Clear", Some(json!({"playlistid":VIDEO_PLAYLIST})))
+            .await?;
+        self.call(
+            "Playlist.Add",
+            Some(json!({"playlistid":VIDEO_PLAYLIST,"item":{"file":url}})),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Kodi's video playlist (`PLAYLIST::Id::TYPE_VIDEO`).
+const VIDEO_PLAYLIST: i64 = 1;
 
 fn seconds_to_kodi_time(seconds: u64) -> Value {
     json!({"hours":seconds/3600,"minutes":(seconds%3600)/60,"seconds":seconds%60,"milliseconds":0})
