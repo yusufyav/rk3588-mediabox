@@ -67,7 +67,7 @@ pub struct SourceProfile {
 }
 
 impl SourceProfile {
-    /// `rk3588-vendor61-dw-hdmi-qp@2`.
+    /// `rk3588-vendor61-dw-hdmi-qp@3`.
     pub fn name(&self) -> String {
         format!("{}@{}", self.id, self.version)
     }
@@ -97,11 +97,14 @@ impl SourceProfile {
 /// DesignWare HDMI QP transmitter -- the stack this product ships.
 ///
 /// Link limits as the vendor driver enforces them: `dw_hdmi_rockchip_mode_valid`
-/// stops TMDS at 600 MHz; `color_depth` offers 24 and 30 bit, so ten bits per
+/// stops TMDS at 600 MHz and above it the transmitter trains FRL up to four
+/// lanes at 12 Gbps (`FRL_12GBPS_4LANE`, dw-hdmi-qp.c) -- with the patches in
+/// patches/kernel/rk35xx-vendor-6.1 and the mediabox-vp0-v0pll overlay, which
+/// are what make those modes listable, exactly clocked and sent in RGB; `color_depth` offers 24 and 30 bit, so ten bits per
 /// component at most; `color_format` offers RGB, 4:4:4, 4:2:2 and 4:2:0.
 pub const RK3588_VENDOR_61: SourceProfile = SourceProfile {
     id: "rk3588-vendor61-dw-hdmi-qp",
-    version: 2,
+    version: 3,
     scope: Some(ProductScope {
         soc_compatible: "rockchip,rk3588",
         kernel_series: "6.1.",
@@ -130,6 +133,7 @@ pub const RK3588_VENDOR_61: SourceProfile = SourceProfile {
         ],
         hdr10: true,
         hdr10_ycbcr422: true,
+        max_frl_gbps: 48,
     },
 };
 
@@ -148,6 +152,7 @@ pub const CONSERVATIVE: SourceProfile = SourceProfile {
         formats: &[ColorFormat::Rgb],
         hdr10: false,
         hdr10_ycbcr422: false,
+        max_frl_gbps: 0,
     },
 };
 
@@ -221,7 +226,7 @@ pub struct Resolved {
 }
 
 impl Resolved {
-    /// `rk3588-vendor61-dw-hdmi-qp@2 (matched)`: for logs and the offer.
+    /// `rk3588-vendor61-dw-hdmi-qp@3 (matched)`: for logs and the offer.
     pub fn describe(&self) -> String {
         let how = match &self.matched {
             ProfileMatch::Matched => "matched".to_string(),
@@ -420,7 +425,7 @@ mod tests {
         });
         assert_eq!(resolved.profile, &RK3588_VENDOR_61);
         assert_eq!(resolved.matched, ProfileMatch::Matched);
-        assert_eq!(resolved.profile.name(), "rk3588-vendor61-dw-hdmi-qp@2");
+        assert_eq!(resolved.profile.name(), "rk3588-vendor61-dw-hdmi-qp@3");
         // The limits the display screen has always used.
         assert_eq!(resolved.profile.caps.max_tmds_khz, 600_000);
         assert_eq!(resolved.profile.caps.max_bpc, 10);
@@ -497,6 +502,7 @@ mod tests {
         let sink = SinkVideo {
             max_character_rate_khz: 600_000,
             rate_is_declared: true,
+            max_frl_gbps: 0,
             advertised: Vec::new(),
             st2084: true,
             hlg: true,

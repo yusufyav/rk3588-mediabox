@@ -1,0 +1,39 @@
+// Give Video Port 0 the video PLL for every mode above 600 MHz.
+//
+// On RK3588 a VP's pixel clock comes from the HDMI PHY's own PLL up to
+// 600 MHz, and above that from dclk_vop0_src -- a divider whose parent the
+// board DTS leaves on gpll. gpll runs at 1188 MHz for the rest of the SoC, so
+// above 600 MHz the only pixel clocks VP0 can make are 1188 MHz over a whole
+// number, and the VOP2 driver refuses every HDMI mode it cannot make exactly
+// (rockchip_drm_vop2.c, vop2_crtc_mode_valid: MODE_CLOCK_RANGE).
+//
+// Measured on an Orange Pi 5 Plus with a BenQ RD280UG: its 3840x2560 at 60,
+// 100 and 120 Hz (631.75, 1063.2 and 1287.7 MHz) never reached the mode list,
+// and the one attempt made before validation ran asked for 315.875 MHz and got
+// 297 MHz. "Automatic" then fell to 3840x2560 at 49.98 Hz.
+//
+// v0pll is the SoC's video PLL and nothing else on this board uses it. With it
+// as dclk_vop0_src's parent the vendor DRM code treats any rate as exact
+// (rockchip_drm_clk.c, rockchip_rk3588_drm_dclk_round_rate) and programs the
+// PLL to an even multiple of the pixel clock at modeset
+// (rockchip_rk3588_drm_dclk_set_rate); the PLL's fractional mode reaches the
+// rate (clk-pll.c, rockchip_rk3588_pll_frac_by_auto). Modes up to 600 MHz
+// still run from the HDMI PHY PLL and are untouched.
+//
+// assigned-clocks replaces the board's own list, so ACLK_VOP keeps its
+// 800 MHz here; the zeros leave a clock's rate or parent as it was.
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/vop@fdd90000";
+		__overlay__ {
+			/* ACLK_VOP (624), DCLK_VOP0_SRC (625) */
+			assigned-clocks = <&cru 624>, <&cru 625>;
+			assigned-clock-rates = <800000000>, <0>;
+			/* PLL_V0PLL (4) */
+			assigned-clock-parents = <0>, <&cru 4>;
+		};
+	};
+};

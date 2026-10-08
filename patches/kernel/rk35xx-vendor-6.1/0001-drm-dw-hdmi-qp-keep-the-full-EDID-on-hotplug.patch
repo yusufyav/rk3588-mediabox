@@ -1,0 +1,56 @@
+From: Yusuf <yusufyav.dev@gmail.com>
+Subject: [PATCH] drm/bridge: dw-hdmi-qp: keep the full EDID on hotplug
+
+dw_hdmi_qp_cec_set_hpd() read the EDID with drm_get_edid() for the CEC
+physical address only. drm_get_edid() also stores its copy as the
+connector's EDID property, through drm_connector_update_edid_property(),
+which sizes the blob by the base block's extension count and so drops
+every block an HF-EEODB declares beyond it. get_modes() then reuses that
+property instead of reading again.
+
+A BenQ RD280UG declares three blocks through HF-EEODB, the third a
+DisplayID block holding 3840x2560 at 60, 100 and 120 Hz. After the first
+hotplug its EDID was 256 bytes, those modes were gone and the preferred
+mode fell back to the base block's 3840x2560 at 49.98 Hz.
+
+Read with drm_edid_read_ddc(), which leaves the property alone.
+---
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c
+index 20d6a9393..77f001a8e 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c
+@@ -3836,15 +3836,25 @@ void dw_hdmi_qp_cec_set_hpd(struct dw_hdmi_qp *hdmi, bool plug_in, bool change)
+ 	if (!plug_in)
+ 		cec_notifier_set_phys_addr(hdmi->cec_notifier,
+ 					   CEC_PHYS_ADDR_INVALID);
+-       else if (hdmi->ddc) {
+-               struct edid *edid = drm_get_edid(&hdmi->connector, hdmi->ddc);
+-               if (edid) {
+-                       if (hdmi->cec_notifier)
+-                               cec_notifier_set_phys_addr_from_edid(
+-                                       hdmi->cec_notifier, edid);
+-                       kfree(edid);
+-               }
+-       }
++	else if (hdmi->ddc) {
++		/*
++		 * Read for the physical address only. drm_get_edid() would also
++		 * store this copy as the connector's EDID property, sized by the
++		 * base block's extension count: an EDID that declares further
++		 * blocks through HF-EEODB loses them, and get_modes() then
++		 * reuses the truncated property instead of reading again -- a
++		 * BenQ RD280UG lost its DisplayID block, and with it 3840x2560
++		 * at 60, 100 and 120 Hz, on every hotplug.
++		 */
++		const struct drm_edid *drm_edid =
++			drm_edid_read_ddc(&hdmi->connector, hdmi->ddc);
++
++		if (drm_edid) {
++			cec_notifier_set_phys_addr_from_edid(hdmi->cec_notifier,
++							     drm_edid_raw(drm_edid));
++			drm_edid_free(drm_edid);
++		}
++	}
+ 
+ 	if (hdmi->bridge.dev) {
+ #if IS_REACHABLE(CONFIG_DRM_DW_HDMI_CEC)

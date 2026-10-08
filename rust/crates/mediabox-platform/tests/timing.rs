@@ -35,6 +35,7 @@ fn wide_open(max_khz: u32) -> SinkVideo {
     SinkVideo {
         max_character_rate_khz: max_khz,
         rate_is_declared: true,
+        max_frl_gbps: 0,
         advertised: Vec::new(),
         st2084: true,
         hlg: false,

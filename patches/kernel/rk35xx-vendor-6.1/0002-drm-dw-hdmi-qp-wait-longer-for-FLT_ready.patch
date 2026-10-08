@@ -1,0 +1,44 @@
+From: Yusuf <yusufyav.dev@gmail.com>
+Subject: [PATCH] drm/bridge: dw-hdmi-qp: wait up to 2 s for FLT_ready and log it
+
+LTS2 polled SCDC FLT_ready for 400 ms. A BenQ RD280UG coming out of TMDS
+was not ready in that time: the first FRL attempt after a hotplug failed
+with "sink flt isn't ready" and a later one trained. Poll for up to 2 s
+and log how long the sink took, so the figure is measured.
+---
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c
+index 20d6a9393..77f001a8e 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.c
+@@ -1982,18 +1982,27 @@ static int dw_hdmi_qp_flt_lts2(struct dw_hdmi_qp *hdmi, u8 rate)
+ 	u8 val = 0;
+ 	u8 flt_rate = hdmi_set_frl_mask(rate);
+ 
+-	/* FLT_READY & FFE_LEVELS read */
+-	for (i = 0; i < 20; i++) {
++	/*
++	 * FLT_READY & FFE_LEVELS read.
++	 *
++	 * 400 ms was not enough for a BenQ RD280UG coming out of TMDS: the
++	 * first attempt after a hotplug failed and the next one, seconds
++	 * later, trained. Wait up to 2 s and say how long it took, so the
++	 * figure is measured rather than guessed.
++	 */
++	for (i = 0; i < 100; i++) {
+ 		drm_scdc_readb(hdmi->ddc, SCDC_STATUS_FLAGS_0, &val);
+ 		if (val & BIT(6))
+ 			break;
+ 		msleep(20);
+ 	}
+ 
+-	if (i == 20) {
+-		dev_err(hdmi->dev, "sink flt isn't ready,SCDC_STATUS_FLAGS_0:0x%x\n", val);
++	if (i == 100) {
++		dev_err(hdmi->dev, "sink flt isn't ready after %d ms,SCDC_STATUS_FLAGS_0:0x%x\n",
++			i * 20, val);
+ 		return LTSL;
+ 	}
++	dev_info(hdmi->dev, "sink flt ready after %d ms\n", i * 20);
+ 
+ 	/* max ffe level 3 */
+ 	val = hdmi->max_ffe_lv << 4 | flt_rate;

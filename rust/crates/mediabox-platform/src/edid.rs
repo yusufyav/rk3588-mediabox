@@ -284,6 +284,33 @@ pub struct HdmiForum {
     pub dc_420_30bit: bool,
     pub dc_420_36bit: bool,
     pub dc_420_48bit: bool,
+    /// Max_FRL_Rate, as declared: 0 for none, 1 to 6 for the link it can
+    /// take ([`HdmiForum::frl`]).
+    #[serde(default)]
+    pub max_frl_rate: u8,
+}
+
+impl HdmiForum {
+    /// The fixed-rate link the sink takes, as lanes and gigabits per lane:
+    /// `drm_get_max_frl_rate` (drivers/gpu/drm/drm_edid.c; HDMI 2.1 table
+    /// 10-6). `None` when the sink declared none, or a value HDMI reserves.
+    pub fn frl(&self) -> Option<(u8, u8)> {
+        match self.max_frl_rate {
+            1 => Some((3, 3)),
+            2 => Some((3, 6)),
+            3 => Some((4, 6)),
+            4 => Some((4, 8)),
+            5 => Some((4, 10)),
+            6 => Some((4, 12)),
+            _ => None,
+        }
+    }
+
+    /// The whole link, in gigabits per second; zero for none.
+    pub fn frl_gbps(&self) -> u32 {
+        self.frl()
+            .map_or(0, |(lanes, gbps)| u32::from(lanes) * u32::from(gbps))
+    }
 }
 
 /// The HDR Static Metadata Data Block (CTA extended tag 0x06): the transfer
@@ -592,6 +619,8 @@ fn forum(block: ForumBlock, payload: &[u8]) -> HdmiForum {
         dc_420_30bit: dc & 0x01 != 0,
         dc_420_36bit: dc & 0x02 != 0,
         dc_420_48bit: dc & 0x04 != 0,
+        // The same byte's top nibble (`DRM_EDID_MAX_FRL_RATE_MASK`).
+        max_frl_rate: dc >> 4,
     }
 }
 

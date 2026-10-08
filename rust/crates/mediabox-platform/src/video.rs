@@ -18,7 +18,9 @@
 //! The source's own limits are the ones the running vendor HDMI driver
 //! exposes on this board, read off the connector: `color_format` offers RGB,
 //! YCbCr 4:4:4, 4:2:2 and 4:2:0; `color_depth` offers 24 and 30 bit, so ten
-//! bits per component at most; and its `mode_valid` stops TMDS at 600 MHz.
+//! bits per component at most; its `mode_valid` stops TMDS at 600 MHz, and
+//! past that the link is FRL where both ends declare it
+//! ([`SinkVideo::refusal`]).
 //!
 //! Checked against the reference Android box on both inputs of the same Sony,
 //! whose lists are in `tests/color_modes.rs`.
@@ -47,6 +49,9 @@ pub struct SourceCaps {
     /// HDR film: measured on the Plus at 2160p23.976 on a 600 MHz input,
     /// `rgb` and ten bits asked, `YUYV10_1X20` on the wire.
     pub hdr10_ycbcr422: bool,
+    /// The HDMI 2.1 fixed-rate link the transmitter trains, in gigabits per
+    /// second over all its lanes; zero for a TMDS-only source.
+    pub max_frl_gbps: u32,
 }
 
 /// RK3588 HDMI TX under the vendor kernel this product runs: the link limits
@@ -64,6 +69,10 @@ pub struct SinkVideo {
     /// Zero when the sink declared neither.
     pub max_character_rate_khz: u32,
     pub rate_is_declared: bool,
+    /// The HF-VSDB's Max_FRL_Rate as a whole link, in gigabits per second
+    /// ([`crate::edid::HdmiForum::frl_gbps`]); zero for a TMDS-only sink.
+    #[serde(default)]
+    pub max_frl_gbps: u32,
     /// Everything declared, before any mode or link budget is applied -- what
     /// the Amlogic stack calls `dc_cap`.
     pub advertised: Vec<ColorMode>,
@@ -314,21 +323,51 @@ impl SinkVideo {
             });
         };
         let need_khz = timing.mode.hdmi_character_rate_khz(mode);
-        if self.max_character_rate_khz != 0
+        let over_tmds = if self.max_character_rate_khz != 0
             && need_hz > u64::from(self.max_character_rate_khz) * 1000
         {
-            return Some(Refusal::OverSink {
+            Some(Refusal::OverSink {
                 need_khz,
                 max_khz: self.max_character_rate_khz,
-            });
-        }
-        if need_hz > u64::from(source.max_tmds_khz) * 1000 {
-            return Some(Refusal::OverSource {
+            })
+        } else if need_hz > u64::from(source.max_tmds_khz) * 1000 {
+            Some(Refusal::OverSource {
                 need_khz,
                 max_khz: source.max_tmds_khz,
-            });
+            })
+        } else {
+            None
+        };
+        // Past what TMDS carries, the driver trains FRL when both ends
+        // declare it (`dw_hdmi_qp_set_link_cfg`); a cell it cannot carry
+        // there keeps the TMDS refusal, which is still why it is refused.
+        over_tmds.filter(|_| !self.frl_carries(timing, mode, source))
+    }
+
+    /// Whether the fixed-rate link both ends declare carries `mode` at
+    /// `timing`, by the rule the patched vendor driver applies
+    /// (patches/kernel/rk35xx-vendor-6.1/0003): FRL packs 16 bits in 18 and
+    /// packetisation with RS FEC costs about 3% more; above 1188 MHz the
+    /// driver keeps a non-4:2:0 format only where RGB at 8 bit fits.
+    fn frl_carries(&self, timing: &Timing, mode: ColorMode, source: &SourceCaps) -> bool {
+        let link_kbps = u64::from(self.max_frl_gbps.min(source.max_frl_gbps)) * 1_000_000;
+        if link_kbps == 0 {
+            return false;
         }
-        None
+        let clock_khz = u64::from(timing.pixel_clock_khz);
+        // Bits per pixel, doubled so 4:2:0's one and a half stay whole.
+        let fits = |bpp_x2: u64| clock_khz * bpp_x2 / 2 * 18 / 16 * 103 / 100 <= link_kbps;
+        let bits = u64::from(mode.bits);
+        let bpp_x2 = match mode.format {
+            ColorFormat::Rgb | ColorFormat::Ycbcr444 => 6 * bits,
+            // A twelve-bit container whatever the depth (HDMI 1.0 s6.5).
+            ColorFormat::Ycbcr422 => 48,
+            ColorFormat::Ycbcr420 => 3 * bits,
+        };
+        if clock_khz > 1_188_000 && mode.format != ColorFormat::Ycbcr420 && !fits(48) {
+            return false;
+        }
+        fits(bpp_x2)
     }
 
     /// Every cell the display screen draws at this timing: each format at
@@ -573,6 +612,7 @@ pub fn sink_video(cta: &CtaCapabilities) -> SinkVideo {
     let mut sink = SinkVideo {
         max_character_rate_khz: cta.max_tmds_khz(),
         rate_is_declared: false,
+        max_frl_gbps: cta.hdmi_forum.map_or(0, |forum| forum.frl_gbps()),
         advertised: Vec::new(),
         st2084: cta.hdr_static.is_some_and(|hdr| hdr.eotf_st2084),
         hlg: cta.hdr_static.is_some_and(|hdr| hdr.eotf_hlg),

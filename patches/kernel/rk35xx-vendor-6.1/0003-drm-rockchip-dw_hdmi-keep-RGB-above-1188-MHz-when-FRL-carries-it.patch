@@ -1,0 +1,70 @@
+From: Yusuf <yusufyav.dev@gmail.com>
+Subject: [PATCH] drm/rockchip: dw_hdmi: keep RGB above 1188 MHz when FRL carries it
+
+Above 1188 MHz the driver forced YCbCr 4:2:0 for every mode. A sink's own
+timing it declares no 4:2:0 for goes dark in it: a BenQ RD280UG's
+3840x2560 at 120 Hz is 1287.7 MHz, a DisplayID timing with no 4:2:0
+capability map, and RGB at 8 bit needs about 35.8 Gbps of FRL -- inside
+the 48 Gbps it declares.
+
+Keep the chosen format above 1188 MHz when RGB at 8 bit fits the FRL
+link the sink declares, and publish RGB 8 bit in the mode colour
+capabilities for those modes. 4:2:0 stays for 4:2:0-only modes and for
+rates the link cannot carry in RGB.
+---
+diff --git a/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c b/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c
+index 1b32ff0b9..51269fab7 100644
+--- a/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c
++++ b/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c
+@@ -2337,6 +2337,19 @@ static u64 rockchip_get_grf_color_fmt(void *data)
+ 	return bus_format;
+ }
+ 
++/*
++ * Whether RGB at 8 bit per component reaches the sink over the FRL link it
++ * declares (lanes x Gbps per lane, from the HF-VSDB). FRL carries 16 bits in
++ * 18, and packetisation with RS FEC takes about 3% more.
++ */
++static bool hdmi_frl_carries_rgb8(struct rockchip_hdmi *hdmi, int clock_khz)
++{
++	u64 need_kbps = (u64)clock_khz * 24 * 18 / 16 * 103 / 100;
++	u64 link_kbps = (u64)hdmi->max_lanes * hdmi->max_frl_rate_per_lane * 1000000;
++
++	return link_kbps && need_kbps <= link_kbps;
++}
++
+ static void
+ dw_hdmi_rockchip_select_output(struct drm_connector_state *conn_state,
+ 			       struct drm_crtc_state *crtc_state,
+@@ -2475,7 +2488,17 @@ dw_hdmi_rockchip_select_output(struct drm_connector_state *conn_state,
+ 		DRM_MODE_FLAG_3D_FRAME_PACKING)
+ 		pixclock *= 2;
+ 
+-	if ((hdmi->is_hdmi_qp && mode.clock > 1188000) || drm_mode_is_420_only(info, &mode))
++	/*
++	 * Above 4K120 the vendor driver forced 4:2:0 for every mode. A sink's
++	 * own timing that it declares no 4:2:0 for -- a BenQ RD280UG's
++	 * 3840x2560 at 120 Hz, 1287.7 MHz -- goes dark in it. Above 1188 MHz
++	 * the format chosen above now stands when RGB at 8 bit fits the FRL
++	 * link both ends declare; 4:2:0 remains for 4:2:0-only modes and for
++	 * rates that do not fit.
++	 */
++	if (drm_mode_is_420_only(info, &mode) ||
++	    (hdmi->is_hdmi_qp && mode.clock > 1188000 &&
++	     !hdmi_frl_carries_rgb8(hdmi, mode.clock)))
+ 		*color_format = RK_IF_FORMAT_YCBCR420;
+ 
+ 	if (!sink_is_hdmi) {
+@@ -3170,8 +3193,11 @@ static void dw_hdmi_rockchip_get_mode_color_caps(struct drm_connector *connector
+ 		drm_mode_convert_to_umode(&caps->umode, mode);
+ 		/* hdmi 2.1 frl mode */
+ 		if (mode->clock > 600000) {
++			/* RGB 8 bit too where the FRL link carries it */
+ 			if (mode->clock > 1188000)
+-				color_caps_mask = BIT(YUV420_8BIT) | BIT(YUV420_10BIT);
++				color_caps_mask = BIT(YUV420_8BIT) | BIT(YUV420_10BIT) |
++					(hdmi_frl_carries_rgb8(hdmi, mode->clock) ?
++					 BIT(RGB_8BIT) : 0);
+ 
+ 			caps->color_caps = color_caps_mask;
+ 			caps++;

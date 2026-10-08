@@ -1,0 +1,5 @@
+FROM docker.io/library/debian:trixie
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gcc libc6-dev gcc-14-aarch64-linux-gnu gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+      make bc bison flex libssl-dev libelf-dev dwarves kmod cpio python3 rsync perl \
+    && rm -rf /var/lib/apt/lists/*
