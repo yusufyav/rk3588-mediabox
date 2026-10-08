@@ -17,7 +17,7 @@
 //! The destructive rows are the reason [`Action::confirms`] exists. Nothing on
 //! this screen restarts or shuts down the appliance on one press.
 
-use mediabox_core::{FanStatus, LedMode};
+use mediabox_core::{CecChange, CecPowerTarget, CecSettings, CecSourceLost, FanStatus, LedMode};
 use serde_json::Value;
 
 use crate::model::DisplayStatus;
@@ -57,6 +57,13 @@ pub enum Action {
     /// Whether a film's frame rate chooses the display's refresh: turned to
     /// the other state.
     SetRefreshMatching(bool),
+    /// One HDMI-CEC panel row, changed: the application sends the kept
+    /// settings with this change.
+    Cec(CecChange),
+    /// Opens the list of power-control targets.
+    ChooseCecTarget,
+    /// Opens the two answers to the television going to another input.
+    ChooseCecSourceLost,
 }
 
 impl Action {
@@ -92,6 +99,8 @@ impl Action {
                 | Action::OpenBluetooth
                 | Action::OpenAccount
                 | Action::ChooseLeds
+                | Action::ChooseCecTarget
+                | Action::ChooseCecSourceLost
         )
     }
 }
@@ -101,6 +110,8 @@ impl Action {
 pub enum Page {
     Playback,
     Account,
+    /// The HDMI-CEC panel: a list page, so it sits with the other two.
+    Cec,
     /// The display editor.
     Output,
     /// The fan curve editor.
@@ -117,6 +128,7 @@ impl Page {
         match self {
             Page::Playback => "Oynatma",
             Page::Account => "Hesap",
+            Page::Cec => "HDMI-CEC",
             Page::Output => OUTPUT,
             Page::Cooling => COOLING,
             Page::Audio => AUDIO,
@@ -128,6 +140,7 @@ impl Page {
         match self {
             Page::Playback => "Oynatıcının durumu ve yeniden başlatılması",
             Page::Account => "Stremio hesabı ve eklentileri",
+            Page::Cec => "TV kumandası ve güç",
             Page::Output => "Çözünürlük, yenileme hızı ve renk",
             Page::Cooling => "Fan eğrisi ve işlemci sıcaklığı",
             Page::Audio => "Ses çıkışı, biçim ve ses seviyesi",
@@ -139,6 +152,7 @@ impl Page {
         match self {
             Page::Playback => "play",
             Page::Account => "user",
+            Page::Cec => "remote",
             Page::Output => "monitor",
             Page::Cooling => "fan",
             Page::Audio => "speaker",
@@ -187,6 +201,11 @@ pub struct Row {
     pub page: Option<Page>,
     /// The wired port an Ethernet card opens.
     pub port: Option<String>,
+    /// Drawn, greyed, and never focused or pressed: a setting that is kept
+    /// but not in force, as everything under HDMI-CEC is while it is off.
+    pub disabled: bool,
+    /// An on/off setting, drawn as a switch rather than a word.
+    pub toggle: Option<bool>,
 }
 
 /// The Wi-Fi door, with what the daemon could tell us without asking the
@@ -247,6 +266,8 @@ impl Row {
             action: None,
             page: None,
             port: None,
+            disabled: false,
+            toggle: None,
         }
     }
 
@@ -284,7 +305,16 @@ impl Row {
     }
 
     pub fn selectable(&self) -> bool {
-        self.action.is_some() || self.page.is_some()
+        !self.disabled && (self.action.is_some() || self.page.is_some())
+    }
+
+    /// A verdict's colour is for a setting in force; a greyed one is drawn
+    /// as plain text.
+    fn disabled_if(self, disabled: bool) -> Self {
+        if !disabled {
+            return self;
+        }
+        Self { disabled, tone: String::new(), ..self }
     }
 
     pub fn kind(&self) -> Kind {
@@ -318,7 +348,17 @@ pub enum Pane {
     Page,
 }
 
-const PAGES: usize = 5;
+const PAGES: usize = 6;
+
+/// Which short list is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChoiceKind {
+    Leds,
+    CecTarget,
+    CecSourceLost,
+}
+
+const SOURCE_LOST: [CecSourceLost; 2] = [CecSourceLost::StayOn, CecSourceLost::Standby];
 
 /// A short list opened from a card, as the screen draws it.
 #[derive(Debug, Clone, PartialEq)]
@@ -351,8 +391,11 @@ pub struct Settings {
     page_positions: [usize; PAGES],
     /// The mode the lights are in, when the board has lights anybody can set.
     leds: Option<LedMode>,
-    /// The lights' list, open, with the remote on this option.
+    /// A short list, open, with the remote on this option.
     choice: Option<usize>,
+    choice_kind: ChoiceKind,
+    /// The HDMI-CEC panel as the daemon last reported it.
+    cec: Option<CecSettings>,
     /// The fan curve editor, which is the whole of the "Soğutma" page: a
     /// graph and a list of points rather than rows of readings.
     pub cooling: super::cooling::Cooling,
@@ -379,6 +422,8 @@ impl Settings {
             page_positions: [0; PAGES],
             leds: None,
             choice: None,
+            choice_kind: ChoiceKind::Leds,
+            cec: None,
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
             ethernet: super::ethernet::Ethernet::new(),
@@ -397,7 +442,7 @@ impl Settings {
     /// Whether the rows on the right are a list page's rather than the
     /// category's.
     fn in_list_page(&self) -> bool {
-        matches!(self.page(), Some(Page::Playback | Page::Account))
+        matches!(self.page(), Some(Page::Playback | Page::Account | Page::Cec))
     }
 
     pub fn row_index(&self) -> usize {
@@ -472,18 +517,87 @@ impl Settings {
     pub fn open_choice(&mut self) -> bool {
         let Some(mode) = self.leds else { return false };
         self.choice = Some(LedMode::ALL.iter().position(|m| *m == mode).unwrap_or(0));
+        self.choice_kind = ChoiceKind::Leds;
         true
     }
 
-    /// Ok in the list: the mode under the focus, to be set. The list closes.
+    /// Opens the power-control targets on the one kept. Not with CEC off:
+    /// the row is not pressable then, and this is the second lock.
+    pub fn open_cec_choice(&mut self) -> bool {
+        let Some(settings) = self.cec.filter(|settings| settings.enabled) else { return false };
+        self.choice = Some(
+            CecPowerTarget::ALL.iter().position(|t| *t == settings.power_target).unwrap_or(0),
+        );
+        self.choice_kind = ChoiceKind::CecTarget;
+        true
+    }
+
+    /// Opens what to do when the television goes to another input.
+    pub fn open_cec_source_lost(&mut self) -> bool {
+        let Some(settings) = self.cec.filter(|settings| settings.enabled) else { return false };
+        self.choice = Some(
+            SOURCE_LOST.iter().position(|lost| *lost == settings.on_active_source_lost).unwrap_or(0),
+        );
+        self.choice_kind = ChoiceKind::CecSourceLost;
+        true
+    }
+
+    fn choice_len(&self) -> usize {
+        match self.choice_kind {
+            ChoiceKind::Leds => LedMode::ALL.len(),
+            ChoiceKind::CecTarget => CecPowerTarget::ALL.len(),
+            ChoiceKind::CecSourceLost => SOURCE_LOST.len(),
+        }
+    }
+
+    /// Ok in the list: the option under the focus, to be set. The list closes.
     pub fn choose(&mut self) -> Option<Action> {
         let at = self.choice.take()?;
-        let mode = LedMode::ALL.get(at).copied()?;
-        (self.leds != Some(mode)).then_some(Action::SetLeds(mode))
+        match self.choice_kind {
+            ChoiceKind::Leds => {
+                let mode = LedMode::ALL.get(at).copied()?;
+                (self.leds != Some(mode)).then_some(Action::SetLeds(mode))
+            }
+            ChoiceKind::CecTarget => {
+                let target = CecPowerTarget::ALL.get(at).copied()?;
+                let settings = self.cec.filter(|settings| settings.enabled)?;
+                (settings.power_target != target).then_some(Action::Cec(CecChange::PowerTarget(target)))
+            }
+            ChoiceKind::CecSourceLost => {
+                let lost = SOURCE_LOST.get(at).copied()?;
+                let settings = self.cec.filter(|settings| settings.enabled)?;
+                (settings.on_active_source_lost != lost)
+                    .then_some(Action::Cec(CecChange::OnActiveSourceLost(lost)))
+            }
+        }
     }
 
     pub fn choice_view(&self) -> Option<ChoiceView> {
         let focus = self.choice?;
+        if self.choice_kind == ChoiceKind::CecSourceLost {
+            let kept = self.cec.map(|settings| settings.on_active_source_lost);
+            return Some(ChoiceView {
+                title: "Başka girişe geçilince".into(),
+                note: String::new(),
+                focus,
+                items: SOURCE_LOST
+                    .iter()
+                    .map(|lost| (lost.label().to_string(), String::new(), kept == Some(*lost)))
+                    .collect(),
+            });
+        }
+        if self.choice_kind == ChoiceKind::CecTarget {
+            let kept = self.cec.map(|settings| settings.power_target);
+            return Some(ChoiceView {
+                title: "Kapatma hedefi".into(),
+                note: String::new(),
+                focus,
+                items: CecPowerTarget::ALL
+                    .iter()
+                    .map(|target| (target.label().to_string(), String::new(), kept == Some(*target)))
+                    .collect(),
+            });
+        }
         Some(ChoiceView {
             title: "Yeşil ve mavi led".into(),
             note: "Kırmızı led donanımdan yanar; bu seçim onu etkilemez.".into(),
@@ -500,7 +614,7 @@ impl Settings {
             if dy == 0 {
                 return false;
             }
-            let next = (at as i32 + dy).clamp(0, LedMode::ALL.len() as i32 - 1) as usize;
+            let next = (at as i32 + dy).clamp(0, self.choice_len() as i32 - 1) as usize;
             self.choice = Some(next);
             return next != at;
         }
@@ -647,7 +761,7 @@ impl Settings {
                     return false;
                 }
             }
-            Page::Playback | Page::Account => {}
+            Page::Playback | Page::Account | Page::Cec => {}
         }
         self.page = Some(page);
         self.pane = Pane::Page;
@@ -694,9 +808,17 @@ impl Settings {
         self.ethernet.load(ethernet_status(status));
         self.audio.load(audio_status(status));
         self.leds = led_mode(status);
-        // Lights that stopped answering have nothing left to choose.
-        if self.leds.is_none() {
-            self.choice = None;
+        self.cec = cec_status(status).map(|cec| cec.settings);
+        // Lights that stopped answering have nothing left to choose, and a
+        // CEC turned off has no target to choose.
+        match self.choice_kind {
+            ChoiceKind::Leds if self.leds.is_none() => self.choice = None,
+            ChoiceKind::CecTarget | ChoiceKind::CecSourceLost
+                if !self.cec.is_some_and(|settings| settings.enabled) =>
+            {
+                self.choice = None
+            }
+            _ => {}
         }
         let groups = compose(status, diagnostics, display);
         let changed = self.groups.len() != groups.len();
@@ -709,7 +831,7 @@ impl Settings {
             let slot = self.positions[index].min(group.rows.len().saturating_sub(1));
             self.positions[index] = slot;
         }
-        for page in [Page::Playback, Page::Account] {
+        for page in [Page::Playback, Page::Account, Page::Cec] {
             let rows = page_rows(page, status, display);
             let slot = self.page_positions[page.index()].min(rows.len().saturating_sub(1));
             self.page_rows[page.index()] = rows;
@@ -744,6 +866,15 @@ fn next_selectable(rows: &[Row], start: i32, direction: i32) -> Option<usize> {
         at += direction;
     }
     None
+}
+
+fn cec_status(status: Option<&Value>) -> Option<mediabox_core::CecStatus> {
+    serde_json::from_value(status?.get("cec")?.clone()).ok()
+}
+
+/// The kept HDMI-CEC panel, for the application to change one row of.
+pub fn cec_settings(status: Option<&Value>) -> Option<CecSettings> {
+    cec_status(status).map(|cec| cec.settings)
 }
 
 fn fan_status(status: Option<&Value>) -> Option<FanStatus> {
@@ -1068,14 +1199,6 @@ fn flag(root: Option<&Value>, pointer: &str) -> Option<bool> {
     root?.pointer(pointer)?.as_bool()
 }
 
-fn yes_no(value: Option<bool>) -> (String, &'static str) {
-    match value {
-        Some(true) => ("Bağlı".into(), "good"),
-        Some(false) => ("Yok".into(), "bad"),
-        None => ("—".into(), ""),
-    }
-}
-
 fn duration(seconds: u64) -> String {
     let days = seconds / 86_400;
     let hours = (seconds % 86_400) / 3600;
@@ -1240,10 +1363,94 @@ fn playback(status: Option<&Value>, display: Option<&DisplayStatus>) -> Vec<Row>
     ]
 }
 
+fn on_off(on: bool) -> &'static str {
+    if on { "Açık" } else { "Kapalı" }
+}
+
+/// A switch on the HDMI-CEC panel: drawn as a switch, and the change a
+/// press sends.
+fn cec_switch(label: &str, on: bool, change: fn(bool) -> CecChange) -> Row {
+    Row {
+        toggle: Some(on),
+        ..Row::act(label, "", "", Action::Cec(change(!on)))
+    }
+}
+
+/// What the adapter is, in words: ready, off by choice, or why not.
+fn cec_state(cec: &mediabox_core::CecStatus) -> (String, &'static str) {
+    if !cec.settings.enabled {
+        return ("Kapalı".into(), "");
+    }
+    if cec.available {
+        return ("Hazır".into(), "good");
+    }
+    (cec.error.clone().unwrap_or_else(|| "CEC bağdaştırıcısı kullanılamıyor".into()), "warn")
+}
+
+/// The "TV ve Kumanda" category: the door to the HDMI-CEC panel, the two
+/// things a person does to the television by hand, and the adapter.
+fn tv_and_remote(status: Option<&Value>) -> Vec<Row> {
+    let dash = || "—".to_string();
+    let cec = cec_status(status);
+    let enabled = cec.as_ref().is_some_and(|cec| cec.settings.enabled);
+    let (state, tone) = cec.as_ref().map(cec_state).unwrap_or_else(|| ("Okunuyor…".into(), ""));
+    vec![
+        Row::link(Page::Cec, "", on_off(enabled), if enabled { "good" } else { "" }),
+        Row::act("TV'yi aç", "", "tv", Action::WakeTelevision).disabled_if(!enabled),
+        Row::act("TV'yi kapat", "", "moon", Action::StandbyTelevision).disabled_if(!enabled),
+        Row::header("HDMI-CEC"),
+        Row::toned("CEC", state, tone),
+        Row::reading("Bağdaştırıcı", text(status, "/cec/adapter").unwrap_or_else(dash)),
+        Row::reading("Fiziksel adres", text(status, "/cec/physical_address").unwrap_or_else(dash)),
+        Row::header("Telefon kumandası"),
+        Row::reading("Uzaktan kumanda", "http://<cihaz>:8788"),
+    ]
+}
+
+/// The HDMI-CEC panel.
+///
+/// The master switch first; every row under it is greyed and out of the
+/// remote's reach while it is off, and keeps its value, so turning it back
+/// on shows -- and puts into effect -- exactly what was there. The daemon
+/// refuses the same rows' commands with CEC off; this only draws that.
+fn cec_panel(status: Option<&Value>) -> Vec<Row> {
+    let Some(cec) = cec_status(status) else {
+        return vec![Row::reading("HDMI-CEC", "Okunuyor…")];
+    };
+    let s = cec.settings;
+    let off = !s.enabled;
+    let choice = |label: &str, value: &str, action: Action| Row {
+        value: value.into(),
+        ..Row::act(label, "", "", action)
+    };
+    let mut rows = vec![
+        cec_switch("HDMI-CEC", s.enabled, CecChange::Enabled),
+        cec_switch("TV kumandası", s.remote_control, CecChange::RemoteControl).disabled_if(off),
+        cec_switch("Açılışta TV'yi aç", s.wake_tv_on_start, CecChange::WakeTvOnStart).disabled_if(off),
+        cec_switch("Açılışta TV girişini seç", s.active_source_on_start, CecChange::ActiveSourceOnStart)
+            .disabled_if(off),
+        cec_switch("Kapanışta TV'yi kapat", s.standby_tv_on_shutdown, CecChange::StandbyTvOnShutdown)
+            .disabled_if(off),
+        cec_switch("Kapanışta önceki duruma dön", s.restore_power_on_shutdown, CecChange::RestorePowerOnShutdown)
+            .disabled_if(off),
+        choice("Kapatma hedefi", s.power_target.label(), Action::ChooseCecTarget).disabled_if(off),
+        choice("Başka girişe geçilince", s.on_active_source_lost.label(), Action::ChooseCecSourceLost)
+            .disabled_if(off),
+        Row::header("Durum"),
+    ];
+    let (state, tone) = cec_state(&cec);
+    rows.push(Row::toned("Bağlantı", state, tone));
+    if s.enabled {
+        rows.push(Row::reading("Televizyon", cec.session.tv_power.label()));
+    }
+    rows
+}
+
 fn page_rows(page: Page, status: Option<&Value>, display: Option<&DisplayStatus>) -> Vec<Row> {
     match page {
         Page::Playback => playback(status, display),
         Page::Account => account(status),
+        Page::Cec => cec_panel(status),
         Page::Output | Page::Cooling | Page::Audio | Page::Ethernet => Vec::new(),
     }
 }
@@ -1255,7 +1462,6 @@ fn compose(
 ) -> Vec<Group> {
     let dash = || "—".to_string();
 
-    let (cec_state, cec_tone) = yes_no(flag(status, "/cec/available"));
     let running = kodi_running(status);
     let signed_in = signed_in(status);
     let (led_card, led_readings) = leds(status);
@@ -1313,32 +1519,7 @@ fn compose(
             title: "TV ve Kumanda".into(),
             blurb: "Televizyonu HDMI-CEC ile yönetin",
             icon: "remote",
-            rows: vec![
-                Row::act(
-                    "Televizyonu uyandır",
-                    "CEC ile açılış isteği",
-                    "tv",
-                    Action::WakeTelevision,
-                ),
-                Row::act(
-                    "Televizyonu beklemeye al",
-                    "CEC ile standby",
-                    "moon",
-                    Action::StandbyTelevision,
-                ),
-                Row::header("HDMI-CEC"),
-                Row::toned("CEC", cec_state, cec_tone),
-                Row::reading(
-                    "Bağdaştırıcı",
-                    text(status, "/cec/adapter").unwrap_or_else(dash),
-                ),
-                Row::reading(
-                    "Fiziksel adres",
-                    text(status, "/cec/physical_address").unwrap_or_else(dash),
-                ),
-                Row::header("Telefon kumandası"),
-                Row::reading("Uzaktan kumanda", "http://<cihaz>:8788"),
-            ],
+            rows: tv_and_remote(status),
         },
         Group {
             title: "Cihaz".into(),
@@ -2128,4 +2309,151 @@ mod tests {
         assert!(!row.selectable());
         assert_eq!(row.value, "EDID okunamadı");
     }
+
+    // ------------------------------------------------------------- HDMI-CEC
+
+    fn cec_answer(settings: CecSettings, available: bool) -> Value {
+        serde_json::json!({"cec": {
+            "available": available,
+            "adapter": "/dev/cec1 (dw_hdmi_qp)",
+            "driver": "dw_hdmi_qp",
+            "capabilities": [],
+            "physical_address": "4.0.0.0",
+            "logical_addresses": [4],
+            "known_devices": [],
+            "last_rx": null,
+            "last_tx": null,
+            "errors": {"receive": 0, "transmit": 0, "arbitration_lost": 0, "nack": 0, "low_drive": 0},
+            "error": if available { Value::Null } else { Value::String("HDMI-CEC ayarlardan kapatıldı".into()) },
+            "settings": settings,
+            "session": {"tv_power": "standby"},
+        }})
+    }
+
+    fn cec_page(settings: CecSettings) -> Settings {
+        let mut screen = Settings::new();
+        let status = cec_answer(settings, settings.enabled);
+        screen.compose(Some(&status), None, None);
+        section(&mut screen, "TV ve Kumanda");
+        assert!(screen.step(1, 0));
+        assert_eq!(screen.focused().and_then(|row| row.page), Some(Page::Cec));
+        assert!(screen.open(Page::Cec));
+        screen
+    }
+
+    /// Every row's action the remote can reach on the page, walking it.
+    fn walk(screen: &mut Settings) -> Vec<Action> {
+        let mut seen = vec![];
+        seen.extend(screen.focused().and_then(|row| row.action));
+        while screen.step(0, 1) {
+            seen.extend(screen.focused().and_then(|row| row.action));
+        }
+        seen
+    }
+
+    #[test]
+    fn the_cec_panel_has_every_row_and_all_of_them_reach() {
+        let mut screen = cec_page(CecSettings::default());
+        let labels: Vec<String> = screen.rows().iter().map(|row| row.label.clone()).collect();
+        for wanted in [
+            "HDMI-CEC",
+            "TV kumandası",
+            "Açılışta TV'yi aç",
+            "Açılışta TV girişini seç",
+            "Kapanışta TV'yi kapat",
+            "Kapanışta önceki duruma dön",
+            "Kapatma hedefi",
+            "Başka girişe geçilince",
+        ] {
+            assert!(labels.iter().any(|label| label == wanted), "{wanted} missing: {labels:?}");
+        }
+        let actions = walk(&mut screen);
+        assert_eq!(actions.len(), 8, "{actions:?}");
+        assert_eq!(actions[0], Action::Cec(CecChange::Enabled(false)));
+        assert!(actions.contains(&Action::ChooseCecTarget));
+        assert!(actions.contains(&Action::ChooseCecSourceLost));
+        // Every switch is a switch, and no row carries an icon.
+        let switches = screen.rows().iter().filter(|row| row.toggle.is_some()).count();
+        assert_eq!(switches, 6);
+        assert!(screen.rows().iter().all(|row| row.icon.is_empty()));
+        assert!(screen.open_cec_source_lost());
+        assert!(screen.step(0, 1));
+        assert_eq!(screen.choose(), Some(Action::Cec(CecChange::OnActiveSourceLost(CecSourceLost::Standby))));
+    }
+
+    #[test]
+    fn with_cec_off_only_the_master_switch_can_be_reached() {
+        let kept = CecSettings {
+            wake_tv_on_start: true,
+            remote_control: false,
+            power_target: CecPowerTarget::Broadcast,
+            ..Default::default()
+        };
+        let mut screen = cec_page(kept.with(CecChange::Enabled(false)));
+        // Drawn, greyed, with their kept values.
+        let sub: Vec<&Row> = screen.rows().iter().filter(|row| row.action.is_some()).skip(1).collect();
+        assert_eq!(sub.len(), 7);
+        assert!(sub.iter().all(|row| row.disabled && !row.selectable()));
+        assert!(sub.iter().any(|row| row.label == "Açılışta TV'yi aç" && row.toggle == Some(true)));
+        assert!(sub.iter().any(|row| row.label == "Kapatma hedefi" && row.value == "Tüm cihazlar"));
+        // The remote reaches the master switch and nothing else.
+        assert_eq!(walk(&mut screen), [Action::Cec(CecChange::Enabled(true))]);
+        // And the target list does not open.
+        assert!(!screen.open_cec_choice());
+        // The category's own CEC commands are greyed too.
+        section(&mut screen, "TV ve Kumanda");
+        let group = &screen.groups[screen.section].rows;
+        for action in [Action::WakeTelevision, Action::StandbyTelevision] {
+            let row = group.iter().find(|row| row.action == Some(action)).unwrap();
+            assert!(!row.selectable(), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn turning_cec_back_on_shows_every_kept_choice() {
+        let kept = CecSettings {
+            wake_tv_on_start: true,
+            restore_power_on_shutdown: true,
+            on_active_source_lost: CecSourceLost::Standby,
+            ..Default::default()
+        };
+        let off = cec_page(kept.with(CecChange::Enabled(false)));
+        let on = cec_page(kept);
+        let values = |screen: &Settings| -> Vec<(String, String)> {
+            screen.rows().iter().filter(|row| row.action.is_some()).skip(1).map(|row| (row.label.clone(), format!("{}{:?}", row.value, row.toggle))).collect()
+        };
+        assert_eq!(values(&off), values(&on));
+        assert!(on.rows().iter().filter(|row| row.action.is_some()).all(Row::selectable));
+    }
+
+    #[test]
+    fn the_power_target_is_chosen_from_a_list_not_stepped() {
+        let mut screen = cec_page(CecSettings::default());
+        assert!(screen.open_cec_choice());
+        let view = screen.choice_view().unwrap();
+        assert_eq!(view.items.len(), 3);
+        assert!(view.items[0].2, "the kept one is marked");
+        // Ok on the kept one changes nothing.
+        assert_eq!(screen.choose(), None);
+        assert!(screen.open_cec_choice());
+        assert!(screen.step(0, 1));
+        assert!(screen.step(0, 1));
+        assert!(!screen.step(0, 1), "three options");
+        assert_eq!(screen.choose(), Some(Action::Cec(CecChange::PowerTarget(CecPowerTarget::Broadcast))));
+        assert!(!screen.choosing());
+    }
+
+    #[test]
+    fn an_adapter_that_cannot_be_used_says_why() {
+        let mut screen = Settings::new();
+        let mut status = cec_answer(CecSettings::default(), false);
+        status["cec"]["error"] = "/dev/cec1: fiziksel adres yok (f.f.f.f); televizyon bu soketi görmüyor".into();
+        screen.compose(Some(&status), None, None);
+        let rows = page_rows(Page::Cec, Some(&status), None);
+        let state = rows.iter().find(|row| row.label == "Bağlantı").unwrap();
+        assert!(state.value.contains("f.f.f.f") && state.tone == "warn", "{state:?}");
+        // The panel itself stays usable: it is a setting, not a command.
+        assert!(rows.iter().filter(|row| row.action.is_some()).all(Row::selectable));
+    }
 }
+

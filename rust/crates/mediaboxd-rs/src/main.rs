@@ -91,6 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // its logical address by itself whenever that happens. Choosing a single
     // adapter here, once, is what left a box that booted with the television
     // off -- or had its cable moved to the other socket -- with no CEC at all.
+    // The panel's settings decide what each adapter is claimed as: with
+    // HDMI-CEC off, nothing is claimed and the box is not on the bus.
+    let cec_policy = Arc::new(mediaboxd_rs::cec::Policy::system());
     let (adapters, unavailable) = if args.disable_cec {
         (
             Vec::new(),
@@ -101,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     } else {
         let adapters = match args.cec_device.as_deref() {
-            Some(path) => match Adapter::open(path) {
+            Some(path) => match Adapter::open_with(path, cec_policy.claim()) {
                 Ok(adapter) => vec![adapter],
                 Err(error) if args.require_cec => return Err(error.into()),
                 Err(error) => {
@@ -109,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Vec::new()
                 }
             },
-            None => Adapter::open_all(),
+            None => Adapter::open_all(cec_policy.claim()),
         };
         if adapters.is_empty() && args.require_cec {
             return Err(CecError::NotFound.into());
@@ -191,6 +194,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mediaboxd_rs::cec::target(&mediabox_platform::Platform::discover())
                 }),
             },
+            policy: Arc::clone(&cec_policy),
+            requested: std::sync::Mutex::new(None),
         },
         input: input.clone(),
         media,
@@ -298,7 +303,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if wait.revents & libc::POLLIN == 0 {
                                 continue;
                             }
+                            // The remote's keys reach the bus only with CEC
+                            // and the remote both on. The kernel's own
+                            // passthrough follows the same switch through the
+                            // claim; this is the daemon's half of it.
+                            let settings = state.cec.policy.settings();
                             match adapter.receive(1) {
+                                Ok(Some(_)) if !settings.enabled => {}
+                                Ok(Some((parsed, None))) => {
+                                    let _guard = runtime.enter();
+                                    state.cec_received(adapter, &parsed.event);
+                                }
+                                Ok(Some((_, Some(_)))) if !settings.remote_control => {}
                                 Ok(Some((parsed, Some((action, pressed))))) => {
                                     let mode = input.mode();
                                     let decision = input.publish(
@@ -369,6 +385,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_tasks.push(tokio::spawn(serve_web(listener, state.clone(), config)));
     }
     eprintln!("mediaboxd-rs hazır: {}", args.socket.display());
+    // One Touch Play, once a boot, if the panel asks for it. Never waited on.
+    if !state.cec.adapters.is_empty() {
+        state.cec_start();
+    }
 
     // The display goes to whoever this board is set to come up as.
     //
@@ -407,6 +427,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     shutdown_signal().await?;
+    // Before the receiver stops and the adapters are released: a message
+    // sent after the claim is cleared would go nowhere.
+    state.cec_shutdown().await;
     stop.store(true, Ordering::Relaxed);
     if wake >= 0 {
         let one: u64 = 1;

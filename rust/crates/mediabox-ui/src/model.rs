@@ -798,6 +798,11 @@ pub struct CecStatus {
     pub known_devices: Vec<serde_json::Value>,
     #[serde(default)]
     pub error: Option<String>,
+    /// The HDMI-CEC panel, as the daemon keeps it.
+    #[serde(default)]
+    pub settings: mediabox_core::CecSettings,
+    #[serde(default)]
+    pub session: mediabox_core::CecSession,
 }
 
 /// One thing this box can be used for.

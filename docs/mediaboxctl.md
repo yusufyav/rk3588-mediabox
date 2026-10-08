@@ -19,6 +19,14 @@ mediaboxctl cec devices
 mediaboxctl cec active-source
 mediaboxctl cec wake-tv
 mediaboxctl cec standby-tv
+mediaboxctl cec set enabled off            # HDMI-CEC ana anahtarı
+mediaboxctl cec set remote on|off
+mediaboxctl cec set wake-on-start on|off
+mediaboxctl cec set active-source-on-start on|off
+mediaboxctl cec set standby-on-shutdown on|off   # restore-on-shutdown'ı kapatır
+mediaboxctl cec set restore-on-shutdown on|off   # standby-on-shutdown'ı kapatır
+mediaboxctl cec set power-target tv|tv-audio|all
+mediaboxctl cec set source-lost stay-on|standby
 mediaboxctl input monitor
 ```
 

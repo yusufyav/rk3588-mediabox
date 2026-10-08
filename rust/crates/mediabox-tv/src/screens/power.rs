@@ -61,11 +61,22 @@ pub const CHOICES: [Choice; 4] = [
     Choice::Shutdown,
 ];
 
+/// The power menu's rows, without the television's when CEC is off.
+pub fn choices(television: bool) -> Vec<Choice> {
+    CHOICES
+        .into_iter()
+        .filter(|choice| television || *choice != Choice::StandbyTelevision)
+        .collect()
+}
+
 /// A sheet on the panel: the power menu, a yes/no over one decision, or where
 /// a film the account was watching starts.
 pub enum Sheet {
     Power {
         index: usize,
+        /// Whether HDMI-CEC is on. Off, "Televizyonu kapat" is not on the
+        /// sheet at all: it would only be refused.
+        television: bool,
     },
     Confirm {
         question: String,
@@ -93,8 +104,13 @@ pub enum Sheet {
 }
 
 impl Sheet {
+    #[cfg(test)]
     pub fn power() -> Self {
-        Sheet::Power { index: 0 }
+        Self::power_with(true)
+    }
+
+    pub fn power_with(television: bool) -> Self {
+        Sheet::Power { index: 0, television }
     }
 
     pub fn confirm(action: Action, question: &str) -> Self {
@@ -124,11 +140,12 @@ impl Sheet {
 
     pub fn step(&mut self, dx: i32, dy: i32) -> bool {
         match self {
-            Sheet::Power { index } => {
+            Sheet::Power { index, television } => {
                 if dy == 0 {
                     return false;
                 }
-                let next = (*index as i32 + dy).clamp(0, CHOICES.len() as i32 - 1) as usize;
+                let count = choices(*television).len();
+                let next = (*index as i32 + dy).clamp(0, count as i32 - 1) as usize;
                 if next == *index {
                     return false;
                 }
@@ -165,8 +182,9 @@ impl Sheet {
     /// from a confirmation whose focus was deliberately moved to "Evet".
     pub fn press(&self) -> Press {
         match self {
-            Sheet::Power { index } => {
-                let choice = CHOICES[(*index).min(CHOICES.len() - 1)];
+            Sheet::Power { index, television } => {
+                let choices = choices(*television);
+                let choice = choices[(*index).min(choices.len() - 1)];
                 match choice.action() {
                     None => Press::Close,
                     Some(action) if choice.destructive() => {
@@ -211,6 +229,20 @@ pub enum Press {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_cec_off_the_power_sheet_has_no_television_row() {
+        let mut sheet = Sheet::power_with(false);
+        let mut seen = vec![sheet.press()];
+        while sheet.step(0, 1) {
+            seen.push(sheet.press());
+        }
+        assert!(!seen.contains(&Press::Do(Action::StandbyTelevision)), "{seen:?}");
+        assert_eq!(seen.len(), CHOICES.len() - 1);
+        let mut on = Sheet::power_with(true);
+        on.step(0, 1);
+        assert_eq!(on.press(), Press::Do(Action::StandbyTelevision));
+    }
 
     #[test]
     fn the_power_sheet_opens_on_the_harmless_row() {

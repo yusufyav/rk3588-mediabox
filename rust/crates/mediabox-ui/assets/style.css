@@ -1186,6 +1186,10 @@ body.tv .field-input { cursor: text; caret-color: var(--accent); }
 .row-value.ok { color: var(--ok); }
 .row-value.bad { color: var(--bad); }
 .row-value.warn { color: var(--warn); }
+/* A setting row with its own button: the HDMI-CEC panel's switches. */
+.row.switch { grid-template-columns: minmax(0, 1fr) auto auto; }
+/* Kept but not in force (HDMI-CEC off): greyed; its button is disabled. */
+.row.muted { opacity: 0.45; }
 
 .meter { grid-column: 1 / -1; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
 .meter > i { display: block; height: 100%; background: var(--accent); }

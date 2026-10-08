@@ -73,6 +73,35 @@ export component FocusRing inherits Rectangle {
 
 // A verdict: a dot and a word. The word is always there, so the colour is never
 // the only thing that says it.
+// An on/off switch, as television settings draw one: a pill track and a
+// knob that slides. On is the settings' own amber; a greyed one is a setting
+// kept but not in force.
+export component Toggle inherits Rectangle {
+    in property <bool> on;
+    in property <bool> enabled: true;
+    in property <bool> focused;
+    property <length> pad: self.height * 0.14;
+
+    height: Metrics.t-primary * 1.25;
+    width: self.height * 1.8;
+    border-radius: self.height / 2;
+    opacity: enabled ? 1 : 0.4;
+    background: on ? Theme.accent : (focused ? #4a5262 : #343b48);
+    animate background { duration: Theme.t-focus; easing: Theme.ease; }
+
+    Rectangle {
+        y: pad;
+        x: on ? parent.width - self.width - pad : pad;
+        width: parent.height - pad * 2;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: on ? #ffffff : #c9ced8;
+        drop-shadow-blur: 4px;
+        drop-shadow-color: #00000066;
+        animate x { duration: Theme.t-focus; easing: Theme.ease; }
+    }
+}
+
 export component StatusChip inherits HorizontalLayout {
     in property <string> text;
     in property <string> tone;
@@ -185,6 +214,8 @@ export component SettingCard inherits Rectangle {
     in property <string> kind: "link";
     in property <bool> focused;
     in property <bool> enabled: true;
+    // -1 for none; 0 or 1 draws an on/off switch in place of the value.
+    in property <int> toggle: -1;
     // Ends something — the machine, the session. Its name is red, as a word
     // on a card rather than a colour alone.
     in property <bool> danger;
@@ -225,7 +256,7 @@ export component SettingCard inherits Rectangle {
             }
             if hint != "": Text {
                 text: hint;
-                color: focused ? #b9bfcb : Theme.muted;
+                color: !enabled ? Theme.dim : (focused ? #b9bfcb : Theme.muted);
                 font-size: Metrics.t-secondary;
                 font-weight: 500;
                 overflow: elide;
@@ -233,6 +264,14 @@ export component SettingCard inherits Rectangle {
             }
         }
 
+        if toggle >= 0: VerticalLayout {
+            alignment: center;
+            Toggle {
+                on: toggle == 1;
+                enabled: enabled;
+                focused: focused;
+            }
+        }
         if value != "" && tone != "": StatusChip {
             text: value;
             tone: tone;
@@ -244,7 +283,7 @@ export component SettingCard inherits Rectangle {
             max-width: root.width * 0.45;
             Text {
                 text: value;
-                color: focused ? Theme.text : #c3c8d2;
+                color: !enabled ? Theme.dim : (focused ? Theme.text : #c3c8d2);
                 font-size: Metrics.t-secondary;
                 font-weight: 600;
                 horizontal-alignment: right;

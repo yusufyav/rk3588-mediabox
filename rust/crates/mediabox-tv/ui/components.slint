@@ -71,6 +71,10 @@ export struct SettingRow {
     tone: string,
     // False for a reading or a heading. Focus never lands on one.
     selectable: bool,
+    // False for a setting kept but not in force: drawn greyed, never focused.
+    enabled: bool,
+    // -1 for none; 0 or 1 is an on/off switch.
+    toggle: int,
     // "header", "reading", "link" (goes somewhere) or "action" (does
     // something).
     kind: string,

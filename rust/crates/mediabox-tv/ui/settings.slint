@@ -188,7 +188,9 @@ export component Settings inherits Rectangle {
                     value: entry.value;
                     tone: entry.tone;
                     kind: entry.kind;
-                    focused: !on-sections && !choice-open && i == row-index;
+                    enabled: entry.enabled;
+                    toggle: entry.toggle;
+                    focused: entry.enabled && !on-sections && !choice-open && i == row-index;
                 }
             }
         }

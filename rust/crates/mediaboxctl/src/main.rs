@@ -393,6 +393,56 @@ enum CecCommand {
     ActiveSource,
     WakeTv,
     StandbyTv,
+    /// Change one HDMI-CEC panel setting; the others stay as kept.
+    ///
+    /// enabled, remote, wake-on-start, active-source-on-start,
+    /// standby-on-shutdown, restore-on-shutdown: on | off.
+    /// power-target: tv | tv-audio | all. source-lost: stay-on | standby.
+    Set { setting: String, value: String },
+}
+
+/// A `cec set` argument pair, as the panel row it is.
+fn cec_change(setting: &str, value: &str) -> Result<mediabox_core::CecChange, String> {
+    use mediabox_core::{CecChange, CecPowerTarget, CecSourceLost};
+    let switch = || match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("'{setting}' için on ya da off: '{value}'")),
+    };
+    Ok(match setting {
+        "enabled" => CecChange::Enabled(switch()?),
+        "remote" => CecChange::RemoteControl(switch()?),
+        "wake-on-start" => CecChange::WakeTvOnStart(switch()?),
+        "active-source-on-start" => CecChange::ActiveSourceOnStart(switch()?),
+        "standby-on-shutdown" => CecChange::StandbyTvOnShutdown(switch()?),
+        "restore-on-shutdown" => CecChange::RestorePowerOnShutdown(switch()?),
+        "power-target" => CecChange::PowerTarget(
+            CecPowerTarget::parse(value).ok_or(format!("power-target: tv, tv-audio ya da all: '{value}'"))?,
+        ),
+        "source-lost" => CecChange::OnActiveSourceLost(
+            CecSourceLost::parse(value).ok_or(format!("source-lost: stay-on ya da standby: '{value}'"))?,
+        ),
+        _ => return Err(format!("bilinmeyen CEC ayarı '{setting}'")),
+    })
+}
+
+/// The kept settings with the one change, read from the daemon first: the
+/// same thing a panel row sends.
+async fn cec_request(path: &PathBuf, command: &CecCommand) -> Result<Option<Request>, String> {
+    let CecCommand::Set { setting, value } = command else {
+        return Ok(None);
+    };
+    let change = cec_change(setting, value)?;
+    let answer = execute(path, Request::CecStatus)
+        .await
+        .map_err(|error| format!("mediaboxd kullanılamıyor: {error}"))?;
+    let status: mediabox_core::CecStatus = answer
+        .into_iter()
+        .next()
+        .and_then(|value| value.get("result").cloned())
+        .and_then(|result| serde_json::from_value(result).ok())
+        .ok_or("daemon CEC durumunu vermedi")?;
+    Ok(Some(Request::CecSettingsSet { settings: status.settings.with(change) }))
 }
 
 #[derive(Debug, Subcommand)]
@@ -464,6 +514,16 @@ async fn main() {
     let mut request = to_request(&args.command);
     if let Command::Audio { command } = &args.command {
         match audio_request(&args.socket, command).await {
+            Ok(Some(resolved)) => request = resolved,
+            Ok(None) => {}
+            Err(message) => {
+                eprintln!("Hata: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Command::Cec { command } = &args.command {
+        match cec_request(&args.socket, command).await {
             Ok(Some(resolved)) => request = resolved,
             Ok(None) => {}
             Err(message) => {
@@ -551,6 +611,8 @@ fn to_request(command: &Command) -> Request {
             CecCommand::ActiveSource => Request::CecActiveSource,
             CecCommand::WakeTv => Request::CecWakeTv,
             CecCommand::StandbyTv => Request::CecStandbyTv,
+            // Resolved against the kept settings (`cec_request`).
+            CecCommand::Set { .. } => Request::CecStatus,
         },
         Command::Surface { command } => match command {
             SurfaceCommand::Status => Request::SurfaceStatus,
@@ -727,6 +789,32 @@ async fn audio_request(path: &PathBuf, command: &AudioCommand) -> Result<Option<
         AudioCommand::Status | AudioCommand::Volume { .. } | AudioCommand::Mute { .. } => {}
     }
     Ok(Some(Request::AudioSet { setting }))
+}
+
+/// The panel, line by line, as `mediaboxctl cec status` prints it. A
+/// sub-setting under CEC off reads as kept but not in force.
+fn cec_settings_lines(settings: &mediabox_core::CecSettings) -> Vec<String> {
+    let on = |value: bool| if value { "açık" } else { "kapalı" };
+    let kept = if settings.enabled { "" } else { " (CEC kapalı; saklanıyor)" };
+    vec![
+        format!("HDMI-CEC: {}", on(settings.enabled)),
+        format!("  TV kumandası (remote): {}{kept}", on(settings.remote_control)),
+        format!("  Açılışta TV'yi uyandır (wake-on-start): {}{kept}", on(settings.wake_tv_on_start)),
+        format!(
+            "  Açılışta aktif kaynak ol (active-source-on-start): {}{kept}",
+            on(settings.active_source_on_start)
+        ),
+        format!(
+            "  Kapanırken TV'yi kapat (standby-on-shutdown): {}{kept}",
+            on(settings.standby_tv_on_shutdown)
+        ),
+        format!(
+            "  Kapanırken önceki duruma dön (restore-on-shutdown): {}{kept}",
+            on(settings.restore_power_on_shutdown)
+        ),
+        format!("  Güç hedefi (power-target): {}{kept}", settings.power_target.label()),
+        format!("  Aktif kaynak kaybında (source-lost): {}{kept}", settings.on_active_source_lost.label()),
+    ]
 }
 
 async fn display_request(path: &PathBuf, command: &DisplayCommand) -> Result<Option<Request>, String> {
@@ -1108,6 +1196,28 @@ fn render(value: &Value, out: &mut impl Write) -> Result<(), String> {
         if let Some(error) = result.get("error").and_then(Value::as_str) {
             write(out, format!("CEC hatası: {error}"))?;
         }
+        if let Some(settings) = result
+            .get("settings")
+            .and_then(|value| serde_json::from_value::<mediabox_core::CecSettings>(value.clone()).ok())
+        {
+            for line in cec_settings_lines(&settings) {
+                write(out, line)?;
+            }
+        }
+        if let Some(session) = result
+            .get("session")
+            .and_then(|value| serde_json::from_value::<mediabox_core::CecSession>(value.clone()).ok())
+        {
+            write(
+                out,
+                format!(
+                    "Oturum: TV başlangıçta {}, MediaBox uyandırdı: {}, aktif kaynak: {:?}",
+                    session.tv_power_at_start.label().to_lowercase(),
+                    if session.woke_tv { "evet" } else { "hayır" },
+                    session.active_source
+                ),
+            )?;
+        }
         return Ok(());
     }
 
@@ -1258,6 +1368,29 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn cec_set_names_every_panel_row_and_refuses_the_rest() {
+        use mediabox_core::{CecChange, CecPowerTarget, CecSourceLost};
+        assert_eq!(cec_change("enabled", "off"), Ok(CecChange::Enabled(false)));
+        assert_eq!(cec_change("remote", "on"), Ok(CecChange::RemoteControl(true)));
+        assert_eq!(cec_change("restore-on-shutdown", "on"), Ok(CecChange::RestorePowerOnShutdown(true)));
+        assert_eq!(cec_change("power-target", "tv-audio"), Ok(CecChange::PowerTarget(CecPowerTarget::TvAndAudioSystem)));
+        assert_eq!(cec_change("power-target", "all"), Ok(CecChange::PowerTarget(CecPowerTarget::Broadcast)));
+        assert_eq!(cec_change("source-lost", "standby"), Ok(CecChange::OnActiveSourceLost(CecSourceLost::Standby)));
+        assert!(cec_change("enabled", "yes").is_err());
+        assert!(cec_change("volume", "on").is_err());
+    }
+
+    #[test]
+    fn cec_status_marks_kept_settings_while_off() {
+        let off = mediabox_core::CecSettings { enabled: false, ..Default::default() };
+        let lines = cec_settings_lines(&off);
+        assert_eq!(lines[0], "HDMI-CEC: kapalı");
+        assert!(lines[1..].iter().all(|line| line.contains("saklanıyor")));
+        let on = cec_settings_lines(&mediabox_core::CecSettings::default());
+        assert!(on.iter().all(|line| !line.contains("saklanıyor")));
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

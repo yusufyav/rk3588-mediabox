@@ -5,6 +5,7 @@ use serde_json::Value;
 
 pub mod audio;
 mod cadence;
+mod cec;
 mod ethernet;
 mod output;
 mod timing;
@@ -20,6 +21,10 @@ pub use audio::{
     AudioMode, AudioPlan, AudioSetting, AudioStatus, CapsSource, SadEntry, SinkAudio, StreamAudio,
 };
 pub use cadence::{Cadence, CadenceFit};
+pub use cec::{
+    ActiveSource, CEC_SETTINGS_SCHEMA, CecChange, CecPowerTarget, CecSession, CecSettings,
+    CecSettingsError, CecSourceLost, TvPower,
+};
 pub use timing::{ModeTiming, Refresh, TimingKey, mode_flags};
 pub use ethernet::{
     ETHERNET_DNS_MAX, ETHERNET_TRIAL_SECONDS, EthernetConfig, EthernetPort, EthernetStatus,
@@ -165,6 +170,13 @@ pub struct CecStatus {
     pub last_tx: Option<CecEvent>,
     pub errors: CecErrorCounters,
     pub error: Option<String>,
+    /// The HDMI-CEC panel as kept. Reported whether or not an adapter is
+    /// there: a box on DisplayPort still shows what it was set to.
+    #[serde(default)]
+    pub settings: CecSettings,
+    /// What this boot has done and seen.
+    #[serde(default)]
+    pub session: CecSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1337,6 +1349,13 @@ pub enum Request {
     CecActiveSource,
     CecWakeTv,
     CecStandbyTv,
+    /// Keep the HDMI-CEC panel and put it into effect now: the adapters are
+    /// released or claimed, and the remote's keys stop or start, without a
+    /// restart. Refused, with the reason, for a pair of shutdown answers that
+    /// contradict each other.
+    CecSettingsSet {
+        settings: CecSettings,
+    },
     LedsStatus,
     /// Set the indicator lights and remember the choice across boots. The
     /// daemon owns this because `/sys/class/leds` is root-only and the

@@ -36,6 +36,12 @@ const CEC_MSG_USER_CONTROL_PRESSED: u8 = 0x44;
 const CEC_MSG_USER_CONTROL_RELEASED: u8 = 0x45;
 const CEC_MSG_ACTIVE_SOURCE: u8 = 0x82;
 const CEC_MSG_REPORT_PHYSICAL_ADDR: u8 = 0x84;
+const CEC_MSG_GIVE_DEVICE_POWER_STATUS: u8 = 0x8f;
+const CEC_MSG_INACTIVE_SOURCE: u8 = 0x9d;
+const CEC_MSG_REPORT_POWER_STATUS: u8 = 0x90;
+const CEC_RX_STATUS_OK: u8 = 1;
+
+pub mod policy;
 
 const IOC_WRITE: u64 = 1;
 const IOC_READ: u64 = 2;
@@ -225,7 +231,34 @@ pub fn wake_tv_message(logical: u8) -> Vec<u8> {
     vec![logical << 4, CEC_MSG_IMAGE_VIEW_ON]
 }
 pub fn standby_tv_message(logical: u8) -> Vec<u8> {
-    vec![logical << 4, CEC_MSG_STANDBY]
+    standby_message(logical, 0)
+}
+/// `<Standby>` to one device, or to every device with destination 15.
+pub fn standby_message(logical: u8, destination: u8) -> Vec<u8> {
+    vec![(logical << 4) | (destination & 0x0f), CEC_MSG_STANDBY]
+}
+pub fn give_power_status_message(logical: u8, destination: u8) -> Vec<u8> {
+    vec![(logical << 4) | (destination & 0x0f), CEC_MSG_GIVE_DEVICE_POWER_STATUS]
+}
+/// `<Inactive Source>`: directed to the television, with this box's address.
+pub fn inactive_source_message(logical: u8, physical: u16) -> Vec<u8> {
+    vec![logical << 4, CEC_MSG_INACTIVE_SOURCE, (physical >> 8) as u8, physical as u8]
+}
+/// `<Report Power Status>` "on": the answer a running box gives.
+pub fn report_power_on_message(logical: u8, destination: u8) -> Vec<u8> {
+    vec![(logical << 4) | (destination & 0x0f), CEC_MSG_REPORT_POWER_STATUS, 0x00]
+}
+
+/// What the adapter is told to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// A playback device. `remote_control` is the kernel's RC passthrough:
+    /// off, the television's remote no longer reaches the rc-core input
+    /// device Kodi reads either.
+    Playback { remote_control: bool },
+    /// Nothing: no logical address, so this box is not on the bus at all.
+    /// What HDMI-CEC "off" is, as AOSP clears its local devices.
+    Released,
 }
 
 #[derive(Debug)]
@@ -239,7 +272,6 @@ pub struct Adapter {
     file: File,
     path: PathBuf,
     physical_address: u16,
-    logical_address: u8,
     state: Mutex<State>,
 }
 
@@ -267,6 +299,10 @@ impl Adapter {
     }
 
     pub fn open(path: &Path) -> Result<Arc<Self>, CecError> {
+        Self::open_with(path, Claim::Playback { remote_control: true })
+    }
+
+    pub fn open_with(path: &Path, claim: Claim) -> Result<Arc<Self>, CecError> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -295,15 +331,48 @@ impl Adapter {
         }
         let mut physical = 0u16;
         ioctl(fd, CEC_ADAP_G_PHYS_ADDR, &mut physical, "G_PHYS_ADDR")?;
-        // No physical address is not a reason to give up on the adapter. The
-        // HDMI driver sets it when a sink is plugged into this socket and
-        // clears it when it is taken out, and the kernel claims the logical
-        // address below on its own the moment one arrives. Refusing here is
-        // what left a box that booted with the television off without CEC
-        // until the next restart.
-        //
-        // A configuration left by a previous process is cleared first:
-        // setting logical addresses on a configured adapter is refused.
+        let driver = c_string(&caps.driver);
+        let name = c_string(&caps.name);
+        let capabilities = capability_names(caps.capabilities);
+        let status = CecStatus {
+            available: true,
+            adapter: Some(format!("{} ({})", path.display(), name)),
+            driver: Some(driver),
+            capabilities,
+            ..Default::default()
+        };
+        let adapter = Arc::new(Self {
+            file,
+            path: path.to_path_buf(),
+            physical_address: physical,
+            state: Mutex::new(State {
+                status,
+                devices: BTreeMap::new(),
+                pressed: BTreeMap::new(),
+            }),
+        });
+        adapter.claim(claim)?;
+        Ok(adapter)
+    }
+
+    /// Become a playback device, or leave the bus.
+    ///
+    /// No physical address is not a reason to give up on the adapter. The
+    /// HDMI driver sets it when a sink is plugged into this socket and clears
+    /// it when it is taken out, and the kernel claims the logical address on
+    /// its own the moment one arrives. Refusing there is what left a box that
+    /// booted with the television off without CEC until the next restart.
+    ///
+    /// Nor is a claim that came back without an address (15): the kernel
+    /// claims again on the next hotplug, and [`Adapter::recover`] asks again.
+    /// Dropping the adapter for it is what left `/dev/cec1` unopened for the
+    /// rest of the boot on 2026-09-25 (docs/hdmi-cec.md).
+    ///
+    /// A configuration already on the adapter -- a previous process's, or
+    /// this one's before a change -- is cleared first: setting logical
+    /// addresses on a configured adapter is refused.
+    pub fn claim(&self, claim: Claim) -> Result<Option<u8>, CecError> {
+        let fd = self.file.as_raw_fd();
         let mut existing = RawLogAddrs::default();
         if ioctl(fd, CEC_ADAP_G_LOG_ADDRS, &mut existing, "G_LOG_ADDRS").is_ok()
             && existing.num_log_addrs > 0
@@ -311,11 +380,15 @@ impl Adapter {
             let mut clear = RawLogAddrs::default();
             ioctl(fd, CEC_ADAP_S_LOG_ADDRS, &mut clear, "S_LOG_ADDRS(clear)")?;
         }
+        self.state.lock().expect("CEC state lock").pressed.clear();
+        let Claim::Playback { remote_control } = claim else {
+            return Ok(None);
+        };
         let mut addresses = RawLogAddrs {
             cec_version: CEC_VERSION_2_0,
             num_log_addrs: 1,
             vendor_id: CEC_VENDOR_ID_NONE,
-            flags: CEC_LOG_ADDRS_FL_ALLOW_RC_PASSTHRU,
+            flags: if remote_control { CEC_LOG_ADDRS_FL_ALLOW_RC_PASSTHRU } else { 0 },
             ..Default::default()
         };
         for (dst, src) in addresses.osd_name.iter_mut().zip(b"MediaBox\0") {
@@ -327,39 +400,30 @@ impl Adapter {
         if let Err(error) = ioctl(fd, CEC_ADAP_S_LOG_ADDRS, &mut addresses, "S_LOG_ADDRS") {
             return match &error {
                 CecError::Io { source, .. } if source.raw_os_error() == Some(libc::EBUSY) => {
-                    Err(CecError::Busy(path.display().to_string()))
+                    Err(CecError::Busy(self.path.display().to_string()))
                 }
                 _ => Err(error),
             };
         }
         let logical = addresses.log_addr[0];
-        if physical != CEC_PHYS_ADDR_INVALID && logical > 14 {
-            return Err(CecError::Busy("Playback mantıksal adresi alınamadı".into()));
+        Ok((logical <= 14).then_some(logical))
+    }
+
+    /// Whether the adapter is configured as a device at all -- claimed, with
+    /// or without an address yet -- rather than released.
+    pub fn configured(&self) -> bool {
+        let mut addresses = RawLogAddrs::default();
+        ioctl(self.file.as_raw_fd(), CEC_ADAP_G_LOG_ADDRS, &mut addresses, "G_LOG_ADDRS").is_ok()
+            && addresses.num_log_addrs > 0
+    }
+
+    /// A sink is on the socket but the claim left no address: claim again,
+    /// once. The caller bounds how often.
+    pub fn recover(&self, claim: Claim) -> Result<Option<u8>, CecError> {
+        match self.addresses() {
+            (physical, None) if physical != CEC_PHYS_ADDR_INVALID => self.claim(claim),
+            (_, logical) => Ok(logical),
         }
-        let driver = c_string(&caps.driver);
-        let name = c_string(&caps.name);
-        let capabilities = capability_names(caps.capabilities);
-        let status = CecStatus {
-            available: true,
-            adapter: Some(format!("{} ({})", path.display(), name)),
-            driver: Some(driver),
-            capabilities,
-            physical_address: (physical != CEC_PHYS_ADDR_INVALID)
-                .then(|| format_physical_address(physical)),
-            logical_addresses: (logical <= 14).then_some(logical).into_iter().collect(),
-            ..Default::default()
-        };
-        Ok(Arc::new(Self {
-            file,
-            path: path.to_path_buf(),
-            physical_address: physical,
-            logical_address: logical,
-            state: Mutex::new(State {
-                status,
-                devices: BTreeMap::new(),
-                pressed: BTreeMap::new(),
-            }),
-        }))
     }
 
     /// Whether a sink is on this adapter's socket and the adapter holds a
@@ -380,7 +444,7 @@ impl Adapter {
     /// television is the kernel's to say -- it sets a physical address on the
     /// socket a sink is plugged into -- so all of them are configured and the
     /// live one is asked for when something is sent.
-    pub fn open_all() -> Vec<Arc<Self>> {
+    pub fn open_all(claim: Claim) -> Vec<Arc<Self>> {
         let Ok(entries) = std::fs::read_dir("/dev") else {
             return Vec::new();
         };
@@ -395,7 +459,7 @@ impl Adapter {
         paths.sort();
         paths
             .into_iter()
-            .filter_map(|path| match Self::open(&path) {
+            .filter_map(|path| match Self::open_with(&path, claim) {
                 Ok(adapter) => Some(adapter),
                 Err(error) => {
                     eprintln!("CEC {}: {error}", path.display());
@@ -428,7 +492,7 @@ impl Adapter {
                 Some(addresses.log_addr[0])
             }
             Ok(()) => None,
-            Err(_) => Some(self.logical_address),
+            Err(_) => None,
         };
         (physical, logical)
     }
@@ -516,6 +580,48 @@ impl Adapter {
     pub fn standby_tv(&self) -> Result<(), CecError> {
         self.transmit(&standby_tv_message(self.logical_now()?))
     }
+    pub fn standby(&self, destination: u8) -> Result<(), CecError> {
+        self.transmit(&standby_message(self.logical_now()?, destination))
+    }
+    pub fn inactive_source(&self) -> Result<(), CecError> {
+        let logical = self.logical_now()?;
+        let (physical, _) = self.addresses();
+        self.transmit(&inactive_source_message(logical, physical))
+    }
+    pub fn report_power_on(&self, destination: u8) -> Result<(), CecError> {
+        self.transmit(&report_power_on_message(self.logical_now()?, destination))
+    }
+    /// Any message this adapter's own logical address sends, its header
+    /// built here: `body` is the opcode and operands.
+    pub fn send(&self, destination: u8, body: &[u8]) -> Result<(), CecError> {
+        let mut bytes = vec![(self.logical_now()? << 4) | (destination & 0x0f)];
+        bytes.extend_from_slice(body);
+        self.transmit(&bytes)
+    }
+
+    /// The television's power state: `<Give Device Power Status>` and the
+    /// kernel waits for its `<Report Power Status>` (`cec_msg.reply`), so
+    /// the answer comes back here and not through the receive loop. No
+    /// answer within `timeout_ms`, or a `<Feature Abort>`, is `Unknown`.
+    pub fn power_status(&self, destination: u8, timeout_ms: u32) -> Result<mediabox_core::TvPower, CecError> {
+        let bytes = give_power_status_message(self.logical_now()?, destination);
+        let mut raw = RawMessage {
+            len: bytes.len() as u32,
+            timeout: timeout_ms,
+            reply: CEC_MSG_REPORT_POWER_STATUS,
+            ..Default::default()
+        };
+        raw.msg[..bytes.len()].copy_from_slice(&bytes);
+        ioctl(self.file.as_raw_fd(), CEC_TRANSMIT, &mut raw, "TRANSMIT(power status)")?;
+        self.account(&bytes, &raw)?;
+        if raw.rx_status & CEC_RX_STATUS_OK != 0
+            && raw.len >= 3
+            && raw.msg[1] == CEC_MSG_REPORT_POWER_STATUS
+        {
+            return Ok(mediabox_core::TvPower::from_report(raw.msg[2]));
+        }
+        Ok(mediabox_core::TvPower::Unknown)
+    }
 
     pub fn discover_devices(&self) -> Result<Vec<CecDevice>, CecError> {
         let own = self.logical_now()?;
@@ -554,6 +660,11 @@ impl Adapter {
         };
         raw.msg[..bytes.len()].copy_from_slice(bytes);
         ioctl(self.file.as_raw_fd(), CEC_TRANSMIT, &mut raw, "TRANSMIT")?;
+        self.account(bytes, &raw)
+    }
+
+    /// The counters and the last message, for a transmit that returned.
+    fn account(&self, bytes: &[u8], raw: &RawMessage) -> Result<(), CecError> {
         let event = parse_message(bytes, raw.tx_ts.max(wallclock_ns()))?.event;
         let mut state = self.state.lock().expect("CEC state lock");
         state.status.last_tx = Some(event);
@@ -700,6 +811,11 @@ mod tests {
         assert_eq!(active_source_message(4, 0x1000), [0x4f, 0x82, 0x10, 0x00]);
         assert_eq!(wake_tv_message(4), [0x40, 0x04]);
         assert_eq!(standby_tv_message(4), [0x40, 0x36]);
+        assert_eq!(standby_message(4, 5), [0x45, 0x36]);
+        assert_eq!(standby_message(4, 15), [0x4f, 0x36]);
+        assert_eq!(give_power_status_message(4, 0), [0x40, 0x8f]);
+        assert_eq!(report_power_on_message(4, 0), [0x40, 0x90, 0x00]);
+        assert_eq!(inactive_source_message(4, 0x4000), [0x40, 0x9d, 0x40, 0x00]);
     }
 
     #[test]

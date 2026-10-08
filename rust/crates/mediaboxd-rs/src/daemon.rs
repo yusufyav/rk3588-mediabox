@@ -30,15 +30,22 @@ pub struct CecRuntime {
     /// Where a command goes: the selected output's transmitter's adapter,
     /// resolved when the command is sent (`crate::cec`).
     pub target: Arc<dyn Fn() -> CecTarget + Send + Sync>,
+    /// The HDMI-CEC panel and what this boot has done (`crate::cec::Policy`).
+    pub policy: Arc<crate::cec::Policy>,
+    /// What this daemon was asked to do to the machine, for a stop whose
+    /// reason systemd's queue does not say.
+    pub requested: std::sync::Mutex<Option<PowerAction>>,
 }
+
+/// Said by every refusal that is CEC being off, on every interface.
+pub const CEC_DISABLED: &str = "HDMI-CEC ayarlardan kapatıldı";
 
 impl CecRuntime {
     /// The adapter a command goes down, or why none may: the selected
     /// output's, never merely the first one that is live.
     pub fn adapter(&self) -> Result<Arc<Adapter>, String> {
-        let target = (self.target)();
-        let chosen = crate::cec::choose(&self.adapters, &target);
-        match (&chosen, &target) {
+        let chosen = self.adapter_quiet();
+        match (&chosen, (self.target)()) {
             (Ok(adapter), CecTarget::Adapter { confidence, .. }) => eprintln!(
                 "mediaboxd-rs: CEC target {} ({confidence:?}, selected output)",
                 adapter.path().display()
@@ -49,7 +56,38 @@ impl CecRuntime {
         chosen
     }
 
+    /// The same answer, without a line in the journal: for the policy's own
+    /// sends, which ask on every message from the television.
+    pub fn adapter_quiet(&self) -> Result<Arc<Adapter>, String> {
+        crate::cec::choose(&self.adapters, &(self.target)())
+    }
+
+    /// Every adapter told what the kept settings make it: released with CEC
+    /// off, a playback device with or without the remote's passthrough
+    /// otherwise. Blocking: a claim waits for the bus.
+    pub fn apply_claim(&self) -> Vec<String> {
+        let claim = self.policy.claim();
+        self.adapters
+            .iter()
+            .filter_map(|adapter| match adapter.claim(claim) {
+                Ok(_) => None,
+                Err(error) => Some(format!("{}: {error}", adapter.path().display())),
+            })
+            .collect()
+    }
+
     pub fn status(&self) -> CecStatus {
+        let mut status = self.adapter_status();
+        status.settings = self.policy.settings();
+        status.session = self.policy.session();
+        if !status.settings.enabled {
+            status.available = false;
+            status.error = Some(CEC_DISABLED.into());
+        }
+        status
+    }
+
+    fn adapter_status(&self) -> CecStatus {
         if self.adapters.is_empty() {
             return self.unavailable.clone();
         }
@@ -133,7 +171,11 @@ impl AppState {
                 Err(error) => Response::failure("KODI_LIFECYCLE_ERROR", error.to_string()),
             },
             Request::CecStatus => Response::success(self.cec.status()),
+            Request::CecSettingsSet { settings } => self.cec_settings_set(settings).await,
             Request::CecDevices => {
+                if !self.cec.policy.enabled() {
+                    return Response::failure("CEC_DISABLED", CEC_DISABLED);
+                }
                 let adapter = match self.cec.adapter() {
                     Ok(adapter) => adapter,
                     Err(why) => return Response::failure("CEC_UNAVAILABLE", why),
@@ -145,7 +187,13 @@ impl AppState {
                 }
             }
             Request::CecActiveSource => {
-                cec_action(&self.cec, |adapter| adapter.active_source()).await
+                let answer = cec_action(&self.cec, |adapter| adapter.active_source()).await;
+                if answer.ok {
+                    self.cec.policy.session_update(|session| {
+                        session.active_source = mediabox_core::ActiveSource::Us
+                    });
+                }
+                answer
             }
             Request::CecWakeTv => cec_action(&self.cec, |adapter| adapter.wake_tv()).await,
             Request::CecStandbyTv => cec_action(&self.cec, |adapter| adapter.standby_tv()).await,
@@ -408,7 +456,10 @@ impl AppState {
             Request::InputMonitor => {
                 Response::failure("PROTOCOL_ERROR", "input.monitor akış komutudur")
             }
-            Request::SystemPower { action } => Self::system_power(action).await,
+            Request::SystemPower { action } => {
+                *self.cec.requested.lock().expect("power request") = Some(action);
+                Self::system_power(action).await
+            }
 
             // The radios. Every one of these shells out as root — rfkill,
             // netplan, bluetoothctl — which is exactly why they are here and
@@ -473,6 +524,226 @@ impl AppState {
             ),
             Ok(Err(error)) => Response::failure("POWER_ERROR", error.to_string()),
             Err(_) => Response::failure("POWER_ERROR", "systemctl zaman aşımı"),
+        }
+    }
+
+    /// Keep the HDMI-CEC panel and put it into effect now.
+    ///
+    /// The master switch and the remote are the adapters' claim, so a change
+    /// to either releases or re-claims every adapter -- the change takes
+    /// effect on the bus, not at the next boot. Nothing is sent to the
+    /// television for it: AOSP's One Touch Play is a boot's, not a setting's.
+    async fn cec_settings_set(&self, settings: mediabox_core::CecSettings) -> Response {
+        let before = match self.cec.policy.set(settings) {
+            Ok(before) => before,
+            Err(crate::cec::SetError::Invalid(why)) => {
+                return Response::failure("CEC_SETTINGS_INVALID", why);
+            }
+            Err(crate::cec::SetError::Write(why)) => {
+                return Response::failure("CEC_SETTINGS_WRITE", why);
+            }
+        };
+        let reclaim = before.enabled != settings.enabled
+            || (settings.enabled && before.remote_control != settings.remote_control);
+        if reclaim && !self.cec.adapters.is_empty() {
+            let adapters = self.cec.adapters.clone();
+            let policy = Arc::clone(&self.cec.policy);
+            let claim = policy.claim();
+            let failures = tokio::task::spawn_blocking(move || {
+                adapters
+                    .iter()
+                    .filter_map(|adapter| match adapter.claim(claim) {
+                        Ok(_) => None,
+                        Err(error) => Some(format!("{}: {error}", adapter.path().display())),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_else(|error| vec![error.to_string()]);
+            eprintln!(
+                "mediaboxd-rs: CEC {} (remote {}){}",
+                if settings.enabled { "on" } else { "off" },
+                if settings.remote_control { "on" } else { "off" },
+                if failures.is_empty() { String::new() } else { format!(": {}", failures.join("; ")) }
+            );
+            if !settings.enabled {
+                self.cec.policy.session_update(|session| {
+                    session.active_source = mediabox_core::ActiveSource::Unknown
+                });
+            }
+        }
+        Response::success(self.cec.status())
+    }
+
+    /// One Touch Play at boot, beside the daemon rather than in front of it.
+    ///
+    /// Runs once a boot: a daemon restarted by a deploy finds this boot's
+    /// session already done and sends nothing. A box that came up with the
+    /// television's hotplug low waits a bounded time for an address and then
+    /// gives up, saying why.
+    pub fn cec_start(self: &Arc<Self>) {
+        let plan = mediabox_cec::policy::start(&self.cec.policy.settings(), &self.cec.policy.session());
+        if !plan.anything() {
+            self.cec.policy.session_update(|session| session.start_done = true);
+            return;
+        }
+        let state = Arc::clone(self);
+        let spawned = std::thread::Builder::new().name("mediabox-cec-start".into()).spawn(move || {
+            let cec = &state.cec;
+            let report = crate::cec::run_start(
+                plan,
+                |round| {
+                    let chosen = cec.adapter_quiet();
+                    // An address the claim did not get is asked for again,
+                    // twice in the whole wait.
+                    if chosen.is_err() && (round == 5 || round == 15) {
+                        for adapter in &cec.adapters {
+                            let _ = adapter.recover(cec.policy.claim());
+                        }
+                    }
+                    chosen
+                },
+                || cec.policy.enabled(),
+                || std::thread::sleep(std::time::Duration::from_secs(1)),
+                || std::thread::sleep(std::time::Duration::from_millis(250)),
+            );
+            match report {
+                Ok(report) => {
+                    eprintln!(
+                        "mediaboxd-rs: CEC start tv={:?} woke={} active_source={}{}",
+                        report.tv_power,
+                        report.woke,
+                        report.announced,
+                        if report.notes.is_empty() { String::new() } else { format!(" ({})", report.notes.join("; ")) }
+                    );
+                    cec.policy.session_update(|session| {
+                        session.tv_power_at_start = report.tv_power;
+                        session.tv_power = report.tv_power;
+                        session.woke_tv = report.woke;
+                        if report.announced {
+                            session.active_source = mediabox_core::ActiveSource::Us;
+                        }
+                        session.start_done = true;
+                    });
+                }
+                Err(why) => {
+                    eprintln!("mediaboxd-rs: CEC start skipped: {why}");
+                    cec.policy.session_update(|session| session.start_done = true);
+                }
+            }
+        });
+        if let Err(error) = spawned {
+            eprintln!("mediaboxd-rs: CEC start thread: {error}");
+        }
+    }
+
+    /// At the daemon's stop, before the adapters are released: `<Standby>`
+    /// if the box is powering off and the settings ask for it. Bounded to
+    /// three seconds; a reboot and a restart of the daemon send nothing.
+    pub async fn cec_shutdown(&self) {
+        let jobs = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::process::Command::new("/usr/bin/systemctl")
+                .args(["list-jobs", "--no-legend", "--plain"])
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) if output.status.success() => {
+                Some(String::from_utf8_lossy(&output.stdout).into_owned())
+            }
+            _ => None,
+        };
+        let requested = *self.cec.requested.lock().expect("power request");
+        let stop = crate::cec::stop_reason(jobs.as_deref(), requested);
+        let plan = mediabox_cec::policy::shutdown(
+            &self.cec.policy.settings(),
+            &self.cec.policy.session(),
+            stop,
+        );
+        eprintln!(
+            "mediaboxd-rs: CEC stop {stop:?} standby -> {:?} inactive_source={}",
+            plan.standby, plan.inactive_source
+        );
+        if plan.standby.is_empty() && !plan.inactive_source {
+            return;
+        }
+        let adapter = match self.cec.adapter() {
+            Ok(adapter) => adapter,
+            Err(_) => return,
+        };
+        let sent = tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            crate::cec::run_shutdown(
+                adapter.as_ref(),
+                &plan,
+                || std::time::Instant::now() < deadline,
+                || std::thread::sleep(std::time::Duration::from_millis(200)),
+            )
+        })
+        .await
+        .unwrap_or_default();
+        for (message, result) in sent {
+            match result {
+                Ok(()) => eprintln!("mediaboxd-rs: CEC {message}: sent"),
+                Err(why) => eprintln!("mediaboxd-rs: CEC {message}: {why}"),
+            }
+        }
+    }
+
+    /// A message the selected adapter received, through the policy: the
+    /// session follows what the bus said, and an answer is sent when one is
+    /// owed. Called from the receive thread; sends go to a blocking task.
+    pub fn cec_received(self: &Arc<Self>, adapter: &Arc<Adapter>, event: &mediabox_core::CecEvent) {
+        if !mediabox_cec::policy::relevant(event.opcode) {
+            return;
+        }
+        // Only the adapter the picture is on: another television on the
+        // other socket is not this box's to answer.
+        let Ok(selected) = self.cec.adapter_quiet() else { return };
+        if !Arc::ptr_eq(&selected, adapter) {
+            return;
+        }
+        let (physical, Some(logical)) = adapter.addresses() else { return };
+        let settings = self.cec.policy.settings();
+        let reactions = self.cec.policy.session_update(|session| {
+            mediabox_cec::policy::receive(&settings, session, logical, physical, event)
+        });
+        for reaction in reactions {
+            let state = Arc::clone(self);
+            let adapter = Arc::clone(adapter);
+            tokio::spawn(async move {
+                use mediabox_cec::policy::Reaction;
+                match reaction {
+                    Reaction::AnnounceActiveSource => {
+                        let _ = tokio::task::spawn_blocking(move || adapter.active_source()).await;
+                    }
+                    Reaction::ReportPowerOn(to) => {
+                        let _ = tokio::task::spawn_blocking(move || adapter.report_power_on(to)).await;
+                    }
+                    Reaction::SourceLost => state.cec_source_lost().await,
+                }
+            });
+        }
+    }
+
+    /// "Aktif HDMI kaynağı kaybedildiğinde: Beklemeye geç".
+    ///
+    /// This box has no sleep state of its own, so standby is what the
+    /// lifecycle already does safely: the film here stops with its place
+    /// written to the account, Kodi stops what it plays and gives the panel
+    /// back, and the home screen is what is waiting when the television
+    /// comes back to this input. Nothing is powered off.
+    async fn cec_source_lost(&self) {
+        eprintln!("mediaboxd-rs: CEC active source lost; standing by");
+        if self.player.playing().await.is_some() {
+            let _ = self.stop_here(crate::playback::Intent::Stop).await;
+        }
+        if self.surface.status().await.kodi_active {
+            let _ = self.kodi.stop().await;
+            if let Err(error) = self.switch_surface(Surface::Ui).await {
+                eprintln!("mediaboxd-rs: CEC standby -> ui: {error}");
+            }
         }
     }
 
@@ -1006,7 +1277,8 @@ impl AppState {
             },
             ServiceHealth {
                 name: "cec".into(),
-                healthy: cec.available,
+                // Off by choice is not a fault.
+                healthy: cec.available || !cec.settings.enabled,
                 detail: cec.error.clone(),
             },
             ServiceHealth {
@@ -1077,6 +1349,11 @@ async fn cec_action<F>(runtime: &CecRuntime, action: F) -> Response
 where
     F: FnOnce(&Adapter) -> Result<(), mediabox_cec::CecError> + Send + 'static,
 {
+    // The daemon's own lock, whatever an interface drew: with CEC off the
+    // adapters are released, and nothing is sent even if one were not.
+    if !runtime.policy.enabled() {
+        return Response::failure("CEC_DISABLED", CEC_DISABLED);
+    }
     let adapter = match runtime.adapter() {
         Ok(adapter) => adapter,
         Err(why) => return Response::failure("CEC_UNAVAILABLE", why),
@@ -1313,6 +1590,12 @@ mod tests {
                     ..Default::default()
                 },
                 target: Arc::new(|| crate::cec::CecTarget::Refused("testte kapalı".into())),
+                policy: Arc::new(crate::cec::Policy::load(
+                    dir.path().join("cec.json"),
+                    dir.path().join("cec-session.json"),
+                    "test-boot",
+                )),
+                requested: std::sync::Mutex::new(None),
             },
             input: InputManager::new(InputMode::Ui),
             media: Arc::clone(&media),
@@ -1420,6 +1703,88 @@ mod tests {
         assert!(!response.ok);
         assert_eq!(response.error.unwrap().code, "OUTPUT_REPORT_REFUSED");
         task.abort();
+    }
+
+    fn code(response: &Response) -> Option<&str> {
+        response.error.as_ref().map(|error| error.code.as_str())
+    }
+
+    #[tokio::test]
+    async fn with_cec_off_every_cec_command_is_refused_by_the_daemon() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        // On, with no adapter: refused for the adapter, not for the switch.
+        let on = state.handle(Request::CecWakeTv).await;
+        assert_eq!(code(&on), Some("CEC_UNAVAILABLE"));
+        let off = mediabox_core::CecSettings { enabled: false, ..Default::default() };
+        assert!(state.handle(Request::CecSettingsSet { settings: off }).await.ok);
+        for request in [
+            Request::CecWakeTv,
+            Request::CecStandbyTv,
+            Request::CecActiveSource,
+            Request::CecDevices,
+        ] {
+            let answer = state.handle(request.clone()).await;
+            assert_eq!(code(&answer), Some("CEC_DISABLED"), "{request:?}");
+        }
+        // The status still answers, and says why.
+        let status = state.cec.status();
+        assert!(!status.available && !status.settings.enabled);
+        assert_eq!(status.error.as_deref(), Some(CEC_DISABLED));
+    }
+
+    #[tokio::test]
+    async fn turning_cec_back_on_brings_every_choice_back() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        let chosen = mediabox_core::CecSettings {
+            wake_tv_on_start: true,
+            active_source_on_start: true,
+            restore_power_on_shutdown: true,
+            power_target: mediabox_core::CecPowerTarget::TvAndAudioSystem,
+            on_active_source_lost: mediabox_core::CecSourceLost::Standby,
+            remote_control: false,
+            ..Default::default()
+        };
+        assert!(state.handle(Request::CecSettingsSet { settings: chosen }).await.ok);
+        let off = chosen.with(mediabox_core::CecChange::Enabled(false));
+        assert!(state.handle(Request::CecSettingsSet { settings: off }).await.ok);
+        // Kept on disk while off, as a later daemon reads it.
+        let reread = crate::cec::Policy::load(
+            dir.path().join("cec.json"),
+            dir.path().join("cec-session.json"),
+            "test-boot",
+        );
+        assert_eq!(reread.settings(), off);
+        let on = state.cec.status().settings.with(mediabox_core::CecChange::Enabled(true));
+        assert!(state.handle(Request::CecSettingsSet { settings: on }).await.ok);
+        assert_eq!(state.cec.status().settings, chosen);
+    }
+
+    #[tokio::test]
+    async fn a_contradictory_pair_is_refused_and_nothing_changes() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        let both = mediabox_core::CecSettings {
+            standby_tv_on_shutdown: true,
+            restore_power_on_shutdown: true,
+            ..Default::default()
+        };
+        let answer = state.handle(Request::CecSettingsSet { settings: both }).await;
+        assert_eq!(code(&answer), Some("CEC_SETTINGS_INVALID"));
+        assert_eq!(state.cec.status().settings, mediabox_core::CecSettings::default());
+        assert!(!dir.path().join("cec.json").exists());
+    }
+
+    #[tokio::test]
+    async fn the_settings_request_is_on_the_wire_as_the_interfaces_send_it() {
+        let parsed: Request = serde_json::from_str(
+            r#"{"command":"cec_settings_set","settings":{"enabled":false,"power_target":"broadcast"}}"#,
+        )
+        .unwrap();
+        let Request::CecSettingsSet { settings } = parsed else { panic!("{parsed:?}") };
+        assert!(!settings.enabled && settings.remote_control);
+        assert_eq!(settings.power_target, mediabox_core::CecPowerTarget::Broadcast);
     }
 
     #[tokio::test]

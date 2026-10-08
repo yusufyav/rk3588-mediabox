@@ -265,6 +265,10 @@ pub fn cec_wake_tv() -> Value {
     json!({"command": "cec_wake_tv"})
 }
 
+pub fn cec_settings_set(settings: mediabox_core::CecSettings) -> Value {
+    json!({"command": "cec_settings_set", "settings": settings})
+}
+
 pub fn cec_standby_tv() -> Value {
     json!({"command": "cec_standby_tv"})
 }

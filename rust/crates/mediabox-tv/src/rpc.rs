@@ -360,6 +360,13 @@ impl Client {
         self.call(json!({"command": "fan_curve_reset"})).await
     }
 
+    /// The HDMI-CEC panel, kept and put into effect. The answer is the CEC
+    /// status as it is after the change.
+    pub async fn cec_settings_set(&self, settings: mediabox_core::CecSettings) -> Result<Value> {
+        self.call(json!({"command": "cec_settings_set", "settings": settings}))
+            .await
+    }
+
     pub async fn leds_set(&self, mode: mediabox_core::LedMode) -> Result<Value> {
         self.call(json!({"command": "leds_set", "mode": mode}))
             .await

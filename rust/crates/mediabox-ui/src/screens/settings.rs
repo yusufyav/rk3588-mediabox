@@ -591,6 +591,7 @@ fn Bluetooth(system: SystemStatus) -> impl IntoView {
 
 #[component]
 fn Cec(system: SystemStatus) -> impl IntoView {
+    use mediabox_core::{CecChange, CecPowerTarget, CecSettings, CecSourceLost};
     let toaster = expect_context::<Toaster>();
     let cec = system.cec.clone();
     let (available, tone) = yes_no(cec.available);
@@ -600,8 +601,10 @@ fn Cec(system: SystemStatus) -> impl IntoView {
         .map(u8::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let cec_available = cec.available;
     let known = cec.known_devices.len().to_string();
+    // The kept panel, replaced by the daemon's answer after every change.
+    let kept = RwSignal::new(cec.settings);
+    let enabled = Signal::derive(move || kept.get().enabled);
     let send = move |request: serde_json::Value, ok: &'static str| {
         spawn_local(async move {
             match api::control(request).await {
@@ -610,8 +613,90 @@ fn Cec(system: SystemStatus) -> impl IntoView {
             }
         });
     };
+    let change = move |change: CecChange| {
+        let wanted = kept.get_untracked().with(change);
+        spawn_local(async move {
+            match api::typed::<crate::model::CecStatus>(api::cec_settings_set(wanted)).await {
+                Ok(status) => kept.set(status.settings),
+                Err(error) => toaster.warn(format!("HDMI-CEC ayarı uygulanmadı — {}", error.message)),
+            }
+        });
+    };
+    // A switch row: its state, and one button that turns it the other way.
+    // Under CEC off the button is disabled, which takes it out of the focus
+    // graph: the same rule as the television's panel.
+    let switch = move |label: &'static str,
+                       read: fn(&CecSettings) -> bool,
+                       make: fn(bool) -> CecChange,
+                       master: bool| {
+        let on = Signal::derive(move || read(&kept.get()));
+        view! {
+            <div class="row switch" class:muted=move || !master && !enabled.get()>
+                <span class="row-label">{label}</span>
+                <span class=move || format!("row-value {}", if on.get() { "ok" } else { "" })>
+                    {move || if on.get() { "Açık" } else { "Kapalı" }}
+                </span>
+                <Action
+                    label=Signal::derive(move || if on.get() { "Kapat".to_string() } else { "Aç".to_string() })
+                    disabled=Signal::derive(move || !master && !enabled.get())
+                    on_press=Callback::new(move |()| change(make(!on.get_untracked())))
+                />
+            </div>
+        }
+    };
     view! {
         <h2>"HDMI / CEC"</h2>
+        <div class="rows">
+            {switch("HDMI-CEC", |s| s.enabled, CecChange::Enabled, true)}
+            {switch("TV kumandası", |s| s.remote_control, CecChange::RemoteControl, false)}
+            {switch("Açılışta TV'yi aç", |s| s.wake_tv_on_start, CecChange::WakeTvOnStart, false)}
+            {switch("Açılışta TV girişini seç", |s| s.active_source_on_start, CecChange::ActiveSourceOnStart, false)}
+            {switch("Kapanışta TV'yi kapat", |s| s.standby_tv_on_shutdown, CecChange::StandbyTvOnShutdown, false)}
+            {switch("Kapanışta önceki duruma dön", |s| s.restore_power_on_shutdown, CecChange::RestorePowerOnShutdown, false)}
+        </div>
+        <h3>"Kapatma hedefi"</h3>
+        <div class="actions-row">
+            {CecPowerTarget::ALL
+                .into_iter()
+                .map(|target| {
+                    view! {
+                        <Action
+                            label=Signal::derive(move || {
+                                if kept.get().power_target == target {
+                                    format!("● {}", target.label())
+                                } else {
+                                    target.label().to_string()
+                                }
+                            })
+                            disabled=Signal::derive(move || !enabled.get())
+                            on_press=Callback::new(move |()| change(CecChange::PowerTarget(target)))
+                        />
+                    }
+                })
+                .collect_view()}
+        </div>
+        <h3>"Başka girişe geçilince"</h3>
+        <div class="actions-row">
+            {[CecSourceLost::StayOn, CecSourceLost::Standby]
+                .into_iter()
+                .map(|lost| {
+                    view! {
+                        <Action
+                            label=Signal::derive(move || {
+                                if kept.get().on_active_source_lost == lost {
+                                    format!("● {}", lost.label())
+                                } else {
+                                    lost.label().to_string()
+                                }
+                            })
+                            disabled=Signal::derive(move || !enabled.get())
+                            on_press=Callback::new(move |()| change(CecChange::OnActiveSourceLost(lost)))
+                        />
+                    }
+                })
+                .collect_view()}
+        </div>
+        <h3>"Bağdaştırıcı"</h3>
         <div class="rows">
             <Row label="CEC kullanılabilir" value=available tone=tone />
             <Row label="Adaptör" value=cec.adapter.clone().unwrap_or_else(|| "—".into()) />
@@ -622,6 +707,7 @@ fn Cec(system: SystemStatus) -> impl IntoView {
             />
             <Row label="Mantıksal adresler" value=logical />
             <Row label="Bilinen cihaz" value=known />
+            <Row label="Televizyon" value=cec.session.tv_power.label() />
         </div>
         {cec
             .error
@@ -629,16 +715,16 @@ fn Cec(system: SystemStatus) -> impl IntoView {
             .map(|error| view! { <p class="panel-note">{error}</p> })}
         <div class="actions-row">
             <Action
-                label="Televizyonu Uyandır"
+                label="TV'yi aç"
                 variant="primary"
-                disabled=Signal::derive(move || !cec_available)
+                disabled=Signal::derive(move || !cec.available || !enabled.get())
                 on_press=Callback::new(move |()| {
                     send(api::cec_wake_tv(), "Uyandırma komutu gönderildi.")
                 })
             />
             <Action
-                label="Televizyonu Beklemeye Al"
-                disabled=Signal::derive(move || !cec_available)
+                label="TV'yi kapat"
+                disabled=Signal::derive(move || !cec.available || !enabled.get())
                 on_press=Callback::new(move |()| {
                     send(api::cec_standby_tv(), "Bekleme komutu gönderildi.")
                 })

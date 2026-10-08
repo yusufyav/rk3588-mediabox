@@ -207,6 +207,9 @@ struct App {
     /// a poll that was already in flight when the press happened is ignored
     /// for this one field: it cannot know about a choice made after it left.
     leds_pending: Option<mediabox_core::LedMode>,
+    /// A CEC panel change on its way: the drawn value is the one pressed, and
+    /// the machine poll does not put the old one back meanwhile.
+    cec_pending: bool,
     /// The seconds last drawn on the display question, and whether its
     /// buttons were taking Ok yet, so it is redrawn when either changes and
     /// not four times a second.
@@ -322,7 +325,11 @@ impl App {
                 }
                 self.go_home();
             }
-            Intent::OfferPower => self.open_sheet(Sheet::power()),
+            Intent::OfferPower => {
+                let television = screens::settings::cec_settings(self.status.as_ref())
+                    .is_some_and(|settings| settings.enabled);
+                self.open_sheet(Sheet::power_with(television))
+            }
             Intent::Options => self.options(),
             Intent::Transport(transport) => self.transport(transport),
             Intent::Ignore => {}
@@ -886,6 +893,22 @@ impl App {
                 );
             }
             Err(error) => self.say(format!("Fan eğrisi kaydedilemedi — {error}")),
+        }
+        self.recompose_settings();
+    }
+
+    /// The daemon's account of CEC after a panel change, or why it refused.
+    fn cec_answered(&mut self, answer: Result<Value, String>) {
+        self.cec_pending = false;
+        match answer {
+            Ok(cec) => {
+                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert("cec".into(), cec);
+                }
+            }
+            // The row goes back to what the daemon kept on the next poll;
+            // the reason is said now.
+            Err(message) => self.say(format!("HDMI-CEC ayarı uygulanmadı: {message}")),
         }
         self.recompose_settings();
     }
@@ -3802,6 +3825,35 @@ impl App {
                     self.paint();
                 }
             }
+            Action::ChooseCecTarget => {
+                if self.settings.open_cec_choice() {
+                    self.paint();
+                }
+            }
+            Action::ChooseCecSourceLost => {
+                if self.settings.open_cec_source_lost() {
+                    self.paint();
+                }
+            }
+            Action::Cec(change) => {
+                let Some(kept) = screens::settings::cec_settings(self.status.as_ref()) else {
+                    return;
+                };
+                let settings = kept.with(change);
+                // Drawn now; the daemon's answer replaces it.
+                if let Some(cec) = self
+                    .status
+                    .as_mut()
+                    .and_then(|status| status.get_mut("cec"))
+                    .and_then(Value::as_object_mut)
+                {
+                    cec.insert("settings".into(), serde_json::to_value(settings).unwrap_or_default());
+                }
+                self.cec_pending = true;
+                self.clear_notice();
+                self.recompose_settings();
+                spawn_cec_settings(settings);
+            }
             Action::SetLeds(mode) => {
                 // No message along the bottom. A setting whose own row shows
                 // the new value has already said it, and this interface's
@@ -4067,6 +4119,16 @@ impl App {
             }
         }
         if let Some(mut fresh) = status {
+            if self.cec_pending {
+                let kept = self
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.get("cec"))
+                    .cloned();
+                if let (Some(kept), Some(fresh)) = (kept, fresh.as_object_mut()) {
+                    fresh.insert("cec".into(), kept);
+                }
+            }
             if self.leds_pending.is_some() {
                 let kept = self
                     .status
@@ -4298,11 +4360,11 @@ impl App {
         window.set_sheet_title(sheet.title().into());
 
         match sheet {
-            Sheet::Power { index } => {
+            Sheet::Power { index, television } => {
                 window.set_sheet_kind("power".into());
                 window.set_sheet_index(*index as i32);
                 window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(
-                    screens::power::CHOICES
+                    screens::power::choices(*television)
                         .iter()
                         .map(|choice| SheetRow {
                             label: choice.label().into(),
@@ -5563,6 +5625,8 @@ fn setting_rows(rows: &[screens::settings::Row]) -> Vec<SettingRow> {
                 hint: row.hint.clone().into(),
                 tone: row.tone.clone().into(),
                 selectable: row.selectable(),
+                enabled: !row.disabled,
+                toggle: row.toggle.map_or(-1, i32::from),
                 kind: kind.name().into(),
                 icon: row.icon.into(),
                 n_header: headers,
@@ -5683,6 +5747,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: None,
         diag: None,
         leds_pending: None,
+        cec_pending: false,
         output_seconds: (0, false),
         ethernet_seconds: None,
         fan_pending: false,
@@ -6875,6 +6940,22 @@ fn spawn_fan(curve: Option<mediabox_core::FanCurve>) {
         });
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.fan_answered(reset, answer));
+        });
+    });
+}
+
+fn spawn_cec_settings(settings: mediabox_core::CecSettings) {
+    detached("mediabox-tv-cec", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.cec_settings_set(settings).await.map_err(|error| {
+            eprintln!("mediabox-tv.cec settings failed: {error}");
+            match error {
+                rpc::Error::Refused { message, .. } => message,
+                other => other.to_string(),
+            }
+        });
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.cec_answered(answer));
         });
     });
 }
