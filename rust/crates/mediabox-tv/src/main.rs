@@ -266,6 +266,8 @@ struct App {
     detail_backdrop: Option<String>,
     /// When the line along the bottom stops being true. See `say`.
     notice_until: Option<Instant>,
+    /// When the Bluetooth glyph goes away.
+    device_toast_until: Option<Instant>,
     /// The volume indicator: until when it is up, and what it shows.
     volume_osd: Option<VolumeOsd>,
     detail_fade: f32,
@@ -729,6 +731,26 @@ impl App {
         {
             self.clear_notice();
         }
+        if self.device_toast_until.is_some_and(|until| until <= Instant::now()) {
+            self.device_toast_until = None;
+            // Only the flag: the card slides out with its words still on it.
+            if let Some(window) = self.window.upgrade() {
+                platform::keep_drawing(Duration::from_millis(300));
+                window.set_device_toast_shown(false);
+            }
+        }
+    }
+
+    /// A Bluetooth device connected or went away: the Bluetooth mark and the
+    /// device's name come up in the top right corner, over whatever is on it,
+    /// and go on their own.
+    pub fn device_changed(&mut self, name: &str, connected: bool) {
+        let Some(window) = self.window.upgrade() else { return };
+        window.set_device_toast_title(name.into());
+        window.set_device_toast_connected(connected);
+        platform::keep_drawing(Duration::from_millis(300));
+        window.set_device_toast_shown(true);
+        self.device_toast_until = Some(Instant::now() + DEVICE_TOAST_LIFETIME);
     }
 
     /// Takes that line away again.
@@ -3648,11 +3670,6 @@ impl App {
                                         .get("secured")
                                         .and_then(serde_json::Value::as_bool)
                                         .unwrap_or(true),
-                                    band: item
-                                        .get("band")
-                                        .and_then(serde_json::Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
                                     remembered: item
                                         .get("remembered")
                                         .and_then(serde_json::Value::as_bool)
@@ -3695,13 +3712,15 @@ impl App {
         window.set_wifi_busy(wifi.busy);
         window.set_wifi_scanning(wifi.scanning);
         window.set_wifi_notice(wifi.notice.clone().into());
-        window.set_wifi_address(wifi.address.clone().unwrap_or_default().into());
         window.set_wifi_summary(
             match (wifi.known, &wifi.connected_to, wifi.powered) {
                 // Nothing has come back yet, so there is nothing to say. This
                 // used to read "Kapalı" for the first moment of every visit.
                 (false, _, _) => String::new(),
-                (true, Some(ssid), _) => format!("{ssid} · bağlı"),
+                (true, Some(ssid), _) => match &wifi.address {
+                    Some(address) => format!("{ssid} ağına bağlı · {address}"),
+                    None => format!("{ssid} ağına bağlı"),
+                },
                 (true, None, true) => "Bağlı değil".to_string(),
                 (true, None, false) => "Kapalı".to_string(),
             }
@@ -3742,7 +3761,6 @@ impl App {
                 .map(|network| WifiRow {
                     ssid: network.ssid.clone().into(),
                     bars: network.bars() as i32,
-                    band: network.band.clone().into(),
                     secured: network.secured,
                     remembered: network.remembered,
                     connected: connected.as_deref() == Some(network.ssid.as_str()),
@@ -3759,25 +3777,18 @@ impl App {
         window.set_bt_index(bt.index as i32);
         window.set_bt_busy(bt.busy);
         window.set_bt_notice(bt.notice.clone().into());
-        window.set_bt_press_label(bt.press_label().into());
         window.set_bt_summary(
-            match (bt.known, &bt.controller, bt.powered) {
-                (false, _, _) => String::new(),
-                (true, Some(_), true) => "Açık".to_string(),
-                (true, Some(_), false) => "Kapalı".to_string(),
-                (true, None, _) => "Denetleyici yok".to_string(),
-            }
-            .into(),
+            bt.summary().into(),
         );
         window.set_bt_devices(slint::ModelRc::new(slint::VecModel::from(
-            bt.devices
-                .iter()
-                .map(|device| BtRow {
-                    name: device.title().into(),
-                    address: device.address.clone().into(),
-                    kind: device.kind().into(),
-                    paired: device.paired,
-                    connected: device.connected,
+            bt.rows_view()
+                .into_iter()
+                .map(|row| BtRow {
+                    name: row.name.into(),
+                    under: row.under.into(),
+                    connected: row.connected,
+                    header: row.header.into(),
+                    n_header: row.n_header as i32,
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -5615,29 +5626,25 @@ fn spawn_hero(kind: String, id: String, with_state: bool) {
 /// height come before it: the screen places and scrolls them by arithmetic.
 fn setting_rows(rows: &[screens::settings::Row]) -> Vec<SettingRow> {
     use screens::settings::Kind;
-    let (mut headers, mut readings, mut cards, mut flats) = (0, 0, 0, 0);
+    let (mut headers, mut readings, mut cards) = (0, 0, 0);
     rows.iter()
         .map(|row| {
             let kind = row.kind();
             let out = SettingRow {
                 label: row.label.clone().into(),
                 value: row.value.clone().into(),
-                hint: row.hint.clone().into(),
                 tone: row.tone.clone().into(),
                 selectable: row.selectable(),
                 enabled: !row.disabled,
                 toggle: row.toggle.map_or(-1, i32::from),
                 kind: kind.name().into(),
-                icon: row.icon.into(),
                 n_header: headers,
                 n_reading: readings,
                 n_card: cards,
-                n_flat: flats,
             };
             match kind {
                 Kind::Header => headers += 1,
                 Kind::Reading => readings += 1,
-                Kind::Link | Kind::Action if row.hint.is_empty() => flats += 1,
                 Kind::Link | Kind::Action => cards += 1,
             }
             out
@@ -5764,6 +5771,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         library_listing: None,
         detail_backdrop: None,
         notice_until: None,
+        device_toast_until: None,
         volume_osd: None,
         detail_fade: 0.0,
         epoch: 0,
@@ -6420,6 +6428,9 @@ struct OkHold {
 /// Long enough to read a sentence twice from a sofa, short enough that it is
 /// gone before the viewer has finished doing the next thing.
 const NOTICE_LIFETIME: Duration = Duration::from_secs(6);
+
+/// How long the Bluetooth card stays up before it slides away.
+const DEVICE_TOAST_LIFETIME: Duration = Duration::from_millis(1800);
 
 /// How long the controls stay up after the last press.
 const CONTROLS_LINGER: Duration = Duration::from_secs(5);

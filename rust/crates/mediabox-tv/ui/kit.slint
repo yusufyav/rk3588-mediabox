@@ -71,8 +71,6 @@ export component FocusRing inherits Rectangle {
     }
 }
 
-// A verdict: a dot and a word. The word is always there, so the colour is never
-// the only thing that says it.
 // An on/off switch, as television settings draw one: a pill track and a
 // knob that slides. On is the settings' own amber; a greyed one is a setting
 // kept but not in force.
@@ -102,6 +100,8 @@ export component Toggle inherits Rectangle {
     }
 }
 
+// A verdict: a dot and a word. The word is always there, so the colour is never
+// the only thing that says it.
 export component StatusChip inherits HorizontalLayout {
     in property <string> text;
     in property <string> tone;
@@ -874,6 +874,78 @@ export component Toast inherits Rectangle {
             overflow: elide;
             wrap: no-wrap;
         }
+    }
+}
+
+// A device that came or went: the Bluetooth mark in a dark rounded square in
+// the top right corner -- never the centre, where a menu's focus usually is -- with a small badge -- a check, or an unplugged
+// plug struck through, so the meaning is the shape and not only the colour --
+// and the device's name under it. It fades in growing from 85 %, stays a
+// moment, and goes the same way: yt-local-translate's controller glyph.
+export component DeviceToast inherits Rectangle {
+    in property <string> title;
+    in property <bool> connected: true;
+    in property <bool> shown;
+    in property <length> screen-width;
+
+    property <length> glyph: Metrics.vh * 0.045;
+    property <length> pad: Metrics.vh * 0.018;
+
+    width: max(glyph + pad * 2.4, name.preferred-width + pad * 2);
+    height: glyph + name.preferred-height + pad * 2.5;
+    x: screen-width - Metrics.safe-x - self.width;
+    y: Metrics.safe-y;
+    border-radius: Metrics.vh * 0.017;
+    background: #00000099;
+    transform-origin: { x: self.width / 2, y: self.height / 2 };
+    opacity: shown ? 1 : 0;
+    transform-scale: shown ? 1.0 : 0.85;
+    animate opacity, transform-scale { duration: Theme.motion ? 150ms : 0ms; easing: ease; }
+
+    Rectangle {
+        x: (parent.width - glyph) / 2;
+        y: pad;
+        width: glyph;
+        height: glyph;
+        Icon {
+            name: "bluetooth";
+            size: glyph;
+            ink: #ffffff;
+        }
+        // The badge, in the glyph's own 24-unit box: a dark disc at its top
+        // right, and on it the state.
+        Path {
+            width: glyph;
+            height: glyph;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: "M13.6 6a4.4 4.4 0 1 0 8.8 0a4.4 4.4 0 1 0 -8.8 0z";
+            fill: #0f1115;
+            stroke: transparent;
+        }
+        Path {
+            width: glyph;
+            height: glyph;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: connected
+                ? "M16 6.1l1.3 1.3 2.4-2.6"
+                : "M16.2 4.2v1.2 M19.8 4.2v1.2 M15.8 5.4h4.4v1.4a2.2 2.2 0 0 1-2.2 2.2a2.2 2.2 0 0 1-2.2-2.2z M15.1 8.7l5.4-5.4";
+            fill: transparent;
+            stroke: connected ? #4ade80 : #f87171;
+            stroke-width: glyph / 24 * 1.4;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+        }
+    }
+    name := Text {
+        x: (parent.width - self.width) / 2;
+        y: pad * 1.5 + glyph;
+        text: root.title;
+        color: #ffffffd9;
+        font-size: Metrics.t-secondary * 0.9;
+        font-weight: 600;
+        wrap: no-wrap;
     }
 }
 

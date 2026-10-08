@@ -184,7 +184,6 @@ impl Row {
     fn toggle(control: Control, label: &str, hint: impl Into<String>, on: bool) -> Self {
         Self {
             on,
-            value: if on { "Açık".into() } else { "Kapalı".into() },
             ..Self::new(control, RowKind::Toggle, label, hint)
         }
     }

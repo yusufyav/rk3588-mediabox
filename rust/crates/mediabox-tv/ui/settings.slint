@@ -148,14 +148,12 @@ export component Settings inherits Rectangle {
         pure function y-of(r: SettingRow) -> length {
             return r.n-header * Metrics.header-h
                 + r.n-reading * Metrics.reading-h
-                + r.n-card * (Metrics.set-h + Metrics.row-gap)
-                + r.n-flat * (Metrics.set-h-flat + Metrics.row-gap);
+                + r.n-card * (Metrics.set-h-flat + Metrics.row-gap);
         }
         pure function h-of(r: SettingRow) -> length {
             return r.kind == "header" ? Metrics.header-h
                 : r.kind == "reading" ? Metrics.reading-h
-                : r.hint == "" ? Metrics.set-h-flat
-                : Metrics.set-h;
+                : Metrics.set-h-flat;
         }
 
         Rectangle {
@@ -182,9 +180,7 @@ export component Settings inherits Rectangle {
                 }
                 if entry.kind == "link" || entry.kind == "action": SettingCard {
                     width: 100%;
-                    icon: entry.icon;
                     label: entry.label;
-                    hint: entry.hint;
                     value: entry.value;
                     tone: entry.tone;
                     kind: entry.kind;

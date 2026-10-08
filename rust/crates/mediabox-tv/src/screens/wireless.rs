@@ -18,7 +18,6 @@ pub struct Network {
     pub ssid: String,
     pub signal: i32,
     pub secured: bool,
-    pub band: String,
     pub remembered: bool,
 }
 
@@ -211,6 +210,42 @@ impl Wifi {
             .get("address")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        // The network the board is on is shown at once, before any scan has
+        // answered: a screen that opens on "Aranıyor…" and nothing else for
+        // ten seconds looks as if the radio were off.
+        if let Some(ssid) = self.connected_to.clone()
+            && !self.networks.iter().any(|network| network.ssid == ssid)
+        {
+            self.networks.push(Network {
+                ssid,
+                signal: value
+                    .get("signal")
+                    .and_then(serde_json::Value::as_i64)
+                    .map_or(-99, |signal| signal as i32),
+                secured: true,
+                remembered: true,
+            });
+        }
+        self.order();
+    }
+
+    /// The network the board is on first, then the ones it knows, then the
+    /// strongest -- the remote staying on the network it was on.
+    fn order(&mut self) {
+        let was = self.highlighted().map(|network| network.ssid.clone());
+        let connected = self.connected_to.clone();
+        self.networks.sort_by_key(|network| {
+            (
+                connected.as_deref() != Some(network.ssid.as_str()),
+                !network.remembered,
+                -network.signal,
+            )
+        });
+        if let Some(ssid) = was
+            && let Some(at) = self.networks.iter().position(|n| n.ssid == ssid)
+        {
+            self.index = WIFI_HEAD + at;
+        }
     }
 
     /// Fold a scan answer in, keeping the remote on the same network it was on
@@ -218,11 +253,12 @@ impl Wifi {
     pub fn take_networks(&mut self, networks: Vec<Network>) {
         let was = self.highlighted().map(|network| network.ssid.clone());
         self.networks = networks;
-        if let Some(ssid) = was {
-            if let Some(at) = self.networks.iter().position(|n| n.ssid == ssid) {
-                self.index = WIFI_HEAD + at;
-                return;
-            }
+        self.order();
+        if let Some(ssid) = was
+            && let Some(at) = self.networks.iter().position(|n| n.ssid == ssid)
+        {
+            self.index = WIFI_HEAD + at;
+            return;
         }
         self.index = self.index.min(self.rows().saturating_sub(1));
     }
@@ -416,6 +452,17 @@ impl Device {
     }
 }
 
+/// One device as the list draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtView {
+    pub name: String,
+    pub under: String,
+    pub connected: bool,
+    pub header: String,
+    /// Headings before this row.
+    pub n_header: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BtPress {
     None,
@@ -531,6 +578,7 @@ impl Bluetooth {
                 devices.sort_by_key(|device| {
                     (
                         !device.paired,
+                        !device.connected,
                         device.name.is_none(),
                         device.title().to_lowercase(),
                     )
@@ -588,6 +636,62 @@ impl Bluetooth {
         }
     }
 
+    /// One line at the top: how many are paired, and connected.
+    pub fn summary(&self) -> String {
+        if !self.known {
+            return String::new();
+        }
+        if self.controller.is_none() {
+            return "Bu kartta Bluetooth denetleyicisi yok".into();
+        }
+        if !self.powered {
+            return "Kapalı".into();
+        }
+        let paired = self.devices.iter().filter(|device| device.paired).count();
+        let connected = self.devices.iter().filter(|device| device.connected).count();
+        match (paired, connected) {
+            (0, _) => "Eşleşmiş aygıt yok".into(),
+            (paired, 0) => format!("{paired} eşleşmiş aygıt"),
+            (paired, connected) => format!("{paired} eşleşmiş aygıt · {connected} bağlı"),
+        }
+    }
+
+    /// The list as drawn: a heading over the paired ones and over the ones
+    /// a search found; under each name what it is, or -- under the one the
+    /// remote is on -- what Ok does to it.
+    pub fn rows_view(&self) -> Vec<BtView> {
+        let mut headers = 0;
+        let mut previous: Option<bool> = None;
+        self.devices
+            .iter()
+            .enumerate()
+            .map(|(at, device)| {
+                let header = if previous != Some(device.paired) {
+                    if device.paired { "Eşleşmiş aygıtlar" } else { "Bulunan aygıtlar" }
+                } else {
+                    ""
+                };
+                previous = Some(device.paired);
+                let n_header = headers;
+                if !header.is_empty() {
+                    headers += 1;
+                }
+                let focused = self.index == BT_HEAD + at;
+                BtView {
+                    name: device.title(),
+                    under: match (focused, device.kind()) {
+                        (true, "") => self.press_label().to_string(),
+                        (true, kind) => format!("{kind} · {}", self.press_label()),
+                        (false, kind) => kind.to_string(),
+                    },
+                    connected: device.connected,
+                    header: header.to_string(),
+                    n_header,
+                }
+            })
+            .collect()
+    }
+
     pub fn forget(&mut self) -> BtPress {
         match self.highlighted() {
             Some(device) if device.paired => BtPress::Forget,
@@ -606,7 +710,6 @@ mod tests {
             ssid: ssid.into(),
             signal,
             secured,
-            band: "5 GHz".into(),
             remembered: false,
         }
     }
@@ -774,4 +877,60 @@ mod tests {
         bt.index = BT_HEAD;
         assert_eq!(bt.forget(), BtPress::None);
     }
+
+    #[test]
+    fn the_network_the_board_is_on_is_listed_first_and_at_once() {
+        let mut wifi = Wifi::new();
+        wifi.take_status(&serde_json::json!({
+            "present": true, "powered": true, "ssid": "YuHome5", "signal": -42, "address": "10.27.27.34"
+        }));
+        // Before any scan: the connected network is there.
+        assert_eq!(wifi.networks.len(), 1);
+        assert_eq!(wifi.networks[0].ssid, "YuHome5");
+        assert_eq!(wifi.networks[0].bars(), 4);
+        let net = |ssid: &str, signal, remembered| Network {
+            ssid: ssid.into(),
+            signal,
+            secured: true,
+            remembered,
+        };
+        wifi.take_networks(vec![
+            net("YuHome", -38, false),
+            net("SUPERONLINE_WiFi_4999", -60, false),
+            net("YuHome5", -42, true),
+            net("Komşu", -50, true),
+        ]);
+        let order: Vec<&str> = wifi.networks.iter().map(|n| n.ssid.as_str()).collect();
+        assert_eq!(order, ["YuHome5", "Komşu", "YuHome", "SUPERONLINE_WiFi_4999"]);
+        assert_eq!(wifi.networks[3].bars(), 3, "-60 dBm is three bars");
+    }
+
+    #[test]
+    fn paired_devices_and_found_ones_are_under_their_own_headings() {
+        let mut bt = Bluetooth::new();
+        bt.take_status(&serde_json::json!({
+            "present": true,
+            "controller": {"address": "B0:AC", "powered": true},
+            "devices": [
+                {"address": "A1", "name": "Kulaklık", "paired": false, "connected": false, "icon": "audio-headset"},
+                {"address": "C5", "name": "ROG AZOTH", "paired": true, "connected": false, "icon": "input-keyboard"},
+                {"address": "DE", "name": "MX Master 3S", "paired": true, "connected": true, "icon": "input-mouse"},
+            ],
+        }));
+        let rows = bt.rows_view();
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["MX Master 3S", "ROG AZOTH", "Kulaklık"]);
+        assert_eq!(rows[0].header, "Eşleşmiş aygıtlar");
+        assert_eq!(rows[1].header, "");
+        assert_eq!(rows[2].header, "Bulunan aygıtlar");
+        assert_eq!((rows[0].n_header, rows[1].n_header, rows[2].n_header), (0, 1, 1));
+        assert!(rows[0].connected);
+        // No address anywhere; the focused row says what Ok does.
+        assert!(rows.iter().all(|row| !row.under.contains(':')));
+        bt.index = BT_HEAD + 2;
+        assert_eq!(bt.rows_view()[2].under, "Ses aygıtı · Eşleştir");
+        assert_eq!(bt.rows_view()[0].under, "Fare");
+        assert_eq!(bt.summary(), "2 eşleşmiş aygıt · 1 bağlı");
+    }
 }
+

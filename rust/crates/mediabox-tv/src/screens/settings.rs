@@ -191,11 +191,8 @@ impl Kind {
 pub struct Row {
     pub label: String,
     pub value: String,
-    pub hint: String,
     /// "" for a reading, "good" / "warn" / "bad" for one that has a verdict.
     pub tone: String,
-    /// A mark from the interface's own table, "" for none.
-    pub icon: &'static str,
     pub header: bool,
     pub action: Option<Action>,
     pub page: Option<Page>,
@@ -219,7 +216,7 @@ fn wifi_row(diagnostics: Option<&Value>) -> Row {
         Some("kapalı") => ("Kapalı".to_string(), "warn"),
         Some("bağlı") => (
             text(diagnostics, "/wireless/wifi/ssid").unwrap_or_else(|| "Bağlı".into()),
-            "good",
+            "",
         ),
         Some(_) => ("Bağlı değil".to_string(), ""),
         None => (String::new(), ""),
@@ -227,7 +224,7 @@ fn wifi_row(diagnostics: Option<&Value>) -> Row {
     Row {
         value,
         tone: tone.into(),
-        ..Row::act("Wi-Fi", "Ağları ara ve bağlan", "wifi", Action::OpenWifi)
+        ..Row::act("Wi-Fi", Action::OpenWifi)
     }
 }
 
@@ -240,9 +237,11 @@ fn bluetooth_row(diagnostics: Option<&Value>) -> Row {
             let paired = text(diagnostics, "/wireless/bluetooth/paired")
                 .and_then(|count| count.parse::<u32>().ok())
                 .unwrap_or(0);
+            // The daemon counts the controller's live links (hci0:N), not
+            // its pairings: three paired devices, none on, read "Açık".
             match paired {
-                0 => ("Açık".to_string(), "good"),
-                n => (format!("Açık · {n} aygıt eşli"), "good"),
+                0 => ("Açık".to_string(), ""),
+                n => (format!("Açık · {n} aygıt bağlı"), ""),
             }
         }
         Some(_) | None => (String::new(), ""),
@@ -250,7 +249,7 @@ fn bluetooth_row(diagnostics: Option<&Value>) -> Row {
     Row {
         value,
         tone: tone.into(),
-        ..Row::act("Bluetooth", "Aygıt ara ve eşleştir", "bluetooth", Action::OpenBluetooth)
+        ..Row::act("Bluetooth", Action::OpenBluetooth)
     }
 }
 
@@ -259,9 +258,7 @@ impl Row {
         Self {
             label: label.into(),
             value: value.into(),
-            hint: String::new(),
             tone: String::new(),
-            icon: "",
             header: false,
             action: None,
             page: None,
@@ -285,19 +282,15 @@ impl Row {
         }
     }
 
-    fn act(label: &str, hint: &str, icon: &'static str, action: Action) -> Self {
+    fn act(label: &str, action: Action) -> Self {
         Self {
-            hint: hint.into(),
-            icon,
             action: Some(action),
             ..Row::reading(label, "")
         }
     }
 
-    fn link(page: Page, hint: &str, value: impl Into<String>, tone: &str) -> Self {
+    fn link(page: Page, value: impl Into<String>, tone: &str) -> Self {
         Self {
-            hint: hint.into(),
-            icon: page.icon(),
             page: Some(page),
             tone: tone.into(),
             ..Row::reading(page.title(), value)
@@ -820,6 +813,8 @@ impl Settings {
             }
             _ => {}
         }
+        // The right-hand side is names and values, as a television's own
+        // settings are: no mark on every row, no sentence under it.
         let groups = compose(status, diagnostics, display);
         let changed = self.groups.len() != groups.len();
         self.groups = groups;
@@ -955,8 +950,6 @@ fn ethernet_cards(status: Option<&Value>) -> Vec<Row> {
                 label,
                 value: if on_trial { "Onay bekliyor".into() } else { port.config.label() },
                 tone: if on_trial { "warn".into() } else { String::new() },
-                hint: format!("Adres ayarı · {}", port.name),
-                icon: "network",
                 page: Some(Page::Ethernet),
                 port: Some(port.name.clone()),
                 ..Row::reading("", "")
@@ -1111,7 +1104,7 @@ fn output(status: Option<&Value>) -> Row {
                 .and_then(|(offer, wire)| offer.mode(&wire))
                 .map(super::output::label)
                 .unwrap_or_default();
-            Row::link(Page::Output, Page::Output.blurb(), now, "")
+            Row::link(Page::Output, now, "")
         }
         Some(output) => Row::toned(
             OUTPUT,
@@ -1129,14 +1122,8 @@ pub const AUDIO: &str = "Ses";
 fn refresh_matching(status: Option<&Value>) -> Row {
     let on = output_status(status).is_none_or(|output| output.content_matching);
     Row {
-        value: if on { "Açık".into() } else { "Kapalı".into() },
-        tone: if on { "good".into() } else { String::new() },
-        ..Row::act(
-            "Yenileme hızını içeriğe eşle",
-            "Film kendi kare hızına uyan modda oynar; bitince ekran geri döner",
-            "refresh",
-            Action::SetRefreshMatching(!on),
-        )
+        toggle: Some(on),
+        ..Row::act("Yenileme hızını içeriğe eşle", Action::SetRefreshMatching(!on))
     }
 }
 
@@ -1156,7 +1143,7 @@ fn audio(status: Option<&Value>) -> Row {
                 audio.setting.mode.label(),
                 if audio.setting.muted { " · sessiz" } else { "" }
             );
-            Row::link(Page::Audio, Page::Audio.blurb(), now, if plan.device.is_none() { "warn" } else { "" })
+            Row::link(Page::Audio, now, if plan.device.is_none() { "warn" } else { "" })
         }
         None => Row::reading(AUDIO, "Okunuyor…"),
     }
@@ -1174,7 +1161,7 @@ fn cooling(status: Option<&Value>) -> Row {
                 (Some(celsius), None) => format!("{celsius:.0} °C"),
                 _ => String::new(),
             };
-            Row::link(Page::Cooling, "Fan eğrisi", now, "")
+            Row::link(Page::Cooling, now, "")
         }
         Some(fan) => Row::toned(
             "Fan",
@@ -1238,7 +1225,7 @@ fn led_mode(status: Option<&Value>) -> Option<LedMode> {
 /// press, and two presses of Ok — one meant, one not — left the lights in a
 /// mode nobody had picked.
 fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
-    let red = Row::reading("Kırmızı led", "Donanımdan yanar — kapatılamaz");
+    let red = Row::reading("Kırmızı led", "Kapatılamaz");
 
     if flag(status, "/leds/available") != Some(true) {
         // Either the daemon has not answered yet, or this is not a board whose
@@ -1253,22 +1240,9 @@ fn leds(status: Option<&Value>) -> (Option<Row>, Vec<Row>) {
     (
         Some(Row {
             value: mode.label().into(),
-            tone: if mode == LedMode::Off {
-                "good".into()
-            } else {
-                String::new()
-            },
-            ..Row::act(
-                "Yeşil ve mavi led",
-                "Kapalı, sürekli açık ya da nabız",
-                "bulb",
-                Action::ChooseLeds,
-            )
+            ..Row::act("Yeşil ve mavi led", Action::ChooseLeds)
         }),
-        vec![
-            red,
-            Row::reading("Kalıcılık", "Seçim yeniden başlatmadan sonra korunur"),
-        ],
+        vec![red],
     )
 }
 
@@ -1296,11 +1270,7 @@ fn account(status: Option<&Value>) -> Vec<Row> {
 
     if !signed_in {
         return vec![
-            Row::act(
-                "Giriş yap",
-                "E-posta ve parolanızı kumandayla girin",
-                "signin",
-                Action::OpenAccount,
+            Row::act("Giriş yap", Action::OpenAccount,
             ),
             Row::header("Durum"),
             Row::toned("Durum", "Bağlı değil", "warn"),
@@ -1309,7 +1279,7 @@ fn account(status: Option<&Value>) -> Vec<Row> {
     }
 
     vec![
-        Row::act("Çıkış yap", "Hesabın bağlantısını keser", "signout", Action::SignOut),
+        Row::act("Çıkış yap", Action::SignOut),
         Row::header("Durum"),
         Row::toned("Durum", "Bağlı", "good"),
         Row::reading(
@@ -1345,11 +1315,7 @@ fn playback(status: Option<&Value>, display: Option<&DisplayStatus>) -> Vec<Row>
         .unwrap_or_else(|| "Boşta".into());
     let running = kodi_running(status);
     vec![
-        Row::act(
-            "Oynatıcıyı yeniden başlat",
-            "Kodi'yi kapatıp açar",
-            "restart",
-            Action::RestartPlayer,
+        Row::act("Oynatıcıyı yeniden başlat", Action::RestartPlayer,
         ),
         Row::header("Durum"),
         Row::toned(
@@ -1372,7 +1338,7 @@ fn on_off(on: bool) -> &'static str {
 fn cec_switch(label: &str, on: bool, change: fn(bool) -> CecChange) -> Row {
     Row {
         toggle: Some(on),
-        ..Row::act(label, "", "", Action::Cec(change(!on)))
+        ..Row::act(label, Action::Cec(change(!on)))
     }
 }
 
@@ -1395,9 +1361,9 @@ fn tv_and_remote(status: Option<&Value>) -> Vec<Row> {
     let enabled = cec.as_ref().is_some_and(|cec| cec.settings.enabled);
     let (state, tone) = cec.as_ref().map(cec_state).unwrap_or_else(|| ("Okunuyor…".into(), ""));
     vec![
-        Row::link(Page::Cec, "", on_off(enabled), if enabled { "good" } else { "" }),
-        Row::act("TV'yi aç", "", "tv", Action::WakeTelevision).disabled_if(!enabled),
-        Row::act("TV'yi kapat", "", "moon", Action::StandbyTelevision).disabled_if(!enabled),
+        Row::link(Page::Cec, on_off(enabled), ""),
+        Row::act("TV'yi aç", Action::WakeTelevision).disabled_if(!enabled),
+        Row::act("TV'yi kapat", Action::StandbyTelevision).disabled_if(!enabled),
         Row::header("HDMI-CEC"),
         Row::toned("CEC", state, tone),
         Row::reading("Bağdaştırıcı", text(status, "/cec/adapter").unwrap_or_else(dash)),
@@ -1421,7 +1387,7 @@ fn cec_panel(status: Option<&Value>) -> Vec<Row> {
     let off = !s.enabled;
     let choice = |label: &str, value: &str, action: Action| Row {
         value: value.into(),
-        ..Row::act(label, "", "", action)
+        ..Row::act(label, action)
     };
     let mut rows = vec![
         cec_switch("HDMI-CEC", s.enabled, CecChange::Enabled),
@@ -1478,17 +1444,11 @@ fn compose(
             blurb: "Oynatma ve hesap ile ilgili ayarlar",
             icon: "play",
             rows: vec![
-                Row::link(
-                    Page::Playback,
-                    "Oynatıcının durumu ve yeniden başlatılması",
-                    if running { "Çalışıyor" } else { "Kapalı" },
-                    if running { "good" } else { "" },
-                ),
+                Row::link(Page::Playback, if running { "Çalışıyor" } else { "Kapalı" }, ""),
                 Row::link(
                     Page::Account,
-                    "Stremio hesabı ve eklentileri",
                     if signed_in { "Bağlı" } else { "Bağlı değil" },
-                    if signed_in { "good" } else { "warn" },
+                    if signed_in { "" } else { "warn" },
                 ),
             ],
         },
@@ -1532,8 +1492,8 @@ fn compose(
             blurb: "Sürüm, yeniden başlatma ve kapatma",
             icon: "info",
             rows: vec![
-                Row::act("Yeniden başlat", "Cihazı kapatıp açar", "restart", Action::Restart),
-                Row::act("Kapat", "Cihazı kapatır", "power", Action::Shutdown),
+                Row::act("Yeniden başlat", Action::Restart),
+                Row::act("Kapat", Action::Shutdown),
                 Row::header("Sürüm"),
                 Row::reading("Sürüm", text(status, "/version").unwrap_or_else(dash)),
                 Row::reading("Makine", text(status, "/hostname").unwrap_or_else(dash)),
@@ -1551,11 +1511,7 @@ fn compose(
             title: "Tanılama".into(),
             blurb: "İşlemci, bellek, sıcaklık, ekran ve servisler",
             icon: "bars",
-            rows: vec![Row::act(
-                "Tanılamayı aç",
-                "Salt okunur teknik ayrıntılar",
-                "bars",
-                Action::OpenDiagnostics,
+            rows: vec![Row::act("Tanılamayı aç", Action::OpenDiagnostics,
             )],
         },
     ]
@@ -1933,7 +1889,7 @@ mod tests {
             .into_iter()
             .chain(groups.into_iter().flat_map(|g| g.rows));
         for row in rows {
-            for field in [&row.label, &row.value, &row.hint] {
+            for field in [&row.label, &row.value] {
                 assert!(!field.contains("hunter2"), "{field}");
                 assert!(!field.contains("sekritkey"), "{field}");
             }
@@ -2062,7 +2018,7 @@ mod tests {
                 .find(|row| row.label.contains("Kırmızı"))
                 .unwrap_or_else(|| panic!("no red row, available={available}"));
             assert!(!red.selectable(), "the red light must not look changeable");
-            assert!(red.value.contains("kapatılamaz"));
+            assert!(red.value.contains("Kapatılamaz"));
         }
     }
 
@@ -2375,7 +2331,6 @@ mod tests {
         // Every switch is a switch, and no row carries an icon.
         let switches = screen.rows().iter().filter(|row| row.toggle.is_some()).count();
         assert_eq!(switches, 6);
-        assert!(screen.rows().iter().all(|row| row.icon.is_empty()));
         assert!(screen.open_cec_source_lost());
         assert!(screen.step(0, 1));
         assert_eq!(screen.choose(), Some(Action::Cec(CecChange::OnActiveSourceLost(CecSourceLost::Standby))));

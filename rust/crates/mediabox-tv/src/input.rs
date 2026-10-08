@@ -116,6 +116,31 @@ pub fn classify(path: &str, name: &str, rc_protocols: Option<&str>, rc_driver: O
 /// through the keymap in /etc/rc_keymaps. `keyboard` is false for the board's
 /// infrared receiver, where the four arrows, Ok and Power are the remote's
 /// too; on a keyboard those stay the keyboard's (typing, and no power key).
+/// Whether an input node is a Bluetooth device's: its bus is
+/// `BUS_BLUETOOTH` (5). The path is no answer -- a classic keyboard sits under
+/// the controller (`.../bluetooth/hci0/hci0:3/...`), a Bluetooth LE one under
+/// `/devices/virtual/misc/uhid/0005:...`; measured on the Plus with the ROG
+/// AZOTH, which the path rule missed.
+pub fn is_bluetooth(bustype: Option<&str>, path: &str) -> bool {
+    match bustype.map(str::trim) {
+        Some(bus) => u16::from_str_radix(bus, 16).is_ok_and(|bus| bus == 5),
+        None => path.contains("/bluetooth/hci"),
+    }
+}
+
+/// The device's own name without the role the kernel appends to each of its
+/// input nodes ("MX Master 3S Keyboard", "... Mouse").
+pub fn device_title(name: &str) -> String {
+    let mut title = name.trim();
+    for suffix in [" Consumer Control", " System Control", " Keyboard", " Mouse", " Keys"] {
+        if let Some(rest) = title.strip_suffix(suffix) {
+            title = rest.trim_end();
+            break;
+        }
+    }
+    if title.is_empty() { name.trim().to_string() } else { title.to_string() }
+}
+
 pub fn action_for_evdev(code: u32, keyboard: bool) -> Option<InputAction> {
     let remote_only = match code {
         158 | 174 => InputAction::Back,           // KEY_BACK, KEY_EXIT
@@ -374,6 +399,21 @@ mod tests {
 #[cfg(test)]
 mod device_tests {
     use super::*;
+
+    #[test]
+    fn a_bluetooth_device_is_known_by_its_path_and_named_once() {
+        // Bluetooth LE through uhid, and classic under the controller.
+        assert!(is_bluetooth(Some("0005\n"), "/sys/devices/virtual/misc/uhid/0005:0B05:1A85.0003/input/input12/event12"));
+        assert!(is_bluetooth(None, "/sys/devices/platform/fe2c0000.serial/serial1/serial1-0/bluetooth/hci0/hci0:3/0005:046D:B034.0001/input/input12/event7"));
+        // USB, the CEC rc device, the board's own Bluetooth power key.
+        assert!(!is_bluetooth(Some("0003"), "/sys/devices/platform/fc880000.usb/usb3/3-1/3-1:1.0/0003:046D:C52B.0001/input/input5/event5"));
+        assert!(!is_bluetooth(Some("0019"), "/sys/devices/platform/wireless-bluetooth/input/input7/event7"));
+        assert!(!is_bluetooth(None, "/sys/devices/platform/fdea0000.hdmi/rc/rc1/input1/event1"));
+        assert_eq!(device_title("MX Master 3S Keyboard"), "MX Master 3S");
+        assert_eq!(device_title("MX Master 3S Mouse"), "MX Master 3S");
+        assert_eq!(device_title("ROG AZOTH"), "ROG AZOTH");
+        assert_eq!(device_title("Keyboard"), "Keyboard");
+    }
 
     #[test]
     fn the_cec_rc_device_is_a_duplicate_and_the_ir_receiver_is_not() {

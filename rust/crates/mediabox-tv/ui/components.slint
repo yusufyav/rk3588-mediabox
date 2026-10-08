@@ -67,7 +67,6 @@ export struct TechRow {
 export struct SettingRow {
     label: string,
     value: string,
-    hint: string,
     tone: string,
     // False for a reading or a heading. Focus never lands on one.
     selectable: bool,
@@ -78,14 +77,11 @@ export struct SettingRow {
     // "header", "reading", "link" (goes somewhere) or "action" (does
     // something).
     kind: string,
-    // A mark from the Icons table, or "".
-    icon: string,
     // How many rows of each height come before this one, so the screen can
     // place it — and scroll to it — by arithmetic rather than by measuring.
     n-header: int,
     n-reading: int,
     n-card: int,
-    n-flat: int,
 }
 
 export struct DiagGroup {

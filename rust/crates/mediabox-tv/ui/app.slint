@@ -12,7 +12,7 @@ import { MediaSettings, MsCategory, MsRow, MsNode, MsRate, MsRoute } from "media
 import { Settings } from "settings.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
-import { SettingNav, Badge, InfoLine, Toast, ChoiceItem } from "kit.slint";
+import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit.slint";
 import { EthernetView } from "ethernet.slint";
 import { AudioView, AudioCard } from "audio.slint";
 import { Account } from "account.slint";
@@ -95,6 +95,10 @@ export component MediaBoxWindow inherits Window {
     in property <string> status: "Başlatılıyor…";
     in property <bool> failed: false;
     in property <string> notice;
+    // A Bluetooth device that has just connected.
+    in property <string> device-toast-title;
+    in property <bool> device-toast-shown;
+    in property <bool> device-toast-connected: true;
     // The volume indicator, over everything.
     in property <bool> volume-shown;
     in property <int> volume-level;
@@ -187,7 +191,6 @@ export component MediaBoxWindow inherits Window {
     in property <bool> wifi-present;
     in property <bool> wifi-powered;
     in property <string> wifi-summary;
-    in property <string> wifi-address;
     in property <[WifiRow]> wifi-networks;
     in property <int> wifi-index;
     in property <bool> wifi-busy;
@@ -212,7 +215,6 @@ export component MediaBoxWindow inherits Window {
     in property <int> bt-index;
     in property <bool> bt-busy;
     in property <string> bt-notice;
-    in property <string> bt-press-label;
     in property <int> search-key-row;
     in property <int> search-key-col;
     in property <int> search-pane;
@@ -635,7 +637,7 @@ export component MediaBoxWindow inherits Window {
             present: root.wifi-present;
             powered: root.wifi-powered;
             summary: root.wifi-summary;
-            address: root.wifi-address;
+            vitals: root.vitals;
             networks: root.wifi-networks;
             index: root.wifi-index;
             busy: root.wifi-busy;
@@ -658,11 +660,11 @@ export component MediaBoxWindow inherits Window {
             present: root.bt-present;
             powered: root.bt-powered;
             summary: root.bt-summary;
+            vitals: root.vitals;
             devices: root.bt-devices;
             index: root.bt-index;
             busy: root.bt-busy;
             notice: root.bt-notice;
-            press-label: root.bt-press-label;
         }
 
         if screen == "account": Account {
@@ -708,7 +710,10 @@ export component MediaBoxWindow inherits Window {
         // places down the left and its search box across the top.
         if screen != "boot" && screen != "film" && screen != "detail" && screen != "media"
             && screen != "discover" && screen != "search" && screen != "library"
-            && screen != "settings" && screen != "diagnostics" && screen != "media-settings": TopBar {
+            && screen != "settings" && screen != "diagnostics" && screen != "media-settings"
+            // The radios' lists sit in the settings' own frame; only the
+            // password keeps the bar.
+            && screen != "bluetooth" && !(screen == "wifi" && root.wifi-face == "list"): TopBar {
             x: 0;
             y: 0;
             width: 100%;
@@ -790,6 +795,16 @@ export component MediaBoxWindow inherits Window {
             muted: root.volume-muted;
             bitstream: root.volume-bitstream;
             shown: root.volume-shown;
+        }
+
+        // A Bluetooth device came or went. The very last thing drawn, so it is
+        // over the film, the player's own panel and every sheet; always there,
+        // so it leaves as smoothly as it came.
+        DeviceToast {
+            screen-width: root.width;
+            title: root.device-toast-title;
+            connected: root.device-toast-connected;
+            shown: root.device-toast-shown;
         }
     }
 

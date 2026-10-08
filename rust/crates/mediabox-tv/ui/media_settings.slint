@@ -189,7 +189,8 @@ component Control inherits Rectangle {
                 overflow: elide;
                 wrap: no-wrap;
             }
-            if (root.focused || !root.line.enabled) && root.line.hint != "": Text {
+            // A name, and a reason only when the row cannot be changed.
+            if !root.line.enabled && root.line.hint != "": Text {
                 text: root.line.hint;
                 font-size: Metrics.t-meta;
                 color: root.soft;
@@ -225,13 +226,6 @@ component Control inherits Rectangle {
         if root.line.kind == "toggle": HorizontalLayout {
             horizontal-stretch: 0;
             spacing: root.pad * 0.6;
-            Text {
-                text: root.line.value;
-                font-size: Metrics.t-meta;
-                color: root.soft;
-                vertical-alignment: center;
-                wrap: no-wrap;
-            }
             VerticalLayout {
                 alignment: center;
                 Switch {

@@ -1,5 +1,8 @@
 import { Theme, Metrics } from "theme.slint";
-import { KeyRow, KeyCap, Keyboard, SignalBars } from "components.slint";
+import { KeyRow, KeyCap, Keyboard, VitalsModel } from "components.slint";
+import {
+    SettingCard, SectionHeader, PageHeader, SideNav, StatusCorner, Backdrop, FocusRing, Icon,
+} from "kit.slint";
 
 // One network in the Wi-Fi list.
 export struct WifiRow {
@@ -7,7 +10,6 @@ export struct WifiRow {
     // 1 to 4. A number in dBm is not something anyone should have to read
     // from a sofa.
     bars: int,
-    band: string,
     secured: bool,
     remembered: bool,
     connected: bool,
@@ -16,79 +18,154 @@ export struct WifiRow {
 // One device in the Bluetooth list.
 export struct BtRow {
     name: string,
-    address: string,
-    kind: string,
-    paired: bool,
+    // Under the name: what it is, or -- on the focused row -- what Ok does.
+    under: string,
     connected: bool,
+    // The heading this row opens ("Eşleşmiş aygıtlar"), "" when it continues
+    // one; and how many headings come before it, so it is placed by
+    // arithmetic.
+    header: string,
+    n-header: int,
 }
 
-// Four bars, the two strongest filled or not according to `bars`.
-component Signal inherits HorizontalLayout {
+// Four bars, as many lit as the signal earns.
+component Bars inherits Rectangle {
     in property <int> bars;
-    spacing: Metrics.vh * 0.004;
-    alignment: end;
+    in property <bool> focused;
+    property <length> w: Metrics.t-secondary * 0.24;
+    property <length> gap: w * 0.65;
+    width: w * 4 + gap * 3;
+    height: Metrics.t-secondary * 1.05;
 
     for step[i] in [1, 2, 3, 4]: Rectangle {
-        width: Metrics.vh * 0.008;
-        height: Metrics.vh * 0.010 + Metrics.vh * 0.006 * i;
+        x: i * (w + gap);
+        width: w;
+        height: parent.height * (0.28 + 0.24 * i);
         y: parent.height - self.height;
-        border-radius: self.width / 2;
-        background: i <= bars ? Theme.text : #ffffff33;
+        border-radius: w / 2;
+        background: step <= bars ? (focused ? Theme.text : #d6dae2) : #ffffff26;
     }
 }
 
-// The shared shape of a row on either screen: a title, something small under
-// it, and a value on the right.
-component Line inherits Rectangle {
+// A network or a device, in the settings' own card: its name, a line under
+// it when there is one, and on the right what it is now.
+component RadioCard inherits Rectangle {
     in property <bool> focused;
     in property <string> title;
     in property <string> under;
-    in property <string> value;
-    in property <bool> dim;
+    in property <string> status;
+    in property <bool> lock;
+    in property <int> bars: -1;
 
-    height: Metrics.vh * 0.085;
-    border-radius: Theme.radius * 0.6;
-    background: focused ? Theme.focus-fill : #ffffff08;
-    border-width: focused ? 2px : 1px;
-    border-color: focused ? Theme.focus-ring : Theme.line-soft;
-
-    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    height: under == "" ? Metrics.set-h-flat : Metrics.set-h;
+    border-radius: Metrics.s-radius;
+    background: focused ? Theme.s-card-hi : Theme.s-card;
+    border-width: 1px;
+    border-color: focused ? transparent : Theme.s-line;
+    animate background { duration: Theme.t-focus; easing: Theme.ease; }
 
     HorizontalLayout {
-        padding-left: Metrics.vh * 0.024;
-        padding-right: Metrics.vh * 0.024;
-        spacing: Metrics.vh * 0.016;
+        padding-left: Metrics.card-pad;
+        padding-right: Metrics.card-pad;
+        spacing: Metrics.card-pad * 0.75;
 
         VerticalLayout {
             alignment: center;
-            spacing: Metrics.vh * 0.004;
+            spacing: Metrics.t-primary * 0.12;
+            horizontal-stretch: 1;
+            min-width: 0px;
             Text {
                 text: title;
-                color: focused ? #0a0c10 : (dim ? #ffffff80 : Theme.text);
-                font-size: Metrics.root-font * 1.05;
-                font-weight: 700;
+                color: focused ? #ffffff : Theme.text;
+                font-size: Metrics.t-primary;
+                font-weight: focused ? 650 : 600;
                 overflow: elide;
+                wrap: no-wrap;
             }
             if under != "": Text {
                 text: under;
-                color: focused ? #0a0c1099 : #ffffff70;
-                font-size: Metrics.text-chip;
+                color: focused ? #b9bfcb : Theme.muted;
+                font-size: Metrics.t-secondary;
+                font-weight: 500;
                 overflow: elide;
+                wrap: no-wrap;
             }
         }
-
-        Rectangle { horizontal-stretch: 1; }
-
-        if value != "": Text {
-            vertical-alignment: center;
-            text: value;
-            color: focused ? #0a0c10 : #ffffffb0;
-            font-size: Metrics.text-chip;
-            font-weight: 600;
+        if status != "": VerticalLayout {
+            alignment: center;
+            Text {
+                text: status;
+                color: Theme.ok;
+                font-size: Metrics.t-secondary;
+                font-weight: 600;
+                wrap: no-wrap;
+            }
         }
-
-        @children
+        if lock: VerticalLayout {
+            alignment: center;
+            Icon {
+                name: "lock";
+                size: Metrics.icon * 0.85;
+                ink: focused ? Theme.text : Theme.muted;
+            }
+        }
+        if bars >= 0: VerticalLayout {
+            alignment: center;
+            Bars {
+                bars: bars;
+                focused: focused;
+            }
+        }
     }
+
+    FocusRing {
+        width: 100%;
+        height: 100%;
+        on: focused;
+    }
+}
+
+// The settings' frame around a radio's list: the column with the way back,
+// the heading, the clock in the corner.
+component Frame inherits Rectangle {
+    in property <string> page;
+    in property <string> page-icon;
+    in property <string> title;
+    in property <string> blurb;
+    in property <VitalsModel> vitals;
+
+    Backdrop {
+        width: 100%;
+        height: 100%;
+    }
+    SideNav {
+        x: 0;
+        y: 0;
+        width: Metrics.safe-x + Metrics.nav-w + Metrics.safe-x * 0.5;
+        height: root.height;
+        items: [];
+        current: 0;
+        active: false;
+        parent-label: "Bağlantılar";
+        page-label: root.page;
+        page-icon: root.page-icon;
+    }
+    StatusCorner {
+        x: root.width - Metrics.safe-x - self.width;
+        y: Metrics.safe-y;
+        width: self.preferred-width;
+        height: Metrics.t-nav-head * 2.6;
+        network: vitals.network;
+        time: vitals.time;
+    }
+    PageHeader {
+        x: Metrics.pane-x;
+        y: Metrics.safe-y + Metrics.t-nav-head * 0.5;
+        width: Metrics.pane-w * 0.68;
+        title: root.title;
+        blurb: root.blurb;
+    }
+    @children
 }
 
 export component WifiScreen inherits Rectangle {
@@ -98,13 +175,13 @@ export component WifiScreen inherits Rectangle {
     in property <bool> present;
     in property <bool> powered;
     in property <string> summary;
-    in property <string> address;
     in property <[WifiRow]> networks;
     in property <int> index;
     in property <bool> busy;
     /// Busy *with a scan*, as opposed to a join or a power switch.
     in property <bool> scanning;
     in property <string> notice;
+    in property <VitalsModel> vitals;
 
     // "list" | "password"
     in property <string> face;
@@ -117,25 +194,89 @@ export component WifiScreen inherits Rectangle {
     in property <int> key-row;
     in property <int> key-col;
 
-    background: Theme.bg;
+    property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
+    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
+    property <length> step: Metrics.set-h-flat + Metrics.row-gap;
+    property <length> lead: step * 2 + Metrics.header-h;
 
-    VerticalLayout {
+    background: Theme.s-ground;
+    clip: true;
+
+    if face == "list": Frame {
+        width: 100%;
+        height: 100%;
+        page: "Wi-Fi";
+        page-icon: "wifi";
+        title: "Wi-Fi";
+        blurb: notice != "" ? notice : summary;
+        vitals: root.vitals;
+
+        Rectangle {
+            property <length> pad: Metrics.glow-w * 3;
+            property <length> focus-y: index < 2 ? index * step : lead + (index - 2) * step;
+            property <length> scroll: max(0px, focus-y + step + pad * 2 - self.height);
+
+            x: Metrics.pane-x - pad;
+            y: top - pad;
+            width: Metrics.list-w + pad * 2;
+            height: root.height - Metrics.safe-y - top + pad;
+            clip: true;
+
+            Rectangle {
+                x: pad;
+                y: pad - scroll;
+                width: Metrics.list-w;
+                animate y { duration: Theme.t-row; easing: Theme.ease; }
+
+                SettingCard {
+                    y: 0;
+                    width: 100%;
+                    label: "Wi-Fi";
+                    kind: "action";
+                    toggle: known && present ? (powered ? 1 : 0) : -1;
+                    value: !known ? "…" : (present ? "" : "Bu kartta yok");
+                    enabled: !known || present;
+                    focused: index == 0;
+                }
+                SettingCard {
+                    y: step;
+                    width: 100%;
+                    label: scanning ? "Aranıyor…" : "Ağları ara";
+                    kind: "action";
+                    enabled: !known || powered;
+                    focused: index == 1;
+                }
+                SectionHeader {
+                    y: step * 2;
+                    width: 100%;
+                    text: "Ağlar";
+                }
+                for row[i] in networks: RadioCard {
+                    y: lead + i * step;
+                    width: 100%;
+                    title: row.ssid;
+                    under: "";
+                    status: row.connected ? "Bağlı" : "";
+                    lock: row.secured;
+                    bars: row.bars;
+                    focused: index == i + 2;
+                }
+                if known && networks.length == 0 && !busy: Text {
+                    y: lead + Metrics.row-gap;
+                    text: powered ? "Ağ bulunamadı" : "Wi-Fi kapalı";
+                    color: Theme.muted;
+                    font-size: Metrics.t-secondary;
+                }
+            }
+        }
+    }
+
+    if face == "password": VerticalLayout {
         padding: Metrics.gutter;
         // The shared bar draws the name of the screen; this clears it rather
         // than printing a second title underneath the first.
         padding-top: Metrics.topbar + Metrics.vh * 0.012;
         spacing: Metrics.vh * 0.016;
-
-        HorizontalLayout {
-            height: Metrics.vh * 0.030;
-            Rectangle { horizontal-stretch: 1; }
-            Text {
-                vertical-alignment: center;
-                text: summary;
-                color: #ffffffb0;
-                font-size: Metrics.text-chip;
-            }
-        }
 
         if notice != "": Rectangle {
             height: Metrics.vh * 0.052;
@@ -149,75 +290,13 @@ export component WifiScreen inherits Rectangle {
             }
         }
 
-        if face == "list": VerticalLayout {
-            spacing: Metrics.vh * 0.010;
-
-            Line {
-                focused: index == 0;
-                title: "Wi-Fi";
-                under: !known || present ? "" : "Bu kartta kablosuz arayüz yok";
-                value: known ? (powered ? "Açık" : "Kapalı") : "…";
-                dim: !known || !present;
-            }
-            Line {
-                // "Aranıyor…" only while a scan is what is running. It used
-                // to say that during a join as well, which told the viewer
-                // the wrong thing about the thing they had just pressed.
-                focused: index == 1;
-                title: scanning ? "Aranıyor…" : "Ağları ara";
-                under: address != "" ? "Adres: " + address : "";
-                value: "";
-            }
-
-            Rectangle { height: Metrics.vh * 0.008; }
-
-            Flickable {
-                viewport-height: networks.length * (Metrics.vh * 0.085 + Metrics.vh * 0.010);
-                // Keep the highlighted row on the panel as the list is walked.
-                viewport-y: min(0, max(
-                    -(self.viewport-height - self.height),
-                    -((index - 2) * (Metrics.vh * 0.085 + Metrics.vh * 0.010))
-                        + self.height / 2 - Metrics.vh * 0.085));
-
-                VerticalLayout {
-                    spacing: Metrics.vh * 0.010;
-                    alignment: start;
-
-                    for row[i] in networks: Line {
-                        focused: index == i + 2;
-                        title: row.ssid;
-                        under: row.connected
-                            ? "Bağlı"
-                            : (row.remembered ? "Kayıtlı" : "");
-                        value: row.band + (row.secured ? "  🔒" : "");
-
-                        Rectangle {
-                            width: Metrics.vh * 0.05;
-                            Signal {
-                                bars: row.bars;
-                                width: 100%;
-                                height: parent.height * 0.4;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-
-                    if networks.length == 0: Text {
-                        text: busy ? "" : "Henüz ağ yok — “Ağları ara”";
-                        color: #ffffff70;
-                        font-size: Metrics.text-chip;
-                    }
-                }
-            }
-        }
-
         // --------------------------------------------------------- password
         //
         // One column, centred, everything in it the width of the grid. Laid
         // out full-bleed it put a full-width field and a full-width button
         // around a keyboard a third as wide, which read as three unrelated
         // things stacked up.
-        if face == "password": HorizontalLayout {
+        HorizontalLayout {
             alignment: center;
 
             VerticalLayout {
@@ -310,87 +389,92 @@ export component BluetoothScreen inherits Rectangle {
     in property <int> index;
     in property <bool> busy;
     in property <string> notice;
-    /// What Ok would do to the highlighted row, said rather than discovered.
-    in property <string> press-label;
+    in property <VitalsModel> vitals;
 
-    background: Theme.bg;
+    property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
+    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
+    property <length> flat: Metrics.set-h-flat + Metrics.row-gap;
+    property <length> card: Metrics.set-h + Metrics.row-gap;
 
-    VerticalLayout {
-        padding: Metrics.gutter;
-        padding-top: Metrics.topbar + Metrics.vh * 0.012;
-        spacing: Metrics.vh * 0.016;
+    pure function y-of(r: BtRow, i: int) -> length {
+        return flat * 2 + (r.n-header + (r.header != "" ? 1 : 0)) * Metrics.header-h + i * card;
+    }
 
-        HorizontalLayout {
-            height: Metrics.vh * 0.030;
-            Rectangle { horizontal-stretch: 1; }
-            Text {
-                vertical-alignment: center;
-                text: summary;
-                color: #ffffffb0;
-                font-size: Metrics.text-chip;
-            }
-        }
+    background: Theme.s-ground;
+    clip: true;
 
-        if notice != "": Rectangle {
-            height: Metrics.vh * 0.052;
-            border-radius: Theme.radius * 0.5;
-            background: #ffffff12;
-            Text {
-                text: notice;
-                color: Theme.text;
-                font-size: Metrics.text-chip;
-                font-weight: 600;
-            }
-        }
+    Frame {
+        width: 100%;
+        height: 100%;
+        page: "Bluetooth";
+        page-icon: "bluetooth";
+        title: "Bluetooth";
+        blurb: notice != "" ? notice : summary;
+        vitals: root.vitals;
 
-        Line {
-            focused: index == 0;
-            title: "Bluetooth";
-            under: !known || present ? "" : "Bu kartta denetleyici görünmüyor";
-            value: known ? (powered ? "Açık" : "Kapalı") : "…";
-            dim: !known || !present;
-        }
-        Line {
-            focused: index == 1;
-            title: busy ? "Aranıyor…" : "Aygıt ara";
-            under: "";
-            value: "";
-        }
+        Rectangle {
+            property <length> pad: Metrics.glow-w * 3;
+            property <length> focus-y: index < 2 ? index * flat
+                : devices.length == 0 ? 0px : y-of(devices[index - 2], index - 2);
+            property <length> scroll: max(0px, focus-y + card + pad * 2 - self.height);
 
-        Rectangle { height: Metrics.vh * 0.008; }
+            x: Metrics.pane-x - pad;
+            y: top - pad;
+            width: Metrics.list-w + pad * 2;
+            height: root.height - Metrics.safe-y - top + pad;
+            clip: true;
 
-        Flickable {
-            viewport-height: devices.length * (Metrics.vh * 0.085 + Metrics.vh * 0.010);
-            viewport-y: min(0, max(
-                -(self.viewport-height - self.height),
-                -((index - 2) * (Metrics.vh * 0.085 + Metrics.vh * 0.010))
-                    + self.height / 2 - Metrics.vh * 0.085));
+            Rectangle {
+                x: pad;
+                y: pad - scroll;
+                width: Metrics.list-w;
+                animate y { duration: Theme.t-row; easing: Theme.ease; }
 
-            VerticalLayout {
-                spacing: Metrics.vh * 0.010;
-                alignment: start;
-
-                for row[i] in devices: Line {
-                    focused: index == i + 2;
-                    title: row.name;
-                    under: row.kind == "" ? row.address : row.kind + "  ·  " + row.address;
-                    value: row.connected
-                        ? "Bağlı"
-                        : (row.paired ? "Eşli" : "");
+                SettingCard {
+                    y: 0;
+                    width: 100%;
+                    label: "Bluetooth";
+                    kind: "action";
+                    toggle: known && present ? (powered ? 1 : 0) : -1;
+                    value: !known ? "…" : (present ? "" : "Bu kartta yok");
+                    enabled: !known || present;
+                    focused: index == 0;
                 }
+                SettingCard {
+                    y: flat;
+                    width: 100%;
+                    label: busy ? "Aranıyor…" : "Aygıt ara";
+                    kind: "action";
+                    enabled: !known || powered;
+                    focused: index == 1;
+                }
+                for row[i] in devices: Rectangle {
+                    y: y-of(row, i) - (row.header != "" ? Metrics.header-h : 0px);
+                    width: 100%;
+                    height: (row.header != "" ? Metrics.header-h : 0px) + Metrics.set-h;
 
-                if devices.length == 0: Text {
-                    text: busy ? "" : "Henüz aygıt yok — “Aygıt ara”";
-                    color: #ffffff70;
-                    font-size: Metrics.text-chip;
+                    if row.header != "": SectionHeader {
+                        y: 0;
+                        width: 100%;
+                        text: row.header;
+                    }
+                    RadioCard {
+                        y: row.header != "" ? Metrics.header-h : 0px;
+                        width: 100%;
+                        height: Metrics.set-h;
+                        title: row.name;
+                        under: row.under;
+                        status: row.connected ? "Bağlı" : "";
+                        focused: index == i + 2;
+                    }
+                }
+                if known && devices.length == 0 && !busy: Text {
+                    y: flat * 2 + Metrics.row-gap;
+                    text: powered ? "Aygıt yok" : "Bluetooth kapalı";
+                    color: Theme.muted;
+                    font-size: Metrics.t-secondary;
                 }
             }
-        }
-
-        if press-label != "": Text {
-            text: "Ok: " + press-label;
-            color: #ffffff80;
-            font-size: Metrics.text-chip;
         }
     }
 }

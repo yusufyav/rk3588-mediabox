@@ -2159,12 +2159,24 @@ impl SplitWindow {
                 phases.frames += 1;
                 phases.total_us += total.as_micros() as u64;
             });
-            if self.bench || self.window.has_active_animations() {
+            let moving = DRAW_UNTIL.with(|until| until.get().is_some_and(|until| until > std::time::Instant::now()));
+            if self.bench || moving || self.window.has_active_animations() {
                 self.redraw.set(true);
             }
         }
         Ok(())
     }
+}
+
+thread_local! {
+    static DRAW_UNTIL: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+/// Draw every frame for `span`: for a transition the loop must not wait on
+/// Slint's own "animation running" signal to notice, which left gaps of
+/// tens of milliseconds in the Bluetooth card's slide (measured 2026-10-08).
+pub fn keep_drawing(span: Duration) {
+    DRAW_UNTIL.with(|until| until.set(Some(std::time::Instant::now() + span)));
 }
 
 impl WindowAdapter for SplitWindow {
@@ -2319,6 +2331,16 @@ struct SplitPlatform {
     /// the same numbers Kodi reads, so a remote held down behaves alike in
     /// both.
     rates: RefCell<std::collections::HashMap<String, (Duration, Duration)>>,
+    /// When this process started: libinput hands over every device already
+    /// there as "added" at start, and those are not arrivals.
+    started: std::time::Instant,
+    /// Bluetooth devices announced in the last two seconds, by name: one
+    /// keyboard registers two or three input nodes and is one arrival.
+    announced: RefCell<std::collections::HashMap<String, std::time::Instant>>,
+    /// The Bluetooth input nodes on the seat, by sysname, with the device's
+    /// name: on removal sysfs is already gone, so this is how a node that
+    /// leaves is known to have been a Bluetooth device's.
+    bluetooth: RefCell<std::collections::HashMap<String, String>>,
 }
 
 /// A press being repeated.
@@ -2373,6 +2395,9 @@ impl SplitPlatform {
             held: RefCell::new(None),
             rates: RefCell::new(std::collections::HashMap::new()),
             shift: std::cell::Cell::new(false),
+            started: std::time::Instant::now(),
+            announced: RefCell::new(std::collections::HashMap::new()),
+            bluetooth: RefCell::new(std::collections::HashMap::new()),
         })
     }
 
@@ -2429,6 +2454,47 @@ impl SplitPlatform {
         answer
     }
 
+    /// A Bluetooth input device -- a keyboard, a mouse, a remote -- that
+    /// has just connected, said on the panel. The kernel registers it the
+    /// moment the link is up, so this is as soon as it can be known.
+    fn device_added(&self, device: &input::Device) {
+        let path = std::fs::canonicalize(format!("/sys/class/input/{}", device.sysname()))
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let bustype = std::fs::read_to_string(format!("/sys/class/input/{}/device/id/bustype", device.sysname())).ok();
+        if !crate::input::is_bluetooth(bustype.as_deref(), &path) {
+            return;
+        }
+        let name = crate::input::device_title(&device.name());
+        self.bluetooth.borrow_mut().insert(device.sysname().to_string(), name.clone());
+        self.announce(name, true);
+    }
+
+    fn device_removed(&self, device: &input::Device) {
+        if let Some(name) = self.bluetooth.borrow_mut().remove(device.sysname()) {
+            self.announce(name, false);
+        }
+    }
+
+    /// Said once per device per change: one keyboard is two or three input
+    /// nodes. Nothing at start, where libinput lists what is already there.
+    fn announce(&self, name: String, connected: bool) {
+        if self.started.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        let key = format!("{connected}{name}");
+        let now = std::time::Instant::now();
+        let mut announced = self.announced.borrow_mut();
+        announced.retain(|_, at| now.duration_since(*at) < Duration::from_secs(2));
+        if announced.contains_key(&key) {
+            return;
+        }
+        announced.insert(key, now);
+        drop(announced);
+        eprintln!("mediabox-tv.input bluetooth {} {name:?}", if connected { "connected" } else { "disconnected" });
+        crate::with_app(|app| app.device_changed(&name, connected));
+    }
+
     fn drain_messages(&self) -> bool {
         let mut quit = false;
         while let Ok(message) = self.receiver.borrow_mut().try_recv() {
@@ -2445,6 +2511,17 @@ impl SplitPlatform {
             .dispatch()
             .map_err(|e| format!("libinput dispatch: {e}"))?;
         for event in libinput {
+            match &event {
+                input::Event::Device(input::event::DeviceEvent::Added(added)) => {
+                    self.device_added(&added.device());
+                    continue;
+                }
+                input::Event::Device(input::event::DeviceEvent::Removed(removed)) => {
+                    self.device_removed(&removed.device());
+                    continue;
+                }
+                _ => {}
+            }
             // A remote in its pointer mode -- the UR-02's, with the gyroscope
             // -- clicks where it would otherwise press Ok. There is no pointer
             // on this interface, so the click is the press of what has focus,
