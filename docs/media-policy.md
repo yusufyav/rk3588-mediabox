@@ -77,7 +77,8 @@ assumed; it is decided from the DOVI configuration record.
 **Profile 5** has no backward-compatible base layer. Its base layer is IPTPQc2
 with a cross-talk matrix only a DV decoder undoes, so a plain HEVC Main 10
 decoder puts the channels in the wrong places — exactly the reported symptom.
-On a device with no DV pipeline a Profile 5 stream is **never Direct**:
+On a device with no DV pipeline a Profile 5 stream is ranked as unsafe rather
+than silently called HDR10:
 
 ```
 Video      RISKY,  prefer_alternative = True
@@ -87,8 +88,10 @@ Reasons    DV_UNSUPPORTED_PIPELINE
            SAFER_ALTERNATIVE_EXPECTED
 ```
 
-It cannot become a media session at all: `POST /media/session` answers
-`409 SOURCE_NOT_PREFERRED`.
+`FallbackSourcePreferred` is a ranking warning, not a hard refusal. If the
+viewer explicitly chooses that source, `mode_when_chosen` opens it through the
+otherwise applicable direct/remux/audio path and keeps the DV warnings. The
+picture may therefore be green/magenta; no Dolby Vision pipeline is claimed.
 
 **Profile 7** is dual-layer and its base layer is HDR10 by definition of the
 profile. It plays as HDR10 with the enhancement layer and RPU dropped

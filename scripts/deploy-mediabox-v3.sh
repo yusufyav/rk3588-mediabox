@@ -232,9 +232,10 @@ sh_ "set -e
   udevadm trigger --subsystem-match=input --action=change
   systemctl daemon-reload
   systemctl enable mediabox-display-seed.service >/dev/null
-  # logind rereads its configuration on reload; the watched-button set is
-  # rebuilt from udev's tags at the same time.
-  systemctl kill -s HUP systemd-logind.service 2>/dev/null || systemctl restart systemd-logind.service"
+  # A HUP reloads logind.conf but keeps file descriptors for input devices it
+  # watched before the udev retag. Restart so the watched-button set is rebuilt
+  # from the current tags; otherwise kiosk-smoke correctly reports event0/1.
+  systemctl restart systemd-logind.service"
 
 # A remote's Ok, the HID usage "Menu Pick", as KEY_OK for every reader: Kodi
 # has no meaning for the KEY_SELECT the kernel names it by default. See the
@@ -444,6 +445,7 @@ sh_ "$prefix/bin/mediabox-platform inspect" || true
 
 say "state"
 sh_ "systemctl is-active mediaboxd-rs mediabox-media-worker stremio-server; \
-     echo '--- library ---'; $prefix/bin/mediaboxctl media library --json | head -c 400; echo; \
+     echo '--- library ---'; library=\"\$($prefix/bin/mediaboxctl media library --json)\"; \
+     printf '%.400s\n' \"\$library\"; \
      echo '--- ui ---'; curl -sS -o /dev/null -w 'loopback %{http_code}\n' http://127.0.0.1:8787/
      curl -sS -o /dev/null -w 'lan      %{http_code}\n' http://127.0.0.1:8788/"

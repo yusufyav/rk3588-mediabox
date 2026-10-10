@@ -17,6 +17,7 @@ const REPORT_EVERY: Duration = Duration::from_secs(5);
 pub struct Metrics {
     started: Instant,
     first_frame: Option<Duration>,
+    first_launcher: Option<Duration>,
     first_data: Option<Duration>,
 
     window_start: Instant,
@@ -38,6 +39,7 @@ impl Metrics {
         Self {
             started,
             first_frame: None,
+            first_launcher: None,
             first_data: None,
             window_start: Instant::now(),
             last_frame: None,
@@ -64,6 +66,19 @@ impl Metrics {
             eprintln!(
                 "mediabox-tv.startup first_data_ms={}",
                 self.first_data.unwrap().as_millis()
+            );
+        }
+    }
+
+    /// The control plane answered with the applications that populate the
+    /// opening launcher. Catalogue data is deliberately fetched only after
+    /// the viewer opens “Filmler ve Diziler”, so it is not a startup gate.
+    pub fn launcher_arrived(&mut self) {
+        if self.first_launcher.is_none() {
+            self.first_launcher = Some(self.started.elapsed());
+            eprintln!(
+                "mediabox-tv.startup first_launcher_ms={}",
+                self.first_launcher.unwrap().as_millis()
             );
         }
     }

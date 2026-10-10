@@ -143,7 +143,7 @@ pub fn fit(cadence: Cadence, refresh: Refresh) -> Option<CadenceFit> {
     let bottom = u128::from(refresh.den) * u128::from(cadence.num);
     // The nearest whole multiple, and how far the refresh is from it.
     let repeats = (top + bottom / 2) / bottom;
-    if repeats >= 1 && repeats <= 16 && close(top, repeats * bottom) {
+    if (1..=16).contains(&repeats) && close(top, repeats * bottom) {
         return Some(CadenceFit::Exact {
             repeats: repeats as u32,
         });

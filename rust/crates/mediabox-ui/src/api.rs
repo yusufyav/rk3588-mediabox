@@ -287,13 +287,25 @@ pub fn application_launch(id: &str) -> Value {
 /// Put one web address in front of the television's browser and give it the
 /// display. The browser has no address bar, so this is the only way in.
 /// Play it here, in the interface's own player.
-pub fn play_here(url: Option<&str>, stream: Option<&Value>, start_seconds: u64) -> Value {
+pub fn play_here(
+    url: Option<&str>,
+    stream: Option<&Value>,
+    start_seconds: u64,
+    title: Option<&str>,
+    duration_seconds: Option<u64>,
+) -> Value {
     let mut request = json!({"command": "media_play_here", "start_seconds": start_seconds});
     if let Some(url) = url {
         request["url"] = json!(url);
     }
     if let Some(stream) = stream {
         request["stream"] = stream.clone();
+    }
+    if let Some(title) = title.filter(|title| !title.is_empty()) {
+        request["title"] = json!(title);
+    }
+    if let Some(duration_seconds) = duration_seconds.filter(|duration| *duration > 0) {
+        request["duration_seconds"] = json!(duration_seconds);
     }
     request
 }
@@ -309,4 +321,35 @@ pub fn browser_open(url: &str) -> Value {
 
 pub fn surface_switch(target: &str) -> Value {
     json!({"command": "surface_switch", "target": target})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn play_here_carries_catalogue_metadata() {
+        assert_eq!(
+            play_here(Some("https://example.invalid/film.mkv"), None, 12, Some("Film"), Some(5_940)),
+            json!({
+                "command": "media_play_here",
+                "url": "https://example.invalid/film.mkv",
+                "start_seconds": 12,
+                "title": "Film",
+                "duration_seconds": 5_940
+            })
+        );
+    }
+
+    #[test]
+    fn play_here_omits_unknown_metadata() {
+        assert_eq!(
+            play_here(None, Some(&json!({"infoHash": "abc"})), 0, Some(""), Some(0)),
+            json!({
+                "command": "media_play_here",
+                "stream": {"infoHash": "abc"},
+                "start_seconds": 0
+            })
+        );
+    }
 }

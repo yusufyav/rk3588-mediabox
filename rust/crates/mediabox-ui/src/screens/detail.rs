@@ -156,9 +156,52 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
         busy.set(true);
         toaster.say("Açılıyor…");
         spawn_local(async move {
+            // A source picked from the list starts immediately, before the
+            // background policy request necessarily answers. The player still
+            // needs the catalogue's name and the probe's real duration: its
+            // session URL contains neither. Reuse the ready plan, or finish
+            // that same inspection here before opening the film.
+            let inspected = match plan.get_untracked() {
+                Some(Load::Ready(found)) => Some(found),
+                _ => {
+                    let request = match source.parsed.url.as_deref() {
+                        Some(url) => api::media_policy(url),
+                        None => api::media_stream_plan(&source.raw),
+                    };
+                    match api::typed::<Plan>(request).await {
+                        Ok(found) => {
+                            plan.set(Some(Load::Ready(found.clone())));
+                            Some(found)
+                        }
+                        Err(_) => None,
+                    }
+                }
+            };
+            let title = match meta.get_untracked() {
+                Load::Ready(found) if !found.name.is_empty() => Some(found.name),
+                _ => None,
+            };
+            let duration_seconds = inspected
+                .as_ref()
+                .and_then(|found| found.media.container.as_ref())
+                .and_then(|container| container.duration_seconds)
+                .filter(|duration| duration.is_finite() && *duration > 0.0)
+                .map(|duration| duration.round() as u64);
             let request = match source.parsed.url.as_deref() {
-                Some(url) => api::play_here(Some(url), None, 0),
-                None => api::play_here(None, Some(&source.raw), 0),
+                Some(url) => api::play_here(
+                    Some(url),
+                    None,
+                    0,
+                    title.as_deref(),
+                    duration_seconds,
+                ),
+                None => api::play_here(
+                    None,
+                    Some(&source.raw),
+                    0,
+                    title.as_deref(),
+                    duration_seconds,
+                ),
             };
             match api::control(request).await {
                 Ok(_) => {

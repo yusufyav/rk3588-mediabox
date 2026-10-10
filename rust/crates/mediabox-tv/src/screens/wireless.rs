@@ -65,8 +65,6 @@ pub enum Press {
     Forget,
     /// Turn the radio on or off.
     Power(bool),
-    /// Leave the screen.
-    Close,
 }
 
 pub struct Wifi {
@@ -400,7 +398,7 @@ impl Wifi {
 
     /// The long press that forgets a network, offered only where it means
     /// something.
-    pub fn forget(&mut self) -> Press {
+    pub fn forget(&self) -> Press {
         if self.face != Face::List {
             return Press::None;
         }
@@ -692,7 +690,7 @@ impl Bluetooth {
             .collect()
     }
 
-    pub fn forget(&mut self) -> BtPress {
+    pub fn forget(&self) -> BtPress {
         match self.highlighted() {
             Some(device) if device.paired => BtPress::Forget,
             _ => BtPress::None,
@@ -761,6 +759,18 @@ mod tests {
         wifi.index = 2;
         assert_eq!(wifi.press(), Press::Join);
         assert!(wifi.password().is_empty());
+    }
+
+    #[test]
+    fn only_a_remembered_network_can_be_forgotten() {
+        let mut wifi = Wifi::new();
+        let mut known = net("known", -40, true);
+        known.remembered = true;
+        wifi.take_networks(vec![known, net("new", -50, true)]);
+        wifi.index = WIFI_HEAD;
+        assert_eq!(wifi.forget(), Press::Forget);
+        wifi.index += 1;
+        assert_eq!(wifi.forget(), Press::None);
     }
 
     #[test]
@@ -876,6 +886,18 @@ mod tests {
         }));
         bt.index = BT_HEAD;
         assert_eq!(bt.forget(), BtPress::None);
+    }
+
+    #[test]
+    fn a_paired_device_can_be_forgotten() {
+        let mut bt = Bluetooth::new();
+        bt.take_status(&json!({
+            "present": true,
+            "controller": {"address": "AA:BB", "powered": true},
+            "devices": [{"address": "33:33", "name": "Kulaklık", "paired": true, "connected": false}]
+        }));
+        bt.index = BT_HEAD;
+        assert_eq!(bt.forget(), BtPress::Forget);
     }
 
     #[test]

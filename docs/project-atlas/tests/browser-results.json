@@ -139,7 +139,7 @@
   "context": {
     "browser": "headless Chromium",
     "date": "2026-10-10",
-    "source_revision": "80b5021",
+    "source_revision": "0f9dc3e",
     "scope": "Yerel atlas davranışları; ürün donanım testleri değil"
   }
 }

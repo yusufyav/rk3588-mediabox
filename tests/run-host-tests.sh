@@ -193,6 +193,10 @@ echo "-- MediaBox owns its media runtime"
 # Where the prefix is defined, and that it is not the other product's.
 media_prefix="$(sed -n 's/^: "${MEDIABOX_MEDIA_PREFIX:=\(.*\)}"$/\1/p' "$here/scripts/env.sh")"
 contains "the media prefix is MediaBox's own" "$media_prefix" 'MEDIABOX_PREFIX/media-runtime'
+contains "the C++ probes default to MediaBox's runtime" "$(cat "$here/CMakeLists.txt")" \
+  'set(MEDIABOX_FFMPEG_PREFIX "/opt/rk3588-mediabox/media-runtime"'
+lacks "the C++ probes do not default to ScreenBridge" "$(cat "$here/CMakeLists.txt")" \
+  'set(MEDIABOX_FFMPEG_PREFIX "/opt/rk3588-screenbridge"'
 
 # Anything that names the other prefix in a way that would *use* it: a library
 # path, a pkg-config path, an install prefix or an rpath. Naming it in order to
@@ -619,6 +623,19 @@ smoke="$(cat "$here/packaging/mediabox-kiosk-smoke")"
 contains "the player is checked for existence" "$smoke" "bad 'player present'"
 contains "vo_mediabox is required"             "$smoke" 'vo_mediabox absent'
 contains "rkmpp is required"                   "$smoke" 'rkmpp absent'
+contains "the opening launcher is the startup data gate" "$smoke" 'first_launcher_ms='
+lacks "catalogue data is not required before its screen opens" "$smoke" 'first_data_ms='
+contains "the interface records launcher arrival" \
+  "$(cat "$here/rust/crates/mediabox-tv/src/metrics.rs")" 'first_launcher_ms='
+
+power_rules="$(cat "$here/packaging/udev/80-mediabox-no-power-switch.rules")"
+deploy="$(cat "$here/scripts/deploy-mediabox-v3.sh")"
+contains "CEC inputs replace the system power tag" "$power_rules" 'TAG="mediabox-cec"'
+lacks "udev is never given an invalid empty tag" "$power_rules" 'TAG=""'
+contains "deploy drops logind's stale input descriptors" "$deploy" \
+  'systemctl restart systemd-logind.service'
+lacks "deploy does not SIGPIPE the library command" "$deploy" \
+  'mediaboxctl media library --json | head'
 
 echo "-- a staged build cannot be shipped as the product"
 # The failure this guards is specific: an accepted A/B candidate of Kodi copied

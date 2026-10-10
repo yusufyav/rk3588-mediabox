@@ -10,10 +10,10 @@ add_compile_options(-Wall -Wextra)
 
 find_package(PkgConfig REQUIRED)
 
-# MEDIABOX_FFMPEG_PREFIX points at an RKMPP-enabled FFmpeg. On the current
-# target that is the ScreenBridge media stack; this is a deliberate temporary
-# dependency for the MP1 gates and is tracked in docs/architecture.md.
-set(MEDIABOX_FFMPEG_PREFIX "/opt/rk3588-screenbridge" CACHE PATH
+# MEDIABOX_FFMPEG_PREFIX points at the product's own RKMPP-enabled FFmpeg.
+# Keeping the accepted probes on the same pinned runtime as the players avoids
+# silently validating a different product's libraries.
+set(MEDIABOX_FFMPEG_PREFIX "/opt/rk3588-mediabox/media-runtime" CACHE PATH
     "Prefix of an RKMPP-enabled FFmpeg installation")
 set(ENV{PKG_CONFIG_PATH} "${MEDIABOX_FFMPEG_PREFIX}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
 

@@ -22,11 +22,11 @@ Ardından `http://127.0.0.1:8765/`. Sunucuyu bitirmek için Ctrl+C.
 - **Servisler:** 12 gerçek unit tanımı ve bir transient player. Satır açıldığında gerçek ExecStart, sıralama ve çatışma alanları.
 - **Bileşen kataloğu:** katman ve tam metin filtresi; tüm bileşen ilişkileri. `#components/session` gibi doğrudan adresler.
 - **Kanıt defteri:** kabul kapıları, açık kayıtlar, belge/kod farkları, rafa kaldırılan araştırmalar ve korunacak sözleşmeler.
-- **Kaynak kütüphanesi:** 26 Markdown belgesi, 114 seçili kaynak içeriği ve Git tarafından izlenen 429 dosyanın envanteri. Tam metin arama, satırlı kaynak okuyucu, dosya sayfalama ve JSON dışa aktarma.
+- **Kaynak kütüphanesi:** 26 Markdown belgesi, 116 seçili kaynak içeriği ve Git tarafından izlenen 429 dosyanın envanteri. Tam metin arama, satırlı kaynak okuyucu, dosya sayfalama ve JSON dışa aktarma.
 
 Ctrl+K global aramayı açar; Escape diyalogları kapatır. Tema düğmesi açık/koyu görünümü değiştirir; yalnız bu tercih tarayıcıda saklanır. Dar ekranlarda ana diyagram yatay kaydırılır, menü altta gösterilir. Klavye odağı, etiketler ve azaltılmış hareket tercihi desteklenir.
 
-Sayılar ilk sürümün anlık görüntüsüdür; arayüz çoğunu veri modelinden hesaplar. “Cihaz ölçümü var” etiketi kaynaklarda ilgili ölçüm bulunduğunu söyler; bileşenin her işlevinin veya bugünkü cihazın doğrulandığı anlamına gelmez. Bu çalışma fiziksel kartta yeni test çalıştırmadı.
+Sayılar yenilenen kaynak anlık görüntüsünden gelir; arayüz çoğunu veri modelinden hesaplar. “Cihaz ölçümü var” etiketi kaynaklarda ilgili ölçüm bulunduğunu söyler; bileşenin her işlevinin veya bugünkü cihazın doğrulandığı anlamına gelmez. 2026-10-10 denetimi host testlerine ek olarak Orange Pi 5 Plus'ta ürün, native kabuk ve sahip oynatıcı kapılarını yeniden çalıştırdı.
 
 ## Dosya yapısı
 
@@ -62,8 +62,8 @@ Snapshot yenilemek **mimari yorumları güncellemez**. Eski bir açık sorunu ka
 
 ## Doğrulama
 
-İlk sürüm: Chromium başsız çalıştırmada **33 başarılı davranış kontrolü**, sıfır hata. Navigasyon, on düğümlü harita, kaynak içi arama, altı akışın ileri/geri adımları, oynatma düğmesi, kart/port eşleme, unit ayrıntıları, katalog filtresi, doğrudan adres, kanıt filtresi, kütüphane araması, sayfalama, global arama ve tema kontrol edildi. Kaynak referansları ve SHA-256 özetleri ayrıca doğrulandı.
+2026-10-10: Chromium başsız çalıştırmada **33 başarılı davranış kontrolü**, sıfır hata. Navigasyon, on düğümlü harita, kaynak içi arama, altı akışın ileri/geri adımları, oynatma düğmesi, kart/port eşleme, unit ayrıntıları, katalog filtresi, doğrudan adres, kanıt filtresi, kütüphane araması, sayfalama, global arama ve tema kontrol edildi.
 
-Masaüstü 1440×1100 ve mobil 390×844 render’ları ile akış görünümü görsel olarak incelendi. İnteraktif kullanıcı tarayıcısı bağlantısı ortamda bulunmadığı için otomasyon geçici profilli başsız Chromium ile yapıldı. Ürünün Rust/Python testleri çalıştırılmadı; ürün kodu değişmedi.
+Kaynak referansları ve SHA-256 özetleri de yeniden doğrulandı; ana Rust çalışma alanı, TV ve web çalışma alanları, Python medya çekirdeği ve host sözleşme testleri çalıştırıldı. Plus cihaz kapıları HDMI/CEC/ses, RKMPP ve native scanout yolunu doğruladı; Wi-Fi/Bluetooth eşleşme-unutma, HDR/hotplug ve tarayıcı kusurları için yeni kabul iddiasında bulunulmaz.
 
 HTTP sunucusu açıkken `http://127.0.0.1:8765/tests/browser.html` test sayfasını açabilirsiniz. Sonuç sayfanın üstünde JSON olarak görünür. Test profili açık temayla başlamalıdır. Kaydedilmiş sonuç, yalnız oluşturulduğu sürüm için kanıttır; sonraki değişikliklerden sonra yeniden çalıştırın.

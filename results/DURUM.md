@@ -4,8 +4,9 @@ Bu dosya **tek yaşayan belge**. Oturum başına yeni bir tarihli rapor yazılma
 burası güncellenir.
 
 Geliştirme cihazı: Orange Pi 5 Ultra (RK3588),
-`6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio`. İkinci hedef: Orange Pi 5
-Plus — hazırlandı, **kurulmadı**. Ne panel ne adres repoda sabit:
+`6.1.115-vendor-rk35xx-screenbridge-hdmirx-audio`. İkinci hedef Orange Pi 5
+Plus da 19 Eylül 2026'da aynı paketle kuruldu; ürün doğrulayıcısı ve gömülü
+oynatıcı film kapısı iki kartta da `PASS` verdi (`927ed0a`). Ne panel ne adres repoda sabit:
 `MEDIABOX_HOST` / `scripts/env.sh`, çıkış `mediabox-platform` ile keşfediliyor.
 
 > **Eski tarihli raporlar.** 27 oturum raporu ve bütün ham kanıt `710181b`
@@ -65,7 +66,7 @@ Bunlar ölçülüp kapatıldı. **Yeniden kampanya olarak koşturulmaz.**
   dma-buf export → PRIME import → ADDFB2 → page flip. Compositor yok, Wayland
   yok, llvmpipe yok.
 * Kumandanın kutuyu yeniden başlatması kapatıldı — dört bağımsız kilit
-  (udev `TAG=""`, logind drop-in, `ctrl-alt-del` mask, `actions.rs` yönlendirme
+  (udev `TAG="mediabox-cec"`, logind drop-in, `ctrl-alt-del` mask, `actions.rs` yönlendirme
   tablosu ve testleri).
 * Girişte çift tuş kapatıldı: rc-core cihazları atlanıyor + simetrik dedup.
 * Panelde konsol metni yok: fbcon unbind **ve** `/dev/fb0` sıfırlama.
@@ -486,26 +487,33 @@ diğer iki belirtinin gittiğini, bunun **sürdüğünü** bildirdi. Yani nedeni
    `PRIME_FD_TO_HANDLE` + `ADDFB2` yapıyor; MPP havuzu 3-4 tampon döndürüyor,
    tampon başına bir kez yapılıp önbelleklenebilir.
 3. **Detay ekranının düğmeleri** — 1 geldikten sonra, önce değil.
-4. **`main.rs` 2.367 satır / 88 KB.** Tek başına ~25.000 token ve
-   değişikliklerin çoğu oraya düşüyor. Ekran başına ayrılmalı.
+4. **TV `main.rs` hâlâ entegrasyon darboğazı: 7.311 satır / 299.650 bayt
+   (10 Ekim 2026).** Ekran durumları ve yerel politikaları `screens/` altına
+   ayrılmış olsa da RPC sonuçları, yönlendirme, boyama ve eylem orkestrasyonu
+   bu dosyada toplanıyor. Sonraki güvenli adım ekran bazlı controller katmanları;
+   bunu yalnız satır sayısını düşürmek için davranış değiştiren toplu taşıma
+   olarak yapmak doğru değil.
 
 ### Sonra
 
-5. Ses çıkışı seçimi (çekirdek USB kulaklığı görüyor, üründe seçecek yer yok)
-6. Wi-Fi (NetworkManager yok)
-7. Bluetooth (`bluetooth.service` inactive)
-8. Web UI'da donanım hızlandırmalı önizleme/oynatma
-9. Home yoğunluğu — sağda ve altta boş alan
-10. Süreç içi DRM yeniden modeset (hot plug şu an birim yeniden başlatmayla telafi)
-11. HDR regresyonu — takılı ekran SDR monitör, `edid` 0 bayt; HDR TV takılınca
+5. Web UI'da donanım hızlandırmalı önizleme/oynatma
+6. Home yoğunluğu — sağda ve altta boş alan
+7. Süreç içi DRM yeniden modeset (hot plug şu an birim yeniden başlatmayla telafi)
+8. HDR regresyonu — takılı ekran SDR monitör, `edid` 0 bayt; HDR TV takılınca
+
+Tarihsel listenin ses çıkışı, Wi-Fi ve Bluetooth maddeleri kapanmıştır. Ses
+aygıtı seçimi ve eski HDMI passthrough tercihiyle USB'ye geçiş `5c373b4` içinde
+testlidir; Wi-Fi netplan/networkd yolu ve BlueZ eşleme ajanı üretim servisleri
+ile arayüzde bulunur. Bunların varlığı her yeni donanımın kabulü değildir.
 
 ### Bilinen açık kusurlar
 
 * Sarmada çubuk yalnız işaretin yerini gösteriyor; filmin gerçek konumu çubuk
   üzerinde işaretlenmiyor.
-* Web UI'dan başlatılan film sahipleniliyor ama adı ve süresi gelmiyor —
-  `MediaPlayHere`'ın `title`/`duration_seconds` alanlarını web arayüzü henüz
-  göndermiyor.
+* ~~Web UI'dan başlatılan film sahipleniliyor ama adı ve süresi gelmiyor~~ —
+  **kapandı, 10 Ekim 2026.** Web arayüzü kaynak seçimi sırasında plan henüz
+  bitmediyse aynı incelemeyi tamamlıyor ve `MediaPlayHere`'a katalog adını ve
+  probun gerçek süresini gönderiyor; istek şekli birim testiyle korunuyor.
 * Kodi'nin "Şimdi Oynatılan" ekranı hâlâ eski simge setini kullanıyor.
 * ~~Tarayıcıda AV1 donanımda çözülmüyor~~ — **kapandı, 22 Eylül 2026**, bölüm 6b.
   Çözüm VA-API'yi genişletmek değil, tarayıcının zaten taşıdığı V4L2 arka ucunu
@@ -540,10 +548,11 @@ diğer iki belirtinin gittiğini, bunun **sürdüğünü** bildirdi. Yani nedeni
   kaldığı bayttan sürdürüyor (`docs/media-session-proxy.md`), yani oynatıcı bu
   duruma düşmemeli; mpv'nin kendi hatası ölçülmedi. Ses çıkışı o sırada USB
   kulaklıktı (Arctis GameBuds); aygıt tarafında çekirdek hatasız.
-* **USB kulaklık seçiliyken ses ayarı değiştirilemiyor.** Kayıtlı ayarda
-  Dolby Digital aktarımı açık (`/var/lib/mediabox/audio.json`), kulaklık
-  bildirmiyor ve her `AudioSet` "Dolby Digital bu çıkışın alıcısında
-  bildirilmiyor; seçilemez" ile reddediliyor.
+* ~~USB kulaklık seçiliyken ses ayarı değiştirilemiyor~~ — **kapandı,
+  27 Eylül 2026 (`5c373b4`).** `audio::check` yalnız gerçekten değiştirilen
+  passthrough/transcode alanlarını alıcının yeteneklerine karşı reddediyor;
+  HDMI için saklanan biçimler USB aygıt seçimini veya ses seviyesi değişimini
+  engellemiyor. Plan USB'de PCM'e düşüyor, tercih HDMI'ya dönünce korunuyor.
 * **Bazı kaynaklar 118 743 baytlık bir yer tutucu olarak geliyor** (Drive ve To
   Rome with Love'ın birer kaynağı, aynı hash `51390742a48d798c`). Film
   açılmıyor ve altyazı yüklemesi 404 alıyor. Büyük ihtimalle MediaFusion /
@@ -566,12 +575,17 @@ diğer iki belirtinin gittiğini, bunun **sürdüğünü** bildirdi. Yani nedeni
   zamanlandı. Bu filmde reddedilen aday çıkmadığı için menü gizlemesi
   cihazda görülmedi; OpenSubtitles.com uygulama anahtarı olmadığından
   `not-configured` (anahtarsız API 403 veriyor), istek sayısı 0.
-* **`mediabox-kiosk-smoke`'ta "home: data absent".** 30 Eylül 11:00 açılışından
-  beri, altyazı değişikliklerinden önceki ikililerle de; bir önceki açılışta
-  yoktu. Nedeni aranmadı.
-* **Tam deploy bu iş istasyonunda `wasm-bindgen` olmadan durur** (web arayüzü
-  adımı). 30 Eylül'de medya çekirdeği, `mediaboxd-rs` ve `mediabox-tv` betiğin
-  kendi adımlarıyla tek tek kuruldu; web arayüzü yeniden kurulmadı.
+* ~~`mediabox-kiosk-smoke`'ta "home: data absent"~~ — **kapandı, 10 Ekim
+  2026.** Home artık katalog verisini açılışta yüklemeyen uygulama başlatıcısıdır;
+  katalog yalnız “Filmler ve Diziler” açılınca istenir. Smoke eski `first_data_ms`
+  işaretini yanlış kapı olarak kullanıyordu. TV artık `first_launcher_ms`
+  yayımlıyor; Plus'a tam deploy sonrası native shell smoke launcher verisi,
+  HDMI-A-1, CEC, ses, PRIME scanout ve player kontrollerinin tamamında PASS verdi.
+* **Tam deploy, crate ile aynı `wasm-bindgen-cli` sürümünü gerektiriyor.**
+  10 Ekim'de sistem CLI'ı 0.2.129, crate pini 0.2.128 olduğu için ilk deneme
+  cihazı değiştirmeden durdu. Build betiğine `MEDIABOX_WASM_BINDGEN` seçimi
+  eklendi; izole 0.2.128 ikilisiyle web dahil tam deploy geçti. Kalıcı build
+  ortamının pinli CLI'ı sağlaması hâlâ teslimat önkoşulu.
 * Tarayıcıda video kodlama (encode) yok — yalnız çözme.
 * Chromium'un VA-API render düğümü seçimi sıralama şansına bağlı
   (`Preferred drm_render_node not found`). sway altında doğrusunu alıyor,
@@ -581,7 +595,9 @@ diğer iki belirtinin gittiğini, bunun **sürdüğünü** bildirdi. Yani nedeni
 
 ## 8. Taşınabilirlik ve ikinci cihaz (Plus)
 
-**Durum: hazır, kurulmadı.** Bu bölümün önceki hâli dört sabit ve ayrı bir
+**Durum: kuruldu ve temel kapıları geçti.** 19 Eylül 2026'da aynı release ile
+Ultra ve Plus üzerinde ürün doğrulayıcısı ve gömülü oynatıcı smoke testi
+`PASS` verdi (`927ed0a`). Bu bölümün önceki hâli dört sabit ve ayrı bir
 önyükleme zinciri sayıyordu; hepsi kapandı ya da yanlış çıktı.
 
 ### Kendi medya çalışma zamanı
@@ -621,14 +637,14 @@ Eski kayıt Plus'ı EDK II → EFI GRUB → `/dev/nvme0n1p2` diye tarif ediyordu
 | EFI/GRUB | yok (`/boot/efi` yok, `efibootmgr` yok) | **yok** |
 | Kök | eMMC `/dev/mmcblk0p1` | NVMe `/dev/nvme0n1p1` |
 | DTB | `rk3588-orangepi-5-ultra.dtb` | **stok** `rk3588-orangepi-5-plus.dtb` |
-| Overlay | yok | `user_overlays=orangepi5-plus-screenbridge-hdmirx` |
-| CMA | 256M | 512M |
+| Overlay | yok | `mediabox-hdmi-any-vp`, fan ve MediaBox IR overlay'leri |
+| CMA | 256M | 256M |
 
 ### Plus'ta salt-okunur platform probu
 
-Yeni keşif ikilisi `/tmp` altına geçici kopyalandı, çalıştırıldı ve silindi.
-MediaBox **kurulmadı**, hiçbir paket kurulmadı, hiçbir servis değişmedi,
-ScreenBridge'e dokunulmadı.
+Bu tablo ilk salt-okunur `/tmp` probunun kanıtıdır; daha sonra aynı kartta tam
+MediaBox kurulumu ve film kapısı da geçti. İlk prob sırasında hiçbir paket veya
+servis değiştirilmemiş, ScreenBridge'e dokunulmamıştı.
 
 | | Plus'ta bulunan |
 |---|---|
@@ -639,6 +655,10 @@ ScreenBridge'e dokunulmadı.
 | Ses ucu | `rockchiphdmi0`, `rockchiphdmi1`, `rockchipdp0` |
 | CEC | `/dev/cec0`, `/dev/cec1`, DP'de yok |
 | Bağlı çıkış | **hiçbiri** — o karta ekran takılı değil |
+
+10 Ekim tam deploy ölçümünde aynı Plus'a SONY alıcı `HDMI-A-1` üzerinden
+bağlıydı; çalışma zamanı `rockchiphdmi0` ve `/dev/cec0` eşlemesini seçti. Boot
+dosyası repodaki overlay'lerle zaten aynı olduğundan deploy `/boot`'a yazmadı.
 
 Ses eşlemesi ScreenBridge'in bağımsız ölçtüğü platform matrisiyle birebir
 tuttu. Dikkat: Plus'ta `HDMI-A-1` → `rockchiphdmi0`, Ultra'da tek konektör →
@@ -658,12 +678,11 @@ yazan her şey kartlardan birinde yanlış televizyona sesleniyordu.
 
 ### Sonraki kapı için kalanlar
 
-1. Plus'a bir ekran tak ve `mediabox-platform inspect` ile bağlı konektörün
-   `measured` bağlandığını doğrula.
-2. Plus'ta ScreenBridge daemon'ı çalışırken MediaBox ekran sahibi bir birimi
-   başlat; geçişin belirlenmiş olduğunu (yarış değil) gözle.
-3. Medya çalışma zamanını Plus'ta derle — Ultra'daki aynı pinlerle.
-4. Stok çekirdekle MediaBox'ı açmayı dene: HDMI RX yaması TX'i ilgilendirmiyor,
+1. Plus HDMI-A-1 / VP0 üzerinde HDR karma kompozisyon kapısını yeniden ölç;
+   10 Ekim'de aynı çıkışta geçen SDR temel smoke bu kanıtın yerine geçmez.
+2. Yüksek-TMDS aynı-sink hotplug sonrasında tam modeset/SCDC toparlanmasını
+   cihazda doğrula; kernel/boot değişikliği ayrıca yetki gerektirir.
+3. Stok çekirdekle MediaBox'ı açmayı dene: HDMI RX yaması TX'i ilgilendirmiyor,
    ama bu hâlâ çıkarım.
 
 ## 9. Nerede ne var

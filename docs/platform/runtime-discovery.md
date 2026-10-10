@@ -380,16 +380,16 @@ file, which is itself the answer "nobody has chosen yet".
 
 | | Ultra | Plus |
 | --- | --- | --- |
-| Discovery run | yes, installed | yes, read-only probe from `/tmp`, removed afterwards |
+| Discovery run | yes, installed | yes, then installed from the same release |
 | Display device found | `card0` (rockchip-drm) | `card0` (rockchip-drm) |
 | Render device found | `renderD128`, same parent | `renderD128`, same parent |
 | Connectors enumerated | 1 (`HDMI-A-1`) | 3 (`HDMI-A-1`, `HDMI-A-2`, `DP-1`) |
-| Connected | `HDMI-A-1`, binding `measured` | none — nothing is plugged into the board |
+| Connected | `HDMI-A-1`, binding `measured` | initial probe: none; installed smoke: `HDMI-A-2` |
 | Audio resolved per output | `rockchiphdmi1` | `rockchiphdmi0`, `rockchiphdmi1`, `rockchipdp0` |
 | CEC resolved per output | `/dev/cec0` | `/dev/cec0`, `/dev/cec1`, none for DP |
-| MediaBox installed | yes | **no, deliberately** |
+| MediaBox installed | yes | yes; product verify and own-player smoke `PASS` (`927ed0a`) |
 
-The Plus probe could not confirm "the connector that is connected" for the plain
-reason that no display is attached to that board. Everything that does not
-depend on a cable resolved, and matched `rk3588-screenbridge`'s own independently
-measured platform matrix for that machine.
+The first Plus probe had no display attached and therefore could not confirm a
+selected connector. The later installation used HDMI-A-2 and closed the basic
+product and film gates. That does not turn HDMI-A-2/VP1 into an HDR mixed-
+composition proof; the VP0 constraint and per-port evidence remain explicit.

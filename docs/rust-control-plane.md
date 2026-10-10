@@ -9,7 +9,7 @@ dışında kalır — medya çekirdeği hâlâ çalışan bir bileşendir, kalı
 ## Bileşenler
 
 - `mediabox-core`: serde destekli ortak durum, olay ve wire protocol tipleri.
-- `mediaboxd-rs`: yetkili Unix socket sunucusu, opsiyonel loopback HTTP API,
+- `mediaboxd-rs`: yetkili Unix socket sunucusu, loopback ve özel-LAN HTTP yüzeyleri,
   Kodi JSON-RPC istemcisi, systemd lifecycle adaptörü ve olay yönlendirmesi.
 - `mediaboxctl`: yalnız daemon protokolünü kullanan operatör CLI'ı.
 - `mediabox-cec`: doğrudan Linux CEC UAPI (`/dev/cecX`) sahibi.
@@ -21,9 +21,11 @@ JSON `Request` gönderir ve tek satır JSON `Response` alır. `input_monitor`
 komutu ilk yanıttan sonra newline-delimited JSON olay akışını açık tutar. Wire
 protokol enum ile kapalıdır; shell/argv/komut satırı taşıyan genel bir çağrı yoktur.
 
-Opsiyonel HTTP sunucusu `--http 127.0.0.1:8788` ile açılır, yalnız loopback
-adresini kabul eder ve `POST /v1/control` endpoint'ini sunar. Bu yüzey varsayılan
-olarak kapalıdır.
+Üretim birimi iki HTTP dinleyicisi açar: `--http 127.0.0.1:8787` yalnız yerel
+UI/relay için, `--lan-http 0.0.0.0:8788` ise yalnız özel-ağ eşleri için. İkisi de
+`POST /v1/control` yüzeyini ve ürün UI'sını daemon üzerinden sunar; Python medya
+işçisi loopback'te kalır. Komut satırı bu dinleyicileri isteğe bağlı bıraksa da
+üretim unit'inde ikisi de açıkça yapılandırılmıştır.
 
 ## Kodi
 

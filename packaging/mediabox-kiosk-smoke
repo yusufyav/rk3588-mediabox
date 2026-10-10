@@ -56,7 +56,8 @@ else
 fi
 printf '%s\n' "$log" | grep -q 'EGL_VENDOR=ARM.*GL_RENDERER=Mali-G610' && ok gpu 'ARM / Mali-G610' || bad gpu 'vendor GPU absent'
 printf '%s\n' "$log" | grep -q 'present dma-buf=active' && ok scanout 'PRIME FB active' || bad scanout 'no PRIME FB'
-printf '%s\n' "$log" | grep -q 'first_data_ms=' && ok home 'real data loaded' || bad home 'data absent'
+printf '%s\n' "$log" | grep -q 'first_launcher_ms=' \
+  && ok home 'launcher data loaded' || bad home 'launcher data absent'
 # The plane that is actually scanning out, not whichever one the file happens
 # to list first. A board with one connector puts the live plane at the top and
 # `head -1` reads it by luck; a board with three does not, and every idle plane

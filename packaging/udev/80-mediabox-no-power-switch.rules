@@ -13,8 +13,8 @@
 #   systemd-logind: Powering off...
 #
 # CEC power semantics belong to mediaboxd-rs, which owns /dev/cec0 and answers
-# a standby request by putting the *television* into standby. So the tag is
-# taken off the CEC device, and logind stops watching it. The board's own
+# a standby request by putting the *television* into standby. So the default tag
+# is replaced on the CEC device, and logind stops watching it. The board's own
 # buttons (rk805 pwrkey, bt-powerkey) keep their tag: a finger on the physical
 # button should still work.
 #
@@ -27,13 +27,12 @@ SUBSYSTEM!="input", GOTO="mediabox_power_end"
 
 # The HDMI-CEC remote-control device, by the platform path of the HDMI block
 # and by the rc-core path, so a driver that renames it is still covered.
-# `TAG=""` and not `TAG-="power-switch"`. udev accepts the second without
-# complaint and does nothing with it — measured on the appliance at udev 257,
-# where the rule matched (checked by having it set a marker variable instead)
-# and the tag survived anyway. The assignment clears the list, which on these
-# two devices is exactly the one tag: the CEC remote carries `power-switch` and
-# nothing else. The board's own buttons match neither line and keep theirs.
-KERNEL=="event*", ATTRS{name}=="dw_hdmi_qp", TAG=""
-DEVPATH=="*/rc/rc[0-9]*/input[0-9]*/event[0-9]*", TAG=""
+# Replace the default tag list with a harmless product tag. Empty TAG
+# assignment is rejected by current udev, while TAG-="power-switch" does not
+# remove a tag restored from the device database on udev 257. A non-empty
+# assignment resets the list deterministically. The board's own buttons match
+# neither line and keep their power-switch tag.
+KERNEL=="event*", ATTRS{name}=="dw_hdmi_qp", TAG="mediabox-cec"
+DEVPATH=="*/rc/rc[0-9]*/input[0-9]*/event[0-9]*", TAG="mediabox-cec"
 
 LABEL="mediabox_power_end"

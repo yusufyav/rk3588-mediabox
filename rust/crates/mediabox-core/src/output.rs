@@ -658,11 +658,10 @@ pub struct DisplayState {
 
 impl DisplayState {
     pub fn identity(&self) -> Option<DisplayIdentity> {
-        Some(DisplayIdentity {
+        self.connected.then_some(DisplayIdentity {
             connector: self.connector.clone()?,
             edid_sha256: self.edid_sha256.clone()?,
         })
-        .filter(|_| self.connected)
     }
 }
 

@@ -769,8 +769,23 @@ mod tests {
     }
 
     fn send(to: &OwnedFd, message: &[u8]) {
-        // SAFETY: a live descriptor and a buffer of the stated size.
-        unsafe { libc::send(to.as_raw_fd(), message.as_ptr() as *const libc::c_void, message.len(), 0) };
+        // `write` has datagram semantics on this connected socket pair and is
+        // accepted by restricted test runners that deliberately deny send(2).
+        // Check the result: silently dropping the fixture used to make these
+        // tests report a misleading timeout instead of their real cause.
+        let sent = unsafe {
+            libc::write(
+                to.as_raw_fd(),
+                message.as_ptr() as *const libc::c_void,
+                message.len(),
+            )
+        };
+        assert_eq!(
+            sent,
+            message.len() as isize,
+            "fixture datagram was not sent: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     /// `first`, then the Ultra's receiver announcing itself every 63 ms.

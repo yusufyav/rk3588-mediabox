@@ -55,9 +55,6 @@ class PlaybackDecision:
         }
 
     def summary(self) -> str:
-        video_track = None
-        if self.video.reasons:
-            video_track = None
         parts = [f"{self.mode.value} [{self.profile_name}]"]
         parts.append(f"video={self.video.verdict.value}/{self.video.hdr.value}")
         parts.append(f"audio={self.audio.action.value}")

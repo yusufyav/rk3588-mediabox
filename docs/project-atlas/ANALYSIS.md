@@ -1,12 +1,17 @@
 # Kaynak incelemesi ve mimari çıkarım
 
-İnceleme tarihi: **10 Ekim 2026**, kaynak revizyonu **80b5021**. Bu rapor ve atlas, yerel çalışma ağacını açıklar. Kartlara bağlanılmadı, donanım ayarı yapılmadı, servis çalıştırılmadı, ürün kodu değiştirilmedi.
+İnceleme tarihi: **10 Ekim 2026**, başlangıç kaynak revizyonu **0f9dc3e**. Bu
+rapor ve atlas güncel yerel çalışma ağacını açıklar. Host testleri
+çalıştırıldı; güvenli kod/belge düzeltmeleri çalışma ağacına uygulandı.
+Ardından ağdaki Orange Pi 5 Plus'a tam deploy yapılıp ürün, native kabuk
+ve sahip oynatıcı kapıları fiziksel cihazda yeniden çalıştırıldı. Kernel,
+bootloader ve boot overlay yapılandırması değiştirilmedi.
 
 ## Yöntem ve kanıt sırası
 
 README, `docs/`, platform notları, `results/` durum ve araştırma belgeleri, araç README’leri; ardından ilgili Rust/Python/C/C++ kaynakları, systemd birimleri, uygulama yapılandırması ve build/deploy betikleri karşılaştırıldı. Belgelerdeki her cümle eşit güncellikte değildir. Çalıştırılacak komut için gerçek unit/launcher, davranış için güncel fonksiyon, fiziksel özellik için bağlamı belirtilmiş cihaz ölçümü esas alındı. Güncel kodun varlığı cihazda kabul kanıtı yerine kullanılmadı.
 
-Örnek: `media/policy/decide.py::mode_when_chosen` açık kullanıcı seçimini eski P5 ret belgesinden farklı ele alıyor. Buna karşılık Dolby Vision donanım desteği, o fonksiyon nedeniyle var kabul edilmedi. Her iki bilgi de atlasın fark defterinde korunuyor.
+Örnek: `media/policy/decide.py::mode_when_chosen` açık kullanıcı seçimini eski P5 ret belgesinden farklı ele alıyordu. Belge güncel davranışa uyarlandı: kaynak sıralamada risklidir, açık seçim ise uyarıyla ilerleyebilir. Buna karşılık Dolby Vision donanım desteği, o fonksiyon nedeniyle var kabul edilmedi.
 
 ## Mimari omurga
 
@@ -52,7 +57,7 @@ Uygunluk önce Matroska indeksindeki referansla değerlendirilir. Birden çok iz
 
 CEC UAPI adaptörleri daemon tarafından dinlenir; gönderim seçili çıkışa gider. IR ve BLE HID girdileri ayrı yollarla libinput’a gelir. UR-02 mikrofonunun ADPCM çözümleyicisi araştırma aracıdır; üründe sesli arama değildir.
 
-Ses cihazları, softvol, Ethernet, Wi-Fi/netplan, Bluetooth/BlueZ, fan ve GPIO LED’ler daemon modülleridir. Eski “Wi-Fi/BT yok” listesinin güncel kaynakla farkı açıkça kaydedildi. BT eşleme agent’ı, radyo başlangıç sırası, ekran seed/observer/changed ve konsol hizmetleri servis envanterine dahil edildi.
+Ses cihazları, softvol, Ethernet, Wi-Fi/netplan, Bluetooth/BlueZ, fan ve GPIO LED’ler daemon modülleridir. Eski “Wi-Fi/BT yok” listesi güncel kaynak ve servis envanteriyle uzlaştırıldı. BT eşleme agent’ı, radyo başlangıç sırası, ekran seed/observer/changed ve konsol hizmetleri servis envanterine dahil edildi.
 
 MPP/librga/FFmpeg ve player/runtime pinleri ürün prefix’ine aittir; ScreenBridge runtime bağımlılığı yoktur. İki ürünün ekran sahipliği systemd Conflicts + After ve kalıcı tercih ile sıralanır. Rust/WASM host cross-build ile üretilirken runtime/player target build akışları bulunur. Üretim kurucusu prebuilt release kullanır; temiz kurulumda build zorunluymuş gibi gösterilmedi.
 
@@ -75,8 +80,51 @@ MPP/librga/FFmpeg ve player/runtime pinleri ürün prefix’ine aittir; ScreenBr
 
 ## Açık ve tarihsel bulgular
 
-Atlasın kanıt defterinde kaynaklarıyla ayrı kayıtlar vardır: yüksek-TMDS SCDC/hotplug kaybı; debugfs summary OOPS; browser tearing/direct-scanout ve hover ayrımı; USB ses tercihi ve relay sonrası mpv durması; altyazı kalibrasyonu; player UI/performance ve web metadata borcu.
+Atlasın kanıt defterinde kaynaklarıyla ayrı kayıtlar vardır: yüksek-TMDS
+SCDC/hotplug kaybı; debugfs summary OOPS; browser tearing/direct-scanout ve
+adres çubuğu ayrımı; relay sonrası mpv durması; altyazı kalibrasyonu; player
+UI/performance ve render-node borçları. Eski kiosk home-data alarmı güncel
+launcher mimarisi ve cihaz smoke testiyle kapatıldı.
 
-P5 ret kararı, gömülü ses dönüşümü, Wi-Fi/BT, Plus kurulum tablosu, HTTP portları ve HDR doğrulamasının kapsamındaki belge/kod farkları işaretlendi. Eski tabloya bakıp Plus’ı hâlâ kurulmamış saymak yerine 19 Eylül kurulum kanıtı dikkate alındı. Aynı biçimde tarayıcıda erken “kapandı” kaydı daha sonraki geri alınma notuyla birlikte ele alındı.
+P5 seçimi, gömülü ses dönüşümü, Wi-Fi/BT, Plus kurulum tablosu ve HTTP
+portlarındaki belge/kod farkları güncel kaynak ve Git kanıtıyla uzlaştırıldı.
+Plus’ın 19 Eylül’de iki kapıyı da geçtiği `927ed0a`, USB aygıta geçerken eski
+passthrough tercihinin artık değişiklikleri kilitlemediği `5c373b4` ve testleriyle
+doğrulandı. Webden başlatılan filmin ad/süre kaybı giderildi. Tarayıcıdaki erken
+“kapandı” kaydı ise daha sonraki fiziksel gözlem nedeniyle açık tutuldu.
+
+Temizlikte çağrısı olmayan TV `App::fail` ve eski toplu `posters` yardımcısı,
+hiç üretilmeyen kablosuz `Press::Close` kolu ve Python karar özetindeki etkisiz
+yerel değişken kaldırıldı. C++ kabul problarının varsayılan FFmpeg yolu da başka
+ürünün prefix’inden MediaBox’ın pinli medya runtime’ına taşındı ve host bekçisi
+eklendi.
 
 AI upscale 4 Ekim kaydına göre raftadır. MBSR hız hedefini yakalasa da gerçek film sürüm çiftinde kalite hedefini karşılamadı. Araç/ağırlıklar git geçmişindedir. RGA3 denemeleri geometrik kayma nedeniyle reddedildi. Üretimin VOP2 ölçekleme yolu değişmiş gibi gösterilmedi.
+
+## 10 Ekim doğrulaması
+
+Ana Rust çalışma alanı tüm hedefleriyle geçti; TV çalışma alanında 337, web
+çalışma alanında yeni istek-şekli testleri dahil 2 ve Python medya çekirdeğinde
+420 test başarılı oldu. Host sözleşme seti ve Atlas kaynak/hash doğrulaması da
+geçti. Test ortamının Unix datagram `send(2)` çağrısını engellemesi nedeniyle
+observer fixture’ı bağlı sokette `write(2)` kullanacak biçimde kesinleştirildi;
+üretim gözlemci yolu değişmedi.
+
+Orange Pi 5 Plus'a tam deploy sonrası `mediabox-product-verify`, native shell
+smoke ve gerçek 4K HEVC örneği kullanan own-player smoke PASS verdi. Seçili
+`HDMI-A-1`/SONY alıcı, `rockchiphdmi0`, `/dev/cec0`, Mali-G610, PRIME scanout,
+RKMPP decoder, NV12/NV15 video plane ve oynatma/durdurma cihazda gözlendi. CEC
+input aygıtlarının `power-switch` yerine `mediabox-cec` taşıdığı ve logind'in
+bu aygıtları tutmadığı da smoke kapısıyla doğrulandı. Kurulum mevcut boot
+dosyaları aynı olduğu için `/boot`'a yazmadı ve yeniden başlatma gerektirmedi.
+
+Bu cihaz kapıları Wi-Fi unut/eşleşme, Bluetooth unut/eşleşme veya tüm
+alıcı davranışlarını kabul etmez. Plus HDR karma kompozisyonu, yüksek-TMDS
+hotplug/SCDC toparlanması, ses yeniden bağlantı vakası ve tarayıcı görüntü
+kusurları cihazda açık kalır.
+
+`mediabox-core` Clippy `-D warnings` kapısından geçer. TV ve web çalışma
+alanlarında önceden var olan dead-code, tip karmaşıklığı ve stil uyarıları
+sürer; testlerde kullanılan güvenlik tabloları ve henüz davranış bağı kanıtı
+kurulamayan model tipleri yalnız uyarı gördüğü için silinmedi. Bu lint borcu
+Atlas'ta açık kayıt olarak tutuldu.

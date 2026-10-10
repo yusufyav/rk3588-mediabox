@@ -14,15 +14,16 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crate="$here/rust/crates/mediabox-ui"
 out="${MEDIABOX_UI_DIST:-$here/rust/crates/mediabox-ui/dist}"
+wasm_bindgen="${MEDIABOX_WASM_BINDGEN:-wasm-bindgen}"
 
-command -v wasm-bindgen >/dev/null || {
-  echo "wasm-bindgen not found; install it with:" >&2
+command -v "$wasm_bindgen" >/dev/null || {
+  echo "$wasm_bindgen not found; install wasm-bindgen with:" >&2
   echo "  cargo install wasm-bindgen-cli --version <crate version> --locked" >&2
   exit 1
 }
 
 crate_version="$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' "$crate/Cargo.toml")"
-cli_version="$(wasm-bindgen --version | awk '{print $2}')"
+cli_version="$("$wasm_bindgen" --version | awk '{print $2}')"
 [ -n "$crate_version" ] || { echo "wasm-bindgen is not pinned in $crate/Cargo.toml" >&2; exit 1; }
 [ "$crate_version" = "$cli_version" ] || {
   echo "wasm-bindgen mismatch: crate pins $crate_version, CLI is $cli_version" >&2
@@ -41,7 +42,7 @@ echo "== compiling mediabox-ui (wasm32, release)"
 echo "== generating bindings -> $out"
 rm -rf "$out"
 mkdir -p "$out"
-wasm-bindgen --target web --no-typescript --out-dir "$out" \
+"$wasm_bindgen" --target web --no-typescript --out-dir "$out" \
   "$crate/target/wasm32-unknown-unknown/release/mediabox_ui.wasm"
 
 # The typeface ships with the bundle rather than being asked of the system.

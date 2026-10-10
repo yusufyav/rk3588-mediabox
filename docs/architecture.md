@@ -374,14 +374,16 @@ switch that would do nothing. Two consequences live in the code:
   the value for about as long as it takes to read back. Every write clears the
   trigger first.
 
-**Second board (Orange Pi 5 Plus).** The differences are measured and they are
-all in the boot chain and the peripheral indices — EFI/GRUB and NVMe rather than
-U-Boot and eMMC, a different DTB, two HDMI outputs, a different HDMI-IN card
-index. The SoC peripherals are identical. Four places in this repository are
-pinned to the Ultra and are listed in `docs/temiz-imaj.md`; the television
-interface is not one of them, because it discovers both its connector and its
-video plane. **A clean-image MediaBox bring-up on the Plus has not been run**,
-so everything about it is derived rather than accepted.
+**Second board (Orange Pi 5 Plus).** The differences are measured: both boards
+use the Armbian U-Boot / `boot.scr` chain, while the root medium, DTB, output
+count and peripheral indices differ (NVMe rather than eMMC, three display
+outputs, a different HDMI-IN card index). The SoC peripherals are identical.
+Product paths discover their
+connector, render node, audio card and CEC adapter rather than pinning either
+board's indices. A clean-image MediaBox installation was run on both boards
+from the same package on 2026-09-19; product verification and the embedded
+player smoke passed on both (`927ed0a`). Per-sink HDR and high-TMDS behaviour
+still keeps the measurement scope stated in the display documents.
 
 ## H. Known debt and deferred work
 
@@ -393,8 +395,11 @@ rather than cosmetic:
   `PRIME_FD_TO_HANDLE` + `ADDFB2` for every frame, while the MPP pool cycles
   three or four buffers. The import could be done once per buffer and cached.
   This is the first place to look at the player's 6–9 % CPU, against Kodi's 2 %.
-* **The television interface's `main.rs` is one file of ~2,400 lines.** Most
-  changes land in it. It wants splitting per screen.
+* **The television interface's `main.rs` is still a large orchestration file
+  (~7,300 lines).** Screen state and rendering have moved into `screens/`, but
+  event dispatch, async command completion and composition still concentrate
+  here. Further splitting must preserve their ordering and is not a mechanical
+  deletion task.
 * **No in-process DRM re-modeset.** A display hot-plug is currently absorbed by
   restarting the unit rather than by re-modesetting in place.
 * **The probes stay.** `src/`, `tools/` and `tests/run-host-tests.sh` are

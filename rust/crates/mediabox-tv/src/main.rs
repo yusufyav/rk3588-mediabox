@@ -3539,15 +3539,8 @@ impl App {
                     }
                     Press::Join => self.join_wifi(),
                     Press::Forget => {
-                        let Some(network) = self.wifi.highlighted().cloned() else {
-                            return;
-                        };
-                        self.wifi.busy = true;
-                        self.wifi.notice = format!("{} unutuluyor…", network.ssid);
-                        self.paint();
-                        spawn_wifi(WifiCommand::Forget(network.ssid));
+                        self.forget_wifi();
                     }
-                    Press::Close => self.back(),
                 }
             }
             Intent::Dismiss => {
@@ -3559,6 +3552,19 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn forget_wifi(&mut self) -> bool {
+        if self.wifi.busy || self.wifi.forget() != screens::wireless::Press::Forget {
+            return false;
+        }
+        let Some(network) = self.wifi.highlighted().cloned() else {
+            return false;
+        };
+        self.wifi.busy = true;
+        self.wifi.notice = format!("{} unutuluyor…", network.ssid);
+        spawn_wifi(WifiCommand::Forget(network.ssid));
+        true
     }
 
     /// Join the network the password face is for.
@@ -3639,6 +3645,19 @@ impl App {
             Intent::Dismiss => self.back(),
             _ => {}
         }
+    }
+
+    fn forget_bluetooth(&mut self) -> bool {
+        if self.bt.busy || self.bt.forget() != screens::wireless::BtPress::Forget {
+            return false;
+        }
+        let Some(address) = self.bt.highlighted().map(|device| device.address.clone()) else {
+            return false;
+        };
+        self.bt.busy = true;
+        self.bt.notice = "Eşleşme kaldırılıyor…".into();
+        spawn_bt(BtCommand::Forget(address));
+        true
     }
 
     /// An answer from the daemon about the Wi-Fi radio.
@@ -3935,8 +3954,8 @@ impl App {
 
     // ------------------------------------------------------ holding Ok down
 
-    /// Whether a hold of Ok means something here other than a press: on a
-    /// library poster, where the reference opens the poster's menu.
+    /// Whether a hold of Ok means something here other than a press: a poster
+    /// menu, or forgetting the highlighted remembered wireless peer.
     fn wants_ok_hold(&self) -> bool {
         if self.here.is_some() {
             return false;
@@ -3949,6 +3968,8 @@ impl App {
             Route::Media => {
                 self.media.menu.is_none() && self.media.focused().is_some_and(|item| item.continuing)
             }
+            Route::Wifi => self.wifi.forget() == screens::wireless::Press::Forget,
+            Route::Bluetooth => self.bt.forget() == screens::wireless::BtPress::Forget,
             _ => false,
         }
     }
@@ -3996,6 +4017,8 @@ impl App {
         }
         let opened = match self.route() {
             Route::Media => self.media.open_menu(),
+            Route::Wifi => self.forget_wifi(),
+            Route::Bluetooth => self.forget_bluetooth(),
             _ => self.library.open_menu(),
         };
         if opened {
@@ -4017,6 +4040,7 @@ impl App {
         if self.wants_ok_hold() {
             let opened = match self.route() {
                 Route::Media => self.media.open_menu(),
+                Route::Wifi | Route::Bluetooth => false,
                 _ => self.library.open_menu(),
             };
             if opened {
@@ -4123,6 +4147,7 @@ impl App {
         kodi: Option<Value>,
     ) {
         if let Some(display) = display {
+            self.meter.launcher_arrived();
             self.home.set_apps(state::app_tiles_from(&display));
             self.display = Some(display);
             if let Some(window) = self.window.upgrade() {
@@ -4295,13 +4320,6 @@ impl App {
             return;
         }
         self.paint();
-    }
-
-    fn fail(&mut self, why: &str) {
-        if let Some(window) = self.window.upgrade() {
-            window.set_failed(true);
-            window.set_status(why.into());
-        }
     }
 
     // ------------------------------------------------------------- the drawing
@@ -5542,34 +5560,6 @@ fn grid_posters(
         .enumerate()
         .map(|(index, item)| {
             let art = match item.poster.as_deref().filter(|_| near(index)) {
-                Some(url) => {
-                    let key = images::Key::new(url, state::POSTER_WIDTH);
-                    images.want(&key);
-                    images.get(&key).unwrap_or_default()
-                }
-                None => slint::Image::default(),
-            };
-            PosterItem {
-                id: item.id.clone().into(),
-                kind: item.kind.clone().into(),
-                title: item.title.clone().into(),
-                subtitle: item.year.clone().unwrap_or_default().into(),
-                art,
-                hue: item.hue,
-                progress: item.progress,
-                local: item.local,
-                watched: item.record.as_ref().is_some_and(|r| r.times_watched > 0),
-                dismissable: item.continuing,
-            }
-        })
-        .collect()
-}
-
-fn posters(images: &mut images::ImageManager, items: &[state::Item]) -> Vec<PosterItem> {
-    items
-        .iter()
-        .map(|item| {
-            let art = match item.poster.as_deref() {
                 Some(url) => {
                     let key = images::Key::new(url, state::POSTER_WIDTH);
                     images.want(&key);
@@ -7223,7 +7213,7 @@ fn deliver(line: &str) {
 
     // Through CEC the press, the hold and the release each arrive as their
     // own event. The release matters only to Ok, whose hold means something
-    // on a library poster; `bus_input` drops the rest.
+    // on a poster or remembered wireless peer; `bus_input` drops the rest.
     let (action, pressed, source) = (event.action, event.pressed, event.source);
     let _ = slint::invoke_from_event_loop(move || {
         with_app(|app| app.bus_input(action, pressed, source));
