@@ -1,0 +1,32 @@
+<!doctype html><html lang="tr"><meta charset="utf-8"><title>Atlas browser checks</title><body><pre id="result">RUNNING</pre><iframe id="app" src="../index.html" style="width:1440px;height:1100px"></iframe><script>
+const results=[],errors=[];
+const frame=document.querySelector('#app');
+frame.addEventListener('load',async()=>{
+ const w=frame.contentWindow,d=frame.contentDocument;
+ w.addEventListener('error',e=>errors.push(e.message));
+ const wait=()=>new Promise(r=>setTimeout(r,40));
+ const check=(name,condition)=>{results.push({name,pass:!!condition});if(!condition)throw Error(name);};
+ const click=s=>{const el=d.querySelector(s);if(!el)throw Error('Eksik hedef '+s);el.click();};
+ const type=(s,text)=>{const el=d.querySelector(s);el.value=text;el.dispatchEvent(new Event('input',{bubbles:true}));};
+ const route=async r=>{w.location.hash=r;await wait();};
+ try{
+ check('Harita ve 10 düğüm çizildi',d.querySelectorAll('.graph-node').length===10);
+ click('[data-map-node="mpv"]');check('Seçili düğüm ayrıntısı değişti',d.querySelector('#map-inspector h2').textContent==='Gömülü oynatıcı');
+ click('[data-map-mode="data"]');check('Medya filtresi komut kenarlarını soldurdu',d.querySelectorAll('.map-svg path.dim').length>0);
+ click('[data-source="packaging/mediabox-player"]');check('Uzantısız kaynak çevrimdışı açıldı',d.querySelector('#source-dialog').open&&d.querySelector('#source-content').textContent.includes('mpv'));
+ type('#source-find','mpv');check('Kaynak içi arama işaretlendi',d.querySelectorAll('.source-line.match').length>0);click('[data-close="source-dialog"]');
+ for(const f of w.ATLAS.flows){await route('flows');click('[data-flow="'+f.id+'"]');for(let i=1;i<f.steps.length;i++)click('[data-next]');check(f.name+' son adımı',d.querySelector('[data-next]').disabled);click('[data-prev]');check(f.name+' geri adımı',!d.querySelector('[data-next]').disabled);}
+ click('[data-play]');check('Akış oynatma başlar',d.querySelector('[data-play]').textContent.includes('Duraklat'));click('[data-play]');
+ await route('hardware');let select=d.querySelector('#port-select');select.value='dp';select.dispatchEvent(new Event('change',{bubbles:true}));check('DP CEC olmadığını gösterir',d.querySelector('.port-path').textContent.includes('Yok · DisplayPort'));click('[data-board="ultra"]');check('Ultra tek çıkış',d.querySelectorAll('#port-select option').length===1);
+ await route('services');click('[data-service="mediaboxd-rs.service"]');check('Unit gerçek HTTP portlarını gösterir',d.querySelector('.service-detail').textContent.includes('8787')&&d.querySelector('.service-detail').textContent.includes('8788'));
+ await route('components');type('#component-search','altyazı');check('Bileşen arama daralır',d.querySelectorAll('.component-card').length>0&&d.querySelectorAll('.component-card').length<w.ATLAS.nodes.length);type('#component-search','ZZZ_no_match');check('Boş sonuç mesajı',d.querySelector('#component-grid').textContent.includes('eşleşen bileşen yok'));type('#component-search','');click('[data-layer="hardware"]');check('Katman filtresi',d.querySelectorAll('.component-card').length===w.ATLAS.nodes.filter(n=>n.layer==='hardware').length);
+ await route('components/session');check('Doğrudan bileşen adresi açılır',d.querySelector('.inspector h2').textContent==='Oturum & relay');
+ await route('evidence');click('[data-issue="difference"]');check('Belge/kod farkı filtresi',d.querySelectorAll('.issue').length===w.ATLAS.issues.filter(i=>i[0]==='difference').length);
+ await route('sources');type('#source-search','SCDC');check('Belge tam metin araması',d.querySelectorAll('.doc-item').length>0);type('#source-search','');click('[data-file-next]');check('Envanter sayfalama',d.querySelector('#file-count').textContent.includes('sayfa 2'));
+ click('#search-open');type('#global-search','SCM_RIGHTS');check('Global arama',d.querySelectorAll('.search-result').length>0);click('[data-search-component="mpv"]');await wait();check('Arama sonucundan bileşene',d.querySelector('.inspector h2').textContent==='Gömülü oynatıcı');
+ check('Tema değişimi',!d.body.classList.contains('dark'));click('#theme');check('Koyu tema çalışır',d.body.classList.contains('dark'));click('#theme');
+ check('JavaScript runtime hatası yok',errors.length===0);
+ }catch(e){errors.push(e.stack||String(e));}
+ document.querySelector('#result').textContent=JSON.stringify({passed:results.filter(x=>x.pass).length,failed:results.filter(x=>!x.pass).length,errors,results},null,2);
+});
+</script></body></html>

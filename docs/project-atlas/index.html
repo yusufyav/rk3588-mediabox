@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="tr">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#182b2c"><title>MediaBox — Yaşayan Proje Atlası</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<a class="skip" href="#main">İçeriğe geç</a>
+<aside class="sidebar">
+<a class="brand" href="#architecture"><span class="brand-mark">m<span>•</span></span><span>MediaBox<small>PROJE ATLASI</small></span></a>
+<div class="side-label">ÇALIŞMA ALANI</div><div class="workspace"><span class="tiny-led"></span> rk3588-mediabox <small>Kaynak tabanlı mimari haritası</small></div>
+<nav aria-label="Atlas bölümleri" id="navigation"></nav>
+<div class="sidebar-bottom"><div class="chip-icon">RK<br><b>3588</b></div><div>Bir SoC. İki kart.<small>Orange Pi 5 Ultra / Plus</small></div></div>
+<div class="snapshot-note"><span class="tiny-led"></span> Yerel kaynak anlık görüntüsü<br><span id="revision">—</span></div>
+</aside>
+<div class="app">
+<header class="topbar"><div class="breadcrumb">Mühendislik <span>/</span> <strong id="crumb">Sistem haritası</strong></div><button class="search-trigger" id="search-open"><span>⌕</span> Atlas içinde ara <kbd>Ctrl K</kbd></button><button id="theme" class="icon-button" aria-label="Renk temasını değiştir" title="Renk temasını değiştir">◐</button><span class="local-tag">OFFLINE READY</span></header>
+<main id="main" tabindex="-1"></main>
+<footer>Kaynak kodundan mimariye. <span id="footnote"></span><span>Atlas v1.0 · Canlı cihaz bağlantısı yok</span></footer>
+</div>
+<dialog id="source-dialog" aria-labelledby="source-title"><div class="dialog-head"><div><span class="eyebrow">KAYNAK OKUYUCU</span><h2 id="source-title"></h2></div><button class="icon-button" data-close="source-dialog" aria-label="Kaynak okuyucuyu kapat">×</button></div><div class="source-tools"><label>Metinde ara <input id="source-find" type="search" placeholder="Bir terim yazın…"></label><span id="source-meta"></span></div><pre id="source-content"></pre></dialog>
+<dialog id="search-dialog" aria-labelledby="search-title"><div class="dialog-head"><h2 id="search-title">Atlas içinde ara</h2><button class="icon-button" data-close="search-dialog" aria-label="Aramayı kapat">×</button></div><input type="search" id="global-search" placeholder="Bileşen, dosya, servis veya kavram…" aria-label="Atlas araması"><div id="search-results"></div></dialog>
+<div id="toast" role="status"></div>
+<script src="atlas-data.js"></script><script src="snapshot.js"></script><script src="app.js"></script>
+</body></html>

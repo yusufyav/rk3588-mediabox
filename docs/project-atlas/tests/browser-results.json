@@ -1,0 +1,145 @@
+{
+  "passed": 33,
+  "failed": 0,
+  "errors": [],
+  "results": [
+    {
+      "name": "Harita ve 10 düğüm çizildi",
+      "pass": true
+    },
+    {
+      "name": "Seçili düğüm ayrıntısı değişti",
+      "pass": true
+    },
+    {
+      "name": "Medya filtresi komut kenarlarını soldurdu",
+      "pass": true
+    },
+    {
+      "name": "Uzantısız kaynak çevrimdışı açıldı",
+      "pass": true
+    },
+    {
+      "name": "Kaynak içi arama işaretlendi",
+      "pass": true
+    },
+    {
+      "name": "Gömülü oynatma son adımı",
+      "pass": true
+    },
+    {
+      "name": "Gömülü oynatma geri adımı",
+      "pass": true
+    },
+    {
+      "name": "Kodi’ye devir son adımı",
+      "pass": true
+    },
+    {
+      "name": "Kodi’ye devir geri adımı",
+      "pass": true
+    },
+    {
+      "name": "Altyazı & AutoSync son adımı",
+      "pass": true
+    },
+    {
+      "name": "Altyazı & AutoSync geri adımı",
+      "pass": true
+    },
+    {
+      "name": "TV tarayıcısı son adımı",
+      "pass": true
+    },
+    {
+      "name": "TV tarayıcısı geri adımı",
+      "pass": true
+    },
+    {
+      "name": "Çıkış ayarı & hotplug son adımı",
+      "pass": true
+    },
+    {
+      "name": "Çıkış ayarı & hotplug geri adımı",
+      "pass": true
+    },
+    {
+      "name": "Derleme → kurulum son adımı",
+      "pass": true
+    },
+    {
+      "name": "Derleme → kurulum geri adımı",
+      "pass": true
+    },
+    {
+      "name": "Akış oynatma başlar",
+      "pass": true
+    },
+    {
+      "name": "DP CEC olmadığını gösterir",
+      "pass": true
+    },
+    {
+      "name": "Ultra tek çıkış",
+      "pass": true
+    },
+    {
+      "name": "Unit gerçek HTTP portlarını gösterir",
+      "pass": true
+    },
+    {
+      "name": "Bileşen arama daralır",
+      "pass": true
+    },
+    {
+      "name": "Boş sonuç mesajı",
+      "pass": true
+    },
+    {
+      "name": "Katman filtresi",
+      "pass": true
+    },
+    {
+      "name": "Doğrudan bileşen adresi açılır",
+      "pass": true
+    },
+    {
+      "name": "Belge/kod farkı filtresi",
+      "pass": true
+    },
+    {
+      "name": "Belge tam metin araması",
+      "pass": true
+    },
+    {
+      "name": "Envanter sayfalama",
+      "pass": true
+    },
+    {
+      "name": "Global arama",
+      "pass": true
+    },
+    {
+      "name": "Arama sonucundan bileşene",
+      "pass": true
+    },
+    {
+      "name": "Tema değişimi",
+      "pass": true
+    },
+    {
+      "name": "Koyu tema çalışır",
+      "pass": true
+    },
+    {
+      "name": "JavaScript runtime hatası yok",
+      "pass": true
+    }
+  ],
+  "context": {
+    "browser": "headless Chromium",
+    "date": "2026-10-10",
+    "source_revision": "80b5021",
+    "scope": "Yerel atlas davranışları; ürün donanım testleri değil"
+  }
+}
