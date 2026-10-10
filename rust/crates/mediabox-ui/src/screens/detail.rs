@@ -115,7 +115,13 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
                 Some(url) => api::media_policy(url),
                 None => api::media_stream_plan(&source.raw),
             };
-            match api::typed::<Plan>(request).await {
+            let answer = api::typed::<Plan>(request).await;
+            // A slow answer for a source the viewer has since moved off is not
+            // this source's plan: its duration would be sent with the wrong film.
+            if selected.get_untracked().as_ref() != Some(&source) {
+                return;
+            }
+            match answer {
                 Ok(found) => plan.set(Some(Load::Ready(found))),
                 Err(error) => plan.set(Some(Load::Failed(error.message))),
             }
@@ -155,38 +161,26 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
     let play_source = move |source: Source| {
         busy.set(true);
         toaster.say("Açılıyor…");
-        spawn_local(async move {
-            // A source picked from the list starts immediately, before the
-            // background policy request necessarily answers. The player still
-            // needs the catalogue's name and the probe's real duration: its
-            // session URL contains neither. Reuse the ready plan, or finish
-            // that same inspection here before opening the film.
-            let inspected = match plan.get_untracked() {
-                Some(Load::Ready(found)) => Some(found),
-                _ => {
-                    let request = match source.parsed.url.as_deref() {
-                        Some(url) => api::media_policy(url),
-                        None => api::media_stream_plan(&source.raw),
-                    };
-                    match api::typed::<Plan>(request).await {
-                        Ok(found) => {
-                            plan.set(Some(Load::Ready(found.clone())));
-                            Some(found)
-                        }
-                        Err(_) => None,
-                    }
-                }
-            };
-            let title = match meta.get_untracked() {
-                Load::Ready(found) if !found.name.is_empty() => Some(found.name),
-                _ => None,
-            };
-            let duration_seconds = inspected
+        // The player needs the catalogue's name and the probe's real duration:
+        // its session URL carries neither. The duration is taken only from a
+        // plan that is already in hand. Waiting for the inspection here would
+        // hold the film back for as long as the probe takes (up to its 25 s
+        // timeout); an unknown length is drawn honestly as unknown.
+        let title = match meta.get_untracked() {
+            Load::Ready(found) if !found.name.is_empty() => Some(found.name),
+            _ => None,
+        };
+        let duration_seconds = match plan.get_untracked() {
+            Some(Load::Ready(found)) => found
+                .media
+                .container
                 .as_ref()
-                .and_then(|found| found.media.container.as_ref())
                 .and_then(|container| container.duration_seconds)
                 .filter(|duration| duration.is_finite() && *duration > 0.0)
-                .map(|duration| duration.round() as u64);
+                .map(|duration| duration.round() as u64),
+            _ => None,
+        };
+        spawn_local(async move {
             let request = match source.parsed.url.as_deref() {
                 Some(url) => api::play_here(
                     Some(url),
@@ -221,7 +215,13 @@ pub fn Detail(kind: String, id: String) -> impl IntoView {
     // OK on a source now starts it, which is what pressing OK on a source
     // means everywhere else.
     let pick = Callback::new(move |source: Source| {
-        analyze(source.clone());
+        // The first playable source is analysed as soon as the page opens;
+        // choosing it keeps that answer rather than asking the probe again.
+        let analysed = selected.get_untracked().as_ref() == Some(&source)
+            && matches!(plan.get_untracked(), Some(Load::Ready(_)));
+        if !analysed {
+            analyze(source.clone());
+        }
         play_source(source);
     });
 

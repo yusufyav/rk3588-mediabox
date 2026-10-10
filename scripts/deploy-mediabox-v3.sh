@@ -233,9 +233,25 @@ sh_ "set -e
   systemctl daemon-reload
   systemctl enable mediabox-display-seed.service >/dev/null
   # A HUP reloads logind.conf but keeps file descriptors for input devices it
-  # watched before the udev retag. Restart so the watched-button set is rebuilt
-  # from the current tags; otherwise kiosk-smoke correctly reports event0/1.
-  systemctl restart systemd-logind.service"
+  # watched before the udev retag. Restart only when logind still holds an
+  # input that no longer carries power-switch, so the watched-button set is
+  # rebuilt from the current tags; otherwise kiosk-smoke correctly reports
+  # event0/1. A board that is already right keeps its logind and its sessions.
+  logind_pid=\$(systemctl show systemd-logind.service -p MainPID --value)
+  stale=
+  for fd in /proc/\${logind_pid:-0}/fd/*; do
+    node=\$(readlink \"\$fd\" 2>/dev/null) || continue
+    case \"\$node\" in /dev/input/event*) ;; *) continue ;; esac
+    if ! udevadm info -q property \"\$node\" | grep -q '^CURRENT_TAGS=.*:power-switch:'; then
+      stale=\"\$stale \$node\"
+    fi
+  done
+  if [ -n \"\$stale\" ]; then
+    echo \"logind holds untagged inputs:\$stale; restarting it\"
+    systemctl restart systemd-logind.service
+  else
+    systemctl kill -s HUP systemd-logind.service
+  fi"
 
 # A remote's Ok, the HID usage "Menu Pick", as KEY_OK for every reader: Kodi
 # has no meaning for the KEY_SELECT the kernel names it by default. See the

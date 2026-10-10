@@ -634,6 +634,8 @@ contains "CEC inputs replace the system power tag" "$power_rules" 'TAG="mediabox
 lacks "udev is never given an invalid empty tag" "$power_rules" 'TAG=""'
 contains "deploy drops logind's stale input descriptors" "$deploy" \
   'systemctl restart systemd-logind.service'
+contains "logind is restarted only for an input that lost its tag" "$deploy" \
+  "grep -q '^CURRENT_TAGS=.*:power-switch:'"
 lacks "deploy does not SIGPIPE the library command" "$deploy" \
   'mediaboxctl media library --json | head'
 

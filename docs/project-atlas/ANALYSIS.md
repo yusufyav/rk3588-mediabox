@@ -90,7 +90,7 @@ P5 seçimi, gömülü ses dönüşümü, Wi-Fi/BT, Plus kurulum tablosu ve HTTP
 portlarındaki belge/kod farkları güncel kaynak ve Git kanıtıyla uzlaştırıldı.
 Plus’ın 19 Eylül’de iki kapıyı da geçtiği `927ed0a`, USB aygıta geçerken eski
 passthrough tercihinin artık değişiklikleri kilitlemediği `5c373b4` ve testleriyle
-doğrulandı. Webden başlatılan filmin ad/süre kaybı giderildi. Tarayıcıdaki erken
+doğrulandı. Webden başlatılan filme ad her zaman, süre hazır plandan verilir. Tarayıcıdaki erken
 “kapandı” kaydı ise daha sonraki fiziksel gözlem nedeniyle açık tutuldu.
 
 Temizlikte çağrısı olmayan TV `App::fail` ve eski toplu `posters` yardımcısı,

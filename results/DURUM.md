@@ -511,9 +511,11 @@ ile arayüzde bulunur. Bunların varlığı her yeni donanımın kabulü değild
 * Sarmada çubuk yalnız işaretin yerini gösteriyor; filmin gerçek konumu çubuk
   üzerinde işaretlenmiyor.
 * ~~Web UI'dan başlatılan film sahipleniliyor ama adı ve süresi gelmiyor~~ —
-  **kapandı, 10 Ekim 2026.** Web arayüzü kaynak seçimi sırasında plan henüz
-  bitmediyse aynı incelemeyi tamamlıyor ve `MediaPlayHere`'a katalog adını ve
-  probun gerçek süresini gönderiyor; istek şekli birim testiyle korunuyor.
+  **kapandı, 10 Ekim 2026.** Web arayüzü `MediaPlayHere`'a katalog adını her
+  zaman, probun gerçek süresini ise plan zaten hazırsa gönderiyor (sayfa açılınca
+  ilk oynatılabilir kaynak arka planda inceleniyor). Plan bitmemişse film
+  beklemeden başlar ve süre bilinmiyor olarak çizilir: probu beklemek filmi 25 s
+  zaman aşımına kadar geciktirir. İstek şekli birim testiyle korunuyor.
 * Kodi'nin "Şimdi Oynatılan" ekranı hâlâ eski simge setini kullanıyor.
 * ~~Tarayıcıda AV1 donanımda çözülmüyor~~ — **kapandı, 22 Eylül 2026**, bölüm 6b.
   Çözüm VA-API'yi genişletmek değil, tarayıcının zaten taşıdığı V4L2 arka ucunu
