@@ -280,6 +280,8 @@ struct App {
     /// Where the remote is on the account mark at the top right: 0 not on
     /// it, 1 the mark, 2 the button in its menu.
     account_focus: i32,
+    /// The Wi-Fi screen's status poll is scheduled.
+    wifi_polling: bool,
 }
 
 impl App {
@@ -553,6 +555,15 @@ impl App {
                     self.close_sheet();
                     self.start_on_kodi(start);
                 }
+                Press::AskPeer(op, question) => {
+                    self.sheet = Some(Sheet::ConfirmPeer { question, op, yes: false });
+                    self.paint();
+                }
+                Press::Peer(op) => {
+                    self.close_sheet();
+                    self.peer(op);
+                }
+                Press::Stay => {}
             },
             _ => {}
         }
@@ -3523,13 +3534,6 @@ impl App {
                 }
                 match self.wifi.press() {
                     Press::None => self.paint(),
-                    Press::Scan => {
-                        self.wifi.busy = true;
-                        self.wifi.scanning = true;
-                        self.wifi.notice = "Ağlar aranıyor…".into();
-                        self.paint();
-                        spawn_wifi(WifiCommand::Scan);
-                    }
                     Press::Power(on) => {
                         self.wifi.busy = true;
                         self.wifi.notice =
@@ -3538,8 +3542,10 @@ impl App {
                         spawn_wifi(WifiCommand::Power(on));
                     }
                     Press::Join => self.join_wifi(),
-                    Press::Forget => {
-                        self.forget_wifi();
+                    Press::Do(op) => self.peer(op),
+                    Press::Rescan => {
+                        self.rescan_wifi();
+                        self.paint();
                     }
                 }
             }
@@ -3554,17 +3560,83 @@ impl App {
         }
     }
 
-    fn forget_wifi(&mut self) -> bool {
-        if self.wifi.busy || self.wifi.forget() != screens::wireless::Press::Forget {
+    /// The highlighted network's menu, if it has one.
+    fn open_wifi_menu(&mut self) -> bool {
+        if self.wifi.busy {
             return false;
         }
-        let Some(network) = self.wifi.highlighted().cloned() else {
+        let Some((title, choices)) = self.wifi.menu() else {
             return false;
         };
-        self.wifi.busy = true;
-        self.wifi.notice = format!("{} unutuluyor…", network.ssid);
-        spawn_wifi(WifiCommand::Forget(network.ssid));
+        self.open_sheet(Sheet::peer(title, choices));
         true
+    }
+
+    fn open_bt_menu(&mut self) -> bool {
+        if self.bt.busy {
+            return false;
+        }
+        let Some((title, choices)) = self.bt.menu() else {
+            return false;
+        };
+        self.open_sheet(Sheet::peer(title, choices));
+        true
+    }
+
+    /// A choice from a network's or a device's menu, confirmed where it asks.
+    fn peer(&mut self, op: screens::wireless::PeerOp) {
+        use screens::wireless::PeerOp;
+        match op {
+            PeerOp::WifiJoin(ssid) => {
+                let Some(network) = self.wifi.network(&ssid).cloned() else {
+                    return;
+                };
+                // A stranger with a key asks for it first, as Android's
+                // "Bağlan" does.
+                if network.key_missing || (network.secured && !network.remembered) {
+                    self.wifi.ask_password(network);
+                    self.paint();
+                    return;
+                }
+                self.wifi.target = Some(network);
+                self.join_wifi();
+            }
+            PeerOp::WifiModify(ssid) => {
+                let Some(network) = self.wifi.network(&ssid).cloned() else {
+                    return;
+                };
+                self.wifi.ask_password(network);
+                self.paint();
+            }
+            PeerOp::WifiDisconnect => {
+                self.wifi.busy = true;
+                self.paint();
+                spawn_wifi(WifiCommand::Disconnect);
+            }
+            PeerOp::WifiForget(ssid) => {
+                // Off the page of a network that is about to stop existing.
+                if self.wifi.face == screens::wireless::Face::Details {
+                    self.wifi.back();
+                }
+                self.wifi.busy = true;
+                self.paint();
+                spawn_wifi(WifiCommand::Forget(ssid));
+            }
+            PeerOp::BtConnect(address) => self.bt_command("Bağlanıyor…", BtCommand::Connect(address)),
+            PeerOp::BtDisconnect(address) => {
+                self.bt_command("Bağlantı kesiliyor…", BtCommand::Disconnect(address))
+            }
+            PeerOp::BtForget(address) => {
+                self.bt_command("Eşleşme kaldırılıyor…", BtCommand::Forget(address))
+            }
+        }
+    }
+
+    fn bt_command(&mut self, notice: &str, command: BtCommand) {
+        self.bt.busy = true;
+        self.bt.notice = notice.into();
+        self.paint();
+        spawn_bt(command);
     }
 
     /// Join the network the password face is for.
@@ -3576,10 +3648,17 @@ impl App {
             return;
         };
         let secret = self.wifi.password().to_string();
+        let hidden = self.wifi.adding;
         self.wifi.busy = true;
-        self.wifi.notice = format!("{} ağına bağlanılıyor…", target.ssid);
+        // As in the reference video: the list stays, and the network's own row
+        // says "Bağlanıyor…" until it says "Bağlı". The dialog closes on
+        // the press, not on the answer.
+        self.wifi.notice.clear();
+        self.wifi.joining = Some(target.ssid.clone());
+        self.wifi.finish_password();
         self.paint();
         spawn_wifi(WifiCommand::Connect {
+            hidden,
             ssid: target.ssid,
             psk: (!secret.is_empty()).then_some(secret),
         });
@@ -3632,10 +3711,6 @@ impl App {
                         self.bt.notice = "Bağlantı kesiliyor…".into();
                         BtCommand::Disconnect(address)
                     }
-                    BtPress::Forget => {
-                        self.bt.notice = "Eşleşme kaldırılıyor…".into();
-                        BtCommand::Forget(address)
-                    }
                     _ => return,
                 };
                 self.bt.busy = true;
@@ -3647,27 +3722,57 @@ impl App {
         }
     }
 
-    fn forget_bluetooth(&mut self) -> bool {
-        if self.bt.busy || self.bt.forget() != screens::wireless::BtPress::Forget {
-            return false;
+    /// An answer from the daemon about the Wi-Fi radio.
+    /// The link as it is, while the Wi-Fi screen is open: a link that drops or
+    /// comes up is on the panel within seconds, not at the next scan.
+    fn poll_wifi_soon(&mut self) {
+        if self.wifi_polling {
+            return;
         }
-        let Some(address) = self.bt.highlighted().map(|device| device.address.clone()) else {
-            return false;
-        };
-        self.bt.busy = true;
-        self.bt.notice = "Eşleşme kaldırılıyor…".into();
-        spawn_bt(BtCommand::Forget(address));
-        true
+        self.wifi_polling = true;
+        slint::Timer::single_shot(WIFI_POLL, || {
+            with_app(|app| {
+                app.wifi_polling = false;
+                if app.route() == Route::Wifi {
+                    spawn_wifi(WifiCommand::Status);
+                    app.poll_wifi_soon();
+                }
+            })
+        });
     }
 
-    /// An answer from the daemon about the Wi-Fi radio.
-    fn wifi_answer(&mut self, answer: Result<serde_json::Value, String>, scanned: bool) {
-        self.wifi.busy = false;
-        self.wifi.scanning = false;
+    /// A scan for "Yenile".
+    fn rescan_wifi(&mut self) {
+        if self.route() != Route::Wifi || self.wifi.scanning || !self.wifi.powered {
+            return;
+        }
+        let scan = self.wifi.begin_scan();
+        self.paint();
+        spawn_wifi(WifiCommand::Scan(scan));
+    }
+
+    fn wifi_answer(&mut self, answer: Result<serde_json::Value, String>, reply: WifiReply) {
+        match reply {
+            WifiReply::Networks { last, scan } => {
+                // One pass on opening and one per "Yenile", as the reference
+                // recording shows; nothing scans on its own in between.
+                if last {
+                    self.wifi.end_scan(scan);
+                }
+            }
+            // Only the answer to the action that set it. A background status
+            // used to clear it while a join was still running, and the next
+            // press started a second join on top of the first.
+            WifiReply::Done => self.wifi.busy = false,
+            WifiReply::Joined => {
+                self.wifi.busy = false;
+                self.wifi.joining = None;
+            }
+            WifiReply::Status => {}
+        }
         match answer {
-            Ok(value) => {
-                self.wifi.notice.clear();
-                if scanned {
+            Ok(value) => match reply {
+                WifiReply::Networks { .. } => {
                     let networks = value
                         .get("networks")
                         .and_then(serde_json::Value::as_array)
@@ -3693,18 +3798,57 @@ impl App {
                                         .get("remembered")
                                         .and_then(serde_json::Value::as_bool)
                                         .unwrap_or(false),
+                                    key_missing: item
+                                        .get("keyMissing")
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(false),
+                                    heard: true,
+                                    missed: 0,
+                                    security: item
+                                        .get("security")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    band: item
+                                        .get("band")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    bands: item
+                                        .get("bands")
+                                        .and_then(serde_json::Value::as_array)
+                                        .map(|bands| {
+                                            bands
+                                                .iter()
+                                                .filter_map(serde_json::Value::as_str)
+                                                .map(str::to_string)
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
                                 })
                                 .collect()
                         })
                         .unwrap_or_default();
                     self.wifi.take_networks(networks);
                     // A scan answer carries no link state, so ask for it.
-                    spawn_wifi(WifiCommand::Status);
-                } else {
-                    self.wifi.take_status(&value);
-                    self.wifi.face = screens::wireless::Face::List;
+                    if !matches!(reply, WifiReply::Networks { last: false, .. }) {
+                        spawn_wifi(WifiCommand::Status);
+                    }
                 }
-            }
+                WifiReply::Status | WifiReply::Done => {
+                    // A background answer never clears what an action said, nor
+                    // takes a half-typed password away.
+                    if !self.wifi.busy && self.wifi.notice.ends_with('…') && !self.wifi.scanning {
+                        self.wifi.notice.clear();
+                    }
+                    self.wifi.take_status(&value);
+                }
+                WifiReply::Joined => {
+                    self.wifi.notice.clear();
+                    self.wifi.take_status(&value);
+                    self.wifi.finish_password();
+                }
+            },
             Err(error) => self.wifi.notice = error,
         }
         self.paint();
@@ -3723,69 +3867,238 @@ impl App {
     }
 
     fn paint_wifi(&mut self, window: &MediaBoxWindow) {
+        use screens::wireless::{Face, PasswordFocus, Row};
         let wifi = &self.wifi;
         window.set_wifi_known(wifi.known);
         window.set_wifi_present(wifi.present);
         window.set_wifi_powered(wifi.powered);
-        window.set_wifi_index(wifi.index as i32);
         window.set_wifi_busy(wifi.busy);
-        window.set_wifi_scanning(wifi.scanning);
         window.set_wifi_notice(wifi.notice.clone().into());
-        window.set_wifi_summary(
-            match (wifi.known, &wifi.connected_to, wifi.powered) {
-                // Nothing has come back yet, so there is nothing to say. This
-                // used to read "Kapalı" for the first moment of every visit.
-                (false, _, _) => String::new(),
-                (true, Some(ssid), _) => match &wifi.address {
-                    Some(address) => format!("{ssid} ağına bağlı · {address}"),
-                    None => format!("{ssid} ağına bağlı"),
-                },
-                (true, None, true) => "Bağlı değil".to_string(),
-                (true, None, false) => "Kapalı".to_string(),
-            }
-            .into(),
-        );
         window.set_wifi_face(
             match wifi.face {
-                screens::wireless::Face::List => "list",
-                screens::wireless::Face::Password => "password",
+                Face::List => "list",
+                Face::Saved => "saved",
+                Face::Details => "details",
+                Face::Password => "password",
             }
             .into(),
         );
+
+        // The rows, each placed by how many rows of each height come before it.
+        let card = |network: &screens::wireless::Network, focused: bool, saved_list: bool| {
+            let on = wifi.is_connected(&network.ssid);
+            let under = if saved_list { if on { "Bağlı" } else { "" } } else { wifi.summary(network) };
+            WifiRow {
+                kind: "card".into(),
+                label: network.ssid.clone().into(),
+                under: under.into(),
+                bars: if wifi.in_range(network) && !saved_list { network.bars() as i32 } else { -1 },
+                secured: network.secured && !saved_list,
+                on,
+                focused,
+                tag: if saved_list { "".into() } else { network.tag().into() },
+                info: !saved_list,
+                info_focused: false,
+                flats: 0,
+                talls: 0,
+                notes: 0,
+                heads: 0,
+            }
+        };
+        let mut rows: Vec<WifiRow> = Vec::new();
+        let mut focus = (0, 0, 0, 0, false);
+        match wifi.face {
+            Face::Saved => {
+                window.set_wifi_title("Kayıtlı ağlar".into());
+                // SavedAccessPointsWifiSettings2: the saved networks sit in
+                // the "Diğer ağlar" category, shown while it has any; the
+                // "Abonelikler" one above it holds Passpoint subscriptions,
+                // which this board has none of.
+                if !wifi.saved().is_empty() {
+                    rows.push(WifiRow {
+                        kind: "header".into(),
+                        label: "Diğer ağlar".into(),
+                        bars: -1,
+                        ..Default::default()
+                    });
+                }
+                for (at, ssid) in wifi.saved().iter().enumerate() {
+                    if let Some(network) = wifi.network(ssid) {
+                        rows.push(card(network, at == wifi.saved_index, true));
+                    }
+                }
+            }
+            _ => {
+                window.set_wifi_title("Wi-Fi".into());
+                let focused = wifi.focused_row();
+                for row in wifi.list_rows() {
+                    let here = focused.as_ref() == Some(&row);
+                    rows.push(match &row {
+                        Row::Toggle => WifiRow {
+                            kind: "toggle".into(),
+                            label: "Wi-Fi".into(),
+                            on: wifi.powered,
+                            focused: here,
+                            bars: -1,
+                            ..Default::default()
+                        },
+                        Row::Network(ssid) => match wifi.network(ssid) {
+                            Some(network) => {
+                                let mut row = card(network, here, false);
+                                row.info_focused = here && wifi.info;
+                                row
+                            }
+                            None => continue,
+                        },
+                        Row::Header(text) => WifiRow {
+                            kind: "header".into(),
+                            label: (*text).into(),
+                            bars: -1,
+                            ..Default::default()
+                        },
+                        Row::Others => WifiRow {
+                            kind: "header".into(),
+                            label: "Diğer ağlar".into(),
+                            tag: "Yenile".into(),
+                            // As the reference recording shows: the spinner
+                            // turns for every scan, the one on opening and the
+                            // ones that follow; "Yenile" stands between them.
+                            on: wifi.scanning,
+                            focused: here,
+                            bars: -1,
+                            ..Default::default()
+                        },
+                        Row::Note(text) => WifiRow {
+                            kind: "note".into(),
+                            label: (*text).into(),
+                            bars: -1,
+                            ..Default::default()
+                        },
+                        Row::Add => WifiRow {
+                            kind: "card".into(),
+                            label: "Ağ ekleyin".into(),
+                            focused: here,
+                            bars: -1,
+                            ..Default::default()
+                        },
+                        Row::Saved => {
+                            let count = wifi.saved().len();
+                            WifiRow {
+                                kind: "card".into(),
+                                label: "Kayıtlı ağlar".into(),
+                                under: if count == 1 { "1 ağ".into() } else { format!("{count} ağ").into() },
+                                focused: here,
+                                bars: -1,
+                                ..Default::default()
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        let (mut flats, mut talls, mut notes, mut heads) = (0, 0, 0, 0);
+        for row in &mut rows {
+            row.flats = flats;
+            row.talls = talls;
+            row.notes = notes;
+            row.heads = heads;
+            let tall = !row.under.is_empty();
+            if row.focused {
+                focus = (flats, talls, notes, heads, tall);
+            }
+            match (row.kind.as_str(), tall) {
+                ("note", _) => notes += 1,
+                ("header", _) => heads += 1,
+                (_, true) => talls += 1,
+                (_, false) => flats += 1,
+            }
+        }
+        window.set_wifi_focus_flats(focus.0);
+        window.set_wifi_focus_talls(focus.1);
+        window.set_wifi_focus_notes(focus.2);
+        window.set_wifi_focus_heads(focus.3);
+        window.set_wifi_focus_tall(focus.4);
+        window.set_wifi_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+
+        // A network's page: WifiNetworkDetailsFragment, its header, buttons
+        // and facts. Signal and band only while it can be heard; the network
+        // details only for the one the board is on.
+        let line = |label: &str, value: String| InfoLine {
+            label: label.into(),
+            value: value.into(),
+            tone: "".into(),
+        };
+        let mut facts = Vec::new();
+        let mut net_facts = Vec::new();
+        if let Some(network) = wifi.details.as_deref().and_then(|ssid| wifi.network(ssid)) {
+            let on = wifi.is_connected(&network.ssid);
+            if wifi.in_range(network) {
+                facts.push(line("Sinyal gücü", screens::wireless::strength(network.signal).into()));
+                let band = if on { wifi.link.frequency.clone() } else { None }
+                    .or_else(|| (!network.band.is_empty()).then(|| network.band.clone()));
+                if let Some(band) = band {
+                    facts.push(line("Frekans", band));
+                }
+            }
+            if !network.security.is_empty() {
+                facts.push(line("Güvenlik", network.security.clone()));
+            }
+            if on {
+                if let Some(mac) = &wifi.link.mac {
+                    net_facts.push(line("Cihaz MAC adresi", mac.clone()));
+                }
+                if let Some(address) = &wifi.address {
+                    net_facts.push(line("IP adresi", address.clone()));
+                }
+                if let Some(gateway) = &wifi.link.gateway {
+                    net_facts.push(line("Ağ geçidi", gateway.clone()));
+                }
+                if let Some(mask) = &wifi.link.netmask {
+                    net_facts.push(line("Alt ağ maskesi", mask.clone()));
+                }
+                if !wifi.link.dns.is_empty() {
+                    net_facts.push(line("DNS", wifi.link.dns.join(", ")));
+                }
+            }
+        }
+        window.set_wifi_details_status(wifi.details_status().into());
+        window.set_wifi_buttons(slint::ModelRc::new(slint::VecModel::from(
+            wifi.details_buttons()
+                .into_iter()
+                .map(|(label, _)| slint::SharedString::from(label))
+                .collect::<Vec<_>>(),
+        )));
+        window.set_wifi_button(wifi.button as i32);
+        window.set_wifi_facts(slint::ModelRc::new(slint::VecModel::from(facts)));
+        window.set_wifi_net_facts(slint::ModelRc::new(slint::VecModel::from(net_facts)));
+
+        // The password dialog, and "Ağ ekleyin".
         window.set_wifi_target(
-            wifi.target
-                .as_ref()
-                .map(|network| network.ssid.clone())
-                .unwrap_or_default()
-                .into(),
+            match wifi.face {
+                Face::Details => wifi.details.clone().unwrap_or_default(),
+                _ => wifi.target.as_ref().map(|network| network.ssid.clone()).unwrap_or_default(),
+            }
+            .into(),
         );
+        window.set_wifi_adding(wifi.adding);
+        window.set_wifi_ssid_text(wifi.ssid.clone().into());
+        window.set_wifi_secure(wifi.secure);
         window.set_wifi_password_mask(wifi.password_mask().into());
         window.set_wifi_show(wifi.show);
         window.set_wifi_focus(
             match wifi.focus {
-                screens::wireless::PasswordFocus::Field => "field",
-                screens::wireless::PasswordFocus::Show => "show",
-                screens::wireless::PasswordFocus::Keys => "keys",
-                screens::wireless::PasswordFocus::Join => "join",
+                PasswordFocus::Ssid => "ssid",
+                PasswordFocus::Security => "security",
+                PasswordFocus::Field => "field",
+                PasswordFocus::Show => "show",
+                PasswordFocus::Keys => "keys",
+                PasswordFocus::Join => "join",
             }
             .into(),
         );
         window.set_wifi_key_row(wifi.keys.row() as i32);
         window.set_wifi_key_col(wifi.keys.col() as i32);
         window.set_wifi_keys(key_rows(&wifi.keys));
-        let connected = wifi.connected_to.clone();
-        window.set_wifi_networks(slint::ModelRc::new(slint::VecModel::from(
-            wifi.networks
-                .iter()
-                .map(|network| WifiRow {
-                    ssid: network.ssid.clone().into(),
-                    bars: network.bars() as i32,
-                    secured: network.secured,
-                    remembered: network.remembered,
-                    connected: connected.as_deref() == Some(network.ssid.as_str()),
-                })
-                .collect::<Vec<_>>(),
-        )));
     }
 
     fn paint_bluetooth(&mut self, window: &MediaBoxWindow) {
@@ -3831,10 +4144,13 @@ impl App {
                 self.wifi.open();
                 self.open(Route::Wifi);
                 // Ask straight away: a screen that opens empty and waits for a
-                // press reads as broken.
-                self.wifi.busy = true;
-                self.wifi.scanning = true;
-                spawn_wifi(WifiCommand::Refresh);
+                // press reads as broken. Not busy: the link and the cached list
+                // answer in milliseconds, and the remote stays live while the
+                // fresh scan that follows takes its twelve seconds.
+                self.wifi.busy = false;
+                let scan = self.wifi.begin_scan();
+                spawn_wifi(WifiCommand::Refresh(scan));
+                self.poll_wifi_soon();
             }
             Action::OpenBluetooth => {
                 self.bt.open();
@@ -3955,7 +4271,7 @@ impl App {
     // ------------------------------------------------------ holding Ok down
 
     /// Whether a hold of Ok means something here other than a press: a poster
-    /// menu, or forgetting the highlighted remembered wireless peer.
+    /// menu, a network's or a paired device's.
     fn wants_ok_hold(&self) -> bool {
         if self.here.is_some() {
             return false;
@@ -3968,8 +4284,8 @@ impl App {
             Route::Media => {
                 self.media.menu.is_none() && self.media.focused().is_some_and(|item| item.continuing)
             }
-            Route::Wifi => self.wifi.forget() == screens::wireless::Press::Forget,
-            Route::Bluetooth => self.bt.forget() == screens::wireless::BtPress::Forget,
+            Route::Wifi => !self.wifi.busy && self.wifi.menu().is_some(),
+            Route::Bluetooth => !self.bt.busy && self.bt.menu().is_some(),
             _ => false,
         }
     }
@@ -4017,8 +4333,8 @@ impl App {
         }
         let opened = match self.route() {
             Route::Media => self.media.open_menu(),
-            Route::Wifi => self.forget_wifi(),
-            Route::Bluetooth => self.forget_bluetooth(),
+            Route::Wifi => self.open_wifi_menu(),
+            Route::Bluetooth => self.open_bt_menu(),
             _ => self.library.open_menu(),
         };
         if opened {
@@ -4040,7 +4356,8 @@ impl App {
         if self.wants_ok_hold() {
             let opened = match self.route() {
                 Route::Media => self.media.open_menu(),
-                Route::Wifi | Route::Bluetooth => false,
+                Route::Wifi => self.open_wifi_menu(),
+                Route::Bluetooth => self.open_bt_menu(),
                 _ => self.library.open_menu(),
             };
             if opened {
@@ -4440,7 +4757,21 @@ impl App {
                     },
                 ])));
             }
-            Sheet::Confirm { yes, .. } => {
+            Sheet::Peer { choices, index, .. } => {
+                window.set_sheet_kind("power".into());
+                window.set_sheet_index(*index as i32);
+                window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(
+                    choices
+                        .iter()
+                        .map(|choice| SheetRow {
+                            label: choice.label.into(),
+                            hint: choice.value.clone().into(),
+                            tone: "".into(),
+                        })
+                        .collect::<Vec<_>>(),
+                )));
+            }
+            Sheet::Confirm { yes, .. } | Sheet::ConfirmPeer { yes, .. } => {
                 window.set_sheet_kind("confirm".into());
                 window.set_sheet_index(i32::from(*yes));
                 window.set_sheet_rows(slint::ModelRc::new(slint::VecModel::from(vec![
@@ -5767,6 +6098,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         epoch: 0,
         resume: session::read(state_file()),
         account_focus: 0,
+        wifi_polling: false,
     }));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
     // The earlier searches outlive the process, as they do in the reference.
@@ -5978,13 +6310,31 @@ fn key_rows(grid: &crate::keyboard::Grid) -> slint::ModelRc<KeyRow> {
 }
 
 enum WifiCommand {
-    /// Status and a scan, which is what an opening screen wants.
-    Refresh,
+    /// The link, the cached list and then a fresh scan, each folded in as it
+    /// answers: what an opening screen wants.
+    /// Each carries the number of the scan it is, which its answer brings back.
+    Refresh(u64),
     Status,
-    Scan,
-    Connect { ssid: String, psk: Option<String> },
+    Scan(u64),
+    Connect { ssid: String, psk: Option<String>, hidden: bool },
+    Disconnect,
     Forget(String),
     Power(bool),
+}
+
+/// What a Wi-Fi answer is, so the screen folds it in the right way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WifiReply {
+    /// The radio's state, asked for in the background: it says nothing about
+    /// whether an action has finished.
+    Status,
+    /// The radio's state, answering an action -- power, forget, disconnect.
+    Done,
+    /// The radio's state after a join: the password face has done its job.
+    Joined,
+    /// A list of networks from scan `scan`; `last` is false while a fresher
+    /// one is coming.
+    Networks { last: bool, scan: u64 },
 }
 
 enum BtCommand {
@@ -6005,20 +6355,39 @@ enum BtCommand {
 fn spawn_wifi(command: WifiCommand) {
     detached("mediabox-tv-wifi", async move {
         let client = rpc::Client::new(socket_path());
-        // A scan answers with a network list; everything else answers with the
-        // radio's state, and the screen folds them in differently.
-        let scanned = matches!(command, WifiCommand::Scan | WifiCommand::Refresh);
-        let answer = match command {
-            WifiCommand::Refresh | WifiCommand::Scan => client.wifi_scan().await,
-            WifiCommand::Status => client.wifi_status().await,
-            WifiCommand::Connect { ssid, psk } => client.wifi_connect(&ssid, psk.as_deref()).await,
-            WifiCommand::Forget(ssid) => client.wifi_forget(&ssid).await,
-            WifiCommand::Power(on) => client.wifi_power(on).await,
+        let deliver = |answer: rpc::Result<serde_json::Value>, reply: WifiReply| {
+            let answer = answer.map_err(|error| error.to_string());
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.wifi_answer(answer, reply));
+            });
         };
-        let answer = answer.map_err(|error| error.to_string());
-        let _ = slint::invoke_from_event_loop(move || {
-            with_app(|app| app.wifi_answer(answer, scanned));
-        });
+        let follow_up = matches!(command, WifiCommand::Forget(_) | WifiCommand::Disconnect);
+        match command {
+            WifiCommand::Refresh(scan) => {
+                deliver(client.wifi_status().await, WifiReply::Status);
+                deliver(client.wifi_scan(true).await, WifiReply::Networks { last: false, scan });
+                deliver(client.wifi_scan(false).await, WifiReply::Networks { last: true, scan });
+            }
+            WifiCommand::Status => deliver(client.wifi_status().await, WifiReply::Status),
+            WifiCommand::Scan(scan) => {
+                deliver(client.wifi_scan(false).await, WifiReply::Networks { last: true, scan })
+            }
+            WifiCommand::Connect { ssid, psk, hidden } => {
+                deliver(client.wifi_connect(&ssid, psk.as_deref(), hidden).await, WifiReply::Joined)
+            }
+            WifiCommand::Disconnect => deliver(client.wifi_disconnect().await, WifiReply::Done),
+            WifiCommand::Forget(ssid) => {
+                deliver(client.wifi_forget(&ssid).await, WifiReply::Done)
+            }
+            WifiCommand::Power(on) => deliver(client.wifi_power(on).await, WifiReply::Done),
+        }
+        // Forgetting the network the board is on sends the supplicant to the
+        // next one it knows, which takes a few seconds the first answer does
+        // not wait for. Asked again, so the screen says where it ended up.
+        if follow_up {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            deliver(client.wifi_status().await, WifiReply::Status);
+        }
     });
 }
 
@@ -6403,6 +6772,8 @@ const LEFT_FILM_QUIET: Duration = Duration::from_secs(3);
 const DISCOVER_BLUR_WIDTH: u32 = 48;
 /// How long Ok is held for the hold to be its own gesture.
 const OK_HOLD: Duration = Duration::from_millis(500);
+/// How often the open Wi-Fi screen asks after the link.
+const WIFI_POLL: Duration = Duration::from_secs(3);
 /// A held key the remote has stopped repeating and never released: taken as
 /// let go, so one lost release does not swallow every press after it.
 const OK_HOLD_LOST: Duration = Duration::from_millis(1500);
@@ -7213,7 +7584,7 @@ fn deliver(line: &str) {
 
     // Through CEC the press, the hold and the release each arrive as their
     // own event. The release matters only to Ok, whose hold means something
-    // on a poster or remembered wireless peer; `bus_input` drops the rest.
+    // on a poster or a paired device; `bus_input` drops the rest.
     let (action, pressed, source) = (event.action, event.pressed, event.source);
     let _ = slint::invoke_from_event_loop(move || {
         with_app(|app| app.bus_input(action, pressed, source));

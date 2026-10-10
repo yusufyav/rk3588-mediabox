@@ -1685,14 +1685,23 @@ pub enum Request {
     // systemd-networkd, and adding a second thing that claims interfaces is
     // how a board ends up with two managers fighting over one radio.
     WifiStatus,
-    /// Ask the radio for what is in the air. Seconds, not instant.
-    WifiScan,
+    /// Ask the radio for what is in the air. Seconds, not instant -- unless
+    /// `cached`, which answers from what the kernel already holds and falls
+    /// back to a real scan only when that is empty.
+    WifiScan {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cached: bool,
+    },
     /// Join a network. `psk` is absent for an open one; it never reaches a
     /// log, and what is written to disk is the derived key, not the phrase.
     WifiConnect {
         ssid: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         psk: Option<String>,
+        /// A network that does not announce itself ("Gizli ağ"): the radio
+        /// has to ask for it by name.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hidden: bool,
     },
     WifiDisconnect,
     WifiForget {

@@ -396,16 +396,25 @@ impl Client {
         self.call(json!({"command": "wifi_status"})).await
     }
 
-    pub async fn wifi_scan(&self) -> Result<Value> {
-        self.call(json!({"command": "wifi_scan"})).await
+    /// `cached` answers from what the kernel already holds -- milliseconds --
+    /// and is a real scan only when that is empty.
+    pub async fn wifi_scan(&self, cached: bool) -> Result<Value> {
+        self.call(json!({"command": "wifi_scan", "cached": cached})).await
     }
 
-    pub async fn wifi_connect(&self, ssid: &str, psk: Option<&str>) -> Result<Value> {
+    pub async fn wifi_connect(&self, ssid: &str, psk: Option<&str>, hidden: bool) -> Result<Value> {
         let mut body = json!({"command": "wifi_connect", "ssid": ssid});
         if let Some(psk) = psk {
             body["psk"] = json!(psk);
         }
+        if hidden {
+            body["hidden"] = json!(true);
+        }
         self.call(body).await
+    }
+
+    pub async fn wifi_disconnect(&self) -> Result<Value> {
+        self.call(json!({"command": "wifi_disconnect"})).await
     }
 
     pub async fn wifi_forget(&self, ssid: &str) -> Result<Value> {

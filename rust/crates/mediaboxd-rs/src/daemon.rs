@@ -465,9 +465,9 @@ impl AppState {
             // netplan, bluetoothctl — which is exactly why they are here and
             // not in the interface.
             Request::WifiStatus => Response::success(crate::wireless::wifi_status().await),
-            Request::WifiScan => radio(crate::wireless::wifi_scan().await),
-            Request::WifiConnect { ssid, psk } => {
-                radio(crate::wireless::wifi_connect(&ssid, psk.as_deref()).await)
+            Request::WifiScan { cached } => radio(crate::wireless::wifi_scan(cached).await),
+            Request::WifiConnect { ssid, psk, hidden } => {
+                radio(crate::wireless::wifi_connect(&ssid, psk.as_deref(), hidden).await)
             }
             Request::WifiDisconnect => radio(crate::wireless::wifi_disconnect().await),
             Request::WifiForget { ssid } => radio(crate::wireless::wifi_forget(&ssid).await),

@@ -190,18 +190,29 @@ export component MediaBoxWindow inherits Window {
     in property <bool> wifi-known;
     in property <bool> wifi-present;
     in property <bool> wifi-powered;
-    in property <string> wifi-summary;
-    in property <[WifiRow]> wifi-networks;
-    in property <int> wifi-index;
     in property <bool> wifi-busy;
-    in property <bool> wifi-scanning;
     in property <string> wifi-notice;
-    /// "list" | "password"
+    /// "list" | "saved" | "details" | "password"
     in property <string> wifi-face;
+    in property <string> wifi-title;
+    in property <[WifiRow]> wifi-rows;
+    in property <int> wifi-focus-flats;
+    in property <int> wifi-focus-talls;
+    in property <int> wifi-focus-notes;
+    in property <int> wifi-focus-heads;
+    in property <bool> wifi-focus-tall;
+    in property <string> wifi-details-status;
+    in property <[string]> wifi-buttons;
+    in property <int> wifi-button;
+    in property <[InfoLine]> wifi-facts;
+    in property <[InfoLine]> wifi-net-facts;
     in property <string> wifi-target;
+    in property <bool> wifi-adding;
+    in property <string> wifi-ssid-text;
+    in property <bool> wifi-secure;
     in property <string> wifi-password-mask;
     in property <bool> wifi-show;
-    /// "field" | "keys" | "join"
+    /// "ssid" | "security" | "field" | "show" | "keys" | "join"
     in property <string> wifi-focus;
     in property <[KeyRow]> wifi-keys;
     in property <int> wifi-key-row;
@@ -636,15 +647,26 @@ export component MediaBoxWindow inherits Window {
             known: root.wifi-known;
             present: root.wifi-present;
             powered: root.wifi-powered;
-            summary: root.wifi-summary;
             vitals: root.vitals;
-            networks: root.wifi-networks;
-            index: root.wifi-index;
             busy: root.wifi-busy;
-            scanning: root.wifi-scanning;
             notice: root.wifi-notice;
             face: root.wifi-face;
+            title: root.wifi-title;
+            rows: root.wifi-rows;
+            focus-flats: root.wifi-focus-flats;
+            focus-talls: root.wifi-focus-talls;
+            focus-notes: root.wifi-focus-notes;
+            focus-heads: root.wifi-focus-heads;
+            focus-tall: root.wifi-focus-tall;
+            details-status: root.wifi-details-status;
+            buttons: root.wifi-buttons;
+            button: root.wifi-button;
+            facts: root.wifi-facts;
+            net-facts: root.wifi-net-facts;
             target: root.wifi-target;
+            adding: root.wifi-adding;
+            ssid-text: root.wifi-ssid-text;
+            secure: root.wifi-secure;
             password-mask: root.wifi-password-mask;
             show: root.wifi-show;
             focus-at: root.wifi-focus;
@@ -713,7 +735,7 @@ export component MediaBoxWindow inherits Window {
             && screen != "settings" && screen != "diagnostics" && screen != "media-settings"
             // The radios' lists sit in the settings' own frame; only the
             // password keeps the bar.
-            && screen != "bluetooth" && !(screen == "wifi" && root.wifi-face == "list"): TopBar {
+            && screen != "bluetooth" && !(screen == "wifi" && root.wifi-face != "password"): TopBar {
             x: 0;
             y: 0;
             width: 100%;

@@ -2,17 +2,33 @@ import { Theme, Metrics } from "theme.slint";
 import { KeyRow, KeyCap, Keyboard, VitalsModel } from "components.slint";
 import {
     SettingCard, SectionHeader, PageHeader, SideNav, StatusCorner, Backdrop, FocusRing, Icon,
+    ActionButton, InfoLine,
 } from "kit.slint";
 
-// One network in the Wi-Fi list.
+// One row of the Wi-Fi list or of "Kayıtlı ağlar", top to bottom, in the
+// order of Android's network_provider_settings.xml.
 export struct WifiRow {
-    ssid: string,
-    // 1 to 4. A number in dBm is not something anyone should have to read
-    // from a sofa.
+    // "toggle" | "card" | "note" | "header"
+    kind: string,
+    label: string,
+    under: string,
+    // 1 to 4, or -1 for none. A number in dBm is not something anyone should
+    // have to read from a sofa.
     bars: int,
     secured: bool,
-    remembered: bool,
-    connected: bool,
+    on: bool,
+    focused: bool,
+    // "5GHz", "2.4/5GHz" beside the name.
+    tag: string,
+    // The (i) that opens the network's page, and whether the remote is on it.
+    info: bool,
+    info-focused: bool,
+    // How many rows of each height come before this one, so it is placed by
+    // arithmetic.
+    flats: int,
+    talls: int,
+    notes: int,
+    heads: int,
 }
 
 // One device in the Bluetooth list.
@@ -26,6 +42,39 @@ export struct BtRow {
     // arithmetic.
     header: string,
     n-header: int,
+}
+
+// A scan running: Android's indeterminate circular progress
+// (progress_indeterminate_material). Each 1333 ms cycle the head of the arc
+// runs ahead to three quarters of the circle in the first half and the tail
+// catches it up in the second, the trim offset turning a quarter meanwhile;
+// the whole ring turns 720 degrees every 4444 ms. Head and tail ease as
+// fast-out-slow-in, drawn here as smoothstep.
+component Spinner inherits Path {
+    in property <length> size: Metrics.icon;
+    in property <brush> ink: Theme.muted;
+    property <float> p: mod(animation-tick(), 1333ms) / 1333ms;
+    property <float> head-p: min(p * 2, 1);
+    property <float> tail-p: max(p * 2 - 1, 0);
+    property <float> head: 0.75 * head-p * head-p * (3 - 2 * head-p);
+    property <float> tail: 0.75 * tail-p * tail-p * (3 - 2 * tail-p);
+    property <float> offset: 0.25 * p;
+    // At least a dot, as the stroke's round cap draws it.
+    property <angle> a0: (tail + offset) * 360deg;
+    property <angle> a1: max((head + offset) * 360deg, a0 + 4deg);
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: "M " + (12 + 9 * cos(a0)) + " " + (12 + 9 * sin(a0))
+        + " A 9 9 0 " + (a1 - a0 > 180deg ? "1" : "0") + " 1 "
+        + (12 + 9 * cos(a1)) + " " + (12 + 9 * sin(a1));
+    fill: transparent;
+    stroke: ink;
+    stroke-width: max(1.6px, size * 0.075);
+    stroke-line-cap: round;
+    transform-origin: { x: self.width / 2, y: self.height / 2 };
+    transform-rotation: mod(animation-tick(), 4444ms) / 4444ms * 720deg - 90deg;
 }
 
 // Four bars, as many lit as the signal earns.
@@ -56,12 +105,16 @@ component RadioCard inherits Rectangle {
     in property <string> status;
     in property <bool> lock;
     in property <int> bars: -1;
+    in property <string> tag;
+    in property <bool> info;
+    in property <bool> info-focused;
+    property <bool> lit: focused && !info-focused;
 
     height: under == "" ? Metrics.set-h-flat : Metrics.set-h;
     border-radius: Metrics.s-radius;
-    background: focused ? Theme.s-card-hi : Theme.s-card;
+    background: lit ? Theme.s-card-hi : Theme.s-card;
     border-width: 1px;
-    border-color: focused ? transparent : Theme.s-line;
+    border-color: lit ? transparent : Theme.s-line;
     animate background { duration: Theme.t-focus; easing: Theme.ease; }
 
     HorizontalLayout {
@@ -74,13 +127,31 @@ component RadioCard inherits Rectangle {
             spacing: Metrics.t-primary * 0.12;
             horizontal-stretch: 1;
             min-width: 0px;
-            Text {
-                text: title;
-                color: focused ? #ffffff : Theme.text;
-                font-size: Metrics.t-primary;
-                font-weight: focused ? 650 : 600;
-                overflow: elide;
-                wrap: no-wrap;
+            HorizontalLayout {
+                spacing: Metrics.card-pad * 0.4;
+                alignment: start;
+                Text {
+                    text: title;
+                    color: lit ? #ffffff : Theme.text;
+                    font-size: Metrics.t-primary;
+                    font-weight: lit ? 650 : 600;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    vertical-alignment: center;
+                }
+                if tag != "": Rectangle {
+                    width: tag-text.preferred-width + Metrics.t-secondary * 0.8;
+                    height: Metrics.t-secondary * 1.45;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: self.height * 0.22;
+                    background: #ffffff1f;
+                    tag-text := Text {
+                        text: tag;
+                        color: Theme.muted;
+                        font-size: Metrics.t-secondary * 0.82;
+                        font-weight: 600;
+                    }
+                }
             }
             if under != "": Text {
                 text: under;
@@ -113,7 +184,27 @@ component RadioCard inherits Rectangle {
             alignment: center;
             Bars {
                 bars: bars;
-                focused: focused;
+                focused: lit;
+            }
+        }
+        if info: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Metrics.icon * 1.6;
+                height: Metrics.icon * 1.6;
+                border-radius: self.width / 2;
+                background: info-focused ? Theme.s-card-hi : transparent;
+                Icon {
+                    name: "info";
+                    size: Metrics.icon * 1.05;
+                    ink: info-focused ? #ffffff : Theme.muted;
+                }
+                FocusRing {
+                    width: 100%;
+                    height: 100%;
+                    radius: parent.width / 2;
+                    on: info-focused;
+                }
             }
         }
     }
@@ -121,7 +212,7 @@ component RadioCard inherits Rectangle {
     FocusRing {
         width: 100%;
         height: 100%;
-        on: focused;
+        on: lit;
     }
 }
 
@@ -168,27 +259,81 @@ component Frame inherits Rectangle {
     @children
 }
 
+// A network's facts, as Android's details page lists them: a name, and its
+// value beside it.
+component Facts inherits Rectangle {
+    in property <[InfoLine]> rows;
+    border-radius: Metrics.s-radius;
+    background: Theme.s-card;
+    border-width: 1px;
+    border-color: Theme.s-line;
+    height: body.preferred-height;
+
+    body := VerticalLayout {
+        padding-left: Metrics.card-pad;
+        padding-right: Metrics.card-pad;
+        padding-top: Metrics.card-pad * 0.5;
+        padding-bottom: Metrics.card-pad * 0.5;
+        for r in rows: HorizontalLayout {
+            spacing: Metrics.card-pad * 0.6;
+            height: Metrics.t-primary * 2.1;
+            Text {
+                text: r.label;
+                color: Theme.muted;
+                font-size: Metrics.t-secondary;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+            Text {
+                text: r.value;
+                color: Theme.text;
+                font-size: Metrics.t-secondary;
+                font-weight: 600;
+                horizontal-alignment: right;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+                min-width: 0px;
+            }
+        }
+    }
+}
+
 export component WifiScreen inherits Rectangle {
     /// False until the daemon has answered once. Nothing below states a fact
     /// about the radio while this is false.
     in property <bool> known;
     in property <bool> present;
     in property <bool> powered;
-    in property <string> summary;
-    in property <[WifiRow]> networks;
-    in property <int> index;
     in property <bool> busy;
-    /// Busy *with a scan*, as opposed to a join or a power switch.
-    in property <bool> scanning;
     in property <string> notice;
     in property <VitalsModel> vitals;
 
-    // "list" | "password"
+    // "list" | "saved" | "details" | "password"
     in property <string> face;
+    // The list face and "Kayıtlı ağlar".
+    in property <string> title;
+    in property <[WifiRow]> rows;
+    in property <int> focus-flats;
+    in property <int> focus-talls;
+    in property <int> focus-notes;
+    in property <int> focus-heads;
+    in property <bool> focus-tall;
+    // A network's page.
+    in property <string> details-status;
+    in property <[string]> buttons;
+    in property <int> button;
+    in property <[InfoLine]> facts;
+    in property <[InfoLine]> net-facts;
+    // The password dialog, and "Ağ ekleyin".
     in property <string> target;
+    in property <bool> adding;
+    in property <string> ssid-text;
+    in property <bool> secure;
     in property <string> password-mask;
     in property <bool> show;
-    // "field" | "keys" | "join"
+    // "ssid" | "security" | "field" | "show" | "keys" | "join"
     in property <string> focus-at;
     in property <[KeyRow]> keys;
     in property <int> key-row;
@@ -196,25 +341,26 @@ export component WifiScreen inherits Rectangle {
 
     property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
     property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
-    property <length> step: Metrics.set-h-flat + Metrics.row-gap;
-    property <length> lead: step * 2 + Metrics.header-h;
+    property <length> flat-step: Metrics.set-h-flat + Metrics.row-gap;
+    property <length> tall-step: Metrics.set-h + Metrics.row-gap;
+    property <length> note-step: Metrics.t-secondary * 2.4;
 
     background: Theme.s-ground;
     clip: true;
 
-    if face == "list": Frame {
+    if face == "list" || face == "saved": Frame {
         width: 100%;
         height: 100%;
         page: "Wi-Fi";
         page-icon: "wifi";
-        title: "Wi-Fi";
-        blurb: notice != "" ? notice : summary;
+        title: root.title;
+        blurb: notice;
         vitals: root.vitals;
 
         Rectangle {
             property <length> pad: Metrics.glow-w * 3;
-            property <length> focus-y: index < 2 ? index * step : lead + (index - 2) * step;
-            property <length> scroll: max(0px, focus-y + step + pad * 2 - self.height);
+            property <length> focus-y: focus-flats * flat-step + focus-talls * tall-step + focus-notes * note-step + focus-heads * Metrics.header-h;
+            property <length> scroll: max(0px, focus-y + (focus-tall ? tall-step : flat-step) + pad * 2 - self.height);
 
             x: Metrics.pane-x - pad;
             y: top - pad;
@@ -228,46 +374,120 @@ export component WifiScreen inherits Rectangle {
                 width: Metrics.list-w;
                 animate y { duration: Theme.t-row; easing: Theme.ease; }
 
-                SettingCard {
-                    y: 0;
+                for row in rows: Rectangle {
+                    y: row.flats * flat-step + row.talls * tall-step + row.notes * note-step + row.heads * Metrics.header-h;
                     width: 100%;
-                    label: "Wi-Fi";
-                    kind: "action";
-                    toggle: known && present ? (powered ? 1 : 0) : -1;
-                    value: !known ? "…" : (present ? "" : "Bu kartta yok");
-                    enabled: !known || present;
-                    focused: index == 0;
-                }
-                SettingCard {
-                    y: step;
-                    width: 100%;
-                    label: scanning ? "Aranıyor…" : "Ağları ara";
-                    kind: "action";
-                    enabled: !known || powered;
-                    focused: index == 1;
-                }
-                SectionHeader {
-                    y: step * 2;
-                    width: 100%;
-                    text: "Ağlar";
-                }
-                for row[i] in networks: RadioCard {
-                    y: lead + i * step;
-                    width: 100%;
-                    title: row.ssid;
-                    under: "";
-                    status: row.connected ? "Bağlı" : "";
-                    lock: row.secured;
-                    bars: row.bars;
-                    focused: index == i + 2;
-                }
-                if known && networks.length == 0 && !busy: Text {
-                    y: lead + Metrics.row-gap;
-                    text: powered ? "Ağ bulunamadı" : "Wi-Fi kapalı";
-                    color: Theme.muted;
-                    font-size: Metrics.t-secondary;
+                    height: row.kind == "header" ? Metrics.header-h
+                        : (row.kind == "note" ? note-step : (row.under != "" ? Metrics.set-h : Metrics.set-h-flat));
+
+                    // A group's title, small and grey, as the reference screen
+                    // draws it: "Kayıtlı ağlar", "Diğer ağlar" with "Yenile" or
+                    // the spinner at its right.
+                    if row.kind == "header": Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        Text {
+                            x: Metrics.card-pad * 0.4;
+                            y: parent.height - self.height - Metrics.row-gap * 0.5;
+                            text: row.label;
+                            color: Theme.muted;
+                            font-size: Metrics.t-secondary;
+                            font-weight: 600;
+                        }
+                        if row.tag != "" && !row.on: Rectangle {
+                            x: parent.width - self.width;
+                            y: parent.height - self.height - Metrics.row-gap * 0.2;
+                            width: refresh.preferred-width + Metrics.card-pad;
+                            height: Metrics.t-secondary * 1.9;
+                            border-radius: self.height / 2;
+                            background: row.focused ? Theme.s-card-hi : transparent;
+                            refresh := Text {
+                                text: row.tag;
+                                color: row.focused ? #ffffff : Theme.accent;
+                                font-size: Metrics.t-secondary;
+                                font-weight: 650;
+                            }
+                            FocusRing {
+                                width: 100%;
+                                height: 100%;
+                                radius: parent.height / 2;
+                                on: row.focused;
+                            }
+                        }
+                        // Measured off the reference recording: the ring is
+                        // about 1.7 times the heading's text, near white.
+                        if row.on: Spinner {
+                            x: parent.width - self.width - Metrics.card-pad * 0.5;
+                            y: parent.height - self.height - Metrics.row-gap * 0.1;
+                            size: Metrics.t-secondary * 1.7;
+                            ink: Theme.text;
+                        }
+                    }
+
+                    if row.kind == "toggle": SettingCard {
+                        width: 100%;
+                        label: row.label;
+                        kind: "action";
+                        toggle: known && present ? (row.on ? 1 : 0) : -1;
+                        value: !known ? "…" : (present ? "" : "Bu kartta yok");
+                        enabled: !known || present;
+                        focused: row.focused;
+                    }
+                    if row.kind == "card": RadioCard {
+                        width: 100%;
+                        height: parent.height;
+                        title: row.label;
+                        under: row.under;
+                        status: "";
+                        lock: row.secured;
+                        bars: row.bars;
+                        focused: row.focused;
+                        tag: row.tag;
+                        info: row.info;
+                        info-focused: row.info-focused;
+                    }
+                    if row.kind == "note": Text {
+                        x: Metrics.card-pad * 0.4;
+                        text: row.label;
+                        color: Theme.muted;
+                        font-size: Metrics.t-secondary;
+                        vertical-alignment: center;
+                    }
                 }
             }
+        }
+    }
+
+    // A network's page: WifiNetworkDetailsFragment's header, its buttons and
+    // its facts.
+    if face == "details": Frame {
+        width: 100%;
+        height: 100%;
+        page: "Wi-Fi";
+        page-icon: "wifi";
+        title: root.target;
+        blurb: notice != "" ? notice : details-status;
+        vitals: root.vitals;
+
+        VerticalLayout {
+            x: Metrics.pane-x;
+            y: top;
+            width: Metrics.list-w;
+            height: self.preferred-height;
+            spacing: Metrics.row-gap * 1.6;
+            alignment: start;
+
+            HorizontalLayout {
+                spacing: Metrics.row-gap * 1.2;
+                alignment: start;
+                for label[i] in buttons: ActionButton {
+                    label: label;
+                    focused: i == button;
+                }
+            }
+            if facts.length > 0: Facts { rows: facts; }
+            if net-facts.length > 0: SectionHeader { text: "Ağ ayrıntıları"; }
+            if net-facts.length > 0: Facts { rows: net-facts; }
         }
     }
 
@@ -305,16 +525,65 @@ export component WifiScreen inherits Rectangle {
             spacing: Metrics.vh * 0.014;
 
             Text {
-                text: target;
+                text: adding ? "Ağ ekleyin" : target;
                 color: Theme.text;
                 font-size: Metrics.root-font * 1.25;
                 font-weight: 700;
                 horizontal-alignment: center;
             }
 
+            // "Ağ adı" and "Güvenlik", as AddNetworkFragment asks them.
+            if adding: Rectangle {
+                height: Metrics.vh * 0.08;
+                border-radius: Theme.radius * 0.6;
+                background: focus-at == "ssid" ? Theme.focus-fill : #ffffff0f;
+                border-width: focus-at == "ssid" ? 2px : 1px;
+                border-color: focus-at == "ssid" ? Theme.focus-ring : Theme.line-soft;
+                HorizontalLayout {
+                    padding-left: Metrics.vh * 0.02;
+                    padding-right: Metrics.vh * 0.02;
+                    Text {
+                        vertical-alignment: center;
+                        text: ssid-text == "" ? "Ağ adı" : ssid-text;
+                        color: focus-at == "ssid"
+                            ? #0a0c10
+                            : (ssid-text == "" ? #ffffff66 : Theme.text);
+                        font-size: Metrics.root-font * 1.1;
+                        font-weight: 700;
+                    }
+                }
+            }
+            if adding: Rectangle {
+                height: Metrics.vh * 0.07;
+                border-radius: Theme.radius * 0.6;
+                background: focus-at == "security" ? Theme.focus-fill : #ffffff0f;
+                border-width: focus-at == "security" ? 2px : 1px;
+                border-color: focus-at == "security" ? Theme.focus-ring : Theme.line-soft;
+                HorizontalLayout {
+                    padding-left: Metrics.vh * 0.02;
+                    padding-right: Metrics.vh * 0.02;
+                    Text {
+                        vertical-alignment: center;
+                        text: "Güvenlik";
+                        color: focus-at == "security" ? #0a0c10 : Theme.muted;
+                        font-size: Metrics.root-font * 0.95;
+                        font-weight: 600;
+                    }
+                    Text {
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        horizontal-stretch: 1;
+                        text: secure ? "‹  WPA/WPA2/WPA3-Personal  ›" : "‹  Yok  ›";
+                        color: focus-at == "security" ? #0a0c10 : Theme.text;
+                        font-size: Metrics.root-font * 0.95;
+                        font-weight: 700;
+                    }
+                }
+            }
+
             // The field and, beside it, the switch that turns the bullets
             // back into letters. Right from the field reaches it.
-            HorizontalLayout {
+            if !adding || secure: HorizontalLayout {
                 spacing: Metrics.vh * 0.012;
                 height: Metrics.vh * 0.08;
 
@@ -329,7 +598,7 @@ export component WifiScreen inherits Rectangle {
                         padding-right: Metrics.vh * 0.02;
                         Text {
                             vertical-alignment: center;
-                            text: password-mask == "" ? "Parola" : password-mask;
+                            text: password-mask == "" ? "Şifre" : password-mask;
                             color: focus-at == "field"
                                 ? #0a0c10
                                 : (password-mask == "" ? #ffffff66 : Theme.text);
@@ -368,7 +637,7 @@ export component WifiScreen inherits Rectangle {
                 border-width: focus-at == "join" ? 2px : 1px;
                 border-color: focus-at == "join" ? Theme.focus-ring : Theme.line-soft;
                 Text {
-                    text: busy ? "Bağlanıyor…" : "Bağlan";
+                    text: busy ? "Bağlanıyor…" : (adding ? "Kaydet" : "Bağlan");
                     color: focus-at == "join" ? #0a0c10 : Theme.text;
                     font-size: Metrics.root-font * 1.05;
                     font-weight: 700;
