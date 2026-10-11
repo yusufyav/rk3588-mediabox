@@ -3,19 +3,6 @@
 Open items that were measured but not yet fixed. Each says what was seen,
 what was measured, and what was not established.
 
-## The patched bluez-alsa is not in the installer or the release
-
-The Bluetooth headset's dropouts next to a BLE keyboard were fixed partly by
-`patches/bluez-alsa/0001-a2dp-sbc-send-full-packets.patch` (measured: every
-A2DP packet full instead of 38-50 %; see `docs/bluetooth.md`). The patched
-packages (`4.3.1-3+mediabox1`) were built and installed by hand on the Plus.
-`install-mediabox.sh` and `deploy-mediabox-v3.sh` still install Debian's
-unpatched `bluez-alsa-utils` and `libasound2-plugin-bluez`, and
-`create-mediabox-release.sh` writes the golden board's package list -- with
-the `+mediabox1` version, which no apt source carries. Not established: what a
-clean install from such a release does with that line. Needed: build the two
-`.deb`s reproducibly, ship them with the release, install and hold them.
-
 ## A sink that comes back after a hot-plug can get no picture (HDMI 2.0 scrambling)
 
 **Seen** on the Plus, 2026-09-29, monitor on HDMI-A-1 at 2560x1440p144

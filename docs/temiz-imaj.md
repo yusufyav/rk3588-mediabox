@@ -219,6 +219,21 @@ Debian'ın açtığı `bluealsa-aplay.service`'i kapatır. `deploy-mediabox-v3.s
 aynısını yapar; release betiği paketleri golden karttan
 `meta/runtime-packages.txt`'ye yazar.
 
+Bu iki paket Debian'ınki değil, ürünün kendi derlemesidir
+(`4.3.1-3+mediabox1`, tek yama: dolu A2DP paketleri; bkz.
+[bluetooth.md](bluetooth.md#ses)). `scripts/build-bluez-alsa.sh` onları golden
+kartta derler, kurar, `apt-mark hold` ile sabitler ve `.deb`'leri
+`/opt/rk3588-mediabox/packages/bluez-alsa/` altına koyar; release bu dizini
+önekle birlikte taşır ve golden kartta yamalı sürüm ya da `.deb`'leri yoksa
+capture kapıda durur. Kurucu önce paket adlarını apt'den kurar, sonra
+arşivdeki `.deb`'leri kurup hold eder; deploy da önekte `.deb` varsa onları
+kurar, yoksa Debian'ınkini kurup uyarır.
+
+```bash
+dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\n' \
+  bluez-alsa-utils libasound2-plugin-bluez   # 4.3.1-3+mediabox1 hi
+```
+
 **Doğrulama:**
 
 ```bash

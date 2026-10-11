@@ -165,25 +165,29 @@ PCM tamponu bir MTU'luk çerçeveyle dolmadan kodlamaz. Sonuç (ölçüldü): t�
 paketler dolu (671 B), saniyede 62,6 paket, 42,0 kB/s. bluez-alsa 5.0.0'da
 aynı kod duruyor; yama yukarıya gönderilmedi.
 
-Paket Debian kaynağından cihazda derlenir:
+Paket golden kartta Debian kaynağından derlenir:
 
 ```sh
-apt-get source bluez-alsa            # 4.3.1-3, Debian trixie
-cd bluez-alsa-4.3.1
-patch -p1 < 0001-a2dp-sbc-send-full-packets.patch
-dch -v 4.3.1-3+mediabox1 "A2DP SBC source: send full packets only"
-apt-get build-dep -y bluez-alsa
-DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -uc -us
-apt-get install -y ../bluez-alsa-utils_4.3.1-3+mediabox1_*.deb \
-    ../libasound2-plugin-bluez_4.3.1-3+mediabox1_*.deb
-apt-mark hold bluez-alsa-utils libasound2-plugin-bluez
-systemctl restart bluealsa       # sonra kulaklık yeniden bağlanır
+MEDIABOX_HOST=<kart> scripts/build-bluez-alsa.sh
 ```
 
-Derleme bağımlılıkları (32 paket) derlemeden sonra kaldırılır; paket listesi
-derleme öncesiyle aynı kalmalıdır. **Açık iş:** `install-mediabox.sh`,
-`deploy-mediabox-v3.sh` ve `create-mediabox-release.sh` bu yamalı paketi henüz
-bilmez, Debian'ın yamasız paketini kurar (bkz. `docs/todo.md`).
+Betik Debian'ın `4.3.1-3` kaynak paketini indirir (kartta `deb-src` yoksa
+yalnız derleme için ekler), yamayı uygular, `4.3.1-3+mediabox1` olarak
+derler (`nocheck noddebs`), iki paketi kurup `apt-mark hold` ile sabitler ve
+`.deb`'leri `/opt/rk3588-mediabox/packages/bluez-alsa/` altına koyar. Derleme
+bağımlılıklarını kaldırır ve paket listesinin derleme öncesiyle aynı olduğunu
+denetler; değilse hata verir. Plus'ta 1 dk 21 sn sürdü; üretilen `bluealsa` ve
+ALSA eklentisi daha önce ölçülen yamalı dosyalarla birebir aynı (sha256).
+
+Dağıtım: release önekle birlikte `.deb`'leri taşır; golden kartta yamalı
+sürüm ya da onun `.deb`'leri yoksa capture kapıda durur. `install-mediabox.sh`
+paket adlarını apt'den kurduktan sonra arşivdeki `.deb`'leri kurup hold eder;
+`deploy-mediabox-v3.sh` önekte `.deb` varsa onları kurar, yoksa Debian'ınkini
+kurup uyarır. Denendi: Debian'ın `4.3.1-3`'ü kuruluyken kurucunun ve
+deploy'un bloğu `4.3.1-3+mediabox1 hi`'ye geçirdi; ikinci çalıştırma bir şey
+değiştirmedi. Hold, Debian'dan gelecek bir `4.3.1-4`'ün yamayı ezmesini
+engeller; Debian sürümü yükseltilecekse yama o sürüme karşı yeniden denenir
+(`MEDIABOX_BLUEZ_ALSA_DEBIAN_VERSION`).
 
 *Klavye 7,5 ms istiyordu.* ROG AZOTH bağlantı aralığını en az ve en çok 7,5 ms
 ister (bluez kaydında `MinInterval=MaxInterval=6`). Android çevre biriminin

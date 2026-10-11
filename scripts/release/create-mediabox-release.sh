@@ -490,6 +490,24 @@ fi
 bad="$(grep -cE '^(build-essential|gcc|g\+\+|rustc|cargo|cmake|meson|ninja-build|.*-dev)$' "$M/runtime-packages.txt" || true)"
 [ "$bad" -eq 0 ] && g "build packages in manifest ($bad)" PASS || g "build packages in manifest ($bad)" FAIL
 
+# And the Bluetooth headset's bluez-alsa is this product's build, carried in
+# the prefix, at the version the board runs (docs/bluetooth.md). Debian's
+# unpatched one starves a headset next to a BLE keyboard; a release without
+# the .debs would install exactly that on every clean board.
+ba_ver="$(dpkg-query -W -f='${Version}' bluez-alsa-utils 2>/dev/null || true)"
+ba_plugin="$(dpkg-query -W -f='${Version}' libasound2-plugin-bluez 2>/dev/null || true)"
+case "$ba_ver" in
+  *+mediabox*)
+    if [ "$ba_plugin" = "$ba_ver" ] \
+      && ls "$PREFIX/packages/bluez-alsa/bluez-alsa-utils_${ba_ver}_"*.deb >/dev/null 2>&1 \
+      && ls "$PREFIX/packages/bluez-alsa/libasound2-plugin-bluez_${ba_ver}_"*.deb >/dev/null 2>&1; then
+      g "bluez-alsa $ba_ver carried in the prefix" PASS
+    else
+      g "bluez-alsa $ba_ver installed but its .debs are not in $PREFIX/packages/bluez-alsa (plugin $ba_plugin)" FAIL
+    fi ;;
+  *) g "bluez-alsa ${ba_ver:-missing} is not this product's build (run scripts/build-bluez-alsa.sh)" FAIL ;;
+esac
+
 # And nothing staged, in a prefix that is supposed to be only what was installed.
 #
 # An accepted A/B candidate of Kodi was once copied over the production binary

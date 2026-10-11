@@ -254,6 +254,22 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
   || die "could not install the runtime packages this product depends on"
 ok "$(wc -l <"$pkgs") packages present"
 
+# bluez-alsa is this product's build, not Debian's: one patch, so a Bluetooth
+# headset is sent full A2DP packets and keeps its sound next to a BLE keyboard
+# (docs/bluetooth.md, scripts/build-bluez-alsa.sh). The release carries the two
+# .debs in the prefix; the names above installed Debian's, these replace them,
+# and the hold keeps an apt upgrade from putting the unpatched one back.
+ba_debs="$staging/rootfs$prefix/packages/bluez-alsa"
+if ls "$ba_debs"/bluez-alsa-utils_*.deb "$ba_debs"/libasound2-plugin-bluez_*.deb >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends --allow-downgrades \
+    "$ba_debs"/bluez-alsa-utils_*.deb "$ba_debs"/libasound2-plugin-bluez_*.deb >/dev/null \
+    || die "could not install this product's bluez-alsa"
+  apt-mark hold bluez-alsa-utils libasound2-plugin-bluez >/dev/null
+  ok "bluez-alsa $(dpkg-query -W -f='${Version}' bluez-alsa-utils) (held)"
+else
+  note "this release carries no bluez-alsa of its own; Debian's is in use"
+fi
+
 # ----------------------------------------------- 9. users and mutable state
 #
 # State is not product. The archive carries no logs, no sessions and no keys,

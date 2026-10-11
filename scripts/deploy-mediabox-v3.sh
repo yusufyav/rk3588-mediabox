@@ -328,9 +328,22 @@ sh_ "set -e
   install -D -m 0644 /var/tmp/60-mediabox-unrouted.conf /etc/alsa/conf.d/60-mediabox-unrouted.conf
   install -D -m 0644 /var/tmp/61-mediabox-volume.conf /etc/alsa/conf.d/61-mediabox-volume.conf
   install -D -m 0644 /var/tmp/62-mediabox-bluetooth.conf /etc/alsa/conf.d/62-mediabox-bluetooth.conf
-  # Bluetooth headphones (docs/bluetooth.md): bluez-alsa, a2dp-source only.
-  command -v bluealsa >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    --no-install-recommends bluez-alsa-utils libasound2-plugin-bluez >/dev/null
+  # Bluetooth headphones (docs/bluetooth.md): bluez-alsa, a2dp-source only --
+  # this product's build when scripts/build-bluez-alsa.sh has left it in the
+  # prefix, Debian's (with a warning) when it has not.
+  if ls $prefix/packages/bluez-alsa/bluez-alsa-utils_*.deb >/dev/null 2>&1; then
+    case \"\$(dpkg-query -W -f='\${Version}' bluez-alsa-utils 2>/dev/null)\" in
+      *+mediabox*) ;;
+      *) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends --allow-downgrades \
+           $prefix/packages/bluez-alsa/bluez-alsa-utils_*.deb \
+           $prefix/packages/bluez-alsa/libasound2-plugin-bluez_*.deb >/dev/null ;;
+    esac
+    apt-mark hold bluez-alsa-utils libasound2-plugin-bluez >/dev/null
+  else
+    command -v bluealsa >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      --no-install-recommends bluez-alsa-utils libasound2-plugin-bluez >/dev/null
+    echo 'WARNING: Debian bluez-alsa in use; run scripts/build-bluez-alsa.sh' >&2
+  fi
   install -D -m 0644 /var/tmp/10-mediabox.conf /etc/systemd/system/bluealsa.service.d/10-mediabox.conf
   systemctl daemon-reload
   systemctl disable --now bluealsa-aplay.service >/dev/null 2>&1 || true
