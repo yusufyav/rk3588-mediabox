@@ -276,6 +276,8 @@ async fn serve_events(
     // phone is put on the wire by the interface, and the question whether to
     // keep it is asked wherever somebody is looking.
     let mut output = state.output.subscribe();
+    // And sound the interface did not ask for: a headset's own volume.
+    let mut audio = state.audio.subscribe();
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\
@@ -305,6 +307,14 @@ async fn serve_events(
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return Ok(()),
             },
             next = output.recv() => match next {
+                Ok(event) => format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&event).expect("event JSON")
+                ),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+            },
+            next = audio.recv() => match next {
                 Ok(event) => format!(
                     "data: {}\n\n",
                     serde_json::to_string(&event).expect("event JSON")

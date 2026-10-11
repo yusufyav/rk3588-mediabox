@@ -20,6 +20,10 @@
 //! the same Short Audio Descriptors are read from the EDID of the connector
 //! the card is bound to, which is what the kernel builds the ELD from. Which
 //! of the two it was is part of the answer.
+//!
+//! A Bluetooth headset or speaker is `bluetooth:<address>`, listed by
+//! [`bluetooth_devices`] while bluez-alsa has an A2DP PCM for it -- that is,
+//! while it is connected with a profile that carries sound.
 
 use std::path::Path;
 
@@ -310,9 +314,88 @@ fn speakers(byte: u8) -> Vec<String> {
         .collect()
 }
 
+/// bluez-alsa's command line (Debian's `bluez-alsa-utils`).
+pub const BLUEALSA_CLI: &str = "/usr/bin/bluealsa-cli";
+/// Where bluez keeps what it knows of each paired device, its name included.
+const BLUEZ_STATE: &str = "/var/lib/bluetooth";
+
+/// Every Bluetooth device bluez-alsa can play to now: one A2DP PCM each.
+///
+/// Played through bluez-alsa's own ALSA plugin, `bluealsa:DEV=<address>`,
+/// which every player here opens like any other PCM. Nothing is listed when
+/// bluez-alsa is not installed or not running.
+pub fn bluetooth_devices() -> Vec<AudioDevice> {
+    if !Path::new(BLUEALSA_CLI).is_file() {
+        return Vec::new();
+    }
+    // Bounded: this is asked on the way to starting a player.
+    let Ok(output) = std::process::Command::new("/usr/bin/timeout")
+        .args(["2", BLUEALSA_CLI, "list-pcms"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    a2dp_addresses(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .map(|address| {
+            let name = bluez_name(&address).unwrap_or_else(|| "Bluetooth".into());
+            AudioDevice {
+                id: format!("bluetooth:{address}"),
+                label: name,
+                kind: AudioKind::Bluetooth,
+                card_id: "bluealsa".into(),
+                card_index: None,
+                pcm: format!("bluealsa:DEV={address},PROFILE=a2dp"),
+                bitstream: false,
+                connector: None,
+                display: false,
+                sink: None,
+            }
+        })
+        .collect()
+}
+
+/// The addresses of the playback A2DP PCMs in `bluealsa-cli list-pcms`:
+/// `/org/bluealsa/hci0/dev_20_AF_1B_19_E8_D2/a2dpsrc/sink`.
+pub fn a2dp_addresses(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.trim().split('/');
+        let Some(device) = parts.find(|part| part.starts_with("dev_")) else { continue };
+        if parts.next() != Some("a2dpsrc") {
+            continue;
+        }
+        let address = device.trim_start_matches("dev_").replace('_', ":");
+        if address.len() == 17 && !found.contains(&address) {
+            found.push(address);
+        }
+    }
+    found
+}
+
+/// The name bluez stored for a paired device.
+fn bluez_name(address: &str) -> Option<String> {
+    sorted_children(Path::new(BLUEZ_STATE)).iter().find_map(|controller| {
+        let info = std::fs::read_to_string(controller.join(address).join("info")).ok()?;
+        info.lines()
+            .find_map(|line| line.strip_prefix("Name="))
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_headset_is_found_by_its_a2dp_pcm() {
+        // `bluealsa-cli list-pcms` on the Plus, a second line of another
+        // profile added.
+        let text = "/org/bluealsa/hci0/dev_20_AF_1B_19_E8_D2/a2dpsrc/sink\n/org/bluealsa/hci0/dev_11_22_33_44_55_66/hfpag/sink\n";
+        assert_eq!(a2dp_addresses(text), vec!["20:AF:1B:19:E8:D2".to_string()]);
+        assert!(a2dp_addresses("").is_empty());
+    }
     use mediabox_core::AudioCodec;
 
     /// The Sony KD-65XE9005 the Plus is measured on, read off HDMI-A-2 on

@@ -282,6 +282,8 @@ struct App {
     account_focus: i32,
     /// The Wi-Fi screen's status poll is scheduled.
     wifi_polling: bool,
+    /// The Bluetooth screen's.
+    bt_polling: bool,
 }
 
 impl App {
@@ -680,6 +682,20 @@ impl App {
             bitstream,
         });
         self.paint_volume();
+    }
+
+    /// The volume moved from somewhere else -- a Bluetooth headset's own
+    /// buttons: kept as the level now, and shown as a key on the remote
+    /// would show it.
+    fn audio_event(&mut self, event: mediabox_core::AudioEvent) {
+        let mediabox_core::AudioEvent::Volume { volume, muted } = event;
+        if let Some(status) = self.status.as_mut().and_then(|status| status.get_mut("audio"))
+            && let Some(setting) = status.get_mut("setting")
+        {
+            setting["volume"] = volume.into();
+            setting["muted"] = muted.into();
+        }
+        self.show_volume(volume, muted, false);
     }
 
     /// A volume key: the indicator moves at once, from the level last known,
@@ -3085,8 +3101,11 @@ impl App {
     }
 
     /// The daemon's account of sound, or its refusal in its own words.
-    fn audio_answered(&mut self, answer: Result<Value, String>, announce: bool) {
+    fn audio_answered(&mut self, answer: Result<Value, String>, announce: bool, ticket: u64) {
         match answer {
+            // An answer overtaken by a later request: the level it carries is
+            // one the presses after it have already moved on from.
+            Ok(_) if ticket != AUDIO_SENT.load(std::sync::atomic::Ordering::SeqCst) => return,
             Ok(audio) => {
                 self.settings.audio.answered();
                 if announce && let Ok(status) = serde_json::from_value::<mediabox_core::AudioStatus>(audio.clone()) {
@@ -3622,21 +3641,23 @@ impl App {
                 self.paint();
                 spawn_wifi(WifiCommand::Forget(ssid));
             }
-            PeerOp::BtConnect(address) => self.bt_command("Bağlanıyor…", BtCommand::Connect(address)),
+            PeerOp::BtConnect(address) => self.bt_do(screens::wireless::BtOp::Connect, address),
             PeerOp::BtDisconnect(address) => {
-                self.bt_command("Bağlantı kesiliyor…", BtCommand::Disconnect(address))
+                self.bt_do(screens::wireless::BtOp::Disconnect, address)
             }
-            PeerOp::BtForget(address) => {
-                self.bt_command("Eşleşme kaldırılıyor…", BtCommand::Forget(address))
-            }
+            PeerOp::BtForget(address) => self.bt_do(screens::wireless::BtOp::Forget, address),
         }
     }
 
-    fn bt_command(&mut self, notice: &str, command: BtCommand) {
-        self.bt.busy = true;
-        self.bt.notice = notice.into();
+    /// A verb on one device. Its row says what is happening until the
+    /// answer to this very request comes back.
+    fn bt_do(&mut self, op: screens::wireless::BtOp, address: String) {
+        if self.bt.pending.contains_key(&address) {
+            return;
+        }
+        self.bt.begin(op, &address);
         self.paint();
-        spawn_bt(command);
+        spawn_bt(BtCommand::Do(op, address));
     }
 
     /// Join the network the password face is for.
@@ -3674,52 +3695,50 @@ impl App {
                 self.bt.step(dy);
                 self.paint();
             }
-            Intent::Select => {
-                if self.bt.busy {
-                    return;
+            Intent::Select => match self.bt.press() {
+                BtPress::Power(on) => {
+                    self.bt.busy = true;
+                    self.bt.notice = if on { "Açılıyor…" } else { "Kapatılıyor…" }.into();
+                    self.paint();
+                    spawn_bt(BtCommand::Power(on));
                 }
-                let Some(address) = self.bt.highlighted().map(|d| d.address.clone()) else {
-                    // The two head rows carry no address.
-                    match self.bt.press() {
-                        BtPress::Scan => {
-                            self.bt.busy = true;
-                            self.bt.notice = "Aygıtlar aranıyor…".into();
-                            self.paint();
-                            spawn_bt(BtCommand::Scan);
-                        }
-                        BtPress::Power(on) => {
-                            self.bt.busy = true;
-                            self.bt.notice =
-                                if on { "Açılıyor…" } else { "Kapatılıyor…" }.into();
-                            self.paint();
-                            spawn_bt(BtCommand::Power(on));
-                        }
-                        _ => {}
-                    }
-                    return;
-                };
-                let command = match self.bt.press() {
-                    BtPress::Pair => {
-                        self.bt.notice = "Eşleştiriliyor…".into();
-                        BtCommand::Pair(address)
-                    }
-                    BtPress::Connect => {
-                        self.bt.notice = "Bağlanıyor…".into();
-                        BtCommand::Connect(address)
-                    }
-                    BtPress::Disconnect => {
-                        self.bt.notice = "Bağlantı kesiliyor…".into();
-                        BtCommand::Disconnect(address)
-                    }
-                    _ => return,
-                };
-                self.bt.busy = true;
-                self.paint();
-                spawn_bt(command);
-            }
+                BtPress::Scan => {
+                    self.bt.begin_scan();
+                    self.paint();
+                    spawn_bt(BtCommand::Scan);
+                }
+                BtPress::Do(op, address) => self.bt_do(op, address),
+                BtPress::Menu => {
+                    self.open_bt_menu();
+                }
+                BtPress::None => {}
+            },
             Intent::Dismiss => self.back(),
             _ => {}
         }
+    }
+
+    /// The Bluetooth screen looks every [`BT_POLL`] while it is open; once it
+    /// is not, a search it started is ended rather than left to run out.
+    fn poll_bt_soon(&mut self) {
+        if self.bt_polling {
+            return;
+        }
+        self.bt_polling = true;
+        slint::Timer::single_shot(BT_POLL, || {
+            with_app(|app| {
+                app.bt_polling = false;
+                if app.route() == Route::Bluetooth {
+                    if !app.bt.busy {
+                        spawn_bt(BtCommand::Status);
+                    }
+                    app.poll_bt_soon();
+                } else if app.bt.scanning {
+                    app.bt.scanning = false;
+                    spawn_bt(BtCommand::StopScan);
+                }
+            })
+        });
     }
 
     /// An answer from the daemon about the Wi-Fi radio.
@@ -3854,15 +3873,12 @@ impl App {
         self.paint();
     }
 
-    fn bt_answer(&mut self, answer: Result<serde_json::Value, String>) {
-        self.bt.busy = false;
-        match answer {
-            Ok(value) => {
-                self.bt.notice.clear();
-                self.bt.take_status(&value);
-            }
-            Err(error) => self.bt.notice = error,
-        }
+    fn bt_answer(
+        &mut self,
+        answer: Result<serde_json::Value, String>,
+        reply: screens::wireless::BtReply,
+    ) {
+        self.bt.take_answer(answer, &reply);
         self.paint();
     }
 
@@ -3899,6 +3915,7 @@ impl App {
                 tag: if saved_list { "".into() } else { network.tag().into() },
                 info: !saved_list,
                 info_focused: false,
+                icon: "".into(),
                 flats: 0,
                 talls: 0,
                 notes: 0,
@@ -3996,22 +4013,8 @@ impl App {
                 }
             }
         }
-        let (mut flats, mut talls, mut notes, mut heads) = (0, 0, 0, 0);
-        for row in &mut rows {
-            row.flats = flats;
-            row.talls = talls;
-            row.notes = notes;
-            row.heads = heads;
-            let tall = !row.under.is_empty();
-            if row.focused {
-                focus = (flats, talls, notes, heads, tall);
-            }
-            match (row.kind.as_str(), tall) {
-                ("note", _) => notes += 1,
-                ("header", _) => heads += 1,
-                (_, true) => talls += 1,
-                (_, false) => flats += 1,
-            }
+        if let Some(at) = place_rows(&mut rows) {
+            focus = at;
         }
         window.set_wifi_focus_flats(focus.0);
         window.set_wifi_focus_talls(focus.1);
@@ -4101,29 +4104,64 @@ impl App {
         window.set_wifi_keys(key_rows(&wifi.keys));
     }
 
+    /// The Bluetooth list, drawn with the Wi-Fi list's rows.
     fn paint_bluetooth(&mut self, window: &MediaBoxWindow) {
+        use screens::wireless::BtLine;
         let bt = &self.bt;
         window.set_bt_known(bt.known);
         window.set_bt_present(bt.present);
-        window.set_bt_powered(bt.powered);
-        window.set_bt_index(bt.index as i32);
-        window.set_bt_busy(bt.busy);
         window.set_bt_notice(bt.notice.clone().into());
-        window.set_bt_summary(
-            bt.summary().into(),
-        );
-        window.set_bt_devices(slint::ModelRc::new(slint::VecModel::from(
-            bt.rows_view()
-                .into_iter()
-                .map(|row| BtRow {
-                    name: row.name.into(),
-                    under: row.under.into(),
-                    connected: row.connected,
-                    header: row.header.into(),
-                    n_header: row.n_header as i32,
-                })
-                .collect::<Vec<_>>(),
-        )));
+        window.set_bt_summary(bt.summary().into());
+        let focused = bt.focused_row();
+        let mut rows: Vec<WifiRow> = Vec::new();
+        for row in bt.rows() {
+            let here = focused.as_ref() == Some(&row);
+            rows.push(match &row {
+                BtLine::Toggle => WifiRow {
+                    kind: "toggle".into(),
+                    label: "Bluetooth".into(),
+                    on: bt.powered,
+                    focused: here,
+                    bars: -1,
+                    ..Default::default()
+                },
+                BtLine::Note(text) | BtLine::Header(text) => WifiRow {
+                    kind: if matches!(row, BtLine::Note(_)) { "note" } else { "header" }.into(),
+                    label: (*text).into(),
+                    bars: -1,
+                    ..Default::default()
+                },
+                BtLine::Available => WifiRow {
+                    kind: "header".into(),
+                    label: "Kullanılabilir cihazlar".into(),
+                    tag: "Yenile".into(),
+                    on: bt.scanning,
+                    focused: here,
+                    bars: -1,
+                    ..Default::default()
+                },
+                BtLine::Device(address) => match bt.device(address) {
+                    Some(device) => WifiRow {
+                        kind: "card".into(),
+                        label: device.title().into(),
+                        under: bt.under(device).into(),
+                        icon: device.glyph().into(),
+                        on: device.connected,
+                        focused: here,
+                        bars: -1,
+                        ..Default::default()
+                    },
+                    None => continue,
+                },
+            });
+        }
+        let focus = place_rows(&mut rows).unwrap_or_default();
+        window.set_bt_focus_flats(focus.0);
+        window.set_bt_focus_talls(focus.1);
+        window.set_bt_focus_notes(focus.2);
+        window.set_bt_focus_heads(focus.3);
+        window.set_bt_focus_tall(focus.4);
+        window.set_bt_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
     }
 
     /// The one place a settings decision leaves this process.
@@ -4155,8 +4193,13 @@ impl App {
             Action::OpenBluetooth => {
                 self.bt.open();
                 self.open(Route::Bluetooth);
-                self.bt.busy = true;
-                spawn_bt(BtCommand::Refresh);
+                // As the Wi-Fi screen: what bluez knows at once, then one
+                // search, as Android's pairing page starts one on opening.
+                if self.bt.powered {
+                    self.bt.begin_scan();
+                }
+                spawn_bt(BtCommand::Open);
+                self.poll_bt_soon();
             }
             Action::OpenDiagnostics => {
                 self.diagnostics.compose(
@@ -6099,6 +6142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         resume: session::read(state_file()),
         account_focus: 0,
         wifi_polling: false,
+        bt_polling: false,
     }));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
     // The earlier searches outlive the process, as they do in the reference.
@@ -6338,13 +6382,13 @@ enum WifiReply {
 }
 
 enum BtCommand {
-    Refresh,
+    /// A look, then a search if the radio is on.
+    Open,
+    Status,
     Scan,
+    StopScan,
     Power(bool),
-    Pair(String),
-    Connect(String),
-    Disconnect(String),
-    Forget(String),
+    Do(screens::wireless::BtOp, String),
 }
 
 /// Ask the daemon about the Wi-Fi radio.
@@ -6392,22 +6436,70 @@ fn spawn_wifi(command: WifiCommand) {
 }
 
 fn spawn_bt(command: BtCommand) {
+    use screens::wireless::{BtOp, BtReply};
     detached("mediabox-tv-bluetooth", async move {
         let client = rpc::Client::new(socket_path());
-        let answer = match command {
-            BtCommand::Refresh => client.bluetooth_status().await,
-            BtCommand::Scan => client.bluetooth_scan().await,
-            BtCommand::Power(on) => client.bluetooth_power(on).await,
-            BtCommand::Pair(address) => client.bluetooth_pair(&address).await,
-            BtCommand::Connect(address) => client.bluetooth_connect(&address).await,
-            BtCommand::Disconnect(address) => client.bluetooth_disconnect(&address).await,
-            BtCommand::Forget(address) => client.bluetooth_remove(&address).await,
+        let deliver = |answer: rpc::Result<serde_json::Value>, reply: BtReply| {
+            let answer = answer.map_err(|error| error.to_string());
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| app.bt_answer(answer, reply));
+            });
         };
-        let answer = answer.map_err(|error| error.to_string());
-        let _ = slint::invoke_from_event_loop(move || {
-            with_app(|app| app.bt_answer(answer));
-        });
+        match command {
+            BtCommand::Open => {
+                let status = client.bluetooth_status().await;
+                let powered = status.as_ref().is_ok_and(|value| {
+                    value.pointer("/controller/powered") == Some(&serde_json::Value::Bool(true))
+                });
+                deliver(status, BtReply::Status);
+                // Answered even when there is nothing to search with, so the
+                // spinner the opening started does not wait on it.
+                let search = if powered {
+                    client.bluetooth_scan(false).await
+                } else {
+                    client.bluetooth_status().await
+                };
+                deliver(search, BtReply::Scan);
+            }
+            BtCommand::Status => deliver(client.bluetooth_status().await, BtReply::Status),
+            BtCommand::Scan => deliver(client.bluetooth_scan(false).await, BtReply::Scan),
+            BtCommand::StopScan => deliver(client.bluetooth_scan(true).await, BtReply::Status),
+            BtCommand::Power(on) => deliver(client.bluetooth_power(on).await, BtReply::Power),
+            BtCommand::Do(op, address) => {
+                let answer = match op {
+                    BtOp::Pair => client.bluetooth_pair(&address).await,
+                    BtOp::Connect => client.bluetooth_connect(&address).await,
+                    BtOp::Disconnect => client.bluetooth_disconnect(&address).await,
+                    BtOp::Forget => client.bluetooth_remove(&address).await,
+                };
+                deliver(answer, BtReply::Done(address, op));
+            }
+        }
     });
+}
+
+/// Place each row by how many rows of each height come before it, as both
+/// radio lists are drawn; the focused row's counts, if one is focused.
+fn place_rows(rows: &mut [WifiRow]) -> Option<(i32, i32, i32, i32, bool)> {
+    let (mut flats, mut talls, mut notes, mut heads) = (0, 0, 0, 0);
+    let mut focus = None;
+    for row in rows {
+        row.flats = flats;
+        row.talls = talls;
+        row.notes = notes;
+        row.heads = heads;
+        let tall = !row.under.is_empty();
+        if row.focused {
+            focus = Some((flats, talls, notes, heads, tall));
+        }
+        match (row.kind.as_str(), tall) {
+            ("note", _) => notes += 1,
+            ("header", _) => heads += 1,
+            (_, true) => talls += 1,
+            (_, false) => flats += 1,
+        }
+    }
+    focus
 }
 
 fn detached(name: &str, work: impl std::future::Future<Output = ()> + Send + 'static) {
@@ -6774,6 +6866,10 @@ const DISCOVER_BLUR_WIDTH: u32 = 48;
 const OK_HOLD: Duration = Duration::from_millis(500);
 /// How often the open Wi-Fi screen asks after the link.
 const WIFI_POLL: Duration = Duration::from_secs(3);
+/// How often the open Bluetooth screen looks: what a search hears reaches the
+/// list at this pace, and a device that connects by itself -- a remote woken
+/// by a key -- says "Bağlı" without the page being opened again.
+const BT_POLL: Duration = Duration::from_secs(2);
 /// A held key the remote has stopped repeating and never released: taken as
 /// let go, so one lost release does not swallow every press after it.
 const OK_HOLD_LOST: Duration = Duration::from_millis(1500);
@@ -7228,18 +7324,61 @@ fn spawn_ethernet(request: mediabox_core::Request) {
 }
 
 /// One call about sound; the answer comes back to the event loop.
+/// The number of the last sound request sent: only its answer is drawn.
+static AUDIO_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ask the daemon about sound, one request at a time and in the order asked.
+///
+/// A held volume key repeats sixteen to twenty-four times a second. Each press
+/// used to go out on a thread of its own, the answers came back in any order,
+/// and each put its own level on the indicator: it jumped back and forth while
+/// the key was held. As Android's AudioService takes volume keys on one
+/// handler, in order, these go through one queue, and the indicator takes only
+/// the answer to the last one sent -- the level the presses before it led to.
 fn spawn_audio(request: mediabox_core::Request) {
-    let announce = matches!(request, mediabox_core::Request::AudioVolume { .. });
-    detached("mediabox-tv-audio", async move {
-        let client = rpc::Client::new(socket_path());
-        let answer = client.request(&request).await.map_err(|error| {
-            eprintln!("mediabox-tv.audio {request:?} failed: {error}");
-            error.to_string()
+    static QUEUE: std::sync::OnceLock<std::sync::mpsc::Sender<(mediabox_core::Request, u64)>> =
+        std::sync::OnceLock::new();
+    let ticket = AUDIO_SENT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let queue = QUEUE.get_or_init(|| {
+        let (send, receive) = std::sync::mpsc::channel::<(mediabox_core::Request, u64)>();
+        detached("mediabox-tv-audio", async move {
+            let client = rpc::Client::new(socket_path());
+            let mut held = None;
+            while let Some((mut request, mut ticket)) = held.take().or_else(|| receive.recv().ok()) {
+                // Steps waiting behind this one in the same direction go as
+                // one: each costs the daemon a round of device discovery
+                // (~90 ms measured on the Plus), and a held key's twenty sent
+                // one by one reached the level a second after the key was
+                // let go. Only the same direction: at the end of the range
+                // "up, up, down" is not the sum of its steps.
+                while let mediabox_core::Request::AudioVolume { step: Some(step), volume: None, muted: None, toggle_mute: false } = &mut request {
+                    match receive.try_recv() {
+                        Ok((mediabox_core::Request::AudioVolume { step: Some(next), volume: None, muted: None, toggle_mute: false }, later))
+                            if next.signum() == step.signum() =>
+                        {
+                            *step += next;
+                            ticket = later;
+                        }
+                        Ok(other) => {
+                            held = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let announce = matches!(request, mediabox_core::Request::AudioVolume { .. });
+                let answer = client.request(&request).await.map_err(|error| {
+                    eprintln!("mediabox-tv.audio {request:?} failed: {error}");
+                    error.to_string()
+                });
+                let _ = slint::invoke_from_event_loop(move || {
+                    with_app(|app| app.audio_answered(answer, announce, ticket));
+                });
+            }
         });
-        let _ = slint::invoke_from_event_loop(move || {
-            with_app(|app| app.audio_answered(answer, announce));
-        });
+        send
     });
+    let _ = queue.send((request, ticket));
 }
 
 fn spawn_output(request: mediabox_core::Request) {
@@ -7575,6 +7714,12 @@ fn deliver(line: &str) {
     if let Ok(event) = serde_json::from_str::<mediabox_core::OutputEvent>(payload) {
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.output_event(event));
+        });
+        return;
+    }
+    if let Ok(event) = serde_json::from_str::<mediabox_core::AudioEvent>(payload) {
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.audio_event(event));
         });
         return;
     }

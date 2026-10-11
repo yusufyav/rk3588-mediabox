@@ -93,8 +93,13 @@ esac
 audio=""
 platform=/opt/rk3588-mediabox/bin/mediabox-platform
 audio_volume_pcm=""
+audio_kind=card
 [ -x "$platform" ] && eval "$("$platform" audio-shell 2>/dev/null)" || true
-if [ -n "$audio_volume_pcm" ] && [ -f /etc/alsa/conf.d/61-mediabox-volume.conf ]; then
+if [ "$audio_kind" = bluetooth ] && [ -f /etc/alsa/conf.d/62-mediabox-bluetooth.conf ]; then
+  # A headset connected when the browser starts. Chromium keeps the device it
+  # opened, so one connected later is heard from the next start.
+  audio="--alsa-output-device=mediabox_bluetooth"
+elif [ -n "$audio_volume_pcm" ] && [ -f /etc/alsa/conf.d/61-mediabox-volume.conf ]; then
   audio="--alsa-output-device=$audio_volume_pcm"
 elif [ -x "$platform" ]; then
   card="$("$platform" alsa-card 2>/dev/null || true)"

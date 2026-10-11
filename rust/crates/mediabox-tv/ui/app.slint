@@ -16,7 +16,7 @@ import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit
 import { EthernetView } from "ethernet.slint";
 import { AudioView, AudioCard } from "audio.slint";
 import { Account } from "account.slint";
-import { WifiScreen, BluetoothScreen, WifiRow, BtRow } from "wireless.slint";
+import { WifiScreen, BluetoothScreen, WifiRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
 import { AccountChip } from "chrome.slint";
 export { AccountChip, CaptionStyle }
@@ -220,12 +220,14 @@ export component MediaBoxWindow inherits Window {
 
     in property <bool> bt-known;
     in property <bool> bt-present;
-    in property <bool> bt-powered;
     in property <string> bt-summary;
-    in property <[BtRow]> bt-devices;
-    in property <int> bt-index;
-    in property <bool> bt-busy;
     in property <string> bt-notice;
+    in property <[WifiRow]> bt-rows;
+    in property <int> bt-focus-flats;
+    in property <int> bt-focus-talls;
+    in property <int> bt-focus-notes;
+    in property <int> bt-focus-heads;
+    in property <bool> bt-focus-tall;
     in property <int> search-key-row;
     in property <int> search-key-col;
     in property <int> search-pane;
@@ -680,13 +682,15 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             known: root.bt-known;
             present: root.bt-present;
-            powered: root.bt-powered;
             summary: root.bt-summary;
             vitals: root.vitals;
-            devices: root.bt-devices;
-            index: root.bt-index;
-            busy: root.bt-busy;
             notice: root.bt-notice;
+            rows: root.bt-rows;
+            focus-flats: root.bt-focus-flats;
+            focus-talls: root.bt-focus-talls;
+            focus-notes: root.bt-focus-notes;
+            focus-heads: root.bt-focus-heads;
+            focus-tall: root.bt-focus-tall;
         }
 
         if screen == "account": Account {

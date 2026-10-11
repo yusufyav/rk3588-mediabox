@@ -94,6 +94,8 @@ packaging/udev/81-mediabox-display-hotplug.rules	etc/udev/rules.d/81-mediabox-di
 config/sway-browser.conf	etc/mediabox/sway-browser.conf
 config/alsa/60-mediabox-unrouted.conf	etc/alsa/conf.d/60-mediabox-unrouted.conf
 config/alsa/61-mediabox-volume.conf	etc/alsa/conf.d/61-mediabox-volume.conf
+config/alsa/62-mediabox-bluetooth.conf	etc/alsa/conf.d/62-mediabox-bluetooth.conf
+packaging/systemd/bluealsa.service.d/10-mediabox.conf	etc/systemd/system/bluealsa.service.d/10-mediabox.conf
 config/mediabox-applications.json	etc/mediabox-applications.json
 config/mediabox-library.json	etc/mediabox-library.json
 packaging/chromium-policies.json	etc/chromium/policies/managed/mediabox.json
@@ -311,9 +313,15 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   # even fails with 203/EXEC when it is missing, because its ExecStartPre is
   # /usr/sbin/rfkill. The firmware, the patchram tool and that unit come from
   # the board's BSP and are already on a clean image; these two are not.
-  for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode fc-list fc-match bluetoothctl btattach rfkill; do
+  for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode fc-list fc-match bluetoothctl btattach rfkill bluealsa bluealsa-cli; do
     p="$(command -v "$c" 2>/dev/null)" || continue
     dpkg-query -S "$(readlink -f "$p")" 2>/dev/null | cut -d: -f1
+  done | tr ',' '\n' | tr -d ' '
+  # Bluetooth sound (docs/bluetooth.md): bluez-alsa's daemon and its command
+  # line above, and its ALSA plugin here, which alsa-lib loads by name when a
+  # player opens `mediabox_bluetooth` -- nothing links it, so no closure does.
+  for f in /usr/lib/*/alsa-lib/libasound_module_pcm_bluealsa.so; do
+    [ -e "$f" ] && dpkg-query -S "$f" 2>/dev/null | cut -d: -f1
   done | tr ',' '\n' | tr -d ' '
 
   # The fonts the interface actually draws with.

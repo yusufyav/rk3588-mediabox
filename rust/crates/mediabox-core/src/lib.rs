@@ -17,7 +17,7 @@ pub use output::{
     StoredSetting,
 };
 pub use audio::{
-    AUDIO_SETTING_SCHEMA, Ac3Encode, AudioCodec, AudioDevice, AudioDeviceChoice, AudioKind,
+    AUDIO_SETTING_SCHEMA, Ac3Encode, AudioCodec, AudioDevice, AudioDeviceChoice, AudioEvent, AudioKind,
     AudioMode, AudioPlan, AudioSetting, AudioStatus, CapsSource, SadEntry, SinkAudio, StreamAudio,
 };
 pub use cadence::{Cadence, CadenceFit};
@@ -1712,7 +1712,12 @@ pub enum Request {
     },
 
     BluetoothStatus,
-    BluetoothScan,
+    /// Start a search, answering once it runs; with `stop`, end it. Absent
+    /// is a start, as the request always was.
+    BluetoothScan {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stop: bool,
+    },
     BluetoothPower {
         on: bool,
     },

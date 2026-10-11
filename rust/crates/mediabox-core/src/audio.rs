@@ -169,6 +169,8 @@ pub enum AudioKind {
     DisplayPort,
     Usb,
     Analog,
+    /// An A2DP headset or speaker, through bluez-alsa.
+    Bluetooth,
     Other,
 }
 
@@ -179,6 +181,7 @@ impl AudioKind {
             AudioKind::DisplayPort => "DisplayPort",
             AudioKind::Usb => "USB",
             AudioKind::Analog => "Analog",
+            AudioKind::Bluetooth => "Bluetooth",
             AudioKind::Other => "Ses kartı",
         }
     }
@@ -382,11 +385,23 @@ pub fn check(setting: &AudioSetting, devices: &[AudioDevice], previous: &AudioSe
 
 /// The device a choice resolves to among those found now: the chosen one
 /// when it is there, the display's own otherwise.
+///
+/// "Otomatik" is a connected Bluetooth headset or speaker before the
+/// display: media follows an A2DP device the moment it connects and comes
+/// back when it leaves. A device chosen by hand is kept while it is there --
+/// HDMI chosen stays HDMI with a headset connected; the headset is chosen
+/// from the list, or by "Otomatik". The owner's decision (2026-10-11), over
+/// Android's rule that a headset overrides any choice.
 pub fn resolve<'a>(choice: &AudioDeviceChoice, devices: &'a [AudioDevice]) -> Option<&'a AudioDevice> {
     let display = || devices.iter().find(|device| device.display);
+    let headset = || devices.iter().find(|device| device.kind == AudioKind::Bluetooth);
     match choice {
-        AudioDeviceChoice::Auto => display(),
-        AudioDeviceChoice::Device { id } => devices.iter().find(|device| &device.id == id).or_else(display),
+        AudioDeviceChoice::Auto => headset().or_else(display),
+        AudioDeviceChoice::Device { id } => devices
+            .iter()
+            .find(|device| &device.id == id)
+            .or_else(headset)
+            .or_else(display),
     }
 }
 
@@ -458,6 +473,17 @@ impl AudioPlan {
         !self.passthrough.is_empty() || self.ac3_encode.is_some()
     }
 
+    /// The software gain a player applies. A Bluetooth headset applies the
+    /// volume itself (AVRCP absolute volume, set by the daemon), so a player
+    /// in front of it stays at full: applying it in both places halved it
+    /// twice -- 50 heard as 25.
+    pub fn player_volume(&self) -> u8 {
+        match &self.device {
+            Some(device) if device.kind == AudioKind::Bluetooth => 100,
+            _ => self.volume,
+        }
+    }
+
     /// mpv's `audio-device` for this plan.
     pub fn mpv_device(&self) -> String {
         match &self.device {
@@ -501,7 +527,7 @@ impl AudioPlan {
         if self.ac3_encode.is_some() {
             args.push(format!("--af={}", self.mpv_af()));
         }
-        args.push(format!("--volume={}", self.volume));
+        args.push(format!("--volume={}", self.player_volume()));
         args.push(format!("--mute={}", if self.muted { "yes" } else { "no" }));
         args
     }
@@ -514,7 +540,12 @@ pub fn plan(setting: &AudioSetting, devices: &[AudioDevice]) -> AudioPlan {
     let fallback = matches!(&setting.device, AudioDeviceChoice::Device { id }
         if !devices.iter().any(|device| &device.id == id));
     if fallback {
-        notes.push("Seçilen cihaz takılı değil; ekranın sesi kullanılıyor.".into());
+        notes.push(match device.as_ref() {
+            Some(device) if device.kind == AudioKind::Bluetooth => {
+                format!("Seçilen cihaz takılı değil; {} kullanılıyor.", device.label)
+            }
+            _ => "Seçilen cihaz takılı değil; ekranın sesi kullanılıyor.".into(),
+        });
     }
     if device.is_none() {
         notes.push("Sesin gideceği bir cihaz yok; ses gönderilmiyor.".into());
@@ -643,6 +674,30 @@ impl StreamAudio {
     }
 }
 
+/// Something about sound the interface did not ask for and should show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "audio", rename_all = "snake_case")]
+pub enum AudioEvent {
+    /// The volume moved from somewhere else -- a Bluetooth headset's own
+    /// buttons -- and is now this. The indicator comes up for it as for a
+    /// key on the remote.
+    Volume { volume: u8, muted: bool },
+}
+
+/// A volume on bluez's AVRCP scale (0-127) as this box's (0-100).
+///
+/// With [`to_avrcp`] it is a round trip that comes back to where it started
+/// for every level here, so a level written to a headset and reported back
+/// by it is the level it was and does not move the setting again.
+pub fn from_avrcp(level: u8) -> u8 {
+    ((u16::from(level.min(127)) * 100 + 63) / 127) as u8
+}
+
+/// This box's volume (0-100) on bluez's AVRCP scale (0-127).
+pub fn to_avrcp(volume: u8) -> u8 {
+    ((u16::from(volume.min(100)) * 127 + 50) / 100) as u8
+}
+
 /// The sound, as the daemon knows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioStatus {
@@ -716,6 +771,84 @@ mod tests {
             display: false,
             sink: None,
         }
+    }
+
+    fn headset() -> AudioDevice {
+        AudioDevice {
+            id: "bluetooth:20:AF:1B:19:E8:D2".into(),
+            label: "Arctis GameBuds".into(),
+            kind: AudioKind::Bluetooth,
+            card_id: "bluealsa".into(),
+            card_index: None,
+            pcm: "bluealsa:DEV=20:AF:1B:19:E8:D2,PROFILE=a2dp".into(),
+            bitstream: false,
+            connector: None,
+            display: false,
+            sink: None,
+        }
+    }
+
+    #[test]
+    fn a_volume_survives_the_round_trip_through_a_headset() {
+        for volume in 0..=100u8 {
+            assert_eq!(from_avrcp(to_avrcp(volume)), volume, "{volume}");
+        }
+        assert_eq!((to_avrcp(0), to_avrcp(100), from_avrcp(127)), (0, 127, 100));
+        // The Arctis GameBuds' own steps, measured on the Plus.
+        let steps: Vec<u8> = [17, 25, 34, 42, 51, 59, 68, 76, 85, 93, 102, 110, 119, 127].map(from_avrcp).to_vec();
+        assert_eq!(steps, [13, 20, 27, 33, 40, 46, 54, 60, 67, 73, 80, 87, 94, 100]);
+        // A level the headset reports goes back to it within one step of
+        // its own scale, and then holds.
+        for level in 0..=127u8 {
+            let back = to_avrcp(from_avrcp(level));
+            assert!(back.abs_diff(level) <= 1, "{level} -> {back}");
+            assert_eq!(from_avrcp(back), from_avrcp(level));
+        }
+    }
+
+    #[test]
+    fn a_headset_sets_its_own_volume_and_the_player_stays_full() {
+        let auto = AudioSetting { volume: 50, ..AudioSetting::default() };
+        let with = plan(&auto, &[hdmi(Some(sony())), headset()]);
+        assert_eq!(with.player_volume(), 100);
+        assert!(with.mpv_args().contains(&"--volume=100".to_string()));
+        let without = plan(&auto, &[hdmi(Some(sony()))]);
+        assert_eq!(without.player_volume(), 50);
+    }
+
+    #[test]
+    fn a_connected_headset_takes_the_sound_and_gives_it_back() {
+        let auto = AudioSetting::default();
+        let with = plan(&auto, &[hdmi(Some(sony())), headset()]);
+        assert_eq!(with.device.as_ref().unwrap().kind, AudioKind::Bluetooth);
+        // Decoded here: a headset takes no bitstream.
+        assert!(with.passthrough.is_empty());
+        assert!(with.ac3_encode.is_none() || !with.bitstream());
+        assert_eq!(with.mpv_device(), "alsa/bluealsa:DEV=20:AF:1B:19:E8:D2,PROFILE=a2dp");
+        let without = plan(&auto, &[hdmi(Some(sony()))]);
+        assert_eq!(without.device.as_ref().unwrap().id, "display:fdea0000.hdmi");
+        // A wired output chosen by hand is kept with a headset connected.
+        let chosen = AudioSetting {
+            device: AudioDeviceChoice::Device { id: "display:fdea0000.hdmi".into() },
+            ..AudioSetting::default()
+        };
+        assert_eq!(plan(&chosen, &[hdmi(Some(sony())), headset()]).device.unwrap().kind, AudioKind::Hdmi);
+        // The headset chosen by hand is used while it is connected...
+        let headset_chosen = AudioSetting {
+            device: AudioDeviceChoice::Device { id: "bluetooth:20:AF:1B:19:E8:D2".into() },
+            ..AudioSetting::default()
+        };
+        assert_eq!(plan(&headset_chosen, &[hdmi(Some(sony())), headset()]).device.unwrap().kind, AudioKind::Bluetooth);
+        // ...and the display's sound when it is not.
+        let away = plan(&headset_chosen, &[hdmi(Some(sony()))]);
+        assert_eq!(away.device.unwrap().kind, AudioKind::Hdmi);
+        assert!(away.fallback);
+        // A chosen USB card that is unplugged gives way to a connected headset.
+        let usb_chosen = AudioSetting {
+            device: AudioDeviceChoice::Device { id: "usb:0d8c:0014:Device".into() },
+            ..AudioSetting::default()
+        };
+        assert_eq!(plan(&usb_chosen, &[hdmi(Some(sony())), headset()]).device.unwrap().kind, AudioKind::Bluetooth);
     }
 
     #[test]

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The volume keys while sound is on a Bluetooth headset, and only then.
+
+  Kodi on Android leaves the volume keys to the system
+  (xbmc/platform/android/activity/AndroidKey.cpp: AKEYCODE_VOLUME_UP, _DOWN and
+  _MUTE map to XBMCK_LAST), so they move the system volume, the headset's
+  absolute volume, and Kodi's own gain stays where it is. Here they are handed
+  to mediaboxd-rs (NotifyAll arrives as `Other.volume_up` from sender
+  `mediabox`), which moves the box's volume, puts it on the headset and says it
+  on screen.
+
+  This file is not installed into Kodi's profile directly:
+  userdata/keymaps/mediabox-bluetooth.xml is a link to
+  /run/mediabox/kodi-bluetooth-keymap.xml, which holds this while sound is on a
+  headset and an empty <keymap/> otherwise (mediabox-hdmi-prepare when Kodi
+  starts, mediaboxd-rs while it runs, with Kodi's reloadkeymaps). On HDMI or any
+  other card Kodi answers its volume keys itself, exactly as before.
+-->
+<keymap>
+  <global>
+    <keyboard>
+      <volume_up>NotifyAll(mediabox,volume_up)</volume_up>
+      <volume_down>NotifyAll(mediabox,volume_down)</volume_down>
+      <volume_mute>NotifyAll(mediabox,volume_mute)</volume_mute>
+    </keyboard>
+    <remote>
+      <volumeplus>NotifyAll(mediabox,volume_up)</volumeplus>
+      <volumeminus>NotifyAll(mediabox,volume_down)</volumeminus>
+      <mute>NotifyAll(mediabox,volume_mute)</mute>
+    </remote>
+  </global>
+</keymap>

@@ -23,25 +23,14 @@ export struct WifiRow {
     // The (i) that opens the network's page, and whether the remote is on it.
     info: bool,
     info-focused: bool,
+    // A glyph at the card's left: what a Bluetooth device is. "" for none.
+    icon: string,
     // How many rows of each height come before this one, so it is placed by
     // arithmetic.
     flats: int,
     talls: int,
     notes: int,
     heads: int,
-}
-
-// One device in the Bluetooth list.
-export struct BtRow {
-    name: string,
-    // Under the name: what it is, or -- on the focused row -- what Ok does.
-    under: string,
-    connected: bool,
-    // The heading this row opens ("Eşleşmiş aygıtlar"), "" when it continues
-    // one; and how many headings come before it, so it is placed by
-    // arithmetic.
-    header: string,
-    n-header: int,
 }
 
 // A scan running: Android's indeterminate circular progress
@@ -108,6 +97,7 @@ component RadioCard inherits Rectangle {
     in property <string> tag;
     in property <bool> info;
     in property <bool> info-focused;
+    in property <string> icon;
     property <bool> lit: focused && !info-focused;
 
     height: under == "" ? Metrics.set-h-flat : Metrics.set-h;
@@ -122,6 +112,14 @@ component RadioCard inherits Rectangle {
         padding-right: Metrics.card-pad;
         spacing: Metrics.card-pad * 0.75;
 
+        if icon != "": VerticalLayout {
+            alignment: center;
+            Icon {
+                name: icon;
+                size: Metrics.icon * 1.05;
+                ink: lit ? #ffffff : Theme.muted;
+            }
+        }
         VerticalLayout {
             alignment: center;
             spacing: Metrics.t-primary * 0.12;
@@ -300,6 +298,127 @@ component Facts inherits Rectangle {
     }
 }
 
+// A radio's list: the switch, the headings, the cards, each row placed by
+// how many rows of each height come before it. The Wi-Fi list and the
+// Bluetooth list are both this.
+component RadioList inherits Rectangle {
+    in property <bool> known;
+    in property <bool> present;
+    in property <[WifiRow]> rows;
+    in property <int> focus-flats;
+    in property <int> focus-talls;
+    in property <int> focus-notes;
+    in property <int> focus-heads;
+    in property <bool> focus-tall;
+
+    property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
+    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
+    property <length> flat-step: Metrics.set-h-flat + Metrics.row-gap;
+    property <length> tall-step: Metrics.set-h + Metrics.row-gap;
+    property <length> note-step: Metrics.t-secondary * 2.4;
+
+    Rectangle {
+        property <length> pad: Metrics.glow-w * 3;
+        property <length> focus-y: focus-flats * flat-step + focus-talls * tall-step + focus-notes * note-step + focus-heads * Metrics.header-h;
+        property <length> scroll: max(0px, focus-y + (focus-tall ? tall-step : flat-step) + pad * 2 - self.height);
+
+        x: Metrics.pane-x - pad;
+        y: top - pad;
+        width: Metrics.list-w + pad * 2;
+        height: root.height - Metrics.safe-y - top + pad;
+        clip: true;
+
+        Rectangle {
+            x: pad;
+            y: pad - scroll;
+            width: Metrics.list-w;
+            animate y { duration: Theme.t-row; easing: Theme.ease; }
+
+            for row in rows: Rectangle {
+                y: row.flats * flat-step + row.talls * tall-step + row.notes * note-step + row.heads * Metrics.header-h;
+                width: 100%;
+                height: row.kind == "header" ? Metrics.header-h
+                    : (row.kind == "note" ? note-step : (row.under != "" ? Metrics.set-h : Metrics.set-h-flat));
+
+                // A group's title, small and grey, as the reference screen
+                // draws it: "Kayıtlı ağlar", "Diğer ağlar" with "Yenile" or
+                // the spinner at its right.
+                if row.kind == "header": Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    Text {
+                        x: Metrics.card-pad * 0.4;
+                        y: parent.height - self.height - Metrics.row-gap * 0.5;
+                        text: row.label;
+                        color: Theme.muted;
+                        font-size: Metrics.t-secondary;
+                        font-weight: 600;
+                    }
+                    if row.tag != "" && !row.on: Rectangle {
+                        x: parent.width - self.width;
+                        y: parent.height - self.height - Metrics.row-gap * 0.2;
+                        width: refresh.preferred-width + Metrics.card-pad;
+                        height: Metrics.t-secondary * 1.9;
+                        border-radius: self.height / 2;
+                        background: row.focused ? Theme.s-card-hi : transparent;
+                        refresh := Text {
+                            text: row.tag;
+                            color: row.focused ? #ffffff : Theme.accent;
+                            font-size: Metrics.t-secondary;
+                            font-weight: 650;
+                        }
+                        FocusRing {
+                            width: 100%;
+                            height: 100%;
+                            radius: parent.height / 2;
+                            on: row.focused;
+                        }
+                    }
+                    // Measured off the reference recording: the ring is
+                    // about 1.7 times the heading's text, near white.
+                    if row.on: Spinner {
+                        x: parent.width - self.width - Metrics.card-pad * 0.5;
+                        y: parent.height - self.height - Metrics.row-gap * 0.1;
+                        size: Metrics.t-secondary * 1.7;
+                        ink: Theme.text;
+                    }
+                }
+
+                if row.kind == "toggle": SettingCard {
+                    width: 100%;
+                    label: row.label;
+                    kind: "action";
+                    toggle: known && present ? (row.on ? 1 : 0) : -1;
+                    value: !known ? "…" : (present ? "" : "Bu kartta yok");
+                    enabled: !known || present;
+                    focused: row.focused;
+                }
+                if row.kind == "card": RadioCard {
+                    width: 100%;
+                    height: parent.height;
+                    title: row.label;
+                    under: row.under;
+                    status: "";
+                    lock: row.secured;
+                    bars: row.bars;
+                    focused: row.focused;
+                    tag: row.tag;
+                    info: row.info;
+                    info-focused: row.info-focused;
+                    icon: row.icon;
+                }
+                if row.kind == "note": Text {
+                    x: Metrics.card-pad * 0.4;
+                    text: row.label;
+                    color: Theme.muted;
+                    font-size: Metrics.t-secondary;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 export component WifiScreen inherits Rectangle {
     /// False until the daemon has answered once. Nothing below states a fact
     /// about the radio while this is false.
@@ -357,104 +476,17 @@ export component WifiScreen inherits Rectangle {
         blurb: notice;
         vitals: root.vitals;
 
-        Rectangle {
-            property <length> pad: Metrics.glow-w * 3;
-            property <length> focus-y: focus-flats * flat-step + focus-talls * tall-step + focus-notes * note-step + focus-heads * Metrics.header-h;
-            property <length> scroll: max(0px, focus-y + (focus-tall ? tall-step : flat-step) + pad * 2 - self.height);
-
-            x: Metrics.pane-x - pad;
-            y: top - pad;
-            width: Metrics.list-w + pad * 2;
-            height: root.height - Metrics.safe-y - top + pad;
-            clip: true;
-
-            Rectangle {
-                x: pad;
-                y: pad - scroll;
-                width: Metrics.list-w;
-                animate y { duration: Theme.t-row; easing: Theme.ease; }
-
-                for row in rows: Rectangle {
-                    y: row.flats * flat-step + row.talls * tall-step + row.notes * note-step + row.heads * Metrics.header-h;
-                    width: 100%;
-                    height: row.kind == "header" ? Metrics.header-h
-                        : (row.kind == "note" ? note-step : (row.under != "" ? Metrics.set-h : Metrics.set-h-flat));
-
-                    // A group's title, small and grey, as the reference screen
-                    // draws it: "Kayıtlı ağlar", "Diğer ağlar" with "Yenile" or
-                    // the spinner at its right.
-                    if row.kind == "header": Rectangle {
-                        width: 100%;
-                        height: 100%;
-                        Text {
-                            x: Metrics.card-pad * 0.4;
-                            y: parent.height - self.height - Metrics.row-gap * 0.5;
-                            text: row.label;
-                            color: Theme.muted;
-                            font-size: Metrics.t-secondary;
-                            font-weight: 600;
-                        }
-                        if row.tag != "" && !row.on: Rectangle {
-                            x: parent.width - self.width;
-                            y: parent.height - self.height - Metrics.row-gap * 0.2;
-                            width: refresh.preferred-width + Metrics.card-pad;
-                            height: Metrics.t-secondary * 1.9;
-                            border-radius: self.height / 2;
-                            background: row.focused ? Theme.s-card-hi : transparent;
-                            refresh := Text {
-                                text: row.tag;
-                                color: row.focused ? #ffffff : Theme.accent;
-                                font-size: Metrics.t-secondary;
-                                font-weight: 650;
-                            }
-                            FocusRing {
-                                width: 100%;
-                                height: 100%;
-                                radius: parent.height / 2;
-                                on: row.focused;
-                            }
-                        }
-                        // Measured off the reference recording: the ring is
-                        // about 1.7 times the heading's text, near white.
-                        if row.on: Spinner {
-                            x: parent.width - self.width - Metrics.card-pad * 0.5;
-                            y: parent.height - self.height - Metrics.row-gap * 0.1;
-                            size: Metrics.t-secondary * 1.7;
-                            ink: Theme.text;
-                        }
-                    }
-
-                    if row.kind == "toggle": SettingCard {
-                        width: 100%;
-                        label: row.label;
-                        kind: "action";
-                        toggle: known && present ? (row.on ? 1 : 0) : -1;
-                        value: !known ? "…" : (present ? "" : "Bu kartta yok");
-                        enabled: !known || present;
-                        focused: row.focused;
-                    }
-                    if row.kind == "card": RadioCard {
-                        width: 100%;
-                        height: parent.height;
-                        title: row.label;
-                        under: row.under;
-                        status: "";
-                        lock: row.secured;
-                        bars: row.bars;
-                        focused: row.focused;
-                        tag: row.tag;
-                        info: row.info;
-                        info-focused: row.info-focused;
-                    }
-                    if row.kind == "note": Text {
-                        x: Metrics.card-pad * 0.4;
-                        text: row.label;
-                        color: Theme.muted;
-                        font-size: Metrics.t-secondary;
-                        vertical-alignment: center;
-                    }
-                }
-            }
+        RadioList {
+            width: 100%;
+            height: 100%;
+            known: root.known;
+            present: root.present;
+            rows: root.rows;
+            focus-flats: root.focus-flats;
+            focus-talls: root.focus-talls;
+            focus-notes: root.focus-notes;
+            focus-heads: root.focus-heads;
+            focus-tall: root.focus-tall;
         }
     }
 
@@ -652,22 +684,15 @@ export component BluetoothScreen inherits Rectangle {
     /// As on WifiScreen.
     in property <bool> known;
     in property <bool> present;
-    in property <bool> powered;
     in property <string> summary;
-    in property <[BtRow]> devices;
-    in property <int> index;
-    in property <bool> busy;
     in property <string> notice;
     in property <VitalsModel> vitals;
-
-    property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
-    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
-    property <length> flat: Metrics.set-h-flat + Metrics.row-gap;
-    property <length> card: Metrics.set-h + Metrics.row-gap;
-
-    pure function y-of(r: BtRow, i: int) -> length {
-        return flat * 2 + (r.n-header + (r.header != "" ? 1 : 0)) * Metrics.header-h + i * card;
-    }
+    in property <[WifiRow]> rows;
+    in property <int> focus-flats;
+    in property <int> focus-talls;
+    in property <int> focus-notes;
+    in property <int> focus-heads;
+    in property <bool> focus-tall;
 
     background: Theme.s-ground;
     clip: true;
@@ -681,69 +706,17 @@ export component BluetoothScreen inherits Rectangle {
         blurb: notice != "" ? notice : summary;
         vitals: root.vitals;
 
-        Rectangle {
-            property <length> pad: Metrics.glow-w * 3;
-            property <length> focus-y: index < 2 ? index * flat
-                : devices.length == 0 ? 0px : y-of(devices[index - 2], index - 2);
-            property <length> scroll: max(0px, focus-y + card + pad * 2 - self.height);
-
-            x: Metrics.pane-x - pad;
-            y: top - pad;
-            width: Metrics.list-w + pad * 2;
-            height: root.height - Metrics.safe-y - top + pad;
-            clip: true;
-
-            Rectangle {
-                x: pad;
-                y: pad - scroll;
-                width: Metrics.list-w;
-                animate y { duration: Theme.t-row; easing: Theme.ease; }
-
-                SettingCard {
-                    y: 0;
-                    width: 100%;
-                    label: "Bluetooth";
-                    kind: "action";
-                    toggle: known && present ? (powered ? 1 : 0) : -1;
-                    value: !known ? "…" : (present ? "" : "Bu kartta yok");
-                    enabled: !known || present;
-                    focused: index == 0;
-                }
-                SettingCard {
-                    y: flat;
-                    width: 100%;
-                    label: busy ? "Aranıyor…" : "Aygıt ara";
-                    kind: "action";
-                    enabled: !known || powered;
-                    focused: index == 1;
-                }
-                for row[i] in devices: Rectangle {
-                    y: y-of(row, i) - (row.header != "" ? Metrics.header-h : 0px);
-                    width: 100%;
-                    height: (row.header != "" ? Metrics.header-h : 0px) + Metrics.set-h;
-
-                    if row.header != "": SectionHeader {
-                        y: 0;
-                        width: 100%;
-                        text: row.header;
-                    }
-                    RadioCard {
-                        y: row.header != "" ? Metrics.header-h : 0px;
-                        width: 100%;
-                        height: Metrics.set-h;
-                        title: row.name;
-                        under: row.under;
-                        status: row.connected ? "Bağlı" : "";
-                        focused: index == i + 2;
-                    }
-                }
-                if known && devices.length == 0 && !busy: Text {
-                    y: flat * 2 + Metrics.row-gap;
-                    text: powered ? "Aygıt yok" : "Bluetooth kapalı";
-                    color: Theme.muted;
-                    font-size: Metrics.t-secondary;
-                }
-            }
+        RadioList {
+            width: 100%;
+            height: 100%;
+            known: root.known;
+            present: root.present;
+            rows: root.rows;
+            focus-flats: root.focus-flats;
+            focus-talls: root.focus-talls;
+            focus-notes: root.focus-notes;
+            focus-heads: root.focus-heads;
+            focus-tall: root.focus-tall;
         }
     }
 }

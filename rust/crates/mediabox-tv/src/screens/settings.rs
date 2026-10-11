@@ -1132,15 +1132,24 @@ fn audio(status: Option<&Value>) -> Row {
     match audio_status(status) {
         Some(audio) => {
             let plan = audio.plan.clone().unwrap_or_else(|| mediabox_core::audio::plan(&audio.setting, &audio.devices));
+            // A headset is named, and said to take PCM: nothing reaches it as
+            // a bitstream whatever the kept mode is.
+            let headset = plan
+                .device
+                .as_ref()
+                .filter(|device| device.kind == mediabox_core::AudioKind::Bluetooth);
             let device = plan
                 .device
                 .as_ref()
-                .map(|device| device.connector.clone().unwrap_or_else(|| device.kind.label().to_string()))
+                .map(|device| match headset {
+                    Some(headset) => headset.label.clone(),
+                    None => device.connector.clone().unwrap_or_else(|| device.kind.label().to_string()),
+                })
                 .unwrap_or_else(|| "Yok".into());
             let now = format!(
                 "{} · {}{}",
                 device,
-                audio.setting.mode.label(),
+                if headset.is_some() { mediabox_core::AudioMode::Pcm.label() } else { audio.setting.mode.label() },
                 if audio.setting.muted { " · sessiz" } else { "" }
             );
             Row::link(Page::Audio, now, if plan.device.is_none() { "warn" } else { "" })

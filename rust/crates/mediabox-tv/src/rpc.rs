@@ -430,8 +430,10 @@ impl Client {
         self.call(json!({"command": "bluetooth_status"})).await
     }
 
-    pub async fn bluetooth_scan(&self) -> Result<Value> {
-        self.call(json!({"command": "bluetooth_scan"})).await
+    /// Start a search, or with `stop` end it. Answers at once; what it finds
+    /// comes with the looks that follow.
+    pub async fn bluetooth_scan(&self, stop: bool) -> Result<Value> {
+        self.call(json!({"command": "bluetooth_scan", "stop": stop})).await
     }
 
     pub async fn bluetooth_power(&self, on: bool) -> Result<Value> {

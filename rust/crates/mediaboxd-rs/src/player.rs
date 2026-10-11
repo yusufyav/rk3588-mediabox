@@ -124,7 +124,7 @@ impl PlayerManager {
         if before.mpv_af() != after.mpv_af() {
             let _ = self.ask(set("af", json!(after.mpv_af()))).await;
         }
-        let _ = self.ask(set("volume", json!(after.volume))).await;
+        let _ = self.ask(set("volume", json!(after.player_volume()))).await;
         let _ = self.ask(set("mute", json!(after.muted))).await;
     }
 

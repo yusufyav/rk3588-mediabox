@@ -91,6 +91,13 @@ ExecStartPre=/bin/mkdir -p /var/tmp/kodi-home/.kodi/temp /var/tmp/kodi-home/.kod
 # `test -f` and not an overwrite: after the first run the file is the user's,
 # with whatever they changed in Kodi's own settings screens.
 ExecStartPre=/bin/sh -c 'test -f /var/tmp/kodi-home/.kodi/userdata/guisettings.xml || install -m 0644 /opt/rk3588-mediabox/share/kodi/guisettings-appliance.xml /var/tmp/kodi-home/.kodi/userdata/guisettings.xml'
+# The product's keymap (Back during a film, the volume keys), put back on every
+# start: the profile lives under /var/tmp and is the product's, not kept.
+ExecStartPre=-/bin/sh -c 'test -f /opt/rk3588-mediabox/share/kodi/mediabox-keymap.xml && install -D -m 0644 /opt/rk3588-mediabox/share/kodi/mediabox-keymap.xml /var/tmp/kodi-home/.kodi/userdata/keymaps/mediabox.xml'
+# The volume keys while sound is on a Bluetooth headset: a link to the keymap
+# mediabox-hdmi-prepare (below) and mediaboxd-rs keep in /run, which binds
+# nothing unless sound is on a headset.
+ExecStartPre=-/bin/ln -sfn /run/mediabox/kodi-bluetooth-keymap.xml /var/tmp/kodi-home/.kodi/userdata/keymaps/mediabox-bluetooth.xml
 
 # The sink's EDID and the codec's ELD bypass, both of which are runtime state
 # that is lost on every restart. Without them Kodi cannot see that the panel

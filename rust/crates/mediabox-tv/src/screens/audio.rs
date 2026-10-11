@@ -416,7 +416,7 @@ impl Audio {
                     Pick::Device => {
                         let mut options = vec![OptionView {
                             title: "Otomatik".into(),
-                            sub: "Görüntünün gittiği ekranın sesi".into(),
+                            sub: "Bağlı Bluetooth kulaklık, yoksa görüntünün gittiği ekranın sesi".into(),
                             selected: setting.device == AudioDeviceChoice::Auto,
                             focused: picker.focus == 0,
                         }];

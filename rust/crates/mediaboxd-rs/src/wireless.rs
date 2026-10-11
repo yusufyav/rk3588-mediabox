@@ -20,10 +20,11 @@
 //!
 //! **Bluetooth goes through bluetoothctl** rather than the D-Bus API, which
 //! would mean a new dependency for a handful of calls that are all one verb
-//! and an address.
+//! and an address -- each with a time limit, one controller change at a time
+//! and one verb per device; see the Bluetooth section and docs/bluetooth.md.
 
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
@@ -1209,10 +1210,169 @@ pub async fn wifi_power(on: bool) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------- Bluetooth
+//
+// Measured on the Plus (RTL8852BU on USB, bluez 5.82): `show`, `devices` and
+// an `info` for each of three devices answer in 83 ms together; power off and
+// on take 85 and 197 ms; a search is running 94 ms after it is asked for and
+// stops 199 ms after the bluetoothctl that owns it goes away. None of that is
+// slow enough to want a resident D-Bus client, so this stays on bluetoothctl.
+// What needed fixing was around it: no verb had a time limit (`connect` to a
+// keyboard that was switched off had not returned after 40 s, and the screen
+// said "Bağlanıyor…" for as long), a search that failed exited 0 and said so
+// only in text nobody read, nothing kept two verbs from crossing, and bluez
+// forgets a found device 30 s after it last heard it, so the list emptied
+// under the viewer.
 
-/// `bluetoothctl` with one command, which is how every verb below is shaped.
-async fn bctl(args: &[&str]) -> Result<String, String> {
-    run(BLUETOOTHCTL, args).await
+/// How long each verb is given.
+const BT_QUERY: Duration = Duration::from_secs(5);
+const BT_POWER: Duration = Duration::from_secs(10);
+/// Pairing waits on the other device and, for a keyboard, on a person.
+const BT_PAIR: Duration = Duration::from_secs(35);
+const BT_CONNECT: Duration = Duration::from_secs(20);
+/// Disconnect, remove, trust.
+const BT_LINK: Duration = Duration::from_secs(10);
+/// One search. bluez keeps what it found for 30 s after it last heard it.
+const BT_SEARCH_SECONDS: &str = "12";
+/// How long a found device stays on the list after bluez has forgotten it:
+/// two searches' worth, so one that misses it does not move the list.
+const BT_FOUND_AGE: Duration = Duration::from_secs(120);
+/// How long a pairing listens for a device bluez had forgotten.
+const BT_REFIND: Duration = Duration::from_secs(10);
+/// How long a new link is watched before it counts as connected.
+const BT_SETTLE: Duration = Duration::from_secs(2);
+/// What a time limit reads as, so it can be told from bluez's own errors.
+const BT_TIMED_OUT: &str = "zaman aşımı";
+
+/// Power and recovery hold the controller alone; the per-device verbs and the
+/// search share it.
+static BT_CONTROLLER: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+/// Pairability is the controller's, so one pairing at a time opens and shuts
+/// it.
+static BT_PAIRING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The addresses a verb is running on. A second verb on one of them is
+/// refused rather than sent to bluez on top of the first.
+static BT_BUSY: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+/// The running search: the bluetoothctl that holds discovery open. bluez ties
+/// a discovery to the client that asked for it, so ending this ends it.
+static BT_SEARCH: std::sync::Mutex<Option<tokio::process::Child>> = std::sync::Mutex::new(None);
+/// One search started at a time: two asked for together would each start one.
+static BT_STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// What the searches found, by address.
+static BT_FOUND: std::sync::Mutex<BTreeMap<String, Found>> = std::sync::Mutex::new(BTreeMap::new());
+/// Each device's icon, asked of `info` once: what a device is does not change.
+static BT_ICONS: std::sync::Mutex<BTreeMap<String, Option<String>>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[derive(Debug, Clone)]
+struct Found {
+    name: Option<String>,
+    icon: Option<String>,
+    heard: std::time::Instant,
+}
+
+/// A verb running on one address, for as long as this is held.
+struct Claim(String);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        BT_BUSY.lock().expect("bluetooth busy").remove(&self.0);
+    }
+}
+
+fn claim(address: &str) -> Result<Claim, String> {
+    let address = address.trim().to_ascii_uppercase();
+    if !is_address(&address) {
+        return Err("Geçersiz Bluetooth adresi".into());
+    }
+    if !BT_BUSY.lock().expect("bluetooth busy").insert(address.clone()) {
+        return Err("Bu cihazda bir işlem zaten sürüyor".into());
+    }
+    Ok(Claim(address))
+}
+
+/// Six pairs of hex digits: the only shape an address reaches bluetoothctl in.
+fn is_address(text: &str) -> bool {
+    let parts: Vec<&str> = text.split(':').collect();
+    parts.len() == 6
+        && parts.iter().all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// bluetoothctl's colours and prompt, off its text.
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else if c != '\u{1}' && c != '\u{2}' {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `bluetoothctl` with one command, within `limit`. A failure is a non-zero
+/// exit or bluez's error in the text: a search that cannot start exits 0.
+/// Run past its limit, the child is killed with the future.
+async fn bctl(limit: Duration, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new(BLUETOOTHCTL);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(limit, command.output()).await {
+        Err(_) => return Err(BT_TIMED_OUT.into()),
+        Ok(Err(error)) => return Err(format!("bluetoothctl çalıştırılamadı: {error}")),
+        Ok(Ok(output)) => output,
+    };
+    let text = plain(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ));
+    let refused = text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("Failed to") || line.contains("org.bluez.Error.") || line.contains("not available")
+    });
+    if output.status.success() && !refused {
+        Ok(text)
+    } else {
+        Err(text.trim().to_string())
+    }
+}
+
+/// bluez's answer in words a viewer can act on. Nothing here is a secret --
+/// bluetoothctl never prints a key -- but the raw line is no use on a sofa.
+fn bt_error(raw: &str) -> String {
+    let has = |needle: &str| raw.contains(needle);
+    if raw == BT_TIMED_OUT || has("AuthenticationTimeout") {
+        "cihaz yanıt vermedi".into()
+    } else if has("profile-unavailable") || has("NotSupported") {
+        "bu cihazın türü bu kutuda desteklenmiyor".into()
+    } else if has("AuthenticationFailed") || has("AuthenticationRejected") {
+        "cihaz eşleşmeyi reddetti".into()
+    } else if has("AuthenticationCanceled") {
+        "eşleştirme iptal edildi".into()
+    } else if has("not available") || has("DoesNotExist") {
+        "cihaz şu an görünmüyor; açık ve eşleştirme modunda mı?".into()
+    } else if has("page-timeout") || has("Host is down") || has("connection-abort") || has("ConnectionAttemptFailed") {
+        "cihaz yanıt vermedi; açık ve yakında mı?".into()
+    } else if has("InProgress") {
+        "bu cihazda bir işlem zaten sürüyor".into()
+    } else if has("NotReady") || has("mgmt_socket") {
+        "Bluetooth denetleyicisi hazır değil".into()
+    } else {
+        // bluez's own last line, which names the error.
+        raw.lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or("bilinmeyen hata")
+            .to_string()
+    }
 }
 
 fn parse_controller(text: &str) -> Value {
@@ -1240,49 +1400,133 @@ fn parse_controller(text: &str) -> Value {
     })
 }
 
-/// The devices bluez knows about, with what it knows about each.
-async fn device_list() -> Vec<Value> {
-    let Ok(text) = bctl(&["devices"]).await else {
-        return Vec::new();
-    };
-    let mut devices = Vec::new();
-    for line in text.lines() {
-        let mut fields = line.trim().splitn(3, ' ');
-        if fields.next() != Some("Device") {
-            continue;
-        }
-        let Some(address) = fields.next() else {
-            continue;
-        };
-        let name = fields.next().unwrap_or(address).trim().to_string();
-        let info = bctl(&["info", address]).await.unwrap_or_default();
-        let flag = |key: &str| {
-            info.lines()
+/// `devices` as (address, name). bluez falls back to the address when no
+/// name was resolved; a row reading "28-56-5A-A0-A1-8A" is no use on a
+/// television, so that is no name.
+fn parse_devices(text: &str) -> Vec<(String, Option<String>)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().splitn(3, ' ');
+            if fields.next() != Some("Device") {
+                return None;
+            }
+            let address = fields.next().filter(|address| is_address(address))?.to_string();
+            let name = fields
+                .next()
                 .map(str::trim)
-                .find_map(|line| line.strip_prefix(key))
-                .map(|rest| rest.trim() == "yes")
-                .unwrap_or(false)
+                .filter(|name| !name.is_empty() && !name.replace('-', ":").eq_ignore_ascii_case(&address))
+                .map(str::to_string);
+            Some((address, name))
+        })
+        .collect()
+}
+
+/// A `yes`/`no` line of `info`.
+fn info_flag(info: &str, key: &str) -> bool {
+    info.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(key))
+        .is_some_and(|rest| rest.trim() == "yes")
+}
+
+fn info_icon(info: &str) -> Option<String> {
+    info.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("Icon: "))
+        .map(|rest| rest.trim().to_string())
+}
+
+/// "Battery Percentage: 0x50 (80)", which bluez reports for a connected
+/// device with a battery service.
+fn info_battery(info: &str) -> Option<u8> {
+    info.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("Battery Percentage: "))
+        .and_then(|rest| rest.split('(').nth(1))
+        .and_then(|rest| rest.trim_end_matches(')').trim().parse().ok())
+}
+
+/// The devices bluez knows about, with what it knows about each, and the ones
+/// a recent search found that bluez has dropped since.
+///
+/// Three listings and an `info` only where one is needed -- a connected
+/// device, for its battery, and a device met for the first time, for its
+/// icon -- where this used to ask `info` of every device on every look.
+async fn device_list() -> Vec<Value> {
+    let (all, paired, connected) = tokio::join!(
+        bctl(BT_QUERY, &["devices"]),
+        bctl(BT_QUERY, &["devices", "Paired"]),
+        bctl(BT_QUERY, &["devices", "Connected"]),
+    );
+    let addresses = |text: Result<String, String>| -> BTreeSet<String> {
+        parse_devices(&text.unwrap_or_default())
+            .into_iter()
+            .map(|(address, _)| address)
+            .collect()
+    };
+    let paired = addresses(paired);
+    let connected = addresses(connected);
+    let now = std::time::Instant::now();
+    let mut devices = Vec::new();
+    let mut listed = BTreeSet::new();
+    for (address, name) in parse_devices(&all.unwrap_or_default()) {
+        let is_connected = connected.contains(&address);
+        let cached = BT_ICONS.lock().expect("bluetooth icons").get(&address).cloned();
+        let (icon, battery) = if is_connected || cached.is_none() {
+            let info = bctl(BT_QUERY, &["info", &address]).await.unwrap_or_default();
+            let icon = info_icon(&info);
+            BT_ICONS
+                .lock()
+                .expect("bluetooth icons")
+                .insert(address.clone(), icon.clone());
+            (icon, info_battery(&info))
+        } else {
+            (cached.flatten(), None)
         };
+        let is_paired = paired.contains(&address);
+        if !is_paired {
+            BT_FOUND.lock().expect("bluetooth found").insert(
+                address.clone(),
+                Found { name: name.clone(), icon: icon.clone(), heard: now },
+            );
+        }
         devices.push(json!({
             "address": address,
-            // bluez falls back to the address when no name was resolved; a row
-            // reading "28-56-5A-A0-A1-8A" twice is no use on a television.
-            "name": if name.replace('-', ":").eq_ignore_ascii_case(address) { Value::Null } else { json!(name) },
-            "paired": flag("Paired:"),
-            "trusted": flag("Trusted:"),
-            "connected": flag("Connected:"),
-            "icon": info
-                .lines()
-                .map(str::trim)
-                .find_map(|line| line.strip_prefix("Icon: "))
-                .map(|rest| rest.trim().to_string()),
+            "name": name,
+            "paired": is_paired,
+            "connected": is_connected,
+            "icon": icon,
+            "battery": battery,
+            "inRange": true,
+        }));
+        listed.insert(address);
+    }
+    let mut found = BT_FOUND.lock().expect("bluetooth found");
+    found.retain(|address, seen| {
+        now.duration_since(seen.heard) < BT_FOUND_AGE && !paired.contains(address)
+    });
+    for (address, seen) in found.iter().filter(|(address, _)| !listed.contains(*address)) {
+        devices.push(json!({
+            "address": address,
+            "name": seen.name,
+            "paired": false,
+            "connected": false,
+            "icon": seen.icon,
+            "battery": null,
+            "inRange": false,
         }));
     }
     devices
 }
 
 async fn bluetooth_blocked() -> Option<bool> {
-    let text = run(RFKILL, &["--output", "TYPE,SOFT", "--noheadings"])
+    rfkill_state("SOFT").await
+}
+
+/// Whether every Bluetooth radio is blocked in `column` (SOFT or HARD).
+async fn rfkill_state(column: &str) -> Option<bool> {
+    let columns = format!("TYPE,{column}");
+    let text = run(RFKILL, &["--output", &columns, "--noheadings"])
         .await
         .ok()?;
     let mut seen = None;
@@ -1298,47 +1542,138 @@ async fn bluetooth_blocked() -> Option<bool> {
 
 /// Whether bluez can see a controller at all.
 async fn controller_present() -> bool {
-    bctl(&["show"])
+    bctl(BT_QUERY, &["show"])
         .await
         .map(|text| text.contains("Controller "))
         .unwrap_or(false)
 }
 
-/// Re-run whichever unit attaches a UART Bluetooth part on this board.
+/// Bring back a controller bluez lists but cannot power: the UART part on
+/// the Ultra.
 ///
-/// The name is the board vendor's, not ours, and differs between them, so the
-/// known ones are tried in turn and a board that has none is unharmed: its
-/// Bluetooth is on USB or SDIO and never lost its firmware in the first place.
-async fn reattach_bluetooth() {
+/// Dropping the GPIO there takes the firmware with it and the part comes back
+/// mute: the controller is still listed -- `bluetoothctl show` prints it even
+/// while hci0 sits DOWN, which is why asking "is there a controller" is not
+/// the test -- but powering it answers "Unable to open mgmt_socket", and after
+/// the firmware is pushed again, "org.bluez.Error.Failed" until bluez itself
+/// is restarted. Measured on the Ultra; without this, switching Bluetooth off
+/// from the settings screen and on again loses it until a reboot.
+///
+/// Only a board that has one of these units is touched. The Plus has none --
+/// its Bluetooth is on USB and powers off and on in 85 and 197 ms -- so on it
+/// this restarts nothing, bluez included. One attempt per power-on, under the
+/// controller's lock, so two never run at once.
+async fn recover_controller() {
+    let started = std::time::Instant::now();
     for unit in [
         "ap6611s-bluetooth.service",
         "brcm-bluetooth.service",
         "hciuart.service",
     ] {
-        if run("/usr/bin/systemctl", &["restart", unit]).await.is_ok() {
-            // Firmware down a 1.5 Mbaud line takes a few seconds.
-            tokio::time::sleep(Duration::from_millis(5000)).await;
-            // And bluez has to be restarted on top of it. It was holding a
-            // management socket on the controller that went away with the
-            // firmware, and until it lets go the new one cannot be raised:
-            // measured on the Ultra, where `bluetoothctl power on` answered
-            // "Unable to open mgmt_socket" and then
-            // "org.bluez.Error.Failed" with hci0 sitting DOWN, and came up
-            // only once bluetoothd had been restarted after the attach.
-            // The pairing agent follows it by BindsTo.
-            let _ = run("/usr/bin/systemctl", &["restart", "bluetooth.service"]).await;
-            for _ in 0..30 {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                if controller_present().await {
-                    return;
-                }
+        if run(SYSTEMCTL, &["cat", unit]).await.is_err() {
+            continue;
+        }
+        eprintln!("mediaboxd.bluetooth recovery: controller does not power on; re-attaching via {unit}");
+        if run(SYSTEMCTL, &["restart", unit]).await.is_err() {
+            continue;
+        }
+        // Firmware down a 1.5 Mbaud line takes a few seconds.
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+        // And bluez has to be restarted on top of it: it was holding a
+        // management socket on the controller that went away with the
+        // firmware. The pairing agent follows it by BindsTo.
+        let _ = run(SYSTEMCTL, &["restart", "bluetooth.service"]).await;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if controller_present().await {
+                break;
             }
         }
+        eprintln!(
+            "mediaboxd.bluetooth recovery: done in {} ms",
+            started.elapsed().as_millis()
+        );
+        return;
+    }
+    eprintln!("mediaboxd.bluetooth recovery: no attach unit on this board; bluez left alone");
+}
+
+/// Whether a search is running, reaping the one that has ended.
+fn searching() -> bool {
+    let mut slot = BT_SEARCH.lock().expect("bluetooth search");
+    match slot.as_mut().map(tokio::process::Child::try_wait) {
+        Some(Ok(None)) => true,
+        Some(_) => {
+            *slot = None;
+            false
+        }
+        None => false,
     }
 }
 
+/// End the search, and wait the moment bluez takes to stop it.
+async fn stop_search() {
+    let child = BT_SEARCH.lock().expect("bluetooth search").take();
+    let Some(mut child) = child else {
+        return;
+    };
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    for _ in 0..20 {
+        let discovering = bctl(BT_QUERY, &["show"])
+            .await
+            .map(|text| parse_controller(&text)["discovering"] == true)
+            .unwrap_or(false);
+        if !discovering {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Start a search unless one is running, and come back once bluez says it is
+/// discovering -- or with why it is not.
+async fn start_search() -> Result<(), String> {
+    let _starting = BT_STARTING.lock().await;
+    if searching() {
+        return Ok(());
+    }
+    let mut child = Command::new(BLUETOOTHCTL)
+        .args(["--timeout", BT_SEARCH_SECONDS, "scan", "on"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("bluetoothctl çalıştırılamadı: {error}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            return Err("Arama başlatılamadı".into());
+        }
+        let controller = bctl(BT_QUERY, &["show"])
+            .await
+            .map(|text| parse_controller(&text))
+            .unwrap_or_else(|_| json!({}));
+        if controller["discovering"] == true {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(3) {
+            let _ = child.start_kill();
+            return Err("Arama başlatılamadı: denetleyici yanıt vermedi".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    eprintln!(
+        "mediaboxd.bluetooth search started in {} ms",
+        started.elapsed().as_millis()
+    );
+    *BT_SEARCH.lock().expect("bluetooth search") = Some(child);
+    Ok(())
+}
+
 pub async fn bluetooth_status() -> Value {
-    let controller = bctl(&["show"])
+    let controller = bctl(BT_QUERY, &["show"])
         .await
         .map(|text| parse_controller(&text))
         .unwrap_or_else(|_| json!({}));
@@ -1350,93 +1685,232 @@ pub async fn bluetooth_status() -> Value {
         "present": present,
         "blocked": bluetooth_blocked().await,
         "controller": controller,
+        "scanning": searching(),
         "devices": if present { device_list().await } else { Vec::new() },
     })
 }
 
 pub async fn bluetooth_power(on: bool) -> Result<Value, String> {
+    let _controller = BT_CONTROLLER.write().await;
     if on {
         let _ = run(RFKILL, &["unblock", "bluetooth"]).await;
         // The radio needs a moment after the GPIO goes high before bluez sees
-        // a controller.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // a controller: asked for until it does, not slept on.
+        for _ in 0..30 {
+            if controller_present().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    } else {
+        stop_search().await;
     }
-    // Try, repair, try again.
-    //
-    // On a board whose Bluetooth is attached over a UART, dropping the GPIO
-    // takes the firmware with it and the part comes back mute: the controller
-    // is still listed — `bluetoothctl show` prints it even while hci0 sits
-    // DOWN, which is why asking "is there a controller" is not the test —
-    // but powering it answers "Unable to open mgmt_socket", and after the
-    // firmware is pushed again, "org.bluez.Error.Failed" until bluez itself
-    // is restarted. Measured on the Ultra; without this, switching Bluetooth
-    // off from the settings screen and on again loses it until a reboot.
     let verb = if on { "on" } else { "off" };
-    if bctl(&["power", verb]).await.is_err() {
+    if let Err(error) = bctl(BT_POWER, &["power", verb]).await {
         if !on {
             // Nothing to rescue on the way down.
             return Ok(bluetooth_status().await);
         }
-        reattach_bluetooth().await;
-        bctl(&["power", verb])
+        if rfkill_state("HARD").await == Some(true) {
+            return Err("Bluetooth donanım tarafından kapalı".into());
+        }
+        eprintln!("mediaboxd.bluetooth power on failed: {}", bt_error(&error));
+        recover_controller().await;
+        bctl(BT_POWER, &["power", verb])
             .await
-            .map_err(|_| "Bluetooth denetleyicisi yanıt vermiyor".to_string())?;
+            .map_err(|error| format!("Bluetooth denetleyicisi yanıt vermiyor: {}", bt_error(&error)))?;
     }
     if on {
         // On, but not open: an appliance that sits there pairable is one
-        // anybody in the building can pair with. Both are turned on only for
-        // the length of a pairing the viewer asked for.
-        let _ = bctl(&["pairable", "off"]).await;
-        let _ = bctl(&["discoverable", "off"]).await;
+        // anybody in the building can pair with. Pairable only for the length
+        // of a pairing the viewer asked for; discoverable never.
+        let _ = bctl(BT_QUERY, &["pairable", "off"]).await;
+        let _ = bctl(BT_QUERY, &["discoverable", "off"]).await;
     } else {
         let _ = run(RFKILL, &["block", "bluetooth"]).await;
     }
     Ok(bluetooth_status().await)
 }
 
-pub async fn bluetooth_scan(seconds: u64) -> Result<Value, String> {
-    let _ = bctl(&["power", "on"]).await;
-    // `--timeout` makes bluetoothctl run discovery and exit by itself; without
-    // it the command returns immediately and nothing is ever discovered.
-    let limit = Duration::from_secs(seconds + 8);
-    let seconds = seconds.to_string();
-    let _ = run_within(limit, BLUETOOTHCTL, &["--timeout", &seconds, "scan", "on"]).await;
+/// Start a search, or with `stop`, end the one running. Answers at once: what
+/// the search finds reaches the screen through the status it asks for while
+/// it runs, so the list fills as devices are heard rather than all at once
+/// twelve seconds later.
+pub async fn bluetooth_scan(stop: bool) -> Result<Value, String> {
+    if stop {
+        stop_search().await;
+        return Ok(bluetooth_status().await);
+    }
+    let _controller = BT_CONTROLLER.read().await;
+    // It used to power the radio on by itself here; a search does not
+    // overrule the switch the viewer set.
+    let controller = bctl(BT_QUERY, &["show"])
+        .await
+        .map(|text| parse_controller(&text))
+        .map_err(|error| bt_error(&error))?;
+    if controller["powered"] != true {
+        return Err("Bluetooth kapalı".into());
+    }
+    start_search().await?;
     Ok(bluetooth_status().await)
 }
 
+/// Listen until bluez has heard `address` again: a device found by an earlier
+/// search that bluez dropped 30 s later cannot be paired until it has.
+async fn refind(address: &str) -> Result<(), String> {
+    start_search().await?;
+    let started = std::time::Instant::now();
+    let heard = loop {
+        if bctl(BT_QUERY, &["info", address]).await.is_ok() {
+            break true;
+        }
+        if started.elapsed() > BT_REFIND {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    stop_search().await;
+    if heard {
+        Ok(())
+    } else {
+        Err(bt_error("not available"))
+    }
+}
+
+/// Connect, and on a time limit take the attempt back: bluez goes on trying a
+/// connection after the client that asked has gone -- measured on the Plus,
+/// the switched-off keyboard's attempt ended only on a `disconnect`.
+async fn connect(address: &str) -> Result<(), String> {
+    match bctl(BT_CONNECT, &["connect", address]).await {
+        Ok(_) => held(address).await,
+        Err(error) => {
+            if error == BT_TIMED_OUT {
+                let _ = bctl(BT_LINK, &["disconnect", address]).await;
+            }
+            Err(bt_error(&error))
+        }
+    }
+}
+
+/// Whether a link that came up is still up a moment later.
+///
+/// bluez says "Connected: yes" as soon as the baseband link is there, before
+/// any profile has. Measured on the Plus with a headset and no audio
+/// endpoint: connected straight after pairing, gone two seconds later with
+/// "a2dp-sink profile connect failed". A link that does not hold is not a
+/// connection, and is not reported as one.
+async fn held(address: &str) -> Result<(), String> {
+    tokio::time::sleep(BT_SETTLE).await;
+    let info = bctl(BT_QUERY, &["info", address]).await.unwrap_or_default();
+    if info_flag(&info, "Connected:") {
+        Ok(())
+    } else {
+        Err("bağlantı kuruldu ama hemen koptu; bu cihazın türü desteklenmiyor olabilir".into())
+    }
+}
+
+/// Pair, trust, connect -- three steps, reported as three.
+///
+/// A pairing that worked and a connection that did not is a paired device
+/// that is not connected, and the answer says exactly that under `outcome`
+/// rather than claiming either all of it or none of it.
 pub async fn bluetooth_pair(address: &str) -> Result<Value, String> {
+    let claim = claim(address)?;
+    let address = claim.0.as_str();
+    let _controller = BT_CONTROLLER.read().await;
+    let _window = BT_PAIRING.lock().await;
+    // CachedBluetoothDevice.startPairing cancels discovery before it bonds;
+    // the radio then pages the one device instead of inquiring for all.
+    stop_search().await;
+    let before = match bctl(BT_QUERY, &["info", address]).await {
+        Ok(info) => info,
+        Err(_) => {
+            refind(address).await.map_err(|error| format!("Eşleştirilemedi: {error}"))?;
+            bctl(BT_QUERY, &["info", address]).await.unwrap_or_default()
+        }
+    };
+    let was_paired = info_flag(&before, "Paired:");
+
     // Pairable for exactly as long as this takes.
     //
-    // The agent answers "yes" without asking — a television has no keypad to
-    // type a passkey on — so the protection is the window, not the answer:
+    // The agent answers "yes" without asking -- a television has no keypad to
+    // type a passkey on -- so the protection is the window, not the answer:
     // the appliance accepts a pairing only while somebody standing in front
-    // of it has just pressed Eşleştir on a device they found, and it stops
-    // accepting them again on the way out of this function, whether the
-    // pairing worked or not.
-    let _ = bctl(&["pairable", "on"]).await;
-    let paired = bctl(&["pair", address]).await;
-    let _ = bctl(&["pairable", "off"]).await;
-    paired?;
-    // Trust it, or the device has to be authorised by hand every time it comes
-    // back — which on a television means a remote that stops working after a
-    // power cut and no way to say yes to it.
-    let _ = bctl(&["trust", address]).await;
-    let _ = bctl(&["connect", address]).await;
-    Ok(bluetooth_status().await)
+    // of it has just pressed a device they found, and it stops accepting them
+    // again on the way out of here, whether the pairing worked or not.
+    let _ = bctl(BT_QUERY, &["pairable", "on"]).await;
+    let paired = bctl(BT_PAIR, &["pair", address]).await;
+    if paired.is_err() {
+        let _ = bctl(BT_QUERY, &["cancel-pairing", address]).await;
+    }
+    let _ = bctl(BT_QUERY, &["pairable", "off"]).await;
+    match paired {
+        Ok(_) => {}
+        Err(error) if error.contains("AlreadyExists") => {}
+        Err(error) => {
+            // A pairing that failed half way can leave a bond bluez thinks it
+            // has and the device does not, which then refuses every later
+            // attempt. A device that was not paired before goes back to not
+            // being paired; one that was keeps what it had.
+            let after = bctl(BT_QUERY, &["info", address]).await.unwrap_or_default();
+            if !was_paired && (info_flag(&after, "Paired:") || info_flag(&after, "Bonded:")) {
+                let _ = bctl(BT_LINK, &["remove", address]).await;
+                eprintln!("mediaboxd.bluetooth pair failed half way; the partial bond was removed");
+            }
+            return Err(format!("Eşleştirilemedi: {}", bt_error(&error)));
+        }
+    }
+    // Trusted, or the device has to be authorised by hand every time it comes
+    // back -- on a television, a remote that stops working after a power cut
+    // and nothing to say yes to it with.
+    let trusted = bctl(BT_LINK, &["trust", address]).await.is_ok();
+    // A keyboard or a remote connects by itself the moment it is paired; ask
+    // only for what did not.
+    let now = bctl(BT_QUERY, &["info", address]).await.unwrap_or_default();
+    let link = if info_flag(&now, "Connected:") {
+        held(address).await
+    } else {
+        connect(address).await
+    };
+    let mut status = bluetooth_status().await;
+    status["outcome"] = json!({
+        "paired": true,
+        "trusted": trusted,
+        "connected": link.is_ok(),
+        "error": link.err(),
+    });
+    Ok(status)
 }
 
 pub async fn bluetooth_connect(address: &str) -> Result<Value, String> {
-    bctl(&["connect", address]).await?;
+    let claim = claim(address)?;
+    let _controller = BT_CONTROLLER.read().await;
+    // A radio that is inquiring shares its time with the page this needs.
+    stop_search().await;
+    connect(&claim.0)
+        .await
+        .map_err(|error| format!("Bağlanamadı: {error}"))?;
     Ok(bluetooth_status().await)
 }
 
 pub async fn bluetooth_disconnect(address: &str) -> Result<Value, String> {
-    bctl(&["disconnect", address]).await?;
+    let claim = claim(address)?;
+    let _controller = BT_CONTROLLER.read().await;
+    bctl(BT_LINK, &["disconnect", &claim.0])
+        .await
+        .map_err(|error| format!("Bağlantı kesilemedi: {}", bt_error(&error)))?;
     Ok(bluetooth_status().await)
 }
 
+/// Remove a pairing. bluez drops the link first if there is one; any other
+/// device's connection is its own and is not touched.
 pub async fn bluetooth_remove(address: &str) -> Result<Value, String> {
-    bctl(&["remove", address]).await?;
+    let claim = claim(address)?;
+    let _controller = BT_CONTROLLER.read().await;
+    bctl(BT_LINK, &["remove", &claim.0])
+        .await
+        .map_err(|error| format!("Eşleşme kaldırılamadı: {}", bt_error(&error)))?;
+    BT_ICONS.lock().expect("bluetooth icons").remove(&claim.0);
     Ok(bluetooth_status().await)
 }
 
@@ -1458,6 +1932,70 @@ mod tests {
     fn an_empty_controller_block_is_not_a_controller() {
         let parsed = parse_controller("No default controller available\n");
         assert!(parsed["address"].is_null());
+    }
+
+    // ------------------------------------------------ Bluetooth, from real text
+
+    #[test]
+    fn devices_are_read_with_their_names_and_without_made_up_ones() {
+        // `bluetoothctl devices` on the Plus, one nameless device added.
+        let text = "Device C5:A3:30:E0:02:07 ROG AZOTH\nDevice A4:C1:38:7C:25:32 UR02\nDevice 28:56:5A:A0:A1:8A 28-56-5A-A0-A1-8A\nnot a device line\nDevice nonsense name\n";
+        assert_eq!(
+            parse_devices(text),
+            vec![
+                ("C5:A3:30:E0:02:07".to_string(), Some("ROG AZOTH".to_string())),
+                ("A4:C1:38:7C:25:32".to_string(), Some("UR02".to_string())),
+                ("28:56:5A:A0:A1:8A".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn info_gives_flags_icon_and_battery() {
+        let info = "Device DE:00:45:62:12:B7 (random)\n\tName: MX Master 3S\n\tIcon: input-mouse\n\tPaired: yes\n\tBonded: yes\n\tConnected: no\n\tBattery Percentage: 0x50 (80)\n";
+        assert!(info_flag(info, "Paired:"));
+        assert!(!info_flag(info, "Connected:"));
+        assert!(!info_flag(info, "Trusted:"));
+        assert_eq!(info_icon(info).as_deref(), Some("input-mouse"));
+        assert_eq!(info_battery(info), Some(80));
+        assert_eq!(info_battery("Device x\n"), None);
+    }
+
+    #[test]
+    fn only_an_address_reaches_bluetoothctl() {
+        assert!(is_address("A4:C1:38:7C:25:32"));
+        assert!(!is_address("--help"));
+        assert!(!is_address("A4:C1:38:7C:25"));
+        assert!(!is_address("A4:C1:38:7C:25:3G"));
+    }
+
+    #[test]
+    fn a_verb_already_running_on_a_device_is_refused_and_released_after() {
+        let first = claim("aa:bb:cc:dd:ee:01").unwrap();
+        // The same device, however it is spelt: refused, not sent twice.
+        assert!(claim("AA:BB:CC:DD:EE:01").is_err());
+        // Another device is not held up by it.
+        let other = claim("AA:BB:CC:DD:EE:02").unwrap();
+        drop(first);
+        assert!(claim("AA:BB:CC:DD:EE:01").is_ok());
+        drop(other);
+    }
+
+    #[test]
+    fn bluez_errors_are_said_in_words() {
+        // As bluetoothctl printed them on the Plus.
+        assert_eq!(bt_error(BT_TIMED_OUT), "cihaz yanıt vermedi");
+        assert!(bt_error("Device 11:22:33:44:55:66 not available").contains("görünmüyor"));
+        assert!(bt_error("Failed to connect: org.bluez.Error.Failed br-connection-profile-unavailable").contains("desteklenmiyor"));
+        assert!(bt_error("Failed to pair: org.bluez.Error.AuthenticationFailed").contains("reddetti"));
+        assert!(bt_error("SetDiscoveryFilter failed: org.bluez.Error.NotReady\nFailed to start discovery: org.bluez.Error.NotReady").contains("hazır değil"));
+        assert_eq!(bt_error("Failed to x: org.bluez.Error.Odd\n"), "Failed to x: org.bluez.Error.Odd");
+    }
+
+    #[test]
+    fn colours_and_prompts_are_taken_off() {
+        assert_eq!(plain("[\u{1b}[0;93mCHG\u{1b}[0m] Device"), "[CHG] Device");
+        assert_eq!(plain("\u{1}\u{1b}[0;94m\u{2}[bluetoothctl]> x"), "[bluetoothctl]> x");
     }
 
     #[test]

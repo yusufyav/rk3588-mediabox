@@ -11,6 +11,7 @@
 //! is what a viewer who picked the wrong network expects.
 
 use crate::keyboard::{Edit, Grid};
+use std::collections::BTreeMap;
 
 /// One network, as the scan handed it over.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -961,6 +962,7 @@ pub struct Device {
     pub paired: bool,
     pub connected: bool,
     pub icon: Option<String>,
+    pub battery: Option<u8>,
 }
 
 impl Device {
@@ -973,41 +975,77 @@ impl Device {
             .unwrap_or_else(|| self.address.clone())
     }
 
-    /// The reference's own words for what this is.
-    pub fn kind(&self) -> &'static str {
+    /// The glyph at the row's left, from what bluez says the device is.
+    pub fn glyph(&self) -> &'static str {
         match self.icon.as_deref() {
-            Some("audio-card") | Some("audio-headset") | Some("audio-headphones") => "Ses aygıtı",
-            Some("input-keyboard") => "Klavye",
-            Some("input-mouse") => "Fare",
-            Some("input-gaming") => "Oyun kolu",
-            Some("phone") => "Telefon",
-            Some("computer") => "Bilgisayar",
-            Some("tv") | Some("video-display") => "Televizyon",
-            _ => "",
+            Some("audio-headset") | Some("audio-headphones") => "headphones",
+            Some("audio-card") => "speaker",
+            Some("input-keyboard") => "keyboard",
+            Some("input-mouse") | Some("input-tablet") => "mouse",
+            Some("input-gaming") => "remote",
+            Some("phone") => "phone",
+            Some("computer") => "monitor",
+            Some("tv") | Some("video-display") => "tv",
+            _ => "bluetooth",
         }
     }
 }
 
-/// One device as the list draws it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BtView {
-    pub name: String,
-    pub under: String,
-    pub connected: bool,
-    pub header: String,
-    /// Headings before this row.
-    pub n_header: usize,
-}
-
+/// A verb on one device, running until its own answer comes back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BtPress {
-    None,
-    Scan,
-    Power(bool),
-    /// Pair and then connect; the address is `highlighted()`.
+pub enum BtOp {
     Pair,
     Connect,
     Disconnect,
+    Forget,
+}
+
+impl BtOp {
+    /// What the device's row says while it runs.
+    fn running(self) -> &'static str {
+        match self {
+            BtOp::Pair => "Eşleşiyor…",
+            BtOp::Connect => "Bağlanıyor…",
+            BtOp::Disconnect => "Bağlantı kesiliyor…",
+            BtOp::Forget => "Kaldırılıyor…",
+        }
+    }
+}
+
+/// A row of the Bluetooth list, top to bottom, as the Wi-Fi list is laid out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BtLine {
+    /// "Bluetooth", the radio's switch.
+    Toggle,
+    /// With the radio off, what to do about it. Drawn, never focused.
+    Note(&'static str),
+    /// "Eşleşmiş cihazlar" above the paired ones. Drawn, never focused.
+    Header(&'static str),
+    /// "Kullanılabilir cihazlar" with "Yenile" at its right -- the spinner
+    /// while a search runs. Ok on "Yenile" searches.
+    Available,
+    Device(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BtPress {
+    None,
+    Power(bool),
+    Scan,
+    Do(BtOp, String),
+    /// The device's actions: what Ok on a connected device opens.
+    Menu,
+}
+
+/// Which request an answer from the daemon is the answer to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BtReply {
+    /// A look, on opening or while the screen is open.
+    Status,
+    /// A search started (or refused).
+    Scan,
+    Power,
+    Done(String, BtOp),
 }
 
 pub struct Bluetooth {
@@ -1017,13 +1055,19 @@ pub struct Bluetooth {
     pub powered: bool,
     pub controller: Option<String>,
     pub devices: Vec<Device>,
-    /// 0 is the radio switch, 1 is "search again", and the devices follow.
+    /// Into the focusable rows.
     pub index: usize,
+    /// The radio is being switched: the list waits for that answer.
     pub busy: bool,
+    pub scanning: bool,
+    /// A search asked for and not answered yet: a look that set out before
+    /// it does not stop the spinner it started.
+    scan_asked: bool,
+    /// The devices a verb is running on. One at a time per device; another
+    /// device is not held up by it.
+    pub pending: BTreeMap<String, BtOp>,
     pub notice: String,
 }
-
-pub const BT_HEAD: usize = 2;
 
 impl Default for Bluetooth {
     fn default() -> Self {
@@ -1039,33 +1083,90 @@ impl Bluetooth {
             powered: false,
             controller: None,
             devices: Vec::new(),
-            index: 1,
+            index: 0,
             busy: false,
+            scanning: false,
+            scan_asked: false,
+            pending: BTreeMap::new(),
             notice: String::new(),
         }
     }
 
     pub fn open(&mut self) {
-        self.index = 1;
+        self.index = 0;
         self.notice.clear();
     }
 
-    pub fn rows(&self) -> usize {
-        BT_HEAD + self.devices.len()
+    pub fn device(&self, address: &str) -> Option<&Device> {
+        self.devices.iter().find(|device| device.address == address)
+    }
+
+    /// Every row, as AOSP's Bluetooth settings group them: the switch; the
+    /// paired devices, the connected ones first; then the ones a search
+    /// found. A found device with no name is left out, as Android leaves it
+    /// out unless a developer option says otherwise: a search in a block of
+    /// flats turns up a dozen anonymous addresses nobody can tell apart.
+    pub fn rows(&self) -> Vec<BtLine> {
+        let mut rows = vec![BtLine::Toggle];
+        if !self.known || !self.present {
+            return rows;
+        }
+        if !self.powered {
+            rows.push(BtLine::Note("Yakındaki cihazları görmek için Bluetooth'u açın."));
+            return rows;
+        }
+        let mut paired: Vec<&Device> = self.devices.iter().filter(|device| device.paired).collect();
+        paired.sort_by_key(|device| (!device.connected, device.title().to_lowercase()));
+        if !paired.is_empty() {
+            rows.push(BtLine::Header("Eşleşmiş cihazlar"));
+            rows.extend(paired.iter().map(|device| BtLine::Device(device.address.clone())));
+        }
+        rows.push(BtLine::Available);
+        // By name, not by when it was heard: a list that reorders itself
+        // every two seconds is one the remote cannot stay on.
+        let mut found: Vec<&Device> = self
+            .devices
+            .iter()
+            .filter(|device| !device.paired && device.name.is_some())
+            .collect();
+        found.sort_by_key(|device| device.title().to_lowercase());
+        rows.extend(found.iter().map(|device| BtLine::Device(device.address.clone())));
+        rows
+    }
+
+    fn focusable(&self) -> Vec<BtLine> {
+        self.rows()
+            .into_iter()
+            .filter(|row| !matches!(row, BtLine::Note(_) | BtLine::Header(_)))
+            .collect()
+    }
+
+    pub fn focused_row(&self) -> Option<BtLine> {
+        self.focusable().get(self.index).cloned()
     }
 
     pub fn highlighted(&self) -> Option<&Device> {
-        self.index
-            .checked_sub(BT_HEAD)
-            .and_then(|at| self.devices.get(at))
+        match self.focused_row()? {
+            BtLine::Device(address) => self.device(&address),
+            _ => None,
+        }
     }
 
+    /// Fold a status answer in, keeping the remote on the row it was on.
     pub fn take_status(&mut self, value: &serde_json::Value) {
+        let was = self.focused_row();
         self.known = true;
-        self.present = value
-            .get("present")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        // Switched off is not absent. On the Plus, rfkill cuts the radio's
+        // power and the USB controller leaves with it: bluez then has no
+        // controller to show, and reading that as "no Bluetooth on this
+        // board" greyed the switch out -- the radio could be turned off from
+        // here and never on again.
+        let blocked = value.get("blocked").and_then(serde_json::Value::as_bool) == Some(true);
+        self.present = blocked
+            || value
+                .get("present")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
         let controller = value.get("controller");
         self.controller = controller
             .and_then(|c| c.get("address"))
@@ -1075,13 +1176,16 @@ impl Bluetooth {
             .and_then(|c| c.get("powered"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-
-        let was = self.highlighted().map(|device| device.address.clone());
+        let scanning = value
+            .get("scanning")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        self.scanning = self.powered && (scanning || self.scan_asked);
         self.devices = value
             .get("devices")
             .and_then(serde_json::Value::as_array)
             .map(|items| {
-                let mut devices: Vec<Device> = items
+                items
                     .iter()
                     .map(|item| Device {
                         address: item
@@ -1105,69 +1209,132 @@ impl Bluetooth {
                             .get("icon")
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_string),
+                        battery: item
+                            .get("battery")
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|level| level.min(100) as u8),
                     })
-                    .collect();
-                // Paired first, then named, then the rest: a scan in a block of
-                // flats turns up a dozen anonymous addresses and the viewer's
-                // own headphones should not be below them.
-                devices.sort_by_key(|device| {
-                    (
-                        !device.paired,
-                        !device.connected,
-                        device.name.is_none(),
-                        device.title().to_lowercase(),
-                    )
-                });
-                devices
+                    .collect()
             })
             .unwrap_or_default();
+        let rows = self.focusable();
+        if let Some(at) = was.and_then(|was| rows.iter().position(|row| *row == was)) {
+            self.index = at;
+        }
+        self.index = self.index.min(rows.len().saturating_sub(1));
+    }
 
-        if let Some(address) = was {
-            if let Some(at) = self.devices.iter().position(|d| d.address == address) {
-                self.index = BT_HEAD + at;
-                return;
+    /// Fold in the daemon's answer to `reply`.
+    ///
+    /// Only an action's own answer ends it: the looks taken every two seconds
+    /// while the screen is open used to clear "busy" under a pairing that was
+    /// still running, and the next Ok started a second one on top of it.
+    pub fn take_answer(&mut self, answer: Result<serde_json::Value, String>, reply: &BtReply) {
+        match reply {
+            BtReply::Power => self.busy = false,
+            BtReply::Done(address, _) => {
+                self.pending.remove(address);
+            }
+            BtReply::Scan => self.scan_asked = false,
+            BtReply::Status => {}
+        }
+        match answer {
+            Ok(value) => {
+                // While the radio is being switched a look sees it half way;
+                // the switch's own answer says where it ended up.
+                if self.busy && *reply != BtReply::Power {
+                    return;
+                }
+                self.take_status(&value);
+                match reply {
+                    BtReply::Power => self.notice.clear(),
+                    BtReply::Done(_, op) => {
+                        let outcome = value.get("outcome");
+                        let linked = outcome
+                            .and_then(|o| o.get("connected"))
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true);
+                        self.notice = if *op == BtOp::Pair && !linked {
+                            // Paired is paired: the row says so, and this
+                            // says what did not happen.
+                            let why = outcome
+                                .and_then(|o| o.get("error"))
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("bilinmeyen hata");
+                            format!("Eşleşti, ancak bağlanamadı: {why}")
+                        } else {
+                            String::new()
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            Err(error) => {
+                if *reply == BtReply::Scan {
+                    self.scanning = false;
+                }
+                // A failed look does not cover what an action said.
+                if *reply != BtReply::Status || self.notice.is_empty() {
+                    self.notice = error;
+                }
             }
         }
-        self.index = self.index.min(self.rows().saturating_sub(1));
+    }
+
+    /// A search is being asked for.
+    pub fn begin_scan(&mut self) {
+        self.scanning = true;
+        self.scan_asked = true;
+        self.notice.clear();
+    }
+
+    /// A verb on a device is being asked for.
+    pub fn begin(&mut self, op: BtOp, address: &str) {
+        self.pending.insert(address.to_string(), op);
+        self.notice.clear();
+        // Pairing and connecting end the search in the daemon.
+        if matches!(op, BtOp::Pair | BtOp::Connect) {
+            self.scanning = false;
+        }
     }
 
     pub fn step(&mut self, dy: i32) {
-        let last = self.rows().saturating_sub(1);
+        let last = self.focusable().len().saturating_sub(1);
         let next = self.index as i32 + dy;
         self.index = next.clamp(0, last as i32) as usize;
     }
 
-    pub fn press(&mut self) -> BtPress {
-        match self.index {
-            0 => BtPress::Power(!self.powered),
-            1 => BtPress::Scan,
-            _ => match self.highlighted() {
-                None => BtPress::None,
-                Some(device) if device.connected => BtPress::Disconnect,
-                Some(device) if device.paired => BtPress::Connect,
-                Some(_) => BtPress::Pair,
-            },
+    /// What Ok does on the focused row: AOSP's
+    /// BluetoothDevicePreference.onClicked -- a found device pairs, a paired
+    /// one connects, a connected one offers what can be done to it.
+    pub fn press(&self) -> BtPress {
+        match self.focused_row() {
+            Some(BtLine::Toggle) if self.known && self.present && !self.busy => {
+                BtPress::Power(!self.powered)
+            }
+            Some(BtLine::Available) if self.powered && !self.scanning && !self.busy => BtPress::Scan,
+            Some(BtLine::Device(address)) if !self.busy && !self.pending.contains_key(&address) => {
+                match self.device(&address) {
+                    Some(device) if device.connected => BtPress::Menu,
+                    Some(device) if device.paired => BtPress::Do(BtOp::Connect, address),
+                    Some(_) => BtPress::Do(BtOp::Pair, address),
+                    None => BtPress::None,
+                }
+            }
+            _ => BtPress::None,
         }
     }
 
-    /// What Ok would do, said in the row itself rather than discovered by
-    /// pressing it.
-    pub fn press_label(&self) -> &'static str {
-        match self.index {
-            0 => {
-                if self.powered {
-                    "Kapat"
-                } else {
-                    "Aç"
-                }
-            }
-            1 => "Ara",
-            _ => match self.highlighted() {
-                None => "",
-                Some(device) if device.connected => "Bağlantıyı kes",
-                Some(device) if device.paired => "Bağlan",
-                Some(_) => "Eşleştir",
-            },
+    /// Under a device's name: what is happening to it, or that it is
+    /// connected, with its battery when it reports one.
+    pub fn under(&self, device: &Device) -> String {
+        if let Some(op) = self.pending.get(&device.address) {
+            return op.running().into();
+        }
+        match (device.connected, device.battery) {
+            (true, Some(level)) => format!("Bağlı, pil %{level}"),
+            (true, None) => "Bağlı".into(),
+            _ => String::new(),
         }
     }
 
@@ -1176,7 +1343,7 @@ impl Bluetooth {
         if !self.known {
             return String::new();
         }
-        if self.controller.is_none() {
+        if !self.present {
             return "Bu kartta Bluetooth denetleyicisi yok".into();
         }
         if !self.powered {
@@ -1185,51 +1352,19 @@ impl Bluetooth {
         let paired = self.devices.iter().filter(|device| device.paired).count();
         let connected = self.devices.iter().filter(|device| device.connected).count();
         match (paired, connected) {
-            (0, _) => "Eşleşmiş aygıt yok".into(),
-            (paired, 0) => format!("{paired} eşleşmiş aygıt"),
-            (paired, connected) => format!("{paired} eşleşmiş aygıt · {connected} bağlı"),
+            (0, _) => "Eşleşmiş cihaz yok".into(),
+            (paired, 0) => format!("{paired} eşleşmiş cihaz"),
+            (paired, connected) => format!("{paired} eşleşmiş cihaz · {connected} bağlı"),
         }
     }
 
-    /// The list as drawn: a heading over the paired ones and over the ones
-    /// a search found; under each name what it is, or -- under the one the
-    /// remote is on -- what Ok does to it.
-    pub fn rows_view(&self) -> Vec<BtView> {
-        let mut headers = 0;
-        let mut previous: Option<bool> = None;
-        self.devices
-            .iter()
-            .enumerate()
-            .map(|(at, device)| {
-                let header = if previous != Some(device.paired) {
-                    if device.paired { "Eşleşmiş aygıtlar" } else { "Bulunan aygıtlar" }
-                } else {
-                    ""
-                };
-                previous = Some(device.paired);
-                let n_header = headers;
-                if !header.is_empty() {
-                    headers += 1;
-                }
-                let focused = self.index == BT_HEAD + at;
-                BtView {
-                    name: device.title(),
-                    under: match (focused, device.kind()) {
-                        (true, "") => self.press_label().to_string(),
-                        (true, kind) => format!("{kind} · {}", self.press_label()),
-                        (false, kind) => kind.to_string(),
-                    },
-                    connected: device.connected,
-                    header: header.to_string(),
-                    n_header,
-                }
-            })
-            .collect()
-    }
-
-    /// What a long Ok -- or Menu -- offers on a paired device.
+    /// What a long Ok -- or Ok on a connected device, or Menu -- offers on a
+    /// paired device.
     pub fn menu(&self) -> Option<(String, Vec<PeerChoice>)> {
         let device = self.highlighted().filter(|device| device.paired)?;
+        if self.busy || self.pending.contains_key(&device.address) {
+            return None;
+        }
         let title = device.title();
         let address = device.address.clone();
         let link = if device.connected {
@@ -1595,42 +1730,7 @@ mod tests {
         assert_eq!(net("x", -60, true).bars(), 3);
     }
 
-    #[test]
-    fn bluetooth_puts_paired_devices_first() {
-        let mut bt = Bluetooth::new();
-        bt.take_status(&json!({
-            "present": true,
-            "controller": {"address": "AA:BB", "powered": true},
-            "devices": [
-                {"address": "11:11", "name": null, "paired": false, "connected": false},
-                {"address": "22:22", "name": "Kulaklık", "paired": true, "connected": false},
-                {"address": "33:33", "name": "TV", "paired": false, "connected": false}
-            ]
-        }));
-        assert_eq!(bt.devices[0].address, "22:22");
-        assert_eq!(bt.devices[1].address, "33:33");
-        assert_eq!(bt.devices[2].address, "11:11");
-    }
 
-    #[test]
-    fn what_ok_does_to_a_device_depends_on_where_it_already_is() {
-        let mut bt = Bluetooth::new();
-        bt.take_status(&json!({
-            "present": true,
-            "controller": {"address": "AA:BB", "powered": true},
-            "devices": [
-                {"address": "11:11", "name": "Bağlı", "paired": true, "connected": true},
-                {"address": "22:22", "name": "Eşli", "paired": true, "connected": false},
-                {"address": "33:33", "name": "Yeni", "paired": false, "connected": false}
-            ]
-        }));
-        bt.index = BT_HEAD;
-        assert_eq!(bt.press(), BtPress::Disconnect);
-        bt.index = BT_HEAD + 1;
-        assert_eq!(bt.press(), BtPress::Connect);
-        bt.index = BT_HEAD + 2;
-        assert_eq!(bt.press(), BtPress::Pair);
-    }
 
     /// A screen that has not heard from the daemon says nothing about the
     /// radio. Measured on the Ultra: the first frame of the Wi-Fi screen read
@@ -1653,35 +1753,7 @@ mod tests {
         assert!(!bt.present);
     }
 
-    #[test]
-    fn an_unpaired_device_cannot_be_forgotten() {
-        let mut bt = Bluetooth::new();
-        bt.take_status(&json!({
-            "present": true,
-            "controller": {"address": "AA:BB", "powered": true},
-            "devices": [{"address": "33:33", "name": "Yeni", "paired": false, "connected": false}]
-        }));
-        bt.index = BT_HEAD;
-        assert!(bt.menu().is_none());
-    }
 
-    #[test]
-    fn a_paired_device_can_be_forgotten() {
-        let mut bt = Bluetooth::new();
-        bt.take_status(&json!({
-            "present": true,
-            "controller": {"address": "AA:BB", "powered": true},
-            "devices": [{"address": "33:33", "name": "Kulaklık", "paired": true, "connected": false}]
-        }));
-        bt.index = BT_HEAD;
-        let (title, menu) = bt.menu().unwrap();
-        assert_eq!(title, "Kulaklık");
-        assert_eq!(
-            ops(&menu),
-            vec![Some(PeerOp::BtConnect("33:33".into())), Some(PeerOp::BtForget("33:33".into()))]
-        );
-        assert!(menu[1].ask.is_some(), "removing a pairing asks first");
-    }
 
     #[test]
     fn the_network_the_board_is_on_is_listed_at_once() {
@@ -1700,32 +1772,214 @@ mod tests {
         assert!(wifi.network("YuHome5").is_none());
     }
 
-    #[test]
-    fn paired_devices_and_found_ones_are_under_their_own_headings() {
+    // ------------------------------------------------------------- Bluetooth
+
+    /// The Plus as it answered, a found device or two added.
+    fn plus() -> Bluetooth {
         let mut bt = Bluetooth::new();
-        bt.take_status(&serde_json::json!({
+        bt.take_status(&json!({
             "present": true,
-            "controller": {"address": "B0:AC", "powered": true},
+            "controller": {"address": "B0:AC:82:E0:9C:AC", "powered": true},
+            "scanning": false,
             "devices": [
-                {"address": "A1", "name": "Kulaklık", "paired": false, "connected": false, "icon": "audio-headset"},
                 {"address": "C5", "name": "ROG AZOTH", "paired": true, "connected": false, "icon": "input-keyboard"},
-                {"address": "DE", "name": "MX Master 3S", "paired": true, "connected": true, "icon": "input-mouse"},
+                {"address": "DE", "name": "MX Master 3S", "paired": true, "connected": true, "icon": "input-mouse", "battery": 80},
+                {"address": "A4", "name": "UR02", "paired": true, "connected": false},
+                {"address": "70", "name": "VESTEL TV", "paired": false, "connected": false},
+                {"address": "28", "name": null, "paired": false, "connected": false},
+                {"address": "64", "name": "Android TV", "paired": false, "connected": false},
             ],
         }));
-        let rows = bt.rows_view();
-        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
-        assert_eq!(names, ["MX Master 3S", "ROG AZOTH", "Kulaklık"]);
-        assert_eq!(rows[0].header, "Eşleşmiş aygıtlar");
-        assert_eq!(rows[1].header, "");
-        assert_eq!(rows[2].header, "Bulunan aygıtlar");
-        assert_eq!((rows[0].n_header, rows[1].n_header, rows[2].n_header), (0, 1, 1));
-        assert!(rows[0].connected);
-        // No address anywhere; the focused row says what Ok does.
-        assert!(rows.iter().all(|row| !row.under.contains(':')));
-        bt.index = BT_HEAD + 2;
-        assert_eq!(bt.rows_view()[2].under, "Ses aygıtı · Eşleştir");
-        assert_eq!(bt.rows_view()[0].under, "Fare");
-        assert_eq!(bt.summary(), "2 eşleşmiş aygıt · 1 bağlı");
+        bt
+    }
+
+    fn focus_bt(bt: &mut Bluetooth, wanted: BtLine) {
+        bt.index = bt.focusable().iter().position(|row| *row == wanted).expect("row on the list");
+    }
+
+    fn device(address: &str) -> BtLine {
+        BtLine::Device(address.into())
+    }
+
+    #[test]
+    fn paired_devices_and_available_ones_are_under_their_own_headings() {
+        let bt = plus();
+        assert_eq!(
+            bt.rows(),
+            vec![
+                BtLine::Toggle,
+                BtLine::Header("Eşleşmiş cihazlar"),
+                // Connected first, then by name.
+                device("DE"),
+                device("C5"),
+                device("A4"),
+                BtLine::Available,
+                // By name; the nameless one is not listed.
+                device("64"),
+                device("70"),
+            ]
+        );
+        assert_eq!(bt.summary(), "3 eşleşmiş cihaz · 1 bağlı");
+        assert_eq!(bt.under(bt.device("DE").unwrap()), "Bağlı, pil %80");
+        assert_eq!(bt.under(bt.device("C5").unwrap()), "");
+        assert_eq!(bt.device("C5").unwrap().glyph(), "keyboard");
+        assert_eq!(bt.device("A4").unwrap().glyph(), "bluetooth");
+    }
+
+    #[test]
+    fn with_the_radio_off_the_list_says_how_to_see_devices() {
+        let mut bt = Bluetooth::new();
+        bt.take_status(&json!({"present": true, "controller": {"address": "B0", "powered": false}, "devices": [
+            {"address": "C5", "name": "ROG AZOTH", "paired": true, "connected": false}
+        ]}));
+        assert!(matches!(bt.rows()[..], [BtLine::Toggle, BtLine::Note(_)]));
+        assert_eq!(bt.press(), BtPress::Power(true));
+    }
+
+    /// The Plus after "Bluetooth" was switched off from this screen, as the
+    /// daemon answered it.
+    #[test]
+    fn a_radio_switched_off_can_be_switched_on_again() {
+        let mut bt = Bluetooth::new();
+        bt.take_status(&json!({"present": false, "blocked": true, "controller": {}, "scanning": false, "devices": []}));
+        assert!(bt.present);
+        assert!(!bt.powered);
+        assert_eq!(bt.summary(), "Kapalı");
+        assert!(matches!(bt.rows()[..], [BtLine::Toggle, BtLine::Note(_)]));
+        assert_eq!(bt.press(), BtPress::Power(true));
+        // A board with no Bluetooth at all still says so.
+        let mut none = Bluetooth::new();
+        none.take_status(&json!({"present": false, "blocked": null}));
+        assert!(!none.present);
+        assert_eq!(none.press(), BtPress::None);
+    }
+
+    #[test]
+    fn what_ok_does_to_a_device_depends_on_where_it_already_is() {
+        let mut bt = plus();
+        focus_bt(&mut bt, device("DE"));
+        assert_eq!(bt.press(), BtPress::Menu);
+        focus_bt(&mut bt, device("C5"));
+        assert_eq!(bt.press(), BtPress::Do(BtOp::Connect, "C5".into()));
+        focus_bt(&mut bt, device("70"));
+        assert_eq!(bt.press(), BtPress::Do(BtOp::Pair, "70".into()));
+        focus_bt(&mut bt, BtLine::Available);
+        assert_eq!(bt.press(), BtPress::Scan);
+    }
+
+    #[test]
+    fn a_second_ok_on_a_device_does_nothing_while_the_first_runs() {
+        let mut bt = plus();
+        focus_bt(&mut bt, device("70"));
+        bt.begin(BtOp::Pair, "70");
+        assert_eq!(bt.press(), BtPress::None);
+        assert_eq!(bt.under(bt.device("70").unwrap()), "Eşleşiyor…");
+        // Another device is not held up by it.
+        focus_bt(&mut bt, device("C5"));
+        assert_eq!(bt.press(), BtPress::Do(BtOp::Connect, "C5".into()));
+        // A look taken meanwhile does not end it.
+        let look = json!({"present": true, "controller": {"address": "B0", "powered": true}, "devices": []});
+        bt.take_answer(Ok(look), &BtReply::Status);
+        assert!(bt.pending.contains_key("70"));
+        // Its own answer does.
+        bt.take_answer(Err("Eşleştirilemedi: cihaz yanıt vermedi".into()), &BtReply::Done("70".into(), BtOp::Pair));
+        assert!(bt.pending.is_empty());
+        assert_eq!(bt.notice, "Eşleştirilemedi: cihaz yanıt vermedi");
+    }
+
+    #[test]
+    fn paired_but_not_connected_is_not_shown_as_done() {
+        let mut bt = plus();
+        bt.begin(BtOp::Pair, "70");
+        let answer = json!({
+            "present": true,
+            "controller": {"address": "B0", "powered": true},
+            "devices": [{"address": "70", "name": "VESTEL TV", "paired": true, "connected": false}],
+            "outcome": {"paired": true, "connected": false, "error": "cihaz yanıt vermedi"},
+        });
+        bt.take_answer(Ok(answer), &BtReply::Done("70".into(), BtOp::Pair));
+        assert_eq!(bt.notice, "Eşleşti, ancak bağlanamadı: cihaz yanıt vermedi");
+        assert!(bt.device("70").unwrap().paired);
+        assert!(!bt.device("70").unwrap().connected);
+        assert_eq!(bt.under(bt.device("70").unwrap()), "");
+    }
+
+    #[test]
+    fn a_look_taken_while_the_radio_switches_is_not_shown() {
+        let mut bt = plus();
+        bt.busy = true;
+        let off = json!({"present": false});
+        bt.take_answer(Ok(off), &BtReply::Status);
+        assert!(bt.present, "half-way state ignored");
+        assert_eq!(bt.press(), BtPress::None);
+        let on = json!({"present": true, "controller": {"address": "B0", "powered": false}});
+        bt.take_answer(Ok(on), &BtReply::Power);
+        assert!(!bt.busy);
+        assert!(!bt.powered);
+    }
+
+    #[test]
+    fn only_the_search_asked_for_or_the_daemon_ends_the_spinner() {
+        let mut bt = plus();
+        focus_bt(&mut bt, BtLine::Available);
+        bt.begin_scan();
+        // A look that set out before the search started.
+        let idle = json!({"present": true, "controller": {"address": "B0", "powered": true}, "scanning": false});
+        bt.take_answer(Ok(idle.clone()), &BtReply::Status);
+        assert!(bt.scanning);
+        assert_eq!(bt.press(), BtPress::None, "no second search on top");
+        let running = json!({"present": true, "controller": {"address": "B0", "powered": true}, "scanning": true});
+        bt.take_answer(Ok(running), &BtReply::Scan);
+        assert!(bt.scanning);
+        bt.take_answer(Ok(idle), &BtReply::Status);
+        assert!(!bt.scanning);
+        // A search that could not start says why and stops turning.
+        bt.begin_scan();
+        bt.take_answer(Err("Arama başlatılamadı".into()), &BtReply::Scan);
+        assert!(!bt.scanning);
+        assert_eq!(bt.notice, "Arama başlatılamadı");
+    }
+
+    #[test]
+    fn the_remote_stays_on_its_device_when_the_list_changes() {
+        let mut bt = plus();
+        focus_bt(&mut bt, device("70"));
+        // A search hears a new device that sorts above it, and the mouse
+        // drops off.
+        bt.take_status(&json!({
+            "present": true,
+            "controller": {"address": "B0", "powered": true},
+            "devices": [
+                {"address": "C5", "name": "ROG AZOTH", "paired": true, "connected": false},
+                {"address": "11", "name": "AAA Kulaklık", "paired": false, "connected": false},
+                {"address": "70", "name": "VESTEL TV", "paired": false, "connected": false},
+            ],
+        }));
+        assert_eq!(bt.focused_row(), Some(device("70")));
+        // Its device gone, the remote stays on the list.
+        bt.take_status(&json!({"present": true, "controller": {"address": "B0", "powered": true}, "devices": []}));
+        assert!(bt.focused_row().is_some());
+    }
+
+    #[test]
+    fn an_unpaired_device_cannot_be_forgotten() {
+        let mut bt = plus();
+        focus_bt(&mut bt, device("70"));
+        assert!(bt.menu().is_none());
+    }
+
+    #[test]
+    fn a_paired_device_can_be_forgotten_but_not_while_a_verb_runs_on_it() {
+        let mut bt = plus();
+        focus_bt(&mut bt, device("DE"));
+        let (title, menu) = bt.menu().unwrap();
+        assert_eq!(title, "MX Master 3S");
+        assert_eq!(
+            ops(&menu),
+            vec![Some(PeerOp::BtDisconnect("DE".into())), Some(PeerOp::BtForget("DE".into()))]
+        );
+        assert!(menu[1].ask.is_some(), "removing a pairing asks first");
+        bt.begin(BtOp::Disconnect, "DE");
+        assert!(bt.menu().is_none());
     }
 }
-

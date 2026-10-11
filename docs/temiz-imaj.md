@@ -211,6 +211,14 @@ kendisi, beşincisi HDMI devir yolunu ve HDR referansını getirir.
 `deploy-mediabox-v3.sh` gerektiğinde `fonts-inter`, `fonts-noto-color-emoji`,
 tarayıcı uygulaması için `sway` ve `chromium` paketlerini kendisi kurar.
 
+**Bluetooth kulaklık sesi** için `bluez-alsa-utils` ve `libasound2-plugin-bluez`
+gerekir (bkz. [bluetooth.md](bluetooth.md#ses)). Kurucu, arşivin paket listesinde
+yoksa bunları kendisi kurar; `bluealsa.service`'i yalnız `a2dp-source` ile
+(`/etc/systemd/system/bluealsa.service.d/10-mediabox.conf`) çalıştırır ve
+Debian'ın açtığı `bluealsa-aplay.service`'i kapatır. `deploy-mediabox-v3.sh`
+aynısını yapar; release betiği paketleri golden karttan
+`meta/runtime-packages.txt`'ye yazar.
+
 **Doğrulama:**
 
 ```bash

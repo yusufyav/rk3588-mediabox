@@ -229,6 +229,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let audio = Arc::clone(&state.audio);
         tokio::task::spawn_blocking(move || audio.restore());
     }
+    // And moved to a Bluetooth headset when one connects, and back.
+    tokio::spawn(mediaboxd_rs::audio::follow_headsets(
+        Arc::clone(&state.audio),
+        Arc::clone(&state.player),
+        Arc::clone(&state.kodi),
+    ));
+    // With sound on a headset, Kodi's volume keys move the box's volume, as
+    // Kodi on Android leaves them to the system; and only the headset sound
+    // is on keeps its media keys.
+    tokio::spawn(mediaboxd_rs::audio::follow_kodi_keys(
+        Arc::clone(&state.audio),
+        Arc::clone(&state.kodi),
+        state.kodi_events,
+    ));
+    tokio::spawn(mediaboxd_rs::audio::follow_route(
+        Arc::clone(&state.audio),
+        Arc::clone(&state.kodi),
+    ));
     // An address left on trial by a run of this daemon that did not finish
     // is taken back before anything else is asked of the network.
     state.ethernet.recover().await;

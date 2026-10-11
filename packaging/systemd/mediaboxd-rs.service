@@ -93,6 +93,10 @@ ReadWritePaths=/run/mediabox /var/lib/mediabox-browser
 # startable on a board that has no gpio-leds device at all, where the daemon
 # simply reports that there is nothing to control.
 ReadWritePaths=-/sys/devices/platform/gpio-leds
+# A Bluetooth headset's media keys are switched off while sound is not on it
+# (`inhibited` on bluez's `<name> (AVRCP)` input device, as Android ignores an
+# inactive device's keys). bluez creates those devices under virtual/input.
+ReadWritePaths=-/sys/devices/virtual/input
 # Wi-Fi networks the viewer has joined.
 #
 # /etc/netplan because that is what configures networking on these boards --

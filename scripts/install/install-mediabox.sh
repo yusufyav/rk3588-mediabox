@@ -339,7 +339,9 @@ fi
 for pair in \
   "packaging/systemd/mediabox-display-observer.service:etc/systemd/system/mediabox-display-observer.service:bin/mediabox-display-observer" \
   "config/alsa/60-mediabox-unrouted.conf:etc/alsa/conf.d/60-mediabox-unrouted.conf:" \
-  "config/alsa/61-mediabox-volume.conf:etc/alsa/conf.d/61-mediabox-volume.conf:"; do
+  "config/alsa/61-mediabox-volume.conf:etc/alsa/conf.d/61-mediabox-volume.conf:" \
+  "config/alsa/62-mediabox-bluetooth.conf:etc/alsa/conf.d/62-mediabox-bluetooth.conf:" \
+  "packaging/systemd/bluealsa.service.d/10-mediabox.conf:etc/systemd/system/bluealsa.service.d/10-mediabox.conf:"; do
   src="${pair%%:*}"; rest="${pair#*:}"; rel="${rest%%:*}"; needs="${rest#*:}"
   [ -e "/$rel" ] && continue
   [ -z "$needs" ] || [ -e "$prefix/$needs" ] || continue
@@ -467,6 +469,11 @@ case "$ir_out" in *"reboot needed"*) reboot_needed=1 ;; esac
 # Kodi's settings for this appliance, which kodi.service seeds on a first run.
 install -D -m 0644 "$here/config/kodi/guisettings-appliance.xml" \
   "$prefix/share/kodi/guisettings-appliance.xml"
+# Kodi's keymap: kodi.service copies it into the profile on every start.
+install -D -m 0644 "$here/packaging/mediabox-kodi-keymap.xml" \
+  "$prefix/share/kodi/mediabox-keymap.xml"
+install -D -m 0644 "$here/packaging/mediabox-kodi-bluetooth-keymap.xml" \
+  "$prefix/share/kodi/mediabox-bluetooth-keymap.xml"
 ok "Kodi appliance profile"
 
 # ------------------------------------ 12-14. reload, udev, platform discovery
@@ -603,6 +610,23 @@ if [ -e /etc/systemd/system/mediabox-bt-agent.service ]; then
   systemctl enable mediabox-bt-agent.service >/dev/null 2>&1 || true
   systemctl start mediabox-bt-agent.service >/dev/null 2>&1 || true
   ok "mediabox-bt-agent.service"
+fi
+# Bluetooth headphones: bluez-alsa (bluez-alsa-utils, libasound2-plugin-bluez)
+# plays the box's sound to an A2DP device; without it bluez has no audio
+# endpoint and a headset pairs but every connect fails with "Protocol not
+# available". Debian enables bluealsa-aplay too, which plays what a phone
+# sends to the box; the drop-in turns that profile off and so is the unit.
+if ! command -v bluealsa >/dev/null 2>&1 || ! ls /usr/lib/*/alsa-lib/libasound_module_pcm_bluealsa.so >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+    bluez-alsa-utils libasound2-plugin-bluez >/dev/null \
+    || note "bluez-alsa could not be installed; Bluetooth headphones will not play"
+fi
+if command -v bluealsa >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl disable --now bluealsa-aplay.service >/dev/null 2>&1 || true
+  systemctl enable bluealsa.service >/dev/null 2>&1 || true
+  systemctl restart bluealsa.service >/dev/null 2>&1 || true
+  ok "bluealsa.service (a2dp-source)"
 fi
 for u in stremio-server.service mediabox-media-worker.service mediaboxd-rs.service; do
   systemctl enable "$u" >/dev/null

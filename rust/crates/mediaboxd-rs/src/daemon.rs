@@ -476,7 +476,7 @@ impl AppState {
             Request::BluetoothStatus => {
                 Response::success(crate::wireless::bluetooth_status().await)
             }
-            Request::BluetoothScan => radio(crate::wireless::bluetooth_scan(12).await),
+            Request::BluetoothScan { stop } => radio(crate::wireless::bluetooth_scan(stop).await),
             Request::BluetoothPower { on } => radio(crate::wireless::bluetooth_power(on).await),
             Request::BluetoothPair { address } => {
                 radio(crate::wireless::bluetooth_pair(&address).await)

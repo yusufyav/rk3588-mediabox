@@ -133,11 +133,12 @@ fn main() -> std::process::ExitCode {
         // started from this and decide nothing of their own.
         "audio-devices" | "audio-plan" | "audio-args" | "audio-shell" => {
             let roots = mediabox_platform::roots::Roots::from_env();
-            let found = mediabox_platform::sound::devices(
+            let mut found = mediabox_platform::sound::devices(
                 &platform,
                 &roots,
                 std::path::Path::new(mediabox_platform::sound::ALSA_CARDS),
             );
+            found.extend(mediabox_platform::sound::bluetooth_devices());
             let setting = std::fs::read_to_string(roots.state("audio.json"))
                 .ok()
                 .and_then(|text| mediabox_core::AudioSetting::parse(&text))
@@ -180,9 +181,13 @@ fn main() -> std::process::ExitCode {
                     println!("audio_device={}", quote(device.map(|d| d.id.as_str()).unwrap_or("")));
                     println!("audio_card={}", quote(device.map(|d| d.card_id.as_str()).unwrap_or("")));
                     println!("audio_pcm={}", quote(device.map(|d| d.pcm.as_str()).unwrap_or("")));
+                    let bluetooth = device.is_some_and(|d| d.kind == mediabox_core::AudioKind::Bluetooth);
+                    println!("audio_kind={}", quote(if bluetooth { "bluetooth" } else { "card" }));
                     // The same device through the box's own volume
-                    // (config/alsa/61-mediabox-volume.conf).
+                    // (config/alsa/61-mediabox-volume.conf). Not a headset's:
+                    // bluez-alsa has a volume of its own, which the daemon sets.
                     let volume_pcm = device
+                        .filter(|_| !bluetooth)
                         .map(|d| {
                             let dev = d.pcm.rsplit_once("DEV=").map(|(_, n)| n).unwrap_or("0");
                             format!("mediabox_volume:CARD={},DEV={dev}", d.card_id)

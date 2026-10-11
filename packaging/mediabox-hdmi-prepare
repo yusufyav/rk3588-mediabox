@@ -230,7 +230,7 @@ fi
 # control ("MediaBox", 0-100) mediaboxd-rs sets from the kept setting. A
 # compressed burst never goes through it -- Kodi's passthrough device below is
 # the card's raw `hdmi:` PCM -- so a bitstream is never volume-scaled.
-audio_device=""; audio_card=""; audio_pcm=""; audio_volume_pcm=""
+audio_device=""; audio_card=""; audio_pcm=""; audio_volume_pcm=""; audio_kind=card
 audio_bitstream=no; audio_volume=100; audio_muted=no
 eval "$("$PLATFORM" audio-shell 2>/dev/null)" || true
 volume_ctl=skipped
@@ -254,12 +254,22 @@ kodi_profile=absent
 profile="${MEDIABOX_KODI_PROFILE:-/var/tmp/kodi-home/.kodi/userdata/guisettings.xml}"
 device=""
 passthrough_device=""
-if [ -n "$audio_volume_pcm" ]; then
+kodi_passthrough=""
+if [ "$audio_kind" = bluetooth ]; then
+  # A connected Bluetooth headset (config/alsa/62-mediabox-bluetooth.conf),
+  # named as Kodi lists it. Passthrough off: Kodi sends a bitstream to its
+  # passthrough device whatever the PCM device is, and that is the
+  # television. mediaboxd-rs moves a running Kodi the same way.
+  device="ALSA:mediabox_bluetooth|MediaBox: Bluetooth kulaklık"
+  kodi_passthrough=false
+elif [ -n "$audio_volume_pcm" ]; then
   # PCM through the volume; a burst straight to the card's `hdmi:` PCM, whose
   # name is what Kodi reads passthrough capability off.
   device="ALSA:$audio_volume_pcm|MediaBox"
   if [ "$audio_bitstream" = yes ]; then
     passthrough_device="ALSA:$audio_pcm|${alsa_driver:-$audio_card}"
+    # Back on after a headset turned it off, when the plan sends a bitstream.
+    [ -n "$audio_passthrough" ] && kodi_passthrough=true
   else
     passthrough_device="$device"
   fi
@@ -288,6 +298,10 @@ if [ -n "$device" ] && [ -f "$profile" ]; then
     -e "s#\(<setting id=\"audiooutput.audiodevice\"\)[^>]*>[^<]*\(</setting>\)#\1>$device\2#" \
     -e "s#\(<setting id=\"audiooutput.passthroughdevice\"\)[^>]*>[^<]*\(</setting>\)#\1>$passthrough_device\2#" \
     "$profile" || kodi_profile=failed
+  if [ -n "$kodi_passthrough" ]; then
+    sed -i -e "s#\(<setting id=\"audiooutput.passthrough\"\)[^>]*>[^<]*\(</setting>\)#\1>$kodi_passthrough\2#" \
+      "$profile" || kodi_profile=failed
+  fi
 fi
 
 kodi_whitelist=absent
@@ -301,13 +315,33 @@ if [ -f "$profile" ]; then
     sed -i "s#</settings>#  <setting id=\"videoscreen.screenmode\">$kodi_screenmode</setting>\n</settings>#" "$profile"
 fi
 
+# Kodi's volume keys with sound on a Bluetooth headset (kodi.service links the
+# profile's keymaps/mediabox-bluetooth.xml here): the headset keymap while sound
+# goes to one, a keymap that binds nothing otherwise, so on HDMI and every other
+# card Kodi answers its own volume keys. mediaboxd-rs keeps it in step while
+# Kodi runs.
+# Never fatal: this script also runs for units that may not write /run/mediabox
+# (the interface's), and everything after it still has to run there.
+bt_keymap=skipped
+live=/run/mediabox/kodi-bluetooth-keymap.xml
+if mkdir -p /run/mediabox 2>/dev/null && [ -w /run/mediabox ]; then
+  if [ "$audio_kind" = bluetooth ] && [ -f /opt/rk3588-mediabox/share/kodi/mediabox-bluetooth-keymap.xml ]; then
+    if cp /opt/rk3588-mediabox/share/kodi/mediabox-bluetooth-keymap.xml "$live.tmp" 2>/dev/null \
+      && mv "$live.tmp" "$live" 2>/dev/null; then bt_keymap=headset; fi
+  else
+    if printf '<keymap/>\n' 2>/dev/null >"$live.tmp" && mv "$live.tmp" "$live" 2>/dev/null; then
+      bt_keymap=empty
+    fi
+  fi
+fi
+
 # One line in the journal saying what this board is and what was done to it.
 # Anything that did not happen says so by name; a silent preparation step is
 # how a wrong sound card survives a deploy.
 echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-unrouted}" \
      "audio=${audio_device:-none} volume=$volume_ctl" \
      "driver=${alsa_driver:-none} alsa-conf=$alsa_conf kodi-profile=$kodi_profile" \
-     "plan=$plan_state kodi-whitelist=$kodi_whitelist gui=$kodi_screenmode" \
+     "plan=$plan_state kodi-whitelist=$kodi_whitelist gui=$kodi_screenmode bt-keymap=$bt_keymap" \
      "boot-video=$boot_mode${video_arg:+ ($video_arg)}" >&2
 
 # Put the link back to SDR before an SDR interface is drawn on it.

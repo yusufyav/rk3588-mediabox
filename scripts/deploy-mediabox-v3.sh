@@ -318,7 +318,8 @@ say "templates that are filled in from the board"
 # HDMI sockets neither is the same in both. mediabox-hdmi-prepare renders them
 # before anything draws, from mediabox-platform's answer.
 cp_ "$here/config/alsa/mediabox-hdmi.conf.in" "$here/config/alsa/60-mediabox-unrouted.conf" \
-    "$here/config/alsa/61-mediabox-volume.conf" \
+    "$here/config/alsa/61-mediabox-volume.conf" "$here/config/alsa/62-mediabox-bluetooth.conf" \
+    "$here/packaging/systemd/bluealsa.service.d/10-mediabox.conf" \
     "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/config/kodi/guisettings-appliance.xml" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "set -e
@@ -326,7 +327,17 @@ sh_ "set -e
   install -m 0644 /var/tmp/mediabox-hdmi.conf.in $prefix/share/alsa/mediabox-hdmi.conf.in
   install -D -m 0644 /var/tmp/60-mediabox-unrouted.conf /etc/alsa/conf.d/60-mediabox-unrouted.conf
   install -D -m 0644 /var/tmp/61-mediabox-volume.conf /etc/alsa/conf.d/61-mediabox-volume.conf
-  rm -f /var/tmp/60-mediabox-unrouted.conf /var/tmp/61-mediabox-volume.conf
+  install -D -m 0644 /var/tmp/62-mediabox-bluetooth.conf /etc/alsa/conf.d/62-mediabox-bluetooth.conf
+  # Bluetooth headphones (docs/bluetooth.md): bluez-alsa, a2dp-source only.
+  command -v bluealsa >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    --no-install-recommends bluez-alsa-utils libasound2-plugin-bluez >/dev/null
+  install -D -m 0644 /var/tmp/10-mediabox.conf /etc/systemd/system/bluealsa.service.d/10-mediabox.conf
+  systemctl daemon-reload
+  systemctl disable --now bluealsa-aplay.service >/dev/null 2>&1 || true
+  systemctl enable bluealsa.service >/dev/null 2>&1 || true
+  systemctl restart bluealsa.service
+  rm -f /var/tmp/60-mediabox-unrouted.conf /var/tmp/61-mediabox-volume.conf \
+        /var/tmp/62-mediabox-bluetooth.conf /var/tmp/10-mediabox.conf
   test -f /var/tmp/kodi-home/.kodi/userdata/guisettings.xml \
     || install -m 0644 /var/tmp/guisettings-appliance.xml /var/tmp/kodi-home/.kodi/userdata/guisettings.xml
   rm -f /var/tmp/mediabox-hdmi.conf.in /var/tmp/guisettings-appliance.xml"
@@ -335,7 +346,7 @@ say "application table -> /etc/mediabox-applications.json"
 cp_ "$here/config/mediabox-applications.json" "$MEDIABOX_TARGET:/etc/mediabox-applications.json"
 
 say "Kodi keymap -> Back hands the display back"
-cp_ "$here/packaging/mediabox-kodi-keymap.xml" "$MEDIABOX_TARGET:/var/tmp/"
+cp_ "$here/packaging/mediabox-kodi-keymap.xml" "$here/packaging/mediabox-kodi-bluetooth-keymap.xml" "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/packaging/mediabox-display-guard" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "install -m 0755 /var/tmp/mediabox-display-guard $prefix/bin/mediabox-display-guard && \
      rm -f /var/tmp/mediabox-display-guard"
@@ -352,6 +363,9 @@ sh_ "set -e
   mkdir -p /var/tmp/kodi-home/.kodi/userdata/keymaps
   install -m 0644 /var/tmp/mediabox-kodi-keymap.xml \
     /var/tmp/kodi-home/.kodi/userdata/keymaps/mediabox.xml
+  install -D -m 0644 /var/tmp/mediabox-kodi-keymap.xml $prefix/share/kodi/mediabox-keymap.xml
+  install -D -m 0644 /var/tmp/mediabox-kodi-bluetooth-keymap.xml $prefix/share/kodi/mediabox-bluetooth-keymap.xml
+  rm -f /var/tmp/mediabox-kodi-bluetooth-keymap.xml
   rm -f /var/tmp/mediabox-kodi-keymap.xml"
 
 say "library manifest -> /etc/mediabox-library.json"
