@@ -1,0 +1,33 @@
+Description: A2DP SBC source: send full packets only
+ bluealsa encoded whatever PCM was in its buffer on each wake-up. The ALSA
+ plugin feeds it through a 4096-byte pipe (1024 frames), so every full packet
+ (6 SBC frames at the usual 672-byte MTU) was followed by a 2-frame one:
+ measured on an RK3588 with an RTL8852BU, 38-50 % of packets full and ~104
+ packets/s for 42 kB/s of audio. With a 7.5 ms BLE keyboard on the same
+ controller the controller's ACL buffers were full 98 % of the time and the
+ headset went short of audio. Android's SBC encoder sends a fixed number of
+ frames per packet sized to the MTU (system/stack/a2dp/a2dp_sbc_encoder.cc).
+ Encode only once the PCM buffer, sized to one MTU of frames, is full.
+Author: rk3588-mediabox
+Forwarded: no
+Last-Update: 2026-10-11
+
+--- a/src/a2dp-sbc.c
++++ b/src/a2dp-sbc.c
+@@ -212,6 +212,16 @@
+ 
+ 		const int16_t *input = pcm.data;
+ 		size_t input_samples = ffb_len_out(&pcm);
++
++		/* Send full packets only. The PCM buffer holds exactly as many SBC
++		 * frames as fit the write MTU, so encode only once it is full. The
++		 * ALSA plugin hands PCM over through a 4096-byte pipe (1024 frames),
++		 * and encoding whatever was there sent a full packet followed by a
++		 * two-frame one: half the packets, and nearly twice the air time, for
++		 * the same audio. Android's encoder does the same (a fixed number of
++		 * frames per packet, sized to the MTU: a2dp_sbc_encoder.cc). */
++		if (input_samples < ffb_pcm_len)
++			continue;
+ 		size_t output_len = ffb_len_in(&bt);
+ 		size_t pcm_frames = 0;
+ 		size_t sbc_frames = 0;

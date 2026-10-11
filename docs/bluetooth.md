@@ -147,6 +147,44 @@ aygıtı açar. Ses o kulaklıkta değilken aygıt çekirdeğin
 olmayan cihazın tuşlarını yok sayar); bunun için mediaboxd-rs.service'e
 `ReadWritePaths=-/sys/devices/virtual/input` eklendi.
 
+**Kulaklık ve klavye birlikte: ses kesintisi.** Kulaklık ile bir BLE klavye
+aynı anda bağlıyken ses gidip geliyordu. Plus'ta btsnoop ile ölçüldü (aynı
+film, Wi-Fi, kulaklık): klavye yokken denetleyicinin kulaklığa ayrılmış ACL
+tamponu zamanın %0-19'unda doluydu, ROG AZOTH 7,5 ms aralıkla bağlıyken %98;
+akış saniyelerce gerçek zamanın (~42 kB/s) altına düştü. Wi-Fi yükü, AVRCP
+ses komutları ve BLE arka plan taraması ayrı ayrı denenip elendi. İki neden
+vardı, ikisi de Android'in davranışıyla düzeltildi:
+
+*bluez-alsa yarım paket gönderiyordu.* ALSA eklentisi PCM'i 4096 baytlık bir
+pipe ile (1024 kare) verir; bluealsa her uyanışta eldekini kodladığı için her
+dolu SBC paketini (MTU 672 baytta 6 çerçeve) 2 çerçevelik bir paket izliyordu:
+paketlerin %38-50'si dolu, saniyede ~104 paket. Android kodlayıcısı MTU'ya göre
+sabit sayıda çerçeve gönderir (`system/stack/a2dp/a2dp_sbc_encoder.cc`).
+`patches/bluez-alsa/0001-a2dp-sbc-send-full-packets.patch` aynısını yapar:
+PCM tamponu bir MTU'luk çerçeveyle dolmadan kodlamaz. Sonuç (ölçüldü): tüm
+paketler dolu (671 B), saniyede 62,6 paket, 42,0 kB/s. bluez-alsa 5.0.0'da
+aynı kod duruyor; yama yukarıya gönderilmedi.
+
+Paket Debian kaynağından cihazda derlenir:
+
+```sh
+apt-get source bluez-alsa            # 4.3.1-3, Debian trixie
+cd bluez-alsa-4.3.1
+patch -p1 < 0001-a2dp-sbc-send-full-packets.patch
+dch -v 4.3.1-3+mediabox1 "A2DP SBC source: send full packets only"
+apt-get build-dep -y bluez-alsa
+DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -uc -us
+apt-get install -y ../bluez-alsa-utils_4.3.1-3+mediabox1_*.deb \
+    ../libasound2-plugin-bluez_4.3.1-3+mediabox1_*.deb
+apt-mark hold bluez-alsa-utils libasound2-plugin-bluez
+systemctl restart bluealsa       # sonra kulaklık yeniden bağlanır
+```
+
+Derleme bağımlılıkları (32 paket) derlemeden sonra kaldırılır; paket listesi
+derleme öncesiyle aynı kalmalıdır. **Açık iş:** `install-mediabox.sh`,
+`deploy-mediabox-v3.sh` ve `create-mediabox-release.sh` bu yamalı paketi henüz
+bilmez, Debian'ın yamasız paketini kurar (bkz. `docs/todo.md`).
+
 **Ölçülenler (Plus, Arctis GameBuds):** codec yalnız SBC (kulaklığın
 sunduğu); bluez-alsa'nın kaynak codec'leri SBC, MP3, aptX, aptX-HD,
 FastStream, LDAC, Opus — AAC yok. bluez-alsa'nın bildirdiği gecikme 200 ms;
