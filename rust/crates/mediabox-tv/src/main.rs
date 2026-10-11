@@ -3298,6 +3298,10 @@ impl App {
                 let on = self.output_status().is_some_and(|output| output.content_matching);
                 spawn_output(mediabox_core::Request::OutputContentMatching { enabled: !on });
             }
+            Control::DisplaySync => {
+                let on = self.output_status().is_some_and(|output| output.display_sync);
+                spawn_output(mediabox_core::Request::OutputDisplaySync { enabled: !on });
+            }
             Control::AutoSync => self.toggle_subtitle_auto_sync(),
             Control::ShowIncompatible => self.toggle_subtitle_show_incompatible(),
             Control::SignIn => self.run(Action::OpenAccount),

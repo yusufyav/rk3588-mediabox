@@ -112,6 +112,7 @@ pub enum Control {
     DefaultPlayer,
     Resume,
     RefreshMatching,
+    DisplaySync,
     AudioDevice,
     AudioMode,
     AudioFormat(AudioCodec),
@@ -274,9 +275,20 @@ fn video_rows(ctx: &Context) -> Vec<Row> {
         "Film bitince ekran kendi moduna döner",
         ctx.output.is_some_and(|output| output.content_matching),
     );
+    // Kodi's "Oynatımı görüntüye eşitle", a setting of its own beside the
+    // refresh: it follows whatever refresh the display runs at.
+    let sync = Row::toggle(
+        Control::DisplaySync,
+        "Oynatımı görüntüye eşitle",
+        "",
+        ctx.output.is_some_and(|output| output.display_sync),
+    );
     match ctx.output {
-        Some(_) => vec![row],
-        None => vec![row.disabled("Ekran durumu henüz okunmadı")],
+        Some(_) => vec![row, sync],
+        None => vec![
+            row.disabled("Ekran durumu henüz okunmadı"),
+            sync.disabled("Ekran durumu henüz okunmadı"),
+        ],
     }
 }
 

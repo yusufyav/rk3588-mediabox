@@ -85,7 +85,27 @@ if [ -x "$platform" ]; then
         audio="$planned"
     fi
 fi
-echo "mediabox-player: ses: $audio" >&2
+# "Oynatımı görüntüye eşitle", Kodi's videoplayer.usedisplayasclock, kept by
+# the control plane (OutputStatus::display_sync) and handed over as
+# MEDIABOX_PLAYER_DISPLAY_SYNC=1. mpv's display-resample times video to the
+# display's refresh and resamples the sound to match it -- what Kodi's
+# SYNC_RESAMPLE does -- and, as Kodi does with the setting on
+# (VideoPlayerAudio.cpp: allowpassthrough = !usedisplayasclock), the sound is
+# decoded to PCM: no passthrough, no Dolby Digital encoding, both of which a
+# resampler cannot touch. Off, nothing here changes.
+sync=""
+if [ "${MEDIABOX_PLAYER_DISPLAY_SYNC:-0}" = 1 ]; then
+    sync="--video-sync=display-resample"
+    pcm=""
+    for arg in $audio; do
+        case "$arg" in
+            --audio-spdif=*|--af=lavcac3enc*) ;;
+            *) pcm="$pcm $arg" ;;
+        esac
+    done
+    audio="${pcm# }"
+fi
+echo "mediabox-player: ses: $audio${sync:+ (görüntüye eşitli: $sync)}" >&2
 
 # What MPP has to say about a film, at the level a product logs at.
 #
@@ -122,11 +142,12 @@ fi
 # end of the film or a read that failed short of it, then closes the player
 # itself. Exiting at once left nobody to ask (see rust/crates/mediaboxd-rs/
 # src/playback.rs).
-# shellcheck disable=SC2086  # $ipc, $hold and $audio are empty or known flags.
+# shellcheck disable=SC2086  # $ipc, $hold, $audio and $sync are empty or known flags.
 exec /opt/rk3588-mediabox/player/bin/mpv \
     $ipc \
     $hold \
     $audio \
+    $sync \
     --no-config \
     --input-conf=/opt/rk3588-mediabox/player/share/mediabox-input.conf \
     --scripts=/opt/rk3588-mediabox/player/share/mediabox.lua \

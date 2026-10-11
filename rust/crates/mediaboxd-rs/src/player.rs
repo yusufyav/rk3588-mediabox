@@ -61,6 +61,9 @@ pub struct PlayerManager {
     /// The player was started paused and is held there until the display
     /// has been matched to the film (see `Daemon::follow_film`).
     holding: AtomicBool,
+    /// The film was started timed to the display: its sound is PCM for as
+    /// long as it plays, whatever the sound plan says about passthrough.
+    display_sync: AtomicBool,
 }
 
 impl PlayerManager {
@@ -71,6 +74,7 @@ impl PlayerManager {
             playing: Mutex::new(None),
             film: AtomicU64::new(0),
             holding: AtomicBool::new(false),
+            display_sync: AtomicBool::new(false),
         }
     }
 
@@ -118,10 +122,13 @@ impl PlayerManager {
         if before.mpv_device() != after.mpv_device() && after.device.is_some() {
             let _ = self.ask(set("audio-device", json!(after.mpv_device()))).await;
         }
-        if before.mpv_spdif() != after.mpv_spdif() {
+        // Timed to the display, the film never had passthrough (Kodi: no
+        // passthrough while usedisplayasclock is on) and does not get it now.
+        let pcm_only = self.display_sync.load(Ordering::SeqCst);
+        if before.mpv_spdif() != after.mpv_spdif() && !pcm_only {
             let _ = self.ask(set("audio-spdif", json!(after.mpv_spdif()))).await;
         }
-        if before.mpv_af() != after.mpv_af() {
+        if before.mpv_af() != after.mpv_af() && !pcm_only {
             let _ = self.ask(set("af", json!(after.mpv_af()))).await;
         }
         let _ = self.ask(set("volume", json!(after.player_volume()))).await;
@@ -256,10 +263,12 @@ impl PlayerManager {
         url: &str,
         start_seconds: u64,
         playing: Playing,
+        display_sync: bool,
     ) -> Result<(), String> {
         self.stop().await;
         self.film.fetch_add(1, Ordering::SeqCst);
         self.holding.store(true, Ordering::SeqCst);
+        self.display_sync.store(display_sync, Ordering::SeqCst);
         // A socket left behind by a player that did not exit cleanly would be
         // answered by nobody; mpv replaces it, but only if it is not there.
         let _ = tokio::fs::remove_file(&self.socket).await;
@@ -312,6 +321,12 @@ impl PlayerManager {
             // go -- the television re-locks once, on the first frame, not
             // three seconds into the film with the sound already running.
             .arg("--setenv=MEDIABOX_PLAYER_HOLD=1")
+            // "Oynatımı görüntüye eşitle" (OutputStatus::display_sync): the
+            // launcher turns it into mpv's display-resample and no passthrough.
+            .arg(format!(
+                "--setenv=MEDIABOX_PLAYER_DISPLAY_SYNC={}",
+                u8::from(display_sync)
+            ))
             .arg(self.launcher.as_os_str())
             .arg(url)
             .arg(start_seconds.to_string())

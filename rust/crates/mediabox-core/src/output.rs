@@ -838,6 +838,13 @@ pub struct OutputStatus {
     /// Whether a film's frame rate chooses the refresh.
     #[serde(default = "matching_default")]
     pub content_matching: bool,
+    /// "Oynatımı görüntüye eşitle", Kodi's `videoplayer.usedisplayasclock`:
+    /// the box's own player times video and sound to the display's refresh
+    /// (mpv `--video-sync=display-resample`) and, as Kodi does, sends no
+    /// passthrough while it does. A separate setting from the one above: that
+    /// one changes the refresh, this one only follows whatever it is.
+    #[serde(default)]
+    pub display_sync: bool,
     /// What a record written before this version could not carry over.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,

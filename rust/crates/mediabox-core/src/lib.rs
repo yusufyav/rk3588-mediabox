@@ -1383,6 +1383,9 @@ pub enum Request {
     /// Whether a film's frame rate chooses the display's refresh, from now
     /// on and for the film playing now.
     OutputContentMatching { enabled: bool },
+    /// Whether the box's own player times video and sound to the display
+    /// ([`OutputStatus::display_sync`]), from the next film on.
+    OutputDisplaySync { enabled: bool },
     /// The wired ports and what each is set to.
     EthernetStatus,
     /// Put an address on a wired port on trial. It is taken back after

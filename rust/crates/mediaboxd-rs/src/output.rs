@@ -61,6 +61,9 @@ pub struct Paths {
     /// Whether a film's frame rate chooses the refresh: one word, `on` or
     /// `off`, beside the display's record. Absent is on.
     pub matching: PathBuf,
+    /// "Oynatımı görüntüye eşitle": `on` or `off`. Absent is off, as in Kodi
+    /// on this box.
+    pub display_sync: PathBuf,
 }
 
 impl Paths {
@@ -72,6 +75,7 @@ impl Paths {
             plan: roots.run(mediabox_platform::output::PLAN_FILE),
             observer: roots.run(observer::RUNTIME),
             matching: roots.state("output-content-matching"),
+            display_sync: roots.state("output-display-sync"),
         }
     }
 }
@@ -113,6 +117,8 @@ struct State {
     content: Option<Content>,
     /// Whether films choose the refresh at all.
     matching: bool,
+    /// Whether the player is timed to the display.
+    display_sync: bool,
 }
 
 /// The display while one film plays. `film` is the player's number for it;
@@ -165,6 +171,9 @@ impl Output {
         let matching = std::fs::read_to_string(&paths.matching)
             .map(|text| text.trim() != "off")
             .unwrap_or(true);
+        let display_sync = std::fs::read_to_string(&paths.display_sync)
+            .map(|text| text.trim() == "on")
+            .unwrap_or(false);
         let (events, _) = broadcast::channel(16);
         Arc::new(Self {
             paths,
@@ -172,6 +181,7 @@ impl Output {
                 stored,
                 notes,
                 matching,
+                display_sync,
                 ..Default::default()
             }),
             events,
@@ -379,7 +389,23 @@ impl Output {
                 .filter(|content| Some(&content.identity) == state.identity.as_ref())
                 .map(|content| content.output.clone()),
             content_matching: state.matching,
+            display_sync: state.display_sync,
         }
+    }
+
+    /// Whether the next film is timed to the display.
+    pub fn display_sync(&self) -> bool {
+        self.state().display_sync
+    }
+
+    /// Kept for the next film; the one playing keeps how it was started,
+    /// as Kodi's does.
+    pub fn set_display_sync(&self, enabled: bool) -> Result<OutputStatus, String> {
+        write_atomic(&self.paths.display_sync, if enabled { "on\n" } else { "off\n" })
+            .map_err(|error| format!("Ayar kaydedilemedi: {error}"))?;
+        self.state().display_sync = enabled;
+        self.send(vec![OutputEvent::Changed]);
+        Ok(self.status())
     }
 
     /// Whether a film's frame rate chooses the refresh, from now on and for
@@ -963,6 +989,7 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
                 plan: self.dir.path().join("output-plan"),
                 observer: self.dir.path().join("observer"),
                 matching: self.dir.path().join("output-content-matching"),
+                display_sync: self.dir.path().join("output-display-sync"),
             }
         }
 
@@ -1179,6 +1206,23 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         let (setting, _, content) = next_apply(&mut events).await;
         assert_eq!(offer.select(&setting).unwrap().label, "3840x2160p23.976");
         assert!(content);
+    }
+
+    #[tokio::test]
+    async fn display_sync_is_off_until_turned_on_and_stays_apart_from_matching() {
+        let rig = Rig::new();
+        rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        // Off, as Kodi's is on this box; matching keeps its own default.
+        assert!(!output.display_sync());
+        assert!(output.status().content_matching);
+        let status = output.set_display_sync(true).unwrap();
+        assert!(status.display_sync);
+        assert!(status.content_matching, "the refresh setting is not this one");
+        // Kept across a restart of the daemon.
+        assert!(rig.output().display_sync());
+        output.set_display_sync(false).unwrap();
+        assert!(!rig.output().display_sync());
     }
 
     #[tokio::test]

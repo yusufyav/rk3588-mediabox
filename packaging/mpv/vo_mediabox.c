@@ -41,6 +41,8 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,9 +52,12 @@
 
 #include <drm_fourcc.h>
 #include <libavutil/hwcontext_drm.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
 
 #include "common/common.h"
 #include "common/msg.h"
+#include "osdep/timer.h"
 #include "input/input.h"
 #include "input/keycodes.h"
 #include "video/img_format.h"
@@ -93,6 +98,14 @@ struct priv {
     bool lost;
     /* This output is being torn down; a failed write is expected, not news. */
     bool closing;
+
+    /* --video-sync=display-*, "Oynatımı görüntüye eşitle": see display_sync. */
+    int drm;
+    int crtc_index;
+    uint32_t crtc_id;
+    double display_fps;
+    int64_t display_checked;
+    bool said_vblank;
 };
 
 /* Which matrix, which range and which transfer curve the frame carries.
@@ -287,6 +300,122 @@ static bool send_message(struct vo *vo, const uint8_t *message,
     return true;
 }
 
+/* "Oynatımı görüntüye eşitle", Kodi's videoplayer.usedisplayasclock: video and
+ * sound timed to the display rather than the display left to catch up with
+ * them. mpv's --video-sync=display-resample does it, and its manual names the
+ * two things it needs from an output (DOCS/man/options.rst, --video-sync):
+ *
+ *   "using the detected display vertical refresh rate as a hint", and
+ *   "These modes also require a vsync blocked presentation mode."
+ *
+ * This output had neither. It never said what the display runs at, so mpv
+ * reported display-fps unavailable and fell back to `audio`; and flip_page
+ * returned at once, because the interface, not this process, puts the frame
+ * on the panel at its next vertical blank.
+ *
+ * Both come from the display controller itself, read without touching it:
+ * the CRTC the interface drives has the mode it runs (the refresh is the
+ * pixel clock over the whole raster, 23.976 rather than vrefresh's 24), and
+ * DRM_IOCTL_WAIT_VBLANK, which any process with the card open may call, is
+ * the blocking flip mpv asks for. Nothing here sets a mode or a plane.
+ *
+ * All of it only with a display-* mode chosen. In the default `audio` mode
+ * this output does exactly what it did before: no card opened, no refresh
+ * reported, no wait. */
+static bool display_sync(struct vo *vo)
+{
+    return VS_IS_DISP(vo->opts->video_sync);
+}
+
+static double mode_fps(const drmModeModeInfo *mode)
+{
+    if (!mode->clock || !mode->htotal || !mode->vtotal)
+        return 0;
+    double fps = mode->clock * 1000.0 / ((double)mode->htotal * mode->vtotal);
+    if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+        fps *= 2;
+    if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
+        fps /= 2;
+    if (mode->vscan > 1)
+        fps /= mode->vscan;
+    return fps;
+}
+
+/* The CRTC scanning out, and what it runs at. One television on this box,
+ * so one active CRTC; with more than one the first is taken and named. */
+static void read_display(struct vo *vo)
+{
+    struct priv *p = vo->priv;
+    drmModeRes *res = drmModeGetResources(p->drm);
+    if (!res)
+        return;
+    double fps = 0;
+    for (int i = 0; i < res->count_crtcs; i++) {
+        drmModeCrtc *crtc = drmModeGetCrtc(p->drm, res->crtcs[i]);
+        if (!crtc)
+            continue;
+        bool active = crtc->mode_valid && crtc->buffer_id;
+        if (active && fps == 0) {
+            fps = mode_fps(&crtc->mode);
+            if (p->crtc_id != crtc->crtc_id) {
+                p->crtc_id = crtc->crtc_id;
+                p->crtc_index = i;
+                MP_VERBOSE(vo, "ekran: CRTC %u (%d), %dx%d\n", crtc->crtc_id, i,
+                           crtc->mode.hdisplay, crtc->mode.vdisplay);
+            }
+        }
+        drmModeFreeCrtc(crtc);
+    }
+    drmModeFreeResources(res);
+    p->display_checked = mp_time_ns();
+    if (fps > 0 && fabs(fps - p->display_fps) > 1e-6) {
+        MP_INFO(vo, "ekran yenileme hızı %.6f Hz\n", fps);
+        p->display_fps = fps;
+        /* mpv asks again on this event (vo.c, update_display_fps). */
+        vo_event(vo, VO_EVENT_WIN_STATE);
+    }
+}
+
+static void open_display(struct vo *vo)
+{
+    struct priv *p = vo->priv;
+    p->drm = -1;
+    if (!display_sync(vo))
+        return;
+    const char *card = getenv("MEDIABOX_VIDEO_CARD");
+    if (!card || !card[0])
+        card = "/dev/dri/card0";
+    p->drm = open(card, O_RDWR | O_CLOEXEC);
+    if (p->drm < 0) {
+        MP_WARN(vo, "%s açılamadı (%s); görüntüye eşitleme yapılamaz\n",
+                card, strerror(errno));
+        return;
+    }
+    read_display(vo);
+}
+
+/* The vsync blocked flip: back at the display's next vertical blank. */
+static void wait_vblank(struct vo *vo)
+{
+    struct priv *p = vo->priv;
+    if (p->drm < 0 || !p->crtc_id)
+        return;
+    uint32_t which = 0;
+    if (p->crtc_index == 1)
+        which = DRM_VBLANK_SECONDARY;
+    else if (p->crtc_index > 1)
+        which = (p->crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT) & DRM_VBLANK_HIGH_CRTC_MASK;
+    drmVBlank vbl = { .request = { .type = DRM_VBLANK_RELATIVE | which, .sequence = 1 } };
+    if (drmWaitVBlank(p->drm, &vbl) != 0 && !p->said_vblank) {
+        MP_WARN(vo, "vblank beklenemedi: %s\n", strerror(errno));
+        p->said_vblank = true;
+    }
+    /* A refresh changed for the film ("Kare hızına göre yenileme") is a new
+     * rate to time to; looked at once a second, not on every frame. */
+    if (mp_time_ns() - p->display_checked > MP_TIME_S_TO_NS(1))
+        read_display(vo);
+}
+
 static int preinit(struct vo *vo)
 {
     struct priv *p = vo->priv;
@@ -322,6 +451,7 @@ static int preinit(struct vo *vo)
 
     p->next_id = 1;
     MP_INFO(vo, "MediaBox video düzlemine çiziliyor (%s)\n", path);
+    open_display(vo);
     return 0;
 }
 
@@ -415,6 +545,12 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     if (!frame->current)
         return VO_TRUE;
 
+    /* Synced to the display, mpv asks for the same frame again on every vsync
+     * it stays up. It is already on the panel; sending it again would only
+     * import the same buffer once more. */
+    if (display_sync(vo) && frame->repeat && !frame->redraw && p->nheld > 0)
+        return VO_TRUE;
+
     struct mp_image *mpi = frame->current;
     AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)mpi->planes[0];
     if (!desc || desc->nb_layers < 1 || desc->nb_objects < 1) {
@@ -490,12 +626,20 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
 
 static void flip_page(struct vo *vo)
 {
-    /* Nothing. The frame was on the panel the moment the interface called
-     * SetPlane; there is no second buffer here to swap. */
+    /* Nothing to swap: the interface puts the frame on the panel at its next
+     * vertical blank. Synced to the display, mpv needs this to return at that
+     * blank (display_sync above); otherwise it returns at once, as always. */
+    if (display_sync(vo))
+        wait_vblank(vo);
 }
 
 static int control(struct vo *vo, uint32_t request, void *data)
 {
+    struct priv *p = vo->priv;
+    if (request == VOCTRL_GET_DISPLAY_FPS && display_sync(vo) && p->display_fps > 0) {
+        *(double *)data = p->display_fps;
+        return VO_TRUE;
+    }
     return VO_NOTIMPL;
 }
 
@@ -519,6 +663,8 @@ static void uninit(struct vo *vo)
     while (p->nheld > 0)
         release_held(p, 0);
 
+    if (p->drm >= 0)
+        close(p->drm);
     close(p->fd);
     p->fd = -1;
 }

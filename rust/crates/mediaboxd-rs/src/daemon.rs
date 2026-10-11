@@ -222,6 +222,10 @@ impl AppState {
                 Ok(status) => Response::success(status),
                 Err(error) => Response::failure("OUTPUT_REFUSED", error),
             },
+            Request::OutputDisplaySync { enabled } => match self.output.set_display_sync(enabled) {
+                Ok(status) => Response::success(status),
+                Err(error) => Response::failure("OUTPUT_REFUSED", error),
+            },
             Request::EthernetStatus => Response::success(self.ethernet.status()),
             Request::EthernetTry { interface, config } => {
                 ethernet_result(self.ethernet.try_config(&interface, config).await)
@@ -909,7 +913,8 @@ impl AppState {
             title: title.filter(|title| !title.trim().is_empty()),
             duration: duration_seconds.filter(|seconds| *seconds > 0),
         };
-        if let Err(error) = self.player.start(&local, start_seconds, playing).await {
+        let display_sync = self.output.display_sync();
+        if let Err(error) = self.player.start(&local, start_seconds, playing, display_sync).await {
             self.stop_session(&session_id).await;
             return Response::failure("PLAYER_FAILED", error);
         }
@@ -1618,6 +1623,7 @@ mod tests {
                     plan: dir.path().join("output-plan"),
                     observer: dir.path().join("observer"),
                     matching: dir.path().join("output-content-matching"),
+                    display_sync: dir.path().join("output-display-sync"),
                 },
                 || {},
             ),

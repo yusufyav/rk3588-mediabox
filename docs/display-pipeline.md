@@ -808,6 +808,43 @@ uname -r
 # sink SCDC 0x20: bit0 scrambling, bit1 1/40; 0x40: bit0 clock, bits1-3 channel locks
 ```
 
+## 16. "Oynatımı görüntüye eşitle" is Kodi's setting, and needs the output to be honest
+
+Kodi's `videoplayer.usedisplayasclock` ("Oynatımı görüntüye eşitle", off on
+this box) times video and sound to the display: on, `VideoPlayerAudio.cpp`
+resamples the sound (`SYNC_RESAMPLE`), `RenderManager.cpp` locks the clock to
+vsync when the refresh is a whole multiple of the frame rate, and passthrough
+is not used (`allowpassthrough = !usedisplayasclock`). Off, the sound is the
+clock and the picture follows it (`SYNC_DISCON`). It is a separate setting from
+"Görüntü yenileme hızını ayarla" (ours: "Kare hızına göre yenileme"): that one
+changes the refresh, this one only follows whatever refresh there is.
+
+Ours is the same setting, kept by the control plane
+(`OutputStatus::display_sync`, `/var/lib/mediabox/output-display-sync`, off
+by default) and shown under Filmler ve Diziler > Ayarlar > Görüntü. On, the
+launcher gives mpv `--video-sync=display-resample` and drops `--audio-spdif`
+and `lavcac3enc`, so the sound is PCM like Kodi's; the daemon does not put
+passthrough back if the sound plan changes during that film.
+
+mpv's manual names what the display-* modes need from an output: the
+display's refresh rate, and "a vsync blocked presentation mode". `vo_mediabox`
+had neither (`VOCTRL_GET_DISPLAY_FPS` unanswered, `flip_page` empty), so mpv
+reported `display-fps` unavailable and fell back to `audio` silently. With a
+display-* mode chosen, and only then, it now opens the card, reads the active
+CRTC's mode (pixel clock over the whole raster: 23.976, not vrefresh's 24),
+reports it, looks again once a second so a refresh changed for the film is
+followed, and blocks `flip_page` on `DRM_IOCTL_WAIT_VBLANK`. Nothing in it sets
+a mode or a plane. In the default `audio` mode no card is opened and the output
+behaves exactly as before.
+
+Measured on the Plus: off, `video-sync audio`, `display-fps` none, speed 1.0,
+`spdif-ac3` out, as before. On, 59.94 fps at 60 Hz: `display-sync-active`,
+`display-fps 60.0`, the sound resampled by 1.001, A/V within 0.5 ms, no frame
+dropped; 23.976 fps through the daemon: the refresh matched to 23.976, the
+output followed it, no late frame in 30 s either way; E-AC3 5.1: PCM out. A/V
+reached 16.5 ms once with it on (0.1 ms off), inside the 20 ms Kodi leaves
+alone in the same mode.
+
 ## The smoke test
 
 `packaging/mediabox-kiosk-smoke` checks rules 1 and 2 on every deploy, and
