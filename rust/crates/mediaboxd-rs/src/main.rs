@@ -247,6 +247,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&state.audio),
         Arc::clone(&state.kodi),
     ));
+    // Android's floor under a BLE peripheral's connection interval: a 7.5 ms
+    // keyboard starved a Bluetooth headset of air time (bt_le.rs).
+    let _ = std::thread::Builder::new()
+        .name("mediabox-bt-le-floor".into())
+        .spawn(mediaboxd_rs::bt_le::run);
     // An address left on trial by a run of this daemon that did not finish
     // is taken back before anything else is asked of the network.
     state.ethernet.recover().await;

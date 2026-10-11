@@ -185,6 +185,22 @@ derleme öncesiyle aynı kalmalıdır. **Açık iş:** `install-mediabox.sh`,
 `deploy-mediabox-v3.sh` ve `create-mediabox-release.sh` bu yamalı paketi henüz
 bilmez, Debian'ın yamasız paketini kurar (bkz. `docs/todo.md`).
 
+*Klavye 7,5 ms istiyordu.* ROG AZOTH bağlantı aralığını en az ve en çok 7,5 ms
+ister (bluez kaydında `MinInterval=MaxInterval=6`). Android çevre biriminin
+isteğini en az 11,25 ms'ye yükseltir (`system/stack/l2cap/l2c_ble.cc`,
+`L2CA_AdjustConnectionIntervals`, `BTM_BLE_CONN_INT_MIN_LIMIT` 0x0009); Linux
+yükseltmez (2019'da eklenen alt sınır farelerin gecikmesi yüzünden geri
+alındı, 68d19d7d9957). mediaboxd-rs (`src/bt_le.rs`) hci0'ı ham HCI soketiyle
+izler: merkezi olduğu bir LE bağlantısı 11,25 ms'nin altında kurulur ya da
+güncellenirse `HCI_LE_Connection_Update` ile 11,25 ms'ye çeker; gecikme
+(latency) ve denetim süresi korunur, süre kuralı bozulacaksa gecikme düşürülür
+(Core Vol 6 Part B 4.5.2). Klavye her ~7 s'de yine 7,5 ms ister ve her
+seferinde yeniden çekilir (ölçüldü: 5 dakikada 43 istek, 43 yükseltme). Bunun
+için mediaboxd-rs.service'e `RestrictAddressFamilies=… AF_BLUETOOTH`
+eklendi. İkisi birlikte (ölçüldü, 5 dakika, film + kulaklık + klavye): tampon
+doluluğu %0, 42 kB/s altı saniye yalnız sarma anlarında; kullanıcı kesinti
+duymadı.
+
 **Ölçülenler (Plus, Arctis GameBuds):** codec yalnız SBC (kulaklığın
 sunduğu); bluez-alsa'nın kaynak codec'leri SBC, MP3, aptX, aptX-HD,
 FastStream, LDAC, Opus — AAC yok. bluez-alsa'nın bildirdiği gecikme 200 ms;

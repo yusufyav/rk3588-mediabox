@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod bt_le;
 pub mod output;
 pub mod cec;
 pub mod daemon;

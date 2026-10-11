@@ -64,7 +64,9 @@ RestrictRealtime=true
 # reading the link, bringing the interface up -- is nl80211, which is generic
 # netlink. Without it `iw` fails with "Failed to connect to generic netlink"
 # and the settings screen reports no networks on a board whose radio is fine.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# AF_BLUETOOTH: a raw HCI socket on hci0, read for LE connection events and
+# written to raise a peripheral's connection interval to 11.25 ms (bt_le.rs).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_BLUETOOTH
 DevicePolicy=closed
 # The CEC subsystem rather than one adapter by number: a board with two HDMI
 # transmitters has two, and which one is the television's depends on which
