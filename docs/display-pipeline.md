@@ -845,6 +845,31 @@ output followed it, no late frame in 30 s either way; E-AC3 5.1: PCM out. A/V
 reached 16.5 ms once with it on (0.1 ms off), inside the 20 ms Kodi leaves
 alone in the same mode.
 
+## 17. The interface's commit waits for the film's frame
+
+The interface's frame and the film's go in one atomic commit per vblank (see
+`VideoPlane::stage`). While the interface draws over a moving film, that
+commit used to go the moment the previous vblank passed, before that
+period's film frame had arrived; the frame then waited a whole period, the
+next one arrived on top of it, and the older was given back unseen -- a frame
+dropped and the one before shown twice, an 84 ms gap at 24 Hz. A volume key
+held on a Bluetooth keyboard, with a headset echoing every step, makes the
+interface draw nearly every vblank, and that was the stutter people saw.
+
+Measured with a per-frame trace (`MEDIABOX_TV_FRAME_TRACE=<file>` in the
+interface's environment; the service has `PrivateTmp`, so the file lands in
+its private `/var/tmp`): 76 of 552 film frames dropped while the interface
+drew, nearly all read 0-5 ms after a vblank, against 1.2 % while it did not.
+Neither the CPU, bluetoothd, the headset code nor HDR was the cause; a
+synthetic key source (daemon `input_inject`, a uinput keyboard) never drew
+fast enough to show it.
+
+`SplitDisplay::wait_for_film_frame` now holds the interface's commit, while
+film frames are coming (one in the last 120 ms), until this period's frame
+arrives or 4 ms before the vblank. Paused or with no film, nothing waits.
+After: 2 of 2404 frames dropped while drawing (0.1 %), 0.2 % otherwise, most
+of those at seeks.
+
 ## The smoke test
 
 `packaging/mediabox-kiosk-smoke` checks rules 1 and 2 on every deploy, and

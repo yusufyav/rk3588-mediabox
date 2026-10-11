@@ -1001,6 +1001,8 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// first replaces it, and the replaced one goes straight back to the
     /// player: it was never on the panel.
     pending: Option<Pending<D>>,
+    /// When the last frame arrived: whether the film is moving (`moving`).
+    arrived: Option<std::time::Instant>,
     on: bool,
     refused: bool,
     frames: u64,
@@ -1017,6 +1019,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
             chosen: None,
             shown: VecDeque::new(),
             pending: None,
+            arrived: None,
             on: false,
             refused: false,
             frames: 0,
@@ -1036,6 +1039,12 @@ impl<D: ControlDevice + Clone> Sink<D> {
 
     pub fn showing(&self) -> bool {
         self.on
+    }
+
+    /// A film is on the panel and its frames are still coming: the last one
+    /// arrived within `within`. False while it is paused.
+    pub fn moving(&self, within: std::time::Duration) -> bool {
+        self.on && self.arrived.is_some_and(|at| at.elapsed() < within)
     }
 
     pub fn frames(&self) -> u64 {
@@ -1103,7 +1112,10 @@ impl<D: ControlDevice + Clone> Sink<D> {
                         height: frame.height,
                         colour: frame.colour,
                     };
-                    if let Some(old) = self.pending.replace(Pending { id, imported, info, dst }) {
+                    self.arrived = Some(std::time::Instant::now());
+                    let replaced = self.pending.replace(Pending { id, imported, info, dst });
+                    trace::event('A', id, replaced.as_ref().map_or(0, |old| old.id));
+                    if let Some(old) = replaced {
                         self.server.release(old.id);
                     }
                     return;
@@ -1185,6 +1197,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// now go back to the player.
     pub fn committed(&mut self, planes: &[VideoPlane], index: usize) {
         let Some(pending) = self.pending.take() else { return };
+        trace::event('c', pending.id, 0);
         planes[index].staged(pending.info.colour);
         self.on = true;
         self.frames += 1;
@@ -1211,6 +1224,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// Take the film off the panel and give every buffer back.
     pub fn clear(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
         self.hdr = None;
+        self.arrived = None;
         if let Some(pending) = self.pending.take() {
             self.server.release(pending.id);
         }
@@ -1343,6 +1357,44 @@ mod tests {
         assert_eq!(MESSAGE, 88);
         assert_eq!(REPLY, 16);
         assert_eq!(MAGIC, u32::from_le_bytes(*b"MBV1"));
+    }
+}
+
+/// Every film frame's way to the panel, one line per event, for the one
+/// question the five-second `pace` summary cannot answer: which vblank a
+/// frame missed and why. Off unless `MEDIABOX_TV_FRAME_TRACE` names a file;
+/// then each line is `<microseconds> <event> <a> <b>`:
+///
+///   A id replaced   a frame arrived (replaced: the waiting one it pushed out, or 0)
+///   C ui film       an atomic commit went (ui 1/0, film: the frame's id, or 0)
+///   F               the commit in flight reached its vblank
+pub mod trace {
+    use std::io::Write;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    struct Trace {
+        start: Instant,
+        out: std::io::BufWriter<std::fs::File>,
+        lines: u32,
+    }
+
+    static TRACE: Mutex<Option<Option<Trace>>> = Mutex::new(None);
+
+    pub fn event(kind: char, a: u64, b: u64) {
+        let mut guard = TRACE.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = guard.get_or_insert_with(|| {
+            let path = std::env::var_os("MEDIABOX_TV_FRAME_TRACE")?;
+            let file = std::fs::File::create(path).ok()?;
+            Some(Trace { start: Instant::now(), out: std::io::BufWriter::new(file), lines: 0 })
+        });
+        let Some(trace) = slot.as_mut() else { return };
+        let at = trace.start.elapsed().as_micros();
+        let _ = writeln!(trace.out, "{at} {kind} {a} {b}");
+        trace.lines += 1;
+        if trace.lines % 64 == 0 {
+            let _ = trace.out.flush();
+        }
     }
 }
 

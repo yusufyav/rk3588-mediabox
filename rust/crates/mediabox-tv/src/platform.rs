@@ -163,6 +163,8 @@ struct Presentation {
     current: Option<PresentedFrame>,
     pending_previous: Option<PresentedFrame>,
     waiting_for_flip: bool,
+    /// When the last commit reached its vblank.
+    last_flip: Option<std::time::Instant>,
     first_frame_logged: bool,
     /// How many buffers have needed a framebuffer built for them. On a healthy
     /// run this stops at the surface's buffer count — two or three — and the
@@ -690,9 +692,11 @@ impl SplitDisplay {
         loop {
             let mut events = self.kms.receive_events()?;
             if events.any(|event| matches!(event, control::Event::PageFlip(_))) {
+                crate::video::trace::event('F', 1, 0);
                 let old = {
                     let mut state = self.presentation.borrow_mut();
                     state.waiting_for_flip = false;
+                    state.last_flip = Some(std::time::Instant::now());
                     state.pending_previous.take()
                 };
                 drop(old);
@@ -895,6 +899,7 @@ impl SplitDisplay {
             // Whatever film frame is waiting goes out with this one, in the
             // same commit, on the same vblank.
             self.pump_video_socket();
+            self.wait_for_film_frame();
             self.commit_frames(Some(frame))?;
             state = self.presentation.borrow_mut();
         }
@@ -914,6 +919,69 @@ impl SplitDisplay {
             return Ok(());
         }
         Ok(())
+    }
+
+    /// While the interface draws over a moving film, its commit waits for
+    /// this vblank's film frame -- until 4 ms before the vblank, and no
+    /// longer.
+    ///
+    /// Without it the interface's commit went the moment the last vblank
+    /// passed, and the film frame of that period arrived after it. It then
+    /// waited a whole period, the next one arrived on top of it, and the
+    /// older was given back unseen: a frame dropped and the one before shown
+    /// twice. Measured on the Plus with a 4K HDR film at 23.976 Hz and a
+    /// keyboard's volume key held (frame trace, 2026-10-12): 76 of 552 film
+    /// frames dropped while the interface drew against 36 of 3015 while it
+    /// did not, nearly all of them read 0-5 ms after a vblank. A film frame
+    /// arriving with nothing in flight is committed at once and never had
+    /// this problem; this makes the interface's commit behave the same.
+    ///
+    /// Only while film frames are coming: paused, or with no film, nothing
+    /// waits and the interface answers as fast as it always did.
+    fn wait_for_film_frame(&self) {
+        const MARGIN: Duration = Duration::from_millis(4);
+        let period = self.frame_period();
+        let waiting = {
+            let sink = self.sink.borrow();
+            sink.moving(Duration::from_millis(120)) && !sink.has_pending()
+        };
+        let Some(flip) = self.presentation.borrow().last_flip.filter(|_| waiting) else {
+            return;
+        };
+        let deadline = flip + period.saturating_sub(MARGIN);
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return;
+            }
+            let mut fd = libc::pollfd {
+                fd: self.sink.borrow().poll_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = (deadline - now).as_micros().div_ceil(1000) as i32;
+            let rc = unsafe { libc::poll(&mut fd, 1, timeout) };
+            if rc <= 0 || fd.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+                return;
+            }
+            self.pump_video_socket();
+            let sink = self.sink.borrow();
+            if sink.has_pending() || !sink.moving(Duration::from_millis(120)) {
+                return;
+            }
+        }
+    }
+
+    /// One refresh of the mode on the wire, from its own timing.
+    fn frame_period(&self) -> Duration {
+        let mode = self.mode.get();
+        let (_, _, htotal) = mode.hsync();
+        let (_, _, vtotal) = mode.vsync();
+        let clock_khz = u64::from(mode.clock());
+        if clock_khz == 0 || htotal == 0 || vtotal == 0 {
+            return Duration::from_micros(16_667);
+        }
+        Duration::from_micros(u64::from(htotal) * u64::from(vtotal) * 1000 / clock_khz)
     }
 
     /// Everything waiting on the player's socket, put on the panel.
@@ -970,9 +1038,11 @@ impl SplitDisplay {
         if !finished {
             return;
         }
+        crate::video::trace::event('F', 0, 0);
         let old = {
             let mut state = self.presentation.borrow_mut();
             state.waiting_for_flip = false;
+            state.last_flip = Some(std::time::Instant::now());
             state.pending_previous.take()
         };
         drop(old);
@@ -1049,6 +1119,7 @@ impl SplitDisplay {
             }
         };
         let staged = committed.map_err(|e| format!("atomic commit: {e}"))?;
+        crate::video::trace::event('C', u64::from(ui.is_some()), u64::from(staged.is_some()));
         if let Some(index) = staged {
             self.sink.borrow_mut().committed(&self.video, index);
             VIDEO.with(|cell| cell.set(true));
