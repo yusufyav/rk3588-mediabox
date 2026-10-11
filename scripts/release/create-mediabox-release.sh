@@ -71,7 +71,7 @@ trap cleanup EXIT
 say "system integration"
 mediabox_ssh "mkdir -p '$stage/rootfs/etc/systemd/system' \
   '$stage/rootfs/etc/systemd/logind.conf.d' '$stage/rootfs/etc/udev/rules.d' \
-  '$stage/rootfs/etc/alsa/conf.d' \
+  '$stage/rootfs/etc/systemd/system/bluealsa.service.d' '$stage/rootfs/etc/alsa/conf.d' \
   '$stage/rootfs/etc/mediabox' '$stage/rootfs/etc/chromium/policies/managed' '$stage/meta'"
 
 # repo path <TAB> installed path
