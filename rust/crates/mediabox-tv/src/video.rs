@@ -705,6 +705,7 @@ const KIND_FRAME: u32 = 0;
 const KIND_STOP: u32 = 1;
 const KIND_RELEASE: u32 = 2;
 const KIND_HDR: u32 = 3;
+const KIND_SUBTITLE: u32 = 4;
 
 /// One fixed-size message per `sendmsg`, so a frame and its descriptors can
 /// never be split across reads:
@@ -739,10 +740,102 @@ pub enum Incoming {
     },
     /// What the film says about itself; sent once per configuration.
     Hdr(HdrStatic),
+    /// A picture subtitle came on, changed or went (`None`).
+    Subtitle(Option<SubtitleImage>),
     /// The player is finished with the plane but is still there.
     Stop,
     /// The player went away.
     Gone,
+}
+
+/// A picture subtitle (a Blu-ray's PGS, a DVD's VobSub), drawn by the player
+/// into premultiplied RGBA because it has no text for this interface to draw.
+///
+/// `canvas` is the film's own picture at the size the player drew it; `x`,
+/// `y`, `width` and `height` are the part of it that holds anything. The
+/// interface puts that part where it falls on the picture, scaled, as Kodi
+/// does (OverlayRenderer.cpp, ALIGN_VIDEO).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubtitleImage {
+    pub canvas: (u32, u32),
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, premultiplied, `width * 4` bytes a row.
+    pub rgba: Vec<u8>,
+}
+
+/// Where a picture subtitle goes, as fractions of the panel: what the
+/// interface's own layout needs, whatever its scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SubtitlePlacement {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The most a subtitle's picture may be: a whole 1920x1080 canvas.
+const SUBTITLE_MAX_BYTES: u64 = 1920 * 1080 * 4;
+
+/// The picture the player sent: `width` by `height` premultiplied BGRA rows,
+/// `stride` bytes apart, in a memfd.
+///
+/// ```text
+///  8  canvas width    16  x    24  width     32  stride
+/// 12  canvas height   20  y    28  height    72  descriptors
+/// ```
+fn read_subtitle(bytes: &[u8; MESSAGE], fds: &[OwnedFd]) -> Result<Option<SubtitleImage>, String> {
+    use std::os::unix::fs::FileExt;
+
+    let (width, height, stride) = (u32_at(bytes, 24), u32_at(bytes, 28), u32_at(bytes, 32));
+    let canvas = (u32_at(bytes, 8), u32_at(bytes, 12));
+    if width == 0 || height == 0 {
+        return Ok(None);
+    }
+    let Some(fd) = fds.first() else {
+        return Err("a subtitle picture with no descriptor".into());
+    };
+    let row = u64::from(width) * 4;
+    let size = u64::from(stride) * u64::from(height);
+    if u64::from(stride) < row || size > SUBTITLE_MAX_BYTES * 2 || row * u64::from(height) > SUBTITLE_MAX_BYTES {
+        return Err(format!("a subtitle picture {width}x{height} stride {stride}"));
+    }
+    let file = std::fs::File::from(fd.try_clone().map_err(|error| error.to_string())?);
+    let mut raw = vec![0u8; size as usize];
+    file.read_exact_at(&mut raw, 0).map_err(|error| error.to_string())?;
+    let mut rgba = Vec::with_capacity((row * u64::from(height)) as usize);
+    for line in raw.chunks_exact(stride as usize) {
+        for pixel in line[..row as usize].chunks_exact(4) {
+            rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+        }
+    }
+    Ok(Some(SubtitleImage {
+        canvas,
+        x: u32_at(bytes, 16),
+        y: u32_at(bytes, 20),
+        width,
+        height,
+        rgba,
+    }))
+}
+
+/// Where `image` falls on a panel `panel` wide and high, the picture being at
+/// `picture` on it.
+pub fn place_subtitle(image: &SubtitleImage, picture: Rect, panel: (u32, u32)) -> Option<SubtitlePlacement> {
+    let (canvas_w, canvas_h) = image.canvas;
+    if canvas_w == 0 || canvas_h == 0 || panel.0 == 0 || panel.1 == 0 {
+        return None;
+    }
+    let scale_x = picture.width as f32 / canvas_w as f32;
+    let scale_y = picture.height as f32 / canvas_h as f32;
+    Some(SubtitlePlacement {
+        x: (picture.x as f32 + image.x as f32 * scale_x) / panel.0 as f32,
+        y: (picture.y as f32 + image.y as f32 * scale_y) / panel.1 as f32,
+        width: image.width as f32 * scale_x / panel.0 as f32,
+        height: image.height as f32 * scale_y / panel.1 as f32,
+    })
 }
 
 fn u16_at(bytes: &[u8; MESSAGE], offset: usize) -> u16 {
@@ -901,6 +994,10 @@ impl Server {
                     }
                     match u32_at(&bytes, 4) {
                         KIND_STOP => received.push(Incoming::Stop),
+                        KIND_SUBTITLE => match read_subtitle(&bytes, &fds) {
+                            Ok(image) => received.push(Incoming::Subtitle(image)),
+                            Err(error) => eprintln!("mediabox-tv.video {error}"),
+                        },
                         KIND_HDR => {
                             let mut primaries = [0u16; 8];
                             for (i, slot) in primaries.iter_mut().enumerate() {
@@ -987,6 +1084,7 @@ struct Pending<D: ControlDevice> {
     imported: Imported<D>,
     info: FrameInfo,
     dst: Rect,
+    panel: (u32, u32),
 }
 
 /// The film on the panel: the socket, the plane it settled on, and the frames
@@ -1010,6 +1108,12 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// when the film stops, because the television must not be left being
     /// told it is receiving HDR by a player that has gone.
     hdr: Option<HdrStatic>,
+    /// The picture subtitle on now, and where the film's picture is on the
+    /// panel: the last frame's rectangle, and the panel's size.
+    subtitle: Option<SubtitleImage>,
+    picture: Option<(Rect, (u32, u32))>,
+    /// Counts every change to either, for whoever draws the subtitle.
+    subtitle_changes: u64,
 }
 
 impl<D: ControlDevice + Clone> Sink<D> {
@@ -1024,6 +1128,9 @@ impl<D: ControlDevice + Clone> Sink<D> {
             refused: false,
             frames: 0,
             hdr: None,
+            subtitle: None,
+            picture: None,
+            subtitle_changes: 0,
         })
     }
 
@@ -1051,6 +1158,25 @@ impl<D: ControlDevice + Clone> Sink<D> {
         self.frames
     }
 
+    /// The picture subtitle to draw and where, with a number that changes
+    /// whenever either does.
+    pub fn subtitle(&self) -> (u64, Option<(&SubtitleImage, SubtitlePlacement)>) {
+        let shown = match (&self.subtitle, self.picture) {
+            (Some(image), Some((picture, panel))) if self.on => {
+                place_subtitle(image, picture, panel).map(|placement| (image, placement))
+            }
+            _ => None,
+        };
+        (self.subtitle_changes, shown)
+    }
+
+    fn set_subtitle(&mut self, image: Option<SubtitleImage>) {
+        if self.subtitle != image {
+            self.subtitle = image;
+            self.subtitle_changes += 1;
+        }
+    }
+
     /// Reads whatever is waiting and puts it on the panel.
     ///
     /// `into` is the whole area the film may use, in the panel's own pixels;
@@ -1066,6 +1192,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
         for message in self.server.pump() {
             match message {
                 Incoming::Hdr(hdr) => self.hdr = Some(hdr),
+                Incoming::Subtitle(image) => self.set_subtitle(image),
                 Incoming::Stop | Incoming::Gone => self.clear(device, crtc, planes),
                 Incoming::Frame {
                     id,
@@ -1113,7 +1240,8 @@ impl<D: ControlDevice + Clone> Sink<D> {
                         colour: frame.colour,
                     };
                     self.arrived = Some(std::time::Instant::now());
-                    let replaced = self.pending.replace(Pending { id, imported, info, dst });
+                    let panel = (into.width, into.height);
+                    let replaced = self.pending.replace(Pending { id, imported, info, dst, panel });
                     trace::event('A', id, replaced.as_ref().map_or(0, |old| old.id));
                     if let Some(old) = replaced {
                         self.server.release(old.id);
@@ -1199,6 +1327,10 @@ impl<D: ControlDevice + Clone> Sink<D> {
         let Some(pending) = self.pending.take() else { return };
         trace::event('c', pending.id, 0);
         planes[index].staged(pending.info.colour);
+        if !self.on || self.picture.map(|(picture, _)| picture) != Some(pending.dst) {
+            self.picture = Some((pending.dst, pending.panel));
+            self.subtitle_changes += 1;
+        }
         self.on = true;
         self.frames += 1;
         pace::presented();
@@ -1224,6 +1356,10 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// Take the film off the panel and give every buffer back.
     pub fn clear(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
         self.hdr = None;
+        self.set_subtitle(None);
+        if self.picture.take().is_some() {
+            self.subtitle_changes += 1;
+        }
         self.arrived = None;
         if let Some(pending) = self.pending.take() {
             self.server.release(pending.id);
@@ -1357,6 +1493,66 @@ mod tests {
         assert_eq!(MESSAGE, 88);
         assert_eq!(REPLY, 16);
         assert_eq!(MAGIC, u32::from_le_bytes(*b"MBV1"));
+    }
+
+    fn subtitle_message(x: u32, y: u32, width: u32, height: u32, stride: u32) -> [u8; MESSAGE] {
+        let mut bytes = [0u8; MESSAGE];
+        bytes[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        bytes[4..8].copy_from_slice(&KIND_SUBTITLE.to_le_bytes());
+        for (at, value) in [(8, 1920), (12, 1080), (16, x), (20, y), (24, width), (28, height), (32, stride)] {
+            bytes[at..at + 4].copy_from_slice(&u32::to_le_bytes(value));
+        }
+        bytes
+    }
+
+    fn memfd(contents: &[u8]) -> OwnedFd {
+        use std::io::Write;
+        let fd = unsafe { libc::memfd_create(c"test".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(fd >= 0);
+        let mut file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        file.write_all(contents).unwrap();
+        OwnedFd::from(file)
+    }
+
+    #[test]
+    fn a_subtitle_picture_is_read_as_rgba_row_by_row() {
+        // Two pixels a row, a stride of three: the third is padding.
+        let bgra = [
+            1, 2, 3, 4, 5, 6, 7, 8, 0xee, 0xee, 0xee, 0xee, //
+            9, 10, 11, 12, 13, 14, 15, 16, 0xee, 0xee, 0xee, 0xee,
+        ];
+        let image = read_subtitle(&subtitle_message(10, 900, 2, 2, 12), &[memfd(&bgra)])
+            .unwrap()
+            .unwrap();
+        assert_eq!((image.canvas, image.x, image.y, image.width, image.height), ((1920, 1080), 10, 900, 2, 2));
+        assert_eq!(image.rgba, [3, 2, 1, 4, 7, 6, 5, 8, 11, 10, 9, 12, 15, 14, 13, 16]);
+    }
+
+    #[test]
+    fn an_empty_subtitle_message_takes_the_picture_off() {
+        assert_eq!(read_subtitle(&subtitle_message(0, 0, 0, 0, 0), &[]), Ok(None));
+        assert!(read_subtitle(&subtitle_message(0, 0, 4, 4, 16), &[]).is_err());
+        assert!(read_subtitle(&subtitle_message(0, 0, 4, 4, 8), &[memfd(&[0; 64])]).is_err());
+    }
+
+    #[test]
+    fn a_subtitle_goes_where_it_falls_on_the_picture() {
+        let image = SubtitleImage {
+            canvas: (1920, 1080),
+            x: 480,
+            y: 900,
+            width: 960,
+            height: 108,
+            rgba: Vec::new(),
+        };
+        // A 4K panel, the picture filling it: the canvas scaled twice over.
+        let whole = Rect { x: 0, y: 0, width: 3840, height: 2160 };
+        let at = place_subtitle(&image, whole, (3840, 2160)).unwrap();
+        assert_eq!((at.x, at.y, at.width, at.height), (0.25, 900.0 / 1080.0, 0.5, 0.1));
+        // Pillarboxed into the middle half of the panel's width.
+        let narrow = Rect { x: 960, y: 0, width: 1920, height: 2160 };
+        let at = place_subtitle(&image, narrow, (3840, 2160)).unwrap();
+        assert_eq!((at.x, at.width), (0.375, 0.25));
     }
 }
 

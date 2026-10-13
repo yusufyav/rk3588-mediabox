@@ -35,11 +35,26 @@ second while a subtitle is on (`MediaSubtitleTextHere`) and draws it on its own
 plane over the film. Timing therefore stays mpv's: `sub-delay` is applied
 before `sub-text` is read.
 
-What this path does not do: bitmap subtitles (PGS, VobSub) have no text and are
-not drawn; ASS styling (fonts, positions, karaoke) is not drawn — the ASS file
-is kept intact and mpv reads it, but the line on screen is plain. Drawing
-libass bitmaps would need a new message on the video socket and an overlay
-plane; see "Limitations".
+What this path does not do: ASS styling (fonts, positions, karaoke) is not
+drawn — the ASS file is kept intact and mpv reads it, but the line on screen
+is plain; see "Limitations".
+
+## Picture subtitles (PGS, VobSub)
+
+A Blu-ray's subtitle is a picture, not text, so `sub-text` is empty. It is
+drawn the way Kodi draws it on this board: Kodi decodes it to an RGBA image and
+puts it on its GUI layer over the video plane, scaled from the film's own
+pixels to the rectangle the picture occupies (`OverlayRenderer.cpp`,
+`ALIGN_VIDEO`). Here `vo_mediabox` asks mpv for the subtitle's bitmaps
+(`osd_render`, subtitles only, at the film's display size capped at 1920
+wide) and composes them with `mp_draw_sub_overlay` -- what mpv's own
+`vo_dmabuf_wayland` uses for its OSD surface. Only the part that holds
+anything is sent, in a memfd, as its own message on the video socket
+(`MBV_SUBTITLE`), and only when it changed; libass's text bitmaps are left
+out, since the interface draws text itself. The interface (`video.rs`) places
+it on the film's last frame rectangle and draws it as an image over the film,
+under the panels. Timing is mpv's: the bitmaps are asked for at each frame's
+pts, `sub-delay` included.
 
 ## Sources
 
@@ -460,9 +475,9 @@ constants; a wider sample should set them.
   subtitle that is on is checked now.
 * When a film has a subtitle in the preferred language, that language is the
   first language on the subtitle panel (under "Etkisizleştirildi") and is on
-  when the film starts: the file's own text track in that language (full
-  before forced, default first), else the best-ranked fetched one, else a
-  picture track (listed as "Resim (gösterilemez)": this path draws text only).
+  when the film starts: the file's own track in that language (full before
+  forced, default first, text before a picture), else the best-ranked fetched
+  one.
   When it has none, the language is not listed and subtitles start off. A
   viewer who has never set it gets mpv's default and nothing is loaded.
 * Long panels scroll: nine rows are drawn, the focus stays on screen, and a
@@ -481,7 +496,7 @@ constants; a wider sample should set them.
 * **When every automatic candidate is refused, none of them is left on**
   if it was shown not to fit (`REJECT_PARTIAL`, `REJECT_TIMEBASE_MISMATCH`,
   `REJECT_WRONG_RELEASE`, `REJECT_DUPLICATE`). What comes on instead: the
-  film's own text track in the language; else -- only with "AutoSync
+  film's own track in the language; else -- only with "AutoSync
   uyumsuz altyazıları göster" on -- the best-ranked candidate whose fit could
   not be told (`INCONCLUSIVE`), as it came and untimed; else subtitles off.
 * **With "Otomatik eşitleme" on, every fetched subtitle in the preferred
@@ -523,8 +538,8 @@ external subtitles a film had and when an automatic choice moves on.
 
 ## Limitations
 
-* No ASS styling or bitmap subtitles on screen (see the first section). The
-  engine and delivery handle ASS; only the drawing is plain.
+* No ASS styling on screen (see the first section). The engine and delivery
+  handle ASS; only the drawing is plain.
 * The caption is polled at 10 Hz: up to 0.1 s late on and off.
 * Energy VAD: a film scored wall to wall with music gives little evidence and
   is left untimed rather than guessed.

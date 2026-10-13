@@ -1032,9 +1032,9 @@ pub fn auto_choice(preferences: &Preferences, tracks: &[Value], candidates: &[Ca
         return Choice::Leave;
     };
     // The file's own in that language: a full one before a forced-only one,
-    // the default before the rest. A picture subtitle (PGS, VobSub) only
-    // when nothing else in the language exists at all: this player's line is
-    // drawn by the interface from text, and a picture subtitle has none.
+    // the default before the rest, text before a picture (PGS, VobSub). Both
+    // are drawn -- the text by the interface from its words, the picture as
+    // the player drew it -- and both are the film's own, timed to it.
     let of_language = |track: &&Value| {
         track.get("type").and_then(Value::as_str) == Some("sub")
             && !track.get("external").and_then(Value::as_bool).unwrap_or(false)
@@ -1061,13 +1061,15 @@ pub fn auto_choice(preferences: &Preferences, tracks: &[Value], candidates: &[Ca
         .iter()
         .find(|candidate| candidate.language.as_deref() == Some(language))
         .map(|candidate| candidate.id.clone());
-    // The original text track before a fetched one, always. (An older
-    // build kept the origin of the last pick in the preferences file; it is
-    // read and ignored.)
-    let pick = embedded.map(Choice::Embedded).or(external.map(Choice::External));
-    // Nothing in the language at all: subtitles stay off rather than on in a
-    // language nobody asked for.
-    pick.or(picture.map(Choice::Embedded)).unwrap_or(Choice::Off)
+    // The original before a fetched one, always. (An older build kept the
+    // origin of the last pick in the preferences file; it is read and
+    // ignored.) Nothing in the language at all: subtitles stay off rather
+    // than on in a language nobody asked for.
+    embedded
+        .or(picture)
+        .map(Choice::Embedded)
+        .or(external.map(Choice::External))
+        .unwrap_or(Choice::Off)
 }
 
 /// A subtitle that is pictures, not text.
@@ -1130,16 +1132,11 @@ fn usable(film: &Film) -> Vec<Candidate> {
         .collect()
 }
 
-/// What is left when no fetched subtitle fits: the film's own text track in
-/// the language, or nothing. A picture track is not it -- this interface
-/// draws the line from text, and a picture subtitle has none.
+/// What is left when no fetched subtitle fits: the film's own track in the
+/// language, or nothing.
 fn fallback_choice(preferences: &Preferences, tracks: &[Value]) -> Choice {
     match auto_choice(preferences, tracks, &[]) {
-        Choice::Embedded(id)
-            if !tracks.iter().any(|t| t.get("id").and_then(Value::as_i64) == Some(id) && t.get("type").and_then(Value::as_str) == Some("sub") && is_picture(t)) =>
-        {
-            Choice::Embedded(id)
-        }
+        Choice::Embedded(id) => Choice::Embedded(id),
         _ => Choice::Off,
     }
 }
@@ -1353,12 +1350,13 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_subtitle_only_when_nothing_else_is_in_the_language() {
+    fn the_films_own_picture_subtitle_before_a_fetched_one_and_after_its_text() {
         let mut picture = track(1, "tur", false);
         picture["codec"] = json!("hdmv_pgs_subtitle");
         let candidates = [candidate("ext:t", "tr")];
-        assert_eq!(auto_choice(&on("tr", None), &[picture.clone()], &candidates), Choice::External("ext:t".into()));
-        assert_eq!(auto_choice(&on("tr", None), &[picture], &[]), Choice::Embedded(1));
+        assert_eq!(auto_choice(&on("tr", None), &[picture.clone()], &candidates), Choice::Embedded(1));
+        assert_eq!(auto_choice(&on("tr", None), &[picture.clone()], &[]), Choice::Embedded(1));
+        assert_eq!(auto_choice(&on("tr", None), &[picture, track(3, "tur", false)], &candidates), Choice::Embedded(3));
         // Nothing in the language: off, not some other language.
         assert_eq!(auto_choice(&on("tr", None), &[track(2, "eng", false)], &[]), Choice::Off);
     }
@@ -1409,12 +1407,12 @@ mod tests {
     }
 
     #[test]
-    fn with_nothing_fetched_fitting_the_films_own_text_or_nothing() {
+    fn with_nothing_fetched_fitting_the_films_own_or_nothing() {
         let turkish = on("tr", None);
         assert_eq!(fallback_choice(&turkish, &[track(1, "eng", false), track(4, "tur", false)]), Choice::Embedded(4));
         let mut picture = track(2, "tur", false);
         picture["codec"] = json!("hdmv_pgs_subtitle");
-        assert_eq!(fallback_choice(&turkish, &[picture]), Choice::Off);
+        assert_eq!(fallback_choice(&turkish, &[picture]), Choice::Embedded(2));
         assert_eq!(fallback_choice(&turkish, &[track(1, "eng", false)]), Choice::Off);
     }
 

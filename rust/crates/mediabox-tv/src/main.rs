@@ -142,6 +142,11 @@ fn with_app(f: impl FnOnce(&mut App)) {
     }
 }
 
+/// The player's picture subtitle came on, changed, moved or went.
+pub(crate) fn picture_subtitle_changed() {
+    with_app(|app| app.show_picture_caption());
+}
+
 /// How long the volume indicator stays up after the last change.
 const VOLUME_OSD_LINGER: Duration = Duration::from_millis(2200);
 
@@ -2285,6 +2290,26 @@ impl App {
                 with_app(|app| app.show_caption(text));
             });
         });
+    }
+
+    /// A picture subtitle (PGS) is drawn as the player drew it, where it
+    /// falls on the film; see `platform::picture_subtitle`.
+    fn show_picture_caption(&mut self) {
+        let Some(window) = self.window.upgrade() else { return };
+        match platform::picture_subtitle() {
+            Some((image, at)) => {
+                window.set_np_picture_caption(image);
+                window.set_np_picture_caption_x(at.x);
+                window.set_np_picture_caption_y(at.y);
+                window.set_np_picture_caption_w(at.width);
+                window.set_np_picture_caption_h(at.height);
+                window.set_np_picture_caption_on(true);
+            }
+            None => {
+                window.set_np_picture_caption_on(false);
+                window.set_np_picture_caption(slint::Image::default());
+            }
+        }
     }
 
     fn show_caption(&mut self, text: String) {

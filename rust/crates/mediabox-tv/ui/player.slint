@@ -237,6 +237,16 @@ export component Player inherits Rectangle {
     in property <string> caption;
     /// The same, line by line and styled.
     in property <[CaptionLine]> caption-lines;
+    /// A subtitle that is a picture, not text (a Blu-ray's PGS): the player
+    /// draws it into an image and it goes where the disc put it on the
+    /// picture, scaled with the picture, as Kodi draws it. The fractions are
+    /// of the panel.
+    in property <image> picture-caption;
+    in property <bool> picture-caption-on;
+    in property <float> picture-caption-x;
+    in property <float> picture-caption-y;
+    in property <float> picture-caption-w;
+    in property <float> picture-caption-h;
     /// How the subtitle that is on was timed, under the delay on the
     /// subtitle panel: "Otomatik eşitleme · +1,82 sn · %97".
     in property <string> menu-note;
@@ -349,6 +359,16 @@ export component Player inherits Rectangle {
         frame-w: root.width;
         frame-h: root.height;
         lines: caption-lines;
+    }
+
+    if picture-caption-on && waiting == "": Image {
+        x: root.width * picture-caption-x;
+        y: root.height * picture-caption-y;
+        width: root.width * picture-caption-w;
+        height: root.height * picture-caption-h;
+        source: picture-caption;
+        image-fit: fill;
+        image-rendering: smooth;
     }
 
     if open: Rectangle {

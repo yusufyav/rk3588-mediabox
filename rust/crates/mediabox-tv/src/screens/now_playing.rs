@@ -1482,13 +1482,6 @@ fn read_subtitles(list: &[Value]) -> Vec<Track> {
             if entry.get("unavailable").and_then(Value::as_str) == Some("quota-exhausted") {
                 detail.push_str(" · İndirme kotası doldu");
             }
-            // A picture subtitle has no text for this interface to draw.
-            if matches!(
-                entry.get("codec").and_then(Value::as_str),
-                Some("hdmv_pgs_subtitle" | "dvd_subtitle" | "dvb_subtitle" | "xsub")
-            ) {
-                detail.push_str(" · Resim (gösterilemez)");
-            }
             Some(Track {
                 id,
                 label,

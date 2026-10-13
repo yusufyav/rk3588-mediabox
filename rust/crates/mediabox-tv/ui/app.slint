@@ -331,6 +331,14 @@ export component MediaBoxWindow inherits Window {
     /// nothing of its own; and how the subtitle that is on was timed.
     in property <string> np-caption;
     in property <[CaptionLine]> np-caption-lines;
+    /// A subtitle that is a picture (a Blu-ray's PGS), drawn by the player
+    /// into an image, and where it goes as fractions of the panel.
+    in property <image> np-picture-caption;
+    in property <bool> np-picture-caption-on;
+    in property <float> np-picture-caption-x;
+    in property <float> np-picture-caption-y;
+    in property <float> np-picture-caption-w;
+    in property <float> np-picture-caption-h;
     in property <string> np-menu-note;
     /// The panel's list goes on above or below what is drawn.
     in property <bool> np-menu-above;
@@ -809,6 +817,12 @@ export component MediaBoxWindow inherits Window {
             pill: root.np-pill;
             caption: root.np-caption;
             caption-lines: root.np-caption-lines;
+            picture-caption: root.np-picture-caption;
+            picture-caption-on: root.np-picture-caption-on;
+            picture-caption-x: root.np-picture-caption-x;
+            picture-caption-y: root.np-picture-caption-y;
+            picture-caption-w: root.np-picture-caption-w;
+            picture-caption-h: root.np-picture-caption-h;
         }
 
         // Last, so it is over the film and over every sheet.

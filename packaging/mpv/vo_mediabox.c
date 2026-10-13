@@ -37,6 +37,9 @@
  *                         28  planes                       80  display width
  *                                                          84  display height
  *
+ * A picture subtitle travels on the same wire as its own kind; see
+ * send_subtitle.
+ *
  * This file is part of mpv, and is licensed under the same terms.
  */
 
@@ -46,6 +49,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -60,6 +64,8 @@
 #include "osdep/timer.h"
 #include "input/input.h"
 #include "input/keycodes.h"
+#include "sub/draw_bmp.h"
+#include "sub/osd.h"
 #include "video/img_format.h"
 #include "video/mp_image.h"
 #include "vo.h"
@@ -69,6 +75,7 @@
 #define MBV_STOP      1U
 #define MBV_RELEASE   2U
 #define MBV_HDR       3U
+#define MBV_SUBTITLE  4U
 #define MBV_MESSAGE   88
 #define MBV_REPLY     16
 #define MBV_MAX_FDS   4
@@ -80,6 +87,12 @@
 #define MBV_IN_FLIGHT 8
 
 #define MBV_SOCKET "/run/mediabox-ui/video.sock"
+
+/* The widest a picture subtitle is drawn here. A Blu-ray's PGS is authored on
+ * a 1920x1080 canvas, a UHD disc's too, so a 4K film's subtitle drawn at 4K
+ * would be the same pixels four times over; the interface scales it to the
+ * picture as Kodi does. */
+#define MBV_SUB_MAX_W 1920
 
 struct held {
     uint64_t id;
@@ -106,6 +119,11 @@ struct priv {
     double display_fps;
     int64_t display_checked;
     bool said_vblank;
+
+    /* Picture subtitles: see send_subtitle. */
+    struct mp_draw_sub_cache *sub_cache;
+    int sub_w, sub_h;
+    bool sub_shown;
 };
 
 /* Which matrix, which range and which transfer curve the frame carries.
@@ -530,10 +548,120 @@ static int reconfig(struct vo *vo, struct mp_image *img)
      * interface is the one that letterboxes it, so it has to be told. */
     mp_image_params_get_dsize(&img->params, &p->d_w, &p->d_h);
     p->colour = colour_flags(&img->params);
+    p->sub_w = MPMIN(p->d_w, MBV_SUB_MAX_W);
+    p->sub_h = p->d_w > 0 ? (int)((int64_t)p->d_h * p->sub_w / p->d_w) : 0;
     MP_VERBOSE(vo, "kare %dx%d, gösterim %dx%d, renk %u\n",
                img->params.w, img->params.h, p->d_w, p->d_h, p->colour);
     send_hdr(vo, &img->params);
     return 0;
+}
+
+/* The subtitle, when it is a picture.
+ *
+ * This output draws nothing, so the interface draws the subtitle -- and a text
+ * subtitle it already does, from mpv's `sub-text`. A picture subtitle (a
+ * Blu-ray's PGS, a DVD's VobSub) has no text: until this, the interface had
+ * nothing to draw and listed it as "Resim (gösterilemez)".
+ *
+ * Kodi shows the same track on the same board. It decodes it to an RGBA image
+ * and draws that on its GUI layer, over the video plane, scaled from the
+ * film's own pixels to the rectangle the picture occupies (OverlayRenderer.cpp,
+ * ALIGN_VIDEO: source to m_rd). This does the same with mpv's own pieces:
+ * osd_render for the subtitle's bitmaps at the film's display size, and
+ * mp_draw_sub_overlay -- what vo_dmabuf_wayland uses for its OSD surface --
+ * to compose them into one premultiplied BGRA overlay that says which part of
+ * it holds anything and whether it changed. Only the part that holds anything
+ * goes over, in a memfd, and only when it changed: a subtitle is on screen
+ * for seconds, the film's frames go by twenty-four times a second.
+ *
+ * Text subtitles are left out of the overlay: libass's bitmaps would draw the
+ * same line the interface already draws. An empty message (width 0, no
+ * descriptor) takes the picture off.
+ *
+ *      8  canvas width    16  x    24  width     32  stride
+ *     12  canvas height   20  y    28  height    72  descriptors
+ */
+static void send_subtitle(struct vo *vo, double pts)
+{
+    struct priv *p = vo->priv;
+    if (p->sub_w <= 0 || p->sub_h <= 0 || p->lost)
+        return;
+
+    struct mp_osd_res res = { .w = p->sub_w, .h = p->sub_h, .display_par = 1.0 };
+    struct sub_bitmap_list *sbs = osd_render(vo->osd, res, pts, OSD_DRAW_SUB_ONLY,
+                                             mp_draw_sub_formats);
+    if (!sbs)
+        return;
+
+    int kept = 0;
+    for (int n = 0; n < sbs->num_items; n++) {
+        if (sbs->items[n]->format == SUBBITMAP_BGRA)
+            sbs->items[kept++] = sbs->items[n];
+    }
+    sbs->num_items = kept;
+
+    uint8_t message[MBV_MESSAGE];
+    memset(message, 0, sizeof(message));
+    put32(message + 0, MBV_MAGIC);
+    put32(message + 4, MBV_SUBTITLE);
+    put32(message + 8, p->sub_w);
+    put32(message + 12, p->sub_h);
+
+    if (!kept) {
+        /* Nothing a picture: a text subtitle, or none. Said once. */
+        if (p->sub_shown && send_message(vo, message, NULL, 0))
+            p->sub_shown = false;
+        goto done;
+    }
+
+    if (!p->sub_cache)
+        p->sub_cache = mp_draw_sub_alloc(p, vo->global);
+    struct mp_rect act[1], mod[1];
+    int nact = 0, nmod = 0;
+    struct mp_image *osd = mp_draw_sub_overlay(p->sub_cache, sbs, act, 1, &nact,
+                                               mod, 1, &nmod);
+    if (!osd || !nmod)
+        goto done;
+
+    if (!nact) {
+        if (p->sub_shown && send_message(vo, message, NULL, 0))
+            p->sub_shown = false;
+        goto done;
+    }
+
+    struct mp_rect rc = act[0];
+    int w = mp_rect_w(rc), h = mp_rect_h(rc);
+    size_t stride = (size_t)w * 4;
+    size_t size = stride * h;
+    int fd = memfd_create("mediabox-subtitle", MFD_CLOEXEC);
+    if (fd < 0 || ftruncate(fd, size) < 0) {
+        MP_WARN(vo, "altyazı resmi için bellek ayrılamadı: %s\n", strerror(errno));
+        if (fd >= 0)
+            close(fd);
+        goto done;
+    }
+    uint8_t *dst = mmap(NULL, size, PROT_WRITE, MAP_SHARED, fd, 0);
+    if (dst == MAP_FAILED) {
+        MP_WARN(vo, "altyazı resmi eşlenemedi: %s\n", strerror(errno));
+        close(fd);
+        goto done;
+    }
+    memcpy_pic(dst, mp_image_pixel_ptr(osd, 0, rc.x0, rc.y0), stride, h,
+               stride, osd->stride[0]);
+    munmap(dst, size);
+
+    put32(message + 16, rc.x0);
+    put32(message + 20, rc.y0);
+    put32(message + 24, w);
+    put32(message + 28, h);
+    put32(message + 32, stride);
+    put32(message + 72, 1);
+    if (send_message(vo, message, &fd, 1))
+        p->sub_shown = true;
+    close(fd);
+
+done:
+    talloc_free(sbs);
 }
 
 static bool draw_frame(struct vo *vo, struct vo_frame *frame)
@@ -548,8 +676,10 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     /* Synced to the display, mpv asks for the same frame again on every vsync
      * it stays up. It is already on the panel; sending it again would only
      * import the same buffer once more. */
-    if (display_sync(vo) && frame->repeat && !frame->redraw && p->nheld > 0)
+    if (display_sync(vo) && frame->repeat && !frame->redraw && p->nheld > 0) {
+        send_subtitle(vo, frame->current->pts);
         return VO_TRUE;
+    }
 
     struct mp_image *mpi = frame->current;
     AVDRMFrameDescriptor *desc = (AVDRMFrameDescriptor *)mpi->planes[0];
@@ -621,6 +751,8 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         .image = mp_image_new_ref(mpi),
     };
     p->said_full = false;
+
+    send_subtitle(vo, mpi->pts);
     return VO_TRUE;
 }
 

@@ -292,6 +292,39 @@ pub fn video_showing() -> bool {
     VIDEO.with(|cell| cell.get())
 }
 
+thread_local! {
+    /// The picture subtitle on the film now, ready for the interface to draw,
+    /// and the sink's change number it was made from.
+    static PICTURE_SUBTITLE: RefCell<(u64, Option<(slint::Image, crate::video::SubtitlePlacement)>)> =
+        const { RefCell::new((0, None)) };
+}
+
+/// The picture subtitle to draw over the film and where, if one is on.
+///
+/// The player draws nothing itself; a text subtitle the interface draws from
+/// its words, and one that is a picture (a Blu-ray's PGS) from this.
+pub fn picture_subtitle() -> Option<(slint::Image, crate::video::SubtitlePlacement)> {
+    PICTURE_SUBTITLE.with(|cell| cell.borrow().1.clone())
+}
+
+/// Hand the sink's picture subtitle to the interface when it has changed.
+fn publish_subtitle(changes: u64, shown: Option<(&crate::video::SubtitleImage, crate::video::SubtitlePlacement)>) {
+    let changed = PICTURE_SUBTITLE.with(|cell| cell.borrow().0 != changes);
+    if !changed {
+        return;
+    }
+    let made = shown.map(|(image, placement)| {
+        let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            &image.rgba,
+            image.width,
+            image.height,
+        );
+        (slint::Image::from_rgba8_premultiplied(pixels), placement)
+    });
+    PICTURE_SUBTITLE.with(|cell| *cell.borrow_mut() = (changes, made));
+    let _ = slint::invoke_from_event_loop(crate::picture_subtitle_changed);
+}
+
 /// A new mode and colour asked for, and what to go back to if the kernel
 /// refuses them.
 struct Switch {
@@ -1022,6 +1055,8 @@ impl SplitDisplay {
             let mut sink = self.sink.borrow_mut();
             sink.pump(&self.kms, self.crtc, &self.video, into);
             VIDEO.with(|cell| cell.set(sink.showing() || sink.has_pending()));
+            let (changes, shown) = sink.subtitle();
+            publish_subtitle(changes, shown);
             sink.hdr()
         };
         self.signal_output_colour(hdr);
