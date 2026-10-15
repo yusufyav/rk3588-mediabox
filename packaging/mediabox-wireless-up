@@ -30,7 +30,7 @@
 # The Plus also takes an Intel AX210 in the same M.2 slot -- Wi-Fi on PCIe
 # (8086:2725, iwlwifi), Bluetooth on USB (8087:0032, btusb). The race above was
 # measured on the RTL8852BE only; with the AX210 both halves come up under the
-# same order (hci0 and wlP2p33s0, two cold boots).
+# same order (hci0 and wlP2p33s0, two boots: one power-on, one reboot).
 #
 # The Ultra does not have this race: its Bluetooth is on a UART and its Wi-Fi
 # on SDIO, two separate parts. Nothing here harms it — the waits end early and
