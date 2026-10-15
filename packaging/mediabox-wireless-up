@@ -27,6 +27,11 @@
 # if the interface is still missing after the wait, the driver is bounced,
 # which is exactly what recovers it by hand.
 #
+# The Plus also takes an Intel AX210 in the same M.2 slot -- Wi-Fi on PCIe
+# (8086:2725, iwlwifi), Bluetooth on USB (8087:0032, btusb). The race above was
+# measured on the RTL8852BE only; with the AX210 both halves come up under the
+# same order (hci0 and wlP2p33s0, two cold boots).
+#
 # The Ultra does not have this race: its Bluetooth is on a UART and its Wi-Fi
 # on SDIO, two separate parts. Nothing here harms it — the waits end early and
 # the reload never runs — and it gets the same deterministic order for free.
@@ -71,7 +76,12 @@ if [ -z "$interface" ]; then
     module="$(wifi_module || true)"
     if [ -n "$module" ]; then
         say "no wireless interface; reloading $module"
-        modprobe -r "$module" 2>/dev/null || true
+        # --remove-holders: iwlwifi is held by iwlmvm, which iwlwifi itself
+        # loads (iwlmvm has no device alias), and a bare `modprobe -r iwlwifi`
+        # answers "Module iwlwifi is in use" and removes nothing. Measured on
+        # the Plus with an AX210. rtw89_8852be has no holders (modules.dep),
+        # so for the Realtek part this is the same command as before.
+        modprobe -r --remove-holders "$module" 2>/dev/null || true
         sleep 1
         modprobe "$module" 2>/dev/null || true
         i=0

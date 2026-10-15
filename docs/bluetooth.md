@@ -10,9 +10,11 @@ verbs and the television's settings screen. The code is
 | Board | Part | Bus | Firmware | Recovery |
 | --- | --- | --- | --- | --- |
 | Orange Pi 5 Plus | RTL8852BU (Bluetooth half of the RTL8852BE combo) | USB (`0bda:b85b`, `btusb`) | `rtl_bt/rtl8852bu_fw.bin` by the kernel | none needed: power off/on 85/197 ms |
+| Orange Pi 5 Plus (Intel AX210 fitted) | AX210 Bluetooth (Bluetooth half of the AX210 combo) | USB (`8087:0032`, `btusb` + `btintel`) | `intel/ibt-0041-0041.sfi` + `.ddc` by the kernel | none needed: power off/on 190/125 ms |
 | Orange Pi 5 Ultra | UART part | UART, attached by a vendor unit | pushed by that unit | re-attach unit, then `bluetooth.service` |
 
-The Plus shares one chip between Wi-Fi (PCIe) and Bluetooth (USB);
+The Plus shares one chip between Wi-Fi (PCIe) and Bluetooth (USB) with
+either card -- RTL8852BE (`rtw89_8852be`) or AX210 (`iwlwifi`);
 `mediabox-wireless-up` unblocks Wi-Fi first for that reason. bluez is 5.82,
 `main.conf` is stock (`TemporaryTimeout` 30 s).
 

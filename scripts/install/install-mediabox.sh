@@ -610,7 +610,9 @@ fi
 #   rtw89_8852be: failed to dump efuse physical map
 #   rtw89_8852be: probe of 0002:21:00.0 failed with error -16
 #
-# The board then had no wireless interface at all. So systemd-rfkill is masked
+# The board then had no wireless interface at all. (A Plus may carry an Intel
+# AX210 instead -- iwlwifi on PCIe, btusb on USB; the same order serves it.)
+# So systemd-rfkill is masked
 # and mediabox-wireless.service unblocks Wi-Fi first, waits for the interface,
 # and only then unblocks Bluetooth. See packaging/mediabox-wireless-up.
 systemctl mask systemd-rfkill.service systemd-rfkill.socket >/dev/null 2>&1 || true
