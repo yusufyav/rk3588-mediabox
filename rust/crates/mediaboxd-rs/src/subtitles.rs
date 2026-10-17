@@ -116,9 +116,19 @@ pub struct Preferences {
     /// off: the menu carries only what may fit the film.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_incompatible_subtitles: Option<bool>,
+    /// "Tercih edilen ses dili", kept with the subtitle language: the two
+    /// languages a film starts in. Absent until chosen, and then English,
+    /// as Stremio's `audio_language` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_language: Option<String>,
 }
 
 impl Preferences {
+    /// The language a film's sound is chosen in, canonical (`en`, `tr`).
+    pub fn audio_language(&self) -> String {
+        self.audio_language.clone().unwrap_or_else(|| "en".into())
+    }
+
     pub fn auto_sync(&self) -> bool {
         self.auto_sync_enabled.unwrap_or(true)
     }
@@ -910,6 +920,16 @@ impl Subtitles {
     /// "AutoSync uyumsuz altyazıları göster" was turned on or off: kept for
     /// every film, and the menu reads it on its next look. Turned off during
     /// a film, an incompatible subtitle that is on is taken off.
+    /// Keep "Tercih edilen ses dili". The next film's sound is chosen in it;
+    /// `false` for a language that is no language.
+    pub fn set_audio_language(&self, language: &str) -> bool {
+        let Some(language) = canonical(Some(language)) else {
+            return false;
+        };
+        self.remember(|p| p.audio_language = Some(language));
+        true
+    }
+
     pub async fn set_show_incompatible(&self, enabled: bool) {
         self.remember(|p| p.show_incompatible_subtitles = Some(enabled));
         if enabled {

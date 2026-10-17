@@ -2676,6 +2676,13 @@ impl App {
         let auto_sync = self.now.subtitle_auto_sync.unwrap_or(true);
         let show_incompatible = self.now.subtitle_show_incompatible.unwrap_or(false);
         let mut rows = vec![
+            // Leads the sound group: the language the next film is heard in.
+            screens::audio::PlayerRow {
+                label: "Tercih edilen ses dili".into(),
+                detail: screens::now_playing::preference_name(Some(self.now.audio_language.as_deref().unwrap_or("en"))),
+                active: true,
+                act: screens::audio::PlayerAct::AudioLanguage,
+            },
             screens::audio::PlayerRow {
                 label: "Tercih edilen altyazı dili".into(),
                 detail: screens::now_playing::preference_name(self.now.subtitle_preference.as_deref()),
@@ -2722,6 +2729,10 @@ impl App {
         use screens::audio::PlayerAct;
         match row.act {
             PlayerAct::SubtitleLanguage => self.step_subtitle_preference(1),
+            PlayerAct::AudioLanguage => {
+                let next = screens::now_playing::next_audio_language(self.now.audio_language.as_deref(), 1);
+                self.set_audio_language(next);
+            }
             PlayerAct::SubtitleAutoSync => self.toggle_subtitle_auto_sync(),
             PlayerAct::SubtitleShowIncompatible => self.toggle_subtitle_show_incompatible(),
             PlayerAct::RefreshMatching => spawn_output(mediabox_core::Request::OutputContentMatching {
@@ -2752,6 +2763,15 @@ impl App {
         let next = !self.now.subtitle_show_incompatible.unwrap_or(false);
         self.now.subtitle_show_incompatible = Some(next);
         spawn_here(HereCommand::SubtitleShowIncompatibleSet(next));
+        self.open_controls();
+        self.paint();
+    }
+
+    /// "Tercih edilen ses dili", kept by the control plane for the next film.
+    fn set_audio_language(&mut self, language: String) {
+        self.subtitle_generation += 1;
+        self.now.audio_language = Some(language.clone());
+        spawn_here(HereCommand::AudioLanguage(language));
         self.open_controls();
         self.paint();
     }
@@ -3239,6 +3259,7 @@ impl App {
             audio: audio.as_ref(),
             output: output.as_ref(),
             subtitle_language: self.now.subtitle_preference.as_deref(),
+            audio_language: self.now.audio_language.as_deref(),
             subtitle_auto_sync: self.now.subtitle_auto_sync,
             subtitle_show_incompatible: self.now.subtitle_show_incompatible,
             session: &session,
@@ -3300,6 +3321,12 @@ impl App {
                 let language = language_pick(index);
                 if language != self.now.subtitle_preference {
                     self.set_subtitle_preference(language);
+                }
+            }
+            Control::AudioLanguage => {
+                let language = screens::now_playing::PREFERRED_LANGUAGES.get(index).map(|code| code.to_string());
+                if let Some(language) = language.filter(|l| Some(l) != self.now.audio_language.as_ref()) {
+                    self.set_audio_language(language);
                 }
             }
             other => {
@@ -6935,6 +6962,7 @@ enum HereCommand {
     SubtitleChoose(String),
     SubtitleAutoSync,
     SubtitlePreference(Option<String>),
+    AudioLanguage(String),
     SubtitleAutoSyncSet(bool),
     SubtitleShowIncompatibleSet(bool),
     Audio(i64),
@@ -7125,6 +7153,11 @@ fn spawn_here(command: HereCommand) {
             HereCommand::SubtitlePreference(language) => {
                 client
                     .call(serde_json::json!({"command": "subtitle_preference_set", "language": language}))
+                    .await
+            }
+            HereCommand::AudioLanguage(language) => {
+                client
+                    .call(serde_json::json!({"command": "audio_language_set", "language": language}))
                     .await
             }
             HereCommand::SubtitleAutoSyncSet(enabled) => {

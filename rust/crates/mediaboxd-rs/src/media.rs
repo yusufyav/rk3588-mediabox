@@ -23,6 +23,25 @@ pub struct MediaClient {
     timeout: Duration,
 }
 
+/// What the worker chooses the interface's own player's audio track by:
+/// the formats its sound setting passes through as they are (mpv's names)
+/// and the viewer's "Tercih edilen ses dili".
+#[derive(Debug, Clone, Default)]
+pub struct HereAudio {
+    pub passthrough: Vec<String>,
+    pub language: Option<String>,
+}
+
+impl HereAudio {
+    fn with(&self, mut body: Value) -> Value {
+        body["passthrough"] = json!(self.passthrough);
+        if let Some(language) = &self.language {
+            body["language"] = json!(language);
+        }
+        body
+    }
+}
+
 impl MediaClient {
     pub fn new(endpoint: &str, timeout: Duration) -> Result<Self, MediaError> {
         let endpoint =
@@ -150,14 +169,10 @@ impl MediaClient {
             .await
     }
 
-    /// The plan for the interface's own player, which passes `passthrough`
-    /// through as it is (mpv's names) and plays the audio track chosen here.
-    pub async fn stream_plan(
-        &self,
-        stream: Value,
-        passthrough: &[String],
-    ) -> Result<Value, MediaError> {
-        self.post(&["media", "plan"], json!({"stream": stream, "passthrough": passthrough}))
+    /// The plan for the interface's own player, which plays the audio track
+    /// chosen here.
+    pub async fn stream_plan(&self, stream: Value, here: &HereAudio) -> Result<Value, MediaError> {
+        self.post(&["media", "plan"], here.with(json!({"stream": stream})))
             .await
     }
 
@@ -193,17 +208,16 @@ impl MediaClient {
         url: Option<&str>,
         stream: Option<Value>,
         start_seconds: u64,
-        passthrough: &[String],
+        here: &HereAudio,
     ) -> Result<Value, MediaError> {
         // Held by the player until the control plane lets it go: a paused
         // film reads nothing and still needs its address.
-        let mut body = json!({
+        let mut body = here.with(json!({
             "startSeconds": start_seconds,
             "audio": "player",
-            "passthrough": passthrough,
             "owner": "player",
             "answerBy": self.answer_by(),
-        });
+        }));
         match (url, stream) {
             (Some(url), _) => body["url"] = json!(url),
             (None, Some(stream)) => body["stream"] = stream,
@@ -247,8 +261,8 @@ impl MediaClient {
     }
 
     /// As [`MediaClient::stream_plan`], for a plain address.
-    pub async fn policy(&self, url: &str, passthrough: &[String]) -> Result<Value, MediaError> {
-        self.post(&["media", "plan"], json!({"url": url, "passthrough": passthrough}))
+    pub async fn policy(&self, url: &str, here: &HereAudio) -> Result<Value, MediaError> {
+        self.post(&["media", "plan"], here.with(json!({"url": url})))
             .await
     }
 

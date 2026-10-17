@@ -569,6 +569,9 @@ pub enum PlayerAct {
     CycleMode,
     Format(AudioCodec),
     Transcode,
+    /// "Tercih edilen ses dili": the language the next film's sound is
+    /// chosen in.
+    AudioLanguage,
     /// "Tercih edilen altyazı dili": the language a film starts with.
     SubtitleLanguage,
     /// "Otomatik eşitleme": whether an external subtitle is checked and
@@ -608,7 +611,9 @@ impl PlayerAct {
             PlayerAct::SubtitleLanguage | PlayerAct::SubtitleAutoSync | PlayerAct::SubtitleShowIncompatible => {
                 PlayerGroup::Subtitles
             }
-            PlayerAct::CycleMode | PlayerAct::Format(_) | PlayerAct::Transcode => PlayerGroup::Audio,
+            PlayerAct::AudioLanguage | PlayerAct::CycleMode | PlayerAct::Format(_) | PlayerAct::Transcode => {
+                PlayerGroup::Audio
+            }
         }
     }
 }
@@ -703,6 +708,7 @@ pub fn player_choose(status: &AudioStatus, act: PlayerAct) -> AudioSetting {
         PlayerAct::Format(codec) => toggle_format(status, codec),
         PlayerAct::Transcode => AudioSetting { ac3_transcode: !setting.ac3_transcode, ..setting.clone() },
         PlayerAct::RefreshMatching
+        | PlayerAct::AudioLanguage
         | PlayerAct::SubtitleLanguage
         | PlayerAct::SubtitleAutoSync
         | PlayerAct::SubtitleShowIncompatible => setting.clone(),
@@ -754,6 +760,7 @@ pub(crate) mod tests {
     fn the_film_settings_are_grouped_by_what_they_are_about() {
         let row = |label: &str, act: PlayerAct| PlayerRow { label: label.into(), detail: String::new(), active: false, act };
         let rows = vec![
+            row("Tercih edilen ses dili", PlayerAct::AudioLanguage),
             row("Tercih edilen altyazı dili", PlayerAct::SubtitleLanguage),
             row("Otomatik eşitleme", PlayerAct::SubtitleAutoSync),
             row("AutoSync uyumsuz altyazıları göster", PlayerAct::SubtitleShowIncompatible),
@@ -769,7 +776,7 @@ pub(crate) mod tests {
         assert_eq!(
             names,
             vec![
-                ("Ses", vec!["Ses", "Dolby Digital dönüştürme"]),
+                ("Ses", vec!["Tercih edilen ses dili", "Ses", "Dolby Digital dönüştürme"]),
                 ("Altyazı", vec!["Tercih edilen altyazı dili", "Otomatik eşitleme", "AutoSync uyumsuz altyazıları göster"]),
                 ("Video", vec!["Yenileme hızı"]),
             ]

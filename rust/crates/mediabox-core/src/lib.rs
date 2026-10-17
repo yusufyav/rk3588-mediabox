@@ -1594,6 +1594,12 @@ pub enum Request {
     /// another cut, part of it, a file already tried) stays in the subtitle
     /// menu. Off, the default, leaves it out. Kept for every film.
     SubtitleShowIncompatibleSet { enabled: bool },
+    /// "Tercih edilen ses dili": the language a film's sound is chosen in,
+    /// as Stremio's `audio_language` (English until chosen). A file with no
+    /// track in it plays its default track. Kept for every film from the
+    /// next one; the film playing keeps its track, which the audio menu
+    /// changes.
+    AudioLanguageSet { language: String },
     /// The subtitle line on screen now, as the player's own timing puts it.
     ///
     /// The appliance's player hands its frames to the interface and draws

@@ -192,6 +192,15 @@ pub fn next_preference(current: Option<&str>, step: i32) -> Option<String> {
     (next > 0).then(|| PREFERRED_LANGUAGES[next as usize - 1].to_string())
 }
 
+/// The audio language `step` places along `PREFERRED_LANGUAGES`, round
+/// again. There is no "Kapalı": a film always has a sound, and a file with
+/// no track in the language plays its default one.
+pub fn next_audio_language(current: Option<&str>, step: i32) -> String {
+    let count = PREFERRED_LANGUAGES.len() as i32;
+    let at = current.and_then(|code| PREFERRED_LANGUAGES.iter().position(|l| *l == code)).map_or(1, |at| at as i32);
+    PREFERRED_LANGUAGES[(at + step).rem_euclid(count) as usize].to_string()
+}
+
 /// How many rows of a panel's column are drawn at once. The sheet has room
 /// for about eleven; a film with thirty subtitle languages scrolls.
 pub const MENU_VISIBLE: usize = 9;
@@ -259,6 +268,9 @@ pub struct NowPlaying {
     /// Its "AutoSync uyumsuz altyazıları göster". None until the control
     /// plane has said, which reads as off -- its own default.
     pub subtitle_show_incompatible: Option<bool>,
+    /// "Tercih edilen ses dili", as the control plane keeps it. None until
+    /// it has said; it says English until one is chosen.
+    pub audio_language: Option<String>,
     pub audio: Vec<Track>,
     pub speed: f64,
     pub sub_delay: f64,
@@ -856,6 +868,9 @@ impl NowPlaying {
         if let Some(on) = status.get("subtitle_auto_sync").and_then(Value::as_bool) {
             self.subtitle_auto_sync = Some(on);
         }
+        if let Some(language) = status.get("audio_language").and_then(Value::as_str) {
+            self.audio_language = Some(language.to_owned());
+        }
         if let Some(on) = status.get("subtitle_show_incompatible").and_then(Value::as_bool) {
             self.subtitle_show_incompatible = Some(on);
         }
@@ -1058,6 +1073,17 @@ mod tests {
         );
         assert!(now.subtitles.iter().all(|t| t.label == "Türkçe"));
         assert_eq!(now.subtitle_show_incompatible, Some(true));
+    }
+
+    #[test]
+    fn the_audio_language_is_read_and_stepped_without_a_kapali() {
+        let mut now = NowPlaying::new();
+        assert_eq!(now.audio_language, None);
+        now.take_subtitle_preferences(&serde_json::json!({"audio_language": "en"}));
+        assert_eq!(now.audio_language.as_deref(), Some("en"));
+        assert_eq!(next_audio_language(Some("tr"), 1), "en");
+        assert_eq!(next_audio_language(Some("tr"), -1), "zh", "round again");
+        assert_eq!(next_audio_language(None, 1), "de", "unknown reads as English");
     }
 
     /// Asked with no film, the control plane's status carries no tracks but

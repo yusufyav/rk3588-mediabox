@@ -151,6 +151,16 @@ Cheapest first: passthrough beats decode beats transcode, then more channels,
 then the default flag, then stream index. A requested language filters before
 any of that, because the wrong language played perfectly is still wrong.
 
+The language is the viewer's "Tercih edilen ses dili", as Stremio's
+`audio_language`: English until chosen, kept by the daemon with the subtitle
+language and sent as `language` with the player's plans and sessions. Codes
+are compared canonically (`tur`, `tr`). A file with no track in it keeps to
+its default track's language, and so does a request with no language: the
+cheaper track is never looked for in another language, which would put an
+English film's AC-3 Turkish dub ahead of its TrueHD original. Stremio does
+not know a film's original language (Cinemeta has no such field), so
+neither does this.
+
 This is what stops a TrueHD Atmos track being transcoded while a native AC-3
 track sits unused in the same file — `AUDIO_NATIVE_TRACK_PREFERRED`. A native
 track is preferred only when it carries as many channels as the conversion

@@ -117,6 +117,7 @@ pub enum Control {
     AudioMode,
     AudioFormat(AudioCodec),
     Transcode,
+    AudioLanguage,
     SubtitleLanguage,
     AutoSync,
     ShowIncompatible,
@@ -226,6 +227,9 @@ pub struct Context<'a> {
     /// The daemon's subtitle preferences, as the film's panel keeps them.
     /// `auto_sync` is `None` until the daemon has said anything at all.
     pub subtitle_language: Option<&'a str>,
+    /// "Tercih edilen ses dili", as the daemon keeps it; `None` until it
+    /// has said, which reads as its own default, English.
+    pub audio_language: Option<&'a str>,
     pub subtitle_auto_sync: Option<bool>,
     pub subtitle_show_incompatible: Option<bool>,
     pub session: &'a Session,
@@ -237,7 +241,11 @@ pub fn rows(category: Category, ctx: &Context) -> Vec<Row> {
     match category {
         Category::Player => player_rows(ctx),
         Category::Video => video_rows(ctx),
-        Category::Audio => audio_rows(ctx),
+        Category::Audio => {
+            let mut rows = audio_rows(ctx);
+            rows.push(audio_language_row(ctx));
+            rows
+        }
         Category::Subtitles => subtitle_rows(ctx),
         Category::Account => account_rows(ctx),
     }
@@ -358,6 +366,23 @@ fn audio_rows(ctx: &Context) -> Vec<Row> {
         transcode.disabled("Alıcı Dolby Digital bildirmiyor")
     });
     rows
+}
+
+/// "Tercih edilen ses dili": the daemon's, whatever the sound device is.
+fn audio_language_row(ctx: &Context) -> Row {
+    let current = ctx.audio_language.unwrap_or("en");
+    Row {
+        value: preference_name(Some(current)),
+        choices: PREFERRED_LANGUAGES.iter().map(|code| preference_name(Some(code))).collect(),
+        selected: PREFERRED_LANGUAGES.iter().position(|known| *known == current).unwrap_or(0),
+        ..Row::new(
+            Control::AudioLanguage,
+            RowKind::Choice,
+            "Tercih edilen ses dili",
+            "Film bu dilde bir ses parçasıyla başlar; yoksa dosyanın varsayılanıyla",
+        )
+    }
+    .in_group("Dil")
 }
 
 fn subtitle_rows(ctx: &Context) -> Vec<Row> {
@@ -1124,6 +1149,7 @@ mod tests {
             audio: None,
             output: None,
             subtitle_language: None,
+            audio_language: None,
             subtitle_auto_sync: None,
             subtitle_show_incompatible: None,
             session,
@@ -1349,6 +1375,23 @@ mod tests {
         assert_eq!(summary(Category::Subtitles, &context), "Türkçe");
     }
 
+    /// "Tercih edilen ses dili" closes the sound page, English until the
+    /// daemon says otherwise -- also before the sound device is known.
+    #[test]
+    fn the_audio_language_is_on_the_sound_page_with_stremios_default() {
+        let prefs = MediaPreferences::default();
+        let session = session(false);
+        let mut context = ctx(&prefs, &session);
+        let row = rows(Category::Audio, &context).pop().unwrap();
+        assert_eq!(row.control, Control::AudioLanguage);
+        assert_eq!(row.value, "English");
+        assert_eq!(row.choices.len(), PREFERRED_LANGUAGES.len());
+        assert!(!row.choices.iter().any(|choice| choice == "Kapalı"));
+        context.audio_language = Some("tr");
+        let row = rows(Category::Audio, &context).pop().unwrap();
+        assert_eq!((row.value.as_str(), row.selected), ("Türkçe", 0));
+    }
+
     #[test]
     fn the_sound_rows_and_its_changes_are_the_film_panels() {
         let prefs = MediaPreferences::default();
@@ -1366,6 +1409,7 @@ mod tests {
                 Control::AudioFormat(AudioCodec::Eac3),
                 Control::AudioFormat(AudioCodec::Dts),
                 Control::Transcode,
+                Control::AudioLanguage,
             ]
         );
         assert!(rows.iter().all(|row| row.enabled));
@@ -1387,7 +1431,11 @@ mod tests {
         let pcm_status = crate::screens::audio::tests::status_for_tests(analog);
         context.audio = Some(&pcm_status);
         let rows = super::rows(Category::Audio, &context);
-        assert_eq!(controls(&rows), [Control::AudioDevice, Control::AudioMode, Control::Transcode]);
+        // The language is the film's, whatever the output: it stays.
+        assert_eq!(
+            controls(&rows),
+            [Control::AudioDevice, Control::AudioMode, Control::Transcode, Control::AudioLanguage]
+        );
         assert!(!rows[1].enabled && !rows[2].enabled);
         assert_eq!(rows[0].selected, 2, "the analog output, chosen by hand");
         assert_eq!(audio_pick(&pcm_status, Control::AudioDevice, 0).unwrap().device, AudioDeviceChoice::Auto);

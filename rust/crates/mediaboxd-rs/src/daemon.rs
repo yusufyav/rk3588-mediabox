@@ -308,7 +308,7 @@ impl AppState {
             Request::MediaLibraryItem { id } => media_result(self.media.library_item(&id).await),
             Request::MediaResolve { stream } => media_result(self.media.resolve(stream).await),
             Request::MediaStreamPlan { stream } => {
-                media_result(self.media.stream_plan(stream, &self.passthrough()).await)
+                media_result(self.media.stream_plan(stream, &self.here_audio()).await)
             }
             Request::MediaPlayOnKodi {
                 url,
@@ -352,7 +352,15 @@ impl AppState {
                 status["subtitle_auto_sync"] = json!(preferences.auto_sync());
                 // ... and its "AutoSync uyumsuz altyazıları göster".
                 status["subtitle_show_incompatible"] = json!(preferences.show_incompatible());
+                // ... and "Tercih edilen ses dili", from the next film.
+                status["audio_language"] = json!(preferences.audio_language());
                 Response::success(status)
+            }
+            Request::AudioLanguageSet { language } => {
+                if !self.subtitles.set_audio_language(&language) {
+                    return Response::failure("INVALID_REQUEST", "ses dili tanınmadı");
+                }
+                Response::success(json!({"applied": false, "language": self.subtitles.preferences().audio_language()}))
             }
             Request::SubtitlePreferenceSet { language } => {
                 let applied = self.subtitles.set_preference(language).await;
@@ -442,7 +450,7 @@ impl AppState {
                 media_result(self.media.account(action.path(), change).await)
             }
             Request::MediaPolicy { url } => {
-                media_result(self.media.policy(&url, &self.passthrough()).await)
+                media_result(self.media.policy(&url, &self.here_audio()).await)
             }
             Request::MediaSessions => media_result(self.media.sessions().await),
             Request::MediaSessionStart { url } => {
@@ -866,6 +874,15 @@ impl AppState {
         self.audio.now().2.passthrough.iter().map(|codec| codec.mpv().to_string()).collect()
     }
 
+    /// What the worker chooses the player's audio track by: the above, and
+    /// "Tercih edilen ses dili".
+    fn here_audio(&self) -> crate::media::HereAudio {
+        crate::media::HereAudio {
+            passthrough: self.passthrough(),
+            language: Some(self.subtitles.preferences().audio_language()),
+        }
+    }
+
     async fn play_here(
         &self,
         url: Option<String>,
@@ -885,7 +902,7 @@ impl AppState {
 
         let created = self
             .media
-            .session_start_here(url.as_deref(), stream, start_seconds, &self.passthrough())
+            .session_start_here(url.as_deref(), stream, start_seconds, &self.here_audio())
             .await;
         let session = match created {
             Ok(value) => value,
@@ -1943,7 +1960,7 @@ mod tests {
         )
         .await;
         let playback = quiet_playback();
-        assert!(media.session_start_here(Some("https://debrid.example/film.mkv"), None, 0, &[]).await.is_err());
+        assert!(media.session_start_here(Some("https://debrid.example/film.mkv"), None, 0, &Default::default()).await.is_err());
         let ended = sweep_stray_sessions(
             Arc::clone(&media),
             Arc::clone(&playback),
@@ -2054,7 +2071,7 @@ mod tests {
     async fn a_held_start_tells_the_worker_when_nobody_waits_any_more() {
         let (worker, media) = session_rig(Vec::new(), Duration::ZERO).await;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
-        let _ = media.session_start_here(Some("https://debrid.example/a.mkv"), None, 0, &[]).await;
+        let _ = media.session_start_here(Some("https://debrid.example/a.mkv"), None, 0, &Default::default()).await;
         let _ = media.session_start_at("https://debrid.example/b.mkv", 0).await;
         let _ = media.session_start_stream(json!({"url": "https://debrid.example/c.mkv"}), 0).await;
         let _ = media.session_start("https://debrid.example/d.mkv").await;
@@ -2068,6 +2085,33 @@ mod tests {
             assert!(matches!(held["owner"].as_str(), Some("player" | "kodi")));
         }
         assert!(created[3].get("answerBy").is_none());
+    }
+
+    /// The player's start and its plans carry what the worker chooses the
+    /// audio track by: the formats passed through, and the language.
+    #[tokio::test]
+    async fn the_players_start_carries_the_audio_language_and_formats() {
+        let (worker, media) = session_rig(Vec::new(), Duration::ZERO).await;
+        let here = crate::media::HereAudio { passthrough: vec!["ac3".into()], language: Some("tr".into()) };
+        let _ = media.session_start_here(Some("https://debrid.example/a.mkv"), None, 0, &here).await;
+        let created = worker.created.lock().unwrap().clone();
+        assert_eq!(created[0]["passthrough"], json!(["ac3"]));
+        assert_eq!(created[0]["language"], json!("tr"));
+        assert_eq!(created[0]["audio"], json!("player"));
+    }
+
+    /// "Tercih edilen ses dili": English until chosen, as Stremio's
+    /// `audio_language`; kept canonical; nothing that is no language.
+    #[test]
+    fn the_audio_language_is_english_until_chosen_and_kept_canonical() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        assert_eq!(state.here_audio().language.as_deref(), Some("en"));
+        assert!(state.subtitles.set_audio_language("tur"));
+        assert_eq!(state.here_audio().language.as_deref(), Some("tr"));
+        assert!(!state.subtitles.set_audio_language(" "));
+        assert!(!state.subtitles.set_audio_language("und"));
+        assert_eq!(state.here_audio().language.as_deref(), Some("tr"));
     }
 
     /// `GET /media/session` as the worker answered it on the Plus on
