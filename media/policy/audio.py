@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any
 
 from ..inspector.model import AudioTrack
+from ..subtitles.languages import canonical
 from . import reasons as R
 from .capabilities import CapabilityProfile
 
@@ -354,11 +355,20 @@ def select_audio(
         )
 
     candidates = list(tracks)
-    if preferred_language:
-        wanted = preferred_language.lower()
-        matching = [t for t in candidates if (t.language or "").lower() == wanted]
-        if matching:
-            candidates = matching
+    wanted = canonical(preferred_language)
+    matching = [t for t in candidates if wanted and canonical(t.language) == wanted]
+    if matching:
+        candidates = matching
+    else:
+        # No language asked for, or none of the file's: the file's default
+        # track says which language the film is in, and the cheaper track is
+        # looked for in that language only. Across languages, an English
+        # film's TrueHD default lost to its Turkish AC-3 dub -- and the
+        # player plays the track chosen here.
+        default = next((t for t in candidates if t.is_default), candidates[0])
+        language = canonical(default.language)
+        if language is not None:
+            candidates = [t for t in candidates if canonical(t.language) == language]
 
     decisions = [(track, decide_track(track, profile)) for track in candidates]
 

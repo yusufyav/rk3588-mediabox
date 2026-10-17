@@ -298,6 +298,24 @@ class AudioSelectionTests(unittest.TestCase):
         self.assertEqual(decision.track.codec, "truehd")
         self.assertNotIn(R.AUDIO_NATIVE_TRACK_PREFERRED, codes(decision.reasons))
 
+    def test_with_no_language_asked_for_the_film_stays_in_its_default_tracks_language(self):
+        info = F.media(
+            [
+                F.video_stream(),
+                F.audio_stream(index=1, codec_name="truehd", channels=8, channel_layout="7.1",
+                               bit_rate=None, language="eng", default=1),
+                F.audio_stream(index=2, codec_name="ac3", language="tur", default=0),
+            ]
+        )
+        decision = select_audio(info.audio, PROFILE)
+        self.assertEqual(decision.track.language, "eng")
+        self.assertIs(decision.action, AudioAction.TRANSCODE_AC3)
+        # Asked for, the dub is chosen, whichever way the code is written.
+        for asked in ("tur", "tr", "TUR"):
+            self.assertEqual(select_audio(info.audio, PROFILE, preferred_language=asked).track.language, "tur")
+        # Asked for a language the file does not have: the default's language.
+        self.assertEqual(select_audio(info.audio, PROFILE, preferred_language="de").track.language, "eng")
+
     def test_selection_is_deterministic_across_track_order(self):
         info = F.hdr10_hevc_truehd_and_ac3()
         forward = select_audio(info.audio, PROFILE)
