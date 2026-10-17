@@ -167,6 +167,8 @@ fn watch() -> io::Result<()> {
     }
     eprintln!("mediaboxd.bluetooth LE interval floor: following hci0 (floor 11.25 ms)");
     let mut central = std::collections::BTreeSet::new();
+    // How many times each connection has been raised, for the log.
+    let mut raised = std::collections::BTreeMap::<u16, u64>::new();
     let mut packet = [0u8; 260];
     loop {
         let read = unsafe { libc::read(fd.as_raw_fd(), packet.as_mut_ptr() as *mut libc::c_void, packet.len()) };
@@ -180,10 +182,12 @@ fn watch() -> io::Result<()> {
         let (handle, interval, latency, timeout) = match parse(&packet[..read as usize]) {
             Some(Event::Gone { handle }) => {
                 central.remove(&handle);
+                raised.remove(&handle);
                 continue;
             }
             Some(Event::Connected { handle, central: true, interval, latency, timeout }) => {
                 central.insert(handle);
+                raised.remove(&handle);
                 (handle, interval, latency, timeout)
             }
             Some(Event::Updated { handle, interval, latency, timeout }) if central.contains(&handle) => {
@@ -203,17 +207,42 @@ fn watch() -> io::Result<()> {
                 io::Error::last_os_error()
             );
         } else {
-            eprintln!(
-                "mediaboxd.bluetooth LE handle {handle}: {:.2} ms raised to 11.25 ms",
-                f32::from(interval) * 1.25
-            );
+            let count = raised.entry(handle).or_insert(0);
+            *count += 1;
+            if worth_saying(*count) {
+                eprintln!(
+                    "mediaboxd.bluetooth LE handle {handle}: {:.2} ms raised to 11.25 ms ({count} times on this connection)",
+                    f32::from(interval) * 1.25
+                );
+            }
         }
     }
+}
+
+/// Whether the `count`-th raise of one connection is logged: the first, and
+/// then the tenth, hundredth and so on.
+///
+/// A keyboard that asks for 7.5 ms again every few seconds is raised every
+/// few seconds, and is meant to be; logging every one was a quarter of the
+/// Plus's journal over a night (8489 lines in sixteen hours), which pushed the
+/// journal to its size limit and the night's other evidence out with it.
+fn worth_saying(count: u64) -> bool {
+    let mut step = 1;
+    while step < count {
+        step *= 10;
+    }
+    step == count
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_raised_again_and_again_is_logged_by_powers_of_ten() {
+        let said: Vec<u64> = (1..=10_000).filter(|count| worth_saying(*count)).collect();
+        assert_eq!(said, [1, 10, 100, 1000, 10_000]);
+    }
 
     #[test]
     fn the_keyboards_connection_is_read_off_the_events() {
