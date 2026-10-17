@@ -394,6 +394,9 @@ impl AppState {
                 Response::success(json!({"moved": moved}))
             }
             Request::MediaStopHere => {
+                // Back has the last word over a film still opening: whatever
+                // step its start is on, it puts nothing on (`play_here`).
+                self.playback.call_off_starts();
                 let stopped = self.stop_here(crate::playback::Intent::Stop).await;
                 Response::success(json!({"stopped": stopped.is_some()}))
             }
@@ -894,7 +897,7 @@ impl AppState {
         if url.is_none() && stream.is_none() {
             return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
         }
-        let _starting = self.playback.begin_start();
+        let starting = self.playback.begin_start();
         // Whatever was playing is over, here or on Kodi.
         self.stop_here(crate::playback::Intent::Replace).await;
         self.stop_film_sessions().await;
@@ -929,6 +932,12 @@ impl AppState {
             .to_string();
         if session_id.is_empty() {
             return Response::failure("MEDIA_WORKER_ERROR", "medya oturumu kimlik üretmedi");
+        }
+        // Back while the worker was opening the source: the session it made
+        // goes, and nothing is put on the television.
+        if starting.called_off() {
+            self.stop_session(&session_id).await;
+            return called_off();
         }
         // What Kodi would be given if the film is handed over later.
         let source = session
@@ -966,6 +975,12 @@ impl AppState {
         {
             self.stop_session(&session_id).await;
             return Response::failure("PLAYER_FAILED", error);
+        }
+        // ... or while the player was being started.
+        if starting.called_off() {
+            self.player.stop().await;
+            self.stop_session(&session_id).await;
+            return called_off();
         }
         let film = self.playback.begin(crate::playback::Start {
             player: crate::playback::PlayerKind::Here,
@@ -1294,6 +1309,11 @@ fn owner_of(player: crate::playback::PlayerKind) -> &'static str {
 /// the window is the most that is waited). The
 /// film playing on `player` keeps its session; the other player's sessions
 /// and those nobody holds are never touched. Returns how many were ended.
+/// A start the viewer called off with Back, or a later start replaced.
+fn called_off() -> Response {
+    Response::failure("START_CALLED_OFF", "açılış geri alındı")
+}
+
 /// The audio track the worker chose, as mpv numbers it: mpv counts a file's
 /// audio tracks from 1 in the order they are stored, which is the order of
 /// `media.audio`. `None` leaves the choice to mpv (the file's default).
@@ -2107,6 +2127,39 @@ mod tests {
         assert_eq!(created[1]["ac3Encode"], Value::Null);
         assert_eq!(created[0]["language"], json!("tr"));
         assert_eq!(created[0]["audio"], json!("player"));
+    }
+
+    /// Back while the worker is still opening the source: the start puts
+    /// nothing on, and the session the worker makes afterwards goes.
+    #[tokio::test]
+    async fn back_while_a_film_opens_calls_the_opening_off() {
+        let (worker, media) = session_rig(Vec::new(), Duration::from_millis(100)).await;
+        let dir = tempdir().unwrap();
+        let mut state = Arc::try_unwrap(test_state(&dir)).ok().unwrap();
+        state.media = media;
+        let state = Arc::new(state);
+        let opening = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                state
+                    .handle(Request::MediaPlayHere {
+                        url: Some("https://debrid.example/a.mkv".into()),
+                        stream: None,
+                        start_seconds: 0,
+                        title: None,
+                        duration_seconds: None,
+                        watch: None,
+                    })
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(state.handle(Request::MediaStopHere).await.ok);
+        let answer = opening.await.unwrap();
+        assert!(!answer.ok);
+        assert_eq!(answer.error.unwrap().code, "START_CALLED_OFF");
+        assert_eq!(*worker.stopped.lock().unwrap(), ["late"]);
+        assert!(state.player.playing().await.is_none());
     }
 
     /// "Tercih edilen ses dili": English until chosen, as Stremio's

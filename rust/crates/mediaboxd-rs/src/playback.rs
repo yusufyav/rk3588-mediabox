@@ -244,15 +244,30 @@ pub struct Supervisor {
     /// started in between is never taken for one of them.
     starts_begun: std::sync::atomic::AtomicU64,
     starts_busy: std::sync::atomic::AtomicU64,
+    /// Every start numbered up to this one is called off: the viewer pressed
+    /// Back while it was opening, or a later start replaced it.
+    starts_called_off: std::sync::atomic::AtomicU64,
 }
 
 /// A film being started, from its first step to its last; see
 /// [`Supervisor::begin_start`].
-pub struct Starting<'a>(&'a Supervisor);
+pub struct Starting<'a> {
+    supervisor: &'a Supervisor,
+    number: u64,
+}
+
+impl Starting<'_> {
+    /// Whether this start has been called off since it began: Back while it
+    /// was opening, or a later start. Asked before each step that would put
+    /// the film on, so an answer that arrives late does not.
+    pub fn called_off(&self) -> bool {
+        self.number <= self.supervisor.starts_called_off.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 impl Drop for Starting<'_> {
     fn drop(&mut self) {
-        self.0.starts_busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.supervisor.starts_busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -263,6 +278,7 @@ impl Supervisor {
             effects: Box::new(effects),
             starts_begun: std::sync::atomic::AtomicU64::new(0),
             starts_busy: std::sync::atomic::AtomicU64::new(0),
+            starts_called_off: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -307,12 +323,20 @@ impl Supervisor {
     }
 
     /// A film is being started: its session may exist before its film does,
-    /// until the returned guard is dropped.
+    /// until the returned guard is dropped. Any start still under way is
+    /// called off by it: the newest choice is the one that plays.
     pub fn begin_start(&self) -> Starting<'_> {
         use std::sync::atomic::Ordering;
-        self.starts_begun.fetch_add(1, Ordering::SeqCst);
+        let number = self.starts_begun.fetch_add(1, Ordering::SeqCst) + 1;
         self.starts_busy.fetch_add(1, Ordering::SeqCst);
-        Starting(self)
+        self.starts_called_off.fetch_max(number - 1, Ordering::SeqCst);
+        Starting { supervisor: self, number }
+    }
+
+    /// Back while a film is opening: every start under way is called off.
+    pub fn call_off_starts(&self) {
+        use std::sync::atomic::Ordering;
+        self.starts_called_off.fetch_max(self.starts_begun.load(Ordering::SeqCst), Ordering::SeqCst);
     }
 
     /// How many starts have begun, and how many are under way.
@@ -700,6 +724,21 @@ pub async fn follow_kodi(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Back while a film opens calls off every start under way, and a later
+    /// start calls off an earlier one: the newest choice is the one played.
+    #[test]
+    fn back_and_a_later_start_call_off_the_starts_under_way() {
+        let supervisor = Supervisor::new(|_| {});
+        let first = supervisor.begin_start();
+        assert!(!first.called_off());
+        supervisor.call_off_starts();
+        assert!(first.called_off());
+        let second = supervisor.begin_start();
+        assert!(!second.called_off(), "Back before a start is not Back for it");
+        let third = supervisor.begin_start();
+        assert!(second.called_off() && !third.called_off());
+    }
     use std::sync::{Arc, Mutex as StdMutex};
 
     fn exact(position: f64, duration: f64) -> Reached {

@@ -2536,6 +2536,18 @@ impl App {
     fn act_on_now_playing(&mut self, intent: Intent) {
         use screens::now_playing::{Control, Film, Menu, Row};
 
+        // Back while the film is still opening has the last word, whatever
+        // is open over it: the opening is called off at once -- here, and in
+        // the control plane, which puts on nothing that answers late. Three
+        // presses were needed on 2026-10-17 while a stalled source was
+        // waited on: the first closed the controls, as on a playing film.
+        if intent == Intent::Dismiss && self.here.as_ref().is_some_and(|playing| !playing.seen) {
+            eprintln!("mediabox-tv.play called off by Back before the first frame");
+            spawn_here(HereCommand::Stop);
+            self.leave_film(None);
+            return;
+        }
+
         // A panel down over the film owns every key while it is down.
         if self.now.menu != Menu::None {
             match intent {
