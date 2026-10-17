@@ -770,7 +770,7 @@ impl AppState {
         // otherwise go on until its idle timeout, and a player of ours that
         // somehow outlived the handover would hold the video plane.
         if from_kodi {
-            self.stop_all_sessions().await;
+            self.stop_film_sessions().await;
             if self.player.playing().await.is_some() {
                 self.player.stop().await;
             }
@@ -842,9 +842,9 @@ impl AppState {
 
     /// Create a media session and put it on the television.
     ///
-    /// The ordering is the whole point of routing this through the daemon: any
-    /// existing session is torn down first so a preview encoder cannot outlive
-    /// the screen that asked for it, the display is taken back from the UI, and
+    /// The ordering is the whole point of routing this through the daemon: the
+    /// television's previous film session is torn down first (`FILM_OWNERS`;
+    /// an unheld preview is the worker's to reap), the display is taken back from the UI, and
     /// only then is Kodi asked to open the URL the media core produced. A
     /// failure anywhere after the session exists stops that session, so a
     /// refused `Player.Open` never leaves an ffmpeg running with no reader.
@@ -865,9 +865,10 @@ impl AppState {
         if url.is_none() && stream.is_none() {
             return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
         }
+        let _starting = self.playback.begin_start();
         // Whatever was playing is over, here or on Kodi.
         self.stop_here(crate::playback::Intent::Replace).await;
-        self.stop_all_sessions().await;
+        self.stop_film_sessions().await;
 
         let created = self
             .media
@@ -875,7 +876,21 @@ impl AppState {
             .await;
         let session = match created {
             Ok(value) => value,
-            Err(error) => return Response::failure("MEDIA_WORKER_ERROR", error.to_string()),
+            Err(error) => {
+                // A request this end gave up on may still be answered at the
+                // other: the worker finishes its probe and creates the session,
+                // held by the player, with an id nobody was told. Measured on
+                // the Plus on 2026-10-16: created 17 s after the timeout, and
+                // still held the next afternoon.
+                tokio::spawn(sweep_stray_sessions(
+                    Arc::clone(&self.media),
+                    Arc::clone(&self.playback),
+                    crate::playback::PlayerKind::Here,
+                    STRAY_SWEEP_TICK,
+                    STRAY_SWEEP_WINDOW,
+                ));
+                return Response::failure("MEDIA_WORKER_ERROR", error.to_string());
+            }
         };
         let session_id = session
             .get("sessionId")
@@ -1063,7 +1078,8 @@ impl AppState {
         if url.is_none() && stream.is_none() {
             return Response::failure("INVALID_REQUEST", "url veya stream alanı gerekli");
         }
-        self.stop_all_sessions().await;
+        let _starting = self.playback.begin_start();
+        self.stop_film_sessions().await;
 
         // Resolving the stream and handing Kodi the display are independent
         // until the moment Kodi is asked to play, so they are done at the same
@@ -1090,14 +1106,19 @@ impl AppState {
                 // to play is not an answer: give the interface back so the
                 // failure is read where it can be acted on.
                 let _ = self.switch_surface(Surface::Ui).await;
+                // As for a film here: a late answer is a session Kodi holds
+                // and was never given.
+                tokio::spawn(sweep_stray_sessions(
+                    Arc::clone(&self.media),
+                    Arc::clone(&self.playback),
+                    crate::playback::PlayerKind::Kodi,
+                    STRAY_SWEEP_TICK,
+                    STRAY_SWEEP_WINDOW,
+                ));
                 return Response::failure("MEDIA_WORKER_ERROR", error.to_string());
             }
         };
-        let session_id = session
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let session_id = session_id(&session).unwrap_or_default().to_string();
         // What Kodi opens: the source, resolved. The core is asked to resolve
         // and to say what is in the file; it is not asked to stand between
         // Kodi and the film. A transform it offers is for players that need
@@ -1173,18 +1194,118 @@ fn is_proxy_address(address: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A media session's id, as the core names it.
+///
+/// The core says `sessionId` (`MediaSession.as_dict`). Reading `id` instead
+/// found nothing, so every sweep of the core's sessions stopped none of them,
+/// and a session created for a request that had already timed out was held
+/// by the player for as long as the worker ran.
+fn session_id(session: &Value) -> Option<&str> {
+    session
+        .get("sessionId")
+        .or_else(|| session.get("id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// Who holds a session for the television's film. One film plays at a
+/// time, here or on Kodi, so starting one -- or coming back from Kodi -- ends
+/// these. A session nobody holds (`MediaSessionCreate`, a preview in the web
+/// interface) is not the television's: the worker reaps it once nobody reads
+/// it, and a film starting here does not end it.
+const FILM_OWNERS: [&str; 2] = ["player", "kodi"];
+
+/// How often, and for how long after a failed start, the core is looked at
+/// for a session the player holds and is not playing. The worker refuses to
+/// make a held session once the request's `answerBy` has passed (see
+/// `MediaClient`), so a late one can only be the few milliseconds between that
+/// check and the answer; the window is the 30 s timeout four times over.
+const STRAY_SWEEP_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+const STRAY_SWEEP_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The live sessions in a `GET /media/session` listing held by one of
+/// `owners`, other than `keep`.
+fn sessions_to_end<'a>(listing: &'a Value, owners: &[&str], keep: Option<&str>) -> Vec<&'a str> {
+    let Some(sessions) = listing.get("sessions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    sessions
+        .iter()
+        .filter(|session| {
+            let owner = session.get("owner").and_then(Value::as_str);
+            let state = session.get("state").and_then(Value::as_str);
+            owner.is_some_and(|owner| owners.contains(&owner))
+                && matches!(state, Some("created" | "running"))
+        })
+        .filter_map(session_id)
+        .filter(|id| Some(*id) != keep)
+        .collect()
+}
+
+/// The owner the core records for sessions of `player`'s films.
+fn owner_of(player: crate::playback::PlayerKind) -> &'static str {
+    match player {
+        crate::playback::PlayerKind::Here => "player",
+        crate::playback::PlayerKind::Kodi => "kodi",
+    }
+}
+
+/// End the sessions `player` holds and is not playing, for `window` and
+/// until one whole look has been had after it.
+///
+/// Looked at every `tick`, and only between two readings of the starts that
+/// agree with none under way: a film started meanwhile has a session before
+/// it has a film, and is left alone. A look skipped for that is had again at
+/// the next tick, past the window if need be (a start does not last; twice
+/// the window is the most that is waited). The
+/// film playing on `player` keeps its session; the other player's sessions
+/// and those nobody holds are never touched. Returns how many were ended.
+pub(crate) async fn sweep_stray_sessions(
+    media: Arc<MediaClient>,
+    playback: Arc<crate::playback::Supervisor>,
+    player: crate::playback::PlayerKind,
+    tick: std::time::Duration,
+    window: std::time::Duration,
+) -> usize {
+    let owner = owner_of(player);
+    let until = tokio::time::Instant::now() + window;
+    let mut ended = 0;
+    loop {
+        tokio::time::sleep(tick).await;
+        let before = playback.starts();
+        let looked = match media.sessions().await {
+            Ok(listing) => {
+                let keep = playback.session(player);
+                if before.1 != 0 || playback.starts() != before {
+                    false
+                } else {
+                    for id in sessions_to_end(&listing, &[owner], keep.as_deref()) {
+                        if media.session_stop(id).await.is_ok() {
+                            eprintln!("mediaboxd-rs: media session {id} held by {owner} and not playing; ended");
+                            ended += 1;
+                        }
+                    }
+                    true
+                }
+            }
+            // Nobody to ask is nothing to end; a worker that comes back has
+            // started again with no sessions.
+            Err(_) => true,
+        };
+        let now = tokio::time::Instant::now();
+        if (looked && now >= until) || now >= until + window {
+            return ended;
+        }
+    }
+}
+
 impl AppState {
-    async fn stop_all_sessions(&self) {
+    /// End the television's film sessions; see [`FILM_OWNERS`].
+    async fn stop_film_sessions(&self) {
         let Ok(listing) = self.media.sessions().await else {
             return;
         };
-        let Some(sessions) = listing.get("sessions").and_then(Value::as_array) else {
-            return;
-        };
-        for id in sessions
-            .iter()
-            .filter_map(|session| session.get("id").and_then(Value::as_str))
-        {
+        for id in sessions_to_end(&listing, &FILM_OWNERS, None) {
             let _ = self.media.session_stop(id).await;
         }
     }
@@ -1559,6 +1680,315 @@ mod tests {
     use mediabox_core::{CecStatus, InputMode};
     use std::time::Duration;
     use tempfile::tempdir;
+
+    /// One session as `MediaSession.as_dict` spells it, the fields the
+    /// daemon reads and a few it does not.
+    fn core_session(id: &str, owner: Option<&str>, state: &str) -> Value {
+        json!({
+            "sessionId": id, "source": "https://debrid.example/film.mkv",
+            "mode": "Direct", "state": state, "pid": null, "clients": 0,
+            "owner": owner, "playbackUrl": "https://debrid.example/film.mkv",
+            "selectedTracks": {}, "videoCopied": true, "reasons": [], "stderr": null
+        })
+    }
+
+    /// Who ends what: a film starting on the television ends the
+    /// television's sessions (the player's and Kodi's); the sweep after a
+    /// failed start ends only the player's, and never the one playing. A
+    /// preview nobody holds, and a session already stopped, are neither's.
+    #[test]
+    fn film_sessions_and_strays_are_told_apart_by_owner() {
+        let listing = json!({"sessions": [
+            core_session("playing", Some("player"), "running"),
+            core_session("stray", Some("player"), "running"),
+            core_session("stopped", Some("player"), "stopped"),
+            core_session("kodi", Some("kodi"), "running"),
+            core_session("preview", None, "running"),
+            core_session("starting", Some("player"), "created"),
+        ]});
+        assert_eq!(
+            sessions_to_end(&listing, &FILM_OWNERS, None),
+            ["playing", "stray", "kodi", "starting"]
+        );
+        // A film playing here -- seeking reads new ranges of the same session,
+        // and the id does not change -- keeps its own; Kodi's and the
+        // preview are not the player's.
+        assert_eq!(
+            sessions_to_end(&listing, &["player"], Some("playing")),
+            ["stray", "starting"]
+        );
+        // Nothing playing here: after the player's stop its own session is
+        // stopped too, and only the stray is left to end.
+        let after_stop = json!({"sessions": [
+            core_session("playing", Some("player"), "stopped"),
+            core_session("stray", Some("player"), "running"),
+            core_session("kodi", Some("kodi"), "running"),
+            core_session("preview", None, "running"),
+        ]});
+        assert_eq!(sessions_to_end(&after_stop, &["player"], None), ["stray"]);
+        assert!(sessions_to_end(&json!({}), &FILM_OWNERS, None).is_empty());
+    }
+
+    /// The media worker, as far as sessions go: a listing, a create that can
+    /// be slower than the client, the bodies it was sent and the stops it was
+    /// asked for. A create makes `late`, held by the body's owner.
+    #[derive(Clone, Default)]
+    struct SessionWorker {
+        sessions: Arc<std::sync::Mutex<Vec<Value>>>,
+        stopped: Arc<std::sync::Mutex<Vec<String>>>,
+        created: Arc<std::sync::Mutex<Vec<Value>>>,
+        create_after: Duration,
+    }
+
+    async fn serve_sessions(listener: tokio::net::TcpListener, worker: SessionWorker) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let worker = worker.clone();
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 16384];
+                let mut used = 0;
+                let (head, body) = loop {
+                    let n = stream.read(&mut buffer[used..]).await.unwrap_or(0);
+                    used += n;
+                    let text = String::from_utf8_lossy(&buffer[..used]).to_string();
+                    if let Some(at) = text.find("\r\n\r\n") {
+                        let length = text[..at]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                            .unwrap_or(0);
+                        if used >= at + 4 + length || n == 0 {
+                            break (text[..at].to_string(), text[at + 4..].to_string());
+                        }
+                    }
+                    if n == 0 {
+                        break (text, String::new());
+                    }
+                };
+                let line = head.lines().next().unwrap_or_default().to_string();
+                // The client asks for the listing with an empty query
+                // (`GET /media/session? HTTP/1.1`), as the worker's log shows.
+                let (status, answer) = if line.starts_with("GET /media/session ") || line.starts_with("GET /media/session?") {
+                    ("200 OK", json!({"sessions": worker.sessions.lock().unwrap().clone()}))
+                } else if line.starts_with("POST /media/session ") {
+                    let asked: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    worker.created.lock().unwrap().push(asked.clone());
+                    // The probe goes on whether or not anybody still waits.
+                    tokio::time::sleep(worker.create_after).await;
+                    let session = core_session("late", asked["owner"].as_str(), "running");
+                    worker.sessions.lock().unwrap().push(session.clone());
+                    ("201 Created", session)
+                } else if let Some(rest) = line.strip_prefix("DELETE /media/session/") {
+                    let id = rest.split(' ').next().unwrap_or_default().to_string();
+                    for session in worker.sessions.lock().unwrap().iter_mut() {
+                        if session["sessionId"] == id.as_str() {
+                            session["state"] = json!("stopped");
+                        }
+                    }
+                    worker.stopped.lock().unwrap().push(id.clone());
+                    ("200 OK", json!({"sessionId": id, "state": "stopped"}))
+                } else {
+                    ("404 Not Found", json!({"error": {"code": "NOT_FOUND"}}))
+                };
+                let body = answer.to_string();
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    }
+
+    /// A worker already holding `sessions`, slow to create by `create_after`,
+    /// and a client that gives up after 150 ms.
+    async fn session_rig(sessions: Vec<Value>, create_after: Duration) -> (SessionWorker, Arc<MediaClient>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = SessionWorker { create_after, ..SessionWorker::default() };
+        worker.sessions.lock().unwrap().extend(sessions);
+        tokio::spawn(serve_sessions(listener, worker.clone()));
+        let media = Arc::new(MediaClient::new(&format!("http://{address}"), Duration::from_millis(150)).unwrap());
+        (worker, media)
+    }
+
+    fn quiet_playback() -> Arc<crate::playback::Supervisor> {
+        Arc::new(crate::playback::Supervisor::new(|_| {}))
+    }
+
+    const TICK: Duration = Duration::from_millis(50);
+
+    /// The night of 2026-10-16 on the Plus, in small: the start times out
+    /// here, the worker creates the session afterwards, held by the player,
+    /// and no film is started after it. The sweep ends it, and nothing else:
+    /// not Kodi's session, not a preview.
+    #[tokio::test]
+    async fn a_session_created_after_the_start_gave_up_is_ended_without_a_new_film() {
+        let (worker, media) = session_rig(
+            vec![core_session("kodi", Some("kodi"), "running"), core_session("preview", None, "running")],
+            Duration::from_millis(400),
+        )
+        .await;
+        let playback = quiet_playback();
+        assert!(media.session_start_here(Some("https://debrid.example/film.mkv"), None, 0).await.is_err());
+        let ended = sweep_stray_sessions(
+            Arc::clone(&media),
+            Arc::clone(&playback),
+            crate::playback::PlayerKind::Here,
+            TICK,
+            Duration::from_millis(800),
+        )
+        .await;
+        assert_eq!(ended, 1);
+        assert_eq!(*worker.stopped.lock().unwrap(), ["late"]);
+    }
+
+    /// The same for Kodi's start, with a film playing here meanwhile: Kodi's
+    /// late session is ended, the film here keeps its own, and the player's
+    /// sessions are not Kodi's sweep's to end.
+    #[tokio::test]
+    async fn kodi_s_late_session_is_ended_and_the_film_here_is_left_alone() {
+        let (worker, media) = session_rig(
+            vec![core_session("here", Some("player"), "running"), core_session("preview", None, "running")],
+            Duration::from_millis(400),
+        )
+        .await;
+        let playback = quiet_playback();
+        playback.begin(crate::playback::Start {
+            player: crate::playback::PlayerKind::Here,
+            watch: None,
+            session: Some("here".into()),
+            duration: Some(6_000),
+            position: 0,
+        });
+        assert!(media.session_start_at("https://debrid.example/film.mkv", 0).await.is_err());
+        let ended = sweep_stray_sessions(
+            Arc::clone(&media),
+            Arc::clone(&playback),
+            crate::playback::PlayerKind::Kodi,
+            TICK,
+            Duration::from_millis(800),
+        )
+        .await;
+        assert_eq!(ended, 1);
+        assert_eq!(*worker.stopped.lock().unwrap(), ["late"]);
+    }
+
+    /// The film playing keeps its session through a sweep -- paused, seeking
+    /// (the same session, new ranges) or handed on -- here and on Kodi alike.
+    #[tokio::test]
+    async fn the_film_playing_keeps_its_session_through_a_sweep() {
+        for (player, owner) in [(crate::playback::PlayerKind::Here, "player"), (crate::playback::PlayerKind::Kodi, "kodi")] {
+            let (worker, media) = session_rig(
+                vec![
+                    core_session("playing", Some(owner), "running"),
+                    core_session("stray", Some(owner), "running"),
+                    core_session("preview", None, "running"),
+                ],
+                Duration::ZERO,
+            )
+            .await;
+            let playback = quiet_playback();
+            playback.begin(crate::playback::Start {
+                player,
+                watch: None,
+                session: Some("playing".into()),
+                duration: Some(6_000),
+                position: 1_200,
+            });
+            let ended = sweep_stray_sessions(media, Arc::clone(&playback), player, TICK, TICK).await;
+            assert_eq!(ended, 1);
+            assert_eq!(*worker.stopped.lock().unwrap(), ["stray"]);
+            assert_eq!(playback.session(player).as_deref(), Some("playing"));
+        }
+    }
+
+    /// A start under way for longer than the whole window: nothing is ended
+    /// while it lasts, and the look it cost is had once it is over, after the
+    /// window -- not dropped. A start that never ends is waited for no longer
+    /// than twice the window.
+    #[tokio::test]
+    async fn a_look_skipped_for_a_start_is_had_after_it_even_past_the_window() {
+        let (worker, media) = session_rig(vec![core_session("stray", Some("player"), "running")], Duration::ZERO).await;
+        let playback = quiet_playback();
+        let starting = playback.begin_start();
+        let sweep = tokio::spawn(sweep_stray_sessions(
+            Arc::clone(&media),
+            Arc::clone(&playback),
+            crate::playback::PlayerKind::Here,
+            TICK,
+            Duration::from_millis(300),
+        ));
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        assert!(worker.stopped.lock().unwrap().is_empty(), "ended during a start");
+        drop(starting);
+        assert_eq!(sweep.await.unwrap(), 1);
+        assert_eq!(*worker.stopped.lock().unwrap(), ["stray"]);
+
+        let (worker, media) = session_rig(vec![core_session("stray", Some("player"), "running")], Duration::ZERO).await;
+        let _forever = playback.begin_start();
+        let started = std::time::Instant::now();
+        let ended = sweep_stray_sessions(media, Arc::clone(&playback), crate::playback::PlayerKind::Here, TICK, Duration::from_millis(200)).await;
+        assert_eq!(ended, 0);
+        assert!(worker.stopped.lock().unwrap().is_empty());
+        assert!(started.elapsed() < Duration::from_millis(700));
+    }
+
+    /// Every held start says when its answer stops being wanted, a second
+    /// inside the client's timeout, so the worker makes no session for it
+    /// afterwards. An unheld one (`MediaSessionCreate`) does not need to.
+    #[tokio::test]
+    async fn a_held_start_tells_the_worker_when_nobody_waits_any_more() {
+        let (worker, media) = session_rig(Vec::new(), Duration::ZERO).await;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let _ = media.session_start_here(Some("https://debrid.example/a.mkv"), None, 0).await;
+        let _ = media.session_start_at("https://debrid.example/b.mkv", 0).await;
+        let _ = media.session_start_stream(json!({"url": "https://debrid.example/c.mkv"}), 0).await;
+        let _ = media.session_start("https://debrid.example/d.mkv").await;
+        let created = worker.created.lock().unwrap().clone();
+        assert_eq!(created.len(), 4);
+        for held in &created[..3] {
+            let by = held["answerBy"].as_f64().unwrap();
+            // 150 ms timeout, less the second: already past by the time it
+            // is read, which is what a worker reading it would do.
+            assert!(by <= now + 0.15 && by > now - 2.0, "{held}");
+            assert!(matches!(held["owner"].as_str(), Some("player" | "kodi")));
+        }
+        assert!(created[3].get("answerBy").is_none());
+    }
+
+    /// `GET /media/session` as the worker answered it on the Plus on
+    /// 2026-10-17, the source replaced: a session created for a play request
+    /// that had timed out at this end, still held by the player hours later.
+    #[test]
+    fn the_core_s_session_listing_is_read_by_its_own_key() {
+        let listing = json!({"sessions": [{
+            "sessionId": "87649cc6000000000000000000000000",
+            "source": "https://debrid.example/film.mkv",
+            "mode": "Direct", "state": "running", "pid": null, "clients": 0,
+            "createdAt": 7519.007373903, "startedAt": null, "lastSeen": 7519.007373903,
+            "owner": "player", "stoppedAt": null, "exitCode": null, "stopReason": null,
+            "playbackUrl": "https://debrid.example/film.mkv",
+            "selectedTracks": {"video": {"streamIndex": 0, "codec": "h264", "action": "copy"},
+                               "audio": {"streamIndex": 1, "codec": "aac", "action": "DecodeToPCM", "target": null}},
+            "videoCopied": true, "reasons": [], "stderr": null
+        }]});
+        let ids: Vec<&str> = listing["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(session_id)
+            .collect();
+        assert_eq!(ids, ["87649cc6000000000000000000000000"]);
+        // An older spelling still reads; nothing at all is not an id.
+        assert_eq!(session_id(&json!({"id": "abc"})), Some("abc"));
+        assert_eq!(session_id(&json!({"sessionId": ""})), None);
+        assert_eq!(session_id(&json!({})), None);
+    }
 
     /// Which handover a film gets is decided by this, and getting it wrong
     /// is either a 400 from the media core or a film with no picture.

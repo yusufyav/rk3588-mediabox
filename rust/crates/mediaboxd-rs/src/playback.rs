@@ -238,6 +238,22 @@ struct Inner {
 pub struct Supervisor {
     inner: Mutex<Inner>,
     effects: Box<dyn Fn(Effect) + Send + Sync>,
+    /// Films being started, here or on Kodi, and how many starts have ever
+    /// begun. A start has a session before it has a film here; a sweep for
+    /// sessions nobody plays reads both before and after it looks, so a film
+    /// started in between is never taken for one of them.
+    starts_begun: std::sync::atomic::AtomicU64,
+    starts_busy: std::sync::atomic::AtomicU64,
+}
+
+/// A film being started, from its first step to its last; see
+/// [`Supervisor::begin_start`].
+pub struct Starting<'a>(&'a Supervisor);
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.0.starts_busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Supervisor {
@@ -245,6 +261,8 @@ impl Supervisor {
         Self {
             inner: Mutex::new(Inner::default()),
             effects: Box::new(effects),
+            starts_begun: std::sync::atomic::AtomicU64::new(0),
+            starts_busy: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -286,6 +304,33 @@ impl Supervisor {
         };
         self.run(effects);
         number
+    }
+
+    /// A film is being started: its session may exist before its film does,
+    /// until the returned guard is dropped.
+    pub fn begin_start(&self) -> Starting<'_> {
+        use std::sync::atomic::Ordering;
+        self.starts_begun.fetch_add(1, Ordering::SeqCst);
+        self.starts_busy.fetch_add(1, Ordering::SeqCst);
+        Starting(self)
+    }
+
+    /// How many starts have begun, and how many are under way.
+    pub fn starts(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            self.starts_begun.load(Ordering::SeqCst),
+            self.starts_busy.load(Ordering::SeqCst),
+        )
+    }
+
+    /// The media session of the film playing on `player` now, if it has one.
+    pub fn session(&self, player: PlayerKind) -> Option<String> {
+        self.lock()
+            .film
+            .as_ref()
+            .filter(|film| film.player == player)
+            .and_then(|film| film.session.clone())
     }
 
     /// The film playing on `player` now, if one is.

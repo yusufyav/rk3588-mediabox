@@ -20,6 +20,7 @@ pub enum MediaError {
 pub struct MediaClient {
     endpoint: Url,
     client: Client,
+    timeout: Duration,
 }
 
 impl MediaClient {
@@ -43,7 +44,20 @@ impl MediaClient {
         Ok(Self {
             endpoint,
             client: Client::builder().timeout(timeout).build()?,
+            timeout,
         })
+    }
+
+    /// When a held session must have been answered by, as seconds since the
+    /// epoch: a second inside this client's timeout. The worker makes no
+    /// session for a request past it -- nobody is waiting for its id, and a
+    /// session held by an owner who never learnt of it is never let go.
+    fn answer_by(&self) -> f64 {
+        let deadline = std::time::SystemTime::now() + self.timeout.saturating_sub(Duration::from_secs(1));
+        deadline
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs_f64())
+            .unwrap_or(0.0)
     }
 
     pub async fn status(&self) -> Result<Value, MediaError> {
@@ -148,7 +162,7 @@ impl MediaClient {
     ) -> Result<Value, MediaError> {
         self.post(
             &["media", "session"],
-            json!({"stream": stream, "startSeconds": start_seconds, "owner": "kodi"}),
+            json!({"stream": stream, "startSeconds": start_seconds, "owner": "kodi", "answerBy": self.answer_by()}),
         )
         .await
     }
@@ -160,7 +174,7 @@ impl MediaClient {
     ) -> Result<Value, MediaError> {
         self.post(
             &["media", "session"],
-            json!({"url": url, "startSeconds": start_seconds, "owner": "kodi"}),
+            json!({"url": url, "startSeconds": start_seconds, "owner": "kodi", "answerBy": self.answer_by()}),
         )
         .await
     }
@@ -176,7 +190,12 @@ impl MediaClient {
     ) -> Result<Value, MediaError> {
         // Held by the player until the control plane lets it go: a paused
         // film reads nothing and still needs its address.
-        let mut body = json!({"startSeconds": start_seconds, "audio": "player", "owner": "player"});
+        let mut body = json!({
+            "startSeconds": start_seconds,
+            "audio": "player",
+            "owner": "player",
+            "answerBy": self.answer_by(),
+        });
         match (url, stream) {
             (Some(url), _) => body["url"] = json!(url),
             (None, Some(stream)) => body["stream"] = stream,

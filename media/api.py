@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote
@@ -645,6 +646,16 @@ class MediaCore:
         # The appliance's own player handles sound itself; see the function.
         if body.get("audio") == "player":
             decision = for_a_player_that_does_its_own_audio(decision)
+        # The probe above can outlast the caller. A session made for a caller
+        # that has given up is held by an owner who never learns its id, and
+        # a held session is never reaped: past the caller's own deadline,
+        # none is made.
+        answer_by = body.get("answerBy")
+        if answer_by is not None and (isinstance(answer_by, bool) or not isinstance(answer_by, (int, float))):
+            raise InvalidRequest("answerBy must be seconds since the epoch")
+        if answer_by is not None and time.time() > answer_by:
+            LOG.warning("media session for %s not made: its caller gave up", _owner(body.get("owner")))
+            raise SessionError("CALLER_GAVE_UP", "the caller stopped waiting before the session was made", 504)
         session = self.sessions.create(
             url,
             decision,

@@ -397,6 +397,29 @@ class SessionLifetimeTests(unittest.TestCase):
         self.assertEqual(gone.status, 410)
         self.assertEqual(body_of(gone)["error"]["code"], "SESSION_STOPPED")
 
+    def test_no_held_session_is_made_for_a_caller_that_gave_up(self):
+        # The Plus, 2026-10-16: the control plane's request timed out at
+        # 20:04:55 while ffprobe went on; the session was made at 20:05:12,
+        # held by the player under an id nobody had, and never reaped.
+        import time
+
+        for owner in ("player", "kodi"):
+            late = self.core.handle(
+                "POST",
+                "/media/session",
+                body=json.dumps(
+                    {"url": "https://cdn.example/hdr10.mkv", "owner": owner, "answerBy": time.time() - 1}
+                ).encode(),
+            )
+            self.assertEqual(late.status, 504)
+            self.assertEqual(body_of(late)["error"]["code"], "CALLER_GAVE_UP")
+        self.assertEqual(self.core.sessions.list(), [])
+        # In time, or with no deadline at all, the session is made as before
+        # (the same source twice is the same session).
+        made = self._create(owner="player", answerBy=time.time() + 30)
+        self.assertEqual(self._create(owner="kodi"), made)
+        self.assertEqual([s["sessionId"] for s in self.core.sessions.list()], [made])
+
     def test_an_owner_is_a_short_name(self):
         response = self.core.handle(
             "POST",
