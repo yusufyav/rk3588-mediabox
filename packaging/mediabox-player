@@ -137,15 +137,25 @@ if [ "${MEDIABOX_PLAYER_HOLD:-}" = 1 ]; then
     hold="--pause"
 fi
 
+# The audio track the media core chose for this film, by mpv's numbering. Set,
+# the film plays what the plan says it plays; unset, mpv picks the file's
+# default track as it always did.
+aid=""
+case "${MEDIABOX_PLAYER_AID:-}" in
+    '' | *[!0-9]*) ;;
+    *) aid="--aid=$MEDIABOX_PLAYER_AID" ;;
+esac
+
 # At the end of the file the player holds its last frame rather than exiting:
 # the control plane reads where it stopped and decides whether that was the
 # end of the film or a read that failed short of it, then closes the player
 # itself. Exiting at once left nobody to ask (see rust/crates/mediaboxd-rs/
 # src/playback.rs).
-# shellcheck disable=SC2086  # $ipc, $hold, $audio and $sync are empty or known flags.
+# shellcheck disable=SC2086  # $ipc, $hold, $aid, $audio and $sync are empty or known flags.
 exec /opt/rk3588-mediabox/player/bin/mpv \
     $ipc \
     $hold \
+    $aid \
     $audio \
     $sync \
     --no-config \

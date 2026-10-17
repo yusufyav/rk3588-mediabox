@@ -286,6 +286,18 @@ class AudioSelectionTests(unittest.TestCase):
         self.assertEqual(decision.track.codec, "ac3")
         self.assertIn(R.AUDIO_NATIVE_TRACK_PREFERRED, codes(decision.reasons))
 
+    def test_the_remuxs_own_ac3_mix_is_chosen_over_converting_its_truehd(self):
+        decision = select_audio(F.remux_truehd_atmos_with_native_tracks().audio, PROFILE)
+        self.assertIs(decision.action, AudioAction.PASSTHROUGH)
+        self.assertEqual(decision.track.stream_index, 2)
+        self.assertIn(R.AUDIO_NATIVE_TRACK_PREFERRED, codes(decision.reasons))
+
+    def test_a_stereo_commentary_is_not_chosen_over_the_films_mix(self):
+        decision = select_audio(F.truehd_with_only_a_stereo_commentary_in_ac3().audio, PROFILE)
+        self.assertIs(decision.action, AudioAction.TRANSCODE_AC3)
+        self.assertEqual(decision.track.codec, "truehd")
+        self.assertNotIn(R.AUDIO_NATIVE_TRACK_PREFERRED, codes(decision.reasons))
+
     def test_selection_is_deterministic_across_track_order(self):
         info = F.hdr10_hevc_truehd_and_ac3()
         forward = select_audio(info.audio, PROFILE)

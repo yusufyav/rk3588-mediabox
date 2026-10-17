@@ -264,6 +264,7 @@ impl PlayerManager {
         start_seconds: u64,
         playing: Playing,
         display_sync: bool,
+        audio_track: Option<u32>,
     ) -> Result<(), String> {
         self.stop().await;
         self.film.fetch_add(1, Ordering::SeqCst);
@@ -326,6 +327,14 @@ impl PlayerManager {
             .arg(format!(
                 "--setenv=MEDIABOX_PLAYER_DISPLAY_SYNC={}",
                 u8::from(display_sync)
+            ))
+            // The audio track the plan chose, so the film plays what the plan
+            // says: the remux's own AC-3 mix rather than its TrueHD default
+            // converted (measured on the Plus on 2026-10-17). Empty: mpv's
+            // own choice.
+            .arg(format!(
+                "--setenv=MEDIABOX_PLAYER_AID={}",
+                audio_track.map(|track| track.to_string()).unwrap_or_default()
             ))
             .arg(self.launcher.as_os_str())
             .arg(url)

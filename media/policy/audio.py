@@ -374,6 +374,21 @@ def select_audio(
     decisions.sort(key=rank)
     best_track, best = decisions[0]
 
+    # A native track is preferred only when it carries what the conversion
+    # would: an AC-3 commentary in stereo is not a substitute for the film's
+    # 7.1 mix, which still arrives as 5.1 once converted. The player plays the
+    # track chosen here, so a wrong choice is heard, not just reported.
+    if not best.requires_encoder:
+        fuller = [
+            (track, decision)
+            for track, decision in decisions[1:]
+            if decision.requires_encoder
+            and min(track.channels or 0, profile.audio.transcode_max_channels)
+            > (best_track.channels or 0)
+        ]
+        if fuller:
+            best_track, best = fuller[0]
+
     if len(decisions) > 1 and not best.requires_encoder:
         would_encode = [d for _, d in decisions[1:] if d.requires_encoder]
         if would_encode:

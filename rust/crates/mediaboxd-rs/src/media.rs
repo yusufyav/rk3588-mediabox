@@ -150,8 +150,14 @@ impl MediaClient {
             .await
     }
 
-    pub async fn stream_plan(&self, stream: Value) -> Result<Value, MediaError> {
-        self.post(&["media", "plan"], json!({"stream": stream}))
+    /// The plan for the interface's own player, which passes `passthrough`
+    /// through as it is (mpv's names) and plays the audio track chosen here.
+    pub async fn stream_plan(
+        &self,
+        stream: Value,
+        passthrough: &[String],
+    ) -> Result<Value, MediaError> {
+        self.post(&["media", "plan"], json!({"stream": stream, "passthrough": passthrough}))
             .await
     }
 
@@ -187,12 +193,14 @@ impl MediaClient {
         url: Option<&str>,
         stream: Option<Value>,
         start_seconds: u64,
+        passthrough: &[String],
     ) -> Result<Value, MediaError> {
         // Held by the player until the control plane lets it go: a paused
         // film reads nothing and still needs its address.
         let mut body = json!({
             "startSeconds": start_seconds,
             "audio": "player",
+            "passthrough": passthrough,
             "owner": "player",
             "answerBy": self.answer_by(),
         });
@@ -238,8 +246,10 @@ impl MediaClient {
         self.get(&["media", "state", media_type, id], &[]).await
     }
 
-    pub async fn policy(&self, url: &str) -> Result<Value, MediaError> {
-        self.post(&["media", "plan"], json!({"url": url})).await
+    /// As [`MediaClient::stream_plan`], for a plain address.
+    pub async fn policy(&self, url: &str, passthrough: &[String]) -> Result<Value, MediaError> {
+        self.post(&["media", "plan"], json!({"url": url, "passthrough": passthrough}))
+            .await
     }
 
     /// Where the worker serves this session's bytes.

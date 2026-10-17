@@ -152,7 +152,16 @@ then the default flag, then stream index. A requested language filters before
 any of that, because the wrong language played perfectly is still wrong.
 
 This is what stops a TrueHD Atmos track being transcoded while a native AC-3
-track sits unused in the same file — `AUDIO_NATIVE_TRACK_PREFERRED`.
+track sits unused in the same file — `AUDIO_NATIVE_TRACK_PREFERRED`. A native
+track is preferred only when it carries as many channels as the conversion
+would deliver: a stereo AC-3 commentary never replaces the film's 7.1 mix.
+
+The appliance's own player plays the track chosen here (`--aid`), so the plan
+says what is heard. Its session and plan requests carry `passthrough`, the
+formats its sound setting passes through on the receiver found now (mpv's
+names; empty while the film is timed to the display), and the track is chosen
+against those rather than the board's defaults: a receiver that takes TrueHD
+gets the Atmos track as it is.
 
 ## Source ranking
 

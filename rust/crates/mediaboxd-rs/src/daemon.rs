@@ -308,7 +308,7 @@ impl AppState {
             Request::MediaLibraryItem { id } => media_result(self.media.library_item(&id).await),
             Request::MediaResolve { stream } => media_result(self.media.resolve(stream).await),
             Request::MediaStreamPlan { stream } => {
-                media_result(self.media.stream_plan(stream).await)
+                media_result(self.media.stream_plan(stream, &self.passthrough()).await)
             }
             Request::MediaPlayOnKodi {
                 url,
@@ -441,7 +441,9 @@ impl AppState {
             Request::MediaAccount { action, change } => {
                 media_result(self.media.account(action.path(), change).await)
             }
-            Request::MediaPolicy { url } => media_result(self.media.policy(&url).await),
+            Request::MediaPolicy { url } => {
+                media_result(self.media.policy(&url, &self.passthrough()).await)
+            }
             Request::MediaSessions => media_result(self.media.sessions().await),
             Request::MediaSessionStart { url } => {
                 media_result(self.media.session_start(&url).await)
@@ -853,6 +855,17 @@ impl AppState {
     /// No display changes hands: the player is a window of the same
     /// compositor the catalogue is drawn on, so the film appears in front of
     /// the page it was chosen from and Back puts the page back.
+    /// What the interface's own player passes through as it is, by mpv's
+    /// names: the sound setting on the receiver found now, and nothing while
+    /// the film is timed to the display (the launcher drops passthrough
+    /// then). The worker chooses the audio track by it.
+    fn passthrough(&self) -> Vec<String> {
+        if self.output.display_sync() {
+            return Vec::new();
+        }
+        self.audio.now().2.passthrough.iter().map(|codec| codec.mpv().to_string()).collect()
+    }
+
     async fn play_here(
         &self,
         url: Option<String>,
@@ -872,7 +885,7 @@ impl AppState {
 
         let created = self
             .media
-            .session_start_here(url.as_deref(), stream, start_seconds)
+            .session_start_here(url.as_deref(), stream, start_seconds, &self.passthrough())
             .await;
         let session = match created {
             Ok(value) => value,
@@ -929,7 +942,12 @@ impl AppState {
             duration: duration_seconds.filter(|seconds| *seconds > 0),
         };
         let display_sync = self.output.display_sync();
-        if let Err(error) = self.player.start(&local, start_seconds, playing, display_sync).await {
+        let audio_track = player_audio_track(&session);
+        if let Err(error) = self
+            .player
+            .start(&local, start_seconds, playing, display_sync, audio_track)
+            .await
+        {
             self.stop_session(&session_id).await;
             return Response::failure("PLAYER_FAILED", error);
         }
@@ -1260,6 +1278,18 @@ fn owner_of(player: crate::playback::PlayerKind) -> &'static str {
 /// the window is the most that is waited). The
 /// film playing on `player` keeps its session; the other player's sessions
 /// and those nobody holds are never touched. Returns how many were ended.
+/// The audio track the worker chose, as mpv numbers it: mpv counts a file's
+/// audio tracks from 1 in the order they are stored, which is the order of
+/// `media.audio`. `None` leaves the choice to mpv (the file's default).
+fn player_audio_track(session: &Value) -> Option<u32> {
+    let chosen = session.pointer("/playback/audio/track/streamIndex")?.as_u64()?;
+    let tracks = session.pointer("/media/audio")?.as_array()?;
+    let position = tracks
+        .iter()
+        .position(|track| track.get("streamIndex").and_then(Value::as_u64) == Some(chosen))?;
+    u32::try_from(position + 1).ok()
+}
+
 pub(crate) async fn sweep_stray_sessions(
     media: Arc<MediaClient>,
     playback: Arc<crate::playback::Supervisor>,
@@ -1692,6 +1722,31 @@ mod tests {
         })
     }
 
+    /// The remux played on the Plus on 2026-10-17: the plan chose its AC-3
+    /// mix (stream 2, mpv's second audio track) over the TrueHD default.
+    #[test]
+    fn the_player_is_given_the_audio_track_the_plan_chose() {
+        let audio = json!([
+            {"streamIndex": 1, "codec": "truehd"}, {"streamIndex": 2, "codec": "ac3"},
+            {"streamIndex": 3, "codec": "dts"}, {"streamIndex": 4, "codec": "ac3"}
+        ]);
+        let session = |chosen: Value| json!({
+            "media": {"audio": audio.clone()},
+            "playback": {"audio": {"action": "Passthrough", "track": chosen}}
+        });
+        assert_eq!(player_audio_track(&session(json!({"streamIndex": 2}))), Some(2));
+        assert_eq!(player_audio_track(&session(json!({"streamIndex": 1}))), Some(1));
+        // A video stream first does not shift mpv's audio numbering.
+        let after_video = json!({
+            "media": {"audio": [{"streamIndex": 1}, {"streamIndex": 2}]},
+            "playback": {"audio": {"track": {"streamIndex": 2}}}
+        });
+        assert_eq!(player_audio_track(&after_video), Some(2));
+        // No track, or one the listing does not have: mpv chooses.
+        assert_eq!(player_audio_track(&session(Value::Null)), None);
+        assert_eq!(player_audio_track(&session(json!({"streamIndex": 9}))), None);
+    }
+
     /// Who ends what: a film starting on the television ends the
     /// television's sessions (the player's and Kodi's); the sweep after a
     /// failed start ends only the player's, and never the one playing. A
@@ -1834,7 +1889,7 @@ mod tests {
         )
         .await;
         let playback = quiet_playback();
-        assert!(media.session_start_here(Some("https://debrid.example/film.mkv"), None, 0).await.is_err());
+        assert!(media.session_start_here(Some("https://debrid.example/film.mkv"), None, 0, &[]).await.is_err());
         let ended = sweep_stray_sessions(
             Arc::clone(&media),
             Arc::clone(&playback),
@@ -1945,7 +2000,7 @@ mod tests {
     async fn a_held_start_tells_the_worker_when_nobody_waits_any_more() {
         let (worker, media) = session_rig(Vec::new(), Duration::ZERO).await;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
-        let _ = media.session_start_here(Some("https://debrid.example/a.mkv"), None, 0).await;
+        let _ = media.session_start_here(Some("https://debrid.example/a.mkv"), None, 0, &[]).await;
         let _ = media.session_start_at("https://debrid.example/b.mkv", 0).await;
         let _ = media.session_start_stream(json!({"url": "https://debrid.example/c.mkv"}), 0).await;
         let _ = media.session_start("https://debrid.example/d.mkv").await;

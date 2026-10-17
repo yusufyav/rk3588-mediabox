@@ -41,7 +41,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, unquote
 
@@ -178,16 +178,39 @@ class MediaCore:
         validate_source_url(url, self.source_policy)
         return inspect(url, self.config.ffprobe)
 
-    def plan(self, url: str, *, preferred_language: str | None = None) -> dict[str, Any]:
+    def plan(
+        self,
+        url: str,
+        *,
+        preferred_language: str | None = None,
+        passthrough: Any = None,
+    ) -> dict[str, Any]:
         """Everything the appliance knows about one source, in one answer."""
         info = self.inspect_url(url)
-        decision = decide(info, self.profile, preferred_language=preferred_language)
+        profile = self._profile_for(passthrough)
+        decision = decide(info, profile, preferred_language=preferred_language)
         preview = decide_preview(info, self.profile)
         return {
             "media": info.as_dict(),
             "playback": decision.as_dict(),
             "preview": preview.as_dict(),
         }
+
+    def _profile_for(self, passthrough: Any) -> CapabilityProfile:
+        """The profile, with the formats the asking player passes through.
+
+        The appliance's own player passes through what its sound setting and
+        the receiver allow -- DTS or TrueHD on a receiver that declares them --
+        and plays the audio track chosen here. Chosen against the board's
+        defaults instead, a DTS receiver would be given a converted track.
+        """
+        if passthrough is None:
+            return self.profile
+        if not isinstance(passthrough, list) or not all(isinstance(c, str) for c in passthrough):
+            raise InvalidRequest("passthrough must be a list of codec names")
+        # mpv's `dts-hd` is the same track as ffprobe's `dts`, sent whole.
+        codecs = frozenset("dts" if c == "dts-hd" else c for c in passthrough)
+        return replace(self.profile, audio=replace(self.profile.audio, passthrough_codecs=codecs))
 
     # --------------------------------------------------------------- dispatcher
 
@@ -529,7 +552,12 @@ class MediaCore:
         if head == "plan" and len(parts) == 1:
             url = self._source_from_body(body)
             return json_response(
-                200, self.plan(url, preferred_language=body.get("language"))
+                200,
+                self.plan(
+                    url,
+                    preferred_language=body.get("language"),
+                    passthrough=body.get("passthrough"),
+                ),
             )
 
         if head == "rank" and len(parts) == 1:
@@ -642,7 +670,8 @@ class MediaCore:
     def _create_session(self, body: dict[str, Any]) -> dict[str, Any]:
         url = self._source_from_body(body)
         info = self.inspect_url(url)
-        decision = decide(info, self.profile, preferred_language=body.get("language"))
+        profile = self._profile_for(body.get("passthrough"))
+        decision = decide(info, profile, preferred_language=body.get("language"))
         # The appliance's own player handles sound itself; see the function.
         if body.get("audio") == "player":
             decision = for_a_player_that_does_its_own_audio(decision)

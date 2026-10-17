@@ -183,6 +183,33 @@ class PlanAndRankTests(unittest.TestCase):
         codes = {r["code"] for r in payload["playback"]["audio"]["reasons"]}
         self.assertIn("AUDIO_OBJECT_METADATA_LOST", codes)
 
+    def test_plan_chooses_the_track_by_what_the_player_passes_through(self):
+        self.table["https://cdn.example/remux.mkv"] = F.remux_truehd_atmos_with_native_tracks()
+        url = "https://cdn.example/remux.mkv"
+
+        def chosen(passthrough):
+            body = {"url": url}
+            if passthrough is not None:
+                body["passthrough"] = passthrough
+            audio = self._post("/media/plan", body)["playback"]["audio"]
+            return audio["action"], audio["track"]["streamIndex"]
+
+        # The board's own profile, and a player that says the same.
+        self.assertEqual(chosen(None), ("Passthrough", 2))
+        self.assertEqual(chosen(["ac3"]), ("Passthrough", 2))
+        # A receiver that takes TrueHD is given the Atmos track as it is.
+        self.assertEqual(chosen(["ac3", "eac3", "truehd"]), ("Passthrough", 1))
+        # Nothing passed through: the film's fullest mix, converted.
+        self.assertEqual(chosen([]), ("TranscodeToAC3", 1))
+
+    def test_a_malformed_passthrough_list_is_refused(self):
+        response = self.core.handle(
+            "POST",
+            "/media/plan",
+            body=json.dumps({"url": "https://cdn.example/hdr10.mkv", "passthrough": "ac3"}).encode(),
+        )
+        self.assertEqual(response.status, 400)
+
     def test_the_clients_fixture_is_still_what_plan_answers(self):
         # mediabox-tv and mediabox-ui parse this file in their own tests; a
         # plan they could not read ("invalid type: map, expected a string")

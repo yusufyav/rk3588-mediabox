@@ -329,6 +329,37 @@ def dolby_vision_profile8_tagged_sdr():
     )
 
 
+def remux_truehd_atmos_with_native_tracks():
+    """The track layout of a UHD Blu-ray remux played on the Plus on
+    2026-10-17: TrueHD Atmos 7.1 by default, then AC-3 5.1, DTS-HD MA 5.1
+    and two stereo AC-3 commentaries."""
+    return media(
+        [
+            video_stream(),
+            audio_stream(index=1, codec_name="truehd", profile="Dolby TrueHD + Dolby Atmos",
+                         channels=8, channel_layout="7.1", bit_rate=None, default=1),
+            audio_stream(index=2, codec_name="ac3", default=0),
+            audio_stream(index=3, codec_name="dts", profile="DTS-HD MA", bit_rate=None, default=0),
+            audio_stream(index=4, codec_name="ac3", channels=2, channel_layout="stereo",
+                         bit_rate=192000, default=0, title="Commentary"),
+            audio_stream(index=5, codec_name="ac3", channels=2, channel_layout="stereo",
+                         bit_rate=192000, default=0, title="Commentary"),
+        ]
+    )
+
+
+def truehd_with_only_a_stereo_commentary_in_ac3():
+    return media(
+        [
+            video_stream(),
+            audio_stream(index=1, codec_name="truehd", channels=8, channel_layout="7.1",
+                         bit_rate=None, default=1),
+            audio_stream(index=2, codec_name="ac3", channels=2, channel_layout="stereo",
+                         bit_rate=192000, default=0, title="Commentary"),
+        ]
+    )
+
+
 def conflicting_color_metadata():
     """BT.2020 primaries with a BT.709 transfer: the file contradicts itself."""
     return media(
