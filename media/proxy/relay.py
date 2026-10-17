@@ -50,6 +50,17 @@ CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+|\*)$")
 #: them answering 5xx or not at all once ended a film at 28:26 ("kaynak
 #: okunamadı") that the next request would have played on.
 RETRY_DELAYS = (0.5, 1.5)
+#: How long one try waits for the upstream to answer a request -- the
+#: resolver's redirect and the debrid host's headers -- before it is tried
+#: again. Three tries and their pauses fit in the 25 s the television waits
+#: for a first frame: on 2026-10-17 a seek back to the start of Tenebrae went
+#: unanswered for 17 s, and with the reading timeout (30 s) on the open as
+#: well, the retry that would have played it never came before the film was
+#: given up on.
+OPEN_TIMEOUT = 7.0
+#: An open slower than this is said, with the host only, so the next stall
+#: can be measured rather than guessed at.
+SLOW_OPEN = 2.0
 #: Upstream answers worth another try: the host was busy, not the request wrong.
 TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 #: How often one reply is picked up again after its upstream connection ended
@@ -132,8 +143,9 @@ def _open(url: str, range_header: str | None, timeout: float):
         # Some hosts answer differently, or not at all, without one.
         request.add_header("User-Agent", "MediaBox/1.0")
         last = attempt == len(RETRY_DELAYS)
+        began = time.monotonic()
         try:
-            return urllib.request.urlopen(request, timeout=timeout)
+            response = urllib.request.urlopen(request, timeout=OPEN_TIMEOUT)
         except urllib.error.HTTPError as error:
             error.close()
             # A 416 or a 404 is the upstream's answer, not a failure of ours,
@@ -159,8 +171,23 @@ def _open(url: str, range_header: str | None, timeout: float):
             )
             if last:
                 raise MediaError("SOURCE_UNREACHABLE", f"{url} is unreachable", 502) from exc
+        else:
+            took = time.monotonic() - began
+            if took > SLOW_OPEN:
+                LOG.warning("relay from %s range=%s answered in %.1f s (try %d)", host, range_header, took, attempt + 1)
+            _reading_timeout(response, timeout)
+            return response
         time.sleep(RETRY_DELAYS[attempt])
     raise AssertionError("unreachable")
+
+
+def _reading_timeout(response, timeout: float) -> None:
+    """Give an opened response the reading timeout back: the open waits
+    `OPEN_TIMEOUT`, the film's body `timeout` -- a quiet past that is resumed
+    from where it stopped (see `relay`)."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    if sock is not None:
+        sock.settimeout(timeout)
 
 
 def _start_of(range_header: str | None) -> tuple[int, str]:

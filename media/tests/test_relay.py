@@ -199,6 +199,54 @@ class ContentRange(unittest.TestCase):
         self.assertNotIn("content-length", {name.lower() for name, _ in headers})
 
 
+class Stalling(BaseHTTPRequestHandler):
+    """Answers nothing at all to its first request for a while -- a seek on
+    2026-10-17 went unanswered for 17 s -- and properly afterwards."""
+
+    requests = 0
+
+    def log_message(self, *args):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        Stalling.requests += 1
+        if Stalling.requests == 1:
+            time.sleep(1.5)
+            return
+        body = b"film"
+        self.send_response(206)
+        self.send_header("Content-Range", "bytes 0-3/1000")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class Stall(unittest.TestCase):
+    def test_an_open_the_source_does_not_answer_is_tried_again_within_the_wait(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Stalling)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_address[1]}/film.mkv?token=secret"
+        Stalling.requests = 0
+        with mock.patch.object(relay_module, "OPEN_TIMEOUT", 0.3), mock.patch.object(
+            relay_module, "RETRY_DELAYS", (0.0, 0.0)
+        ):
+            began = time.monotonic()
+            with self.assertLogs("media.proxy.relay", "WARNING") as logged:
+                status, _, chunks = relay(url, "bytes=0-", timeout=30.0)
+            self.assertEqual((status, b"".join(chunks)), (206, b"film"))
+        # Tried again at the open's own timeout, not the reading one.
+        self.assertLess(time.monotonic() - began, 1.2)
+        self.assertEqual(Stalling.requests, 2)
+        self.assertIn("timed out", "".join(logged.output))
+        self.assertNotIn("secret", "".join(logged.output))
+
+    def test_the_tries_fit_in_the_televisions_wait_for_a_first_frame(self):
+        worst = (len(relay_module.RETRY_DELAYS) + 1) * relay_module.OPEN_TIMEOUT + sum(relay_module.RETRY_DELAYS)
+        self.assertLess(worst, 25.0)
+
+
 class Relay(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
