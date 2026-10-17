@@ -68,6 +68,10 @@ _DV_COMPAT_FORMAT = {
     DV_COMPAT_BLURAY: HdrFormat.HDR10,
 }
 
+#: Transfer characteristics that are SDR. A base layer tagged with one of these
+#: is decoded and shown as SDR by the player, whatever the DOVI record claims.
+_SDR_TRANSFERS = {"bt709", "smpte170m", "bt470bg", "bt470m", "bt2020-10", "bt2020-12"}
+
 
 def _dolby_vision_decision(
     track: VideoTrack, profile: CapabilityProfile
@@ -162,6 +166,23 @@ def _dolby_vision_decision(
 
     if compat in _DV_COMPAT_FORMAT:
         fallback = _DV_COMPAT_FORMAT[compat]
+        transfer = (track.color_transfer or "").lower()
+        if fallback is not HdrFormat.SDR and transfer in _SDR_TRANSFERS:
+            # Re-encodes that keep the DOVI record of an HDR source but tag
+            # their own samples SDR: the player follows the tag, so the plan
+            # says what will be on the screen.
+            notes.append(
+                R.warning(
+                    R.DV_BASE_LAYER_SIGNALLED_SDR,
+                    f"the Dolby Vision record calls the base layer {fallback.value} "
+                    f"compatible, but the base layer itself is tagged {transfer}; "
+                    "it plays as SDR",
+                    dvProfile=dv.profile,
+                    blSignalCompatibilityId=compat,
+                    colorTransfer=track.color_transfer,
+                )
+            )
+            return VideoVerdict.DIRECT, notes, HdrFormat.SDR, False
         if fallback not in profile.video.hdr_formats:
             notes.append(
                 R.risk(

@@ -142,6 +142,13 @@ class DolbyVisionTests(unittest.TestCase):
         self.assertIs(decision.hdr, HdrFormat.HDR10)
         self.assertIn(R.DV_BASE_LAYER_COMPATIBLE, codes(decision.reasons))
 
+    def test_profile8_whose_base_layer_is_tagged_sdr_plays_as_sdr(self):
+        decision = decide_video(F.dolby_vision_profile8_tagged_sdr().primary_video, PROFILE)
+        self.assertIs(decision.verdict, VideoVerdict.DIRECT)
+        self.assertIs(decision.hdr, HdrFormat.SDR)
+        self.assertIn(R.DV_BASE_LAYER_SIGNALLED_SDR, codes(decision.reasons))
+        self.assertNotIn(R.DV_BASE_LAYER_COMPATIBLE, codes(decision.reasons))
+
     def test_profile8_sdr_compatible_plays_as_sdr(self):
         decision = decide_video(F.dolby_vision_profile8(2).primary_video, PROFILE)
         self.assertIs(decision.verdict, VideoVerdict.DIRECT)

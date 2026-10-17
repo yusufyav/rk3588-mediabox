@@ -109,6 +109,12 @@ on that field rather than on the profile number:
 | 0 | — | Risky |
 | anything else | — | Risky, `DV_PROFILE_UNKNOWN` |
 
+When the record claims an HDR base layer but the base layer's own transfer
+characteristics are SDR (`bt709` and the like), the stream plays as SDR with
+`DV_BASE_LAYER_SIGNALLED_SDR`. Re-encodes do this: the samples are SDR and the
+DOVI record of the HDR source was carried over. The player follows the
+stream's own tag, so the plan does too.
+
 An unrecognised id stays unrecognised. A Dolby Vision stream whose profile
 cannot be read at all — a `dvhe` codec tag with no configuration record — is
 risky for the same reason.

@@ -313,6 +313,22 @@ def dolby_vision_profile8(compatibility_id: int = 1):
     )
 
 
+def dolby_vision_profile8_tagged_sdr():
+    """A re-encode that kept the HDR source's DOVI record but tags its samples
+    BT.709 (seen 2026-10-17: a 2160p x265 WEB release, P8 compat 1, bt709)."""
+    return media(
+        [
+            video_stream(
+                color_primaries="bt709",
+                color_transfer="bt709",
+                color_space="bt709",
+                side_data_list=[dovi(profile=8, compatibility_id=1)],
+            ),
+            audio_stream(codec_name="aac", channels=6, channel_layout="5.1"),
+        ]
+    )
+
+
 def conflicting_color_metadata():
     """BT.2020 primaries with a BT.709 transfer: the file contradicts itself."""
     return media(
