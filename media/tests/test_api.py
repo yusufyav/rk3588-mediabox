@@ -191,6 +191,7 @@ class PlanAndRankTests(unittest.TestCase):
             body = {"url": url}
             if passthrough is not None:
                 body["passthrough"] = passthrough
+                body["ac3Encode"] = {"minChannels": 3}
             audio = self._post("/media/plan", body)["playback"]["audio"]
             return audio["action"], audio["track"]["streamIndex"]
 
@@ -199,7 +200,7 @@ class PlanAndRankTests(unittest.TestCase):
         self.assertEqual(chosen(["ac3"]), ("Passthrough", 2))
         # A receiver that takes TrueHD is given the Atmos track as it is.
         self.assertEqual(chosen(["ac3", "eac3", "truehd"]), ("Passthrough", 1))
-        # Nothing passed through: the film's fullest mix, converted.
+        # Nothing passed through: the film's fullest mix, encoded by the player.
         self.assertEqual(chosen([]), ("TranscodeToAC3", 1))
 
     def test_a_format_the_sound_setting_turned_off_is_never_passed_through(self):
@@ -224,7 +225,11 @@ class PlanAndRankTests(unittest.TestCase):
         )
 
         def chosen(name, passthrough):
-            body = {"url": f"https://cdn.example/{name}.mkv", "passthrough": passthrough}
+            body = {
+                "url": f"https://cdn.example/{name}.mkv",
+                "passthrough": passthrough,
+                "ac3Encode": {"minChannels": 3},
+            }
             audio = self._post("/media/plan", body)["playback"]["audio"]
             return audio["action"], audio["track"]["codec"]
 
@@ -237,6 +242,44 @@ class PlanAndRankTests(unittest.TestCase):
         self.assertEqual(chosen("ddp", all_three), ("Passthrough", "eac3"))
         self.assertEqual(chosen("dts", all_three), ("Passthrough", "dts"))
         self.assertEqual(chosen("ddp-and-ac3", all_three), ("Passthrough", "eac3"))
+
+    def test_the_plan_says_what_the_player_does_with_the_sound(self):
+        self.table.update(
+            {
+                "https://cdn.example/tenebrae.mkv": F.remux_with_a_flagged_commentary(),
+                "https://cdn.example/remux.mkv": F.remux_truehd_atmos_with_native_tracks(),
+            }
+        )
+
+        def audio(name, **player):
+            body = {"url": f"https://cdn.example/{name}.mkv", "passthrough": ["ac3"], "language": "en", **player}
+            return self._post("/media/plan", body)["playback"]["audio"]
+
+        on = {"ac3Encode": {"minChannels": 3}}
+        # Tenebrae: stereo DTS is decoded to PCM, never "converted to AC-3".
+        tenebrae = audio("tenebrae", **on)
+        self.assertEqual((tenebrae["action"], tenebrae["track"]["streamIndex"]), ("DecodeToPCM", 1))
+        self.assertIsNone(tenebrae["target"])
+        # 7.1 TrueHD with the encoder on: AC-3 5.1 at lavcac3enc's own 448 kbit/s.
+        self.table["https://cdn.example/truehd.mkv"] = F.truehd_with_only_a_stereo_commentary_in_ac3()
+        truehd = audio("truehd", **on)
+        self.assertEqual(truehd["action"], "TranscodeToAC3")
+        self.assertEqual((truehd["target"]["channels"], truehd["target"]["bitRate"]), (6, 448_000))
+        # ... at the rate the setting names, when it names one.
+        named = audio("truehd", ac3Encode={"minChannels": 3, "kbps": 640})
+        self.assertEqual(named["target"]["bitRate"], 640_000)
+        # The encoder off: PCM, whatever the channels.
+        self.assertEqual(audio("truehd", ac3Encode=None)["action"], "DecodeToPCM")
+        # The board's own profile, for a caller that is not the player.
+        board = self._post("/media/plan", {"url": "https://cdn.example/truehd.mkv"})["playback"]["audio"]
+        self.assertEqual(board["target"]["bitRate"], 640_000)
+        for bad in ({"minChannels": 1}, {"minChannels": 3, "kbps": 900}, "on"):
+            response = self.core.handle(
+                "POST",
+                "/media/plan",
+                body=json.dumps({"url": "https://cdn.example/truehd.mkv", "passthrough": [], "ac3Encode": bad}).encode(),
+            )
+            self.assertEqual(response.status, 400, bad)
 
     def test_a_malformed_passthrough_list_is_refused(self):
         response = self.core.handle(

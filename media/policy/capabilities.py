@@ -49,6 +49,20 @@ class VideoCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class PlayerAudio:
+    """The appliance's own player (mpv) as its sound setting runs it: what is
+    not passed through it encodes to AC-3 itself (`lavcac3enc`) from
+    `encode_min_channels` channels up, and decodes to PCM below that -- or
+    always, with the encoder off."""
+
+    #: Fewer channels than this stay PCM. `None`: the encoder is off.
+    encode_min_channels: int | None
+    #: kbit/s asked of the encoder. `None`: `bitrate=auto`, the encoder's own
+    #: choice by channel count.
+    encode_kbps: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AudioCapabilities:
     #: Codecs handed to the sink as a compressed bitstream, bit exact.
     passthrough_codecs: frozenset[str]
@@ -63,6 +77,9 @@ class AudioCapabilities:
     #: The codec every non-playable track is converted to.
     transcode_target: str = "ac3"
     transcode_max_channels: int = 6
+    #: Set when the plan is for the appliance's own player, which decides
+    #: the sound by its own rules rather than this profile's PCM limits.
+    player: PlayerAudio | None = None
 
 
 @dataclass(frozen=True, slots=True)

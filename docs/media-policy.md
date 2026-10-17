@@ -173,6 +173,14 @@ names; empty while the film is timed to the display), and the track is chosen
 against those rather than the board's defaults: a receiver that takes TrueHD
 gets the Atmos track as it is.
 
+They also carry `ac3Encode` (`{"minChannels": 3, "kbps": null}`, or `null`
+with Dolby Digital dönüştürme off or the film timed to the display), and the
+plan then says what mpv does rather than what this profile's own transcoder
+would: passthrough, AC-3 from `minChannels` channels up at `lavcac3enc`'s
+`bitrate=auto` rate (448 kbit/s for 5.1, `default_bit_rate` in
+af_lavcac3enc.c), or PCM. A stereo DTS track is `DecodeToPCM`, not a
+conversion the player never makes.
+
 ## Source ranking
 
 Resolution is not the first criterion. Tiers, best first:

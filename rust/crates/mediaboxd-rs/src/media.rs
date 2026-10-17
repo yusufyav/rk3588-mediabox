@@ -23,18 +23,24 @@ pub struct MediaClient {
     timeout: Duration,
 }
 
-/// What the worker chooses the interface's own player's audio track by:
-/// the formats its sound setting passes through as they are (mpv's names)
-/// and the viewer's "Tercih edilen ses dili".
+/// How the interface's own player runs the sound, for the worker to choose
+/// its audio track by and to say what becomes of it: the formats its sound
+/// setting passes through as they are (mpv's names), its Dolby Digital
+/// encoder (`lavcac3enc`) if on, and the viewer's "Tercih edilen ses dili".
 #[derive(Debug, Clone, Default)]
 pub struct HereAudio {
     pub passthrough: Vec<String>,
+    pub ac3_encode: Option<mediabox_core::Ac3Encode>,
     pub language: Option<String>,
 }
 
 impl HereAudio {
     fn with(&self, mut body: Value) -> Value {
         body["passthrough"] = json!(self.passthrough);
+        body["ac3Encode"] = match &self.ac3_encode {
+            Some(encode) => json!({"minChannels": encode.min_channels, "kbps": encode.kbps}),
+            None => Value::Null,
+        };
         if let Some(language) = &self.language {
             body["language"] = json!(language);
         }

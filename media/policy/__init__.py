@@ -7,6 +7,7 @@ from .capabilities import (
     DEFAULT_PROFILE_NAME,
     PROFILES,
     CapabilityProfile,
+    PlayerAudio,
     get_profile,
 )
 from .decide import PlaybackDecision, PlaybackMode, decide, for_a_player_that_does_its_own_audio
@@ -23,6 +24,7 @@ __all__ = [
     "CapabilityProfile",
     "PlaybackDecision",
     "PlaybackMode",
+    "PlayerAudio",
     "PreviewDecision",
     "PreviewMode",
     "RankTier",

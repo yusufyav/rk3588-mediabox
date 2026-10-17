@@ -863,22 +863,21 @@ impl AppState {
     /// No display changes hands: the player is a window of the same
     /// compositor the catalogue is drawn on, so the film appears in front of
     /// the page it was chosen from and Back puts the page back.
-    /// What the interface's own player passes through as it is, by mpv's
-    /// names: the sound setting on the receiver found now, and nothing while
-    /// the film is timed to the display (the launcher drops passthrough
-    /// then). The worker chooses the audio track by it.
-    fn passthrough(&self) -> Vec<String> {
-        if self.output.display_sync() {
-            return Vec::new();
-        }
-        self.audio.now().2.passthrough.iter().map(|codec| codec.mpv().to_string()).collect()
-    }
-
-    /// What the worker chooses the player's audio track by: the above, and
-    /// "Tercih edilen ses dili".
+    /// How the player will run the sound -- the sound plan the launcher
+    /// renders, less passthrough and the encoder while the film is timed to
+    /// the display (the launcher drops both then) -- and "Tercih edilen ses
+    /// dili". The worker chooses the audio track by it and says what becomes
+    /// of it.
     fn here_audio(&self) -> crate::media::HereAudio {
+        let plan = self.audio.now().2;
+        let timed = self.output.display_sync();
         crate::media::HereAudio {
-            passthrough: self.passthrough(),
+            passthrough: if timed {
+                Vec::new()
+            } else {
+                plan.passthrough.iter().map(|codec| codec.mpv().to_string()).collect()
+            },
+            ac3_encode: if timed { None } else { plan.ac3_encode },
             language: Some(self.subtitles.preferences().audio_language()),
         }
     }
@@ -1811,7 +1810,7 @@ mod tests {
             .unwrap();
             let mut state = Arc::try_unwrap(test_state(&dir)).ok().unwrap();
             state.audio = Arc::new(crate::audio::Audio::new(setting, || vec![sony_hdmi()], |_| {}));
-            state.passthrough()
+            state.here_audio().passthrough
         };
         // The setting on the Plus: E-AC-3 and DTS turned off on purpose.
         assert_eq!(told(r#"["ac3"]"#), ["ac3"]);
@@ -2092,10 +2091,20 @@ mod tests {
     #[tokio::test]
     async fn the_players_start_carries_the_audio_language_and_formats() {
         let (worker, media) = session_rig(Vec::new(), Duration::ZERO).await;
-        let here = crate::media::HereAudio { passthrough: vec!["ac3".into()], language: Some("tr".into()) };
+        let here = crate::media::HereAudio {
+            passthrough: vec!["ac3".into()],
+            ac3_encode: Some(mediabox_core::Ac3Encode { kbps: None, min_channels: 3 }),
+            language: Some("tr".into()),
+        };
         let _ = media.session_start_here(Some("https://debrid.example/a.mkv"), None, 0, &here).await;
+        let _ = media
+            .session_start_here(Some("https://debrid.example/b.mkv"), None, 0, &Default::default())
+            .await;
         let created = worker.created.lock().unwrap().clone();
         assert_eq!(created[0]["passthrough"], json!(["ac3"]));
+        assert_eq!(created[0]["ac3Encode"], json!({"minChannels": 3, "kbps": null}));
+        // The encoder off says so: null, not absent.
+        assert_eq!(created[1]["ac3Encode"], Value::Null);
         assert_eq!(created[0]["language"], json!("tr"));
         assert_eq!(created[0]["audio"], json!("player"));
     }

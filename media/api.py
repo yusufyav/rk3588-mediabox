@@ -51,6 +51,7 @@ from .inspector import FFprobeConfig, MediaInfo, inspect
 from .library import Library
 from .policy import (
     CapabilityProfile,
+    PlayerAudio,
     PlaybackMode,
     decide,
     decide_preview,
@@ -183,11 +184,11 @@ class MediaCore:
         url: str,
         *,
         preferred_language: str | None = None,
-        passthrough: Any = None,
+        player: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Everything the appliance knows about one source, in one answer."""
         info = self.inspect_url(url)
-        profile = self._profile_for(passthrough)
+        profile = self._profile_for(player or {})
         decision = decide(info, profile, preferred_language=preferred_language)
         preview = decide_preview(info, self.profile)
         return {
@@ -196,21 +197,36 @@ class MediaCore:
             "preview": preview.as_dict(),
         }
 
-    def _profile_for(self, passthrough: Any) -> CapabilityProfile:
-        """The profile, with the formats the asking player passes through.
+    def _profile_for(self, body: dict[str, Any]) -> CapabilityProfile:
+        """The profile, as the asking player runs the sound.
 
         The appliance's own player passes through what its sound setting and
         the receiver allow -- DTS or TrueHD on a receiver that declares them --
-        and plays the audio track chosen here. Chosen against the board's
-        defaults instead, a DTS receiver would be given a converted track.
+        encodes the rest to AC-3 itself from `ac3Encode.minChannels` channels
+        up, decodes what is left to PCM, and plays the audio track chosen
+        here. Chosen against the board's defaults instead, a DTS receiver
+        would be given a converted track, and a stereo track planned as an
+        AC-3 conversion the player never makes.
         """
+        passthrough = body.get("passthrough")
         if passthrough is None:
             return self.profile
         if not isinstance(passthrough, list) or not all(isinstance(c, str) for c in passthrough):
             raise InvalidRequest("passthrough must be a list of codec names")
+        encode = body.get("ac3Encode")
+        if encode is not None:
+            minimum, kbps = (encode.get("minChannels"), encode.get("kbps")) if isinstance(encode, dict) else (None, None)
+            if isinstance(minimum, bool) or not isinstance(minimum, int) or not 2 <= minimum <= 6:
+                raise InvalidRequest("ac3Encode.minChannels must be 2 to 6")
+            if kbps is not None and (isinstance(kbps, bool) or not isinstance(kbps, int) or not 32 <= kbps <= 640):
+                raise InvalidRequest("ac3Encode.kbps must be 32 to 640")
+            player = PlayerAudio(encode_min_channels=minimum, encode_kbps=kbps)
+        else:
+            player = PlayerAudio(encode_min_channels=None)
         # mpv's `dts-hd` is the same track as ffprobe's `dts`, sent whole.
         codecs = frozenset("dts" if c == "dts-hd" else c for c in passthrough)
-        return replace(self.profile, audio=replace(self.profile.audio, passthrough_codecs=codecs))
+        audio = replace(self.profile.audio, passthrough_codecs=codecs, player=player)
+        return replace(self.profile, audio=audio)
 
     # --------------------------------------------------------------- dispatcher
 
@@ -556,7 +572,7 @@ class MediaCore:
                 self.plan(
                     url,
                     preferred_language=body.get("language"),
-                    passthrough=body.get("passthrough"),
+                    player=body,
                 ),
             )
 
@@ -670,7 +686,7 @@ class MediaCore:
     def _create_session(self, body: dict[str, Any]) -> dict[str, Any]:
         url = self._source_from_body(body)
         info = self.inspect_url(url)
-        profile = self._profile_for(body.get("passthrough"))
+        profile = self._profile_for(body)
         decision = decide(info, profile, preferred_language=body.get("language"))
         # The appliance's own player handles sound itself; see the function.
         if body.get("audio") == "player":

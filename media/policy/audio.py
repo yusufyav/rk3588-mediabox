@@ -22,7 +22,7 @@ from typing import Any
 from ..inspector.model import AudioTrack
 from ..subtitles.languages import canonical
 from . import reasons as R
-from .capabilities import CapabilityProfile
+from .capabilities import CapabilityProfile, PlayerAudio
 
 
 class AudioAction(str, Enum):
@@ -86,6 +86,11 @@ KNOWN_CODECS = frozenset(
 AC3_BITRATE_BY_CHANNELS = {1: 192_000, 2: 256_000, 3: 384_000, 4: 448_000, 5: 448_000, 6: 640_000}
 AC3_SAMPLE_RATES = (32000, 44100, 48000)
 
+#: What mpv's `lavcac3enc` asks for with `bitrate=auto`, by channel count
+#: (`default_bit_rate` in audio/filter/af_lavcac3enc.c, mpv 0.41.0): 448
+#: kbit/s for 5.1, not the format's 640.
+MPV_AC3_AUTO_BITRATE = {1: 96_000, 2: 192_000, 3: 256_000, 4: 384_000, 5: 448_000, 6: 448_000}
+
 
 @dataclass(frozen=True, slots=True)
 class AudioDecision:
@@ -129,7 +134,13 @@ def ac3_target(track: AudioTrack, profile: CapabilityProfile) -> tuple[int, int,
     """Channels, bitrate and sample rate for the AC-3 the encoder must produce."""
     source_channels = track.channels or 2
     channels = max(1, min(source_channels, profile.audio.transcode_max_channels))
-    bitrate = AC3_BITRATE_BY_CHANNELS.get(channels, 640_000)
+    player = profile.audio.player
+    if player is not None and player.encode_kbps is not None:
+        bitrate = player.encode_kbps * 1000
+    elif player is not None:
+        bitrate = MPV_AC3_AUTO_BITRATE.get(channels, 448_000)
+    else:
+        bitrate = AC3_BITRATE_BY_CHANNELS.get(channels, 640_000)
     rate = track.sample_rate or 48000
     sample_rate = rate if rate in AC3_SAMPLE_RATES else 48000
     return channels, bitrate, sample_rate
@@ -189,6 +200,9 @@ def decide_track(track: AudioTrack, profile: CapabilityProfile) -> AudioDecision
             track,
             (R.blocking(R.AUDIO_CODEC_UNKNOWN, "the audio track declares no codec"),),
         )
+
+    if caps.player is not None:
+        return _decide_for_the_player(track, profile, caps.player)
 
     if codec not in KNOWN_CODECS:
         # An unknown codec gets a decision, not an assumption. Converting is the
@@ -310,6 +324,61 @@ def decide_track(track: AudioTrack, profile: CapabilityProfile) -> AudioDecision
             )
         ),
         **_target_kwargs(track, profile),
+    )
+
+
+def _decide_for_the_player(track: AudioTrack, profile: CapabilityProfile, player: PlayerAudio) -> AudioDecision:
+    """What mpv does with the track under the appliance's sound setting: pass
+    it through, encode it to AC-3, or decode it to PCM -- and nothing it does
+    not. Tenebrae's stereo DTS was planned as an AC-3 conversion the player
+    never makes (minch=3 leaves stereo PCM)."""
+    codec = (track.codec or "").lower()
+    channels = track.channels or 0
+    caps = profile.audio
+    if codec in caps.passthrough_codecs and not (channels and channels > caps.max_passthrough_channels):
+        return AudioDecision(
+            AudioAction.PASSTHROUGH,
+            track,
+            (
+                R.info(
+                    R.AUDIO_PASSTHROUGH,
+                    f"{track.codec} {track.channel_layout or ''}".strip()
+                    + " is passed through to the sink as a bitstream",
+                    codec=track.codec,
+                    channels=track.channels,
+                ),
+            ),
+        )
+    if player.encode_min_channels is not None and channels >= player.encode_min_channels:
+        return AudioDecision(
+            AudioAction.TRANSCODE_AC3,
+            track,
+            tuple(
+                _transcode_reasons(
+                    track,
+                    profile,
+                    R.info(
+                        R.AUDIO_HANDLED_BY_PLAYER,
+                        f"the player encodes sound of {player.encode_min_channels} channels "
+                        "or more to Dolby Digital (Dolby Digital dönüştürme)",
+                        minChannels=player.encode_min_channels,
+                    ),
+                )
+            ),
+            **_target_kwargs(track, profile),
+        )
+    return AudioDecision(
+        AudioAction.DECODE_PCM,
+        track,
+        (
+            R.info(
+                R.AUDIO_DECODE_PCM,
+                f"{track.codec} {track.channel_layout or ''}".strip() + " is decoded to PCM by the player"
+                + ("" if player.encode_min_channels is not None else "; Dolby Digital dönüştürme is off"),
+                codec=track.codec,
+                channels=track.channels,
+            ),
+        ),
     )
 
 
