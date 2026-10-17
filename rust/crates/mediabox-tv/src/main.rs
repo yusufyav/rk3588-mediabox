@@ -2136,7 +2136,9 @@ impl App {
 
         self.remember();
         self.store.flush();
+        let opening = next_opening();
         self.here = Some(Playing {
+            opening,
             grace: if start > 0 {
                 FIRST_FRAME_GRACE_RESUMED
             } else {
@@ -2159,7 +2161,7 @@ impl App {
         if let Some(window) = self.window.upgrade() {
             window.set_detail_note("Oynatılıyor…".into());
         }
-        spawn_play_here(url, raw, name, runtime, start, watch);
+        spawn_play_here(url, raw, name, runtime, start, watch, opening);
         // The film covers the panel — the video window sits above the primary —
         // so the screen behind it is the one a remote should already be on when
         // it comes back.
@@ -6891,6 +6893,11 @@ struct Playing {
     /// taken up here: there is no page of it under the player until one is
     /// put there.
     adopted: bool,
+    /// Which opening this is, of the ones started here (0: adopted). The
+    /// control plane's answer to a start belongs to that start alone: an
+    /// opening called off with Back answers late, and its refusal once
+    /// closed the film opened after it (2026-10-18).
+    opening: u64,
 }
 
 impl Playing {
@@ -6904,7 +6911,31 @@ impl Playing {
             film: None,
             dark_since: None,
             adopted: false,
+            opening: 0,
         }
+    }
+}
+
+/// A number for each film opened here, so a late answer finds its own.
+fn next_opening() -> u64 {
+    static OPENINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    OPENINGS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// What becomes of the control plane's answer to opening `opening`, given
+/// the film this interface has now.
+#[derive(Debug, PartialEq, Eq)]
+enum OpeningAnswer {
+    /// It is the film being opened: the answer is its.
+    Ours,
+    /// Another film, or none: Back, or a later start, came first.
+    Stale,
+}
+
+fn opening_answer(now: Option<&Playing>, opening: u64) -> OpeningAnswer {
+    match now {
+        Some(playing) if playing.opening == opening => OpeningAnswer::Ours,
+        _ => OpeningAnswer::Stale,
     }
 }
 
@@ -7228,6 +7259,7 @@ fn spawn_play_here(
     runtime: Option<u64>,
     start: u64,
     watch: serde_json::Value,
+    opening: u64,
 ) {
     detached("mediabox-tv-play-here", async move {
         let client = rpc::Client::new(socket_path());
@@ -7243,21 +7275,31 @@ fn spawn_play_here(
                 if let Some(film) = answer.get("film").and_then(serde_json::Value::as_u64) {
                     let _ = slint::invoke_from_event_loop(move || {
                         with_app(|app| {
-                            if let Some(playing) = app.here.as_mut() {
+                            if opening_answer(app.here.as_ref(), opening) == OpeningAnswer::Ours
+                                && let Some(playing) = app.here.as_mut()
+                            {
                                 playing.film = Some(film);
                             }
                         });
                     });
                 }
             }
+            // Called off -- Back, or a later start -- is what the viewer did,
+            // not a failure: nothing is said, and nothing is closed.
+            Err(rpc::Error::Refused { ref code, .. }) if code == "START_CALLED_OFF" => {
+                eprintln!("mediabox-tv.play opening {opening} called off");
+            }
             Err(e) => {
                 eprintln!("mediabox-tv.play here failed: {e}");
                 let notice = play_refusal(&e.to_string());
                 let _ = slint::invoke_from_event_loop(move || {
                     with_app(|app| {
-                        // Only the film that was being opened: a refusal that
-                        // arrives after it is already showing is not its.
-                        if app.here.as_ref().is_some_and(|playing| !playing.seen) {
+                        // Only the film that was being opened, and only before
+                        // it showed: a refusal for another opening, or one
+                        // that arrives after the picture, is not this film's.
+                        if opening_answer(app.here.as_ref(), opening) == OpeningAnswer::Ours
+                            && app.here.as_ref().is_some_and(|playing| !playing.seen)
+                        {
                             app.leave_film(Some(notice));
                         }
                     });
@@ -7812,7 +7854,23 @@ fn deliver(line: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ending_of, page_of_film, parse_kodi_return, play_refusal};
+    use super::{
+        OpeningAnswer, Playing, ending_of, next_opening, opening_answer, page_of_film, parse_kodi_return, play_refusal,
+    };
+
+    /// 2026-10-18: Back called opening A off, Ok opened B, and A's refusal --
+    /// arriving late -- closed B with "açılış geri alındı". An answer goes
+    /// to its own opening only.
+    #[test]
+    fn a_late_answer_belongs_to_its_own_opening_only() {
+        let b = Playing { opening: 2, ..Playing::new() };
+        assert_eq!(opening_answer(Some(&b), 2), OpeningAnswer::Ours);
+        assert_eq!(opening_answer(Some(&b), 1), OpeningAnswer::Stale, "A's answer, B on");
+        assert_eq!(opening_answer(None, 1), OpeningAnswer::Stale, "A's answer after Back");
+        let adopted = Playing { adopted: true, ..Playing::new() };
+        assert_eq!(opening_answer(Some(&adopted), 1), OpeningAnswer::Stale);
+        assert!(next_opening() < next_opening());
+    }
 
     #[test]
     fn a_film_ends_only_when_the_control_plane_says_that_film_ended() {
