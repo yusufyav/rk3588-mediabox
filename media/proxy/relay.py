@@ -15,10 +15,12 @@ film and never seek in it, which is not a film player.
 
 from __future__ import annotations
 
+import http.client
 import logging
 import mimetypes
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -58,6 +60,15 @@ RETRY_DELAYS = (0.5, 1.5)
 #: well, the retry that would have played it never came before the film was
 #: given up on.
 OPEN_TIMEOUT = 7.0
+#: How long one address of the host is given to accept the connection. Not
+#: `OPEN_TIMEOUT`: Python waits that long on every address in turn, and on
+#: 2026-10-18 torrentio's two IPv4 addresses took 7 s each before the IPv6
+#: one failed at once with "Network is unreachable" -- 14 s for one try, and
+#: only the last address's error said.
+CONNECT_TIMEOUT = 3.0
+#: All the tries of one open together: the television waits 25 s for a first
+#: frame, and a try that still runs past this is not started.
+OPEN_BUDGET = 20.0
 #: An open slower than this is said, with the host only, so the next stall
 #: can be measured rather than guessed at.
 SLOW_OPEN = 2.0
@@ -132,20 +143,66 @@ def _relay_file(url: str, range_header: str | None):
     return (206 if partial else 200), headers, chunks()
 
 
+def _connect(host: str, port: int, timeout: float) -> socket.socket:
+    """A connection to the first address of `host` that takes one within
+    `timeout`, saying what each one did when none does."""
+    tried: list[str] = []
+    for family, kind, proto, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        sock = socket.socket(family, kind, proto)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(address)
+            return sock
+        except OSError as error:
+            sock.close()
+            tried.append(f"{address[0]}: {error.strerror or error}")
+    raise OSError("no address of the host took the connection (" + "; ".join(tried) + ")")
+
+
+class _Connection(http.client.HTTPConnection):
+    """Connects within `CONNECT_TIMEOUT` an address, then waits the request's
+    own timeout for the answer."""
+
+    def connect(self) -> None:
+        self.sock = _connect(self.host, self.port, CONNECT_TIMEOUT)
+        self.sock.settimeout(self.timeout)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+
+class _TlsConnection(http.client.HTTPSConnection, _Connection):
+    """The same, under TLS: `HTTPSConnection.connect` wraps what
+    `_Connection.connect` opened."""
+
+
+class _Handler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_Connection, req)
+
+
+class _TlsHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_TlsConnection, req, context=self._context)
+
+
+_OPENER = urllib.request.build_opener(_Handler, _TlsHandler)
+
+
 def _open(url: str, range_header: str | None, timeout: float):
     """The upstream response for `range_header`, tried again on a failure
-    that is the host's rather than the request's."""
+    that is the host's rather than the request's, within `OPEN_BUDGET`."""
     host = urllib.parse.urlsplit(url).hostname or "?"
+    began_open = time.monotonic()
     for attempt in range(len(RETRY_DELAYS) + 1):
         request = urllib.request.Request(url, method="GET")
         if range_header:
             request.add_header("Range", range_header)
         # Some hosts answer differently, or not at all, without one.
         request.add_header("User-Agent", "MediaBox/1.0")
-        last = attempt == len(RETRY_DELAYS)
+        left = OPEN_BUDGET - (time.monotonic() - began_open)
+        last = attempt == len(RETRY_DELAYS) or left <= RETRY_DELAYS[attempt] + CONNECT_TIMEOUT
         began = time.monotonic()
         try:
-            response = urllib.request.urlopen(request, timeout=OPEN_TIMEOUT)
+            response = _OPENER.open(request, timeout=min(OPEN_TIMEOUT, max(left, 1.0)))
         except urllib.error.HTTPError as error:
             error.close()
             # A 416 or a 404 is the upstream's answer, not a failure of ours,

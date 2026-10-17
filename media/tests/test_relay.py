@@ -3,6 +3,7 @@ source stumbles once."""
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 import unittest
@@ -243,8 +244,37 @@ class Stall(unittest.TestCase):
         self.assertNotIn("secret", "".join(logged.output))
 
     def test_the_tries_fit_in_the_televisions_wait_for_a_first_frame(self):
-        worst = (len(relay_module.RETRY_DELAYS) + 1) * relay_module.OPEN_TIMEOUT + sum(relay_module.RETRY_DELAYS)
-        self.assertLess(worst, 25.0)
+        # No try starts past the budget, and the last one cannot outlast the
+        # wait for a first frame.
+        self.assertLess(relay_module.OPEN_BUDGET + relay_module.OPEN_TIMEOUT - relay_module.CONNECT_TIMEOUT, 25.0)
+
+    def test_every_address_is_given_a_short_connect_and_each_is_said(self):
+        # 2026-10-18: torrentio's two IPv4 addresses did not take the
+        # connection and the IPv6 one could not be reached; only the last was
+        # said. Here a refusing address comes first and a listening one second.
+        listening = socket.socket()
+        listening.bind(("127.0.0.1", 0))
+        listening.listen()
+        self.addCleanup(listening.close)
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        refusing = closed.getsockname()[1]
+        closed.close()
+        open_port = listening.getsockname()[1]
+
+        def addresses(host, port, **_):
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", refusing)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", open_port)),
+            ]
+
+        with mock.patch.object(relay_module.socket, "getaddrinfo", addresses):
+            relay_module._connect("film.example", 443, 0.5).close()
+            with mock.patch.object(relay_module.socket, "getaddrinfo", lambda *a, **k: addresses(*a)[:1]):
+                with self.assertRaises(OSError) as caught:
+                    relay_module._connect("film.example", 443, 0.5)
+        self.assertIn(f"127.0.0.1: ", str(caught.exception))
+        self.assertIn("refused", str(caught.exception).lower())
 
 
 class Relay(unittest.TestCase):
