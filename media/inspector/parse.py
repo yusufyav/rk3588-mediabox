@@ -9,6 +9,7 @@ consumer sees one shape.
 from __future__ import annotations
 
 import logging
+import re
 from fractions import Fraction
 from typing import Any
 
@@ -377,6 +378,17 @@ def _video_track(
     )
 
 
+#: Words a commentary track's title carries when the muxer did not set the
+#: disposition flag ("Commentary by Nicolas Winding Refn/Peter Bradshaw").
+_COMMENTARY_TITLE = re.compile(r"commentary|kommentar|commento|commentaire|comentario|yorum", re.IGNORECASE)
+
+
+def _is_commentary(stream: dict[str, Any]) -> bool:
+    disposition = stream.get("disposition")
+    flagged = any(_flag(disposition, key) for key in ("comment", "visual_impaired", "descriptions"))
+    return flagged or bool(_COMMENTARY_TITLE.search(_tag(stream, "title") or ""))
+
+
 def _audio_track(stream: dict[str, Any]) -> AudioTrack:
     profile = _text(stream.get("profile"))
     object_audio: bool | None = None
@@ -402,6 +414,7 @@ def _audio_track(stream: dict[str, Any]) -> AudioTrack:
         title=_tag(stream, "title"),
         is_default=_flag(stream.get("disposition"), "default"),
         is_forced=_flag(stream.get("disposition"), "forced"),
+        is_commentary=_is_commentary(stream),
         object_audio=object_audio,
         object_audio_source=object_source,
     )

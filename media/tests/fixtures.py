@@ -348,6 +348,24 @@ def remux_truehd_atmos_with_native_tracks():
     )
 
 
+def remux_with_a_flagged_commentary():
+    """Tenebrae's tracks as ffprobe read them on the Plus on 2026-10-17:
+    English DTS 2.0, an English AC-3 2.0 commentary flagged `comment`, and
+    the Italian DTS 2.0 default."""
+    commentary = audio_stream(index=2, codec_name="ac3", channels=2, channel_layout="stereo",
+                              bit_rate=192000, default=0, title="Commentary")
+    commentary["disposition"] = disposition(comment=1)
+    return media(
+        [
+            video_stream(),
+            audio_stream(index=1, codec_name="dts", channels=2, channel_layout="stereo", default=0),
+            commentary,
+            audio_stream(index=3, codec_name="dts", channels=2, channel_layout="stereo",
+                         language="ita", default=1),
+        ]
+    )
+
+
 def truehd_with_only_a_stereo_commentary_in_ac3():
     return media(
         [

@@ -172,6 +172,9 @@ class AudioTrack:
     title: str | None = None
     is_default: bool = False
     is_forced: bool = False
+    #: A commentary or an audio description: a track about the film rather
+    #: than the film's own sound. Never chosen while its language has another.
+    is_commentary: bool = False
     #: True only when an object-audio substream is actually signalled. `None`
     #: means "not determinable from this probe", which is not the same as False
     #: and is never reported to the user as "no Atmos".

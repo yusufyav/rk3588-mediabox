@@ -316,6 +316,23 @@ class AudioSelectionTests(unittest.TestCase):
         # Asked for a language the file does not have: the default's language.
         self.assertEqual(select_audio(info.audio, PROFILE, preferred_language="de").track.language, "eng")
 
+    def test_a_commentary_is_never_chosen_over_the_films_own_sound(self):
+        info = F.remux_with_a_flagged_commentary()
+        self.assertTrue(info.audio[1].is_commentary)
+        decision = select_audio(info.audio, PROFILE, preferred_language="en")
+        self.assertEqual((decision.track.stream_index, decision.track.codec), (1, "dts"))
+        # Unflagged, its title says it ("Commentary by ..."), and that is enough.
+        unflagged = F.media([
+            F.video_stream(),
+            F.audio_stream(index=1, codec_name="dts", channels=2, channel_layout="stereo"),
+            F.audio_stream(index=2, codec_name="ac3", channels=2, channel_layout="stereo", default=0,
+                           title="Commentary by Director Nicolas Winding Refn"),
+        ])
+        self.assertEqual(select_audio(unflagged.audio, PROFILE).track.stream_index, 1)
+        # A language whose only track is a commentary still plays it.
+        only = F.media([F.video_stream(), F.audio_stream(index=1, codec_name="ac3", title="Commentary")])
+        self.assertEqual(select_audio(only.audio, PROFILE).track.stream_index, 1)
+
     def test_selection_is_deterministic_across_track_order(self):
         info = F.hdr10_hevc_truehd_and_ac3()
         forward = select_audio(info.audio, PROFILE)

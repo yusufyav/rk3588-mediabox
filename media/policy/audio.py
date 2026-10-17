@@ -369,6 +369,13 @@ def select_audio(
         language = canonical(default.language)
         if language is not None:
             candidates = [t for t in candidates if canonical(t.language) == language]
+    # A commentary is about the film, not the film: in a language that has
+    # the film's own sound it is never the choice, however cheap. Tenebrae's
+    # English AC-3 commentary passed through beat its English DTS mix
+    # (2026-10-17, preferred language English).
+    films_own = [t for t in candidates if not t.is_commentary]
+    if films_own:
+        candidates = films_own
 
     decisions = [(track, decide_track(track, profile)) for track in candidates]
 
