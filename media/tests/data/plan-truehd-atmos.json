@@ -1,0 +1,260 @@
+{
+  "media": {
+    "source": "https://cdn.example/atmos.mkv",
+    "container": {
+      "format": "matroska,webm",
+      "formatLongName": "Matroska / WebM",
+      "durationSeconds": 6343.52,
+      "bitRate": 15236005,
+      "sizeBytes": 12081238172
+    },
+    "video": [
+      {
+        "streamIndex": 0,
+        "codec": "hevc",
+        "profile": "Main 10",
+        "level": 150,
+        "width": 3840,
+        "height": 2160,
+        "fps": 23.976023976023978,
+        "pixelFormat": "yuv420p10le",
+        "bitDepth": 10,
+        "chroma": "4:2:0",
+        "colorRange": "limited",
+        "colorMatrix": "bt2020nc",
+        "colorPrimaries": "bt2020",
+        "colorTransfer": "smpte2084",
+        "masteringDisplay": {
+          "red": [
+            0.708,
+            0.292
+          ],
+          "green": [
+            0.17,
+            0.797
+          ],
+          "blue": [
+            0.131,
+            0.046
+          ],
+          "whitePoint": [
+            0.3127,
+            0.329
+          ],
+          "minLuminance": 0.005,
+          "maxLuminance": 1000.0
+        },
+        "maxCLL": 1000,
+        "maxFALL": 400,
+        "hdr": "HDR10",
+        "dolbyVision": null,
+        "codecTag": null,
+        "default": true
+      }
+    ],
+    "audio": [
+      {
+        "streamIndex": 1,
+        "codec": "truehd",
+        "profile": "Dolby TrueHD + Dolby Atmos",
+        "channels": 8,
+        "channelLayout": "7.1",
+        "sampleRate": 48000,
+        "bitRate": 4000000,
+        "language": "eng",
+        "title": null,
+        "default": true,
+        "forced": false,
+        "objectAudio": true,
+        "objectAudioSource": "codec profile: Dolby TrueHD + Dolby Atmos"
+      }
+    ],
+    "subtitles": [],
+    "warnings": [],
+    "probeDurationSeconds": 0.1
+  },
+  "playback": {
+    "source": "https://cdn.example/atmos.mkv",
+    "mode": "DirectWithAudioTranscode",
+    "capabilityProfile": "rk3588_orangepi5_production",
+    "needsSession": true,
+    "videoCopied": true,
+    "video": {
+      "verdict": "Direct",
+      "hdr": "HDR10",
+      "streamIndex": 0,
+      "preferAlternative": false,
+      "track": {
+        "streamIndex": 0,
+        "codec": "hevc",
+        "profile": "Main 10",
+        "level": 150,
+        "width": 3840,
+        "height": 2160,
+        "fps": 23.976023976023978,
+        "pixelFormat": "yuv420p10le",
+        "bitDepth": 10,
+        "chroma": "4:2:0",
+        "colorRange": "limited",
+        "colorMatrix": "bt2020nc",
+        "colorPrimaries": "bt2020",
+        "colorTransfer": "smpte2084",
+        "masteringDisplay": {
+          "red": [
+            0.708,
+            0.292
+          ],
+          "green": [
+            0.17,
+            0.797
+          ],
+          "blue": [
+            0.131,
+            0.046
+          ],
+          "whitePoint": [
+            0.3127,
+            0.329
+          ],
+          "minLuminance": 0.005,
+          "maxLuminance": 1000.0
+        },
+        "maxCLL": 1000,
+        "maxFALL": 400,
+        "hdr": "HDR10",
+        "dolbyVision": null,
+        "codecTag": null,
+        "default": true
+      },
+      "reasons": [
+        {
+          "code": "VIDEO_CODEC_SUPPORTED",
+          "severity": "info",
+          "message": "hevc Main 10 is hardware decoded",
+          "details": {
+            "codec": "hevc",
+            "profile": "Main 10"
+          }
+        },
+        {
+          "code": "HDR_FORMAT_SUPPORTED",
+          "severity": "info",
+          "message": "HDR10 is carried end to end",
+          "details": {
+            "hdr": "HDR10"
+          }
+        }
+      ]
+    },
+    "audio": {
+      "action": "TranscodeToAC3",
+      "track": {
+        "streamIndex": 1,
+        "codec": "truehd",
+        "profile": "Dolby TrueHD + Dolby Atmos",
+        "channels": 8,
+        "channelLayout": "7.1",
+        "sampleRate": 48000,
+        "bitRate": 4000000,
+        "language": "eng",
+        "title": null,
+        "default": true,
+        "forced": false,
+        "objectAudio": true,
+        "objectAudioSource": "codec profile: Dolby TrueHD + Dolby Atmos"
+      },
+      "target": {
+        "codec": "ac3",
+        "channels": 6,
+        "bitRate": 640000,
+        "sampleRate": 48000
+      },
+      "reasons": [
+        {
+          "code": "AUDIO_TRANSCODE_AC3",
+          "severity": "info",
+          "message": "truehd is neither passed through nor decoded to PCM by this profile",
+          "details": {
+            "codec": "truehd"
+          }
+        },
+        {
+          "code": "AUDIO_TRANSCODE_AC3",
+          "severity": "info",
+          "message": "truehd is converted to AC-3 6ch at 640 kbit/s; the video is copied",
+          "details": {
+            "fromCodec": "truehd",
+            "channels": 6,
+            "bitRate": 640000
+          }
+        },
+        {
+          "code": "AUDIO_OBJECT_METADATA_LOST",
+          "severity": "warning",
+          "message": "object audio metadata is discarded by the conversion; the bed is rendered to channels",
+          "details": {
+            "source": "codec profile: Dolby TrueHD + Dolby Atmos"
+          }
+        },
+        {
+          "code": "AUDIO_LOSSLESS_TO_LOSSY",
+          "severity": "warning",
+          "message": "truehd is lossless and AC-3 is not; this conversion loses information that cannot be recovered"
+        },
+        {
+          "code": "AUDIO_CHANNELS_REDUCED",
+          "severity": "warning",
+          "message": "8 channels are downmixed to 6",
+          "details": {
+            "fromChannels": 8,
+            "toChannels": 6
+          }
+        }
+      ]
+    },
+    "reasons": [
+      {
+        "code": "CONTAINER_SUPPORTED",
+        "severity": "info",
+        "message": "matroska,webm is opened directly",
+        "details": {
+          "container": "matroska,webm"
+        }
+      }
+    ]
+  },
+  "preview": {
+    "mode": "Unsupported",
+    "reasons": [
+      {
+        "code": "PREVIEW_SOFTWARE_TRANSCODE_REFUSED",
+        "severity": "blocking",
+        "message": "hevc is not decoded by the browser, and re-encoding it would be a software video transcode on a board with no hardware encoder",
+        "details": {
+          "codec": "hevc"
+        }
+      },
+      {
+        "code": "PREVIEW_SOFTWARE_TRANSCODE_REFUSED",
+        "severity": "blocking",
+        "message": "10-bit video would have to be converted to 8-bit in software",
+        "details": {
+          "bitDepth": 10
+        }
+      },
+      {
+        "code": "PREVIEW_SOFTWARE_TRANSCODE_REFUSED",
+        "severity": "blocking",
+        "message": "HDR10 would have to be tone mapped in software for a browser",
+        "details": {
+          "hdr": "HDR10"
+        }
+      },
+      {
+        "code": "PREVIEW_UNSUPPORTED",
+        "severity": "info",
+        "message": "this source cannot be previewed in a browser; it is still playable on the television"
+      }
+    ]
+  }
+}

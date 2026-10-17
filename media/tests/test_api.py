@@ -183,6 +183,16 @@ class PlanAndRankTests(unittest.TestCase):
         codes = {r["code"] for r in payload["playback"]["audio"]["reasons"]}
         self.assertIn("AUDIO_OBJECT_METADATA_LOST", codes)
 
+    def test_the_clients_fixture_is_still_what_plan_answers(self):
+        # mediabox-tv and mediabox-ui parse this file in their own tests; a
+        # plan they could not read ("invalid type: map, expected a string")
+        # once reached the television because nothing tied the two together.
+        from pathlib import Path
+
+        fixture = Path(__file__).with_name("data") / "plan-truehd-atmos.json"
+        payload = self._post("/media/plan", {"url": "https://cdn.example/atmos.mkv"})
+        self.assertEqual(payload, json.loads(fixture.read_text(encoding="utf-8")))
+
     def test_rank_puts_the_safe_hdr10_source_ahead_of_the_dolby_vision_one(self):
         payload = self._post(
             "/media/rank",

@@ -731,10 +731,25 @@ pub struct AudioDecision {
     pub action: String,
     #[serde(default)]
     pub track: Option<AudioTrack>,
+    /// What the AC-3 encoder is asked for; set for `TranscodeToAC3` only.
+    /// The worker sends an object here, and reading it as a string made every
+    /// plan with an audio transcode fail to parse.
     #[serde(default)]
-    pub target: Option<String>,
+    pub target: Option<AudioTarget>,
     #[serde(default)]
     pub reasons: Vec<Reason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AudioTarget {
+    #[serde(default)]
+    pub codec: String,
+    #[serde(default)]
+    pub channels: Option<u32>,
+    #[serde(rename = "bitRate", default)]
+    pub bit_rate: Option<u64>,
+    #[serde(rename = "sampleRate", default)]
+    pub sample_rate: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -945,4 +960,45 @@ pub struct SystemStatus {
     pub media: serde_json::Value,
     #[serde(default)]
     pub surface: Option<SurfaceStatus>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the media worker's `POST /media/plan` answers for a TrueHD Atmos
+    /// source, kept equal to the live answer by `media/tests/test_api.py`.
+    const TRUEHD_PLAN: &str = include_str!("../../../../media/tests/data/plan-truehd-atmos.json");
+
+    #[test]
+    fn a_plan_with_an_audio_transcode_parses() {
+        let plan: Plan = serde_json::from_str(TRUEHD_PLAN).unwrap();
+        assert_eq!(plan.playback.mode, "DirectWithAudioTranscode");
+        let audio = plan.playback.audio.as_ref().unwrap();
+        assert_eq!(audio.action, "TranscodeToAC3");
+        assert_eq!(
+            audio.target,
+            Some(AudioTarget {
+                codec: "ac3".into(),
+                channels: Some(6),
+                bit_rate: Some(640_000),
+                sample_rate: Some(48_000),
+            })
+        );
+        assert_eq!(plan.audio().and_then(|track| track.channels), Some(8));
+    }
+
+    /// Passthrough and PCM decisions carry `"target": null`; an older worker
+    /// left the field out. Both are a plan with no encoder target.
+    #[test]
+    fn a_plan_without_an_encoder_target_parses() {
+        let mut wire: serde_json::Value = serde_json::from_str(TRUEHD_PLAN).unwrap();
+        wire["playback"]["audio"]["action"] = "Passthrough".into();
+        wire["playback"]["audio"]["target"] = serde_json::Value::Null;
+        let plan: Plan = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(plan.playback.audio.as_ref().unwrap().target, None);
+        wire["playback"]["audio"].as_object_mut().unwrap().remove("target");
+        let plan: Plan = serde_json::from_value(wire).unwrap();
+        assert_eq!(plan.playback.audio.as_ref().unwrap().target, None);
+    }
 }
