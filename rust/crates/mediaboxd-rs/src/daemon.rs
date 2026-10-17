@@ -1747,6 +1747,60 @@ mod tests {
         assert_eq!(player_audio_track(&session(json!({"streamIndex": 9}))), None);
     }
 
+    /// What the worker is told the player passes through is the sound
+    /// setting's choice, not what the television declares: the Plus's Sony
+    /// declares AC-3, E-AC-3 and DTS, and the setting kept on it passes AC-3
+    /// alone. A plan made against the declaration would choose E-AC-3 and
+    /// DTS tracks the player then converts.
+    #[test]
+    fn the_worker_is_told_what_the_sound_setting_passes_through() {
+        fn sony_hdmi() -> mediabox_core::AudioDevice {
+            let sad = |coding: u8, name: &str, channels: u8, max_kbps: Option<u32>| mediabox_core::SadEntry {
+                coding,
+                name: name.into(),
+                channels,
+                rates: vec![48_000],
+                max_kbps,
+            };
+            mediabox_core::AudioDevice {
+                id: "display:fde80000.hdmi".into(),
+                label: "HDMI-A-1 · SONY TV".into(),
+                kind: mediabox_core::AudioKind::Hdmi,
+                card_id: "rockchiphdmi0".into(),
+                card_index: Some(1),
+                pcm: "hdmi:CARD=rockchiphdmi0,DEV=0".into(),
+                bitstream: true,
+                connector: Some("HDMI-A-1".into()),
+                display: true,
+                sink: Some(mediabox_core::SinkAudio {
+                    source: mediabox_core::CapsSource::Edid,
+                    entries: vec![
+                        sad(1, "LPCM", 6, None),
+                        sad(2, "AC-3", 6, Some(640)),
+                        sad(7, "DTS", 6, Some(1504)),
+                        sad(10, "E-AC-3", 8, None),
+                    ],
+                    speakers: vec!["FL/FR".into(), "LFE".into(), "FC".into(), "RL/RR".into()],
+                }),
+            }
+        }
+        let told = |formats: &str| {
+            let dir = tempdir().unwrap();
+            let setting = dir.path().join("audio.json");
+            std::fs::write(
+                &setting,
+                format!(r#"{{"schema":1,"device":{{"kind":"auto"}},"mode":"passthrough","formats":{formats},"ac3_transcode":true,"volume":100,"muted":false}}"#),
+            )
+            .unwrap();
+            let mut state = Arc::try_unwrap(test_state(&dir)).ok().unwrap();
+            state.audio = Arc::new(crate::audio::Audio::new(setting, || vec![sony_hdmi()], |_| {}));
+            state.passthrough()
+        };
+        // The setting on the Plus: E-AC-3 and DTS turned off on purpose.
+        assert_eq!(told(r#"["ac3"]"#), ["ac3"]);
+        assert_eq!(told(r#"["ac3","eac3","dts"]"#), ["ac3", "eac3", "dts"]);
+    }
+
     /// Who ends what: a film starting on the television ends the
     /// television's sessions (the player's and Kodi's); the sweep after a
     /// failed start ends only the player's, and never the one playing. A

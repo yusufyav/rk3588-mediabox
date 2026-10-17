@@ -202,6 +202,42 @@ class PlanAndRankTests(unittest.TestCase):
         # Nothing passed through: the film's fullest mix, converted.
         self.assertEqual(chosen([]), ("TranscodeToAC3", 1))
 
+    def test_a_format_the_sound_setting_turned_off_is_never_passed_through(self):
+        # The Plus's television declares E-AC-3 and DTS; its sound setting
+        # passes AC-3 alone, on purpose. The plan keeps to the setting.
+        self.table.update(
+            {
+                "https://cdn.example/ddp.mkv": F.media(
+                    [F.video_stream(), F.audio_stream(index=1, codec_name="eac3")]
+                ),
+                "https://cdn.example/dts.mkv": F.media(
+                    [F.video_stream(), F.audio_stream(index=1, codec_name="dts")]
+                ),
+                "https://cdn.example/ddp-and-ac3.mkv": F.media(
+                    [
+                        F.video_stream(),
+                        F.audio_stream(index=1, codec_name="eac3", default=1),
+                        F.audio_stream(index=2, codec_name="ac3", default=0),
+                    ]
+                ),
+            }
+        )
+
+        def chosen(name, passthrough):
+            body = {"url": f"https://cdn.example/{name}.mkv", "passthrough": passthrough}
+            audio = self._post("/media/plan", body)["playback"]["audio"]
+            return audio["action"], audio["track"]["codec"]
+
+        only_ac3 = ["ac3"]
+        self.assertEqual(chosen("ddp", only_ac3), ("TranscodeToAC3", "eac3"))
+        self.assertEqual(chosen("dts", only_ac3), ("TranscodeToAC3", "dts"))
+        self.assertEqual(chosen("ddp-and-ac3", only_ac3), ("Passthrough", "ac3"))
+        # Turned back on, they pass through as they are.
+        all_three = ["ac3", "eac3", "dts"]
+        self.assertEqual(chosen("ddp", all_three), ("Passthrough", "eac3"))
+        self.assertEqual(chosen("dts", all_three), ("Passthrough", "dts"))
+        self.assertEqual(chosen("ddp-and-ac3", all_three), ("Passthrough", "eac3"))
+
     def test_a_malformed_passthrough_list_is_refused(self):
         response = self.core.handle(
             "POST",
