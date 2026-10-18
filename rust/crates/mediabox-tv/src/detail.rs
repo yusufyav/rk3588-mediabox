@@ -355,15 +355,7 @@ impl Detail {
             return false;
         }
         if dx < 0 {
-            // Left out of the column is the record — but only when there is
-            // something there to land on. A title with no trailer has an empty
-            // action row, and moving the remote onto it would strand it.
-            if !self.enabled().iter().any(|ok| *ok) {
-                return false;
-            }
-            self.pane = Pane::Record;
-            self.settle();
-            return true;
+            return self.leave_for_record();
         }
         if dx > 0 {
             return false;
@@ -469,6 +461,11 @@ impl Detail {
         };
         self.record_loaded = true;
         self.follow_last_played();
+        // A series opens on its episodes, as a film opens on its sources:
+        // they are what the page is for.
+        if self.is_series() && !self.touched && !self.meta.videos.is_empty() {
+            self.pane = Pane::Episodes;
+        }
     }
 
     pub fn take_streams(&mut self, listing: StreamListing, raw: Vec<Value>) {
@@ -719,12 +716,17 @@ impl Detail {
         false
     }
 
+    /// Left out of the column: onto the button nearest it, the last one that
+    /// can be pressed, so further presses walk the row leftwards. Only when
+    /// there is something there to land on: a title with no trailer and no
+    /// account has an empty action row, and moving the remote onto it would
+    /// strand it.
     fn leave_for_record(&mut self) -> bool {
-        if !self.enabled().iter().any(|ok| *ok) {
+        let Some(last) = self.enabled().iter().rposition(|ok| *ok) else {
             return false;
-        }
+        };
         self.pane = Pane::Record;
-        self.settle();
+        self.action = last;
         true
     }
 
@@ -1418,6 +1420,44 @@ mod filter_tests {
         assert_eq!(film.providers()[film.provider - 1], "WatchHub");
         assert_eq!(film.shown(), vec![2]);
         assert_eq!(film.selected, Some(1));
+    }
+
+    #[test]
+    fn left_from_the_sources_lands_on_the_nearest_button_and_walks_the_row() {
+        let raws = vec![release("t1", "Torrentio", 4, true)];
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_meta(serde_json::from_value(json!({"id": "tt1", "trailer": "abc"})).expect("a record"));
+        film.take_watch(serde_json::from_value(json!({})).expect("a state"));
+        film.take_streams(listed(&raws, &[]), raws.clone());
+        assert_eq!(film.pane, Pane::Sources);
+
+        assert!(film.step(-1, 0));
+        assert_eq!(film.pane, Pane::Record);
+        assert_eq!(film.focused_action(), Some(Action::Watched));
+        assert!(film.step(-1, 0));
+        assert_eq!(film.focused_action(), Some(Action::Library));
+        assert!(film.step(-1, 0));
+        assert_eq!(film.focused_action(), Some(Action::Trailer));
+        assert!(!film.step(-1, 0));
+    }
+
+    #[test]
+    fn a_series_opens_on_its_episodes_unless_the_viewer_has_moved() {
+        let mut item = crate::state::Item::stub("tt2");
+        item.kind = "series".into();
+        let record = || -> Meta {
+            serde_json::from_value(json!({"id": "tt2", "type": "series", "trailer": "abc",
+                "videos": [{"id": "tt2:1:1", "season": 1, "episode": 1}]}))
+            .expect("a record")
+        };
+        let mut series = Detail::seeded(&item);
+        series.take_meta(record());
+        assert_eq!(series.pane, Pane::Episodes);
+
+        let mut moved = Detail::seeded(&item);
+        moved.step(1, 0);
+        moved.take_meta(record());
+        assert_ne!(moved.pane, Pane::Episodes);
     }
 
     fn with(sources: Vec<Source>) -> Detail {

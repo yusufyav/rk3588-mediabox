@@ -248,6 +248,9 @@ struct App {
     /// Ok held down where a hold means something of its own, and not yet
     /// let go.
     ok_hold: Option<OkHold>,
+    /// Space is down on a film: the keyboard repeats it while held, and one
+    /// press is one pause.
+    space_down: bool,
 
     /// The film this interface started on its own video plane, if there is
     /// one.
@@ -1784,22 +1787,9 @@ impl App {
                     self.paint();
                     return;
                 }
-                // Back out of the source column before backing out of the
-                // screen: one press, one step, and never two things at once.
-                let left = self
-                    .detail
-                    .as_mut()
-                    .filter(|detail| detail.pane != detail::Pane::Record)
-                    .map(|detail| {
-                        detail.pane = detail::Pane::Record;
-                        detail.settle();
-                    })
-                    .is_some();
-                if left {
-                    self.paint();
-                } else {
-                    self.back();
-                }
+                // Otherwise Back leaves the title, from wherever the remote is
+                // on it: the buttons are reached with Left.
+                self.back();
             }
             _ => {}
         }
@@ -6228,6 +6218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         caption: String::new(),
         subtitle_generation: 0,
         ok_hold: None,
+        space_down: false,
         here: None,
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
@@ -6317,6 +6308,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if input::action_for_key(text.as_str()) == Some(InputAction::Ok) {
             with_app(|app| app.ok_up());
         }
+        if text.as_str() == " " {
+            with_app(|app| app.space_down = false);
+        }
     });
     window.on_key_pressed(move |text| {
         let Some(first) = text.chars().next() else {
@@ -6326,6 +6320,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut held = false;
             with_app(|app| held = app.ok_down());
             if held {
+                return;
+            }
+        }
+        // Space on a film is pause and play again, as in Stremio's player;
+        // anywhere else it is a letter.
+        if text.as_str() == " " {
+            let mut on_film = false;
+            with_app(|app| {
+                if app.here.is_none() {
+                    return;
+                }
+                on_film = true;
+                if std::mem::replace(&mut app.space_down, true) {
+                    return;
+                }
+                if let Some(action) = app.dispatcher.accept(InputAction::PlayPause, input::Origin::Keyboard) {
+                    app.act(action);
+                }
+            });
+            if on_film {
                 return;
             }
         }
