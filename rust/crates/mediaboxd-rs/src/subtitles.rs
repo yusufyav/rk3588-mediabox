@@ -652,34 +652,6 @@ impl Subtitles {
         }
     }
 
-    /// A subtitle shown although nothing could time it is shown at the
-    /// engine's own estimate rather than at none, when the estimate rests on
-    /// more than a stray window. The engine refused it for want of
-    /// confidence, and it stays refused: nothing else trusts it.
-    ///
-    /// Carmen, 2026-10-18 (no subtitle of its own, mostly music): the engine
-    /// put the 23.976 timing at -18.12 s from 3 of 31 windows and refused
-    /// it; shown at 0 it ran behind the speech, at -18.12 s it was with it.
-    /// The other timing's estimate rested on 1 window and is not used.
-    async fn put_on_estimate(&self, number: u64, id: &str) {
-        if !self.preferences().auto_sync() {
-            return;
-        }
-        let estimate = self.with_film(number, |film| {
-            let timing = film.timing.get(id)?;
-            (film.selected.as_deref() == Some(id)
-                && !film.manual_delay
-                && timing.inliers >= ESTIMATE_MIN_INLIERS
-                && timing.offset != 0.0)
-                .then_some((timing.offset, timing.inliers))
-        });
-        let Some(Some((offset, inliers))) = estimate else {
-            return;
-        };
-        eprintln!("mediaboxd-rs: film {number}: subtitle {id} at its estimate, {offset:+.2} s ({inliers} windows agree)");
-        self.player.subtitle_timing(offset, 1.0).await;
-    }
-
     /// With "AutoSync uyumsuz altyazıları göster" off, a subtitle AutoSync
     /// refused is not left on the screen, whoever put it on.
     async fn withdraw(&self, number: u64, id: &str) {
@@ -766,28 +738,38 @@ impl Subtitles {
 
     /// Every automatic candidate was tried and none was accepted. A subtitle
     /// shown not to fit is never what is left on: the film's own text track
-    /// in the language, else -- only with "AutoSync uyumsuz altyazıları
-    /// göster" on -- one whose fit could not be told (untimed, as it came),
-    /// else nothing.
+    /// in the language, else -- with "Otomatik eşitleme" on -- one the engine
+    /// could put at an estimate enough of its windows agree on, timed at it,
+    /// else -- only with "AutoSync uyumsuz altyazıları göster" on -- one
+    /// whose fit could not be told (untimed, as it came), else nothing.
     async fn fall_back(self: &Arc<Self>, number: u64) {
         // The automatic choice is over: the rest of the language is checked.
         spawn_survey(Arc::clone(self), number);
         let show = self.preferences().show_incompatible();
-        let Some((manual, undecided)) = self.with_film(number, |film| {
-            let undecided: Vec<(String, Option<f64>)> = film
+        let Some((manual, estimated, undecided)) = self.with_film(number, |film| {
+            let open: Vec<&String> = film
                 .tried
                 .iter()
                 .filter(|tried| film.loaded.contains_key(tried.as_str()) && !known_bad(film.timing.get(tried.as_str())))
-                .filter(|_| show)
-                .map(|tried| (tried.clone(), film.loaded.get(tried.as_str()).and_then(|loaded| loaded.last)))
                 .collect();
-            (film.manual, undecided)
+            let last = |id: &String| film.loaded.get(id.as_str()).and_then(|loaded| loaded.last);
+            let estimated: Vec<(String, Option<f64>)> = open
+                .iter()
+                .filter(|id| film.timing.get(id.as_str()).is_some_and(estimate_holds))
+                .map(|id| ((*id).clone(), last(id)))
+                .collect();
+            let undecided: Vec<(String, Option<f64>)> =
+                open.iter().filter(|_| show).map(|id| ((*id).clone(), last(id))).collect();
+            (film.manual, estimated, undecided)
         }) else {
             return;
         };
+        if manual {
+            return;
+        }
         // Which of them, when there is a choice: the film's length is asked
         // for only then.
-        let duration = if undecided.len() > 1 {
+        let duration = if estimated.len() > 1 || undecided.len() > 1 {
             self.player
                 .property("duration")
                 .await
@@ -796,23 +778,24 @@ impl Subtitles {
         } else {
             None
         };
-        let undecided = undecided_to_show(&undecided, duration);
-        if let (Some(id), Some(duration)) = (undecided.as_deref(), duration) {
-            eprintln!("mediaboxd-rs: film {number}: no subtitle could be timed; showing {id} untimed, against a {duration:.0} s film");
-        }
-        if manual {
-            return;
-        }
         let tracks = self.player.tracks().await;
         let preferences = self.preferences();
-        let choice = match (fallback_choice(&preferences, &tracks), undecided) {
+        let own = fallback_choice(&preferences, &tracks);
+        if !matches!(own, Choice::Embedded(_))
+            && preferences.auto_sync()
+            && let Some(id) = undecided_to_show(&estimated, duration)
+        {
+            self.time_at_estimate(number, &id).await;
+            return;
+        }
+        let choice = match (own, undecided_to_show(&undecided, duration)) {
             (Choice::Embedded(track), _) => Choice::Embedded(track),
             (_, Some(undecided)) => {
+                eprintln!("mediaboxd-rs: film {number}: no subtitle could be timed; showing {undecided} untimed");
                 let on = self.with_film(number, |film| film.selected.as_deref() == Some(undecided.as_str()));
                 if on != Some(true) {
                     self.put_on(number, &undecided).await;
                 }
-                self.put_on_estimate(number, &undecided).await;
                 return;
             }
             (choice, None) => choice,
@@ -820,6 +803,35 @@ impl Subtitles {
         eprintln!("mediaboxd-rs: film {number}: no fetched subtitle fits; {choice:?}");
         if !self.with_film(number, |film| film.manual).unwrap_or(true) {
             self.apply_own(number, choice).await;
+        }
+    }
+
+    /// AutoSync's answer when nothing could be timed with confidence: the
+    /// subtitle at the engine's own estimate, put on and said as any timing
+    /// AutoSync puts on is -- in the menu, and once on the screen.
+    ///
+    /// Carmen, 2026-10-18 (no subtitle of its own, mostly music): the engine
+    /// put the 23.976 timing at -18.12 s from 3 of 31 windows and refused
+    /// it; untimed it ran behind the speech, at -18.12 s it was with it. The
+    /// engine's verdict is not changed: this is the control plane's use of
+    /// the estimate it gave, after everything it could confirm was tried.
+    async fn time_at_estimate(&self, number: u64, id: &str) {
+        let Some(Some((offset, inliers, on))) = self.with_film(number, |film| {
+            let on = film.selected.as_deref() == Some(id);
+            let timing = film.timing.get_mut(id)?;
+            timing.state = "applied".into();
+            Some((timing.offset, timing.inliers, on))
+        }) else {
+            return;
+        };
+        eprintln!(
+            "mediaboxd-rs: film {number}: nothing could be timed with confidence; subtitle {id} at the engine's estimate, {offset:+.2} s ({inliers} windows agree)"
+        );
+        if on {
+            self.player.subtitle_timing(offset, 1.0).await;
+            self.with_film(number, |film| film.manual_delay = false);
+        } else {
+            self.put_on(number, id).await;
         }
     }
 
@@ -1221,9 +1233,15 @@ fn undecided_to_show(undecided: &[(String, Option<f64>)], duration: Option<f64>)
         .or(first)
 }
 
-/// How many of the engine's windows must agree before a refused subtitle
-/// shown anyway is put at its estimate. One window is chance.
+/// How many of the engine's windows must agree before its estimate for a
+/// subtitle it could not confirm is used. One window is chance.
 const ESTIMATE_MIN_INLIERS: u64 = 3;
+
+/// Whether the engine's estimate for a subtitle it did not accept is worth
+/// timing it at: an offset at all, that enough windows agree on.
+fn estimate_holds(timing: &Timing) -> bool {
+    timing.state == "rejected" && timing.inliers >= ESTIMATE_MIN_INLIERS && timing.offset != 0.0
+}
 
 /// How far past the film's end a subtitle's last line may run and still be
 /// taken for this film: a closing line held over the last frame.
@@ -2186,24 +2204,48 @@ mod flows {
     }
 
     #[tokio::test]
-    async fn the_one_shown_untimed_is_put_at_an_estimate_enough_windows_agree_on() {
-        for (inliers, delay) in [(3, 1.82), (1, 0.0)] {
+    async fn when_nothing_could_be_confirmed_autosync_times_one_at_an_estimate_enough_windows_agree_on() {
+        // Whether incompatible ones are shown or not: this is AutoSync's own
+        // answer, applied and said as one.
+        for preferences in [turkish(), shown()] {
             let worker = Worker {
                 apply: Value::Null,
                 refusal: Some("INCONCLUSIVE"),
-                inliers: Some(inliers),
+                inliers: Some(3),
                 last_cues: &[("tr1", 5175.0), ("tr2", 5380.0)],
                 ..Worker::default()
             };
-            let rig = rig(worker, shown()).await;
+            let rig = rig(worker, preferences.clone()).await;
             rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
             let subtitles = Arc::clone(&rig.subtitles);
-            settled(&subtitles, |list| {
-                entry(list, "ext:tr2").is_some_and(|e| e["sync"]["state"] == "rejected" && e["selected"] == true)
+            let list = settled(&subtitles, |list| {
+                entry(list, "ext:tr2").is_some_and(|e| e["sync"]["state"] == "applied" && e["selected"] == true)
             })
             .await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            assert_eq!(rig.mpv.lock().unwrap().delay, delay, "{inliers} windows");
+            assert_eq!(entry(&list, "ext:tr2").unwrap()["sync"]["offset"], 1.82);
+            let mpv = Arc::clone(&rig.mpv);
+            until("the estimate is on", || mpv.lock().unwrap().delay == 1.82).await;
+            assert!(mpv.lock().unwrap().sid.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_estimate_one_window_agrees_on_is_not_used() {
+        for (preferences, shown_untimed) in [(turkish(), false), (shown(), true)] {
+            let worker = Worker {
+                apply: Value::Null,
+                refusal: Some("INCONCLUSIVE"),
+                inliers: Some(1),
+                ..Worker::default()
+            };
+            let rig = rig(worker, preferences).await;
+            rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+            let seen = Arc::clone(&rig.seen);
+            until("both were answered", || syncs(&seen) >= 2).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mpv = rig.mpv.lock().unwrap();
+            assert_eq!(mpv.delay, 0.0);
+            assert_eq!(mpv.sid.is_some(), shown_untimed);
         }
     }
 
