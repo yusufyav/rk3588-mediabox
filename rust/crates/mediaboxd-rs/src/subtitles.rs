@@ -214,6 +214,8 @@ pub struct Timing {
     pub ratio: Option<String>,
     /// The pre-filter's own estimate of the offset (seconds).
     pub estimated_offset: Option<f64>,
+    /// How many of the engine's windows agreed with `offset`.
+    pub inliers: u64,
     /// Answered from what was kept, not worked out now.
     pub cached: bool,
 }
@@ -650,6 +652,34 @@ impl Subtitles {
         }
     }
 
+    /// A subtitle shown although nothing could time it is shown at the
+    /// engine's own estimate rather than at none, when the estimate rests on
+    /// more than a stray window. The engine refused it for want of
+    /// confidence, and it stays refused: nothing else trusts it.
+    ///
+    /// Carmen, 2026-10-18 (no subtitle of its own, mostly music): the engine
+    /// put the 23.976 timing at -18.12 s from 3 of 31 windows and refused
+    /// it; shown at 0 it ran behind the speech, at -18.12 s it was with it.
+    /// The other timing's estimate rested on 1 window and is not used.
+    async fn put_on_estimate(&self, number: u64, id: &str) {
+        if !self.preferences().auto_sync() {
+            return;
+        }
+        let estimate = self.with_film(number, |film| {
+            let timing = film.timing.get(id)?;
+            (film.selected.as_deref() == Some(id)
+                && !film.manual_delay
+                && timing.inliers >= ESTIMATE_MIN_INLIERS
+                && timing.offset != 0.0)
+                .then_some((timing.offset, timing.inliers))
+        });
+        let Some(Some((offset, inliers))) = estimate else {
+            return;
+        };
+        eprintln!("mediaboxd-rs: film {number}: subtitle {id} at its estimate, {offset:+.2} s ({inliers} windows agree)");
+        self.player.subtitle_timing(offset, 1.0).await;
+    }
+
     /// With "AutoSync uyumsuz altyazıları göster" off, a subtitle AutoSync
     /// refused is not left on the screen, whoever put it on.
     async fn withdraw(&self, number: u64, id: &str) {
@@ -782,6 +812,7 @@ impl Subtitles {
                 if on != Some(true) {
                     self.put_on(number, &undecided).await;
                 }
+                self.put_on_estimate(number, &undecided).await;
                 return;
             }
             (choice, None) => choice,
@@ -1190,6 +1221,10 @@ fn undecided_to_show(undecided: &[(String, Option<f64>)], duration: Option<f64>)
         .or(first)
 }
 
+/// How many of the engine's windows must agree before a refused subtitle
+/// shown anyway is put at its estimate. One window is chance.
+const ESTIMATE_MIN_INLIERS: u64 = 3;
+
 /// How far past the film's end a subtitle's last line may run and still be
 /// taken for this film: a closing line held over the last frame.
 const UNDECIDED_RUN_PAST: f64 = 1.01;
@@ -1226,6 +1261,7 @@ fn timing_from(job: &Value, state: &str) -> Timing {
         reference: verdict.get("reference").and_then(Value::as_str).map(str::to_owned),
         ratio: verdict.get("ratioLabel").and_then(Value::as_str).map(str::to_owned),
         estimated_offset: verdict.get("offset").and_then(Value::as_f64),
+        inliers: result.get("inliers").and_then(Value::as_u64).unwrap_or(0),
         cached: job.get("cache").and_then(Value::as_str) == Some("hit"),
     }
 }
@@ -1764,6 +1800,8 @@ mod flows {
         apply: Value,
         /// Polls answered "running" before "done".
         polls_before_done: usize,
+        /// How many windows agree with the engine's offset in its answer.
+        inliers: Option<u64>,
         /// When each candidate's last line ends, as the worker reads it.
         last_cues: &'static [(&'static str, f64)],
         /// The candidate whose subtitle ends long before the film.
@@ -1850,6 +1888,7 @@ mod flows {
                         json!({"job": job, "state": "done", "apply": worker.apply,
                                "result": {"model": if worker.apply["kind"] == "file" {"piecewise"} else {"offset"},
                                           "decision": decision, "offset": 1.82, "scale": 1.0, "confidence": 0.97,
+                                          "inliers": worker.inliers,
                                           "reason": if worker.apply.is_null() { Some(reason) } else { None },
                                           "eligibility": {"result": verdict, "reference": "embedded-picture", "ratioLabel": "1"}}})
                     }
@@ -2144,6 +2183,28 @@ mod flows {
         .await;
         assert_eq!(entry(&list, "ext:tr1").unwrap()["selected"], false);
         assert_eq!(rig.mpv.lock().unwrap().delay, 0.0);
+    }
+
+    #[tokio::test]
+    async fn the_one_shown_untimed_is_put_at_an_estimate_enough_windows_agree_on() {
+        for (inliers, delay) in [(3, 1.82), (1, 0.0)] {
+            let worker = Worker {
+                apply: Value::Null,
+                refusal: Some("INCONCLUSIVE"),
+                inliers: Some(inliers),
+                last_cues: &[("tr1", 5175.0), ("tr2", 5380.0)],
+                ..Worker::default()
+            };
+            let rig = rig(worker, shown()).await;
+            rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+            let subtitles = Arc::clone(&rig.subtitles);
+            settled(&subtitles, |list| {
+                entry(list, "ext:tr2").is_some_and(|e| e["sync"]["state"] == "rejected" && e["selected"] == true)
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(rig.mpv.lock().unwrap().delay, delay, "{inliers} windows");
+        }
     }
 
     #[tokio::test]
