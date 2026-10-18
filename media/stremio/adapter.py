@@ -157,9 +157,14 @@ def _watch_state(record: dict[str, Any] | None, meta: Meta | None) -> dict[str, 
 
 LOG = logging.getLogger(__name__)
 
-#: The longest one reply waits for the addons. Past this it goes out with what
-#: has arrived and names the addons still loading; a source list that is nearly
-#: complete now beats a complete one after a dead host's connect timeout.
+#: The longest a title's first reply waits for its addons. Past this it goes
+#: out with what has arrived and names the addons still loading, as Stremio
+#: shows each addon's sources when they come. Measured on the Plus, the
+#: addons that answer do so in 0.3-1.2 s; one whose host is half gone held
+#: every reply to the deadline (15 s connects to one of rarbg's two addresses).
+STREAM_FIRST_REPLY = 2.0
+#: The longest a reply waits for an addon a previous reply already went out
+#: without: asking again is waiting for the next of them to answer.
 STREAM_DEADLINE = 6.0
 #: How long an addon's answer that came after its reply went out is kept for
 #: the next request for the same title.
@@ -288,6 +293,8 @@ class HeadlessStremio:
         # while it runs and, once a reply has gone out without it, until its
         # answer is handed to the next request.
         self._stream_asks: dict[tuple[str, str, str], _StreamAsk] = {}
+        # Told whenever one of those requests finishes.
+        self._stream_answered = threading.Condition(self._lock)
         self._meta_cache: dict[tuple[str, str], tuple[float, Meta]] = {}
 
     # ------------------------------------------------------------------ session
@@ -919,18 +926,32 @@ class HeadlessStremio:
         addons: a single installed addon whose host had gone away — measured
         on a real collection — spent fifteen seconds in a connect
         timeout, and the sources for the film did not appear until it gave up,
-        however quickly the others had answered. The wait is now the slowest
-        single addon, capped. Whatever has not answered by the deadline is
-        named as loading rather than given up on: its request runs on, as it
-        does in Stremio, and its answer goes to the next request.
+        however quickly the others had answered. Whatever has not answered by
+        the first reply is named as loading rather than given up on: its
+        request runs on, as it does in Stremio, and the reply to the next
+        request comes as soon as one of those answers.
         """
         asks = [self._ask_for_streams(addon, type_name, target) for addon in addons]
         results: list[list[Stream]] = [[] for _ in addons]
         loading: list[int] = []
-        deadline = self._clock() + STREAM_DEADLINE
-        for index, ask in enumerate(asks):
-            ask.done.wait(timeout=max(0.0, deadline - self._clock()))
-            with self._lock:
+        with self._lock:
+            # Requests a reply already went out without: this one is asking
+            # again, and waits for the next of them rather than for all.
+            earlier = [ask for ask in asks if ask.outlived and not ask.done.is_set()]
+            wait = STREAM_DEADLINE if earlier else STREAM_FIRST_REPLY
+            deadline = self._clock() + wait
+
+            def settled() -> bool:
+                if all(ask.done.is_set() for ask in asks):
+                    return True
+                return any(ask.done.is_set() for ask in earlier)
+
+            while not settled():
+                left = deadline - self._clock()
+                if left <= 0:
+                    break
+                self._stream_answered.wait(timeout=left)
+            for index, ask in enumerate(asks):
                 if not ask.done.is_set():
                     ask.outlived = True
                     loading.append(index)
@@ -939,12 +960,12 @@ class HeadlessStremio:
                     # A late answer is handed over once; the next opening
                     # of the title asks again.
                     del self._stream_asks[ask.key]
-            results[index] = ask.streams or []
+                results[index] = ask.streams or []
         for index in loading:
             LOG.info(
                 "Streams from %s did not answer within %.0fs; still loading",
                 addons[index].id,
-                STREAM_DEADLINE,
+                wait,
             )
         return results, loading
 
@@ -975,6 +996,7 @@ class HeadlessStremio:
                 ask.streams = streams
                 ask.finished_at = self._clock()
                 ask.done.set()
+                self._stream_answered.notify_all()
                 if ask.outlived:
                     LOG.info("Streams from %s answered late, kept for the next request", addon.id)
                 # Nobody is waiting for an answer that came in time, or for

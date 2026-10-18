@@ -281,9 +281,9 @@ class AdapterTests(unittest.TestCase):
     def _with_stream_deadline(self, seconds: float):
         from ..stremio import adapter as adapter_module
 
-        previous = adapter_module.STREAM_DEADLINE
-        adapter_module.STREAM_DEADLINE = seconds
-        self.addCleanup(setattr, adapter_module, "STREAM_DEADLINE", previous)
+        for name in ("STREAM_FIRST_REPLY", "STREAM_DEADLINE"):
+            self.addCleanup(setattr, adapter_module, name, getattr(adapter_module, name))
+            setattr(adapter_module, name, seconds)
 
     def test_a_slow_addon_is_loading_and_its_answer_comes_with_the_next_request(self):
         """The case measured on the appliance: Torrentio and MediaFusion missed
@@ -324,6 +324,38 @@ class AdapterTests(unittest.TestCase):
         time.sleep(0.05)
         self.assertEqual(adapter.stream_listing("movie", "tt1")[1], [])
         self.assertEqual(calls.count("a"), 1)
+
+    def test_a_dead_addon_holds_the_first_reply_only_to_the_first_reply_time(self):
+        """Measured on the Plus: a host whose first address hangs held every
+        reply for a title to the full deadline."""
+        from ..stremio import adapter as adapter_module
+
+        self._with_stream_deadline(5.0)
+        adapter_module.STREAM_FIRST_REPLY = 0.1
+        release = threading.Event()
+        self.addCleanup(release.set)
+        adapter = self._slow_stream_adapter(release)
+        began = time.monotonic()
+        streams, loading = adapter.stream_listing("movie", "tt1")
+        self.assertLess(time.monotonic() - began, 1.0)
+        self.assertEqual([s.url for s in streams], ["https://cdn/b.mkv"])
+        self.assertEqual(loading, ["a"])
+
+    def test_asking_again_answers_as_soon_as_the_slow_addon_does(self):
+        from ..stremio import adapter as adapter_module
+
+        self._with_stream_deadline(5.0)
+        adapter_module.STREAM_FIRST_REPLY = 0.05
+        release = threading.Event()
+        self.addCleanup(release.set)
+        adapter = self._slow_stream_adapter(release)
+        adapter.stream_listing("movie", "tt1")
+        threading.Timer(0.2, release.set).start()
+        began = time.monotonic()
+        streams, loading = adapter.stream_listing("movie", "tt1")
+        self.assertLess(time.monotonic() - began, 2.0)
+        self.assertEqual([s.url for s in streams], ["https://cdn/a.mkv", "https://cdn/b.mkv"])
+        self.assertEqual(loading, [])
 
     def test_an_addon_that_was_slow_is_asked_again_next_time(self):
         """No penalty: once its late answer has been handed over, the next
