@@ -312,6 +312,11 @@ class LoadAndSync(Harness):
         self.assertEqual(status, 200)
         self.assertIn("ğüşİ", body.decode("utf-8"))
 
+    def test_a_loaded_subtitle_says_where_its_last_line_ends(self):
+        # The control plane tells two timings of one text apart by it.
+        loaded = self.prepared(srt([(1, 2), (6051.5, 6053.25), (3, 4)]))
+        self.assertEqual(loaded["lastCue"], 6053.25)
+
     def test_a_legacy_code_page_is_given_to_the_player_as_utf8(self):
         loaded = self.prepared("1\n00:00:01,000 --> 00:00:02,000\nİyi günler\n".encode("cp1254"))
         _, body = self.call("GET", loaded["url"][len("http://127.0.0.1:8790"):])

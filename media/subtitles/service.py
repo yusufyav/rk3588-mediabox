@@ -542,6 +542,9 @@ class SubtitleService:
             "url": self.file_url(key, document.extension),
             "format": document.format,
             "cues": len(document.cues),
+            # Where its last line ends: the control plane tells two timings
+            # of the same text apart by it when neither could be checked.
+            "lastCue": round(max((cue.end for cue in document.cues), default=0.0), 3) or None,
             "language": canonical(subtitle.language),
         }
 

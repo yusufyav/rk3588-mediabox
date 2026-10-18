@@ -245,6 +245,8 @@ struct Loaded {
     key: String,
     url: String,
     mpv: i64,
+    /// When its last line ends, in seconds, as the worker read it.
+    last: Option<f64>,
 }
 
 /// What is known about the subtitles of the film playing now.
@@ -507,7 +509,8 @@ impl Subtitles {
             .player
             .sub_add(&url, &title, candidate.language.as_deref())
             .await?;
-        let loaded = Loaded { key, url, mpv };
+        let last = answer.get("lastCue").and_then(Value::as_f64);
+        let loaded = Loaded { key, url, mpv, last };
         self.with_film(number, |film| {
             film.loaded.insert(id.to_owned(), loaded.clone());
         })?;
@@ -741,16 +744,32 @@ impl Subtitles {
         spawn_survey(Arc::clone(self), number);
         let show = self.preferences().show_incompatible();
         let Some((manual, undecided)) = self.with_film(number, |film| {
-            let undecided = film
+            let undecided: Vec<(String, Option<f64>)> = film
                 .tried
                 .iter()
-                .find(|tried| film.loaded.contains_key(tried.as_str()) && !known_bad(film.timing.get(tried.as_str())))
+                .filter(|tried| film.loaded.contains_key(tried.as_str()) && !known_bad(film.timing.get(tried.as_str())))
                 .filter(|_| show)
-                .cloned();
+                .map(|tried| (tried.clone(), film.loaded.get(tried.as_str()).and_then(|loaded| loaded.last)))
+                .collect();
             (film.manual, undecided)
         }) else {
             return;
         };
+        // Which of them, when there is a choice: the film's length is asked
+        // for only then.
+        let duration = if undecided.len() > 1 {
+            self.player
+                .property("duration")
+                .await
+                .and_then(|value| value.as_f64())
+                .filter(|seconds| *seconds > 0.0)
+        } else {
+            None
+        };
+        let undecided = undecided_to_show(&undecided, duration);
+        if let (Some(id), Some(duration)) = (undecided.as_deref(), duration) {
+            eprintln!("mediaboxd-rs: film {number}: no subtitle could be timed; showing {id} untimed, against a {duration:.0} s film");
+        }
         if manual {
             return;
         }
@@ -1143,6 +1162,38 @@ fn incompatible(timing: Option<&Timing>) -> bool {
     timing.is_some_and(|timing| timing.state == "rejected")
 }
 
+/// Of the subtitles whose fit could not be told, in the order they were
+/// tried, the one to show untimed.
+///
+/// The first tried, as it always was -- unless the film's length and each
+/// one's last line are known: then the one that covers the most of the film
+/// without running past its end. The same translation is often there timed
+/// twice, for 25 and for 23.976 frames a second; measured on the Plus
+/// (Carmen, 2026-10-18), the first tried was the 25 one, which ended 4 %
+/// early on the 23.976 film and fell further behind it all the way, while
+/// the other ended 43 s before the film did. A subtitle timed for a slower
+/// film runs past this one's end.
+fn undecided_to_show(undecided: &[(String, Option<f64>)], duration: Option<f64>) -> Option<String> {
+    let first = undecided.first().map(|(id, _)| id.clone());
+    let Some(duration) = duration else {
+        return first;
+    };
+    let limit = duration * UNDECIDED_RUN_PAST;
+    undecided
+        .iter()
+        .filter_map(|(id, last)| last.filter(|last| *last <= limit).map(|last| (id, last)))
+        .fold(None::<(&String, f64)>, |best, (id, last)| match best {
+            Some((_, kept)) if kept >= last => best,
+            _ => Some((id, last)),
+        })
+        .map(|(id, _)| id.clone())
+        .or(first)
+}
+
+/// How far past the film's end a subtitle's last line may run and still be
+/// taken for this film: a closing line held over the last frame.
+const UNDECIDED_RUN_PAST: f64 = 1.01;
+
 /// The candidates the automatic choice may take, in their order.
 fn usable(film: &Film) -> Vec<Candidate> {
     film.candidates
@@ -1332,6 +1383,32 @@ mod tests {
         Preferences { enabled: Some(true), language: Some(language.into()), origin, ..Preferences::default() }
     }
 
+    fn undecided(entries: &[(&str, Option<f64>)]) -> Vec<(String, Option<f64>)> {
+        entries.iter().map(|(id, last)| (id.to_string(), *last)).collect()
+    }
+
+    #[test]
+    fn of_the_untimed_the_one_that_covers_the_film_is_shown() {
+        // Carmen, 2026-10-18: a 6094 s film, the same translation for 25
+        // frames a second (ends 5766 s) and for 23.976 (ends 6051 s).
+        let both = undecided(&[("ext:pal", Some(5766.1)), ("ext:film", Some(6051.1))]);
+        assert_eq!(undecided_to_show(&both, Some(6094.1)).as_deref(), Some("ext:film"));
+        // One timed for a slower film runs past this one's end.
+        let past = undecided(&[("ext:fits", Some(5800.0)), ("ext:slow", Some(6350.0))]);
+        assert_eq!(undecided_to_show(&past, Some(6094.0)).as_deref(), Some("ext:fits"));
+    }
+
+    #[test]
+    fn without_the_lengths_the_first_tried_is_shown_as_it_always_was() {
+        let both = undecided(&[("ext:a", Some(5766.0)), ("ext:b", Some(6051.0))]);
+        assert_eq!(undecided_to_show(&both, None).as_deref(), Some("ext:a"));
+        let unknown = undecided(&[("ext:a", None), ("ext:b", None)]);
+        assert_eq!(undecided_to_show(&unknown, Some(6094.0)).as_deref(), Some("ext:a"));
+        let all_past = undecided(&[("ext:a", Some(7000.0)), ("ext:b", Some(7100.0))]);
+        assert_eq!(undecided_to_show(&all_past, Some(6094.0)).as_deref(), Some("ext:a"));
+        assert_eq!(undecided_to_show(&[], Some(6094.0)), None);
+    }
+
     #[test]
     fn nothing_is_chosen_for_a_viewer_who_never_chose() {
         let tracks = [track(1, "tur", false)];
@@ -1490,7 +1567,7 @@ mod tests {
         let mut loaded = HashMap::new();
         loaded.insert(
             "ext:a".to_string(),
-            Loaded { key: "k".into(), url: "http://127.0.0.1:8790/media/subtitles/file/k.srt".into(), mpv: 3 },
+            Loaded { key: "k".into(), url: "http://127.0.0.1:8790/media/subtitles/file/k.srt".into(), mpv: 3, last: None },
         );
         let mut added = track(3, "tur", true);
         added["selected"] = json!(true);
@@ -1687,6 +1764,8 @@ mod flows {
         apply: Value,
         /// Polls answered "running" before "done".
         polls_before_done: usize,
+        /// When each candidate's last line ends, as the worker reads it.
+        last_cues: &'static [(&'static str, f64)],
         /// The candidate whose subtitle ends long before the film.
         misfit: Option<&'static str>,
         /// The pre-filter's answer for a refused one.
@@ -1746,7 +1825,8 @@ mod flows {
                     }
                     let same = if worker.twins && id == "tr2" { "tr1" } else { id };
                     if status == "200 OK" {
-                        json!({"key": format!("{same:0>32}"), "url": format!("http://127.0.0.1:8790/media/subtitles/file/{id}.srt"), "format": "srt"})
+                        let last = worker.last_cues.iter().find(|(c, _)| *c == id).map(|(_, last)| *last);
+                        json!({"key": format!("{same:0>32}"), "url": format!("http://127.0.0.1:8790/media/subtitles/file/{id}.srt"), "format": "srt", "lastCue": last})
                     } else {
                         json!({"error": {"code": "SUBTITLE_QUOTA_EXHAUSTED", "message": "quota"}})
                     }
@@ -2043,6 +2123,27 @@ mod flows {
         assert_eq!(rig.mpv.lock().unwrap().sid, None);
         let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
         assert!(entry(&list, "ext:tr1").is_none() && entry(&list, "ext:tr2").is_none(), "{list:?}");
+    }
+
+    #[tokio::test]
+    async fn when_nothing_could_be_told_the_one_that_covers_the_film_stays_on() {
+        // The film is 5400 s. tr1, the first tried, is the 25-frame timing
+        // of the same text and ends 4 % early; tr2 ends just before the film.
+        let worker = Worker {
+            apply: Value::Null,
+            refusal: Some("INCONCLUSIVE"),
+            last_cues: &[("tr1", 5175.0), ("tr2", 5380.0)],
+            ..Worker::default()
+        };
+        let rig = rig(worker, shown()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let subtitles = Arc::clone(&rig.subtitles);
+        let list = settled(&subtitles, |list| {
+            entry(list, "ext:tr2").is_some_and(|e| e["sync"]["state"] == "rejected" && e["selected"] == true)
+        })
+        .await;
+        assert_eq!(entry(&list, "ext:tr1").unwrap()["selected"], false);
+        assert_eq!(rig.mpv.lock().unwrap().delay, 0.0);
     }
 
     #[tokio::test]
