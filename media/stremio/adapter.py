@@ -157,13 +157,14 @@ def _watch_state(record: dict[str, Any] | None, meta: Meta | None) -> dict[str, 
 
 LOG = logging.getLogger(__name__)
 
-#: How many addons may be asked for streams at the same time.
-STREAM_FAN_OUT = 8
-#: The longest the whole fan-out may take. Past this the reply goes out with
-#: what has arrived; a source list that is nearly complete now beats a complete
-#: one after a dead host's connect timeout.
+#: The longest one reply waits for the addons. Past this it goes out with what
+#: has arrived and names the addons still loading; a source list that is nearly
+#: complete now beats a complete one after a dead host's connect timeout.
 STREAM_DEADLINE = 6.0
-#: How long an addon that just failed is left out of the fan-out.
+#: How long an addon's answer that came after its reply went out is kept for
+#: the next request for the same title.
+LATE_ANSWER_SECONDS = 120.0
+#: How long an addon whose catalogue just hung is left off the home screen.
 ADDON_PENALTY_SECONDS = 300.0
 
 #: How long the addon collection is reused before it is fetched again. The
@@ -235,6 +236,20 @@ class CatalogRow:
         }
 
 
+class _StreamAsk:
+    """One addon's request for one title's streams, which may outlive the reply
+    it was made for."""
+
+    def __init__(self, key: tuple[str, str, str]) -> None:
+        self.key = key
+        self.done = threading.Event()
+        #: What the addon answered; None until then, and None if it failed.
+        self.streams: list[Stream] | None = None
+        self.finished_at: float | None = None
+        #: A reply went out without this answer.
+        self.outlived = False
+
+
 class HeadlessStremio:
     def __init__(
         self,
@@ -264,16 +279,15 @@ class HeadlessStremio:
         self._avatar: tuple[str | None, float, str] | None = None
         self._addons: tuple[Addon, ...] = ()
         self._addons_fetched_at: float | None = None
-        # Addons that have just failed to answer, and when. An addon whose host
-        # has gone away costs a full connect timeout every time it is asked,
-        # and asking it again thirty seconds later buys nothing.
-        self._addon_failures: dict[str, float] = {}
-        # Home keeps its own record rather than sharing the one above. An addon
-        # that is slow to answer for streams is not necessarily slow for a
-        # catalogue — they are different endpoints and often different hosts —
-        # and one table would mean each surface penalising the other's addons
-        # for failures it never saw.
+        # Catalogues that have just hung on the home screen, and when. Streams
+        # keep no such record: Stremio asks every addon for a title's sources
+        # every time, and leaving one out for five minutes because it was slow
+        # once showed a film with its debrid sources missing.
         self._home_failures: dict[str, float] = {}
+        # Each addon's request for one title's streams, by (addon, type, id),
+        # while it runs and, once a reply has gone out without it, until its
+        # answer is handed to the next request.
+        self._stream_asks: dict[tuple[str, str, str], _StreamAsk] = {}
         self._meta_cache: dict[tuple[str, str], tuple[float, Meta]] = {}
 
     # ------------------------------------------------------------------ session
@@ -853,13 +867,20 @@ class HeadlessStremio:
         `video_id` is what selects an episode: for a series the addon is asked
         about `tt1234:1:2`, not about the series.
         """
+        return self.stream_listing(type_name, item_id, video_id)[0]
+
+    def stream_listing(
+        self, type_name: str, item_id: str, video_id: str | None = None
+    ) -> tuple[list[Stream], list[str]]:
+        """As `streams`, with the ids of the addons that are still loading.
+
+        An addon still loading has not failed. Its request goes on after the
+        reply, and what it answers is in the reply to the next request for the
+        title, which is what a caller that was told it is loading should make.
+        """
         target = video_id or item_id
-        addons = [
-            addon
-            for addon in addons_supporting(self.addons(), "stream", type_name, target)
-            if not self._recently_failed(addon.id)
-        ]
-        answers = self._gather_streams(addons, type_name, target)
+        addons = list(addons_supporting(self.addons(), "stream", type_name, target))
+        answers, loading = self._gather_streams(addons, type_name, target)
 
         found: list[Stream] = []
         seen: set[str] = set()
@@ -887,11 +908,11 @@ class HeadlessStremio:
                 found.append(
                     replace(stream, addon_name=addon.name, addon_order=position)
                 )
-        return found
+        return found, [addons[index].id for index in loading]
 
     def _gather_streams(
         self, addons: list[Addon], type_name: str, target: str
-    ) -> list[list[Stream]]:
+    ) -> tuple[list[list[Stream]], list[int]]:
         """Ask every addon at once, and do not let one of them hold the rest.
 
         Asked one after another, the wait for a title was the *sum* of the
@@ -899,54 +920,74 @@ class HeadlessStremio:
         on a real collection — spent fifteen seconds in a connect
         timeout, and the sources for the film did not appear until it gave up,
         however quickly the others had answered. The wait is now the slowest
-        single addon, capped: whatever has not answered by the deadline is left
-        out of this reply rather than delaying all of it, and an addon that
-        failed is not asked again for a while.
+        single addon, capped. Whatever has not answered by the deadline is
+        named as loading rather than given up on: its request runs on, as it
+        does in Stremio, and its answer goes to the next request.
         """
-        if not addons:
-            return []
-
+        asks = [self._ask_for_streams(addon, type_name, target) for addon in addons]
         results: list[list[Stream]] = [[] for _ in addons]
+        loading: list[int] = []
+        deadline = self._clock() + STREAM_DEADLINE
+        for index, ask in enumerate(asks):
+            ask.done.wait(timeout=max(0.0, deadline - self._clock()))
+            with self._lock:
+                if not ask.done.is_set():
+                    ask.outlived = True
+                    loading.append(index)
+                    continue
+                if ask.outlived and self._stream_asks.get(ask.key) is ask:
+                    # A late answer is handed over once; the next opening
+                    # of the title asks again.
+                    del self._stream_asks[ask.key]
+            results[index] = ask.streams or []
+        for index in loading:
+            LOG.info(
+                "Streams from %s did not answer within %.0fs; still loading",
+                addons[index].id,
+                STREAM_DEADLINE,
+            )
+        return results, loading
 
-        def ask(index: int, addon: Addon) -> None:
+    def _ask_for_streams(self, addon: Addon, type_name: str, target: str) -> _StreamAsk:
+        """The request for one addon's streams: the one already running or
+        holding a late answer, or a new one."""
+        key = (addon.id, type_name, target)
+        with self._lock:
+            now = self._clock()
+            for held_key, held in list(self._stream_asks.items()):
+                if held.finished_at is not None and now - held.finished_at >= LATE_ANSWER_SECONDS:
+                    del self._stream_asks[held_key]
+            held = self._stream_asks.get(key)
+            if held is not None and (not held.done.is_set() or held.streams is not None):
+                return held
+            ask = _StreamAsk(key)
+            self._stream_asks[key] = ask
+
+        def run() -> None:
+            streams: list[Stream] | None = None
             try:
-                results[index] = self.addons_client.streams(addon, type_name, target)
+                streams = self.addons_client.streams(addon, type_name, target)
             except UpstreamError as exc:
                 LOG.info("Streams from %s unavailable: %s", addon.id, exc.message)
-                self._note_failure(addon.id)
             except Exception as exc:  # a broken addon is not a broken appliance
                 LOG.info("Streams from %s failed: %s", addon.id, exc)
-                self._note_failure(addon.id)
+            with self._lock:
+                ask.streams = streams
+                ask.finished_at = self._clock()
+                ask.done.set()
+                if ask.outlived:
+                    LOG.info("Streams from %s answered late, kept for the next request", addon.id)
+                # Nobody is waiting for an answer that came in time, or for
+                # a failure, and the next opening asks again.
+                if (not ask.outlived or streams is None) and self._stream_asks.get(key) is ask:
+                    del self._stream_asks[key]
 
-        # Plain daemon threads, joined with a deadline. A pool would have to be
-        # shut down, and shutting one down joins every worker — which is
-        # exactly the wait this exists to avoid. A straggler finishes into a
-        # list nobody reads any more and the process does not wait for it.
-        threads = []
-        for index, addon in enumerate(addons[:STREAM_FAN_OUT]):
-            thread = threading.Thread(
-                target=ask, args=(index, addon), name=f"streams-{addon.id}", daemon=True
-            )
-            thread.start()
-            threads.append((index, thread))
-        # Anything past the fan-out width is asked in line, on this thread.
-        for index, addon in enumerate(addons[STREAM_FAN_OUT:], start=STREAM_FAN_OUT):
-            ask(index, addon)
+        # A plain daemon thread. A straggler finishes into the table above and
+        # the process does not wait for it.
+        threading.Thread(target=run, name=f"streams-{addon.id}", daemon=True).start()
+        return ask
 
-        deadline = self._clock() + STREAM_DEADLINE
-        for index, thread in threads:
-            thread.join(timeout=max(0.0, deadline - self._clock()))
-            if thread.is_alive():
-                LOG.info(
-                    "Streams from %s did not answer within %.0fs",
-                    addons[index].id,
-                    STREAM_DEADLINE,
-                )
-                self._note_failure(addons[index].id)
-        return results
-
-    def _recently_failed(self, addon_id: str, table: dict[str, float] | None = None) -> bool:
-        table = self._addon_failures if table is None else table
+    def _recently_failed(self, addon_id: str, table: dict[str, float]) -> bool:
         with self._lock:
             at = table.get(addon_id)
             if at is None:
@@ -956,8 +997,7 @@ class HeadlessStremio:
                 return False
             return True
 
-    def _note_failure(self, addon_id: str, table: dict[str, float] | None = None) -> None:
-        table = self._addon_failures if table is None else table
+    def _note_failure(self, addon_id: str, table: dict[str, float]) -> None:
         with self._lock:
             table[addon_id] = self._clock()
 

@@ -1834,7 +1834,7 @@ impl App {
             }
             if let Some(episode) = detail.choose_episode() {
                 let (kind, id) = (detail.kind.clone(), detail.id.clone());
-                spawn_sources(self.epoch, kind, id, Some(episode));
+                spawn_sources(self.epoch, kind, id, Some(episode), 0);
                 self.paint();
             }
             return;
@@ -1906,16 +1906,41 @@ impl App {
                 episode,
                 listing,
                 raw,
+                again,
             }) => {
                 // An episode's sources arriving after the viewer went on to
                 // another episode are the wrong episode's.
                 if episode != detail.episode {
                     return;
                 }
-                detail.take_streams(*listing, raw);
+                // Addons still loading are asked again, as Stremio waits on
+                // each addon rather than on the slowest.
+                if !listing.loading.is_empty() && again < SOURCE_ASKS_AGAIN {
+                    spawn_sources(
+                        self.epoch,
+                        detail.kind.clone(),
+                        detail.id.clone(),
+                        episode.clone(),
+                        again + 1,
+                    );
+                }
+                if again == 0 {
+                    detail.take_streams(*listing, raw);
+                } else if !detail.take_late_streams(*listing, raw) {
+                    // The source the buttons are about is the same one: its
+                    // plan stands.
+                    self.paint();
+                    return;
+                }
             }
-            Ok(DetailAnswer::NoSources { episode, why }) => {
+            Ok(DetailAnswer::NoSources { episode, why, again }) => {
                 if episode != detail.episode {
+                    return;
+                }
+                // A list already shown is not taken down because asking for
+                // the rest of it failed.
+                if again > 0 {
+                    eprintln!("mediabox-tv.detail later sources unavailable: {why}");
                     return;
                 }
                 detail.fail(&why);
@@ -6102,11 +6127,15 @@ enum DetailAnswer {
         episode: Option<String>,
         listing: Box<model::StreamListing>,
         raw: Vec<serde_json::Value>,
+        /// 0 for the first ask; more for one made because addons were still
+        /// loading.
+        again: u32,
     },
     /// The sources could not be had. Everything else on the page stays.
     NoSources {
         episode: Option<String>,
         why: String,
+        again: u32,
     },
     /// How far the title has been watched, from the account.
     Watch(Box<model::TitleState>),
@@ -6628,7 +6657,7 @@ fn spawn_detail_load(epoch: u64, kind: String, id: String) {
     }
     // A series has no sources of its own: they are asked for per episode.
     if kind != "series" {
-        spawn_sources(epoch, kind.clone(), id.clone(), None);
+        spawn_sources(epoch, kind.clone(), id.clone(), None, 0);
     }
     detached("mediabox-tv-detail-watch", async move {
         let client = rpc::Client::new(socket_path());
@@ -6714,9 +6743,13 @@ fn spawn_account(action: &'static str, id: String, change: serde_json::Value) {
     });
 }
 
+/// How many times a title's sources are asked for again while addons are
+/// still loading. Each ask waits up to the media core's deadline for them.
+const SOURCE_ASKS_AGAIN: u32 = 5;
+
 /// The ways to watch a title, or one episode of a series, by the episode's
-/// own id.
-fn spawn_sources(epoch: u64, kind: String, id: String, episode: Option<String>) {
+/// own id. `again` counts the asks made because addons were still loading.
+fn spawn_sources(epoch: u64, kind: String, id: String, episode: Option<String>, again: u32) {
     detached("mediabox-tv-detail-sources", async move {
         let client = rpc::Client::new(socket_path());
         let answer = match client.streams(&kind, &id, episode.as_deref()).await {
@@ -6733,16 +6766,19 @@ fn spawn_sources(epoch: u64, kind: String, id: String, episode: Option<String>) 
                         episode,
                         listing: Box::new(listing),
                         raw,
+                        again,
                     },
                     Err(e) => DetailAnswer::NoSources {
                         episode,
                         why: format!("kaynak listesi çözülemedi: {e}"),
+                        again,
                     },
                 }
             }
             Err(e) => DetailAnswer::NoSources {
                 episode,
                 why: e.to_string(),
+                again,
             },
         };
         let _ = slint::invoke_from_event_loop(move || {

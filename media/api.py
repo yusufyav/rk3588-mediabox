@@ -404,12 +404,15 @@ class MediaCore:
             return json_response(200, {"state": self.stremio.watch_state(parts[1], parts[2])})
 
         if head == "streams" and len(parts) == 3:
-            streams = self.stremio.streams(parts[1], parts[2], _one(params, "videoId"))
+            streams, loading = self.stremio.stream_listing(parts[1], parts[2], _one(params, "videoId"))
             return json_response(
                 200,
                 {
                     "streams": [stream.as_dict() for stream in streams],
                     "playable": sum(1 for stream in streams if stream.is_playable),
+                    # Addons that have not answered yet. Asking again brings
+                    # what they answer.
+                    "loading": loading,
                 },
             )
 

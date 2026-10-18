@@ -259,6 +259,100 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertEqual(len(adapter.streams("movie", "tt1")), 1)
 
+    def _slow_stream_adapter(self, wait: threading.Event):
+        a = {"id": "a", "name": "A", "resources": ["stream"], "types": ["movie"], "catalogs": []}
+        b = {"id": "b", "name": "B", "resources": ["stream"], "types": ["movie"], "catalogs": []}
+        from_a = parse_stream({"url": "https://cdn/a.mkv"}, None)
+        from_b = parse_stream({"url": "https://cdn/b.mkv"}, None)
+        adapter = self._adapter(
+            [a, b],
+            {("stream", "a", "movie", "tt1"): [from_a], ("stream", "b", "movie", "tt1"): [from_b]},
+        )
+        answer = adapter.addons_client.streams
+
+        def streams(addon, type_name, item_id):
+            if addon.id == "a":
+                wait.wait(5)
+            return answer(addon, type_name, item_id)
+
+        adapter.addons_client.streams = streams
+        return adapter
+
+    def _with_stream_deadline(self, seconds: float):
+        from ..stremio import adapter as adapter_module
+
+        previous = adapter_module.STREAM_DEADLINE
+        adapter_module.STREAM_DEADLINE = seconds
+        self.addCleanup(setattr, adapter_module, "STREAM_DEADLINE", previous)
+
+    def test_a_slow_addon_is_loading_and_its_answer_comes_with_the_next_request(self):
+        """The case measured on the appliance: Torrentio and MediaFusion missed
+        the deadline once and the film after showed only Netflix for five
+        minutes. Stremio asks every addon every time and shows what each one
+        answers when it answers."""
+        self._with_stream_deadline(0.05)
+        release = threading.Event()
+        adapter = self._slow_stream_adapter(release)
+
+        streams, loading = adapter.stream_listing("movie", "tt1")
+        self.assertEqual([s.url for s in streams], ["https://cdn/b.mkv"])
+        self.assertEqual(loading, ["a"])
+
+        release.set()
+        time.sleep(0.05)
+        streams, loading = adapter.stream_listing("movie", "tt1")
+        self.assertEqual([s.url for s in streams], ["https://cdn/a.mkv", "https://cdn/b.mkv"])
+        self.assertEqual(loading, [])
+        # The late answer was the one the addon was already asked for.
+        self.assertEqual(adapter.addons_client.calls.count(("stream", "a", "movie", "tt1")), 1)
+
+    def test_a_request_while_the_slow_addon_still_loads_waits_on_the_same_request(self):
+        self._with_stream_deadline(0.05)
+        release = threading.Event()
+        adapter = self._slow_stream_adapter(release)
+        calls: list[str] = []
+        original = adapter.addons_client.streams
+
+        def counted(addon, type_name, item_id):
+            calls.append(addon.id)
+            return original(addon, type_name, item_id)
+
+        adapter.addons_client.streams = counted
+        adapter.stream_listing("movie", "tt1")
+        self.assertEqual(adapter.stream_listing("movie", "tt1")[1], ["a"])
+        release.set()
+        time.sleep(0.05)
+        self.assertEqual(adapter.stream_listing("movie", "tt1")[1], [])
+        self.assertEqual(calls.count("a"), 1)
+
+    def test_an_addon_that_was_slow_is_asked_again_next_time(self):
+        """No penalty: once its late answer has been handed over, the next
+        opening of the title asks the addon again."""
+        self._with_stream_deadline(0.05)
+        release = threading.Event()
+        adapter = self._slow_stream_adapter(release)
+        calls: list[str] = []
+        original = adapter.addons_client.streams
+
+        def counted(addon, type_name, item_id):
+            calls.append(addon.id)
+            return original(addon, type_name, item_id)
+
+        adapter.addons_client.streams = counted
+        adapter.stream_listing("movie", "tt1")
+        release.set()
+        time.sleep(0.05)
+        adapter.stream_listing("movie", "tt1")
+        adapter.stream_listing("movie", "tt1")
+        self.assertEqual(calls.count("a"), 2)
+
+    def test_an_addon_that_failed_is_asked_again_next_time(self):
+        a = {"id": "a", "name": "A", "resources": ["stream"], "types": ["movie"], "catalogs": []}
+        adapter = self._adapter([a], {}, failing={"a"})
+        self.assertEqual(adapter.stream_listing("movie", "tt1"), ([], []))
+        self.assertEqual(adapter.stream_listing("movie", "tt1"), ([], []))
+        self.assertEqual(adapter.addons_client.calls.count(("stream", "a", "movie", "tt1")), 2)
+
     def test_an_episode_is_asked_for_by_its_video_id(self):
         a = {"id": "a", "name": "A", "resources": ["stream"], "types": ["series"], "catalogs": []}
         adapter = self._adapter([a], {})
@@ -524,7 +618,8 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertTrue(adapter._recently_failed("a", adapter._home_failures))
-        self.assertFalse(adapter._recently_failed("a"))
+        self.assertEqual(adapter.streams("movie", "tt1"), [])
+        self.assertIn(("stream", "a", "movie", "tt1"), adapter.addons_client.calls)
 
     def test_resolving_a_descriptor_refuses_an_unplayable_one(self):
         adapter = self._adapter([], {})

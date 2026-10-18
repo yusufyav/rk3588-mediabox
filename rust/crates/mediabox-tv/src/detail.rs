@@ -442,6 +442,8 @@ impl Detail {
     /// Ok in the source column: this is the one it plays from now.
     pub fn choose_source(&mut self) -> Option<usize> {
         let index = self.focused_source()?;
+        // A choice is a move: sources that arrive later do not take it back.
+        self.touched = true;
         self.selected = Some(index);
         Some(index)
     }
@@ -470,19 +472,7 @@ impl Detail {
     }
 
     pub fn take_streams(&mut self, listing: StreamListing, raw: Vec<Value>) {
-        self.sources = listing
-            .streams
-            .into_iter()
-            .zip(raw)
-            .map(|(parsed, raw)| Source { raw, parsed })
-            .collect();
-        self.loading = false;
-        self.note = match self.sources.len() {
-            0 => "Bu başlık için kaynak yok".into(),
-            // A count is not something a viewer has to be told: the column is
-            // right there and the reference says nothing above it.
-            _ => String::new(),
-        };
+        self.fill_sources(listing, raw);
         // The first that can actually play, so the buttons mean something
         // before the viewer has chosen anything.
         self.selected = self
@@ -501,6 +491,68 @@ impl Detail {
             self.pane = Pane::Sources;
         }
         self.settle();
+    }
+
+    fn fill_sources(&mut self, listing: StreamListing, raw: Vec<Value>) {
+        let still_loading = !listing.loading.is_empty();
+        self.sources = listing
+            .streams
+            .into_iter()
+            .zip(raw)
+            .map(|(parsed, raw)| Source { raw, parsed })
+            .collect();
+        self.loading = self.sources.is_empty() && still_loading;
+        self.note = match self.sources.len() {
+            // Not "none" while an addon is still to answer.
+            0 if !still_loading => "Bu başlık için kaynak yok".into(),
+            // A count is not something a viewer has to be told: the column is
+            // right there and the reference says nothing above it.
+            _ => String::new(),
+        };
+    }
+
+    /// The sources again, with what an addon that was still loading has
+    /// answered since. Returns whether the source the buttons are about
+    /// changed.
+    ///
+    /// Stremio shows each addon's sources when that addon answers, in its
+    /// place in the list, and leaves the viewer where they were. Until the
+    /// viewer has moved, the page is still opening, and lands as it would have
+    /// had everything come at once.
+    pub fn take_late_streams(&mut self, listing: StreamListing, raw: Vec<Value>) -> bool {
+        let selected = self.selected_source().map(|source| source.raw.clone());
+        if !self.touched {
+            self.take_streams(listing, raw);
+            return !same_source(self.selected_source().map(|s| &s.raw), selected.as_ref());
+        }
+        let focused = self
+            .focused_source()
+            .and_then(|index| self.sources.get(index))
+            .map(|source| source.raw.clone());
+        let providers = self.providers();
+        let provider = self.provider.checked_sub(1).and_then(|i| providers.get(i).cloned());
+        let filter_on = self.filter_focus.checked_sub(1).and_then(|i| providers.get(i).cloned());
+
+        self.fill_sources(listing, raw);
+
+        let find = |sources: &[Source], wanted: Option<&Value>| {
+            wanted.and_then(|wanted| sources.iter().position(|s| same_source(Some(&s.raw), Some(wanted))))
+        };
+        self.selected = find(&self.sources, selected.as_ref())
+            .or_else(|| self.sources.iter().position(|source| source.parsed.playable));
+        let providers = self.providers();
+        let place = |name: Option<String>| {
+            name.and_then(|name| providers.iter().position(|held| *held == name))
+                .map_or(0, |i| i + 1)
+        };
+        self.provider = place(provider);
+        self.filter_focus = place(filter_on);
+        let shown = self.shown();
+        self.source_focus = find(&self.sources, focused.as_ref())
+            .and_then(|index| shown.iter().position(|held| *held == index))
+            .unwrap_or_else(|| self.source_focus.min(shown.len().saturating_sub(1)));
+        self.settle();
+        !same_source(self.selected_source().map(|s| &s.raw), selected.as_ref())
     }
 
     /// The appliance's own library answers with the record and the sources in
@@ -525,6 +577,7 @@ impl Detail {
             StreamListing {
                 streams: envelope.streams,
                 playable: count,
+                loading: Vec::new(),
             },
             raw,
         );
@@ -1227,6 +1280,18 @@ fn runtime_seconds(text: &str) -> Option<u64> {
     (understood && total > 0).then_some(total)
 }
 
+/// Whether two sources are the same one: by the identity the media core gives
+/// every stream, or, for one without, by what it is.
+fn same_source(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => match (a.get("identity"), b.get("identity")) {
+            (Some(x), Some(y)) => x == y,
+            _ => a == b,
+        },
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod filter_tests {
@@ -1264,6 +1329,95 @@ mod filter_tests {
         moved.step(1, 0);
         moved.take_streams(listing(), raws.clone());
         assert_eq!(moved.pane, Pane::Record);
+    }
+
+    fn listed(raws: &[Value], loading: &[&str]) -> StreamListing {
+        serde_json::from_value(json!({"streams": raws, "loading": loading})).expect("a listing")
+    }
+
+    fn release(identity: &str, addon: &str, order: u32, playable: bool) -> Value {
+        json!({"identity": identity, "addonName": addon, "addonOrder": order, "name": identity, "playable": playable})
+    }
+
+    #[test]
+    fn a_title_whose_addons_are_still_loading_is_not_said_to_have_no_sources() {
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_streams(listed(&[], &["torrentio"]), Vec::new());
+        assert!(film.loading);
+        assert_eq!(film.note, "");
+
+        film.take_streams(listed(&[], &[]), Vec::new());
+        assert!(!film.loading);
+        assert_eq!(film.note, "Bu başlık için kaynak yok");
+    }
+
+    #[test]
+    fn sources_that_come_late_open_the_page_as_if_they_had_come_at_once() {
+        // The appliance's case: only the subscription link at first, the
+        // debrid sources from an addon that was still loading.
+        let first = vec![release("netflix", "WatchHub", 2, false)];
+        let later = vec![
+            release("netflix", "WatchHub", 2, false),
+            release("t1", "Torrentio", 4, true),
+            release("t2", "Torrentio", 4, true),
+        ];
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_streams(listed(&first, &["torrentio"]), first.clone());
+        assert_eq!(film.selected, None);
+
+        assert!(film.take_late_streams(listed(&later, &[]), later.clone()));
+        assert_eq!(film.selected, Some(1));
+        assert_eq!(film.pane, Pane::Sources);
+        assert_eq!(film.shown()[film.source_focus], 1);
+    }
+
+    #[test]
+    fn sources_that_come_late_leave_the_viewer_where_they_were() {
+        let first = vec![
+            release("m1", "MediaFusion", 5, true),
+            release("m2", "MediaFusion", 5, true),
+        ];
+        // Torrentio sits before MediaFusion in the collection, so its sources
+        // land above the one the viewer is on.
+        let later = vec![
+            release("t1", "Torrentio", 4, true),
+            release("m1", "MediaFusion", 5, true),
+            release("m2", "MediaFusion", 5, true),
+        ];
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_streams(listed(&first, &["torrentio"]), first.clone());
+        film.step(0, 1);
+        assert_eq!(film.focused_source(), Some(1));
+        assert_eq!(film.choose_source(), Some(1));
+
+        // The same source, further down: its plan stands.
+        assert!(!film.take_late_streams(listed(&later, &[]), later.clone()));
+        assert_eq!(film.selected, Some(2));
+        assert_eq!(film.focused_source(), Some(2));
+        assert_eq!(film.sources[2].raw["identity"], "m2");
+    }
+
+    #[test]
+    fn a_provider_filter_stays_on_its_addon_when_another_addon_answers() {
+        let first = vec![
+            release("m1", "MediaFusion", 5, true),
+            release("w1", "WatchHub", 6, false),
+        ];
+        let later = vec![
+            release("t1", "Torrentio", 4, true),
+            release("m1", "MediaFusion", 5, true),
+            release("w1", "WatchHub", 6, false),
+        ];
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_streams(listed(&first, &["torrentio"]), first.clone());
+        film.step(0, 0);
+        film.provider = 2;
+        assert_eq!(film.providers()[film.provider - 1], "WatchHub");
+
+        assert!(!film.take_late_streams(listed(&later, &[]), later.clone()));
+        assert_eq!(film.providers()[film.provider - 1], "WatchHub");
+        assert_eq!(film.shown(), vec![2]);
+        assert_eq!(film.selected, Some(1));
     }
 
     fn with(sources: Vec<Source>) -> Detail {

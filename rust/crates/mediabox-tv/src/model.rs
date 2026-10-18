@@ -574,6 +574,10 @@ pub struct StreamListing {
     pub streams: Vec<Stream>,
     #[serde(default)]
     pub playable: u32,
+    /// Addons that had not answered when the listing went out. Asking again
+    /// brings what they answer.
+    #[serde(default)]
+    pub loading: Vec<String>,
 }
 
 // ------------------------------------------------------- inspection + policy
