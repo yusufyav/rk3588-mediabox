@@ -141,6 +141,16 @@ pub fn device_title(name: &str) -> String {
     if title.is_empty() { name.trim().to_string() } else { title.to_string() }
 }
 
+/// The kernel's name for the board's own power button (the RK806 PMIC's; the
+/// rk805 driver serves it). mediaboxd-rs reads it to turn the box off.
+pub const BOARD_POWER_BUTTON: &str = "rk805 pwrkey";
+
+/// Whether this interface takes a device exclusively. Every device but the
+/// board's power button, which must still reach the control plane.
+pub fn should_grab(name: &str) -> bool {
+    name.trim() != BOARD_POWER_BUTTON
+}
+
 pub fn action_for_evdev(code: u32, keyboard: bool) -> Option<InputAction> {
     let remote_only = match code {
         158 | 174 => InputAction::Back,           // KEY_BACK, KEY_EXIT
@@ -431,6 +441,14 @@ mod device_tests {
         );
         let keyboard = "/sys/devices/virtual/misc/uhid/0005:1D5A:C081.0003/input/input12/event12";
         assert_eq!(classify(keyboard, "UR-02", None, None), Device::Other);
+    }
+
+    #[test]
+    fn every_device_is_taken_but_the_board_s_power_button() {
+        assert!(!should_grab("rk805 pwrkey\n"));
+        assert!(should_grab("bt-powerkey"));
+        assert!(should_grab("ROG AZOTH Keyboard"));
+        assert!(should_grab("gpio_ir_recv"));
     }
 
     #[test]

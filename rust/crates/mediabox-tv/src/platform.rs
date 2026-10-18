@@ -2385,6 +2385,18 @@ impl LibinputInterface for DirectInput {
         // A refusal is not fatal. Another process holding the grab means keys
         // reach the console again, which is untidy rather than broken, and a
         // television with no input at all would be worse.
+        //
+        // The board's power button is left to everyone: the control plane
+        // reads it to turn the box off, and a grab here took every press of
+        // it (measured on the Plus: the PMIC's interrupts counted each press,
+        // the daemon saw none). It types nothing on a console.
+        let name = path
+            .file_name()
+            .and_then(|node| std::fs::read_to_string(Path::new("/sys/class/input").join(node).join("device/name")).ok())
+            .unwrap_or_default();
+        if !crate::input::should_grab(&name) {
+            return Ok(file.into());
+        }
         // SAFETY: one ioctl on a file descriptor this function owns.
         if unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB, 1) } != 0 {
             eprintln!(
