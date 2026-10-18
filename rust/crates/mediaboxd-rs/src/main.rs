@@ -252,6 +252,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::thread::Builder::new()
         .name("mediabox-bt-le-floor".into())
         .spawn(mediaboxd_rs::bt_le::run);
+    // The board's power button: the same shutdown as Settings', on the one
+    // device that is a power button (power_button.rs).
+    match mediaboxd_rs::power_button::find(Path::new("/sys/class/input"), Path::new("/dev/input")) {
+        Some(path) => {
+            let state = state.clone();
+            let runtime = tokio::runtime::Handle::current();
+            let _ = std::thread::Builder::new()
+                .name("mediabox-power-button".into())
+                .spawn(move || {
+                    let watched = mediaboxd_rs::power_button::watch(&path, || {
+                        eprintln!("mediaboxd.power board button pressed");
+                        let state = state.clone();
+                        runtime.spawn(async move {
+                            let request = mediabox_core::Request::SystemPower {
+                                action: mediabox_core::PowerAction::Shutdown,
+                            };
+                            let _ = state.handle(request).await;
+                        });
+                    });
+                    if let Err(error) = watched {
+                        eprintln!("mediaboxd.power board button {}: {error}", path.display());
+                    }
+                });
+        }
+        None => eprintln!(
+            "mediaboxd.power no \"{}\" on this board",
+            mediaboxd_rs::power_button::BOARD_BUTTON
+        ),
+    }
     // An address left on trial by a run of this daemon that did not finish
     // is taken back before anything else is asked of the network.
     state.ethernet.recover().await;

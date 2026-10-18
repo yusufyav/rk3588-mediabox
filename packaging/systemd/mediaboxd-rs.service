@@ -82,6 +82,10 @@ DeviceAllow=/dev/rfkill rw
 # own volume is written to the softvol control mediabox-hdmi-prepare defines
 # ("MediaBox", through amixer). The daemon opens no PCM.
 DeviceAllow=char-alsa rw
+# The board's power button, read and never grabbed (power_button.rs). The
+# input subsystem as a whole, since the button's event number is the kernel's
+# to give; the daemon opens only the node named "rk805 pwrkey".
+DeviceAllow=char-input r
 # The browser's address drop. This interface chooses a web address and the
 # daemon leaves it here for the browser to read once at start; with
 # ProtectSystem=strict and nothing else named, that write failed with
