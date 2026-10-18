@@ -143,11 +143,30 @@ def _relay_file(url: str, range_header: str | None):
     return (206 if partial else 200), headers, chunks()
 
 
-def _connect(host: str, port: int, timeout: float) -> socket.socket:
-    """A connection to the first address of `host` that takes one within
-    `timeout`, saying what each one did when none does."""
-    tried: list[str] = []
-    for family, kind, proto, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+#: The addresses each host last resolved to, by (host, port). A film's every
+#: seek opens the source again, and resolving its name each time put the LAN's
+#: DNS in the path of every seek: on the Plus, 2026-10-18, one resolution took
+#: twenty seconds on a loaded Wi-Fi (a fifth of the packets to the DNS server
+#: were lost under load) and the seek, and the film, failed. Stremio's player
+#: and a browser keep what they resolved; so does this.
+_RESOLVED: dict[tuple[str, int], list[tuple]] = {}
+
+
+def _resolve(host: str, port: int) -> list[tuple]:
+    began = time.monotonic()
+    try:
+        found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as error:
+        raise OSError(f"{host} did not resolve in {time.monotonic() - began:.1f} s: {error}") from error
+    took = time.monotonic() - began
+    if took > SLOW_OPEN:
+        LOG.warning("relay resolved %s in %.1f s", host, took)
+    _RESOLVED[(host, port)] = found
+    return found
+
+
+def _connect_any(addresses: list[tuple], timeout: float, tried: list[str]) -> socket.socket | None:
+    for family, kind, proto, _, address in addresses:
         sock = socket.socket(family, kind, proto)
         sock.settimeout(timeout)
         try:
@@ -156,6 +175,24 @@ def _connect(host: str, port: int, timeout: float) -> socket.socket:
         except OSError as error:
             sock.close()
             tried.append(f"{address[0]}: {error.strerror or error}")
+    return None
+
+
+def _connect(host: str, port: int, timeout: float) -> socket.socket:
+    """A connection to the first address of `host` that takes one within
+    `timeout`, saying what each one did when none does.
+
+    The addresses the host last resolved to are tried first; the name is
+    resolved again only when none of them takes the connection."""
+    tried: list[str] = []
+    known = _RESOLVED.get((host, port))
+    if known:
+        sock = _connect_any(known, timeout, tried)
+        if sock is not None:
+            return sock
+    sock = _connect_any(_resolve(host, port), timeout, tried)
+    if sock is not None:
+        return sock
     raise OSError("no address of the host took the connection (" + "; ".join(tried) + ")")
 
 
@@ -238,6 +275,41 @@ def _open(url: str, range_header: str | None, timeout: float):
     raise AssertionError("unreachable")
 
 
+#: Where each source's address led, by the address the session was given.
+#: A debrid addon's link is a resolver: torrentio.strem.fun answers it by
+#: asking Real-Debrid and redirecting to the file's own host. Every seek used
+#: to go through that again -- two hosts, two names to resolve, two TLS
+#: handshakes and a debrid lookup per seek -- and on 2026-10-18 a seek in
+#: Carmen failed at the first of them. ffmpeg, Stremio's player, keeps the
+#: redirect's target and seeks against it; so does this.
+_ARRIVED: dict[str, str] = {}
+_ARRIVED_KEPT = 64
+
+
+def _open_source(url: str, range_header: str | None, timeout: float):
+    """As `_open`, against where `url` last led; `url` itself again when that
+    no longer answers (a debrid link expires)."""
+    arrived = _ARRIVED.get(url)
+    if arrived:
+        try:
+            return _open(arrived, range_header, timeout)
+        except MediaError as error:
+            if error.status == 416:
+                raise
+            LOG.warning(
+                "relay: %s no longer answers (%s); asking %s again",
+                urllib.parse.urlsplit(arrived).hostname, error.code, urllib.parse.urlsplit(url).hostname,
+            )
+            _ARRIVED.pop(url, None)
+    response = _open(url, range_header, timeout)
+    final = response.geturl()
+    if final and final != url:
+        if len(_ARRIVED) >= _ARRIVED_KEPT:
+            _ARRIVED.pop(next(iter(_ARRIVED)))
+        _ARRIVED[url] = final
+    return response
+
+
 def _reading_timeout(response, timeout: float) -> None:
     """Give an opened response the reading timeout back: the open waits
     `OPEN_TIMEOUT`, the film's body `timeout` -- a quiet past that is resumed
@@ -282,7 +354,7 @@ def relay(url: str, range_header: str | None, timeout: float = 30.0):
     if urllib.parse.urlsplit(url).scheme == "file":
         return _relay_file(url, range_header)
 
-    response = _open(url, range_header, timeout)
+    response = _open_source(url, range_header, timeout)
     headers = [
         (name.title(), value)
         for name, value in response.headers.items()
@@ -363,7 +435,7 @@ def relay(url: str, range_header: str | None, timeout: float = 30.0):
                 )
                 current.close()
                 try:
-                    current = _open(url, f"bytes={first + sent}-{last}", timeout)
+                    current = _open_source(url, f"bytes={first + sent}-{last}", timeout)
                 except MediaError as exc:
                     LOG.warning("relay from %s could not resume: %s", host, exc.message)
                     return

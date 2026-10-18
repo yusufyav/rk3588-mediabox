@@ -268,13 +268,125 @@ class Stall(unittest.TestCase):
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", open_port)),
             ]
 
+        self.addCleanup(relay_module._RESOLVED.pop, ("film.example", 443), None)
         with mock.patch.object(relay_module.socket, "getaddrinfo", addresses):
             relay_module._connect("film.example", 443, 0.5).close()
+            relay_module._RESOLVED.pop(("film.example", 443))
             with mock.patch.object(relay_module.socket, "getaddrinfo", lambda *a, **k: addresses(*a)[:1]):
                 with self.assertRaises(OSError) as caught:
                     relay_module._connect("film.example", 443, 0.5)
         self.assertIn(f"127.0.0.1: ", str(caught.exception))
         self.assertIn("refused", str(caught.exception).lower())
+
+    def test_a_seek_does_not_wait_on_the_name_once_it_has_resolved(self):
+        # 2026-10-18: a seek in Carmen resolved the source's name again and
+        # waited twenty seconds for it; the film failed at 0:20:30.
+        listening = socket.socket()
+        listening.bind(("127.0.0.1", 0))
+        listening.listen()
+        self.addCleanup(listening.close)
+        port = listening.getsockname()[1]
+        resolved = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        self.addCleanup(relay_module._RESOLVED.pop, ("seek.example", 443), None)
+
+        with mock.patch.object(relay_module.socket, "getaddrinfo", lambda *a, **k: resolved):
+            relay_module._connect("seek.example", 443, 0.5).close()
+
+        def broken(*a, **k):
+            raise OSError(16, "Device or resource busy")
+
+        with mock.patch.object(relay_module.socket, "getaddrinfo", broken):
+            relay_module._connect("seek.example", 443, 0.5).close()
+
+    def test_a_host_that_moved_is_resolved_again_and_a_failure_says_where(self):
+        listening = socket.socket()
+        listening.bind(("127.0.0.1", 0))
+        listening.listen()
+        self.addCleanup(listening.close)
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        gone = closed.getsockname()[1]
+        closed.close()
+        relay_module._RESOLVED[("moved.example", 443)] = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", gone))]
+        self.addCleanup(relay_module._RESOLVED.pop, ("moved.example", 443), None)
+        now = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", listening.getsockname()[1]))]
+        with mock.patch.object(relay_module.socket, "getaddrinfo", lambda *a, **k: now):
+            relay_module._connect("moved.example", 443, 0.5).close()
+        self.assertEqual(relay_module._RESOLVED[("moved.example", 443)], now)
+
+        def broken(*a, **k):
+            raise OSError(16, "Device or resource busy")
+
+        relay_module._RESOLVED.pop(("moved.example", 443))
+        with mock.patch.object(relay_module.socket, "getaddrinfo", broken):
+            with self.assertRaises(OSError) as caught:
+                relay_module._connect("moved.example", 443, 0.5)
+        self.assertIn("moved.example did not resolve in", str(caught.exception))
+
+
+class Resolver(BaseHTTPRequestHandler):
+    """A debrid addon's link: `/resolve` redirects to the file, `/file` serves
+    it until `expired` is set."""
+
+    hits: list[str] = []
+    expired = False
+
+    def log_message(self, *args):  # noqa: D401
+        pass
+
+    def do_GET(self):  # noqa: N802
+        Resolver.hits.append(self.path)
+        if self.path.startswith("/resolve"):
+            Resolver.expired = False
+            self.send_response(302)
+            self.send_header("Location", "/file")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if Resolver.expired:
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        start = int(self.headers.get("Range", "bytes=0-")[6:].split("-")[0])
+        body = FILM[start:start + 4]
+        self.send_response(206)
+        self.send_header("Content-Range", f"bytes {start}-{start + 3}/{len(FILM)}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class Redirect(unittest.TestCase):
+    def setUp(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Resolver)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{server.server_address[1]}/resolve?token=secret"
+        self.addCleanup(relay_module._ARRIVED.pop, self.url, None)
+        Resolver.hits = []
+
+    def read(self, start: int) -> bytes:
+        status, _, chunks = relay(self.url, f"bytes={start}-{start + 3}")
+        self.assertEqual(status, 206)
+        return b"".join(chunks)
+
+    def test_a_seek_goes_where_the_link_led_not_through_the_resolver_again(self):
+        # 2026-10-18: every seek in Carmen went through torrentio.strem.fun
+        # and its lookup at Real-Debrid again; one failed there.
+        self.assertEqual(self.read(0), FILM[0:4])
+        self.assertEqual(self.read(5000), FILM[5000:5004])
+        self.assertEqual(self.read(9000), FILM[9000:9004])
+        self.assertEqual([hit.split("?")[0] for hit in Resolver.hits], ["/resolve", "/file", "/file", "/file"])
+
+    def test_an_expired_link_is_asked_for_again_once(self):
+        self.read(0)
+        Resolver.expired = True
+        with self.assertLogs("media.proxy.relay", "WARNING") as logged:
+            self.assertEqual(self.read(7000), FILM[7000:7004])
+        self.assertEqual([hit.split("?")[0] for hit in Resolver.hits], ["/resolve", "/file", "/file", "/resolve", "/file"])
+        self.assertNotIn("secret", "".join(logged.output))
 
 
 class Relay(unittest.TestCase):
