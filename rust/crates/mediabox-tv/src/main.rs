@@ -2621,7 +2621,9 @@ impl App {
             return;
         };
         let mut showing = platform::video_showing();
-        if playing.previous_on_plane {
+        if playing.continued {
+            showing = playing.seen;
+        } else if playing.previous_on_plane {
             if showing {
                 showing = false;
             } else {
@@ -7455,6 +7457,10 @@ struct Playing {
     /// The receiver says the channel is encrypted: no frame will come, and
     /// none is waited for; the channel stays tuned for the next key.
     scrambled: bool,
+    /// Opened in the player that was already playing the channel before:
+    /// the plane never goes dark, so whether the picture came is the
+    /// control plane's answer, not the plane's.
+    continued: bool,
 }
 
 impl Playing {
@@ -7463,6 +7469,7 @@ impl Playing {
             live: false,
             previous_on_plane: false,
             scrambled: false,
+            continued: false,
             asked: std::time::Instant::now(),
             controls_until: None,
             polled: None,
@@ -7647,6 +7654,8 @@ fn spawn_live_play(channel: mediabox_core::LiveChannel, opening: u64) {
         });
         match client.call(request).await {
             Ok(answer) => {
+                let continued = answer.get("continued").and_then(Value::as_bool) == Some(true);
+                let picture = answer.get("picture").and_then(Value::as_bool) == Some(true);
                 if let Some(film) = answer.get("film").and_then(Value::as_u64) {
                     let _ = slint::invoke_from_event_loop(move || {
                         with_app(|app| {
@@ -7654,6 +7663,17 @@ fn spawn_live_play(channel: mediabox_core::LiveChannel, opening: u64) {
                                 && let Some(playing) = app.here.as_mut()
                             {
                                 playing.film = Some(film);
+                                if continued {
+                                    playing.continued = true;
+                                    if picture {
+                                        eprintln!(
+                                            "mediabox-tv.live first frame {} ms after the key (same player)",
+                                            playing.asked.elapsed().as_millis()
+                                        );
+                                        playing.seen = true;
+                                    }
+                                    app.paint();
+                                }
                             }
                         })
                     });

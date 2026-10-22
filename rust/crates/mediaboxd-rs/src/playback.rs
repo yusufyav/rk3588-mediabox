@@ -409,6 +409,13 @@ impl Supervisor {
         self.lock().film.as_ref().filter(|film| film.player == player).and_then(|film| film.live)
     }
 
+    /// A live film went on to another channel in the same player.
+    pub fn relabel_live(&self, film: u64, service_id: u16) {
+        if let Some(playing) = self.lock().film.as_mut().filter(|playing| playing.number == film && playing.live.is_some()) {
+            playing.live = Some(service_id);
+        }
+    }
+
     /// A live film's source has ended by itself, and this is how. Its
     /// player's end of the stream follows; this says what that end means.
     pub fn source_ended(&self, film: u64, end: SourceEnd) {
@@ -605,7 +612,7 @@ pub async fn follow_mpv(
         supervisor.finish(film, signal);
         return;
     };
-    let signal = read_mpv(stream, &supervisor, film).await;
+    let signal = read_mpv(stream, &supervisor, film, &player).await;
     // Live television: the player's end of the stream means what the
     // source's own process says it means, asked before the verdict.
     if let Some(live) = &live
@@ -632,7 +639,12 @@ pub async fn follow_mpv(
 /// that answered the film's full length, 480 of 480 s -- a failed read that
 /// looked exactly like the end. So every poll asks `eof-reached` first, and
 /// a poll that finds the end is not read for a position.
-async fn read_mpv(stream: tokio::net::UnixStream, supervisor: &Supervisor, film: u64) -> Signal {
+async fn read_mpv(
+    stream: tokio::net::UnixStream,
+    supervisor: &Supervisor,
+    film: u64,
+    player: &crate::player::PlayerManager,
+) -> Signal {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (reader, mut writer) = stream.into_split();
@@ -658,13 +670,17 @@ async fn read_mpv(stream: tokio::net::UnixStream, supervisor: &Supervisor, film:
                 let Ok(Some(line)) = line else { return Signal::Gone };
                 let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
                 let at_the_end = message.get("data").and_then(Value::as_bool) == Some(true);
+                // A live channel opened in this player ends the file before
+                // it, and that end is the channel change's.
+                let reloading = player.reloading();
                 match message.get("event").and_then(Value::as_str) {
+                    Some("end-file") if reloading => {}
                     Some("end-file") => return Signal::EndFile {
                         reason: message.get("reason").and_then(Value::as_str).unwrap_or("unknown").to_string(),
                         error: message.get("file_error").and_then(Value::as_str).map(str::to_owned),
                     },
                     Some("property-change")
-                        if message.get("name").and_then(Value::as_str) == Some("eof-reached") && at_the_end =>
+                        if message.get("name").and_then(Value::as_str) == Some("eof-reached") && at_the_end && !reloading =>
                     {
                         return Signal::EndOfFile;
                     }
@@ -672,7 +688,7 @@ async fn read_mpv(stream: tokio::net::UnixStream, supervisor: &Supervisor, film:
                 }
                 let number = |message: &Value| message.get("data").and_then(Value::as_f64).filter(|value| value.is_finite());
                 match message.get("request_id").and_then(Value::as_u64) {
-                    Some(100) if at_the_end => return Signal::EndOfFile,
+                    Some(100) if at_the_end && !reloading => return Signal::EndOfFile,
                     Some(101) => position = number(&message),
                     Some(102) => duration = number(&message),
                     Some(103) => {
@@ -1065,7 +1081,7 @@ mod tests {
                 _ => json!(false),
             })
         }));
-        let signal = read_mpv(ours, &supervisor, film).await;
+        let signal = read_mpv(ours, &supervisor, film, &idle_player()).await;
         assert_eq!(signal, Signal::EndOfFile);
         let finished = supervisor.finish(film, signal).unwrap();
         assert_eq!(finished.outcome, Outcome::Failed);
@@ -1085,7 +1101,7 @@ mod tests {
                 _ => json!(false),
             })
         }));
-        let signal = read_mpv(ours, &supervisor, film).await;
+        let signal = read_mpv(ours, &supervisor, film, &idle_player()).await;
         let finished = supervisor.finish(film, signal).unwrap();
         assert_eq!(finished.outcome, Outcome::Ended);
     }
@@ -1096,7 +1112,31 @@ mod tests {
         let film = supervisor.begin(start(PlayerKind::Here));
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
         drop(theirs);
-        assert_eq!(read_mpv(ours, &supervisor, film).await, Signal::Gone);
+        assert_eq!(read_mpv(ours, &supervisor, film, &idle_player()).await, Signal::Gone);
+    }
+
+    fn idle_player() -> crate::player::PlayerManager {
+        crate::player::PlayerManager::new("/bin/false", "/nonexistent/player.sock")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_end_of_a_file_a_live_channel_replaced_is_not_the_end() {
+        let (supervisor, _) = rig();
+        let film = supervisor.begin(live());
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        // The old channel's file at its end, as the receiver let it go.
+        tokio::spawn(fake_mpv(theirs, |id, _| Some(if id == 100 { json!(true) } else { json!(0.0) })));
+        let player = std::sync::Arc::new(idle_player());
+        player.begin_reload();
+        let reading = tokio::spawn({
+            let player = std::sync::Arc::clone(&player);
+            let supervisor = std::sync::Arc::clone(&supervisor);
+            async move { read_mpv(ours, &supervisor, film, &player).await }
+        });
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!reading.is_finished(), "an end while the next channel opens is the change's");
+        player.end_reload();
+        assert_eq!(reading.await.unwrap(), Signal::EndOfFile, "once it has opened, an end is an end");
     }
 
     fn live() -> Start {

@@ -106,6 +106,9 @@ pub struct Options {
     /// selector -- and starting a player, with nothing reset, reloaded or
     /// retuned (a cold start costs 6 s of demodulator patch and lock).
     pub hold_reader: Option<Duration>,
+    /// Boot, lock, and wait in standby for the first `Play`: the receiver
+    /// made ready before anybody watches, as a television's tuner is.
+    pub start_standby: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -115,6 +118,8 @@ pub enum State {
     WaitingForPlayer,
     Tuning,
     Streaming,
+    /// Booted and locked, the USB stream stopped: nobody is watching.
+    Standby,
     Reconnecting,
     Stopping,
     Ended,
@@ -363,6 +368,12 @@ struct OutputQueue {
     /// What waits for the next reader is the service before a switch: let
     /// it go.
     forget_pending: AtomicBool,
+    /// Since when no reader has had the FIFO open (`reopen` writers).
+    reader_gone: Mutex<Option<Instant>>,
+    /// Let the reader go: what follows is for the next one, on `fifo`.
+    drop_reader: AtomicBool,
+    /// The FIFO a next reader opens (`reopen` writers).
+    fifo: Mutex<Option<PathBuf>>,
     error: Mutex<Option<std::io::Error>>,
     stats: Mutex<OutputStats>,
 }
@@ -374,7 +385,11 @@ struct Writer {
 }
 
 impl Writer {
-    fn start(sink: Sink, limit: usize, pressure: Pressure, reopen: Option<(PathBuf, Duration)>) -> Self {
+    /// `sink` None: no reader yet; the first one is waited for as a next
+    /// one is (`reopen` is then needed). A `reopen` writer never ends for
+    /// want of a reader: how long it has had none is the stream's to judge
+    /// (`unread_for`).
+    fn start(sink: Option<Sink>, limit: usize, pressure: Pressure, reopen: Option<PathBuf>) -> Self {
         let queue = Arc::new(OutputQueue {
             state: Mutex::new((VecDeque::new(), 0, false)),
             changed: Condvar::new(),
@@ -382,6 +397,9 @@ impl Writer {
             closed: AtomicBool::new(false),
             abort: AtomicBool::new(false),
             forget_pending: AtomicBool::new(false),
+            reader_gone: Mutex::new(sink.is_none().then(Instant::now)),
+            drop_reader: AtomicBool::new(false),
+            fifo: Mutex::new(reopen),
             error: Mutex::new(None),
             stats: Mutex::new(OutputStats::default()),
         });
@@ -389,8 +407,8 @@ impl Writer {
         let thread = std::thread::Builder::new()
             .name("ts-output".into())
             .spawn(move || {
-                let mut sink = Some(sink);
-                let mut no_reader_since: Option<Instant> = None;
+                let mut sink = sink;
+                let gone = |since: Option<Instant>| *shared.reader_gone.lock().unwrap_or_else(|p| p.into_inner()) = since;
                 // Between readers, what arrives is kept for the next one --
                 // above all a channel's start from its last access point
                 // (`RapCache`), written before the player has opened the FIFO
@@ -417,17 +435,21 @@ impl Writer {
                         pending.clear();
                         pending_bytes = 0;
                     }
+                    if shared.drop_reader.swap(false, Ordering::SeqCst) && sink.take().is_some() {
+                        gone(Some(Instant::now()));
+                    }
                     // Between readers: the next one is looked for with every
                     // chunk, and the chunk waits for it.
+                    let next = shared.fifo.lock().unwrap_or_else(|p| p.into_inner()).clone();
                     if sink.is_none()
-                        && let Some((path, hold)) = &reopen
+                        && let Some(path) = &next
                     {
                         match reopen_fifo(path) {
                             Some(file) => {
                                 sink = Some(Sink::Fifo(file));
-                                no_reader_since = None;
+                                gone(None);
                                 shared.stats.lock().unwrap_or_else(|p| p.into_inner()).readers += 1;
-                                let mut gone = false;
+                                let mut lost = false;
                                 while let Some(waiting) = pending.pop_front() {
                                     pending_bytes -= waiting.len();
                                     let Some(out) = sink.as_mut() else { break };
@@ -437,14 +459,14 @@ impl Writer {
                                         }
                                         Ok(false) => return,
                                         Err(_) => {
-                                            gone = true;
+                                            lost = true;
                                             break;
                                         }
                                     }
                                 }
-                                if gone {
+                                if lost {
                                     sink = None;
-                                    no_reader_since = Some(Instant::now());
+                                    gone(Some(Instant::now()));
                                     continue;
                                 }
                             }
@@ -456,13 +478,6 @@ impl Writer {
                                     pending_bytes -= old.len();
                                     shared.stats.lock().unwrap_or_else(|p| p.into_inner()).unread_bytes += old.len() as u64;
                                 }
-                                if no_reader_since.is_some_and(|since| since.elapsed() > *hold) {
-                                    *shared.error.lock().unwrap_or_else(|p| p.into_inner()) =
-                                        Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
-                                    shared.closed.store(true, Ordering::SeqCst);
-                                    shared.changed.notify_all();
-                                    return;
-                                }
                                 continue;
                             }
                         }
@@ -471,10 +486,10 @@ impl Writer {
                     match out.write_all(&chunk, &shared.abort) {
                         Ok(true) => shared.stats.lock().unwrap_or_else(|p| p.into_inner()).bytes += chunk.len() as u64,
                         Ok(false) => return,
-                        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe && reopen.is_some() => {
+                        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe && next.is_some() => {
                             // The player went; the receiver stays for the next.
                             sink = None;
-                            no_reader_since = Some(Instant::now());
+                            gone(Some(Instant::now()));
                         }
                         Err(error) => {
                             *shared.error.lock().unwrap_or_else(|p| p.into_inner()) = Some(error);
@@ -526,6 +541,19 @@ impl Writer {
         self.queue.closed.load(Ordering::SeqCst)
     }
 
+    /// Let the reader go -- it sees the end of its file -- and write what
+    /// follows to whoever opens `fifo` next.
+    fn redirect(&self, fifo: PathBuf) {
+        *self.queue.fifo.lock().unwrap_or_else(|p| p.into_inner()) = Some(fifo);
+        self.queue.drop_reader.store(true, Ordering::SeqCst);
+        self.queue.changed.notify_all();
+    }
+
+    /// How long no reader has had the FIFO open; None while one has.
+    fn unread_for(&self) -> Option<Duration> {
+        self.queue.reader_gone.lock().unwrap_or_else(|p| p.into_inner()).map(|since| since.elapsed())
+    }
+
     /// Forget what is queued: it is the service before a switch.
     fn discard(&self) {
         let mut state = self.queue.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -568,13 +596,8 @@ impl Writer {
     }
 }
 
-/// Create the FIFO, say so (`created`), and wait for its reader; the open end.
-///
-/// The order is the point. The status says "waiting for the player" only once
-/// this run's FIFO exists: said before, a FIFO left by the previous run was
-/// still there, and a player started on it would open the old one, which
-/// nobody will ever write.
-fn open_fifo(path: &Path, timeout: Duration, log: &Log, created: impl FnOnce()) -> Result<std::fs::File, End> {
+/// A new FIFO at `path`, in place of one an earlier run left.
+fn make_fifo(path: &Path, log: &Log) -> Result<(), End> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::FileTypeExt;
     if let Ok(meta) = std::fs::symlink_metadata(path) {
@@ -590,7 +613,21 @@ fn open_fifo(path: &Path, timeout: Duration, log: &Log, created: impl FnOnce()) 
         log.line(format!("mkfifo {}: {}", path.display(), std::io::Error::last_os_error()));
         return Err(End::OutputFailed);
     }
+    log.line(format!("output FIFO {} made", path.display()));
+    Ok(())
+}
+
+/// Create the FIFO, say so (`created`), and wait for its reader; the open end.
+///
+/// The order is the point. The status says "waiting for the player" only once
+/// this run's FIFO exists: said before, a FIFO left by the previous run was
+/// still there, and a player started on it would open the old one, which
+/// nobody will ever write.
+fn open_fifo(path: &Path, timeout: Duration, log: &Log, created: impl FnOnce()) -> Result<std::fs::File, End> {
+    use std::os::unix::ffi::OsStrExt;
+    make_fifo(path, log)?;
     log.line(format!("output FIFO {} waiting for its reader", path.display()));
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| End::OutputFailed)?;
     created();
     let deadline = Instant::now() + timeout;
     loop {
@@ -672,10 +709,17 @@ struct Pipeline {
     select: Option<SelectFile>,
     /// Warm receivers only: where each programme can start from.
     rap: Option<RapCache>,
+    /// The transponder tuned (IF kHz, kS/s), and how a retune searches.
+    tuned: Option<TuneParams>,
+    /// `Options::start_standby`, until the first lock has been had.
+    standby_first: bool,
+    /// The FIFO written now.
+    fifo: Option<PathBuf>,
 }
 
-/// `select.json`: the control plane's word on which service to pass, read
-/// at most every 100 ms and only when it has changed.
+/// `select.json`: the control plane's word on what the receiver is for now
+/// -- a service, perhaps on another transponder, or standby -- read at most
+/// every 100 ms and only when it has changed.
 struct SelectFile {
     path: PathBuf,
     token: Option<String>,
@@ -686,7 +730,44 @@ struct SelectFile {
 #[derive(serde::Deserialize)]
 struct Select {
     token: Option<String>,
-    service_id: u16,
+    want: Want,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Want {
+    /// Pass `service_id`; on `transponder` if given and not the one tuned.
+    Play {
+        service_id: u16,
+        #[serde(default)]
+        transponder: Option<Transponder>,
+        /// The player goes on, opening the new service as a new file: the
+        /// output moves to a new FIFO of this name beside the old one, and
+        /// the old one's reader sees its end. A new path, so the reader of
+        /// the old file can never be taken for the new one's.
+        #[serde(default)]
+        new_fifo: Option<String>,
+    },
+    /// Nobody is watching: the USB stream stops, the demodulator stays
+    /// booted and locked for the next `Play`.
+    Standby,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+struct Transponder {
+    frequency_khz: u32,
+    symbol_rate_ksps: u32,
+}
+
+/// What `select.json` asks of the stream loop.
+#[derive(Debug)]
+enum Order {
+    Nothing,
+    /// Stream (again, from standby).
+    Play,
+    Standby,
+    /// Another transponder: lock it with the demodulator as it is.
+    Retune(TuneParams),
 }
 
 /// The multiplex's services and their event information, written beside the
@@ -832,17 +913,46 @@ impl Pipeline {
         }
     }
 
-    /// A channel change the control plane asked for: the selector starts
-    /// over on the new service, and what was queued for the old one goes.
-    fn follow_select(&mut self, reporter: &mut Reporter, log: &Log) {
-        let Some(select) = self.select.as_mut() else { return };
-        if select.checked.elapsed() < Duration::from_millis(100) {
+    /// The output to a new FIFO, `name` beside the current one; the old one
+    /// goes once its reader has been let go.
+    fn move_output(&mut self, name: &str, log: &Log) {
+        let valid = !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+        let Some(old) = self.fifo.clone().filter(|_| valid) else {
+            log.line(format!("SELECT new FIFO {name:?} refused"));
             return;
+        };
+        let new = old.with_file_name(name);
+        if new == old || make_fifo(&new, log).is_err() {
+            return;
+        }
+        self.writer.redirect(new.clone());
+        let _ = std::fs::remove_file(&old);
+        log.line(format!("SELECT output moves to {}", new.display()));
+        self.fifo = Some(new);
+    }
+
+    /// Standby: what was kept for a reader, and where each programme could
+    /// start from, are of the stream before -- stale when it resumes.
+    fn idle(&mut self) {
+        self.writer.discard();
+        if let Some(rap) = self.rap.as_mut() {
+            *rap = RapCache::default();
+        }
+    }
+
+    /// What the control plane asks now, if it asks anything new. A service
+    /// of the multiplex tuned is a new start for the selector, from that
+    /// service's last access point, with what was queued for the old one
+    /// gone; a service elsewhere is a retune.
+    fn follow_select(&mut self, reporter: &mut Reporter, log: &Log) -> Order {
+        let Some(select) = self.select.as_mut() else { return Order::Nothing };
+        if select.checked.elapsed() < Duration::from_millis(100) {
+            return Order::Nothing;
         }
         select.checked = Instant::now();
         let modified = std::fs::metadata(&select.path).and_then(|m| m.modified()).ok();
         if modified.is_none() || modified == select.modified {
-            return;
+            return Order::Nothing;
         }
         select.modified = modified;
         let Some(wanted) = std::fs::read_to_string(&select.path)
@@ -850,32 +960,65 @@ impl Pipeline {
             .and_then(|text| serde_json::from_str::<Select>(&text).ok())
             .filter(|wanted| wanted.token == select.token)
         else {
-            return;
+            return Order::Nothing;
         };
-        if wanted.service_id == self.service_id {
-            return;
-        }
-        log.line(format!("SELECT service {} -> {}", self.service_id, wanted.service_id));
-        self.service_id = wanted.service_id;
-        self.selected_at = Instant::now();
-        self.selector = Selector::new(wanted.service_id);
-        self.writer.discard();
-        // The new channel starts from its last access point, not the next.
-        let replay = self.rap.as_ref().map(|rap| rap.replay(wanted.service_id)).unwrap_or_default();
-        if !replay.is_empty() {
-            let mut out = Vec::with_capacity(replay.len());
-            for packet in replay.chunks(crate::ts::PACKET) {
-                self.selector.packet(packet, &mut out);
+        let (service_id, transponder) = match wanted.want {
+            Want::Standby => {
+                log.line("SELECT standby");
+                return Order::Standby;
             }
-            log.line(format!("SELECT replay {} B from the last access point", out.len()));
-            self.writer.send(out);
+            Want::Play { service_id, transponder, new_fifo } => {
+                if let Some(name) = new_fifo {
+                    self.move_output(&name, log);
+                }
+                (service_id, transponder)
+            }
+        };
+        let retune = transponder.and_then(|t| {
+            let rf_khz = crate::tune::universal_if_khz(t.frequency_khz);
+            let tuned = self.tuned.as_ref()?;
+            ((tuned.rf_khz, tuned.symbol_rate_ksps) != (rf_khz, t.symbol_rate_ksps)).then(|| TuneParams {
+                rf_khz,
+                symbol_rate_ksps: t.symbol_rate_ksps,
+                lock_timeout_ms: tuned.lock_timeout_ms,
+                search_offsets_khz: tuned.search_offsets_khz.clone(),
+                first_offset_khz: None,
+            })
+        });
+        if service_id != self.service_id || retune.is_some() {
+            log.line(format!("SELECT service {} -> {service_id}", self.service_id));
+            self.service_id = service_id;
+            self.selected_at = Instant::now();
+            self.selector = Selector::new(service_id);
+            self.writer.discard();
+            if retune.is_some() {
+                // Another multiplex: nothing of this one's tables or access
+                // points is of use there.
+                self.analyser = Analyser::new();
+                self.rap = self.rap.as_ref().map(|_| RapCache::default());
+            } else if let Some(replay) = self.rap.as_ref().map(|rap| rap.replay(service_id)).filter(|r| !r.is_empty()) {
+                // The new channel starts from its last access point, not the next.
+                let mut out = Vec::with_capacity(replay.len());
+                for packet in replay.chunks(crate::ts::PACKET) {
+                    self.selector.packet(packet, &mut out);
+                }
+                log.line(format!("SELECT replay {} B from the last access point", out.len()));
+                self.writer.send(out);
+            }
+            let status = &mut reporter.status;
+            status.service_id = service_id;
+            status.service_name = None;
+            status.selection = Selection { service_id, ..Default::default() };
+            status.switches += 1;
+            reporter.write();
         }
-        let status = &mut reporter.status;
-        status.service_id = wanted.service_id;
-        status.service_name = None;
-        status.selection = Selection { service_id: wanted.service_id, ..Default::default() };
-        status.switches += 1;
-        reporter.write();
+        match retune {
+            Some(params) => {
+                self.tuned = Some(params.clone());
+                Order::Retune(params)
+            }
+            None => Order::Play,
+        }
     }
 }
 
@@ -883,11 +1026,22 @@ impl Pipeline {
 pub fn run(options: Options, log: &Log) -> Status {
     let mut reporter = Reporter::new(options.status.clone(), &options);
     reporter.write();
-    let sink = match open_output(&options.output, options.reader_timeout, log, || {
-        reporter.state(State::WaitingForPlayer, log)
-    }) {
-        Ok(sink) => sink,
-        Err(end) => return finish(reporter, None, end, None, log),
+    // A warm receiver does not wait for its player to tune: the demodulator's
+    // boot and the lock (5 s cold) run while the player starts, and what
+    // arrives before the player opens the FIFO waits for it in the writer.
+    let early = matches!(options.source, Source::Satellite { .. }) && options.hold_reader.is_some();
+    let sink = match &options.output {
+        Output::Fifo(path) if early => match make_fifo(path, log) {
+            Ok(()) => {
+                reporter.state(State::WaitingForPlayer, log);
+                None
+            }
+            Err(end) => return finish(reporter, None, end, None, log),
+        },
+        output => match open_output(output, options.reader_timeout, log, || reporter.state(State::WaitingForPlayer, log)) {
+            Ok(sink) => Some(sink),
+            Err(end) => return finish(reporter, None, end, None, log),
+        },
     };
     let pressure = match options.source {
         Source::Recording(_) => Pressure::Block,
@@ -901,7 +1055,7 @@ pub fn run(options: Options, log: &Log) -> Status {
             options.output_queue_bytes,
             pressure,
             match (&options.output, options.hold_reader) {
-                (Output::Fifo(path), Some(hold)) => Some((path.clone(), hold)),
+                (Output::Fifo(path), Some(_)) => Some(path.clone()),
                 _ => None,
             },
         ),
@@ -917,6 +1071,15 @@ pub fn run(options: Options, log: &Log) -> Status {
             checked: Instant::now(),
         }),
         rap: options.hold_reader.map(|_| RapCache::default()),
+        tuned: match &options.source {
+            Source::Satellite { params, .. } => Some(params.clone()),
+            Source::Recording(_) => None,
+        },
+        standby_first: options.start_standby,
+        fifo: match &options.output {
+            Output::Fifo(path) => Some(path.clone()),
+            _ => None,
+        },
     };
     let (end, message) = match &options.source {
         Source::Recording(path) => play_recording(path, &options, &mut pipeline, &mut reporter, log),
@@ -994,7 +1157,8 @@ fn play_recording(path: &Path, options: &Options, pipeline: &mut Pipeline, repor
         if let Some(failed) = check_service(pipeline, options, since) {
             return failed;
         }
-        pipeline.follow_select(reporter, log);
+        // A recording is one service, played once: nothing to change to.
+        let _ = pipeline.follow_select(reporter, log);
         pipeline.report(reporter);
         reporter.maybe_write();
     }
@@ -1102,7 +1266,8 @@ fn play_satellite(
         log.line(format!("source: satellite, session {} {params:?}", reporter.status.sessions));
         let mut bridge = Bridge::new(&*session, log, &clock, []);
         let mut outcome = None;
-        let res = tune::run(&mut bridge, &firmware, params, &STOP, |bridge, demod| {
+        let res = tune::run(&mut bridge, &firmware, params, &STOP, |bridge, demod, tuned| {
+            reporter.status.tune = Some(TuneSummary::from(tuned));
             let (streamed, ended) = stream(session.clone(), bridge, demod, options, pipeline, reporter, log);
             outcome = ended;
             streamed
@@ -1139,24 +1304,80 @@ fn stream(
     reporter: &mut Reporter,
     log: &Log,
 ) -> (Streamed, Option<(End, Option<String>)>) {
-    let mut stream = match TsStream::new(session, options.usb_transfers, options.usb_buffer_bytes, options.usb_queue_bytes) {
-        Ok(stream) => stream,
-        Err(error) => return (Streamed { no_device: false }, Some((End::SourceFailed, Some(error.to_string())))),
+    let open = |log: &Log| -> Result<TsStream, String> {
+        let mut stream = TsStream::new(Arc::clone(&session), options.usb_transfers, options.usb_buffer_bytes, options.usb_queue_bytes)
+            .map_err(|error| error.to_string())?;
+        log.line(format!("TS stream: {} x {} B bulk transfers queued", options.usb_transfers, options.usb_buffer_bytes));
+        stream.start();
+        Ok(stream)
     };
-    log.line(format!("TS stream: {} x {} B bulk transfers queued", options.usb_transfers, options.usb_buffer_bytes));
-    stream.start();
-    reporter.state(State::Streaming, log);
+    let mut stream = if std::mem::take(&mut pipeline.standby_first) {
+        log.line("STANDBY: locked and ready; the TS stream waits for the first Play");
+        reporter.state(State::Standby, log);
+        None
+    } else {
+        match open(log) {
+            Ok(stream) => {
+                reporter.state(State::Streaming, log);
+                Some(stream)
+            }
+            Err(error) => return (Streamed { no_device: false, retune: None }, Some((End::SourceFailed, Some(error)))),
+        }
+    };
     let since = Instant::now();
     let mut next_signal = options.signal_every.map(|every| Instant::now() + every);
     let mut next_line = Instant::now() + Duration::from_secs(5);
     let mut seen_overflow = 0;
     let mut no_device = false;
+    let mut retune = None;
     let ended = loop {
         if STOP.load(Ordering::SeqCst) {
             break Some((End::Stopped, None));
         }
-        let chunk = stream.get(Duration::from_millis(100));
-        let stats = stream.stats();
+        // The control plane's word first: it decides whether there is a
+        // stream to read at all.
+        match pipeline.follow_select(reporter, log) {
+            Order::Nothing => {}
+            Order::Retune(params) => {
+                retune = Some(params);
+                break None;
+            }
+            Order::Standby => {
+                if let Some(mut running) = stream.take() {
+                    let stats = running.stop();
+                    log.line(format!("STANDBY: TS stream stopped, the demodulator stays locked: {stats:?}"));
+                }
+                pipeline.idle();
+                reporter.state(State::Standby, log);
+            }
+            Order::Play => {
+                if stream.is_none() {
+                    match open(log) {
+                        Ok(running) => stream = Some(running),
+                        Err(error) => break Some((End::SourceFailed, Some(error))),
+                    }
+                    reporter.state(State::Streaming, log);
+                }
+            }
+        }
+        // Nobody has read for the hold: standby, as if asked.
+        if stream.is_some()
+            && options.hold_reader.is_some_and(|hold| pipeline.writer.unread_for().is_some_and(|gone| gone > hold))
+            && let Some(mut running) = stream.take()
+        {
+            let stats = running.stop();
+            log.line(format!("STANDBY: no reader for {:?}; TS stream stopped: {stats:?}", options.hold_reader));
+            pipeline.idle();
+            reporter.state(State::Standby, log);
+        }
+        let Some(running) = stream.as_mut() else {
+            std::thread::sleep(Duration::from_millis(50));
+            pipeline.report(reporter);
+            reporter.maybe_write();
+            continue;
+        };
+        let chunk = running.get(Duration::from_millis(100));
+        let stats = running.stats();
         if stats.overflow_chunks != seen_overflow {
             seen_overflow = stats.overflow_chunks;
             log.line(format!(
@@ -1172,7 +1393,7 @@ fn stream(
                     break Some(closed(pipeline));
                 }
             }
-            None if stream.dead() => {
+            None if running.dead() => {
                 no_device = stats.no_device > 0 || !stats.submit_errors.is_empty();
                 log.line("USB stream ended (no transfer in flight: disconnect?)");
                 break None;
@@ -1200,7 +1421,6 @@ fn stream(
             }
         }
         reporter.status.usb = Some(stats);
-        pipeline.follow_select(reporter, log);
         pipeline.report(reporter);
         reporter.maybe_write();
         if Instant::now() >= next_line {
@@ -1220,22 +1440,26 @@ fn stream(
             ));
         }
     };
-    let stats = stream.stop();
-    // What arrived before the stop is still stream data -- unless the reader
-    // is gone or a stop was asked for, when nobody wants it.
-    let tail = stream.drain();
-    if ended.is_none() {
-        for chunk in tail {
-            if !pipeline.feed(&chunk, reporter) {
-                break;
+    if let Some(mut running) = stream {
+        let stats = running.stop();
+        // What arrived before the stop is still stream data -- unless the
+        // reader is gone, a stop was asked for, or another transponder is.
+        let tail = running.drain();
+        if ended.is_none() && retune.is_none() {
+            for chunk in tail {
+                if !pipeline.feed(&chunk, reporter) {
+                    break;
+                }
             }
         }
+        no_device |= stats.no_device > 0;
+        log.line(format!("TS stream stopped: {stats:?}"));
+        reporter.status.usb = Some(stats);
     }
-    no_device |= stats.no_device > 0;
-    log.line(format!("TS stream stopped: {stats:?}"));
-    reporter.status.usb = Some(stats);
-    drop(stream);
-    (Streamed { no_device }, ended)
+    if retune.is_some() {
+        reporter.state(State::Tuning, log);
+    }
+    (Streamed { no_device, retune }, ended)
 }
 
 #[cfg(test)]
@@ -1333,7 +1557,7 @@ mod tests {
         };
         let log = Log::silent();
         let file = open_fifo(&path, Duration::from_secs(5), &log, || {}).unwrap();
-        let writer = Writer::start(Sink::Fifo(file), 64 << 20, Pressure::Drop, None);
+        let writer = Writer::start(Some(Sink::Fifo(file)), 64 << 20, Pressure::Drop, None);
         for _ in 0..64 {
             writer.send(vec![0x47; 188 * 1024]); // far more than a pipe holds
         }
@@ -1374,7 +1598,7 @@ mod tests {
         };
         let log = Log::silent();
         let file = open_fifo(&path, Duration::from_secs(5), &log, || {}).unwrap();
-        let writer = Writer::start(Sink::Fifo(file), 1 << 20, Pressure::Drop, Some((path.clone(), Duration::from_secs(5))));
+        let writer = Writer::start(Some(Sink::Fifo(file)), 1 << 20, Pressure::Drop, Some(path.clone()));
         let started = Instant::now();
         while !readers.is_finished() && started.elapsed() < Duration::from_secs(5) {
             let mut packet = vec![0x47u8; 188];
@@ -1388,4 +1612,98 @@ mod tests {
         writer.finish(false);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn what_arrives_before_the_first_reader_waits_for_it() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("mediabox-dvb-early-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live.ts");
+        make_fifo(&path, &Log::silent()).unwrap();
+        let writer = Writer::start(None, 1 << 20, Pressure::Drop, Some(path.clone()));
+        // The stream starts before anybody reads it: the tune does not wait.
+        let mut first = vec![0x47u8; 188];
+        first[1] = 9;
+        assert!(writer.send(first));
+        let reader = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut file = std::fs::File::open(&path).unwrap();
+                let mut buffer = [0u8; 188];
+                file.read_exact(&mut buffer).unwrap();
+                buffer[1]
+            })
+        };
+        let started = Instant::now();
+        while !reader.is_finished() && started.elapsed() < Duration::from_secs(5) {
+            writer.send(vec![0x47u8; 188]);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(reader.join().unwrap(), 9, "the first reader gets the stream from its start");
+        writer.finish(false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_control_planes_requests_read_as_it_writes_them() {
+        let play: Select = serde_json::from_str(
+            r#"{"token":"1-1","want":{"kind":"play","service_id":10801,"transponder":{"frequency_khz":12188000,"symbol_rate_ksps":27500}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            play.want,
+            Want::Play {
+                service_id: 10801,
+                transponder: Some(Transponder { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 }),
+                new_fifo: None,
+            }
+        );
+        let standby: Select = serde_json::from_str(r#"{"token":"1-1","want":{"kind":"standby"}}"#).unwrap();
+        assert_eq!(standby.want, Want::Standby);
+        assert!(serde_json::from_str::<Select>(r#"{"token":"1-1","service_id":10801}"#).is_err(), "the old form is not guessed at");
+    }
+
+    #[test]
+    fn a_redirected_writer_ends_the_old_file_and_starts_the_new_one() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("mediabox-dvb-handover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, new) = (dir.join("live.ts"), dir.join("live-1.ts"));
+        make_fifo(&old, &Log::silent()).unwrap();
+        let writer = Writer::start(None, 1 << 20, Pressure::Drop, Some(old.clone()));
+        let packet = |mark: u8| {
+            let mut p = vec![0x47u8; 188];
+            p[1] = mark;
+            p
+        };
+        let first = {
+            let old = old.clone();
+            std::thread::spawn(move || {
+                let mut all = Vec::new();
+                std::fs::File::open(&old).unwrap().read_to_end(&mut all).unwrap();
+                all
+            })
+        };
+        writer.send(packet(1));
+        std::thread::sleep(Duration::from_millis(100));
+        make_fifo(&new, &Log::silent()).unwrap();
+        writer.redirect(new.clone());
+        writer.send(packet(2)); // the new channel's start
+        let seen = first.join().unwrap();
+        assert!(!seen.is_empty() && seen.chunks(188).all(|p| p[1] == 1), "the old file ended with the old service");
+        let next = std::thread::spawn(move || {
+            let mut buffer = [0u8; 188];
+            std::fs::File::open(&new).unwrap().read_exact(&mut buffer).unwrap();
+            buffer[1]
+        });
+        let started = Instant::now();
+        while !next.is_finished() && started.elapsed() < Duration::from_secs(5) {
+            writer.send(packet(3));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(next.join().unwrap(), 2, "the new file starts at the new service's start");
+        writer.finish(false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+

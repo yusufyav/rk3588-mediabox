@@ -64,6 +64,25 @@ pub struct TuneParams {
     /// -6.8 MHz, 431 ms; 1600 MHz: -0.7 MHz, 429-482 ms, 3 of 3) and reached
     /// 12.7 MHz from 1588 only now and then (4.3 s; 5 of 12 reference sessions).
     pub search_offsets_khz: Vec<i32>,
+    /// The offset this transponder locked at last time, tried first: on the
+    /// system measured above every cold start otherwise spent a second on
+    /// the nominal IF that never locks.
+    pub first_offset_khz: Option<i32>,
+}
+
+impl TuneParams {
+    /// The offsets in the order they are tried: the one remembered, the
+    /// nominal IF, then the search; none twice.
+    pub fn offsets(&self) -> Vec<i32> {
+        let mut out: Vec<i32> = Vec::new();
+        let order = self.first_offset_khz.into_iter().chain(std::iter::once(0)).chain(self.search_offsets_khz.iter().copied());
+        for offset in order {
+            if !out.contains(&offset) {
+                out.push(offset);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -115,9 +134,12 @@ impl TuneResult {
 }
 
 /// What the stream (the caller's) reports back: whether it ended because
-/// the device went away.
+/// the device went away, or wants another transponder -- tuned with the
+/// demodulator as it is, booted, which is what makes a receiver that stays
+/// up worth having (the boot is 3.5 s of patch upload).
 pub struct Streamed {
     pub no_device: bool,
+    pub retune: Option<TuneParams>,
 }
 
 fn checkpoint(bridge: &mut Bridge, demod: &Avl62x1, res: &mut TuneResult, name: &str) -> Result<()> {
@@ -148,7 +170,7 @@ pub fn run(
     firmware: &Firmware,
     params: &TuneParams,
     stop: &AtomicBool,
-    stream: impl FnOnce(&mut Bridge, &mut Avl62x1) -> Streamed,
+    stream: impl FnMut(&mut Bridge, &mut Avl62x1, &TuneResult) -> Streamed,
 ) -> TuneResult {
     let mut res = TuneResult::default();
     if let Err(error) = run_inner(bridge, firmware, params, stop, stream, &mut res) {
@@ -164,7 +186,7 @@ fn run_inner(
     firmware: &Firmware,
     params: &TuneParams,
     stop: &AtomicBool,
-    stream: impl FnOnce(&mut Bridge, &mut Avl62x1) -> Streamed,
+    stream: impl FnMut(&mut Bridge, &mut Avl62x1, &TuneResult) -> Streamed,
     res: &mut TuneResult,
 ) -> Result<()> {
     bridge.allow_writes(GPIO2.regs());
@@ -225,7 +247,7 @@ fn stages(
     firmware: &Firmware,
     params: &TuneParams,
     stop: &AtomicBool,
-    stream: impl FnOnce(&mut Bridge, &mut Avl62x1) -> Streamed,
+    mut stream: impl FnMut(&mut Bridge, &mut Avl62x1, &TuneResult) -> Streamed,
     res: &mut TuneResult,
 ) -> Result<()> {
     bridge::demod_reset_pulse(bridge)?;
@@ -276,11 +298,51 @@ fn stages(
     res.ts_ep4_off = Some(false); // from here on cleanup must switch EP4 TX off
     bridge::ts_init(bridge)?;
 
+    let mut params = params.clone();
+    loop {
+        lock_carrier(bridge, demod, &params, stop, res)?;
+        if !res.fec_locked() {
+            if res.stopped.is_none() {
+                res.stopped = Some("no FEC lock".into());
+            }
+            return Ok(());
+        }
+        // The stream is told how it was tuned as it starts: what the control
+        // plane learns from a tune (where the carrier locked) is known while
+        // the channel plays, not only once the receiver has gone.
+        let streamed = stream(bridge, demod, res);
+        res.no_device |= streamed.no_device;
+        if streamed.no_device {
+            return Ok(()); // nothing left to ask; cleanup still tries
+        }
+        let Some(next) = streamed.retune else { break };
+        bridge.log.line(format!("RETUNE {} kHz SR {} kS/s, the demodulator as it is", next.rf_khz, next.symbol_rate_ksps));
+        res.lock_flags = None;
+        res.lock_polls = None;
+        res.lock_ms = None;
+        res.acq_trace.clear();
+        res.rf_verdict = None;
+        params = next;
+    }
+    // Read-only, for the record (lock_status / SNR after the stream settled).
+    match demod.acq_status(bridge) {
+        Ok(status) => {
+            bridge.log.line(format!("ACQ post-capture sample {status:?}"));
+            res.post_capture = Some(status);
+        }
+        Err(error) => bridge.log.line(format!("ACQ post-capture sample failed: {error}")),
+    }
+    Ok(())
+}
+
+/// HALT, then the remembered offset, the nominal IF and the search until one
+/// locks (`TuneParams::offsets`); each try a retune, not a reboot.
+fn lock_carrier(bridge: &mut Bridge, demod: &mut Avl62x1, params: &TuneParams, stop: &AtomicBool, res: &mut TuneResult) -> Result<()> {
     if !demod.halt(bridge)? {
         res.stopped = Some("HALT failed".into());
         return Ok(());
     }
-    let offsets: Vec<i32> = std::iter::once(0).chain(params.search_offsets_khz.iter().copied().filter(|&o| o != 0)).collect();
+    let offsets = params.offsets();
     for (attempt, &offset_khz) in offsets.iter().enumerate() {
         let rf_khz = (params.rf_khz as i64 + offset_khz as i64) as u32;
         if attempt > 0 {
@@ -305,26 +367,6 @@ fn stages(
         if res.fec_locked() || res.stopped.is_some() {
             break;
         }
-    }
-    if !res.fec_locked() {
-        if res.stopped.is_none() {
-            res.stopped = Some("no FEC lock".into());
-        }
-        return Ok(());
-    }
-
-    let streamed = stream(bridge, demod);
-    res.no_device |= streamed.no_device;
-    if streamed.no_device {
-        return Ok(()); // nothing left to ask; cleanup still tries
-    }
-    // Read-only, for the record (lock_status / SNR after the stream settled).
-    match demod.acq_status(bridge) {
-        Ok(status) => {
-            bridge.log.line(format!("ACQ post-capture sample {status:?}"));
-            res.post_capture = Some(status);
-        }
-        Err(error) => bridge.log.line(format!("ACQ post-capture sample failed: {error}")),
     }
     Ok(())
 }
@@ -423,3 +465,23 @@ fn cleanup(bridge: &mut Bridge, demod: &mut Avl62x1, res: &mut TuneResult, untou
         Err(error) => bridge.log.line(format!("GPIO5/GPIO14 check failed: {error}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_offset_that_locked_last_time_is_tried_first() {
+        let params = |first| TuneParams {
+            rf_khz: 1_588_000,
+            symbol_rate_ksps: 27_500,
+            lock_timeout_ms: None,
+            search_offsets_khz: vec![10_000, -10_000],
+            first_offset_khz: first,
+        };
+        assert_eq!(params(None).offsets(), [0, 10_000, -10_000]);
+        assert_eq!(params(Some(10_000)).offsets(), [10_000, 0, -10_000]);
+        assert_eq!(params(Some(0)).offsets(), [0, 10_000, -10_000]);
+    }
+}
+

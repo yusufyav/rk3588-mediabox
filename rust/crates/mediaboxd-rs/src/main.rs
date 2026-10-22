@@ -233,6 +233,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if state.live.sweep().await {
                 state.player.stop().await;
             }
+            // Then the receiver is kept ready, as a television's tuner is:
+            // at boot, after the interface restarts, when it is plugged in.
+            loop {
+                state.live.prepare().await;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
         });
     }
     // The kept volume, back on the softvol control of the card it is on.

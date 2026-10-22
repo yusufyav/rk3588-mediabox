@@ -93,6 +93,10 @@ struct Play {
     /// then -step (kHz); 0 = nominal only.
     #[arg(long, default_value_t = 10_000)]
     carrier_search_khz: i32,
+    /// Try this offset from the nominal IF first (kHz): where the
+    /// transponder locked last time.
+    #[arg(long, allow_hyphen_values = true)]
+    carrier_first_khz: Option<i32>,
     #[arg(long, value_parser = clap::value_parser!(u32).range(10..=5000))]
     lock_timeout_ms: Option<u32>,
     #[arg(long, default_value = mediabox_dvb::firmware::DEFAULT_DIR)]
@@ -133,6 +137,10 @@ struct Play {
     /// player), changing service on `select.json` beside --status.
     #[arg(long, default_value_t = 0)]
     hold_reader_s: u64,
+    /// With --hold-reader-s: boot and lock, then wait in standby for a Play
+    /// in select.json.
+    #[arg(long, requires = "hold_reader_s")]
+    standby: bool,
 }
 
 fn play(args: Play) -> ExitCode {
@@ -160,6 +168,7 @@ fn play(args: Play) -> ExitCode {
                     0 => Vec::new(),
                     step => vec![step.abs(), -step.abs()],
                 },
+                first_offset_khz: args.carrier_first_khz,
             },
             firmware_dir: args.firmware_dir,
             access: HardwareAccess::chosen_with_hardware_flag(),
@@ -208,6 +217,7 @@ fn play(args: Play) -> ExitCode {
         raw: args.raw,
         output_queue_bytes: args.output_queue_bytes,
         hold_reader: (args.hold_reader_s > 0).then(|| Duration::from_secs(args.hold_reader_s)),
+        start_standby: args.standby,
     };
     let status = service::run(options, &log);
     match status.end {

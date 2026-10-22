@@ -478,12 +478,22 @@ impl Output {
         if let Some(matched) = matched.as_ref().filter(|_| changes) {
             setting.resolution = ResolutionChoice::Timing { key: matched.timing_key };
         }
+        // What the wire carries now: the kept setting, or the film before
+        // this one's match -- a live channel's, handed over to this one.
+        let on_wire = state
+            .content
+            .as_ref()
+            .map(|content| content.output.setting.clone())
+            .unwrap_or_else(|| state.kept.clone());
         let output = ContentOutput {
             cadence,
             cadence_label: cadence.label(),
             matched,
             setting: setting.clone(),
-            applied: !changes,
+            // Already on the wire is applied: nothing is sent, so no owner
+            // will report it. Waited for, it held a channel's first frame
+            // for the five seconds of the wait (2026-10-22).
+            applied: !changes || on_wire == setting,
         };
         eprintln!(
             "mediaboxd-rs: film {film} at {} fps: {}",
@@ -495,14 +505,11 @@ impl Output {
                 None => "nothing at this size fits; the display is left alone".into(),
             }
         );
-        let previous = state.content.replace(Content {
+        state.content = Some(Content {
             film,
             identity: identity.clone(),
             output: output.clone(),
         });
-        let on_wire = previous
-            .map(|content| content.output.setting)
-            .unwrap_or_else(|| state.kept.clone());
         let mut events = Vec::new();
         if on_wire != setting {
             events.push(OutputEvent::Apply {
@@ -1212,6 +1219,34 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         let status = output.status();
         assert!(status.content.is_none());
         assert_eq!(status.selected.unwrap().label, "3840x2160p60");
+    }
+
+    #[tokio::test]
+    async fn a_channel_change_keeps_the_mode_and_is_applied_at_once() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        let rate = Cadence::from_fps(23.976).unwrap();
+        output.content_start(1, rate).unwrap();
+        let (setting, _, _) = tokio::time::timeout(std::time::Duration::from_secs(3), next_apply(&mut events)).await.expect("first apply");
+        output.owner_report(applied(&offer, &setting, None)).unwrap();
+        // The next channel: the first one ends after handing over.
+        output.content_handover();
+        output.content_end(1);
+        let chosen = output.content_start(2, rate).unwrap();
+        assert!(chosen.applied, "the mode is on the wire already: nothing to wait for");
+        assert!(output.content_applied(2));
+        // Nothing was sent between the two: no mode change, no re-lock.
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, OutputEvent::Apply { .. }), "{event:?}");
+        }
+        // A handover that nothing followed puts the kept mode back.
+        output.content_handover();
+        output.content_handover_failed();
+        let (setting, _, content) = tokio::time::timeout(std::time::Duration::from_secs(3), next_apply(&mut events)).await.expect("apply after a failed handover");
+        assert_eq!(setting.resolution, ResolutionChoice::Auto);
+        assert!(!content);
     }
 
     #[tokio::test]

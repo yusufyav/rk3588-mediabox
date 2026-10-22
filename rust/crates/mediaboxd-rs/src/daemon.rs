@@ -1041,16 +1041,59 @@ impl AppState {
             return Response::failure("INVALID_REQUEST", error);
         }
         let starting = self.playback.begin_start();
+        // Live television already playing here: the next channel opens in
+        // the same player. Its picture plane, its decoder and its audio
+        // device stay; only the receiver's selection and the player's file
+        // change. A new player each time stopped and restarted the sound
+        // over HDMI, and the receiver behind the television (its optical
+        // output, a sound system) lost the start of every channel: mpv's own
+        // manual on --audio-stream-silence, "A/V receivers often ignore
+        // initial audio sent over HDMI ... every time audio over HDMI is
+        // stopped and resumed".
+        if self.live.can_reuse(&source)
+            && let Some(film) = self.playback.current(crate::playback::PlayerKind::Here)
+            && self.playback.live(crate::playback::PlayerKind::Here).is_some()
+            && self.player.answers().await
+        {
+            self.player.begin_reload();
+            match self.live.switch(service_id, &source, true).await {
+                Ok(()) => {
+                    let fifo = self.live.fifo().display().to_string();
+                    let title = title.clone().filter(|title| !title.trim().is_empty());
+                    let picture = self.player.reload_live(&fifo, service_id, title).await;
+                    self.playback.relabel_live(film, service_id);
+                    // The display follows a channel whose rate is not the
+                    // last one's; the same rate sends nothing.
+                    if let Some(cadence) = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps)
+                        && let Err(why) = self.output.content_start(self.player.film(), cadence)
+                    {
+                        eprintln!("mediaboxd-rs: live channel {service_id}: display not matched: {why}");
+                    }
+                    self.live.playing();
+                    return Response::success(json!({
+                        "playing": "here",
+                        "film": film,
+                        "live": service_id,
+                        "continued": true,
+                        "picture": picture,
+                    }));
+                }
+                Err(error) => {
+                    self.player.end_reload();
+                    eprintln!("mediaboxd-rs: live channel {service_id} not opened in the running player ({error})");
+                }
+            }
+        }
         // A channel of the multiplex the receiver is already on: the
         // receiver stays, warm, and only the player is new. What a cold
         // start costs -- the receiver's process, the demodulator's 3.5 s
         // patch, the tune and the lock, 6 s in all on the Plus -- is not paid
         // again, and the display keeps its mode through the change.
-        let warm = self.live.can_switch(&source);
+        let warm = self.live.can_reuse(&source);
         let switched = if warm {
             self.output.content_handover();
             self.stop_here_keeping_receiver(crate::playback::Intent::Replace).await;
-            match self.live.switch(service_id).await {
+            match self.live.switch(service_id, &source, false).await {
                 Ok(()) => true,
                 Err(error) => {
                     eprintln!("mediaboxd-rs: live channel change without a restart failed ({error}); starting the receiver again");
@@ -1513,8 +1556,10 @@ impl AppState {
         let stopped = self.player.stop().await;
         // Live television: the receiver goes with its player, and is waited
         // for -- its cleanup switches the LNB off before anything else starts.
+        // Live television stopped: the receiver waits in standby, booted and
+        // locked, so the next time is a tune and not a boot.
         if live || (!keep_receiver && stopped.as_ref().is_some_and(|playing| playing.live().is_some())) {
-            self.live.stop().await;
+            self.live.standby().await;
         }
         match (film, &stopped) {
             (Some(film), _) => {
@@ -2707,6 +2752,10 @@ async fn follow_live(
 ///
 /// Whatever happens, the film is let go: a player never stays held because
 /// the display could not be matched.
+/// Where a live channel's rate came from when it was remembered rather than
+/// read from the stream.
+const REMEMBERED_RATE: &str = "the rate the channel had last time";
+
 async fn follow_film(
     player: Arc<PlayerManager>,
     output: Arc<crate::output::Output>,
@@ -2745,8 +2794,14 @@ async fn follow_film(
         // (2026-10-22), live: first output 6.3 s after the request; a wait of
         // 4 s let the film go without its rate, and the mode then changed
         // under the playing film.
+        // A channel played before: its rate is known, and the display is
+        // matched now, while the receiver boots -- the television re-locks
+        // before there is a picture, not under the first one.
+        if let Some(known) = receiver.live_service().and_then(|sid| receiver.known_rate(sid)).and_then(mediabox_core::Cadence::from_fps) {
+            cadence = Some((known, REMEMBERED_RATE));
+        }
         let mut streaming_since = None;
-        for _ in 0..300 {
+        for _ in 0..if cadence.is_some() { 0 } else { 300 } {
             if player.film() != film {
                 return;
             }
@@ -2802,6 +2857,14 @@ async fn follow_film(
     }
     player.release(film).await;
 
+    // A live channel matched from what it had last time is checked against
+    // what its stream says now, once it says it: a broadcaster that changed
+    // the channel's format gets the display matched again.
+    let mut confirm = match (&receiver, cadence) {
+        (Some(receiver), Some((expected, from))) if from == REMEMBERED_RATE => Some((Arc::clone(receiver), expected)),
+        _ => None,
+    };
+
     // Until it ends. The player going quiet twice running is the end too:
     // a film that finishes exits by itself and nobody calls stop.
     let mut silent = 0;
@@ -2809,6 +2872,17 @@ async fn follow_film(
         tokio::time::sleep(Duration::from_secs(1)).await;
         if player.film() != film {
             break;
+        }
+        if let Some((receiver, expected)) = &confirm
+            && let Some(actual) = receiver.output_rate().and_then(mediabox_core::Cadence::from_fps)
+        {
+            if actual != *expected {
+                eprintln!("mediaboxd-rs: film {film}: the stream is {} fps, not the {} remembered", actual.label(), expected.label());
+                if let Err(why) = output.content_start(film, actual) {
+                    eprintln!("mediaboxd-rs: film {film}: display not matched: {why}");
+                }
+            }
+            confirm = None;
         }
         if player.answers().await {
             silent = 0;

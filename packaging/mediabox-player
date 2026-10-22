@@ -187,6 +187,16 @@ if [ "${MEDIABOX_PLAYER_LIVE:-0}" = 1 ]; then
     # and the default kept 50 MiB of it -- mpv's RSS climbed with the stream,
     # 38 to 78 MB in the first minute of TRT HABER HD (2026-10-22).
     live="$live --demuxer-max-back-bytes=0"
+    # A channel change opens the next channel in this same player
+    # (`loadfile`): mpv keeps the audio device between files of one format
+    # (--gapless-audio=weak, its default), and this keeps it playing through
+    # the moment between them, silence where there is no sound. Without it the
+    # sound over HDMI stopped and started on every change, and what the
+    # television passes on to a sound system lost each channel's first
+    # second -- mpv's own words for this option: "A/V receivers often ignore
+    # initial audio sent over HDMI ... every time audio over HDMI is stopped
+    # and resumed". Films keep mpv's default.
+    live="$live --audio-stream-silence=yes"
 fi
 
 # At the end of the file the player holds its last frame rather than exiting:

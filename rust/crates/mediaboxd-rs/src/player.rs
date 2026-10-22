@@ -96,6 +96,9 @@ pub struct PlayerManager {
     /// not probed for a start time): the first one read, so what is shown
     /// is how long it has been on.
     live_origin: std::sync::Mutex<Option<f64>>,
+    /// A live channel is being opened in the running player: the end of the
+    /// file before it is not the end of anything (`playback::read_mpv`).
+    reloading: AtomicBool,
 }
 
 impl PlayerManager {
@@ -108,6 +111,7 @@ impl PlayerManager {
             holding: AtomicBool::new(false),
             display_sync: AtomicBool::new(false),
             live_origin: std::sync::Mutex::new(None),
+            reloading: AtomicBool::new(false),
         }
     }
 
@@ -405,6 +409,56 @@ impl PlayerManager {
 
         *self.playing.lock().await = Some(playing);
         Ok(())
+    }
+
+    /// Whether a live channel is being opened in the running player.
+    pub fn reloading(&self) -> bool {
+        self.reloading.load(Ordering::SeqCst)
+    }
+
+    /// The next live channel is about to be opened in this player: from
+    /// now the end of the current file is the channel change's, not the
+    /// end of the film.
+    pub fn begin_reload(&self) {
+        self.reloading.store(true, Ordering::SeqCst);
+    }
+
+    pub fn end_reload(&self) {
+        self.reloading.store(false, Ordering::SeqCst);
+    }
+
+    /// Open live channel `service_id`, on `url`, in the player that is
+    /// running -- its video output, its decoder and above all its audio
+    /// device stay as they are (mpv keeps the device between files of one
+    /// format, `--gapless-audio=weak`), so the sound over HDMI is never
+    /// stopped and started again. True once the new file plays.
+    pub async fn reload_live(&self, url: &str, service_id: u16, title: Option<String>) -> bool {
+        let loaded = self
+            .ask(json!({"command": ["loadfile", url, "replace"], "request_id": 23}))
+            .await
+            .is_some_and(|answer| answer.get("error").and_then(Value::as_str) == Some("success"));
+        if loaded {
+            // The old file's end paused it (`--keep-open`); the new one plays.
+            let _ = self.ask(json!({"command": ["set_property", "pause", false], "request_id": 24})).await;
+        }
+        let mut playing = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while loaded && std::time::Instant::now() < deadline {
+            let idle = self.property("core-idle").await.and_then(|value| value.as_bool());
+            let ended = self.property("eof-reached").await.and_then(|value| value.as_bool());
+            if idle == Some(false) && ended != Some(true) {
+                playing = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        *self.live_origin.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        if let Some(current) = self.playing.lock().await.as_mut() {
+            current.content = Playback::Live { service_id };
+            current.title = title;
+        }
+        self.end_reload();
+        playing
     }
 
     /// How far into the film the player has got, in whole seconds.

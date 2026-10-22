@@ -85,6 +85,8 @@ pub enum Lifecycle {
     /// The player is on it.
     Playing,
     Stopping,
+    /// Up, booted and locked, its stream stopped: nobody is watching.
+    Standby,
     /// It ended without being asked to; `failure` says why.
     Failed,
     /// Stopped, and the receiver's cleanup has run.
@@ -99,13 +101,23 @@ struct Inner {
     failure: Option<String>,
     /// The receiver's last status, kept after it is gone.
     last: Option<Value>,
+    /// The FIFO the receiver writes now: `live.ts` from a start, a new name
+    /// each time a channel is opened in the same player (`switch`).
+    fifo: Option<PathBuf>,
+    /// For those names.
+    fifos: u64,
 }
 
 pub struct LiveManager {
     paths: LivePaths,
     inner: Mutex<Inner>,
     starts: AtomicU64,
+    /// When preparing the receiver last failed: not tried again for a while.
+    prepare_failed: Mutex<Option<Instant>>,
 }
+
+/// How long a failed preparation waits before the next.
+const PREPARE_RETRY: Duration = Duration::from_secs(600);
 
 /// What the receiver's ending means to the viewer.
 fn describe(end: &str, detail: Option<&str>) -> String {
@@ -137,8 +149,11 @@ impl LiveManager {
                 token: None,
                 failure: None,
                 last: None,
+                fifo: None,
+                fifos: 0,
             }),
             starts: AtomicU64::new(0),
+            prepare_failed: Mutex::new(None),
         }
     }
 
@@ -146,8 +161,9 @@ impl LiveManager {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The FIFO the receiver writes now.
     pub fn fifo(&self) -> PathBuf {
-        self.paths.fifo()
+        self.lock().fifo.clone().unwrap_or_else(|| self.paths.fifo())
     }
 
     pub fn lifecycle(&self) -> Lifecycle {
@@ -165,6 +181,10 @@ impl LiveManager {
     /// The command line the receiver's unit is started with. Every argument
     /// comes from a typed value; nothing a caller sent is passed through.
     pub fn argv(&self, service_id: u16, source: &LiveSource, token: &str) -> Vec<String> {
+        self.argv_with(service_id, source, token, false)
+    }
+
+    fn argv_with(&self, service_id: u16, source: &LiveSource, token: &str, standby: bool) -> Vec<String> {
         let mut argv: Vec<String> = [
             "--collect".to_string(),
             format!("--unit={UNIT}"),
@@ -204,6 +224,12 @@ impl LiveManager {
                 // Warm between players: a channel change is a new service
                 // for the selector (`switch`), not a new receiver.
                 argv.extend(["--hold-reader-s".into(), HOLD_READER_S.to_string()]);
+                if standby {
+                    argv.push("--standby".into());
+                }
+                if let Some(offset) = self.stored_guide().and_then(|guide| guide.multiplex(source)?.carrier_offset_khz) {
+                    argv.push(format!("--carrier-first-khz={offset}"));
+                }
             }
         }
         argv
@@ -240,6 +266,10 @@ impl LiveManager {
     /// Start the receiver for `service_id` of `source`, replacing whatever
     /// receiver ran before; returns once its output (the FIFO) exists.
     pub async fn start(&self, service_id: u16, source: &LiveSource) -> Result<(), String> {
+        self.start_with(service_id, source, false).await
+    }
+
+    async fn start_with(&self, service_id: u16, source: &LiveSource, standby: bool) -> Result<(), String> {
         source.validate()?;
         self.stop().await;
         let token = format!("{}-{}", std::process::id(), self.starts.fetch_add(1, Ordering::SeqCst) + 1);
@@ -250,10 +280,11 @@ impl LiveManager {
             inner.token = Some(token.clone());
             inner.failure = None;
             inner.last = None;
+            inner.fifo = None;
         }
         self.set(Lifecycle::Starting);
         let output = Command::new("systemd-run")
-            .args(self.argv(service_id, source, &token))
+            .args(self.argv_with(service_id, source, &token, standby))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -289,45 +320,142 @@ impl LiveManager {
     }
 
     /// Whether a channel of `source` can be had from the receiver already
-    /// running: same multiplex source, this start's, streaming.
-    pub fn can_switch(&self, source: &LiveSource) -> bool {
+    /// up -- streaming, or in standby -- with its demodulator as it is: any
+    /// satellite transponder, the one tuned (a new service) or another (a
+    /// retune without the 3.5 s boot).
+    pub fn can_reuse(&self, source: &LiveSource) -> bool {
         {
             let inner = self.lock();
+            let satellite = |source: Option<&LiveSource>| matches!(source, Some(LiveSource::Satellite { .. }));
             if inner.token.is_none()
-                || inner.source.as_ref() != Some(source)
-                || !matches!(source, LiveSource::Satellite { .. })
-                || inner.lifecycle != Lifecycle::Playing
+                || !satellite(Some(source))
+                || !satellite(inner.source.as_ref())
+                || !matches!(inner.lifecycle, Lifecycle::Playing | Lifecycle::Standby)
             {
                 return false;
             }
         }
-        self.receiver_state().as_deref() == Some("streaming")
+        matches!(self.receiver_state().as_deref(), Some("streaming" | "standby"))
     }
 
-    /// Ask the running receiver for `service_id` instead (`select.json`),
-    /// and wait until it says it has moved.
-    pub async fn switch(&self, service_id: u16) -> Result<(), String> {
+    fn select(&self, want: Value) -> Result<(), String> {
         let token = self.lock().token.clone().ok_or("uydu alıcısı çalışmıyor")?;
         let path = self.paths.run_dir.join("select.json");
         let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, json!({"token": token, "service_id": service_id}).to_string())
+        std::fs::write(&temporary, json!({"token": token, "want": want}).to_string())
             .and_then(|()| std::fs::rename(&temporary, &path))
-            .map_err(|error| format!("kanal seçimi yazılamadı: {error}"))?;
-        let deadline = Instant::now() + Duration::from_secs(2);
+            .map_err(|error| format!("alıcıya istek yazılamadı: {error}"))
+    }
+
+    /// Wait until the receiver says `done`, or has ended.
+    async fn until(&self, within: Duration, done: impl Fn(&Value) -> bool) -> Result<(), String> {
+        let deadline = Instant::now() + within;
         loop {
             if let Some(status) = self.read_status() {
                 if Self::final_of(&status).is_some() {
                     return Err("uydu alıcısı kapandı".into());
                 }
-                if status.get("service_id").and_then(Value::as_u64) == Some(service_id as u64) {
-                    self.lock().service_id = Some(service_id);
+                if done(&status) {
                     return Ok(());
                 }
             }
             if Instant::now() > deadline {
-                return Err("uydu alıcısı kanal değişimini onaylamadı".into());
+                return Err("uydu alıcısı isteği onaylamadı".into());
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Ask the receiver already up for `service_id` of `source`
+    /// (`select.json`), and wait until it streams it. With `new_fifo`, the
+    /// stream moves to a FIFO of its own for the player that is already
+    /// reading, which opens it as its next file (`fifo()` says which).
+    pub async fn switch(&self, service_id: u16, source: &LiveSource, new_fifo: bool) -> Result<(), String> {
+        let LiveSource::Satellite { frequency_khz, symbol_rate_ksps } = *source else {
+            return Err("yalnız uydu kaynağı".into());
+        };
+        let retune = self.lock().source.as_ref() != Some(source);
+        let name = new_fifo.then(|| {
+            let mut inner = self.lock();
+            inner.fifos += 1;
+            format!("live-{}.ts", inner.fifos)
+        });
+        self.select(json!({
+            "kind": "play",
+            "service_id": service_id,
+            "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps},
+            "new_fifo": name,
+        }))?;
+        if let Some(name) = name {
+            self.lock().fifo = Some(self.paths.run_dir.join(name));
+        }
+        // A service of the multiplex tuned is a selector's restart; another
+        // transponder is a lock, seconds at most.
+        let within = Duration::from_secs(if retune { 8 } else { 2 });
+        self.until(within, |status| {
+            status.get("service_id").and_then(Value::as_u64) == Some(service_id as u64)
+                && status.get("state").and_then(Value::as_str) == Some("streaming")
+        })
+        .await?;
+        let mut inner = self.lock();
+        inner.service_id = Some(service_id);
+        inner.source = Some(source.clone());
+        inner.failure = None;
+        drop(inner);
+        self.set(Lifecycle::Starting);
+        Ok(())
+    }
+
+    /// Nobody is watching: the receiver stops its stream and keeps its
+    /// demodulator booted and locked. A receiver that cannot is stopped.
+    pub async fn standby(&self) {
+        let up = {
+            let inner = self.lock();
+            inner.token.is_some() && matches!(inner.source, Some(LiveSource::Satellite { .. }))
+        };
+        let ready = up && matches!(self.receiver_state().as_deref(), Some("streaming" | "standby"));
+        if ready
+            && self.select(json!({"kind": "standby"})).is_ok()
+            && self
+                .until(Duration::from_secs(2), |status| status.get("state").and_then(Value::as_str) == Some("standby"))
+                .await
+                .is_ok()
+        {
+            self.set(Lifecycle::Standby);
+            return;
+        }
+        self.stop().await;
+    }
+
+    /// Make the receiver ready before anybody watches, as a television's
+    /// tuner is: booted and locked on the first satellite multiplex known,
+    /// in standby. Only when the receiver is plugged in and no receiver runs
+    /// (one that went with the interface leaves only its token behind).
+    pub async fn prepare(&self) -> bool {
+        if !receiver_plugged_in()
+            || matches!(self.lifecycle(), Lifecycle::Starting | Lifecycle::Playing | Lifecycle::Stopping)
+            || self.prepare_failed.lock().unwrap_or_else(|p| p.into_inner()).is_some_and(|at| at.elapsed() < PREPARE_RETRY)
+            || Self::unit_active().await
+            || !interface_active().await
+        {
+            return false;
+        }
+        let Some((service_id, source)) = self.stored_guide().and_then(|guide| {
+            guide.channels().into_iter().find(|c| matches!(c.source, LiveSource::Satellite { .. })).map(|c| (c.service_id, c.source))
+        }) else {
+            return false;
+        };
+        match self.start_with(service_id, &source, true).await {
+            Ok(()) => {
+                self.set(Lifecycle::Standby);
+                eprintln!("mediaboxd-rs: live receiver prepared in standby on {source:?}");
+                true
+            }
+            Err(error) => {
+                eprintln!("mediaboxd-rs: live receiver not prepared: {error}");
+                *self.prepare_failed.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+                false
+            }
         }
     }
 
@@ -437,6 +565,17 @@ impl LiveManager {
         }
     }
 
+    /// The service the receiver was asked for.
+    pub fn live_service(&self) -> Option<u16> {
+        self.lock().service_id
+    }
+
+    /// The rate `service_id` of `source` played at last time, if known.
+    pub fn known_rate(&self, service_id: u16) -> Option<f64> {
+        let source = self.lock().source.clone()?;
+        self.stored_guide()?.multiplex(&source)?.rates.get(&service_id).copied()
+    }
+
     /// What the interface and `mediaboxctl` read.
     pub fn status(&self) -> Value {
         let receiver = self.read_status();
@@ -449,6 +588,29 @@ impl LiveManager {
             "receiver": receiver.or_else(|| inner.last.clone()),
         })
     }
+}
+
+/// Whether the interface the receiver's unit is bound to is up: started
+/// without it, the receiver would be stopped at once.
+async fn interface_active() -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", "mediabox-tv-ui.service"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+}
+
+/// Whether the Kanky Link-4K is on the USB bus: read from sysfs, which this
+/// daemon may read although it may not open the device.
+fn receiver_plugged_in() -> bool {
+    let Ok(devices) = std::fs::read_dir("/sys/bus/usb/devices") else { return false };
+    devices.flatten().any(|device| {
+        let read = |name: &str| std::fs::read_to_string(device.path().join(name)).unwrap_or_default();
+        read("idVendor").trim() == "23e2" && read("idProduct").trim() == "5270"
+    })
 }
 
 // ------------------------------------------------------------------ guide
@@ -483,6 +645,15 @@ pub struct StoredGuide {
     pub services: Vec<StoredService>,
     #[serde(default)]
     pub events: std::collections::BTreeMap<u16, Vec<LiveEvent>>,
+    /// Where the carrier was found last time, from the nominal IF (kHz): the
+    /// next cold start tries it first.
+    #[serde(default)]
+    pub carrier_offset_khz: Option<i32>,
+    /// Each service's video rate as its SPS said it (frames, or fields of an
+    /// interlaced stream): the display is matched to it before the next
+    /// cold start of that channel has a frame to read it from.
+    #[serde(default)]
+    pub rates: std::collections::BTreeMap<u16, f64>,
 }
 
 /// The receiver's `guide.json`, as `mediabox_dvb::service::Guide` writes it.
@@ -579,6 +750,29 @@ impl GuideStore {
         self.multiplexes[at].absorb(receiver, source, now)
     }
 
+    /// The multiplex reached by `source`.
+    pub fn multiplex(&self, source: &LiveSource) -> Option<&StoredGuide> {
+        self.multiplexes.iter().find(|m| m.source == *source)
+    }
+
+    /// What a tune of `source` taught: the offset it locked at, and the
+    /// rate of the service it played. True when anything changed.
+    fn learn(&mut self, source: &LiveSource, offset_khz: Option<i32>, rate: Option<(u16, f64)>) -> bool {
+        let Some(mux) = self.multiplexes.iter_mut().find(|m| m.source == *source) else { return false };
+        let mut changed = false;
+        if offset_khz.is_some() && mux.carrier_offset_khz != offset_khz {
+            mux.carrier_offset_khz = offset_khz;
+            changed = true;
+        }
+        if let Some((sid, rate)) = rate
+            && mux.rates.get(&sid).is_none_or(|known| (known - rate).abs() > 0.001)
+        {
+            mux.rates.insert(sid, rate);
+            changed = true;
+        }
+        changed
+    }
+
     /// The events of every channel that overlap `from..to`.
     pub fn window(&self, from: i64, to: i64) -> std::collections::BTreeMap<u16, Vec<LiveEvent>> {
         let mut out = std::collections::BTreeMap::new();
@@ -630,7 +824,15 @@ impl StoredGuide {
     }
 
     fn empty(source: LiveSource) -> Self {
-        Self { source, transport_stream_id: None, updated: 0, services: Vec::new(), events: Default::default() }
+        Self {
+            source,
+            transport_stream_id: None,
+            updated: 0,
+            services: Vec::new(),
+            events: Default::default(),
+            carrier_offset_khz: None,
+            rates: Default::default(),
+        }
     }
 
     /// The events of every channel that overlap `from..to`.
@@ -661,15 +863,23 @@ impl LiveManager {
                 _ => return false,
             }
         };
-        let Some(receiver) = std::fs::read_to_string(self.paths.guide())
+        let receiver = std::fs::read_to_string(self.paths.guide())
             .ok()
             .and_then(|text| serde_json::from_str::<ReceiverGuide>(&text).ok())
-            .filter(|guide| guide.token.as_deref() == Some(token.as_str()))
-        else {
-            return false;
-        };
+            .filter(|guide| guide.token.as_deref() == Some(token.as_str()));
         let mut stored = self.stored_guide().unwrap_or_default();
-        if !stored.absorb(receiver, &source, now_utc()) {
+        let mut changed = receiver.is_some_and(|receiver| stored.absorb(receiver, &source, now_utc()));
+        // What the tune taught, once the receiver streams: where the
+        // carrier locked, and the rate of the service on now.
+        if let Some(status) = self.read_status()
+            && status.get("state").and_then(Value::as_str) == Some("streaming")
+        {
+            let offset = status.pointer("/tune/search_offset_khz").and_then(Value::as_i64).map(|o| o as i32);
+            let sid = status.get("service_id").and_then(Value::as_u64).map(|sid| sid as u16);
+            let rate = sid.zip(self.output_rate());
+            changed |= stored.learn(&source, offset, rate);
+        }
+        if !changed {
             return false;
         }
         let Ok(text) = serde_json::to_string(&stored) else { return false };
@@ -903,4 +1113,26 @@ mod tests {
         let titles: Vec<_> = stored.events[&5].iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["B'"]);
     }
+
+    #[test]
+    fn a_tune_teaches_the_carrier_offset_and_the_channel_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        let satellite = LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 };
+        let mut store = GuideStore::default();
+        assert!(store.absorb(receiver(41306, &[(10801, "TRT HABER HD")]), &satellite, 0));
+        assert!(store.learn(&satellite, Some(10_000), Some((10801, 50.0))));
+        assert!(!store.learn(&satellite, Some(10_000), Some((10801, 50.0))), "nothing new");
+        std::fs::write(dir.path().join("live-guide.json"), serde_json::to_string(&store).unwrap()).unwrap();
+        // The next start tries where it locked.
+        assert!(live.argv(10801, &satellite, "1-1").contains(&"--carrier-first-khz=10000".to_string()));
+        {
+            let mut inner = live.lock();
+            inner.source = Some(satellite.clone());
+            inner.service_id = Some(10801);
+        }
+        assert_eq!(live.known_rate(10801), Some(50.0));
+        assert_eq!(live.known_rate(10800), None);
+    }
 }
+
