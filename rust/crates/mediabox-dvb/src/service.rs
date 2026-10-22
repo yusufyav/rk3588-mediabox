@@ -1,0 +1,1391 @@
+//! The process the control plane starts for live television: one source,
+//! one service out of it, one reader, and a status file that says at every
+//! moment what it is doing and, at the end, why it ended.
+//!
+//! ```text
+//! source  recording (a captured multiplex, read to its end)
+//!       | satellite (the receiver: tune, lock, EP 0x84 stream)
+//!   -> Analyser (integrity of the whole multiplex)
+//!   -> Selector (one programme, single-programme TS)
+//!   -> output queue -> writer thread -> FIFO (mpv) / file / stdout
+//! status  /run/mediabox-dvb/status.json, rewritten every second and at
+//!         every change of state; the last one written before the output
+//!         closes, so a reader that sees the end of the stream finds why.
+//! ```
+//!
+//! How it ends ([`End`]) is the whole point of the status: the natural end of
+//! a recording is not a broken stream, and the player going away is not a
+//! receiver fault. A live source never ends by itself.
+
+use std::collections::VecDeque;
+use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+
+use crate::avl62x1::{AcqStatus, Avl62x1};
+use crate::bridge::Bridge;
+use crate::firmware::Firmware;
+use crate::log::Log;
+use crate::ts::{Analyser, Integrity, RapCache, Selection, Selector};
+use crate::tune::{self, Streamed, TuneParams, TuneResult};
+use crate::usb::{HardwareAccess, OpenError, Session, StreamStats, TsStream};
+
+/// Set by SIGTERM / SIGINT / SIGHUP: end gracefully, clean up, exit.
+pub static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+/// Signals only raise the flag; the cleanup is never interrupted by one.
+pub fn install_signal_handlers() {
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic, which is
+        // async-signal-safe.
+        unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// Never opens USB.
+    Recording(PathBuf),
+    /// The receiver itself; only with the operator's explicit choice.
+    Satellite { params: TuneParams, firmware_dir: PathBuf, access: HardwareAccess },
+}
+
+#[derive(Debug, Clone)]
+pub enum Output {
+    /// A FIFO created here; opened once a reader has it open.
+    Fifo(PathBuf),
+    /// A new regular file.
+    File(PathBuf),
+    Stdout,
+}
+
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub service_id: u16,
+    /// Echoed in the status: which start of the control plane this is, so a
+    /// status left by an earlier one is never read as this one's.
+    pub token: Option<String>,
+    pub source: Source,
+    pub output: Output,
+    pub status: Option<PathBuf>,
+    /// How long the reader may take to open the FIFO.
+    pub reader_timeout: Duration,
+    /// How long the service may take to appear in the stream.
+    pub service_timeout: Duration,
+    pub usb_transfers: usize,
+    pub usb_buffer_bytes: usize,
+    pub usb_queue_bytes: usize,
+    /// Demodulator status read while streaming, every so often (None: never).
+    pub signal_every: Option<Duration>,
+    /// After a USB disconnect, how long to wait for the device to come back.
+    pub reconnect: Duration,
+    /// Write the whole multiplex, unchanged, instead of one service's
+    /// programme: for reading the network's own tables (NIT, SDT other),
+    /// which say where the other services are.
+    pub raw: bool,
+    /// A recording is read at the pace of its own programme clock (PCR),
+    /// as a broadcast would arrive, instead of as fast as the reader takes it.
+    pub pace: bool,
+    /// Bytes the writer may hold for a reader that has stopped reading
+    /// (paused). Beyond it a live stream's output is dropped, and counted --
+    /// never the USB side, which must keep up whatever the player does.
+    pub output_queue_bytes: usize,
+    /// Keep the receiver warm across players: when the FIFO's reader goes,
+    /// carry on and hand the stream to the next reader that opens it, for
+    /// this long at most. With it the control plane changes channel by
+    /// writing `select.json` beside the status -- a service id for the
+    /// selector -- and starting a player, with nothing reset, reloaded or
+    /// retuned (a cold start costs 6 s of demodulator patch and lock).
+    pub hold_reader: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Starting,
+    WaitingForPlayer,
+    Tuning,
+    Streaming,
+    Reconnecting,
+    Stopping,
+    Ended,
+    Failed,
+}
+
+/// Why it ended. Only `RecordingEnd` is the source ending by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum End {
+    /// A recording was read to its last byte.
+    RecordingEnd,
+    /// Asked to stop (SIGTERM from the control plane, Back).
+    Stopped,
+    /// The reader closed its end (the player quit).
+    PlayerClosed,
+    /// The reader never opened the FIFO.
+    PlayerNeverOpened,
+    UsbDisconnected,
+    DeviceNotFound,
+    NoLock,
+    TuneFailed,
+    ServiceNotFound,
+    SourceFailed,
+    OutputFailed,
+}
+
+impl End {
+    /// An ending nobody asked for and the source did not reach by itself.
+    pub fn is_failure(self) -> bool {
+        !matches!(self, End::RecordingEnd | End::Stopped | End::PlayerClosed)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OutputStats {
+    pub bytes: u64,
+    pub dropped_bytes: u64,
+    pub dropped_chunks: u64,
+    pub max_queued_bytes: usize,
+    /// Readers that came after the first (`Options::hold_reader`).
+    pub readers: u64,
+    /// Bytes nobody was there to read, between readers.
+    pub unread_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TuneSummary {
+    pub firmware: Option<String>,
+    pub firmware_loaded: bool,
+    pub lock_ms: Option<u64>,
+    pub search_offset_khz: Option<i32>,
+    pub rf_verdict: Option<&'static str>,
+    pub stopped: Option<String>,
+    pub error: Option<String>,
+    /// Read only; MediaBox never powers or steers the LNB.
+    pub lnb_pins_at_reset: Option<(u32, u32)>,
+    pub lnb_pins_untouched: Option<bool>,
+    pub ts_ep4_off: Option<bool>,
+    pub repeater_closed: Option<bool>,
+    pub untouched_ok: Option<bool>,
+    pub gpio_restored: Option<bool>,
+    pub cleanup_ok: bool,
+}
+
+impl From<&TuneResult> for TuneSummary {
+    fn from(res: &TuneResult) -> Self {
+        Self {
+            firmware: res.firmware.clone(),
+            firmware_loaded: res.firmware_loaded,
+            lock_ms: res.lock_ms,
+            search_offset_khz: res.search_offset_khz,
+            rf_verdict: res.rf_verdict,
+            stopped: res.stopped.clone(),
+            error: res.error.clone(),
+            lnb_pins_at_reset: res.lnb_pins_at_reset,
+            lnb_pins_untouched: res.lnb_pins_untouched,
+            ts_ep4_off: res.ts_ep4_off,
+            repeater_closed: res.repeater_closed,
+            untouched_ok: res.untouched_ok,
+            gpio_restored: res.gpio_restored,
+            cleanup_ok: res.cleanup_done && res.cleanup_ok(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Status {
+    pub token: Option<String>,
+    pub state: State,
+    pub end: Option<End>,
+    pub message: Option<String>,
+    pub source: &'static str,
+    pub service_id: u16,
+    pub service_name: Option<String>,
+    pub pid: u32,
+    pub elapsed_ms: u64,
+    /// From start to the first byte of the service written.
+    pub first_output_ms: Option<u64>,
+    pub selection: Selection,
+    pub integrity: Integrity,
+    pub output: OutputStats,
+    pub usb: Option<StreamStats>,
+    pub tune: Option<TuneSummary>,
+    pub signal: Option<AcqStatus>,
+    /// Receiver sessions: more than one after a reconnect.
+    pub sessions: u32,
+    /// Channel changes made without a restart (`select.json`).
+    pub switches: u32,
+    pub rss_kib: u64,
+}
+
+fn rss_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| pages * 4)
+        .unwrap_or(0)
+}
+
+/// The status, and where it is written.
+struct Reporter {
+    path: Option<PathBuf>,
+    status: Status,
+    start: Instant,
+    last_write: Option<Instant>,
+}
+
+impl Reporter {
+    fn new(path: Option<PathBuf>, options: &Options) -> Self {
+        let source = match options.source {
+            Source::Recording(_) => "recording",
+            Source::Satellite { .. } => "satellite",
+        };
+        Self {
+            path,
+            status: Status {
+                token: options.token.clone(),
+                state: State::Starting,
+                end: None,
+                message: None,
+                source,
+                service_id: options.service_id,
+                service_name: None,
+                pid: std::process::id(),
+                elapsed_ms: 0,
+                first_output_ms: None,
+                selection: Selection { service_id: options.service_id, ..Default::default() },
+                integrity: Integrity::default(),
+                output: OutputStats::default(),
+                usb: None,
+                tune: None,
+                signal: None,
+                sessions: 0,
+                switches: 0,
+                rss_kib: 0,
+            },
+            start: Instant::now(),
+            last_write: None,
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+
+    fn state(&mut self, state: State, log: &Log) {
+        if self.status.state != state {
+            log.line(format!("STATE {:?} -> {state:?}", self.status.state));
+            self.status.state = state;
+            self.write();
+        }
+    }
+
+    fn maybe_write(&mut self) {
+        if self.last_write.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+            self.write();
+        }
+    }
+
+    fn write(&mut self) {
+        self.last_write = Some(Instant::now());
+        self.status.elapsed_ms = self.elapsed_ms();
+        self.status.rss_kib = rss_kib();
+        let Some(path) = &self.path else { return };
+        let Ok(text) = serde_json::to_string(&self.status) else { return };
+        let temporary = path.with_extension("json.tmp");
+        if std::fs::write(&temporary, text).is_ok() {
+            let _ = std::fs::rename(&temporary, path);
+        }
+    }
+}
+
+// ------------------------------------------------------------------ output
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pressure {
+    /// The source can wait (a recording): the writer's queue blocks it.
+    Block,
+    /// The source cannot (a receiver): what does not fit is dropped, counted.
+    Drop,
+}
+
+/// Where the stream goes. A FIFO stays non-blocking and is written with
+/// poll(), so that a reader which has stopped reading (a player held on a
+/// frame, paused, wedged) can never keep this process from ending: the
+/// writer looks at `abort` at least every 100 ms.
+enum Sink {
+    Fifo(std::fs::File),
+    Plain(Box<dyn Write + Send>),
+}
+
+impl Sink {
+    fn write_all(&mut self, mut data: &[u8], abort: &AtomicBool) -> std::io::Result<bool> {
+        match self {
+            Sink::Plain(sink) => sink.write_all(data).and_then(|()| sink.flush()).map(|()| true),
+            Sink::Fifo(file) => {
+                while !data.is_empty() {
+                    if abort.load(Ordering::SeqCst) {
+                        return Ok(false);
+                    }
+                    match file.write(data) {
+                        Ok(n) => data = &data[n..],
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            let mut fd = libc::pollfd { fd: file.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+                            // SAFETY: one valid descriptor, a stack pollfd.
+                            unsafe { libc::poll(&mut fd, 1, 100) };
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+}
+
+struct OutputQueue {
+    state: Mutex<(VecDeque<Vec<u8>>, usize, bool)>, // chunks, bytes, closing
+    changed: Condvar,
+    limit: usize,
+    closed: AtomicBool,
+    /// Give up on what is queued and on the chunk being written.
+    abort: AtomicBool,
+    /// What waits for the next reader is the service before a switch: let
+    /// it go.
+    forget_pending: AtomicBool,
+    error: Mutex<Option<std::io::Error>>,
+    stats: Mutex<OutputStats>,
+}
+
+struct Writer {
+    queue: Arc<OutputQueue>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    pressure: Pressure,
+}
+
+impl Writer {
+    fn start(sink: Sink, limit: usize, pressure: Pressure, reopen: Option<(PathBuf, Duration)>) -> Self {
+        let queue = Arc::new(OutputQueue {
+            state: Mutex::new((VecDeque::new(), 0, false)),
+            changed: Condvar::new(),
+            limit,
+            closed: AtomicBool::new(false),
+            abort: AtomicBool::new(false),
+            forget_pending: AtomicBool::new(false),
+            error: Mutex::new(None),
+            stats: Mutex::new(OutputStats::default()),
+        });
+        let shared = Arc::clone(&queue);
+        let thread = std::thread::Builder::new()
+            .name("ts-output".into())
+            .spawn(move || {
+                let mut sink = Some(sink);
+                let mut no_reader_since: Option<Instant> = None;
+                // Between readers, what arrives is kept for the next one --
+                // above all a channel's start from its last access point
+                // (`RapCache`), written before the player has opened the FIFO
+                // -- up to a bound; the oldest goes first beyond it.
+                let mut pending: VecDeque<Vec<u8>> = VecDeque::new();
+                let mut pending_bytes = 0usize;
+                loop {
+                    let chunk = {
+                        let mut state = shared.state.lock().unwrap_or_else(|p| p.into_inner());
+                        loop {
+                            if let Some(chunk) = state.0.pop_front() {
+                                state.1 -= chunk.len();
+                                shared.changed.notify_all();
+                                break Some(chunk);
+                            }
+                            if state.2 {
+                                break None;
+                            }
+                            state = shared.changed.wait(state).unwrap_or_else(|p| p.into_inner());
+                        }
+                    };
+                    let Some(chunk) = chunk else { break };
+                    if shared.forget_pending.swap(false, Ordering::SeqCst) {
+                        pending.clear();
+                        pending_bytes = 0;
+                    }
+                    // Between readers: the next one is looked for with every
+                    // chunk, and the chunk waits for it.
+                    if sink.is_none()
+                        && let Some((path, hold)) = &reopen
+                    {
+                        match reopen_fifo(path) {
+                            Some(file) => {
+                                sink = Some(Sink::Fifo(file));
+                                no_reader_since = None;
+                                shared.stats.lock().unwrap_or_else(|p| p.into_inner()).readers += 1;
+                                let mut gone = false;
+                                while let Some(waiting) = pending.pop_front() {
+                                    pending_bytes -= waiting.len();
+                                    let Some(out) = sink.as_mut() else { break };
+                                    match out.write_all(&waiting, &shared.abort) {
+                                        Ok(true) => {
+                                            shared.stats.lock().unwrap_or_else(|p| p.into_inner()).bytes += waiting.len() as u64
+                                        }
+                                        Ok(false) => return,
+                                        Err(_) => {
+                                            gone = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if gone {
+                                    sink = None;
+                                    no_reader_since = Some(Instant::now());
+                                    continue;
+                                }
+                            }
+                            None => {
+                                pending_bytes += chunk.len();
+                                pending.push_back(chunk);
+                                while pending_bytes > PENDING_LIMIT {
+                                    let Some(old) = pending.pop_front() else { break };
+                                    pending_bytes -= old.len();
+                                    shared.stats.lock().unwrap_or_else(|p| p.into_inner()).unread_bytes += old.len() as u64;
+                                }
+                                if no_reader_since.is_some_and(|since| since.elapsed() > *hold) {
+                                    *shared.error.lock().unwrap_or_else(|p| p.into_inner()) =
+                                        Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+                                    shared.closed.store(true, Ordering::SeqCst);
+                                    shared.changed.notify_all();
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    let Some(out) = sink.as_mut() else { return };
+                    match out.write_all(&chunk, &shared.abort) {
+                        Ok(true) => shared.stats.lock().unwrap_or_else(|p| p.into_inner()).bytes += chunk.len() as u64,
+                        Ok(false) => return,
+                        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe && reopen.is_some() => {
+                            // The player went; the receiver stays for the next.
+                            sink = None;
+                            no_reader_since = Some(Instant::now());
+                        }
+                        Err(error) => {
+                            *shared.error.lock().unwrap_or_else(|p| p.into_inner()) = Some(error);
+                            shared.closed.store(true, Ordering::SeqCst);
+                            shared.changed.notify_all();
+                            return;
+                        }
+                    }
+                }
+            })
+            .expect("spawn the output thread");
+        Self { queue, thread: Some(thread), pressure }
+    }
+
+    /// Hand a chunk to the writer. False once the reader is gone.
+    fn send(&self, chunk: Vec<u8>) -> bool {
+        if chunk.is_empty() {
+            return !self.closed();
+        }
+        let mut state = self.queue.state.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if self.closed() {
+                return false;
+            }
+            if state.1 + chunk.len() <= self.queue.limit || state.0.is_empty() {
+                break;
+            }
+            if self.pressure == Pressure::Drop {
+                let mut stats = self.queue.stats.lock().unwrap_or_else(|p| p.into_inner());
+                stats.dropped_bytes += chunk.len() as u64;
+                stats.dropped_chunks += 1;
+                return true;
+            }
+            if STOP.load(Ordering::SeqCst) {
+                return true;
+            }
+            state = self.queue.changed.wait_timeout(state, Duration::from_millis(100)).unwrap_or_else(|p| p.into_inner()).0;
+        }
+        state.1 += chunk.len();
+        state.0.push_back(chunk);
+        let mut stats = self.queue.stats.lock().unwrap_or_else(|p| p.into_inner());
+        stats.max_queued_bytes = stats.max_queued_bytes.max(state.1);
+        drop(stats);
+        self.queue.changed.notify_all();
+        true
+    }
+
+    fn closed(&self) -> bool {
+        self.queue.closed.load(Ordering::SeqCst)
+    }
+
+    /// Forget what is queued: it is the service before a switch.
+    fn discard(&self) {
+        let mut state = self.queue.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.0.clear();
+        state.1 = 0;
+        self.queue.forget_pending.store(true, Ordering::SeqCst);
+        self.queue.changed.notify_all();
+    }
+
+    fn stats(&self) -> OutputStats {
+        self.queue.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn broken_pipe(&self) -> bool {
+        self.queue
+            .error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+    }
+
+    /// Write what is queued (unless the reader is gone or a stop was asked
+    /// for), then close the output.
+    fn finish(mut self, flush: bool) -> OutputStats {
+        {
+            let mut state = self.queue.state.lock().unwrap_or_else(|p| p.into_inner());
+            if !flush {
+                state.0.clear();
+                state.1 = 0;
+                self.queue.abort.store(true, Ordering::SeqCst);
+            }
+            state.2 = true;
+            self.queue.changed.notify_all();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.stats()
+    }
+}
+
+/// Create the FIFO, say so (`created`), and wait for its reader; the open end.
+///
+/// The order is the point. The status says "waiting for the player" only once
+/// this run's FIFO exists: said before, a FIFO left by the previous run was
+/// still there, and a player started on it would open the old one, which
+/// nobody will ever write.
+fn open_fifo(path: &Path, timeout: Duration, log: &Log, created: impl FnOnce()) -> Result<std::fs::File, End> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_fifo() {
+            log.line(format!("output {} exists and is not a FIFO", path.display()));
+            return Err(End::OutputFailed);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| End::OutputFailed)?;
+    // SAFETY: a NUL-terminated path.
+    if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+        log.line(format!("mkfifo {}: {}", path.display(), std::io::Error::last_os_error()));
+        return Err(End::OutputFailed);
+    }
+    log.line(format!("output FIFO {} waiting for its reader", path.display()));
+    created();
+    let deadline = Instant::now() + timeout;
+    loop {
+        // O_NONBLOCK: opening for writing fails with ENXIO while nobody reads,
+        // instead of blocking past a stop or the timeout.
+        // SAFETY: a NUL-terminated path; the descriptor is owned below.
+        let fd = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        if fd >= 0 {
+            // SAFETY: fd was just opened and is owned by nobody else.
+            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+            // Left non-blocking: the writer polls (see Sink).
+            log.line("output FIFO: reader connected");
+            return Ok(std::fs::File::from(owned));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENXIO) {
+            log.line(format!("open {}: {error}", path.display()));
+            return Err(End::OutputFailed);
+        }
+        if STOP.load(Ordering::SeqCst) {
+            return Err(End::Stopped);
+        }
+        if Instant::now() > deadline {
+            return Err(End::PlayerNeverOpened);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What a warm receiver keeps for a reader that has not come yet: a few
+/// seconds of one service.
+const PENDING_LIMIT: usize = 16 << 20;
+
+/// The FIFO again, for the next reader, if one has it open.
+fn reopen_fifo(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: a NUL-terminated path; the descriptor is owned below.
+    let fd = unsafe { libc::open(name.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    // SAFETY: fd was just opened and is owned by nobody else.
+    (fd >= 0).then(|| std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
+fn open_output(output: &Output, timeout: Duration, log: &Log, created: impl FnOnce()) -> Result<Sink, End> {
+    match output {
+        Output::Fifo(path) => Ok(Sink::Fifo(open_fifo(path, timeout, log, created)?)),
+        Output::File(path) => {
+            created();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map(|file| Sink::Plain(Box::new(std::io::BufWriter::with_capacity(1 << 20, file))))
+                .map_err(|error| {
+                    log.line(format!("output {}: {error}", path.display()));
+                    End::OutputFailed
+                })
+        }
+        Output::Stdout => {
+            created();
+            Ok(Sink::Plain(Box::new(std::io::stdout())))
+        }
+    }
+}
+
+// ------------------------------------------------------------------ pipeline
+
+/// Analyser + selector + writer, shared by both sources.
+struct Pipeline {
+    analyser: Analyser,
+    selector: Selector,
+    writer: Writer,
+    scratch: Vec<u8>,
+    raw: bool,
+    guide: GuideFile,
+    /// The service being selected, and since when.
+    service_id: u16,
+    selected_at: Instant,
+    select: Option<SelectFile>,
+    /// Warm receivers only: where each programme can start from.
+    rap: Option<RapCache>,
+}
+
+/// `select.json`: the control plane's word on which service to pass, read
+/// at most every 100 ms and only when it has changed.
+struct SelectFile {
+    path: PathBuf,
+    token: Option<String>,
+    modified: Option<std::time::SystemTime>,
+    checked: Instant,
+}
+
+#[derive(serde::Deserialize)]
+struct Select {
+    token: Option<String>,
+    service_id: u16,
+}
+
+/// The multiplex's services and their event information, written beside the
+/// status (`guide.json`) for the control plane: what the channel list and
+/// the programme guide are made of. Only what the broadcaster sent.
+#[derive(Serialize)]
+pub struct Guide<'a> {
+    pub token: Option<&'a str>,
+    pub transport_stream_id: Option<u16>,
+    pub services: Vec<GuideService<'a>>,
+    pub events: Vec<GuideEvents<'a>>,
+}
+
+#[derive(Serialize)]
+pub struct GuideService<'a> {
+    pub service_id: u16,
+    pub name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<&'a str>,
+    pub service_type: Option<u8>,
+    pub free_ca_mode: bool,
+}
+
+#[derive(Serialize)]
+pub struct GuideEvents<'a> {
+    pub service_id: u16,
+    pub events: Vec<&'a crate::ts::Event>,
+}
+
+/// Events that ended this long ago are no longer written.
+const GUIDE_KEEPS_ENDED_S: i64 = 3 * 3600;
+/// At most this often, and only when something changed.
+const GUIDE_INTERVAL: Duration = Duration::from_secs(3);
+
+struct GuideFile {
+    path: Option<PathBuf>,
+    token: Option<String>,
+    /// The analyser's change count last written, and when.
+    written: std::cell::Cell<(u64, Option<Instant>)>,
+}
+
+impl GuideFile {
+    fn new(status: Option<&Path>, token: Option<String>) -> Self {
+        Self {
+            path: status.map(|status| status.with_file_name("guide.json")),
+            token,
+            written: std::cell::Cell::new((0, None)),
+        }
+    }
+
+    fn write(&self, analyser: &Analyser) {
+        let Some(path) = &self.path else { return };
+        let (changes, at) = self.written.get();
+        if changes == analyser.guide_changes || at.is_some_and(|at| at.elapsed() < GUIDE_INTERVAL) {
+            return;
+        }
+        self.written.set((analyser.guide_changes, Some(Instant::now())));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let guide = guide_of(analyser, self.token.as_deref(), now);
+        let Ok(text) = serde_json::to_string(&guide) else { return };
+        let temporary = path.with_extension("json.tmp");
+        if std::fs::write(&temporary, text).is_ok() {
+            let _ = std::fs::rename(&temporary, path);
+        }
+    }
+}
+
+/// What the analyser knows of the multiplex's services and events at `now`.
+pub fn guide_of<'a>(analyser: &'a Analyser, token: Option<&'a str>, now: i64) -> Guide<'a> {
+    Guide {
+        token,
+        transport_stream_id: analyser.integrity().transport_stream_id,
+        services: analyser
+            .sdt
+            .iter()
+            .filter_map(|(&service_id, service)| {
+                Some(GuideService {
+                    service_id,
+                    name: service.name.as_deref().filter(|name| !name.is_empty())?,
+                    provider: service.provider.as_deref().filter(|p| !p.is_empty()),
+                    service_type: service.service_type,
+                    free_ca_mode: service.free_ca_mode,
+                })
+            })
+            .collect(),
+        events: analyser
+            .events
+            .iter()
+            .map(|(&service_id, events)| GuideEvents {
+                service_id,
+                events: events
+                    .values()
+                    .filter(|e| e.start + e.duration as i64 >= now - GUIDE_KEEPS_ENDED_S)
+                    .collect(),
+            })
+            .filter(|service| !service.events.is_empty())
+            .collect(),
+    }
+}
+
+impl Pipeline {
+    /// One chunk of the multiplex. False once the reader is gone.
+    fn feed(&mut self, chunk: &[u8], reporter: &mut Reporter) -> bool {
+        let selector = &mut self.selector;
+        let scratch = &mut self.scratch;
+        match self.rap.as_mut() {
+            Some(rap) => {
+                rap.learn(&self.analyser.pat, &self.analyser.pmts);
+                self.analyser.feed(chunk, |packet| {
+                    rap.packet(packet);
+                    selector.packet(packet, scratch);
+                });
+            }
+            None => self.analyser.feed(chunk, |packet| selector.packet(packet, scratch)),
+        }
+        if self.raw {
+            self.scratch.clear();
+            self.scratch.extend_from_slice(chunk);
+        }
+        if !self.scratch.is_empty() && reporter.status.first_output_ms.is_none() {
+            reporter.status.first_output_ms = Some(reporter.elapsed_ms());
+        }
+        let out = std::mem::take(&mut self.scratch);
+        self.writer.send(out)
+    }
+
+    fn report(&self, reporter: &mut Reporter) {
+        let status = &mut reporter.status;
+        // The rate the display is matched to is read from here, and the
+        // player is held until it is: said at once, not at the next second.
+        let video_found = status.selection.video.is_none() && self.selector.selection().video.is_some();
+        status.selection = self.selector.selection().clone();
+        status.integrity = self.analyser.integrity();
+        status.output = self.writer.stats();
+        if status.service_name.is_none() {
+            status.service_name = self.analyser.sdt.get(&status.service_id).and_then(|s| s.name.clone());
+        }
+        self.guide.write(&self.analyser);
+        if video_found {
+            reporter.write();
+        }
+    }
+
+    /// A channel change the control plane asked for: the selector starts
+    /// over on the new service, and what was queued for the old one goes.
+    fn follow_select(&mut self, reporter: &mut Reporter, log: &Log) {
+        let Some(select) = self.select.as_mut() else { return };
+        if select.checked.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        select.checked = Instant::now();
+        let modified = std::fs::metadata(&select.path).and_then(|m| m.modified()).ok();
+        if modified.is_none() || modified == select.modified {
+            return;
+        }
+        select.modified = modified;
+        let Some(wanted) = std::fs::read_to_string(&select.path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Select>(&text).ok())
+            .filter(|wanted| wanted.token == select.token)
+        else {
+            return;
+        };
+        if wanted.service_id == self.service_id {
+            return;
+        }
+        log.line(format!("SELECT service {} -> {}", self.service_id, wanted.service_id));
+        self.service_id = wanted.service_id;
+        self.selected_at = Instant::now();
+        self.selector = Selector::new(wanted.service_id);
+        self.writer.discard();
+        // The new channel starts from its last access point, not the next.
+        let replay = self.rap.as_ref().map(|rap| rap.replay(wanted.service_id)).unwrap_or_default();
+        if !replay.is_empty() {
+            let mut out = Vec::with_capacity(replay.len());
+            for packet in replay.chunks(crate::ts::PACKET) {
+                self.selector.packet(packet, &mut out);
+            }
+            log.line(format!("SELECT replay {} B from the last access point", out.len()));
+            self.writer.send(out);
+        }
+        let status = &mut reporter.status;
+        status.service_id = wanted.service_id;
+        status.service_name = None;
+        status.selection = Selection { service_id: wanted.service_id, ..Default::default() };
+        status.switches += 1;
+        reporter.write();
+    }
+}
+
+/// Run the whole service; the final status. The exit code follows `end`.
+pub fn run(options: Options, log: &Log) -> Status {
+    let mut reporter = Reporter::new(options.status.clone(), &options);
+    reporter.write();
+    let sink = match open_output(&options.output, options.reader_timeout, log, || {
+        reporter.state(State::WaitingForPlayer, log)
+    }) {
+        Ok(sink) => sink,
+        Err(end) => return finish(reporter, None, end, None, log),
+    };
+    let pressure = match options.source {
+        Source::Recording(_) => Pressure::Block,
+        Source::Satellite { .. } => Pressure::Drop,
+    };
+    let mut pipeline = Pipeline {
+        analyser: Analyser::new(),
+        selector: Selector::new(options.service_id),
+        writer: Writer::start(
+            sink,
+            options.output_queue_bytes,
+            pressure,
+            match (&options.output, options.hold_reader) {
+                (Output::Fifo(path), Some(hold)) => Some((path.clone(), hold)),
+                _ => None,
+            },
+        ),
+        scratch: Vec::with_capacity(1 << 20),
+        raw: options.raw,
+        guide: GuideFile::new(options.status.as_deref(), options.token.clone()),
+        service_id: options.service_id,
+        selected_at: Instant::now(),
+        select: options.hold_reader.and(options.status.as_ref()).map(|status| SelectFile {
+            path: status.with_file_name("select.json"),
+            token: options.token.clone(),
+            modified: None,
+            checked: Instant::now(),
+        }),
+        rap: options.hold_reader.map(|_| RapCache::default()),
+    };
+    let (end, message) = match &options.source {
+        Source::Recording(path) => play_recording(path, &options, &mut pipeline, &mut reporter, log),
+        Source::Satellite { params, firmware_dir, access } => {
+            play_satellite(params, firmware_dir, access, &options, &mut pipeline, &mut reporter, log)
+        }
+    };
+    finish(reporter, Some(pipeline), end, message, log)
+}
+
+fn finish(mut reporter: Reporter, pipeline: Option<Pipeline>, end: End, message: Option<String>, log: &Log) -> Status {
+    reporter.state(State::Stopping, log);
+    if let Some(pipeline) = &pipeline {
+        pipeline.report(&mut reporter);
+    }
+    reporter.status.end = Some(end);
+    reporter.status.message = message.clone();
+    reporter.status.state = if end.is_failure() { State::Failed } else { State::Ended };
+    log.line(format!(
+        "END {end:?}{}: {:?}",
+        message.map(|m| format!(" ({m})")).unwrap_or_default(),
+        reporter.status.integrity
+    ));
+    // The last word is written before the output closes: whoever sees the end
+    // of the stream finds why it ended.
+    reporter.write();
+    if let Some(pipeline) = pipeline {
+        let flush = end == End::RecordingEnd;
+        reporter.status.output = pipeline.writer.finish(flush);
+        reporter.write();
+    }
+    reporter.status
+}
+
+fn check_service(pipeline: &Pipeline, options: &Options, streaming_since: Instant) -> Option<(End, Option<String>)> {
+    let since = streaming_since.max(pipeline.selected_at);
+    (!options.raw && !pipeline.selector.ready() && since.elapsed() > options.service_timeout).then(|| {
+        (End::ServiceNotFound, Some(format!("SID {} bu yayında bulunamadı", pipeline.service_id)))
+    })
+}
+
+fn play_recording(path: &Path, options: &Options, pipeline: &mut Pipeline, reporter: &mut Reporter, log: &Log) -> (End, Option<String>) {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => return (End::SourceFailed, Some(format!("{}: {error}", path.display()))),
+    };
+    log.line(format!("source: recording {}", path.display()));
+    reporter.state(State::Streaming, log);
+    let since = Instant::now();
+    let mut pacer = Pacer::default();
+    let mut buffer = vec![0u8; 188 * 256];
+    loop {
+        if STOP.load(Ordering::SeqCst) {
+            return (End::Stopped, None);
+        }
+        let n = match file.read(&mut buffer) {
+            Ok(0) => {
+                if !options.raw && !pipeline.selector.ready() {
+                    return (End::ServiceNotFound, Some(format!("SID {} kayıtta yok", options.service_id)));
+                }
+                return (End::RecordingEnd, None);
+            }
+            Ok(n) => n,
+            Err(error) => return (End::SourceFailed, Some(error.to_string())),
+        };
+        if !pipeline.feed(&buffer[..n], reporter) {
+            return closed(pipeline);
+        }
+        if options.pace
+            && let Some(pcr) = pipeline.selector.last_pcr()
+        {
+            pacer.wait(pcr);
+        }
+        if let Some(failed) = check_service(pipeline, options, since) {
+            return failed;
+        }
+        pipeline.follow_select(reporter, log);
+        pipeline.report(reporter);
+        reporter.maybe_write();
+    }
+}
+
+/// Holds a recording to its programme clock. A PCR that goes backwards or
+/// jumps more than a second (a discontinuity, a wrap) starts the clock again.
+#[derive(Default)]
+struct Pacer {
+    origin: Option<(u64, Instant)>,
+}
+
+impl Pacer {
+    const TICKS_PER_SECOND: f64 = 27_000_000.0;
+
+    fn wait(&mut self, pcr: u64) {
+        let (pcr0, t0) = *self.origin.get_or_insert((pcr, Instant::now()));
+        let due = if pcr >= pcr0 { (pcr - pcr0) as f64 / Self::TICKS_PER_SECOND } else { f64::NAN };
+        let now = t0.elapsed().as_secs_f64();
+        if !due.is_finite() || due - now > 1.0 || now - due > 1.0 {
+            self.origin = Some((pcr, Instant::now()));
+            return;
+        }
+        if due > now && !STOP.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_secs_f64(due - now));
+        }
+    }
+}
+
+fn closed(pipeline: &Pipeline) -> (End, Option<String>) {
+    if pipeline.writer.broken_pipe() { (End::PlayerClosed, None) } else { (End::OutputFailed, None) }
+}
+
+/// What the end of one receiver session means for the service.
+#[derive(Debug, PartialEq)]
+enum AfterSession {
+    /// The device went away under a running service: wait for it.
+    Reconnect,
+    End(End, Option<String>),
+}
+
+fn after_session(
+    res: &TuneResult,
+    outcome: Option<(End, Option<String>)>,
+    stopping: bool,
+    reconnect: Duration,
+    player_gone: bool,
+) -> AfterSession {
+    if res.no_device && !stopping && !reconnect.is_zero() && !player_gone {
+        return AfterSession::Reconnect;
+    }
+    let (end, message) = match outcome {
+        Some(ended) => ended,
+        None if res.no_device => (End::UsbDisconnected, res.error.clone()),
+        None if stopping => (End::Stopped, None),
+        None if res.boot.is_some() && res.lock_polls.is_some() && !res.fec_locked() => (End::NoLock, res.stopped.clone()),
+        None => (End::TuneFailed, res.error.clone().or(res.stopped.clone())),
+    };
+    AfterSession::End(end, message)
+}
+
+fn play_satellite(
+    params: &TuneParams,
+    firmware_dir: &Path,
+    access: &HardwareAccess,
+    options: &Options,
+    pipeline: &mut Pipeline,
+    reporter: &mut Reporter,
+    log: &Log,
+) -> (End, Option<String>) {
+    let firmware = match Firmware::load(firmware_dir) {
+        Ok(firmware) => firmware,
+        Err(error) => return (End::SourceFailed, Some(error.to_string())),
+    };
+    let clock = crate::RealClock::default();
+    let mut reconnect_until: Option<Instant> = None;
+    // A device that is still enumerating (just plugged in) gets a moment.
+    let mut open_until = Instant::now() + Duration::from_secs(3);
+    loop {
+        if STOP.load(Ordering::SeqCst) {
+            return (End::Stopped, None);
+        }
+        let session = match Session::open(access) {
+            Ok(session) => session,
+            Err(error) => {
+                // Not there yet, or there but not ready (enumerating, busy):
+                // waited for while a window is open -- at start for a device
+                // just plugged in, after a disconnect for the whole reconnect window.
+                let until = reconnect_until.unwrap_or(open_until);
+                let retry = matches!(error, OpenError::NotFound) || reconnect_until.is_some();
+                if retry && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
+                return match (reconnect_until, error) {
+                    (Some(_), error) => (End::UsbDisconnected, Some(format!("cihaz geri gelmedi ({error})"))),
+                    (None, OpenError::NotFound) => (End::DeviceNotFound, Some(OpenError::NotFound.to_string())),
+                    (None, error) => (End::SourceFailed, Some(error.to_string())),
+                };
+            }
+        };
+        open_until = Instant::now();
+        reporter.status.sessions += 1;
+        reporter.state(State::Tuning, log);
+        log.line(format!("source: satellite, session {} {params:?}", reporter.status.sessions));
+        let mut bridge = Bridge::new(&*session, log, &clock, []);
+        let mut outcome = None;
+        let res = tune::run(&mut bridge, &firmware, params, &STOP, |bridge, demod| {
+            let (streamed, ended) = stream(session.clone(), bridge, demod, options, pipeline, reporter, log);
+            outcome = ended;
+            streamed
+        });
+        reporter.status.tune = Some(TuneSummary::from(&res));
+        pipeline.report(reporter);
+        reporter.write();
+        drop(bridge);
+        if let Some(error) = session.release() {
+            log.line(format!("USB release: {error}"));
+        }
+        drop(session);
+
+        match after_session(&res, outcome, STOP.load(Ordering::SeqCst), options.reconnect, pipeline.writer.closed()) {
+            AfterSession::Reconnect => {
+                log.line(format!("USB disconnected; waiting up to {:?} for the receiver", options.reconnect));
+                reporter.state(State::Reconnecting, log);
+                reconnect_until = Some(Instant::now() + options.reconnect);
+            }
+            AfterSession::End(end, message) => return (end, message),
+        }
+    }
+}
+
+/// The locked receiver's stream, until something ends it. Returns what the
+/// tuner needs to know (the device went away) and, if the stream decided
+/// it, how the whole service ends.
+fn stream(
+    session: Arc<Session>,
+    bridge: &mut Bridge,
+    demod: &mut Avl62x1,
+    options: &Options,
+    pipeline: &mut Pipeline,
+    reporter: &mut Reporter,
+    log: &Log,
+) -> (Streamed, Option<(End, Option<String>)>) {
+    let mut stream = match TsStream::new(session, options.usb_transfers, options.usb_buffer_bytes, options.usb_queue_bytes) {
+        Ok(stream) => stream,
+        Err(error) => return (Streamed { no_device: false }, Some((End::SourceFailed, Some(error.to_string())))),
+    };
+    log.line(format!("TS stream: {} x {} B bulk transfers queued", options.usb_transfers, options.usb_buffer_bytes));
+    stream.start();
+    reporter.state(State::Streaming, log);
+    let since = Instant::now();
+    let mut next_signal = options.signal_every.map(|every| Instant::now() + every);
+    let mut next_line = Instant::now() + Duration::from_secs(5);
+    let mut seen_overflow = 0;
+    let mut no_device = false;
+    let ended = loop {
+        if STOP.load(Ordering::SeqCst) {
+            break Some((End::Stopped, None));
+        }
+        let chunk = stream.get(Duration::from_millis(100));
+        let stats = stream.stats();
+        if stats.overflow_chunks != seen_overflow {
+            seen_overflow = stats.overflow_chunks;
+            log.line(format!(
+                "USB QUEUE OVERFLOW: {} bytes in {} chunks dropped so far; last gap at stream byte {:?}",
+                stats.overflow_bytes,
+                seen_overflow,
+                stats.gaps.last()
+            ));
+        }
+        match chunk {
+            Some(chunk) => {
+                if !pipeline.feed(&chunk, reporter) {
+                    break Some(closed(pipeline));
+                }
+            }
+            None if stream.dead() => {
+                no_device = stats.no_device > 0 || !stats.submit_errors.is_empty();
+                log.line("USB stream ended (no transfer in flight: disconnect?)");
+                break None;
+            }
+            None => {}
+        }
+        if let Some(failed) = check_service(pipeline, options, since) {
+            break Some(failed);
+        }
+        // The demodulator, asked between chunks on this thread while the
+        // event thread keeps the transfers going.
+        if let (Some(at), Some(every)) = (next_signal, options.signal_every)
+            && Instant::now() >= at
+        {
+            next_signal = Some(Instant::now() + every);
+            match demod.acq_status(bridge) {
+                Ok(status) => reporter.status.signal = Some(status),
+                Err(error) => {
+                    log.line(format!("signal status failed: {error}"));
+                    if error.is_no_device() {
+                        no_device = true;
+                        break None;
+                    }
+                }
+            }
+        }
+        reporter.status.usb = Some(stats);
+        pipeline.follow_select(reporter, log);
+        pipeline.report(reporter);
+        reporter.maybe_write();
+        if Instant::now() >= next_line {
+            next_line = Instant::now() + Duration::from_secs(5);
+            let s = &reporter.status;
+            log.line(format!(
+                "LIVE t={} s in={} pkts out={} B usb_overflow={} out_dropped={} cc={} tei={} sync={} signal={:?}",
+                since.elapsed().as_secs(),
+                s.integrity.packets,
+                s.output.bytes,
+                s.usb.as_ref().map_or(0, |u| u.overflow_bytes),
+                s.output.dropped_bytes,
+                s.integrity.cc_errors,
+                s.integrity.tei,
+                s.integrity.sync_errors,
+                s.signal.as_ref().map(|a| (a.fec, a.snr_db, a.strength_pct)),
+            ));
+        }
+    };
+    let stats = stream.stop();
+    // What arrived before the stop is still stream data -- unless the reader
+    // is gone or a stop was asked for, when nobody wants it.
+    let tail = stream.drain();
+    if ended.is_none() {
+        for chunk in tail {
+            if !pipeline.feed(&chunk, reporter) {
+                break;
+            }
+        }
+    }
+    no_device |= stats.no_device > 0;
+    log.line(format!("TS stream stopped: {stats:?}"));
+    reporter.status.usb = Some(stats);
+    drop(stream);
+    (Streamed { no_device }, ended)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(no_device: bool, locked: bool) -> TuneResult {
+        TuneResult {
+            no_device,
+            boot: None,
+            lock_polls: Some(10),
+            lock_flags: Some((0, locked as u8)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_disconnect_under_a_running_service_waits_for_the_receiver() {
+        let twenty = Duration::from_secs(20);
+        assert_eq!(after_session(&session(true, true), None, false, twenty, false), AfterSession::Reconnect);
+        // ... unless it is being stopped, the player is gone, or nobody asked for reconnects.
+        assert_eq!(
+            after_session(&session(true, true), Some((End::Stopped, None)), true, twenty, false),
+            AfterSession::End(End::Stopped, None)
+        );
+        assert_eq!(
+            after_session(&session(true, true), Some((End::PlayerClosed, None)), false, twenty, true),
+            AfterSession::End(End::PlayerClosed, None)
+        );
+        assert!(matches!(
+            after_session(&session(true, true), None, false, Duration::ZERO, false),
+            AfterSession::End(End::UsbDisconnected, _)
+        ));
+    }
+
+    #[test]
+    fn a_session_that_ends_by_itself_says_why() {
+        let none = Duration::ZERO;
+        assert!(matches!(after_session(&session(false, true), None, true, none, false), AfterSession::End(End::Stopped, _)));
+        let mut unlocked = session(false, false);
+        unlocked.boot = Some(crate::avl62x1::BootInfo {
+            sys_clk_hz: 1,
+            fec_clk_hz: 1,
+            mpeg_clk_hz: 1,
+            srst: 0,
+            ready_word: String::new(),
+            ready_after_polls: 0,
+            running_patch: String::new(),
+            patch_commands: 0,
+        });
+        assert!(matches!(after_session(&unlocked, None, false, none, false), AfterSession::End(End::NoLock, _)));
+        assert!(matches!(after_session(&session(false, false), None, false, none, false), AfterSession::End(End::TuneFailed, _)));
+    }
+
+    #[test]
+    fn the_status_says_waiting_only_once_this_runs_fifo_exists() {
+        let dir = std::env::temp_dir().join(format!("mediabox-dvb-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live.ts");
+        std::fs::write(&path, b"").ok();
+        let _ = std::fs::remove_file(&path);
+        // A FIFO a previous run left behind.
+        let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        use std::os::unix::fs::MetadataExt;
+        let stale = std::fs::metadata(&path).unwrap().ino();
+        let log = Log::silent();
+        let mut seen = None;
+        let result = open_fifo(&path, Duration::from_millis(100), &log, || {
+            seen = Some(std::fs::metadata(&path).unwrap().ino());
+        });
+        assert_eq!(result.err(), Some(End::PlayerNeverOpened));
+        assert!(seen.is_some_and(|ino| ino != stale), "announced on the new FIFO, not the stale one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_writer_whose_reader_stopped_reading_still_finishes() {
+        let dir = std::env::temp_dir().join(format!("mediabox-dvb-stall-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live.ts");
+        let reader = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                // Opens, reads nothing, keeps the FIFO open: a wedged player.
+                for _ in 0..100 {
+                    if let Ok(file) = std::fs::File::open(&path) {
+                        std::thread::sleep(Duration::from_secs(3));
+                        drop(file);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })
+        };
+        let log = Log::silent();
+        let file = open_fifo(&path, Duration::from_secs(5), &log, || {}).unwrap();
+        let writer = Writer::start(Sink::Fifo(file), 64 << 20, Pressure::Drop, None);
+        for _ in 0..64 {
+            writer.send(vec![0x47; 188 * 1024]); // far more than a pipe holds
+        }
+        let started = Instant::now();
+        writer.finish(false);
+        assert!(started.elapsed() < Duration::from_millis(500), "finish took {:?}", started.elapsed());
+        reader.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_warm_writer_hands_the_stream_to_the_next_reader() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("mediabox-dvb-warm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live.ts");
+        // One reader at a time, each taking a few packets and going, as a
+        // player does on a channel change.
+        let readers = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut got = Vec::new();
+                for _ in 0..2 {
+                    let mut file = loop {
+                        if let Ok(file) = std::fs::File::open(&path) {
+                            break file;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    };
+                    let mut buffer = [0u8; 188];
+                    file.read_exact(&mut buffer).unwrap();
+                    got.push(buffer[1]);
+                    drop(file);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                got
+            })
+        };
+        let log = Log::silent();
+        let file = open_fifo(&path, Duration::from_secs(5), &log, || {}).unwrap();
+        let writer = Writer::start(Sink::Fifo(file), 1 << 20, Pressure::Drop, Some((path.clone(), Duration::from_secs(5))));
+        let started = Instant::now();
+        while !readers.is_finished() && started.elapsed() < Duration::from_secs(5) {
+            let mut packet = vec![0x47u8; 188];
+            packet[1] = 7;
+            assert!(writer.send(packet), "a reader going does not end a warm writer");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let got = readers.join().unwrap();
+        assert_eq!(got, [7, 7], "both readers were written to");
+        assert!(writer.stats().readers >= 1);
+        writer.finish(false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

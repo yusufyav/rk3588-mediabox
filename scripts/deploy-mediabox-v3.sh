@@ -119,12 +119,15 @@ sh_ "fc-list | grep -qi emoji && fc-list | grep -qi inter" || {
 say "binaries -> $prefix/bin"
 sh_ "mkdir -p $prefix/bin $prefix/ui $prefix/assets"
 cp_ "$bin/mediaboxd-rs" "$bin/mediaboxctl" "$bin/mediabox-platform" \
-    "$bin/mediabox-display-observer" "$tv_bin" "$MEDIABOX_TARGET:/var/tmp/"
+    "$bin/mediabox-display-observer" "$bin/mediabox-dvb" "$tv_bin" "$MEDIABOX_TARGET:/var/tmp/"
 sh_ "install -m 0755 /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabox-platform \
-       /var/tmp/mediabox-display-observer /var/tmp/mediabox-tv $prefix/bin/ && \
+       /var/tmp/mediabox-display-observer /var/tmp/mediabox-dvb /var/tmp/mediabox-tv $prefix/bin/ && \
      rm -f /var/tmp/mediaboxd-rs /var/tmp/mediaboxctl /var/tmp/mediabox-platform \
-       /var/tmp/mediabox-display-observer /var/tmp/mediabox-tv && \
+       /var/tmp/mediabox-display-observer /var/tmp/mediabox-dvb /var/tmp/mediabox-tv && \
      ln -sfn $prefix/bin/mediaboxctl /usr/local/bin/mediaboxctl"
+# The satellite receiver's firmware and the recording live tests play are the
+# owner's files, put here by hand (docs/platform/dvb.md); never shipped.
+sh_ "install -d -m 0700 /var/lib/mediabox-dvb /var/lib/mediabox-dvb/firmware"
 
 say "display observer"
 # The display's hardware state, which the control plane takes from nothing

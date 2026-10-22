@@ -1,0 +1,19 @@
+[package]
+name = "mediabox-dvb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The satellite receiver's own process: the USB device, the LNB and the
+# transport stream belong to it and to nothing else. libusb is opened at run
+# time (dlopen), not linked, so the cross build needs no aarch64 libusb.
+[dependencies]
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[[bin]]
+name = "mediabox-dvb"
+path = "src/bin/mediabox-dvb.rs"
