@@ -812,7 +812,9 @@ fi
 # its own loopback as a source (400), and opening the live pipe puts Kodi in
 # the middle of the container -- measured as "Input #0, ac3": sound, no
 # picture, no duration.
-if printf '%s' "$handoff" | grep -q 'playing.origin'; then
+# (The film's addresses are `Playback::Film { source, origin, .. }` since live
+# television was typed apart from films; the upstream one is still `origin`.)
+if printf '%s' "$handoff" | grep -q 'origin.clone()'; then
   echo "ok   a transformed film hands over by its upstream address"
 else
   echo "FAIL the proxied handover does not use the upstream address"

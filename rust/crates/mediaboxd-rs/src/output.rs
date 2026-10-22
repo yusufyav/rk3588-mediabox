@@ -119,6 +119,10 @@ struct State {
     matching: bool,
     /// Whether the player is timed to the display.
     display_sync: bool,
+    /// A live channel is giving way to the next one: the film that ends
+    /// leaves its match on the wire for the one that follows, so a channel
+    /// change is not two mode changes (two re-locks of the television).
+    handover: bool,
 }
 
 /// The display while one film plays. `film` is the player's number for it;
@@ -453,6 +457,7 @@ impl Output {
         film: u64,
         cadence: Cadence,
     ) -> Result<(ContentOutput, Vec<OutputEvent>), String> {
+        state.handover = false;
         if state.trial.is_some() {
             return Err("Ekran ayarı onay bekliyor; film için değiştirilmedi.".into());
         }
@@ -521,6 +526,10 @@ impl Output {
                 Some(content) if content.film == film => {}
                 _ => return,
             }
+            if state.handover {
+                eprintln!("mediaboxd-rs: film {film} ended; its display stays for the channel after it");
+                return;
+            }
             let content = state.content.take().expect("checked above");
             let mut events = Vec::new();
             if content.output.setting != state.kept
@@ -540,6 +549,31 @@ impl Output {
             events
         };
         self.send(events);
+    }
+
+    /// The film playing now is a live channel about to give way to another:
+    /// see `State::handover`.
+    pub fn content_handover(&self) {
+        self.state().handover = true;
+    }
+
+    /// The channel that was to follow did not start, or never matched the
+    /// display (an encrypted one has no picture to read a rate from), and
+    /// live television is stopping: the handover is called off, and the
+    /// display goes back as the last film's end would have. Nothing when no
+    /// handover is pending.
+    pub fn content_handover_failed(&self) {
+        let film = {
+            let mut state = self.state();
+            if !state.handover {
+                return;
+            }
+            state.handover = false;
+            state.content.as_ref().map(|content| content.film)
+        };
+        if let Some(film) = film {
+            self.content_end(film);
+        }
     }
 
     /// Whether film `film`'s match is on the wire: the owner reported the

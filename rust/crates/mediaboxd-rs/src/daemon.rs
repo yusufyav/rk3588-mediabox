@@ -148,6 +148,8 @@ pub struct AppState {
     /// How each film ends, here or in Kodi: the one authority on it, and the
     /// one writer of where it got to on the account (`crate::playback`).
     pub playback: Arc<crate::playback::Supervisor>,
+    /// Live television: the DVB receiver's process, started and stopped here.
+    pub live: Arc<crate::live::LiveManager>,
     /// Where Kodi sends its JSON-RPC notifications (TCP, loopback).
     pub kodi_events: std::net::SocketAddr,
 }
@@ -327,6 +329,11 @@ impl AppState {
                 self.play_here(url, stream, start_seconds, title, duration_seconds, watch)
                     .await
             }
+            Request::LivePlayHere { service_id, source, title } => {
+                self.play_live(service_id, source, title).await
+            }
+            Request::LiveChannels => Response::success(self.live.channels()),
+            Request::LiveGuide { from, to } => Response::success(self.live.guide_window(from, to)),
             Request::MediaHandoffToKodi => self.handoff_to_kodi().await,
             Request::MediaStatusHere => {
                 // The player's own answer, and the control plane's on which
@@ -338,6 +345,17 @@ impl AppState {
                 // it did not start, for Back to land on.
                 status["watch"] = playback["watch"].clone();
                 status["finished"] = playback["finished"].clone();
+                // Live television: where the receiver is in its life, and
+                // what it says about the signal and the stream.
+                // Only while it is the one playing, or its receiver is coming
+                // or going: a film after it does not carry it.
+                let between = matches!(
+                    self.live.lifecycle(),
+                    crate::live::Lifecycle::Starting | crate::live::Lifecycle::Stopping
+                );
+                if !playback["live"].is_null() || between {
+                    status["live"] = self.live.status();
+                }
                 // Carried and fetched subtitles in one list, each saying
                 // where it came from and how it is timed.
                 let tracks = status["tracks"].as_array().cloned().unwrap_or_default();
@@ -960,9 +978,7 @@ impl AppState {
         let local = self.media.session_url(&session_id);
         let subtitle_watch = watch.clone();
         let playing = Playing {
-            session_id: session_id.clone(),
-            source: source.clone(),
-            origin,
+            content: crate::player::Playback::Film { session_id: session_id.clone(), source: source.clone(), origin },
             title: title.filter(|title| !title.trim().is_empty()),
             duration: duration_seconds.filter(|seconds| *seconds > 0),
         };
@@ -984,8 +1000,7 @@ impl AppState {
         }
         let film = self.playback.begin(crate::playback::Start {
             player: crate::playback::PlayerKind::Here,
-            watch,
-            session: Some(session_id.clone()),
+            content: crate::playback::Content::Film { watch, session: Some(session_id.clone()) },
             duration: duration_seconds,
             position: start_seconds,
         });
@@ -994,11 +1009,13 @@ impl AppState {
             Arc::clone(&self.player),
             film,
             self.player.film(),
+            None,
         ));
         tokio::spawn(follow_film(
             Arc::clone(&self.player),
             Arc::clone(&self.output),
             self.player.film(),
+            None,
         ));
         self.subtitles
             .begin(self.player.film(), session_id.clone(), subtitle_watch, duration_seconds);
@@ -1007,6 +1024,98 @@ impl AppState {
             "film": film,
             "sessionId": session_id,
             "startSeconds": start_seconds,
+        }))
+    }
+
+    /// Live television here: one service of the receiver (or of its
+    /// recording), in the interface's own player. Started in a film's order
+    /// (`play_here`) and with Back having the same last word over it; what it
+    /// has not got is a worker session, an account record or a Kodi handover.
+    async fn play_live(
+        &self,
+        service_id: u16,
+        source: mediabox_core::LiveSource,
+        title: Option<String>,
+    ) -> Response {
+        if let Err(error) = source.validate() {
+            return Response::failure("INVALID_REQUEST", error);
+        }
+        let starting = self.playback.begin_start();
+        // A channel of the multiplex the receiver is already on: the
+        // receiver stays, warm, and only the player is new. What a cold
+        // start costs -- the receiver's process, the demodulator's 3.5 s
+        // patch, the tune and the lock, 6 s in all on the Plus -- is not paid
+        // again, and the display keeps its mode through the change.
+        let warm = self.live.can_switch(&source);
+        let switched = if warm {
+            self.output.content_handover();
+            self.stop_here_keeping_receiver(crate::playback::Intent::Replace).await;
+            match self.live.switch(service_id).await {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("mediaboxd-rs: live channel change without a restart failed ({error}); starting the receiver again");
+                    self.output.content_handover_failed();
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !switched {
+            // Whatever was playing is over, here or on Kodi -- a film, or the
+            // receiver on another service, whose cleanup is waited for.
+            self.stop_here(crate::playback::Intent::Replace).await;
+            self.stop_film_sessions().await;
+            if let Err(error) = self.live.start(service_id, &source).await {
+                return Response::failure("LIVE_FAILED", error);
+            }
+        }
+        if starting.called_off() {
+            self.live.stop().await;
+            return called_off();
+        }
+        let playing = Playing {
+            content: crate::player::Playback::Live { service_id },
+            title: title.filter(|title| !title.trim().is_empty()),
+            duration: None,
+        };
+        let fifo = self.live.fifo().display().to_string();
+        if let Err(error) = self.player.start(&fifo, 0, playing, self.output.display_sync(), None).await {
+            self.live.stop().await;
+            return Response::failure("PLAYER_FAILED", error);
+        }
+        if starting.called_off() {
+            self.player.stop().await;
+            self.live.stop().await;
+            return called_off();
+        }
+        let film = self.playback.begin(crate::playback::Start {
+            player: crate::playback::PlayerKind::Here,
+            content: crate::playback::Content::Live { service_id },
+            duration: None,
+            position: 0,
+        });
+        self.live.playing();
+        let here = self.player.film();
+        tokio::spawn(crate::playback::follow_mpv(
+            Arc::clone(&self.playback),
+            Arc::clone(&self.player),
+            film,
+            here,
+            Some(Arc::clone(&self.live)),
+        ));
+        tokio::spawn(follow_film(Arc::clone(&self.player), Arc::clone(&self.output), here, Some(Arc::clone(&self.live))));
+        tokio::spawn(follow_live(
+            Arc::clone(&self.live),
+            Arc::clone(&self.player),
+            Arc::clone(&self.playback),
+            film,
+            here,
+        ));
+        Response::success(json!({
+            "playing": "here",
+            "film": film,
+            "live": service_id,
         }))
     }
 
@@ -1059,7 +1168,10 @@ impl AppState {
         // Asked before the player is stopped, because afterwards there is
         // nobody to ask.
         let at = self.player.position().await.unwrap_or(0);
-        if playing.source.is_empty() {
+        let crate::player::Playback::Film { source, origin, .. } = &playing.content else {
+            return Response::failure("LIVE_NOT_HANDED_OVER", "canlı yayın Kodi'ye aktarılamaz");
+        };
+        if source.is_empty() {
             return Response::failure("NO_SOURCE", "bu kaynağın Kodi için adresi yok");
         }
 
@@ -1068,16 +1180,16 @@ impl AppState {
         // through one, Kodi gets the source instead and does its own work --
         // which for this remux means decoding DTS-HD MA itself, measured
         // below.
-        let address = if is_proxy_address(&playing.source) {
-            if playing.origin.is_empty() {
+        let address = if is_proxy_address(source) {
+            if origin.is_empty() {
                 return Response::failure(
                     "NO_SOURCE",
                     "bu kaynak dönüştürülerek oynuyor ve Kodi için ayrı bir adresi yok",
                 );
             }
-            playing.origin.clone()
+            origin.clone()
         } else {
-            playing.source.clone()
+            source.clone()
         };
 
         // Nothing here belongs to Kodi, so all of it goes: the player and the
@@ -1381,17 +1493,39 @@ impl AppState {
     /// Decided here rather than waiting for the player's own word, which may
     /// never come from a player that is already gone.
     async fn stop_here(&self, intent: crate::playback::Intent) -> Option<crate::player::Playing> {
+        self.stop_here_with(intent, false).await
+    }
+
+    /// The player only: a warm receiver stays for the channel after it.
+    async fn stop_here_keeping_receiver(&self, intent: crate::playback::Intent) -> Option<crate::player::Playing> {
+        self.stop_here_with(intent, true).await
+    }
+
+    async fn stop_here_with(&self, intent: crate::playback::Intent, keep_receiver: bool) -> Option<crate::player::Playing> {
         let film = self.playback.current(crate::playback::PlayerKind::Here);
+        let live = !keep_receiver && self.playback.live(crate::playback::PlayerKind::Here).is_some();
+        if !keep_receiver {
+            self.output.content_handover_failed();
+        }
         if let Some(film) = film {
             self.playback.intend(film, intent);
         }
         let stopped = self.player.stop().await;
+        // Live television: the receiver goes with its player, and is waited
+        // for -- its cleanup switches the LNB off before anything else starts.
+        if live || (!keep_receiver && stopped.as_ref().is_some_and(|playing| playing.live().is_some())) {
+            self.live.stop().await;
+        }
         match (film, &stopped) {
             (Some(film), _) => {
                 self.playback.finish(film, crate::playback::Signal::Gone);
             }
             // A player nobody is following: its session still goes.
-            (None, Some(playing)) => self.stop_session(&playing.session_id).await,
+            (None, Some(playing)) => {
+                if let Some(session_id) = playing.session_id() {
+                    self.stop_session(session_id).await;
+                }
+            }
             (None, None) => {}
         }
         stopped
@@ -1407,8 +1541,7 @@ impl AppState {
     ) {
         let film = self.playback.begin(crate::playback::Start {
             player: crate::playback::PlayerKind::Kodi,
-            watch,
-            session,
+            content: crate::playback::Content::Film { watch, session },
             duration,
             position,
         });
@@ -2005,8 +2138,7 @@ mod tests {
         let playback = quiet_playback();
         playback.begin(crate::playback::Start {
             player: crate::playback::PlayerKind::Here,
-            watch: None,
-            session: Some("here".into()),
+            content: crate::playback::Content::Film { watch: None, session: Some("here".into()) },
             duration: Some(6_000),
             position: 0,
         });
@@ -2040,8 +2172,7 @@ mod tests {
             let playback = quiet_playback();
             playback.begin(crate::playback::Start {
                 player,
-                watch: None,
-                session: Some("playing".into()),
+                content: crate::playback::Content::Film { watch: None, session: Some("playing".into()) },
                 duration: Some(6_000),
                 position: 1_200,
             });
@@ -2162,6 +2293,26 @@ mod tests {
         assert!(state.player.playing().await.is_none());
     }
 
+    #[tokio::test]
+    async fn a_live_source_outside_the_band_starts_nothing() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        let answer = state
+            .handle(Request::LivePlayHere {
+                service_id: 10801,
+                source: mediabox_core::LiveSource::Satellite { frequency_khz: 9_000_000, symbol_rate_ksps: 27_500 },
+                title: None,
+            })
+            .await;
+        assert!(!answer.ok);
+        assert_eq!(answer.error.unwrap().code, "INVALID_REQUEST");
+        assert_eq!(state.live.lifecycle(), crate::live::Lifecycle::Idle);
+        assert!(state.playback.current(crate::playback::PlayerKind::Here).is_none());
+        // Nothing live: the player's status carries no receiver.
+        let status = state.handle(Request::MediaStatusHere).await;
+        assert!(status.result.as_ref().unwrap().get("live").is_none());
+    }
+
     /// "Tercih edilen ses dili": English until chosen, as Stremio's
     /// `audio_language`; kept canonical; nothing that is no language.
     #[test]
@@ -2279,6 +2430,13 @@ mod tests {
             ),
             audio: Arc::new(crate::audio::Audio::new(dir.path().join("audio.json"), Vec::new, |_| {})),
             playback: Arc::new(crate::playback::Supervisor::new(|_| {})),
+            live: Arc::new(crate::live::LiveManager::new(crate::live::LivePaths {
+                binary: "/bin/false".into(),
+                run_dir: dir.path().join("dvb"),
+                recording: dir.path().join("recording.ts"),
+                firmware_dir: dir.path().join("firmware"),
+                guide_store: dir.path().join("live-guide.json"),
+            })),
             kodi_events: "127.0.0.1:9".parse().unwrap(),
             applications: ApplicationManager::load(
                 None,
@@ -2468,6 +2626,60 @@ async fn unit_active(unit: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The receiver of a live film, while it plays: its service's name for the
+/// interface once the stream says it, and a receiver that has gone while the
+/// player did not notice -- held on its last frame, or on an open() of a
+/// FIFO nobody will write -- is the end of the film: its source's word is
+/// recorded and the player stopped, which `follow_mpv` takes from there.
+async fn follow_live(
+    live: Arc<crate::live::LiveManager>,
+    player: Arc<PlayerManager>,
+    playback: Arc<crate::playback::Supervisor>,
+    film: u64,
+    here: u64,
+) {
+    use std::time::{Duration, Instant};
+    let mut named = false;
+    let mut gone_since: Option<(Instant, bool)> = None;
+    for tick in 0u64.. {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if player.film() != here {
+            return;
+        }
+        // What the multiplex says of its channels and programmes is kept as
+        // it arrives, every two seconds at most.
+        if tick % 4 == 0 {
+            live.absorb_guide();
+        }
+        let status = live.read_status();
+        if !named && let Some(name) = status.as_ref().and_then(|s| s.get("service_name")).and_then(Value::as_str) {
+            player.name_if_unnamed(here, name).await;
+            named = true;
+        }
+        let state = status.as_ref().and_then(|s| s.get("state")).and_then(Value::as_str).map(str::to_owned);
+        let finished = matches!(state.as_deref(), Some("ended" | "failed"));
+        // Asked of systemd only now and then: a receiver killed outright
+        // writes no last status.
+        let gone = finished || (tick % 10 == 9 && !crate::live::LiveManager::unit_active().await);
+        if !gone {
+            continue;
+        }
+        let natural = status.as_ref().and_then(|s| s.get("end")).and_then(Value::as_str) == Some("recording_end");
+        let (since, natural) = *gone_since.get_or_insert((Instant::now(), natural));
+        // A recording's end leaves the player its buffer to play out.
+        let grace = Duration::from_secs(if natural { 20 } else { 5 });
+        if since.elapsed() > grace {
+            if let Some(end) = live.final_end().await {
+                playback.source_ended(film, end);
+            }
+            if player.film() == here {
+                player.stop().await;
+            }
+            return;
+        }
+    }
+}
+
 /// The display for the length of one film: matched to its frame rate before a
 /// frame moves, and put back when it ends.
 ///
@@ -2484,19 +2696,30 @@ async fn unit_active(unit: &str) -> bool {
 /// player has actually shown, once a few seconds of them exist. The display
 /// then changes under a playing film -- rarer, and later, but right.
 ///
+/// Live television has no container rate (its stream is opened without that
+/// probe, packaging/mediabox-player), but its receiver reads the rate from
+/// the video's own sequence parameter set before a frame is shown
+/// (`mediabox_dvb::ts::VideoInfo`): for 1080i25 the 50 fields a second MPP's
+/// deinterlacer puts out. With it the display is matched while the player is
+/// still held, as for a film. Matched under a playing film instead, the HDMI
+/// sound device went away with the mode ("[ao/alsa] Device lost") on the
+/// Plus, 2026-10-22. Without it the film is let go at once and measured.
+///
 /// Whatever happens, the film is let go: a player never stays held because
 /// the display could not be matched.
 async fn follow_film(
     player: Arc<PlayerManager>,
     output: Arc<crate::output::Output>,
     film: u64,
+    receiver: Option<Arc<crate::live::LiveManager>>,
 ) {
+    let live = receiver.is_some();
     use std::time::Duration;
     let tick = Duration::from_millis(100);
     let rate = |value: Option<Value>| value.and_then(|value| value.as_f64()).and_then(mediabox_core::Cadence::from_fps);
 
     let mut cadence = None;
-    for _ in 0..80 {
+    for _ in 0..if live { 0 } else { 80 } {
         if player.film() != film {
             return;
         }
@@ -2506,9 +2729,41 @@ async fn follow_film(
         }
         tokio::time::sleep(tick).await;
     }
+    if let Some(receiver) = &receiver {
+        // Let go only once the player answers: a release asked of a player
+        // whose socket is not up yet is lost, and the film stays held.
+        for _ in 0..80 {
+            if player.film() != film || player.answers().await {
+                break;
+            }
+            tokio::time::sleep(tick).await;
+        }
+        // While the receiver is still coming up -- booting the demodulator
+        // (4 s), locking, searching for the carrier -- there is nothing to read
+        // yet, and no frame to hold back either. Once it streams, the SPS is
+        // in the first GOP: three seconds more at most. Measured on the Plus
+        // (2026-10-22), live: first output 6.3 s after the request; a wait of
+        // 4 s let the film go without its rate, and the mode then changed
+        // under the playing film.
+        let mut streaming_since = None;
+        for _ in 0..300 {
+            if player.film() != film {
+                return;
+            }
+            if let Some(found) = receiver.output_rate().and_then(mediabox_core::Cadence::from_fps) {
+                cadence = Some((found, "the stream's SPS"));
+                break;
+            }
+            let coming_up = matches!(receiver.receiver_state().as_deref(), Some("starting" | "waiting_for_player" | "tuning" | "reconnecting"));
+            if !coming_up && streaming_since.get_or_insert_with(std::time::Instant::now).elapsed() > Duration::from_secs(3) {
+                break;
+            }
+            tokio::time::sleep(tick).await;
+        }
+    }
     if cadence.is_none() {
         player.release(film).await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(if live { 1 } else { 3 })).await;
         for _ in 0..40 {
             if player.film() != film {
                 return;

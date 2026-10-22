@@ -214,6 +214,12 @@ pub fn cec_key_to_action(key: u8) -> Option<InputAction> {
         0x42 => InputAction::VolumeDown,
         0x43 | 0x65 => InputAction::Mute,
         0x40 | 0x6b..=0x6d => InputAction::Power,
+        0x20..=0x29 => return InputAction::of_digit(key - 0x20),
+        0x30 => InputAction::ChannelUp,
+        0x31 => InputAction::ChannelDown,
+        0x32 => InputAction::PreviousChannel,
+        0x35 => InputAction::Info,
+        0x53 => InputAction::Guide,
         _ => return None,
     })
 }

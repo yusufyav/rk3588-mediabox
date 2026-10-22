@@ -146,18 +146,62 @@ case "${MEDIABOX_PLAYER_AID:-}" in
     *) aid="--aid=$MEDIABOX_PLAYER_AID" ;;
 esac
 
+# Live television (MEDIABOX_PLAYER_LIVE=1, a DVB service from mediabox-dvb's
+# FIFO): the transport stream's programme table already says what every
+# stream is, so the streams are not probed by decoding them.
+#
+# That probe is what took the picture away. Measured on the Plus on
+# 2026-10-22 with TRT HABER HD (H.264 1080i): lavf's find_stream_info decodes
+# in software and leaves the stream's pix_fmt as yuv420p; h264_rkmpp, given a
+# known pix_fmt, asks get_format at open (rkmppdec.c), and mpv's zero-copy
+# rkmpp method, which uses hw_frames_ctx, cannot answer it for a wrapper
+# decoder (avcodec_get_hw_frames_parameters fails: "Hardware decoding of this
+# stream is unsupported?"). mpv fell back to software, and --vo=mediabox,
+# which takes DRM PRIME only, had no picture. Without the probe the decoder
+# opens straight into DRM PRIME: "Using hardware decoding (rkmpp)",
+# "VO: [mediabox] 1920x1080 drm_prime[nv12]". Films keep the probe.
+#
+# And it is decoded ahead, on a thread of its own (--vd-queue-enable). The
+# deinterlacing decoder hands frames over in bursts -- measured on the same
+# stream with h264_rkmpp -deint 1 at broadcast pace: a median of 3.2 ms
+# between frames, then gaps of 37 to 157 ms, the longest at the 25-frame GOP
+# boundaries -- and mpv's ordinary decode, two frames ahead, met each gap with
+# frames already past their end: dropped (vo.c, "end_time < now"), three at a
+# time, 29 to 35 in ten seconds at 50 fps, at 50 Hz and at 60 Hz, with or
+# without sound, never late on the panel (vo-delayed-frame-count 0). With the
+# queue: 0. Films, 24 frames a second from a decoder that does not burst,
+# keep their pipeline as it was.
+#
+# The queue is bounded to what the longest gap needs (157 ms: 8 frames at
+# 50 fps), not mpv's 50 frames / 2 s. Every queued frame is one of MPP's
+# fixed pool of buffers; with the default, a start held for the display
+# filled the queue, the output's own eight in flight came on top, and on the
+# second of three runs the decoder waited for a buffer nobody would give
+# back: mpv's core stopped answering, its IPC clients piled up to 1022 open
+# descriptors (320 sockets, 644 pipes, 45 dma-bufs) and systemd killed it
+# after 90 s.
+live=""
+if [ "${MEDIABOX_PLAYER_LIVE:-0}" = 1 ]; then
+    live="--demuxer-lavf-probe-info=nostreams --vd-queue-enable=yes --vd-queue-max-samples=8 --vd-queue-max-secs=0.5"
+    # Nothing played is kept to seek back into: a broadcast has no "back",
+    # and the default kept 50 MiB of it -- mpv's RSS climbed with the stream,
+    # 38 to 78 MB in the first minute of TRT HABER HD (2026-10-22).
+    live="$live --demuxer-max-back-bytes=0"
+fi
+
 # At the end of the file the player holds its last frame rather than exiting:
 # the control plane reads where it stopped and decides whether that was the
 # end of the film or a read that failed short of it, then closes the player
 # itself. Exiting at once left nobody to ask (see rust/crates/mediaboxd-rs/
 # src/playback.rs).
-# shellcheck disable=SC2086  # $ipc, $hold, $aid, $audio and $sync are empty or known flags.
+# shellcheck disable=SC2086  # $ipc, $hold, $aid, $audio, $sync and $live are empty or known flags.
 exec /opt/rk3588-mediabox/player/bin/mpv \
     $ipc \
     $hold \
     $aid \
     $audio \
     $sync \
+    $live \
     --no-config \
     --input-conf=/opt/rk3588-mediabox/player/share/mediabox-input.conf \
     --scripts=/opt/rk3588-mediabox/player/share/mediabox.lua \

@@ -8,6 +8,7 @@ pub mod fan;
 pub mod kodi;
 pub mod leds;
 pub mod lifecycle;
+pub mod live;
 pub mod media;
 pub mod owner;
 pub mod playback;

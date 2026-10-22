@@ -174,13 +174,33 @@ pub enum Effect {
     Release(String),
 }
 
+/// What is being played: a film, which has a title the account follows and
+/// a worker session it reads, or live television, which has neither.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Content {
+    Film {
+        watch: Option<WatchRef>,
+        /// The worker session it reads, when it reads one.
+        session: Option<String>,
+    },
+    /// One service of the DVB receiver's process (`crate::live`).
+    Live { service_id: u16 },
+}
+
+/// How a live source ended by itself, as its own process says
+/// (`crate::live::LiveManager::final_end`): a recording read to its end is
+/// natural, anything else is the broadcast breaking off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceEnd {
+    pub natural: bool,
+    pub message: Option<String>,
+}
+
 /// A film starting.
 #[derive(Debug, Clone)]
 pub struct Start {
     pub player: PlayerKind,
-    pub watch: Option<WatchRef>,
-    /// The worker session it reads, when it reads one.
-    pub session: Option<String>,
+    pub content: Content,
     /// The catalogue's length, when it knows one.
     pub duration: Option<u64>,
     pub position: u64,
@@ -191,6 +211,9 @@ struct Film {
     player: PlayerKind,
     watch: Option<WatchRef>,
     session: Option<String>,
+    /// Live television: which service. A live film has no watch and no session.
+    live: Option<u16>,
+    source_end: Option<SourceEnd>,
     given: Option<f64>,
     /// The player's own reading of the length.
     measured: Option<f64>,
@@ -303,11 +326,17 @@ impl Supervisor {
             }
             inner.next += 1;
             let number = inner.next;
+            let (watch, session, live) = match start.content {
+                Content::Film { watch, session } => (watch, session, None),
+                Content::Live { service_id } => (None, None, Some(service_id)),
+            };
             inner.film = Some(Film {
                 number,
                 player: start.player,
-                watch: start.watch,
-                session: start.session,
+                watch,
+                session,
+                live,
+                source_end: None,
                 given: start.duration.filter(|seconds| *seconds > 0).map(|seconds| seconds as f64),
                 measured: None,
                 position: start.position as f64,
@@ -373,6 +402,19 @@ impl Supervisor {
             .as_ref()
             .filter(|playing| playing.number == film)
             .and_then(|playing| playing.watch.clone())
+    }
+
+    /// The live service playing on `player` now, if live television is.
+    pub fn live(&self, player: PlayerKind) -> Option<u16> {
+        self.lock().film.as_ref().filter(|film| film.player == player).and_then(|film| film.live)
+    }
+
+    /// A live film's source has ended by itself, and this is how. Its
+    /// player's end of the stream follows; this says what that end means.
+    pub fn source_ended(&self, film: u64, end: SourceEnd) {
+        if let Some(playing) = self.lock().film.as_mut().filter(|playing| playing.number == film && playing.live.is_some()) {
+            playing.source_end.get_or_insert(end);
+        }
     }
 
     /// The control plane is about to end this film itself.
@@ -465,14 +507,44 @@ impl Supervisor {
         json!({
             "film": inner.film.as_ref().map(|playing| playing.number),
             "watch": watch,
+            "live": inner.film.as_ref().and_then(|playing| playing.live),
             "finished": inner.finished,
         })
     }
 }
 
+/// How live television ended. It has no length to reach: the control plane
+/// ending it is stopped, its source ending by itself is what its process
+/// says, and its player stopping with no word from the source is the
+/// broadcast breaking off -- never "the end of the film".
+fn live_verdict(intent: Option<Intent>, source_end: Option<&SourceEnd>, signal: &Signal) -> (Outcome, Option<String>) {
+    if intent.is_some() {
+        return (Outcome::Stopped, None);
+    }
+    match (source_end, signal) {
+        (Some(end), _) if end.natural => (Outcome::Ended, None),
+        (Some(end), _) => (
+            Outcome::Failed,
+            Some(end.message.clone().unwrap_or_else(|| "Canlı yayın kesildi.".to_string())),
+        ),
+        (None, Signal::EndFile { reason, .. }) if !matches!(reason.as_str(), "eof" | "error") => (Outcome::Stopped, None),
+        (None, Signal::EndFile { reason, error }) if reason == "error" => (
+            Outcome::Failed,
+            Some(match error.as_deref().filter(|text| !text.is_empty()) {
+                Some(text) => format!("Oynatıcı hata verdi: {text}."),
+                None => "Oynatıcı hata verdi.".to_string(),
+            }),
+        ),
+        (None, _) => (Outcome::Failed, Some("Canlı yayın kesildi.".to_string())),
+    }
+}
+
 fn close(playing: Film, signal: &Signal, effects: &mut Vec<Effect>) -> Finished {
     let reached = playing.reached();
-    let (outcome, message) = verdict(playing.intent, signal, reached);
+    let (outcome, message) = match playing.live {
+        Some(_) => live_verdict(playing.intent, playing.source_end.as_ref(), signal),
+        None => verdict(playing.intent, signal, reached),
+    };
     // Stopped or ended is the player closed; a handover is not -- the film
     // goes on in Kodi -- and a failure is not either: it is where the viewer
     // comes back to.
@@ -508,6 +580,7 @@ pub async fn follow_mpv(
     player: std::sync::Arc<crate::player::PlayerManager>,
     film: u64,
     here: u64,
+    live: Option<std::sync::Arc<crate::live::LiveManager>>,
 ) {
     let mut stream = None;
     for _ in 0..150 {
@@ -533,10 +606,21 @@ pub async fn follow_mpv(
         return;
     };
     let signal = read_mpv(stream, &supervisor, film).await;
+    // Live television: the player's end of the stream means what the
+    // source's own process says it means, asked before the verdict.
+    if let Some(live) = &live
+        && let Some(end) = live.final_end().await
+    {
+        supervisor.source_ended(film, end);
+    }
     // Held on its last frame at an end, early or not: the film is over, and
-    // so is the player.
+    // so is the player -- and, for live television, its receiver, whose
+    // cleanup is waited for.
     if supervisor.finish(film, signal).is_some() && player.film() == here {
         player.stop().await;
+        if let Some(live) = &live {
+            live.stop().await;
+        }
     }
 }
 
@@ -821,8 +905,7 @@ mod tests {
     fn start(player: PlayerKind) -> Start {
         Start {
             player,
-            watch: Some(watch()),
-            session: Some("a306b91d".into()),
+            content: Content::Film { watch: Some(watch()), session: Some("a306b91d".into()) },
             duration: Some(6_700),
             position: 0,
         }
@@ -876,7 +959,7 @@ mod tests {
         supervisor.intend(here, Intent::Handover);
         let watch = supervisor.watch(here);
         supervisor.finish(here, Signal::Gone);
-        let kodi = supervisor.begin(Start { player: PlayerKind::Kodi, watch, session: None, duration: Some(6_700), position: 1_200 });
+        let kodi = supervisor.begin(Start { player: PlayerKind::Kodi, content: Content::Film { watch, session: None }, duration: Some(6_700), position: 1_200 });
         assert_eq!(supervisor.current(PlayerKind::Kodi), Some(kodi));
         supervisor.observe(kodi, 6_698.0, Some(6_700.0), false, Instant::now());
         assert_eq!(supervisor.finish(kodi, Signal::KodiStop { end: true }).unwrap().outcome, Outcome::Ended);
@@ -936,7 +1019,7 @@ mod tests {
     #[test]
     fn nothing_is_written_for_a_film_the_account_does_not_know() {
         let (supervisor, effects) = rig();
-        let film = supervisor.begin(Start { watch: None, ..start(PlayerKind::Here) });
+        let film = supervisor.begin(Start { content: Content::Film { watch: None, session: Some("a306b91d".into()) }, ..start(PlayerKind::Here) });
         supervisor.observe(film, 10.0, Some(100.0), false, Instant::now());
         supervisor.finish(film, Signal::EndOfFile);
         assert_eq!(*effects.lock().unwrap(), vec![Effect::Release("a306b91d".into())]);
@@ -1014,6 +1097,58 @@ mod tests {
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
         drop(theirs);
         assert_eq!(read_mpv(ours, &supervisor, film).await, Signal::Gone);
+    }
+
+    fn live() -> Start {
+        Start { player: PlayerKind::Here, content: Content::Live { service_id: 10801 }, duration: None, position: 0 }
+    }
+
+    #[test]
+    fn live_television_writes_nothing_to_the_account_and_holds_no_session() {
+        let (supervisor, seen) = rig();
+        let film = supervisor.begin(live());
+        assert_eq!(supervisor.live(PlayerKind::Here), Some(10801));
+        assert_eq!(supervisor.session(PlayerKind::Here), None);
+        assert_eq!(supervisor.watch(film), None);
+        supervisor.observe(film, 120.0, None, false, Instant::now());
+        supervisor.intend(film, Intent::Stop);
+        let finished = supervisor.finish(film, Signal::Gone).unwrap();
+        assert_eq!(finished.outcome, Outcome::Stopped, "Back on live television is a stop");
+        assert!(seen.lock().unwrap().is_empty(), "no account write, no session to release");
+        assert_eq!(supervisor.status()["live"], Value::Null);
+    }
+
+    #[test]
+    fn a_recording_read_to_its_end_has_ended_and_a_broken_broadcast_has_failed() {
+        let (supervisor, _) = rig();
+        let film = supervisor.begin(live());
+        supervisor.source_ended(film, SourceEnd { natural: true, message: None });
+        let eof = Signal::EndFile { reason: "eof".into(), error: None };
+        assert_eq!(supervisor.finish(film, eof.clone()).unwrap().outcome, Outcome::Ended);
+
+        let film = supervisor.begin(live());
+        supervisor.source_ended(film, SourceEnd { natural: false, message: Some("USB bağlantısı koptu".into()) });
+        let failed = supervisor.finish(film, eof.clone()).unwrap();
+        assert_eq!(failed.outcome, Outcome::Failed);
+        assert_eq!(failed.message.as_deref(), Some("USB bağlantısı koptu"));
+    }
+
+    #[test]
+    fn a_live_end_of_stream_with_no_word_from_the_source_is_never_the_end_of_a_film() {
+        // No length to hold the position against: a film would call this
+        // Ended (the player's word is all there is). Live television cannot.
+        let (supervisor, _) = rig();
+        for signal in [Signal::EndOfFile, Signal::EndFile { reason: "eof".into(), error: None }, Signal::Gone] {
+            let film = supervisor.begin(live());
+            let finished = supervisor.finish(film, signal).unwrap();
+            assert_eq!(finished.outcome, Outcome::Failed);
+            assert!(finished.message.unwrap().contains("Canlı yayın"));
+        }
+        // A film's source_ended is ignored: it has no live source.
+        let film = supervisor.begin(start(PlayerKind::Here));
+        supervisor.source_ended(film, SourceEnd { natural: false, message: None });
+        let unknown = supervisor.finish(film, Signal::EndOfFile).unwrap();
+        assert_ne!(unknown.message.as_deref(), Some("Canlı yayın kesildi."));
     }
 
     /// Kodi's own schema entry, as `xbmc/interfaces/json-rpc/schema/

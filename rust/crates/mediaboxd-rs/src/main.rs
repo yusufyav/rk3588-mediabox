@@ -200,6 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input: input.clone(),
         media,
         playback,
+        live: Arc::new(mediaboxd_rs::live::LiveManager::new(mediaboxd_rs::live::LivePaths::system())),
         kodi_events: args.kodi_events,
         // Constructed here rather than lazily, because constructing it is what
         // re-applies the remembered mode: the kernel puts the device tree's
@@ -224,6 +225,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ethernet: mediaboxd_rs::ethernet::Ethernet::system(),
         audio: Arc::new(mediaboxd_rs::audio::Audio::system()),
     });
+    // A receiver a previous daemon left running is nobody's now, and nor is
+    // the player on its stream: no film record survives a restart.
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            if state.live.sweep().await {
+                state.player.stop().await;
+            }
+        });
+    }
     // The kept volume, back on the softvol control of the card it is on.
     {
         let audio = Arc::clone(&state.audio);

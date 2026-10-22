@@ -63,6 +63,39 @@ pub enum InputAction {
     /// A remote's Menu key: the options of what is on screen -- the film's
     /// settings panel, a poster's menu.
     Menu,
+    /// Television keys: the channel rocker, the previous-channel key, the
+    /// programme guide, the information key and the number pad. Live
+    /// television's; everywhere else they do nothing.
+    ChannelUp,
+    ChannelDown,
+    PreviousChannel,
+    Guide,
+    Info,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+}
+
+impl InputAction {
+    /// The number-pad key for `digit` (0..=9).
+    pub fn of_digit(digit: u8) -> Option<Self> {
+        use InputAction::*;
+        [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9]
+            .get(digit as usize)
+            .copied()
+    }
+
+    /// Which digit a number-pad key is.
+    pub fn digit(self) -> Option<u8> {
+        (0..10).find(|&d| Self::of_digit(d) == Some(self))
+    }
 }
 
 /// The title a film belongs to, as the account knows it: what the control
@@ -79,6 +112,79 @@ pub struct WatchRef {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poster: Option<String>,
+}
+
+/// Where live television comes from. Typed values only: no path, no
+/// command line, nothing the receiver's process is not already written for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LiveSource {
+    /// The multiplex recorded for this on the appliance
+    /// (`/var/lib/mediabox-dvb/recording.ts`), read at broadcast pace to its
+    /// end: the whole live path without the receiver or the dish.
+    Recording,
+    /// The receiver, on a Ku-band transponder behind a universal LNB. The
+    /// RF arrives prepared: the LNB's supply (polarisation) and 22 kHz tone
+    /// (band) are set outside MediaBox, which never powers or steers an LNB;
+    /// the tuner is put on the transponder's IF for that band.
+    Satellite {
+        frequency_khz: u32,
+        symbol_rate_ksps: u32,
+    },
+}
+
+impl LiveSource {
+    /// A universal LNB's band and a DVB-S2 symbol rate the receiver takes.
+    pub fn validate(&self) -> Result<(), String> {
+        match *self {
+            LiveSource::Recording => Ok(()),
+            LiveSource::Satellite { frequency_khz, symbol_rate_ksps, .. } => {
+                if !(10_700_000..=12_750_000).contains(&frequency_khz) {
+                    return Err(format!("{frequency_khz} kHz Ku bandı dışında (10 700 000..12 750 000)"));
+                }
+                if !(1_000..=45_000).contains(&symbol_rate_ksps) {
+                    return Err(format!("sembol hızı {symbol_rate_ksps} kS/s desteklenmiyor (1000..45000)"));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A channel of live television: one TV service of a multiplex the receiver
+/// has been on, as that multiplex's SDT named it. The number is MediaBox's,
+/// in the order of the service ids: there is no channel scan and no logical
+/// channel numbering yet, so nothing else could give one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveChannel {
+    pub number: u32,
+    pub service_id: u16,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub source: LiveSource,
+}
+
+/// One programme of a channel's event information (EIT), as broadcast.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveEvent {
+    /// UTC, seconds since 1970.
+    pub start: i64,
+    /// Seconds.
+    pub duration: u32,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+}
+
+impl LiveEvent {
+    pub fn end(&self) -> i64 {
+        self.start + self.duration as i64
+    }
+
+    pub fn is_on_at(&self, now: i64) -> bool {
+        self.start <= now && now < self.end()
+    }
 }
 
 /// What a change to the account's record of a title is.
@@ -1566,6 +1672,20 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         watch: Option<WatchRef>,
     },
+    /// Live television here, in the interface's own player: one service of
+    /// the DVB-S2 receiver (or of its recording), through the receiver's own
+    /// process (`mediabox-dvb.service`), never through the media worker. It
+    /// is stopped with `MediaStopHere` and followed with `MediaStatusHere`
+    /// like a film, and unlike one it has no session, no account record and
+    /// nothing Kodi can be handed.
+    LivePlayHere {
+        /// The DVB service_id (the programme number in the PAT), e.g. 10801.
+        service_id: u16,
+        source: LiveSource,
+        /// What to call it while the stream has not said (its SDT name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
     /// Hand what is playing here to Kodi, at the position it had reached.
     ///
     /// The equivalent of "send to an external player": the same film, the same
@@ -1577,6 +1697,12 @@ pub enum Request {
     /// it is paused. Answered by the player itself rather than remembered,
     /// because the person watching may have moved it.
     MediaStatusHere,
+    /// The live channels known: those of the last multiplex the receiver
+    /// was on (its SDT), numbered in service-id order.
+    LiveChannels,
+    /// The broadcast programme guide of the known channels between `from`
+    /// and `to` (UTC seconds): only what the multiplex's EIT carried.
+    LiveGuide { from: i64, to: i64 },
     /// Which subtitle language a film starts with, from the player's own
     /// settings panel. `None` is "Kapalı": films start with subtitles off.
     /// Applied to the film playing now as well as to the next ones.
@@ -2463,6 +2589,49 @@ mod tests {
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), request);
+    }
+
+    #[test]
+    fn live_play_here_is_typed_on_the_wire() {
+        let request: Request = serde_json::from_str(
+            r#"{"command":"live_play_here","service_id":10801,"source":{"kind":"satellite",
+                "frequency_khz":12188000,"symbol_rate_ksps":27500}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::LivePlayHere {
+                service_id: 10801,
+                source: LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 },
+                title: None
+            }
+        );
+        // Nothing on the wire can ask for the LNB: no polarisation, no tone.
+        assert!(
+            serde_json::from_str::<Request>(
+                r#"{"command":"live_play_here","service_id":1,"source":{"kind":"satellite","frequency_khz":12188000,"symbol_rate_ksps":27500,"polarisation":"vertical"}}"#
+            )
+            .is_ok_and(|request| serde_json::to_string(&request).is_ok_and(|text| !text.contains("polarisation")))
+        );
+        let recording: Request =
+            serde_json::from_str(r#"{"command":"live_play_here","service_id":10801,"source":{"kind":"recording"}}"#)
+                .unwrap();
+        assert!(matches!(recording, Request::LivePlayHere { source: LiveSource::Recording, .. }));
+        // No path, no argument list: a source is one of two shapes.
+        assert!(
+            serde_json::from_str::<Request>(r#"{"command":"live_play_here","service_id":1,"source":{"kind":"file","path":"/etc/shadow"}}"#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<Request>(r#"{"command":"live_play_here","service_id":70000,"source":{"kind":"recording"}}"#).is_err());
+    }
+
+    #[test]
+    fn a_live_source_outside_the_band_is_refused() {
+        let at = |frequency_khz, symbol_rate_ksps| LiveSource::Satellite { frequency_khz, symbol_rate_ksps };
+        assert!(at(12_188_000, 27_500).validate().is_ok());
+        assert!(at(9_000_000, 27_500).validate().is_err());
+        assert!(at(12_188_000, 60_000).validate().is_err());
+        assert!(LiveSource::Recording.validate().is_ok());
     }
 
     #[test]

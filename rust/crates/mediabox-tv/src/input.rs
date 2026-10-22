@@ -166,7 +166,16 @@ pub fn action_for_evdev(code: u32, keyboard: bool) -> Option<InputAction> {
         115 => InputAction::VolumeUp,
         114 => InputAction::VolumeDown,
         113 => InputAction::Mute,
+        402 => InputAction::ChannelUp,            // KEY_CHANNELUP
+        403 => InputAction::ChannelDown,          // KEY_CHANNELDOWN
+        405 => InputAction::PreviousChannel,      // KEY_LAST
+        365 | 362 => InputAction::Guide,          // KEY_EPG, KEY_PROGRAM
+        358 => InputAction::Info,                 // KEY_INFO
+        512..=521 => return InputAction::of_digit((code - 512) as u8), // KEY_NUMERIC_0..9
+        // A keyboard's digits are text; a remote's are the number pad.
         _ if keyboard => return None,
+        2..=10 => return InputAction::of_digit((code - 1) as u8), // KEY_1..KEY_9
+        11 => InputAction::Digit0,                // KEY_0
         103 => InputAction::Up,
         108 => InputAction::Down,
         105 => InputAction::Left,

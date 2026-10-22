@@ -31,24 +31,52 @@ const UNIT: &str = "mediabox-player.service";
 /// What is playing here, if anything.
 #[derive(Debug, Clone)]
 pub struct Playing {
-    /// The session the worker opened for it; stopped with the player.
-    pub session_id: String,
-    /// The address Kodi is given when the film is handed over: the session's
-    /// own `handoff.kodiPlaybackUrl`, on the media core's loopback. It is
-    /// something Kodi opens, never something the core can be asked to resolve
-    /// -- it refuses its own loopback as a source, which is what broke the
-    /// handover once. See `Daemon::handoff_to_kodi`.
-    pub source: String,
-    /// Where that film actually comes from: the upstream address the media
-    /// core resolved (`handoff.resolvedInput`). When `source` turns out to be
-    /// the core's own proxy, this is the only thing a second player can be
-    /// given -- the proxy is one ffmpeg on one pipe and a late reader joins it
-    /// mid-stream, not at the beginning.
-    pub origin: String,
+    pub content: Playback,
     /// What to call it, and how long it is, as the caller knew them. Neither
     /// is derivable here; see `Request::MediaPlayHere`.
     pub title: Option<String>,
     pub duration: Option<u64>,
+}
+
+/// A film, which the media worker serves and Kodi can be handed, or live
+/// television, which the DVB receiver's process serves and nothing else can.
+#[derive(Debug, Clone)]
+pub enum Playback {
+    Film {
+        /// The session the worker opened for it; stopped with the player.
+        session_id: String,
+        /// The address Kodi is given when the film is handed over: the
+        /// session's own `handoff.kodiPlaybackUrl`, on the media core's
+        /// loopback. It is something Kodi opens, never something the core can
+        /// be asked to resolve -- it refuses its own loopback as a source,
+        /// which is what broke the handover once. See `Daemon::handoff_to_kodi`.
+        source: String,
+        /// Where that film actually comes from: the upstream address the
+        /// media core resolved (`handoff.resolvedInput`). When `source` turns
+        /// out to be the core's own proxy, this is the only thing a second
+        /// player can be given -- the proxy is one ffmpeg on one pipe and a
+        /// late reader joins it mid-stream, not at the beginning.
+        origin: String,
+    },
+    /// One service of `mediabox-dvb.service`, read from its FIFO.
+    Live { service_id: u16 },
+}
+
+impl Playing {
+    /// The worker session a film reads; live television has none.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.content {
+            Playback::Film { session_id, .. } => Some(session_id),
+            Playback::Live { .. } => None,
+        }
+    }
+
+    pub fn live(&self) -> Option<u16> {
+        match self.content {
+            Playback::Live { service_id } => Some(service_id),
+            Playback::Film { .. } => None,
+        }
+    }
 }
 
 pub struct PlayerManager {
@@ -64,6 +92,10 @@ pub struct PlayerManager {
     /// The film was started timed to the display: its sound is PCM for as
     /// long as it plays, whatever the sound plan says about passthrough.
     display_sync: AtomicBool,
+    /// Live television's position is the broadcast's clock (its stream is
+    /// not probed for a start time): the first one read, so what is shown
+    /// is how long it has been on.
+    live_origin: std::sync::Mutex<Option<f64>>,
 }
 
 impl PlayerManager {
@@ -75,6 +107,7 @@ impl PlayerManager {
             film: AtomicU64::new(0),
             holding: AtomicBool::new(false),
             display_sync: AtomicBool::new(false),
+            live_origin: std::sync::Mutex::new(None),
         }
     }
 
@@ -257,6 +290,19 @@ impl PlayerManager {
         self.playing.lock().await.clone()
     }
 
+    /// Name what is playing, if nobody did: live television names itself
+    /// (its service's SDT name) a moment after it starts.
+    pub async fn name_if_unnamed(&self, film: u64, title: &str) {
+        if self.film() != film {
+            return;
+        }
+        if let Some(playing) = self.playing.lock().await.as_mut()
+            && playing.title.is_none()
+        {
+            playing.title = Some(title.to_string());
+        }
+    }
+
     /// Start the player on `url`, replacing whatever was playing.
     pub async fn start(
         &self,
@@ -269,6 +315,7 @@ impl PlayerManager {
         self.stop().await;
         self.film.fetch_add(1, Ordering::SeqCst);
         self.holding.store(true, Ordering::SeqCst);
+        *self.live_origin.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.display_sync.store(display_sync, Ordering::SeqCst);
         // A socket left behind by a player that did not exit cleanly would be
         // answered by nobody; mpv replaces it, but only if it is not there.
@@ -336,6 +383,9 @@ impl PlayerManager {
                 "--setenv=MEDIABOX_PLAYER_AID={}",
                 audio_track.map(|track| track.to_string()).unwrap_or_default()
             ))
+            // Live television: the launcher opens its transport stream
+            // without probing it by decoding (see packaging/mediabox-player).
+            .arg(format!("--setenv=MEDIABOX_PLAYER_LIVE={}", u8::from(playing.live().is_some())))
             .arg(self.launcher.as_os_str())
             .arg(url)
             .arg(start_seconds.to_string())
@@ -406,10 +456,20 @@ impl PlayerManager {
         // transfer is not one either; zero means "unknown", which an interface
         // can draw honestly, and a wrong number is one it cannot.
         let known = playing.as_ref().and_then(|playing| playing.duration);
+        let live = playing.as_ref().and_then(Playing::live).is_some();
         let duration = known
             .map(|seconds| seconds as f64)
-            .or(duration.filter(|seconds| *seconds > 0.0))
+            .or(duration.filter(|seconds| *seconds > 0.0 && !live))
             .unwrap_or(0.0);
+        // Live television has no length, and its clock starts where the
+        // broadcast's was when it came on.
+        let position = match (live, position) {
+            (true, Some(at)) => {
+                let origin = *self.live_origin.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(at);
+                Some((at - origin).max(0.0))
+            }
+            (_, position) => position,
+        };
 
         // What the film is made of, for the subtitle and audio menus. Asked
         // for with the position rather than on its own call: a menu that opens
@@ -437,7 +497,11 @@ impl PlayerManager {
 
         json!({
             "playing": playing.is_some() && position.is_some(),
-            "source": playing.as_ref().map(|playing| playing.source.clone()),
+            "source": playing.as_ref().and_then(|playing| match &playing.content {
+                Playback::Film { source, .. } => Some(source.clone()),
+                Playback::Live { .. } => None,
+            }),
+            "live_service": playing.as_ref().and_then(Playing::live),
             "title": playing.as_ref().and_then(|playing| playing.title.clone()),
             "position": position.unwrap_or(0.0),
             "duration": duration,

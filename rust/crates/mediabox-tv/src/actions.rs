@@ -132,6 +132,23 @@ pub fn intent_for(_route: Route, modal: bool, action: InputAction) -> Intent {
         | InputAction::Right
         | InputAction::Ok
         | InputAction::Back => Intent::Ignore,
+        // Live television's own keys: the live screen reads them before
+        // this table is asked (`App::act`), and nothing else answers them.
+        InputAction::ChannelUp
+        | InputAction::ChannelDown
+        | InputAction::PreviousChannel
+        | InputAction::Guide
+        | InputAction::Info
+        | InputAction::Digit0
+        | InputAction::Digit1
+        | InputAction::Digit2
+        | InputAction::Digit3
+        | InputAction::Digit4
+        | InputAction::Digit5
+        | InputAction::Digit6
+        | InputAction::Digit7
+        | InputAction::Digit8
+        | InputAction::Digit9 => Intent::Ignore,
     }
 }
 

@@ -506,6 +506,33 @@ enum MediaCommand {
     SessionStop {
         id: String,
     },
+    /// Live television in the interface's own player: one DVB service of the
+    /// receiver (--frequency-khz, --symbol-rate; the RF, LNB supply and tone
+    /// included, is prepared outside MediaBox) or of the appliance's
+    /// recording (--recording, no USB access).
+    LiveHere {
+        service_id: u16,
+        #[arg(long, conflicts_with_all = ["frequency_khz", "symbol_rate"], required_unless_present = "frequency_khz")]
+        recording: bool,
+        #[arg(long, requires = "symbol_rate")]
+        frequency_khz: Option<u32>,
+        /// kS/s
+        #[arg(long)]
+        symbol_rate: Option<u32>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// The live channels known (the last multiplex the receiver was on).
+    LiveChannels,
+    /// The live programme guide from now for `hours` hours.
+    LiveGuide {
+        #[arg(long, default_value_t = 6)]
+        hours: i64,
+    },
+    /// Stop whatever plays in the interface's own player (Back).
+    StopHere,
+    /// What the interface's own player is doing, live television included.
+    StatusHere,
 }
 
 #[tokio::main]
@@ -738,6 +765,25 @@ fn to_request(command: &Command) -> Request {
             MediaCommand::Sessions => Request::MediaSessions,
             MediaCommand::SessionStart { url } => Request::MediaSessionStart { url: url.clone() },
             MediaCommand::SessionStop { id } => Request::MediaSessionStop { id: id.clone() },
+            MediaCommand::LiveHere { service_id, recording, frequency_khz, symbol_rate, title } => {
+                let source = match (recording, frequency_khz, symbol_rate) {
+                    (false, Some(frequency_khz), Some(symbol_rate_ksps)) => mediabox_core::LiveSource::Satellite {
+                        frequency_khz: *frequency_khz,
+                        symbol_rate_ksps: *symbol_rate_ksps,
+                    },
+                    _ => mediabox_core::LiveSource::Recording,
+                };
+                Request::LivePlayHere { service_id: *service_id, source, title: title.clone() }
+            }
+            MediaCommand::StopHere => Request::MediaStopHere,
+            MediaCommand::StatusHere => Request::MediaStatusHere,
+            MediaCommand::LiveChannels => Request::LiveChannels,
+            MediaCommand::LiveGuide { hours } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                Request::LiveGuide { from: now, to: now + hours * 3600 }
+            }
         },
         Command::Input {
             command: InputCommand::Monitor,
