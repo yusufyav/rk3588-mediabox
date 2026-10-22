@@ -13,6 +13,7 @@ pub mod output;
 pub mod diagnostics;
 pub mod discover;
 pub mod library;
+pub mod live;
 pub mod media;
 pub mod media_settings;
 pub mod now_playing;

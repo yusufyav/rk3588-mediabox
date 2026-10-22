@@ -18,6 +18,7 @@ import { AudioView, AudioCard } from "audio.slint";
 import { Account } from "account.slint";
 import { WifiScreen, BluetoothScreen, WifiRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
+import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow } from "live.slint";
 import { AccountChip } from "chrome.slint";
 export { AccountChip, CaptionStyle }
 import {
@@ -31,6 +32,7 @@ export {
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
     OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
     EpisodeRow, DiscoverFilter, CaptionLine, CaptionRun, MsCategory, MsRow, MsNode, MsRate, MsRoute,
+    LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow,
 }
 
 // What the television shows before there is anything to show.
@@ -76,7 +78,7 @@ export component MediaBoxWindow inherits Window {
     // desktop to look at a layout. It is the design's own size for that reason.
     preferred-width: 1920px;
     preferred-height: 1080px;
-    background: screen == "film" ? #00000000 : Theme.bg;
+    background: screen == "film" || screen == "live" ? #00000000 : Theme.bg;
     default-font-size: Metrics.root-font;
     // Installed on the appliance from Debian's own archive rather than carried
     // in this repository: Slint reads the system's fonts, and a typeface is not
@@ -295,6 +297,39 @@ export component MediaBoxWindow inherits Window {
     in property <bool> detail-on-mark;
     in property <string> detail-episode-heading;
     in property <int> detail-col;
+
+    // ---- live television (screens/live.rs)
+    in property <string> live-message;
+    in property <bool> live-banner-shown;
+    in property <string> live-banner-number;
+    in property <string> live-banner-name;
+    in property <string> live-banner-title;
+    in property <string> live-banner-time;
+    in property <float> live-banner-progress: -1;
+    in property <string> live-banner-text;
+    in property <string> live-banner-tag;
+    in property <bool> live-keypad-shown;
+    in property <string> live-keypad-typed;
+    in property <[LiveKeypadRow]> live-keypad-rows;
+    in property <int> live-keypad-selected;
+    in property <bool> live-menu-shown;
+    in property <[LiveMenuRow]> live-menu-rows;
+    in property <int> live-menu-row;
+    in property <int> live-menu-col;
+    in property <bool> live-guide-shown;
+    in property <[LiveTime]> live-guide-times;
+    in property <float> live-guide-now-x: -1;
+    in property <[LiveGuideRow]> live-guide-rows;
+    in property <string> live-guide-detail-title;
+    in property <string> live-guide-detail-time;
+    in property <string> live-guide-detail-text;
+    in property <string> live-guide-note;
+    in property <bool> live-panel-shown;
+    in property <string> live-panel-title;
+    in property <[LivePanelRow]> live-panel-rows;
+    in property <int> live-panel-focus;
+    in property <bool> live-panel-above;
+    in property <bool> live-panel-below;
 
     // ---- now playing
     in property <image> np-art;
@@ -742,7 +777,7 @@ export component MediaBoxWindow inherits Window {
         // clock in the corner, in the settings language.
         // The catalogue carries the reference's own chrome instead: its
         // places down the left and its search box across the top.
-        if screen != "boot" && screen != "film" && screen != "detail" && screen != "media"
+        if screen != "boot" && screen != "film" && screen != "live" && screen != "detail" && screen != "media"
             && screen != "discover" && screen != "search" && screen != "library"
             && screen != "settings" && screen != "diagnostics" && screen != "media-settings"
             // The radios' lists sit in the settings' own frame; only the
@@ -823,6 +858,62 @@ export component MediaBoxWindow inherits Window {
             picture-caption-y: root.np-picture-caption-y;
             picture-caption-w: root.np-picture-caption-w;
             picture-caption-h: root.np-picture-caption-h;
+        }
+
+        // Live television: the broadcast is on the video plane under this
+        // transparent surface, and this is what comes over it.
+        // A live channel's subtitles, drawn as a film's are: the player
+        // with nothing of its own up but the caption.
+        if screen == "live": Player {
+            width: 100%;
+            height: 100%;
+            open: false;
+            waiting: "";
+            pill: "";
+            menu: "";
+            caption: root.np-caption;
+            caption-lines: root.np-caption-lines;
+            picture-caption: root.np-picture-caption;
+            picture-caption-on: root.np-picture-caption-on;
+            picture-caption-x: root.np-picture-caption-x;
+            picture-caption-y: root.np-picture-caption-y;
+            picture-caption-w: root.np-picture-caption-w;
+            picture-caption-h: root.np-picture-caption-h;
+        }
+        if screen == "live": LiveTv {
+            width: 100%;
+            height: 100%;
+            message: root.live-message;
+            banner-shown: root.live-banner-shown;
+            banner-number: root.live-banner-number;
+            banner-name: root.live-banner-name;
+            banner-title: root.live-banner-title;
+            banner-time: root.live-banner-time;
+            banner-progress: root.live-banner-progress;
+            banner-text: root.live-banner-text;
+            banner-tag: root.live-banner-tag;
+            keypad-shown: root.live-keypad-shown;
+            keypad-typed: root.live-keypad-typed;
+            keypad-rows: root.live-keypad-rows;
+            keypad-selected: root.live-keypad-selected;
+            menu-shown: root.live-menu-shown;
+            menu-rows: root.live-menu-rows;
+            menu-row: root.live-menu-row;
+            menu-col: root.live-menu-col;
+            guide-shown: root.live-guide-shown;
+            guide-times: root.live-guide-times;
+            guide-now-x: root.live-guide-now-x;
+            guide-rows: root.live-guide-rows;
+            guide-detail-title: root.live-guide-detail-title;
+            guide-detail-time: root.live-guide-detail-time;
+            guide-detail-text: root.live-guide-detail-text;
+            guide-note: root.live-guide-note;
+            panel-shown: root.live-panel-shown;
+            panel-title: root.live-panel-title;
+            panel-rows: root.live-panel-rows;
+            panel-focus: root.live-panel-focus;
+            panel-above: root.live-panel-above;
+            panel-below: root.live-panel-below;
         }
 
         // Last, so it is over the film and over every sheet.

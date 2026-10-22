@@ -32,6 +32,8 @@ pub enum Route {
     /// grid, so neither fits in the right-hand column of a two-pane screen.
     Wifi,
     Bluetooth,
+    /// Live television: the broadcast, and its overlays over it.
+    Live,
 }
 
 impl Route {
@@ -54,6 +56,7 @@ impl Route {
             Route::Diagnostics => "diagnostics",
             Route::Wifi => "wifi",
             Route::Bluetooth => "bluetooth",
+            Route::Live => "live",
         }
     }
 
@@ -72,6 +75,7 @@ impl Route {
             "diagnostics" => Route::Diagnostics,
             "wifi" => Route::Wifi,
             "bluetooth" => Route::Bluetooth,
+            "live" => Route::Live,
             _ => return None,
         })
     }

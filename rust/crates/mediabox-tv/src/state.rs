@@ -85,6 +85,8 @@ pub enum AppAction {
     Launch(String),
     /// One of this interface's own screens.
     Screen(Nav),
+    /// Live television.
+    LiveTv,
     /// The screen this tile would open has not been built yet. The tile is
     /// still drawn — what the box can do should be visible from the sofa — but
     /// it says so rather than doing nothing when it is pressed.
@@ -125,6 +127,11 @@ fn app_mark(id: &str) -> (&'static str, f32) {
             340.0,
         ),
         // Kodi's own mark, from Simple Icons (CC0), stroked like the rest.
+        // A screen on its foot, and an aerial.
+        "livetv" => (
+            "M3.4 7.2h17.2v11H3.4v-11ZM8.6 21h6.8M8.4 3l3.6 4.2L15.6 3",
+            205.0,
+        ),
         "kodi" => (
             KODI_MARK,
             198.0,
@@ -176,6 +183,7 @@ pub fn app_tiles_from(display: &crate::model::DisplayStatus) -> Vec<AppEntryTile
     let here = display.owner.as_deref();
     let mut tiles = vec![
         tile("media", "Filmler ve Diziler", true, "", AppAction::Shelves),
+        tile("livetv", "Canlı TV", true, "", AppAction::LiveTv),
         tile(
             "browser",
             "Tarayıcı",

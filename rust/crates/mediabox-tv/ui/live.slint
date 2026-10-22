@@ -1,0 +1,639 @@
+import { Theme, Metrics } from "theme.slint";
+
+// Live television, over the broadcast.
+//
+// The screen is the picture. Everything here is an overlay that comes when a
+// key asks for it and goes by itself (src/screens/live.rs owns when), laid
+// out as AOSP's Live TV reference application lays its own out: its
+// res/layout and res/values/dimens.xml, in dp. A television's dp is a 540th
+// of the panel's height, so the same proportions hold on a 720p, a 1080p and
+// a 2160p panel. Colours are the reference's res/values/colors.xml, turned
+// from Android's #AARRGGBB into Slint's #RRGGBBAA; no artwork of its is used.
+
+export struct LiveCard {
+    title: string,
+    // A channel card's programme on now, or a card's current value.
+    sub: string,
+    // "guide" | "list" | "favorites" | "channel" | "audio" | "subtitles" | "settings"
+    kind: string,
+    number: string,
+}
+
+export struct LiveMenuRow {
+    title: string,
+    cards: [LiveCard],
+}
+
+export struct LiveKeypadRow {
+    number: string,
+    name: string,
+}
+
+export struct LiveGuideCell {
+    // Fractions of the time line's width.
+    x: float,
+    w: float,
+    title: string,
+    gap: bool,
+    on-now: bool,
+    focused: bool,
+}
+
+export struct LiveGuideRow {
+    number: string,
+    name: string,
+    current: bool,
+    cells: [LiveGuideCell],
+}
+
+export struct LiveTime {
+    label: string,
+    x: float,
+}
+
+export struct LivePanelRow {
+    label: string,
+    value: string,
+    checked: bool,
+    enabled: bool,
+}
+
+global Dp {
+    out property <length> dp: Metrics.vh / 540;
+}
+
+component Thin inherits Text {
+    color: #EEEEEE;
+    font-weight: 200;
+}
+
+// res/layout/channel_banner.xml
+component Banner inherits Rectangle {
+    in property <string> number;
+    in property <string> name;
+    in property <string> title;
+    in property <string> time;
+    in property <float> progress: -1;
+    in property <string> text;
+    in property <string> tag;
+    property <length> dp: Dp.dp;
+
+    width: 696 * dp;
+    height: inner.preferred-height;
+    background: #263238E6;
+    border-radius: 2 * dp;
+    drop-shadow-blur: 8 * dp;
+    drop-shadow-color: #00000080;
+
+    inner := HorizontalLayout {
+        padding-top: 16 * dp;
+        padding-left: 16 * dp;
+        padding-right: 32 * dp;
+        padding-bottom: 14 * dp;
+        spacing: 0;
+
+        Thin {
+            width: 112 * dp;
+            text: root.number;
+            font-size: 54 * dp;
+            vertical-alignment: top;
+        }
+        VerticalLayout {
+            spacing: 6 * dp;
+            Text {
+                text: root.title != "" ? root.title : root.name;
+                color: #EEEEEE;
+                font-size: 28 * dp;
+                font-weight: 300;
+                overflow: elide;
+                wrap: word-wrap;
+                max-height: 2 * 34 * dp;
+            }
+            HorizontalLayout {
+                spacing: 12 * dp;
+                alignment: start;
+                if root.tag != "": Rectangle {
+                    width: tag-text.preferred-width + 10 * dp;
+                    height: 18 * dp;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 2 * dp;
+                    border-width: 1px;
+                    border-color: #EEEEEE80;
+                    tag-text := Text {
+                        text: root.tag;
+                        color: #EEEEEE;
+                        font-size: 11 * dp;
+                        font-weight: 600;
+                    }
+                }
+                if root.title != "": Text {
+                    text: root.name;
+                    color: #EEEEEE;
+                    font-size: 14 * dp;
+                    font-weight: 500;
+                    overflow: elide;
+                    max-width: 220 * dp;
+                    vertical-alignment: center;
+                }
+                if root.time != "": Text {
+                    text: root.time;
+                    color: #EEEEEE80;
+                    font-size: 14 * dp;
+                    vertical-alignment: center;
+                }
+                if root.progress >= 0: Rectangle {
+                    width: 60 * dp;
+                    height: 4 * dp;
+                    y: (parent.height - self.height) / 2;
+                    background: #EEEEEE4D;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * root.progress;
+                        height: 100%;
+                        background: #EEEEEE;
+                    }
+                }
+            }
+            if root.text != "": Text {
+                width: 456 * dp;
+                text: root.text;
+                color: #EEEEEE80;
+                font-size: 12 * dp;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: 3 * 17 * dp;
+            }
+        }
+    }
+}
+
+// res/layout/keypad_channel_switch.xml
+component Keypad inherits Rectangle {
+    in property <string> typed;
+    in property <[LiveKeypadRow]> rows;
+    in property <int> selected;
+    property <length> dp: Dp.dp;
+
+    width: 260 * dp;
+    height: 84 * dp + min(rows.length, 8) * 48 * dp + (rows.length == 0 ? 0 : 8 * dp);
+    background: #263238E6;
+    border-radius: 2 * dp;
+    drop-shadow-blur: 8 * dp;
+    drop-shadow-color: #00000080;
+
+    Thin {
+        x: 16 * dp;
+        y: 6 * dp;
+        text: root.typed + "_";
+        font-size: 54 * dp;
+    }
+    for row[i] in rows: Rectangle {
+        x: 0;
+        y: 84 * dp + i * 48 * dp;
+        width: parent.width;
+        height: 48 * dp;
+        background: i == root.selected ? #FFFFFF33 : transparent;
+        HorizontalLayout {
+            padding-left: 16 * dp;
+            padding-right: 16 * dp;
+            spacing: 16 * dp;
+            Text {
+                width: 56 * dp;
+                text: row.number;
+                color: #EEEEEE;
+                font-size: 18 * dp;
+                vertical-alignment: center;
+            }
+            Text {
+                text: row.name;
+                color: #EEEEEE;
+                font-size: 18 * dp;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// res/layout/menu.xml and its cards. The row the remote is on has its cards
+// drawn; the others are their titles.
+component Menu inherits Rectangle {
+    in property <[LiveMenuRow]> rows;
+    in property <int> at-row;
+    in property <int> at-col;
+    property <length> dp: Dp.dp;
+    property <length> card-w: 132 * dp;
+    property <length> card-h: 92 * dp;
+
+    background: @linear-gradient(0deg, #000000E6 0%, #000000B3 55%, #00000000 100%);
+
+    // From the bottom: the selected row's cards sit `menu_row_align_from_bottom`
+    // (124 dp) up, the titles of the rows above it over them.
+    for menu-row[r] in rows: Rectangle {
+        x: 56 * dp;
+        width: root.width - 112 * dp;
+        height: r == root.at-row ? 48 * dp + card-h : 36 * dp;
+        y: r == root.at-row ? root.height - 124 * dp - card-h
+            : r < root.at-row ? root.height - 124 * dp - card-h - 48 * dp - (root.at-row - r) * 36 * dp
+            : root.height - 124 * dp + 16 * dp + (r - root.at-row - 1) * 36 * dp;
+        animate y { duration: 250ms; easing: ease-out; }
+
+        Text {
+            x: 0;
+            y: r == root.at-row ? -40 * dp : 0;
+            text: menu-row.title;
+            color: r == root.at-row ? #EEEEEE : #EEEEEE99;
+            font-size: r == root.at-row ? 20 * dp : 16 * dp;
+            font-weight: 500;
+        }
+        if r == root.at-row: HorizontalLayout {
+            y: 0;
+            height: card-h;
+            spacing: 8 * dp;
+            alignment: start;
+            for card[c] in menu-row.cards: Rectangle {
+                width: card-w;
+                height: card-h;
+                border-radius: 2 * dp;
+                background: c == root.at-col ? #455A64F2 : #263238E6;
+                border-width: c == root.at-col ? 2 * dp : 0;
+                border-color: #EEEEEE;
+                VerticalLayout {
+                    padding: 10 * dp;
+                    spacing: 4 * dp;
+                    alignment: start;
+                    if card.number != "": Thin {
+                        text: card.number;
+                        font-size: 26 * dp;
+                    }
+                    // One line each, cut with an ellipsis: a card is a fixed
+                    // size, and a programme name longer than it once ran out
+                    // of it over the row below.
+                    Text {
+                        text: card.title;
+                        color: #EEEEEE;
+                        font-size: 14 * dp;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    if card.sub != "": Text {
+                        text: card.sub;
+                        color: #EEEEEEB3;
+                        font-size: 12 * dp;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// res/layout/program_guide.xml: a scrim, the header row of times, the
+// channel column and the grid, and the focused programme's detail.
+component Guide inherits Rectangle {
+    in property <[LiveTime]> times;
+    in property <float> now-x: -1;
+    in property <[LiveGuideRow]> rows;
+    in property <string> detail-title;
+    in property <string> detail-time;
+    in property <string> detail-text;
+    in property <string> note;
+    property <length> dp: Dp.dp;
+    property <length> left: 56 * dp;
+    property <length> column: 232 * dp;
+    property <length> grid-x: left + column;
+    property <length> grid-w: root.width - grid-x;
+    property <length> header-y: 27 * dp;
+    property <length> row-h: 64 * dp;
+    property <length> rows-y: header-y + 40 * dp;
+
+    background: #00000099;
+
+    // The header row.
+    Rectangle {
+        x: left;
+        y: header-y;
+        width: root.width - left;
+        height: 40 * dp;
+        background: #455A64F2;
+        Text {
+            x: 16 * dp;
+            text: "Program rehberi";
+            color: #EEEEEE;
+            font-size: 16 * dp;
+            font-weight: 600;
+            vertical-alignment: center;
+            height: 100%;
+        }
+        for t in root.times: Text {
+            x: column + t.x * grid-w + 8 * dp;
+            height: 100%;
+            text: t.label;
+            color: #EEEEEE80;
+            font-size: 16 * dp;
+            vertical-alignment: center;
+        }
+    }
+
+    for row[i] in root.rows: Rectangle {
+        x: left;
+        y: rows-y + i * row-h;
+        width: root.width - left;
+        height: row-h;
+        // The channel column. Placed, not left to Slint, which centres an
+        // element given only a width.
+        Rectangle {
+            x: 0;
+            width: column;
+            height: 100%;
+            background: #37474FF2;
+            border-width: 0.5px;
+            border-color: #EEEEEE0D;
+            Thin {
+                x: 28 * dp - 12 * dp;
+                width: 84 * dp;
+                height: 100%;
+                text: row.number;
+                font-size: 32 * dp;
+                vertical-alignment: center;
+                color: row.current ? #17FFFF : #EEEEEE;
+            }
+            Text {
+                x: 112 * dp - 12 * dp;
+                width: column - 112 * dp;
+                height: 100%;
+                text: row.name;
+                color: #EEEEEE;
+                font-size: 14 * dp;
+                font-weight: 600;
+                wrap: word-wrap;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            x: column;
+            width: grid-w;
+            height: 100%;
+            background: #263238F2;
+            clip: true;
+            for cell in row.cells: Rectangle {
+                x: cell.x * grid-w;
+                width: cell.w * grid-w;
+                height: 100%;
+                background: cell.focused ? #0176BC : transparent;
+                border-width: 0.5px;
+                border-color: #EEEEEE1A;
+                Text {
+                    x: 16 * dp;
+                    width: max(0px, parent.width - 24 * dp);
+                    height: 100%;
+                    text: cell.title;
+                    color: cell.gap && !cell.focused ? #EEEEEE80 : #EEEEEE;
+                    font-size: 14 * dp;
+                    font-weight: cell.on-now ? 600 : 400;
+                    overflow: elide;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // The time now, down the grid: the reference's indicator colour.
+    if root.now-x >= 0: Rectangle {
+        x: grid-x + root.now-x * grid-w - 1 * dp;
+        y: header-y;
+        width: 2 * dp;
+        height: 40 * dp + root.rows.length * row-h;
+        background: #17FFFF;
+    }
+
+    // The focused programme.
+    Rectangle {
+        x: left;
+        y: rows-y + root.rows.length * row-h;
+        width: root.width - left;
+        height: root.height - self.y - 27 * dp;
+        background: #1B2A33F2;
+        VerticalLayout {
+            padding-left: 16 * dp;
+            padding-right: 56 * dp;
+            padding-top: 14 * dp;
+            spacing: 6 * dp;
+            alignment: start;
+            if root.note != "": Text {
+                text: root.note;
+                color: #EEEEEEB3;
+                font-size: 16 * dp;
+                wrap: word-wrap;
+            }
+            if root.detail-title != "": Text {
+                text: root.detail-title;
+                color: #EEEEEE;
+                font-size: 20 * dp;
+                font-weight: 500;
+                overflow: elide;
+            }
+            if root.detail-time != "": Text {
+                text: root.detail-time;
+                color: #EEEEEEB3;
+                font-size: 14 * dp;
+            }
+            if root.detail-text != "": Text {
+                text: root.detail-text;
+                color: #EEEEEEB3;
+                font-size: 14 * dp;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: 3 * 19 * dp;
+            }
+        }
+    }
+}
+
+// The side panels: res/layout/side_panel and its items, on the right.
+component Panel inherits Rectangle {
+    in property <string> title;
+    in property <[LivePanelRow]> rows;
+    in property <int> at-row;
+    in property <bool> above;
+    in property <bool> below;
+    property <length> dp: Dp.dp;
+
+    width: 270 * dp;
+    background: #263238F2;
+    drop-shadow-blur: 8 * dp;
+    drop-shadow-color: #00000080;
+
+    Text {
+        x: 24 * dp;
+        y: 27 * dp;
+        text: root.title;
+        color: #EEEEEE;
+        font-size: 20 * dp;
+        font-weight: 500;
+    }
+    if root.above: Text {
+        x: 24 * dp;
+        y: 62 * dp;
+        text: "▲";
+        color: #EEEEEE80;
+        font-size: 10 * dp;
+    }
+    for row[i] in root.rows: Rectangle {
+        x: 8 * dp;
+        y: 76 * dp + i * 48 * dp;
+        width: parent.width - 16 * dp;
+        height: 48 * dp;
+        border-radius: 2 * dp;
+        background: i == root.at-row ? #0176BC : transparent;
+        Rectangle {
+            x: 16 * dp;
+            width: 14 * dp;
+            height: 14 * dp;
+            y: (parent.height - self.height) / 2;
+            visible: row.enabled;
+            border-radius: self.width / 2;
+            border-width: 1.5 * dp;
+            border-color: row.checked ? #EEEEEE : #EEEEEE80;
+            Rectangle {
+                width: parent.width * 0.5;
+                height: parent.height * 0.5;
+                border-radius: self.width / 2;
+                background: #EEEEEE;
+                visible: row.checked;
+            }
+        }
+        VerticalLayout {
+            x: 40 * dp;
+            width: parent.width - 48 * dp;
+            alignment: center;
+            Text {
+                text: row.label;
+                color: row.enabled ? #EEEEEE : #EEEEEEB3;
+                font-size: 15 * dp;
+                overflow: elide;
+            }
+            if row.value != "": Text {
+                text: row.value;
+                color: row.enabled ? #EEEEEEB3 : #EEEEEE80;
+                font-size: 12 * dp;
+                overflow: elide;
+            }
+        }
+    }
+    if root.below: Text {
+        x: 24 * dp;
+        y: 76 * dp + root.rows.length * 48 * dp + 2 * dp;
+        text: "▼";
+        color: #EEEEEE80;
+        font-size: 10 * dp;
+    }
+}
+
+export component LiveTv inherits Rectangle {
+    in property <string> message;
+    in property <bool> banner-shown;
+    in property <string> banner-number;
+    in property <string> banner-name;
+    in property <string> banner-title;
+    in property <string> banner-time;
+    in property <float> banner-progress: -1;
+    in property <string> banner-text;
+    in property <string> banner-tag;
+
+    in property <bool> keypad-shown;
+    in property <string> keypad-typed;
+    in property <[LiveKeypadRow]> keypad-rows;
+    in property <int> keypad-selected;
+
+    in property <bool> menu-shown;
+    in property <[LiveMenuRow]> menu-rows;
+    in property <int> menu-row;
+    in property <int> menu-col;
+
+    in property <bool> guide-shown;
+    in property <[LiveTime]> guide-times;
+    in property <float> guide-now-x: -1;
+    in property <[LiveGuideRow]> guide-rows;
+    in property <string> guide-detail-title;
+    in property <string> guide-detail-time;
+    in property <string> guide-detail-text;
+    in property <string> guide-note;
+
+    in property <bool> panel-shown;
+    in property <string> panel-title;
+    in property <[LivePanelRow]> panel-rows;
+    in property <int> panel-focus;
+    in property <bool> panel-above;
+    in property <bool> panel-below;
+
+    property <length> dp: Dp.dp;
+
+    background: transparent;
+
+    // What is wrong with the channel, or that it is coming: in the middle of
+    // the black where the picture would be.
+    if root.message != "" && !root.guide-shown: Text {
+        width: 60%;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.preferred-height) / 2;
+        text: root.message;
+        color: #EEEEEEB3;
+        font-size: 20 * dp;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+
+    if root.menu-shown: Menu {
+        width: parent.width;
+        height: parent.height;
+        rows: root.menu-rows;
+        at-row: root.menu-row;
+        at-col: root.menu-col;
+    }
+
+    if root.banner-shown && !root.guide-shown && !root.keypad-shown: Banner {
+        x: 132 * dp;
+        y: 27 * dp;
+        number: root.banner-number;
+        name: root.banner-name;
+        title: root.banner-title;
+        time: root.banner-time;
+        progress: root.banner-progress;
+        text: root.banner-text;
+        tag: root.banner-tag;
+    }
+
+    if root.keypad-shown: Keypad {
+        x: 56 * dp;
+        y: 27 * dp;
+        typed: root.keypad-typed;
+        rows: root.keypad-rows;
+        selected: root.keypad-selected;
+    }
+
+    if root.guide-shown: Guide {
+        width: parent.width;
+        height: parent.height;
+        times: root.guide-times;
+        now-x: root.guide-now-x;
+        rows: root.guide-rows;
+        detail-title: root.guide-detail-title;
+        detail-time: root.guide-detail-time;
+        detail-text: root.guide-detail-text;
+        note: root.guide-note;
+    }
+
+    if root.panel-shown: Panel {
+        x: parent.width - self.width;
+        y: 0;
+        height: parent.height;
+        title: root.panel-title;
+        rows: root.panel-rows;
+        at-row: root.panel-focus;
+        above: root.panel-above;
+        below: root.panel-below;
+    }
+}

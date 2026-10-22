@@ -259,6 +259,14 @@ struct App {
     /// else: the two are never both running, and asking the control plane what
     /// is playing would answer a frame too late.
     here: Option<Playing>,
+    /// Live television, while its screen is open (`screens::live`).
+    live: Option<screens::live::Live>,
+    /// What live television keeps between sessions.
+    live_kept: LiveKept,
+    /// When the channels and the guide were last asked for.
+    live_asked: Option<Instant>,
+    /// The channel the player was last asked to play.
+    live_tuned: Option<u16>,
     /// Full records of titles the remote has rested on in a grid, so the
     /// record beside it can say what a title is without opening it. An entry
     /// from the account's library carries a name and a poster and little else.
@@ -308,6 +316,20 @@ impl App {
     /// A press that survived the dispatcher.
     fn act(&mut self, action: InputAction) {
         self.meter.key_accepted();
+        // Live television reads its keys before the routing table: the
+        // channel keys, the number pad and the guide are only its. Home,
+        // Power and the volume stay the box's.
+        if self.route() == Route::Live
+            && self.live.is_some()
+            && self.sheet.is_none()
+            && !matches!(
+                action,
+                InputAction::Home | InputAction::Power | InputAction::VolumeUp | InputAction::VolumeDown | InputAction::Mute
+            )
+        {
+            self.act_on_live(action);
+            return;
+        }
         let intent = actions::intent_for(self.route(), self.modal(), action);
 
         // A film is watched, not operated: the controls are down until somebody
@@ -334,7 +356,9 @@ impl App {
             // film that went on playing, and every key after it went to a
             // home screen nobody could see.
             Intent::GoHome => {
-                if self.here.is_some() {
+                if self.live.is_some() {
+                    self.leave_live();
+                } else if self.here.is_some() {
                     self.transport(Transport::Stop);
                 }
                 self.go_home();
@@ -364,6 +388,7 @@ impl App {
                 Route::Diagnostics => self.act_on_diagnostics(intent),
                 Route::Wifi => self.act_on_wifi(intent),
                 Route::Bluetooth => self.act_on_bluetooth(intent),
+                Route::Live => {}
             },
         }
     }
@@ -515,6 +540,19 @@ impl App {
                     self.paint();
                 }
             }
+            // A keyboard on live television: its digits are the number pad,
+            // G the guide and I the banner.
+            Route::Live => {
+                let action = match c {
+                    '0'..='9' => InputAction::of_digit(c as u8 - b'0'),
+                    'g' | 'G' => Some(InputAction::Guide),
+                    'i' | 'I' => Some(InputAction::Info),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    self.act(action);
+                }
+            }
             _ => {}
         }
     }
@@ -645,6 +683,7 @@ impl App {
             // for.
             state::AppAction::Shelves => self.open_media(),
             state::AppAction::Screen(nav) => self.open_screen(nav),
+            state::AppAction::LiveTv => self.open_live(),
             // The control plane stops this unit as part of starting the other
             // one, so nothing after this call is guaranteed to run.
             state::AppAction::Launch(id) => {
@@ -2183,6 +2222,169 @@ impl App {
         self.open(Route::NowPlaying);
     }
 
+    // ------------------------------------------------------- live television
+
+    fn open_live(&mut self) {
+        let mut live = screens::live::Live::new();
+        live.favorites = self.live_kept.favorites.iter().copied().collect();
+        live.recent = self.live_kept.recent.clone();
+        live.problem = Some("Kanallar okunuyor…".into());
+        self.live = Some(live);
+        self.live_asked = Some(Instant::now());
+        self.open(Route::Live);
+        spawn_live_channels();
+    }
+
+    fn live_channels_arrived(&mut self, channels: Vec<mediabox_core::LiveChannel>) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        let first = !live.loaded;
+        live.set_channels(channels);
+        if live.channels.is_empty() {
+            live.problem = Some(
+                "Kanal listesi yok. Kanallar, alıcının kilitlendiği yayının kendi listesinden gelir; kanal tarama henüz yok."
+                    .into(),
+            );
+            self.paint();
+            return;
+        }
+        if live.problem.as_deref() == Some("Kanallar okunuyor…") || live.current.is_none() {
+            live.problem = None;
+        }
+        spawn_live_guide();
+        if first && live.current.is_none() && let Some(sid) = live.starting_channel(self.live_kept.last) {
+            live.tuning(sid, Instant::now());
+            self.tune_live(sid);
+            return;
+        }
+        self.paint();
+    }
+
+    fn live_guide_arrived(&mut self, guide: std::collections::BTreeMap<u16, Vec<mediabox_core::LiveEvent>>) {
+        if let Some(live) = self.live.as_mut() {
+            live.guide = guide;
+            self.paint();
+        }
+    }
+
+    /// Ask the control plane for channel `sid`. The live state has moved to
+    /// it already (`Live::tuning`): the banner says it while it opens.
+    fn tune_live(&mut self, sid: u16) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let Some(channel) = live.channel(sid).cloned() else {
+            return;
+        };
+        let recent = live.recent.clone();
+        let opening = next_opening();
+        // The channel before keeps playing until the control plane replaces
+        // it: one request, which stops it and waits for its receiver.
+        self.here = Some(Playing {
+            opening,
+            live: true,
+            previous_on_plane: platform::video_showing(),
+            grace: LIVE_FIRST_FRAME_GRACE,
+            ..Playing::new()
+        });
+        self.now.film = false;
+        self.left_film = None;
+        self.live_kept.last = Some(sid);
+        self.live_kept.recent = recent;
+        write_live_kept(self.live_kept.clone());
+        eprintln!("mediabox-tv.live tune {} {} opening={opening}", channel.number, channel.name);
+        self.live_tuned = Some(sid);
+        spawn_live_play(channel, opening);
+        self.paint();
+    }
+
+    fn live_refused(&mut self, opening: u64, why: String) {
+        if opening_answer(self.here.as_ref(), opening) != OpeningAnswer::Ours {
+            return;
+        }
+        self.here = None;
+        if let Some(live) = self.live.as_mut() {
+            live.problem = Some(why);
+        }
+        self.paint();
+    }
+
+    fn act_on_live(&mut self, action: InputAction) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        let effect = live.key(action, Instant::now(), screens::live::utc_now());
+        self.live_effect(effect);
+    }
+
+    fn tick_live(&mut self) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        let effect = live.tick(Instant::now());
+        self.live_effect(effect);
+        // What the receiver learns of the multiplex reaches the control
+        // plane's store as it arrives; the screen asks for it now and then.
+        if self.live_asked.is_none_or(|at| at.elapsed() >= LIVE_REFRESH) {
+            self.live_asked = Some(Instant::now());
+            spawn_live_channels();
+        }
+    }
+
+    fn live_effect(&mut self, effect: screens::live::Effect) {
+        use screens::live::Effect;
+        match effect {
+            Effect::Nothing => {}
+            Effect::Paint => self.paint(),
+            // The channel already playing, chosen again (its number, the
+            // guide, the list): the overlays are gone and the picture goes
+            // on, as on a television; it is not opened a second time.
+            Effect::Tune(sid)
+                if self.here.as_ref().is_some_and(|playing| playing.live && playing.seen)
+                    && self.live.as_ref().is_some_and(|live| live.problem.is_none() && live.current == Some(sid))
+                    && self.live_tuned == Some(sid) =>
+            {
+                self.paint();
+            }
+            Effect::Tune(sid) => self.tune_live(sid),
+            Effect::Exit => self.leave_live(),
+            Effect::Audio(id) => {
+                spawn_here(HereCommand::Audio(id));
+                spawn_here_status();
+            }
+            Effect::Subtitle(id) => {
+                spawn_here(HereCommand::Subtitle(id));
+                spawn_here_status();
+            }
+            Effect::Favorites => {
+                if let Some(live) = self.live.as_ref() {
+                    self.live_kept.favorites = live.favorites.iter().copied().collect();
+                    write_live_kept(self.live_kept.clone());
+                }
+                self.paint();
+            }
+        }
+    }
+
+    /// Out of live television: the channel is stopped, and the screen under
+    /// it -- the home screen -- is what is on the panel.
+    fn leave_live(&mut self) {
+        if self.here.take().is_some() {
+            spawn_here(HereCommand::Stop);
+        }
+        self.live = None;
+        self.live_tuned = None;
+        self.left_film = Some(Instant::now());
+        self.now.film = false;
+        self.now.state = None;
+        if self.route() == Route::Live {
+            self.back();
+        } else {
+            self.paint();
+        }
+    }
+
     fn controls_open(&self) -> bool {
         self.here
             .as_ref()
@@ -2229,6 +2431,7 @@ impl App {
         if let Some(playing) = self.here.as_mut()
             && playing.film.is_none()
             && current.is_some()
+            && !playing.live
         {
             playing.film = current;
             learned = playing.adopted;
@@ -2246,6 +2449,29 @@ impl App {
         }
         if current.is_none() || current != film {
             // Between films: nothing to draw from this answer.
+            return;
+        }
+        // A live channel the receiver finds encrypted will never show a
+        // picture: said at once, not after the wait for a first frame.
+        let live_seen = self
+            .here
+            .as_ref()
+            .is_some_and(|playing| playing.live && !playing.seen && !playing.scrambled);
+        if live_seen
+            && status
+                .pointer("/live/receiver/selection")
+                .is_some_and(screens::live::scrambled)
+        {
+            // Said at once, and the channel left tuned: stopping it would
+            // stop the receiver, and the next channel would start cold.
+            eprintln!("mediabox-tv.live the channel is scrambled");
+            if let Some(playing) = self.here.as_mut() {
+                playing.scrambled = true;
+            }
+            if let Some(live) = self.live.as_mut() {
+                live.problem = Some(screens::live::SCRAMBLED.to_string());
+            }
+            self.paint();
             return;
         }
         let pill = self.now.pill.clone();
@@ -2373,7 +2599,7 @@ impl App {
         // told which device asked for it.
         if self.here.is_none() {
             let just_left = self.left_film.is_some_and(|at| at.elapsed() < LEFT_FILM_QUIET);
-            if self.handing_over || just_left || !platform::video_showing() {
+            if self.handing_over || just_left || self.live.is_some() || !platform::video_showing() {
                 return;
             }
             eprintln!("mediabox-tv.play adopted a film this interface did not start");
@@ -2394,7 +2620,22 @@ impl App {
         let Some(playing) = self.here.as_mut() else {
             return;
         };
-        let showing = platform::video_showing();
+        let mut showing = platform::video_showing();
+        if playing.previous_on_plane {
+            if showing {
+                showing = false;
+            } else {
+                playing.previous_on_plane = false;
+            }
+        }
+        if playing.scrambled {
+            // Polled still, so its answers keep coming; never given up on.
+            if playing.polled.is_none_or(|last| last.elapsed() >= POSITION_INTERVAL) {
+                playing.polled = Some(std::time::Instant::now());
+                spawn_here_status();
+            }
+            return;
+        }
         // Where the film is, and whether it has ended, are the control
         // plane's to answer, and it is asked for as long as there is a film.
         let due = playing
@@ -2412,6 +2653,9 @@ impl App {
             // tick would be a frame's work for nothing.
             let first = !playing.seen;
             playing.seen = true;
+            if first && playing.live {
+                eprintln!("mediabox-tv.live first frame {} ms after the key", playing.asked.elapsed().as_millis());
+            }
             if first {
                 self.now.note = String::new();
                 self.paint();
@@ -2437,8 +2681,13 @@ impl App {
                 return;
             }
             eprintln!("mediabox-tv.play here gave up: no frame in {:?}", playing.grace);
+            let live = playing.live;
             spawn_here(HereCommand::Stop);
-            self.leave_film(Some("Kaynak açılamadı: görüntü gelmedi. Başka bir kaynak seçin.".to_string()));
+            self.leave_film(Some(if live {
+                "Bu kanaldan görüntü gelmedi.".to_string()
+            } else {
+                "Kaynak açılamadı: görüntü gelmedi. Başka bir kaynak seçin.".to_string()
+            }));
             return;
         }
         // A dark plane after a picture is not an ending: the control plane
@@ -2458,6 +2707,13 @@ impl App {
     fn film_finished(&mut self, finished: &Value) {
         let outcome = finished.get("outcome").and_then(Value::as_str).unwrap_or("stopped");
         eprintln!("mediabox-tv.play finished: {finished}");
+        // A channel that stops has no place to keep: what the receiver said
+        // is what is shown, over the black, and the channel keys still work.
+        if self.live.is_some() {
+            let why = finished.get("message").and_then(Value::as_str).unwrap_or("Yayın durdu.").to_string();
+            self.leave_film(Some(why));
+            return;
+        }
         let notice = (outcome == "failed").then(|| {
             let why = finished
                 .get("message")
@@ -2474,6 +2730,15 @@ impl App {
     /// and its controls: the now-playing page pushed under it when it
     /// started is taken away with it, never left standing at 0:00.
     fn leave_film(&mut self, notice: Option<String>) {
+        // Live television stays open over a channel that went: zapping on
+        // is how a viewer leaves a channel that does not play.
+        if let Some(live) = self.live.as_mut() {
+            self.here = None;
+            self.now.film = false;
+            live.problem = Some(notice.unwrap_or_else(|| "Yayın kesildi.".to_string()));
+            self.paint();
+            return;
+        }
         self.here = None;
         self.refresh_watch();
         self.left_film = Some(Instant::now());
@@ -4788,6 +5053,14 @@ impl App {
             chip.set_avatar(avatar);
             chip.set_focus(if self.on_search_box() { self.account_focus } else { 0 });
         }
+        // Live television is a film too, with its own overlays rather than a
+        // film's controls.
+        if route == Route::Live && self.live.is_some() {
+            window.set_screen("live".into());
+            self.paint_live(&window);
+            self.paint_sheet(&window);
+            return;
+        }
         // A film is drawn by the display controller on the window under this
         // one, so while one is playing this surface is transparent and carries
         // the film's own controls and nothing else. No screen answers to
@@ -4822,6 +5095,225 @@ impl App {
             Route::Diagnostics => self.paint_diagnostics(&window),
             Route::Wifi => self.paint_wifi(&window),
             Route::Bluetooth => self.paint_bluetooth(&window),
+            Route::Live => {}
+        }
+    }
+
+    /// Live television's overlays, from `screens::live`.
+    fn paint_live(&mut self, window: &MediaBoxWindow) {
+        use screens::live::{self as lv, Card, Layer};
+        fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+            slint::ModelRc::new(slint::VecModel::from(items))
+        }
+        let rows_of = |tracks: &[screens::now_playing::Track]| -> Vec<lv::TrackRow> {
+            tracks
+                .iter()
+                .map(|t| lv::TrackRow { id: t.id, label: t.label.clone(), detail: t.detail.clone(), selected: t.selected })
+                .collect()
+        };
+        let (audio, subtitles) = (rows_of(&self.now.audio), rows_of(&self.now.subtitles));
+        let opening = self
+            .here
+            .as_ref()
+            .is_some_and(|playing| !playing.seen && playing.asked.elapsed() >= Duration::from_millis(1500));
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        live.audio = audio;
+        live.subtitles = subtitles;
+        let live = &*live;
+        let at = Instant::now();
+        let now = lv::utc_now();
+
+        window.set_live_message(
+            match (&live.problem, opening) {
+                (Some(problem), _) => problem.clone(),
+                (None, true) => "Kanal açılıyor…".to_string(),
+                _ => String::new(),
+            }
+            .into(),
+        );
+
+        // The banner.
+        let banner = live.banner_shown(at).then(|| live.current_channel()).flatten();
+        window.set_live_banner_shown(banner.is_some());
+        if let Some(channel) = banner {
+            let event = live.event_at(channel.service_id, now);
+            window.set_live_banner_number(channel.number.to_string().into());
+            window.set_live_banner_name(channel.name.clone().into());
+            window.set_live_banner_title(event.map(|e| e.title.clone()).unwrap_or_default().into());
+            window.set_live_banner_time(event.map(lv::span).unwrap_or_default().into());
+            window.set_live_banner_progress(event.map_or(-1.0, |e| lv::progress(e, now)));
+            window.set_live_banner_text(event.map(|e| e.text.clone()).unwrap_or_default().into());
+            window.set_live_banner_tag(
+                if channel.source == mediabox_core::LiveSource::Recording { "KAYIT" } else { "" }.into(),
+            );
+        }
+
+        // The number entry.
+        window.set_live_keypad_shown(live.layer == Layer::Keypad);
+        if live.layer == Layer::Keypad {
+            window.set_live_keypad_typed(live.keypad.typed.clone().into());
+            window.set_live_keypad_rows(model(
+                live.keypad
+                    .candidates
+                    .iter()
+                    .map(|&i| LiveKeypadRow {
+                        number: live.channels[i].number.to_string().into(),
+                        name: live.channels[i].name.clone().into(),
+                    })
+                    .collect(),
+            ));
+            window.set_live_keypad_selected(live.keypad.selected as i32);
+        }
+
+        // The menu.
+        window.set_live_menu_shown(live.layer == Layer::Menu);
+        if live.layer == Layer::Menu {
+            let selected = |tracks: &[lv::TrackRow]| tracks.iter().find(|t| t.selected).map(|t| t.label.clone());
+            let rows = live
+                .menu_rows()
+                .into_iter()
+                .map(|(title, cards)| LiveMenuRow {
+                    title: title.into(),
+                    cards: model(
+                        cards
+                            .into_iter()
+                            .map(|card| {
+                                let (title, sub, kind, number) = match card {
+                                    Card::Guide => ("Program rehberi".to_string(), String::new(), "guide", String::new()),
+                                    Card::ChannelList => {
+                                        ("Kanal listesi".to_string(), format!("{} kanal", live.channels.len()), "list", String::new())
+                                    }
+                                    Card::Favorites => (
+                                        "Favoriler".to_string(),
+                                        match live.favorites.len() {
+                                            0 => "Yok".to_string(),
+                                            n => format!("{n} kanal"),
+                                        },
+                                        "favorites",
+                                        String::new(),
+                                    ),
+                                    Card::Recent(sid) => {
+                                        let channel = live.channel(sid);
+                                        (
+                                            channel.map(|c| c.name.clone()).unwrap_or_default(),
+                                            live.event_at(sid, now).map(|e| e.title.clone()).unwrap_or_default(),
+                                            "channel",
+                                            channel.map(|c| c.number.to_string()).unwrap_or_default(),
+                                        )
+                                    }
+                                    Card::Audio => (
+                                        "Ses".to_string(),
+                                        selected(&live.audio).unwrap_or_else(|| "Yok".into()),
+                                        "audio",
+                                        String::new(),
+                                    ),
+                                    Card::Subtitles => (
+                                        "Altyazı".to_string(),
+                                        selected(&live.subtitles).unwrap_or_else(|| "Kapalı".into()),
+                                        "subtitles",
+                                        String::new(),
+                                    ),
+                                    Card::Settings => ("TV ayarları".to_string(), String::new(), "settings", String::new()),
+                                };
+                                LiveCard { title: title.into(), sub: sub.into(), kind: kind.into(), number: number.into() }
+                            })
+                            .collect(),
+                    ),
+                })
+                .collect();
+            window.set_live_menu_rows(model(rows));
+            window.set_live_menu_row(live.menu.row as i32);
+            window.set_live_menu_col(live.menu.col as i32);
+        }
+
+        // The guide.
+        window.set_live_guide_shown(live.layer == Layer::Guide);
+        if live.layer == Layer::Guide {
+            let g = live.guide_focus;
+            let (start, end) = (g.start, g.start + lv::GUIDE_VIEW);
+            let span = lv::GUIDE_VIEW as f32;
+            let times = (0..)
+                .map(|k| start + k * lv::HALF_HOUR)
+                .take_while(|&t| t < end)
+                .map(|t| LiveTime { label: lv::clock(t).into(), x: (t - start) as f32 / span })
+                .collect();
+            window.set_live_guide_times(model(times));
+            window.set_live_guide_now_x(if now >= start && now < end { (now - start) as f32 / span } else { -1.0 });
+            let focused = live.focused_entry();
+            let rows = live
+                .channels
+                .iter()
+                .enumerate()
+                .skip(g.top)
+                .take(lv::GUIDE_ROWS)
+                .map(|(i, channel)| LiveGuideRow {
+                    number: channel.number.to_string().into(),
+                    name: channel.name.clone().into(),
+                    current: live.current == Some(channel.service_id),
+                    cells: model(
+                        live.entries(channel.service_id, start, end)
+                            .into_iter()
+                            .map(|entry| LiveGuideCell {
+                                x: (entry.start - start) as f32 / span,
+                                w: (entry.end - entry.start) as f32 / span,
+                                title: entry.event.as_ref().map_or("Bilgi yok".to_string(), |e| e.title.clone()).into(),
+                                gap: entry.event.is_none(),
+                                on_now: entry.start <= now && now < entry.end && entry.event.is_some(),
+                                focused: i == g.row && entry.start <= g.at && g.at < entry.end,
+                            })
+                            .collect(),
+                    ),
+                })
+                .collect();
+            window.set_live_guide_rows(model(rows));
+            let event = focused.as_ref().and_then(|entry| entry.event.as_ref());
+            window.set_live_guide_detail_title(
+                match (&focused, event) {
+                    (_, Some(e)) => e.title.clone(),
+                    (Some(_), None) => "Bilgi yok".to_string(),
+                    _ => String::new(),
+                }
+                .into(),
+            );
+            window.set_live_guide_detail_time(event.map(lv::span).unwrap_or_default().into());
+            window.set_live_guide_detail_text(event.map(|e| e.text.clone()).unwrap_or_default().into());
+            window.set_live_guide_note(
+                if live.has_any_guide() {
+                    ""
+                } else {
+                    "Program bilgisi yok: bu kanalların yayın akışı (EIT) henüz alınmadı."
+                }
+                .into(),
+            );
+        }
+
+        // A side panel.
+        let panel = match live.layer {
+            Layer::Panel(panel) => Some(panel),
+            _ => None,
+        };
+        window.set_live_panel_shown(panel.is_some());
+        if let Some(panel) = panel {
+            let rows = live.panel_rows(panel, now);
+            let top = live.panel.top;
+            window.set_live_panel_title(panel.title().into());
+            window.set_live_panel_above(top > 0);
+            window.set_live_panel_below(top + lv::PANEL_ROWS < rows.len());
+            window.set_live_panel_focus(live.panel.focus as i32 - top as i32);
+            window.set_live_panel_rows(model(
+                rows.into_iter()
+                    .skip(top)
+                    .take(lv::PANEL_ROWS)
+                    .map(|r| LivePanelRow {
+                        label: r.label.into(),
+                        value: r.value.into(),
+                        checked: r.checked,
+                        enabled: r.enabled,
+                    })
+                    .collect(),
+            ));
         }
     }
 
@@ -6220,6 +6712,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ok_hold: None,
         space_down: false,
         here: None,
+        live: None,
+        live_kept: read_live_kept(),
+        live_asked: None,
+        live_tuned: None,
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
         library_listing: None,
@@ -6407,6 +6903,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.send_scrub();
                 }
                 app.watch_the_film();
+                app.tick_live();
                 app.expire_notice();
                 app.expire_volume();
                 app.tick_output();
@@ -6948,11 +7445,24 @@ struct Playing {
     /// opening called off with Back answers late, and its refusal once
     /// closed the film opened after it (2026-10-18).
     opening: u64,
+    /// A live channel: its number comes from the answer to tuning it, never
+    /// from a status that may still be the channel before it.
+    live: bool,
+    /// The channel before this one was still on the plane when this one was
+    /// asked for: its frames are not this one's, so the first frame counted
+    /// is one after the plane has gone dark.
+    previous_on_plane: bool,
+    /// The receiver says the channel is encrypted: no frame will come, and
+    /// none is waited for; the channel stays tuned for the next key.
+    scrambled: bool,
 }
 
 impl Playing {
     fn new() -> Self {
         Self {
+            live: false,
+            previous_on_plane: false,
+            scrambled: false,
             asked: std::time::Instant::now(),
             controls_until: None,
             polled: None,
@@ -6988,6 +7498,13 @@ fn opening_answer(now: Option<&Playing>, opening: u64) -> OpeningAnswer {
         _ => OpeningAnswer::Stale,
     }
 }
+
+/// How long a live channel may take to put its first frame on the plane:
+/// the receiver's start, the lock and the player's open. Measured on the
+/// Plus for TRT HABER HD: 9 to 10 s.
+const LIVE_FIRST_FRAME_GRACE: Duration = Duration::from_secs(30);
+/// How often live television asks again for the channels and the guide.
+const LIVE_REFRESH: Duration = Duration::from_secs(60);
 
 /// How long a film may take to put its first frame on the plane before the
 /// interface stops waiting for it. Measured on the appliance: a local file is
@@ -7043,6 +7560,119 @@ const CONTROLS_LINGER: Duration = Duration::from_secs(5);
 
 /// How often the player is asked where it has got to, while it is up.
 const POSITION_INTERVAL: Duration = Duration::from_millis(900);
+
+/// What live television keeps between sessions: the channel left on, the
+/// ones before it, the favourites. Beside the session file.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct LiveKept {
+    #[serde(default)]
+    last: Option<u16>,
+    #[serde(default)]
+    recent: Vec<u16>,
+    #[serde(default)]
+    favorites: Vec<u16>,
+}
+
+fn live_file() -> std::path::PathBuf {
+    std::path::Path::new(&state_file()).with_file_name("live-tv.json")
+}
+
+fn read_live_kept() -> LiveKept {
+    std::fs::read_to_string(live_file())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Written whole, through a temporary file, off the event loop.
+fn write_live_kept(kept: LiveKept) {
+    let _ = std::thread::Builder::new().name("mediabox-tv-live-kept".into()).spawn(move || {
+        let path = live_file();
+        let temporary = path.with_extension("tmp");
+        let written = serde_json::to_vec(&kept)
+            .map_err(std::io::Error::other)
+            .and_then(|text| std::fs::write(&temporary, text))
+            .and_then(|()| std::fs::rename(&temporary, &path));
+        if let Err(error) = written {
+            eprintln!("mediabox-tv.live could not keep {}: {error}", path.display());
+        }
+    });
+}
+
+fn spawn_live_channels() {
+    detached("mediabox-tv-live-channels", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client.call(serde_json::json!({"command": "live_channels"})).await;
+        let channels: Vec<mediabox_core::LiveChannel> = match answer {
+            Ok(answer) => serde_json::from_value(answer.get("channels").cloned().unwrap_or_default()).unwrap_or_default(),
+            Err(e) => {
+                eprintln!("mediabox-tv.live channels failed: {e}");
+                return;
+            }
+        };
+        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_channels_arrived(channels)));
+    });
+}
+
+/// From three hours back -- what is on now began some time ago -- to the
+/// end of the guide's reach.
+fn spawn_live_guide() {
+    detached("mediabox-tv-live-guide", async move {
+        let client = rpc::Client::new(socket_path());
+        let now = screens::live::utc_now();
+        let request = serde_json::json!({
+            "command": "live_guide",
+            "from": now - 3 * 3600,
+            "to": now + screens::live::GUIDE_HORIZON,
+        });
+        let guide: std::collections::BTreeMap<u16, Vec<mediabox_core::LiveEvent>> = match client.call(request).await {
+            Ok(answer) => serde_json::from_value(answer.get("events").cloned().unwrap_or_default()).unwrap_or_default(),
+            Err(e) => {
+                eprintln!("mediabox-tv.live guide failed: {e}");
+                return;
+            }
+        };
+        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_guide_arrived(guide)));
+    });
+}
+
+fn spawn_live_play(channel: mediabox_core::LiveChannel, opening: u64) {
+    detached("mediabox-tv-live-play", async move {
+        let client = rpc::Client::new(socket_path());
+        let request = serde_json::json!({
+            "command": "live_play_here",
+            "service_id": channel.service_id,
+            "source": channel.source,
+            "title": channel.name,
+        });
+        match client.call(request).await {
+            Ok(answer) => {
+                if let Some(film) = answer.get("film").and_then(Value::as_u64) {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_app(|app| {
+                            if opening_answer(app.here.as_ref(), opening) == OpeningAnswer::Ours
+                                && let Some(playing) = app.here.as_mut()
+                            {
+                                playing.film = Some(film);
+                            }
+                        })
+                    });
+                }
+            }
+            Err(rpc::Error::Refused { ref code, .. }) if code == "START_CALLED_OFF" => {
+                eprintln!("mediabox-tv.live opening {opening} called off");
+            }
+            Err(e) => {
+                eprintln!("mediabox-tv.live play failed: {e}");
+                let why = match &e {
+                    rpc::Error::Refused { message, .. } => message.clone(),
+                    other => other.to_string(),
+                };
+                let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_refused(opening, why)));
+            }
+        }
+    });
+}
 
 /// What the remote can do to a film playing on this interface's own video
 /// plane. Closed for the same reason `KodiCommand` is.

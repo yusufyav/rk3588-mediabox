@@ -31,7 +31,10 @@ ACTIONS = [
     "up", "down", "left", "right", "ok", "back", "home",
     "play", "pause", "play_pause", "stop",
     "seek_forward", "seek_backward",
-    "volume_up", "volume_down", "mute", "power",
+    "volume_up", "volume_down", "mute", "power", "menu",
+    "channel_up", "channel_down", "previous_channel", "guide", "info",
+    "digit0", "digit1", "digit2", "digit3", "digit4",
+    "digit5", "digit6", "digit7", "digit8", "digit9",
 ]
 
 
