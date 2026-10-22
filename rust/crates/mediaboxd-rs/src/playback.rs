@@ -613,6 +613,10 @@ pub async fn follow_mpv(
         return;
     };
     let signal = read_mpv(stream, &supervisor, film, &player).await;
+    // A deliberate player replacement keeps the warm DVB receiver. Snapshot
+    // this before the replacing task clears the flag, otherwise this old
+    // follower can release the USB interface underneath the next channel.
+    let keeping_live_receiver = player.reloading();
     // Live television: the player's end of the stream means what the
     // source's own process says it means, asked before the verdict.
     if let Some(live) = &live
@@ -625,7 +629,9 @@ pub async fn follow_mpv(
     // cleanup is waited for.
     if supervisor.finish(film, signal).is_some() && player.film() == here {
         player.stop().await;
-        if let Some(live) = &live {
+        if let Some(live) = &live
+            && !keeping_live_receiver
+        {
             live.stop().await;
         }
     }

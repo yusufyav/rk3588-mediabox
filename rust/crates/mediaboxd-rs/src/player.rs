@@ -442,7 +442,10 @@ impl PlayerManager {
             let _ = self.ask(json!({"command": ["set_property", "pause", false], "request_id": 24})).await;
         }
         let mut playing = false;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        // Another multiplex: the stream starts after the lock, and the picture
+        // after the next I-frame. 3 s was too short for ATV after TRT HABER
+        // (2026-10-23), and the fallback booted the demodulator again: 10.9 s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         while loaded && std::time::Instant::now() < deadline {
             let idle = self.property("core-idle").await.and_then(|value| value.as_bool());
             let ended = self.property("eof-reached").await.and_then(|value| value.as_bool());

@@ -27,9 +27,10 @@ pub const I2C_MAX_WRITE: usize = 40;
 pub const I2C_MAX_READ: usize = 40;
 pub const MAX_PAYLOAD: usize = 58;
 
-/// The bridge firmware the whole stack was verified on (Linux
-/// dvb-usb-it9303-01.fw).
-pub const VERIFIED_FIRMWARE: [u8; 4] = [1, 4, 0, 0];
+/// The bridge firmware the Kanky application loads (IT9300_initialize: its own
+/// image, `DRV_getFirmwareVersionFromFile` = 0x010C0000). Linux's
+/// dvb-usb-it9303-01.fw (1.4.0.0) left the tuner unreadable (ID 0xFF/0xFF).
+pub const VERIFIED_FIRMWARE: [u8; 4] = [1, 12, 0, 0];
 pub const CHIP_IT9306: u16 = 0x9306;
 
 /// An IT930x GPIOH register triplet; names as in Linux af9035 (gpiot2_o/en/on).
@@ -121,6 +122,19 @@ impl<'a> Bridge<'a> {
             return Err(Error::Protocol("reply checksum mismatch".into()));
         }
         Ok(reply[3..reply.len() - 2].to_vec())
+    }
+
+    /// Kanky BrCmd_reboot: FW_BOOT on a running firmware, sent without a
+    /// reply; the bridge falls back to its boot ROM (COLD).
+    pub fn reboot(&mut self) -> Result<()> {
+        let seq = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        let mut frame = vec![5, 0x00, CMD_FW_BOOT, seq];
+        let sum = checksum(&frame);
+        frame.extend_from_slice(&sum.to_be_bytes());
+        self.log.line(format!("  USB TX: {}", hex(&frame)));
+        self.device.write(EP_OUT, &frame, TIMEOUT_MS)?;
+        Ok(())
     }
 
     pub fn firmware_version(&mut self) -> Result<[u8; 4]> {
@@ -317,8 +331,8 @@ pub fn chip_type(bridge: &mut Bridge) -> Result<u16> {
 }
 
 /// Upload and boot the bridge firmware on a device that came up COLD (every
-/// plug-in does): the scatter-write blocks of `crate::firmware::bridge_blocks`
-/// as Linux af9035 sends them, then FW_BOOT, then the version must be the
+/// plug-in does): the scatter-write blocks of `crate::firmware::kanky_bridge_blocks`
+/// as Kanky _IT9300_loadFirmware sends them, then FW_BOOT, then the version must be the
 /// verified one.
 pub fn load_firmware(bridge: &mut Bridge, blocks: &[Vec<u8>]) -> Result<[u8; 4]> {
     let chip = chip_type(bridge)?;

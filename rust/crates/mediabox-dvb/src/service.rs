@@ -31,8 +31,9 @@ use crate::avl62x1::{AcqStatus, Avl62x1};
 use crate::bridge::Bridge;
 use crate::firmware::Firmware;
 use crate::log::Log;
+use crate::tkgs::TkgsCollector;
 use crate::ts::{Analyser, Integrity, RapCache, Selection, Selector};
-use crate::tune::{self, Streamed, TuneParams, TuneResult};
+use crate::tune::{self, LnbControl, Streamed, TuneParams, TuneResult, BAND_SPLIT_KHZ};
 use crate::usb::{HardwareAccess, OpenError, Session, StreamStats, TsStream};
 
 /// Set by SIGTERM / SIGINT / SIGHUP: end gracefully, clean up, exit.
@@ -554,6 +555,15 @@ impl Writer {
         self.queue.reader_gone.lock().unwrap_or_else(|p| p.into_inner()).map(|since| since.elapsed())
     }
 
+    /// A new Play gets the full reader grace period. Standby may have kept
+    /// this writer alive without a reader for much longer than that period.
+    fn await_reader(&self) {
+        let mut since = self.queue.reader_gone.lock().unwrap_or_else(|p| p.into_inner());
+        if since.is_some() {
+            *since = Some(Instant::now());
+        }
+    }
+
     /// Forget what is queued: it is the service before a switch.
     fn discard(&self) {
         let mut state = self.queue.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -715,6 +725,11 @@ struct Pipeline {
     standby_first: bool,
     /// The FIFO written now.
     fifo: Option<PathBuf>,
+    tkgs: TkgsCollector,
+    tkgs_path: Option<PathBuf>,
+    tkgs_token: Option<String>,
+    tkgs_started: Option<Instant>,
+    tkgs_done: bool,
 }
 
 /// `select.json`: the control plane's word on what the receiver is for now
@@ -751,12 +766,24 @@ enum Want {
     /// Nobody is watching: the USB stream stops, the demodulator stays
     /// booted and locked for the next `Play`.
     Standby,
+    /// Read the complete TKGS table; the result is written beside status.
+    Tkgs { transponder: Transponder },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 struct Transponder {
     frequency_khz: u32,
     symbol_rate_ksps: u32,
+    #[serde(default)]
+    polarisation: Polarisation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Polarisation {
+    Horizontal,
+    #[default]
+    Vertical,
 }
 
 /// What `select.json` asks of the stream loop.
@@ -875,15 +902,27 @@ impl Pipeline {
     fn feed(&mut self, chunk: &[u8], reporter: &mut Reporter) -> bool {
         let selector = &mut self.selector;
         let scratch = &mut self.scratch;
+        let tkgs = &mut self.tkgs;
         match self.rap.as_mut() {
             Some(rap) => {
                 rap.learn(&self.analyser.pat, &self.analyser.pmts);
                 self.analyser.feed(chunk, |packet| {
+                    tkgs.packet(packet);
                     rap.packet(packet);
                     selector.packet(packet, scratch);
                 });
             }
-            None => self.analyser.feed(chunk, |packet| selector.packet(packet, scratch)),
+            None => self.analyser.feed(chunk, |packet| {
+                tkgs.packet(packet);
+                selector.packet(packet, scratch);
+            }),
+        }
+        if self.tkgs_started.is_some() && !self.tkgs_done && let Some(table) = self.tkgs.table() {
+            self.write_tkgs(serde_json::json!({
+                "token": self.tkgs_token, "state": "complete",
+                "transponders": table.transponders.len(), "channels": table.channel_count(), "table": table,
+            }));
+            self.tkgs_done = true;
         }
         if self.raw {
             self.scratch.clear();
@@ -894,6 +933,33 @@ impl Pipeline {
         }
         let out = std::mem::take(&mut self.scratch);
         self.writer.send(out)
+    }
+
+    fn write_tkgs(&self, value: serde_json::Value) {
+        let Some(path) = &self.tkgs_path else { return };
+        let temporary = path.with_extension("json.tmp");
+        if std::fs::write(&temporary, value.to_string()).is_ok() {
+            let _ = std::fs::rename(&temporary, path);
+        }
+    }
+
+    fn begin_tkgs(&mut self) {
+        self.tkgs = TkgsCollector::new();
+        self.tkgs_started = Some(Instant::now());
+        self.tkgs_done = false;
+        self.write_tkgs(serde_json::json!({"token": self.tkgs_token, "state": "reading"}));
+    }
+
+    fn expire_tkgs(&mut self) {
+        if self.tkgs_started.is_some_and(|at| at.elapsed() >= Duration::from_secs(75)) && !self.tkgs_done {
+            let (sections, expected) = self.tkgs.progress();
+            let detail = self.tkgs.error().map(str::to_owned);
+            self.write_tkgs(serde_json::json!({
+                "token": self.tkgs_token, "state": "failed",
+                "error": detail.unwrap_or_else(|| format!("TKGS tablosu tamamlanmadı ({sections}/{expected} bölüm)")),
+            }));
+            self.tkgs_done = true;
+        }
     }
 
     fn report(&self, reporter: &mut Reporter) {
@@ -945,6 +1011,11 @@ impl Pipeline {
     /// service's last access point, with what was queued for the old one
     /// gone; a service elsewhere is a retune.
     fn follow_select(&mut self, reporter: &mut Reporter, log: &Log) -> Order {
+        if self.tkgs_done && self.tkgs_started.take().is_some() {
+            self.tkgs_done = false;
+            log.line("TKGS read ended; returning to standby");
+            return Order::Standby;
+        }
         let Some(select) = self.select.as_mut() else { return Order::Nothing };
         if select.checked.elapsed() < Duration::from_millis(100) {
             return Order::Nothing;
@@ -962,7 +1033,7 @@ impl Pipeline {
         else {
             return Order::Nothing;
         };
-        let (service_id, transponder) = match wanted.want {
+        let (service_id, transponder, tkgs) = match wanted.want {
             Want::Standby => {
                 log.line("SELECT standby");
                 return Order::Standby;
@@ -971,15 +1042,26 @@ impl Pipeline {
                 if let Some(name) = new_fifo {
                     self.move_output(&name, log);
                 }
-                (service_id, transponder)
+                self.writer.await_reader();
+                (service_id, transponder, false)
             }
+            Want::Tkgs { transponder } => (self.service_id, Some(transponder), true),
         };
+        if tkgs {
+            log.line("SELECT TKGS table");
+            self.begin_tkgs();
+        }
         let retune = transponder.and_then(|t| {
             let rf_khz = crate::tune::universal_if_khz(t.frequency_khz);
+            let lnb = Some(LnbControl {
+                vertical: t.polarisation == Polarisation::Vertical,
+                high_band: t.frequency_khz >= BAND_SPLIT_KHZ,
+            });
             let tuned = self.tuned.as_ref()?;
-            ((tuned.rf_khz, tuned.symbol_rate_ksps) != (rf_khz, t.symbol_rate_ksps)).then(|| TuneParams {
+            ((tuned.rf_khz, tuned.symbol_rate_ksps, tuned.lnb) != (rf_khz, t.symbol_rate_ksps, lnb)).then(|| TuneParams {
                 rf_khz,
                 symbol_rate_ksps: t.symbol_rate_ksps,
+                lnb,
                 lock_timeout_ms: tuned.lock_timeout_ms,
                 search_offsets_khz: tuned.search_offsets_khz.clone(),
                 first_offset_khz: None,
@@ -1080,6 +1162,11 @@ pub fn run(options: Options, log: &Log) -> Status {
             Output::Fifo(path) => Some(path.clone()),
             _ => None,
         },
+        tkgs: TkgsCollector::new(),
+        tkgs_path: options.status.as_ref().map(|status| status.with_file_name("tkgs.json")),
+        tkgs_token: options.token.clone(),
+        tkgs_started: None,
+        tkgs_done: false,
     };
     let (end, message) = match &options.source {
         Source::Recording(path) => play_recording(path, &options, &mut pipeline, &mut reporter, log),
@@ -1116,7 +1203,7 @@ fn finish(mut reporter: Reporter, pipeline: Option<Pipeline>, end: End, message:
 
 fn check_service(pipeline: &Pipeline, options: &Options, streaming_since: Instant) -> Option<(End, Option<String>)> {
     let since = streaming_since.max(pipeline.selected_at);
-    (!options.raw && !pipeline.selector.ready() && since.elapsed() > options.service_timeout).then(|| {
+    (!options.raw && pipeline.tkgs_started.is_none() && !pipeline.selector.ready() && since.elapsed() > options.service_timeout).then(|| {
         (End::ServiceNotFound, Some(format!("SID {} bu yayında bulunamadı", pipeline.service_id)))
     })
 }
@@ -1336,6 +1423,7 @@ fn stream(
         }
         // The control plane's word first: it decides whether there is a
         // stream to read at all.
+        pipeline.expire_tkgs();
         match pipeline.follow_select(reporter, log) {
             Order::Nothing => {}
             Order::Retune(params) => {
@@ -1362,6 +1450,7 @@ fn stream(
         }
         // Nobody has read for the hold: standby, as if asked.
         if stream.is_some()
+            && pipeline.tkgs_started.is_none()
             && options.hold_reader.is_some_and(|hold| pipeline.writer.unread_for().is_some_and(|gone| gone > hold))
             && let Some(mut running) = stream.take()
         {
@@ -1654,7 +1743,11 @@ mod tests {
             play.want,
             Want::Play {
                 service_id: 10801,
-                transponder: Some(Transponder { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 }),
+                transponder: Some(Transponder {
+                    frequency_khz: 12_188_000,
+                    symbol_rate_ksps: 27_500,
+                    polarisation: Polarisation::Vertical,
+                }),
                 new_fifo: None,
             }
         );

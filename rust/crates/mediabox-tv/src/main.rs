@@ -2235,10 +2235,16 @@ impl App {
         spawn_live_channels();
     }
 
-    fn live_channels_arrived(&mut self, channels: Vec<mediabox_core::LiveChannel>) {
+    fn live_channels_arrived(&mut self, channels: Vec<mediabox_core::LiveChannel>, tkgs: Option<(usize, usize, i64, bool)>) {
         let Some(live) = self.live.as_mut() else {
             return;
         };
+        if let Some((channel_count, transponders, updated, hd_first)) = tkgs {
+            live.tkgs.channels = channel_count;
+            live.tkgs.transponders = transponders;
+            live.tkgs.updated = Some(updated);
+            live.tkgs.hd_first = hd_first;
+        }
         let first = !live.loaded;
         live.set_channels(channels);
         if live.channels.is_empty() {
@@ -2364,7 +2370,31 @@ impl App {
                 }
                 self.paint();
             }
+            Effect::TkgsUpdate => {
+                spawn_live_tkgs_update();
+                self.paint();
+            }
+            Effect::TkgsOrdering(hd_first) => {
+                spawn_live_tkgs_ordering(hd_first);
+                self.paint();
+            }
         }
+    }
+
+    fn live_tkgs_finished(&mut self, result: Result<(usize, usize, i64), String>) {
+        let Some(live) = self.live.as_mut() else { return };
+        live.tkgs.updating = false;
+        match result {
+            Ok((channels, transponders, updated)) => {
+                live.tkgs.channels = channels;
+                live.tkgs.transponders = transponders;
+                live.tkgs.updated = Some(updated);
+                live.tkgs.error = None;
+                spawn_live_channels();
+            }
+            Err(error) => live.tkgs.error = Some(error),
+        }
+        self.paint();
     }
 
     /// Out of live television: the channel is stopped, and the screen under
@@ -7610,14 +7640,47 @@ fn spawn_live_channels() {
     detached("mediabox-tv-live-channels", async move {
         let client = rpc::Client::new(socket_path());
         let answer = client.call(serde_json::json!({"command": "live_channels"})).await;
-        let channels: Vec<mediabox_core::LiveChannel> = match answer {
-            Ok(answer) => serde_json::from_value(answer.get("channels").cloned().unwrap_or_default()).unwrap_or_default(),
+        let (channels, tkgs) = match answer {
+            Ok(answer) => {
+                let channels = serde_json::from_value(answer.get("channels").cloned().unwrap_or_default()).unwrap_or_default();
+                let tkgs = answer.get("tkgs").filter(|v| !v.is_null()).and_then(|v| Some((
+                    v.get("channels")?.as_u64()? as usize,
+                    v.get("transponders")?.as_u64()? as usize,
+                    v.get("updated")?.as_i64()?,
+                    v.get("hd_first")?.as_bool()?,
+                )));
+                (channels, tkgs)
+            }
             Err(e) => {
                 eprintln!("mediabox-tv.live channels failed: {e}");
                 return;
             }
         };
-        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_channels_arrived(channels)));
+        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_channels_arrived(channels, tkgs)));
+    });
+}
+
+fn spawn_live_tkgs_update() {
+    detached("mediabox-tv-live-tkgs", async move {
+        let client = rpc::Client::new(socket_path());
+        let result = client.call(serde_json::json!({"command": "live_tkgs_update"})).await.map(|answer| (
+            answer.get("channels").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize,
+            answer.get("transponders").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize,
+            answer.get("updated").and_then(serde_json::Value::as_i64).unwrap_or(0),
+        )).map_err(|error| error.to_string());
+        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_tkgs_finished(result)));
+    });
+}
+
+fn spawn_live_tkgs_ordering(hd_first: bool) {
+    detached("mediabox-tv-live-tkgs-order", async move {
+        let client = rpc::Client::new(socket_path());
+        if let Err(error) = client.call(serde_json::json!({
+            "command": "live_tkgs_ordering_set", "hd_first": hd_first,
+        })).await {
+            eprintln!("mediabox-tv.live TKGS ordering failed: {error}");
+        }
+        spawn_live_channels();
     });
 }
 

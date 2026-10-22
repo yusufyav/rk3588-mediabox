@@ -4,17 +4,17 @@
 //! mediabox-dvb.service): one service of one source into a FIFO the player
 //! reads. The receiver is opened only by `play --hardware`; every other mode
 //! -- `play --recording`, `selftest`, `select`, `analyse`, `firmware-check`
-//! -- has no way to reach it (`usb::HardwareAccess`). Nothing here powers or
-//! steers an LNB.
+//! -- has no way to reach it (`usb::HardwareAccess`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use mediabox_dvb::log::Log;
 use mediabox_dvb::service::{self, Options, Output, Source};
-use mediabox_dvb::tune::{TuneParams, universal_if_khz};
+use mediabox_dvb::tkgs::TkgsCollector;
+use mediabox_dvb::tune::{BAND_SPLIT_KHZ, LnbControl, TuneParams, universal_if_khz};
 use mediabox_dvb::usb::HardwareAccess;
 use mediabox_dvb::ts::{Analyser, Selector};
 
@@ -40,6 +40,11 @@ enum Command {
     },
     /// Offline: integrity and programmes of a recording, as JSON.
     Analyse {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Offline: assemble and decode the complete TKGS table in a TS recording.
+    Tkgs {
         #[arg(long)]
         input: PathBuf,
     },
@@ -69,8 +74,7 @@ struct Play {
     #[arg(long, conflicts_with_all = ["transponder", "rf_khz", "hardware"])]
     recording: Option<PathBuf>,
     /// STATE-CHANGING: open the real receiver (reset, firmware, tune). Without
-    /// it nothing touches USB. The LNB is never powered: the RF source,
-    /// supply and tone included, is prepared outside MediaBox.
+    /// it nothing touches USB.
     #[arg(long)]
     hardware: bool,
     /// Write the whole multiplex unchanged (diagnostics: NIT, SDT other).
@@ -83,6 +87,9 @@ struct Play {
     /// universal LNB (9.75 / 10.6 GHz oscillator by band).
     #[arg(long, requires = "hardware")]
     transponder: Option<u32>,
+    /// Universal-LNB supply selection for --transponder.
+    #[arg(long, value_enum, default_value_t = LnbPolarisation::Vertical, requires = "transponder")]
+    polarisation: LnbPolarisation,
     /// L-band frequency at the tuner input.
     #[arg(long, conflicts_with = "transponder", requires = "hardware")]
     rf_khz: Option<u32>,
@@ -143,6 +150,12 @@ struct Play {
     standby: bool,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LnbPolarisation {
+    Horizontal,
+    Vertical,
+}
+
 fn play(args: Play) -> ExitCode {
     let source = if let Some(path) = args.recording {
         Source::Recording(path)
@@ -151,9 +164,15 @@ fn play(args: Play) -> ExitCode {
             eprintln!("mediabox-dvb: --sr is required with the receiver");
             return ExitCode::from(2);
         };
-        let rf_khz = match (args.transponder, args.rf_khz) {
-            (Some(frequency), None) => universal_if_khz(frequency),
-            (None, Some(rf)) => rf,
+        let (rf_khz, lnb) = match (args.transponder, args.rf_khz) {
+            (Some(frequency), None) => (
+                universal_if_khz(frequency),
+                Some(LnbControl {
+                    vertical: matches!(args.polarisation, LnbPolarisation::Vertical),
+                    high_band: frequency >= BAND_SPLIT_KHZ,
+                }),
+            ),
+            (None, Some(rf)) => (rf, None),
             _ => {
                 eprintln!("mediabox-dvb: --hardware needs --transponder or --rf-khz");
                 return ExitCode::from(2);
@@ -163,6 +182,7 @@ fn play(args: Play) -> ExitCode {
             params: TuneParams {
                 rf_khz,
                 symbol_rate_ksps: sr,
+                lnb,
                 lock_timeout_ms: args.lock_timeout_ms,
                 search_offsets_khz: match args.carrier_search_khz {
                     0 => Vec::new(),
@@ -278,6 +298,32 @@ fn analyse(input: PathBuf) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn tkgs(input: PathBuf) -> ExitCode {
+    let data = match std::fs::read(&input) {
+        Ok(data) => data,
+        Err(error) => {
+            eprintln!("mediabox-dvb: {}: {error}", input.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut analyser = Analyser::new();
+    let mut tkgs = TkgsCollector::new();
+    for chunk in data.chunks(153_408) {
+        analyser.feed(chunk, |packet| tkgs.packet(packet));
+    }
+    if let Some(table) = tkgs.table() {
+        println!("{}", serde_json::to_string(table).unwrap_or_default());
+        ExitCode::SUCCESS
+    } else {
+        let (sections, expected) = tkgs.progress();
+        eprintln!(
+            "mediabox-dvb: complete TKGS table not found ({sections}/{expected} sections){}",
+            tkgs.error().map(|e| format!(": {e}")).unwrap_or_default()
+        );
+        ExitCode::FAILURE
+    }
+}
+
 fn firmware_check(dir: PathBuf) -> ExitCode {
     match mediabox_dvb::firmware::Firmware::load(&dir) {
         Ok(firmware) => {
@@ -304,6 +350,7 @@ fn main() -> ExitCode {
         Command::Play(args) => play(*args),
         Command::Select { input, service, output } => select(input, service, output),
         Command::Analyse { input } => analyse(input),
+        Command::Tkgs { input } => tkgs(input),
         Command::FirmwareCheck { firmware_dir } => firmware_check(firmware_dir),
         Command::Selftest { firmware_dir, recording, service } => {
             let report = mediabox_dvb::selftest::run(&firmware_dir, recording.as_deref(), service);

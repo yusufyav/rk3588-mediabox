@@ -134,6 +134,18 @@ pub enum Effect {
     Subtitle(i64),
     /// The favourites changed: keep them.
     Favorites,
+    TkgsUpdate,
+    TkgsOrdering(bool),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TkgsStatus {
+    pub updating: bool,
+    pub channels: usize,
+    pub transponders: usize,
+    pub updated: Option<i64>,
+    pub hd_first: bool,
+    pub error: Option<String>,
 }
 
 /// A track the player has, for the sound and subtitle panels.
@@ -209,6 +221,7 @@ pub struct Live {
     pub panel: PanelFocus,
     pub audio: Vec<TrackRow>,
     pub subtitles: Vec<TrackRow>,
+    pub tkgs: TkgsStatus,
     /// What is wrong with the channel on now, in words, if anything is: a
     /// failed tune, no picture. Drawn over the black.
     pub problem: Option<String>,
@@ -238,6 +251,7 @@ impl Live {
             panel: PanelFocus::default(),
             audio: Vec::new(),
             subtitles: Vec::new(),
+            tkgs: TkgsStatus { hd_first: true, ..Default::default() },
             problem: None,
         }
     }
@@ -291,7 +305,7 @@ impl Live {
         self.recent.retain(|&other| other != sid);
         self.recent.insert(0, sid);
         self.recent.truncate(RECENT + 1);
-        self.problem = None;
+        self.problem = self.channel(sid).filter(|channel| channel.scrambled).map(|_| SCRAMBLED.to_string());
         self.layer = Layer::None;
         self.layer_until = None;
         self.banner_until = Some(at + BANNER_SHOW);
@@ -527,7 +541,12 @@ impl Live {
             checked: Some(c.service_id) == self.current,
             enabled: true,
         };
-        let on_now = |sid: u16| self.event_at(sid, now).map(|e| e.title.clone()).unwrap_or_default();
+        let on_now = |sid: u16| {
+            let event = self.event_at(sid, now).map(|e| e.title.clone()).unwrap_or_default();
+            if self.channel(sid).is_some_and(|channel| channel.scrambled) {
+                if event.is_empty() { "Şifreli".into() } else { format!("Şifreli · {event}") }
+            } else { event }
+        };
         match panel {
             Panel::Channels => self
                 .channels
@@ -569,7 +588,7 @@ impl Live {
             Panel::Subtitles => self.tracks_rows(&self.subtitles, true),
             Panel::Settings => {
                 let describe = |source: &LiveSource| match source {
-                    LiveSource::Satellite { frequency_khz, symbol_rate_ksps } => {
+                    LiveSource::Satellite { frequency_khz, symbol_rate_ksps, .. } => {
                         format!("Uydu · {} MHz · {} kS/s", frequency_khz / 1000, symbol_rate_ksps)
                     }
                     LiveSource::Recording => "Kayıtlı yayın".to_string(),
@@ -585,6 +604,15 @@ impl Live {
                     [one] => describe(one),
                     many => format!("{} yayın", many.len()),
                 };
+                let tkgs = if self.tkgs.updating {
+                    "Alınıyor…".to_string()
+                } else if let Some(error) = &self.tkgs.error {
+                    format!("Hata · {error}")
+                } else if let Some(updated) = self.tkgs.updated {
+                    format!("{} kanal · {} transponder · {}", self.tkgs.channels, self.tkgs.transponders, clock(updated))
+                } else {
+                    "Güncellenmedi".to_string()
+                };
                 vec![
                     PanelRow { label: "Kaynak".into(), value: source, checked: false, enabled: false },
                     PanelRow {
@@ -593,8 +621,12 @@ impl Live {
                         checked: false,
                         enabled: false,
                     },
-                    PanelRow { label: "Kanal tarama".into(), value: "Henüz yok".into(), checked: false, enabled: false },
-                    PanelRow { label: "TKGS".into(), value: "Henüz yok".into(), checked: false, enabled: false },
+                    PanelRow { label: "Kanal listesini güncelle".into(), value: tkgs, checked: false, enabled: !self.tkgs.updating },
+                    PanelRow {
+                        label: "Liste sırası".into(),
+                        value: if self.tkgs.hd_first { "HD önce" } else { "SD önce" }.into(),
+                        checked: false, enabled: !self.tkgs.updating,
+                    },
                 ]
             }
         }
@@ -704,7 +736,18 @@ impl Live {
                         None => Effect::Subtitle(-1),
                         Some(i) => Effect::Subtitle(self.subtitles[i].id),
                     },
-                    Panel::Settings => Effect::Nothing,
+                    Panel::Settings => match self.panel.focus {
+                        2 => {
+                            self.tkgs.updating = true;
+                            self.tkgs.error = None;
+                            Effect::TkgsUpdate
+                        }
+                        3 => {
+                            self.tkgs.hd_first = !self.tkgs.hd_first;
+                            Effect::TkgsOrdering(self.tkgs.hd_first)
+                        }
+                        _ => Effect::Nothing,
+                    },
                 }
             }
             _ => Effect::Nothing,
@@ -974,6 +1017,7 @@ mod tests {
                 name: format!("Kanal {number}"),
                 provider: None,
                 source: LiveSource::Recording,
+                scrambled: false,
             })
             .collect()
     }
@@ -1194,13 +1238,11 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_say_what_does_not_exist_yet() {
+    fn the_settings_offer_tkgs_update() {
         let live = live(1);
         let rows = live.panel_rows(Panel::Settings, NOW);
-        let scan = rows.iter().find(|r| r.label == "Kanal tarama").unwrap();
-        assert_eq!(scan.value, "Henüz yok");
-        assert!(!scan.enabled, "and it cannot be pressed as if it did");
-        assert!(rows.iter().any(|r| r.label == "TKGS" && !r.enabled));
+        assert!(rows.iter().any(|r| r.label == "Kanal listesini güncelle" && r.enabled));
+        assert!(rows.iter().any(|r| r.label == "Liste sırası" && r.value == "HD önce"));
     }
 
     #[test]

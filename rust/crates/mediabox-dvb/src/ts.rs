@@ -167,13 +167,13 @@ pub struct Service {
 
 /// A section in the making, per PID: whole sections are taken off the front.
 #[derive(Default)]
-struct Sections {
+pub(crate) struct Sections {
     buffers: HashMap<u16, Vec<u8>>,
 }
 
 impl Sections {
     /// Feed a packet's payload; each complete, CRC-valid section is handed to `done`.
-    fn payload(&mut self, pid: u16, unit_start: bool, payload: &[u8], mut done: impl FnMut(&[u8])) {
+    pub(crate) fn payload(&mut self, pid: u16, unit_start: bool, payload: &[u8], mut done: impl FnMut(&[u8])) {
         if unit_start {
             let Some(&pointer) = payload.first() else { return };
             let tail_end = (1 + pointer as usize).min(payload.len());
@@ -266,7 +266,7 @@ fn parse_pmt(version: u8, body: &[u8]) -> Option<Pmt> {
     Some(Pmt { version, pcr_pid, streams, ca_system_ids: ca.into_iter().collect() })
 }
 
-fn parse_sdt(body: &[u8], into: &mut BTreeMap<u16, Service>) {
+pub(crate) fn parse_sdt(body: &[u8], into: &mut BTreeMap<u16, Service>) {
     let mut pos = 3; // original_network_id(2) + reserved(1)
     while pos + 5 <= body.len() {
         let sid = u16::from_be_bytes([body[pos], body[pos + 1]]);
@@ -369,12 +369,12 @@ pub fn pcr_of(p: &[u8]) -> Option<u64> {
     Some(base * 300 + extension)
 }
 
-fn pid_of(p: &[u8]) -> u16 {
+pub(crate) fn pid_of(p: &[u8]) -> u16 {
     u16::from_be_bytes([p[1] & 0x1F, p[2]])
 }
 
 /// The payload of a packet, after its adaptation field; None if it has none.
-fn payload_of(p: &[u8]) -> Option<&[u8]> {
+pub(crate) fn payload_of(p: &[u8]) -> Option<&[u8]> {
     let afc = (p[3] >> 4) & 0x3;
     if afc & 1 == 0 {
         return None;

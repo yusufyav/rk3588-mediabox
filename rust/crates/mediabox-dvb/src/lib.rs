@@ -38,6 +38,7 @@ pub mod rda5815m;
 pub mod selftest;
 pub mod service;
 pub mod sha256;
+pub mod tkgs;
 pub mod ts;
 pub mod tune;
 pub mod usb;

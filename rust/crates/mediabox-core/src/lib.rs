@@ -116,6 +116,14 @@ pub struct WatchRef {
 
 /// Where live television comes from. Typed values only: no path, no
 /// command line, nothing the receiver's process is not already written for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SatellitePolarisation {
+    Horizontal,
+    #[default]
+    Vertical,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LiveSource {
@@ -124,12 +132,13 @@ pub enum LiveSource {
     /// end: the whole live path without the receiver or the dish.
     Recording,
     /// The receiver, on a Ku-band transponder behind a universal LNB. The
-    /// RF arrives prepared: the LNB's supply (polarisation) and 22 kHz tone
-    /// (band) are set outside MediaBox, which never powers or steers an LNB;
-    /// the tuner is put on the transponder's IF for that band.
+    /// MediaBox selects the universal LNB's polarisation and band, then puts
+    /// the tuner on the transponder's IF.
     Satellite {
         frequency_khz: u32,
         symbol_rate_ksps: u32,
+        #[serde(default)]
+        polarisation: SatellitePolarisation,
     },
 }
 
@@ -163,6 +172,10 @@ pub struct LiveChannel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     pub source: LiveSource,
+    /// Conditional access is signalled by TKGS/SDT. Packet measurement is
+    /// still the final word once the service is selected.
+    #[serde(default)]
+    pub scrambled: bool,
 }
 
 /// One programme of a channel's event information (EIT), as broadcast.
@@ -1700,6 +1713,10 @@ pub enum Request {
     /// The live channels known: those of the last multiplex the receiver
     /// was on (its SDT), numbered in service-id order.
     LiveChannels,
+    /// Refresh the channel map from Türksat's broadcast TKGS table.
+    LiveTkgsUpdate,
+    /// Prefer TKGS's HD-first or SD-first ordering where it supplies both.
+    LiveTkgsOrderingSet { hd_first: bool },
     /// The broadcast programme guide of the known channels between `from`
     /// and `to` (UTC seconds): only what the multiplex's EIT carried.
     LiveGuide { from: i64, to: i64 },
@@ -2602,17 +2619,19 @@ mod tests {
             request,
             Request::LivePlayHere {
                 service_id: 10801,
-                source: LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 },
+                source: LiveSource::Satellite {
+                    frequency_khz: 12_188_000,
+                    symbol_rate_ksps: 27_500,
+                    polarisation: SatellitePolarisation::Vertical,
+                },
                 title: None
             }
         );
-        // Nothing on the wire can ask for the LNB: no polarisation, no tone.
-        assert!(
-            serde_json::from_str::<Request>(
-                r#"{"command":"live_play_here","service_id":1,"source":{"kind":"satellite","frequency_khz":12188000,"symbol_rate_ksps":27500,"polarisation":"vertical"}}"#
-            )
-            .is_ok_and(|request| serde_json::to_string(&request).is_ok_and(|text| !text.contains("polarisation")))
-        );
+        let horizontal: Request = serde_json::from_str(
+            r#"{"command":"live_play_here","service_id":1,"source":{"kind":"satellite","frequency_khz":12188000,"symbol_rate_ksps":27500,"polarisation":"horizontal"}}"#,
+        )
+        .unwrap();
+        assert!(serde_json::to_string(&horizontal).unwrap().contains("horizontal"));
         let recording: Request =
             serde_json::from_str(r#"{"command":"live_play_here","service_id":10801,"source":{"kind":"recording"}}"#)
                 .unwrap();
@@ -2627,7 +2646,11 @@ mod tests {
 
     #[test]
     fn a_live_source_outside_the_band_is_refused() {
-        let at = |frequency_khz, symbol_rate_ksps| LiveSource::Satellite { frequency_khz, symbol_rate_ksps };
+        let at = |frequency_khz, symbol_rate_ksps| LiveSource::Satellite {
+            frequency_khz,
+            symbol_rate_ksps,
+            polarisation: SatellitePolarisation::Vertical,
+        };
         assert!(at(12_188_000, 27_500).validate().is_ok());
         assert!(at(9_000_000, 27_500).validate().is_err());
         assert!(at(12_188_000, 60_000).validate().is_err());

@@ -6,18 +6,13 @@
 //!   -> GPIO2 reset -> AVL62X1 boot -> tuner I2C
 //!   -> receiver init (ADC, polarity, AGC, MPEG serial, MPEG out on)
 //!   -> repeater on, RDA5815M init, repeater off
-//!   -> the LNB pins must still be at their reset value (read only)
+//!   -> LNB power/polarisation and 22 kHz band selection
 //!   -> bridge TS init -> HALT, carrier plan, repeater on, tuner lock,
 //!      repeater off, clear stream state, LockTP, poll FEC lock
 //!   -> FEC locked: the stream runs (the caller's), then one status sample
-//! cleanup: MPEG out off, HALT, repeater closed, EP4 TX off, LNB pins
-//!          unchanged, GPIO5/14 unchanged, GPIO2 restored (demod back in reset)
+//! cleanup: 22 kHz off, LNB pins restored, MPEG out off, HALT, repeater
+//!          closed, EP4 TX off, GPIO5/14 unchanged, GPIO2 restored
 //! ```
-//!
-//! No LNB supply, no 22 kHz tone, no DiSEqC: MediaBox takes the RF as it is
-//! prepared outside, and the demodulator's write policy has no scope that
-//! could reach those pins (`avl62x1::Scope`). The reference's LNB-armed
-//! sessions are replayed with their LNB frames taken out (`tests/replay.rs`).
 //!
 //! Nothing is retried. Every other read the reference makes is made here, in
 //! the same order, including the ones that only feed the report.
@@ -36,6 +31,12 @@ pub const LOW_BAND_LO_KHZ: u32 = 9_750_000;
 pub const HIGH_BAND_LO_KHZ: u32 = 10_600_000;
 pub const BAND_SPLIT_KHZ: u32 = 11_700_000;
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct LnbControl {
+    pub vertical: bool,
+    pub high_band: bool,
+}
+
 /// The L-band IF of a Ku-band transponder behind a universal LNB: the low
 /// band's 9.75 GHz oscillator below 11.7 GHz, the high band's 10.6 GHz above.
 /// Which band the LNB is in (its 22 kHz tone) and which polarisation (its
@@ -51,6 +52,9 @@ pub struct TuneParams {
     /// L-band frequency at the tuner input.
     pub rf_khz: u32,
     pub symbol_rate_ksps: u32,
+    /// None is reserved for an explicitly supplied raw IF. Ku transponders
+    /// carry the universal-LNB voltage and tone choice here.
+    pub lnb: Option<LnbControl>,
     /// None: the vendor's AVL_FE_LockChannel budget (70/100/150 x 10 ms).
     pub lock_timeout_ms: Option<u32>,
     /// Where else to put the tuner, relative to `rf_khz`, when the carrier is
@@ -193,8 +197,17 @@ fn run_inner(
     bridge.allow_writes(bridge::ts_init_regs());
     let mut version = bridge.firmware_version()?;
     bridge.log.line(format!("Bridge firmware: {}", bridge::dotted(&version)));
+    if version != [0; 4] && version != bridge::VERIFIED_FIRMWARE {
+        // Kanky IT9300_initialize: another firmware runs (Linux's 1.4.0.0
+        // from an older MediaBox): reboot the bridge to its ROM and load its own.
+        bridge.log.line("BRIDGE firmware is not Kanky's: reboot to the boot ROM");
+        bridge.reboot()?;
+        bridge.delay(100);
+        version = bridge.firmware_version()?;
+        bridge.log.line(format!("Bridge firmware after reboot: {}", bridge::dotted(&version)));
+    }
     if version == [0; 4] {
-        // COLD: every plug-in. The firmware is the owner's file, verified.
+        // COLD: every plug-in. The firmware is Kanky's, from its library.
         let Some(blocks) = firmware.bridge_blocks.as_ref() else {
             res.stopped = Some(format!("bridge firmware COLD and {} is missing", crate::firmware::BRIDGE_FIRMWARE));
             return Ok(());
@@ -204,12 +217,12 @@ fn run_inner(
     }
     res.firmware = Some(bridge::dotted(&version));
     if version != bridge::VERIFIED_FIRMWARE {
-        res.stopped = Some("bridge firmware is not the verified 1.4.0.0".into());
-        bridge.log.line("STOP: bridge firmware is not the verified 1.4.0.0; hiçbir yazma yapılmadı");
+        res.stopped = Some("bridge firmware is not Kanky's 1.12.0.0".into());
+        bridge.log.line("STOP: bridge firmware is not Kanky's 1.12.0.0; hiçbir yazma yapılmadı");
         return Ok(());
     }
     let untouched_before = [bridge::snapshot(bridge, GPIO5)?, bridge::snapshot(bridge, GPIO14)?];
-    let mut demod = Avl62x1::new([Scope::Agc]);
+    let mut demod = Avl62x1::new([Scope::Agc, Scope::Lnb]);
     let guard = bridge::snapshot(bridge, GPIO2)?;
 
     let staged = stages(bridge, &mut demod, firmware, params, stop, stream, res);
@@ -276,6 +289,7 @@ fn stages(
     }
     demod.init_tuner_i2c(bridge, sys_clk_hz)?;
     demod.init_receiver(bridge)?;
+    demod.init_diseqc_tone(bridge, sys_clk_hz)?;
     bridge.log.line("DEMOD receiver init done (ADC, polarity, AGC, MPEG serial, MPEG out on)");
     checkpoint(bridge, demod, res, "C0 receiver init, tuner not initialised")?;
 
@@ -289,17 +303,12 @@ fn stages(
         return Ok(());
     }
 
-    if demod.lnb_pins(bridge)? != lnb_reset_state {
-        res.lnb_pins_untouched = Some(false);
-        res.stopped = Some("LNB pins changed although nothing here writes them".into());
-        return Ok(());
-    }
-
     res.ts_ep4_off = Some(false); // from here on cleanup must switch EP4 TX off
     bridge::ts_init(bridge)?;
 
     let mut params = params.clone();
     loop {
+        steer_lnb(bridge, demod, params.lnb)?;
         lock_carrier(bridge, demod, &params, stop, res)?;
         if !res.fec_locked() {
             if res.stopped.is_none() {
@@ -332,6 +341,30 @@ fn stages(
         }
         Err(error) => bridge.log.line(format!("ACQ post-capture sample failed: {error}")),
     }
+    Ok(())
+}
+
+fn steer_lnb(bridge: &mut Bridge, demod: &mut Avl62x1, control: Option<LnbControl>) -> Result<()> {
+    let Some(control) = control else { return Ok(()) };
+    let was_on = demod.lnb_pins(bridge)?.0 == 1;
+    demod.set_lnb_power(bridge, true, control.vertical)?;
+    bridge.delay(80);
+    // Kanky dvbFeControl: 200 ms more when the supply was off before.
+    if !was_on {
+        bridge.delay(200);
+    }
+    // Kanky dvbFeControl: a DiSEqC 1.0 committed switch command (port A)
+    // after the voltage -- the switch, not the 13/18 V and 22 kHz, picks the
+    // polarisation and band here: traced E0 10 38 F3 (H, high), F1 (V, high).
+    let command = 0xF0 | (u8::from(!control.vertical) << 1) | u8::from(control.high_band);
+    demod.send_diseqc(bridge, &[0xE0, 0x10, 0x38, command])?;
+    demod.set_22khz(bridge, control.high_band)?;
+    bridge.delay(30);
+    bridge.log.line(format!(
+        "LNB power on: {} V, DiSEqC E0 10 38 {command:02X}, 22 kHz {}",
+        if control.vertical { 13 } else { 18 },
+        if control.high_band { "on" } else { "off" }
+    ));
     Ok(())
 }
 
@@ -423,13 +456,18 @@ fn acquire(bridge: &mut Bridge, demod: &Avl62x1, params: &TuneParams, stop: &Ato
 }
 
 fn cleanup(bridge: &mut Bridge, demod: &mut Avl62x1, res: &mut TuneResult, untouched: &[GpioSnapshot; 2]) {
-    // Before anything is switched off: still at reset, as nothing wrote them.
+    if let Err(error) = demod.set_22khz(bridge, false) {
+        bridge.log.line(format!("22 kHz off failed: {error}"));
+    }
     if let Some(at_reset) = res.lnb_pins_at_reset {
+        if let Err(error) = demod.restore_lnb_pins(bridge, at_reset) {
+            bridge.log.line(format!("LNB pin restore failed: {error}"));
+        }
         match demod.lnb_pins(bridge) {
             Ok(now) => {
                 let same = now == at_reset;
                 res.lnb_pins_untouched = Some(same && res.lnb_pins_untouched != Some(false));
-                bridge.log.line(format!("LNB pins unchanged: {same} (enable=0x{:X} select=0x{:X})", now.0, now.1));
+                bridge.log.line(format!("LNB pins restored: {same} (enable=0x{:X} select=0x{:X})", now.0, now.1));
             }
             Err(error) => bridge.log.line(format!("LNB pin check failed: {error}")),
         }
@@ -475,6 +513,7 @@ mod tests {
         let params = |first| TuneParams {
             rf_khz: 1_588_000,
             symbol_rate_ksps: 27_500,
+            lnb: Some(LnbControl { vertical: true, high_band: true }),
             lock_timeout_ms: None,
             search_offsets_khz: vec![10_000, -10_000],
             first_offset_khz: first,

@@ -28,6 +28,11 @@ const TABLE_OFFSETS: [(&str, usize, usize); 2] = [("Kanky 2.109", 0x2B408, 0x2B5
 
 const BRIDGE_SHA256: &str = "5213a5a38872661277a2cc1b2dfdfe88faf06f41205f460f3b51857f0568b484";
 const BRIDGE_SIZE: usize = 2169;
+const KANKY_BRIDGE_HEAD: [u8; 16] = [
+    0x03, 0x00, 0x00, 0x03, 0x41, 0x00, 0x03, 0x41, 0x80, 0x06, 0x41, 0x93, 0x1A, 0x02, 0x12, 0xBF,
+];
+const KANKY_BRIDGE_SHA256: &str = "294a1d673a9d6e8b48a6a46c51da727a9f23df5d5ce6eb2495732f19462698fa";
+const KANKY_BRIDGE_SIZE: usize = 7013;
 const MAX_BLOCK: usize = 58;
 
 #[derive(Debug, Clone)]
@@ -54,12 +59,7 @@ impl Firmware {
             .map_err(|error| Error::Firmware(format!("{} okunamadı: {error}", library.display())))?;
         let patch = avl62x1_patch(&image)?;
         let tables = rda5815m_tables(&image)?;
-        let bridge = dir.join(BRIDGE_FIRMWARE);
-        let bridge_blocks = match std::fs::read(&bridge) {
-            Ok(data) => Some(bridge_blocks(&data)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(Error::Firmware(format!("{} okunamadı: {error}", bridge.display()))),
-        };
+        let bridge_blocks = Some(kanky_bridge_blocks(&image)?);
         Ok(Self { patch, tables, bridge_blocks })
     }
 
@@ -157,6 +157,33 @@ pub fn rda5815m_tables(image: &[u8]) -> Result<TunerTables> {
 }
 
 /// The bridge firmware, split the way Linux af9035 scatter-writes it.
+/// The IT9303 firmware the Kanky application loads, from the same library:
+/// IT9300_initialize's image (147 scatter-write segments, all of type 1, 145
+/// of 48 bytes, then 43 and 10). Identical in Kanky 2.109 (arm64) and 2.110
+/// (armeabi-v7a).
+pub fn kanky_bridge_blocks(image: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let start = image
+        .windows(KANKY_BRIDGE_HEAD.len())
+        .position(|window| window == KANKY_BRIDGE_HEAD)
+        .ok_or_else(|| Error::Firmware("Kanky bridge firmware not found in the library".into()))?;
+    let data = image
+        .get(start..start + KANKY_BRIDGE_SIZE)
+        .ok_or_else(|| Error::Firmware("Kanky bridge firmware is truncated".into()))?;
+    if sha256::hex(data) != KANKY_BRIDGE_SHA256 {
+        return Err(Error::Firmware("Kanky bridge firmware SHA256 mismatch".into()));
+    }
+    let mut lengths = vec![48; 145];
+    lengths.extend([43, 10]);
+    let mut at = 0;
+    Ok(lengths
+        .into_iter()
+        .map(|length| {
+            at += length;
+            data[at - length..at].to_vec()
+        })
+        .collect())
+}
+
 pub fn bridge_blocks(data: &[u8]) -> Result<Vec<Vec<u8>>> {
     if data.len() != BRIDGE_SIZE {
         return Err(Error::Firmware("unexpected bridge firmware size".into()));

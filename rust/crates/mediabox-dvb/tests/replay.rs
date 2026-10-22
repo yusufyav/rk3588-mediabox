@@ -240,6 +240,7 @@ fn params(path: &Path) -> Option<TuneParams> {
     Some(TuneParams {
         rf_khz: field("rf_khz")?.parse().ok()?,
         symbol_rate_ksps: field("symbol_rate_ksps")?.parse().ok()?,
+        lnb: None,
         lock_timeout_ms: field("lock_timeout_ms")?.parse().ok(),
         search_offsets_khz: Vec::new(),
         first_offset_khz: None,

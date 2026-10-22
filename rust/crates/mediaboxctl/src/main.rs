@@ -519,11 +519,20 @@ enum MediaCommand {
         /// kS/s
         #[arg(long)]
         symbol_rate: Option<u32>,
+        #[arg(long, value_parser = ["horizontal", "vertical"], default_value = "vertical")]
+        polarisation: String,
         #[arg(long)]
         title: Option<String>,
     },
     /// The live channels known (the last multiplex the receiver was on).
     LiveChannels,
+    /// Refresh the live channel list from Türksat's broadcast TKGS table.
+    LiveTkgsUpdate,
+    /// Choose TKGS's preferred channel ordering.
+    LiveTkgsOrder {
+        #[arg(value_parser = ["hd", "sd"])]
+        first: String,
+    },
     /// The live programme guide from now for `hours` hours.
     LiveGuide {
         #[arg(long, default_value_t = 6)]
@@ -765,11 +774,16 @@ fn to_request(command: &Command) -> Request {
             MediaCommand::Sessions => Request::MediaSessions,
             MediaCommand::SessionStart { url } => Request::MediaSessionStart { url: url.clone() },
             MediaCommand::SessionStop { id } => Request::MediaSessionStop { id: id.clone() },
-            MediaCommand::LiveHere { service_id, recording, frequency_khz, symbol_rate, title } => {
+            MediaCommand::LiveHere { service_id, recording, frequency_khz, symbol_rate, polarisation, title } => {
                 let source = match (recording, frequency_khz, symbol_rate) {
                     (false, Some(frequency_khz), Some(symbol_rate_ksps)) => mediabox_core::LiveSource::Satellite {
                         frequency_khz: *frequency_khz,
                         symbol_rate_ksps: *symbol_rate_ksps,
+                        polarisation: if polarisation == "horizontal" {
+                            mediabox_core::SatellitePolarisation::Horizontal
+                        } else {
+                            mediabox_core::SatellitePolarisation::Vertical
+                        },
                     },
                     _ => mediabox_core::LiveSource::Recording,
                 };
@@ -778,6 +792,8 @@ fn to_request(command: &Command) -> Request {
             MediaCommand::StopHere => Request::MediaStopHere,
             MediaCommand::StatusHere => Request::MediaStatusHere,
             MediaCommand::LiveChannels => Request::LiveChannels,
+            MediaCommand::LiveTkgsUpdate => Request::LiveTkgsUpdate,
+            MediaCommand::LiveTkgsOrder { first } => Request::LiveTkgsOrderingSet { hd_first: first == "hd" },
             MediaCommand::LiveGuide { hours } => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

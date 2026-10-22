@@ -150,6 +150,9 @@ pub struct AppState {
     pub playback: Arc<crate::playback::Supervisor>,
     /// Live television: the DVB receiver's process, started and stopped here.
     pub live: Arc<crate::live::LiveManager>,
+    /// Player, FIFO and the single USB receiver form one channel-change
+    /// transaction. Rapid key presses must not run those transactions at once.
+    pub live_change: tokio::sync::Mutex<()>,
     /// Where Kodi sends its JSON-RPC notifications (TCP, loopback).
     pub kodi_events: std::net::SocketAddr,
 }
@@ -333,6 +336,14 @@ impl AppState {
                 self.play_live(service_id, source, title).await
             }
             Request::LiveChannels => Response::success(self.live.channels()),
+            Request::LiveTkgsUpdate => match self.live.update_tkgs().await {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("tkgs_update_failed", error),
+            },
+            Request::LiveTkgsOrderingSet { hd_first } => match self.live.set_tkgs_ordering(hd_first) {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("tkgs_ordering_failed", error),
+            },
             Request::LiveGuide { from, to } => Response::success(self.live.guide_window(from, to)),
             Request::MediaHandoffToKodi => self.handoff_to_kodi().await,
             Request::MediaStatusHere => {
@@ -1041,6 +1052,10 @@ impl AppState {
             return Response::failure("INVALID_REQUEST", error);
         }
         let starting = self.playback.begin_start();
+        let _change = self.live_change.lock().await;
+        if starting.called_off() {
+            return called_off();
+        }
         // Live television already playing here: the next channel opens in
         // the same player. Its picture plane, its decoder and its audio
         // device stay; only the receiver's selection and the player's file
@@ -1061,22 +1076,25 @@ impl AppState {
                     let fifo = self.live.fifo().display().to_string();
                     let title = title.clone().filter(|title| !title.trim().is_empty());
                     let picture = self.player.reload_live(&fifo, service_id, title).await;
-                    self.playback.relabel_live(film, service_id);
-                    // The display follows a channel whose rate is not the
-                    // last one's; the same rate sends nothing.
-                    if let Some(cadence) = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps)
-                        && let Err(why) = self.output.content_start(self.player.film(), cadence)
-                    {
-                        eprintln!("mediaboxd-rs: live channel {service_id}: display not matched: {why}");
+                    if picture {
+                        self.playback.relabel_live(film, service_id);
+                        // The display follows a channel whose rate is not the
+                        // last one's; the same rate sends nothing.
+                        if let Some(cadence) = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps)
+                            && let Err(why) = self.output.content_start(self.player.film(), cadence)
+                        {
+                            eprintln!("mediaboxd-rs: live channel {service_id}: display not matched: {why}");
+                        }
+                        self.live.playing();
+                        return Response::success(json!({
+                            "playing": "here",
+                            "film": film,
+                            "live": service_id,
+                            "continued": true,
+                            "picture": true,
+                        }));
                     }
-                    self.live.playing();
-                    return Response::success(json!({
-                        "playing": "here",
-                        "film": film,
-                        "live": service_id,
-                        "continued": true,
-                        "picture": picture,
-                    }));
+                    eprintln!("mediaboxd-rs: live channel {service_id}: running player did not open the new FIFO; restarting only the player");
                 }
                 Err(error) => {
                     self.player.end_reload();
@@ -1553,6 +1571,9 @@ impl AppState {
         if let Some(film) = film {
             self.playback.intend(film, intent);
         }
+        if keep_receiver {
+            self.player.begin_reload();
+        }
         let stopped = self.player.stop().await;
         // Live television: the receiver goes with its player, and is waited
         // for -- its cleanup switches the LNB off before anything else starts.
@@ -1572,6 +1593,9 @@ impl AppState {
                 }
             }
             (None, None) => {}
+        }
+        if keep_receiver {
+            self.player.end_reload();
         }
         stopped
     }
@@ -2345,7 +2369,11 @@ mod tests {
         let answer = state
             .handle(Request::LivePlayHere {
                 service_id: 10801,
-                source: mediabox_core::LiveSource::Satellite { frequency_khz: 9_000_000, symbol_rate_ksps: 27_500 },
+                source: mediabox_core::LiveSource::Satellite {
+                    frequency_khz: 9_000_000,
+                    symbol_rate_ksps: 27_500,
+                    polarisation: mediabox_core::SatellitePolarisation::Vertical,
+                },
                 title: None,
             })
             .await;
@@ -2482,6 +2510,7 @@ mod tests {
                 firmware_dir: dir.path().join("firmware"),
                 guide_store: dir.path().join("live-guide.json"),
             })),
+            live_change: tokio::sync::Mutex::new(()),
             kodi_events: "127.0.0.1:9".parse().unwrap(),
             applications: ApplicationManager::load(
                 None,
@@ -2845,6 +2874,14 @@ async fn follow_film(
                     }
                     if output.content_applied(film) {
                         tokio::time::sleep(Duration::from_millis(1500)).await;
+                        // The mode change re-trains HDMI and takes its ALSA
+                        // device away ("[ao/alsa] Device lost"); a live
+                        // player then waited for its sound with the picture
+                        // held: TRT HABER HD, seeking=yes, time-pos 0, until
+                        // the audio output was opened again (2026-10-23).
+                        if live {
+                            player.command(json!(["ao-reload"])).await;
+                        }
                     } else {
                         eprintln!("mediaboxd-rs: film {film}: the owner did not report the matched mode");
                     }

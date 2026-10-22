@@ -199,12 +199,20 @@ if [ "${MEDIABOX_PLAYER_LIVE:-0}" = 1 ]; then
     live="$live --audio-stream-silence=yes"
 fi
 
+# A broadcast has no position to start from: --start on the receiver's FIFO is
+# a seek mpv cannot make ("Cannot seek in this stream"), and TRT HABER HD
+# stayed at seeking=yes, time-pos 0, with 25 s buffered (2026-10-23).
+start="--start=$START"
+if [ "${MEDIABOX_PLAYER_LIVE:-0}" = 1 ]; then
+    start=""
+fi
+
 # At the end of the file the player holds its last frame rather than exiting:
 # the control plane reads where it stopped and decides whether that was the
 # end of the film or a read that failed short of it, then closes the player
 # itself. Exiting at once left nobody to ask (see rust/crates/mediaboxd-rs/
 # src/playback.rs).
-# shellcheck disable=SC2086  # $ipc, $hold, $aid, $audio, $sync and $live are empty or known flags.
+# shellcheck disable=SC2086  # $ipc, $hold, $aid, $audio, $sync, $live and $start are empty or known flags.
 exec /opt/rk3588-mediabox/player/bin/mpv \
     $ipc \
     $hold \
@@ -218,7 +226,7 @@ exec /opt/rk3588-mediabox/player/bin/mpv \
     --fullscreen \
     --vo=mediabox \
     --hwdec=rkmpp \
-    --start="$START" \
+    $start \
     --keep-open=yes \
     --osc=no \
     --input-default-bindings=yes \

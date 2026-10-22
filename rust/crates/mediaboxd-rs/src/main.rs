@@ -201,6 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         media,
         playback,
         live: Arc::new(mediaboxd_rs::live::LiveManager::new(mediaboxd_rs::live::LivePaths::system())),
+        live_change: tokio::sync::Mutex::new(()),
         kodi_events: args.kodi_events,
         // Constructed here rather than lazily, because constructing it is what
         // re-applies the remembered mode: the kernel puts the device tree's

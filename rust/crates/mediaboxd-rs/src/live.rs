@@ -26,7 +26,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mediabox_core::{LiveChannel, LiveEvent, LiveSource};
+use mediabox_core::{LiveChannel, LiveEvent, LiveSource, SatellitePolarisation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -72,6 +72,10 @@ impl LivePaths {
 
     pub fn status(&self) -> PathBuf {
         self.run_dir.join("status.json")
+    }
+
+    pub fn tkgs(&self) -> PathBuf {
+        self.run_dir.join("tkgs.json")
     }
 }
 
@@ -212,12 +216,16 @@ impl LiveManager {
             LiveSource::Recording => {
                 argv.extend(["--recording".into(), self.paths.recording.display().to_string(), "--pace".into()]);
             }
-            LiveSource::Satellite { frequency_khz, symbol_rate_ksps } => {
+            LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } => {
                 // The receiver itself, chosen explicitly. Never an LNB flag:
                 // the RF source is prepared outside MediaBox.
                 argv.push("--hardware".into());
                 argv.extend(["--transponder".into(), frequency_khz.to_string()]);
                 argv.extend(["--sr".into(), symbol_rate_ksps.to_string()]);
+                argv.push(format!(
+                    "--polarisation={}",
+                    match polarisation { SatellitePolarisation::Horizontal => "horizontal", SatellitePolarisation::Vertical => "vertical" }
+                ));
                 argv.extend(["--firmware-dir".into(), self.paths.firmware_dir.display().to_string()]);
                 // A receiver unplugged and plugged back in carries on.
                 argv.extend(["--reconnect-s".into(), "20".into()]);
@@ -270,6 +278,11 @@ impl LiveManager {
     }
 
     async fn start_with(&self, service_id: u16, source: &LiveSource, standby: bool) -> Result<(), String> {
+        // A UI that was already running before polarisation was added sends
+        // the old wire shape (which deserialises as vertical).  The TKGS list
+        // is authoritative, so recover the full source without restarting UI.
+        let source = self.canonical_source(service_id, source);
+        let source = &source;
         source.validate()?;
         self.stop().await;
         let token = format!("{}-{}", std::process::id(), self.starts.fetch_add(1, Ordering::SeqCst) + 1);
@@ -371,7 +384,9 @@ impl LiveManager {
     /// stream moves to a FIFO of its own for the player that is already
     /// reading, which opens it as its next file (`fifo()` says which).
     pub async fn switch(&self, service_id: u16, source: &LiveSource, new_fifo: bool) -> Result<(), String> {
-        let LiveSource::Satellite { frequency_khz, symbol_rate_ksps } = *source else {
+        let source = self.canonical_source(service_id, source);
+        let source = &source;
+        let LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } = *source else {
             return Err("yalnız uydu kaynağı".into());
         };
         let retune = self.lock().source.as_ref() != Some(source);
@@ -383,7 +398,7 @@ impl LiveManager {
         self.select(json!({
             "kind": "play",
             "service_id": service_id,
-            "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps},
+            "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation},
             "new_fifo": name,
         }))?;
         if let Some(name) = name {
@@ -391,7 +406,7 @@ impl LiveManager {
         }
         // A service of the multiplex tuned is a selector's restart; another
         // transponder is a lock, seconds at most.
-        let within = Duration::from_secs(if retune { 8 } else { 2 });
+        let within = Duration::from_secs(if retune { 8 } else { 8 });
         self.until(within, |status| {
             status.get("service_id").and_then(Value::as_u64) == Some(service_id as u64)
                 && status.get("state").and_then(Value::as_str) == Some("streaming")
@@ -427,6 +442,51 @@ impl LiveManager {
         self.stop().await;
     }
 
+    /// Retune the already running receiver and read TKGS without restarting
+    /// its process or reloading the demodulator patch.
+    pub async fn read_tkgs(&self) -> Result<Value, String> {
+        let (token, was_playing, service_id, source) = {
+            let inner = self.lock();
+            if inner.token.is_none() || !matches!(inner.source, Some(LiveSource::Satellite { .. })) {
+                return Err("hazır uydu alıcısı yok".into());
+            }
+            (inner.token.clone().unwrap_or_default(), inner.lifecycle == Lifecycle::Playing, inner.service_id, inner.source.clone())
+        };
+        self.select(json!({
+            "kind": "tkgs",
+            "transponder": {"frequency_khz": 12_380_000u32, "symbol_rate_ksps": 27_500u32, "polarisation": "vertical"},
+        }))?;
+        let deadline = Instant::now() + Duration::from_secs(85);
+        let result = loop {
+            if let Ok(text) = std::fs::read_to_string(self.paths.tkgs())
+                && let Ok(value) = serde_json::from_str::<Value>(&text)
+                && value.get("token").and_then(Value::as_str) == Some(token.as_str())
+            {
+                match value.get("state").and_then(Value::as_str) {
+                    Some("complete") => break Ok(value),
+                    Some("failed") => break Err(value.get("error").and_then(Value::as_str).unwrap_or("TKGS alınamadı").to_string()),
+                    _ => {}
+                }
+            }
+            if !Self::unit_active().await {
+                break Err("TKGS alınırken uydu alıcısı kapandı".into());
+            }
+            if Instant::now() >= deadline {
+                break Err("TKGS tablosu 85 saniyede tamamlanmadı".into());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        if was_playing
+            && let (Some(service_id), Some(LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation })) = (service_id, source)
+        {
+            let _ = self.select(json!({
+                "kind": "play", "service_id": service_id,
+                "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation}, "new_fifo": null,
+            }));
+        }
+        result
+    }
+
     /// Make the receiver ready before anybody watches, as a television's
     /// tuner is: booted and locked on the first satellite multiplex known,
     /// in standby. Only when the receiver is plugged in and no receiver runs
@@ -440,11 +500,15 @@ impl LiveManager {
         {
             return false;
         }
-        let Some((service_id, source)) = self.stored_guide().and_then(|guide| {
-            guide.channels().into_iter().find(|c| matches!(c.source, LiveSource::Satellite { .. })).map(|c| (c.service_id, c.source))
-        }) else {
-            return false;
+        let ready_source = LiveSource::Satellite {
+            frequency_khz: 12_380_000,
+            symbol_rate_ksps: 27_500,
+            polarisation: SatellitePolarisation::Vertical,
         };
+        let service_id = self.stored_guide()
+            .and_then(|guide| guide.multiplex(&ready_source)?.services.first().map(|service| service.service_id))
+            .unwrap_or(0);
+        let source = ready_source;
         match self.start_with(service_id, &source, true).await {
             Ok(()) => {
                 self.set(Lifecycle::Standby);
@@ -615,11 +679,11 @@ fn receiver_plugged_in() -> bool {
 
 // ------------------------------------------------------------------ guide
 
-/// TV service types (EN 300 468 table 87): digital television, MPEG-2 HD,
-/// advanced codec SD/HD/UHD. Radio and data services are not channels here:
-/// the player has nothing to put on the plane for them.
+/// Playable TKGS service types (EN 300 468 table 87): digital television,
+/// digital radio, MPEG-2 HD, and advanced codec SD/HD/UHD. Private data
+/// services such as TKGS itself stay out of the channel list.
 fn is_television(service_type: Option<u8>) -> bool {
-    matches!(service_type, Some(0x01 | 0x11 | 0x16 | 0x19 | 0x1F))
+    matches!(service_type, Some(0x01 | 0x02 | 0x11 | 0x16 | 0x19 | 0x1F))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -671,6 +735,34 @@ struct ReceiverEvents {
     events: Vec<LiveEvent>,
 }
 
+#[derive(Deserialize)]
+struct ReceiverTkgs { table: ReceiverTkgsTable }
+#[derive(Deserialize)]
+struct ReceiverTkgsTable {
+    transponders: Vec<ReceiverTkgsTransponder>,
+    #[serde(default)]
+    orderings: Vec<StoredTkgsOrdering>,
+}
+#[derive(Deserialize)]
+struct ReceiverTkgsTransponder {
+    delivery: ReceiverTkgsDelivery,
+    services: Vec<ReceiverTkgsService>,
+}
+#[derive(Deserialize)]
+struct ReceiverTkgsDelivery { frequency_khz: u32, symbol_rate_ksps: u32, polarisation: String }
+#[derive(Deserialize)]
+struct ReceiverTkgsService {
+    service_id: u16,
+    lcn: u16,
+    name: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    service_type: Option<u8>,
+    #[serde(default)]
+    free_ca_mode: bool,
+}
+
 /// Events that ended this long ago are let go of.
 const GUIDE_KEEPS_ENDED_S: i64 = 3 * 3600;
 
@@ -683,11 +775,47 @@ pub fn now_utc() -> i64 {
 /// Every multiplex the receiver has been on, in the order it was first on
 /// them. Until the TKGS channel search is in, this is the whole of the
 /// channel list: what the broadcasts themselves said, nothing scanned.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GuideStore {
     #[serde(default)]
     pub multiplexes: Vec<StoredGuide>,
+    #[serde(default)]
+    pub tkgs: Option<StoredTkgs>,
+    #[serde(default = "default_hd_first")]
+    pub tkgs_hd_first: bool,
 }
+
+impl Default for GuideStore {
+    fn default() -> Self {
+        Self { multiplexes: Vec::new(), tkgs: None, tkgs_hd_first: true }
+    }
+}
+
+fn default_hd_first() -> bool { true }
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoredTkgs {
+    pub updated: i64,
+    pub transponders: usize,
+    pub channels: Vec<StoredTkgsChannel>,
+    #[serde(default)]
+    pub orderings: Vec<StoredTkgsOrdering>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredTkgsChannel {
+    pub lcn: u16,
+    pub service_id: u16,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub service_type: Option<u8>,
+    pub source: LiveSource,
+    pub free_ca_mode: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredTkgsOrdering { pub name: String, pub lcns: Vec<u16> }
 
 impl GuideStore {
     /// The file, in this form or in the one-multiplex form it had first.
@@ -697,7 +825,9 @@ impl GuideStore {
         {
             return Some(store);
         }
-        serde_json::from_str::<StoredGuide>(text).ok().map(|one| GuideStore { multiplexes: vec![one] })
+        serde_json::from_str::<StoredGuide>(text)
+            .ok()
+            .map(|one| GuideStore { multiplexes: vec![one], tkgs: None, tkgs_hd_first: true })
     }
 
     /// The channels of every multiplex, numbered on from one multiplex to
@@ -706,6 +836,20 @@ impl GuideStore {
     /// multiplex already has is left out: the interface knows a channel by
     /// its service id.
     pub fn channels(&self) -> Vec<LiveChannel> {
+        if let Some(tkgs) = &self.tkgs {
+            let wanted = if self.tkgs_hd_first { "hd" } else { "sd" };
+            let ordering = tkgs.orderings.iter().find(|o| o.name.to_lowercase().contains(wanted));
+            let positions: std::collections::BTreeMap<u16, usize> = ordering
+                .into_iter().flat_map(|o| o.lcns.iter().copied().enumerate().map(|(i, lcn)| (lcn, i))).collect();
+            let mut listed: Vec<&StoredTkgsChannel> = tkgs.channels.iter().collect();
+            listed.sort_by_key(|c| (positions.get(&c.lcn).copied().unwrap_or(usize::MAX), c.lcn));
+            return listed.into_iter().filter_map(|c| {
+                (is_television(c.service_type) && !c.name.trim().is_empty()).then(|| LiveChannel {
+                    number: c.lcn as u32, service_id: c.service_id, name: c.name.clone(),
+                    provider: c.provider.clone(), source: c.source.clone(), scrambled: c.free_ca_mode,
+                })
+            }).collect();
+        }
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for mux in &self.multiplexes {
@@ -725,6 +869,7 @@ impl GuideStore {
                     name: s.name.clone(),
                     provider: s.provider.clone(),
                     source: mux.source.clone(),
+                    scrambled: false,
                 });
             }
         }
@@ -748,6 +893,74 @@ impl GuideStore {
             }
         };
         self.multiplexes[at].absorb(receiver, source, now)
+    }
+
+    fn absorb_tkgs(&mut self, receiver: ReceiverTkgs, now: i64) {
+        let mut listed = Vec::new();
+        let transponder_count = receiver.table.transponders.len();
+        for transponder in receiver.table.transponders {
+            let polarisation = match transponder.delivery.polarisation.as_str() {
+                "horizontal" => SatellitePolarisation::Horizontal,
+                "vertical" => SatellitePolarisation::Vertical,
+                _ => continue,
+            };
+            let source = LiveSource::Satellite {
+                frequency_khz: transponder.delivery.frequency_khz,
+                symbol_rate_ksps: transponder.delivery.symbol_rate_ksps,
+                polarisation,
+            };
+            let incoming: std::collections::BTreeSet<u16> =
+                transponder.services.iter().map(|service| service.service_id).collect();
+            // TKGS's embedded SDT copies use a table-local sequence in the
+            // TSID field. Match the real guide by delivery parameters so an
+            // existing multiplex's EIT/SDT data is preserved.
+            let at = self.multiplexes.iter()
+                .position(|m| m.source == source)
+                .unwrap_or_else(|| {
+                    self.multiplexes.push(StoredGuide::empty(source.clone()));
+                    self.multiplexes.len() - 1
+                });
+            let mux = &mut self.multiplexes[at];
+            if mux.transport_stream_id.is_some()
+                && !mux.services.iter().any(|service| incoming.contains(&service.service_id))
+            {
+                // A wide acquisition window may have caught a neighbouring
+                // carrier.  Do not retain that mux under this TKGS source.
+                mux.transport_stream_id = None;
+                mux.services.clear();
+                mux.events.clear();
+                mux.rates.clear();
+                mux.carrier_offset_khz = None;
+            }
+            mux.source = source.clone();
+            mux.updated = now;
+            for service in transponder.services {
+                if let Some(existing) = mux.services.iter_mut().find(|s| s.service_id == service.service_id) {
+                    if !service.name.trim().is_empty() { existing.name = service.name.clone(); }
+                    if service.provider.is_some() { existing.provider = service.provider.clone(); }
+                    if service.service_type.is_some() { existing.service_type = service.service_type; }
+                } else {
+                    mux.services.push(StoredService {
+                        service_id: service.service_id, name: service.name.clone(),
+                        provider: service.provider.clone(), service_type: service.service_type,
+                    });
+                }
+                listed.push(StoredTkgsChannel {
+                    lcn: service.lcn,
+                    service_id: service.service_id,
+                    name: service.name,
+                    provider: service.provider,
+                    service_type: service.service_type,
+                    source: source.clone(),
+                    free_ca_mode: service.free_ca_mode,
+                });
+            }
+        }
+        listed.sort_by_key(|c| c.lcn);
+        listed.dedup_by_key(|c| c.lcn);
+        self.tkgs = Some(StoredTkgs {
+            updated: now, transponders: transponder_count, channels: listed, orderings: receiver.table.orderings,
+        });
     }
 
     /// The multiplex reached by `source`.
@@ -853,26 +1066,79 @@ impl LiveManager {
         GuideStore::parse(&std::fs::read_to_string(&self.paths.guide_store).ok()?)
     }
 
+    /// Replace a legacy/incomplete satellite source with the exact TKGS
+    /// delivery for this service. Frequency and symbol rate are also matched
+    /// because service ids are only unique within a transport stream.
+    fn canonical_source(&self, service_id: u16, source: &LiveSource) -> LiveSource {
+        let LiveSource::Satellite { frequency_khz, symbol_rate_ksps, .. } = source else {
+            return source.clone();
+        };
+        self.stored_guide()
+            .and_then(|guide| guide.tkgs)
+            .and_then(|tkgs| {
+                tkgs.channels.into_iter().find(|channel| {
+                    channel.service_id == service_id
+                        && matches!(
+                            channel.source,
+                            LiveSource::Satellite {
+                                frequency_khz: frequency,
+                                symbol_rate_ksps: rate,
+                                ..
+                            } if frequency == *frequency_khz && rate == *symbol_rate_ksps
+                        )
+                })
+            })
+            .map_or_else(|| source.clone(), |channel| channel.source)
+    }
+
+    fn keep_guide(&self, stored: &GuideStore) -> Result<(), String> {
+        let text = serde_json::to_string(stored).map_err(|error| format!("kanal listesi yazılamadı: {error}"))?;
+        let temporary = self.paths.guide_store.with_extension("json.tmp");
+        std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &self.paths.guide_store))
+            .map_err(|error| format!("kanal listesi yazılamadı: {error}"))
+    }
+
+    pub async fn update_tkgs(&self) -> Result<Value, String> {
+        let value = self.read_tkgs().await?;
+        let receiver: ReceiverTkgs = serde_json::from_value(value).map_err(|error| format!("TKGS sonucu okunamadı: {error}"))?;
+        let mut stored = self.stored_guide().unwrap_or_default();
+        stored.absorb_tkgs(receiver, now_utc());
+        self.keep_guide(&stored)?;
+        let tkgs = stored.tkgs.as_ref().expect("TKGS was just stored");
+        Ok(json!({"channels": tkgs.channels.len(), "transponders": tkgs.transponders, "updated": tkgs.updated}))
+    }
+
+    pub fn set_tkgs_ordering(&self, hd_first: bool) -> Result<Value, String> {
+        let mut stored = self.stored_guide().unwrap_or_default();
+        stored.tkgs_hd_first = hd_first;
+        self.keep_guide(&stored)?;
+        Ok(json!({"hd_first": hd_first}))
+    }
+
     /// Take in what this start's receiver has said of its multiplex; written
     /// to the store when it changed anything.
     pub fn absorb_guide(&self) -> bool {
-        let (token, source) = {
+        let (token, source, service_id) = {
             let inner = self.lock();
             match (inner.token.clone(), inner.source.clone()) {
-                (Some(token), Some(source)) => (token, source),
+                (Some(token), Some(source)) => (token, source, inner.service_id),
                 _ => return false,
             }
         };
         let receiver = std::fs::read_to_string(self.paths.guide())
             .ok()
             .and_then(|text| serde_json::from_str::<ReceiverGuide>(&text).ok())
-            .filter(|guide| guide.token.as_deref() == Some(token.as_str()));
+            .filter(|guide| guide.token.as_deref() == Some(token.as_str()))
+            .filter(|guide| service_id.is_none_or(|wanted| {
+                guide.services.iter().any(|service| service.service_id == wanted)
+            }));
         let mut stored = self.stored_guide().unwrap_or_default();
         let mut changed = receiver.is_some_and(|receiver| stored.absorb(receiver, &source, now_utc()));
         // What the tune taught, once the receiver streams: where the
         // carrier locked, and the rate of the service on now.
         if let Some(status) = self.read_status()
             && status.get("state").and_then(Value::as_str) == Some("streaming")
+            && status.pointer("/selection/pmt_pid").is_some_and(|pid| !pid.is_null())
         {
             let offset = status.pointer("/tune/search_offset_khz").and_then(Value::as_i64).map(|o| o as i32);
             let sid = status.get("service_id").and_then(Value::as_u64).map(|sid| sid as u16);
@@ -882,10 +1148,7 @@ impl LiveManager {
         if !changed {
             return false;
         }
-        let Ok(text) = serde_json::to_string(&stored) else { return false };
-        let temporary = self.paths.guide_store.with_extension("json.tmp");
-        let written = std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &self.paths.guide_store));
-        if let Err(error) = written {
+        if let Err(error) = self.keep_guide(&stored) {
             eprintln!("mediaboxd-rs: live guide not kept: {error}");
             return false;
         }
@@ -898,9 +1161,13 @@ impl LiveManager {
             Some(guide) => json!({
                 "channels": guide.channels(),
                 "multiplexes": guide.multiplexes.len(),
-                "updated": guide.multiplexes.iter().map(|m| m.updated).max(),
+                "updated": guide.tkgs.as_ref().map(|t| t.updated).or_else(|| guide.multiplexes.iter().map(|m| m.updated).max()),
+                "tkgs": guide.tkgs.as_ref().map(|t| json!({
+                    "channels": t.channels.len(), "transponders": t.transponders,
+                    "updated": t.updated, "hd_first": guide.tkgs_hd_first,
+                })),
             }),
-            None => json!({"channels": [], "multiplexes": 0, "updated": null}),
+            None => json!({"channels": [], "multiplexes": 0, "updated": null, "tkgs": null}),
         }
     }
 
@@ -930,7 +1197,10 @@ mod tests {
     fn the_receiver_is_a_bound_unit_with_typed_arguments_only() {
         let dir = tempfile::tempdir().unwrap();
         let live = manager(dir.path());
-        let satellite = LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 };
+        let satellite = LiveSource::Satellite {
+            frequency_khz: 12_188_000, symbol_rate_ksps: 27_500,
+            polarisation: SatellitePolarisation::Vertical,
+        };
         let argv = live.argv(10801, &satellite, "7-1");
         let joined = argv.join(" ");
         assert!(joined.contains("--unit=mediabox-dvb.service"));
@@ -938,15 +1208,13 @@ mod tests {
         assert!(joined.contains("--property=RuntimeDirectoryPreserve=yes"));
         assert!(joined.ends_with(&format!(
             "play --service 10801 --fifo {0}/live.ts --status {0}/status.json --token 7-1 \
-             --hardware --transponder 12188000 --sr 27500 --firmware-dir /var/lib/mediabox-dvb/firmware --reconnect-s 20 --hold-reader-s 30",
+             --hardware --transponder 12188000 --sr 27500 --polarisation=vertical --firmware-dir /var/lib/mediabox-dvb/firmware --reconnect-s 20 --hold-reader-s 30",
             dir.path().display()
         )));
         let recording = live.argv(10801, &LiveSource::Recording, "7-2").join(" ");
         assert!(recording.ends_with("--recording /var/lib/mediabox-dvb/recording.ts --pace"));
         assert!(!recording.contains("--hardware"), "a recording never opens the receiver");
-        for argv in [joined.as_str(), recording.as_str()] {
-            assert!(!argv.contains("lnb") && !argv.contains("--pol"), "no LNB control: {argv}");
-        }
+        assert!(!recording.contains("--polarisation"));
     }
 
     #[test]
@@ -1020,7 +1288,10 @@ mod tests {
     fn the_receivers_guide_is_kept_and_its_channels_are_the_television_services() {
         let dir = tempfile::tempdir().unwrap();
         let live = manager(dir.path());
-        let source = LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 };
+        let source = LiveSource::Satellite {
+            frequency_khz: 12_188_000, symbol_rate_ksps: 27_500,
+            polarisation: SatellitePolarisation::Vertical,
+        };
         {
             let mut inner = live.lock();
             inner.token = Some("1-6".into());
@@ -1074,8 +1345,14 @@ mod tests {
 
     #[test]
     fn every_multiplex_tuned_is_kept_and_their_channels_numbered_on() {
-        let s12188 = LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 };
-        let s11794 = LiveSource::Satellite { frequency_khz: 11_794_000, symbol_rate_ksps: 30_000 };
+        let s12188 = LiveSource::Satellite {
+            frequency_khz: 12_188_000, symbol_rate_ksps: 27_500,
+            polarisation: SatellitePolarisation::Vertical,
+        };
+        let s11794 = LiveSource::Satellite {
+            frequency_khz: 11_794_000, symbol_rate_ksps: 30_000,
+            polarisation: SatellitePolarisation::Vertical,
+        };
         let mut store = GuideStore::default();
         // The recording first; the same multiplex tuned live takes its place.
         assert!(store.absorb(receiver(41306, &[(10801, "TRT HABER HD"), (10800, "TRT1 HD")]), &LiveSource::Recording, 0));
@@ -1089,6 +1366,40 @@ mod tests {
         // The file it had first is still read.
         let old = serde_json::to_string(&store.multiplexes[0]).unwrap();
         assert_eq!(GuideStore::parse(&old).unwrap().multiplexes.len(), 1);
+    }
+
+    #[test]
+    fn tkgs_repairs_polarisation_from_an_already_running_legacy_ui() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        let exact = LiveSource::Satellite {
+            frequency_khz: 12_345_000,
+            symbol_rate_ksps: 30_000,
+            polarisation: SatellitePolarisation::Horizontal,
+        };
+        let mut store = GuideStore::default();
+        store.multiplexes.push(StoredGuide::empty(exact.clone()));
+        store.tkgs = Some(StoredTkgs {
+            updated: 1,
+            transponders: 1,
+            channels: vec![StoredTkgsChannel {
+                lcn: 42,
+                service_id: 52202,
+                name: "H CHANNEL".into(),
+                provider: None,
+                service_type: Some(0x19),
+                source: exact.clone(),
+                free_ca_mode: false,
+            }],
+            orderings: vec![],
+        });
+        std::fs::write(dir.path().join("live-guide.json"), serde_json::to_string(&store).unwrap()).unwrap();
+        let legacy = LiveSource::Satellite {
+            frequency_khz: 12_345_000,
+            symbol_rate_ksps: 30_000,
+            polarisation: SatellitePolarisation::Vertical,
+        };
+        assert_eq!(live.canonical_source(52202, &legacy), exact);
     }
 
     #[test]
@@ -1118,7 +1429,10 @@ mod tests {
     fn a_tune_teaches_the_carrier_offset_and_the_channel_rate() {
         let dir = tempfile::tempdir().unwrap();
         let live = manager(dir.path());
-        let satellite = LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500 };
+        let satellite = LiveSource::Satellite {
+            frequency_khz: 12_188_000, symbol_rate_ksps: 27_500,
+            polarisation: SatellitePolarisation::Vertical,
+        };
         let mut store = GuideStore::default();
         assert!(store.absorb(receiver(41306, &[(10801, "TRT HABER HD")]), &satellite, 0));
         assert!(store.learn(&satellite, Some(10_000), Some((10801, 50.0))));

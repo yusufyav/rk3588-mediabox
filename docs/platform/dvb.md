@@ -7,22 +7,22 @@ verified on the hardware by `yusufyav/kanky-link-linux` (Python);
 with their LNB frames taken out. There is no Python, PyUSB or python-libusb1
 on this path.
 
-**MediaBox does not power or steer the LNB.** The RF arrives prepared from
-outside: supply (polarisation), 22 kHz tone (band) and any DiSEqC switching
-are the RF source's. The demodulator's write policy has no scope that reaches
-the LNB pins (0x120008/0x12000C) or the DiSEqC block (0x16C000..0x16C0FF);
-they are only read, after the demodulator's reset and again at cleanup, and
-must not have changed. Measured in the reference's 12 replayed sessions:
-both pins read 2 after the reset (high-Z). What the board's LNB regulator
-does with an undriven enable pin is not known here: before an external
-supply is connected to the F connector, the voltage on it with the receiver
-running must be measured.
+**MediaBox powers and steers a universal LNB.** GPIO3 enables the supply,
+GPIO4 selects 13 V (vertical, low) or 18 V (horizontal, high), then a DiSEqC
+1.0 committed command `E0 10 38 F0|H<<1|high` (port A) goes out, and the
+AVL62X1 tone generator selects low/high band (22 kHz off/on) -- the order and
+bytes the Kanky Android application sends, traced on its USB (2026-10-23).
+The switch in front of the LNB picks polarisation and band from that command:
+without it, 13/18 V and 22 kHz changed nothing and every channel locked on
+whatever the switch was last set to. Cleanup turns the tone off and restores
+both pins to their original high-impedance state. The IT9303 runs Kanky's own
+bridge firmware (1.12.0.0, from its library), not Linux's 1.4.0.0.
 
 ```text
 mediaboxctl / interface ── LivePlayHere{service_id, source} ──> mediaboxd-rs
 mediaboxd-rs (no USB: DevicePolicy=closed)
   ├─ systemd-run mediabox-dvb.service   root, BindsTo=mediabox-tv-ui
-  │    libusb-1.0 (dlopen) ─ IT9303 ─ AVL62X1 ─ RDA5815M   (no LNB control)
+  │    libusb-1.0 (dlopen) ─ IT9303 ─ AVL62X1 ─ RDA5815M ─ 13/18 V + 22 kHz
   │    EP 0x84 async bulk ─> Analyser ─> Selector(SID) ─> /run/mediabox-dvb/live.ts (FIFO)
   │    /run/mediabox-dvb/status.json  (state, end, integrity, USB, signal, cleanup)
   └─ systemd-run mediabox-player.service  mpv --hwdec=rkmpp --vo=mediabox
@@ -53,13 +53,14 @@ settings) and a programme guide (60 s, half-hour time line, "Bilgi yok" for
 stretches nobody described). Up/Down and the channel keys change channel;
 Back closes what is up, and with nothing up leaves.
 
-Channels and the guide are the broadcasts' own: the receiver reads every
-service's SDT entry and EIT (present/following and schedule, PID 0x12) and
-writes them to `guide.json` beside its status; the control plane keeps them,
-per multiplex, in `/var/lib/mediabox/live-guide.json` (`LiveChannels`,
-`LiveGuide`). Numbers are MediaBox's, in service-id order, until the TKGS
-channel list is in. A service the receiver finds scrambled is said to be at
-once (`selection.scrambled_packets`).
+Channels are numbered and placed on their own transponders by Türksat's TKGS
+table (PID 0x1FF5, table 0xA7). “TV ayarları > Kanal listesini güncelle” asks
+the already prepared receiver to retune to 12380 V 27500 (the transponder the Kanky application reads it from), collect every long
+section, atomically keep the result in `/var/lib/mediabox/live-guide.json`,
+and return to standby (or the channel that was playing). SDT names and EIT
+events (present/following and schedule, PID 0x12) remain per multiplex in the
+same store. TKGS `free_CA_mode` marks a channel before tuning; the receiver's
+`selection.scrambled_packets` measurement confirms it while selected.
 
 ### Channel change
 
@@ -99,7 +100,7 @@ and the recording, and reports `usb_open_attempts` (must be 0). Only
 
 ```sh
 mediaboxctl media live-here 10801 --recording --title "TRT HABER HD"   # no USB access
-mediaboxctl media live-here 10801 --frequency-khz 12188000 --symbol-rate 27500   # opens the receiver; RF prepared outside
+mediaboxctl media live-here 10801 --frequency-khz 12188000 --symbol-rate 27500 --polarisation vertical
 mediaboxctl media status-here --json      # .result.live: lifecycle, receiver status
 mediaboxctl media live-channels           # the channel list
 mediaboxctl media live-guide --hours 6    # the programme guide from now
@@ -107,13 +108,13 @@ mediaboxctl media stop-here
 mediabox-dvb selftest --recording /var/lib/mediabox-dvb/recording.ts    # no USB
 mediabox-dvb select --input rec.ts --service 10801 --output one.ts       # offline
 mediabox-dvb analyse --input rec.ts                                      # offline
+mediabox-dvb tkgs --input tkgs.ts                                        # offline, complete TKGS JSON
 ```
 
 ## Physical test (needs explicit approval: it opens and tunes the receiver)
 
-Before: the RF source is prepared outside (LNB supply for vertical, 22 kHz
-for the high band at 12188 MHz) and the F-connector voltage with the receiver
-running has been measured.
+Before: connect the receiver directly to the LNB feed. Do not connect an
+external LNB supply at the same time.
 
 1. `lsusb | grep 23e2`, `systemctl is-active mediabox-player` inactive,
    `mediabox-dvb selftest` ok, journal cursor.
@@ -121,14 +122,14 @@ running has been measured.
 3. For 5 minutes, every 5 s from `status-here`: `receiver.state=streaming`,
    `receiver.usb.overflow_bytes`, `out_of_order`, `errors`, `no_device`;
    `receiver.integrity.cc_errors/tei/sync_errors`; `receiver.signal` (fec, snr,
-   strength); `receiver.tune.lnb_pins_untouched`; mpv `hwdec-current`,
+   strength); receiver tune/lock state; mpv `hwdec-current`,
    `frame-drop-count`, `avsync`; VOP2 Esmart0; mpv descriptor count.
 4. Back (`stop-here`) three times: both units inactive, `receiver.tune.cleanup_ok`,
-   `gpio_restored=true`, `lnb_pins_untouched=true`; a fourth start locks again.
+   `gpio_restored=true`; a fourth start locks again.
 5. Unplug during playback: `end=usb_disconnected` after the 20 s reconnect window,
    or a new session (`receiver.sessions=2`) when plugged back within it.
 
-STOP at once (`stop-here`) on: no lock, `lnb_pins_untouched=false`,
-`gpio_restored=false`, USB `overflow_bytes>0` or `out_of_order>0`,
+STOP at once (`stop-here`) on: no lock, `gpio_restored=false`, USB
+`overflow_bytes>0` or `out_of_order>0`,
 `hwdec-current≠rkmpp`, no picture for >10 s, mpv descriptors climbing,
 xHCI/EHCI resets or errors in dmesg.

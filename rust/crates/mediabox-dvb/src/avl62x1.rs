@@ -36,11 +36,18 @@ const GPIO_I2C_CLK2_SEL: u32 = 0x120018;
 const GPIO_M3_SCL_SEL: u32 = 0x12009C;
 const GPIO_M3_SDA_SEL: u32 = 0x1200A0;
 
-/// Kanky AVL GPIO 4 (13/18 V select) and GPIO 3 (LNB power enable). Read,
-/// never written: MediaBox does not power or steer the LNB (the RF arrives
-/// prepared from outside), and no scope exists that would let a write here.
+/// Kanky AVL GPIO 4 (13/18 V select) and GPIO 3 (LNB power enable).
 pub const LNB_CNTRL_1_SEL: u32 = 0x120008;
 pub const LNB_CNTRL_0_SEL: u32 = 0x12000C;
+const DISEQC_TX_CNTRL: u32 = 0x16C000;
+const DISEQC_TONE_FRAC_N: u32 = 0x16C004;
+const DISEQC_TONE_FRAC_D: u32 = 0x16C008;
+const DISEQC_RX_MSG_TIM: u32 = 0x16C014;
+const DISEQC_RX_CNTRL: u32 = 0x16C01C;
+const DISEQC_SRST: u32 = 0x16C020;
+const DISEQC_SAMP_FRAC_N: u32 = 0x16C028;
+const DISEQC_SAMP_FRAC_D: u32 = 0x16C02C;
+const DISEQC_TX_FIFO: u32 = 0x16C080;
 
 const CMD_IDLE: u16 = 0;
 const CMD_LD_DEFAULT: u16 = 1;
@@ -97,10 +104,7 @@ const TUNER_I2C_DIAG: [u32; 5] = [0x118004, 0x11800C, 0x118010, 0x118014, 0x1180
 pub const XTAL_27MHZ: u8 = 1;
 pub const KANKY_MPEG_REF_CLK_HZ: u32 = 130_000_000;
 
-/// Blocks this stack must not touch. The board GPIO block holds the LNB
-/// supply pins; the DiSEqC block is the 22 kHz tone and DiSEqC. Only the four
-/// tuner-I2C pin selects and, under its scope, the two AGC pin selects may be
-/// written in the first; nothing at all in the second.
+/// Board-specific blocks require an explicit scope and exact registers.
 const FORBIDDEN_RANGES: [(u32, u32, &str); 2] =
     [(0x120000, 0x1200FF, "gpio_debug (LNB / board GPIO)"), (0x16C000, 0x16C0FF, "diseqc (22 kHz / DiSEqC)")];
 const ALLOWED_IN_FORBIDDEN: [u32; 4] = [GPIO_I2C_DATA2_SEL, GPIO_I2C_CLK2_SEL, GPIO_M3_SCL_SEL, GPIO_M3_SDA_SEL];
@@ -112,13 +116,13 @@ const BMS_READ_CHUNK: usize = 32;
 
 pub const MAX_LOCK_TIMEOUT_MS: u32 = 5000;
 
-/// Opt-in write scopes on top of the four I2C pin selects. There is no LNB
-/// or DiSEqC scope, by decision: the tuner and the demodulator run without
-/// either, and the RF source (supply, tone, switching) is prepared outside.
+/// Opt-in write scopes on top of the four I2C pin selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Scope {
     /// IRx_DriveAGC pin mux (6 = AGC, 2 = high-Z): the tuner's gain loop.
     Agc,
+    /// The two verified Kanky LNB GPIOs and the AVL62X1 22 kHz registers.
+    Lnb,
 }
 
 pub struct Avl62x1 {
@@ -164,6 +168,14 @@ impl Avl62x1 {
         let mut allowed: BTreeSet<u32> = ALLOWED_IN_FORBIDDEN.into_iter().collect();
         if scopes.contains(&Scope::Agc) {
             allowed.extend([AGC1_SEL, AGC2_SEL]);
+        }
+        if scopes.contains(&Scope::Lnb) {
+            allowed.extend([
+                LNB_CNTRL_0_SEL, LNB_CNTRL_1_SEL, DISEQC_TX_CNTRL,
+                DISEQC_TONE_FRAC_N, DISEQC_TONE_FRAC_D, DISEQC_RX_MSG_TIM,
+                DISEQC_RX_CNTRL, DISEQC_SRST, DISEQC_SAMP_FRAC_N,
+                DISEQC_SAMP_FRAC_D, DISEQC_TX_FIFO,
+            ]);
         }
         Self { addr: I2C_ADDR, scopes, allowed, max_patch_polls: 300, writes: 0, repeater_maybe_on: false }
     }
@@ -372,6 +384,68 @@ impl Avl62x1 {
         Ok((self.read32(bridge, LNB_CNTRL_0_SEL)?, self.read32(bridge, LNB_CNTRL_1_SEL)?))
     }
 
+    /// Kanky's AVL_FE_SetLNBPower: GPIO3 enables the supply and GPIO4 selects
+    /// 18 V (horizontal) when high, 13 V (vertical) when low: Kanky
+    /// libdvb_usb_phy.so writes GPIO4 = (1318v == 1), and its Java side sets
+    /// 1318v = 1 for polarisation 0 (horizontal) on a universal LNB.
+    pub fn set_lnb_power(&mut self, bridge: &mut Bridge, enabled: bool, vertical: bool) -> Result<()> {
+        self.write32(bridge, LNB_CNTRL_0_SEL, u32::from(enabled))?;
+        self.write32(bridge, LNB_CNTRL_1_SEL, u32::from(!vertical))
+    }
+
+    pub fn restore_lnb_pins(&mut self, bridge: &mut Bridge, pins: (u32, u32)) -> Result<()> {
+        self.write32(bridge, LNB_CNTRL_0_SEL, pins.0)?;
+        self.write32(bridge, LNB_CNTRL_1_SEL, pins.1)
+    }
+
+    /// Initialise only the AVL62X1 tone generator, using the vendor driver's
+    /// normal 22 kHz, 15 ms-gap, normal-waveform configuration.
+    pub fn init_diseqc_tone(&mut self, bridge: &mut Bridge, core_clk_hz: u32) -> Result<()> {
+        self.write32(bridge, DISEQC_SRST, 1)?;
+        self.write32(bridge, DISEQC_SAMP_FRAC_N, 2_000_000)?;
+        self.write32(bridge, DISEQC_SAMP_FRAC_D, core_clk_hz)?;
+        self.write32(bridge, DISEQC_TONE_FRAC_N, 44)?;
+        self.write32(bridge, DISEQC_TONE_FRAC_D, core_clk_hz / 1000)?;
+        let mut control = self.read32(bridge, DISEQC_TX_CNTRL)? & 0x0000_0300;
+        control |= 0x28;
+        self.write32(bridge, DISEQC_TX_CNTRL, control)?;
+        control &= !0x20;
+        self.write32(bridge, DISEQC_TX_CNTRL, control)?;
+        self.write32(bridge, DISEQC_RX_CNTRL, 0x0A)?;
+        self.write32(bridge, DISEQC_RX_MSG_TIM, 0)?;
+        self.write32(bridge, DISEQC_SRST, 0)
+    }
+
+    /// Kanky AVL62X1_IDiseqc_SendModulationData, as traced on the Android
+    /// application (2026-10-23): tone off, RX FIFO reset, modulation mode, the
+    /// bytes into the TX FIFO, start, and the ~200 ms it waits before the tone.
+    pub fn send_diseqc(&mut self, bridge: &mut Bridge, message: &[u8]) -> Result<()> {
+        let control = self.read32(bridge, DISEQC_TX_CNTRL)? & !0xC00;
+        self.write32(bridge, DISEQC_TX_CNTRL, control)?;
+        let rx = self.read32(bridge, DISEQC_RX_CNTRL)?;
+        self.write32(bridge, DISEQC_RX_CNTRL, rx | 1)?;
+        self.write32(bridge, DISEQC_RX_CNTRL, rx & !1)?;
+        let control = control & !0x7;
+        self.write32(bridge, DISEQC_TX_CNTRL, control)?;
+        for &byte in message {
+            self.write32(bridge, DISEQC_TX_FIFO, u32::from(byte))?;
+        }
+        self.write32(bridge, DISEQC_TX_CNTRL, control | 0x4)?;
+        bridge.delay(200);
+        Ok(())
+    }
+
+    pub fn set_22khz(&mut self, bridge: &mut Bridge, on: bool) -> Result<()> {
+        let mut control = self.read32(bridge, DISEQC_TX_CNTRL)?;
+        if on {
+            control = (control & !0x7) | 0x3;
+            self.write32(bridge, DISEQC_TX_CNTRL, control)?;
+            self.write32(bridge, DISEQC_TX_CNTRL, control | 0x400)
+        } else {
+            self.write32(bridge, DISEQC_TX_CNTRL, control & !0xC00)
+        }
+    }
+
     // -- receiver init after boot (Kanky AVL62X1_Initialize tail) -------------------
     /// IRx_Initialize, SetTunerPola, DriveAGC(on), SetMpegMode,
     /// DriveMpegOutput(on), with the Kanky chip object's values.
@@ -563,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn the_lnb_pins_and_the_diseqc_block_can_never_be_written() {
+    fn lnb_writes_need_their_explicit_scope() {
         let demod = Avl62x1::new([Scope::Agc]);
         for address in [LNB_CNTRL_0_SEL, LNB_CNTRL_1_SEL] {
             assert!(demod.check_write(address, 4).is_err(), "LNB pin 0x{address:06X}");
@@ -578,6 +652,11 @@ mod tests {
         assert!(demod.check_write(GPIO_M3_SCL_SEL, 4).is_ok());
         assert!(demod.check_write(AGC1_SEL, 4).is_ok());
         assert!(Avl62x1::new([]).check_write(AGC1_SEL, 4).is_err());
+        let demod = Avl62x1::new([Scope::Agc, Scope::Lnb]);
+        for address in [LNB_CNTRL_0_SEL, LNB_CNTRL_1_SEL, DISEQC_TX_CNTRL, DISEQC_SRST] {
+            assert!(demod.check_write(address, 4).is_ok());
+        }
+        assert!(demod.check_write(0x16C00C, 4).is_err(), "read-only DiSEqC status stays protected");
     }
 
     #[test]
