@@ -144,6 +144,10 @@ impl TuneResult {
 pub struct Streamed {
     pub no_device: bool,
     pub retune: Option<TuneParams>,
+    /// The retune is the same transponder after the signal went: a lock
+    /// that fails is not the end, the stream is asked again (it keeps the
+    /// player, follows the control plane and tries once more).
+    pub relock: bool,
 }
 
 fn checkpoint(bridge: &mut Bridge, demod: &Avl62x1, res: &mut TuneResult, name: &str) -> Result<()> {
@@ -307,10 +311,18 @@ fn stages(
     bridge::ts_init(bridge)?;
 
     let mut params = params.clone();
+    let mut relock = false;
+    // Where the transponder was last really found, from its nominal IF.
+    let mut locked_at = 0i32;
     loop {
         steer_lnb(bridge, demod, params.lnb)?;
         lock_carrier(bridge, demod, &params, stop, res)?;
-        if !res.fec_locked() {
+        if res.fec_locked() && !relock {
+            locked_at = res.search_offset_khz.unwrap_or(0);
+        }
+        if relock && !res.fec_locked() && !stopping(stop, res, bridge) {
+            bridge.log.line("RELOCK: no carrier yet");
+        } else if !res.fec_locked() {
             if res.stopped.is_none() {
                 res.stopped = Some("no FEC lock".into());
             }
@@ -324,7 +336,18 @@ fn stages(
         if streamed.no_device {
             return Ok(()); // nothing left to ask; cleanup still tries
         }
-        let Some(next) = streamed.retune else { break };
+        let Some(mut next) = streamed.retune else { break };
+        relock = streamed.relock;
+        if relock {
+            // The same carrier, where it was: no search. A search ±10 MHz
+            // with the cable just back locked the neighbouring transponder
+            // (measured 2026-10-24: 1635 MHz for 1645, the service absent,
+            // the picture never back); the reference retunes the one
+            // frequency.
+            next.rf_khz = (next.rf_khz as i64 + locked_at as i64) as u32;
+            next.first_offset_khz = None;
+            next.search_offsets_khz = Vec::new();
+        }
         bridge.log.line(format!("RETUNE {} kHz SR {} kS/s, the demodulator as it is", next.rf_khz, next.symbol_rate_ksps));
         res.lock_flags = None;
         res.lock_polls = None;

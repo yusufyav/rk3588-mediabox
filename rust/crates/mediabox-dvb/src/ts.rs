@@ -918,6 +918,135 @@ pub struct Selection {
     pub service_missing: u64,
     /// The programme's video, from its SPS, once one has been read.
     pub video: Option<VideoInfo>,
+    /// The programme's own clock and timestamps, as ETSI TR 101 290 judges
+    /// them: what the player will see, apart from anything the output adds.
+    pub timing: Timing,
+}
+
+/// ETSI TR 101 290 on the selected programme, from the stream's own clock.
+///
+/// The multiplex-wide counts (`Integrity`) cannot say whether *this* channel
+/// lost anything: a continuity error on another service's PID is not one the
+/// player sees. These are this programme's PIDs only.
+///
+/// Intervals are measured in programme time (PCR and PTS), not in arrival
+/// time: a receiver that delivers in bursts (USB) would otherwise count its
+/// own buffering as the broadcaster's fault.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Timing {
+    /// 1.4 Continuity_count_error, on the programme's PIDs.
+    pub cc_errors: u64,
+    pub pcr_count: u64,
+    /// 2.3a PCR_repetition_error: more than 40 ms between two PCRs.
+    pub pcr_repetition_errors: u64,
+    /// 2.3b PCR_discontinuity_indicator_error: a jump of more than 100 ms,
+    /// or backwards, that the broadcaster did not announce.
+    pub pcr_discontinuities: u64,
+    /// Announced ones (discontinuity_indicator): not errors.
+    pub pcr_announced_discontinuities: u64,
+    pub pcr_max_interval_ms: f64,
+    /// 2.5 PTS_error: more than 700 ms between two PTSs of one sound or
+    /// picture stream. Subtitles and teletext carry a PTS only when they
+    /// have something to show, so they are not judged by it.
+    pub pts_errors: u64,
+    pub pts_max_interval_ms: f64,
+    pub pes_starts: u64,
+}
+
+/// What `Timing` needs to remember between packets.
+#[derive(Default)]
+struct TimingState {
+    last_pcr: Option<u64>,
+    cc: std::collections::BTreeMap<u16, u8>,
+    pts: std::collections::BTreeMap<u16, u64>,
+    /// The programme's sound and picture PIDs: the ones 2.5 applies to.
+    timed: BTreeSet<u16>,
+}
+
+const PCR_HZ: f64 = 27_000_000.0;
+const PTS_HZ: f64 = 90_000.0;
+const PCR_WRAP: u64 = (1 << 33) * 300;
+const PTS_WRAP: u64 = 1 << 33;
+
+/// The adaptation field's discontinuity_indicator.
+fn discontinuity_of(p: &[u8]) -> bool {
+    (p[3] >> 4) & 0x2 != 0 && p[4] > 0 && p[5] & 0x80 != 0
+}
+
+/// The PTS of a PES that starts in this packet, 90 kHz ticks.
+pub(crate) fn pts_of(p: &[u8]) -> Option<u64> {
+    if p[1] & 0x40 == 0 {
+        return None;
+    }
+    let pes = payload_of(p)?;
+    if pes.len() < 14 || pes[0..3] != [0, 0, 1] || pes[7] & 0x80 == 0 {
+        return None;
+    }
+    let b = &pes[9..14];
+    Some(
+        ((b[0] as u64 >> 1) & 0x07) << 30
+            | (b[1] as u64) << 22
+            | ((b[2] as u64) >> 1) << 15
+            | (b[3] as u64) << 7
+            | (b[4] as u64) >> 1,
+    )
+}
+
+impl TimingState {
+    fn packet(&mut self, t: &mut Timing, p: &[u8], pid: u16, pcr_pid: Option<u16>) {
+        let announced = discontinuity_of(p);
+        // Continuity: only packets with a payload count; a repeat is allowed
+        // once (duplicate), and an announced discontinuity restarts it.
+        if (p[3] >> 4) & 0x1 != 0 {
+            let cc = p[3] & 0x0F;
+            if let Some(last) = self.cc.insert(pid, cc)
+                && !announced
+                && cc != last
+                && cc != (last + 1) & 0x0F
+            {
+                t.cc_errors += 1;
+            }
+        }
+        if Some(pid) == pcr_pid
+            && let Some(pcr) = pcr_of(p)
+        {
+            t.pcr_count += 1;
+            if let Some(last) = self.last_pcr.replace(pcr) {
+                let delta = (pcr + PCR_WRAP - last) % PCR_WRAP;
+                let ms = delta as f64 / PCR_HZ * 1000.0;
+                if announced {
+                    t.pcr_announced_discontinuities += 1;
+                } else if ms > 100.0 {
+                    // Backwards shows up as a delta near the wrap.
+                    t.pcr_discontinuities += 1;
+                } else {
+                    if ms > 40.0 {
+                        t.pcr_repetition_errors += 1;
+                    }
+                    t.pcr_max_interval_ms = t.pcr_max_interval_ms.max(ms);
+                }
+            }
+        }
+        if p[3] >> 6 == 0
+            && self.timed.contains(&pid)
+            && let Some(pts) = pts_of(p)
+        {
+            t.pes_starts += 1;
+            if let Some(last) = self.pts.insert(pid, pts)
+                && !announced
+            {
+                let delta = (pts + PTS_WRAP - last) % PTS_WRAP;
+                let ms = delta as f64 / PTS_HZ * 1000.0;
+                // Backwards (B-frames reorder PTS) is not a gap.
+                if delta < PTS_WRAP / 2 {
+                    if ms > 700.0 {
+                        t.pts_errors += 1;
+                    }
+                    t.pts_max_interval_ms = t.pts_max_interval_ms.max(ms);
+                }
+            }
+        }
+    }
 }
 
 pub struct Selector {
@@ -930,6 +1059,7 @@ pub struct Selector {
     pat_version: u8,
     pat_cc: u8,
     pids: BTreeSet<u16>,
+    timing: TimingState,
 }
 
 impl Selector {
@@ -943,6 +1073,7 @@ impl Selector {
             pat_version: 0,
             pat_cc: 0,
             pids: BTreeSet::new(),
+            timing: TimingState::default(),
         }
     }
 
@@ -1002,6 +1133,7 @@ impl Selector {
             return;
         }
         if self.ready() && self.pids.contains(&pid) {
+            self.timing.packet(&mut self.selection.timing, p, pid, self.selection.pcr_pid);
             if Some(pid) == self.selection.pcr_pid
                 && let Some(pcr) = pcr_of(p)
             {
@@ -1062,6 +1194,8 @@ impl Selector {
         self.pids = pmt.streams.iter().map(|s| s.pid).chain([pmt.pcr_pid]).filter(|&pid| pid != PID_NULL).collect();
         self.selection.pcr_pid = Some(pmt.pcr_pid);
         self.selection.pmt_version = Some(version);
+        self.timing.timed =
+            pmt.streams.iter().filter(|s| matches!(s.kind, "video" | "audio")).map(|s| s.pid).collect();
         let h264 = pmt.streams.iter().find(|s| s.stream_type == 0x1B).map(|s| s.pid);
         if self.video.pid != h264 {
             self.video = VideoProbe { pid: h264, ..Default::default() };

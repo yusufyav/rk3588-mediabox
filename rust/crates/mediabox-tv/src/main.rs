@@ -2481,6 +2481,24 @@ impl App {
             // Between films: nothing to draw from this answer.
             return;
         }
+        // The receiver lost the carrier (the dish's cable out) and is locking
+        // again: the picture goes black with the reference's words over it,
+        // and both go when the stream is back. The channel stays tuned.
+        if self.here.as_ref().is_some_and(|playing| playing.live) {
+            let lost = status.pointer("/live/receiver/state").and_then(Value::as_str) == Some("no_signal");
+            if let Some(live) = self.live.as_mut()
+                && lost != live.no_signal
+            {
+                live.no_signal = lost;
+                live.problem = if lost {
+                    live.current_channel().map(screens::live::no_signal)
+                } else {
+                    None
+                };
+                eprintln!("mediabox-tv.live signal {}", if lost { "lost" } else { "back" });
+                self.paint();
+            }
+        }
         // A live channel the receiver finds encrypted will never show a
         // picture: said at once, not after the wait for a first frame.
         let live_seen = self
@@ -5157,6 +5175,7 @@ impl App {
         let at = Instant::now();
         let now = lv::utc_now();
 
+        window.set_live_dark(live.no_signal);
         window.set_live_message(
             match (&live.problem, opening) {
                 (Some(problem), _) => problem.clone(),

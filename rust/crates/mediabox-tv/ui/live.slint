@@ -568,10 +568,13 @@ export component LiveTv inherits Rectangle {
     in property <int> panel-focus;
     in property <bool> panel-above;
     in property <bool> panel-below;
+    /// No signal: the last picture is not left frozen on the plane below,
+    /// it is covered, as the reference does.
+    in property <bool> dark;
 
     property <length> dp: Dp.dp;
 
-    background: transparent;
+    background: root.dark ? #000000 : transparent;
 
     // What is wrong with the channel, or that it is coming: in the middle of
     // the black where the picture would be.

@@ -225,6 +225,9 @@ pub struct Live {
     /// What is wrong with the channel on now, in words, if anything is: a
     /// failed tune, no picture. Drawn over the black.
     pub problem: Option<String>,
+    /// The receiver lost the carrier and is locking again (its state
+    /// `no_signal`): the picture is taken off and `no_signal` says so.
+    pub no_signal: bool,
 }
 
 /// The half hour at or before `t`.
@@ -253,6 +256,7 @@ impl Live {
             subtitles: Vec::new(),
             tkgs: TkgsStatus { hd_first: true, ..Default::default() },
             problem: None,
+            no_signal: false,
         }
     }
 
@@ -964,6 +968,25 @@ pub fn scrambled(selection: &serde_json::Value) -> bool {
 }
 
 /// What is said over such a channel.
+/// What the reference application (Kanky on SK1) puts in the middle of the
+/// black while its tuner locks again, measured 2026-10-24: "Sinyal Yok,
+/// Kilitleniyor [Türksat 4A/5B/6A  11958/V/27500]...". The channel list is
+/// Türksat's own (TKGS), so that is the satellite named.
+pub fn no_signal(channel: &LiveChannel) -> String {
+    match &channel.source {
+        LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } => format!(
+            "Sinyal Yok, Kilitleniyor [Türksat 4A/5B/6A  {}/{}/{}]...",
+            frequency_khz / 1000,
+            match polarisation {
+                mediabox_core::SatellitePolarisation::Horizontal => "H",
+                mediabox_core::SatellitePolarisation::Vertical => "V",
+            },
+            symbol_rate_ksps
+        ),
+        LiveSource::Recording => "Sinyal Yok, Kilitleniyor...".to_string(),
+    }
+}
+
 pub const SCRAMBLED: &str = "Bu kanal şu an şifreli yayınlanıyor; MediaBox şifreli yayın açamaz.";
 
 /// UTC seconds, now.

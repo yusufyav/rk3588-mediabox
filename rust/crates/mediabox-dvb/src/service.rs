@@ -122,6 +122,10 @@ pub enum State {
     /// Booted and locked, the USB stream stopped: nobody is watching.
     Standby,
     Reconnecting,
+    /// Locked once, then the carrier went (the dish's cable out, rain): the
+    /// player is kept and the same transponder is tried again until it is
+    /// back, as a television does.
+    NoSignal,
     Stopping,
     Ended,
     Failed,
@@ -707,6 +711,11 @@ fn open_output(output: &Output, timeout: Duration, log: &Log, created: impl FnOn
 
 /// Analyser + selector + writer, shared by both sources.
 struct Pipeline {
+    /// While the signal is being found again: the transport stream the
+    /// channel was on. A lock is the channel's only once its PAT says this.
+    relock_tsid: Option<u16>,
+    /// When the next retune of a lost signal is due.
+    retune_at: Option<Instant>,
     analyser: Analyser,
     selector: Selector,
     writer: Writer,
@@ -1158,6 +1167,8 @@ pub fn run(options: Options, log: &Log) -> Status {
             Source::Recording(_) => None,
         },
         standby_first: options.start_standby,
+        relock_tsid: None,
+        retune_at: None,
         fifo: match &options.output {
             Output::Fifo(path) => Some(path.clone()),
             _ => None,
@@ -1405,10 +1416,13 @@ fn stream(
     } else {
         match open(log) {
             Ok(stream) => {
-                reporter.state(State::Streaming, log);
+                // Without a signal it is Streaming only once data comes.
+                if reporter.status.state != State::NoSignal {
+                    reporter.state(State::Streaming, log);
+                }
                 Some(stream)
             }
-            Err(error) => return (Streamed { no_device: false, retune: None }, Some((End::SourceFailed, Some(error)))),
+            Err(error) => return (Streamed { no_device: false, retune: None, relock: false }, Some((End::SourceFailed, Some(error)))),
         }
     };
     let since = Instant::now();
@@ -1417,6 +1431,15 @@ fn stream(
     let mut seen_overflow = 0;
     let mut no_device = false;
     let mut retune = None;
+    let mut relock = false;
+    // The demodulator's lock status (0x408), read once a second, as the
+    // reference does. Traced from Kanky on SK1, 2026-10-24, the dish's cable
+    // pulled for half a minute: 0x408 reads 01 while locked and 00 within a
+    // second of the cable going; the reference retunes the transponder 12 s
+    // after the loss, then every 10 s, reading 0x408 in between, and is back
+    // on the first retune after the cable is. Not inferred from the stream:
+    // with the cable out the receiver keeps sending (40 000 packets a second).
+    let mut lock_checked = Instant::now();
     let ended = loop {
         if STOP.load(Ordering::SeqCst) {
             break Some((End::Stopped, None));
@@ -1476,6 +1499,63 @@ fn stream(
                 stats.gaps.last()
             ));
         }
+        // Found again: the carrier is the channel's when its PAT names the
+        // transport stream the channel was on; another one is no signal
+        // either, and is tuned away from.
+        if let Some(want) = pipeline.relock_tsid
+            && let Some(got) = pipeline.analyser.integrity().transport_stream_id
+        {
+            if got == want {
+                log.line(format!("SIGNAL BACK: transport stream {got} again"));
+                pipeline.relock_tsid = None;
+                pipeline.retune_at = None;
+                reporter.state(State::Streaming, log);
+            } else if let Some(tuned) = pipeline.tuned.clone() {
+                log.line(format!("RELOCK: locked transport stream {got}, not {want}; trying again"));
+                pipeline.analyser = Analyser::new();
+                retune = Some(tuned);
+                relock = true;
+                break None;
+            }
+        }
+        if lock_checked.elapsed() >= Duration::from_secs(1)
+            && let Some(tuned) = pipeline.tuned.clone()
+        {
+            lock_checked = Instant::now();
+            match demod.lock_flags(bridge) {
+                Ok((0, _)) => {
+                    if reporter.status.state != State::NoSignal {
+                        pipeline.relock_tsid = pipeline.selector.selection().transport_stream_id;
+                        pipeline.retune_at = Some(Instant::now() + Duration::from_secs(12));
+                        log.line(format!("SIGNAL LOST: lock status 0; transport stream {:?}", pipeline.relock_tsid));
+                        reporter.state(State::NoSignal, log);
+                        // What it said about the transport stream was before
+                        // the loss; only a PAT after it counts.
+                        pipeline.analyser = Analyser::new();
+                    }
+                    if pipeline.retune_at.is_none_or(|at| Instant::now() >= at) {
+                        pipeline.retune_at = Some(Instant::now() + Duration::from_secs(10));
+                        pipeline.analyser = Analyser::new();
+                        retune = Some(tuned);
+                        relock = true;
+                        break None;
+                    }
+                }
+                // Locked again, with no transport stream to tell it by (lost
+                // before the first PAT): the lock is all there is to go on.
+                Ok(_) if reporter.status.state == State::NoSignal && pipeline.relock_tsid.is_none() => {
+                    log.line("SIGNAL BACK: locked");
+                    pipeline.retune_at = None;
+                    reporter.state(State::Streaming, log);
+                }
+                Ok(_) => {}
+                Err(error) if error.is_no_device() => {
+                    no_device = true;
+                    break None;
+                }
+                Err(error) => log.line(format!("lock status failed: {error}")),
+            }
+        }
         match chunk {
             Some(chunk) => {
                 if !pipeline.feed(&chunk, reporter) {
@@ -1516,15 +1596,24 @@ fn stream(
             next_line = Instant::now() + Duration::from_secs(5);
             let s = &reporter.status;
             log.line(format!(
-                "LIVE t={} s in={} pkts out={} B usb_overflow={} out_dropped={} cc={} tei={} sync={} signal={:?}",
+                "LIVE t={} s in={} pkts out={} B usb_overflow={} out_dropped={} out_max_queued={} cc={} tei={} sync={} \
+                 service: cc={} pcr={} pcr_rep={} pcr_disc={} pcr_max={:.1}ms pts_err={} pts_max={:.1}ms signal={:?}",
                 since.elapsed().as_secs(),
                 s.integrity.packets,
                 s.output.bytes,
                 s.usb.as_ref().map_or(0, |u| u.overflow_bytes),
                 s.output.dropped_bytes,
+                s.output.max_queued_bytes,
                 s.integrity.cc_errors,
                 s.integrity.tei,
                 s.integrity.sync_errors,
+                s.selection.timing.cc_errors,
+                s.selection.timing.pcr_count,
+                s.selection.timing.pcr_repetition_errors,
+                s.selection.timing.pcr_discontinuities,
+                s.selection.timing.pcr_max_interval_ms,
+                s.selection.timing.pts_errors,
+                s.selection.timing.pts_max_interval_ms,
                 s.signal.as_ref().map(|a| (a.fec, a.snr_db, a.strength_pct)),
             ));
         }
@@ -1545,10 +1634,10 @@ fn stream(
         log.line(format!("TS stream stopped: {stats:?}"));
         reporter.status.usb = Some(stats);
     }
-    if retune.is_some() {
+    if retune.is_some() && !relock {
         reporter.state(State::Tuning, log);
     }
-    (Streamed { no_device, retune }, ended)
+    (Streamed { no_device, retune, relock }, ended)
 }
 
 #[cfg(test)]
