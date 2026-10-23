@@ -46,12 +46,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <poll.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <drm_fourcc.h>
@@ -61,6 +64,8 @@
 
 #include "common/common.h"
 #include "common/msg.h"
+#include "osdep/io.h"
+#include "osdep/poll_wrapper.h"
 #include "osdep/timer.h"
 #include "input/input.h"
 #include "input/keycodes.h"
@@ -80,11 +85,26 @@
 #define MBV_REPLY     16
 #define MBV_MAX_FDS   4
 
-/* How many frames may be with the interface before this output stops waiting.
- * Two are normally outstanding — the one on the panel and the one behind it.
- * More than this means the interface has stopped answering, and a player that
- * holds every buffer it ever decoded would starve MPP of its pool instead. */
-#define MBV_IN_FLIGHT 8
+/* How many frames may be with the interface at once.
+ *
+ * The interface holds at most three: the two it has committed (the one on the
+ * panel and the one before it, which is released when a third is committed)
+ * and one waiting for the next vertical blank. One more covers a release still
+ * on the wire. A frame is only ever let go when the interface says the panel
+ * is finished with it: what it has not released may be the one being scanned
+ * out, and handing that back to MPP lets the decoder draw into the picture on
+ * the television. When all of these are out, the new frame is not sent (see
+ * draw_frame) -- that buffer was never on the panel, so it is the one that can
+ * safely go back. Kept small because each is one of MPP's fixed pool. */
+#define MBV_IN_FLIGHT 4
+
+/* How long a full output waits for the interface to give a frame back before
+ * it drops the new one instead: two fields at 50 Hz. */
+#define MBV_FULL_WAIT_MS 40
+
+/* How long uninit waits for the interface to take the plane off and give
+ * every frame back before the buffers go back to MPP regardless. */
+#define MBV_STOP_WAIT_MS 500
 
 #define MBV_SOCKET "/run/mediabox-ui/video.sock"
 
@@ -107,6 +127,9 @@ struct priv {
     int d_w, d_h;
     uint32_t colour;
     bool said_full;
+    uint64_t dropped_full;
+    /* wakeup()'s pipe: wait_events sleeps on it and on the socket. */
+    int wakeup_pipe[2];
     /* The interface has gone and the film has already been told to stop. */
     bool lost;
     /* This output is being torn down; a failed write is expected, not news. */
@@ -119,6 +142,9 @@ struct priv {
     double display_fps;
     int64_t display_checked;
     bool said_vblank;
+
+    /* MEDIABOX_VO_TRACE: see trace_frame. */
+    FILE *trace;
 
     /* Picture subtitles: see send_subtitle. */
     struct mp_draw_sub_cache *sub_cache;
@@ -207,6 +233,25 @@ static void put64(uint8_t *at, uint64_t value)
     memcpy(at, &value, sizeof(value));
 }
 
+/* Which decoded picture each frame id is, for the interface's own trace
+ * (MEDIABOX_TV_FRAME_TRACE) to be joined to: one line per event,
+ * `<CLOCK_MONOTONIC microseconds> <event> <id> <pts>`, the clock the
+ * interface and the kernel's vblank timestamps use.
+ *
+ *   S id pts    sent to the interface
+ *   R id 0      the interface gave it back
+ *   D 0 pts     not sent: every buffer was out (draw_frame) */
+static void trace_frame(struct priv *p, char event, uint64_t id, double pts)
+{
+    if (!p->trace)
+        return;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    fprintf(p->trace, "%lld %c %llu %.6f\n",
+            (long long)now.tv_sec * 1000000 + now.tv_nsec / 1000, event,
+            (unsigned long long)id, pts);
+}
+
 /* Let go of one frame, whatever the reason. */
 static void release_held(struct priv *p, int index)
 {
@@ -238,9 +283,11 @@ static void release_held(struct priv *p, int index)
 static void interface_gone(struct vo *vo, const char *why)
 {
     struct priv *p = vo->priv;
-    if (p->lost || p->closing)
+    if (p->lost)
         return;
     p->lost = true;
+    if (p->closing)
+        return;
     MP_WARN(vo, "MediaBox arayüzü gitti (%s); film kapatılıyor\n", why);
     mp_input_put_key(vo->input_ctx, MP_KEY_CLOSE_WIN);
 }
@@ -273,11 +320,23 @@ static void drain_releases(struct vo *vo)
             continue;
         for (int i = 0; i < p->nheld; i++) {
             if (p->held[i].id == id) {
+                trace_frame(p, 'R', id, 0);
                 release_held(p, i);
                 break;
             }
         }
     }
+}
+
+/* Wait up to `ms` for the socket to have something to read, then read it. */
+static void wait_releases(struct vo *vo, int ms)
+{
+    struct priv *p = vo->priv;
+    if (p->fd < 0 || p->lost)
+        return;
+    struct pollfd fd = { .fd = p->fd, .events = POLLIN };
+    if (mp_poll(&fd, 1, MP_TIME_MS_TO_NS(ms)) > 0)
+        drain_releases(vo);
 }
 
 static bool send_message(struct vo *vo, const uint8_t *message,
@@ -468,7 +527,19 @@ static int preinit(struct vo *vo)
     }
 
     p->next_id = 1;
+    if (mp_make_wakeup_pipe(p->wakeup_pipe) < 0) {
+        MP_ERR(vo, "pipe: %s\n", strerror(errno));
+        close(p->fd);
+        p->fd = -1;
+        return -1;
+    }
     MP_INFO(vo, "MediaBox video düzlemine çiziliyor (%s)\n", path);
+    const char *trace = getenv("MEDIABOX_VO_TRACE");
+    if (trace && trace[0]) {
+        p->trace = fopen(trace, "we");
+        if (!p->trace)
+            MP_WARN(vo, "%s açılamadı: %s\n", trace, strerror(errno));
+    }
     open_display(vo);
     return 0;
 }
@@ -710,15 +781,21 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     if (modifier == DRM_FORMAT_MOD_INVALID)
         modifier = 0; /* LINEAR: what MPP produces on this board. */
 
-    /* The interface has stopped answering. Letting go of the oldest frame is
-     * the lesser fault: the buffer may still be on the panel for a moment, but
-     * holding every one of them empties MPP's pool and the film stops. */
-    while (p->nheld >= MBV_IN_FLIGHT) {
+    /* All out: give the interface a moment to hand one back. If it does
+     * not, this frame is the one that goes -- it was never on the panel. The
+     * held ones stay held: any of them may be what the panel is reading, and
+     * only the interface knows which. Releasing the oldest here, as this did,
+     * let MPP decode into a buffer that could still be on the television. */
+    if (p->nheld >= MBV_IN_FLIGHT)
+        wait_releases(vo, MBV_FULL_WAIT_MS);
+    if (p->nheld >= MBV_IN_FLIGHT) {
+        p->dropped_full++;
+        trace_frame(p, 'D', 0, mpi->pts);
         if (!p->said_full) {
-            MP_WARN(vo, "arayüz kareleri geri vermiyor\n");
+            MP_WARN(vo, "arayüz kareleri geri vermiyor; yeni kare atlanıyor\n");
             p->said_full = true;
         }
-        release_held(p, 0);
+        return VO_TRUE;
     }
 
     uint64_t id = p->next_id++;
@@ -744,13 +821,19 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
     if (!send_message(vo, message, fds, nplanes))
         return VO_FALSE;
 
+    trace_frame(p, 'S', id, mpi->pts);
+
     /* Our own reference, held until the interface says the panel is finished
      * with it. This is the whole of the buffer protocol on this side. */
     p->held[p->nheld++] = (struct held){
         .id = id,
         .image = mp_image_new_ref(mpi),
     };
-    p->said_full = false;
+    if (p->said_full) {
+        MP_WARN(vo, "arayüz kareleri yeniden geri veriyor (%llu kare atlandı)\n",
+                (unsigned long long)p->dropped_full);
+        p->said_full = false;
+    }
 
     send_subtitle(vo, mpi->pts);
     return VO_TRUE;
@@ -763,6 +846,36 @@ static void flip_page(struct vo *vo)
      * blank (display_sync above); otherwise it returns at once, as always. */
     if (display_sync(vo))
         wait_vblank(vo);
+}
+
+/* Between frames -- paused, or waiting for the next one -- mpv sleeps here,
+ * and the releases are read while it does. Read only in draw_frame, as they
+ * were, a paused film or a decoder waiting for a free buffer kept every frame
+ * the interface had already given back: MPP's pool emptied, the decoder
+ * waited for a buffer, and no frame came to draw, so none was ever read. */
+static void wait_events(struct vo *vo, int64_t until_time_ns)
+{
+    struct priv *p = vo->priv;
+    struct pollfd fds[2] = {
+        { .fd = p->wakeup_pipe[0], .events = POLLIN },
+        { .fd = p->lost ? -1 : p->fd, .events = POLLIN },
+    };
+    int64_t wait_ns = until_time_ns - mp_time_ns();
+    int64_t timeout_ns = MPCLAMP(wait_ns, 0, MP_TIME_S_TO_NS(10));
+    mp_poll(fds, 2, timeout_ns);
+    if (fds[0].revents & POLLIN)
+        mp_flush_wakeup_pipe(p->wakeup_pipe[0]);
+    if (fds[1].revents & (POLLIN | POLLHUP | POLLERR))
+        drain_releases(vo);
+}
+
+static void wakeup(struct vo *vo)
+{
+    struct priv *p = vo->priv;
+    if (p->wakeup_pipe[1] >= 0) {
+        ssize_t written = write(p->wakeup_pipe[1], &(char){0}, 1);
+        (void)written;
+    }
 }
 
 static int control(struct vo *vo, uint32_t request, void *data)
@@ -790,13 +903,30 @@ static void uninit(struct vo *vo)
     memset(message, 0, sizeof(message));
     put32(message + 0, MBV_MAGIC);
     put32(message + 4, MBV_STOP);
-    send_message(vo, message, NULL, 0);
+    /* The interface takes the plane off and then gives every frame back;
+     * until it has, any of them may still be on the panel. */
+    if (send_message(vo, message, NULL, 0)) {
+        int64_t until = mp_time_ns() + MP_TIME_MS_TO_NS(MBV_STOP_WAIT_MS);
+        while (p->nheld > 0 && !p->lost && mp_time_ns() < until)
+            wait_releases(vo, MBV_FULL_WAIT_MS);
+        if (p->nheld > 0)
+            MP_WARN(vo, "arayüz %d kareyi geri vermeden kapanılıyor\n", p->nheld);
+    }
 
     while (p->nheld > 0)
         release_held(p, 0);
+    if (p->dropped_full)
+        MP_WARN(vo, "arayüz dolu olduğu için %llu kare atlandı\n",
+                (unsigned long long)p->dropped_full);
 
     if (p->drm >= 0)
         close(p->drm);
+    if (p->trace)
+        fclose(p->trace);
+    for (int i = 0; i < 2; i++) {
+        if (p->wakeup_pipe[i] >= 0)
+            close(p->wakeup_pipe[i]);
+    }
     close(p->fd);
     p->fd = -1;
 }
@@ -810,6 +940,15 @@ const struct vo_driver video_out_mediabox = {
     .control = control,
     .draw_frame = draw_frame,
     .flip_page = flip_page,
+    .wait_events = wait_events,
+    .wakeup = wakeup,
     .uninit = uninit,
     .priv_size = sizeof(struct priv),
+    /* wakeup() may come from another thread before preinit has made the
+     * pipe; -1 is "not yet", where zero would be stdin. */
+    .priv_defaults = &(const struct priv){
+        .fd = -1,
+        .drm = -1,
+        .wakeup_pipe = {-1, -1},
+    },
 };

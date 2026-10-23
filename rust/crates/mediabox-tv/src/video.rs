@@ -1562,17 +1562,37 @@ mod tests {
 /// then each line is `<microseconds> <event> <a> <b>`:
 ///
 ///   A id replaced   a frame arrived (replaced: the waiting one it pushed out, or 0)
-///   C ui film       an atomic commit went (ui 1/0, film: the frame's id, or 0)
+///   C ui film       an atomic commit went (ui 1/0, film 1/0)
+///   c id 0          that commit carried film frame `id`
 ///   F               the commit in flight reached its vblank
+///   V seq at        ...the kernel's vblank: its sequence number and its own
+///                   timestamp, in microseconds
+///
+/// The time is CLOCK_MONOTONIC, the clock of the kernel's vblank timestamps
+/// and of the player's own trace (vo_mediabox, MEDIABOX_VO_TRACE), so a
+/// frame's PTS, its commit and the vblank that put it on the panel line up by
+/// id. A gap of more than one in `seq` between two film commits is a vblank
+/// the film missed.
 pub mod trace {
     use std::io::Write;
     use std::sync::Mutex;
-    use std::time::Instant;
+    use std::time::Duration;
 
     struct Trace {
-        start: Instant,
         out: std::io::BufWriter<std::fs::File>,
         lines: u32,
+    }
+
+    fn monotonic_us() -> u128 {
+        let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a valid clock id and a timespec on the stack.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+        now.tv_sec as u128 * 1_000_000 + now.tv_nsec as u128 / 1000
+    }
+
+    /// The vblank a page flip event reported.
+    pub fn vblank(sequence: u32, at: Duration) {
+        event('V', u64::from(sequence), at.as_micros() as u64);
     }
 
     static TRACE: Mutex<Option<Option<Trace>>> = Mutex::new(None);
@@ -1582,10 +1602,10 @@ pub mod trace {
         let slot = guard.get_or_insert_with(|| {
             let path = std::env::var_os("MEDIABOX_TV_FRAME_TRACE")?;
             let file = std::fs::File::create(path).ok()?;
-            Some(Trace { start: Instant::now(), out: std::io::BufWriter::new(file), lines: 0 })
+            Some(Trace { out: std::io::BufWriter::new(file), lines: 0 })
         });
         let Some(trace) = slot.as_mut() else { return };
-        let at = trace.start.elapsed().as_micros();
+        let at = monotonic_us();
         let _ = writeln!(trace.out, "{at} {kind} {a} {b}");
         trace.lines += 1;
         if trace.lines % 64 == 0 {

@@ -724,8 +724,12 @@ impl SplitDisplay {
         }
         loop {
             let mut events = self.kms.receive_events()?;
-            if events.any(|event| matches!(event, control::Event::PageFlip(_))) {
+            if let Some(flip) = events.find_map(|event| match event {
+                control::Event::PageFlip(flip) => Some(flip),
+                _ => None,
+            }) {
                 crate::video::trace::event('F', 1, 0);
+                crate::video::trace::vblank(flip.frame, flip.duration);
                 let old = {
                     let mut state = self.presentation.borrow_mut();
                     state.waiting_for_flip = false;
@@ -1067,13 +1071,17 @@ impl SplitDisplay {
     /// the waiting film frame if the interface is not about to.
     fn flip_done(&self, redraw_due: bool) {
         let finished = match self.kms.receive_events() {
-            Ok(mut events) => events.any(|event| matches!(event, control::Event::PageFlip(_))),
-            Err(_) => false,
+            Ok(mut events) => events.find_map(|event| match event {
+                control::Event::PageFlip(flip) => Some(flip),
+                _ => None,
+            }),
+            Err(_) => None,
         };
-        if !finished {
+        let Some(flip) = finished else {
             return;
-        }
+        };
         crate::video::trace::event('F', 0, 0);
+        crate::video::trace::vblank(flip.frame, flip.duration);
         let old = {
             let mut state = self.presentation.borrow_mut();
             state.waiting_for_flip = false;
