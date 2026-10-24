@@ -214,6 +214,8 @@ pub struct Live {
     pub favorites: BTreeSet<u16>,
     pub layer: Layer,
     pub banner_until: Option<Instant>,
+    /// The banner's large area (the description), as the Info key opens it.
+    pub banner_detail: bool,
     pub layer_until: Option<Instant>,
     pub keypad: Keypad,
     pub menu: MenuFocus,
@@ -247,6 +249,7 @@ impl Live {
             favorites: BTreeSet::new(),
             layer: Layer::None,
             banner_until: None,
+            banner_detail: false,
             layer_until: None,
             keypad: Keypad::default(),
             menu: MenuFocus::default(),
@@ -313,6 +316,17 @@ impl Live {
         self.layer = Layer::None;
         self.layer_until = None;
         self.banner_until = Some(at + BANNER_SHOW);
+        self.banner_detail = false;
+    }
+
+    /// The channel's picture is up. Sony holds the banner for the whole of
+    /// the tuning (its timeout is cancelled until the picture comes) and lets
+    /// it go a while after: the banner shown at the key stays for its full
+    /// time from here.
+    pub fn picture_arrived(&mut self, at: Instant) {
+        if self.banner_until.is_some() {
+            self.banner_until = Some(at + BANNER_SHOW);
+        }
     }
 
     // ------------------------------------------------------------ the guide
@@ -891,6 +905,7 @@ impl Live {
                     InputAction::Ok => {
                         if self.current.is_some() {
                             self.banner_until = Some(at + BANNER_SHOW);
+                            self.banner_detail = false;
                         }
                         self.menu = MenuFocus::default();
                         self.open_layer(Layer::Menu, at);
@@ -912,7 +927,14 @@ impl Live {
                         if self.current.is_none() {
                             return Effect::Nothing;
                         }
-                        self.banner_until = Some(at + BANNER_SHOW);
+                        // Info again over the large banner takes it away.
+                        if self.banner_shown(at) && self.banner_detail {
+                            self.banner_until = None;
+                            self.banner_detail = false;
+                        } else {
+                            self.banner_until = Some(at + BANNER_SHOW);
+                            self.banner_detail = true;
+                        }
                         Effect::Paint
                     }
                     _ => Effect::Nothing,

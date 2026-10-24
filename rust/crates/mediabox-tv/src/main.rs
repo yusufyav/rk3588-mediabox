@@ -2399,6 +2399,34 @@ impl App {
 
     /// Out of live television: the channel is stopped, and the screen under
     /// it -- the home screen -- is what is on the panel.
+    /// Take channel `sid`, already playing, as this interface's own live
+    /// television: the film screen it was adopted into goes, the Canlı TV
+    /// screen comes up on that channel.
+    fn adopt_live(&mut self, sid: u16, film: Option<u64>) {
+        eprintln!("mediabox-tv.live adopted channel {sid} this interface did not start");
+        if self.route() == Route::NowPlaying {
+            self.stack.pop();
+        }
+        self.now.film = false;
+        if self.live.is_none() {
+            self.open_live();
+        } else if self.route() != Route::Live {
+            self.open(Route::Live);
+        }
+        if let Some(live) = self.live.as_mut() {
+            live.current = Some(sid);
+            if !live.no_signal {
+                live.problem = None;
+            }
+        }
+        self.live_tuned = Some(sid);
+        if let Some(playing) = self.here.as_mut() {
+            playing.live = true;
+            playing.film = film;
+        }
+        self.paint();
+    }
+
     fn leave_live(&mut self) {
         if self.here.take().is_some() {
             spawn_here(HereCommand::Stop);
@@ -2457,6 +2485,15 @@ impl App {
         // plane's to say. A film this interface adopted learns its number
         // here; one it started learned it from the answer to starting it.
         let current = status.get("film").and_then(Value::as_u64);
+        // A live channel this interface did not start -- the web interface or
+        // mediaboxctl opened it -- is live television, not a film: it gets
+        // the Canlı TV screen and its keys, not the film's controls.
+        if let Some(sid) = status.get("live_service").and_then(Value::as_u64).and_then(|sid| u16::try_from(sid).ok())
+            && self.here.as_ref().is_some_and(|playing| playing.adopted && !playing.live)
+        {
+            self.adopt_live(sid, current);
+            return;
+        }
         let mut learned = false;
         if let Some(playing) = self.here.as_mut()
             && playing.film.is_none()
@@ -2473,13 +2510,45 @@ impl App {
             self.put_page_under_film(&item);
         }
         let film = self.here.as_ref().and_then(|playing| playing.film);
-        if let Some(finished) = ending_of(&status, film) {
+        // A live channel that is putting pictures out has not stopped,
+        // whatever the end of the player before it says: that end can come
+        // after the channel is back (measured 2026-10-24: the player
+        // restarted, the channel played again, and the old player's end
+        // then wrote "Yayın durdu." over the picture).
+        let live_playing = self.here.as_ref().is_some_and(|playing| playing.live)
+            && status.get("picture").and_then(Value::as_bool) == Some(true)
+            && status.get("live_service").and_then(Value::as_u64) == self.live_tuned.map(u64::from);
+        if let Some(finished) = ending_of(&status, film).filter(|_| !live_playing) {
             self.film_finished(&finished);
             return;
         }
         if current.is_none() || current != film {
             // Between films: nothing to draw from this answer.
             return;
+        }
+        // A channel opened in the running player has its first picture when
+        // the player says it puts pictures out on that channel -- read from
+        // every status for as long as it takes, not decided once when the
+        // channel was asked for. Measured 2026-10-24: asked during "no
+        // signal", the answer said no picture, nothing asked again, and the
+        // channel that then played was given up on after 30 s.
+        if let Some(playing) = self.here.as_mut()
+            && playing.live
+            && playing.continued
+            && !playing.seen
+            && status.get("picture").and_then(Value::as_bool) == Some(true)
+            && status.get("live_service").and_then(Value::as_u64) == self.live_tuned.map(u64::from)
+        {
+            eprintln!("mediabox-tv.live first frame {} ms after the key (status)", playing.asked.elapsed().as_millis());
+            playing.seen = true;
+            self.now.note = String::new();
+            if let Some(live) = self.live.as_mut() {
+                live.picture_arrived(Instant::now());
+                if !live.no_signal {
+                    live.problem = None;
+                }
+            }
+            self.paint();
         }
         // The receiver lost the carrier (the dish's cable out) and is locking
         // again: the picture goes black with the reference's words over it,
@@ -2647,7 +2716,21 @@ impl App {
         // told which device asked for it.
         if self.here.is_none() {
             let just_left = self.left_film.is_some_and(|at| at.elapsed() < LEFT_FILM_QUIET);
-            if self.handing_over || just_left || self.live.is_some() || !platform::video_showing() {
+            if self.handing_over || just_left || !platform::video_showing() {
+                return;
+            }
+            // Pictures on the plane under Canlı TV: a channel the control plane
+            // opened without this screen (a player restarted, the web
+            // interface) -- or one that came back after this screen gave up
+            // on it. Taken as live television, by its status (film_moved ->
+            // adopt_live), never with the film's controls over it. Before,
+            // with Canlı TV open nothing was adopted, and "Yayın durdu." stayed
+            // over a channel that played (measured 2026-10-24).
+            if self.live.is_some() {
+                eprintln!("mediabox-tv.live pictures on the plane this screen is not following");
+                self.here = Some(Playing { seen: true, adopted: true, ..Playing::new() });
+                self.now.film = false;
+                spawn_here_status();
                 return;
             }
             eprintln!("mediabox-tv.play adopted a film this interface did not start");
@@ -2705,9 +2788,19 @@ impl App {
             playing.seen = true;
             if first && playing.live {
                 eprintln!("mediabox-tv.live first frame {} ms after the key", playing.asked.elapsed().as_millis());
+                if let Some(live) = self.live.as_mut() {
+                    live.picture_arrived(Instant::now());
+                }
             }
             if first {
                 self.now.note = String::new();
+                // The picture is back: what was said over the black goes.
+                if playing.live
+                    && let Some(live) = self.live.as_mut()
+                    && !live.no_signal
+                {
+                    live.problem = None;
+                }
                 self.paint();
             }
             if self.now.pill_expired() {
@@ -2727,10 +2820,12 @@ impl App {
             return;
         }
         if !playing.seen {
-            // No signal is the tuner's state, shown over the black; the
-            // channel stays tuned until it locks or another is chosen.
-            let no_signal = playing.live && self.live.as_ref().is_some_and(|live| live.no_signal);
-            if no_signal || playing.asked.elapsed() < playing.grace {
+            // A live channel is never given up on by a clock: black with its
+            // banner while it opens, the receiver's own words when it has
+            // none ("Sinyal Yok"), as a television does (Sony BRAVIA: every
+            // message is the middleware's signal state, never a timeout).
+            // The channel stays tuned until it plays or another is chosen.
+            if playing.live || playing.asked.elapsed() < playing.grace {
                 return;
             }
             eprintln!("mediabox-tv.play here gave up: no frame in {:?}", playing.grace);
@@ -2763,8 +2858,23 @@ impl App {
         // A channel that stops has no place to keep: what the receiver said
         // is what is shown, over the black, and the channel keys still work.
         if self.live.is_some() {
-            let why = finished.get("message").and_then(Value::as_str).unwrap_or("Yayın durdu.").to_string();
-            self.leave_film(Some(why));
+            // The receiver's own reason (the USB link went, the service is
+            // not in the multiplex) is said; a player that merely ended is
+            // not news to the viewer -- the channel is opened again, black
+            // and banner, as any other change.
+            if let Some(why) = finished.get("message").and_then(Value::as_str).filter(|why| !why.is_empty()) {
+                self.leave_film(Some(why.to_string()));
+                return;
+            }
+            let current = self.live.as_ref().and_then(|live| live.current);
+            eprintln!("mediabox-tv.live the player ended without a reason; channel {current:?} opened again");
+            self.here = None;
+            if let Some(sid) = current {
+                if let Some(live) = self.live.as_mut() {
+                    live.tuning(sid, Instant::now());
+                }
+                self.tune_live(sid);
+            }
             return;
         }
         let notice = (outcome == "failed").then(|| {
@@ -5202,6 +5312,9 @@ impl App {
             window.set_live_banner_tag(
                 if channel.source == mediabox_core::LiveSource::Recording { "KAYIT" } else { "" }.into(),
             );
+            window.set_live_banner_clock(lv::clock(now).into());
+            window.set_live_banner_scrambled(channel.scrambled);
+            window.set_live_banner_detail(live.banner_detail);
         }
 
         // The number entry.
@@ -7756,6 +7869,9 @@ fn spawn_live_play(channel: mediabox_core::LiveChannel, opening: u64) {
                                             playing.asked.elapsed().as_millis()
                                         );
                                         playing.seen = true;
+                                        if let Some(live) = app.live.as_mut() {
+                                            live.picture_arrived(std::time::Instant::now());
+                                        }
                                     }
                                     app.paint();
                                 }

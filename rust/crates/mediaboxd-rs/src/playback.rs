@@ -522,8 +522,11 @@ impl Supervisor {
 
 /// How live television ended. It has no length to reach: the control plane
 /// ending it is stopped, its source ending by itself is what its process
-/// says, and its player stopping with no word from the source is the
-/// broadcast breaking off -- never "the end of the film".
+/// says, and its player stopping with no word from the source is a failure
+/// with nothing to say: the receiver did not report a reason, so none is
+/// made up ("Canlı yayın kesildi.", "Oynatıcı hata verdi." were), and the
+/// interface opens the channel again -- a television says only what its
+/// tuner says (Sony BRAVIA, measured 2026-10-24). Never "the end of a film".
 fn live_verdict(intent: Option<Intent>, source_end: Option<&SourceEnd>, signal: &Signal) -> (Outcome, Option<String>) {
     if intent.is_some() {
         return (Outcome::Stopped, None);
@@ -535,14 +538,7 @@ fn live_verdict(intent: Option<Intent>, source_end: Option<&SourceEnd>, signal: 
             Some(end.message.clone().unwrap_or_else(|| "Canlı yayın kesildi.".to_string())),
         ),
         (None, Signal::EndFile { reason, .. }) if !matches!(reason.as_str(), "eof" | "error") => (Outcome::Stopped, None),
-        (None, Signal::EndFile { reason, error }) if reason == "error" => (
-            Outcome::Failed,
-            Some(match error.as_deref().filter(|text| !text.is_empty()) {
-                Some(text) => format!("Oynatıcı hata verdi: {text}."),
-                None => "Oynatıcı hata verdi.".to_string(),
-            }),
-        ),
-        (None, _) => (Outcome::Failed, Some("Canlı yayın kesildi.".to_string())),
+        (None, _) => (Outcome::Failed, None),
     }
 }
 
@@ -1188,7 +1184,7 @@ mod tests {
             let film = supervisor.begin(live());
             let finished = supervisor.finish(film, signal).unwrap();
             assert_eq!(finished.outcome, Outcome::Failed);
-            assert!(finished.message.unwrap().contains("Canlı yayın"));
+            assert_eq!(finished.message, None, "no reason from the receiver, none made up");
         }
         // A film's source_ended is ignored: it has no live source.
         let film = supervisor.begin(start(PlayerKind::Here));

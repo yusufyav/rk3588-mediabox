@@ -67,15 +67,40 @@ component Thin inherits Text {
     font-weight: 200;
 }
 
-// res/layout/channel_banner.xml
+// A small outlined label beside the programme (KAYIT, ŞİFRELİ).
+component Badge inherits Rectangle {
+    in property <string> label;
+    property <length> dp: Dp.dp;
+    width: badge-text.preferred-width + 10 * dp;
+    height: 18 * dp;
+    border-radius: 2 * dp;
+    border-width: 1px;
+    border-color: #EEEEEE80;
+    badge-text := Text {
+        text: root.label;
+        color: #EEEEEE;
+        font-size: 11 * dp;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+// The channel banner (res/layout/channel_banner.xml's card). The channel is
+// what the viewer chose, so its name is always the first line, the largest
+// after the number; the programme on it comes below, with its time and how
+// far into it. The description only when asked for (the Info key).
 component Banner inherits Rectangle {
     in property <string> number;
     in property <string> name;
     in property <string> title;
     in property <string> time;
+    in property <string> clock;
     in property <float> progress: -1;
     in property <string> text;
     in property <string> tag;
+    in property <bool> scrambled;
+    in property <bool> detail;
     property <length> dp: Dp.dp;
 
     width: 696 * dp;
@@ -86,9 +111,9 @@ component Banner inherits Rectangle {
     drop-shadow-color: #00000080;
 
     inner := HorizontalLayout {
-        padding-top: 16 * dp;
+        padding-top: 14 * dp;
         padding-left: 16 * dp;
-        padding-right: 32 * dp;
+        padding-right: 24 * dp;
         padding-bottom: 14 * dp;
         spacing: 0;
 
@@ -100,40 +125,42 @@ component Banner inherits Rectangle {
         }
         VerticalLayout {
             spacing: 6 * dp;
-            Text {
-                text: root.title != "" ? root.title : root.name;
-                color: #EEEEEE;
-                font-size: 28 * dp;
-                font-weight: 300;
-                overflow: elide;
-                wrap: word-wrap;
-                max-height: 2 * 34 * dp;
-            }
+            alignment: start;
+
+            // The channel: always first.
             HorizontalLayout {
                 spacing: 12 * dp;
-                alignment: start;
-                if root.tag != "": Rectangle {
-                    width: tag-text.preferred-width + 10 * dp;
-                    height: 18 * dp;
-                    y: (parent.height - self.height) / 2;
-                    border-radius: 2 * dp;
-                    border-width: 1px;
-                    border-color: #EEEEEE80;
-                    tag-text := Text {
-                        text: root.tag;
-                        color: #EEEEEE;
-                        font-size: 11 * dp;
-                        font-weight: 600;
-                    }
-                }
-                if root.title != "": Text {
+                Text {
                     text: root.name;
                     color: #EEEEEE;
-                    font-size: 14 * dp;
-                    font-weight: 500;
+                    font-size: 28 * dp;
+                    font-weight: 300;
                     overflow: elide;
-                    max-width: 220 * dp;
                     vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: root.clock;
+                    color: #EEEEEE80;
+                    font-size: 14 * dp;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+            }
+
+            // The programme on it, its time and how far in.
+            if root.title != "" || root.tag != "" || root.scrambled: HorizontalLayout {
+                spacing: 12 * dp;
+                alignment: start;
+                if root.tag != "": Badge { label: root.tag; }
+                if root.scrambled: Badge { label: "ŞİFRELİ"; }
+                if root.title != "": Text {
+                    text: root.title;
+                    color: #EEEEEE;
+                    font-size: 16 * dp;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    max-width: 380 * dp;
                 }
                 if root.time != "": Text {
                     text: root.time;
@@ -141,27 +168,30 @@ component Banner inherits Rectangle {
                     font-size: 14 * dp;
                     vertical-alignment: center;
                 }
-                if root.progress >= 0: Rectangle {
-                    width: 60 * dp;
-                    height: 4 * dp;
-                    y: (parent.height - self.height) / 2;
-                    background: #EEEEEE4D;
+                if root.progress >= 0: VerticalLayout {
+                    alignment: center;
                     Rectangle {
-                        x: 0;
-                        width: parent.width * root.progress;
-                        height: 100%;
-                        background: #EEEEEE;
+                        width: 60 * dp;
+                        height: 4 * dp;
+                        background: #EEEEEE4D;
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * root.progress;
+                            height: 100%;
+                            background: #EEEEEE;
+                        }
                     }
                 }
             }
-            if root.text != "": Text {
-                width: 456 * dp;
+
+            // The description: with the Info key.
+            if root.detail && root.text != "": Text {
                 text: root.text;
                 color: #EEEEEE80;
-                font-size: 12 * dp;
+                font-size: 13 * dp;
                 wrap: word-wrap;
                 overflow: elide;
-                max-height: 3 * 17 * dp;
+                max-height: 4 * 18 * dp;
             }
         }
     }
@@ -542,6 +572,9 @@ export component LiveTv inherits Rectangle {
     in property <float> banner-progress: -1;
     in property <string> banner-text;
     in property <string> banner-tag;
+    in property <string> banner-clock;
+    in property <bool> banner-scrambled;
+    in property <bool> banner-detail;
 
     in property <bool> keypad-shown;
     in property <string> keypad-typed;
@@ -604,9 +637,12 @@ export component LiveTv inherits Rectangle {
         name: root.banner-name;
         title: root.banner-title;
         time: root.banner-time;
+        clock: root.banner-clock;
         progress: root.banner-progress;
         text: root.banner-text;
         tag: root.banner-tag;
+        scrambled: root.banner-scrambled;
+        detail: root.banner-detail;
     }
 
     if root.keypad-shown: Keypad {

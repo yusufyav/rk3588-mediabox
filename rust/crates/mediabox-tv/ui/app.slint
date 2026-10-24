@@ -309,6 +309,9 @@ export component MediaBoxWindow inherits Window {
     in property <float> live-banner-progress: -1;
     in property <string> live-banner-text;
     in property <string> live-banner-tag;
+    in property <string> live-banner-clock;
+    in property <bool> live-banner-scrambled;
+    in property <bool> live-banner-detail;
     in property <bool> live-keypad-shown;
     in property <string> live-keypad-typed;
     in property <[LiveKeypadRow]> live-keypad-rows;
@@ -894,6 +897,9 @@ export component MediaBoxWindow inherits Window {
             banner-progress: root.live-banner-progress;
             banner-text: root.live-banner-text;
             banner-tag: root.live-banner-tag;
+            banner-clock: root.live-banner-clock;
+            banner-scrambled: root.live-banner-scrambled;
+            banner-detail: root.live-banner-detail;
             keypad-shown: root.live-keypad-shown;
             keypad-typed: root.live-keypad-typed;
             keypad-rows: root.live-keypad-rows;

@@ -453,6 +453,13 @@ impl PlayerManager {
         if loaded {
             // The old file's end paused it (`--keep-open`); the new one plays.
             let _ = self.ask(json!({"command": ["set_property", "pause", false], "request_id": 24})).await;
+            // From here the player is on the new channel, picture or not: the
+            // status says so, and its `picture` is this channel's.
+            *self.live_origin.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            if let Some(current) = self.playing.lock().await.as_mut() {
+                current.content = Playback::Live { service_id };
+                current.title = title.clone();
+            }
         }
         let mut playing = false;
         // Another multiplex: the stream starts after the lock, and the picture
@@ -569,8 +576,19 @@ impl PlayerManager {
         )
         .unwrap_or(0.0);
 
+        // Whether the player is putting pictures out now. A live channel's
+        // first picture is read from here for as long as it takes, as Android's
+        // TV input says it (TvInputService.Session.notifyVideoAvailable),
+        // rather than decided once when the channel was asked for.
+        let picture = self
+            .ask(json!({"command": ["get_property", "core-idle"], "request_id": 8}))
+            .await
+            .and_then(|answer| answer.get("data").and_then(Value::as_bool))
+            .map(|idle| !idle);
+
         json!({
             "playing": playing.is_some() && position.is_some(),
+            "picture": picture,
             "source": playing.as_ref().and_then(|playing| match &playing.content {
                 Playback::Film { source, .. } => Some(source.clone()),
                 Playback::Live { .. } => None,

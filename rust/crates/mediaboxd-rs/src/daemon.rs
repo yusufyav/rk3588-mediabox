@@ -1144,7 +1144,12 @@ impl AppState {
         let switched = if warm {
             self.output.content_handover();
             self.stop_here_keeping_receiver(crate::playback::Intent::Replace).await;
-            match self.live.switch(service_id, &source, false, || starting.called_off()).await {
+            // A new FIFO for the new player, named in the same selection the
+            // receiver acts on: the name remembered here could be one the
+            // receiver no longer writes (measured 2026-10-24: the interface
+            // restarted, the receiver with it, and the player was started on
+            // live-83.ts while the receiver wrote live.ts -- no picture).
+            match self.live.switch(service_id, &source, true, || starting.called_off()).await {
                 Err(error) if error == crate::live::CALLED_OFF => return called_off(),
                 Ok(()) => true,
                 Err(error) => {
