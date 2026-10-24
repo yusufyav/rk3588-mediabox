@@ -25,11 +25,16 @@ mediaboxd-rs (no USB: DevicePolicy=closed)
   │    libusb-1.0 (dlopen) ─ IT9303 ─ AVL62X1 ─ RDA5815M ─ 13/18 V + 22 kHz
   │    EP 0x84 async bulk ─> Analyser ─> Selector(SID) ─> /run/mediabox-dvb/live.ts (FIFO)
   │    /run/mediabox-dvb/status.json  (state, end, integrity, USB, signal, cleanup)
-  └─ systemd-run mediabox-player.service  mpv --hwdec=rkmpp --vo=mediabox
-       MEDIABOX_PLAYER_LIVE=1: --demuxer-lavf-probe-info=nostreams
+  └─ systemd-run mediabox-player.service  MEDIABOX_PLAYER_LIVE=1
+       mediabox-live (default): tsdemux ─ mppvideodec / alsasink, one clock
+       mpv --hwdec=rkmpp --vo=mediabox (`mpv` in /var/lib/mediabox/live-engine):
+                               --demuxer-lavf-probe-info=nostreams
                                --vd-queue-enable=yes --vd-queue-max-samples=8 --vd-queue-max-secs=0.5
        dma-buf ─> mediabox-tv-ui ─> VOP2 Esmart0
 ```
+
+The player, and how other televisions do the same job:
+[live-player.md](live-player.md).
 
 A live film is typed apart from a film (`playback::Content::Live`,
 `player::Playback::Live`): no worker session, no account record, no Kodi

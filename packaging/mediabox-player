@@ -122,6 +122,26 @@ echo "mediabox-player: ses: $audio${sync:+ (görüntüye eşitli: $sync)}" >&2
 # commentary does not. Nothing here silences the decoder's real complaints.
 export mpp_log_level="${mpp_log_level:-3}"
 
+# Live television has a player of its own: mediabox-live, a broadcast's
+# transport stream demultiplexed and timed by GStreamer (tsdemux on the PCR,
+# one CLOCK_MONOTONIC for picture and sound), decoded by MPP (mppvideodec,
+# MediaBox's own build in the media runtime), shown on this same video plane
+# and heard on the sound plan's ALSA device. It answers the same control
+# socket in the same language, so the control plane drives either.
+#
+# mpv stays for comparison and as the way back: `mpv` in
+# /var/lib/mediabox/live-engine plays live television on mpv again.
+if [ "${MEDIABOX_PLAYER_LIVE:-0}" = 1 ]; then
+    engine="$(cat /var/lib/mediabox/live-engine 2>/dev/null || true)"
+    native=/opt/rk3588-mediabox/bin/mediabox-live
+    if [ "$engine" != mpv ] && [ -x "$native" ]; then
+        GST_PLUGIN_PATH="/opt/rk3588-mediabox/media-runtime/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
+        export GST_PLUGIN_PATH
+        echo "mediabox-player: canlı yayın: mediabox-live" >&2
+        exec "$native" "$URL"
+    fi
+fi
+
 # A socket the control plane can ask "where have you got to" on, which is what
 # makes handing the film to Kodi land on the same second rather than the start.
 ipc=""
