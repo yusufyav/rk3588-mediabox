@@ -951,6 +951,12 @@ pub struct Timing {
     pub pts_errors: u64,
     pub pts_max_interval_ms: f64,
     pub pes_starts: u64,
+    /// The programme clock as last received, seconds (PCR / 27 MHz): where
+    /// the broadcast is now, for how far behind it the player shows.
+    pub pcr_seconds: f64,
+    /// When that PCR was read, Unix seconds: status is written once a
+    /// second, so the clock is told with the moment it was true.
+    pub pcr_at: f64,
 }
 
 /// What `Timing` needs to remember between packets.
@@ -1011,6 +1017,10 @@ impl TimingState {
             && let Some(pcr) = pcr_of(p)
         {
             t.pcr_count += 1;
+            t.pcr_seconds = pcr as f64 / PCR_HZ;
+            t.pcr_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |since| since.as_secs_f64());
             if let Some(last) = self.last_pcr.replace(pcr) {
                 let delta = (pcr + PCR_WRAP - last) % PCR_WRAP;
                 let ms = delta as f64 / PCR_HZ * 1000.0;

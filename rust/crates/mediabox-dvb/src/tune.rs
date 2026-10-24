@@ -91,6 +91,8 @@ impl TuneParams {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TuneResult {
+    /// The last lock search gave up for a newer tune.
+    pub superseded: bool,
     pub firmware: Option<String>,
     /// The bridge firmware was loaded in this session (the device was COLD).
     pub firmware_loaded: bool,
@@ -173,15 +175,24 @@ fn with_repeater<T>(
 /// One whole session: bring the receiver up, lock, run `stream` while
 /// locked, and clean up whatever happened. `stop` ends it early at the next
 /// step boundary (and the stream itself, which watches it too).
+/// `keep_tuning`: the receiver serves a television (the control plane's
+/// warm receiver): a carrier that does not lock is not the end of it, the
+/// stream is told and the transponder tried again, as VDR's tuner thread
+/// (dvbdevice.c, cDvbTuner::Action: tsTuned times out into tsSet, for
+/// ever), tvheadend's frontend monitor and Android's tuner session
+/// (TunerSessionWorker: VIDEO_UNAVAILABLE_REASON_WEAK_SIGNAL, retry) do.
+/// Without it a carrier that does not lock ends the run (one-off tunes).
 pub fn run(
     bridge: &mut Bridge,
     firmware: &Firmware,
     params: &TuneParams,
+    keep_tuning: bool,
     stop: &AtomicBool,
+    superseded: &dyn Fn() -> bool,
     stream: impl FnMut(&mut Bridge, &mut Avl62x1, &TuneResult) -> Streamed,
 ) -> TuneResult {
     let mut res = TuneResult::default();
-    if let Err(error) = run_inner(bridge, firmware, params, stop, stream, &mut res) {
+    if let Err(error) = run_inner(bridge, firmware, params, keep_tuning, stop, superseded, stream, &mut res) {
         res.no_device |= error.is_no_device();
         bridge.log.line(format!("UNEXPECTED (cleanup attempted, nothing retried): {error}"));
         res.error.get_or_insert(error.to_string());
@@ -189,11 +200,14 @@ pub fn run(
     res
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_inner(
     bridge: &mut Bridge,
     firmware: &Firmware,
     params: &TuneParams,
+    keep_tuning: bool,
     stop: &AtomicBool,
+    superseded: &dyn Fn() -> bool,
     stream: impl FnMut(&mut Bridge, &mut Avl62x1, &TuneResult) -> Streamed,
     res: &mut TuneResult,
 ) -> Result<()> {
@@ -229,7 +243,7 @@ fn run_inner(
     let mut demod = Avl62x1::new([Scope::Agc, Scope::Lnb]);
     let guard = bridge::snapshot(bridge, GPIO2)?;
 
-    let staged = stages(bridge, &mut demod, firmware, params, stop, stream, res);
+    let staged = stages(bridge, &mut demod, firmware, params, keep_tuning, stop, superseded, stream, res);
     cleanup(bridge, &mut demod, res, &untouched_before);
     res.gpio_restored = Some(bridge::restore(bridge, &guard));
     res.cleanup_done = true;
@@ -258,12 +272,15 @@ fn stopping(stop: &AtomicBool, res: &mut TuneResult, bridge: &Bridge) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn stages(
     bridge: &mut Bridge,
     demod: &mut Avl62x1,
     firmware: &Firmware,
     params: &TuneParams,
+    keep_tuning: bool,
     stop: &AtomicBool,
+    superseded: &dyn Fn() -> bool,
     mut stream: impl FnMut(&mut Bridge, &mut Avl62x1, &TuneResult) -> Streamed,
     res: &mut TuneResult,
 ) -> Result<()> {
@@ -316,12 +333,14 @@ fn stages(
     let mut locked_at = 0i32;
     loop {
         steer_lnb(bridge, demod, params.lnb)?;
-        lock_carrier(bridge, demod, &params, stop, res)?;
+        res.superseded = false;
+        lock_carrier(bridge, demod, &params, stop, superseded, res)?;
         if res.fec_locked() && !relock {
             locked_at = res.search_offset_khz.unwrap_or(0);
         }
-        if relock && !res.fec_locked() && !stopping(stop, res, bridge) {
-            bridge.log.line("RELOCK: no carrier yet");
+        if (relock || keep_tuning) && !res.fec_locked() && !stopping(stop, res, bridge) {
+            // The stream reads the lock and asks for the next try itself.
+            bridge.log.line("NO LOCK: the stream waits and tries again");
         } else if !res.fec_locked() {
             if res.stopped.is_none() {
                 res.stopped = Some("no FEC lock".into());
@@ -393,7 +412,18 @@ fn steer_lnb(bridge: &mut Bridge, demod: &mut Avl62x1, control: Option<LnbContro
 
 /// HALT, then the remembered offset, the nominal IF and the search until one
 /// locks (`TuneParams::offsets`); each try a retune, not a reboot.
-fn lock_carrier(bridge: &mut Bridge, demod: &mut Avl62x1, params: &TuneParams, stop: &AtomicBool, res: &mut TuneResult) -> Result<()> {
+/// `superseded`: a newer tune has been asked for. The search gives up at
+/// once, as a tuner HAL must ("If previous tuning isn't completed, this call
+/// MUST stop previous tuning, and start a new tuning": Android's IFrontend
+/// .hal, tune), and the stream reads the newer one.
+fn lock_carrier(
+    bridge: &mut Bridge,
+    demod: &mut Avl62x1,
+    params: &TuneParams,
+    stop: &AtomicBool,
+    superseded: &dyn Fn() -> bool,
+    res: &mut TuneResult,
+) -> Result<()> {
     if !demod.halt(bridge)? {
         res.stopped = Some("HALT failed".into());
         return Ok(());
@@ -419,8 +449,8 @@ fn lock_carrier(bridge: &mut Bridge, demod: &mut Avl62x1, params: &TuneParams, s
             res.stopped = Some("ACQUIRE command failed".into());
             return Ok(());
         }
-        acquire(bridge, demod, params, stop, res)?;
-        if res.fec_locked() || res.stopped.is_some() {
+        acquire(bridge, demod, params, stop, superseded, res)?;
+        if res.fec_locked() || res.stopped.is_some() || res.superseded {
             break;
         }
     }
@@ -429,7 +459,14 @@ fn lock_carrier(bridge: &mut Bridge, demod: &mut Avl62x1, params: &TuneParams, s
 
 /// Poll as AVL_FE_LockChannel (10 ms steps, fec_lock); every 10th poll and
 /// at the end take a read-only sample.
-fn acquire(bridge: &mut Bridge, demod: &Avl62x1, params: &TuneParams, stop: &AtomicBool, res: &mut TuneResult) -> Result<()> {
+fn acquire(
+    bridge: &mut Bridge,
+    demod: &Avl62x1,
+    params: &TuneParams,
+    stop: &AtomicBool,
+    superseded: &dyn Fn() -> bool,
+    res: &mut TuneResult,
+) -> Result<()> {
     let budget = match params.lock_timeout_ms {
         None => avl62x1::fec_poll_budget(params.symbol_rate_ksps),
         Some(ms) => ms / 10,
@@ -446,6 +483,11 @@ fn acquire(bridge: &mut Bridge, demod: &Avl62x1, params: &TuneParams, stop: &Ato
         poll = n;
         if stop.load(Ordering::SeqCst) {
             res.stopped = Some("stop requested".into());
+            break;
+        }
+        if superseded() {
+            bridge.log.line(format!("ACQ given up at poll {n}: a newer tune was asked for"));
+            res.superseded = true;
             break;
         }
         bridge.delay(10);

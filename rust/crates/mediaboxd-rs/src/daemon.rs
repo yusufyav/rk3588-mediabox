@@ -1071,19 +1071,52 @@ impl AppState {
             && self.player.answers().await
         {
             self.player.begin_reload();
-            match self.live.switch(service_id, &source, true).await {
+            // A newer channel asked for while this one opens takes over at
+            // once, as Android's tuner session does (TunerSessionWorker:
+            // a tune drops what is pending and the middle ones are skipped
+            // "to change to the last requested channel quickly"); before,
+            // this one held the lock until its picture was up, and every
+            // channel pressed through was shown in turn.
+            match self.live.switch(service_id, &source, true, || starting.called_off()).await {
+                Err(error) if error == crate::live::CALLED_OFF => {
+                    self.player.end_reload();
+                    return called_off();
+                }
                 Ok(()) => {
                     let fifo = self.live.fifo().display().to_string();
                     let title = title.clone().filter(|title| !title.trim().is_empty());
-                    let picture = self.player.reload_live(&fifo, service_id, title).await;
+                    // No signal on this channel: nothing will come to wait for
+                    // a picture of; the player has the channel's stream open
+                    // and plays it when the receiver locks.
+                    let no_signal = || self.live.receiver_state().as_deref() == Some("no_signal");
+                    let Some(picture) = self
+                        .player
+                        .reload_live(&fifo, service_id, title, || starting.called_off() || no_signal())
+                        .await
+                    else {
+                        if starting.called_off() {
+                            return called_off();
+                        }
+                        self.playback.relabel_live(film, service_id);
+                        self.live.playing();
+                        return Response::success(json!({
+                            "playing": "here",
+                            "film": film,
+                            "live": service_id,
+                            "continued": true,
+                            "picture": false,
+                        }));
+                    };
                     if picture {
                         self.playback.relabel_live(film, service_id);
                         // The display follows a channel whose rate is not the
                         // last one's; the same rate sends nothing.
-                        if let Some(cadence) = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps)
-                            && let Err(why) = self.output.content_start(self.player.film(), cadence)
-                        {
-                            eprintln!("mediaboxd-rs: live channel {service_id}: display not matched: {why}");
+                        if let Some(cadence) = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps) {
+                            // In the background: a newer channel is not held
+                            // behind the television re-locking.
+                            let (player, output, film) =
+                                (Arc::clone(&self.player), Arc::clone(&self.output), self.player.film());
+                            tokio::spawn(async move { rematch_live(&player, &output, film, cadence).await });
                         }
                         self.live.playing();
                         return Response::success(json!({
@@ -1111,7 +1144,8 @@ impl AppState {
         let switched = if warm {
             self.output.content_handover();
             self.stop_here_keeping_receiver(crate::playback::Intent::Replace).await;
-            match self.live.switch(service_id, &source, false).await {
+            match self.live.switch(service_id, &source, false, || starting.called_off()).await {
+                Err(error) if error == crate::live::CALLED_OFF => return called_off(),
                 Ok(()) => true,
                 Err(error) => {
                     eprintln!("mediaboxd-rs: live channel change without a restart failed ({error}); starting the receiver again");
@@ -1140,6 +1174,43 @@ impl AppState {
             title: title.filter(|title| !title.trim().is_empty()),
             duration: None,
         };
+        // The output's mode first, the decoders after, as a set-top box (and
+        // Kodi) does. Started first and held while the display was matched,
+        // the player opened its sound device on the old mode, lost it with the
+        // mode change and either never got it back or, given it back late,
+        // played a second behind the broadcast for the rest of the channel:
+        // what it buffered while held (Plus, 2026-10-24). The channel's rate
+        // is the one it had last time, or what the receiver reads from the
+        // stream's SPS, which comes with the first GOP.
+        let film_next = self.player.film() + 1;
+        let mut cadence = self.live.known_rate(service_id).and_then(mediabox_core::Cadence::from_fps);
+        for _ in 0..30 {
+            if cadence.is_some() || starting.called_off() {
+                break;
+            }
+            cadence = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps);
+            if cadence.is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        if let Some(cadence) = cadence {
+            match self.output.content_start(film_next, cadence) {
+                Ok(chosen) if !chosen.applied => {
+                    for _ in 0..50 {
+                        if starting.called_off() || self.output.content_applied(film_next) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+                Ok(_) => {}
+                Err(why) => eprintln!("mediaboxd-rs: live channel {service_id}: display not matched: {why}"),
+            }
+        }
+        if starting.called_off() {
+            self.live.stop().await;
+            return called_off();
+        }
         let fifo = self.live.fifo().display().to_string();
         if let Err(error) = self.player.start(&fifo, 0, playing, self.output.display_sync(), None).await {
             self.live.stop().await;
@@ -2781,6 +2852,41 @@ async fn follow_live(
 ///
 /// Whatever happens, the film is let go: a player never stays held because
 /// the display could not be matched.
+/// The display matched again under a playing live channel. The mode change
+/// takes the HDMI sound device away ("[ao/alsa] Device lost") and mpv does
+/// not get it back by itself; its sound track is put off for the change and
+/// selected again after it, so the device opens on the mode that stays.
+pub(crate) async fn rematch_live(
+    player: &PlayerManager,
+    output: &crate::output::Output,
+    film: u64,
+    cadence: mediabox_core::Cadence,
+) {
+    use std::time::Duration;
+    let applied = match output.content_start(film, cadence) {
+        Ok(chosen) => chosen.applied,
+        Err(why) => {
+            eprintln!("mediaboxd-rs: film {film}: display not matched: {why}");
+            return;
+        }
+    };
+    if applied {
+        return;
+    }
+    let track = player.property("aid").await.unwrap_or_else(|| json!("auto"));
+    player.command(json!(["set_property", "aid", "no"])).await;
+    for _ in 0..50 {
+        if player.film() != film || output.content_applied(film) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    if player.film() == film {
+        player.command(json!(["set_property", "aid", track])).await;
+    }
+}
+
 /// Where a live channel's rate came from when it was remembered rather than
 /// read from the stream.
 const REMEMBERED_RATE: &str = "the rate the channel had last time";
@@ -2860,6 +2966,12 @@ async fn follow_film(
         }
     }
     match cadence {
+        // Live and already playing (not held): the display is matched with
+        // the sound put off for the mode change.
+        Some((cadence, from)) if live => {
+            eprintln!("mediaboxd-rs: film {film}: {} fps from {from}", cadence.label());
+            rematch_live(&player, &output, film, cadence).await;
+        }
         Some((cadence, from)) => {
             eprintln!("mediaboxd-rs: film {film}: {} fps from {from}", cadence.label());
             match output.content_start(film, cadence) {
@@ -2873,15 +2985,9 @@ async fn follow_film(
                         tokio::time::sleep(tick).await;
                     }
                     if output.content_applied(film) {
+                        // The television re-locks to the new mode; the live
+                        // player's sound is off until it is let go below.
                         tokio::time::sleep(Duration::from_millis(1500)).await;
-                        // The mode change re-trains HDMI and takes its ALSA
-                        // device away ("[ao/alsa] Device lost"); a live
-                        // player then waited for its sound with the picture
-                        // held: TRT HABER HD, seeking=yes, time-pos 0, until
-                        // the audio output was opened again (2026-10-23).
-                        if live {
-                            player.command(json!(["ao-reload"])).await;
-                        }
                     } else {
                         eprintln!("mediaboxd-rs: film {film}: the owner did not report the matched mode");
                     }
@@ -2915,9 +3021,7 @@ async fn follow_film(
         {
             if actual != *expected {
                 eprintln!("mediaboxd-rs: film {film}: the stream is {} fps, not the {} remembered", actual.label(), expected.label());
-                if let Err(why) = output.content_start(film, actual) {
-                    eprintln!("mediaboxd-rs: film {film}: display not matched: {why}");
-                }
+                rematch_live(&player, &output, film, actual).await;
             }
             confirm = None;
         }

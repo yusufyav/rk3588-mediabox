@@ -33,6 +33,9 @@ use tokio::process::Command;
 
 use crate::playback::SourceEnd;
 
+/// What a wait answers when a newer channel has taken over from it.
+pub const CALLED_OFF: &str = "yeni bir kanal istendi";
+
 pub const UNIT: &str = "mediabox-dvb.service";
 
 /// How long a warm receiver waits for the next player before it ends.
@@ -343,12 +346,17 @@ impl LiveManager {
             if inner.token.is_none()
                 || !satellite(Some(source))
                 || !satellite(inner.source.as_ref())
-                || !matches!(inner.lifecycle, Lifecycle::Playing | Lifecycle::Standby)
+                // Starting is a channel being put on: the receiver is up, and a
+                // newer channel retunes it rather than starting another.
+                || !matches!(inner.lifecycle, Lifecycle::Playing | Lifecycle::Standby | Lifecycle::Starting)
             {
                 return false;
             }
         }
-        matches!(self.receiver_state().as_deref(), Some("streaming" | "standby"))
+        // Without a signal the receiver is still up and tuned, and the next
+        // channel is a retune like any other (VDR keeps its tuner thread
+        // for every channel; a lost lock is a state of it).
+        matches!(self.receiver_state().as_deref(), Some("streaming" | "standby" | "no_signal" | "tuning"))
     }
 
     fn select(&self, want: Value) -> Result<(), String> {
@@ -362,8 +370,22 @@ impl LiveManager {
 
     /// Wait until the receiver says `done`, or has ended.
     async fn until(&self, within: Duration, done: impl Fn(&Value) -> bool) -> Result<(), String> {
+        self.until_or(within, done, || false).await
+    }
+
+    /// `until`, given up as soon as `called_off` says a newer request has
+    /// taken over: the answer is `CALLED_OFF`.
+    async fn until_or(
+        &self,
+        within: Duration,
+        done: impl Fn(&Value) -> bool,
+        called_off: impl Fn() -> bool,
+    ) -> Result<(), String> {
         let deadline = Instant::now() + within;
         loop {
+            if called_off() {
+                return Err(CALLED_OFF.into());
+            }
             if let Some(status) = self.read_status() {
                 if Self::final_of(&status).is_some() {
                     return Err("uydu alıcısı kapandı".into());
@@ -383,7 +405,17 @@ impl LiveManager {
     /// (`select.json`), and wait until it streams it. With `new_fifo`, the
     /// stream moves to a FIFO of its own for the player that is already
     /// reading, which opens it as its next file (`fifo()` says which).
-    pub async fn switch(&self, service_id: u16, source: &LiveSource, new_fifo: bool) -> Result<(), String> {
+    /// Another channel, without a restart. Given up with `CALLED_OFF` once
+    /// `called_off` says a newer channel was asked for: the receiver follows
+    /// whatever `select.json` says last, so waiting on for this one would
+    /// only hold the newer one back.
+    pub async fn switch(
+        &self,
+        service_id: u16,
+        source: &LiveSource,
+        new_fifo: bool,
+        called_off: impl Fn() -> bool,
+    ) -> Result<(), String> {
         let source = self.canonical_source(service_id, source);
         let source = &source;
         let LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } = *source else {
@@ -407,10 +439,16 @@ impl LiveManager {
         // A service of the multiplex tuned is a selector's restart; another
         // transponder is a lock, seconds at most.
         let within = Duration::from_secs(if retune { 8 } else { 8 });
-        self.until(within, |status| {
-            status.get("service_id").and_then(Value::as_u64) == Some(service_id as u64)
-                && status.get("state").and_then(Value::as_str) == Some("streaming")
-        })
+        self.until_or(
+            within,
+            // Streaming, or tuned with no signal: either is the receiver on
+            // this channel, and no signal is shown, not taken for a failure.
+            |status| {
+                status.get("service_id").and_then(Value::as_u64) == Some(service_id as u64)
+                    && matches!(status.get("state").and_then(Value::as_str), Some("streaming" | "no_signal"))
+            },
+            called_off,
+        )
         .await?;
         let mut inner = self.lock();
         inner.service_id = Some(service_id);

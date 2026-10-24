@@ -318,7 +318,12 @@ impl PlayerManager {
     ) -> Result<(), String> {
         self.stop().await;
         self.film.fetch_add(1, Ordering::SeqCst);
-        self.holding.store(true, Ordering::SeqCst);
+        // Live television is not held: the control plane matches the
+        // display before it starts the player (Daemon::play_live), and a
+        // held player buffers what the broadcast sends while it waits, then
+        // plays that far behind it.
+        let hold = playing.live().is_none();
+        self.holding.store(hold, Ordering::SeqCst);
         *self.live_origin.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.display_sync.store(display_sync, Ordering::SeqCst);
         // A socket left behind by a player that did not exit cleanly would be
@@ -372,7 +377,7 @@ impl PlayerManager {
             // moves, the display is matched to it, and only then is it let
             // go -- the television re-locks once, on the first frame, not
             // three seconds into the film with the sound already running.
-            .arg("--setenv=MEDIABOX_PLAYER_HOLD=1")
+            .arg(format!("--setenv=MEDIABOX_PLAYER_HOLD={}", u8::from(hold)))
             // "Oynatımı görüntüye eşitle" (OutputStatus::display_sync): the
             // launcher turns it into mpv's display-resample and no passthrough.
             .arg(format!(
@@ -432,7 +437,15 @@ impl PlayerManager {
     /// device stay as they are (mpv keeps the device between files of one
     /// format, `--gapless-audio=weak`), so the sound over HDMI is never
     /// stopped and started again. True once the new file plays.
-    pub async fn reload_live(&self, url: &str, service_id: u16, title: Option<String>) -> bool {
+    /// `None` once `called_off` says a newer channel was asked for: the
+    /// newer one's loadfile replaces this one, nothing waits for its picture.
+    pub async fn reload_live(
+        &self,
+        url: &str,
+        service_id: u16,
+        title: Option<String>,
+        called_off: impl Fn() -> bool,
+    ) -> Option<bool> {
         let loaded = self
             .ask(json!({"command": ["loadfile", url, "replace"], "request_id": 23}))
             .await
@@ -447,6 +460,10 @@ impl PlayerManager {
         // (2026-10-23), and the fallback booted the demodulator again: 10.9 s.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         while loaded && std::time::Instant::now() < deadline {
+            if called_off() {
+                self.end_reload();
+                return None;
+            }
             let idle = self.property("core-idle").await.and_then(|value| value.as_bool());
             let ended = self.property("eof-reached").await.and_then(|value| value.as_bool());
             if idle == Some(false) && ended != Some(true) {
@@ -461,7 +478,7 @@ impl PlayerManager {
             current.title = title;
         }
         self.end_reload();
-        playing
+        Some(playing)
     }
 
     /// How far into the film the player has got, in whole seconds.

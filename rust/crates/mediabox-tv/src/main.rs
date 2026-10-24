@@ -2727,7 +2727,10 @@ impl App {
             return;
         }
         if !playing.seen {
-            if playing.asked.elapsed() < playing.grace {
+            // No signal is the tuner's state, shown over the black; the
+            // channel stays tuned until it locks or another is chosen.
+            let no_signal = playing.live && self.live.as_ref().is_some_and(|live| live.no_signal);
+            if no_signal || playing.asked.elapsed() < playing.grace {
                 return;
             }
             eprintln!("mediabox-tv.play here gave up: no frame in {:?}", playing.grace);

@@ -373,6 +373,10 @@ struct OutputQueue {
     /// What waits for the next reader is the service before a switch: let
     /// it go.
     forget_pending: AtomicBool,
+    /// A reader has come and what waited for it is more than its start:
+    /// the writer asks (START_ASKED) for the channel from its last access
+    /// point instead, and the stream answers (`start_from_access_point`).
+    start: std::sync::atomic::AtomicU8,
     /// Since when no reader has had the FIFO open (`reopen` writers).
     reader_gone: Mutex<Option<Instant>>,
     /// Let the reader go: what follows is for the next one, on `fifo`.
@@ -402,6 +406,7 @@ impl Writer {
             closed: AtomicBool::new(false),
             abort: AtomicBool::new(false),
             forget_pending: AtomicBool::new(false),
+            start: std::sync::atomic::AtomicU8::new(START_IDLE),
             reader_gone: Mutex::new(sink.is_none().then(Instant::now)),
             drop_reader: AtomicBool::new(false),
             fifo: Mutex::new(reopen),
@@ -454,6 +459,26 @@ impl Writer {
                                 sink = Some(Sink::Fifo(file));
                                 gone(None);
                                 shared.stats.lock().unwrap_or_else(|p| p.into_inner()).readers += 1;
+                                // Live, the reader starts where the broadcast
+                                // is, not where it was when the receiver began:
+                                // what waited is replaced by the channel from
+                                // its last access point, if the stream has one
+                                // to give (Plus, 2026-10-24: a cold start
+                                // handed mpv a second of backlog and it played
+                                // that second behind for the whole channel).
+                                if !pending.is_empty() {
+                                    shared.start.store(START_ASKED, Ordering::SeqCst);
+                                    let until = Instant::now() + Duration::from_millis(200);
+                                    while shared.start.load(Ordering::SeqCst) == START_ASKED && Instant::now() < until {
+                                        std::thread::sleep(Duration::from_millis(5));
+                                    }
+                                    if shared.start.swap(START_IDLE, Ordering::SeqCst) == START_GIVEN {
+                                        pending.clear();
+                                        pending_bytes = 0;
+                                        // This chunk is in what was given.
+                                        continue;
+                                    }
+                                }
                                 let mut lost = false;
                                 while let Some(waiting) = pending.pop_front() {
                                     pending_bytes -= waiting.len();
@@ -568,6 +593,23 @@ impl Writer {
         }
     }
 
+    /// A reader has come and waits for its start (see `OutputQueue::start`).
+    fn wants_start(&self) -> bool {
+        self.queue.start.load(Ordering::SeqCst) == START_ASKED
+    }
+
+    /// Answer `wants_start`: `from` is the channel from its last access
+    /// point; empty, the reader gets what waited for it.
+    fn start_from_access_point(&self, from: Vec<u8>) {
+        if from.is_empty() {
+            self.queue.start.store(START_NONE, Ordering::SeqCst);
+            return;
+        }
+        self.discard();
+        self.send(from);
+        self.queue.start.store(START_GIVEN, Ordering::SeqCst);
+    }
+
     /// Forget what is queued: it is the service before a switch.
     fn discard(&self) {
         let mut state = self.queue.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -671,6 +713,11 @@ fn open_fifo(path: &Path, timeout: Duration, log: &Log, created: impl FnOnce()) 
     }
 }
 
+const START_IDLE: u8 = 0;
+const START_ASKED: u8 = 1;
+const START_GIVEN: u8 = 2;
+const START_NONE: u8 = 3;
+
 /// What a warm receiver keeps for a reader that has not come yet: a few
 /// seconds of one service.
 const PENDING_LIMIT: usize = 16 << 20;
@@ -716,6 +763,13 @@ struct Pipeline {
     relock_tsid: Option<u16>,
     /// When the next retune of a lost signal is due.
     retune_at: Option<Instant>,
+    /// After a retune to another transponder: the transport stream of the
+    /// one before. Read again, the tuner has not moved (VDR's sdt.c: "We
+    /// expect a change in NID/TID", tsWrong) and is tuned again.
+    left_tsid: Option<u16>,
+    /// The select.json modification read last, for the tuner to know a
+    /// newer one has come while it searches (`tune::run`, `superseded`).
+    select_seen: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     analyser: Analyser,
     selector: Selector,
     writer: Writer,
@@ -1035,6 +1089,7 @@ impl Pipeline {
             return Order::Nothing;
         }
         select.modified = modified;
+        *self.select_seen.lock().unwrap_or_else(|p| p.into_inner()) = modified;
         let Some(wanted) = std::fs::read_to_string(&select.path)
             .ok()
             .and_then(|text| serde_json::from_str::<Select>(&text).ok())
@@ -1079,6 +1134,10 @@ impl Pipeline {
         if service_id != self.service_id || retune.is_some() {
             log.line(format!("SELECT service {} -> {service_id}", self.service_id));
             self.service_id = service_id;
+            // Another channel: what was being waited for was the last one's.
+            self.relock_tsid = None;
+            self.retune_at = None;
+            self.left_tsid = retune.as_ref().and(self.selector.selection().transport_stream_id);
             self.selected_at = Instant::now();
             self.selector = Selector::new(service_id);
             self.writer.discard();
@@ -1169,6 +1228,16 @@ pub fn run(options: Options, log: &Log) -> Status {
         standby_first: options.start_standby,
         relock_tsid: None,
         retune_at: None,
+        left_tsid: None,
+        // What is there at the start is no newer tune: the first read of it
+        // is follow_select's to make.
+        select_seen: std::sync::Arc::new(std::sync::Mutex::new(
+            options
+                .status
+                .as_ref()
+                .and_then(|status| std::fs::metadata(status.with_file_name("select.json")).ok())
+                .and_then(|meta| meta.modified().ok()),
+        )),
         fifo: match &options.output {
             Output::Fifo(path) => Some(path.clone()),
             _ => None,
@@ -1364,8 +1433,30 @@ fn play_satellite(
         log.line(format!("source: satellite, session {} {params:?}", reporter.status.sessions));
         let mut bridge = Bridge::new(&*session, log, &clock, []);
         let mut outcome = None;
-        let res = tune::run(&mut bridge, &firmware, params, &STOP, |bridge, demod, tuned| {
+        let keep_tuning = options.hold_reader.is_some();
+        // A select.json written after the one read last: a newer channel.
+        let select_path = pipeline.select.as_ref().map(|select| select.path.clone());
+        let select_seen = std::sync::Arc::clone(&pipeline.select_seen);
+        let superseded = move || {
+            select_path.as_ref().is_some_and(|path| {
+                let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                modified.is_some() && modified != *select_seen.lock().unwrap_or_else(|p| p.into_inner())
+            })
+        };
+        let res = tune::run(&mut bridge, &firmware, params, keep_tuning, &STOP, &superseded, |bridge, demod, tuned| {
             reporter.status.tune = Some(TuneSummary::from(tuned));
+            // Tuned and not locked: no signal, until the lock says otherwise.
+            // Given up for a newer channel is not that: the stream reads it.
+            if !tuned.fec_locked() && !tuned.superseded && reporter.status.state != State::NoSignal {
+                log.line("SIGNAL NONE: not locked after the tune; trying again in 10 s");
+                pipeline.relock_tsid = None;
+                pipeline.retune_at = Some(Instant::now() + Duration::from_secs(10));
+                reporter.state(State::NoSignal, log);
+            } else if tuned.fec_locked() && reporter.status.state == State::NoSignal && pipeline.relock_tsid.is_none() {
+                log.line("SIGNAL BACK: locked after the tune");
+                pipeline.retune_at = None;
+                reporter.state(State::Streaming, log);
+            }
             let (streamed, ended) = stream(session.clone(), bridge, demod, options, pipeline, reporter, log);
             outcome = ended;
             streamed
@@ -1471,6 +1562,11 @@ fn stream(
                 }
             }
         }
+        if pipeline.writer.wants_start() {
+            let from = pipeline.rap.as_ref().map(|rap| rap.replay(pipeline.service_id)).unwrap_or_default();
+            log.line(format!("READER: starts from the last access point ({} B)", from.len()));
+            pipeline.writer.start_from_access_point(from);
+        }
         // Nobody has read for the hold: standby, as if asked.
         if stream.is_some()
             && pipeline.tkgs_started.is_none()
@@ -1502,6 +1598,20 @@ fn stream(
         // Found again: the carrier is the channel's when its PAT names the
         // transport stream the channel was on; another one is no signal
         // either, and is tuned away from.
+        if let Some(left) = pipeline.left_tsid
+            && let Some(got) = pipeline.analyser.integrity().transport_stream_id
+        {
+            if got == left
+                && let Some(tuned) = pipeline.tuned.clone()
+            {
+                log.line(format!("RETUNE: still on transport stream {got}, the one left; tuning again"));
+                pipeline.analyser = Analyser::new();
+                retune = Some(tuned);
+                relock = true;
+                break None;
+            }
+            pipeline.left_tsid = None;
+        }
         if let Some(want) = pipeline.relock_tsid
             && let Some(got) = pipeline.analyser.integrity().transport_stream_id
         {
@@ -1569,7 +1679,11 @@ fn stream(
             }
             None => {}
         }
-        if let Some(failed) = check_service(pipeline, options, since) {
+        // Without a signal the service cannot be found; that is no signal,
+        // not a service missing from the multiplex.
+        if reporter.status.state != State::NoSignal
+            && let Some(failed) = check_service(pipeline, options, since)
+        {
             break Some(failed);
         }
         // The demodulator, asked between chunks on this thread while the
