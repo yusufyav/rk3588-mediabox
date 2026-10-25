@@ -57,9 +57,13 @@ Back closes what is up, and with nothing up leaves.
 
 Channels are numbered and placed on their own transponders by Türksat's TKGS
 table (PID 0x1FF5, table 0xA7). “TV ayarları > Kanal listesini güncelle” asks
-the already prepared receiver to retune to 12380 V 27500 (the transponder the Kanky application reads it from), collect every long
-section, atomically keep the result in `/var/lib/mediabox/live-guide.json`,
-and return to standby (or the channel that was playing). SDT names and EIT
+the running receiver -- or, with no channel playing, one started for the
+table and stopped after it -- to retune to 12380 V 27500 (the transponder the
+Kanky application reads it from), collect every long section, atomically keep
+the result in `/var/lib/mediabox/live-guide.json`, and return to the channel
+that was playing. No receiver runs while nobody watches live television: it
+is stopped, cleanup and all, when live television is left, because the LNB
+can be shared with another tuner. SDT names and EIT
 events (present/following and schedule, PID 0x12) remain per multiplex in the
 same store. TKGS `free_CA_mode` marks a channel before tuning; the receiver's
 `selection.scrambled_packets` measurement confirms it while selected.

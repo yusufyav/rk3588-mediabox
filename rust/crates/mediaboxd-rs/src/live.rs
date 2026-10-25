@@ -92,7 +92,8 @@ pub enum Lifecycle {
     /// The player is on it.
     Playing,
     Stopping,
-    /// Up, booted and locked, its stream stopped: nobody is watching.
+    /// Up, booted and locked, its stream stopped: reading TKGS for
+    /// `update_tkgs` while no channel plays.
     Standby,
     /// It ended without being asked to; `failure` says why.
     Failed,
@@ -119,12 +120,7 @@ pub struct LiveManager {
     paths: LivePaths,
     inner: Mutex<Inner>,
     starts: AtomicU64,
-    /// When preparing the receiver last failed: not tried again for a while.
-    prepare_failed: Mutex<Option<Instant>>,
 }
-
-/// How long a failed preparation waits before the next.
-const PREPARE_RETRY: Duration = Duration::from_secs(600);
 
 /// What the receiver's ending means to the viewer.
 fn describe(end: &str, detail: Option<&str>) -> String {
@@ -160,7 +156,6 @@ impl LiveManager {
                 fifos: 0,
             }),
             starts: AtomicU64::new(0),
-            prepare_failed: Mutex::new(None),
         }
     }
 
@@ -368,12 +363,8 @@ impl LiveManager {
             .map_err(|error| format!("alıcıya istek yazılamadı: {error}"))
     }
 
-    /// Wait until the receiver says `done`, or has ended.
-    async fn until(&self, within: Duration, done: impl Fn(&Value) -> bool) -> Result<(), String> {
-        self.until_or(within, done, || false).await
-    }
-
-    /// `until`, given up as soon as `called_off` says a newer request has
+    /// Wait until the receiver says `done`, or has ended; given up as soon
+    /// as `called_off` says a newer request has
     /// taken over: the answer is `CALLED_OFF`.
     async fn until_or(
         &self,
@@ -459,27 +450,6 @@ impl LiveManager {
         Ok(())
     }
 
-    /// Nobody is watching: the receiver stops its stream and keeps its
-    /// demodulator booted and locked. A receiver that cannot is stopped.
-    pub async fn standby(&self) {
-        let up = {
-            let inner = self.lock();
-            inner.token.is_some() && matches!(inner.source, Some(LiveSource::Satellite { .. }))
-        };
-        let ready = up && matches!(self.receiver_state().as_deref(), Some("streaming" | "standby"));
-        if ready
-            && self.select(json!({"kind": "standby"})).is_ok()
-            && self
-                .until(Duration::from_secs(2), |status| status.get("state").and_then(Value::as_str) == Some("standby"))
-                .await
-                .is_ok()
-        {
-            self.set(Lifecycle::Standby);
-            return;
-        }
-        self.stop().await;
-    }
-
     /// Retune the already running receiver and read TKGS without restarting
     /// its process or reloading the demodulator patch.
     pub async fn read_tkgs(&self) -> Result<Value, String> {
@@ -523,42 +493,6 @@ impl LiveManager {
             }));
         }
         result
-    }
-
-    /// Make the receiver ready before anybody watches, as a television's
-    /// tuner is: booted and locked on the first satellite multiplex known,
-    /// in standby. Only when the receiver is plugged in and no receiver runs
-    /// (one that went with the interface leaves only its token behind).
-    pub async fn prepare(&self) -> bool {
-        if !receiver_plugged_in()
-            || matches!(self.lifecycle(), Lifecycle::Starting | Lifecycle::Playing | Lifecycle::Stopping)
-            || self.prepare_failed.lock().unwrap_or_else(|p| p.into_inner()).is_some_and(|at| at.elapsed() < PREPARE_RETRY)
-            || Self::unit_active().await
-            || !interface_active().await
-        {
-            return false;
-        }
-        let ready_source = LiveSource::Satellite {
-            frequency_khz: 12_380_000,
-            symbol_rate_ksps: 27_500,
-            polarisation: SatellitePolarisation::Vertical,
-        };
-        let service_id = self.stored_guide()
-            .and_then(|guide| guide.multiplex(&ready_source)?.services.first().map(|service| service.service_id))
-            .unwrap_or(0);
-        let source = ready_source;
-        match self.start_with(service_id, &source, true).await {
-            Ok(()) => {
-                self.set(Lifecycle::Standby);
-                eprintln!("mediaboxd-rs: live receiver prepared in standby on {source:?}");
-                true
-            }
-            Err(error) => {
-                eprintln!("mediaboxd-rs: live receiver not prepared: {error}");
-                *self.prepare_failed.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
-                false
-            }
-        }
     }
 
     pub fn playing(&self) {
@@ -690,29 +624,6 @@ impl LiveManager {
             "receiver": receiver.or_else(|| inner.last.clone()),
         })
     }
-}
-
-/// Whether the interface the receiver's unit is bound to is up: started
-/// without it, the receiver would be stopped at once.
-async fn interface_active() -> bool {
-    Command::new("systemctl")
-        .args(["is-active", "--quiet", "mediabox-tv-ui.service"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|status| status.success())
-}
-
-/// Whether the Kanky Link-4K is on the USB bus: read from sysfs, which this
-/// daemon may read although it may not open the device.
-fn receiver_plugged_in() -> bool {
-    let Ok(devices) = std::fs::read_dir("/sys/bus/usb/devices") else { return false };
-    devices.flatten().any(|device| {
-        let read = |name: &str| std::fs::read_to_string(device.path().join(name)).unwrap_or_default();
-        read("idVendor").trim() == "23e2" && read("idProduct").trim() == "5270"
-    })
 }
 
 // ------------------------------------------------------------------ guide
@@ -1137,7 +1048,28 @@ impl LiveManager {
     }
 
     pub async fn update_tkgs(&self) -> Result<Value, String> {
-        let value = self.read_tkgs().await?;
+        // No channel playing, no receiver: one is started on the TKGS
+        // multiplex for the table, and stopped -- cleanup and all -- once it
+        // is read. None is kept running for it.
+        let started = self.lock().token.is_none();
+        if started {
+            let source = LiveSource::Satellite {
+                frequency_khz: 12_380_000,
+                symbol_rate_ksps: 27_500,
+                polarisation: SatellitePolarisation::Vertical,
+            };
+            let service_id = self
+                .stored_guide()
+                .and_then(|guide| guide.multiplex(&source)?.services.first().map(|service| service.service_id))
+                .unwrap_or(0);
+            self.start_with(service_id, &source, true).await?;
+            self.set(Lifecycle::Standby);
+        }
+        let value = self.read_tkgs().await;
+        if started {
+            self.stop().await;
+        }
+        let value = value?;
         let receiver: ReceiverTkgs = serde_json::from_value(value).map_err(|error| format!("TKGS sonucu okunamadı: {error}"))?;
         let mut stored = self.stored_guide().unwrap_or_default();
         stored.absorb_tkgs(receiver, now_utc());

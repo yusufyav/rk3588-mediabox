@@ -227,18 +227,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio: Arc::new(mediaboxd_rs::audio::Audio::system()),
     });
     // A receiver a previous daemon left running is nobody's now, and nor is
-    // the player on its stream: no film record survives a restart.
+    // the player on its stream: no film record survives a restart. No
+    // receiver is started until live television asks for one: one kept
+    // ready powers the LNB with nobody watching (see `Daemon::stop_here_with`).
     {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
             if state.live.sweep().await {
                 state.player.stop().await;
-            }
-            // Then the receiver is kept ready, as a television's tuner is:
-            // at boot, after the interface restarts, when it is plugged in.
-            loop {
-                state.live.prepare().await;
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
     }

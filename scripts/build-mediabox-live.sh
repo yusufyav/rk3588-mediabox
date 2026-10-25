@@ -12,6 +12,8 @@
 #      appliance, against MediaBox's own MPP in the media runtime -- the same
 #      library mpv and Kodi decode with, found through an RPATH as the player's
 #      is (see build-mediabox-player.sh). Debian has neither MPP nor this.
+#      MediaBox's patches to it are in packaging/gstreamer-rockchip and are
+#      applied on the pinned revision.
 #   3. mediabox-live itself, cross-compiled here against the appliance's
 #      libraries (the sysroot build-mediabox-tv.sh keeps), as the interface is.
 #
@@ -42,6 +44,8 @@ mediabox_ssh "test -e '$media_prefix/lib/pkgconfig/rockchip_mpp.pc'" || {
 }
 
 say "GStreamer packages and mppvideodec on $MEDIABOX_TARGET"
+mediabox_ssh "rm -rf /var/tmp/gstreamer-rockchip-patches && mkdir -p /var/tmp/gstreamer-rockchip-patches"
+mediabox_scp "$here"/packaging/gstreamer-rockchip/*.patch "$MEDIABOX_TARGET:/var/tmp/gstreamer-rockchip-patches/"
 mediabox_ssh "bash -s" <<REMOTE
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -58,7 +62,11 @@ if [ ! -d "\$src/.git" ]; then
   git clone -q --filter=blob:none -b gstreamer-rockchip "$gst_rockchip_url" "\$src"
 fi
 git -C "\$src" fetch -q origin gstreamer-rockchip || true
-git -C "\$src" checkout -q "$gst_rockchip_rev"
+git -C "\$src" checkout -q -f "$gst_rockchip_rev"
+for patch in /var/tmp/gstreamer-rockchip-patches/*.patch; do
+  git -C "\$src" apply "\$patch"
+done
+rm -rf /var/tmp/gstreamer-rockchip-patches
 rm -rf "\$src/build"
 PKG_CONFIG_PATH="$media_prefix/lib/pkgconfig" \
   meson setup "\$src/build" "\$src" \

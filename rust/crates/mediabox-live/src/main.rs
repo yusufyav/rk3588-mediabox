@@ -106,6 +106,7 @@ fn main() {
     }
 
     let (commands, inbox) = mpsc::channel::<(Command, Option<mpsc::SyncSender<Result<(), String>>>)>();
+    let shared = Arc::new(Shared::default());
     {
         let commands = commands.clone();
         std::thread::spawn(move || {
@@ -150,7 +151,6 @@ fn main() {
         render_delay_ms: env_u32("MEDIABOX_LIVE_RENDER_DELAY_MS", 0),
         max_lateness_ms: env_u32("MEDIABOX_LIVE_MAX_LATENESS_MS", 20),
     };
-    let shared = Arc::new(Shared::default());
     let fail = {
         let commands = commands.clone();
         move |why: Option<String>| {
@@ -217,6 +217,7 @@ fn main() {
                     Command::Aid(aid) => engine.set_aid(aid),
                     Command::Volume { gain, muted } => engine.set_volume(gain, muted),
                     Command::AudioDelay(seconds) => engine.set_audio_delay(seconds),
+                    Command::ReloadSound => engine.reopen_audio_sink(),
                     Command::Fail(why) => {
                         eprintln!("mediabox-live: {why}");
                         failure = Some(why);
@@ -341,6 +342,8 @@ fn stats(engine: &Engine, shared: &Shared, plane: &plane::Plane) -> Value {
     let info = shared.info.lock().unwrap_or_else(|p| p.into_inner()).clone();
     json!({
         "frames": shared.frames.load(Ordering::Relaxed),
+        "decoded": shared.decoded.load(Ordering::Relaxed),
+        "out_of_order": shared.out_of_order.load(Ordering::Relaxed),
         "late_dropped": shared.late.load(Ordering::Relaxed),
         "full_dropped": plane.dropped_full(),
         "held": plane.held(),

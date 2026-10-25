@@ -5,7 +5,8 @@
 //! (rust/crates/mediaboxd-rs/src/player.rs and playback.rs): `loadfile` for a
 //! channel opened in the running player, `get_property` for where it is and
 //! whether it shows the channel, `observe_property eof-reached`, `aid`,
-//! `volume`/`mute`, `audio-delay`, `quit`. Only what is done is answered
+//! `volume`/`mute`, `audio-delay`, `ao-reload` after a display mode change,
+//! `quit`. Only what is done is answered
 //! "success": a property this player does not have is "property
 //! unavailable", a command it does not carry out an error, and a channel that
 //! cannot be opened answers with why.
@@ -26,6 +27,9 @@ pub enum Command {
     Aid(Option<usize>),
     Volume { gain: Option<f64>, muted: Option<bool> },
     AudioDelay(f64),
+    /// mpv's `ao-reload`: the sound device opened again, on the display
+    /// mode that is on now.
+    ReloadSound,
     Quit,
 }
 
@@ -204,6 +208,7 @@ fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, comm
             let paused = query("pause").and_then(|value| value.as_bool()).unwrap_or(false);
             (run(commands, Command::Pause(!paused)), None)
         }
+        "ao-reload" => (run(commands, Command::ReloadSound), None),
         "quit" => {
             let _ = commands.send((Command::Quit, None));
             ("success".into(), None)

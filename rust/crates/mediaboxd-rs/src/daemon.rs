@@ -1097,11 +1097,12 @@ impl AppState {
                         Ok(()) => {
                             self.playback.relabel_live(film, service_id);
                             // The display follows a channel whose rate is not
-                            // the last one's; the same rate sends nothing. Not
-                            // waited for: a newer channel is not held behind
-                            // the television re-locking.
+                            // the last one's; the same rate sends nothing. In
+                            // the background: a newer channel is not held
+                            // behind the television re-locking.
                             if let Some(cadence) = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps) {
-                                rematch_live(&self.output, self.player.film(), cadence);
+                                let (player, output, film) = (Arc::clone(&self.player), Arc::clone(&self.output), self.player.film());
+                                tokio::spawn(async move { rematch_live(&player, &output, film, cadence).await });
                             }
                             self.live.playing();
                             return Response::success(json!({
@@ -1173,13 +1174,30 @@ impl AppState {
         // what it buffered while held (Plus, 2026-10-24). The channel's rate
         // is the one it had last time, or what the receiver reads from the
         // stream's SPS, which comes with the first GOP.
+        //
+        // Waited for while the receiver comes up (its boot, the lock), then
+        // for up to 3 s of stream: nothing is lost by it, since the player
+        // shows nothing before the first key frame and the SPS comes with
+        // it. Given up on after 3 s in all, a channel's mode changed under
+        // its first picture (TRT ULTRA, HEVC, cold, 2026-10-25).
         let film_next = self.player.film() + 1;
         let mut cadence = self.live.known_rate(service_id).and_then(mediabox_core::Cadence::from_fps);
-        for _ in 0..30 {
+        let mut streaming_since: Option<std::time::Instant> = None;
+        for _ in 0..200 {
             if cadence.is_some() || starting.called_off() {
                 break;
             }
             cadence = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps);
+            let coming_up = matches!(
+                self.live.receiver_state().as_deref(),
+                Some("starting" | "waiting_for_player" | "tuning" | "reconnecting")
+            );
+            if cadence.is_none()
+                && !coming_up
+                && streaming_since.get_or_insert_with(std::time::Instant::now).elapsed() > std::time::Duration::from_secs(3)
+            {
+                break;
+            }
             if cadence.is_none() {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
@@ -1637,11 +1655,14 @@ impl AppState {
         // receiver alone (`playback::follow_mpv`).
         let stopped = self.player.stop().await;
         // Live television: the receiver goes with its player, and is waited
-        // for -- its cleanup switches the LNB off before anything else starts.
-        // Live television stopped: the receiver waits in standby, booted and
-        // locked, so the next time is a tune and not a boot.
+        // for -- its cleanup (22 kHz off, the LNB pins restored, MPEG out
+        // off, the demodulator halted, the USB interface released) runs
+        // before anything else starts. It is not kept in standby: booted and
+        // locked, it went on powering the LNB with nobody watching, and the
+        // LNB is shared, through a power-pass splitter, with the
+        // television's own tuner (2026-10-25).
         if live || (!keep_receiver && stopped.as_ref().is_some_and(|playing| playing.live().is_some())) {
-            self.live.standby().await;
+            self.live.stop().await;
         }
         match (film, &stopped) {
             (Some(film), _) => {
@@ -2813,12 +2834,35 @@ async fn follow_live(
 }
 
 /// The display matched again under a playing live channel. The mode change
-/// takes the HDMI sound device away ("Device lost"); mediabox-live opens it
-/// again by itself, on the mode that stays (its bus error on the sound sink),
-/// and nothing has to be done to the player here.
-pub(crate) fn rematch_live(output: &crate::output::Output, film: u64, cadence: mediabox_core::Cadence) {
-    if let Err(why) = output.content_start(film, cadence) {
-        eprintln!("mediaboxd-rs: film {film}: display not matched: {why}");
+/// takes the HDMI sound device away, and nothing says so: measured
+/// 2026-10-25, TRT ULTRA's mode changed under it, alsasink posted no error
+/// and the sound stayed off. Once the mode is on and the television has
+/// locked to it, the player opens its sound device again (`ao-reload`); the
+/// picture is not touched.
+pub(crate) async fn rematch_live(
+    player: &PlayerManager,
+    output: &crate::output::Output,
+    film: u64,
+    cadence: mediabox_core::Cadence,
+) {
+    use std::time::Duration;
+    match output.content_start(film, cadence) {
+        Ok(chosen) if chosen.applied => return,
+        Ok(_) => {}
+        Err(why) => {
+            eprintln!("mediaboxd-rs: film {film}: display not matched: {why}");
+            return;
+        }
+    }
+    for _ in 0..50 {
+        if player.film() != film || output.content_applied(film) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    if player.film() == film && !player.command(json!(["ao-reload"])).await {
+        eprintln!("mediaboxd-rs: film {film}: the player did not open its sound again after the mode change");
     }
 }
 
@@ -2930,7 +2974,7 @@ async fn follow_film(
         // the sound put off for the mode change.
         Some((cadence, from)) if live => {
             eprintln!("mediaboxd-rs: film {film}: {} fps from {from}", cadence.label());
-            rematch_live(&output, film, cadence);
+            rematch_live(&player, &output, film, cadence).await;
         }
         Some((cadence, from)) => {
             eprintln!("mediaboxd-rs: film {film}: {} fps from {from}", cadence.label());
@@ -2981,7 +3025,7 @@ async fn follow_film(
         {
             if actual != *expected {
                 eprintln!("mediaboxd-rs: film {film}: the stream is {} fps, not the {} remembered", actual.label(), expected.label());
-                rematch_live(&output, film, actual);
+                rematch_live(&player, &output, film, actual).await;
             }
             confirm = None;
         }

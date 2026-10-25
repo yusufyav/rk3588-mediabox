@@ -67,6 +67,10 @@ pub struct Shared {
     pub eof: AtomicBool,
     pub paused: AtomicBool,
     pub frames: AtomicU64,
+    /// Frames out of the decoder, this channel's and the ones before.
+    pub decoded: AtomicU64,
+    /// Frames not shown because they were not after the one before.
+    pub out_of_order: AtomicU64,
     pub late: AtomicU64,
     pub audio_buffers: AtomicU64,
     /// Running time minus the PTS of the frame just sent, ns: how far behind
@@ -103,6 +107,80 @@ struct Branch {
     generation: u64,
     elements: Arc<Mutex<Vec<gst::Element>>>,
     pads: Arc<Mutex<Vec<(gst::Element, gst::Pad)>>>,
+}
+
+/// A channel's streams as the demultiplexer finds them, and when its sound
+/// may start: with its picture, as a receiver starts both. Sound comes out of the demultiplexer at once and the picture only
+/// at its first access point, so left to itself the sound played first and
+/// the picture joined it seconds later (measured 2026-10-25, every channel;
+/// a Sony BRAVIA starts both together). Until the first key frame is
+/// known, sound is not passed; after, only from that frame's time on, which
+/// both sinks keep on the one clock.
+struct Programme {
+    opened: Instant,
+    /// Sound has started; how many of its buffers were not played before.
+    sounding: AtomicBool,
+    held: AtomicU64,
+    /// The audio streams met so far, in PMT order.
+    audio_order: Mutex<usize>,
+    /// A picture stream is played (the first one; others are drained).
+    video_taken: AtomicBool,
+    /// The PTS of the channel's first key frame.
+    picture: Mutex<Option<u64>>,
+    /// The programme has no picture (a radio service): its sound waits for
+    /// nothing.
+    no_picture: AtomicBool,
+    /// When sound was first held back: a picture that never comes (its
+    /// stream scrambled, say) does not keep the sound away for good.
+    held_since: Mutex<Option<Instant>>,
+}
+
+/// How long sound waits for a picture that does not come.
+const PICTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+impl Programme {
+    fn new() -> Self {
+        Self {
+            opened: Instant::now(),
+            sounding: AtomicBool::new(false),
+            held: AtomicU64::new(0),
+            audio_order: Mutex::new(0),
+            video_taken: AtomicBool::new(false),
+            picture: Mutex::new(None),
+            no_picture: AtomicBool::new(false),
+            held_since: Mutex::new(None),
+        }
+    }
+
+    /// Whether a sound buffer at `pts` is played.
+    fn sound(&self, pts: Option<u64>) -> bool {
+        if self.sounding.load(Ordering::SeqCst) {
+            return true;
+        }
+        let why = if self.no_picture.load(Ordering::SeqCst) {
+            Some("görüntüsüz servis")
+        } else {
+            match *self.picture.lock().unwrap_or_else(|p| p.into_inner()) {
+                Some(first) if pts.is_none_or(|pts| pts >= first) => Some("ilk anahtar karenin zamanından"),
+                Some(_) => None,
+                None => {
+                    let mut since = self.held_since.lock().unwrap_or_else(|p| p.into_inner());
+                    (since.get_or_insert_with(Instant::now).elapsed() >= PICTURE_WAIT).then_some("görüntü gelmedi")
+                }
+            }
+        };
+        let Some(why) = why else {
+            self.held.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+        self.sounding.store(true, Ordering::SeqCst);
+        eprintln!(
+            "mediabox-live: ses başlıyor ({why}), açılıştan {} ms sonra; önceki {} ses tamponu çalınmadı",
+            self.opened.elapsed().as_millis(),
+            self.held.load(Ordering::Relaxed)
+        );
+        true
+    }
 }
 
 /// The FIFO being read, and the branch its stream goes into.
@@ -343,6 +421,10 @@ impl Engine {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let Some(buffer) = sample.buffer() else { return Ok(gst::FlowSuccess::Ok) };
                     let pts = buffer.pts().map(|pts| pts.nseconds()).unwrap_or(0);
+                    if buffer.offset_end() != shared.generation.load(Ordering::SeqCst) {
+                        trace.event('M', 0, pts / 1000);
+                        return Ok(gst::FlowSuccess::Ok);
+                    }
                     // Described again for every channel, not only when the caps
                     // change: opening the same kind of channel again reset
                     // what the control socket reports (size 0x0, no rate)
@@ -362,8 +444,8 @@ impl Engine {
                             info.fps = found.fps;
                             info.interlaced = Some(found.interlace.clone());
                             eprintln!(
-                                "mediabox-live: görüntü {}x{} {} {:?} fps, {}",
-                                found.width, found.height, found.format, found.fps, found.interlace
+                                "mediabox-live: görüntü {}x{} {} {:?} fps, {}; ekrana {}x{} oranında, yanlardan {} sütun kırpık",
+                                found.width, found.height, found.format, found.fps, found.interlace, found.display.0, found.display.1, found.crop_x
                             );
                         }
                     }
@@ -376,6 +458,7 @@ impl Engine {
                         && pts <= shown_pts
                     {
                         trace.event('M', 0, pts / 1000);
+                        shared.out_of_order.fetch_add(1, Ordering::Relaxed);
                         return Ok(gst::FlowSuccess::Ok);
                     }
                     last = Some((generation, pts));
@@ -502,8 +585,15 @@ impl Engine {
         source.link(&demux).map_err(|e| e.to_string())?;
 
         let weak = Arc::downgrade(self);
-        let audio_order = Arc::new(Mutex::new(0usize));
-        let video_taken = Arc::new(AtomicBool::new(false));
+        let programme = Arc::new(Programme::new());
+        {
+            let programme = Arc::clone(&programme);
+            demux.connect_no_more_pads(move |_| {
+                if !programme.video_taken.load(Ordering::SeqCst) {
+                    programme.no_picture.store(true, Ordering::SeqCst);
+                }
+            });
+        }
         {
             let elements = Arc::clone(&elements);
             let pads = Arc::clone(&pads);
@@ -513,7 +603,7 @@ impl Engine {
                     engine.discard(pad, &elements);
                     return;
                 }
-                if let Err(error) = engine.stream(generation, pad, &elements, &pads, &audio_order, &video_taken) {
+                if let Err(error) = engine.stream(generation, pad, &elements, &pads, &programme) {
                     eprintln!("mediabox-live: {}: {error}", pad.name());
                     engine.discard(pad, &elements);
                     // Without its picture the channel is not played: said,
@@ -565,8 +655,7 @@ impl Engine {
         pad: &gst::Pad,
         elements: &Arc<Mutex<Vec<gst::Element>>>,
         pads: &Arc<Mutex<Vec<(gst::Element, gst::Pad)>>>,
-        audio_order: &Mutex<usize>,
-        video_taken: &AtomicBool,
+        programme: &Arc<Programme>,
     ) -> Result<(), String> {
         let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
         let Some(structure) = caps.structure(0) else {
@@ -575,7 +664,7 @@ impl Engine {
         let name = structure.name().as_str();
         let version = structure.get::<i32>("mpegversion").ok();
         if name.starts_with("video/") {
-            if video_taken.swap(true, Ordering::SeqCst) {
+            if programme.video_taken.swap(true, Ordering::SeqCst) {
                 self.discard(pad, elements);
                 return Ok(());
             }
@@ -589,6 +678,41 @@ impl Engine {
                 }
             };
             let parser = make(parser)?;
+            // What the broadcaster says of the picture's framing (AFD, bar
+            // data), said when it changes: a 4:3 frame can carry a 16:9
+            // picture.
+            if let Some(out) = parser.static_pad("src") {
+                let said: Mutex<Option<String>> = Mutex::new(None);
+                out.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                    let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
+                    let afd = buffer.meta::<gst_video::VideoAFDMeta>().map(|meta| format!("{:?}", meta.afd()));
+                    let bar = buffer.meta::<gst_video::VideoBarMeta>().map(|meta| {
+                        format!("{} {} {}", if meta.is_letterbox() { "üst/alt" } else { "sol/sağ" }, meta.bar_data1(), meta.bar_data2())
+                    });
+                    let now = format!("AFD {} çubuk {}", afd.as_deref().unwrap_or("yok"), bar.as_deref().unwrap_or("yok"));
+                    let mut said = said.lock().unwrap_or_else(|p| p.into_inner());
+                    if said.as_deref() != Some(now.as_str()) {
+                        eprintln!("mediabox-live: çerçeve: {now}");
+                        *said = Some(now);
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
+            // The first key frame says when the channel starts.
+            if let Some(out) = parser.static_pad("src") {
+                let programme = Arc::clone(programme);
+                out.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                    let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
+                    if buffer.flags().contains(gst::BufferFlags::DELTA_UNIT) {
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    if let Some(pts) = buffer.pts() {
+                        programme.picture.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(pts.nseconds());
+                        return gst::PadProbeReturn::Remove;
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
             let decoder = make(&self.options.video_decoder)?;
             // MPP marks a frame interlaced, and starts its deinterlacer, only
             // when the parser is not in fast mode -- ffmpeg-rockchip turns it
@@ -599,15 +723,22 @@ impl Engine {
             }
             // A frame the decoder hands over after a newer channel was asked
             // for is the old channel's, whatever it says: never shown, never
-            // counted as the new one's first.
+            // counted as the new one's first. The ones it let through carry
+            // their channel (`offset_end`), for the sink to check again: a
+            // frame already on its way when the channel changed was shown
+            // and counted as the next channel's first (measured 2026-10-25,
+            // CEM TV's 1920x1080 frame "0 ms" into TV 5).
             if let Some(out) = decoder.static_pad("src") {
                 let shared = Arc::clone(&self.shared);
-                out.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                    if shared.generation.load(Ordering::SeqCst) == generation {
-                        gst::PadProbeReturn::Ok
-                    } else {
-                        gst::PadProbeReturn::Drop
+                out.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                    if shared.generation.load(Ordering::SeqCst) != generation {
+                        return gst::PadProbeReturn::Drop;
                     }
+                    shared.decoded.fetch_add(1, Ordering::Relaxed);
+                    if let Some(buffer) = info.buffer_mut() {
+                        buffer.make_mut().set_offset_end(generation);
+                    }
+                    gst::PadProbeReturn::Ok
                 });
             }
             self.chain(pad, &[parser, decoder], &self.video_selector, elements, pads)?;
@@ -619,7 +750,7 @@ impl Engine {
             return Ok(());
         }
         let order = {
-            let mut order = audio_order.lock().unwrap_or_else(|p| p.into_inner());
+            let mut order = programme.audio_order.lock().unwrap_or_else(|p| p.into_inner());
             *order += 1;
             *order - 1
         };
@@ -656,6 +787,13 @@ impl Engine {
         let passthrough = passthrough_codec == Some(AudioCodec::Ac3)
             && audio.passthrough.contains(&AudioCodec::Ac3)
             && audio.device.is_some();
+        {
+            let programme = Arc::clone(programme);
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                let pts = info.buffer().and_then(|buffer| buffer.pts()).map(|pts| pts.nseconds());
+                if programme.sound(pts) { gst::PadProbeReturn::Ok } else { gst::PadProbeReturn::Drop }
+            });
+        }
         let mut chain = vec![make(parser)?];
         if passthrough {
             let head = self.head(pad, &chain, elements, false)?;
@@ -1185,11 +1323,20 @@ struct Described {
     width: u32,
     height: u32,
     display: (u32, u32),
+    /// Columns left off at the left and again at the right (SD blanking).
+    crop_x: u32,
     colour: u32,
     eotf: u8,
     fps: Option<f64>,
     interlace: String,
 }
+
+/// The columns at each side of a 720-sample standard-definition line that
+/// are not picture: ITU-R BT.601 samples 720, the 4:3 or 16:9 picture is
+/// the 704 (EBU: 702, 52 us) in the middle, and the rest is horizontal
+/// blanking, to be left off when shown. Shown, TRT BELGESEL's 576i had a
+/// dark strip at the edge where a television's own tuner shows none.
+const SD_BLANKING_COLUMNS: u32 = 8;
 
 const fn fourcc(code: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*code)
@@ -1222,11 +1369,32 @@ fn describe(caps: &gst::CapsRef) -> Option<Described> {
     // mpv's mp_image_params_get_dsize: the larger side is stretched.
     let par = info.par();
     let (pn, pd) = (par.numer().max(1) as u64, par.denom().max(1) as u64);
-    let display = if pn > pd {
+    let mut display = if pn > pd {
         ((u64::from(width) * pn / pd) as u32, height)
     } else {
         (width, (u64::from(height) * pd / pn) as u32)
     };
+    // The aspect a stream signals is the picture's, the 704 middle columns
+    // of a 720-wide SD line: the blanking at its sides is left off.
+    let crop_x = if width == 720 && matches!(info.format(), gst_video::VideoFormat::Nv12 | gst_video::VideoFormat::Nv16) {
+        SD_BLANKING_COLUMNS
+    } else {
+        0
+    };
+    // A picture signalled 4:3 fills the 16:9 panel widened, uncut: a
+    // television's "Full" ("enlarges the picture horizontally to fill the
+    // screen when the original source is 4:3", Sony BRAVIA). Measured
+    // against its HD simulcast on the same shot (TRT BELGESEL, 2026-10-25):
+    // the SD 576i carries the whole 16:9 picture squeezed into its 4:3
+    // frame. Widened uncut it matched the HD picture best (SSIM 0.868 on
+    // the static set); with any rows cut off it matched worse (8 rows:
+    // 0.697), Kodi's Wide Zoom (cut, partly widened) 0.652, and shown 4:3
+    // with bars 0.477.
+    let aspect = f64::from(display.0) / f64::from(display.1.max(1));
+    if (aspect - 4.0 / 3.0).abs() < 0.04 {
+        display = (height * 16 / 9, height);
+    }
+
     let fps = info.fps();
     let fps = (fps.numer() > 0 && fps.denom() > 0).then(|| fps.numer() as f64 / fps.denom() as f64);
     Some(Described {
@@ -1235,6 +1403,7 @@ fn describe(caps: &gst::CapsRef) -> Option<Described> {
         width,
         height,
         display,
+        crop_x,
         colour: encoding | (full << 4) | (u32::from(eotf) << 8),
         eotf,
         fps,
@@ -1243,13 +1412,12 @@ fn describe(caps: &gst::CapsRef) -> Option<Described> {
 }
 
 fn picture(found: &Described, buffer: &gst::BufferRef) -> Option<Picture> {
-    let meta = buffer.meta::<gst_video::VideoMeta>();
-    let meta = meta?;
+    let meta = buffer.meta::<gst_video::VideoMeta>()?;
     let (planes, offsets, strides) = (meta.n_planes() as usize, meta.offset(), meta.stride());
     let planes = planes.min(4);
     let mut picture = Picture {
         fourcc: found.fourcc,
-        width: found.width,
+        width: found.width - 2 * found.crop_x,
         height: found.height,
         planes,
         fds: [-1; 4],
@@ -1266,8 +1434,10 @@ fn picture(found: &Described, buffer: &gst::BufferRef) -> Option<Picture> {
         let dmabuf = memory.downcast_memory_ref::<gst_allocators::DmaBufMemory>()?;
         picture.fds[plane] = dmabuf.fd();
         // The plane's offset inside its own memory, plus where that memory
-        // starts inside the dma-buf.
-        picture.offsets[plane] = (skip + memory.offset()) as u32;
+        // starts inside the dma-buf, plus the columns cut off its left: one
+        // byte a column in either plane of NV12 and NV16 (the chroma's two
+        // bytes cover two columns).
+        picture.offsets[plane] = (skip + memory.offset()) as u32 + found.crop_x;
         picture.pitches[plane] = strides[plane] as u32;
     }
     Some(picture)

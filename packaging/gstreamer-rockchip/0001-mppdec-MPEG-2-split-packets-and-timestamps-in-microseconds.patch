@@ -1,0 +1,177 @@
+Subject: [PATCH] mppdec: MPEG-2 -- split its packets, give its timestamps in microseconds
+
+Measured on a DVB-S 576i MPEG-2 broadcast (TRT BELGESEL) on RK3588, against
+the same recording decoded by ffmpeg in software and by ffmpeg-rockchip on
+the same MPP.
+
+Split. A field-coded picture's two fields come from mpegvideoparse in one
+buffer (355 buffers for 463 pictures), and MPP's m2vd, unsplit, decodes one
+picture a packet: the second field was never decoded, the next picture
+found the last one still open ("miss match field order", 104 times in
+12 s) and was marked in error, and with errors ignored its blocks reached
+the screen. MPP_DEC_SET_PARSER_SPLIT_MODE has m2vd find the pictures in the
+packet itself: no mismatch, no frame in error, 700 frames out of the
+deinterlacer where there were 460.
+
+Microseconds. m2vd times every picture from its GOP's first PTS and the
+picture's temporal_reference, reading that PTS as microseconds (or 90 kHz):
+pts * 27 on its 27 MHz clock (m2vd_alloc_frame). This element handed it
+nanoseconds, so pictures came out 40 us apart instead of 40 ms, the
+deinterlacer timed fields 20 us apart, and the matching in
+gst_mpp_dec_get_frame() reused one frame for several outputs. In
+microseconds, as ffmpeg's rkmppdec gives them (AV_TIME_BASE), MPP's times
+are the pictures' own, in display order, and each field its own; they are
+used as they come.
+
+A frame timed at or before the one output last -- a live stream started
+from its last access point begins with such -- is dropped rather than
+finished. Finished, GstVideoDecoder took it for reordered output
+(prepare_finish_frame sets reordered_output for good) and replaced every
+later frame's time with its oldest pending input's, so the two fields of
+a picture came out with one time again.
+
+---
+diff --git a/gst/rockchipmpp/gstmppdec.c b/gst/rockchipmpp/gstmppdec.c
+index 6ff00a6382c2..7068e165e934 100644
+--- a/gst/rockchipmpp/gstmppdec.c
++++ b/gst/rockchipmpp/gstmppdec.c
+@@ -241,6 +241,7 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
+   self->mpi->reset (self->mpp_ctx);
+   self->task_ret = GST_FLOW_OK;
+   self->decoded_frames = 0;
++  self->last_out_pts = GST_CLOCK_TIME_NONE;
+ 
+   /* Clear pending frames */
+   frames = gst_video_decoder_get_frames (decoder);
+@@ -278,6 +279,8 @@ gst_mpp_dec_start (GstVideoDecoder * decoder)
+ 
+   /* Prefer using MPP PTS */
+   self->use_mpp_pts = TRUE;
++  self->pts_in_us = FALSE;
++  self->last_out_pts = GST_CLOCK_TIME_NONE;
+   self->mpp_delta_pts = 0;
+ 
+   g_mutex_init (&self->mutex);
+@@ -372,9 +375,21 @@ gst_mpp_dec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
+   GST_DEBUG_OBJECT (self, "setting format: %" GST_PTR_FORMAT, state->caps);
+ 
+   /* The MPP m2vd's PTS is buggy */
+-  if (self->mpp_type == MPP_VIDEO_CodingMPEG2)
++  if (self->mpp_type == MPP_VIDEO_CodingMPEG2) {
+     self->use_mpp_pts = FALSE;
+ 
++    /* It is not, given the unit it reads: m2vd times each picture from its
++     * GOP's first PTS and its temporal_reference, taking that PTS as
++     * microseconds (or 90 kHz) -- pts * 27 on its 27 MHz clock
++     * (m2vd_alloc_frame). Given nanoseconds, its pictures came out 40 us
++     * apart instead of 40 ms, the deinterlacer timed fields 20 us apart,
++     * and the matching below threw frames away: a broadcast's 576i played
++     * 18 frames a second of 50. In microseconds, as ffmpeg's rkmppdec
++     * gives it (AV_TIME_BASE), its times are the pictures' own, in display
++     * order, and each field its own; they are used as they come. */
++    self->pts_in_us = TRUE;
++  }
++
+   if (self->input_state) {
+     if (gst_caps_is_strictly_equal (self->input_state->caps, state->caps))
+       return TRUE;
+@@ -391,6 +406,21 @@ gst_mpp_dec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
+     self->mpi->control (self->mpp_ctx, MPP_DEC_SET_PARSER_FAST_MODE,
+         &self->fast_mode);
+ 
++    /* MPEG-2: a field-coded picture's two fields come in one buffer from
++     * mpegvideoparse, and MPP's m2vd, unsplit, decodes one picture a
++     * packet: the second field was never decoded, the next picture found
++     * the last one open ("miss match field order") and was marked in
++     * error, and with errors ignored its blocks reached the screen.
++     * Measured on a DVB-S 576i broadcast: 355 buffers for 463 pictures,
++     * 104 mismatches. Split, MPP finds the pictures in the packet itself
++     * (MPP_DEC_SET_PARSER_SPLIT_MODE, to be set before mpp_init()). */
++    if (self->mpp_type == MPP_VIDEO_CodingMPEG2) {
++      guint32 split = 1;
++
++      self->mpi->control (self->mpp_ctx, MPP_DEC_SET_PARSER_SPLIT_MODE,
++          &split);
++    }
++
+     if (mpp_init (self->mpp_ctx, MPP_CTX_DEC, self->mpp_type)) {
+       GST_ERROR_OBJECT (self, "failed to init mpp ctx");
+       return FALSE;
+@@ -656,6 +686,10 @@ gst_mpp_dec_get_frame (GstVideoDecoder * decoder, GstClockTime pts)
+   gboolean is_first_frame = !self->decoded_frames;
+   gint i;
+ 
++  /* MPP's time in microseconds (MPEG-2, see set_format) */
++  if (self->pts_in_us && GST_CLOCK_TIME_IS_VALID (pts) && pts)
++    pts *= GST_USECOND;
++
+   self->decoded_frames++;
+ 
+   frames = gst_video_decoder_get_frames (decoder);
+@@ -806,7 +840,7 @@ out:
+     gst_video_codec_frame_ref (frame);
+ 
+     /* Prefer using MPP PTS */
+-    if (self->use_mpp_pts)
++    if (self->use_mpp_pts || (self->pts_in_us && GST_CLOCK_TIME_IS_VALID (pts)))
+       frame->pts = pts;
+   }
+ 
+@@ -1022,6 +1056,17 @@ gst_mpp_dec_loop (GstVideoDecoder * decoder)
+   if (self->flushing && !self->draining)
+     goto drop;
+ 
++  /* MPEG-2 (pts_in_us): a frame timed at or before the one shown last --
++   * a stream started from its last access point begins with such -- is
++   * dropped, not shown. Shown, GstVideoDecoder took it for reordered
++   * output and replaced every later time with its oldest pending input's
++   * (prepare_finish_frame), the deinterlacer's two fields of a picture
++   * came out with one time, and half the fields were dropped downstream. */
++  if (self->pts_in_us && GST_CLOCK_TIME_IS_VALID (frame->pts) &&
++      GST_CLOCK_TIME_IS_VALID (self->last_out_pts) &&
++      frame->pts <= self->last_out_pts)
++    goto drop;
++
+   if (!mpp_frame_get_buffer (mframe))
+     goto error;
+ 
+@@ -1060,6 +1105,9 @@ gst_mpp_dec_loop (GstVideoDecoder * decoder)
+   GST_DEBUG_OBJECT (self, "finish frame ts=%" GST_TIME_FORMAT,
+       GST_TIME_ARGS (frame->pts));
+ 
++  if (self->pts_in_us && GST_CLOCK_TIME_IS_VALID (frame->pts))
++    self->last_out_pts = frame->pts;
++
+   self->task_ret = gst_video_decoder_finish_frame (decoder, frame);
+ 
+ out:
+@@ -1177,7 +1225,13 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
+   if (!mpkt)
+     goto no_packet;
+ 
+-  mpp_packet_set_pts (mpkt, self->use_mpp_pts ? -1 : (gint64) frame->pts);
++  if (self->use_mpp_pts)
++    mpp_packet_set_pts (mpkt, -1);
++  else if (self->pts_in_us)
++    mpp_packet_set_pts (mpkt, GST_CLOCK_TIME_IS_VALID (frame->pts) ?
++        (gint64) (frame->pts / GST_USECOND) : -1);
++  else
++    mpp_packet_set_pts (mpkt, (gint64) frame->pts);
+ 
+   /* Zero-copy packets (MppBuffer attached) are handed over to MPP and may
+    * already be recycled once decode_put_packet() returns, while copy-path
+diff --git a/gst/rockchipmpp/gstmppdec.h b/gst/rockchipmpp/gstmppdec.h
+index b379cd999135..b1a447b78ca5 100644
+--- a/gst/rockchipmpp/gstmppdec.h
++++ b/gst/rockchipmpp/gstmppdec.h
+@@ -86,6 +86,10 @@ struct _GstMppDec
+   gboolean use_mpp_pts;
+   GstClockTime mpp_delta_pts;
+ 
++  /* MPP takes and gives PTS in microseconds (MPEG-2) */
++  gboolean pts_in_us;
++  GstClockTime last_out_pts;
++
+   guint32 decoded_frames;
+ 
+   GstVideoCodecFrame *last_frame;

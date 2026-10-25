@@ -670,9 +670,9 @@ fn find_sync(buffer: &[u8], mut pos: usize) -> Option<usize> {
 
 // ------------------------------------------------------------------ video
 
-/// What a programme's H.264 video says about itself in its sequence
-/// parameter set, read before a frame is decoded: how big, whether it is
-/// coded as fields, and how often (VUI timing, ITU-T H.264 E.2.1).
+/// What a programme's video says about itself in its sequence parameter
+/// set, read before a frame is decoded: how big, whether it is coded as
+/// fields, and how often (VUI timing: ITU-T H.264 E.2.1, H.265 E.2.1).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoInfo {
     pub codec: &'static str,
@@ -834,6 +834,229 @@ pub fn parse_h264_sps(nal_payload: &[u8]) -> Option<VideoInfo> {
     Some(VideoInfo { codec: "h264", width, height, interlaced: !frame_mbs_only, frame_rate, field_rate })
 }
 
+/// Parse an MPEG-1/2 sequence header (from just after its start code,
+/// 00 00 01 B3) and, for MPEG-2, the sequence extension that follows it
+/// (00 00 01 B5, identifier 1): ISO/IEC 13818-2 6.2.2.1 and 6.2.2.3. An
+/// MPEG-2 channel (TRT BELGESEL's 576i) said nothing before, and its
+/// display was matched from the frames shown -- under the playing channel,
+/// and wrong: 25 Hz for its 50 fields.
+pub fn parse_mpeg2_sequence(header: &[u8], extension: Option<&[u8]>) -> Option<VideoInfo> {
+    let mut b = Bits { data: header, pos: 0 };
+    let mut width = b.bits(12)?;
+    let mut height = b.bits(12)?;
+    b.bits(4)?; // aspect_ratio_information
+    let (num, den) = match b.bits(4)? {
+        1 => (24000, 1001),
+        2 => (24, 1),
+        3 => (25, 1),
+        4 => (30000, 1001),
+        5 => (30, 1),
+        6 => (50, 1),
+        7 => (60000, 1001),
+        8 => (60, 1),
+        _ => return None,
+    };
+    let (mut num, mut den) = (num, den);
+    // MPEG-1 has no extension: progressive.
+    let mut progressive = true;
+    if let Some(extension) = extension {
+        let mut e = Bits { data: extension, pos: 0 };
+        if e.bits(4)? == 1 {
+            e.bits(8)?; // profile_and_level_indication
+            progressive = e.bit()? == 1;
+            e.bits(2)?; // chroma_format
+            width |= e.bits(2)? << 12;
+            height |= e.bits(2)? << 12;
+            e.bits(12)?; // bit_rate_extension
+            e.bit()?; // marker_bit
+            e.bits(8)?; // vbv_buffer_size_extension
+            e.bit()?; // low_delay
+            num *= e.bits(2)? + 1;
+            den *= e.bits(5)? + 1;
+        }
+    }
+    let frame_rate = Some(reduce(num, den));
+    let field_rate = frame_rate.filter(|_| !progressive).map(|(num, den)| reduce(num * 2, den));
+    Some(VideoInfo { codec: "mpeg2video", width, height, interlaced: !progressive, frame_rate, field_rate })
+}
+
+/// The rest of an H.265 profile_tier_level(1, max_sub_layers_minus1)
+/// (ITU-T H.265 7.3.3), skipped: nothing in it says how often.
+fn skip_h265_profile_tier_level(b: &mut Bits, max_sub_layers_minus1: u32) -> Option<()> {
+    b.bits(8)?; // general profile space, tier, idc
+    b.bits(32)?; // general_profile_compatibility_flag[32]
+    b.bits(32)?; // four source flags and 43 reserved bits ...
+    b.bits(16)?; // ... and general_inbld_flag
+    b.bits(8)?; // general_level_idc
+    let mut present = Vec::new();
+    for _ in 0..max_sub_layers_minus1 {
+        present.push((b.bit()?, b.bit()?));
+    }
+    if max_sub_layers_minus1 > 0 {
+        for _ in max_sub_layers_minus1..8 {
+            b.bits(2)?;
+        }
+    }
+    for (profile, level) in present {
+        if profile == 1 {
+            b.bits(32)?;
+            b.bits(32)?;
+            b.bits(24)?;
+        }
+        if level == 1 {
+            b.bits(8)?;
+        }
+    }
+    Some(())
+}
+
+/// Parse an H.265 SPS (the NAL without its two-byte header), as far as its
+/// VUI timing (ITU-T H.265 7.3.2.2, E.2.1). A channel coded in HEVC (TRT
+/// ULTRA, 3840x2160p50) said nothing before, and its display was matched
+/// only from the frames shown, under the playing channel.
+pub fn parse_h265_sps(nal_payload: &[u8]) -> Option<VideoInfo> {
+    let data = rbsp(nal_payload);
+    let mut b = Bits { data: &data, pos: 0 };
+    b.bits(4)?; // sps_video_parameter_set_id
+    let max_sub_layers_minus1 = b.bits(3)?;
+    b.bit()?; // sps_temporal_id_nesting_flag
+    skip_h265_profile_tier_level(&mut b, max_sub_layers_minus1)?;
+    b.ue()?; // sps_seq_parameter_set_id
+    let chroma_format = b.ue()?;
+    if chroma_format == 3 {
+        b.bit()?; // separate_colour_plane_flag
+    }
+    let (mut width, mut height) = (b.ue()?, b.ue()?);
+    if b.bit()? == 1 {
+        // conformance_window, in chroma samples
+        let (left, right, top, bottom) = (b.ue()?, b.ue()?, b.ue()?, b.ue()?);
+        let (unit_x, unit_y) = match chroma_format {
+            1 => (2, 2),
+            2 => (2, 1),
+            _ => (1, 1),
+        };
+        width = width.checked_sub((left + right) * unit_x)?;
+        height = height.checked_sub((top + bottom) * unit_y)?;
+    }
+    b.ue()?; // bit_depth_luma_minus8
+    b.ue()?; // bit_depth_chroma_minus8
+    let poc_lsb_bits = b.ue()? + 4;
+    let ordering_for_all = b.bit()? == 1;
+    for _ in if ordering_for_all { 0 } else { max_sub_layers_minus1 }..=max_sub_layers_minus1 {
+        b.ue()?;
+        b.ue()?;
+        b.ue()?;
+    }
+    for _ in 0..6 {
+        b.ue()?; // coding and transform block sizes, hierarchy depths
+    }
+    if b.bit()? == 1 && b.bit()? == 1 {
+        // scaling_list_data (7.3.4)
+        for size in 0..4u32 {
+            let mut matrix = 0;
+            while matrix < 6 {
+                if b.bit()? == 0 {
+                    b.ue()?; // scaling_list_pred_matrix_id_delta
+                } else {
+                    let coefficients = 64.min(1 << (4 + (size << 1)));
+                    if size > 1 {
+                        b.se()?; // scaling_list_dc_coef_minus8
+                    }
+                    for _ in 0..coefficients {
+                        b.se()?;
+                    }
+                }
+                matrix += if size == 3 { 3 } else { 1 };
+            }
+        }
+    }
+    b.bit()?; // amp_enabled_flag
+    b.bit()?; // sample_adaptive_offset_enabled_flag
+    if b.bit()? == 1 {
+        b.bits(8)?; // pcm sample bit depths
+        b.ue()?;
+        b.ue()?;
+        b.bit()?; // pcm_loop_filter_disabled_flag
+    }
+    // st_ref_pic_set (7.3.7), each one's size needed by the next.
+    let sets = b.ue()?;
+    let mut delta_pocs: Vec<u32> = Vec::new();
+    for i in 0..sets {
+        let predicted = i != 0 && b.bit()? == 1;
+        if predicted {
+            b.bit()?; // delta_rps_sign
+            b.ue()?; // abs_delta_rps_minus1
+            let reference = *delta_pocs.last()?;
+            let mut count = 0;
+            for _ in 0..=reference {
+                let used = b.bit()? == 1;
+                if used || b.bit()? == 1 {
+                    count += 1;
+                }
+            }
+            delta_pocs.push(count);
+        } else {
+            let (negative, positive) = (b.ue()?, b.ue()?);
+            for _ in 0..negative.checked_add(positive)? {
+                b.ue()?; // delta_poc_minus1
+                b.bit()?; // used_by_curr_pic_flag
+            }
+            delta_pocs.push(negative + positive);
+        }
+    }
+    if b.bit()? == 1 {
+        for _ in 0..b.ue()? {
+            b.bits(poc_lsb_bits)?;
+            b.bit()?;
+        }
+    }
+    b.bit()?; // sps_temporal_mvp_enabled_flag
+    b.bit()?; // strong_intra_smoothing_enabled_flag
+    let (mut frame_rate, mut fields) = (None, false);
+    if b.bit()? == 1 {
+        // vui_parameters (E.2.1)
+        if b.bit()? == 1 && b.bits(8)? == 255 {
+            b.bits(32)?; // sar_width, sar_height
+        }
+        if b.bit()? == 1 {
+            b.bit()?; // overscan_appropriate_flag
+        }
+        if b.bit()? == 1 {
+            b.bits(4)?; // video_format, video_full_range_flag
+            if b.bit()? == 1 {
+                b.bits(24)?; // colour_primaries, transfer, matrix
+            }
+        }
+        if b.bit()? == 1 {
+            b.ue()?;
+            b.ue()?;
+        }
+        b.bit()?; // neutral_chroma_indication_flag
+        fields = b.bit()? == 1; // field_seq_flag: every picture a field
+        b.bit()?; // frame_field_info_present_flag
+        if b.bit()? == 1 {
+            for _ in 0..4 {
+                b.ue()?; // default display window
+            }
+        }
+        if b.bit()? == 1 {
+            let units = b.bits(32)?;
+            let scale = b.bits(32)?;
+            if units > 0 && scale > 0 {
+                // Unlike H.264's, a tick is a picture.
+                frame_rate = Some(reduce(scale, units));
+            }
+        }
+    }
+    // Coded as fields, a picture is a field: two to a frame.
+    let (frame_rate, field_rate) = if fields {
+        (frame_rate.map(|(num, den)| reduce(num, den * 2)), frame_rate)
+    } else {
+        (frame_rate, None)
+    };
+    Some(VideoInfo { codec: "hevc", width, height, interlaced: fields, frame_rate, field_rate })
+}
+
 fn reduce(num: u32, den: u32) -> (u32, u32) {
     let gcd = |mut a: u32, mut b: u32| {
         while b != 0 {
@@ -845,10 +1068,11 @@ fn reduce(num: u32, den: u32) -> (u32, u32) {
     (num / g, den / g)
 }
 
-/// The first H.264 SPS in a video PID's PES payloads.
+/// The first SPS in a video PID's PES payloads.
 #[derive(Default)]
 struct VideoProbe {
     pid: Option<u16>,
+    codec: VideoCodec,
     buffer: Vec<u8>,
     in_pes: bool,
 }
@@ -871,7 +1095,7 @@ impl VideoProbe {
             return None;
         }
         self.buffer.extend_from_slice(data);
-        let found = find_sps(&self.buffer);
+        let found = find_sps(&self.buffer, self.codec);
         if found.is_none() && self.buffer.len() > Self::LIMIT {
             let keep = self.buffer.len() - 1024;
             self.buffer.drain(..keep);
@@ -880,13 +1104,42 @@ impl VideoProbe {
     }
 }
 
-fn find_sps(buffer: &[u8]) -> Option<VideoInfo> {
+/// The video codecs whose parameters are read before a frame is decoded.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum VideoCodec {
+    #[default]
+    H264,
+    Hevc,
+    Mpeg2,
+}
+
+fn find_sps(buffer: &[u8], codec: VideoCodec) -> Option<VideoInfo> {
     let starts: Vec<usize> = buffer.windows(3).enumerate().filter(|(_, w)| *w == [0, 0, 1]).map(|(i, _)| i + 3).collect();
+    if codec == VideoCodec::Mpeg2 {
+        // The sequence header, and the start code after it; MPEG-2's
+        // sequence extension, when that is what comes next.
+        let k = starts.iter().position(|&start| buffer.get(start) == Some(&0xB3))?;
+        let header = buffer.get(starts[k] + 1..starts.get(k + 1)?.saturating_sub(3))?;
+        let next = starts[k + 1];
+        let extension = if buffer.get(next) == Some(&0xB5) {
+            Some(buffer.get(next + 1..starts.get(k + 2)?.saturating_sub(3))?)
+        } else {
+            None
+        };
+        return parse_mpeg2_sequence(header, extension);
+    }
+    let hevc = codec == VideoCodec::Hevc;
     for (k, &start) in starts.iter().enumerate() {
-        if buffer.get(start).is_some_and(|header| header & 0x1F == 7) {
+        // The NAL unit type: H.264's in the low five bits of one header
+        // byte (SPS 7), H.265's in bits 1-6 of the first of two (SPS 33).
+        let sps = buffer
+            .get(start)
+            .is_some_and(|header| if hevc { header >> 1 & 0x3F == 33 } else { header & 0x1F == 7 });
+        if sps {
             // Wait for the next start code: the SPS must be whole.
             let end = *starts.get(k + 1)?;
-            return parse_h264_sps(&buffer[start + 1..end.saturating_sub(3)]);
+            let nal = &buffer[start..end.saturating_sub(3)];
+            return if hevc { parse_h265_sps(nal.get(2..)?) } else { parse_h264_sps(nal.get(1..)?) };
         }
     }
     None
@@ -1206,9 +1459,16 @@ impl Selector {
         self.selection.pmt_version = Some(version);
         self.timing.timed =
             pmt.streams.iter().filter(|s| matches!(s.kind, "video" | "audio")).map(|s| s.pid).collect();
-        let h264 = pmt.streams.iter().find(|s| s.stream_type == 0x1B).map(|s| s.pid);
-        if self.video.pid != h264 {
-            self.video = VideoProbe { pid: h264, ..Default::default() };
+        // H.264 (0x1B), H.265 (0x24), MPEG-2 (0x02) or MPEG-1 (0x01).
+        let video = pmt.streams.iter().find(|s| matches!(s.stream_type, 0x1B | 0x24 | 0x02 | 0x01));
+        let pid = video.map(|s| s.pid);
+        if self.video.pid != pid {
+            let codec = match video.map(|s| s.stream_type) {
+                Some(0x24) => VideoCodec::Hevc,
+                Some(0x01 | 0x02) => VideoCodec::Mpeg2,
+                _ => VideoCodec::H264,
+            };
+            self.video = VideoProbe { pid, codec, ..Default::default() };
             self.selection.video = None;
         }
         self.selection.streams = pmt.streams;
