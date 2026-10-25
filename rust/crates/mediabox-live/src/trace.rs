@@ -41,7 +41,7 @@ impl Trace {
         let Some(out) = &self.0 else { return };
         let mut out = out.lock().unwrap_or_else(|p| p.into_inner());
         let _ = writeln!(out, "{} {kind} {id} {value}", monotonic_us());
-        if kind == 'S' && id % 64 == 0 {
+        if kind == 'S' && id.is_multiple_of(64) {
             let _ = out.flush();
         }
     }

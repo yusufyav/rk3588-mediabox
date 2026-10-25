@@ -1,10 +1,10 @@
-//! mediabox-live: live television's player.
+//! mediabox-live: live television's player, and its only one.
 //!
-//! Started by packaging/mediabox-player in place of mpv when the control
-//! plane opens a DVB service (MEDIABOX_PLAYER_LIVE=1), on the receiver's FIFO,
-//! with the same environment and the same control socket. See engine.rs for
-//! the pipeline and its clock, plane.rs for the wire to the interface, ipc.rs
-//! for the control language.
+//! Started by packaging/mediabox-player when the control plane opens a DVB
+//! service (MEDIABOX_PLAYER_LIVE=1), on the receiver's FIFO, with the
+//! launcher's environment and a control socket. See engine.rs for the
+//! pipeline and its clock, plane.rs for the wire to the interface, ipc.rs for
+//! the control language.
 //!
 //! Environment, beyond the launcher's own:
 //!   MEDIABOX_LIVE_VIDEO_DECODER    the decoder element (default mppvideodec)
@@ -37,8 +37,8 @@ fn env_u32(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
 }
 
-/// Where the sound goes, from the kept sound setting: the same plan mpv's
-/// arguments are made from (`mediabox-platform audio-plan`).
+/// Where the sound goes, from the kept sound setting (`mediabox-platform
+/// audio-plan`), the plan films are played with too.
 fn sound_plan() -> Audio {
     let display_sync = std::env::var("MEDIABOX_PLAYER_DISPLAY_SYNC").as_deref() == Ok("1");
     if let Ok(device) = std::env::var("MEDIABOX_LIVE_AUDIO_DEVICE") {
@@ -64,12 +64,13 @@ fn sound_plan() -> Audio {
     let volume = f64::from(plan.player_volume()) / 100.0;
     Audio {
         device: plan.device.as_ref().map(|device| device.pcm.clone()),
-        // "Oynatımı görüntüye eşitle" sends PCM, as the launcher does for mpv.
+        // "Oynatımı görüntüye eşitle" sends PCM, as films do (Kodi: no
+        // passthrough while usedisplayasclock is on).
         passthrough: if display_sync { Vec::new() } else { plan.passthrough.clone() },
         gain: volume.powi(3),
         muted: plan.muted,
-        // The Dolby Digital encoding mpv is given as --af=lavcac3enc; off with
-        // "Oynatımı görüntüye eşitle", as the launcher does for mpv.
+        // The setting's Dolby Digital encoding; off with "Oynatımı görüntüye
+        // eşitle", as for films.
         ac3_encode: plan
             .ac3_encode
             .filter(|_| !display_sync)
@@ -104,7 +105,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let (commands, inbox) = mpsc::channel::<(Command, Option<mpsc::SyncSender<()>>)>();
+    let (commands, inbox) = mpsc::channel::<(Command, Option<mpsc::SyncSender<Result<(), String>>>)>();
     {
         let commands = commands.clone();
         std::thread::spawn(move || {
@@ -150,13 +151,13 @@ fn main() {
         max_lateness_ms: env_u32("MEDIABOX_LIVE_MAX_LATENESS_MS", 20),
     };
     let shared = Arc::new(Shared::default());
-    let quit = {
+    let fail = {
         let commands = commands.clone();
-        move || {
-            let _ = commands.send((Command::Quit, None));
+        move |why: Option<String>| {
+            let _ = commands.send((why.map_or(Command::Quit, Command::Fail), None));
         }
     };
-    let engine = match Engine::new(options, Arc::clone(&plane), Arc::clone(&shared), trace.clone(), quit) {
+    let engine = match Engine::new(options, Arc::clone(&plane), Arc::clone(&shared), trace.clone(), fail) {
         Ok(engine) => engine,
         Err(error) => {
             eprintln!("mediabox-live: {error}");
@@ -175,25 +176,39 @@ fn main() {
         }
     }
 
-    engine.open(&url);
-    clients.event(json!({"event": "start-file"}));
+    match engine.open(&url) {
+        Ok(()) => clients.event(json!({"event": "start-file"})),
+        Err(error) => {
+            let _ = commands.send((Command::Fail(format!("Kanal açılamadı: {error}")), None));
+        }
+    }
 
     let bus = engine.bus();
     let mut last_eof = false;
     let mut last_playing = false;
     let mut audio_failed: Option<Instant> = None;
     let mut branch_failed: Option<Instant> = None;
+    // The same channel opened again after an error, without a frame since.
+    let mut reopened = 0;
+    // Why the player ends, when it ends because it cannot play.
+    let mut failure: Option<String> = None;
     let mut report = Instant::now();
     let dropped_late = Mutex::new(0u64);
     loop {
         match inbox.recv_timeout(Duration::from_millis(20)) {
             Ok((command, done)) => {
-                let quit = matches!(command, Command::Quit);
+                let quit = matches!(command, Command::Quit | Command::Fail(_));
+                let mut result = Ok(());
                 match command {
+                    // The next channel in the same player: not the end of
+                    // anything, so no end-file. A channel that cannot be
+                    // opened is answered with why.
                     Command::Load(path) => {
-                        clients.event(json!({"event": "end-file", "reason": "stop"}));
-                        engine.open(&path);
-                        clients.event(json!({"event": "start-file"}));
+                        reopened = 0;
+                        result = engine.open(&path).map_err(|error| format!("Kanal açılamadı: {error}"));
+                        if result.is_ok() {
+                            clients.event(json!({"event": "start-file"}));
+                        }
                     }
                     Command::Pause(paused) => {
                         engine.set_paused(paused);
@@ -202,10 +217,14 @@ fn main() {
                     Command::Aid(aid) => engine.set_aid(aid),
                     Command::Volume { gain, muted } => engine.set_volume(gain, muted),
                     Command::AudioDelay(seconds) => engine.set_audio_delay(seconds),
+                    Command::Fail(why) => {
+                        eprintln!("mediabox-live: {why}");
+                        failure = Some(why);
+                    }
                     Command::Quit => {}
                 }
                 if let Some(done) = done {
-                    let _ = done.send(());
+                    let _ = done.send(result);
                 }
                 if quit {
                     break;
@@ -231,11 +250,24 @@ fn main() {
                         }
                     } else if source.is_some_and(|source| engine.is_current(source))
                         && branch_failed.is_none_or(|at| at.elapsed() > Duration::from_secs(2))
+                        && let Some(path) = engine.current_path()
                     {
+                        // Opened again, a few times: a broadcast's glitch
+                        // passes. An error that comes back every time is the
+                        // channel's, and is said.
                         branch_failed = Some(Instant::now());
-                        if let Some(path) = engine.current_path() {
+                        if shared.playing.load(Ordering::SeqCst) {
+                            reopened = 0;
+                        }
+                        reopened += 1;
+                        let opened = if reopened > 3 {
+                            Err(error.error().to_string())
+                        } else {
                             eprintln!("mediabox-live: kanal yeniden açılıyor");
-                            engine.open(&path);
+                            engine.open(&path)
+                        };
+                        if let Err(why) = opened {
+                            let _ = commands.send((Command::Fail(format!("Kanal oynatılamıyor: {why}")), None));
                         }
                     }
                 }
@@ -282,7 +314,10 @@ fn main() {
     plane.close();
     plane.stop();
     trace.flush();
-    clients.event(json!({"event": "end-file", "reason": "quit"}));
+    clients.event(match &failure {
+        Some(why) => json!({"event": "end-file", "reason": "error", "file_error": why}),
+        None => json!({"event": "end-file", "reason": "quit"}),
+    });
     if let Ok(path) = std::env::var("MEDIABOX_PLAYER_IPC") {
         let _ = std::fs::remove_file(path);
     }
@@ -323,7 +358,24 @@ fn stats(engine: &Engine, shared: &Shared, plane: &plane::Plane) -> Value {
     })
 }
 
+/// A channel count as mpv names the layout.
+fn layout(channels: i32) -> String {
+    match channels {
+        1 => "mono".into(),
+        2 => "stereo".into(),
+        6 => "5.1".into(),
+        8 => "7.1".into(),
+        n => format!("{n}ch"),
+    }
+}
+
 /// The answers to `get_property`, read from the engine's shared state.
+///
+/// `core-idle` is false once the channel opened last has put its first
+/// frame on the interface's plane -- handed over and committed, not merely
+/// decoded -- or, for a service without a picture, once its sound reaches
+/// the sound device; and while it is not paused. The control plane reads
+/// that as the channel's picture (`picture` in its status).
 fn query(engine: Arc<Engine>, shared: Arc<Shared>, plane: Arc<plane::Plane>) -> ipc::Query {
     Arc::new(move |name: &str| -> Option<Value> {
         let info = || shared.info.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -344,11 +396,21 @@ fn query(engine: Arc<Engine>, shared: Arc<Shared>, plane: Arc<plane::Plane>) -> 
             "container-fps" | "estimated-vf-fps" => json!(info().fps?),
             "audio-codec-name" => json!(info().audio_codec?),
             "video-codec" => json!(info().video_codec?),
-            "audio-params" | "audio-out-params" => {
-                let (format, rate, channels) = engine.audio_caps()?;
-                json!({"format": format, "samplerate": rate, "channel-count": channels})
+            // In mpv's form, which the sound screen reads
+            // (mediabox_core::StreamAudio::from_mpv): what the stream is, and
+            // what leaves for the device -- `spdif-ac3` for the bursts.
+            "audio-params" => {
+                let (rate, channels) = info().audio_decoded?;
+                json!({"samplerate": rate, "channels": layout(channels), "channel-count": channels})
             }
-            "af" => json!([]),
+            "audio-out-params" => {
+                let (format, rate, channels) = engine.audio_caps()?;
+                if engine.bitstream() {
+                    json!({"format": "spdif-ac3", "samplerate": rate, "channels": "stereo", "channel-count": 2})
+                } else {
+                    json!({"format": format, "samplerate": rate, "channels": layout(channels), "channel-count": channels})
+                }
+            }
             "volume" => json!((engine.audio().gain.cbrt() * 100.0).round()),
             "mute" => json!(engine.audio().muted),
             "aid" => match engine.aid() {

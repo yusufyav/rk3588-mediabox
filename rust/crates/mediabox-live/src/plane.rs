@@ -228,36 +228,42 @@ impl Plane {
         }
     }
 
-    /// Take the picture off and wait for every frame to come back, as
-    /// vo_mediabox's uninit does.
     /// From here on nothing is sent; `stop` takes the picture off.
     pub fn close(&self) {
         self.lock().closed = true;
     }
 
-    /// Take the picture off and wait for every frame to come back. The plane
-    /// stays usable: a channel change does this between channels. At the
-    /// player's end, `close` comes first, so nothing follows the STOP.
+    /// Take the picture off and wait for every frame to come back, as
+    /// vo_mediabox's uninit does. The plane stays usable: a channel change
+    /// does this between channels. At the player's end, `close` comes first,
+    /// so nothing follows the STOP.
+    ///
+    /// A frame the interface has not given back by then is still kept: its
+    /// buffer goes back to MPP only on its RELEASE, or with the interface.
+    /// Let go on a timeout, MPP could decode into a buffer the panel was
+    /// still scanning out.
     pub fn stop(&self) {
         let mut message = [0u8; MESSAGE];
         put32(&mut message, 0, MAGIC);
         put32(&mut message, 4, STOP);
-        let sent = self.send_message(&message, &[]).is_ok();
+        if self.send_message(&message, &[]).is_err() {
+            return;
+        }
         let mut state = self.lock();
-        if sent {
-            let deadline = Instant::now() + STOP_WAIT;
-            while !state.held.is_empty() && !state.gone {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                state = self.released.wait_timeout(state, left).unwrap_or_else(|p| p.into_inner()).0;
+        let deadline = Instant::now() + STOP_WAIT;
+        while !state.held.is_empty() && !state.gone {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                eprintln!("mediabox-live: arayüz {} kareyi {STOP_WAIT:?} içinde geri vermedi", state.held.len());
+                break;
             }
+            state = self.released.wait_timeout(state, left).unwrap_or_else(|p| p.into_inner()).0;
         }
-        if !state.held.is_empty() {
-            eprintln!("mediabox-live: arayüz {} kareyi geri vermeden kapanılıyor", state.held.len());
+        // Gone, the interface has closed its side and nothing scans these
+        // buffers out any more.
+        if state.gone {
+            state.held.clear();
         }
-        state.held.clear();
     }
 
     fn send_message(&self, message: &[u8; MESSAGE], fds: &[RawFd]) -> std::io::Result<()> {

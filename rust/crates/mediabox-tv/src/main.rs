@@ -267,6 +267,9 @@ struct App {
     live_asked: Option<Instant>,
     /// The channel the player was last asked to play.
     live_tuned: Option<u16>,
+    /// The channel last opened again because its player ended without a
+    /// reason, and when: once, not over and over (`film_finished`).
+    live_reopened: Option<(u16, Instant)>,
     /// Full records of titles the remote has rested on in a grid, so the
     /// record beside it can say what a title is without opening it. An entry
     /// from the account's library carries a name and a poster and little else.
@@ -2291,7 +2294,6 @@ impl App {
             opening,
             live: true,
             previous_on_plane: platform::video_showing(),
-            grace: LIVE_FIRST_FRAME_GRACE,
             ..Playing::new()
         });
         self.now.film = false;
@@ -2343,11 +2345,12 @@ impl App {
         match effect {
             Effect::Nothing => {}
             Effect::Paint => self.paint(),
-            // The channel already playing, chosen again (its number, the
-            // guide, the list): the overlays are gone and the picture goes
-            // on, as on a television; it is not opened a second time.
+            // The channel already playing or opening, chosen again (its
+            // number, the guide, the list): the overlays are gone and the
+            // picture goes on, or keeps coming, as on a television; it is
+            // not opened a second time.
             Effect::Tune(sid)
-                if self.here.as_ref().is_some_and(|playing| playing.live && playing.seen)
+                if self.here.as_ref().is_some_and(|playing| playing.live)
                     && self.live.as_ref().is_some_and(|live| live.problem.is_none() && live.current == Some(sid))
                     && self.live_tuned == Some(sid) =>
             {
@@ -2397,8 +2400,6 @@ impl App {
         self.paint();
     }
 
-    /// Out of live television: the channel is stopped, and the screen under
-    /// it -- the home screen -- is what is on the panel.
     /// Take channel `sid`, already playing, as this interface's own live
     /// television: the film screen it was adopted into goes, the Canlı TV
     /// screen comes up on that channel.
@@ -2427,12 +2428,15 @@ impl App {
         self.paint();
     }
 
+    /// Out of live television: the channel is stopped, and the screen under
+    /// it -- the home screen -- is what is on the panel.
     fn leave_live(&mut self) {
         if self.here.take().is_some() {
             spawn_here(HereCommand::Stop);
         }
         self.live = None;
         self.live_tuned = None;
+        self.live_reopened = None;
         self.left_film = Some(Instant::now());
         self.now.film = false;
         self.now.state = None;
@@ -2829,13 +2833,8 @@ impl App {
                 return;
             }
             eprintln!("mediabox-tv.play here gave up: no frame in {:?}", playing.grace);
-            let live = playing.live;
             spawn_here(HereCommand::Stop);
-            self.leave_film(Some(if live {
-                "Bu kanaldan görüntü gelmedi.".to_string()
-            } else {
-                "Kaynak açılamadı: görüntü gelmedi. Başka bir kaynak seçin.".to_string()
-            }));
+            self.leave_film(Some("Kaynak açılamadı: görüntü gelmedi. Başka bir kaynak seçin.".to_string()));
             return;
         }
         // A dark plane after a picture is not an ending: the control plane
@@ -2858,22 +2857,44 @@ impl App {
         // A channel that stops has no place to keep: what the receiver said
         // is what is shown, over the black, and the channel keys still work.
         if self.live.is_some() {
-            // The receiver's own reason (the USB link went, the service is
-            // not in the multiplex) is said; a player that merely ended is
-            // not news to the viewer -- the channel is opened again, black
-            // and banner, as any other change.
+            // The receiver's or the player's own reason (the USB link went,
+            // the service is not in the multiplex, the picture cannot be
+            // decoded) is said.
             if let Some(why) = finished.get("message").and_then(Value::as_str).filter(|why| !why.is_empty()) {
                 self.leave_film(Some(why.to_string()));
                 return;
             }
             let current = self.live.as_ref().and_then(|live| live.current);
-            eprintln!("mediabox-tv.live the player ended without a reason; channel {current:?} opened again");
-            self.here = None;
-            if let Some(sid) = current {
-                if let Some(live) = self.live.as_mut() {
-                    live.tuning(sid, Instant::now());
+            match outcome {
+                // A player that failed with nothing to say is not news to the
+                // viewer: the channel is opened again, black and banner, as
+                // any other change -- once. Failing again on the same channel
+                // within the minute, it is said, and the next key is the
+                // viewer's.
+                "failed" => {
+                    let again = current.is_some_and(|sid| {
+                        self.live_reopened.is_some_and(|(last, at)| last == sid && at.elapsed() < LIVE_REOPEN_ONCE)
+                    });
+                    if again || current.is_none() {
+                        eprintln!("mediabox-tv.live the player ended again without a reason; channel {current:?} left");
+                        self.leave_film(Some("Oynatıcı durdu.".to_string()));
+                        return;
+                    }
+                    eprintln!("mediabox-tv.live the player ended without a reason; channel {current:?} opened again");
+                    self.here = None;
+                    if let Some(sid) = current {
+                        self.live_reopened = Some((sid, Instant::now()));
+                        if let Some(live) = self.live.as_mut() {
+                            live.tuning(sid, Instant::now());
+                        }
+                        self.tune_live(sid);
+                    }
                 }
-                self.tune_live(sid);
+                // Stopped from elsewhere (the web interface, mediaboxctl):
+                // what happened is said, and nothing is opened again.
+                "stopped" => self.leave_film(Some("Yayın durduruldu.".to_string())),
+                // A recording read to its end.
+                _ => self.leave_film(Some("Yayın sona erdi.".to_string())),
             }
             return;
         }
@@ -2898,7 +2919,7 @@ impl App {
         if let Some(live) = self.live.as_mut() {
             self.here = None;
             self.now.film = false;
-            live.problem = Some(notice.unwrap_or_else(|| "Yayın kesildi.".to_string()));
+            live.problem = notice;
             self.paint();
             return;
         }
@@ -6883,6 +6904,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         live_kept: read_live_kept(),
         live_asked: None,
         live_tuned: None,
+        live_reopened: None,
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
         library_listing: None,
@@ -7671,10 +7693,9 @@ fn opening_answer(now: Option<&Playing>, opening: u64) -> OpeningAnswer {
     }
 }
 
-/// How long a live channel may take to put its first frame on the plane:
-/// the receiver's start, the lock and the player's open. Measured on the
-/// Plus for TRT HABER HD: 9 to 10 s.
-const LIVE_FIRST_FRAME_GRACE: Duration = Duration::from_secs(30);
+/// A live channel whose player ends without a reason is opened again once
+/// in this long; a second end is said instead.
+const LIVE_REOPEN_ONCE: Duration = Duration::from_secs(60);
 /// How often live television asks again for the channels and the guide.
 const LIVE_REFRESH: Duration = Duration::from_secs(60);
 
@@ -7853,7 +7874,6 @@ fn spawn_live_play(channel: mediabox_core::LiveChannel, opening: u64) {
         match client.call(request).await {
             Ok(answer) => {
                 let continued = answer.get("continued").and_then(Value::as_bool) == Some(true);
-                let picture = answer.get("picture").and_then(Value::as_bool) == Some(true);
                 if let Some(film) = answer.get("film").and_then(Value::as_u64) {
                     let _ = slint::invoke_from_event_loop(move || {
                         with_app(|app| {
@@ -7861,18 +7881,10 @@ fn spawn_live_play(channel: mediabox_core::LiveChannel, opening: u64) {
                                 && let Some(playing) = app.here.as_mut()
                             {
                                 playing.film = Some(film);
+                                // Opened in the running player: its first
+                                // picture is the status's (`film_moved`).
                                 if continued {
                                     playing.continued = true;
-                                    if picture {
-                                        eprintln!(
-                                            "mediabox-tv.live first frame {} ms after the key (same player)",
-                                            playing.asked.elapsed().as_millis()
-                                        );
-                                        playing.seen = true;
-                                        if let Some(live) = app.live.as_mut() {
-                                            live.picture_arrived(std::time::Instant::now());
-                                        }
-                                    }
                                     app.paint();
                                 }
                             }

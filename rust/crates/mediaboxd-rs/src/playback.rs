@@ -522,11 +522,12 @@ impl Supervisor {
 
 /// How live television ended. It has no length to reach: the control plane
 /// ending it is stopped, its source ending by itself is what its process
-/// says, and its player stopping with no word from the source is a failure
-/// with nothing to say: the receiver did not report a reason, so none is
-/// made up ("Canlı yayın kesildi.", "Oynatıcı hata verdi." were), and the
-/// interface opens the channel again -- a television says only what its
-/// tuner says (Sony BRAVIA, measured 2026-10-24). Never "the end of a film".
+/// says, a player that cannot play the channel says why (mediabox-live's
+/// `end-file` with `file_error`), and a player that stopped with no word
+/// from either is a failure with nothing to say: no reason is made up
+/// ("Canlı yayın kesildi.", "Oynatıcı hata verdi." were) -- a television
+/// says only what its tuner says (Sony BRAVIA, measured 2026-10-24). Never
+/// "the end of a film".
 fn live_verdict(intent: Option<Intent>, source_end: Option<&SourceEnd>, signal: &Signal) -> (Outcome, Option<String>) {
     if intent.is_some() {
         return (Outcome::Stopped, None);
@@ -537,7 +538,8 @@ fn live_verdict(intent: Option<Intent>, source_end: Option<&SourceEnd>, signal: 
             Outcome::Failed,
             Some(end.message.clone().unwrap_or_else(|| "Canlı yayın kesildi.".to_string())),
         ),
-        (None, Signal::EndFile { reason, .. }) if !matches!(reason.as_str(), "eof" | "error") => (Outcome::Stopped, None),
+        (None, Signal::EndFile { reason, error }) if reason == "error" => (Outcome::Failed, error.clone()),
+        (None, Signal::EndFile { reason, .. }) if reason != "eof" => (Outcome::Stopped, None),
         (None, _) => (Outcome::Failed, None),
     }
 }
@@ -600,7 +602,7 @@ pub async fn follow_mpv(
         let signal = if player.film() == here {
             Signal::EndFile {
                 reason: "error".into(),
-                error: Some("oynatıcı açılmadı".into()),
+                error: Some("Oynatıcı açılmadı.".into()),
             }
         } else {
             Signal::Gone
@@ -608,11 +610,7 @@ pub async fn follow_mpv(
         supervisor.finish(film, signal);
         return;
     };
-    let signal = read_mpv(stream, &supervisor, film, &player).await;
-    // A deliberate player replacement keeps the warm DVB receiver. Snapshot
-    // this before the replacing task clears the flag, otherwise this old
-    // follower can release the USB interface underneath the next channel.
-    let keeping_live_receiver = player.reloading();
+    let signal = read_mpv(stream, &supervisor, film, live.is_some()).await;
     // Live television: the player's end of the stream means what the
     // source's own process says it means, asked before the verdict.
     if let Some(live) = &live
@@ -622,18 +620,18 @@ pub async fn follow_mpv(
     }
     // Held on its last frame at an end, early or not: the film is over, and
     // so is the player -- and, for live television, its receiver, whose
-    // cleanup is waited for.
+    // cleanup is waited for. A player the control plane stopped or replaced
+    // itself has moved `player.film()` on before this: nothing more is
+    // stopped here, and a receiver kept warm for the next channel stays.
     if supervisor.finish(film, signal).is_some() && player.film() == here {
         player.stop().await;
-        if let Some(live) = &live
-            && !keeping_live_receiver
-        {
+        if let Some(live) = &live {
             live.stop().await;
         }
     }
 }
 
-/// Read one film's mpv socket until the player says it has stopped.
+/// Read one film's player socket until the player says it has stopped.
 ///
 /// Where the film had got to is taken only from answers given before the
 /// end of the file. Measured on the Plus (2026-09-27): a seek whose range was
@@ -641,12 +639,13 @@ pub async fn follow_mpv(
 /// that answered the film's full length, 480 of 480 s -- a failed read that
 /// looked exactly like the end. So every poll asks `eof-reached` first, and
 /// a poll that finds the end is not read for a position.
-async fn read_mpv(
-    stream: tokio::net::UnixStream,
-    supervisor: &Supervisor,
-    film: u64,
-    player: &crate::player::PlayerManager,
-) -> Signal {
+///
+/// Live television's end of file is not its end: the receiver lets the
+/// reader of a FIFO it moves away from go that way, before the player has
+/// been given the next one, and a receiver that has really gone says so
+/// itself (`follow_live`). Only the player's own end -- it quit, or could
+/// not play the channel -- or its socket closing ends it here.
+async fn read_mpv(stream: tokio::net::UnixStream, supervisor: &Supervisor, film: u64, live: bool) -> Signal {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (reader, mut writer) = stream.into_split();
@@ -671,18 +670,14 @@ async fn read_mpv(
             line = lines.next_line() => {
                 let Ok(Some(line)) = line else { return Signal::Gone };
                 let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
-                let at_the_end = message.get("data").and_then(Value::as_bool) == Some(true);
-                // A live channel opened in this player ends the file before
-                // it, and that end is the channel change's.
-                let reloading = player.reloading();
+                let at_the_end = message.get("data").and_then(Value::as_bool) == Some(true) && !live;
                 match message.get("event").and_then(Value::as_str) {
-                    Some("end-file") if reloading => {}
                     Some("end-file") => return Signal::EndFile {
                         reason: message.get("reason").and_then(Value::as_str).unwrap_or("unknown").to_string(),
                         error: message.get("file_error").and_then(Value::as_str).map(str::to_owned),
                     },
                     Some("property-change")
-                        if message.get("name").and_then(Value::as_str) == Some("eof-reached") && at_the_end && !reloading =>
+                        if message.get("name").and_then(Value::as_str) == Some("eof-reached") && at_the_end =>
                     {
                         return Signal::EndOfFile;
                     }
@@ -690,7 +685,7 @@ async fn read_mpv(
                 }
                 let number = |message: &Value| message.get("data").and_then(Value::as_f64).filter(|value| value.is_finite());
                 match message.get("request_id").and_then(Value::as_u64) {
-                    Some(100) if at_the_end && !reloading => return Signal::EndOfFile,
+                    Some(100) if at_the_end => return Signal::EndOfFile,
                     Some(101) => position = number(&message),
                     Some(102) => duration = number(&message),
                     Some(103) => {
@@ -1083,7 +1078,7 @@ mod tests {
                 _ => json!(false),
             })
         }));
-        let signal = read_mpv(ours, &supervisor, film, &idle_player()).await;
+        let signal = read_mpv(ours, &supervisor, film, false).await;
         assert_eq!(signal, Signal::EndOfFile);
         let finished = supervisor.finish(film, signal).unwrap();
         assert_eq!(finished.outcome, Outcome::Failed);
@@ -1103,7 +1098,7 @@ mod tests {
                 _ => json!(false),
             })
         }));
-        let signal = read_mpv(ours, &supervisor, film, &idle_player()).await;
+        let signal = read_mpv(ours, &supervisor, film, false).await;
         let finished = supervisor.finish(film, signal).unwrap();
         assert_eq!(finished.outcome, Outcome::Ended);
     }
@@ -1114,31 +1109,22 @@ mod tests {
         let film = supervisor.begin(start(PlayerKind::Here));
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
         drop(theirs);
-        assert_eq!(read_mpv(ours, &supervisor, film, &idle_player()).await, Signal::Gone);
-    }
-
-    fn idle_player() -> crate::player::PlayerManager {
-        crate::player::PlayerManager::new("/bin/false", "/nonexistent/player.sock")
+        assert_eq!(read_mpv(ours, &supervisor, film, false).await, Signal::Gone);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_end_of_a_file_a_live_channel_replaced_is_not_the_end() {
+    async fn the_end_of_a_live_channels_file_is_not_the_end() {
         let (supervisor, _) = rig();
         let film = supervisor.begin(live());
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
         // The old channel's file at its end, as the receiver let it go.
         tokio::spawn(fake_mpv(theirs, |id, _| Some(if id == 100 { json!(true) } else { json!(0.0) })));
-        let player = std::sync::Arc::new(idle_player());
-        player.begin_reload();
         let reading = tokio::spawn({
-            let player = std::sync::Arc::clone(&player);
             let supervisor = std::sync::Arc::clone(&supervisor);
-            async move { read_mpv(ours, &supervisor, film, &player).await }
+            async move { read_mpv(ours, &supervisor, film, true).await }
         });
         tokio::time::sleep(Duration::from_secs(5)).await;
-        assert!(!reading.is_finished(), "an end while the next channel opens is the change's");
-        player.end_reload();
-        assert_eq!(reading.await.unwrap(), Signal::EndOfFile, "once it has opened, an end is an end");
+        assert!(!reading.is_finished(), "the receiver says when live television ends, not the FIFO");
     }
 
     fn live() -> Start {

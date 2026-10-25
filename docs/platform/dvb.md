@@ -26,10 +26,7 @@ mediaboxd-rs (no USB: DevicePolicy=closed)
   │    EP 0x84 async bulk ─> Analyser ─> Selector(SID) ─> /run/mediabox-dvb/live.ts (FIFO)
   │    /run/mediabox-dvb/status.json  (state, end, integrity, USB, signal, cleanup)
   └─ systemd-run mediabox-player.service  MEDIABOX_PLAYER_LIVE=1
-       mediabox-live (default): tsdemux ─ mppvideodec / alsasink, one clock
-       mpv --hwdec=rkmpp --vo=mediabox (`mpv` in /var/lib/mediabox/live-engine):
-                               --demuxer-lavf-probe-info=nostreams
-                               --vd-queue-enable=yes --vd-queue-max-samples=8 --vd-queue-max-secs=0.5
+       mediabox-live: tsdemux ─ mppvideodec / alsasink, one clock
        dma-buf ─> mediabox-tv-ui ─> VOP2 Esmart0
 ```
 

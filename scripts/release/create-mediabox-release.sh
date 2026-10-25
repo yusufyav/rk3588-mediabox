@@ -185,6 +185,11 @@ mediabox_ssh "PREFIX='$MEDIABOX_PREFIX' STAGE='$stage' VERSION='$version' UI_FON
 set -euo pipefail
 M="$STAGE/meta"
 export LD_LIBRARY_PATH="$PREFIX/mali-g24p0-runtime/lib:$PREFIX/media-runtime/lib"
+# The GStreamer elements mediabox-live's pipeline is made of
+# (rust/crates/mediabox-live/src/engine.rs), mppvideodec apart.
+LIVE_ELEMENTS="appsrc appsink queue input-selector capsfilter fakesink tsdemux h264parse h265parse
+  mpegvideoparse mpegaudioparse aacparse ac3parse mpg123audiodec avdec_aac avdec_eac3 avdec_ac3
+  avenc_ac3 audioconvert audioresample volume alsasink"
 
 # What the archive will and will not carry. The backup binary is a copy of a
 # previous interface left beside the current one; the caches are generated.
@@ -323,6 +328,20 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   for f in /usr/lib/*/alsa-lib/libasound_module_pcm_bluealsa.so; do
     [ -e "$f" ] && dpkg-query -S "$f" 2>/dev/null | cut -d: -f1
   done | tr ',' '\n' | tr -d ' '
+  # Live television (mediabox-live): GStreamer loads every element's plugin
+  # by name at run time, so no closure reaches them either. The plugin
+  # behind each element its pipeline makes (rust/crates/mediabox-live/src/
+  # engine.rs), as this board's GStreamer finds it; mppvideodec is in the
+  # media runtime and travels with the prefix.
+  if command -v gst-inspect-1.0 >/dev/null; then
+    for e in $LIVE_ELEMENTS; do
+      gst-inspect-1.0 "$e" 2>/dev/null | awk '$1 == "Filename" && !seen { print $2; seen = 1 }'
+    done | sed '/^$/d' | sort -u |
+      while read -r f; do dpkg-query -S "$f" 2>/dev/null | cut -d: -f1; done |
+      tr ',' '\n' | tr -d ' '
+    p="$(command -v gst-inspect-1.0)"
+    dpkg-query -S "$(readlink -f "$p")" 2>/dev/null | cut -d: -f1
+  fi
 
   # The fonts the interface actually draws with.
   #
@@ -376,6 +395,13 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
     "$("$PREFIX/player/bin/mpv" --vo=help 2>/dev/null | grep -w mediabox >/dev/null && echo present || echo absent)"
   printf 'mpv-hwdec-rkmpp\t%s\n' \
     "$("$PREFIX/player/bin/mpv" --hwdec=help 2>/dev/null | grep rkmpp >/dev/null && echo present || echo absent)"
+  # Live television's player and every element it builds its pipeline from,
+  # mppvideodec from the media runtime as the launcher points GStreamer at it.
+  missing=""
+  for e in $LIVE_ELEMENTS mppvideodec; do
+    GST_PLUGIN_PATH="$PREFIX/media-runtime/lib/gstreamer-1.0" gst-inspect-1.0 "$e" >/dev/null 2>&1 || missing="$missing $e"
+  done
+  printf 'live-gstreamer-elements\t%s\n' "$([ -z "$missing" ] && echo present || echo "absent:${missing# }")"
 } >"$M/capability-baseline.txt"
 
 rm -f "$elf_list"
@@ -434,6 +460,9 @@ grep -q '^mpv-hwdec-rkmpp	present$' "$M/capability-baseline.txt" && g "mpv hwdec
 readelf -d "$PREFIX/player/bin/mpv" 2>/dev/null | grep "$PREFIX/media-runtime/lib" >/dev/null \
   && g "mpv RUNPATH" PASS || g "mpv RUNPATH" FAIL
 test -x "$PREFIX/kodi/lib/kodi/kodi-gbm" && g "kodi present" PASS || g "kodi present" FAIL
+test -x "$PREFIX/bin/mediabox-live" && g "mediabox-live present" PASS || g "mediabox-live present" FAIL
+grep -q '^live-gstreamer-elements	present$' "$M/capability-baseline.txt" \
+  && g "live GStreamer elements" PASS || g "live GStreamer elements" FAIL
 readelf -d "$PREFIX/kodi/lib/kodi/kodi-gbm" 2>/dev/null | grep "$PREFIX/media-runtime/lib" >/dev/null \
   && g "kodi RUNPATH" PASS || g "kodi RUNPATH" FAIL
 

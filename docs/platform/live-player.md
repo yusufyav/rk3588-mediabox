@@ -1,10 +1,12 @@
 # Canlı TV oynatıcısı: mediabox-live ve diğer TV'ler nasıl yapıyor
 
-Durum: uygulandı ve Plus'ta varsayılan canlı yayın oynatıcısı
+Durum: uygulandı; Canlı TV'nin tek oynatıcısı
 (`rust/crates/mediabox-live`, başlatıcı `packaging/mediabox-player`, derleme
-`scripts/build-mediabox-live.sh`). mpv karşılaştırma ve geri dönüş için
-duruyor. 2026-10-24'te kaynak okuma ve Plus üzerinde ölçümle yazıldı
-(10.27.27.36, Kanky Link-4K, SONY TV HDMI-A-2'de).
+`scripts/build-mediabox-live.sh`). 2026-10-25'te mpv'nin canlı yayın yolu,
+motor seçimi ve geri dönüşü kaldırıldı; mpv yalnız film ve dizi oynatır.
+Bölüm 4'teki mpv sütunu o tarihten önceki karşılaştırma ölçümüdür.
+2026-10-24'te kaynak okuma ve Plus üzerinde ölçümle yazıldı (10.27.27.36,
+Kanky Link-4K, SONY TV HDMI-A-2'de).
 
 Bu belgedeki her iddia üç türden birindedir ve öyle işaretlenmiştir:
 **ölçüldü** (cihazda, tarihli), **kaynak** (bağlantılı belge ya da kaynak
@@ -176,10 +178,27 @@ Kanky ─USB─> mediabox-dvb ─FIFO (tek servis)─> mediabox-live
   hemen koparılır: panelde son kare kalır, ses aygıtı sessizlik çalar. Sonra
   kendi iş parçacığında kapatılır. Sink'ler, HDMI ses aygıtı ve arayüz
   bağlantısı hiç kapanmaz.
-- **Denetim.** Denetim soketi, mediaboxd-rs'in kullandığı mpv JSON-IPC alt
-  kümesini konuşur: `loadfile`, `get_property`, `observe_property
-  eof-reached`, mod değişimi çevresinde `aid`, `volume`, `mute`,
-  `audio-delay` ve `quit`. Daemon iki oynatıcıyı da değiştirmeden sürer.
+- **Denetim.** Denetim soketi, mediaboxd-rs'in oynatıcılarla konuştuğu JSON
+  IPC'nin (mpv'ninki) canlı yayına gereken kısmını konuşur: `loadfile`,
+  `get_property`, `observe_property`, `aid`, `volume`, `mute`, `audio-delay`
+  ve `quit`. Yalnız yapılan iş `success` döner. Oynatıcıda olmayan özellik
+  "property unavailable" döner. Açılamayan kanalın `loadfile` yanıtı sebebi
+  taşır.
+- **Durum anlamları.**
+  - `core-idle=false` (daemon durumunda `picture=true`): son açılan kanalın
+    ilk karesi arayüzün düzlemine verilmiştir ve oynatıcı duraklatılmamıştır.
+    Görüntüsü olmayan serviste aynı şey, sesinin ses aygıtına ulaşmasıdır.
+  - Kanal değişimi `end-file` sayılmaz.
+  - FIFO'nun sonu yayının sonu değildir. Alıcı başka FIFO'ya geçerken eski
+    okuyucuyu bu yolla bırakır. Yayının bittiğini alıcının kendi durumu
+    söyler (`follow_live`).
+  - Oynatıcı yalnız şu iki durumda biter: `quit` gelir, ya da kanal hiç
+    oynatılamaz (görüntü çözülemez, aynı hata üç yeniden açılışta sürer).
+    İkincisinde `end-file reason=error file_error=<sebep>` gönderir; arayüz
+    bu sebebi gösterir.
+- **Okuyucu.** Her FIFO'nun tek okuyucusu vardır ve akışı o anki dala verir.
+  Aynı FIFO'da yeniden açılan kanal (ses izi, devam, hata sonrası) veri
+  kaybetmez.
 
 ### Profesyonel alıcıyla aynı olan ve olmayan
 
@@ -251,8 +270,10 @@ Bu yüzden kadans için kullanılmadı.
   - uzun süreli oynatma
 - "Oynatımı görüntüye eşitle" bu oynatıcıda yok; açıkken ses PCM gider.
 - GStreamer eklentileri dlopen ile yüklendiği için release capture'ın ELF
-  kapanışı onları bulmuyor. Çalışma zamanı paket listesi bunları henüz
-  adlandırmıyor.
+  kapanışı onları bulmuyor. Capture betiği (`create-mediabox-release.sh`)
+  bunların paketlerini ve `mediabox-live`/`mppvideodec` kapılarını
+  2026-10-25'ten beri adlandırıyor; golden kart üzerinde gerçek bir capture
+  ile henüz doğrulanmadı.
 
 ## 6. Kanal değişiminde "görüntü geldi" kararı (2026-10-24 olayı)
 
@@ -294,11 +315,12 @@ Uygulama bir defalık yoklamayla karar vermez.
 denendi. Arayüz 102'nin görüntüsünü 5105 ms'de, 100'ünkünü 4044 ms'de tanıdı.
 40 s içinde "gave up" yok; ekranda uyarı yok.
 
-**TRT ULTRA (101, 16300, TKGS: 11767 V SR 15000):** Alıcı kilitlenmiyor.
-Ara frekansta (1167 MHz) RF AGC 63549 (neredeyse tam kazanç; çalışan
-taşıyıcıda 56486), karar `NO_RF`. Kilit bekleme süresi vendor bütçesi
-(70 × 10 ms). Bu çanak ve LNB ile bu frekansta sinyal yok görünüyor.
-Referans kutuda aynı çanakla doğrulanmadı.
+**TRT ULTRA (101, 16300, TKGS: 11767 V SR 15000):** Sinyal kilitlenme
+sınırında; ölçüm aynı gün referansla tekrarlandı. Sony ve Kanky (Android
+kutuda) 8,06–8,43 dB SNR ile kilitlendi; Android kutu da kanalı ancak 3–4
+denemede açtı. Plus'ta SNR USB portuna bağlı: arka USB3 4,0–4,8 dB, ön USB2
+(Bus 003) 5,4–5,7 dB, öbür ön USB2 (Bus 006) 7,0–7,8 dB. Yukarıdaki ilk
+denemedeki `NO_RF` kararı bu port ölçümlerinden önceydi.
 
 **Kalan:** Kanal değişimi 4–5 s, profesyonel alıcıdan yavaş (bölüm 5).
 
@@ -385,8 +407,6 @@ bildirir):
 ```sh
 scripts/build-mediabox-live.sh --install     # MEDIABOX_HOST ayarlı; Debian GStreamer,
                                              # medya çalışma zamanına karşı mppvideodec, ikili
-echo mpv > /var/lib/mediabox/live-engine     # canlı yayın yeniden mpv ile
-rm /var/lib/mediabox/live-engine             # mediabox-live'a dönüş
 mediaboxctl media live-here 10801 --frequency-khz 12226000 --symbol-rate 27500
 ```
 

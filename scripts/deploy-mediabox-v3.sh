@@ -314,6 +314,16 @@ sh_ "set -e
   install -m 0644 /var/tmp/mediabox.lua $prefix/player/share/mediabox.lua
   rm -f /var/tmp/mediabox-player /var/tmp/mediabox-player-input.conf /var/tmp/mediabox.lua"
 
+# Live television's player is built and installed by
+# scripts/build-mediabox-live.sh --install: GStreamer from Debian, mppvideodec
+# against the media runtime, and the binary. The launcher above starts it for
+# every live channel and has nothing else to start, so its absence is said
+# here rather than found on the television.
+sh_ "test -x $prefix/bin/mediabox-live && test -e $MEDIABOX_MEDIA_PREFIX/lib/gstreamer-1.0/libgstrockchipmpp.so" || {
+  echo "   no mediabox-live at $prefix/bin: live television will not start until you run" >&2
+  echo "     scripts/build-mediabox-live.sh --install" >&2
+}
+
 say "templates that are filled in from the board"
 # Two files that used to be one board's answer written down. The ALSA card
 # config has to be named after the sound card of the output this box is on, and

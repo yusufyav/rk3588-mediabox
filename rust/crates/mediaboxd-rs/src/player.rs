@@ -5,9 +5,11 @@
 //! difference between this and handing Kodi the display: the catalogue is
 //! still behind it, Back returns to it, and nothing has to be handed back.
 //!
-//! The player is mpv, built on the appliance against MediaBox's own Rockchip
-//! media runtime and started by `mediabox-player`. This module only starts it,
-//! asks it where it has got to, and stops it.
+//! A film's player is mpv, built on the appliance against MediaBox's own
+//! Rockchip media runtime; live television's is mediabox-live
+//! (rust/crates/mediabox-live). `mediabox-player` starts whichever it is, and
+//! both answer the same JSON IPC. This module only starts it, asks it where it
+//! has got to, and stops it.
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -92,13 +94,9 @@ pub struct PlayerManager {
     /// The film was started timed to the display: its sound is PCM for as
     /// long as it plays, whatever the sound plan says about passthrough.
     display_sync: AtomicBool,
-    /// Live television's position is the broadcast's clock (its stream is
-    /// not probed for a start time): the first one read, so what is shown
-    /// is how long it has been on.
+    /// Live television's position is the player's clock: the first one read
+    /// on a channel, so what is shown is how long it has been on.
     live_origin: std::sync::Mutex<Option<f64>>,
-    /// A live channel is being opened in the running player: the end of the
-    /// file before it is not the end of anything (`playback::read_mpv`).
-    reloading: AtomicBool,
 }
 
 impl PlayerManager {
@@ -111,7 +109,6 @@ impl PlayerManager {
             holding: AtomicBool::new(false),
             display_sync: AtomicBool::new(false),
             live_origin: std::sync::Mutex::new(None),
-            reloading: AtomicBool::new(false),
         }
     }
 
@@ -172,24 +169,27 @@ impl PlayerManager {
         let _ = self.ask(set("mute", json!(after.muted))).await;
     }
 
-    /// What the film's sound is and what leaves the box, as mpv says.
+    /// What the film's sound is and what leaves the box, as its player says.
     pub async fn audio_stream(&self) -> Option<mediabox_core::StreamAudio> {
-        self.playing().await?;
+        let live = self.playing().await?.live().is_some();
         let codec = self
             .property("audio-codec-name")
             .await
             .and_then(|value| value.as_str().map(str::to_owned));
         let params = self.property("audio-params").await;
         let out = self.property("audio-out-params").await;
-        let encoding = self
-            .property("af")
-            .await
-            .and_then(|value| value.as_array().cloned())
-            .is_some_and(|filters| {
-                filters
-                    .iter()
-                    .any(|filter| filter.get("name").and_then(Value::as_str) == Some("lavcac3enc"))
-            });
+        // mpv encodes through its lavcac3enc filter; live television's AC-3
+        // that is not the broadcast's own is always its encoder's.
+        let encoding = live
+            || self
+                .property("af")
+                .await
+                .and_then(|value| value.as_array().cloned())
+                .is_some_and(|filters| {
+                    filters
+                        .iter()
+                        .any(|filter| filter.get("name").and_then(Value::as_str) == Some("lavcac3enc"))
+                });
         if codec.is_none() && out.is_none() {
             return None;
         }
@@ -392,8 +392,7 @@ impl PlayerManager {
                 "--setenv=MEDIABOX_PLAYER_AID={}",
                 audio_track.map(|track| track.to_string()).unwrap_or_default()
             ))
-            // Live television: the launcher opens its transport stream
-            // without probing it by decoding (see packaging/mediabox-player).
+            // Live television: the launcher starts mediabox-live, not mpv.
             .arg(format!("--setenv=MEDIABOX_PLAYER_LIVE={}", u8::from(playing.live().is_some())))
             .arg(self.launcher.as_os_str())
             .arg(url)
@@ -416,76 +415,27 @@ impl PlayerManager {
         Ok(())
     }
 
-    /// Whether a live channel is being opened in the running player.
-    pub fn reloading(&self) -> bool {
-        self.reloading.load(Ordering::SeqCst)
-    }
-
-    /// The next live channel is about to be opened in this player: from
-    /// now the end of the current file is the channel change's, not the
-    /// end of the film.
-    pub fn begin_reload(&self) {
-        self.reloading.store(true, Ordering::SeqCst);
-    }
-
-    pub fn end_reload(&self) {
-        self.reloading.store(false, Ordering::SeqCst);
-    }
-
     /// Open live channel `service_id`, on `url`, in the player that is
-    /// running -- its video output, its decoder and above all its audio
-    /// device stay as they are (mpv keeps the device between files of one
-    /// format, `--gapless-audio=weak`), so the sound over HDMI is never
-    /// stopped and started again. True once the new file plays.
-    /// `None` once `called_off` says a newer channel was asked for: the
-    /// newer one's loadfile replaces this one, nothing waits for its picture.
-    pub async fn reload_live(
-        &self,
-        url: &str,
-        service_id: u16,
-        title: Option<String>,
-        called_off: impl Fn() -> bool,
-    ) -> Option<bool> {
-        let loaded = self
+    /// running: its picture plane, its decoder and its sound device stay as
+    /// they are, so the sound over HDMI is never stopped and started again.
+    /// Done once the player has the new channel's stream open; its first
+    /// picture is the status's `picture`, read for as long as it takes. An
+    /// error is the player's own reason.
+    pub async fn reload_live(&self, url: &str, service_id: u16, title: Option<String>) -> Result<(), String> {
+        let answer = self
             .ask(json!({"command": ["loadfile", url, "replace"], "request_id": 23}))
             .await
-            .is_some_and(|answer| answer.get("error").and_then(Value::as_str) == Some("success"));
-        if loaded {
-            // The old file's end paused it (`--keep-open`); the new one plays.
-            let _ = self.ask(json!({"command": ["set_property", "pause", false], "request_id": 24})).await;
-            // From here the player is on the new channel, picture or not: the
-            // status says so, and its `picture` is this channel's.
-            *self.live_origin.lock().unwrap_or_else(|p| p.into_inner()) = None;
-            if let Some(current) = self.playing.lock().await.as_mut() {
-                current.content = Playback::Live { service_id };
-                current.title = title.clone();
-            }
-        }
-        let mut playing = false;
-        // Another multiplex: the stream starts after the lock, and the picture
-        // after the next I-frame. 3 s was too short for ATV after TRT HABER
-        // (2026-10-23), and the fallback booted the demodulator again: 10.9 s.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        while loaded && std::time::Instant::now() < deadline {
-            if called_off() {
-                self.end_reload();
-                return None;
-            }
-            let idle = self.property("core-idle").await.and_then(|value| value.as_bool());
-            let ended = self.property("eof-reached").await.and_then(|value| value.as_bool());
-            if idle == Some(false) && ended != Some(true) {
-                playing = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            .ok_or("oynatıcı yanıt vermedi")?;
+        match answer.get("error").and_then(Value::as_str) {
+            Some("success") => {}
+            other => return Err(other.unwrap_or("oynatıcı yanıt vermedi").to_string()),
         }
         *self.live_origin.lock().unwrap_or_else(|p| p.into_inner()) = None;
         if let Some(current) = self.playing.lock().await.as_mut() {
             current.content = Playback::Live { service_id };
             current.title = title;
         }
-        self.end_reload();
-        Some(playing)
+        Ok(())
     }
 
     /// How far into the film the player has got, in whole seconds.
@@ -579,7 +529,10 @@ impl PlayerManager {
         // Whether the player is putting pictures out now. A live channel's
         // first picture is read from here for as long as it takes, as Android's
         // TV input says it (TvInputService.Session.notifyVideoAvailable),
-        // rather than decided once when the channel was asked for.
+        // rather than decided once when the channel was asked for. For live
+        // television it is mediabox-live's word that the channel opened last
+        // has had a frame committed on the interface's plane (or, without a
+        // picture, its sound at the device), and is not paused.
         let picture = self
             .ask(json!({"command": ["get_property", "core-idle"], "request_id": 8}))
             .await

@@ -89,6 +89,9 @@ pub struct Info {
     pub fps: Option<f64>,
     pub interlaced: Option<String>,
     pub audio_codec: Option<String>,
+    /// The sound as decoded, (rate, channels); unknown when it is passed
+    /// through.
+    pub audio_decoded: Option<(i32, i32)>,
     pub passthrough: bool,
     /// Every audio stream the programme carries, in PMT order.
     pub audio_tracks: Vec<(String, Option<String>)>,
@@ -98,11 +101,24 @@ pub struct Info {
 /// One channel's elements.
 struct Branch {
     generation: u64,
-    stop: Arc<AtomicBool>,
     elements: Arc<Mutex<Vec<gst::Element>>>,
     pads: Arc<Mutex<Vec<(gst::Element, gst::Pad)>>>,
-    /// The FIFO's reader end, once the reader has opened it.
-    source: Arc<Mutex<Option<Arc<File>>>>,
+}
+
+/// The FIFO being read, and the branch its stream goes into.
+///
+/// One reader per FIFO, not per branch: a channel opened again on the same
+/// FIFO (an audio track, a resume, a branch that failed) is fed by the same
+/// reader, which waits for the new branch with what it has read. With a
+/// reader per branch, the old one, blocked in read(2) on the same
+/// descriptor, took the next chunk and threw it away. The reader end stays
+/// open throughout: the receiver ends when the last reader closes it (EPIPE).
+struct Feed {
+    path: String,
+    into: Arc<Mutex<Option<gst_app::AppSrc>>>,
+    /// Another FIFO is read now, or this one has ended: the next channel on
+    /// this path needs a reader of its own.
+    stop: Arc<AtomicBool>,
 }
 
 pub struct Engine {
@@ -116,6 +132,7 @@ pub struct Engine {
     audio: Mutex<Audio>,
     shared: Arc<Shared>,
     current: Mutex<Option<Branch>>,
+    feed: Mutex<Option<Feed>>,
     /// The audio stream to play, by its order in the programme; `None`:
     /// no sound (mpv's `aid=no`, which the control plane sets around a
     /// display mode change).
@@ -125,7 +142,9 @@ pub struct Engine {
     trace: crate::trace::Trace,
     plane: Arc<Plane>,
     video_sink: gst_app::AppSink,
-    quit: Box<dyn Fn() + Send + Sync>,
+    /// The player cannot go on: the interface is gone, or the channel
+    /// cannot be played at all. With the reason, for the control plane.
+    fail: Box<dyn Fn(Option<String>) + Send + Sync>,
 }
 
 fn make(factory: &str) -> Result<gst::Element, String> {
@@ -139,7 +158,13 @@ fn first_of(factories: &[&str]) -> Option<gst::Element> {
 }
 
 impl Engine {
-    pub fn new(options: Options, plane: Arc<Plane>, shared: Arc<Shared>, trace: crate::trace::Trace, quit: impl Fn() + Send + Sync + 'static) -> Result<Arc<Self>, String> {
+    pub fn new(
+        options: Options,
+        plane: Arc<Plane>,
+        shared: Arc<Shared>,
+        trace: crate::trace::Trace,
+        fail: impl Fn(Option<String>) + Send + Sync + 'static,
+    ) -> Result<Arc<Self>, String> {
         let pipeline = gst::Pipeline::with_name("mediabox-live");
         // CLOCK_MONOTONIC: the interface's vblank timestamps are in it too.
         let clock = gst::SystemClock::obtain();
@@ -201,12 +226,13 @@ impl Engine {
             options,
             shared,
             current: Mutex::new(None),
+            feed: Mutex::new(None),
             aid: Mutex::new(Some(0)),
             audio_delay: Mutex::new(0.0),
             trace: trace.clone(),
             plane: Arc::clone(&plane),
             video_sink: video_sink.clone(),
-            quit: Box::new(quit),
+            fail: Box::new(fail),
         });
         engine.attach_audio_sink()?;
         engine.attach_video(&video_sink, plane, trace);
@@ -310,7 +336,7 @@ impl Engine {
         // each channel with a burst from its last access point -- a PTS can
         // map a few milliseconds earlier than the one before it.
         let mut last: Option<(u64, u64)> = None;
-        let quit = Arc::downgrade(self);
+        let engine = Arc::downgrade(self);
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
@@ -375,8 +401,8 @@ impl Engine {
                         }
                         Sent::Dropped => {}
                         Sent::Gone => {
-                            if let Some(engine) = quit.upgrade() {
-                                (engine.quit)();
+                            if let Some(engine) = engine.upgrade() {
+                                (engine.fail)(None);
                             }
                             return Err(gst::FlowError::Flushing);
                         }
@@ -389,30 +415,47 @@ impl Engine {
 
     /// Open the channel on `path`: a new branch, switched to, and the one
     /// before it taken down.
-    pub fn open(self: &Arc<Self>, path: &str) {
+    pub fn open(self: &Arc<Self>, path: &str) -> Result<(), String> {
         let generation = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.trace.event('G', generation, 0);
         self.shared.playing.store(false, Ordering::SeqCst);
         self.shared.eof.store(false, Ordering::SeqCst);
-        let same = {
-            let mut info = self.shared.info.lock().unwrap_or_else(|p| p.into_inner());
-            let same = info.path == path;
-            *info = Info { path: path.to_string(), opened_at: Some(Instant::now()), ..Info::default() };
-            same
-        };
-        let old = self.current.lock().unwrap_or_else(|p| p.into_inner()).take();
-        // The same FIFO again (an audio track, a resume): its reader end is
-        // kept open throughout, because the receiver ends when the last reader
-        // closes it (EPIPE).
-        let reuse = if same { old.as_ref().and_then(|branch| branch.source.lock().unwrap_or_else(|p| p.into_inner()).clone()) } else { None };
-        if let Some(old) = old {
+        *self.shared.info.lock().unwrap_or_else(|p| p.into_inner()) =
+            Info { path: path.to_string(), opened_at: Some(Instant::now()), ..Info::default() };
+        let mut feed = self.feed.lock().unwrap_or_else(|p| p.into_inner());
+        if feed.as_ref().is_some_and(|feed| feed.path != path || feed.stop.load(Ordering::SeqCst))
+            && let Some(old) = feed.take()
+        {
+            old.stop.store(true, Ordering::SeqCst);
+            *old.into.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+        // The reader of this FIFO, if it goes on, waits here with what it
+        // has read until the new branch takes it.
+        let into = feed.as_ref().map(|feed| Arc::clone(&feed.into)).unwrap_or_default();
+        let mut target = into.lock().unwrap_or_else(|p| p.into_inner());
+        *target = None;
+        if let Some(old) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
             self.take_down(old);
             self.blank();
         }
-        match self.build(generation, path, reuse) {
-            Ok(branch) => *self.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(branch),
-            Err(error) => eprintln!("mediabox-live: kanal açılamadı: {error}"),
+        let (branch, source) = self.build(generation)?;
+        *self.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(branch);
+        *target = Some(source);
+        drop(target);
+        if feed.is_none() {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (reader_into, reader_stop, shared, reader_path) =
+                (Arc::clone(&into), Arc::clone(&stop), Arc::clone(&self.shared), path.to_string());
+            std::thread::Builder::new()
+                .name("ts-reader".into())
+                .spawn(move || {
+                    read_stream(&reader_path, &reader_into, &reader_stop, &shared);
+                    reader_stop.store(true, Ordering::SeqCst);
+                })
+                .map_err(|e| e.to_string())?;
+            *feed = Some(Feed { path: path.to_string(), into, stop });
         }
+        Ok(())
     }
 
     /// Between channels the panel is dark, as a receiver's is while it tunes,
@@ -432,7 +475,7 @@ impl Engine {
         self.plane.stop();
     }
 
-    fn build(self: &Arc<Self>, generation: u64, path: &str, reuse: Option<Arc<File>>) -> Result<Branch, String> {
+    fn build(self: &Arc<Self>, generation: u64) -> Result<(Branch, gst_app::AppSrc), String> {
         let source = gst_app::AppSrc::builder()
             .name(format!("ts{generation}"))
             .is_live(true)
@@ -473,27 +516,18 @@ impl Engine {
                 if let Err(error) = engine.stream(generation, pad, &elements, &pads, &audio_order, &video_taken) {
                     eprintln!("mediabox-live: {}: {error}", pad.name());
                     engine.discard(pad, &elements);
+                    // Without its picture the channel is not played: said,
+                    // not taken for a radio service by its sound.
+                    if pad.name().starts_with("video") {
+                        (engine.fail)(Some(format!("Kanalın görüntüsü çözülemiyor: {error}")));
+                    }
                 }
             });
         }
         for element in [source.upcast_ref::<gst::Element>(), &demux] {
             element.sync_state_with_parent().map_err(|e| e.to_string())?;
         }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let file = reuse;
-        let held = Arc::new(Mutex::new(file.clone()));
-        {
-            let stop = Arc::clone(&stop);
-            let shared = Arc::clone(&self.shared);
-            let path = path.to_string();
-            let held = Arc::clone(&held);
-            std::thread::Builder::new()
-                .name(format!("ts-reader-{generation}"))
-                .spawn(move || read_stream(&path, file, held, &source, &stop, &shared, generation))
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(Branch { generation, stop, elements, pads, source: held })
+        Ok((Branch { generation, elements, pads }, source))
     }
 
     /// Put elements into the running pipeline on its clock and timeline.
@@ -638,68 +672,71 @@ impl Engine {
             info.passthrough = true;
             info.aid = Some(order);
             return Ok(());
-        } else {
-            let decoder = match (name, version) {
-                ("audio/mpeg", Some(1)) => first_of(&["mpg123audiodec", "avdec_mp2float", "avdec_mp3"]),
-                ("audio/mpeg", _) => first_of(&["avdec_aac", "fdkaacdec", "faad"]),
-                ("audio/x-ac3", _) => first_of(&["a52dec", "avdec_ac3"]),
-                ("audio/x-eac3", _) => first_of(&["avdec_eac3"]),
-                _ => None,
+        }
+        let decoder = match (name, version) {
+            ("audio/mpeg", Some(1)) => first_of(&["mpg123audiodec", "avdec_mp2float", "avdec_mp3"]),
+            ("audio/mpeg", _) => first_of(&["avdec_aac", "fdkaacdec", "faad"]),
+            ("audio/x-ac3", _) => first_of(&["a52dec", "avdec_ac3"]),
+            ("audio/x-eac3", _) => first_of(&["avdec_eac3"]),
+            _ => None,
+        }
+        .ok_or_else(|| format!("{codec} için ses çözücüsü yok"))?;
+        chain.push(decoder);
+        let head = self.head(pad, &chain, elements, false)?;
+        let decoded = head.last().expect("a chain has elements").static_pad("src").ok_or("çözücünün çıkışı yok")?;
+        // How many channels come out is known on the decoder's first caps,
+        // and that decides the rest: the sound setting's Dolby Digital
+        // encoding for three channels or more -- mpv's
+        // `lavcac3enc=tospdif=yes:minch=N`, which this replaces -- and
+        // PCM below that.
+        let weak = Arc::downgrade(self);
+        let (elements_tail, pads_tail) = (Arc::clone(elements), Arc::clone(pads));
+        decoded.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+            let Some(gst::PadProbeData::Event(event)) = &info.data else { return gst::PadProbeReturn::Ok };
+            let gst::EventView::Caps(caps) = event.view() else { return gst::PadProbeReturn::Ok };
+            let Some(engine) = weak.upgrade() else { return gst::PadProbeReturn::Remove };
+            // A channel left before its sound began: the sound device is
+            // the new channel's to open, not this one's.
+            if engine.shared.generation.load(Ordering::SeqCst) != generation {
+                return gst::PadProbeReturn::Remove;
             }
-            .ok_or_else(|| format!("{codec} için ses çözücüsü yok"))?;
-            chain.push(decoder);
-            let head = self.head(pad, &chain, elements, false)?;
-            let decoded = head.last().expect("a chain has elements").static_pad("src").ok_or("çözücünün çıkışı yok")?;
-            // How many channels come out is known on the decoder's first caps,
-            // and that decides the rest: the sound setting's Dolby Digital
-            // encoding for three channels or more -- mpv's
-            // `lavcac3enc=tospdif=yes:minch=N`, which this replaces -- and
-            // PCM below that.
-            let weak = Arc::downgrade(self);
-            let (elements_tail, pads_tail) = (Arc::clone(elements), Arc::clone(pads));
-            decoded.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-                let Some(gst::PadProbeData::Event(event)) = &info.data else { return gst::PadProbeReturn::Ok };
-                let gst::EventView::Caps(caps) = event.view() else { return gst::PadProbeReturn::Ok };
-                let Some(engine) = weak.upgrade() else { return gst::PadProbeReturn::Remove };
-                let channels = caps.caps().structure(0).and_then(|s| s.get::<i32>("channels").ok()).unwrap_or(2);
-                let audio = engine.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
-                let encode = audio.ac3_encode.filter(|(_, min)| channels >= *min as i32);
-                engine.sound_mode(encode.is_some());
-                if let Some((kbps, _)) = encode {
-                    eprintln!("mediabox-live: ses {channels} kanal -> Dolby Digital {kbps} kb/s (IEC 61937)");
-                    if let Err(error) = engine.bitstream_tail(pad, Some(kbps), &elements_tail, &pads_tail) {
-                        eprintln!("mediabox-live: ses zinciri kurulamadı: {error}");
-                    }
-                    engine.shared.info.lock().unwrap_or_else(|p| p.into_inner()).passthrough = true;
+            let structure = caps.caps().structure(0);
+            let channels = structure.and_then(|s| s.get::<i32>("channels").ok()).unwrap_or(2);
+            let rate = structure.and_then(|s| s.get::<i32>("rate").ok()).unwrap_or(0);
+            engine.shared.info.lock().unwrap_or_else(|p| p.into_inner()).audio_decoded = Some((rate, channels));
+            let audio = engine.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let encode = audio.ac3_encode.filter(|(_, min)| channels >= *min as i32);
+            engine.sound_mode(encode.is_some());
+            if let Some((kbps, _)) = encode {
+                eprintln!("mediabox-live: ses {channels} kanal -> Dolby Digital {kbps} kb/s (IEC 61937)");
+                if let Err(error) = engine.bitstream_tail(pad, Some(kbps), &elements_tail, &pads_tail) {
+                    eprintln!("mediabox-live: ses zinciri kurulamadı: {error}");
+                }
+                engine.shared.info.lock().unwrap_or_else(|p| p.into_inner()).passthrough = true;
+                return gst::PadProbeReturn::Remove;
+            }
+            let tail = match engine.sound_tail(&audio) {
+                Ok(tail) => tail,
+                Err(error) => {
+                    eprintln!("mediabox-live: ses zinciri kurulamadı: {error}");
                     return gst::PadProbeReturn::Remove;
                 }
-                let tail = match engine.sound_tail(&audio) {
-                    Ok(tail) => tail,
-                    Err(error) => {
-                        eprintln!("mediabox-live: ses zinciri kurulamadı: {error}");
-                        return gst::PadProbeReturn::Remove;
-                    }
-                };
-                eprintln!(
-                    "mediabox-live: ses {channels} kanal -> {}",
-                    match encode { Some((kbps, _)) => format!("Dolby Digital {kbps} kb/s"), None => "PCM".into() }
-                );
-                if let Err(error) = engine.tail(pad, &tail, &engine.audio_selector, &elements_tail, &pads_tail) {
-                    eprintln!("mediabox-live: ses zinciri bağlanamadı: {error}");
-                }
-                engine.shared.info.lock().unwrap_or_else(|p| p.into_inner()).passthrough = encode.is_some();
-                gst::PadProbeReturn::Remove
-            });
-            for element in head.iter().rev() {
-                element.sync_state_with_parent().map_err(|e| e.to_string())?;
+            };
+            eprintln!("mediabox-live: ses {channels} kanal -> PCM");
+            if let Err(error) = engine.tail(pad, &tail, &engine.audio_selector, &elements_tail, &pads_tail) {
+                eprintln!("mediabox-live: ses zinciri bağlanamadı: {error}");
             }
-            pad.link(&head[0].static_pad("sink").ok_or("kuyruğun girişi yok")?)
-                .map_err(|e| format!("{e:?}"))?;
-            let mut info = self.shared.info.lock().unwrap_or_else(|p| p.into_inner());
-            info.audio_codec = Some(codec);
-            info.aid = Some(order);
-            Ok(())
+            gst::PadProbeReturn::Remove
+        });
+        for element in head.iter().rev() {
+            element.sync_state_with_parent().map_err(|e| e.to_string())?;
         }
+        pad.link(&head[0].static_pad("sink").ok_or("kuyruğun girişi yok")?)
+            .map_err(|e| format!("{e:?}"))?;
+        let mut info = self.shared.info.lock().unwrap_or_else(|p| p.into_inner());
+        info.audio_codec = Some(codec);
+        info.aid = Some(order);
+        Ok(())
     }
 
     /// After the decoder: AC-3 at `kbps`, made into IEC 61937 bursts here and
@@ -883,7 +920,6 @@ impl Engine {
     /// told to stop, its elements go to NULL on a thread of their own, and
     /// the selector inputs it had are given back.
     fn take_down(&self, branch: Branch) {
-        branch.stop.store(true, Ordering::SeqCst);
         // Off the selectors at once: what the old channel still has decoded
         // is not shown after the viewer has asked for the next one. The panel
         // keeps the last frame and the sound device plays silence until the
@@ -905,7 +941,6 @@ impl Engine {
             for (selector, pad) in branch.pads.lock().unwrap_or_else(|p| p.into_inner()).drain(..) {
                 selector.release_request_pad(&pad);
             }
-            drop(branch.source);
         });
     }
 
@@ -944,10 +979,11 @@ impl Engine {
                 }
             }
         }
-        if before.is_some() && aid.is_some() || before.is_none() {
-            if let Some(path) = self.current_path() {
-                self.open(&path);
-            }
+        if (before.is_some() && aid.is_some() || before.is_none())
+            && let Some(path) = self.current_path()
+            && let Err(error) = self.open(&path)
+        {
+            (self.fail)(Some(error));
         }
     }
 
@@ -990,6 +1026,12 @@ impl Engine {
         *self.audio_delay.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The sound device is opened for IEC 61937 bursts (AC-3 passed through
+    /// or encoded), not PCM.
+    pub fn bitstream(&self) -> bool {
+        self.bitstream.load(Ordering::SeqCst)
+    }
+
     /// What the sound device was opened with: (format, rate, channels).
     pub fn audio_caps(&self) -> Option<(String, i32, i32)> {
         let sink = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).clone()?;
@@ -1013,8 +1055,10 @@ impl Engine {
             let _ = self.pipeline.set_state(gst::State::Paused);
         } else {
             let _ = self.pipeline.set_state(gst::State::Playing);
-            if let Some(path) = self.current_path() {
-                self.open(&path);
+            if let Some(path) = self.current_path()
+                && let Err(error) = self.open(&path)
+            {
+                (self.fail)(Some(error));
             }
         }
     }
@@ -1039,67 +1083,47 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
-        if let Some(branch) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            branch.stop.store(true, Ordering::SeqCst);
+        if let Some(feed) = self.feed.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            feed.stop.store(true, Ordering::SeqCst);
+            *feed.into.lock().unwrap_or_else(|p| p.into_inner()) = None;
         }
+        self.current.lock().unwrap_or_else(|p| p.into_inner()).take();
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 }
 
-/// Read the receiver's FIFO into the branch's source, as fast as it comes:
-/// every read is stamped with the time it arrived.
-fn read_stream(
-    path: &str,
-    file: Option<Arc<File>>,
-    held: Arc<Mutex<Option<Arc<File>>>>,
-    source: &gst_app::AppSrc,
-    stop: &AtomicBool,
-    shared: &Shared,
-    generation: u64,
-) {
-    let file = match file {
-        Some(file) => file,
-        None => match File::open(path) {
-            Ok(file) => {
-                let file = Arc::new(file);
-                *held.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&file));
-                file
-            }
-            Err(error) => {
-                eprintln!("mediabox-live: {path} açılamadı: {error}");
-                shared.eof.store(true, Ordering::SeqCst);
-                return;
-            }
-        },
+/// Read the receiver's FIFO into the current branch's source, as fast as it
+/// comes: every buffer is stamped with the time it arrived. The end of the
+/// FIFO is the stream's end only while it is the FIFO being read: the
+/// receiver lets the reader of a FIFO it has moved away from go that way.
+fn read_stream(path: &str, into: &Mutex<Option<gst_app::AppSrc>>, stop: &AtomicBool, shared: &Shared) {
+    let ended = |why: String| {
+        if !stop.load(Ordering::SeqCst) {
+            eprintln!("mediabox-live: {why}");
+            shared.eof.store(true, Ordering::SeqCst);
+        }
+    };
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => return ended(format!("{path} açılamadı: {error}")),
     };
     let mut chunk = vec![0u8; 188 * 348];
     loop {
-        if stop.load(Ordering::SeqCst) {
-            return;
-        }
-        let read = match (&*file).read(&mut chunk) {
-            Ok(0) => {
-                if shared.generation.load(Ordering::SeqCst) == generation {
-                    eprintln!("mediabox-live: yayın akışı bitti ({path})");
-                    shared.eof.store(true, Ordering::SeqCst);
-                }
-                return;
-            }
+        let read = match file.read(&mut chunk) {
+            Ok(0) => return ended(format!("yayın akışı bitti ({path})")),
             Ok(read) => read,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                eprintln!("mediabox-live: {path} okunamadı: {error}");
-                shared.eof.store(true, Ordering::SeqCst);
-                return;
-            }
+            Err(error) => return ended(format!("{path} okunamadı: {error}")),
         };
         if stop.load(Ordering::SeqCst) {
             return;
         }
-        let buffer = gst::Buffer::from_slice(chunk[..read].to_vec());
-        if source.push_buffer(buffer).is_err() {
-            return;
-        }
+        // Cloned out of the lock: a full source blocks the push, and the
+        // next channel must still be able to take the reader over.
+        let Some(source) = into.lock().unwrap_or_else(|p| p.into_inner()).clone() else { continue };
+        // A source taken down under the push refuses it; the reader goes on
+        // for the branch after it.
+        let _ = source.push_buffer(gst::Buffer::from_slice(chunk[..read].to_vec()));
     }
 }
 
@@ -1220,10 +1244,8 @@ fn describe(caps: &gst::CapsRef) -> Option<Described> {
 
 fn picture(found: &Described, buffer: &gst::BufferRef) -> Option<Picture> {
     let meta = buffer.meta::<gst_video::VideoMeta>();
-    let (planes, offsets, strides) = match &meta {
-        Some(meta) => (meta.n_planes() as usize, meta.offset().to_vec(), meta.stride().to_vec()),
-        None => return None,
-    };
+    let meta = meta?;
+    let (planes, offsets, strides) = (meta.n_planes() as usize, meta.offset(), meta.stride());
     let planes = planes.min(4);
     let mut picture = Picture {
         fourcc: found.fourcc,
