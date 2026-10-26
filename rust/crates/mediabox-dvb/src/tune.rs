@@ -72,16 +72,19 @@ pub struct TuneParams {
     /// system measured above every cold start otherwise spent a second on
     /// the nominal IF that never locks.
     pub first_offset_khz: Option<i32>,
+    /// Offsets that locked a carrier without the wanted service on it -- a
+    /// neighbouring transponder -- and are not tried again in this search.
+    pub wrong_offsets_khz: Vec<i32>,
 }
 
 impl TuneParams {
     /// The offsets in the order they are tried: the one remembered, the
-    /// nominal IF, then the search; none twice.
+    /// nominal IF, then the search; none twice, none found wrong.
     pub fn offsets(&self) -> Vec<i32> {
         let mut out: Vec<i32> = Vec::new();
         let order = self.first_offset_khz.into_iter().chain(std::iter::once(0)).chain(self.search_offsets_khz.iter().copied());
         for offset in order {
-            if !out.contains(&offset) {
+            if !out.contains(&offset) && !self.wrong_offsets_khz.contains(&offset) {
                 out.push(offset);
             }
         }
@@ -366,6 +369,7 @@ fn stages(
             next.rf_khz = (next.rf_khz as i64 + locked_at as i64) as u32;
             next.first_offset_khz = None;
             next.search_offsets_khz = Vec::new();
+            next.wrong_offsets_khz = Vec::new();
         }
         bridge.log.line(format!("RETUNE {} kHz SR {} kS/s, the demodulator as it is", next.rf_khz, next.symbol_rate_ksps));
         res.lock_flags = None;
@@ -582,6 +586,7 @@ mod tests {
             lock_timeout_ms: None,
             search_offsets_khz: vec![10_000, -10_000],
             first_offset_khz: first,
+            wrong_offsets_khz: Vec::new(),
         };
         assert_eq!(params(None).offsets(), [0, 10_000, -10_000]);
         assert_eq!(params(Some(10_000)).offsets(), [10_000, 0, -10_000]);

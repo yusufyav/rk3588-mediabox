@@ -528,6 +528,10 @@ enum MediaCommand {
     LiveChannels,
     /// Refresh the live channel list from Türksat's broadcast TKGS table.
     LiveTkgsUpdate,
+    /// How far the TKGS channel setup has got.
+    LiveTkgsProgress,
+    /// Call the TKGS channel setup off.
+    LiveTkgsCancel,
     /// Choose TKGS's preferred channel ordering.
     LiveTkgsOrder {
         #[arg(value_parser = ["hd", "sd"])]
@@ -793,6 +797,8 @@ fn to_request(command: &Command) -> Request {
             MediaCommand::StatusHere => Request::MediaStatusHere,
             MediaCommand::LiveChannels => Request::LiveChannels,
             MediaCommand::LiveTkgsUpdate => Request::LiveTkgsUpdate,
+            MediaCommand::LiveTkgsProgress => Request::LiveTkgsProgress,
+            MediaCommand::LiveTkgsCancel => Request::LiveTkgsCancel,
             MediaCommand::LiveTkgsOrder { first } => Request::LiveTkgsOrderingSet { hd_first: first == "hd" },
             MediaCommand::LiveGuide { hours } => {
                 let now = std::time::SystemTime::now()

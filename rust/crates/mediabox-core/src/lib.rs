@@ -160,10 +160,9 @@ impl LiveSource {
     }
 }
 
-/// A channel of live television: one TV service of a multiplex the receiver
-/// has been on, as that multiplex's SDT named it. The number is MediaBox's,
-/// in the order of the service ids: there is no channel scan and no logical
-/// channel numbering yet, so nothing else could give one.
+/// A channel of live television: a television or radio service, numbered
+/// and placed by TKGS, or -- before TKGS was read -- one of a multiplex the
+/// receiver has been on, numbered by MediaBox in service-id order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveChannel {
     pub number: u32,
@@ -176,6 +175,12 @@ pub struct LiveChannel {
     /// still the final word once the service is selected.
     #[serde(default)]
     pub scrambled: bool,
+    /// A radio service (EN 300 468 service type 0x02): sound only.
+    #[serde(default)]
+    pub radio: bool,
+    /// The TKGS categories the channel is in, by name, as TKGS gives them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
 }
 
 /// One programme of a channel's event information (EIT), as broadcast.
@@ -1713,8 +1718,13 @@ pub enum Request {
     /// The live channels known: those of the last multiplex the receiver
     /// was on (its SDT), numbered in service-id order.
     LiveChannels,
-    /// Refresh the channel map from Türksat's broadcast TKGS table.
+    /// Refresh the channel map from Türksat's broadcast TKGS table: the
+    /// channel setup. Answered when it is done.
     LiveTkgsUpdate,
+    /// How far the channel setup has got.
+    LiveTkgsProgress,
+    /// Call the channel setup off.
+    LiveTkgsCancel,
     /// Prefer TKGS's HD-first or SD-first ordering where it supplies both.
     LiveTkgsOrderingSet { hd_first: bool },
     /// The broadcast programme guide of the known channels between `from`

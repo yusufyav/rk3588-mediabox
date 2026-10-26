@@ -340,6 +340,8 @@ impl AppState {
                 Ok(value) => Response::success(value),
                 Err(error) => Response::failure("tkgs_update_failed", error),
             },
+            Request::LiveTkgsProgress => Response::success(self.live.setup_progress()),
+            Request::LiveTkgsCancel => Response::success(json!({"cancelled": self.live.cancel_setup()})),
             Request::LiveTkgsOrderingSet { hd_first } => match self.live.set_tkgs_ordering(hd_first) {
                 Ok(value) => Response::success(value),
                 Err(error) => Response::failure("tkgs_ordering_failed", error),

@@ -244,6 +244,7 @@ fn params(path: &Path) -> Option<TuneParams> {
         lock_timeout_ms: field("lock_timeout_ms")?.parse().ok(),
         search_offsets_khz: Vec::new(),
         first_offset_khz: None,
+        wrong_offsets_khz: Vec::new(),
     })
 }
 
@@ -285,9 +286,11 @@ fn every_recorded_hardware_session_is_replayed_frame_for_frame() {
         let mut bridge = Bridge::new(&replay, &log, &clock, []);
         let stop = AtomicBool::new(false);
         let mut streamed = false;
-        let res = tune::run(&mut bridge, &firmware, &params, &stop, |_, _, _| {
+        // A one-off tune, as the reference's sessions were: no retrying a
+        // carrier that does not lock, nothing superseding it.
+        let res = tune::run(&mut bridge, &firmware, &params, false, &stop, &|| false, |_, _, _| {
             streamed = true;
-            Streamed { no_device: false, retune: None }
+            Streamed { no_device: false, retune: None, relock: false }
         });
         let name = path.file_name().unwrap().to_string_lossy();
         if let Some(mismatch) = replay.mismatch.borrow().as_ref() {

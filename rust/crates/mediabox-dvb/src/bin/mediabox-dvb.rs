@@ -189,6 +189,7 @@ fn play(args: Play) -> ExitCode {
                     step => vec![step.abs(), -step.abs()],
                 },
                 first_offset_khz: args.carrier_first_khz,
+                wrong_offsets_khz: Vec::new(),
             },
             firmware_dir: args.firmware_dir,
             access: HardwareAccess::chosen_with_hardware_flag(),

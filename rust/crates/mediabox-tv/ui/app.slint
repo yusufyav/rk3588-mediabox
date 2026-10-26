@@ -334,6 +334,12 @@ export component MediaBoxWindow inherits Window {
     in property <int> live-panel-focus;
     in property <bool> live-panel-above;
     in property <bool> live-panel-below;
+    in property <bool> live-setup-shown;
+    in property <string> live-setup-title;
+    in property <string> live-setup-text;
+    in property <float> live-setup-progress: -1;
+    in property <[string]> live-setup-actions;
+    in property <int> live-setup-focus;
 
     // ---- now playing
     in property <image> np-art;
@@ -922,6 +928,12 @@ export component MediaBoxWindow inherits Window {
             panel-focus: root.live-panel-focus;
             panel-above: root.live-panel-above;
             panel-below: root.live-panel-below;
+            setup-shown: root.live-setup-shown;
+            setup-title: root.live-setup-title;
+            setup-text: root.live-setup-text;
+            setup-progress: root.live-setup-progress;
+            setup-actions: root.live-setup-actions;
+            setup-focus: root.live-setup-focus;
         }
 
         // Last, so it is over the film and over every sheet.

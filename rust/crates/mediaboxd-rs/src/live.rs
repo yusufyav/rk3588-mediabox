@@ -114,6 +114,19 @@ struct Inner {
     fifo: Option<PathBuf>,
     /// For those names.
     fifos: u64,
+    /// The channel setup reading TKGS, while it does.
+    setup: Option<Setup>,
+}
+
+/// How far the channel setup has got, for its progress, and whether it was
+/// called off.
+#[derive(Debug, Clone, Copy, Default)]
+struct Setup {
+    /// The receiver is on the TKGS multiplex and reading the table.
+    reading: bool,
+    sections: u64,
+    expected: u64,
+    cancelled: bool,
 }
 
 pub struct LiveManager {
@@ -154,6 +167,7 @@ impl LiveManager {
                 last: None,
                 fifo: None,
                 fifos: 0,
+                setup: None,
             }),
             starts: AtomicU64::new(0),
         }
@@ -473,8 +487,18 @@ impl LiveManager {
                 match value.get("state").and_then(Value::as_str) {
                     Some("complete") => break Ok(value),
                     Some("failed") => break Err(value.get("error").and_then(Value::as_str).unwrap_or("TKGS alınamadı").to_string()),
+                    Some("reading") => {
+                        if let Some(setup) = self.lock().setup.as_mut() {
+                            setup.reading = true;
+                            setup.sections = value.get("sections").and_then(Value::as_u64).unwrap_or(0);
+                            setup.expected = value.get("expected").and_then(Value::as_u64).unwrap_or(0);
+                        }
+                    }
                     _ => {}
                 }
+            }
+            if self.lock().setup.is_some_and(|setup| setup.cancelled) {
+                break Err("Kanal kurulumu iptal edildi.".into());
             }
             if !Self::unit_active().await {
                 break Err("TKGS alınırken uydu alıcısı kapandı".into());
@@ -622,17 +646,51 @@ impl LiveManager {
             "source": inner.source,
             "failure": inner.failure,
             "receiver": receiver.or_else(|| inner.last.clone()),
+            "setup": self.setup_progress_of(&inner),
         })
+    }
+
+    fn setup_progress_of(&self, inner: &Inner) -> Value {
+        match inner.setup {
+            Some(setup) => json!({
+                "running": true, "reading": setup.reading,
+                "sections": setup.sections, "expected": setup.expected,
+            }),
+            None => json!({"running": false}),
+        }
+    }
+
+    /// The channel setup's progress: whether it runs, whether the receiver
+    /// is reading the table yet, and its sections had and expected.
+    pub fn setup_progress(&self) -> Value {
+        let inner = self.lock();
+        self.setup_progress_of(&inner)
+    }
+
+    /// Call the channel setup off. False when none runs.
+    pub fn cancel_setup(&self) -> bool {
+        match self.lock().setup.as_mut() {
+            Some(setup) => {
+                setup.cancelled = true;
+                true
+            }
+            None => false,
+        }
     }
 }
 
 // ------------------------------------------------------------------ guide
 
-/// Playable TKGS service types (EN 300 468 table 87): digital television,
+/// Playable service types (EN 300 468 table 87): digital television,
 /// digital radio, MPEG-2 HD, and advanced codec SD/HD/UHD. Private data
 /// services such as TKGS itself stay out of the channel list.
-fn is_television(service_type: Option<u8>) -> bool {
+fn is_playable(service_type: Option<u8>) -> bool {
     matches!(service_type, Some(0x01 | 0x02 | 0x11 | 0x16 | 0x19 | 0x1F))
+}
+
+/// Digital radio (EN 300 468 table 87): sound, no picture.
+fn is_radio(service_type: Option<u8>) -> bool {
+    service_type == Some(0x02)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -691,6 +749,8 @@ struct ReceiverTkgsTable {
     transponders: Vec<ReceiverTkgsTransponder>,
     #[serde(default)]
     orderings: Vec<StoredTkgsOrdering>,
+    #[serde(default)]
+    categories: Vec<StoredTkgsCategory>,
 }
 #[derive(Deserialize)]
 struct ReceiverTkgsTransponder {
@@ -710,6 +770,8 @@ struct ReceiverTkgsService {
     service_type: Option<u8>,
     #[serde(default)]
     free_ca_mode: bool,
+    #[serde(default)]
+    categories: Vec<u16>,
 }
 
 /// Events that ended this long ago are let go of.
@@ -749,6 +811,9 @@ pub struct StoredTkgs {
     pub channels: Vec<StoredTkgsChannel>,
     #[serde(default)]
     pub orderings: Vec<StoredTkgsOrdering>,
+    /// TKGS's channel categories (its descriptor 0x92): id and name.
+    #[serde(default)]
+    pub categories: Vec<StoredTkgsCategory>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTkgsChannel {
@@ -762,9 +827,14 @@ pub struct StoredTkgsChannel {
     pub service_type: Option<u8>,
     pub source: LiveSource,
     pub free_ca_mode: bool,
+    /// The ids of the TKGS categories the channel is in.
+    #[serde(default)]
+    pub categories: Vec<u16>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTkgsOrdering { pub name: String, pub lcns: Vec<u16> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredTkgsCategory { pub id: u16, pub name: String }
 
 impl GuideStore {
     /// The file, in this form or in the one-multiplex form it had first.
@@ -792,10 +862,13 @@ impl GuideStore {
                 .into_iter().flat_map(|o| o.lcns.iter().copied().enumerate().map(|(i, lcn)| (lcn, i))).collect();
             let mut listed: Vec<&StoredTkgsChannel> = tkgs.channels.iter().collect();
             listed.sort_by_key(|c| (positions.get(&c.lcn).copied().unwrap_or(usize::MAX), c.lcn));
+            let category = |id: &u16| tkgs.categories.iter().find(|k| k.id == *id).map(|k| k.name.clone());
             return listed.into_iter().filter_map(|c| {
-                (is_television(c.service_type) && !c.name.trim().is_empty()).then(|| LiveChannel {
+                (is_playable(c.service_type) && !c.name.trim().is_empty()).then(|| LiveChannel {
                     number: c.lcn as u32, service_id: c.service_id, name: c.name.clone(),
                     provider: c.provider.clone(), source: c.source.clone(), scrambled: c.free_ca_mode,
+                    radio: is_radio(c.service_type),
+                    categories: c.categories.iter().filter_map(category).collect(),
                 })
             }).collect();
         }
@@ -805,7 +878,7 @@ impl GuideStore {
             let mut services: Vec<&StoredService> = mux
                 .services
                 .iter()
-                .filter(|s| is_television(s.service_type) && !s.name.trim().is_empty())
+                .filter(|s| is_playable(s.service_type) && !s.name.trim().is_empty())
                 .collect();
             services.sort_by_key(|s| s.service_id);
             for s in services {
@@ -819,6 +892,8 @@ impl GuideStore {
                     provider: s.provider.clone(),
                     source: mux.source.clone(),
                     scrambled: false,
+                    radio: is_radio(s.service_type),
+                    categories: Vec::new(),
                 });
             }
         }
@@ -902,6 +977,7 @@ impl GuideStore {
                     service_type: service.service_type,
                     source: source.clone(),
                     free_ca_mode: service.free_ca_mode,
+                    categories: service.categories,
                 });
             }
         }
@@ -909,6 +985,7 @@ impl GuideStore {
         listed.dedup_by_key(|c| c.lcn);
         self.tkgs = Some(StoredTkgs {
             updated: now, transponders: transponder_count, channels: listed, orderings: receiver.table.orderings,
+            categories: receiver.table.categories,
         });
     }
 
@@ -1048,6 +1125,19 @@ impl LiveManager {
     }
 
     pub async fn update_tkgs(&self) -> Result<Value, String> {
+        {
+            let mut inner = self.lock();
+            if inner.setup.is_some() {
+                return Err("Kanal listesi zaten alınıyor.".into());
+            }
+            inner.setup = Some(Setup::default());
+        }
+        let result = self.read_and_keep_tkgs().await;
+        self.lock().setup = None;
+        result
+    }
+
+    async fn read_and_keep_tkgs(&self) -> Result<Value, String> {
         // No channel playing, no receiver: one is started on the TKGS
         // multiplex for the table, and stopped -- cleanup and all -- once it
         // is read. None is kept running for it.
@@ -1062,8 +1152,16 @@ impl LiveManager {
                 .stored_guide()
                 .and_then(|guide| guide.multiplex(&source)?.services.first().map(|service| service.service_id))
                 .unwrap_or(0);
-            self.start_with(service_id, &source, true).await?;
+            if let Err(error) = self.start_with(service_id, &source, true).await {
+                // A start called off half way leaves nothing running.
+                self.stop().await;
+                return Err(error);
+            }
             self.set(Lifecycle::Standby);
+            if self.lock().setup.is_some_and(|setup| setup.cancelled) {
+                self.stop().await;
+                return Err("Kanal kurulumu iptal edildi.".into());
+            }
         }
         let value = self.read_tkgs().await;
         if started {
@@ -1075,7 +1173,12 @@ impl LiveManager {
         stored.absorb_tkgs(receiver, now_utc());
         self.keep_guide(&stored)?;
         let tkgs = stored.tkgs.as_ref().expect("TKGS was just stored");
-        Ok(json!({"channels": tkgs.channels.len(), "transponders": tkgs.transponders, "updated": tkgs.updated}))
+        let channels = stored.channels();
+        let radio = channels.iter().filter(|channel| channel.radio).count();
+        Ok(json!({
+            "channels": tkgs.channels.len(), "transponders": tkgs.transponders, "updated": tkgs.updated,
+            "television": channels.len() - radio, "radio": radio,
+        }))
     }
 
     pub fn set_tkgs_ordering(&self, hd_first: bool) -> Result<Value, String> {
@@ -1360,8 +1463,10 @@ mod tests {
                 service_type: Some(0x19),
                 source: exact.clone(),
                 free_ca_mode: false,
+                categories: vec![],
             }],
             orderings: vec![],
+            categories: vec![],
         });
         std::fs::write(dir.path().join("live-guide.json"), serde_json::to_string(&store).unwrap()).unwrap();
         let legacy = LiveSource::Satellite {

@@ -767,6 +767,9 @@ struct Pipeline {
     /// one before. Read again, the tuner has not moved (VDR's sdt.c: "We
     /// expect a change in NID/TID", tsWrong) and is tuned again.
     left_tsid: Option<u16>,
+    /// A fresh lock, at this offset from the nominal IF, not yet known to be
+    /// the transponder's: it is once its PAT names the service.
+    unconfirmed_offset: Option<i32>,
     /// The select.json modification read last, for the tuner to know a
     /// newer one has come while it searches (`tune::run`, `superseded`).
     select_seen: std::sync::Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
@@ -793,6 +796,8 @@ struct Pipeline {
     tkgs_token: Option<String>,
     tkgs_started: Option<Instant>,
     tkgs_done: bool,
+    /// The sections of the table had and expected, as last written.
+    tkgs_reported: (usize, usize),
 }
 
 /// `select.json`: the control plane's word on what the receiver is for now
@@ -986,6 +991,13 @@ impl Pipeline {
                 "transponders": table.transponders.len(), "channels": table.channel_count(), "table": table,
             }));
             self.tkgs_done = true;
+        } else if self.tkgs_started.is_some() && !self.tkgs_done && self.tkgs.progress() != self.tkgs_reported {
+            // How far the table has come, for the channel setup's progress.
+            self.tkgs_reported = self.tkgs.progress();
+            let (sections, expected) = self.tkgs_reported;
+            self.write_tkgs(serde_json::json!({
+                "token": self.tkgs_token, "state": "reading", "sections": sections, "expected": expected,
+            }));
         }
         if self.raw {
             self.scratch.clear();
@@ -1010,7 +1022,8 @@ impl Pipeline {
         self.tkgs = TkgsCollector::new();
         self.tkgs_started = Some(Instant::now());
         self.tkgs_done = false;
-        self.write_tkgs(serde_json::json!({"token": self.tkgs_token, "state": "reading"}));
+        self.tkgs_reported = (0, 0);
+        self.write_tkgs(serde_json::json!({"token": self.tkgs_token, "state": "reading", "sections": 0, "expected": 0}));
     }
 
     fn expire_tkgs(&mut self) {
@@ -1129,6 +1142,7 @@ impl Pipeline {
                 lock_timeout_ms: tuned.lock_timeout_ms,
                 search_offsets_khz: tuned.search_offsets_khz.clone(),
                 first_offset_khz: None,
+                wrong_offsets_khz: Vec::new(),
             })
         });
         if service_id != self.service_id || retune.is_some() {
@@ -1228,6 +1242,7 @@ pub fn run(options: Options, log: &Log) -> Status {
         standby_first: options.start_standby,
         relock_tsid: None,
         retune_at: None,
+        unconfirmed_offset: None,
         left_tsid: None,
         // What is there at the start is no newer tune: the first read of it
         // is follow_select's to make.
@@ -1247,6 +1262,7 @@ pub fn run(options: Options, log: &Log) -> Status {
         tkgs_token: options.token.clone(),
         tkgs_started: None,
         tkgs_done: false,
+        tkgs_reported: (0, 0),
     };
     let (end, message) = match &options.source {
         Source::Recording(path) => play_recording(path, &options, &mut pipeline, &mut reporter, log),
@@ -1445,6 +1461,7 @@ fn play_satellite(
         };
         let res = tune::run(&mut bridge, &firmware, params, keep_tuning, &STOP, &superseded, |bridge, demod, tuned| {
             reporter.status.tune = Some(TuneSummary::from(tuned));
+            pipeline.unconfirmed_offset = tuned.fec_locked().then_some(tuned.search_offset_khz).flatten();
             // Tuned and not locked: no signal, until the lock says otherwise.
             // Given up for a newer channel is not that: the stream reads it.
             if !tuned.fec_locked() && !tuned.superseded && reporter.status.state != State::NoSignal {
@@ -1626,6 +1643,39 @@ fn stream(
                 retune = Some(tuned);
                 relock = true;
                 break None;
+            }
+        }
+        // A carrier the search found is the transponder only when its PAT
+        // has the service; another (a neighbour ±10 MHz away: 12092 H locked
+        // transport stream 41903 at +10 MHz for 41005, 2026-10-25) is
+        // searched on from, the offset left out, as VDR tunes away from a
+        // wrong transport stream (sdt.c, tsWrong). Not the TKGS read, which
+        // wants no service, nor a relock, which checks its own stream.
+        if let Some(offset) = pipeline.unconfirmed_offset
+            && pipeline.relock_tsid.is_none()
+            && pipeline.left_tsid.is_none()
+            && pipeline.tkgs_started.is_none()
+            && !options.raw
+            && !pipeline.analyser.pat.is_empty()
+        {
+            pipeline.unconfirmed_offset = None;
+            if !pipeline.analyser.pat.contains_key(&pipeline.service_id)
+                && let Some(mut next) = pipeline.tuned.clone()
+            {
+                next.wrong_offsets_khz.push(offset);
+                if !next.offsets().is_empty() {
+                    log.line(format!(
+                        "WRONG CARRIER: transport stream {:?} at {offset:+} kHz has no service {}; searching on",
+                        pipeline.analyser.integrity().transport_stream_id,
+                        pipeline.service_id
+                    ));
+                    pipeline.analyser = Analyser::new();
+                    // Kept, so the next wrong one is added to it, not
+                    // instead of it.
+                    pipeline.tuned = Some(next.clone());
+                    retune = Some(next);
+                    break None;
+                }
             }
         }
         if lock_checked.elapsed() >= Duration::from_secs(1)
@@ -1980,8 +2030,17 @@ mod tests {
                 all
             })
         };
-        writer.send(packet(1));
-        std::thread::sleep(Duration::from_millis(100));
+        // The old reader is opened before the file is left: the writer opens
+        // a FIFO only when a chunk comes and a reader is there, as a
+        // broadcast's next chunk always comes. One chunk sent before the
+        // reader's thread had opened was kept back, and the old reader then
+        // waited for ever for a writer that had moved on.
+        let started = Instant::now();
+        while writer.stats().readers == 0 && started.elapsed() < Duration::from_secs(5) {
+            writer.send(packet(1));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(writer.stats().readers, 1, "the old reader opened");
         make_fifo(&new, &Log::silent()).unwrap();
         writer.redirect(new.clone());
         writer.send(packet(2)); // the new channel's start

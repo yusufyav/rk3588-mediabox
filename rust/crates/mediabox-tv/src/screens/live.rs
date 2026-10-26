@@ -27,6 +27,17 @@
 //!   here), Up and Down keeping the time the focus is at, Ok on what is on
 //!   now tuning that channel, `program_guide_show_duration` (60 s).
 //!
+//! * `ui/sidepanel/CustomizeChannelListFragment` -- the channel list in
+//!   groups. The reference groups by source or by HD/SD; here the groups are
+//!   television, radio and TKGS's own categories, since a satellite list is
+//!   Türksat's, and radio is a third of it.
+//! * `TunableTvView` (`VIDEO_UNAVAILABLE_REASON_AUDIO_ONLY`) -- a radio
+//!   channel is black with "Yalnızca ses" (the reference's own Turkish).
+//! * `tuner/setup/ScanFragment`, `ScanResultFragment` -- the channel setup:
+//!   a start, a scan that says how far it has got and can be stopped, and a
+//!   result ("N kanal bulundu", Bitti / Yeniden tara). The scan here reads
+//!   TKGS; with no channels at all, live television opens on it.
+//!
 //! What is not taken: time-shift play controls, recordings, PIP, inputs,
 //! parental PINs -- MediaBox has none of them, and a card for any would be a
 //! card for something that does not work.
@@ -80,6 +91,64 @@ pub enum Layer {
     Menu,
     Guide,
     Panel(Panel),
+    /// The channel setup, the whole screen.
+    Setup,
+}
+
+/// A group of the channel list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Group {
+    Television,
+    Radio,
+    /// A TKGS category, by name.
+    Category(String),
+}
+
+impl Group {
+    pub fn title(&self) -> &str {
+        match self {
+            Group::Television => "TV kanalları",
+            Group::Radio => "Radyo",
+            Group::Category(name) => name,
+        }
+    }
+
+    pub fn holds(&self, channel: &LiveChannel) -> bool {
+        match self {
+            Group::Television => !channel.radio,
+            Group::Radio => channel.radio,
+            Group::Category(name) => channel.categories.iter().any(|c| c == name),
+        }
+    }
+}
+
+/// Where the channel setup is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupStage {
+    Ready,
+    /// The receiver is coming up on the TKGS multiplex (`reading` false),
+    /// then reading the table: `sections` of `expected` had.
+    Running { reading: bool, sections: u64, expected: u64 },
+    Done { television: usize, radio: usize, transponders: usize },
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setup {
+    pub stage: SetupStage,
+    pub focus: usize,
+}
+
+impl Setup {
+    /// The buttons of the stage, in order.
+    pub fn actions(&self) -> &'static [&'static str] {
+        match self.stage {
+            SetupStage::Ready => &["Taramayı başlat", "Kapat"],
+            SetupStage::Running { .. } => &["Taramayı durdur"],
+            SetupStage::Done { .. } => &["Bitti", "Yeniden tara"],
+            SetupStage::Failed(_) => &["Yeniden dene", "Kapat"],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +159,8 @@ pub enum Panel {
     Audio,
     Subtitles,
     Settings,
+    /// The groups of the channel list, to choose one.
+    Groups,
 }
 
 impl Panel {
@@ -101,6 +172,7 @@ impl Panel {
             Panel::Audio => "Ses",
             Panel::Subtitles => "Altyazı",
             Panel::Settings => "TV ayarları",
+            Panel::Groups => "Kanal grubu",
         }
     }
 }
@@ -134,7 +206,10 @@ pub enum Effect {
     Subtitle(i64),
     /// The favourites changed: keep them.
     Favorites,
+    /// Start the channel setup.
     TkgsUpdate,
+    /// Stop the channel setup.
+    TkgsCancel,
     TkgsOrdering(bool),
 }
 
@@ -224,6 +299,9 @@ pub struct Live {
     pub audio: Vec<TrackRow>,
     pub subtitles: Vec<TrackRow>,
     pub tkgs: TkgsStatus,
+    /// The group the channel list shows.
+    pub group: Group,
+    pub setup: Setup,
     /// What is wrong with the channel on now, in words, if anything is: a
     /// failed tune, no picture. Drawn over the black.
     pub problem: Option<String>,
@@ -258,6 +336,8 @@ impl Live {
             audio: Vec::new(),
             subtitles: Vec::new(),
             tkgs: TkgsStatus { hd_first: true, ..Default::default() },
+            group: Group::Television,
+            setup: Setup { stage: SetupStage::Ready, focus: 0 },
             problem: None,
             no_signal: false,
         }
@@ -278,20 +358,47 @@ impl Live {
     }
 
     /// The channel `step` places from the current one, wrapping as the
-    /// reference's `moveToAdjacentBrowsableChannel` does.
+    /// reference's `moveToAdjacentBrowsableChannel` does: among television
+    /// channels from a television channel, among radio from a radio one.
     pub fn adjacent(&self, step: isize) -> Option<u16> {
-        let count = self.channels.len() as isize;
+        let radio = self.current_channel().is_some_and(|c| c.radio);
+        let same: Vec<&LiveChannel> = self.channels.iter().filter(|c| c.radio == radio).collect();
+        let count = same.len() as isize;
         if count == 0 {
             return None;
         }
-        let at = self.current.and_then(|sid| self.index_of(sid)).map_or(-1, |i| i as isize);
+        let at = self.current.and_then(|sid| same.iter().position(|c| c.service_id == sid)).map_or(-1, |i| i as isize);
         let next = if at < 0 { 0 } else { (at + step).rem_euclid(count) };
-        Some(self.channels[next as usize].service_id)
+        Some(same[next as usize].service_id)
     }
 
-    /// The channel to start on: the one left on, else the first.
+    /// The channel to start on: the one left on, else the first television
+    /// channel, else the first.
     pub fn starting_channel(&self, last: Option<u16>) -> Option<u16> {
-        last.filter(|sid| self.index_of(*sid).is_some()).or_else(|| self.channels.first().map(|c| c.service_id))
+        last.filter(|sid| self.index_of(*sid).is_some())
+            .or_else(|| self.channels.iter().find(|c| !c.radio).or(self.channels.first()).map(|c| c.service_id))
+    }
+
+    /// The channel list's groups: television, radio, then TKGS's categories
+    /// in the order the list first has them. A group with nothing in it is
+    /// not offered.
+    pub fn groups(&self) -> Vec<Group> {
+        let mut groups = vec![Group::Television, Group::Radio];
+        for channel in &self.channels {
+            for name in &channel.categories {
+                let group = Group::Category(name.clone());
+                if !groups.contains(&group) {
+                    groups.push(group);
+                }
+            }
+        }
+        groups.retain(|group| self.channels.iter().any(|c| group.holds(c)));
+        groups
+    }
+
+    /// The channels of the group the list shows.
+    pub fn grouped(&self) -> Vec<&LiveChannel> {
+        self.channels.iter().filter(|c| self.group.holds(c)).collect()
     }
 
     /// Take the channel list and guide the control plane answered.
@@ -300,6 +407,82 @@ impl Live {
         self.loaded = true;
         let known: BTreeSet<u16> = self.channels.iter().map(|c| c.service_id).collect();
         self.recent.retain(|sid| known.contains(sid));
+        if !self.groups().contains(&self.group) {
+            self.group = Group::Television;
+        }
+    }
+
+    /// Open the channel setup at its start.
+    pub fn open_setup(&mut self) {
+        self.setup = Setup { stage: SetupStage::Ready, focus: 0 };
+        self.layer = Layer::Setup;
+        self.layer_until = None;
+        self.banner_until = None;
+    }
+
+    /// How far the control plane says the setup has got.
+    pub fn setup_progress(&mut self, reading: bool, sections: u64, expected: u64) {
+        if matches!(self.setup.stage, SetupStage::Running { .. }) {
+            self.setup.stage = SetupStage::Running { reading, sections, expected };
+        }
+    }
+
+    /// The setup's answer: what it found, or why it found nothing.
+    pub fn setup_finished(&mut self, result: Result<(usize, usize, usize), String>) {
+        self.setup.stage = match result {
+            Ok((television, radio, transponders)) => SetupStage::Done { television, radio, transponders },
+            Err(error) => SetupStage::Failed(error),
+        };
+        self.setup.focus = 0;
+    }
+
+    fn setup_key(&mut self, action: InputAction, at: Instant) -> Effect {
+        let running = matches!(self.setup.stage, SetupStage::Running { .. });
+        let count = self.setup.actions().len();
+        match action {
+            InputAction::Up | InputAction::Left => {
+                let Some(focus) = self.setup.focus.checked_sub(1) else { return Effect::Nothing };
+                self.setup.focus = focus;
+                Effect::Paint
+            }
+            InputAction::Down | InputAction::Right => {
+                if self.setup.focus + 1 >= count {
+                    return Effect::Nothing;
+                }
+                self.setup.focus += 1;
+                Effect::Paint
+            }
+            // Back stops a scan, and otherwise leaves the setup.
+            InputAction::Back if running => Effect::TkgsCancel,
+            InputAction::Back => self.leave_setup(at),
+            InputAction::Ok => match (&self.setup.stage, self.setup.focus) {
+                (SetupStage::Running { .. }, _) => Effect::TkgsCancel,
+                (SetupStage::Ready | SetupStage::Failed(_), 0) | (SetupStage::Done { .. }, 1) => {
+                    self.setup = Setup { stage: SetupStage::Running { reading: false, sections: 0, expected: 0 }, focus: 0 };
+                    self.tkgs.updating = true;
+                    self.tkgs.error = None;
+                    Effect::TkgsUpdate
+                }
+                _ => self.leave_setup(at),
+            },
+            _ => Effect::Nothing,
+        }
+    }
+
+    /// Out of the setup: onto the channel playing, or the first one if
+    /// none plays yet; with no channels at all, out of live television.
+    fn leave_setup(&mut self, at: Instant) -> Effect {
+        self.close_all();
+        if self.current.is_some() {
+            return Effect::Paint;
+        }
+        match self.starting_channel(None) {
+            Some(sid) => {
+                self.tuning(sid, at);
+                Effect::Tune(sid)
+            }
+            None => Effect::Exit,
+        }
     }
 
     /// Tuning to `sid` is about to be asked for: the banner says so at once,
@@ -317,6 +500,23 @@ impl Live {
         self.layer_until = None;
         self.banner_until = Some(at + BANNER_SHOW);
         self.banner_detail = false;
+    }
+
+    /// The tuner has no signal: Sony cancels the banner's timeout
+    /// ("Canceling banner timeout", 2026-10-25) and the banner stays until
+    /// the signal is back; `picture_arrived` then gives it its full time.
+    pub fn signal_lost(&mut self) {
+        self.no_signal = true;
+        if self.current.is_some() {
+            self.banner_until = Some(Instant::now() + Duration::from_secs(86_400));
+        }
+    }
+
+    pub fn signal_back(&mut self, at: Instant) {
+        self.no_signal = false;
+        if self.banner_until.is_some() {
+            self.banner_until = Some(at + BANNER_SHOW);
+        }
     }
 
     /// The channel's picture is up. Sony holds the banner for the whole of
@@ -566,15 +766,31 @@ impl Live {
             } else { event }
         };
         match panel {
-            Panel::Channels => self
-                .channels
-                .iter()
-                .map(|c| {
+            Panel::Channels => {
+                let grouped = self.grouped();
+                let mut rows = vec![PanelRow {
+                    label: "Grup".into(),
+                    value: format!("{} · {}", self.group.title(), grouped.len()),
+                    checked: false,
+                    enabled: true,
+                }];
+                rows.extend(grouped.into_iter().map(|c| {
                     let mut row = channel_row(c, on_now(c.service_id));
                     if self.favorites.contains(&c.service_id) {
                         row.label = format!("{} ★", row.label);
                     }
                     row
+                }));
+                rows
+            }
+            Panel::Groups => self
+                .groups()
+                .into_iter()
+                .map(|group| PanelRow {
+                    value: self.channels.iter().filter(|c| group.holds(c)).count().to_string(),
+                    checked: group == self.group,
+                    label: group.title().to_string(),
+                    enabled: true,
                 })
                 .collect(),
             Panel::Favorites => {
@@ -623,7 +839,7 @@ impl Live {
                     many => format!("{} yayın", many.len()),
                 };
                 let tkgs = if self.tkgs.updating {
-                    "Alınıyor…".to_string()
+                    "Taranıyor…".to_string()
                 } else if let Some(error) = &self.tkgs.error {
                     format!("Hata · {error}")
                 } else if let Some(updated) = self.tkgs.updated {
@@ -639,7 +855,7 @@ impl Live {
                         checked: false,
                         enabled: false,
                     },
-                    PanelRow { label: "Kanal listesini güncelle".into(), value: tkgs, checked: false, enabled: !self.tkgs.updating },
+                    PanelRow { label: "Kanal kurulumu".into(), value: tkgs, checked: false, enabled: true },
                     PanelRow {
                         label: "Liste sırası".into(),
                         value: if self.tkgs.hd_first { "HD önce" } else { "SD önce" }.into(),
@@ -674,11 +890,25 @@ impl Live {
 
     fn open_panel(&mut self, panel: Panel, at: Instant) {
         self.panel = PanelFocus::default();
-        // The channel lists open on the channel on now.
-        if matches!(panel, Panel::Channels | Panel::EditFavorites)
-            && let Some(i) = self.current.and_then(|sid| self.index_of(sid))
-        {
-            self.panel.focus = i;
+        // The channel lists open on the channel on now; the list of a
+        // group, below its group row.
+        match panel {
+            Panel::Channels => {
+                if let Some(i) = self.current.and_then(|sid| self.grouped().iter().position(|c| c.service_id == sid)) {
+                    self.panel.focus = i + 1;
+                }
+            }
+            Panel::EditFavorites => {
+                if let Some(i) = self.current.and_then(|sid| self.index_of(sid)) {
+                    self.panel.focus = i;
+                }
+            }
+            Panel::Groups => {
+                if let Some(i) = self.groups().iter().position(|g| *g == self.group) {
+                    self.panel.focus = i;
+                }
+            }
+            _ => {}
         }
         self.open_layer(Layer::Panel(panel), at);
         self.banner_until = None;
@@ -716,10 +946,23 @@ impl Live {
                     return Effect::Nothing;
                 }
                 match panel {
-                    Panel::Channels => {
-                        let sid = self.channels[self.panel.focus].service_id;
-                        self.tuning(sid, at);
-                        Effect::Tune(sid)
+                    Panel::Channels => match self.panel.focus.checked_sub(1) {
+                        None => {
+                            self.open_panel(Panel::Groups, at);
+                            Effect::Paint
+                        }
+                        Some(i) => {
+                            let sid = self.grouped()[i].service_id;
+                            self.tuning(sid, at);
+                            Effect::Tune(sid)
+                        }
+                    },
+                    Panel::Groups => {
+                        if let Some(group) = self.groups().into_iter().nth(self.panel.focus) {
+                            self.group = group;
+                        }
+                        self.open_panel(Panel::Channels, at);
+                        Effect::Paint
                     }
                     Panel::Favorites => {
                         let favorites: Vec<u16> = self
@@ -756,9 +999,13 @@ impl Live {
                     },
                     Panel::Settings => match self.panel.focus {
                         2 => {
-                            self.tkgs.updating = true;
-                            self.tkgs.error = None;
-                            Effect::TkgsUpdate
+                            // A scan already running is shown as it is.
+                            if !self.tkgs.updating {
+                                self.setup = Setup { stage: SetupStage::Ready, focus: 0 };
+                            }
+                            self.layer = Layer::Setup;
+                            self.layer_until = None;
+                            Effect::Paint
                         }
                         3 => {
                             self.tkgs.hd_first = !self.tkgs.hd_first;
@@ -789,6 +1036,11 @@ impl Live {
             Layer::Menu => MENU_SHOW,
             Layer::Guide => GUIDE_SHOW,
             Layer::Panel(_) => PANEL_SHOW,
+            // The setup stays until it is left.
+            Layer::Setup => {
+                self.layer_until = None;
+                return;
+            }
         };
         self.layer_until = Some(at + life);
     }
@@ -815,8 +1067,15 @@ impl Live {
     pub fn key(&mut self, action: InputAction, at: Instant, now: i64) -> Effect {
         // Back closes what is up before it means anything else; with nothing
         // up, it leaves.
+        if self.layer == Layer::Setup {
+            return self.setup_key(action, at);
+        }
         if action == InputAction::Back {
             return match self.layer {
+                Layer::Panel(Panel::Groups) => {
+                    self.open_panel(Panel::Channels, at);
+                    Effect::Paint
+                }
                 Layer::Panel(Panel::EditFavorites) => {
                     self.open_panel(Panel::Favorites, at);
                     Effect::Paint
@@ -880,6 +1139,7 @@ impl Live {
                 _ => self.guide_key(action, at, now),
             },
             Layer::Panel(panel) => self.panel_key(panel, action, at, now),
+            Layer::Setup => self.setup_key(action, at),
             Layer::None => {
                 if let Some(digit) = digit {
                     if self.channels.is_empty() {
@@ -1011,7 +1271,6 @@ pub fn no_signal(channel: &LiveChannel) -> String {
 
 pub const SCRAMBLED: &str = "Bu kanal şu an şifreli yayınlanıyor; MediaBox şifreli yayın açamaz.";
 
-/// UTC seconds, now.
 pub fn utc_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1063,6 +1322,8 @@ mod tests {
                 provider: None,
                 source: LiveSource::Recording,
                 scrambled: false,
+                radio: false,
+                categories: Vec::new(),
             })
             .collect()
     }
@@ -1286,7 +1547,7 @@ mod tests {
     fn the_settings_offer_tkgs_update() {
         let live = live(1);
         let rows = live.panel_rows(Panel::Settings, NOW);
-        assert!(rows.iter().any(|r| r.label == "Kanal listesini güncelle" && r.enabled));
+        assert!(rows.iter().any(|r| r.label == "Kanal kurulumu" && r.enabled));
         assert!(rows.iter().any(|r| r.label == "Liste sırası" && r.value == "HD önce"));
     }
 

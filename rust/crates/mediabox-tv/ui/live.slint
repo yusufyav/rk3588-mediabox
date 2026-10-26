@@ -562,6 +562,75 @@ component Panel inherits Rectangle {
     }
 }
 
+// The channel setup: the tuner setup's guided steps
+// (tuner/setup/ScanFragment, ScanResultFragment) -- the guidance on the
+// left, the actions on the right, a progress bar while it scans.
+component Setup inherits Rectangle {
+    in property <string> title;
+    in property <string> text;
+    in property <float> progress: -1;
+    in property <[string]> actions;
+    in property <int> at-action;
+    property <length> dp: Dp.dp;
+
+    background: #21272B;
+
+    VerticalLayout {
+        x: 72 * dp;
+        y: 0;
+        width: parent.width * 0.55 - 96 * dp;
+        height: parent.height;
+        alignment: center;
+        spacing: 16 * dp;
+        Text {
+            text: root.title;
+            color: #EEEEEE;
+            font-size: 32 * dp;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.text;
+            color: #EEEEEEB3;
+            font-size: 16 * dp;
+            wrap: word-wrap;
+        }
+        if root.progress >= 0: Rectangle {
+            height: 4 * dp;
+            background: #EEEEEE33;
+            Rectangle {
+                x: 0;
+                width: parent.width * clamp(root.progress, 0, 1);
+                height: parent.height;
+                background: #0176BC;
+            }
+        }
+    }
+    Rectangle {
+        x: parent.width * 0.55;
+        width: parent.width * 0.45;
+        height: parent.height;
+        background: #263238;
+        VerticalLayout {
+            x: 32 * dp;
+            width: parent.width - 64 * dp;
+            alignment: center;
+            spacing: 8 * dp;
+            for action[i] in root.actions: Rectangle {
+                height: 48 * dp;
+                border-radius: 2 * dp;
+                background: i == root.at-action ? #0176BC : transparent;
+                Text {
+                    x: 16 * dp;
+                    text: action;
+                    color: #EEEEEE;
+                    font-size: 16 * dp;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 export component LiveTv inherits Rectangle {
     in property <string> message;
     in property <bool> banner-shown;
@@ -601,6 +670,12 @@ export component LiveTv inherits Rectangle {
     in property <int> panel-focus;
     in property <bool> panel-above;
     in property <bool> panel-below;
+    in property <bool> setup-shown;
+    in property <string> setup-title;
+    in property <string> setup-text;
+    in property <float> setup-progress: -1;
+    in property <[string]> setup-actions;
+    in property <int> setup-focus;
     /// No signal: the last picture is not left frozen on the plane below,
     /// it is covered, as the reference does.
     in property <bool> dark;
@@ -674,5 +749,15 @@ export component LiveTv inherits Rectangle {
         at-row: root.panel-focus;
         above: root.panel-above;
         below: root.panel-below;
+    }
+
+    if root.setup-shown: Setup {
+        width: parent.width;
+        height: parent.height;
+        title: root.setup-title;
+        text: root.setup-text;
+        progress: root.setup-progress;
+        actions: root.setup-actions;
+        at-action: root.setup-focus;
     }
 }

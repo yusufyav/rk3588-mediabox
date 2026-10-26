@@ -34,8 +34,9 @@ pub struct TkgsService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_type: Option<u8>,
     pub free_ca_mode: bool,
+    /// The ids of its categories (`TkgsCategory::id`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub categories: Vec<u8>,
+    pub categories: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +55,7 @@ pub struct TkgsOrdering {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TkgsCategory {
-    pub id: u8,
+    pub id: u16,
     pub name: String,
 }
 
@@ -244,7 +245,13 @@ fn delivery(d: &[u8]) -> Result<TkgsDelivery, String> {
     })
 }
 
-fn service_categories(section: &[u8]) -> BTreeMap<u16, Vec<u8>> {
+/// Each service's categories, from its descriptor 0x95 in the embedded SDT:
+/// records of eight bytes, three not known, the language ("TUR"), then the
+/// category id, 16 bits, as descriptor 0x92 defines it. Read off the table
+/// of 2026-10-25 against channels of known kind: TRT HABER, NTV, HABERTÜRK
+/// 0x0020 (HABER); TRT SPOR, A SPOR 0x0030 (SPOR); TRT ÇOCUK, MİNİKA 0x0050
+/// (ÇOCUK); TRT BELGESEL 0x0070 (BELGESEL).
+fn service_categories(section: &[u8]) -> BTreeMap<u16, Vec<u16>> {
     let mut out = BTreeMap::new();
     if section.len() < 15 {
         return out;
@@ -255,10 +262,15 @@ fn service_categories(section: &[u8]) -> BTreeMap<u16, Vec<u8>> {
         let sid = u16::from_be_bytes([body[at], body[at + 1]]);
         let len = (((body[at + 3] & 0x0F) as usize) << 8) | body[at + 4] as usize;
         let end = (at + 5 + len).min(body.len());
-        let found = descriptor_loop(&body[at + 5..end])
-            .filter(|(tag, _)| *tag == 0x95)
-            .flat_map(|(_, d)| d.iter().copied())
-            .collect::<Vec<_>>();
+        let mut found = Vec::new();
+        for (_, d) in descriptor_loop(&body[at + 5..end]).filter(|(tag, _)| *tag == 0x95) {
+            for record in d.chunks_exact(8) {
+                let id = u16::from_be_bytes([record[6], record[7]]);
+                if !found.contains(&id) {
+                    found.push(id);
+                }
+            }
+        }
         if !found.is_empty() {
             out.insert(sid, found);
         }
@@ -364,7 +376,7 @@ fn parse_block(extension: u16, version: u8, data: &[u8]) -> Result<TkgsTable, St
             .ok_or_else(|| "TKGS transponder has no satellite delivery descriptor".to_string())
             .and_then(|(_, d)| delivery(d))?;
         let mut services = BTreeMap::<u16, Service>::new();
-        let mut service_cats = BTreeMap::<u16, Vec<u8>>::new();
+        let mut service_cats = BTreeMap::<u16, Vec<u16>>::new();
         let mut tsid = 0;
         let mut onid = 0;
         while data.get(at) == Some(&0x42) {
@@ -444,7 +456,7 @@ fn parse_block(extension: u16, version: u8, data: &[u8]) -> Result<TkgsTable, St
                 // Each record maps a display position to a channel LCN.
                 0x94 if body.len() >= 4 => ordering_lcns.push(u16::from_be_bytes([body[2], body[3]])),
                 0x92 if body.len() >= 6 => categories.push(TkgsCategory {
-                    id: body[1],
+                    id: u16::from_be_bytes([body[0], body[1]]),
                     name: labelled_text(&body[2..]),
                 }),
                 _ => {}
@@ -460,7 +472,7 @@ fn parse_block(extension: u16, version: u8, data: &[u8]) -> Result<TkgsTable, St
     let category_block = data.get(at..at + category_len).ok_or("TKGS category descriptor block is truncated")?;
     for (tag, body) in descriptor_loop(category_block) {
         if tag == 0x92 && body.len() >= 6 {
-            categories.push(TkgsCategory { id: body[1], name: labelled_text(&body[2..]) });
+            categories.push(TkgsCategory { id: u16::from_be_bytes([body[0], body[1]]), name: labelled_text(&body[2..]) });
         }
     }
     let known: BTreeSet<u16> = transponders
