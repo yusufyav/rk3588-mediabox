@@ -21,6 +21,7 @@ use serde::Serialize;
 
 pub const PACKET: usize = 188;
 pub const PID_PAT: u16 = 0x0000;
+pub const PID_NIT: u16 = 0x0010;
 pub const PID_SDT: u16 = 0x0011;
 pub const PID_EIT: u16 = 0x0012;
 pub const PID_NULL: u16 = 0x1FFF;
@@ -29,6 +30,7 @@ const CC_EVENT_GAP: u64 = 64;
 const TABLE_PAT: u8 = 0x00;
 const TABLE_PMT: u8 = 0x02;
 const TABLE_SDT_ACTUAL: u8 = 0x42;
+const TABLE_NIT_ACTUAL: u8 = 0x40;
 /// EIT, actual transport stream: present/following, then the schedule.
 const TABLE_EIT_PF_ACTUAL: u8 = 0x4E;
 const TABLES_EIT_SCHEDULE_ACTUAL: std::ops::RangeInclusive<u8> = 0x50..=0x5F;
@@ -217,6 +219,29 @@ impl Sections {
 }
 
 /// Where a section's header puts things: (table_id, extension, version, current, body).
+/// The sections of a table had so far, of its version on now: whole once
+/// every one from 0 to its last_section_number is in (EN 300 468 5.1.1).
+#[derive(Debug, Default, Clone)]
+pub struct TableSections {
+    version: Option<u8>,
+    last: u8,
+    had: std::collections::BTreeSet<u8>,
+}
+
+impl TableSections {
+    fn take(&mut self, s: &[u8], version: u8) {
+        if self.version != Some(version) {
+            *self = TableSections { version: Some(version), ..TableSections::default() };
+        }
+        self.last = s[7];
+        self.had.insert(s[6]);
+    }
+
+    pub fn complete(&self) -> bool {
+        self.version.is_some() && (0..=self.last).all(|n| self.had.contains(&n))
+    }
+}
+
 fn section_header(s: &[u8]) -> (u8, u16, u8, bool, &[u8]) {
     (s[0], u16::from_be_bytes([s[3], s[4]]), (s[5] >> 1) & 0x1F, s[5] & 0x01 != 0, &s[8..s.len() - 4])
 }
@@ -264,6 +289,30 @@ fn parse_pmt(version: u8, body: &[u8]) -> Option<Pmt> {
         pos += 5 + es_len;
     }
     Some(Pmt { version, pcr_pid, streams, ca_system_ids: ca.into_iter().collect() })
+}
+
+/// A NIT section's transport stream loop (EN 300 468 5.2.1): each TSID
+/// with its original_network_id and satellite delivery descriptor (0x43).
+pub(crate) fn parse_nit(body: &[u8], into: &mut BTreeMap<u16, (u16, crate::tkgs::TkgsDelivery)>) {
+    let length = |at: usize| body.get(at..at + 2).map(|b| (((b[0] & 0x0F) as usize) << 8) | b[1] as usize);
+    let Some(network_len) = length(0) else { return };
+    let mut at = 2 + network_len;
+    let Some(loop_len) = length(at) else { return };
+    at += 2;
+    let end = (at + loop_len).min(body.len());
+    while at + 6 <= end {
+        let tsid = u16::from_be_bytes([body[at], body[at + 1]]);
+        let onid = u16::from_be_bytes([body[at + 2], body[at + 3]]);
+        let Some(descriptors_len) = length(at + 4) else { return };
+        let descriptors = &body[(at + 6).min(end)..(at + 6 + descriptors_len).min(end)];
+        if let Some(delivery) = crate::tkgs::descriptor_loop(descriptors)
+            .find(|(tag, _)| *tag == 0x43)
+            .and_then(|(_, d)| crate::tkgs::delivery(d).ok())
+        {
+            into.insert(tsid, (onid, delivery));
+        }
+        at += 6 + descriptors_len;
+    }
 }
 
 pub(crate) fn parse_sdt(body: &[u8], into: &mut BTreeMap<u16, Service>) {
@@ -436,6 +485,17 @@ pub struct Analyser {
     pub pat: BTreeMap<u16, u16>,
     pub pmts: BTreeMap<u16, Pmt>,
     pub sdt: BTreeMap<u16, Service>,
+    /// The SDT's original_network_id: with the TSID and a SID, a channel's
+    /// identity (TvContract.Channels' DVB triplet).
+    pub original_network_id: Option<u16>,
+    /// The NIT's transport streams of this network, by TSID: where each
+    /// is (its satellite delivery descriptor, EN 300 468 6.2.13.2).
+    pub network: BTreeMap<u16, (u16, crate::tkgs::TkgsDelivery)>,
+    /// The table ids seen on the NIT's PID, and its packets.
+    pub nit_tables: std::collections::BTreeSet<u8>,
+    /// The SDT actual's and NIT actual's sections had.
+    pub sdt_sections: TableSections,
+    pub nit_sections: TableSections,
     /// Event information per service, keyed by start time.
     pub events: BTreeMap<u16, BTreeMap<i64, Event>>,
     /// Bumped whenever `sdt` or `events` gain something new.
@@ -543,7 +603,7 @@ impl Analyser {
         }
         self.cc.insert(pid, cc);
         if scrambling != 0
-            || !(pid == PID_PAT || pid == PID_SDT || pid == PID_EIT || self.pat.values().any(|&pmt| pmt == pid))
+            || !(pid == PID_PAT || pid == PID_NIT || pid == PID_SDT || pid == PID_EIT || self.pat.values().any(|&pmt| pmt == pid))
         {
             return;
         }
@@ -565,7 +625,21 @@ impl Analyser {
             if let Some(pmt) = parse_pmt(version, body) {
                 self.pmts.insert(ext, pmt);
             }
+        } else if pid == PID_NIT && table != TABLE_NIT_ACTUAL {
+            self.nit_tables.insert(table);
+        } else if pid == PID_NIT && table == TABLE_NIT_ACTUAL {
+            self.nit_tables.insert(table);
+            self.nit_sections.take(s, version);
+            let before = self.network.len();
+            parse_nit(body, &mut self.network);
+            if self.network.len() != before {
+                self.guide_changes += 1;
+            }
         } else if pid == PID_SDT && table == TABLE_SDT_ACTUAL {
+            if body.len() >= 2 {
+                self.original_network_id = Some(u16::from_be_bytes([body[0], body[1]]));
+            }
+            self.sdt_sections.take(s, version);
             let before = self.sdt.len();
             parse_sdt(body, &mut self.sdt);
             if self.sdt.len() != before {
@@ -606,6 +680,10 @@ impl Analyser {
         for kept in self.events.values_mut() {
             kept.retain(|&start, e| start + e.duration as i64 >= now - keep);
         }
+    }
+
+    pub fn packets_on(&self, pid: u16) -> u64 {
+        self.pids.get(&pid).copied().unwrap_or(0)
     }
 
     pub fn integrity(&self) -> Integrity {

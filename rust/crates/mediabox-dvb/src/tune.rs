@@ -35,6 +35,9 @@ pub const BAND_SPLIT_KHZ: u32 = 11_700_000;
 pub struct LnbControl {
     pub vertical: bool,
     pub high_band: bool,
+    /// The DiSEqC 1.0 committed switch port: 0 A, 1 B, 2 C, 3 D; none
+    /// for an LNB on its own (no command sent).
+    pub diseqc_port: Option<u8>,
 }
 
 /// The L-band IF of a Ku-band transponder behind a universal LNB: the low
@@ -399,15 +402,23 @@ fn steer_lnb(bridge: &mut Bridge, demod: &mut Avl62x1, control: Option<LnbContro
     if !was_on {
         bridge.delay(200);
     }
-    // Kanky dvbFeControl: a DiSEqC 1.0 committed switch command (port A)
-    // after the voltage -- the switch, not the 13/18 V and 22 kHz, picks the
-    // polarisation and band here: traced E0 10 38 F3 (H, high), F1 (V, high).
-    let command = 0xF0 | (u8::from(!control.vertical) << 1) | u8::from(control.high_band);
-    demod.send_diseqc(bridge, &[0xE0, 0x10, 0x38, command])?;
+    // Kanky dvbFeControl: a DiSEqC 1.0 committed switch command after the
+    // voltage -- the switch, not the 13/18 V and 22 kHz, picks the
+    // polarisation and band here: traced E0 10 38 F3 (H, high), F1 (V, high)
+    // on port A. Its data byte (Eutelsat DiSEqC 1.0, command 38): 1111,
+    // option, position, polarisation, band; port B..D set position/option.
+    let diseqc = match control.diseqc_port {
+        Some(port) => {
+            let command = 0xF0 | ((port & 3) << 2) | (u8::from(!control.vertical) << 1) | u8::from(control.high_band);
+            demod.send_diseqc(bridge, &[0xE0, 0x10, 0x38, command])?;
+            format!("DiSEqC E0 10 38 {command:02X}")
+        }
+        None => "DiSEqC off".to_string(),
+    };
     demod.set_22khz(bridge, control.high_band)?;
     bridge.delay(30);
     bridge.log.line(format!(
-        "LNB power on: {} V, DiSEqC E0 10 38 {command:02X}, 22 kHz {}",
+        "LNB power on: {} V, {diseqc}, 22 kHz {}",
         if control.vertical { 13 } else { 18 },
         if control.high_band { "on" } else { "off" }
     ));
@@ -582,7 +593,7 @@ mod tests {
         let params = |first| TuneParams {
             rf_khz: 1_588_000,
             symbol_rate_ksps: 27_500,
-            lnb: Some(LnbControl { vertical: true, high_band: true }),
+            lnb: Some(LnbControl { vertical: true, high_band: true, diseqc_port: Some(0) }),
             lock_timeout_ms: None,
             search_offsets_khz: vec![10_000, -10_000],
             first_offset_khz: first,

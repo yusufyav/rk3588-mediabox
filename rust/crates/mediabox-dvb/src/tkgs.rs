@@ -177,7 +177,7 @@ fn be16(data: &[u8], at: usize) -> Result<u16, String> {
     Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
-fn descriptor_loop(data: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
+pub(crate) fn descriptor_loop(data: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
     let mut at = 0;
     std::iter::from_fn(move || {
         let tag = *data.get(at)?;
@@ -201,7 +201,7 @@ fn bcd(data: &[u8], nibbles: usize) -> Option<u32> {
     Some(value)
 }
 
-fn delivery(d: &[u8]) -> Result<TkgsDelivery, String> {
+pub(crate) fn delivery(d: &[u8]) -> Result<TkgsDelivery, String> {
     if d.len() < 11 {
         return Err("TKGS satellite_delivery_system_descriptor is shorter than 11 bytes".into());
     }

@@ -100,6 +100,10 @@ struct Play {
     /// then -step (kHz); 0 = nominal only.
     #[arg(long, default_value_t = 10_000)]
     carrier_search_khz: i32,
+    /// The DiSEqC 1.0 committed switch port the LNB is on: 0 A .. 3 D;
+    /// absent, no DiSEqC command (an LNB on its own).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
+    diseqc_port: Option<u8>,
     /// Try this offset from the nominal IF first (kHz): where the
     /// transponder locked last time.
     #[arg(long, allow_hyphen_values = true)]
@@ -170,6 +174,7 @@ fn play(args: Play) -> ExitCode {
                 Some(LnbControl {
                     vertical: matches!(args.polarisation, LnbPolarisation::Vertical),
                     high_band: frequency >= BAND_SPLIT_KHZ,
+                    diseqc_port: args.diseqc_port,
                 }),
             ),
             (None, Some(rf)) => (rf, None),

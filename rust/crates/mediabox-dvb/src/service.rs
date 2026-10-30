@@ -798,6 +798,9 @@ struct Pipeline {
     tkgs_done: bool,
     /// The sections of the table had and expected, as last written.
     tkgs_reported: (usize, usize),
+    /// A manual scan: the multiplex is read for what it carries, no service
+    /// is looked for and no reader waited for.
+    scanning: bool,
 }
 
 /// `select.json`: the control plane's word on what the receiver is for now
@@ -836,6 +839,9 @@ enum Want {
     Standby,
     /// Read the complete TKGS table; the result is written beside status.
     Tkgs { transponder: Transponder },
+    /// The channel setup's manual scan: stream `transponder` for its PAT and
+    /// SDT, no service wanted; what it carries is `guide.json`.
+    Scan { transponder: Transponder },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -872,8 +878,30 @@ enum Order {
 pub struct Guide<'a> {
     pub token: Option<&'a str>,
     pub transport_stream_id: Option<u16>,
+    pub original_network_id: Option<u16>,
+    /// The NIT's carriers: what a network scan goes on to.
+    pub network: Vec<GuideCarrier<'a>>,
+    pub nit_packets: u64,
+    pub nit_tables: Vec<u8>,
+    /// Every section of the SDT actual, and of the NIT actual, is in: a
+    /// scan has all this multiplex says of its services and network.
+    pub sdt_complete: bool,
+    pub nit_complete: bool,
     pub services: Vec<GuideService<'a>>,
     pub events: Vec<GuideEvents<'a>>,
+}
+
+#[derive(Serialize)]
+pub struct GuideCarrier<'a> {
+    pub transport_stream_id: u16,
+    pub original_network_id: u16,
+    pub frequency_khz: u32,
+    pub symbol_rate_ksps: u32,
+    pub polarisation: &'a str,
+    pub dvb_s2: bool,
+    /// Orbital position in tenths of a degree, east or west.
+    pub orbital_position_tenths: u16,
+    pub east: bool,
 }
 
 #[derive(Serialize)]
@@ -913,6 +941,11 @@ impl GuideFile {
         }
     }
 
+    /// The next `write` writes, whatever the analyser's changes.
+    fn force(&self) {
+        self.written.set((u64::MAX, None));
+    }
+
     fn write(&self, analyser: &Analyser) {
         let Some(path) = &self.path else { return };
         let (changes, at) = self.written.get();
@@ -937,6 +970,25 @@ pub fn guide_of<'a>(analyser: &'a Analyser, token: Option<&'a str>, now: i64) ->
     Guide {
         token,
         transport_stream_id: analyser.integrity().transport_stream_id,
+        original_network_id: analyser.original_network_id,
+        nit_packets: analyser.packets_on(crate::ts::PID_NIT),
+        nit_tables: analyser.nit_tables.iter().copied().collect(),
+        sdt_complete: analyser.sdt_sections.complete(),
+        nit_complete: analyser.nit_sections.complete(),
+        network: analyser
+            .network
+            .iter()
+            .map(|(&transport_stream_id, (original_network_id, d))| GuideCarrier {
+                transport_stream_id,
+                original_network_id: *original_network_id,
+                frequency_khz: d.frequency_khz,
+                symbol_rate_ksps: d.symbol_rate_ksps,
+                polarisation: &d.polarisation,
+                dvb_s2: d.dvb_s2,
+                orbital_position_tenths: d.orbital_position_tenths,
+                east: d.east,
+            })
+            .collect(),
         services: analyser
             .sdt
             .iter()
@@ -1110,9 +1162,10 @@ impl Pipeline {
         else {
             return Order::Nothing;
         };
-        let (service_id, transponder, tkgs) = match wanted.want {
+        let (service_id, transponder, tkgs, scan) = match wanted.want {
             Want::Standby => {
                 log.line("SELECT standby");
+                self.scanning = false;
                 return Order::Standby;
             }
             Want::Play { service_id, transponder, new_fifo } => {
@@ -1120,21 +1173,30 @@ impl Pipeline {
                     self.move_output(&name, log);
                 }
                 self.writer.await_reader();
-                (service_id, transponder, false)
+                (service_id, transponder, false, false)
             }
-            Want::Tkgs { transponder } => (self.service_id, Some(transponder), true),
+            Want::Tkgs { transponder } => (self.service_id, Some(transponder), true, false),
+            Want::Scan { transponder } => (self.service_id, Some(transponder), false, true),
         };
+        self.scanning = scan;
         if tkgs {
             log.line("SELECT TKGS table");
             self.begin_tkgs();
         }
+        if scan {
+            log.line("SELECT scan");
+            // What the multiplex carries is said again at once, even if it
+            // is the one tuned and nothing in it changes.
+            self.guide.force();
+        }
         let retune = transponder.and_then(|t| {
             let rf_khz = crate::tune::universal_if_khz(t.frequency_khz);
+            let tuned = self.tuned.as_ref()?;
             let lnb = Some(LnbControl {
                 vertical: t.polarisation == Polarisation::Vertical,
                 high_band: t.frequency_khz >= BAND_SPLIT_KHZ,
+                diseqc_port: tuned.lnb.and_then(|lnb| lnb.diseqc_port),
             });
-            let tuned = self.tuned.as_ref()?;
             ((tuned.rf_khz, tuned.symbol_rate_ksps, tuned.lnb) != (rf_khz, t.symbol_rate_ksps, lnb)).then(|| TuneParams {
                 rf_khz,
                 symbol_rate_ksps: t.symbol_rate_ksps,
@@ -1151,7 +1213,8 @@ impl Pipeline {
             // Another channel: what was being waited for was the last one's.
             self.relock_tsid = None;
             self.retune_at = None;
-            self.left_tsid = retune.as_ref().and(self.selector.selection().transport_stream_id);
+            // A scan takes whatever the transponder is; it leaves nothing.
+            self.left_tsid = retune.as_ref().filter(|_| !scan).and(self.selector.selection().transport_stream_id);
             self.selected_at = Instant::now();
             self.selector = Selector::new(service_id);
             self.writer.discard();
@@ -1263,6 +1326,7 @@ pub fn run(options: Options, log: &Log) -> Status {
         tkgs_started: None,
         tkgs_done: false,
         tkgs_reported: (0, 0),
+        scanning: false,
     };
     let (end, message) = match &options.source {
         Source::Recording(path) => play_recording(path, &options, &mut pipeline, &mut reporter, log),
@@ -1299,7 +1363,12 @@ fn finish(mut reporter: Reporter, pipeline: Option<Pipeline>, end: End, message:
 
 fn check_service(pipeline: &Pipeline, options: &Options, streaming_since: Instant) -> Option<(End, Option<String>)> {
     let since = streaming_since.max(pipeline.selected_at);
-    (!options.raw && pipeline.tkgs_started.is_none() && !pipeline.selector.ready() && since.elapsed() > options.service_timeout).then(|| {
+    (!options.raw
+        && pipeline.tkgs_started.is_none()
+        && !pipeline.scanning
+        && !pipeline.selector.ready()
+        && since.elapsed() > options.service_timeout)
+        .then(|| {
         (End::ServiceNotFound, Some(format!("SID {} bu yayında bulunamadı", pipeline.service_id)))
     })
 }
@@ -1498,6 +1567,9 @@ fn play_satellite(
     }
 }
 
+const TS_DEAD_AFTER: Duration = Duration::from_secs(10);
+const TS_CYCLE_EVERY: Duration = Duration::from_secs(60);
+
 /// The locked receiver's stream, until something ends it. Returns what the
 /// tuner needs to know (the device went away) and, if the stream decided
 /// it, how the whole service ends.
@@ -1548,6 +1620,8 @@ fn stream(
     // on the first retune after the cable is. Not inferred from the stream:
     // with the cable out the receiver keeps sending (40 000 packets a second).
     let mut lock_checked = Instant::now();
+    // Packets the bridge has delivered, and when that last grew.
+    let mut delivered = (0u64, Instant::now());
     let ended = loop {
         if STOP.load(Ordering::SeqCst) {
             break Some((End::Stopped, None));
@@ -1587,6 +1661,7 @@ fn stream(
         // Nobody has read for the hold: standby, as if asked.
         if stream.is_some()
             && pipeline.tkgs_started.is_none()
+            && !pipeline.scanning
             && options.hold_reader.is_some_and(|hold| pipeline.writer.unread_for().is_some_and(|gone| gone > hold))
             && let Some(mut running) = stream.take()
         {
@@ -1655,6 +1730,7 @@ fn stream(
             && pipeline.relock_tsid.is_none()
             && pipeline.left_tsid.is_none()
             && pipeline.tkgs_started.is_none()
+            && !pipeline.scanning
             && !options.raw
             && !pipeline.analyser.pat.is_empty()
         {
@@ -1752,6 +1828,25 @@ fn stream(
                     }
                 }
             }
+        }
+        // FEC locked and not one transfer for 10 s: the bridge's TS path is
+        // dead (measured 2026-10-29 after a scan: fec_lock 1, completed 0,
+        // through firmware reboots, port resets and demodulator resets) --
+        // a state only power takes it out of. The port's power is cut and
+        // restored, and the receiver comes back as if replugged.
+        if stats.completed != delivered.0 {
+            delivered = (stats.completed, Instant::now());
+        } else if delivered.1.elapsed() >= TS_DEAD_AFTER
+            && matches!(demod.lock_flags(bridge), Ok((_, fec)) if fec != 0)
+            && crate::usbpower::may_cycle(TS_CYCLE_EVERY)
+        {
+            log.line(format!("TS DEAD: no transfer completed for {:?}; the receiver's port is power-cycled", TS_DEAD_AFTER));
+            match crate::usbpower::cycle_kanky(Duration::from_secs(3)) {
+                Ok(port) => log.line(format!("TS DEAD: port {port} power cut and restored")),
+                Err(error) => log.line(format!("TS DEAD: power cycle failed: {error}")),
+            }
+            no_device = true;
+            break None;
         }
         reporter.status.usb = Some(stats);
         pipeline.report(reporter);
