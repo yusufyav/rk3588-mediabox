@@ -26,7 +26,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mediabox_core::{LiveChannel, LiveEvent, LiveSource, SatellitePolarisation};
+use mediabox_core::{LiveChannel, LiveEvent, LiveScanKeep, LiveSource, SatellitePolarisation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -116,17 +116,103 @@ struct Inner {
     fifos: u64,
     /// The channel setup reading TKGS, while it does.
     setup: Option<Setup>,
+    /// The DiSEqC port the receiver up now was started with.
+    diseqc_port: Option<u8>,
+    /// The manual scan form's signal reading: how to put the receiver back,
+    /// and the carrier it is on.
+    probe: Option<(ScanRestore, LiveSource)>,
 }
 
 /// How far the channel setup has got, for its progress, and whether it was
 /// called off.
 #[derive(Debug, Clone, Copy, Default)]
 struct Setup {
+    /// A manual scan, not the TKGS read.
+    scan: bool,
     /// The receiver is on the TKGS multiplex and reading the table.
     reading: bool,
     sections: u64,
     expected: u64,
+    /// A scan: the services its SDT has named so far, and the demodulator's
+    /// word on the carrier.
+    found: u64,
+    locked: bool,
+    strength_pct: Option<u64>,
+    snr_db: Option<f64>,
+    /// A satellite scan: the carrier on now (from 1) of `carriers`, and
+    /// the channels it has added so far.
+    carrier: u64,
+    carriers: u64,
+    frequency_khz: u64,
+    added: u64,
+    /// The channels the carriers before this one gave.
+    found_before: u64,
+    /// The named services found, by AOSP's service types (TvContract
+    /// SERVICE_TYPE_AUDIO_VIDEO, _AUDIO, _OTHER): on the carrier on now,
+    /// and on those before it.
+    kinds: [u64; 3],
+    kinds_before: [u64; 3],
     cancelled: bool,
+}
+
+/// Türksat 42°E's home carrier, where its NIT and TKGS are read.
+const HOME_CARRIER: LiveSource =
+    LiveSource::Satellite { frequency_khz: 12_380_000, symbol_rate_ksps: 27_500, polarisation: SatellitePolarisation::Vertical };
+
+/// What a scan keeps: Sony's Scan type (All, Only Free, Only Encrypted)
+/// and Store type (All, Only Digital, Only Radio).
+#[derive(Debug, Clone, Copy)]
+pub struct ScanFilter {
+    pub free_only: bool,
+    pub scrambled_only: bool,
+    pub keep: LiveScanKeep,
+}
+
+/// How the receiver is put back after a scan.
+/// A satellite scan's account of the transport streams it has had: a
+/// carrier that locks one the home carrier's NIT puts on another frequency
+/// has locked its neighbour (the receiver searches ±10 MHz around the
+/// nominal IF); of two carriers that lock the same one, the one locked
+/// further from its nominal frequency has.
+#[derive(Default)]
+struct CarrierCheck {
+    /// The NIT's carriers and their (original network, transport stream).
+    network: Vec<(LiveSource, (u16, u16))>,
+    /// Each transport stream had: on which carrier, how far off nominal.
+    had: Vec<((Option<u16>, u16), LiveSource, u32)>,
+}
+
+impl CarrierCheck {
+    /// Ok with the carrier this one shows to have been a neighbour's lock,
+    /// if one was taken before; Err when this one is.
+    fn carrier(&mut self, source: &LiveSource, onid: Option<u16>, tsid: Option<u16>, offset_khz: u32) -> Result<Option<LiveSource>, String> {
+        let LiveSource::Satellite { frequency_khz, polarisation, .. } = *source else { return Ok(None) };
+        let Some(tsid) = tsid else { return Ok(None) };
+        let near = |other: &LiveSource| matches!(*other, LiveSource::Satellite { frequency_khz: f, polarisation: p, .. }
+            if p == polarisation && f.abs_diff(frequency_khz) <= 3_000);
+        let same = |(n, t): (u16, u16)| t == tsid && onid.is_none_or(|onid| onid == n);
+        let named: Vec<&LiveSource> = self.network.iter().filter(|(_, ids)| same(*ids)).map(|(s, _)| s).collect();
+        let neighbour = || format!("{} MHz: komşu taşıyıcı kilitlendi (TSID {tsid}).", frequency_khz / 1000);
+        if !named.is_empty() && !named.iter().any(|s| near(s)) {
+            return Err(neighbour());
+        }
+        match self.had.iter_mut().find(|(ids, _, _)| *ids == (onid, tsid)) {
+            Some((_, _, before)) if *before <= offset_khz => Err(neighbour()),
+            Some((_, carrier, before)) => {
+                *before = offset_khz;
+                Ok(Some(std::mem::replace(carrier, source.clone())))
+            }
+            None => {
+                self.had.push(((onid, tsid), source.clone(), offset_khz));
+                Ok(None)
+            }
+        }
+    }
+}
+
+struct ScanRestore {
+    started: bool,
+    playing: Option<(Option<u16>, Option<LiveSource>)>,
 }
 
 pub struct LiveManager {
@@ -167,6 +253,8 @@ impl LiveManager {
                 last: None,
                 fifo: None,
                 fifos: 0,
+                diseqc_port: None,
+                probe: None,
                 setup: None,
             }),
             starts: AtomicU64::new(0),
@@ -229,8 +317,8 @@ impl LiveManager {
                 argv.extend(["--recording".into(), self.paths.recording.display().to_string(), "--pace".into()]);
             }
             LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } => {
-                // The receiver itself, chosen explicitly. Never an LNB flag:
-                // the RF source is prepared outside MediaBox.
+                // The receiver itself, chosen explicitly, and the LNB's
+                // DiSEqC port from the setup.
                 argv.push("--hardware".into());
                 argv.extend(["--transponder".into(), frequency_khz.to_string()]);
                 argv.extend(["--sr".into(), symbol_rate_ksps.to_string()]);
@@ -247,8 +335,12 @@ impl LiveManager {
                 if standby {
                     argv.push("--standby".into());
                 }
-                if let Some(offset) = self.stored_guide().and_then(|guide| guide.multiplex(source)?.carrier_offset_khz) {
+                let stored = self.stored_guide();
+                if let Some(offset) = stored.as_ref().and_then(|guide| guide.multiplex(source)?.carrier_offset_khz) {
                     argv.push(format!("--carrier-first-khz={offset}"));
+                }
+                if let Some(port) = stored.map_or(default_diseqc_port(), |guide| guide.diseqc_port) {
+                    argv.push(format!("--diseqc-port={port}"));
                 }
             }
         }
@@ -297,6 +389,7 @@ impl LiveManager {
         let source = &source;
         source.validate()?;
         self.stop().await;
+        let port = self.stored_guide().map_or(default_diseqc_port(), |guide| guide.diseqc_port);
         let token = format!("{}-{}", std::process::id(), self.starts.fetch_add(1, Ordering::SeqCst) + 1);
         {
             let mut inner = self.lock();
@@ -306,6 +399,7 @@ impl LiveManager {
             inner.failure = None;
             inner.last = None;
             inner.fifo = None;
+            inner.diseqc_port = port;
         }
         self.set(Lifecycle::Starting);
         let output = Command::new("systemd-run")
@@ -349,8 +443,12 @@ impl LiveManager {
     /// satellite transponder, the one tuned (a new service) or another (a
     /// retune without the 3.5 s boot).
     pub fn can_reuse(&self, source: &LiveSource) -> bool {
+        let port = self.stored_guide().map_or(default_diseqc_port(), |guide| guide.diseqc_port);
         {
             let inner = self.lock();
+            if inner.diseqc_port != port {
+                return false;
+            }
             let satellite = |source: Option<&LiveSource>| matches!(source, Some(LiveSource::Satellite { .. }));
             if inner.token.is_none()
                 || !satellite(Some(source))
@@ -653,8 +751,16 @@ impl LiveManager {
     fn setup_progress_of(&self, inner: &Inner) -> Value {
         match inner.setup {
             Some(setup) => json!({
-                "running": true, "reading": setup.reading,
+                "running": true, "scan": setup.scan, "reading": setup.reading,
                 "sections": setup.sections, "expected": setup.expected,
+                "found": setup.found, "locked": setup.locked,
+                "strength_pct": setup.strength_pct, "snr_db": setup.snr_db,
+                "carrier": setup.carrier, "carriers": setup.carriers,
+                "frequency_khz": setup.frequency_khz, "added": setup.added,
+                "found_total": setup.found_before + setup.found,
+                "television_total": setup.kinds_before[0] + setup.kinds[0],
+                "radio_total": setup.kinds_before[1] + setup.kinds[1],
+                "data_total": setup.kinds_before[2] + setup.kinds[2],
             }),
             None => json!({"running": false}),
         }
@@ -688,6 +794,17 @@ fn is_playable(service_type: Option<u8>) -> bool {
     matches!(service_type, Some(0x01 | 0x02 | 0x11 | 0x16 | 0x19 | 0x1F))
 }
 
+/// AOSP's service type of an EN 300 468 one (table 87): 0 television
+/// (SERVICE_TYPE_AUDIO_VIDEO), 1 radio (SERVICE_TYPE_AUDIO), 2 data and
+/// the rest (SERVICE_TYPE_OTHER).
+fn service_kind(service_type: Option<u8>) -> usize {
+    match service_type {
+        Some(0x01 | 0x11 | 0x16 | 0x19 | 0x1F | 0x20) => 0,
+        Some(0x02 | 0x07 | 0x0A) => 1,
+        _ => 2,
+    }
+}
+
 /// Digital radio (EN 300 468 table 87): sound, no picture.
 fn is_radio(service_type: Option<u8>) -> bool {
     service_type == Some(0x02)
@@ -701,6 +818,9 @@ pub struct StoredService {
     pub provider: Option<String>,
     #[serde(default)]
     pub service_type: Option<u8>,
+    /// EN 300 468 free_CA_mode: scrambled.
+    #[serde(default)]
+    pub free_ca_mode: bool,
 }
 
 /// One multiplex in `/var/lib/mediabox/live-guide.json`: the source it came
@@ -725,6 +845,11 @@ pub struct StoredGuide {
     /// cold start of that channel has a frame to read it from.
     #[serde(default)]
     pub rates: std::collections::BTreeMap<u16, f64>,
+    /// The services a manual scan of this multiplex put in the channel
+    /// list, by service id: the form before the channel table, read only to
+    /// be moved into it.
+    #[serde(default, skip_serializing)]
+    pub manual: Vec<u16>,
 }
 
 /// The receiver's `guide.json`, as `mediabox_dvb::service::Guide` writes it.
@@ -732,8 +857,33 @@ pub struct StoredGuide {
 struct ReceiverGuide {
     token: Option<String>,
     transport_stream_id: Option<u16>,
+    #[serde(default)]
+    original_network_id: Option<u16>,
+    /// Every section of the SDT actual is in; of the NIT actual too.
+    #[serde(default)]
+    sdt_complete: bool,
+    #[serde(default)]
+    nit_complete: bool,
+    /// The NIT's carriers (a network scan's list).
+    #[serde(default)]
+    network: Vec<ReceiverCarrier>,
     services: Vec<StoredService>,
     events: Vec<ReceiverEvents>,
+}
+
+#[derive(Deserialize)]
+struct ReceiverCarrier {
+    #[serde(default)]
+    transport_stream_id: u16,
+    #[serde(default)]
+    original_network_id: u16,
+    #[serde(default)]
+    orbital_position_tenths: u16,
+    #[serde(default)]
+    east: bool,
+    frequency_khz: u32,
+    symbol_rate_ksps: u32,
+    polarisation: String,
 }
 
 #[derive(Deserialize)]
@@ -746,6 +896,9 @@ struct ReceiverEvents {
 struct ReceiverTkgs { table: ReceiverTkgsTable }
 #[derive(Deserialize)]
 struct ReceiverTkgsTable {
+    /// Its header's text (descriptor 0x90), as Türksat words it.
+    #[serde(default)]
+    title: String,
     transponders: Vec<ReceiverTkgsTransponder>,
     #[serde(default)]
     orderings: Vec<StoredTkgsOrdering>,
@@ -790,24 +943,49 @@ pub fn now_utc() -> i64 {
 pub struct GuideStore {
     #[serde(default)]
     pub multiplexes: Vec<StoredGuide>,
+    /// The channel table (AOSP TvContract.Channels): every channel the
+    /// setup put in the list, TKGS's and the scans', one row each.
+    #[serde(default)]
+    pub channels: Vec<StoredChannel>,
+    /// The DiSEqC 1.0 committed switch port the LNB is on: 0 A .. 3 D;
+    /// none (null) for an LNB on its own, sent no command. Port A unless
+    /// set: this box's own line answers to the switch command only.
+    #[serde(default = "default_diseqc_port")]
+    pub diseqc_port: Option<u8>,
     #[serde(default)]
     pub tkgs: Option<StoredTkgs>,
     #[serde(default = "default_hd_first")]
     pub tkgs_hd_first: bool,
+    /// "TKGS Kapalı": the channel list is the manual scans' alone.
+    #[serde(default)]
+    pub tkgs_off: bool,
+    /// TKGS's categories are not the channel list's groups.
+    #[serde(default)]
+    pub categories_hidden: bool,
 }
 
 impl Default for GuideStore {
     fn default() -> Self {
-        Self { multiplexes: Vec::new(), tkgs: None, tkgs_hd_first: true }
+        Self {
+            multiplexes: Vec::new(), channels: Vec::new(), diseqc_port: default_diseqc_port(),
+            tkgs: None, tkgs_hd_first: true, tkgs_off: false, categories_hidden: false,
+        }
     }
 }
 
 fn default_hd_first() -> bool { true }
 
+fn default_diseqc_port() -> Option<u8> { Some(0) }
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoredTkgs {
+    /// The table's own text (its header's descriptor 0x90).
+    #[serde(default)]
+    pub title: String,
     pub updated: i64,
     pub transponders: usize,
+    /// The form before the channel table, read only to be moved into it.
+    #[serde(default, skip_serializing)]
     pub channels: Vec<StoredTkgsChannel>,
     #[serde(default)]
     pub orderings: Vec<StoredTkgsOrdering>,
@@ -836,68 +1014,183 @@ pub struct StoredTkgsOrdering { pub name: String, pub lcns: Vec<u16> }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTkgsCategory { pub id: u16, pub name: String }
 
+/// The list a channel came in by (TvContract.Channels.COLUMN_CHANNEL_LIST_ID).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelList {
+    Tkgs,
+    Scan,
+}
+
+/// A row of the channel table (TvContract.Channels): the DVB triplet
+/// (COLUMN_ORIGINAL_NETWORK_ID, COLUMN_TRANSPORT_STREAM_ID,
+/// COLUMN_SERVICE_ID), where it is tuned, and its number.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredChannel {
+    pub list: ChannelList,
+    /// COLUMN_DISPLAY_NUMBER: TKGS's LCN; 0 for a scanned channel, numbered
+    /// in the table's order after TKGS's.
+    #[serde(default)]
+    pub number: u16,
+    #[serde(default)]
+    pub original_network_id: Option<u16>,
+    /// The transport stream's own id, once a tune or scan has read it.
+    #[serde(default)]
+    pub transport_stream_id: Option<u16>,
+    pub service_id: u16,
+    pub name: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub service_type: Option<u8>,
+    pub source: LiveSource,
+    pub free_ca_mode: bool,
+    /// TKGS's category ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<u16>,
+}
+
+impl StoredChannel {
+    fn scanned(s: &StoredService, source: &LiveSource, transport_stream_id: Option<u16>, original_network_id: Option<u16>) -> Self {
+        Self {
+            list: ChannelList::Scan, number: 0, original_network_id, transport_stream_id,
+            service_id: s.service_id, name: s.name.clone(), provider: s.provider.clone(),
+            service_type: s.service_type, source: source.clone(), free_ca_mode: s.free_ca_mode,
+            categories: Vec::new(),
+        }
+    }
+
+    fn listed(&self) -> bool {
+        is_playable(self.service_type) && !self.name.trim().is_empty()
+    }
+}
+
 impl GuideStore {
     /// The file, in this form or in the one-multiplex form it had first.
     fn parse(text: &str) -> Option<Self> {
-        if let Ok(store) = serde_json::from_str::<GuideStore>(text)
-            && !store.multiplexes.is_empty()
-        {
-            return Some(store);
+        // The first form is one multiplex (it has a `source`); this one may
+        // have none yet and still hold the setup's settings.
+        if let Ok(one) = serde_json::from_str::<StoredGuide>(text) {
+            return Some(GuideStore { multiplexes: vec![one], ..GuideStore::default() }.migrated());
         }
-        serde_json::from_str::<StoredGuide>(text)
-            .ok()
-            .map(|one| GuideStore { multiplexes: vec![one], tkgs: None, tkgs_hd_first: true })
+        serde_json::from_str::<GuideStore>(text).ok().map(GuideStore::migrated)
     }
 
-    /// The channels of every multiplex, numbered on from one multiplex to
-    /// the next, each multiplex's in service-id order. Numbers are
-    /// MediaBox's until TKGS gives the real ones. A service id another
-    /// multiplex already has is left out: the interface knows a channel by
-    /// its service id.
+    /// TKGS's list and the scans' marks of the form before, moved into the
+    /// channel table; one multiplex per source.
+    fn migrated(mut self) -> Self {
+        let mut seen = Vec::new();
+        self.multiplexes.retain(|m| {
+            let first = !seen.contains(&m.source);
+            seen.push(m.source.clone());
+            first
+        });
+        let tkgs = self.tkgs.as_mut().map(|t| std::mem::take(&mut t.channels)).unwrap_or_default();
+        for c in tkgs {
+            let transport_stream_id = self.multiplex(&c.source).and_then(|m| m.transport_stream_id);
+            self.channels.push(StoredChannel {
+                list: ChannelList::Tkgs, number: c.lcn, original_network_id: None, transport_stream_id,
+                service_id: c.service_id, name: c.name, provider: c.provider, service_type: c.service_type,
+                source: c.source, free_ca_mode: c.free_ca_mode, categories: c.categories,
+            });
+        }
+        let mut rows = Vec::new();
+        for mux in &mut self.multiplexes {
+            for sid in std::mem::take(&mut mux.manual) {
+                if let Some(s) = mux.services.iter().find(|s| s.service_id == sid) {
+                    rows.push(StoredChannel::scanned(s, &mux.source, mux.transport_stream_id, None));
+                }
+            }
+        }
+        for row in rows {
+            if !self.channels.iter().any(|c| c.service_id == row.service_id && c.source == row.source) {
+                self.channels.push(row);
+            }
+        }
+        self
+    }
+
+    /// The channel list, from the channel table: with TKGS on, its rows in
+    /// the HD or SD ordering it gives, then the scans' rows numbered on after
+    /// its last number; with TKGS off, the scans' rows alone, from 1. A
+    /// service id already listed is left out: the interface knows a channel
+    /// by its service id.
     pub fn channels(&self) -> Vec<LiveChannel> {
-        if let Some(tkgs) = &self.tkgs {
+        let mut out: Vec<LiveChannel> = Vec::new();
+        let row = |c: &StoredChannel, number: u32, categories: Vec<String>| LiveChannel {
+            number, service_id: c.service_id, name: c.name.clone(), provider: c.provider.clone(),
+            source: c.source.clone(), scrambled: c.free_ca_mode, radio: is_radio(c.service_type), categories,
+        };
+        if let Some(tkgs) = self.tkgs.as_ref().filter(|_| !self.tkgs_off) {
             let wanted = if self.tkgs_hd_first { "hd" } else { "sd" };
             let ordering = tkgs.orderings.iter().find(|o| o.name.to_lowercase().contains(wanted));
             let positions: std::collections::BTreeMap<u16, usize> = ordering
                 .into_iter().flat_map(|o| o.lcns.iter().copied().enumerate().map(|(i, lcn)| (lcn, i))).collect();
-            let mut listed: Vec<&StoredTkgsChannel> = tkgs.channels.iter().collect();
-            listed.sort_by_key(|c| (positions.get(&c.lcn).copied().unwrap_or(usize::MAX), c.lcn));
+            let mut listed: Vec<&StoredChannel> =
+                self.channels.iter().filter(|c| c.list == ChannelList::Tkgs && c.listed()).collect();
+            listed.sort_by_key(|c| (positions.get(&c.number).copied().unwrap_or(usize::MAX), c.number));
             let category = |id: &u16| tkgs.categories.iter().find(|k| k.id == *id).map(|k| k.name.clone());
-            return listed.into_iter().filter_map(|c| {
-                (is_playable(c.service_type) && !c.name.trim().is_empty()).then(|| LiveChannel {
-                    number: c.lcn as u32, service_id: c.service_id, name: c.name.clone(),
-                    provider: c.provider.clone(), source: c.source.clone(), scrambled: c.free_ca_mode,
-                    radio: is_radio(c.service_type),
-                    categories: c.categories.iter().filter_map(category).collect(),
-                })
-            }).collect();
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        let mut out = Vec::new();
-        for mux in &self.multiplexes {
-            let mut services: Vec<&StoredService> = mux
-                .services
-                .iter()
-                .filter(|s| is_playable(s.service_type) && !s.name.trim().is_empty())
-                .collect();
-            services.sort_by_key(|s| s.service_id);
-            for s in services {
-                if !seen.insert(s.service_id) {
-                    continue;
-                }
-                out.push(LiveChannel {
-                    number: out.len() as u32 + 1,
-                    service_id: s.service_id,
-                    name: s.name.clone(),
-                    provider: s.provider.clone(),
-                    source: mux.source.clone(),
-                    scrambled: false,
-                    radio: is_radio(s.service_type),
-                    categories: Vec::new(),
-                });
+            for c in listed {
+                let categories = if self.categories_hidden { Vec::new() } else { c.categories.iter().filter_map(category).collect() };
+                out.push(row(c, c.number as u32, categories));
             }
         }
+        let mut number = out.iter().map(|c| c.number).max().unwrap_or(0);
+        for c in self.channels.iter().filter(|c| c.list == ChannelList::Scan && c.listed()) {
+            if out.iter().any(|o| o.service_id == c.service_id) {
+                continue;
+            }
+            number += 1;
+            out.push(row(c, number, Vec::new()));
+        }
         out
+    }
+
+    /// What a scan of `source` found: the multiplex's services as its SDT
+    /// has them, and a row in the channel table for each of `kept` the table
+    /// does not have yet (by its transport stream, else its carrier). The
+    /// service ids of the rows added.
+    fn absorb_scan(
+        &mut self, source: &LiveSource, transport_stream_id: Option<u16>, original_network_id: Option<u16>,
+        services: Vec<StoredService>, kept: &[u16], now: i64,
+    ) -> Vec<u16> {
+        let at = self
+            .multiplexes
+            .iter()
+            .position(|m| m.source == *source)
+            .unwrap_or_else(|| {
+                self.multiplexes.push(StoredGuide::empty(source.clone()));
+                self.multiplexes.len() - 1
+            });
+        let mux = &mut self.multiplexes[at];
+        if transport_stream_id.is_some() {
+            mux.transport_stream_id = transport_stream_id;
+        }
+        mux.services = services.clone();
+        mux.updated = now;
+        // The rows of this carrier are now known by their transport stream;
+        // a scanned one the carrier no longer has is gone.
+        for c in self.channels.iter_mut().filter(|c| c.source == *source) {
+            c.transport_stream_id = transport_stream_id.or(c.transport_stream_id);
+            c.original_network_id = original_network_id.or(c.original_network_id);
+        }
+        self.channels.retain(|c| {
+            c.list != ChannelList::Scan || c.source != *source || services.iter().any(|s| s.service_id == c.service_id)
+        });
+        let mut added = Vec::new();
+        let mut order: Vec<&StoredService> = services.iter().filter(|s| kept.contains(&s.service_id)).collect();
+        order.sort_by_key(|s| s.service_id);
+        for s in order {
+            let present = self.channels.iter().any(|c| {
+                c.service_id == s.service_id
+                    && (c.source == *source || (transport_stream_id.is_some() && c.transport_stream_id == transport_stream_id))
+            });
+            if !present {
+                self.channels.push(StoredChannel::scanned(s, source, transport_stream_id, original_network_id));
+                added.push(s.service_id);
+            }
+        }
+        added
     }
 
     /// The receiver's account of its multiplex, into the multiplex it is: the
@@ -967,10 +1260,14 @@ impl GuideStore {
                     mux.services.push(StoredService {
                         service_id: service.service_id, name: service.name.clone(),
                         provider: service.provider.clone(), service_type: service.service_type,
+                        free_ca_mode: service.free_ca_mode,
                     });
                 }
-                listed.push(StoredTkgsChannel {
-                    lcn: service.lcn,
+                listed.push(StoredChannel {
+                    list: ChannelList::Tkgs,
+                    number: service.lcn,
+                    original_network_id: None,
+                    transport_stream_id: mux.transport_stream_id,
                     service_id: service.service_id,
                     name: service.name,
                     provider: service.provider,
@@ -981,10 +1278,14 @@ impl GuideStore {
                 });
             }
         }
-        listed.sort_by_key(|c| c.lcn);
-        listed.dedup_by_key(|c| c.lcn);
+        listed.sort_by_key(|c| c.number);
+        listed.dedup_by_key(|c| c.number);
+        // TKGS's rows are the table's new ones; the scans' stay.
+        self.channels.retain(|c| c.list != ChannelList::Tkgs);
+        self.channels.extend(listed);
         self.tkgs = Some(StoredTkgs {
-            updated: now, transponders: transponder_count, channels: listed, orderings: receiver.table.orderings,
+            title: receiver.table.title.trim().to_string(),
+            updated: now, transponders: transponder_count, channels: Vec::new(), orderings: receiver.table.orderings,
             categories: receiver.table.categories,
         });
     }
@@ -1071,6 +1372,7 @@ impl StoredGuide {
             events: Default::default(),
             carrier_offset_khz: None,
             rates: Default::default(),
+            manual: Vec::new(),
         }
     }
 
@@ -1100,10 +1402,10 @@ impl LiveManager {
             return source.clone();
         };
         self.stored_guide()
-            .and_then(|guide| guide.tkgs)
-            .and_then(|tkgs| {
-                tkgs.channels.into_iter().find(|channel| {
-                    channel.service_id == service_id
+            .and_then(|guide| {
+                guide.channels.into_iter().find(|channel| {
+                    channel.list == ChannelList::Tkgs
+                        && channel.service_id == service_id
                         && matches!(
                             channel.source,
                             LiveSource::Satellite {
@@ -1176,8 +1478,9 @@ impl LiveManager {
         let channels = stored.channels();
         let radio = channels.iter().filter(|channel| channel.radio).count();
         Ok(json!({
-            "channels": tkgs.channels.len(), "transponders": tkgs.transponders, "updated": tkgs.updated,
-            "television": channels.len() - radio, "radio": radio,
+            "channels": stored.channels.iter().filter(|c| c.list == ChannelList::Tkgs).count(),
+            "transponders": tkgs.transponders, "updated": tkgs.updated,
+            "television": channels.len() - radio, "radio": radio, "title": tkgs.title,
         }))
     }
 
@@ -1186,6 +1489,443 @@ impl LiveManager {
         stored.tkgs_hd_first = hd_first;
         self.keep_guide(&stored)?;
         Ok(json!({"hd_first": hd_first}))
+    }
+
+    pub fn set_tkgs_mode(&self, off: bool) -> Result<Value, String> {
+        let mut stored = self.stored_guide().unwrap_or_default();
+        stored.tkgs_off = off;
+        self.keep_guide(&stored)?;
+        Ok(json!({"off": off}))
+    }
+
+    pub fn set_tkgs_categories(&self, shown: bool) -> Result<Value, String> {
+        let mut stored = self.stored_guide().unwrap_or_default();
+        stored.categories_hidden = !shown;
+        self.keep_guide(&stored)?;
+        Ok(json!({"shown": shown}))
+    }
+
+    /// The channel setup's manual scan: `source` streamed for what it
+    /// carries, and its playable services that `free_only` and `keep` let
+    /// through put in the channel list. One setup at a time; its progress
+    /// and cancel are the TKGS read's.
+    pub async fn scan_transponder(&self, source: LiveSource, filter: ScanFilter) -> Result<Value, String> {
+        self.end_probe().await;
+        if !matches!(source, LiveSource::Satellite { .. }) {
+            return Err("Yalnız uydu taşıyıcısı taranır.".into());
+        }
+        source.validate()?;
+        {
+            let mut inner = self.lock();
+            if inner.setup.is_some() {
+                return Err("Kanal kurulumu zaten sürüyor.".into());
+            }
+            inner.setup = Some(Setup { scan: true, ..Setup::default() });
+        }
+        let result = self.scan_and_keep(&source, filter).await;
+        self.lock().setup = None;
+        result
+    }
+
+    /// The channel setup's satellite scan: every carrier TKGS names and
+    /// every one scanned before, in frequency order, each one's channels
+    /// kept as `scan_transponder` keeps them. A carrier without signal is
+    /// passed over.
+    pub async fn scan_satellite(&self, filter: ScanFilter, add_only: bool) -> Result<Value, String> {
+        self.end_probe().await;
+        let stored = self.stored_guide().unwrap_or_default();
+        // A network scan (Sony's Scan mode "Network"): the home carrier
+        // first, then every carrier the NIT names, with those known already.
+        let mut carriers: Vec<LiveSource> = vec![HOME_CARRIER];
+        let listed = stored.channels.iter().map(|c| c.source.clone());
+        for source in listed.chain(stored.multiplexes.iter().map(|m| m.source.clone())) {
+            if matches!(source, LiveSource::Satellite { .. }) && !carriers.contains(&source) {
+                carriers.push(source);
+            }
+        }
+        carriers[1..].sort_by_key(|s| match s { LiveSource::Satellite { frequency_khz, .. } => *frequency_khz, _ => 0 });
+        {
+            let mut inner = self.lock();
+            if inner.setup.is_some() {
+                return Err("Kanal kurulumu zaten sürüyor.".into());
+            }
+            inner.setup = Some(Setup { scan: true, carriers: carriers.len() as u64, ..Setup::default() });
+        }
+        let (mut found, mut television, mut radio, mut added, mut first, mut locked) = (0, 0, 0, 0, None, 0);
+        let mut outcome = Ok(());
+        // A re-scan (Sony's Satellite Re-scan): once it has gone through
+        // every carrier, the list is what it found and nothing else.
+        let mut kept_by_carrier: Vec<(LiveSource, Vec<u16>)> = Vec::new();
+        let mut check = CarrierCheck::default();
+        let restore = match self.scan_receiver(&carriers[0]).await {
+            Ok(restore) => restore,
+            Err(error) => {
+                self.lock().setup = None;
+                return Err(error);
+            }
+        };
+        let mut at = 0;
+        while at < carriers.len() {
+            let source = carriers[at].clone();
+            let source = &source;
+            at += 1;
+            if let Some(setup) = self.lock().setup.as_mut() {
+                setup.carrier = at as u64;
+                setup.carriers = carriers.len() as u64;
+                setup.frequency_khz = match source { LiveSource::Satellite { frequency_khz, .. } => *frequency_khz as u64, _ => 0 };
+                setup.found = 0;
+                setup.kinds = [0; 3];
+                setup.locked = false;
+            }
+            let result = self.scan_carrier(source, filter, at == 1, &mut check).await;
+            // The home carrier's NIT is the network's; the others' NITs are
+            // other networks', which name other satellites as well.
+            if at == 1 {
+                check.network = self.read_network();
+                for (carrier, _) in &check.network {
+                    if !carriers.contains(carrier) {
+                        carriers.push(carrier.clone());
+                    }
+                }
+            }
+            match result {
+                Ok(result) => {
+                    locked += 1;
+                    let n = |key: &str| result.get(key).and_then(Value::as_u64).unwrap_or(0);
+                    found += n("found");
+                    television += n("television");
+                    radio += n("radio");
+                    added += n("added");
+                    first = first.or(result.get("first").and_then(Value::as_u64));
+                    let kept = result.get("kept").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64()).map(|v| v as u16).collect()).unwrap_or_default();
+                    kept_by_carrier.push((source.clone(), kept));
+                    if let Some(setup) = self.lock().setup.as_mut() {
+                        setup.added = added;
+                        setup.found_before = found;
+                        setup.found = 0;
+                        for (before, now) in setup.kinds_before.iter_mut().zip(setup.kinds) {
+                            *before += now;
+                        }
+                        setup.kinds = [0; 3];
+                    }
+                }
+                Err(_) if self.lock().setup.is_some_and(|setup| setup.cancelled) => {
+                    outcome = Err("Kanal kurulumu iptal edildi.".to_string());
+                    break;
+                }
+                // The receiver gone is not a carrier without signal: the
+                // scan ends there, and the list stays as it was.
+                Err(error) if !Self::unit_active().await => {
+                    outcome = Err(error);
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        self.scan_restore(restore).await;
+        self.lock().setup = None;
+        outcome?;
+        let mut stored = self.stored_guide().unwrap_or_default();
+        if !add_only {
+            stored.channels.retain(|c| {
+                c.list != ChannelList::Scan
+                    || kept_by_carrier.iter().any(|(source, kept)| *source == c.source && kept.contains(&c.service_id))
+            });
+        }
+        self.keep_guide(&stored)?;
+        Ok(json!({
+            "found": found, "television": television, "radio": radio, "added": added, "first": first,
+            "carriers": carriers.len(), "locked": locked,
+        }))
+    }
+
+    /// "Kanal listesini sil" (Vestel 55UA9090 kılavuzu, Kanallar): every
+    /// row of the channel table, TKGS's and the scans'. The setup's
+    /// settings stay as they are. The channel on goes with them.
+    pub async fn clear_channels(&self) -> Result<Value, String> {
+        if self.lock().setup.is_some() {
+            return Err("Kanal kurulumu sürüyor.".into());
+        }
+        self.end_probe().await;
+        self.stop().await;
+        let mut stored = self.stored_guide().unwrap_or_default();
+        // The channels the list showed, not the table's rows.
+        let removed = stored.channels().len();
+        stored.channels.clear();
+        self.keep_guide(&stored)?;
+        Ok(json!({"removed": removed}))
+    }
+
+    /// The LNB's DiSEqC 1.0 port (0 A .. 3 D), or none; a receiver up on
+    /// another is not reused (`can_reuse`).
+    pub fn set_diseqc_port(&self, port: Option<u8>) -> Result<Value, String> {
+        if port.is_some_and(|port| port > 3) {
+            return Err("DiSEqC portu A, B, C ya da D olur.".into());
+        }
+        let mut stored = self.stored_guide().unwrap_or_default();
+        stored.diseqc_port = port;
+        self.keep_guide(&stored)?;
+        Ok(json!({"diseqc_port": port}))
+    }
+
+    /// The manual scan form's signal level and quality (Sony's Manual
+    /// Tuning shows them as the transponder is set): the receiver on
+    /// `source`, streaming it as a scan does, and what it says of the
+    /// carrier. None ends it and puts the receiver back as it was.
+    pub async fn probe_signal(&self, source: Option<LiveSource>) -> Result<Value, String> {
+        if self.lock().setup.is_some() {
+            return Err("Kanal kurulumu sürüyor.".into());
+        }
+        let Some(source) = source else {
+            self.end_probe().await;
+            return Ok(json!({"probe": false}));
+        };
+        source.validate()?;
+        let LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } = source.clone() else {
+            return Err("Yalnız uydu taşıyıcısı ölçülür.".into());
+        };
+        // The DiSEqC setting changed under the reading: the receiver is
+        // started again on it.
+        // What leaving puts back stays as it was before.
+        let port = self.stored_guide().map_or(default_diseqc_port(), |guide| guide.diseqc_port);
+        if self.lock().diseqc_port != port {
+            let probe = self.lock().probe.take();
+            if let Some((restore, _)) = probe {
+                self.scan_receiver(&source).await?;
+                self.lock().probe = Some((restore, LiveSource::Recording));
+            }
+        }
+        let on = self.lock().probe.as_ref().map(|(_, on)| on.clone());
+        if on.is_none() {
+            let restore = self.scan_receiver(&source).await?;
+            self.lock().probe = Some((restore, source.clone()));
+        }
+        if on.as_ref() != Some(&source) {
+            self.select(json!({
+                "kind": "scan",
+                "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation},
+            }))?;
+            if let Some((_, on)) = self.lock().probe.as_mut() {
+                *on = source.clone();
+            }
+        }
+        let status = self.read_status();
+        let locked = status.as_ref().and_then(|s| s.get("state")).and_then(Value::as_str) == Some("streaming");
+        Ok(json!({
+            "probe": true, "locked": locked,
+            "strength_pct": status.as_ref().and_then(|s| s.pointer("/signal/strength_pct")).and_then(Value::as_u64),
+            "snr_db": status.as_ref().and_then(|s| s.pointer("/signal/snr_db")).and_then(Value::as_f64),
+        }))
+    }
+
+    /// A scan takes the receiver over from the form's signal reading.
+    async fn end_probe(&self) {
+        let probe = self.lock().probe.take();
+        if let Some((restore, _)) = probe {
+            self.scan_restore(restore).await;
+        }
+    }
+
+    /// The carriers the NIT of the multiplex just scanned names.
+    fn read_network(&self) -> Vec<(LiveSource, (u16, u16))> {
+        let Some(guide) = std::fs::read_to_string(self.paths.guide())
+            .ok()
+            .and_then(|text| serde_json::from_str::<ReceiverGuide>(&text).ok())
+        else {
+            return Vec::new();
+        };
+        guide
+            .network
+            .into_iter()
+            // Only Türksat 42.0°E's: a NIT may name other satellites' too.
+            .filter(|c| c.east && c.orbital_position_tenths == 420)
+            .filter_map(|c| {
+                let polarisation = match c.polarisation.as_str() {
+                    "horizontal" => SatellitePolarisation::Horizontal,
+                    "vertical" => SatellitePolarisation::Vertical,
+                    _ => return None,
+                };
+                let source = LiveSource::Satellite { frequency_khz: c.frequency_khz, symbol_rate_ksps: c.symbol_rate_ksps, polarisation };
+                Some((source, (c.original_network_id, c.transport_stream_id)))
+            })
+            .collect()
+    }
+
+    async fn scan_and_keep(&self, source: &LiveSource, filter: ScanFilter) -> Result<Value, String> {
+        let restore = self.scan_receiver(source).await?;
+        let result = self.scan_carrier(source, filter, false, &mut CarrierCheck::default()).await;
+        self.scan_restore(restore).await;
+        result
+    }
+
+    /// The receiver for a scan: one already up is retuned (and put back by
+    /// `scan_restore`), else one is started on `first` in standby. It stays
+    /// on the scan from carrier to carrier, as AOSP's ScanFragment keeps its
+    /// streamer for the whole channel map.
+    async fn scan_receiver(&self, first: &LiveSource) -> Result<ScanRestore, String> {
+        let reuse = self.can_reuse(first);
+        let restore = {
+            let inner = self.lock();
+            ScanRestore {
+                started: !reuse,
+                playing: (reuse && inner.lifecycle == Lifecycle::Playing).then(|| (inner.service_id, inner.source.clone())),
+            }
+        };
+        if !reuse {
+            if let Err(error) = self.start_with(0, first, true).await {
+                self.stop().await;
+                return Err(error);
+            }
+            self.set(Lifecycle::Standby);
+        }
+        Ok(restore)
+    }
+
+    async fn scan_restore(&self, restore: ScanRestore) {
+        if restore.started {
+            self.stop().await;
+        } else if let Some((Some(service_id), Some(LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation }))) = restore.playing {
+            let _ = self.select(json!({
+                "kind": "play", "service_id": service_id,
+                "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation}, "new_fifo": null,
+            }));
+        } else {
+            let _ = self.select(json!({"kind": "standby"}));
+        }
+    }
+
+    /// One carrier scanned and what `filter` lets through kept.
+    async fn scan_carrier(&self, source: &LiveSource, filter: ScanFilter, network: bool, check: &mut CarrierCheck) -> Result<Value, String> {
+        let LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } = *source else {
+            return Err("Yalnız uydu taşıyıcısı taranır.".into());
+        };
+        // Only what this scan's multiplex says counts.
+        let _ = std::fs::remove_file(self.paths.guide());
+        self.select(json!({
+            "kind": "scan",
+            "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation},
+        }))?;
+        let receiver = self.scan_wait(frequency_khz, network).await?;
+        let offset_khz = self
+            .read_status()
+            .and_then(|status| status.pointer("/tune/search_offset_khz").and_then(Value::as_i64))
+            .map_or(0, |offset| offset.unsigned_abs() as u32);
+        let wrong = match check.carrier(source, receiver.original_network_id, receiver.transport_stream_id, offset_khz) {
+            Ok(earlier) => earlier.map(|earlier| (earlier, None)),
+            Err(error) => Some((source.clone(), Some(error))),
+        };
+        if let Some((wrong, error)) = wrong {
+            // What a neighbour's lock put under that carrier goes with it.
+            let mut stored = self.stored_guide().unwrap_or_default();
+            stored.multiplexes.retain(|m| !(m.source == wrong && m.transport_stream_id == receiver.transport_stream_id));
+            stored.channels.retain(|c| !(c.list == ChannelList::Scan && c.source == wrong));
+            self.keep_guide(&stored)?;
+            if let Some(error) = error {
+                return Err(error);
+            }
+        }
+        let wanted = |s: &StoredService| {
+            is_playable(s.service_type)
+                && !s.name.trim().is_empty()
+                && !(filter.free_only && s.free_ca_mode)
+                && !(filter.scrambled_only && !s.free_ca_mode)
+                && match filter.keep {
+                    LiveScanKeep::All => true,
+                    LiveScanKeep::Television => !is_radio(s.service_type),
+                    LiveScanKeep::Radio => is_radio(s.service_type),
+                }
+        };
+        let kept: Vec<u16> = receiver.services.iter().filter(|s| wanted(s)).map(|s| s.service_id).collect();
+        let radio = receiver.services.iter().filter(|s| wanted(s) && is_radio(s.service_type)).count();
+        let mut stored = self.stored_guide().unwrap_or_default();
+        let services = receiver.services;
+        let added = stored.absorb_scan(
+            source, receiver.transport_stream_id, receiver.original_network_id, services.clone(), &kept, now_utc(),
+        );
+        self.keep_guide(&stored)?;
+        let is_tv = |sid: &u16| services.iter().any(|s| s.service_id == *sid && !is_radio(s.service_type));
+        let first = added.iter().find(|sid| is_tv(sid)).or(added.first()).copied();
+        Ok(json!({
+            "found": kept.len(), "television": kept.len() - radio, "radio": radio,
+            "added": added.len(), "first": first, "kept": kept,
+        }))
+    }
+
+    /// Until the scanned multiplex's SDT has stopped naming new services: the
+    /// services and NIT carriers in its `guide.json` unchanged for
+    /// `SCAN_SETTLE` after the first services in it (the file itself is
+    /// rewritten with every EIT and NIT repetition), at most `SCAN_MOST`. No signal, nothing on it, the receiver gone, or the setup called
+    /// off end it with the reason.
+    async fn scan_wait(&self, frequency_khz: u32, network: bool) -> Result<ReceiverGuide, String> {
+        const SCAN_SETTLE: Duration = Duration::from_secs(5);
+        const NIT_WAIT: Duration = Duration::from_secs(12);
+        const SCAN_MOST: Duration = Duration::from_secs(45);
+        let started = Instant::now();
+        let mut last: Option<((Vec<StoredService>, usize), Instant)> = None;
+        loop {
+            if self.lock().setup.is_some_and(|setup| setup.cancelled) {
+                return Err("Kanal kurulumu iptal edildi.".into());
+            }
+            if !Self::unit_active().await {
+                return Err("Tarama sırasında uydu alıcısı kapandı.".into());
+            }
+            let status = self.read_status();
+            let locked = status.as_ref().and_then(|s| s.get("state")).and_then(Value::as_str) == Some("streaming");
+            let token = self.lock().token.clone();
+            let text = std::fs::read_to_string(self.paths.guide()).ok();
+            let guide = text.as_deref().and_then(|text| serde_json::from_str::<ReceiverGuide>(text).ok())
+                .filter(|guide| guide.token.is_some() && guide.token == token);
+            let found = guide.as_ref().map_or(0, |g| g.services.iter().filter(|s| is_playable(s.service_type)).count());
+            let mut kinds = [0u64; 3];
+            for s in guide.iter().flat_map(|g| g.services.iter()).filter(|s| !s.name.trim().is_empty()) {
+                kinds[service_kind(s.service_type)] += 1;
+            }
+            if let Some(setup) = self.lock().setup.as_mut() {
+                setup.kinds = kinds;
+                setup.locked = locked;
+                setup.found = found as u64;
+                setup.strength_pct = status.as_ref().and_then(|s| s.pointer("/signal/strength_pct")).and_then(Value::as_u64);
+                setup.snr_db = status.as_ref().and_then(|s| s.pointer("/signal/snr_db")).and_then(Value::as_f64);
+            }
+            // The whole SDT is in (and on the home carrier the NIT, sent at
+            // least every 10 s, EN 300 468 5.1.4): nothing more will come.
+            let whole = guide.as_ref().is_some_and(|guide| {
+                !guide.services.is_empty()
+                    && guide.sdt_complete
+                    && (!network || guide.nit_complete || started.elapsed() >= NIT_WAIT)
+            });
+            if whole && let Some(guide) = guide {
+                return Ok(guide);
+            }
+            if let Some(guide) = guide
+                && !guide.services.is_empty()
+            {
+                let seen_now = (guide.services.clone(), guide.network.len());
+                match &last {
+                    Some((seen, since)) if *seen == seen_now => {
+                        // The home carrier's NIT, repeated at most every
+                        // 10 s (EN 300 468 5.1.4), is waited for too.
+                        if since.elapsed() >= SCAN_SETTLE && (!network || !guide.network.is_empty() || started.elapsed() >= NIT_WAIT) {
+                            return Ok(guide);
+                        }
+                    }
+                    _ if started.elapsed() >= SCAN_MOST => return Ok(guide),
+                    _ => last = Some((seen_now, Instant::now())),
+                }
+            }
+            let elapsed = started.elapsed();
+            // The receiver has tried the carrier and its offsets and says
+            // nothing is there: on to the next (AOSP's Tuner framework moves
+            // on when LOCKED does not come). Locks here take under 2.5 s.
+            let no_signal = status.as_ref().and_then(|s| s.get("state")).and_then(Value::as_str) == Some("no_signal");
+            if !locked && last.is_none() && (elapsed >= Duration::from_secs(20) || (no_signal && elapsed >= Duration::from_secs(3))) {
+                return Err(format!("{} MHz: sinyal yok.", frequency_khz / 1000));
+            }
+            if last.is_none() && elapsed >= Duration::from_secs(30) {
+                return Err(format!("{} MHz: yayın bulunamadı.", frequency_khz / 1000));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     /// Take in what this start's receiver has said of its multiplex; written
@@ -1230,17 +1970,26 @@ impl LiveManager {
 
     /// `LiveChannels`.
     pub fn channels(&self) -> Value {
+        let running = self.lock().setup.is_some();
         match self.stored_guide() {
             Some(guide) => json!({
                 "channels": guide.channels(),
                 "multiplexes": guide.multiplexes.len(),
                 "updated": guide.tkgs.as_ref().map(|t| t.updated).or_else(|| guide.multiplexes.iter().map(|m| m.updated).max()),
                 "tkgs": guide.tkgs.as_ref().map(|t| json!({
-                    "channels": t.channels.len(), "transponders": t.transponders,
-                    "updated": t.updated, "hd_first": guide.tkgs_hd_first,
+                    "channels": guide.channels.iter().filter(|c| c.list == ChannelList::Tkgs).count(),
+                    "transponders": t.transponders,
+                    "updated": t.updated, "hd_first": guide.tkgs_hd_first, "title": t.title,
                 })),
+                "setup": {
+                    "tkgs_off": guide.tkgs_off, "categories_hidden": guide.categories_hidden, "hd_first": guide.tkgs_hd_first,
+                    "running": running, "diseqc_port": guide.diseqc_port,
+                },
             }),
-            None => json!({"channels": [], "multiplexes": 0, "updated": null, "tkgs": null}),
+            None => json!({
+                "channels": [], "multiplexes": 0, "updated": null, "tkgs": null,
+                "setup": {"tkgs_off": false, "categories_hidden": false, "hd_first": true, "running": running, "diseqc_port": 0},
+            }),
         }
     }
 
@@ -1281,7 +2030,7 @@ mod tests {
         assert!(joined.contains("--property=RuntimeDirectoryPreserve=yes"));
         assert!(joined.ends_with(&format!(
             "play --service 10801 --fifo {0}/live.ts --status {0}/status.json --token 7-1 \
-             --hardware --transponder 12188000 --sr 27500 --polarisation=vertical --firmware-dir /var/lib/mediabox-dvb/firmware --reconnect-s 20 --hold-reader-s 30",
+             --hardware --transponder 12188000 --sr 27500 --polarisation=vertical --firmware-dir /var/lib/mediabox-dvb/firmware --reconnect-s 20 --hold-reader-s 30 --diseqc-port=0",
             dir.path().display()
         )));
         let recording = live.argv(10801, &LiveSource::Recording, "7-2").join(" ");
@@ -1387,10 +2136,9 @@ mod tests {
         std::fs::write(dir.path().join("guide.json"), receiver.to_string()).unwrap();
         assert!(live.absorb_guide());
         assert!(!live.absorb_guide(), "nothing new the second time");
-        let channels = live.channels();
-        let names: Vec<_> = channels["channels"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["TRT1 HD", "TRT HABER HD"], "radio is not a channel; numbered by service id");
-        assert_eq!(channels["channels"][1]["number"], 2);
+        // A tune keeps the multiplex; only the setup makes channels.
+        assert_eq!(live.stored_guide().unwrap().multiplexes[0].services.len(), 3);
+        assert_eq!(live.channels()["channels"].as_array().unwrap().len(), 0);
         let window = live.guide_window(now - 3600, now + 3600);
         assert_eq!(window["events"]["10801"][0]["title"], "Haber");
         assert_eq!(window["events"]["10801"].as_array().unwrap().len(), 1, "an event long ended is let go of");
@@ -1400,7 +2148,7 @@ mod tests {
     }
 
     fn receiver(tsid: u16, services: &[(u16, &str)]) -> ReceiverGuide {
-        ReceiverGuide {
+        ReceiverGuide { original_network_id: None, network: vec![], sdt_complete: false, nit_complete: false,
             token: None,
             transport_stream_id: Some(tsid),
             services: services
@@ -1410,6 +2158,7 @@ mod tests {
                     name: name.into(),
                     provider: None,
                     service_type: Some(0x19),
+                    free_ca_mode: false,
                 })
                 .collect(),
             events: vec![],
@@ -1433,6 +2182,11 @@ mod tests {
         assert_eq!(store.multiplexes.len(), 1);
         assert_eq!(store.multiplexes[0].source, s12188);
         assert!(store.absorb(receiver(40301, &[(10601, "TRT 1"), (10800, "Duplicate")]), &s11794, 0));
+        // Scanned, the channel table has their rows, numbered in its order.
+        let mux = |at: usize| store.multiplexes[at].services.clone();
+        let (first, second) = (mux(0), mux(1));
+        store.absorb_scan(&s12188, Some(41306), Some(1070), first, &[10800, 10801], 0);
+        store.absorb_scan(&s11794, Some(40301), Some(1070), second, &[10601, 10800], 0);
         let channels = store.channels();
         let shown: Vec<_> = channels.iter().map(|c| (c.number, c.service_id, c.source == s11794)).collect();
         assert_eq!(shown, [(1, 10800, false), (2, 10801, false), (3, 10601, true)], "a service id already listed is left out");
@@ -1452,20 +2206,17 @@ mod tests {
         };
         let mut store = GuideStore::default();
         store.multiplexes.push(StoredGuide::empty(exact.clone()));
-        store.tkgs = Some(StoredTkgs {
-            updated: 1,
-            transponders: 1,
-            channels: vec![StoredTkgsChannel {
-                lcn: 42,
-                service_id: 52202,
-                name: "H CHANNEL".into(),
-                provider: None,
-                service_type: Some(0x19),
-                source: exact.clone(),
-                free_ca_mode: false,
-                categories: vec![],
-            }],
-            orderings: vec![],
+        store.channels.push(StoredChannel {
+            list: ChannelList::Tkgs,
+            number: 42,
+            original_network_id: None,
+            transport_stream_id: None,
+            service_id: 52202,
+            name: "H CHANNEL".into(),
+            provider: None,
+            service_type: Some(0x19),
+            source: exact.clone(),
+            free_ca_mode: false,
             categories: vec![],
         });
         std::fs::write(dir.path().join("live-guide.json"), serde_json::to_string(&store).unwrap()).unwrap();
@@ -1482,14 +2233,14 @@ mod tests {
         let source = LiveSource::Recording;
         let mut stored = StoredGuide::empty(source.clone());
         let now = 1_000_000;
-        let first = ReceiverGuide {
+        let first = ReceiverGuide { original_network_id: None, network: vec![], sdt_complete: false, nit_complete: false,
             token: None,
             transport_stream_id: Some(1),
             services: vec![],
             events: vec![ReceiverEvents { service_id: 5, events: vec![event(now, 60, "A"), event(now + 3600, 60, "B")] }],
         };
         assert!(stored.absorb(first, &source, now));
-        let moved = ReceiverGuide {
+        let moved = ReceiverGuide { original_network_id: None, network: vec![], sdt_complete: false, nit_complete: false,
             token: None,
             transport_stream_id: Some(1),
             services: vec![],

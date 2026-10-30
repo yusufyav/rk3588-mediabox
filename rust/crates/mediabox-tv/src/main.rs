@@ -267,6 +267,9 @@ struct App {
     live_asked: Option<Instant>,
     /// When the channel setup's progress was last asked for.
     live_setup_asked: Option<Instant>,
+    /// The manual scan form's signal reading: last asked, and whether one is on.
+    live_signal_asked: Option<Instant>,
+    live_signal_on: bool,
     /// The channel the player was last asked to play.
     live_tuned: Option<u16>,
     /// The channel last opened again because its player ended without a
@@ -2240,7 +2243,12 @@ impl App {
         spawn_live_channels();
     }
 
-    fn live_channels_arrived(&mut self, channels: Vec<mediabox_core::LiveChannel>, tkgs: Option<(usize, usize, i64, bool)>) {
+    fn live_channels_arrived(
+        &mut self,
+        channels: Vec<mediabox_core::LiveChannel>,
+        tkgs: Option<(usize, usize, i64, bool)>,
+        setup: Option<(bool, bool, bool, bool, Option<u8>)>,
+    ) {
         let Some(live) = self.live.as_mut() else {
             return;
         };
@@ -2248,6 +2256,13 @@ impl App {
             live.tkgs.channels = channel_count;
             live.tkgs.transponders = transponders;
             live.tkgs.updated = Some(updated);
+            live.tkgs.hd_first = hd_first;
+        }
+        let scanning = setup.is_some_and(|s| s.3);
+        if let Some((off, categories_hidden, hd_first, _, diseqc_port)) = setup {
+            live.tkgs.diseqc_port = diseqc_port;
+            live.tkgs.off = off;
+            live.tkgs.categories_hidden = categories_hidden;
             live.tkgs.hd_first = hd_first;
         }
         let first = !live.loaded;
@@ -2266,6 +2281,13 @@ impl App {
             live.problem = None;
         }
         spawn_live_guide();
+        // A search running (started elsewhere): the setup shows it, and
+        // nothing is tuned that would take its receiver.
+        if first && scanning {
+            live.open_setup();
+            self.paint();
+            return;
+        }
         if first && live.current.is_none() && let Some(sid) = live.starting_channel(self.live_kept.last) {
             live.tuning(sid, Instant::now());
             self.tune_live(sid);
@@ -2327,7 +2349,12 @@ impl App {
             return;
         };
         let effect = live.key(action, Instant::now(), screens::live::utc_now());
+        let zapping = live.zap.is_some();
         self.live_effect(effect);
+        // The held zap's tune when the presses stop, not at the next tick.
+        if zapping {
+            slint::Timer::single_shot(screens::live::ZAP_SETTLE, || with_app(|app| app.tick_live()));
+        }
     }
 
     fn tick_live(&mut self) {
@@ -2342,10 +2369,36 @@ impl App {
             self.live_asked = Some(Instant::now());
             spawn_live_channels();
         }
-        let scanning = self.live.as_ref().is_some_and(|live| live.tkgs.updating);
+        let scanning = self.live.as_ref().is_some_and(|live| {
+            live.tkgs.updating || (live.layer == screens::live::Layer::Setup && live.setup.stage == screens::live::SetupStage::Menu)
+        });
         if scanning && self.live_setup_asked.is_none_or(|at| at.elapsed() >= LIVE_SETUP_REFRESH) {
             self.live_setup_asked = Some(Instant::now());
             spawn_live_setup_progress();
+        }
+        // The manual scan form shows the signal of the carrier typed, as
+        // Sony's Manual Tuning does; leaving it puts the receiver back.
+        let form = self.live.as_ref().filter(|live| {
+            live.layer == screens::live::Layer::Setup && live.setup.stage == screens::live::SetupStage::Manual
+        }).map(|live| live.setup.manual.source());
+        match form {
+            Some(source) => {
+                if self.live_signal_asked.is_none_or(|at| at.elapsed() >= LIVE_SIGNAL_REFRESH) {
+                    self.live_signal_asked = Some(Instant::now());
+                    if let Some(source) = source {
+                        self.live_signal_on = true;
+                        spawn_live_signal(Some(source));
+                    }
+                }
+            }
+            None if self.live_signal_on => {
+                self.live_signal_on = false;
+                if let Some(live) = self.live.as_mut() {
+                    live.setup.signal = None;
+                }
+                spawn_live_signal(None);
+            }
+            None => {}
         }
     }
 
@@ -2388,7 +2441,41 @@ impl App {
             }
             Effect::TkgsCancel => spawn_live_tkgs_cancel(),
             Effect::TkgsOrdering(hd_first) => {
-                spawn_live_tkgs_ordering(hd_first);
+                spawn_live_setting("live_tkgs_ordering_set", "hd_first", hd_first);
+                self.paint();
+            }
+            Effect::TkgsMode(off) => {
+                spawn_live_setting("live_tkgs_mode_set", "off", off);
+                self.paint();
+            }
+            Effect::TkgsCategories(shown) => {
+                spawn_live_setting("live_tkgs_categories_set", "shown", shown);
+                self.paint();
+            }
+            Effect::Diseqc(port) => {
+                detached("mediabox-tv-live-setting", async move {
+                    let client = rpc::Client::new(socket_path());
+                    if let Err(error) = client.call(serde_json::json!({"command": "live_diseqc_set", "port": port})).await {
+                        eprintln!("mediabox-tv.live live_diseqc_set failed: {error}");
+                    }
+                    spawn_live_channels();
+                });
+                self.paint();
+            }
+            Effect::ChannelsClear => {
+                detached("mediabox-tv-live-clear", async move {
+                    let client = rpc::Client::new(socket_path());
+                    let result = client
+                        .call(serde_json::json!({"command": "live_channels_clear"}))
+                        .await
+                        .map(|answer| answer.get("removed").and_then(Value::as_u64).unwrap_or(0))
+                        .map_err(|error| error.to_string());
+                    let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_cleared(result)));
+                });
+                self.paint();
+            }
+            Effect::Scan { source, add_only, free_only, scrambled_only, keep } => {
+                spawn_live_scan(source, add_only, free_only, scrambled_only, keep);
                 self.paint();
             }
         }
@@ -2407,18 +2494,53 @@ impl App {
             }
             Err(error) => live.tkgs.error = Some(error.clone()),
         }
-        live.setup_finished(result.map(|found| (found.television, found.radio, found.transponders)));
+        live.tkgs_finished(result.map(|found| (found.television, found.radio, found.title)));
         self.paint();
+    }
+
+    fn live_scan_finished(&mut self, result: Result<(usize, usize, Option<u16>), String>) {
+        let Some(live) = self.live.as_mut() else { return };
+        live.tkgs.updating = false;
+        match &result {
+            Ok(_) => {
+                live.tkgs.error = None;
+                spawn_live_channels();
+            }
+            Err(error) => live.tkgs.error = Some(error.clone()),
+        }
+        live.scan_finished(result);
+        self.paint();
+    }
+
+    fn live_signal_arrived(&mut self, reading: (bool, Option<u64>, Option<f64>)) {
+        let Some(live) = self.live.as_mut() else { return };
+        if live.layer == screens::live::Layer::Setup && live.setup.stage == screens::live::SetupStage::Manual {
+            live.setup.signal = Some(reading);
+            self.paint();
+        }
     }
 
     fn live_setup_progressed(&mut self, progress: Value) {
         let Some(live) = self.live.as_mut() else { return };
         let number = |key: &str| progress.get(key).and_then(Value::as_u64).unwrap_or(0);
-        live.setup_progress(
-            progress.get("reading").and_then(Value::as_bool).unwrap_or(false),
-            number("sections"),
-            number("expected"),
-        );
+        let running = progress.get("running").and_then(Value::as_bool).unwrap_or(false);
+        live.setup_progress(screens::live::Run {
+            scan: progress.get("scan").and_then(Value::as_bool).unwrap_or(false),
+            reading: progress.get("reading").and_then(Value::as_bool).unwrap_or(false),
+            sections: number("sections"),
+            expected: number("expected"),
+            found: number("found"),
+            locked: progress.get("locked").and_then(Value::as_bool).unwrap_or(false),
+            strength_pct: progress.get("strength_pct").and_then(Value::as_u64),
+            // -100 is the demodulator's word for no reading.
+            snr_db: progress.get("snr_db").and_then(Value::as_f64).filter(|snr| *snr > -50.0),
+            carrier: number("carrier"),
+            carriers: number("carriers"),
+            frequency_khz: number("frequency_khz"),
+            added: number("added"),
+            found_total: number("found_total"),
+            kinds: [number("television_total"), number("radio_total"), number("data_total")],
+        }, running);
         self.paint();
     }
 
@@ -2452,6 +2574,28 @@ impl App {
 
     /// Out of live television: the channel is stopped, and the screen under
     /// it -- the home screen -- is what is on the panel.
+    /// The channel list deleted: the channel on goes with it, and what was
+    /// kept of the channels (last, recent, favourites).
+    fn live_cleared(&mut self, result: Result<u64, String>) {
+        let Some(live) = self.live.as_mut() else { return };
+        if result.is_ok() {
+            if self.here.take().is_some() {
+                spawn_here(HereCommand::Stop);
+            }
+            self.live_tuned = None;
+            live.current = None;
+            live.previous = None;
+            live.recent.clear();
+            live.favorites.clear();
+            live.problem = None;
+            self.live_kept = LiveKept::default();
+            write_live_kept(self.live_kept.clone());
+        }
+        live.setup.cleared = Some(result.map_err(|error| error.rsplit(": ").next().unwrap_or(&error).trim_end_matches('.').to_string()));
+        spawn_live_channels();
+        self.paint();
+    }
+
     fn leave_live(&mut self) {
         if self.here.take().is_some() {
             spawn_here(HereCommand::Stop);
@@ -5354,35 +5498,108 @@ impl App {
         window.set_live_setup_shown(live.layer == Layer::Setup);
         if live.layer == Layer::Setup {
             use screens::live::SetupStage;
-            let (text, progress) = match &live.setup.stage {
-                SetupStage::Ready => (
-                    "Kanal listesi ve numaraları Türksat 42°D'nin TKGS yayınından alınır (12380 MHz dikey, 27500 kS/s).".to_string(),
-                    -1.0,
-                ),
-                SetupStage::Running { reading: false, .. } => ("Uydu alıcısı TKGS yayınına ayarlanıyor…".to_string(), 0.0),
-                SetupStage::Running { sections, expected, .. } => (
-                    if *expected == 0 {
-                        "TKGS tablosu bekleniyor…".to_string()
-                    } else {
-                        format!("TKGS tablosu alınıyor: {sections}/{expected} bölüm")
-                    },
-                    if *expected == 0 { 0.0 } else { *sections as f32 / *expected as f32 },
-                ),
-                SetupStage::Done { television, radio, transponders } => (
-                    format!("{television} TV kanalı, {radio} radyo kanalı · {transponders} transponder"),
-                    -1.0,
-                ),
-                SetupStage::Failed(error) => (error.clone(), -1.0),
-            };
+            let rows = live.setup_rows();
             let title = match &live.setup.stage {
-                SetupStage::Ready => "Kanal kurulumu".to_string(),
-                SetupStage::Running { .. } => "Kanallar taranıyor".to_string(),
-                SetupStage::Done { television, radio, .. } => format!("{} kanal bulundu", television + radio),
-                SetupStage::Failed(_) => "Kanal bulunamadı".to_string(),
+                SetupStage::Menu => "Kanal kurulumu",
+                SetupStage::Settings => "TKGS ayarları",
+                SetupStage::Manual => "Manuel tarama",
+                SetupStage::Satellite => "Uydu taraması",
+                SetupStage::Running(_) | SetupStage::ScanDone { .. } | SetupStage::Failed { scan: true, .. } if live.setup.satellite => "Uydu taraması",
+                SetupStage::Running(run) => if run.scan { "Manuel tarama" } else { "Otomatik arama · TKGS" },
+                SetupStage::TkgsDone { .. } => "Otomatik arama · TKGS",
+                SetupStage::ScanDone { .. } | SetupStage::Failed { scan: true, .. } => "Manuel tarama",
+                SetupStage::Failed { .. } => "Otomatik arama · TKGS",
+            };
+            let mut mhz = live.setup.manual.frequency.clone();
+            // The found services by type, on the count's own line.
+            let digital = |[tv, radio, data]: [u64; 3]| format!("Dijital kanallar · TV {tv} · Radyo {radio} · Veri {data}");
+            // The signal and its quality as bars, SNR 15 dB a full one.
+            let (mut signal, mut quality) = (-1.0f32, -1.0f32);
+            // The card: the count large, what it is, then what is known of how.
+            let (big, unit, line, note, progress) = match &live.setup.stage {
+                SetupStage::Running(run) if run.scan => {
+                    if run.carriers > 0 {
+                        mhz = (run.frequency_khz / 1000).to_string();
+                    }
+                    signal = run.strength_pct.map_or(0.0, |s| s as f32 / 100.0);
+                    quality = run.snr_db.filter(|_| run.locked).map_or(0.0, |snr| (snr as f32 / 15.0).clamp(0.0, 1.0));
+                    let carrier = match (run.locked, run.snr_db) {
+                        (true, Some(snr)) => format!("{mhz} MHz · %{} · {snr:.1} dB", run.strength_pct.unwrap_or(0)),
+                        (true, None) => format!("{mhz} MHz · kilitlendi"),
+                        (false, _) => format!("{mhz} MHz · sinyal aranıyor"),
+                    };
+                    if run.carriers > 0 {
+                        (
+                            run.kinds.iter().sum::<u64>().to_string(),
+                            digital(run.kinds),
+                            format!("Türksat 42E · Taşıyıcı {} / {} · {carrier}", run.carrier, run.carriers),
+                            format!("%{}", 100 * run.carrier.saturating_sub(1) / run.carriers),
+                            run.carrier.saturating_sub(1) as f32 / run.carriers as f32,
+                        )
+                    } else {
+                        (run.found.to_string(), "kanal".to_string(), carrier, String::new(), -1.0)
+                    }
+                }
+                SetupStage::Running(run) if !run.reading || run.expected == 0 => (
+                    "…".to_string(),
+                    "TKGS alınıyor".to_string(),
+                    if run.reading { "Tablo bekleniyor".to_string() } else { "Alıcı ayarlanıyor".to_string() },
+                    String::new(),
+                    0.0,
+                ),
+                SetupStage::Running(run) => (
+                    format!("%{}", run.sections * 100 / run.expected),
+                    "TKGS alınıyor".to_string(),
+                    format!("{} / {} bölüm", run.sections, run.expected),
+                    String::new(),
+                    run.sections as f32 / run.expected as f32,
+                ),
+                SetupStage::TkgsDone { television, radio, title } => (
+                    (television + radio).to_string(),
+                    "kanal".to_string(),
+                    format!("{television} TV · {radio} radyo"),
+                    title.clone(),
+                    -1.0,
+                ),
+                SetupStage::ScanDone { found, added, .. } => (
+                    if live.setup.satellite { live.setup.kinds.iter().sum::<u64>().to_string() } else { found.to_string() },
+                    if live.setup.satellite { digital(live.setup.kinds) } else { "kanal".to_string() },
+                    match (live.setup.satellite, *added) {
+                        (true, _) => "Türksat 42E · Tarama tamamlandı".to_string(),
+                        (false, 0) => format!("{mhz} MHz · yeni kanal yok"),
+                        (false, added) => format!("{mhz} MHz · {added} yeni"),
+                    },
+                    String::new(),
+                    -1.0,
+                ),
+                SetupStage::Failed { error, .. } => ("0".to_string(), "kanal".to_string(), error.clone(), String::new(), -1.0),
+                SetupStage::Manual => {
+                    if let Some((locked, strength, snr)) = live.setup.signal {
+                        signal = strength.map_or(0.0, |s| s as f32 / 100.0);
+                        quality = snr.filter(|snr| locked && *snr > -50.0).map_or(0.0, |snr| (snr as f32 / 15.0).clamp(0.0, 1.0));
+                    }
+                    Default::default()
+                }
+                SetupStage::Menu | SetupStage::Settings | SetupStage::Satellite => Default::default(),
             };
             window.set_live_setup_title(title.into());
-            window.set_live_setup_text(text.into());
+            window.set_live_setup_card(rows.is_empty());
+            window.set_live_setup_rows(model(
+                rows.iter()
+                    .map(|&row| {
+                        let (label, value) = live.setup_row_text(row);
+                        LivePanelRow { label: label.into(), value: value.into(), checked: false, enabled: live.setup_row_enabled(row) }
+                    })
+                    .collect(),
+            ));
+            window.set_live_setup_row(live.setup.focus as i32);
+            window.set_live_setup_big(big.into());
+            window.set_live_setup_unit(unit.into());
+            window.set_live_setup_line(line.into());
+            window.set_live_setup_note(note.into());
             window.set_live_setup_progress(progress);
+            window.set_live_setup_signal(signal);
+            window.set_live_setup_quality(quality);
             window.set_live_setup_actions(model(live.setup.actions().iter().map(|a| slint::SharedString::from(*a)).collect()));
             window.set_live_setup_focus(live.setup.focus as i32);
         }
@@ -6972,6 +7189,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         live_kept: read_live_kept(),
         live_asked: None,
         live_setup_asked: None,
+        live_signal_asked: None,
+        live_signal_on: false,
         live_tuned: None,
         live_reopened: None,
         hero_meta: std::collections::HashMap::new(),
@@ -7865,7 +8084,7 @@ fn spawn_live_channels() {
     detached("mediabox-tv-live-channels", async move {
         let client = rpc::Client::new(socket_path());
         let answer = client.call(serde_json::json!({"command": "live_channels"})).await;
-        let (channels, tkgs) = match answer {
+        let (channels, tkgs, setup) = match answer {
             Ok(answer) => {
                 let channels = serde_json::from_value(answer.get("channels").cloned().unwrap_or_default()).unwrap_or_default();
                 let tkgs = answer.get("tkgs").filter(|v| !v.is_null()).and_then(|v| Some((
@@ -7874,14 +8093,22 @@ fn spawn_live_channels() {
                     v.get("updated")?.as_i64()?,
                     v.get("hd_first")?.as_bool()?,
                 )));
-                (channels, tkgs)
+                // The setup's settings: TKGS off, its categories hidden, HD first.
+                let setup = answer.get("setup").and_then(|v| Some((
+                    v.get("tkgs_off")?.as_bool()?,
+                    v.get("categories_hidden")?.as_bool()?,
+                    v.get("hd_first")?.as_bool()?,
+                    v.get("running").and_then(|r| r.as_bool()).unwrap_or(false),
+                    v.get("diseqc_port").and_then(|p| p.as_u64()).map(|p| p as u8),
+                )));
+                (channels, tkgs, setup)
             }
             Err(e) => {
                 eprintln!("mediabox-tv.live channels failed: {e}");
                 return;
             }
         };
-        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_channels_arrived(channels, tkgs)));
+        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_channels_arrived(channels, tkgs, setup)));
     });
 }
 
@@ -7894,9 +8121,31 @@ struct TkgsResult {
     /// Of them, the television and radio channels the list has.
     television: usize,
     radio: usize,
+    /// The table's own text.
+    title: String,
 }
 
 const LIVE_SETUP_REFRESH: Duration = Duration::from_millis(500);
+const LIVE_SIGNAL_REFRESH: Duration = Duration::from_millis(700);
+
+fn spawn_live_signal(source: Option<mediabox_core::LiveSource>) {
+    detached("mediabox-tv-live-signal", async move {
+        let client = rpc::Client::new(socket_path());
+        let ended = source.is_none();
+        match client.call(serde_json::json!({"command": "live_signal", "source": source})).await {
+            Ok(answer) if !ended => {
+                let reading = (
+                    answer.get("locked").and_then(Value::as_bool).unwrap_or(false),
+                    answer.get("strength_pct").and_then(Value::as_u64),
+                    answer.get("snr_db").and_then(Value::as_f64),
+                );
+                let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_signal_arrived(reading)));
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("mediabox-tv.live signal failed: {error}"),
+        }
+    });
+}
 
 fn spawn_live_tkgs_update() {
     detached("mediabox-tv-live-tkgs", async move {
@@ -7909,9 +8158,51 @@ fn spawn_live_tkgs_update() {
                 updated: answer.get("updated").and_then(serde_json::Value::as_i64).unwrap_or(0),
                 television: count("television"),
                 radio: count("radio"),
+                title: answer.get("title").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
             }
         }).map_err(|error| error.to_string());
         let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_tkgs_finished(result)));
+    });
+}
+
+/// The manual scan: answered when it is done.
+/// A setup command with no arguments, then the channel list it changes.
+fn spawn_live_command(command: &'static str) {
+    detached("mediabox-tv-live-command", async move {
+        let client = rpc::Client::new(socket_path());
+        if let Err(error) = client.call(serde_json::json!({"command": command})).await {
+            eprintln!("mediabox-tv.live {command} failed: {error}");
+        }
+        spawn_live_channels();
+    });
+}
+
+fn spawn_live_scan(source: Option<mediabox_core::LiveSource>, add_only: bool, free_only: bool, scrambled_only: bool, keep: mediabox_core::LiveScanKeep) {
+    detached("mediabox-tv-live-scan", async move {
+        let client = rpc::Client::new(socket_path());
+        let request = match source {
+            Some(source) => serde_json::json!({
+                "command": "live_scan", "source": source, "free_only": free_only, "scrambled_only": scrambled_only, "keep": keep,
+            }),
+            None => serde_json::json!({"command": "live_satellite_scan", "add_only": add_only, "free_only": free_only, "scrambled_only": scrambled_only, "keep": keep}),
+        };
+        let result = client.call(request).await.map(|answer| {
+            let count = |key: &str| answer.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+            let first = answer.get("first").and_then(serde_json::Value::as_u64).map(|sid| sid as u16);
+            (count("found"), count("added"), first)
+        }).map_err(|error| error.to_string());
+        let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_scan_finished(result)));
+    });
+}
+
+/// One of the setup's settings, then the channel list it changes.
+fn spawn_live_setting(command: &'static str, key: &'static str, value: bool) {
+    detached("mediabox-tv-live-setting", async move {
+        let client = rpc::Client::new(socket_path());
+        if let Err(error) = client.call(serde_json::json!({"command": command, key: value})).await {
+            eprintln!("mediabox-tv.live {command} failed: {error}");
+        }
+        spawn_live_channels();
     });
 }
 
@@ -7933,18 +8224,6 @@ fn spawn_live_tkgs_cancel() {
         if let Err(error) = client.call(serde_json::json!({"command": "live_tkgs_cancel"})).await {
             eprintln!("mediabox-tv.live setup cancel failed: {error}");
         }
-    });
-}
-
-fn spawn_live_tkgs_ordering(hd_first: bool) {
-    detached("mediabox-tv-live-tkgs-order", async move {
-        let client = rpc::Client::new(socket_path());
-        if let Err(error) = client.call(serde_json::json!({
-            "command": "live_tkgs_ordering_set", "hd_first": hd_first,
-        })).await {
-            eprintln!("mediabox-tv.live TKGS ordering failed: {error}");
-        }
-        spawn_live_channels();
     });
 }
 

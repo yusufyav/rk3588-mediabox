@@ -346,6 +346,34 @@ impl AppState {
                 Ok(value) => Response::success(value),
                 Err(error) => Response::failure("tkgs_ordering_failed", error),
             },
+            Request::LiveChannelsClear => match self.live.clear_channels().await {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("live_scan_failed", error),
+            },
+            Request::LiveSignal { source } => match self.live.probe_signal(source).await {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("live_scan_failed", error),
+            },
+            Request::LiveDiseqcSet { port } => match self.live.set_diseqc_port(port) {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("live_scan_failed", error),
+            },
+            Request::LiveSatelliteScan { add_only, free_only, scrambled_only, keep } => match self.live.scan_satellite(crate::live::ScanFilter { free_only, scrambled_only, keep }, add_only).await {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("live_scan_failed", error),
+            },
+            Request::LiveScan { source, free_only, scrambled_only, keep } => match self.live.scan_transponder(source, crate::live::ScanFilter { free_only, scrambled_only, keep }).await {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("live_scan_failed", error),
+            },
+            Request::LiveTkgsModeSet { off } => match self.live.set_tkgs_mode(off) {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("tkgs_mode_failed", error),
+            },
+            Request::LiveTkgsCategoriesSet { shown } => match self.live.set_tkgs_categories(shown) {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("tkgs_categories_failed", error),
+            },
             Request::LiveGuide { from, to } => Response::success(self.live.guide_window(from, to)),
             Request::MediaHandoffToKodi => self.handoff_to_kodi().await,
             Request::MediaStatusHere => {

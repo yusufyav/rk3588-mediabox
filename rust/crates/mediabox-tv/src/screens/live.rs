@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use mediabox_core::{InputAction, LiveChannel, LiveEvent, LiveSource};
+use mediabox_core::{InputAction, LiveChannel, LiveEvent, LiveScanKeep, LiveSource, SatellitePolarisation};
 
 pub const BANNER_SHOW: Duration = Duration::from_millis(8000);
 pub const KEYPAD_SHOW: Duration = Duration::from_millis(2000);
@@ -71,6 +71,10 @@ pub const GUIDE_VIEW: i64 = 6300;
 /// How far ahead the guide goes.
 pub const GUIDE_HORIZON: i64 = 2 * 86_400;
 /// `ProgramGuide.MIN_DURATION_FROM_START_TIME_TO_CURRENT_TIME`.
+/// How long after the last Up or Down the channel the banner shows is tuned:
+/// past a held key's repeats (the dispatcher's 110 ms step) and short of
+/// AOSP's 500 ms before its own fast stepping starts.
+pub const ZAP_SETTLE: Duration = Duration::from_millis(350);
 const GUIDE_LEAD: i64 = 60;
 /// `FOCUS_AREA_RIGHT_MARGIN_MILLIS`: the focus is kept this far from the
 /// right edge.
@@ -122,31 +126,155 @@ impl Group {
     }
 }
 
-/// Where the channel setup is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where the channel setup is. Its pages are the receivers' own (TCL's
+/// "Kanal Tarama": Otomatik arama / Manuel tarama / Turksat TKGS ayarları);
+/// only what works here has a row.
+#[derive(Debug, Clone, PartialEq)]
 pub enum SetupStage {
-    Ready,
-    /// The receiver is coming up on the TKGS multiplex (`reading` false),
-    /// then reading the table: `sections` of `expected` had.
-    Running { reading: bool, sections: u64, expected: u64 },
-    Done { television: usize, radio: usize, transponders: usize },
-    Failed(String),
+    /// "Kanal kurulumu": the ways to set the channels up.
+    Menu,
+    /// "TKGS ayarları".
+    Settings,
+    /// "Manuel tarama": the transponder, and what of it to keep.
+    /// The satellite scan's settings (Sony's satellite detail screen).
+    Satellite,
+    Manual,
+    /// The TKGS read or a manual scan, under way.
+    Running(Run),
+    /// The TKGS read is in: its channels, and the table's own text.
+    TkgsDone { television: usize, radio: usize, title: String },
+    /// A manual scan is in: what it kept, and of that what is new to the
+    /// list; the first new channel, television first.
+    ScanDone { found: usize, added: usize, first: Option<u16> },
+    Failed { scan: bool, error: String },
 }
 
+/// How far a search has got, as the control plane says.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Run {
+    /// A manual scan, not the TKGS read.
+    pub scan: bool,
+    /// TKGS: the receiver is on the multiplex and reading the table, its
+    /// `sections` of `expected` had. The table is one block: its channels
+    /// are known only once all of it is in.
+    pub reading: bool,
+    pub sections: u64,
+    pub expected: u64,
+    /// A scan: the services the multiplex has named so far, and the
+    /// demodulator's word on the carrier.
+    pub found: u64,
+    pub locked: bool,
+    pub strength_pct: Option<u64>,
+    pub snr_db: Option<f64>,
+    /// A satellite scan: the carrier on (from 1) of `carriers`, its
+    /// frequency, and the channels added so far.
+    pub carrier: u64,
+    pub carriers: u64,
+    pub frequency_khz: u64,
+    pub added: u64,
+    /// The channels found so far, all carriers (Sony's "Dijital kanallar").
+    pub found_total: u64,
+    /// The services found so far, all carriers, by AOSP's service type:
+    /// television, radio, data and other.
+    pub kinds: [u64; 3],
+}
+
+/// The manual scan's form.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualForm {
+    /// MHz and kS/s, as typed.
+    pub frequency: String,
+    pub symbol_rate: String,
+    pub vertical: bool,
+    /// "Tarama türü" (Sony's Scan type): 0 all, 1 only free, 2 only
+    /// encrypted.
+    pub access: u8,
+    pub keep: LiveScanKeep,
+    /// The next digit starts the focused number over.
+    pub fresh: bool,
+}
+
+impl ManualForm {
+    pub fn source(&self) -> Option<LiveSource> {
+        let frequency: u32 = self.frequency.parse().ok()?;
+        let symbol_rate: u32 = self.symbol_rate.parse().ok()?;
+        let source = LiveSource::Satellite {
+            frequency_khz: frequency.checked_mul(1000)?,
+            symbol_rate_ksps: symbol_rate,
+            polarisation: if self.vertical { SatellitePolarisation::Vertical } else { SatellitePolarisation::Horizontal },
+        };
+        source.validate().ok().map(|()| source)
+    }
+
+    fn set(&mut self, source: &LiveSource) {
+        if let LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation } = *source {
+            self.frequency = (frequency_khz / 1000).to_string();
+            self.symbol_rate = symbol_rate_ksps.to_string();
+            self.vertical = polarisation == SatellitePolarisation::Vertical;
+        }
+    }
+}
+
+/// A row of the setup's lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupRow {
+    Automatic,
+    Satellite,
+    SatelliteName,
+    ScanMode,
+    /// The satellite scan that keeps the list and adds what is new.
+    ScanNew,
+    /// Every channel of the list deleted (Vestel's "Kanal listesini sil").
+    ClearList,
+    /// The LNB's DiSEqC 1.0 port.
+    Diseqc,
+    Manual,
+    TkgsSettings,
+    UpdateNow,
+    TkgsMode,
+    Ordering,
+    Categories,
+    Frequency,
+    SymbolRate,
+    Polarisation,
+    Scrambled,
+    Keep,
+    Scan,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Setup {
     pub stage: SetupStage,
     pub focus: usize,
+    pub manual: ManualForm,
+    /// The scan on, or last, is the whole satellite's.
+    pub satellite: bool,
+    /// The search on was started elsewhere (mediaboxctl, another screen):
+    /// shown as it goes, its result not this screen's to have.
+    pub adopted: bool,
+    /// The satellite scan on, or last, adds to the list (else rebuilds it).
+    pub add_only: bool,
+    /// "Kanal listesini sil" asked once: the next Ok deletes.
+    pub confirm_clear: bool,
+    /// What the deletion did: the channels gone, or why none.
+    pub cleared: Option<Result<u64, String>>,
+    /// The manual form's carrier as the receiver reads it: locked, level
+    /// (%), SNR (dB).
+    pub signal: Option<(bool, Option<u64>, Option<f64>)>,
+    /// The last satellite scan's services by type, for its result.
+    pub kinds: [u64; 3],
 }
 
 impl Setup {
-    /// The buttons of the stage, in order.
+    /// The buttons of a search's card, in order; none for the lists.
     pub fn actions(&self) -> &'static [&'static str] {
         match self.stage {
-            SetupStage::Ready => &["Taramayı başlat", "Kapat"],
-            SetupStage::Running { .. } => &["Taramayı durdur"],
-            SetupStage::Done { .. } => &["Bitti", "Yeniden tara"],
-            SetupStage::Failed(_) => &["Yeniden dene", "Kapat"],
+            SetupStage::Running(_) => &["Durdur"],
+            SetupStage::TkgsDone { .. } => &["Bitti", "Yeniden ara"],
+            SetupStage::ScanDone { .. } if self.satellite => &["Bitti", "Yeniden tara"],
+            SetupStage::ScanDone { .. } => &["Bitti", "Başka taşıyıcı"],
+            SetupStage::Failed { .. } => &["Yeniden dene", "Geri"],
+            SetupStage::Menu | SetupStage::Settings | SetupStage::Satellite | SetupStage::Manual => &[],
         }
     }
 }
@@ -211,16 +339,29 @@ pub enum Effect {
     /// Stop the channel setup.
     TkgsCancel,
     TkgsOrdering(bool),
+    /// TKGS off (true) or on.
+    TkgsMode(bool),
+    /// TKGS's categories shown as the list's groups.
+    TkgsCategories(bool),
+    /// The manual scan of a transponder.
+    Scan { source: Option<LiveSource>, add_only: bool, free_only: bool, scrambled_only: bool, keep: LiveScanKeep },
+    ChannelsClear,
+    Diseqc(Option<u8>),
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct TkgsStatus {
+    /// A search (the TKGS read or a scan) is under way.
     pub updating: bool,
     pub channels: usize,
     pub transponders: usize,
     pub updated: Option<i64>,
     pub hd_first: bool,
     pub error: Option<String>,
+    /// "TKGS Kapalı".
+    pub off: bool,
+    pub categories_hidden: bool,
+    pub diseqc_port: Option<u8>,
 }
 
 /// A track the player has, for the sound and subtitle panels.
@@ -289,6 +430,10 @@ pub struct Live {
     pub favorites: BTreeSet<u16>,
     pub layer: Layer,
     pub banner_until: Option<Instant>,
+    /// Up or Down moves the banner only; the channel it is on is tuned once
+    /// the presses stop, at this instant (AOSP Live TV's MainActivity tunes
+    /// on the key's release, `finishChannelChangeIfNeeded`).
+    pub zap: Option<(u16, Instant)>,
     /// The banner's large area (the description), as the Info key opens it.
     pub banner_detail: bool,
     pub layer_until: Option<Instant>,
@@ -337,9 +482,28 @@ impl Live {
             subtitles: Vec::new(),
             tkgs: TkgsStatus { hd_first: true, ..Default::default() },
             group: Group::Television,
-            setup: Setup { stage: SetupStage::Ready, focus: 0 },
+            setup: Setup {
+                stage: SetupStage::Menu,
+                focus: 0,
+                manual: ManualForm {
+                    frequency: String::new(),
+                    symbol_rate: "27500".into(),
+                    vertical: true,
+                    access: 0,
+                    keep: LiveScanKeep::All,
+                    fresh: true,
+                },
+                satellite: false,
+                adopted: false,
+                add_only: false,
+                confirm_clear: false,
+                cleared: None,
+                signal: None,
+                kinds: [0; 3],
+            },
             problem: None,
             no_signal: false,
+            zap: None,
         }
     }
 
@@ -412,32 +576,387 @@ impl Live {
         }
     }
 
-    /// Open the channel setup at its start.
+    /// Open the channel setup at its menu; a search under way is shown as
+    /// it is.
     pub fn open_setup(&mut self) {
-        self.setup = Setup { stage: SetupStage::Ready, focus: 0 };
+        if !self.tkgs.updating {
+            self.setup.stage = SetupStage::Menu;
+            self.setup.focus = 0;
+        }
         self.layer = Layer::Setup;
         self.layer_until = None;
         self.banner_until = None;
     }
 
-    /// How far the control plane says the setup has got.
-    pub fn setup_progress(&mut self, reading: bool, sections: u64, expected: u64) {
-        if matches!(self.setup.stage, SetupStage::Running { .. }) {
-            self.setup.stage = SetupStage::Running { reading, sections, expected };
+    /// How far the control plane says the search has got.
+    pub fn setup_progress(&mut self, run: Run, running: bool) {
+        if running && run.carriers > 0 {
+            self.setup.kinds = run.kinds;
+        }
+        match &mut self.setup.stage {
+            SetupStage::Running(now) if running => *now = Run { scan: now.scan, ..run },
+            SetupStage::Running(_) if self.setup.adopted => {
+                self.setup.adopted = false;
+                self.tkgs.updating = false;
+                let on = if self.setup.satellite { SetupRow::Satellite } else { SetupRow::Automatic };
+                self.setup_menu(on);
+            }
+            // A search the control plane runs that this screen did not
+            // start: the setup shows it rather than a menu that cannot start
+            // another.
+            SetupStage::Menu if running && self.layer == Layer::Setup && !self.tkgs.updating => {
+                self.setup.adopted = true;
+                self.setup.satellite = run.carriers > 0;
+                self.tkgs.updating = true;
+                self.setup.stage = SetupStage::Running(run);
+                self.setup.focus = 0;
+            }
+            _ => {}
         }
     }
 
-    /// The setup's answer: what it found, or why it found nothing.
-    pub fn setup_finished(&mut self, result: Result<(usize, usize, usize), String>) {
+    /// The TKGS read's answer: the television and radio channels it gave,
+    /// and the table's text; or why there are none.
+    pub fn tkgs_finished(&mut self, result: Result<(usize, usize, String), String>) {
         self.setup.stage = match result {
-            Ok((television, radio, transponders)) => SetupStage::Done { television, radio, transponders },
-            Err(error) => SetupStage::Failed(error),
+            Ok((television, radio, title)) => SetupStage::TkgsDone { television, radio, title },
+            Err(error) => SetupStage::Failed { scan: false, error },
         };
         self.setup.focus = 0;
     }
 
+    /// A manual scan's answer: the services it kept, how many are new to
+    /// the list and the first of those; or why there are none.
+    pub fn scan_finished(&mut self, result: Result<(usize, usize, Option<u16>), String>) {
+        self.setup.stage = match result {
+            Ok((found, added, first)) => SetupStage::ScanDone { found, added, first },
+            Err(error) => SetupStage::Failed { scan: true, error },
+        };
+        self.setup.focus = 0;
+    }
+
+    /// The rows of the setup's list on now. A row is there only when what
+    /// it does works: with TKGS off, nothing of TKGS's but turning it on.
+    pub fn setup_rows(&self) -> Vec<SetupRow> {
+        match self.setup.stage {
+            SetupStage::Menu => {
+                let mut rows = Vec::new();
+                if !self.tkgs.off {
+                    rows.push(SetupRow::Automatic);
+                }
+                rows.extend([SetupRow::Satellite, SetupRow::Manual, SetupRow::TkgsSettings, SetupRow::ClearList]);
+                rows
+            }
+            SetupStage::Settings if self.tkgs.off => vec![SetupRow::TkgsMode],
+            SetupStage::Settings => vec![SetupRow::UpdateNow, SetupRow::TkgsMode, SetupRow::Ordering, SetupRow::Categories],
+            SetupStage::Satellite => vec![
+                SetupRow::Scan,
+                SetupRow::ScanNew,
+                SetupRow::SatelliteName,
+                SetupRow::Diseqc,
+                SetupRow::ScanMode,
+                SetupRow::Scrambled,
+                SetupRow::Keep,
+            ],
+            SetupStage::Manual => vec![
+                SetupRow::Frequency,
+                SetupRow::SymbolRate,
+                SetupRow::Polarisation,
+                SetupRow::Diseqc,
+                SetupRow::Scrambled,
+                SetupRow::Keep,
+                SetupRow::Scan,
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// A row's label and value.
+    pub fn setup_row_text(&self, row: SetupRow) -> (&'static str, String) {
+        let form = &self.setup.manual;
+        let number = |typed: &str, unit: &str| if typed.is_empty() { "—".to_string() } else { format!("{typed} {unit}") };
+        match row {
+            SetupRow::Automatic => ("Otomatik arama", "TKGS".into()),
+            SetupRow::Satellite => ("Uydu taraması", "Türksat 42°E".into()),
+            SetupRow::Manual => ("Manuel tarama", String::new()),
+            SetupRow::TkgsSettings => ("TKGS ayarları", String::new()),
+            SetupRow::UpdateNow => ("Şimdi güncelle", String::new()),
+            SetupRow::TkgsMode => ("TKGS modu", if self.tkgs.off { "Kapalı" } else { "Otomatik" }.into()),
+            SetupRow::Ordering => ("Liste", if self.tkgs.hd_first { "HD" } else { "SD" }.into()),
+            SetupRow::Categories => ("Türler", if self.tkgs.categories_hidden { "Kapalı" } else { "Açık" }.into()),
+            SetupRow::Frequency => ("Frekans", number(&form.frequency, "MHz")),
+            SetupRow::SymbolRate => ("Sembol oranı", number(&form.symbol_rate, "kS/s")),
+            SetupRow::Polarisation => ("Polarizasyon", if form.vertical { "Dikey" } else { "Yatay" }.into()),
+            SetupRow::SatelliteName => ("Uydu", "Türksat 42E".into()),
+            SetupRow::ScanMode => ("Tarama modu", "Ağ".into()),
+            SetupRow::Scrambled => ("Tarama türü", ["Tümü", "Yalnız ücretsiz", "Yalnız şifreli"][form.access as usize % 3].into()),
+            SetupRow::Keep => (
+                "Hafızaya alma türü",
+                match form.keep {
+                    LiveScanKeep::All => "Tümü",
+                    LiveScanKeep::Television => "Yalnız TV",
+                    LiveScanKeep::Radio => "Yalnız radyo",
+                }
+                .into(),
+            ),
+            SetupRow::Scan if self.setup.stage == SetupStage::Satellite => ("Yeniden tara", String::new()),
+            SetupRow::Scan => ("Tara", String::new()),
+            SetupRow::ScanNew => ("Yeni kanalları ekle", String::new()),
+            SetupRow::ClearList => (
+                "Kanal listesini sil",
+                match (&self.setup.cleared, self.setup.confirm_clear) {
+                    (Some(Ok(removed)), _) => format!("{removed} kanal silindi"),
+                    (Some(Err(error)), _) => error.clone(),
+                    (None, true) => "Onay: OK".into(),
+                    (None, false) => String::new(),
+                },
+            ),
+            SetupRow::Diseqc => (
+                "DiSEqC",
+                match self.tkgs.diseqc_port {
+                    None => "Kapalı".into(),
+                    Some(port) => format!("1.0 · {}", ["A", "B", "C", "D"][port as usize % 4]),
+                },
+            ),
+        }
+    }
+
+    /// "Tara" only with a frequency and rate the receiver takes.
+    pub fn setup_row_enabled(&self, row: SetupRow) -> bool {
+        match row {
+            SetupRow::SatelliteName | SetupRow::ScanMode => false,
+            SetupRow::Scan => self.setup.stage == SetupStage::Satellite || self.setup.manual.source().is_some(),
+            _ => true,
+        }
+    }
+
+    /// The satellite transponders of the channel list, by frequency.
+    pub fn carriers(&self) -> Vec<LiveSource> {
+        let mut out: Vec<LiveSource> = Vec::new();
+        for channel in &self.channels {
+            if matches!(channel.source, LiveSource::Satellite { .. }) && !out.contains(&channel.source) {
+                out.push(channel.source.clone());
+            }
+        }
+        out.sort_by_key(|source| match *source {
+            LiveSource::Satellite { frequency_khz, polarisation, .. } => (frequency_khz, polarisation == SatellitePolarisation::Vertical),
+            LiveSource::Recording => (0, false),
+        });
+        out
+    }
+
+    fn open_manual(&mut self) {
+        // It starts on the channel on now's transponder, else the first the
+        // list has; what was typed last time stays.
+        if self.setup.manual.frequency.is_empty() {
+            let from = self
+                .current_channel()
+                .map(|channel| channel.source.clone())
+                .filter(|source| matches!(source, LiveSource::Satellite { .. }))
+                .or_else(|| self.carriers().into_iter().next());
+            if let Some(source) = from {
+                self.setup.manual.set(&source);
+            }
+        }
+        self.setup.manual.fresh = true;
+        self.setup.stage = SetupStage::Manual;
+        self.setup.focus = 0;
+    }
+
+    fn start_tkgs(&mut self) -> Effect {
+        self.setup.adopted = false;
+        self.setup.stage = SetupStage::Running(Run::default());
+        self.setup.focus = 0;
+        self.tkgs.updating = true;
+        self.tkgs.error = None;
+        Effect::TkgsUpdate
+    }
+
+    fn start_scan(&mut self) -> Effect {
+        let Some(source) = self.setup.manual.source() else { return Effect::Nothing };
+        self.run_scan(Some(source))
+    }
+
+    /// Every carrier the channel list knows, scanned in turn.
+    fn start_satellite(&mut self, add_only: bool) -> Effect {
+        self.setup.add_only = add_only;
+        self.run_scan(None)
+    }
+
+    fn run_scan(&mut self, source: Option<LiveSource>) -> Effect {
+        self.setup.adopted = false;
+        self.setup.satellite = source.is_none();
+        self.setup.stage = SetupStage::Running(Run { scan: true, ..Run::default() });
+        self.setup.focus = 0;
+        self.tkgs.updating = true;
+        self.tkgs.error = None;
+        let form = &self.setup.manual;
+        Effect::Scan { source, add_only: self.setup.add_only, free_only: form.access == 1, scrambled_only: form.access == 2, keep: form.keep }
+    }
+
+    /// Back onto the menu, on the row that led away from it.
+    fn setup_menu(&mut self, on: SetupRow) -> Effect {
+        self.setup.stage = SetupStage::Menu;
+        self.setup.focus = self.setup_rows().iter().position(|row| *row == on).unwrap_or(0);
+        Effect::Paint
+    }
+
     fn setup_key(&mut self, action: InputAction, at: Instant) -> Effect {
-        let running = matches!(self.setup.stage, SetupStage::Running { .. });
+        match self.setup.stage {
+            // A search: Back, or its one button, stops it.
+            SetupStage::Running(_) => match action {
+                InputAction::Back | InputAction::Ok => Effect::TkgsCancel,
+                _ => Effect::Nothing,
+            },
+            SetupStage::Menu | SetupStage::Settings | SetupStage::Satellite | SetupStage::Manual => self.setup_list_key(action, at),
+            _ => self.setup_card_key(action, at),
+        }
+    }
+
+    fn setup_list_key(&mut self, action: InputAction, at: Instant) -> Effect {
+        let rows = self.setup_rows();
+        if self.setup.focus >= rows.len() {
+            self.setup.focus = 0;
+        }
+        let row = rows[self.setup.focus];
+        if let Some(digit) = action.digit() {
+            return self.setup_digit(row, digit);
+        }
+        match action {
+            InputAction::Up | InputAction::Down => {
+                let focus = if action == InputAction::Up {
+                    self.setup.focus.checked_sub(1)
+                } else {
+                    Some(self.setup.focus + 1).filter(|&f| f < rows.len())
+                };
+                let Some(focus) = focus else { return Effect::Nothing };
+                self.setup.focus = focus;
+                self.setup.manual.fresh = true;
+                self.setup.confirm_clear = false;
+                self.setup.cleared = None;
+                Effect::Paint
+            }
+            InputAction::Back => match self.setup.stage {
+                SetupStage::Settings => self.setup_menu(SetupRow::TkgsSettings),
+                SetupStage::Manual => self.setup_menu(SetupRow::Manual),
+                SetupStage::Satellite => self.setup_menu(SetupRow::Satellite),
+                _ => self.leave_setup(at),
+            },
+            InputAction::Ok | InputAction::Left | InputAction::Right => self.setup_row_act(row, action),
+            _ => Effect::Nothing,
+        }
+    }
+
+    /// Ok on a row, or Left or Right on a row with a value to change.
+    fn setup_row_act(&mut self, row: SetupRow, action: InputAction) -> Effect {
+        let ok = action == InputAction::Ok;
+        let forward = action != InputAction::Left;
+        let form = &mut self.setup.manual;
+        match row {
+            SetupRow::Automatic | SetupRow::UpdateNow if ok => self.start_tkgs(),
+            SetupRow::Satellite if ok => {
+                self.setup.stage = SetupStage::Satellite;
+                self.setup.focus = 0;
+                Effect::Paint
+            }
+            SetupRow::Manual if ok => {
+                self.open_manual();
+                Effect::Paint
+            }
+            SetupRow::TkgsSettings if ok => {
+                self.setup.stage = SetupStage::Settings;
+                self.setup.focus = 0;
+                Effect::Paint
+            }
+            SetupRow::TkgsMode => {
+                self.tkgs.off = !self.tkgs.off;
+                self.setup.focus = self.setup_rows().iter().position(|r| *r == SetupRow::TkgsMode).unwrap_or(0);
+                Effect::TkgsMode(self.tkgs.off)
+            }
+            SetupRow::Ordering => {
+                self.tkgs.hd_first = !self.tkgs.hd_first;
+                Effect::TkgsOrdering(self.tkgs.hd_first)
+            }
+            SetupRow::Categories => {
+                self.tkgs.categories_hidden = !self.tkgs.categories_hidden;
+                Effect::TkgsCategories(!self.tkgs.categories_hidden)
+            }
+            // The transponders the list knows, one after another.
+            SetupRow::Frequency if !ok => {
+                let carriers = self.carriers();
+                if carriers.is_empty() {
+                    return Effect::Nothing;
+                }
+                let at = self.setup.manual.source().and_then(|source| carriers.iter().position(|c| *c == source));
+                let next = match (at, forward) {
+                    (Some(i), true) => (i + 1) % carriers.len(),
+                    (Some(i), false) => (i + carriers.len() - 1) % carriers.len(),
+                    (None, _) => 0,
+                };
+                self.setup.manual.set(&carriers[next]);
+                self.setup.manual.fresh = true;
+                Effect::Paint
+            }
+            SetupRow::Polarisation => {
+                form.vertical = !form.vertical;
+                Effect::Paint
+            }
+            SetupRow::Scrambled => {
+                form.access = if forward { (form.access + 1) % 3 } else { (form.access + 2) % 3 };
+                Effect::Paint
+            }
+            SetupRow::Keep => {
+                let order = [LiveScanKeep::All, LiveScanKeep::Television, LiveScanKeep::Radio];
+                let i = order.iter().position(|k| *k == form.keep).unwrap_or(0);
+                form.keep = order[if forward { (i + 1) % 3 } else { (i + 2) % 3 }];
+                Effect::Paint
+            }
+            SetupRow::Scan if ok && self.setup.stage == SetupStage::Satellite => self.start_satellite(false),
+            SetupRow::ScanNew if ok => self.start_satellite(true),
+            SetupRow::ClearList if ok && self.setup.confirm_clear => {
+                self.setup.confirm_clear = false;
+                Effect::ChannelsClear
+            }
+            SetupRow::ClearList if ok => {
+                self.setup.confirm_clear = true;
+                self.setup.cleared = None;
+                Effect::Paint
+            }
+            SetupRow::Diseqc => {
+                // Kapalı, A, B, C, D, round.
+                let order = [None, Some(0), Some(1), Some(2), Some(3)];
+                let at = order.iter().position(|p| *p == self.tkgs.diseqc_port).unwrap_or(0);
+                let port = order[if forward { (at + 1) % 5 } else { (at + 4) % 5 }];
+                self.tkgs.diseqc_port = port;
+                Effect::Diseqc(port)
+            }
+            SetupRow::Scan if ok => self.start_scan(),
+            _ => Effect::Nothing,
+        }
+    }
+
+    /// A digit on the frequency or the rate: the first after the focus came
+    /// there starts the number over; five digits at most.
+    fn setup_digit(&mut self, row: SetupRow, digit: u8) -> Effect {
+        let form = &mut self.setup.manual;
+        let typed = match row {
+            SetupRow::Frequency => &mut form.frequency,
+            SetupRow::SymbolRate => &mut form.symbol_rate,
+            _ => return Effect::Nothing,
+        };
+        if form.fresh {
+            typed.clear();
+            form.fresh = false;
+        }
+        if typed.len() >= 5 {
+            return Effect::Nothing;
+        }
+        typed.push(char::from(b'0' + digit));
+        Effect::Paint
+    }
+
+    /// The card a search ends on: its buttons.
+    fn setup_card_key(&mut self, action: InputAction, at: Instant) -> Effect {
         let count = self.setup.actions().len();
         match action {
             InputAction::Up | InputAction::Left => {
@@ -452,18 +971,36 @@ impl Live {
                 self.setup.focus += 1;
                 Effect::Paint
             }
-            // Back stops a scan, and otherwise leaves the setup.
-            InputAction::Back if running => Effect::TkgsCancel,
-            InputAction::Back => self.leave_setup(at),
-            InputAction::Ok => match (&self.setup.stage, self.setup.focus) {
-                (SetupStage::Running { .. }, _) => Effect::TkgsCancel,
-                (SetupStage::Ready | SetupStage::Failed(_), 0) | (SetupStage::Done { .. }, 1) => {
-                    self.setup = Setup { stage: SetupStage::Running { reading: false, sections: 0, expected: 0 }, focus: 0 };
-                    self.tkgs.updating = true;
-                    self.tkgs.error = None;
-                    Effect::TkgsUpdate
+            InputAction::Back => match self.setup.stage {
+                SetupStage::ScanDone { .. } | SetupStage::Failed { scan: true, .. } if self.setup.satellite => self.setup_menu(SetupRow::Satellite),
+                SetupStage::ScanDone { .. } | SetupStage::Failed { scan: true, .. } => {
+                    self.open_manual();
+                    Effect::Paint
                 }
-                _ => self.leave_setup(at),
+                _ => self.setup_menu(SetupRow::Automatic),
+            },
+            InputAction::Ok => match (self.setup.stage.clone(), self.setup.focus) {
+                (SetupStage::TkgsDone { .. }, 0) => self.leave_setup(at),
+                (SetupStage::TkgsDone { .. }, _) => self.start_tkgs(),
+                (SetupStage::ScanDone { first: Some(sid), .. }, 0) if self.index_of(sid).is_some() => {
+                    self.tuning(sid, at);
+                    Effect::Tune(sid)
+                }
+                (SetupStage::ScanDone { .. }, 0) => self.leave_setup(at),
+                (SetupStage::ScanDone { .. }, _) if self.setup.satellite => self.start_satellite(self.setup.add_only),
+                (SetupStage::ScanDone { .. }, _) => {
+                    self.open_manual();
+                    Effect::Paint
+                }
+                (SetupStage::Failed { scan: true, .. }, 0) if self.setup.satellite => self.start_satellite(self.setup.add_only),
+                (SetupStage::Failed { scan: true, .. }, 0) => self.start_scan(),
+                (SetupStage::Failed { scan: false, .. }, 0) => self.start_tkgs(),
+                (SetupStage::Failed { scan: true, .. }, _) => {
+                    self.open_manual();
+                    Effect::Paint
+                }
+                (SetupStage::Failed { .. }, _) => self.setup_menu(SetupRow::Automatic),
+                _ => Effect::Nothing,
             },
             _ => Effect::Nothing,
         }
@@ -856,11 +1393,6 @@ impl Live {
                         enabled: false,
                     },
                     PanelRow { label: "Kanal kurulumu".into(), value: tkgs, checked: false, enabled: true },
-                    PanelRow {
-                        label: "Liste sırası".into(),
-                        value: if self.tkgs.hd_first { "HD önce" } else { "SD önce" }.into(),
-                        checked: false, enabled: !self.tkgs.updating,
-                    },
                 ]
             }
         }
@@ -999,17 +1531,8 @@ impl Live {
                     },
                     Panel::Settings => match self.panel.focus {
                         2 => {
-                            // A scan already running is shown as it is.
-                            if !self.tkgs.updating {
-                                self.setup = Setup { stage: SetupStage::Ready, focus: 0 };
-                            }
-                            self.layer = Layer::Setup;
-                            self.layer_until = None;
+                            self.open_setup();
                             Effect::Paint
-                        }
-                        3 => {
-                            self.tkgs.hd_first = !self.tkgs.hd_first;
-                            Effect::TkgsOrdering(self.tkgs.hd_first)
                         }
                         _ => Effect::Nothing,
                     },
@@ -1153,7 +1676,8 @@ impl Live {
                         let up = matches!(action, InputAction::Up | InputAction::ChannelUp);
                         let Some(sid) = self.adjacent(if up { 1 } else { -1 }) else { return Effect::Nothing };
                         self.tuning(sid, at);
-                        Effect::Tune(sid)
+                        self.zap = Some((sid, at + ZAP_SETTLE));
+                        Effect::Paint
                     }
                     InputAction::PreviousChannel => {
                         let Some(sid) = self.previous.filter(|sid| self.index_of(*sid).is_some()) else {
@@ -1206,6 +1730,14 @@ impl Live {
     /// The overlays' lifetimes. The number entry's end tunes to what it
     /// had selected.
     pub fn tick(&mut self, at: Instant) -> Effect {
+        if let Some((sid, due)) = self.zap
+            && due <= at
+        {
+            self.zap = None;
+            if self.current == Some(sid) {
+                return Effect::Tune(sid);
+            }
+        }
         let mut effect = Effect::Nothing;
         if self.banner_until.is_some_and(|until| until <= at) {
             self.banner_until = None;
@@ -1345,10 +1877,13 @@ mod tests {
         let at = Instant::now();
         let mut live = live(3);
         live.tuning(10_800, at);
-        assert_eq!(live.key(InputAction::Up, at, NOW), Effect::Tune(10_801));
-        assert_eq!(live.key(InputAction::ChannelUp, at, NOW), Effect::Tune(10_802));
-        assert_eq!(live.key(InputAction::Up, at, NOW), Effect::Tune(10_800), "past the last is the first");
-        assert_eq!(live.key(InputAction::Down, at, NOW), Effect::Tune(10_802));
+        assert_eq!(live.key(InputAction::Up, at, NOW), Effect::Paint);
+        assert_eq!(live.key(InputAction::ChannelUp, at, NOW), Effect::Paint);
+        assert_eq!(live.key(InputAction::Up, at, NOW), Effect::Paint);
+        assert_eq!(live.key(InputAction::Down, at, NOW), Effect::Paint);
+        assert_eq!(live.tick(at), Effect::Nothing, "held: nothing tuned yet");
+        assert_eq!(live.tick(at + ZAP_SETTLE), Effect::Tune(10_802), "one tune, to the last one");
+        assert_eq!(live.tick(at + ZAP_SETTLE), Effect::Nothing);
         assert!(live.banner_shown(at), "a channel change shows the banner");
         assert_eq!(live.key(InputAction::PreviousChannel, at, NOW), Effect::Tune(10_800));
         assert_eq!(live.key(InputAction::PreviousChannel, at, NOW), Effect::Tune(10_802));
@@ -1548,7 +2083,6 @@ mod tests {
         let live = live(1);
         let rows = live.panel_rows(Panel::Settings, NOW);
         assert!(rows.iter().any(|r| r.label == "Kanal kurulumu" && r.enabled));
-        assert!(rows.iter().any(|r| r.label == "Liste sırası" && r.value == "HD önce"));
     }
 
     #[test]

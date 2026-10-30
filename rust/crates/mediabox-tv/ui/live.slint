@@ -562,69 +562,199 @@ component Panel inherits Rectangle {
     }
 }
 
-// The channel setup: the tuner setup's guided steps
-// (tuner/setup/ScanFragment, ScanResultFragment) -- the guidance on the
-// left, the actions on the right, a progress bar while it scans.
+// The channel setup, in the banner's card language: its lists (Kanal
+// kurulumu, TKGS ayarları, Manuel tarama) as a card of rows, a search and
+// its result as a card with the count in large thin figures -- the
+// receivers' Durum page said our way. Black behind: the receiver is not
+// the picture's while it searches.
 component Setup inherits Rectangle {
     in property <string> title;
-    in property <string> text;
+    in property <[LivePanelRow]> rows;
+    in property <int> at-row;
+    in property <bool> card;
+    in property <string> big;
+    in property <string> unit;
+    in property <string> line;
+    in property <float> signal: -1;
+    in property <float> quality: -1;
+    in property <string> note;
     in property <float> progress: -1;
     in property <[string]> actions;
     in property <int> at-action;
     property <length> dp: Dp.dp;
 
-    background: #21272B;
+    background: #000000;
 
-    VerticalLayout {
+    if !root.card: Rectangle {
         x: 72 * dp;
-        y: 0;
-        width: parent.width * 0.55 - 96 * dp;
-        height: parent.height;
-        alignment: center;
-        spacing: 16 * dp;
+        y: 72 * dp;
+        width: 360 * dp;
+        height: 52 * dp + root.rows.length * 48 * dp + 16 * dp + (root.signal >= 0 ? 64 * dp : 0);
+        background: #263238E6;
+        border-radius: 2 * dp;
+        drop-shadow-blur: 8 * dp;
+        drop-shadow-color: #00000080;
         Text {
+            x: 24 * dp;
+            y: 18 * dp;
             text: root.title;
-            color: #EEEEEE;
-            font-size: 32 * dp;
-            wrap: word-wrap;
+            color: #EEEEEE80;
+            font-size: 14 * dp;
+            font-weight: 300;
         }
-        Text {
-            text: root.text;
-            color: #EEEEEEB3;
-            font-size: 16 * dp;
-            wrap: word-wrap;
+        for row[i] in root.rows: Rectangle {
+            x: 8 * dp;
+            y: 52 * dp + i * 48 * dp;
+            width: parent.width - 16 * dp;
+            height: 48 * dp;
+            border-radius: 2 * dp;
+            background: i == root.at-row ? #0176BC : transparent;
+            Text {
+                x: 16 * dp;
+                width: parent.width * 0.6;
+                height: 100%;
+                text: row.label;
+                color: row.enabled ? #EEEEEE : #EEEEEE66;
+                font-size: 16 * dp;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                x: parent.width * 0.5;
+                width: parent.width * 0.5 - 16 * dp;
+                height: 100%;
+                text: row.value;
+                color: i == root.at-row ? #EEEEEE : #17FFFF;
+                font-size: 15 * dp;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
         }
-        if root.progress >= 0: Rectangle {
-            height: 4 * dp;
-            background: #EEEEEE33;
-            Rectangle {
+        // The carrier the form is on, as the receiver reads it.
+        for meter[m] in root.signal >= 0 ? [{label: "Sinyal", value: root.signal}, {label: "Kalite", value: root.quality}] : []: Rectangle {
+            x: 24 * dp;
+            y: 52 * dp + root.rows.length * 48 * dp + 12 * dp + m * 26 * dp;
+            width: parent.width - 48 * dp;
+            height: 20 * dp;
+            Text {
                 x: 0;
-                width: parent.width * clamp(root.progress, 0, 1);
-                height: parent.height;
-                background: #0176BC;
+                width: 56 * dp;
+                height: 100%;
+                text: meter.label;
+                color: #EEEEEE99;
+                font-size: 13 * dp;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                x: 68 * dp;
+                width: parent.width - 68 * dp;
+                y: (parent.height - 6 * dp) / 2;
+                height: 6 * dp;
+                background: #EEEEEE26;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * clamp(meter.value, 0, 1);
+                    height: parent.height;
+                    background: meter.value < 0.35 ? #FF5A5A : meter.value < 0.6 ? #FFC83D : #4CD964;
+                }
             }
         }
     }
-    Rectangle {
-        x: parent.width * 0.55;
-        width: parent.width * 0.45;
-        height: parent.height;
-        background: #263238;
-        VerticalLayout {
-            x: 32 * dp;
-            width: parent.width - 64 * dp;
-            alignment: center;
-            spacing: 8 * dp;
-            for action[i] in root.actions: Rectangle {
-                height: 48 * dp;
-                border-radius: 2 * dp;
-                background: i == root.at-action ? #0176BC : transparent;
+
+    if root.card: Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - 60 * dp;
+        width: 600 * dp;
+        height: inner.preferred-height;
+        background: #263238E6;
+        border-radius: 2 * dp;
+        drop-shadow-blur: 8 * dp;
+        drop-shadow-color: #00000080;
+        inner := HorizontalLayout {
+            padding: 24 * dp;
+            padding-left: 28 * dp;
+            spacing: 24 * dp;
+            Thin {
+                width: 150 * dp;
+                text: root.big;
+                font-size: 72 * dp;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                spacing: 8 * dp;
+                alignment: center;
                 Text {
-                    x: 16 * dp;
-                    text: action;
+                    text: root.title;
+                    color: #EEEEEE80;
+                    font-size: 13 * dp;
+                    font-weight: 300;
+                }
+                Text {
+                    text: root.unit;
                     color: #EEEEEE;
-                    font-size: 16 * dp;
-                    vertical-alignment: center;
+                    font-size: 18 * dp;
+                    font-weight: 300;
+                }
+                if root.line != "": Text {
+                    text: root.line;
+                    color: #EEEEEE99;
+                    font-size: 13 * dp;
+                    wrap: word-wrap;
+                }
+                for meter in root.signal >= 0 ? [{label: "Sinyal", value: root.signal}, {label: "Kalite", value: root.quality}] : []: HorizontalLayout {
+                    spacing: 12 * dp;
+                    Text {
+                        width: 56 * dp;
+                        text: meter.label;
+                        color: #EEEEEE99;
+                        font-size: 13 * dp;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        height: 6 * dp;
+                        background: #EEEEEE26;
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * clamp(meter.value, 0, 1);
+                            height: parent.height;
+                            background: meter.value < 0.35 ? #FF5A5A : meter.value < 0.6 ? #FFC83D : #4CD964;
+                        }
+                    }
+                }
+                if root.progress >= 0: Rectangle {
+                    height: 3 * dp;
+                    background: #EEEEEE4D;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * clamp(root.progress, 0, 1);
+                        height: parent.height;
+                        background: #EEEEEE;
+                    }
+                }
+                if root.note != "": Text {
+                    text: root.note;
+                    color: #17FFFF;
+                    font-size: 13 * dp;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8 * dp;
+                    alignment: start;
+                    padding-top: 6 * dp;
+                    for action[i] in root.actions: Rectangle {
+                        width: label.preferred-width + 40 * dp;
+                        height: 36 * dp;
+                        border-radius: 2 * dp;
+                        background: i == root.at-action ? #0176BC : #FFFFFF1A;
+                        label := Text {
+                            text: action;
+                            color: #EEEEEE;
+                            font-size: 14 * dp;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
         }
@@ -672,7 +802,15 @@ export component LiveTv inherits Rectangle {
     in property <bool> panel-below;
     in property <bool> setup-shown;
     in property <string> setup-title;
-    in property <string> setup-text;
+    in property <[LivePanelRow]> setup-rows;
+    in property <int> setup-row;
+    in property <bool> setup-card;
+    in property <string> setup-big;
+    in property <string> setup-unit;
+    in property <string> setup-line;
+    in property <string> setup-note;
+    in property <float> setup-signal: -1;
+    in property <float> setup-quality: -1;
     in property <float> setup-progress: -1;
     in property <[string]> setup-actions;
     in property <int> setup-focus;
@@ -755,7 +893,15 @@ export component LiveTv inherits Rectangle {
         width: parent.width;
         height: parent.height;
         title: root.setup-title;
-        text: root.setup-text;
+        rows: root.setup-rows;
+        at-row: root.setup-row;
+        card: root.setup-card;
+        big: root.setup-big;
+        unit: root.setup-unit;
+        line: root.setup-line;
+        note: root.setup-note;
+        signal: root.setup-signal;
+        quality: root.setup-quality;
         progress: root.setup-progress;
         actions: root.setup-actions;
         at-action: root.setup-focus;

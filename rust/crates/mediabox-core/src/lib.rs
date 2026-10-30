@@ -142,6 +142,16 @@ pub enum LiveSource {
     },
 }
 
+/// Which services a manual scan keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveScanKeep {
+    #[default]
+    All,
+    Television,
+    Radio,
+}
+
 impl LiveSource {
     /// A universal LNB's band and a DVB-S2 symbol rate the receiver takes.
     pub fn validate(&self) -> Result<(), String> {
@@ -1727,6 +1737,51 @@ pub enum Request {
     LiveTkgsCancel,
     /// Prefer TKGS's HD-first or SD-first ordering where it supplies both.
     LiveTkgsOrderingSet { hd_first: bool },
+    /// The channel setup's manual scan: what one satellite transponder
+    /// carries joins the channel list. Answered when it is done; its
+    /// progress and cancel are the TKGS setup's.
+    /// "Kanal listesini sil": every channel of the channel table gone, the
+    /// setup's settings kept.
+    LiveChannelsClear,
+    /// The LNB's DiSEqC 1.0 port: 0 A, 1 B, 2 C, 3 D; none, no DiSEqC.
+    LiveDiseqcSet {
+        #[serde(default)]
+        port: Option<u8>,
+    },
+    /// The manual scan form's signal on `source`; none ends the reading.
+    LiveSignal {
+        #[serde(default)]
+        source: Option<LiveSource>,
+    },
+    /// Every carrier the channel list knows (TKGS's transponders and the
+    /// scanned ones) scanned in turn.
+    LiveSatelliteScan {
+        /// Sony's "Yeni hizmetleri tara": the list kept, only what is new
+        /// added. Otherwise "Normal Tarama": the list is what the scan found.
+        #[serde(default)]
+        add_only: bool,
+        #[serde(default)]
+        free_only: bool,
+        #[serde(default)]
+        scrambled_only: bool,
+        #[serde(default)]
+        keep: LiveScanKeep,
+    },
+    LiveScan {
+        source: LiveSource,
+        /// Only services not scrambled (EN 300 468 free_CA_mode 0).
+        #[serde(default)]
+        free_only: bool,
+        #[serde(default)]
+        scrambled_only: bool,
+        #[serde(default)]
+        keep: LiveScanKeep,
+    },
+    /// TKGS off: the channel list is the manual scans' alone, as the
+    /// receivers' "TKGS Kapalı" has it.
+    LiveTkgsModeSet { off: bool },
+    /// Whether TKGS's categories are the channel list's groups.
+    LiveTkgsCategoriesSet { shown: bool },
     /// The broadcast programme guide of the known channels between `from`
     /// and `to` (UTC seconds): only what the multiplex's EIT carried.
     LiveGuide { from: i64, to: i64 },

@@ -537,6 +537,36 @@ enum MediaCommand {
         #[arg(value_parser = ["hd", "sd"])]
         first: String,
     },
+    /// TKGS on, or off (the channel list is then the manual scans' alone).
+    LiveTkgsMode {
+        #[arg(value_parser = ["on", "off"])]
+        mode: String,
+    },
+    /// Whether TKGS's categories are the channel list's groups.
+    LiveTkgsCategories {
+        #[arg(value_parser = ["on", "off"])]
+        shown: String,
+    },
+    /// Manually scan one satellite transponder; what it carries joins the
+    /// channel list. Its progress and cancel are live-tkgs-progress/-cancel.
+    LiveScan {
+        #[arg(long)]
+        frequency_khz: u32,
+        #[arg(long)]
+        symbol_rate: u32,
+        #[arg(long, value_parser = ["horizontal", "vertical"], default_value = "vertical")]
+        polarisation: String,
+        /// Leave scrambled services out.
+        #[arg(long)]
+        free_only: bool,
+        #[arg(long, value_parser = ["all", "television", "radio"], default_value = "all")]
+        keep: String,
+    },
+    /// Scan every carrier the channel list knows; what they carry joins it.
+    LiveSatelliteScan {
+        #[arg(long)]
+        free_only: bool,
+    },
     /// The live programme guide from now for `hours` hours.
     LiveGuide {
         #[arg(long, default_value_t = 6)]
@@ -800,6 +830,27 @@ fn to_request(command: &Command) -> Request {
             MediaCommand::LiveTkgsProgress => Request::LiveTkgsProgress,
             MediaCommand::LiveTkgsCancel => Request::LiveTkgsCancel,
             MediaCommand::LiveTkgsOrder { first } => Request::LiveTkgsOrderingSet { hd_first: first == "hd" },
+            MediaCommand::LiveTkgsMode { mode } => Request::LiveTkgsModeSet { off: mode == "off" },
+            MediaCommand::LiveTkgsCategories { shown } => Request::LiveTkgsCategoriesSet { shown: shown == "on" },
+            MediaCommand::LiveSatelliteScan { free_only } => Request::LiveSatelliteScan { add_only: false, free_only: *free_only, scrambled_only: false, keep: mediabox_core::LiveScanKeep::All },
+            MediaCommand::LiveScan { frequency_khz, symbol_rate, polarisation, free_only, keep } => Request::LiveScan {
+                source: mediabox_core::LiveSource::Satellite {
+                    frequency_khz: *frequency_khz,
+                    symbol_rate_ksps: *symbol_rate,
+                    polarisation: if polarisation == "horizontal" {
+                        mediabox_core::SatellitePolarisation::Horizontal
+                    } else {
+                        mediabox_core::SatellitePolarisation::Vertical
+                    },
+                },
+                free_only: *free_only,
+                scrambled_only: false,
+                keep: match keep.as_str() {
+                    "television" => mediabox_core::LiveScanKeep::Television,
+                    "radio" => mediabox_core::LiveScanKeep::Radio,
+                    _ => mediabox_core::LiveScanKeep::All,
+                },
+            },
             MediaCommand::LiveGuide { hours } => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
