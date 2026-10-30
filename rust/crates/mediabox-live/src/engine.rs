@@ -62,6 +62,9 @@ pub struct Audio {
 #[derive(Default)]
 pub struct Shared {
     pub generation: AtomicU64,
+    /// MEDIABOX_LIVE_OPEN_TRACE: the decoded frames of a channel's opening
+    /// still to be logged with their lead over the clock.
+    pub open_probe: AtomicU64,
     /// A frame (or, with no video, sound) has come out since the last open.
     pub playing: AtomicBool,
     pub eof: AtomicBool,
@@ -268,6 +271,25 @@ impl Engine {
         video_sink.set_async(false);
         video_sink.set_max_lateness(i64::from(options.max_lateness_ms) * 1_000_000);
         video_sink.set_render_delay(gst::ClockTime::from_mseconds(u64::from(options.render_delay_ms)));
+        // A channel's first decoded frames, as they reach the sink: PTS
+        // minus the clock's running time (the sink wants it above minus
+        // the latency), when MEDIABOX_LIVE_OPEN_TRACE asks for it.
+        {
+            let shared = Arc::clone(&shared);
+            let pipeline_clock = clock.clone();
+            let weak_pipeline = pipeline.downgrade();
+            video_sink.static_pad("sink").expect("appsink has a sink pad").add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if shared.open_probe.load(Ordering::Relaxed) > 0
+                    && let (Some(buffer), Some(pipeline)) = (info.buffer(), weak_pipeline.upgrade())
+                    && let (Some(pts), Some(base)) = (buffer.pts(), pipeline.base_time())
+                {
+                    shared.open_probe.fetch_sub(1, Ordering::Relaxed);
+                    let now = pipeline_clock.time().saturating_sub(base).nseconds() as i64;
+                    eprintln!("mediabox-live: açılış kare pts {} ms öndelik {:.3} s", pts.mseconds(), (pts.nseconds() as i64 - now) as f64 / 1e9);
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
 
         pipeline
             .add_many([&video_selector, video_sink.upcast_ref(), &audio_selector])
@@ -501,6 +523,9 @@ impl Engine {
     pub fn open(self: &Arc<Self>, path: &str) -> Result<(), String> {
         let generation = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.trace.event('G', generation, 0);
+        if std::env::var_os("MEDIABOX_LIVE_OPEN_TRACE").is_some() {
+            self.shared.open_probe.store(60, Ordering::Relaxed);
+        }
         self.shared.playing.store(false, Ordering::SeqCst);
         self.shared.eof.store(false, Ordering::SeqCst);
         *self.shared.info.lock().unwrap_or_else(|p| p.into_inner()) =
@@ -562,7 +587,8 @@ impl Engine {
         let source = gst_app::AppSrc::builder()
             .name(format!("ts{generation}"))
             .is_live(true)
-            .do_timestamp(true)
+            // Stamped by `read_stream`, on the broadcast's PCR at first.
+            .do_timestamp(false)
             .format(gst::Format::Time)
             .stream_type(gst_app::AppStreamType::Stream)
             .caps(&gst::Caps::builder("video/mpegts").field("systemstream", true).field("packetsize", 188i32).build())
@@ -1246,6 +1272,7 @@ fn read_stream(path: &str, into: &Mutex<Option<gst_app::AppSrc>>, stop: &AtomicB
         Err(error) => return ended(format!("{path} açılamadı: {error}")),
     };
     let mut chunk = vec![0u8; 188 * 348];
+    let mut stamp = Stamp::default();
     loop {
         let read = match file.read(&mut chunk) {
             Ok(0) => return ended(format!("yayın akışı bitti ({path})")),
@@ -1259,10 +1286,88 @@ fn read_stream(path: &str, into: &Mutex<Option<gst_app::AppSrc>>, stop: &AtomicB
         // Cloned out of the lock: a full source blocks the push, and the
         // next channel must still be able to take the reader over.
         let Some(source) = into.lock().unwrap_or_else(|p| p.into_inner()).clone() else { continue };
+        let mut buffer = gst::Buffer::from_slice(chunk[..read].to_vec());
+        if let Some(arrived) = source.current_running_time() {
+            let at = stamp.time(&source, arrived, first_pcr(&chunk[..read]));
+            let buffer = buffer.get_mut().expect("a new buffer is writable");
+            buffer.set_pts(at);
+            buffer.set_dts(at);
+        }
         // A source taken down under the push refuses it; the reader goes on
         // for the branch after it.
-        let _ = source.push_buffer(gst::Buffer::from_slice(chunk[..read].to_vec()));
+        let _ = source.push_buffer(buffer);
     }
+}
+
+/// When a channel opens, the receiver sends its service from the last access
+/// point on at once: half a second or more of the broadcast arrives in one
+/// burst. Stamped with the time it arrived, all of it would be one instant
+/// against PCRs a second apart, and tsdemux's estimate of the broadcaster's
+/// clock (mpegtspacketizer's skew) swings for the first seconds: pictures
+/// timed 9-60 ms off their place, dropped or doubled -- 100-660 ms of
+/// picture lost at every opening (measured 2026-10-30, eleven openings;
+/// with tsdemux's ignore-pcr none lost, and the sound off the picture).
+///
+/// So the clock starts as a tuner's STC does, from the PCR (AOSP, Multimedia
+/// tunneling: on live broadcast the A/V sync clock is "a program reference
+/// clock (PCR) or system time clock (STC) driven by a tuner"): the burst is
+/// timed by its PCRs from the first one's arrival, at the broadcast's own
+/// pace. Once the burst is in, the lead it gave is kept as a constant and
+/// every buffer after is stamped on arrival plus it, so tsdemux goes on
+/// estimating the broadcaster's clock from arrival times as before.
+#[derive(Default)]
+struct Stamp {
+    /// The source these times are for: a new branch starts again.
+    source: Option<gst_app::AppSrc>,
+    /// The first PCR (27 MHz) and when it arrived.
+    first: Option<(u64, gst::ClockTime)>,
+    /// The lead kept once the burst is in.
+    lead: Option<gst::ClockTime>,
+    last: Option<gst::ClockTime>,
+}
+
+/// How long after the first PCR the burst is taken to be in.
+const BURST_WITHIN: gst::ClockTime = gst::ClockTime::from_mseconds(1500);
+
+impl Stamp {
+    fn time(&mut self, source: &gst_app::AppSrc, arrived: gst::ClockTime, pcr: Option<u64>) -> gst::ClockTime {
+        if self.source.as_ref() != Some(source) {
+            *self = Stamp { source: Some(source.clone()), ..Stamp::default() };
+        }
+        let at = match (self.lead, self.first, pcr) {
+            (Some(lead), _, _) => arrived + lead,
+            (None, None, Some(pcr)) => {
+                self.first = Some((pcr, arrived));
+                arrived
+            }
+            (None, Some((first, at)), Some(pcr)) => {
+                // 33-bit base times 300: wraps at 2^33 * 300.
+                let ticks = pcr.wrapping_sub(first) % ((1u64 << 33) * 300);
+                let paced = at + gst::ClockTime::from_nseconds(ticks * 1000 / 27);
+                let at_ = paced.max(arrived);
+                if arrived >= at + BURST_WITHIN {
+                    self.lead = Some(at_ - arrived);
+                }
+                at_
+            }
+            (None, _, None) => self.last.map_or(arrived, |last| last.max(arrived)),
+        };
+        let at = self.last.map_or(at, |last| last.max(at));
+        self.last = Some(at);
+        at
+    }
+}
+
+/// The first PCR in `data`, 27 MHz, wherever its packets start.
+fn first_pcr(data: &[u8]) -> Option<u64> {
+    let start = (0..188.min(data.len())).find(|&k| data[k] == 0x47 && data.get(k + 188).is_none_or(|&b| b == 0x47))?;
+    data[start..].chunks_exact(188).find_map(|p| {
+        let pcr = p[0] == 0x47 && p[3] & 0x20 != 0 && p[4] >= 7 && p[5] & 0x10 != 0;
+        pcr.then(|| {
+            let base = (u64::from(p[6]) << 25) | (u64::from(p[7]) << 17) | (u64::from(p[8]) << 9) | (u64::from(p[9]) << 1) | (u64::from(p[10]) >> 7);
+            base * 300 + ((u64::from(p[10] & 1) << 8) | u64::from(p[11]))
+        })
+    })
 }
 
 /// One AC-3 frame as an IEC 61937 burst (IEC 61937-3; ffmpeg's spdifenc):
