@@ -1,0 +1,44 @@
+Subject: [PATCH] mppdec: H.264 -- the broadcast's own timestamps, in microseconds
+
+Measured on a DVB-S 1080i field-coded H.264 broadcast (TGRT BELGESEL HD) on
+RK3588, from a recording that starts mid-GOP, as every channel opening does.
+
+The timestamps MPP makes up for H.264 (use_mpp_pts) came out repeated after
+the first key frame -- .253 .613 ... .893 eighteen times -- and the frames
+behind them were dropped downstream as not after the one before: 150-480 ms
+of picture missing in the first seconds of every channel. The software
+decoder on the same stream gives .253 .333 .413 ...
+
+Given the broadcast's PTS in microseconds, as for MPEG-2, h264d starts at
+the key frame and times each field 20 ms apart: .373 .433 .453 .473 ...
+
+---
+--- a/gst/rockchipmpp/gstmppdec.c
++++ b/gst/rockchipmpp/gstmppdec.c
+@@ -375,7 +375,7 @@
+   GST_DEBUG_OBJECT (self, "setting format: %" GST_PTR_FORMAT, state->caps);
+ 
+   /* The MPP m2vd's PTS is buggy */
+-  if (self->mpp_type == MPP_VIDEO_CodingMPEG2) {
++  if (self->mpp_type == MPP_VIDEO_CodingMPEG2 || self->mpp_type == MPP_VIDEO_CodingAVC) {
+     self->use_mpp_pts = FALSE;
+ 
+     /* It is not, given the unit it reads: m2vd times each picture from its
+@@ -386,7 +386,16 @@
+      * and the matching below threw frames away: a broadcast's 576i played
+      * 18 frames a second of 50. In microseconds, as ffmpeg's rkmppdec
+      * gives it (AV_TIME_BASE), its times are the pictures' own, in display
+-     * order, and each field its own; they are used as they come. */
++     * order, and each field its own; they are used as they come.
++     *
++     * H.264 the same: the timestamps MPP makes up for it, which the matching
++     * below has to guess frames by, come out repeated when a field-coded
++     * broadcast is joined mid-GOP -- the frames after the first key frame
++     * all timed alike (one time 18 times, TGRT BELGESEL HD, 1080i), dropped
++     * downstream as not after the one before: 150-480 ms of picture missing
++     * at every channel opening. Given the broadcast's own PTS in
++     * microseconds, h264d starts at the key frame and times every field
++     * 20 ms apart (measured 2026-10-30 on a recording of that channel). */
+     self->pts_in_us = TRUE;
+   }
+ 
