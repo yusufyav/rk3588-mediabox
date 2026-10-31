@@ -1806,8 +1806,13 @@ fn stream(
             None => {}
         }
         // Without a signal the service cannot be found; that is no signal,
-        // not a service missing from the multiplex.
+        // not a service missing from the multiplex. Nor is it with no
+        // transfer ever completed: that is a stream gone dead under a lock,
+        // for the power cycle below (both 10 s; this check came first and
+        // ended the receiver "service not found" with 0 bytes read, the
+        // cycle never reached -- 2026-10-31, twice).
         if reporter.status.state != State::NoSignal
+            && delivered.0 > 0
             && let Some(failed) = check_service(pipeline, options, since)
         {
             break Some(failed);
