@@ -718,6 +718,9 @@ const KIND_SUBTITLE: u32 = 4;
 ///                                                     84  display height
 /// ```
 const MESSAGE: usize = 88;
+/// A frame message may carry 8 bytes more: when it is due on the panel,
+/// CLOCK_MONOTONIC nanoseconds (mediabox-live; vo_mediabox sends none).
+const TIMED: usize = MESSAGE + 8;
 const REPLY: usize = 16;
 const MAX_FDS: usize = 4;
 
@@ -737,6 +740,8 @@ pub enum Incoming {
         frame: Frame,
         display: (u32, u32),
         fds: Vec<OwnedFd>,
+        /// When it is due on the panel, CLOCK_MONOTONIC ns; none: now.
+        due_ns: Option<u64>,
     },
     /// What the film says about itself; sent once per configuration.
     Hdr(HdrStatic),
@@ -859,14 +864,23 @@ fn quad_at(bytes: &[u8; MESSAGE], offset: usize) -> [u32; 4] {
     ]
 }
 
+/// CLOCK_MONOTONIC, ns: the clock of the kernel's vblank timestamps and of
+/// the player's due times.
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid clock id and a timespec on the stack.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
 /// One message and whatever descriptors came with it.
 ///
 /// `Ok(None)` means nothing was waiting; `Ok(Some((0, _)))` means the peer has
 /// gone.
-fn recv_message(fd: RawFd, bytes: &mut [u8; MESSAGE]) -> io::Result<Option<(usize, Vec<OwnedFd>)>> {
+fn recv_message(fd: RawFd, bytes: &mut [u8; TIMED]) -> io::Result<Option<(usize, Vec<OwnedFd>)>> {
     let mut iov = libc::iovec {
         iov_base: bytes.as_mut_ptr().cast(),
-        iov_len: MESSAGE,
+        iov_len: TIMED,
     };
     let space = unsafe { libc::CMSG_SPACE((MAX_FDS * size_of::<RawFd>()) as u32) } as usize;
     let mut control = vec![0u8; space];
@@ -967,8 +981,8 @@ impl Server {
 
         let fd = client.as_raw_fd();
         loop {
-            let mut bytes = [0u8; MESSAGE];
-            match recv_message(fd, &mut bytes) {
+            let mut wire = [0u8; TIMED];
+            match recv_message(fd, &mut wire) {
                 Ok(None) => return received,
                 Err(error) => {
                     // A player that exits without closing politely resets the
@@ -988,7 +1002,9 @@ impl Server {
                     return received;
                 }
                 Ok(Some((read, fds))) => {
-                    if read != MESSAGE || u32_at(&bytes, 0) != MAGIC {
+                    let bytes: [u8; MESSAGE] = wire[..MESSAGE].try_into().expect("TIMED is longer");
+                    let due_ns = (read == TIMED).then(|| u64::from_le_bytes(wire[MESSAGE..].try_into().expect("8 bytes")));
+                    if (read != MESSAGE && read != TIMED) || u32_at(&bytes, 0) != MAGIC {
                         eprintln!("mediabox-tv.video ignoring a {read} byte message");
                         continue;
                     }
@@ -1038,6 +1054,7 @@ impl Server {
                                 },
                                 display: (u32_at(&bytes, 80), u32_at(&bytes, 84)),
                                 fds,
+                                due_ns,
                             });
                         }
                         other => eprintln!("mediabox-tv.video unknown message {other}"),
@@ -1081,6 +1098,7 @@ impl Drop for Server {
 
 struct Pending<D: ControlDevice> {
     id: u64,
+    due_ns: Option<u64>,
     imported: Imported<D>,
     info: FrameInfo,
     dst: Rect,
@@ -1095,10 +1113,17 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// using it — see `VideoPlane::candidates`.
     chosen: Option<usize>,
     shown: VecDeque<(u64, Imported<D>)>,
-    /// The newest frame, imported and not yet committed. A newer one arriving
-    /// first replaces it, and the replaced one goes straight back to the
-    /// player: it was never on the panel.
-    pending: Option<Pending<D>>,
+    /// The frames imported and not yet committed, oldest first. One with no
+    /// time replaces all before it (it is to be shown now); timed ones wait
+    /// for their vblank (`due`), and of those due by one vblank only the
+    /// newest is shown, the others going straight back to the player: they
+    /// were never on the panel (Android's SurfaceView: "if multiple buffers
+    /// are sent to the Surface to be rendered at the same VSYNC, the last one
+    /// will be shown, and the other ones will be dropped").
+    pending: VecDeque<Pending<D>>,
+    /// The last vblank, CLOCK_MONOTONIC ns, and the refresh period: when the
+    /// next ones fall.
+    vblank: Option<(u64, u64)>,
     /// When the last frame arrived: whether the film is moving (`moving`).
     arrived: Option<std::time::Instant>,
     on: bool,
@@ -1122,7 +1147,8 @@ impl<D: ControlDevice + Clone> Sink<D> {
             server: Server::bind(path)?,
             chosen: None,
             shown: VecDeque::new(),
-            pending: None,
+            pending: VecDeque::new(),
+            vblank: None,
             arrived: None,
             on: false,
             refused: false,
@@ -1199,8 +1225,9 @@ impl<D: ControlDevice + Clone> Sink<D> {
                     frame,
                     display,
                     fds,
+                    due_ns,
                 } => {
-                    self.present(device, crtc, planes, &frame, display, into, id, &fds);
+                    self.present(device, crtc, planes, &frame, display, into, id, &fds, due_ns);
                 }
             }
         }
@@ -1217,6 +1244,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
         into: Rect,
         id: u64,
         fds: &[OwnedFd],
+        due_ns: Option<u64>,
     ) {
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
         let dst = fit(display, frame, into);
@@ -1241,11 +1269,16 @@ impl<D: ControlDevice + Clone> Sink<D> {
                     };
                     self.arrived = Some(std::time::Instant::now());
                     let panel = (into.width, into.height);
-                    let replaced = self.pending.replace(Pending { id, imported, info, dst, panel });
-                    trace::event('A', id, replaced.as_ref().map_or(0, |old| old.id));
-                    if let Some(old) = replaced {
-                        self.server.release(old.id);
+                    let mut replaced = 0;
+                    if due_ns.is_none() {
+                        while let Some(old) = self.pending.pop_front() {
+                            replaced = old.id;
+                            self.server.release(old.id);
+                        }
                     }
+                    trace::event('A', id, replaced);
+                    trace::event('D', id, due_ns.unwrap_or(0) / 1000);
+                    self.pending.push_back(Pending { id, due_ns, imported, info, dst, panel });
                     return;
                 }
                 Err(error) => last = error,
@@ -1262,9 +1295,49 @@ impl<D: ControlDevice + Clone> Sink<D> {
         self.server.release(id);
     }
 
-    /// Whether a frame is waiting to be committed.
+    /// Whether a frame is waiting to be committed for the next vblank.
     pub fn has_pending(&self) -> bool {
-        self.pending.is_some()
+        self.due_now().is_some()
+    }
+
+    /// A vblank happened at `at_ns` (the kernel's timestamp), the refresh
+    /// being `period_ns`.
+    pub fn vblank(&mut self, at_ns: u64, period_ns: u64) {
+        if period_ns > 0 {
+            self.vblank = Some((at_ns, period_ns));
+        }
+    }
+
+    /// The next vblank a commit made now still reaches, and the period.
+    fn next_vblank(&self) -> Option<(u64, u64)> {
+        let (last, period) = self.vblank?;
+        // A commit wants a moment before its vblank.
+        let from = monotonic_ns() + 2_000_000;
+        let ahead = from.saturating_sub(last).div_ceil(period).max(1);
+        Some((last + ahead * period, period))
+    }
+
+    /// Which waiting frame goes up at the next vblank: the newest of those
+    /// due nearer it than the one after (ExoPlayer's VideoFrameReleaseHelper
+    /// puts a frame on the vsync closest to its time). A frame with no time,
+    /// or with no vblank known yet, is due at once.
+    fn due_now(&self) -> Option<usize> {
+        let next = self.next_vblank();
+        self.pending.iter().rposition(|frame| match (frame.due_ns, next) {
+            (Some(due), Some((vblank, period))) => due <= vblank + period / 2,
+            _ => true,
+        })
+    }
+
+    /// How long until a waiting frame is due at a vblank, if one waits and
+    /// none is due yet: the event loop sleeps no longer than that.
+    pub fn until_due(&self) -> Option<std::time::Duration> {
+        if self.pending.is_empty() || self.due_now().is_some() {
+            return None;
+        }
+        let (vblank, _) = self.next_vblank()?;
+        // Past the vblank that comes first, the next one is reachable.
+        Some(std::time::Duration::from_nanos(vblank.saturating_sub(monotonic_ns()) + 1_000_000))
     }
 
     /// Adds the waiting frame, if there is one, to `request`, on the plane
@@ -1278,7 +1351,15 @@ impl<D: ControlDevice + Clone> Sink<D> {
         planes: &[VideoPlane],
         request: &mut control::atomic::AtomicModeReq,
     ) -> Option<usize> {
-        let pending = self.pending.as_ref()?;
+        // Frames due at the same vblank as a newer one go back unseen.
+        let due = self.due_now()?;
+        for _ in 0..due {
+            if let Some(old) = self.pending.pop_front() {
+                trace::event('A', 0, old.id);
+                self.server.release(old.id);
+            }
+        }
+        let pending = self.pending.front()?;
         if self.chosen.is_none() {
             for (index, plane) in planes.iter().enumerate() {
                 if !plane.accepts(pending.info.fourcc) {
@@ -1311,7 +1392,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
                 eprintln!("mediabox-tv.video no plane on this video port would take the frame");
                 self.refused = true;
             }
-            let old = self.pending.take()?;
+            let old = self.pending.pop_front()?;
             self.server.release(old.id);
             return None;
         };
@@ -1324,7 +1405,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// its way to the panel, and the frames before the one the panel shows
     /// now go back to the player.
     pub fn committed(&mut self, planes: &[VideoPlane], index: usize) {
-        let Some(pending) = self.pending.take() else { return };
+        let Some(pending) = self.pending.pop_front() else { return };
         trace::event('c', pending.id, 0);
         planes[index].staged(pending.info.colour);
         if !self.on || self.picture.map(|(picture, _)| picture) != Some(pending.dst) {
@@ -1344,7 +1425,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
 
     /// The commit carrying the waiting frame was refused: it goes back.
     pub fn refused_commit(&mut self, error: &str) {
-        if let Some(pending) = self.pending.take() {
+        if let Some(pending) = self.pending.pop_front() {
             if !self.refused {
                 eprintln!("mediabox-tv.video the frame's commit was refused: {error}");
                 self.refused = true;
@@ -1361,7 +1442,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
             self.subtitle_changes += 1;
         }
         self.arrived = None;
-        if let Some(pending) = self.pending.take() {
+        while let Some(pending) = self.pending.pop_front() {
             self.server.release(pending.id);
         }
         if let Some(index) = self.chosen

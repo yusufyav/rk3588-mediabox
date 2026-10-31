@@ -730,6 +730,7 @@ impl SplitDisplay {
             }) {
                 crate::video::trace::event('F', 1, 0);
                 crate::video::trace::vblank(flip.frame, flip.duration);
+                self.sink.borrow_mut().vblank(flip.duration.as_nanos() as u64, self.frame_period().as_nanos() as u64);
                 let old = {
                     let mut state = self.presentation.borrow_mut();
                     state.waiting_for_flip = false;
@@ -1082,6 +1083,7 @@ impl SplitDisplay {
         };
         crate::video::trace::event('F', 0, 0);
         crate::video::trace::vblank(flip.frame, flip.duration);
+        self.sink.borrow_mut().vblank(flip.duration.as_nanos() as u64, self.frame_period().as_nanos() as u64);
         let old = {
             let mut state = self.presentation.borrow_mut();
             state.waiting_for_flip = false;
@@ -2807,6 +2809,8 @@ impl Platform for SplitPlatform {
                     .unwrap_or(Duration::from_millis(250))
                     .min(Duration::from_millis(250))
                     .min(repeat.unwrap_or(Duration::MAX))
+                    // A film frame waiting for its vblank.
+                    .min(self.window.display.sink.borrow().until_due().unwrap_or(Duration::MAX))
                     .as_millis() as i32
             };
             // The third is the player's socket. Its descriptor is the door
@@ -2862,7 +2866,8 @@ impl Platform for SplitPlatform {
             if pollfds[3].revents & libc::POLLIN != 0 {
                 self.window.display.flip_done(self.window.redraw.get());
             }
-            if pollfds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            // Woken for the socket, or for a waiting film frame's vblank.
+            if pollfds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 || self.window.display.sink.borrow().has_pending() {
                 self.window.display.pump_video();
             }
         }

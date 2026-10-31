@@ -266,7 +266,14 @@ impl Engine {
             .drop(false)
             .enable_last_sample(false)
             .wait_on_eos(false)
-            .qos(true)
+            // No QoS upstream: a frame a few ms past its sink time is still
+            // in time for the panel, which shows it at the vblank at or after
+            // its due time (plane.rs, as MediaCodec.releaseOutputBuffer with
+            // a render timestamp). With QoS on, GstVideoDecoder threw away the
+            // frame after every key frame's decode -- "Dropping frame due to
+            // QoS", 3-17 ms past its deadline, once a second on TRT HABER HD
+            // (measured 2026-10-31): a picture missing from the panel each time.
+            .qos(false)
             .build();
         video_sink.set_async(false);
         video_sink.set_max_lateness(i64::from(options.max_lateness_ms) * 1_000_000);
@@ -436,6 +443,7 @@ impl Engine {
         // each channel with a burst from its last access point -- a PTS can
         // map a few milliseconds earlier than the one before it.
         let mut last: Option<(u64, u64)> = None;
+        let mut latency: Option<(u64, u64)> = None;
         let engine = Arc::downgrade(self);
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
@@ -491,11 +499,26 @@ impl Engine {
                         trace.event('X', 0, pts / 1000);
                         return Ok(gst::FlowSuccess::Ok);
                     };
+                    // When it is due on the panel, on the clock's own time
+                    // (CLOCK_MONOTONIC): from its PTS, not from when this
+                    // thread woke, so frames due 20 ms apart are 20 ms apart.
+                    let mut due = 0;
                     if let (Some(clock), Some(base)) = (sink.clock(), sink.base_time()) {
                         let now = clock.time().saturating_sub(base).nseconds() as i64;
                         shared.video_lag_ns.store(now - pts as i64, Ordering::Relaxed);
+                        // The latency the sinks wait by, asked once a channel.
+                        if latency.is_none_or(|(asked_in, _)| asked_in != generation) {
+                            // The pipeline's: the one every sink was given.
+                            let mut query = gst::query::Latency::new();
+                            let ns = match sink.parent().and_then(|parent| parent.downcast::<gst::Element>().ok()) {
+                                Some(pipeline) if pipeline.query(&mut query) => query.result().1.nseconds(),
+                                _ => 0,
+                            };
+                            latency = Some((generation, ns));
+                        }
+                        due = base.nseconds() + pts + latency.map_or(0, |(_, ns)| ns);
                     }
-                    match plane.send(&picture, sample.clone(), pts) {
+                    match plane.send(&picture, sample.clone(), pts, due) {
                         Sent::Shown => {
                             shared.frames.fetch_add(1, Ordering::Relaxed);
                             if !shared.playing.swap(true, Ordering::SeqCst) {

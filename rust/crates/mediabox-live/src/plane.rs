@@ -10,9 +10,18 @@
 //! ```text
 //!  0 magic 'MBV1'  16 fourcc   32 pitches[4]  64 modifier     80 display width
 //!  4 kind          20 width    48 offsets[4]  72 descriptors  84 display height
-//!  8 id            24 height                  76 flags
+//!  8 id            24 height                  76 flags         88 due (frames)
 //!                  28 planes
 //! ```
+//!
+//! A frame message carries 8 bytes more than the others: when it is due on
+//! the panel, CLOCK_MONOTONIC nanoseconds -- the clock of the kernel's
+//! vblank timestamps. It is sent two refreshes ahead of that, and the
+//! interface puts it up at the vblank nearest it, as Android's SurfaceView
+//! does with `MediaCodec.releaseOutputBuffer(index, renderTimestampNs)`:
+//! "for best performance and quality, call this method when you are about
+//! two VSYNCs' time before the desired render time". A reader of the 88
+//! bytes alone (SOCK_SEQPACKET truncates) shows it as it comes, as before.
 //!
 //! What this side owes the wire is the same as vo_mediabox's: a frame is kept
 //! -- here, its `gst::Sample`, which is what holds MPP's buffer out of the
@@ -33,13 +42,14 @@ const STOP: u32 = 1;
 const RELEASE: u32 = 2;
 const HDR: u32 = 3;
 const MESSAGE: usize = 88;
+const TIMED: usize = MESSAGE + 8;
 const REPLY: usize = 16;
 const MAX_FDS: usize = 4;
 
 /// Frames with the interface at once: vo_mediabox's MBV_IN_FLIGHT, for the
 /// same reason (two committed, one waiting for the vblank, one release on the
 /// wire), and each one of MPP's fixed pool.
-pub const IN_FLIGHT: usize = 4;
+pub const IN_FLIGHT: usize = 6;
 /// Two fields at 50 Hz.
 const FULL_WAIT: Duration = Duration::from_millis(40);
 const STOP_WAIT: Duration = Duration::from_millis(500);
@@ -164,7 +174,7 @@ impl Plane {
     /// Put `picture` on the plane, keeping `sample` until the interface gives
     /// it back. Called when the frame is due: the interface shows it at its
     /// next vertical blank.
-    pub fn send(&self, picture: &Picture, sample: gst::Sample, pts_ns: u64) -> Sent {
+    pub fn send(&self, picture: &Picture, sample: gst::Sample, pts_ns: u64, due_ns: u64) -> Sent {
         let mut state = self.lock();
         if state.gone || state.closed {
             return Sent::Gone;
@@ -188,7 +198,7 @@ impl Plane {
             return Sent::Dropped;
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let mut message = [0u8; MESSAGE];
+        let mut message = [0u8; TIMED];
         put32(&mut message, 0, MAGIC);
         put32(&mut message, 4, FRAME);
         message[8..16].copy_from_slice(&id.to_le_bytes());
@@ -205,6 +215,7 @@ impl Plane {
         put32(&mut message, 76, picture.colour);
         put32(&mut message, 80, picture.display.0);
         put32(&mut message, 84, picture.display.1);
+        message[MESSAGE..TIMED].copy_from_slice(&due_ns.to_le_bytes());
         if let Err(error) = self.send_message(&message, &picture.fds[..picture.planes]) {
             eprintln!("mediabox-live: kare gönderilemedi: {error}");
             state.gone = true;
@@ -266,9 +277,9 @@ impl Plane {
         }
     }
 
-    fn send_message(&self, message: &[u8; MESSAGE], fds: &[RawFd]) -> std::io::Result<()> {
+    fn send_message(&self, message: &[u8], fds: &[RawFd]) -> std::io::Result<()> {
         let fds = &fds[..fds.len().min(MAX_FDS)];
-        let mut iov = libc::iovec { iov_base: message.as_ptr() as *mut libc::c_void, iov_len: MESSAGE };
+        let mut iov = libc::iovec { iov_base: message.as_ptr() as *mut libc::c_void, iov_len: message.len() };
         // CMSG_SPACE(4 * sizeof(int)) with room to spare, aligned for cmsghdr.
         let mut control = [0u64; 8];
         // SAFETY: zeroed msghdr, pointers into live stack buffers; the control
@@ -300,7 +311,7 @@ impl Plane {
     }
 }
 
-fn put32(message: &mut [u8; MESSAGE], at: usize, value: u32) {
+fn put32(message: &mut [u8], at: usize, value: u32) {
     message[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 

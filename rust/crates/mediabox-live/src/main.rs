@@ -9,7 +9,7 @@
 //! Environment, beyond the launcher's own:
 //!   MEDIABOX_LIVE_VIDEO_DECODER    the decoder element (default mppvideodec)
 //!   MEDIABOX_LIVE_DEMUX_LATENCY_MS tsdemux latency (default 700)
-//!   MEDIABOX_LIVE_RENDER_DELAY_MS  sink wake-up to scan-out (default 0)
+//!   MEDIABOX_LIVE_RENDER_DELAY_MS  how far ahead of its time a frame is sent (default 40: two refreshes at 50 Hz)
 //!   MEDIABOX_LIVE_MAX_LATENESS_MS  later than this, a frame is not sent (20)
 //!   MEDIABOX_LIVE_AUDIO_DEVICE     an ALSA PCM instead of the sound plan's
 //!   MEDIABOX_LIVE_PROGRAM          one service of a whole multiplex (a recording)
@@ -148,7 +148,7 @@ fn main() {
         video_decoder: std::env::var("MEDIABOX_LIVE_VIDEO_DECODER").unwrap_or_else(|_| "mppvideodec".into()),
         audio,
         demux_latency_ms: env_u32("MEDIABOX_LIVE_DEMUX_LATENCY_MS", 700),
-        render_delay_ms: env_u32("MEDIABOX_LIVE_RENDER_DELAY_MS", 0),
+        render_delay_ms: env_u32("MEDIABOX_LIVE_RENDER_DELAY_MS", 40),
         max_lateness_ms: env_u32("MEDIABOX_LIVE_MAX_LATENESS_MS", 20),
     };
     let fail = {
