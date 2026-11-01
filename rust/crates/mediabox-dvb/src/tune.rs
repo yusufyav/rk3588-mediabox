@@ -457,14 +457,34 @@ fn lock_carrier(
         bridge.log.line(format!("CARRIER {rf_khz} kHz SR {} kS/s -> {carrier:?}", params.symbol_rate_ksps));
         res.carrier = Some(carrier);
         res.search_offset_khz = Some(offset_khz);
-        with_repeater(bridge, demod, |bridge| rda5815m::lock(bridge, carrier.tuner_rf_hz, carrier.lpf_hz))?;
-        checkpoint(bridge, demod, res, "C3 tuner locked to carrier, before ACQUIRE")?;
+        let asked = std::time::Instant::now();
+        mediabox_core::timeline!(
+            "tune",
+            "rf_khz={rf_khz} sr={} attempt={attempt}",
+            params.symbol_rate_ksps
+        );
+        with_repeater(bridge, demod, |bridge| {
+            rda5815m::lock(bridge, carrier.tuner_rf_hz, carrier.lpf_hz)
+        })?;
+        checkpoint(
+            bridge,
+            demod,
+            res,
+            "C3 tuner locked to carrier, before ACQUIRE",
+        )?;
         demod.clear_stream_state(bridge)?;
         if !demod.lock_tp(bridge, params.symbol_rate_ksps * 1000, carrier.carrier_offset_hz)? {
             res.stopped = Some("ACQUIRE command failed".into());
             return Ok(());
         }
         acquire(bridge, demod, params, stop, superseded, res)?;
+        mediabox_core::timeline!(
+            "lock",
+            "ok={} superseded={} ms={}",
+            u8::from(res.fec_locked()),
+            u8::from(res.superseded),
+            asked.elapsed().as_millis()
+        );
         if res.fec_locked() || res.stopped.is_some() || res.superseded {
             break;
         }

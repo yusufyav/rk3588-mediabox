@@ -466,13 +466,24 @@ impl LiveManager {
         matches!(self.receiver_state().as_deref(), Some("streaming" | "standby" | "no_signal" | "tuning"))
     }
 
-    fn select(&self, want: Value) -> Result<(), String> {
+    /// Write `select.json`. `rid`: the viewer's request it is for, on the
+    /// timeline; none for the receiver's own housekeeping (a scan, TKGS).
+    fn select(&self, rid: Option<u64>, want: Value) -> Result<(), String> {
         let token = self.lock().token.clone().ok_or("uydu alıcısı çalışmıyor")?;
         let path = self.paths.run_dir.join("select.json");
         let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, json!({"token": token, "want": want}).to_string())
-            .and_then(|()| std::fs::rename(&temporary, &path))
-            .map_err(|error| format!("alıcıya istek yazılamadı: {error}"))
+        mediabox_core::timeline!(
+            "select",
+            "rid={} want={}",
+            rid.unwrap_or(0),
+            want.to_string().replace(' ', "")
+        );
+        std::fs::write(
+            &temporary,
+            json!({"token": token, "rid": rid, "want": want}).to_string(),
+        )
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|error| format!("alıcıya istek yazılamadı: {error}"))
     }
 
     /// Wait until the receiver says `done`, or has ended; given up as soon
@@ -514,6 +525,7 @@ impl LiveManager {
     /// only hold the newer one back.
     pub async fn switch(
         &self,
+        rid: u64,
         service_id: u16,
         source: &LiveSource,
         new_fifo: bool,
@@ -530,7 +542,7 @@ impl LiveManager {
             inner.fifos += 1;
             format!("live-{}.ts", inner.fifos)
         });
-        self.select(json!({
+        self.select(Some(rid), json!({
             "kind": "play",
             "service_id": service_id,
             "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation},
@@ -553,6 +565,7 @@ impl LiveManager {
             called_off,
         )
         .await?;
+        mediabox_core::timeline!("switch-done", "rid={rid} sid={service_id}");
         let mut inner = self.lock();
         inner.service_id = Some(service_id);
         inner.source = Some(source.clone());
@@ -572,7 +585,7 @@ impl LiveManager {
             }
             (inner.token.clone().unwrap_or_default(), inner.lifecycle == Lifecycle::Playing, inner.service_id, inner.source.clone())
         };
-        self.select(json!({
+        self.select(None, json!({
             "kind": "tkgs",
             "transponder": {"frequency_khz": 12_380_000u32, "symbol_rate_ksps": 27_500u32, "polarisation": "vertical"},
         }))?;
@@ -609,7 +622,7 @@ impl LiveManager {
         if was_playing
             && let (Some(service_id), Some(LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation })) = (service_id, source)
         {
-            let _ = self.select(json!({
+            let _ = self.select(None, json!({
                 "kind": "play", "service_id": service_id,
                 "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation}, "new_fifo": null,
             }));
@@ -1701,7 +1714,7 @@ impl LiveManager {
             self.lock().probe = Some((restore, source.clone()));
         }
         if on.as_ref() != Some(&source) {
-            self.select(json!({
+            self.select(None, json!({
                 "kind": "scan",
                 "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation},
             }))?;
@@ -1785,12 +1798,12 @@ impl LiveManager {
         if restore.started {
             self.stop().await;
         } else if let Some((Some(service_id), Some(LiveSource::Satellite { frequency_khz, symbol_rate_ksps, polarisation }))) = restore.playing {
-            let _ = self.select(json!({
+            let _ = self.select(None, json!({
                 "kind": "play", "service_id": service_id,
                 "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation}, "new_fifo": null,
             }));
         } else {
-            let _ = self.select(json!({"kind": "standby"}));
+            let _ = self.select(None, json!({"kind": "standby"}));
         }
     }
 
@@ -1801,7 +1814,7 @@ impl LiveManager {
         };
         // Only what this scan's multiplex says counts.
         let _ = std::fs::remove_file(self.paths.guide());
-        self.select(json!({
+        self.select(None, json!({
             "kind": "scan",
             "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation},
         }))?;
@@ -2037,6 +2050,54 @@ mod tests {
         assert!(recording.ends_with("--recording /var/lib/mediabox-dvb/recording.ts --pace"));
         assert!(!recording.contains("--hardware"), "a recording never opens the receiver");
         assert!(!recording.contains("--polarisation"));
+    }
+
+    fn select_rid(dir: &std::path::Path) -> Option<u64> {
+        let text = std::fs::read_to_string(dir.join("select.json")).ok()?;
+        serde_json::from_str::<Value>(&text)
+            .ok()?
+            .get("rid")?
+            .as_u64()
+    }
+
+    /// Two channel requests one over the other: each selection carries its
+    /// own request, and the one given up never takes the newer one's.
+    #[tokio::test]
+    async fn overlapping_switches_each_carry_their_own_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        live.lock().token = Some("1-9".into());
+        let source = LiveSource::Satellite {
+            frequency_khz: 12_226_000,
+            symbol_rate_ksps: 27_500,
+            polarisation: SatellitePolarisation::Vertical,
+        };
+        let superseded = std::sync::atomic::AtomicBool::new(false);
+        let first = live.switch(11, 10801, &source, false, || {
+            superseded.load(Ordering::SeqCst)
+        });
+        let second = async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(
+                select_rid(dir.path()),
+                Some(11),
+                "the first request's selection"
+            );
+            std::fs::write(
+                dir.path().join("status.json"),
+                r#"{"token":"1-9","state":"streaming","service_id":10802}"#,
+            )
+            .unwrap();
+            superseded.store(true, Ordering::SeqCst);
+            live.switch(12, 10802, &source, false, || false).await
+        };
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap_err(), CALLED_OFF);
+        assert!(second.is_ok());
+        assert_eq!(select_rid(dir.path()), Some(12));
+        // Housekeeping carries no request.
+        live.select(None, json!({"kind": "standby"})).unwrap();
+        assert_eq!(select_rid(dir.path()), None);
     }
 
     #[test]

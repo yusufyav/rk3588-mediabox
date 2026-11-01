@@ -1081,10 +1081,19 @@ impl AppState {
         if let Err(error) = source.validate() {
             return Response::failure("INVALID_REQUEST", error);
         }
+        // This request on the timeline: every process's events after it,
+        // up to the next one, are its opening.
+        let rid = mediabox_core::timeline::now_ns();
+        mediabox_core::timeline!("request", "rid={rid} sid={service_id}");
         let starting = self.playback.begin_start();
         let _change = self.live_change.lock().await;
+        mediabox_core::timeline!(
+            "request-locked",
+            "rid={rid} reuse={}",
+            u8::from(self.live.can_reuse(&source))
+        );
         if starting.called_off() {
-            return called_off();
+            return called_off_live(rid, "lock");
         }
         let here = crate::playback::PlayerKind::Here;
         // The channel already playing here, asked for again (a second press,
@@ -1118,21 +1127,49 @@ impl AppState {
             // "to change to the last requested channel quickly"); before,
             // this one held the lock until its picture was up, and every
             // channel pressed through was shown in turn.
-            match self.live.switch(service_id, &source, true, || starting.called_off()).await {
-                Err(error) if error == crate::live::CALLED_OFF => return called_off(),
+            match self
+                .live
+                .switch(rid, service_id, &source, true, || starting.called_off())
+                .await
+            {
+                Err(error) if error == crate::live::CALLED_OFF => {
+                    return called_off_live(rid, "switch");
+                }
                 Ok(()) => {
                     let fifo = self.live.fifo().display().to_string();
                     let title = title.clone().filter(|title| !title.trim().is_empty());
-                    match self.player.reload_live(&fifo, service_id, title).await {
+                    mediabox_core::timeline!("loadfile", "rid={rid} path={fifo}");
+                    let loaded = self.player.reload_live(&fifo, service_id, title).await;
+                    mediabox_core::timeline!(
+                        "loadfile-done",
+                        "rid={rid} ok={}",
+                        u8::from(loaded.is_ok())
+                    );
+                    match loaded {
                         Ok(()) => {
                             self.playback.relabel_live(film, service_id);
                             // The display follows a channel whose rate is not
                             // the last one's; the same rate sends nothing. In
                             // the background: a newer channel is not held
                             // behind the television re-locking.
-                            if let Some(cadence) = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps) {
-                                let (player, output, film) = (Arc::clone(&self.player), Arc::clone(&self.output), self.player.film());
-                                tokio::spawn(async move { rematch_live(&player, &output, film, cadence).await });
+                            if let Some(cadence) = self
+                                .live
+                                .output_rate()
+                                .and_then(mediabox_core::Cadence::from_fps)
+                            {
+                                let (player, output, film) = (
+                                    Arc::clone(&self.player),
+                                    Arc::clone(&self.output),
+                                    self.player.film(),
+                                );
+                                mediabox_core::timeline!(
+                                    "rematch",
+                                    "rid={rid} cadence={}",
+                                    format!("{cadence:?}").replace(' ', "")
+                                );
+                                tokio::spawn(async move {
+                                    rematch_live(&player, &output, film, cadence).await
+                                });
                             }
                             self.live.playing();
                             return Response::success(json!({
@@ -1166,8 +1203,14 @@ impl AppState {
             // receiver no longer writes (measured 2026-10-24: the interface
             // restarted, the receiver with it, and the player was started on
             // live-83.ts while the receiver wrote live.ts -- no picture).
-            match self.live.switch(service_id, &source, true, || starting.called_off()).await {
-                Err(error) if error == crate::live::CALLED_OFF => return called_off(),
+            match self
+                .live
+                .switch(rid, service_id, &source, true, || starting.called_off())
+                .await
+            {
+                Err(error) if error == crate::live::CALLED_OFF => {
+                    return called_off_live(rid, "handover-switch");
+                }
                 Ok(()) => true,
                 Err(error) => {
                     eprintln!("mediaboxd-rs: live channel change without a restart failed ({error}); starting the receiver again");
@@ -1183,13 +1226,15 @@ impl AppState {
             // receiver on another service, whose cleanup is waited for.
             self.stop_here(crate::playback::Intent::Replace).await;
             self.stop_film_sessions().await;
+            mediabox_core::timeline!("receiver-start", "rid={rid}");
             if let Err(error) = self.live.start(service_id, &source).await {
                 return Response::failure("LIVE_FAILED", error);
             }
+            mediabox_core::timeline!("receiver-up", "rid={rid}");
         }
         if starting.called_off() {
             self.live.stop().await;
-            return called_off();
+            return called_off_live(rid, "receiver-start");
         }
         let playing = Playing {
             content: crate::player::Playback::Live { service_id },
@@ -1232,6 +1277,11 @@ impl AppState {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
+        mediabox_core::timeline!(
+            "mode-match",
+            "rid={rid} cadence={}",
+            format!("{cadence:?}").replace(' ', "")
+        );
         if let Some(cadence) = cadence {
             match self.output.content_start(film_next, cadence) {
                 Ok(chosen) if !chosen.applied => {
@@ -1248,17 +1298,27 @@ impl AppState {
         }
         if starting.called_off() {
             self.live.stop().await;
-            return called_off();
+            return called_off_live(rid, "mode-match");
         }
         let fifo = self.live.fifo().display().to_string();
-        if let Err(error) = self.player.start(&fifo, 0, playing, self.output.display_sync(), None).await {
+        mediabox_core::timeline!("player-start", "rid={rid} path={fifo}");
+        let started = self
+            .player
+            .start(&fifo, 0, playing, self.output.display_sync(), None)
+            .await;
+        mediabox_core::timeline!(
+            "player-started",
+            "rid={rid} ok={}",
+            u8::from(started.is_ok())
+        );
+        if let Err(error) = started {
             self.live.stop().await;
             return Response::failure("PLAYER_FAILED", error);
         }
         if starting.called_off() {
             self.player.stop().await;
             self.live.stop().await;
-            return called_off();
+            return called_off_live(rid, "player-start");
         }
         let film = self.playback.begin(crate::playback::Start {
             player: crate::playback::PlayerKind::Here,
@@ -2869,6 +2929,12 @@ async fn follow_live(
 /// and the sound stayed off. Once the mode is on and the television has
 /// locked to it, the player opens its sound device again (`ao-reload`); the
 /// picture is not touched.
+/// A live request given up for a newer one, on the timeline.
+fn called_off_live(rid: u64, at: &str) -> Response {
+    mediabox_core::timeline!("cancel", "rid={rid} at={at}");
+    called_off()
+}
+
 pub(crate) async fn rematch_live(
     player: &PlayerManager,
     output: &crate::output::Output,
@@ -2876,7 +2942,13 @@ pub(crate) async fn rematch_live(
     cadence: mediabox_core::Cadence,
 ) {
     use std::time::Duration;
-    match output.content_start(film, cadence) {
+    let applied = output.content_start(film, cadence);
+    mediabox_core::timeline!(
+        "rematch-start",
+        "film={film} already={}",
+        u8::from(matches!(&applied, Ok(chosen) if chosen.applied))
+    );
+    match applied {
         Ok(chosen) if chosen.applied => return,
         Ok(_) => {}
         Err(why) => {
@@ -2890,7 +2962,13 @@ pub(crate) async fn rematch_live(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    mediabox_core::timeline!(
+        "rematch-applied",
+        "film={film} ok={}",
+        u8::from(output.content_applied(film))
+    );
     tokio::time::sleep(Duration::from_millis(1500)).await;
+    mediabox_core::timeline!("ao-reload", "film={film}");
     if player.film() == film && !player.command(json!(["ao-reload"])).await {
         eprintln!("mediaboxd-rs: film {film}: the player did not open its sound again after the mode change");
     }

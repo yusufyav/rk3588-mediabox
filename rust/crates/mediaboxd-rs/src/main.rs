@@ -73,6 +73,7 @@ enum ModeArg {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    mediabox_core::timeline::init("ctl");
     let args = Args::parse();
     if let Some(address) = args.http
         && !address.ip().is_loopback()

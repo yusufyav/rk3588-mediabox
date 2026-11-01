@@ -10,7 +10,7 @@
 //!   MEDIABOX_LIVE_VIDEO_DECODER    the decoder element (default mppvideodec)
 //!   MEDIABOX_LIVE_DEMUX_LATENCY_MS tsdemux latency (default 700)
 //!   MEDIABOX_LIVE_RENDER_DELAY_MS  how far ahead of its time a frame is sent (default 40: two refreshes at 50 Hz)
-//!   MEDIABOX_LIVE_MAX_LATENESS_MS  later than this, a frame is not sent (20)
+//!   MEDIABOX_LIVE_MAX_LATENESS_MS  later than this, the sink drops a frame (default: never; the panel decides)
 //!   MEDIABOX_LIVE_AUDIO_DEVICE     an ALSA PCM instead of the sound plan's
 //!   MEDIABOX_LIVE_PROGRAM          one service of a whole multiplex (a recording)
 //!   MEDIABOX_VO_TRACE              the frame trace, vo_mediabox's format
@@ -18,6 +18,7 @@
 mod engine;
 mod ipc;
 mod plane;
+mod stamp;
 mod trace;
 
 use std::sync::atomic::Ordering;
@@ -95,6 +96,7 @@ fn block_signals() -> libc::sigset_t {
 
 fn main() {
     let signals = block_signals();
+    mediabox_core::timeline::init("live");
     let Some(url) = std::env::args().nth(1) else {
         eprintln!("kullanım: mediabox-live <FIFO>");
         std::process::exit(2);
@@ -149,7 +151,7 @@ fn main() {
         audio,
         demux_latency_ms: env_u32("MEDIABOX_LIVE_DEMUX_LATENCY_MS", 700),
         render_delay_ms: env_u32("MEDIABOX_LIVE_RENDER_DELAY_MS", 40),
-        max_lateness_ms: env_u32("MEDIABOX_LIVE_MAX_LATENESS_MS", 20),
+        max_lateness_ms: std::env::var("MEDIABOX_LIVE_MAX_LATENESS_MS").ok().and_then(|value| value.parse().ok()),
     };
     let fail = {
         let commands = commands.clone();
@@ -276,7 +278,15 @@ fn main() {
                     let name = warning.src().map(|source| source.path_string().to_string()).unwrap_or_default();
                     eprintln!("mediabox-live: uyarı ({name}): {}", warning.error());
                 }
-                MessageView::Latency(_) => engine.recalculate_latency(),
+                MessageView::Latency(_) => {
+                    engine.recalculate_latency();
+                    mediabox_core::timeline!(
+                        "latency",
+                        "gen={} s={:?}",
+                        shared.generation.load(Ordering::SeqCst),
+                        engine.latency()
+                    );
+                }
                 MessageView::Qos(qos) => {
                     let (_processed, dropped) = qos.stats();
                     if qos.src().is_some_and(|source| source.name() == "video") {
@@ -307,6 +317,7 @@ fn main() {
             report = Instant::now();
             eprintln!("mediabox-live: {}", stats(&engine, &shared, &plane));
             trace.flush();
+            mediabox_core::timeline::flush();
         }
     }
 
@@ -315,6 +326,7 @@ fn main() {
     plane.close();
     plane.stop();
     trace.flush();
+    mediabox_core::timeline::flush();
     clients.event(match &failure {
         Some(why) => json!({"event": "end-file", "reason": "error", "file_error": why}),
         None => json!({"event": "end-file", "reason": "quit"}),

@@ -706,6 +706,9 @@ const KIND_STOP: u32 = 1;
 const KIND_RELEASE: u32 = 2;
 const KIND_HDR: u32 = 3;
 const KIND_SUBTITLE: u32 = 4;
+/// A frame with when it is due: `MESSAGE` bytes as `KIND_FRAME`, then the
+/// due time, 8 bytes, in the same `sendmsg` (mediabox-live).
+const KIND_FRAME_TIMED: u32 = 5;
 
 /// One fixed-size message per `sendmsg`, so a frame and its descriptors can
 /// never be split across reads:
@@ -718,8 +721,17 @@ const KIND_SUBTITLE: u32 = 4;
 ///                                                     84  display height
 /// ```
 const MESSAGE: usize = 88;
-/// A frame message may carry 8 bytes more: when it is due on the panel,
-/// CLOCK_MONOTONIC nanoseconds (mediabox-live; vo_mediabox sends none).
+/// A `KIND_FRAME_TIMED` message carries 8 bytes more: when it is due on the
+/// panel, CLOCK_MONOTONIC nanoseconds (mediabox-live; vo_mediabox sends
+/// none).
+///
+/// The socket is a stream: reads do not keep messages apart. Every message
+/// is read `MESSAGE` bytes at a time and the 8 more only when its kind says
+/// they are there. Read 96 at a time, an 88-byte HDR message followed by a
+/// 96-byte frame came as one read of the HDR and the frame's first 8 bytes,
+/// and the frame's other 88 were thrown away as no message: the first frame
+/// of a channel never shown and never given back, and the player waiting
+/// 500 ms for it at the next channel (measured 2026-10-31, NTV HD).
 const TIMED: usize = MESSAGE + 8;
 const REPLY: usize = 16;
 const MAX_FDS: usize = 4;
@@ -880,7 +892,7 @@ fn monotonic_ns() -> u64 {
 fn recv_message(fd: RawFd, bytes: &mut [u8; TIMED]) -> io::Result<Option<(usize, Vec<OwnedFd>)>> {
     let mut iov = libc::iovec {
         iov_base: bytes.as_mut_ptr().cast(),
-        iov_len: TIMED,
+        iov_len: MESSAGE,
     };
     let space = unsafe { libc::CMSG_SPACE((MAX_FDS * size_of::<RawFd>()) as u32) } as usize;
     let mut control = vec![0u8; space];
@@ -918,7 +930,15 @@ fn recv_message(fd: RawFd, bytes: &mut [u8; TIMED]) -> io::Result<Option<(usize,
             cmsg = libc::CMSG_NXTHDR(&header, cmsg);
         }
     }
-    Ok(Some((read as usize, fds)))
+    let mut read = read as usize;
+    // The due time of a timed frame: in the same `sendmsg`, so here already.
+    if read == MESSAGE && u32_at(bytes[..MESSAGE].try_into().expect("MESSAGE"), 4) == KIND_FRAME_TIMED {
+        let more = unsafe { libc::recv(fd, bytes[MESSAGE..].as_mut_ptr().cast(), TIMED - MESSAGE, libc::MSG_DONTWAIT) };
+        if more > 0 {
+            read += more as usize;
+        }
+    }
+    Ok(Some((read, fds)))
 }
 
 /// The socket the player draws through.
@@ -926,6 +946,30 @@ pub struct Server {
     listener: UnixListener,
     path: PathBuf,
     client: Option<UnixStream>,
+    /// The connected player's process id (SO_PEERCRED), for the timeline:
+    /// a frame's id is the player's own, unique with the player's process.
+    peer: u32,
+}
+
+/// The process at the other end of a Unix socket.
+fn peer_pid(stream: &UnixStream) -> u32 {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: a connected socket and a ucred on the stack with its length.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc == 0 { cred.pid as u32 } else { 0 }
 }
 
 impl Server {
@@ -946,7 +990,13 @@ impl Server {
             listener,
             path,
             client: None,
+            peer: 0,
         })
+    }
+
+    /// The connected player's process id; 0 with none.
+    pub fn peer(&self) -> u32 {
+        self.peer
     }
 
     /// The descriptor to wait on: whoever is connected, or the door.
@@ -969,6 +1019,8 @@ impl Server {
                 Ok((stream, _)) => {
                     let _ = stream.set_nonblocking(true);
                     eprintln!("mediabox-tv.video player connected");
+                    self.peer = peer_pid(&stream);
+                    mediabox_core::timeline!("client", "pid={}", self.peer);
                     self.client = Some(stream);
                 }
                 Err(error) if error.kind() != io::ErrorKind::WouldBlock => {
@@ -1003,9 +1055,11 @@ impl Server {
                 }
                 Ok(Some((read, fds))) => {
                     let bytes: [u8; MESSAGE] = wire[..MESSAGE].try_into().expect("TIMED is longer");
-                    let due_ns = (read == TIMED).then(|| u64::from_le_bytes(wire[MESSAGE..].try_into().expect("8 bytes")));
-                    if (read != MESSAGE && read != TIMED) || u32_at(&bytes, 0) != MAGIC {
+                    let timed = u32_at(&bytes, 4) == KIND_FRAME_TIMED;
+                    let due_ns = (timed && read == TIMED).then(|| u64::from_le_bytes(wire[MESSAGE..].try_into().expect("8 bytes")));
+                    if read != if timed { TIMED } else { MESSAGE } || u32_at(&bytes, 0) != MAGIC {
                         eprintln!("mediabox-tv.video ignoring a {read} byte message");
+                        mediabox_core::timeline!("wire-ignored", "bytes={read} kind={}", u32_at(&bytes, 4));
                         continue;
                     }
                     match u32_at(&bytes, 4) {
@@ -1028,7 +1082,7 @@ impl Server {
                                 max_fall: u16_at(&bytes, 34),
                             }));
                         }
-                        KIND_FRAME => {
+                        KIND_FRAME | KIND_FRAME_TIMED => {
                             let Ok(fourcc) = DrmFourcc::try_from(u32_at(&bytes, 16)) else {
                                 eprintln!(
                                     "mediabox-tv.video unknown format {:#x}",
@@ -1122,8 +1176,16 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// will be shown, and the other ones will be dropped").
     pending: VecDeque<Pending<D>>,
     /// The last vblank, CLOCK_MONOTONIC ns, and the refresh period: when the
-    /// next ones fall.
+    /// next ones fall. None until the kernel has said, and again after a
+    /// mode change: the grid of the mode before is not this one's.
     vblank: Option<(u64, u64)>,
+    /// The kernel will not say when its vblanks are (the vblank request was
+    /// refused): timed frames then go up as they come, as they always did.
+    no_vblank: bool,
+    /// Added to every due time of the film now playing, fixed at its first
+    /// timed frame (`snap_offset`): its frames fall on the vblanks, not
+    /// between two.
+    snap: Option<i64>,
     /// When the last frame arrived: whether the film is moving (`moving`).
     arrived: Option<std::time::Instant>,
     on: bool,
@@ -1149,6 +1211,8 @@ impl<D: ControlDevice + Clone> Sink<D> {
             shown: VecDeque::new(),
             pending: VecDeque::new(),
             vblank: None,
+            no_vblank: false,
+            snap: None,
             arrived: None,
             on: false,
             refused: false,
@@ -1182,6 +1246,11 @@ impl<D: ControlDevice + Clone> Sink<D> {
 
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// The connected player's process id, for the timeline.
+    pub fn peer(&self) -> u32 {
+        self.server.peer()
     }
 
     /// The picture subtitle to draw and where, with a number that changes
@@ -1273,12 +1342,26 @@ impl<D: ControlDevice + Clone> Sink<D> {
                     if due_ns.is_none() {
                         while let Some(old) = self.pending.pop_front() {
                             replaced = old.id;
+                            mediabox_core::timeline!(
+                                "unseen",
+                                "pid={} id={} why=untimed-replaced",
+                                self.server.peer(),
+                                old.id
+                            );
                             self.server.release(old.id);
                         }
                     }
+                    self.pending.push_back(Pending { id, due_ns, imported, info, dst, panel });
+                    self.settle_snap();
+                    mediabox_core::timeline!(
+                        "arrive",
+                        "pid={} id={id} due={} pending={}",
+                        self.server.peer(),
+                        due_ns.unwrap_or(0),
+                        self.pending.len()
+                    );
                     trace::event('A', id, replaced);
                     trace::event('D', id, due_ns.unwrap_or(0) / 1000);
-                    self.pending.push_back(Pending { id, due_ns, imported, info, dst, panel });
                     return;
                 }
                 Err(error) => last = error,
@@ -1305,39 +1388,128 @@ impl<D: ControlDevice + Clone> Sink<D> {
     pub fn vblank(&mut self, at_ns: u64, period_ns: u64) {
         if period_ns > 0 {
             self.vblank = Some((at_ns, period_ns));
+            self.no_vblank = false;
+            self.settle_snap();
         }
+    }
+
+    /// The film's phase against the vblanks, from its first timed frame
+    /// once the grid is known.
+    fn settle_snap(&mut self) {
+        if self.snap.is_some() {
+            return;
+        }
+        let (Some((last, period)), Some(due)) = (self.vblank, self.pending.iter().find_map(|frame| frame.due_ns)) else {
+            return;
+        };
+        let snap = snap_offset(due, last, period);
+        self.snap = Some(snap);
+        mediabox_core::timeline!("snap", "pid={} offset={snap} period={period}", self.server.peer());
+    }
+
+    /// The mode changed: the vblanks known so far are of the mode before.
+    /// Until the kernel reports one of the new mode, a timed frame waits.
+    pub fn forget_vblank(&mut self) {
+        self.vblank = None;
+        self.snap = None;
+        mediabox_core::timeline!("vblank-forget");
+    }
+
+    /// A timed frame waits for the vblank grid, and the kernel has to be
+    /// asked for it (`DRM_VBLANK_EVENT`).
+    pub fn wants_vblank(&self) -> bool {
+        self.vblank.is_none() && !self.no_vblank && self.pending.iter().any(|frame| frame.due_ns.is_some())
+    }
+
+    /// The kernel refused to report a vblank: frames go up as they come.
+    pub fn vblank_unavailable(&mut self) {
+        self.no_vblank = true;
     }
 
     /// The next vblank a commit made now still reaches, and the period.
     fn next_vblank(&self) -> Option<(u64, u64)> {
+        self.next_vblank_at(monotonic_ns())
+    }
+
+    fn next_vblank_at(&self, now: u64) -> Option<(u64, u64)> {
         let (last, period) = self.vblank?;
-        // A commit wants a moment before its vblank.
-        let from = monotonic_ns() + 2_000_000;
-        let ahead = from.saturating_sub(last).div_ceil(period).max(1);
-        Some((last + ahead * period, period))
+        Some((next_vblank_after(now, last, period), period))
     }
 
-    /// Which waiting frame goes up at the next vblank: the newest of those
-    /// due nearer it than the one after (ExoPlayer's VideoFrameReleaseHelper
-    /// puts a frame on the vsync closest to its time). A frame with no time,
-    /// or with no vblank known yet, is due at once.
+    /// Which waiting frame goes up at the next vblank (`due_index`); none
+    /// while a commit made now could still land on the vblank about to
+    /// come (`racing`).
     fn due_now(&self) -> Option<usize> {
-        let next = self.next_vblank();
-        self.pending.iter().rposition(|frame| match (frame.due_ns, next) {
-            (Some(due), Some((vblank, period))) => due <= vblank + period / 2,
-            _ => true,
-        })
+        self.due_at(monotonic_ns())
     }
 
-    /// How long until a waiting frame is due at a vblank, if one waits and
-    /// none is due yet: the event loop sleeps no longer than that.
-    pub fn until_due(&self) -> Option<std::time::Duration> {
-        if self.pending.is_empty() || self.due_now().is_some() {
+    /// `due_now` at `now`: one reading of the clock for every part of the
+    /// answer. Read again between them, a vblank passing in between gave
+    /// two answers at once -- not due (racing it) and then, the race over,
+    /// the frame's own vblank still to come -- and the loop slept through
+    /// the frame's commit (measured 2026-11-01: the first frame of two
+    /// openings in 40, the last look 5 and 12 us before the vblank).
+    fn due_at(&self, now: u64) -> Option<usize> {
+        if self.vblank.is_none() && self.no_vblank {
+            return self.pending.len().checked_sub(1);
+        }
+        if let Some((last, period)) = self.vblank
+            && racing(now, last, period).is_some()
+        {
             return None;
         }
-        let (vblank, _) = self.next_vblank()?;
+        let snap = self.snap.unwrap_or(0);
+        let dues: Vec<Option<u64>> =
+            self.pending.iter().map(|frame| frame.due_ns.map(|due| due.saturating_add_signed(snap))).collect();
+        due_index(&dues, self.next_vblank_at(now))
+    }
+
+    /// Before the first frame of a film is up, what decides it, on the
+    /// timeline (`first-wait`): the vblank grid, the snap, each waiting
+    /// frame's due time against the next vblank.
+    pub fn trace_first_wait(&self, flip_pending: bool, ui_shown: bool) {
+        if self.on || self.pending.is_empty() || !mediabox_core::timeline::enabled() {
+            return;
+        }
+        let now = monotonic_ns();
+        let racing = self.vblank.and_then(|(last, period)| racing(now, last, period));
+        let dues: Vec<String> = self
+            .pending
+            .iter()
+            .map(|frame| frame.due_ns.map_or("-".into(), |due| due.saturating_add_signed(self.snap.unwrap_or(0)).to_string()))
+            .collect();
+        mediabox_core::timeline!(
+            "first-wait",
+            "vblank={:?} snap={:?} next={:?} racing={:?} due_now={:?} dues={} flip_pending={flip_pending} ui={ui_shown} no_vblank={}",
+            self.vblank,
+            self.snap,
+            self.next_vblank(),
+            racing,
+            self.due_now(),
+            dues.join(","),
+            self.no_vblank
+        );
+    }
+
+    /// How long until a waiting frame is due at a vblank, if one waits --
+    /// zero when one is due now: the event loop sleeps no longer than that.
+    pub fn until_due(&self) -> Option<std::time::Duration> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let now = monotonic_ns();
+        if self.due_at(now).is_some() {
+            return Some(std::time::Duration::ZERO);
+        }
+        if let Some((last, period)) = self.vblank
+            && let Some(vblank) = racing(now, last, period)
+        {
+            // Right after the vblank about to come.
+            return Some(std::time::Duration::from_nanos(vblank.saturating_sub(now) + RACE_AFTER_NS));
+        }
+        let (vblank, _) = self.next_vblank_at(now)?;
         // Past the vblank that comes first, the next one is reachable.
-        Some(std::time::Duration::from_nanos(vblank.saturating_sub(monotonic_ns()) + 1_000_000))
+        Some(std::time::Duration::from_nanos(vblank.saturating_sub(now) + 1_000_000))
     }
 
     /// Adds the waiting frame, if there is one, to `request`, on the plane
@@ -1355,6 +1527,14 @@ impl<D: ControlDevice + Clone> Sink<D> {
         let due = self.due_now()?;
         for _ in 0..due {
             if let Some(old) = self.pending.pop_front() {
+                mediabox_core::timeline!(
+                    "unseen",
+                    "pid={} id={} why=same-vblank due={} vblank={}",
+                    self.server.peer(),
+                    old.id,
+                    old.due_ns.unwrap_or(0),
+                    self.next_vblank().map_or(0, |(vblank, _)| vblank)
+                );
                 trace::event('A', 0, old.id);
                 self.server.release(old.id);
             }
@@ -1404,8 +1584,10 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// The request `stage` added the waiting frame to was committed: it is on
     /// its way to the panel, and the frames before the one the panel shows
     /// now go back to the player.
-    pub fn committed(&mut self, planes: &[VideoPlane], index: usize) {
-        let Some(pending) = self.pending.pop_front() else { return };
+    /// Returns the frame's id.
+    pub fn committed(&mut self, planes: &[VideoPlane], index: usize) -> Option<u64> {
+        let pending = self.pending.pop_front()?;
+        let id = pending.id;
         trace::event('c', pending.id, 0);
         planes[index].staged(pending.info.colour);
         if !self.on || self.picture.map(|(picture, _)| picture) != Some(pending.dst) {
@@ -1421,11 +1603,18 @@ impl<D: ControlDevice + Clone> Sink<D> {
                 self.server.release(old);
             }
         }
+        Some(id)
     }
 
     /// The commit carrying the waiting frame was refused: it goes back.
     pub fn refused_commit(&mut self, error: &str) {
         if let Some(pending) = self.pending.pop_front() {
+            mediabox_core::timeline!(
+                "unseen",
+                "pid={} id={} why=commit-refused",
+                self.server.peer(),
+                pending.id
+            );
             if !self.refused {
                 eprintln!("mediabox-tv.video the frame's commit was refused: {error}");
                 self.refused = true;
@@ -1442,9 +1631,18 @@ impl<D: ControlDevice + Clone> Sink<D> {
             self.subtitle_changes += 1;
         }
         self.arrived = None;
+        // The next film (the next channel) has a phase of its own.
+        self.snap = None;
         while let Some(pending) = self.pending.pop_front() {
+            mediabox_core::timeline!(
+                "unseen",
+                "pid={} id={} why=stop",
+                self.server.peer(),
+                pending.id
+            );
             self.server.release(pending.id);
         }
+        mediabox_core::timeline!("plane-off", "frames={}", self.frames);
         if let Some(index) = self.chosen
             && let Some(plane) = planes.get(index)
         {
@@ -1462,6 +1660,69 @@ impl<D: ControlDevice + Clone> Sink<D> {
         self.on = false;
         self.frames = 0;
     }
+}
+
+/// A commit wants a moment before its vblank.
+const COMMIT_MARGIN_NS: u64 = 2_000_000;
+/// How long after a vblank a held commit goes: past it, for certain.
+const RACE_AFTER_NS: u64 = 500_000;
+
+/// What to add to a film's due times so that its first timed frame, due at
+/// `due`, is due on the vblank nearest it (on the grid of `last`): never
+/// more than half a period either way. A film's frames are 20 ms apart and
+/// the vblanks 20 ms apart, but its phase against them is wherever the
+/// stream put it -- measured, 9.5 ms from a vblank, half a period: then the
+/// panel's clock and the board's (19.998 ms against 20.000, measured) carry
+/// the due times across the midpoint within seconds, and a frame is shown
+/// twice. On the vblank, they have half a period to drift before that --
+/// minutes. ExoPlayer's VideoFrameReleaseHelper snaps release times to the
+/// vsync the same way.
+fn snap_offset(due: u64, last: u64, period: u64) -> i64 {
+    let from = i128::from(due) - i128::from(last);
+    let period = i128::from(period);
+    let nearest = (from + period / 2).div_euclid(period) * period;
+    (nearest - from) as i64
+}
+
+/// The vblank a commit made at `now` might or might not still catch: one
+/// less than `COMMIT_MARGIN_NS` away. The kernel takes a commit up to the
+/// vblank itself -- measured on the Plus (2026-10-31), commits 0.15 ms
+/// before a vblank landed on it -- so a frame chosen for the vblank after
+/// went up a period early, and when the frames' arrival drifted past the
+/// vblank by 40 us the same choice landed where it was meant to: one frame
+/// shown for two vblanks. In this window nothing is committed until the
+/// vblank has passed; then the vblank a commit lands on is the one it was
+/// chosen for.
+fn racing(now: u64, last: u64, period: u64) -> Option<u64> {
+    let previous = next_vblank_after(now, last, period) - period;
+    (previous > now).then_some(previous)
+}
+
+/// The next vblank a commit made at `now` still reaches, from the last one
+/// seen and the refresh period (all CLOCK_MONOTONIC ns): on the grid of the
+/// last, however many vblanks have gone by unseen since.
+fn next_vblank_after(now: u64, last: u64, period: u64) -> u64 {
+    let ahead = (now + COMMIT_MARGIN_NS)
+        .saturating_sub(last)
+        .div_ceil(period)
+        .max(1);
+    last + ahead * period
+}
+
+/// Of the frames waiting, oldest first, by when each is due: the one to put
+/// up at the next vblank -- the newest of those due nearer it than the one
+/// after (ExoPlayer's VideoFrameReleaseHelper puts a frame on the vsync
+/// closest to its time); the ones before it go back unseen. A frame with no
+/// time is due at once. A timed frame with no vblank known yet waits for
+/// one: put up at once it lands on whatever vblank comes, ahead of its time,
+/// and the next frame -- on the grid -- then leaves it up for two (measured
+/// on the first frame after a 60 -> 50 Hz change, 2026-10-31).
+fn due_index(dues: &[Option<u64>], next: Option<(u64, u64)>) -> Option<usize> {
+    dues.iter().rposition(|due| match (due, next) {
+        (Some(due), Some((vblank, period))) => *due <= vblank + period / 2,
+        (Some(_), None) => false,
+        (None, _) => true,
+    })
 }
 
 /// The largest rectangle of the decoder's aspect that fits in `into`.
@@ -1527,6 +1788,359 @@ mod tests {
     };
 
     /// The panel's own shape: the film fills it.
+    const MS: u64 = 1_000_000;
+    const P50: u64 = 20 * MS;
+    /// 1001/60 ms.
+    const P5994: u64 = 16_683_333;
+
+    #[test]
+    fn a_frame_due_exactly_half_way_goes_up_at_the_earlier_vblank() {
+        let next = Some((1_000 * MS, P50));
+        assert_eq!(due_index(&[Some(1_010 * MS)], next), Some(0));
+        assert_eq!(due_index(&[Some(1_010 * MS + 1)], next), None);
+    }
+
+    #[test]
+    fn of_two_frames_due_at_one_vblank_only_the_newer_goes_up() {
+        let next = Some((1_000 * MS, P50));
+        // The older one goes back unseen: index 1 is shown, 0 is released.
+        assert_eq!(
+            due_index(&[Some(999 * MS), Some(1_003 * MS), Some(1_030 * MS)], next),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_frame_without_a_time_goes_at_once_and_a_timed_one_waits_for_the_grid() {
+        assert_eq!(
+            due_index(&[Some(5_000 * MS), None], Some((1_000 * MS, P50))),
+            Some(1)
+        );
+        assert_eq!(due_index(&[Some(5_000 * MS)], None), None);
+        assert_eq!(due_index(&[Some(5_000 * MS), None], None), Some(1));
+        assert_eq!(due_index(&[], Some((0, P50))), None);
+    }
+
+    #[test]
+    fn a_commit_too_late_for_a_vblank_reaches_the_one_after() {
+        let last = 1_000 * MS;
+        // 3 ms before the next vblank: in time.
+        assert_eq!(
+            next_vblank_after(last + P50 - 3 * MS, last, P50),
+            last + P50
+        );
+        // Exactly the margin before it: still in time.
+        assert_eq!(
+            next_vblank_after(last + P50 - COMMIT_MARGIN_NS, last, P50),
+            last + P50
+        );
+        // 1 ms before it: the one after.
+        assert_eq!(
+            next_vblank_after(last + P50 - MS, last, P50),
+            last + 2 * P50
+        );
+        // Right after the last one: never the last one again.
+        assert_eq!(next_vblank_after(last, last, P50), last + P50);
+    }
+
+    #[test]
+    fn vblanks_gone_by_unseen_keep_the_grid() {
+        let last = 1_000 * MS;
+        // Ten vblanks with no page flip event (nothing committed).
+        let now = last + 10 * P50 + 5 * MS;
+        assert_eq!(next_vblank_after(now, last, P50), last + 11 * P50);
+        assert_eq!(
+            next_vblank_after(last + 10 * P5994 + MS, last, P5994),
+            last + 11 * P5994
+        );
+    }
+
+    /// Frames due one period apart, each arriving two periods ahead as the
+    /// player sends them: every vblank shows exactly the next frame, at
+    /// 50 Hz and at 59.94 Hz, whatever the phase of the due times against
+    /// the vblanks.
+    #[test]
+    fn a_steady_cadence_puts_one_frame_on_every_vblank() {
+        for period in [P50, P5994] {
+            for phase in [0, period / 4, period / 2 - 1, period - 1] {
+                let base = 1_000 * MS;
+                let mut pending: Vec<(u64, u64)> = Vec::new();
+                let mut shown = Vec::new();
+                let mut unseen = 0;
+                let mut next_frame = 0u64;
+                for k in 0..200u64 {
+                    let vblank = base + k * period;
+                    let now = vblank - 5 * MS;
+                    while base + phase + next_frame * period <= now + 2 * period {
+                        pending.push((next_frame, base + phase + next_frame * period));
+                        next_frame += 1;
+                    }
+                    let dues: Vec<Option<u64>> =
+                        pending.iter().map(|(_, due)| Some(*due)).collect();
+                    if let Some(index) = due_index(
+                        &dues,
+                        Some((next_vblank_after(now, vblank - period, period), period)),
+                    ) {
+                        unseen += index;
+                        let rest = pending.split_off(index + 1);
+                        shown.push(pending.last().unwrap().0);
+                        pending = rest;
+                    }
+                }
+                assert_eq!(unseen, 0, "period {period} phase {phase}");
+                assert!(
+                    shown.windows(2).all(|w| w[1] == w[0] + 1),
+                    "period {period} phase {phase}: {shown:?}"
+                );
+            }
+        }
+    }
+
+    /// The first frames after a mode change, in the order things happen:
+    /// each frame arrives two periods before it is due (the player's render
+    /// delay) and is looked at as it arrives (`pump_video`); the first one
+    /// finds no vblank grid known and the kernel is asked; its event comes
+    /// at the next vblank and the waiting frame is looked at again right
+    /// after it. One commit is in flight at a time. From there every vblank
+    /// shows the next frame -- the first one included, at the vblank nearest
+    /// its time -- whatever the phase of the new mode's grid. Put up as it
+    /// arrived, with no grid known, the first frame went up two vblanks
+    /// early and stayed up for three.
+    #[test]
+    fn from_a_first_frame_with_no_vblank_known_every_frame_gets_one_vblank() {
+        for period in [P50, P5994] {
+            for phase in [0, period / 3, period / 2, period / 2 + 1, period - 1] {
+                let grid = 10_000 * MS + phase; // the new mode's vblanks
+                let at = |index: u64| grid + index * period;
+                let first_due = 10_100 * MS + 7 * MS;
+                let arrival = |n: u64| first_due + n * period - 2 * period;
+                let mut pending: Vec<(u64, u64)> = Vec::new();
+                let (mut known, mut asked): (Option<(u64, u64)>, bool) = (None, false);
+                let mut in_flight: Option<u64> = None;
+                let mut shown: Vec<(u64, u64)> = Vec::new(); // (frame, vblank index)
+                let (mut unseen, mut next_frame) = (0, 0u64);
+                // A commit made at `now`, if a frame is due: it lands on the
+                // first vblank of the real grid it still reaches.
+                let mut decide = |now: u64, pending: &mut Vec<(u64, u64)>, known: Option<(u64, u64)>, in_flight: &mut Option<u64>| {
+                    if in_flight.is_some() {
+                        return;
+                    }
+                    let lands = (now + COMMIT_MARGIN_NS - grid).div_ceil(period);
+                    let next = known.map(|(last, p)| (next_vblank_after(now, last, p), p));
+                    let dues: Vec<Option<u64>> = pending.iter().map(|(_, due)| Some(*due)).collect();
+                    if let Some(index) = due_index(&dues, next) {
+                        unseen += index;
+                        let rest = pending.split_off(index + 1);
+                        shown.push((pending.last().unwrap().0, lands));
+                        *pending = rest;
+                        *in_flight = Some(lands);
+                    }
+                };
+                for k in 1..140u64 {
+                    if in_flight.is_some_and(|landed| landed < k) {
+                        in_flight = None;
+                    }
+                    // Frames arriving before this vblank, each looked at as
+                    // it comes; the first, finding no grid, asks the kernel.
+                    while arrival(next_frame) < at(k) {
+                        let now = arrival(next_frame);
+                        pending.push((next_frame, first_due + next_frame * period));
+                        next_frame += 1;
+                        asked |= known.is_none();
+                        decide(now, &mut pending, known, &mut in_flight);
+                    }
+                    if in_flight == Some(k) {
+                        in_flight = None;
+                    }
+                    // The event asked for, with this vblank's timestamp.
+                    if asked {
+                        known = Some((at(k), period));
+                        asked = false;
+                    }
+                    decide(at(k) + MS, &mut pending, known, &mut in_flight);
+                }
+                assert_eq!(unseen, 0, "period {period} phase {phase}");
+                assert_eq!(shown[0].0, 0, "period {period} phase {phase}: the first frame is the first shown");
+                assert!(
+                    at(shown[0].1).abs_diff(first_due) <= period / 2,
+                    "period {period} phase {phase}: the first frame at the vblank nearest its time: {shown:?}"
+                );
+                for pair in shown.windows(2) {
+                    assert_eq!(pair[1].0, pair[0].0 + 1, "period {period} phase {phase}: {shown:?}");
+                    assert_eq!(pair[1].1, pair[0].1 + 1, "period {period} phase {phase}: one vblank each: {shown:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_commit_closer_than_the_margin_to_a_vblank_is_held() {
+        let last = 1_000 * MS;
+        assert_eq!(racing(last + P50 - 3 * MS, last, P50), None, "3 ms before: in time");
+        assert_eq!(racing(last + P50 - MS, last, P50), Some(last + P50), "1 ms before: held");
+        assert_eq!(racing(last + P50 - 1, last, P50), Some(last + P50));
+        assert_eq!(racing(last + P50, last, P50), None, "on it: past");
+        assert_eq!(racing(last + P50 + MS, last, P50), None);
+    }
+
+    /// Frames as the panel sees them: due `due(n)`, arriving `arrival(n)`;
+    /// commits checked right after each vblank's flip event, at each
+    /// arrival, and at the end of a hold; the kernel lands a commit on the
+    /// first vblank at or after it is made. Returns (frame, vblank index)
+    /// shown, and how many went back unseen.
+    fn panel(
+        period: u64,
+        vblanks: u64,
+        due: impl Fn(u64) -> u64,
+        arrival: impl Fn(u64) -> u64,
+        guard: bool,
+        snap: bool,
+    ) -> (Vec<(u64, u64)>, usize) {
+        let grid = 10_000 * MS;
+        let at = |k: u64| grid + k * period;
+        let mut pending: Vec<u64> = Vec::new();
+        let mut shown: Vec<(u64, u64)> = Vec::new();
+        let (mut in_flight, mut held_until, mut offset): (Option<u64>, Option<u64>, Option<i64>) = (None, None, None);
+        let mut unseen = 0;
+        let mut next_frame = 0u64;
+        let mut try_commit = |now: u64, pending: &mut Vec<u64>, in_flight: &mut Option<u64>, held_until: &mut Option<u64>, last: u64| {
+            if in_flight.is_some() || pending.is_empty() {
+                return;
+            }
+            if snap && offset.is_none() {
+                offset = Some(snap_offset(due(pending[0]), last, period));
+            }
+            if guard && let Some(vblank) = racing(now, last, period) {
+                *held_until = Some(vblank + RACE_AFTER_NS);
+                return;
+            }
+            let dues: Vec<Option<u64>> =
+                pending.iter().map(|&n| Some(due(n).saturating_add_signed(offset.unwrap_or(0)))).collect();
+            if let Some(index) = due_index(&dues, Some((next_vblank_after(now, last, period), period))) {
+                unseen += index;
+                let frame = pending[index];
+                pending.drain(..=index);
+                let lands = (now - grid).div_ceil(period);
+                shown.push((frame, lands));
+                *in_flight = Some(lands);
+            }
+        };
+        for k in 1..vblanks {
+            let last = at(k - 1);
+            if in_flight == Some(k - 1) {
+                in_flight = None;
+            }
+            try_commit(last + 100_000, &mut pending, &mut in_flight, &mut held_until, last);
+            loop {
+                let next_arrival = arrival(next_frame);
+                let held = held_until.filter(|&t| t < at(k));
+                match (next_arrival < at(k), held) {
+                    (true, Some(t)) if t < next_arrival => {
+                        held_until = None;
+                        try_commit(t, &mut pending, &mut in_flight, &mut held_until, last);
+                    }
+                    (true, _) => {
+                        pending.push(next_frame);
+                        next_frame += 1;
+                        try_commit(next_arrival + 100_000, &mut pending, &mut in_flight, &mut held_until, last);
+                    }
+                    (false, Some(t)) => {
+                        held_until = None;
+                        try_commit(t, &mut pending, &mut in_flight, &mut held_until, last);
+                    }
+                    (false, None) => break,
+                }
+            }
+        }
+        (shown, unseen)
+    }
+
+    fn one_vblank_each(shown: &[(u64, u64)]) -> bool {
+        shown.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1 && pair[1].1 == pair[0].1 + 1)
+    }
+
+    /// The case measured on the tuner (2026-10-31): due times on a fixed
+    /// phase, 9.4 ms after a vblank, and the frames arriving 69.7 ms before
+    /// them -- 0.3 ms before a vblank -- give or take the wake-up's jitter,
+    /// so some arrive just after it. Without the hold, a commit 0.15 ms
+    /// before a vblank landed on it a period early and the next one, just
+    /// after, where it was meant to: one frame up for two vblanks.
+    #[test]
+    fn frames_arriving_at_a_vblank_land_where_they_were_meant_to() {
+        let grid = 10_000 * MS;
+        let due = |n: u64| grid + (n + 13) * P50 + 9_400_000;
+        let arrival = |n: u64| due(n) - 69_700_000 + if n % 7 == 3 { 450_000 } else { 0 };
+        let (shown, unseen) = panel(P50, 300, due, arrival, true, false);
+        assert_eq!(unseen, 0);
+        assert!(shown.len() > 250);
+        assert!(one_vblank_each(&shown), "{shown:?}");
+        let (old, old_unseen) = panel(P50, 300, due, arrival, false, false);
+        assert!(!one_vblank_each(&old) || old_unseen > 0, "the measured fault, without the hold");
+    }
+
+    /// A film whose due times sit 0.2 ms from the midpoint between vblanks
+    /// (measured: 9.5-9.6 ms after one) while the
+    /// panel's clock runs 75 ppm off the board's (19.9985 ms against 20 ms,
+    /// as measured): unsnapped, a frame is shown twice within the first
+    /// seconds; snapped to the vblank, the first five seconds and more are
+    /// one frame a vblank.
+    #[test]
+    fn a_film_snapped_to_the_vblanks_has_minutes_before_the_clocks_part() {
+        let grid = 10_000 * MS;
+        // The board's 20 ms is the panel's 20.0015: due times drift later.
+        let due = |n: u64| grid + 13 * P50 + n * (P50 + 1_500) + 9_800_000;
+        let arrival = |n: u64| due(n) - 69_700_000;
+        let (unsnapped, _) = panel(P50, 600, due, arrival, true, false);
+        assert!(!one_vblank_each(&unsnapped[..300]), "the half-period phase fails within six seconds");
+        let (snapped, unseen) = panel(P50, 600, due, arrival, true, true);
+        assert_eq!(unseen, 0);
+        assert!(snapped.len() > 550);
+        assert!(one_vblank_each(&snapped), "{snapped:?}");
+    }
+
+    #[test]
+    fn the_snap_is_to_the_nearest_vblank_and_never_more_than_half_a_period() {
+        let last = 1_000 * MS;
+        assert_eq!(snap_offset(last + 5 * P50, last, P50), 0);
+        assert_eq!(snap_offset(last + 5 * P50 + 9 * MS, last, P50), -9 * MS as i64);
+        assert_eq!(snap_offset(last + 5 * P50 + 11 * MS, last, P50), 9 * MS as i64);
+        assert_eq!(snap_offset(last - 3 * MS, last, P50), 3 * MS as i64, "before the last vblank");
+        for due in (last..last + 3 * P5994).step_by(1_234_567) {
+            let offset = snap_offset(due, last, P5994);
+            assert!(offset.unsigned_abs() <= P5994 / 2);
+            assert_eq!((due as i64 + offset - last as i64).rem_euclid(P5994 as i64), 0);
+        }
+    }
+
+    /// An HDR message (88 bytes) and a timed frame (96) queued together on
+    /// the stream socket, as the player sends them at a channel's first
+    /// frame: read as two messages, the frame's due time with it.
+    #[test]
+    fn messages_queued_together_on_the_stream_are_read_apart() {
+        use std::io::Write;
+        let (mut player, interface) = UnixStream::pair().unwrap();
+        let mut hdr = [0u8; MESSAGE];
+        hdr[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        hdr[4..8].copy_from_slice(&KIND_HDR.to_le_bytes());
+        let mut frame = [0u8; TIMED];
+        frame[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        frame[4..8].copy_from_slice(&KIND_FRAME_TIMED.to_le_bytes());
+        frame[8..16].copy_from_slice(&7u64.to_le_bytes());
+        frame[MESSAGE..].copy_from_slice(&123_456_789u64.to_le_bytes());
+        player.write_all(&hdr).unwrap();
+        player.write_all(&frame).unwrap();
+        interface.set_nonblocking(true).unwrap();
+        let mut wire = [0u8; TIMED];
+        let (read, _) = recv_message(interface.as_raw_fd(), &mut wire).unwrap().unwrap();
+        assert_eq!((read, u32::from_le_bytes(wire[4..8].try_into().unwrap())), (MESSAGE, KIND_HDR));
+        let (read, _) = recv_message(interface.as_raw_fd(), &mut wire).unwrap().unwrap();
+        assert_eq!(read, TIMED);
+        assert_eq!(u32::from_le_bytes(wire[0..4].try_into().unwrap()), MAGIC);
+        assert_eq!(u64::from_le_bytes(wire[8..16].try_into().unwrap()), 7);
+        assert_eq!(u64::from_le_bytes(wire[MESSAGE..].try_into().unwrap()), 123_456_789);
+        assert!(recv_message(interface.as_raw_fd(), &mut wire).unwrap().is_none());
+    }
+
     #[test]
     fn sixteen_by_nine_fills_a_sixteen_by_nine_panel() {
         let fitted = fit((1920, 1080), &frame(1920, 1080), PANEL);

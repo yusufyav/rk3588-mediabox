@@ -352,7 +352,8 @@ fn firmware_check(dir: PathBuf) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    mediabox_core::timeline::init("dvb");
+    let code = match Cli::parse().command {
         Command::Play(args) => play(*args),
         Command::Select { input, service, output } => select(input, service, output),
         Command::Analyse { input } => analyse(input),
@@ -363,5 +364,7 @@ fn main() -> ExitCode {
             println!("{}", serde_json::to_string(&report).unwrap_or_default());
             if report.ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
-    }
+    };
+    mediabox_core::timeline::flush();
+    code
 }

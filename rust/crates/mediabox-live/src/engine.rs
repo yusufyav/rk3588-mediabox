@@ -31,6 +31,7 @@ use gst::prelude::*;
 use mediabox_core::AudioCodec;
 
 use crate::plane::{Picture, Plane, Sent};
+use crate::stamp::{Class, Packetizer, Stamp, Stamped};
 
 pub struct Options {
     /// The element that decodes video: `mppvideodec` on the appliance.
@@ -41,8 +42,14 @@ pub struct Options {
     /// From the sink's wake-up to the light on the panel: the interface
     /// commits at its next vertical blank.
     pub render_delay_ms: u32,
-    /// A frame later than this is not sent.
-    pub max_lateness_ms: u32,
+    /// A frame later than this is not sent; `None`: none is dropped here,
+    /// the panel decides (a frame past its vblank goes up at the next, the
+    /// one it replaces goes back unseen). Dropped here at 20 ms, the second
+    /// picture of a channel -- held up behind the first, which waited 1.7 s
+    /// in the sink for its time -- was thrown away 29 ms before the panel
+    /// would have shown it (2026-10-31, TRT WORLD, TRT 4K: a picture missing
+    /// at the start of one opening in ten).
+    pub max_lateness_ms: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -120,6 +127,7 @@ struct Branch {
 /// known, sound is not passed; after, only from that frame's time on, which
 /// both sinks keep on the one clock.
 struct Programme {
+    generation: u64,
     opened: Instant,
     /// Sound has started; how many of its buffers were not played before.
     sounding: AtomicBool,
@@ -130,6 +138,10 @@ struct Programme {
     video_taken: AtomicBool,
     /// The PTS of the channel's first key frame.
     picture: Mutex<Option<u64>>,
+    /// `picture` or `no_picture` has been set.
+    known: std::sync::Condvar,
+    /// Sound has waited for the key frame (traced once).
+    waited: AtomicBool,
     /// The programme has no picture (a radio service): its sound waits for
     /// nothing.
     no_picture: AtomicBool,
@@ -142,41 +154,90 @@ struct Programme {
 const PICTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Programme {
-    fn new() -> Self {
+    fn new(generation: u64) -> Self {
         Self {
+            generation,
             opened: Instant::now(),
             sounding: AtomicBool::new(false),
             held: AtomicU64::new(0),
             audio_order: Mutex::new(0),
             video_taken: AtomicBool::new(false),
             picture: Mutex::new(None),
+            known: std::sync::Condvar::new(),
+            waited: AtomicBool::new(false),
             no_picture: AtomicBool::new(false),
             held_since: Mutex::new(None),
         }
     }
 
-    /// Whether a sound buffer at `pts` is played.
-    fn sound(&self, pts: Option<u64>) -> bool {
+    /// The first key frame is known, or that there is none to wait for.
+    fn picture_known(&self) {
+        let _picture = self.picture.lock().unwrap_or_else(|p| p.into_inner());
+        self.known.notify_all();
+    }
+
+    /// Whether a sound frame at `pts` is played.
+    ///
+    /// Until the key frame's time is known a frame waits here, on the
+    /// sound's own thread (its queue takes what comes meanwhile), rather
+    /// than being dropped: in an opening's burst the sound reaches here
+    /// before the key frame reaches its parser, and the frames after the
+    /// key frame's time went with those before it -- the sound joined the
+    /// picture 316 ms late (measured 2026-11-01: 35 frames dropped in the
+    /// 2.3 ms before the key frame was parsed). `stop`: the branch is being
+    /// taken down, and waits no more.
+    fn sound(&self, pts: Option<u64>, stop: &dyn Fn() -> bool) -> bool {
         if self.sounding.load(Ordering::SeqCst) {
             return true;
         }
-        let why = if self.no_picture.load(Ordering::SeqCst) {
-            Some("görüntüsüz servis")
-        } else {
-            match *self.picture.lock().unwrap_or_else(|p| p.into_inner()) {
-                Some(first) if pts.is_none_or(|pts| pts >= first) => Some("ilk anahtar karenin zamanından"),
-                Some(_) => None,
+        let why = loop {
+            if self.no_picture.load(Ordering::SeqCst) {
+                break Some("görüntüsüz servis");
+            }
+            let picture = self.picture.lock().unwrap_or_else(|p| p.into_inner());
+            match *picture {
+                Some(first) if pts.is_none_or(|pts| pts >= first) => break Some("ilk anahtar karenin zamanından"),
+                Some(_) => break None,
                 None => {
-                    let mut since = self.held_since.lock().unwrap_or_else(|p| p.into_inner());
-                    (since.get_or_insert_with(Instant::now).elapsed() >= PICTURE_WAIT).then_some("görüntü gelmedi")
+                    let waited = self.held_since.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Instant::now).elapsed();
+                    if waited >= PICTURE_WAIT {
+                        break Some("görüntü gelmedi");
+                    }
+                    if stop() {
+                        break None;
+                    }
+                    if !self.waited.swap(true, Ordering::Relaxed) {
+                        mediabox_core::timeline!(
+                            "audio-gate",
+                            "gen={} wait=1 pts={}",
+                            self.generation,
+                            pts.map_or(-1, |p| p as i64)
+                        );
+                    }
+                    let _ = self.known.wait_timeout(picture, std::time::Duration::from_millis(10));
                 }
             }
         };
         let Some(why) = why else {
-            self.held.fetch_add(1, Ordering::Relaxed);
+            if self.held.fetch_add(1, Ordering::Relaxed) == 0 {
+                mediabox_core::timeline!(
+                    "audio-gate",
+                    "gen={} open=0 pts={}",
+                    self.generation,
+                    pts.map_or(-1, |p| p as i64)
+                );
+            }
             return false;
         };
         self.sounding.store(true, Ordering::SeqCst);
+        mediabox_core::timeline!(
+            "audio-gate",
+            "gen={} open=1 pts={} held={} why={}",
+            self.generation,
+            pts.map_or(-1, |p| p as i64),
+            self.held.load(Ordering::Relaxed),
+            why.replace(' ', "_")
+        );
         eprintln!(
             "mediabox-live: ses başlıyor ({why}), açılıştan {} ms sonra; önceki {} ses tamponu çalınmadı",
             self.opened.elapsed().as_millis(),
@@ -228,6 +289,150 @@ pub struct Engine {
     fail: Box<dyn Fn(Option<String>) + Send + Sync>,
 }
 
+/// One display slot per decoded picture.
+///
+/// While a newly opened transport stream settles, `tsdemux` can briefly map
+/// an otherwise steady 50 Hz programme to PTS steps between roughly 12 and
+/// 36 ms, and swing it more than 100 ms off for a moment (NTV HD after a
+/// retune, measured 2026-10-31). MPP's HEVC decoder hands its first pictures
+/// out with one PTS for dozens of them (TRT 4K: about fifty). Passed to the
+/// panel, two different pictures land on one vblank and the next one is
+/// repeated, or pictures are thrown away as not later than the one before.
+/// So each picture takes the next slot of a grid at the programme's picture
+/// period; a large timestamp discontinuity re-anchors the grid.
+///
+/// The period: the decoder's duration, or half of it when the pictures come
+/// at half of it -- MPP deinterlaces MPEG-2 576i into one picture a field,
+/// 20 ms apart, each still saying 40 ms (TRT HABER SD, measured). Taken as
+/// 40, every second field was thrown away and 576i played at 25 pictures.
+///
+/// The grid is not let wander from the programme clock, which the sound is
+/// played by, beyond EBU R37's detectability (sound no more than 40 ms ahead
+/// of the picture, 60 ms behind it) for long: past either for two seconds
+/// on end -- a picture the decoder lost, the board's clock against the
+/// broadcaster's over hours -- it catches up: ahead of its sound, the grid
+/// moves on by the fewest whole periods back within them (a picture held
+/// once); behind it, pictures are left out until it is within them --
+/// never put on or before a slot already used. A swing that comes and goes
+/// inside two seconds (the opening's) moves nothing.
+#[derive(Default)]
+struct PresentationTimeline {
+    generation: u64,
+    /// The slot the last picture took.
+    last: Option<u64>,
+    last_source: Option<u64>,
+    /// The latest steps between source timestamps, for the period.
+    steps: std::collections::VecDeque<u64>,
+    /// Consecutive pictures off the grid beyond R37, and how long.
+    beyond_ns: u64,
+    /// Behind the sound for too long: pictures are left out until not.
+    catching_up: bool,
+}
+
+impl PresentationTimeline {
+    const MIN_PERIOD_NS: u64 = 5_000_000;
+    const MAX_PERIOD_NS: u64 = 200_000_000;
+    /// A difference this large is a timeline break, not jitter.
+    const REANCHOR_NS: u64 = 2_000_000_000;
+    /// EBU R37: the picture later than its sound by more than this is seen.
+    const LATE_NS: u64 = 40_000_000;
+    /// ... and earlier than its sound by more than this.
+    const EARLY_NS: u64 = 60_000_000;
+    /// How long beyond those before the grid moves.
+    const PERSIST_NS: u64 = 2_000_000_000;
+    /// Off the grid by more than this is a jump in the stream, not a drift.
+    const JUMP_NS: u64 = 200_000_000;
+    const STEPS: usize = 9;
+
+    /// A channel's first picture timed nowhere near its first key frame:
+    /// MPP's MPEG-2 decoder gave its first two pictures 80 ms and 158 s for
+    /// a key frame at 316 s (TRT HABER SD, 2026-10-31), and the second was
+    /// put up two and a half minutes "late", before the picture proper. Not
+    /// shown; the first picture is the first one within two seconds of it.
+    fn bogus_first(&self, generation: u64, source_pts: u64, key: Option<u64>) -> bool {
+        (self.generation != generation || self.last.is_none())
+            && key.is_some_and(|key| source_pts.abs_diff(key) > Self::REANCHOR_NS)
+    }
+
+    /// The picture period: `duration`, or half of it when the source
+    /// timestamps step by half of it (one picture a field).
+    fn period(&self, duration: u64) -> u64 {
+        if self.steps.is_empty() {
+            return duration;
+        }
+        let mut steps: Vec<u64> = self.steps.iter().copied().collect();
+        steps.sort_unstable();
+        let median = steps[steps.len() / 2];
+        let half = duration / 2;
+        if half >= Self::MIN_PERIOD_NS && median.abs_diff(half) * 4 <= half { half } else { duration }
+    }
+
+    /// The slot for a picture at `source_pts`; `None`: left out, to catch
+    /// up with the sound.
+    fn schedule(&mut self, generation: u64, source_pts: u64, duration_ns: Option<u64>) -> Option<u64> {
+        if self.generation != generation {
+            *self = Self { generation, ..Self::default() };
+        }
+        if let Some(previous) = self.last_source.replace(source_pts)
+            && source_pts > previous
+            && source_pts - previous <= Self::MAX_PERIOD_NS
+        {
+            if self.steps.len() == Self::STEPS {
+                self.steps.pop_front();
+            }
+            self.steps.push_back(source_pts - previous);
+        }
+        let Some(duration) = duration_ns.filter(|period| (Self::MIN_PERIOD_NS..=Self::MAX_PERIOD_NS).contains(period)) else {
+            self.last = None;
+            return Some(source_pts);
+        };
+        let period = self.period(duration);
+        let scheduled = match self.last {
+            None => source_pts,
+            Some(last) => {
+                let next = last + period;
+                let late = next > source_pts && next - source_pts > Self::LATE_NS;
+                let early = source_pts > next && source_pts - next > Self::EARLY_NS;
+                if source_pts.abs_diff(next) > Self::REANCHOR_NS {
+                    self.beyond_ns = 0;
+                    self.catching_up = false;
+                    source_pts
+                } else if late && self.catching_up {
+                    // Left out; the next picture is a period less behind.
+                    return None;
+                } else if late || early {
+                    self.beyond_ns += period;
+                    if self.beyond_ns < Self::PERSIST_NS {
+                        next
+                    } else if late {
+                        self.beyond_ns = 0;
+                        self.catching_up = true;
+                        return None;
+                    } else {
+                        self.beyond_ns = 0;
+                        // A jump in the stream: to the slot nearest its time.
+                        // A drift or a lost picture: the fewest whole periods
+                        // back within the limit -- one, as a rule.
+                        let off = source_pts - next;
+                        let periods = if off > Self::JUMP_NS {
+                            (off + period / 2) / period
+                        } else {
+                            (off - Self::EARLY_NS).div_ceil(period)
+                        };
+                        next + periods * period
+                    }
+                } else {
+                    self.beyond_ns = 0;
+                    self.catching_up = false;
+                    next
+                }
+            }
+        };
+        self.last = Some(scheduled);
+        Some(scheduled)
+    }
+}
+
 fn make(factory: &str) -> Result<gst::Element, String> {
     gst::ElementFactory::make(factory)
         .build()
@@ -276,7 +481,7 @@ impl Engine {
             .qos(false)
             .build();
         video_sink.set_async(false);
-        video_sink.set_max_lateness(i64::from(options.max_lateness_ms) * 1_000_000);
+        video_sink.set_max_lateness(options.max_lateness_ms.map_or(-1, |ms| i64::from(ms) * 1_000_000));
         video_sink.set_render_delay(gst::ClockTime::from_mseconds(u64::from(options.render_delay_ms)));
         // A channel's first decoded frames, as they reach the sink: PTS
         // minus the clock's running time (the sink wants it above minus
@@ -307,12 +512,23 @@ impl Engine {
             let shared = Arc::clone(&shared);
             let pipeline_clock = clock.clone();
             let weak_pipeline = pipeline.downgrade();
+            let audio_traced = AtomicU64::new(0);
             audio_selector.static_pad("src").expect("input-selector has a src pad").add_probe(gst::PadProbeType::BUFFER, move |_, info| {
                 if let (Some(buffer), Some(pipeline)) = (info.buffer(), weak_pipeline.upgrade())
                     && let (Some(pts), Some(base)) = (buffer.pts(), pipeline.base_time())
                 {
                     let now = pipeline_clock.time().saturating_sub(base).nseconds() as i64;
                     shared.audio_lead_ns.store(pts.nseconds() as i64 - now, Ordering::Relaxed);
+                    let generation = shared.generation.load(Ordering::SeqCst);
+                    if audio_traced.swap(generation, Ordering::Relaxed) != generation {
+                        mediabox_core::timeline!(
+                            "audio-sink",
+                            "gen={generation} pts={} rt={now} base={} dur={}",
+                            pts.nseconds(),
+                            base.nseconds(),
+                            buffer.duration().map_or(-1, |d| d.nseconds() as i64)
+                        );
+                    }
                 }
                 if shared.audio_buffers.fetch_add(1, Ordering::Relaxed) > 0
                     && shared.info.lock().unwrap_or_else(|p| p.into_inner()).video_codec.is_none()
@@ -451,8 +667,17 @@ impl Engine {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let Some(buffer) = sample.buffer() else { return Ok(gst::FlowSuccess::Ok) };
                     let pts = buffer.pts().map(|pts| pts.nseconds()).unwrap_or(0);
+                    if mediabox_core::timeline::enabled()
+                        && let (Some(clock), Some(base)) = (sink.clock(), sink.base_time())
+                    {
+                        mediabox_core::timeline::write(
+                            "sink",
+                            format_args!("gen={} pts={pts} rt={}", buffer.offset_end(), clock.time().saturating_sub(base).nseconds()),
+                        );
+                    }
                     if buffer.offset_end() != shared.generation.load(Ordering::SeqCst) {
                         trace.event('M', 0, pts / 1000);
+                        mediabox_core::timeline!("drop", "gen={} pts_us={} why=stale", buffer.offset_end(), pts / 1000);
                         return Ok(gst::FlowSuccess::Ok);
                     }
                     // Described again for every channel, not only when the caps
@@ -488,6 +713,7 @@ impl Engine {
                         && pts <= shown_pts
                     {
                         trace.event('M', 0, pts / 1000);
+                        mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=order last_us={}", pts / 1000, shown_pts / 1000);
                         shared.out_of_order.fetch_add(1, Ordering::Relaxed);
                         return Ok(gst::FlowSuccess::Ok);
                     }
@@ -497,6 +723,7 @@ impl Engine {
                         // Traced, never copied -- the whole point is that
                         // nothing is.
                         trace.event('X', 0, pts / 1000);
+                        mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=not-dmabuf", pts / 1000);
                         return Ok(gst::FlowSuccess::Ok);
                     };
                     // When it is due on the panel, on the clock's own time
@@ -515,10 +742,11 @@ impl Engine {
                                 _ => 0,
                             };
                             latency = Some((generation, ns));
+                            mediabox_core::timeline!("sink-latency", "gen={generation} ns={ns} base={}", base.nseconds());
                         }
                         due = base.nseconds() + pts + latency.map_or(0, |(_, ns)| ns);
                     }
-                    match plane.send(&picture, sample.clone(), pts, due) {
+                    match plane.send(&picture, sample.clone(), generation, pts, due) {
                         Sent::Shown => {
                             shared.frames.fetch_add(1, Ordering::Relaxed);
                             if !shared.playing.swap(true, Ordering::SeqCst) {
@@ -546,6 +774,14 @@ impl Engine {
     pub fn open(self: &Arc<Self>, path: &str) -> Result<(), String> {
         let generation = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.trace.event('G', generation, 0);
+        let opened_ns = mediabox_core::timeline::now_ns();
+        mediabox_core::timeline!(
+            "open",
+            "gen={generation} path={path} base={} latency_ms={} render_delay_ms={}",
+            self.pipeline.base_time().map_or(0, |base| base.nseconds()),
+            self.options.demux_latency_ms,
+            self.options.render_delay_ms
+        );
         if std::env::var_os("MEDIABOX_LIVE_OPEN_TRACE").is_some() {
             self.shared.open_probe.store(60, Ordering::Relaxed);
         }
@@ -568,8 +804,18 @@ impl Engine {
         if let Some(old) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
             self.take_down(old);
             self.blank();
+            mediabox_core::timeline!(
+                "blanked",
+                "gen={generation} ms={:.1}",
+                (mediabox_core::timeline::now_ns() - opened_ns) as f64 / 1e6
+            );
         }
         let (branch, source) = self.build(generation)?;
+        mediabox_core::timeline!(
+            "built",
+            "gen={generation} ms={:.1}",
+            (mediabox_core::timeline::now_ns() - opened_ns) as f64 / 1e6
+        );
         *self.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(branch);
         *target = Some(source);
         drop(target);
@@ -634,12 +880,13 @@ impl Engine {
         source.link(&demux).map_err(|e| e.to_string())?;
 
         let weak = Arc::downgrade(self);
-        let programme = Arc::new(Programme::new());
+        let programme = Arc::new(Programme::new(generation));
         {
             let programme = Arc::clone(&programme);
             demux.connect_no_more_pads(move |_| {
                 if !programme.video_taken.load(Ordering::SeqCst) {
                     programme.no_picture.store(true, Ordering::SeqCst);
+                    programme.picture_known();
                 }
             });
         }
@@ -648,6 +895,9 @@ impl Engine {
             let pads = Arc::clone(&pads);
             demux.connect_pad_added(move |_, pad| {
                 let Some(engine) = weak.upgrade() else { return };
+                if mediabox_core::timeline::enabled() {
+                    trace_demux_pad(generation, pad);
+                }
                 if engine.shared.generation.load(Ordering::SeqCst) != generation {
                     engine.discard(pad, &elements);
                     return;
@@ -757,12 +1007,49 @@ impl Engine {
                     }
                     if let Some(pts) = buffer.pts() {
                         programme.picture.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(pts.nseconds());
+                        programme.picture_known();
+                        mediabox_core::timeline!(
+                            "parse-key",
+                            "gen={} pts={} dts={}",
+                            programme.generation,
+                            pts.nseconds(),
+                            buffer.dts().map_or(-1, |dts| dts.nseconds() as i64)
+                        );
                         return gst::PadProbeReturn::Remove;
                     }
                     gst::PadProbeReturn::Ok
                 });
             }
+            if mediabox_core::timeline::enabled()
+                && let Some(out) = parser.static_pad("src")
+            {
+                out.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                    if let Some(gst::PadProbeData::Event(event)) = &info.data
+                        && let gst::EventView::Caps(caps) = event.view()
+                    {
+                        let caps = caps.caps().to_string().replace(' ', "");
+                        mediabox_core::timeline!("parse-caps", "gen={generation} caps={caps}");
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
             let decoder = make(&self.options.video_decoder)?;
+            if mediabox_core::timeline::enabled()
+                && let Some(input) = decoder.static_pad("sink")
+            {
+                input.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                    if let Some(buffer) = info.buffer() {
+                        mediabox_core::timeline!(
+                            "dec-in",
+                            "gen={generation} pts={} dts={} key={}",
+                            buffer.pts().map_or(-1, |t| t.nseconds() as i64),
+                            buffer.dts().map_or(-1, |t| t.nseconds() as i64),
+                            u8::from(!buffer.flags().contains(gst::BufferFlags::DELTA_UNIT))
+                        );
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
             // MPP marks a frame interlaced, and starts its deinterlacer, only
             // when the parser is not in fast mode -- ffmpeg-rockchip turns it
             // off for interlaced video (rkmppdec.c), gstreamer-rockchip leaves
@@ -779,18 +1066,79 @@ impl Engine {
             // CEM TV's 1920x1080 frame "0 ms" into TV 5).
             if let Some(out) = decoder.static_pad("src") {
                 let shared = Arc::clone(&self.shared);
+                let programme = Arc::clone(programme);
+                let presentation = Mutex::new(PresentationTimeline::default());
                 out.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                    if mediabox_core::timeline::enabled()
+                        && let Some(buffer) = info.buffer()
+                    {
+                        // The video flags (interlaced, TFF, RFF, one field)
+                        // are bits 20 and up of the buffer's flags.
+                        mediabox_core::timeline::write(
+                            "dec-out",
+                            format_args!(
+                                "gen={generation} pts={} dur={} flags={:#x} stale={}",
+                                buffer.pts().map_or(-1, |t| t.nseconds() as i64),
+                                buffer.duration().map_or(-1, |t| t.nseconds() as i64),
+                                buffer.flags().bits(),
+                                u8::from(shared.generation.load(Ordering::SeqCst) != generation)
+                            ),
+                        );
+                    }
                     if shared.generation.load(Ordering::SeqCst) != generation {
                         return gst::PadProbeReturn::Drop;
                     }
                     shared.decoded.fetch_add(1, Ordering::Relaxed);
                     if let Some(buffer) = info.buffer_mut() {
-                        buffer.make_mut().set_offset_end(generation);
+                        let buffer = buffer.make_mut();
+                        buffer.set_offset_end(generation);
+                        if let Some(source_pts) = buffer.pts() {
+                            let source_pts = source_pts.nseconds();
+                            let key = *programme.picture.lock().unwrap_or_else(|p| p.into_inner());
+                            if presentation.lock().unwrap_or_else(|p| p.into_inner()).bogus_first(generation, source_pts, key) {
+                                mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=bogus-pts", source_pts / 1000);
+                                return gst::PadProbeReturn::Drop;
+                            }
+                            let Some(scheduled) = presentation
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .schedule(
+                                    generation,
+                                    source_pts,
+                                    buffer.duration().map(|duration| duration.nseconds()),
+                                )
+                            else {
+                                mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=catch-up", source_pts / 1000);
+                                return gst::PadProbeReturn::Drop;
+                            };
+                            if scheduled != source_pts {
+                                mediabox_core::timeline!(
+                                    "schedule",
+                                    "gen={generation} pts={source_pts} presentation={scheduled} delta={}",
+                                    scheduled as i128 - source_pts as i128
+                                );
+                                buffer.set_pts(gst::ClockTime::from_nseconds(scheduled));
+                            }
+                        }
                     }
                     gst::PadProbeReturn::Ok
                 });
             }
-            self.chain(pad, &[parser, decoder], &self.video_selector, elements, pads)?;
+            // Between the decoder and the sink, a few pictures: mppvideodec
+            // pushes each one from its output task holding the decoder's
+            // stream lock (gst_mpp_dec_loop -> finish_frame), and the sink
+            // holds a channel's first picture until its time, 1.7 s. All
+            // that while handle_frame waited on the lock and MPP was given
+            // nothing to decode: the pictures after the first were decoded
+            // only once it went, and a 4K HEVC picture takes 25-40 ms -- the
+            // first five of TRT 4K came past their time and the panel put
+            // them back unseen (2026-10-31, three openings in three). Pushed
+            // into a queue the lock is let go at once and MPP decodes ahead.
+            let ahead = make("queue")?;
+            ahead.set_property("max-size-buffers", 3u32);
+            ahead.set_property("max-size-bytes", 0u32);
+            ahead.set_property("max-size-time", 0u64);
+            self.chain(pad, &[parser, decoder, ahead], &self.video_selector, elements, pads)?;
             self.shared.info.lock().unwrap_or_else(|p| p.into_inner()).video_codec = Some(codec_name(name, version));
             return Ok(());
         }
@@ -836,14 +1184,22 @@ impl Engine {
         let passthrough = passthrough_codec == Some(AudioCodec::Ac3)
             && audio.passthrough.contains(&AudioCodec::Ac3)
             && audio.device.is_some();
+        let mut chain = vec![make(parser)?];
+        // Gated frame by frame, after the parser (`Programme::sound`): on the demultiplexer's
+        // pad a buffer is a whole PES packet, up to 350 ms of sound on some
+        // channels, and the one holding the key frame's time began before
+        // it and was dropped -- the sound joined the picture up to 350 ms
+        // late (measured 2026-11-01, 32 openings: the delay was each
+        // channel's first passed PES minus the key frame's PTS).
         {
             let programme = Arc::clone(programme);
-            pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            let framed = chain[0].static_pad("src").ok_or("ayrıştırıcının çıkışı yok")?;
+            framed.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
                 let pts = info.buffer().and_then(|buffer| buffer.pts()).map(|pts| pts.nseconds());
-                if programme.sound(pts) { gst::PadProbeReturn::Ok } else { gst::PadProbeReturn::Drop }
+                let stop = || pad.pad_flags().contains(gst::PadFlags::FLUSHING);
+                if programme.sound(pts, &stop) { gst::PadProbeReturn::Ok } else { gst::PadProbeReturn::Drop }
             });
         }
-        let mut chain = vec![make(parser)?];
         if passthrough {
             let head = self.head(pad, &chain, elements, false)?;
             let framed = head.last().expect("a chain has elements").static_pad("src").ok_or("ayrıştırıcının çıkışı yok")?;
@@ -1295,7 +1651,11 @@ fn read_stream(path: &str, into: &Mutex<Option<gst_app::AppSrc>>, stop: &AtomicB
         Err(error) => return ended(format!("{path} açılamadı: {error}")),
     };
     let mut chunk = vec![0u8; 188 * 348];
+    let mut packetizer = Packetizer::default();
     let mut stamp = Stamp::default();
+    let mut pushed = 0u64;
+    let mut key: Option<gst_app::AppSrc> = None;
+    let mut generation = 0u64;
     loop {
         let read = match file.read(&mut chunk) {
             Ok(0) => return ended(format!("yayın akışı bitti ({path})")),
@@ -1309,88 +1669,100 @@ fn read_stream(path: &str, into: &Mutex<Option<gst_app::AppSrc>>, stop: &AtomicB
         // Cloned out of the lock: a full source blocks the push, and the
         // next channel must still be able to take the reader over.
         let Some(source) = into.lock().unwrap_or_else(|p| p.into_inner()).clone() else { continue };
-        let mut buffer = gst::Buffer::from_slice(chunk[..read].to_vec());
-        if let Some(arrived) = source.current_running_time() {
-            let at = stamp.time(&source, arrived, first_pcr(&chunk[..read]));
-            let buffer = buffer.get_mut().expect("a new buffer is writable");
-            buffer.set_pts(at);
-            buffer.set_dts(at);
+        if key.as_ref() != Some(&source) {
+            key = Some(source.clone());
+            generation = shared.generation.load(Ordering::SeqCst);
+            pushed = 0;
+            packetizer.new_programme();
         }
-        // A source taken down under the push refuses it; the reader goes on
-        // for the branch after it.
-        let _ = source.push_buffer(buffer);
+        let arrived = source.current_running_time();
+        for piece in packetizer.cut(&chunk[..read]) {
+            let bytes = piece.data.len();
+            let mut buffer = gst::Buffer::from_mut_slice(piece.data);
+            if let Some(arrived) = arrived {
+                let Stamped { at, class, discontinuity } = stamp.time(generation, arrived.nseconds(), piece.pcr);
+                pushed += 1;
+                // A PCR jump is said on the timeline: the times of this
+                // opening are then no measurement (tools/live-trace.py marks
+                // it invalid).
+                mediabox_core::timeline!(
+                    "src",
+                    "gen={generation} n={pushed} bytes={bytes} arr={} pts={at} pcr0={} class={} disc={}",
+                    arrived.nseconds(),
+                    piece.pcr.map_or(-1, |v| v as i64),
+                    if class == Class::Paced { "paced" } else { "live" },
+                    u8::from(discontinuity)
+                );
+                let at = gst::ClockTime::from_nseconds(at);
+                let buffer = buffer.get_mut().expect("a new buffer is writable");
+                buffer.set_pts(at);
+                buffer.set_dts(at);
+            }
+            // A source taken down under the push refuses it; the reader goes
+            // on for the branch after it.
+            let _ = source.push_buffer(buffer);
+        }
     }
 }
-
-/// When a channel opens, the receiver sends its service from the last access
-/// point on at once: half a second or more of the broadcast arrives in one
-/// burst. Stamped with the time it arrived, all of it would be one instant
-/// against PCRs a second apart, and tsdemux's estimate of the broadcaster's
-/// clock (mpegtspacketizer's skew) swings for the first seconds: pictures
-/// timed 9-60 ms off their place, dropped or doubled -- 100-660 ms of
-/// picture lost at every opening (measured 2026-10-30, eleven openings;
-/// with tsdemux's ignore-pcr none lost, and the sound off the picture).
-///
-/// So the clock starts as a tuner's STC does, from the PCR (AOSP, Multimedia
-/// tunneling: on live broadcast the A/V sync clock is "a program reference
-/// clock (PCR) or system time clock (STC) driven by a tuner"): the burst is
-/// timed by its PCRs from the first one's arrival, at the broadcast's own
-/// pace. Once the burst is in, the lead it gave is kept as a constant and
-/// every buffer after is stamped on arrival plus it, so tsdemux goes on
-/// estimating the broadcaster's clock from arrival times as before.
-#[derive(Default)]
-struct Stamp {
-    /// The source these times are for: a new branch starts again.
-    source: Option<gst_app::AppSrc>,
-    /// The first PCR (27 MHz) and when it arrived.
-    first: Option<(u64, gst::ClockTime)>,
-    /// The lead kept once the burst is in.
-    lead: Option<gst::ClockTime>,
-    last: Option<gst::ClockTime>,
-}
-
-/// How long after the first PCR the burst is taken to be in.
-const BURST_WITHIN: gst::ClockTime = gst::ClockTime::from_mseconds(1500);
-
-impl Stamp {
-    fn time(&mut self, source: &gst_app::AppSrc, arrived: gst::ClockTime, pcr: Option<u64>) -> gst::ClockTime {
-        if self.source.as_ref() != Some(source) {
-            *self = Stamp { source: Some(source.clone()), ..Stamp::default() };
-        }
-        let at = match (self.lead, self.first, pcr) {
-            (Some(lead), _, _) => arrived + lead,
-            (None, None, Some(pcr)) => {
-                self.first = Some((pcr, arrived));
-                arrived
-            }
-            (None, Some((first, at)), Some(pcr)) => {
-                // 33-bit base times 300: wraps at 2^33 * 300.
-                let ticks = pcr.wrapping_sub(first) % ((1u64 << 33) * 300);
-                let paced = at + gst::ClockTime::from_nseconds(ticks * 1000 / 27);
-                let at_ = paced.max(arrived);
-                if arrived >= at + BURST_WITHIN {
-                    self.lead = Some(at_ - arrived);
+/// A demultiplexer pad on the timeline: when it came, its first buffer,
+/// every segment and every discontinuity on it.
+fn trace_demux_pad(generation: u64, pad: &gst::Pad) {
+    let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+    let name = caps
+        .structure(0)
+        .map(|s| s.name().to_string())
+        .unwrap_or_default();
+    let kind = if name.starts_with("video/") {
+        "video"
+    } else if name.starts_with("audio/") {
+        "audio"
+    } else {
+        "other"
+    };
+    mediabox_core::timeline!(
+        "pad",
+        "gen={generation} kind={kind} pad={} caps={name}",
+        pad.name()
+    );
+    let first = AtomicBool::new(true);
+    let pad_name = pad.name().to_string();
+    pad.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_, info| {
+            match &info.data {
+                Some(gst::PadProbeData::Buffer(buffer)) => {
+                    let discont = buffer.flags().contains(gst::BufferFlags::DISCONT);
+                    if first.swap(false, Ordering::Relaxed) || discont {
+                        mediabox_core::timeline!(
+                            if discont {
+                                "demux-discont"
+                            } else {
+                                "demux-first"
+                            },
+                            "gen={generation} kind={kind} pad={pad_name} pts={} dts={}",
+                            buffer.pts().map_or(-1, |t| t.nseconds() as i64),
+                            buffer.dts().map_or(-1, |t| t.nseconds() as i64)
+                        );
+                    }
                 }
-                at_
+                Some(gst::PadProbeData::Event(event)) => {
+                    if let gst::EventView::Segment(segment) = event.view()
+                        && let Some(segment) = segment.segment().downcast_ref::<gst::ClockTime>()
+                    {
+                        mediabox_core::timeline!(
+                            "demux-segment",
+                            "gen={generation} kind={kind} pad={pad_name} start={} time={} base={}",
+                            segment.start().map_or(-1, |t| t.nseconds() as i64),
+                            segment.time().map_or(-1, |t| t.nseconds() as i64),
+                            segment.base().map_or(-1, |t| t.nseconds() as i64)
+                        );
+                    }
+                }
+                _ => {}
             }
-            (None, _, None) => self.last.map_or(arrived, |last| last.max(arrived)),
-        };
-        let at = self.last.map_or(at, |last| last.max(at));
-        self.last = Some(at);
-        at
-    }
-}
-
-/// The first PCR in `data`, 27 MHz, wherever its packets start.
-fn first_pcr(data: &[u8]) -> Option<u64> {
-    let start = (0..188.min(data.len())).find(|&k| data[k] == 0x47 && data.get(k + 188).is_none_or(|&b| b == 0x47))?;
-    data[start..].chunks_exact(188).find_map(|p| {
-        let pcr = p[0] == 0x47 && p[3] & 0x20 != 0 && p[4] >= 7 && p[5] & 0x10 != 0;
-        pcr.then(|| {
-            let base = (u64::from(p[6]) << 25) | (u64::from(p[7]) << 17) | (u64::from(p[8]) << 9) | (u64::from(p[9]) << 1) | (u64::from(p[10]) >> 7);
-            base * 300 + ((u64::from(p[10] & 1) << 8) | u64::from(p[11]))
-        })
-    })
+            gst::PadProbeReturn::Ok
+        },
+    );
 }
 
 /// One AC-3 frame as an IEC 61937 burst (IEC 61937-3; ffmpeg's spdifenc):
@@ -1569,4 +1941,163 @@ fn picture(found: &Described, buffer: &gst::BufferRef) -> Option<Picture> {
         picture.pitches[plane] = strides[plane] as u32;
     }
     Some(picture)
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::PresentationTimeline;
+
+    const MS: u64 = 1_000_000;
+
+    /// The slots of the pictures not left out.
+    fn run(timeline: &mut PresentationTimeline, source: &[u64], duration: u64) -> Vec<u64> {
+        source.iter().filter_map(|&pts| timeline.schedule(1, pts, Some(duration))).collect()
+    }
+
+    fn steps(scheduled: &[u64]) -> Vec<u64> {
+        scheduled.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    #[test]
+    fn opening_pts_jitter_keeps_one_picture_per_fifty_hz_slot() {
+        let mut timeline = PresentationTimeline::default();
+        let source: Vec<u64> = [0, 20, 40, 57, 75, 95, 115, 137, 159, 172, 185, 206, 227].iter().map(|ms| ms * MS).collect();
+        let scheduled = run(&mut timeline, &source, 20 * MS);
+        assert_eq!(scheduled, (0..source.len() as u64).map(|n| n * 20 * MS).collect::<Vec<_>>());
+    }
+
+    /// NTV HD after a retune (2026-10-31, generation 14), as tsdemux timed
+    /// it while its clock estimate swung: steps of 9 to 68 ms for 20 ms
+    /// pictures, ending 108 ms ahead of the grid. The swing moves nothing
+    /// for two seconds; what stays beyond R37 after them is caught up once,
+    /// by whole periods.
+    #[test]
+    fn the_measured_retune_swing_moves_nothing_for_two_seconds() {
+        let measured_us = [
+            190_481_800u64, 190_512_900, 190_544_000, 190_552_900, 190_561_800, 190_599_000, 190_636_200, 190_678_700,
+            190_746_600, 190_779_800, 190_789_900, 190_809_900, 190_829_900, 190_849_900,
+        ];
+        let mut source: Vec<u64> = measured_us.iter().map(|us| us * 1_000).collect();
+        let mut t = *source.last().unwrap();
+        for _ in 0..200 {
+            t += 20 * MS;
+            source.push(t);
+        }
+        let mut timeline = PresentationTimeline::default();
+        let scheduled = run(&mut timeline, &source, 20 * MS);
+        let odd: Vec<(usize, u64)> = steps(&scheduled).into_iter().enumerate().filter(|&(_, s)| s != 20 * MS).collect();
+        assert_eq!(odd.len(), 1, "{odd:?}");
+        assert!(odd[0].0 >= 100, "not within two seconds: {odd:?}");
+        assert_eq!(odd[0].1, 80 * MS, "108 ms ahead: three periods, back within 60");
+        let settled = source.last().unwrap() - scheduled.last().unwrap();
+        assert!(settled <= 60 * MS, "within R37: {settled}");
+    }
+
+    /// TRT 4K (HEVC) opening as MPP timed it before 0003: some fifty
+    /// pictures with one PTS, then on 20 ms apart. Every picture its own
+    /// slot, none on or before one already used; the grid, a second behind
+    /// the sound, catches up two seconds later by leaving pictures out.
+    #[test]
+    fn hevc_pictures_with_one_timestamp_each_get_their_own_slot() {
+        let mut source = vec![306_348_500 * 1_000u64, 306_363_900 * 1_000, 306_397_800 * 1_000];
+        source.extend(std::iter::repeat_n(306_567_400 * 1_000, 50));
+        let mut t = 306_580_800 * 1_000u64;
+        for _ in 0..300 {
+            source.push(t);
+            t += 20 * MS;
+        }
+        let mut timeline = PresentationTimeline::default();
+        let scheduled = run(&mut timeline, &source, 20 * MS);
+        assert!(scheduled.windows(2).all(|w| w[1] >= w[0] + 20 * MS), "never back, never the same slot");
+        let left_out = source.len() - scheduled.len();
+        assert!((40..=55).contains(&left_out), "caught up: {left_out}");
+        let behind = scheduled.last().unwrap() - source.last().unwrap();
+        assert!(behind <= 40 * MS, "within R37 at the end: {behind}");
+    }
+
+    /// MPEG-2 576i: MPP gives one picture a field, 20 ms apart, each saying
+    /// 40 ms. Fifty a second, one slot each.
+    #[test]
+    fn a_deinterlaced_field_rate_stream_keeps_every_field() {
+        let source: Vec<u64> = (0..300u64).map(|n| 318_969_700_000 + n * 20 * MS).collect();
+        let mut timeline = PresentationTimeline::default();
+        let scheduled = run(&mut timeline, &source, 40 * MS);
+        assert!(steps(&scheduled[2..]).iter().all(|&s| s == 20 * MS), "{:?}", &steps(&scheduled)[..10]);
+        assert!(scheduled.windows(2).all(|w| w[1] > w[0]));
+        // A progressive 25 Hz stream stays at 40.
+        let source: Vec<u64> = (0..50u64).map(|n| n * 40 * MS).collect();
+        let mut timeline = PresentationTimeline::default();
+        assert!(steps(&run(&mut timeline, &source, 40 * MS)).iter().all(|&s| s == 40 * MS));
+    }
+
+    #[test]
+    fn a_new_channel_and_a_real_discontinuity_reanchor_the_grid() {
+        let mut timeline = PresentationTimeline::default();
+        assert_eq!(timeline.schedule(1, 100 * MS, Some(20 * MS)), Some(100 * MS));
+        assert_eq!(timeline.schedule(1, 121 * MS, Some(20 * MS)), Some(120 * MS));
+        assert_eq!(timeline.schedule(2, 900 * MS, Some(20 * MS)), Some(900 * MS));
+        assert_eq!(timeline.schedule(2, 4_000 * MS, Some(20 * MS)), Some(4_000 * MS));
+        assert_eq!(timeline.schedule(2, 4_021 * MS, Some(20 * MS)), Some(4_020 * MS));
+    }
+
+    /// Pictures the decoder lost for good (four at once): the stream's time
+    /// stays 80 ms ahead of the grid, past R37's 60 ms; two seconds later
+    /// the grid moves to within it, once, by whole periods.
+    #[test]
+    fn a_lasting_loss_is_caught_up_after_two_seconds_in_whole_periods() {
+        let mut source: Vec<u64> = (0..50u64).map(|n| n * 20 * MS).collect();
+        source.extend((54..400u64).map(|n| n * 20 * MS));
+        let mut timeline = PresentationTimeline::default();
+        let scheduled = run(&mut timeline, &source, 20 * MS);
+        let moves: Vec<(usize, u64)> =
+            steps(&scheduled).into_iter().enumerate().filter(|&(_, s)| s != 20 * MS).collect();
+        assert_eq!(moves.len(), 1, "{moves:?}");
+        assert_eq!(moves[0].1, 40 * MS, "one period: 80 ms off is 20 beyond the limit");
+        assert!((145..=160).contains(&moves[0].0), "two seconds on: {moves:?}");
+        assert!(source.last().unwrap() - scheduled.last().unwrap() <= 60 * MS);
+        assert_eq!(scheduled.iter().filter(|&&s| s % (20 * MS) != 0).count(), 0, "on the grid");
+    }
+
+    /// The board's clock against the broadcaster's, over a long run: the
+    /// grid follows with a single slot moved now and then, never seconds.
+    #[test]
+    fn a_slow_clock_drift_is_followed_by_single_slots() {
+        let mut timeline = PresentationTimeline::default();
+        // 100 ppm, far beyond a broadcaster's 30: 2 us a picture.
+        let mut moved = 0;
+        let mut last = timeline.schedule(1, 0, Some(20 * MS)).unwrap();
+        for k in 1..200_000u64 {
+            let source = k * 20 * MS + k * 2_000;
+            let scheduled = timeline.schedule(1, source, Some(20 * MS)).unwrap();
+            if scheduled - last != 20 * MS {
+                moved += 1;
+                assert_eq!(scheduled - last, 40 * MS, "one slot at a time");
+            }
+            assert!(source - scheduled <= 60 * MS + 2 * 2_000 * 100);
+            last = scheduled;
+        }
+        assert!((10..=25).contains(&moved), "{moved}");
+    }
+
+    #[test]
+    fn a_first_picture_timed_far_from_its_key_frame_is_not_shown() {
+        let mut timeline = PresentationTimeline::default();
+        let key = 316_677_462_958;
+        assert!(timeline.bogus_first(23, 80 * MS, Some(key)));
+        assert!(timeline.bogus_first(23, 158_398_731_000, Some(key)));
+        assert!(!timeline.bogus_first(23, 316_717_462_000, Some(key)));
+        timeline.schedule(23, 316_717_462_000, Some(40 * MS));
+        // Once the channel has a picture up, the key frame says nothing.
+        assert!(!timeline.bogus_first(23, 316_717_462_000 + 600_000 * MS, Some(key)));
+        // A new channel asks again.
+        assert!(timeline.bogus_first(24, 80 * MS, Some(key)));
+    }
+
+    #[test]
+    fn missing_or_implausible_duration_uses_the_source_timestamp() {
+        let mut timeline = PresentationTimeline::default();
+        assert_eq!(timeline.schedule(1, 100 * MS, None), Some(100 * MS));
+        assert_eq!(timeline.schedule(1, 140 * MS, Some(MS)), Some(140 * MS));
+        assert_eq!(timeline.schedule(1, 180 * MS, Some(250 * MS)), Some(180 * MS));
+    }
 }

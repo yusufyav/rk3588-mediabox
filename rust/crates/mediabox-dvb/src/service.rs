@@ -425,6 +425,8 @@ impl Writer {
                 // -- up to a bound; the oldest goes first beyond it.
                 let mut pending: VecDeque<Vec<u8>> = VecDeque::new();
                 let mut pending_bytes = 0usize;
+                // The first write to a reader just opened, for the timeline.
+                let mut first_write = false;
                 loop {
                     let chunk = {
                         let mut state = shared.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -458,6 +460,12 @@ impl Writer {
                             Some(file) => {
                                 sink = Some(Sink::Fifo(file));
                                 gone(None);
+                                mediabox_core::timeline!(
+                                    "fifo-open",
+                                    "path={} pending_bytes={pending_bytes}",
+                                    path.display()
+                                );
+                                first_write = true;
                                 shared.stats.lock().unwrap_or_else(|p| p.into_inner()).readers += 1;
                                 // Live, the reader starts where the broadcast
                                 // is, not where it was when the receiver began:
@@ -485,6 +493,13 @@ impl Writer {
                                     let Some(out) = sink.as_mut() else { break };
                                     match out.write_all(&waiting, &shared.abort) {
                                         Ok(true) => {
+                                            if std::mem::take(&mut first_write) {
+                                                mediabox_core::timeline!(
+                                                    "fifo-write",
+                                                    "bytes={} kind=pending",
+                                                    waiting.len()
+                                                );
+                                            }
                                             shared.stats.lock().unwrap_or_else(|p| p.into_inner()).bytes += waiting.len() as u64
                                         }
                                         Ok(false) => return,
@@ -514,7 +529,17 @@ impl Writer {
                     }
                     let Some(out) = sink.as_mut() else { return };
                     match out.write_all(&chunk, &shared.abort) {
-                        Ok(true) => shared.stats.lock().unwrap_or_else(|p| p.into_inner()).bytes += chunk.len() as u64,
+                        Ok(true) => {
+                            if std::mem::take(&mut first_write) {
+                                mediabox_core::timeline!(
+                                    "fifo-write",
+                                    "bytes={} kind=queued",
+                                    chunk.len()
+                                );
+                            }
+                            shared.stats.lock().unwrap_or_else(|p| p.into_inner()).bytes +=
+                                chunk.len() as u64
+                        }
                         Ok(false) => return,
                         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe && next.is_some() => {
                             // The player went; the receiver stays for the next.
@@ -785,6 +810,8 @@ struct Pipeline {
     select: Option<SelectFile>,
     /// Warm receivers only: where each programme can start from.
     rap: Option<RapCache>,
+    /// The timeline's firsts since the last selection (`SEEN_*`).
+    seen: u8,
     /// The transponder tuned (IF kHz, kS/s), and how a retune searches.
     tuned: Option<TuneParams>,
     /// `Options::start_standby`, until the first lock has been had.
@@ -816,6 +843,9 @@ struct SelectFile {
 #[derive(serde::Deserialize)]
 struct Select {
     token: Option<String>,
+    /// The control plane's request this selection is for, on the timeline.
+    #[serde(default)]
+    rid: Option<u64>,
     want: Want,
 }
 
@@ -1020,6 +1050,29 @@ pub fn guide_of<'a>(analyser: &'a Analyser, token: Option<&'a str>, now: i64) ->
 impl Pipeline {
     /// One chunk of the multiplex. False once the reader is gone.
     fn feed(&mut self, chunk: &[u8], reporter: &mut Reporter) -> bool {
+        let traced = self.seen != SEEN_ALL && mediabox_core::timeline::enabled();
+        let video_pid = if traced && self.seen & SEEN_RAP == 0 {
+            self.selector
+                .selection()
+                .streams
+                .iter()
+                .find(|s| s.kind == "video")
+                .map(|s| s.pid)
+        } else {
+            None
+        };
+        let mut rap_seen = false;
+        let mut rap_check = |packet: &[u8]| {
+            if let Some(video) = video_pid
+                && !rap_seen
+                && packet[3] & 0x20 != 0
+                && packet[4] > 0
+                && packet[5] & 0x40 != 0
+                && crate::ts::pid_of(packet) == video
+            {
+                rap_seen = true;
+            }
+        };
         let selector = &mut self.selector;
         let scratch = &mut self.scratch;
         let tkgs = &mut self.tkgs;
@@ -1029,13 +1082,18 @@ impl Pipeline {
                 self.analyser.feed(chunk, |packet| {
                     tkgs.packet(packet);
                     rap.packet(packet);
+                    rap_check(packet);
                     selector.packet(packet, scratch);
                 });
             }
             None => self.analyser.feed(chunk, |packet| {
                 tkgs.packet(packet);
+                rap_check(packet);
                 selector.packet(packet, scratch);
             }),
+        }
+        if traced {
+            self.trace_firsts(rap_seen);
         }
         if self.tkgs_started.is_some() && !self.tkgs_done && let Some(table) = self.tkgs.table() {
             self.write_tkgs(serde_json::json!({
@@ -1060,6 +1118,21 @@ impl Pipeline {
         }
         let out = std::mem::take(&mut self.scratch);
         self.writer.send(out)
+    }
+
+    /// The selected service's first PAT, PMT, PCR and access point since
+    /// it was selected, on the timeline.
+    fn trace_firsts(&mut self, rap_seen: bool) {
+        let mut first = |bit: u8, now: bool, event: &str| {
+            if now && self.seen & bit == 0 {
+                self.seen |= bit;
+                mediabox_core::timeline!(event, "sid={}", self.service_id);
+            }
+        };
+        first(SEEN_PAT, !self.analyser.pat.is_empty(), "pat");
+        first(SEEN_PMT, self.selector.ready(), "pmt");
+        first(SEEN_PCR, self.selector.last_pcr().is_some(), "pcr");
+        first(SEEN_RAP, rap_seen, "rap");
     }
 
     fn write_tkgs(&self, value: serde_json::Value) {
@@ -1120,6 +1193,7 @@ impl Pipeline {
             return;
         }
         self.writer.redirect(new.clone());
+        mediabox_core::timeline!("fifo-move", "path={}", new.display());
         let _ = std::fs::remove_file(&old);
         log.line(format!("SELECT output moves to {}", new.display()));
         self.fifo = Some(new);
@@ -1162,6 +1236,12 @@ impl Pipeline {
         else {
             return Order::Nothing;
         };
+        mediabox_core::timeline!(
+            "select",
+            "rid={} want={:?}",
+            wanted.rid.unwrap_or(0),
+            format!("{:?}", wanted.want).replace(' ', "")
+        );
         let (service_id, transponder, tkgs, scan) = match wanted.want {
             Want::Standby => {
                 log.line("SELECT standby");
@@ -1216,6 +1296,12 @@ impl Pipeline {
             // A scan takes whatever the transponder is; it leaves nothing.
             self.left_tsid = retune.as_ref().filter(|_| !scan).and(self.selector.selection().transport_stream_id);
             self.selected_at = Instant::now();
+            self.seen = 0;
+            mediabox_core::timeline!(
+                "selected",
+                "sid={service_id} retune={}",
+                u8::from(retune.is_some())
+            );
             self.selector = Selector::new(service_id);
             self.writer.discard();
             if retune.is_some() {
@@ -1230,6 +1316,7 @@ impl Pipeline {
                     self.selector.packet(packet, &mut out);
                 }
                 log.line(format!("SELECT replay {} B from the last access point", out.len()));
+                trace_replay("select", &out);
                 self.writer.send(out);
             }
             let status = &mut reporter.status;
@@ -1247,6 +1334,37 @@ impl Pipeline {
             None => Order::Play,
         }
     }
+}
+
+const SEEN_PAT: u8 = 1;
+const SEEN_PMT: u8 = 2;
+const SEEN_PCR: u8 = 4;
+const SEEN_RAP: u8 = 8;
+const SEEN_ALL: u8 = 15;
+
+/// A start from the last access point, on the timeline: how much, and how
+/// much of the broadcast it spans by its PCRs -- how old the access point
+/// is against the live edge.
+fn trace_replay(at: &str, data: &[u8]) {
+    if !mediabox_core::timeline::enabled() {
+        return;
+    }
+    let pcrs: Vec<u64> = data
+        .as_chunks::<{ crate::ts::PACKET }>()
+        .0
+        .iter()
+        .filter_map(|p| crate::ts::pcr_of(p))
+        .collect();
+    let span = match (pcrs.first(), pcrs.last()) {
+        (Some(&a), Some(&b)) => ((b + (1 << 33) * 300 - a) % ((1 << 33) * 300)) as f64 / 27_000.0,
+        _ => -1.0,
+    };
+    mediabox_core::timeline!(
+        "replay",
+        "at={at} bytes={} pcrs={} pcr_span_ms={span:.1}",
+        data.len(),
+        pcrs.len()
+    );
 }
 
 /// Run the whole service; the final status. The exit code follows `end`.
@@ -1298,6 +1416,7 @@ pub fn run(options: Options, log: &Log) -> Status {
             checked: Instant::now(),
         }),
         rap: options.hold_reader.map(|_| RapCache::default()),
+        seen: 0,
         tuned: match &options.source {
             Source::Satellite { params, .. } => Some(params.clone()),
             Source::Recording(_) => None,
@@ -1606,6 +1725,8 @@ fn stream(
         }
     };
     let since = Instant::now();
+    // The first transfer of this lock, for the timeline.
+    let mut usb_first = true;
     let mut next_signal = options.signal_every.map(|every| Instant::now() + every);
     let mut next_line = Instant::now() + Duration::from_secs(5);
     let mut seen_overflow = 0;
@@ -1656,6 +1777,7 @@ fn stream(
         if pipeline.writer.wants_start() {
             let from = pipeline.rap.as_ref().map(|rap| rap.replay(pipeline.service_id)).unwrap_or_default();
             log.line(format!("READER: starts from the last access point ({} B)", from.len()));
+            trace_replay("reader", &from);
             pipeline.writer.start_from_access_point(from);
         }
         // Nobody has read for the hold: standby, as if asked.
@@ -1794,6 +1916,14 @@ fn stream(
         }
         match chunk {
             Some(chunk) => {
+                if std::mem::take(&mut usb_first) {
+                    mediabox_core::timeline!(
+                        "usb-first",
+                        "bytes={} sync={}",
+                        chunk.len(),
+                        u8::from(chunk.first() == Some(&0x47))
+                    );
+                }
                 if !pipeline.feed(&chunk, reporter) {
                     break Some(closed(pipeline));
                 }

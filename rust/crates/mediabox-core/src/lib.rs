@@ -9,6 +9,7 @@ mod cec;
 mod ethernet;
 mod output;
 mod timing;
+pub mod timeline;
 pub use output::{
     AppliedOutput, ColourCell, ContentMatch, ContentOutput, DisplayGeneration, DisplayIdentity, DisplayState, LegacyResolution,
     LegacySetting, OUTPUT_SETTING_SCHEMA, OUTPUT_TRIAL_SECONDS, Observed, ObservedOutput,

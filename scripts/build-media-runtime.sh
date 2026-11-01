@@ -74,6 +74,8 @@ step="${1:-all}"
 remote() { mediabox_ssh "bash -s" ; }
 
 fetch_and_build() {
+mediabox_ssh "rm -rf /var/tmp/mediabox-mpp-patches && mkdir -p /var/tmp/mediabox-mpp-patches"
+mediabox_scp "$here"/packaging/mpp-patches/*.patch "$MEDIABOX_TARGET:/var/tmp/mediabox-mpp-patches/"
 cat <<REMOTE | remote
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -117,6 +119,13 @@ build_mpp() {
   need build-essential cmake git ca-certificates
   echo "== Rockchip MPP"
   checkout mpp "$MPP_REPO" "$MPP_REV"
+  # MediaBox's patches to MPP (packaging/mpp-patches), copied over before
+  # this runs: no pulldown recovery on 50 Hz broadcasts.
+  for patch in /var/tmp/mediabox-mpp-patches/*.patch; do
+    [ -e "\$patch" ] || continue
+    git -C "\$src/mpp" apply "\$patch"
+    echo "   applied \$(basename "\$patch")"
+  done
   cd "\$src"
   rm -rf mpp-build
   cmake -S mpp -B mpp-build \

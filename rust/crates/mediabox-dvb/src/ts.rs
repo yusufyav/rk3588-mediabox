@@ -1153,10 +1153,37 @@ struct VideoProbe {
     codec: VideoCodec,
     buffer: Vec<u8>,
     in_pes: bool,
+    /// How far `buffer` has been searched for start codes.
+    scanned: usize,
+    /// Where a sequence header (SPS, or MPEG-2's) starts in `buffer`, its
+    /// start code included, until it is whole.
+    candidate: Option<usize>,
 }
 
 impl VideoProbe {
     const LIMIT: usize = 512 * 1024;
+
+    /// Whether the NAL unit (or MPEG-2 start code) after a start code is
+    /// the sequence header.
+    fn header(&self, byte: u8) -> bool {
+        match self.codec {
+            VideoCodec::Mpeg2 => byte == 0xB3,
+            VideoCodec::Hevc => byte >> 1 & 0x3F == 33,
+            _ => byte & 0x1F == 7,
+        }
+    }
+
+    /// Whether the header at the start of `window` is followed by what it
+    /// needs to be read whole: the next start code, and for MPEG-2 the one
+    /// after a sequence extension too.
+    fn whole(&self, window: &[u8]) -> bool {
+        let starts: Vec<usize> =
+            window.windows(3).enumerate().skip(1).filter(|(_, w)| *w == [0, 0, 1]).map(|(i, _)| i + 3).take(2).collect();
+        match (self.codec, starts.as_slice()) {
+            (VideoCodec::Mpeg2, [next, ..]) if window.get(*next) == Some(&0xB5) => starts.len() == 2,
+            (_, starts) => !starts.is_empty(),
+        }
+    }
 
     fn packet(&mut self, p: &[u8]) -> Option<VideoInfo> {
         let payload = payload_of(p)?;
@@ -1173,12 +1200,49 @@ impl VideoProbe {
             return None;
         }
         self.buffer.extend_from_slice(data);
-        let found = find_sps(&self.buffer, self.codec);
-        if found.is_none() && self.buffer.len() > Self::LIMIT {
-            let keep = self.buffer.len() - 1024;
-            self.buffer.drain(..keep);
+        // Only what came since the last look is searched: searched whole on
+        // every packet, as it was, the buffer cost its full length a packet
+        // until the first sequence header -- 1.9 MB into NTV HD's video,
+        // two seconds -- and the receiver ran at a quarter of the stream's
+        // rate for the first three seconds of every channel opened on the
+        // board (measured 2026-10-31, live and from a recording).
+        loop {
+            if self.candidate.is_none() {
+                let from = self.scanned.saturating_sub(3);
+                let found = self.buffer[from..]
+                    .windows(4)
+                    .position(|w| w[..3] == [0, 0, 1] && self.header(w[3]))
+                    .map(|i| from + i);
+                self.scanned = self.buffer.len();
+                match found {
+                    Some(at) => self.candidate = Some(at),
+                    None => {
+                        if self.buffer.len() > Self::LIMIT {
+                            // Nothing to keep but a start code split at the end.
+                            let keep = self.buffer.len() - 3;
+                            self.buffer.drain(..keep);
+                            self.scanned = self.buffer.len();
+                        }
+                        return None;
+                    }
+                }
+            }
+            let at = self.candidate.expect("a candidate");
+            let window = &self.buffer[at..];
+            if !self.whole(window) {
+                if window.len() > Self::LIMIT {
+                    self.candidate = None;
+                }
+                return None;
+            }
+            if let Some(info) = find_sps(window, self.codec) {
+                return Some(info);
+            }
+            // A header that does not read: the next one is looked for after it.
+            self.candidate = None;
+            self.buffer.drain(..at + 3);
+            self.scanned = 0;
         }
-        found
     }
 }
 
@@ -1770,6 +1834,43 @@ mod tests {
         analyser.feed(&packets.concat(), |_| {});
         assert_eq!(analyser.integrity().cc_errors, 1);
         assert_eq!(analyser.integrity().cc_missing_min, 1);
+    }
+
+    /// A sequence header split across packets, behind a megabyte of
+    /// pictures without one, and an unreadable one before it: found, from
+    /// the readable one; and the search does not go over what it has seen.
+    #[test]
+    fn the_video_probe_finds_the_header_after_a_long_wait_and_a_bad_one() {
+        // NTV HD's SPS, taken from a recording of 12015 H (2026-10-31).
+        let sps = [
+            0x67u8, 0x4D, 0x00, 0x28, 0x89, 0x98, 0xA0, 0x3C, 0x02, 0x23, 0xEF, 0x01, 0xF5, 0x01, 0x01, 0x01, 0xF0,
+            0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03, 0x03, 0x29, 0x40,
+        ];
+        let mut stream = Vec::new();
+        for k in 0..6_000u32 {
+            stream.extend_from_slice(&[0, 0, 1, 0x41]);
+            stream.extend(std::iter::repeat_n((k % 251) as u8 | 1, 180));
+        }
+        stream.extend_from_slice(&[0, 0, 1, 0x67, 0xFF]); // unreadable
+        stream.extend_from_slice(&[0, 0, 1]);
+        stream.extend_from_slice(&sps);
+        stream.extend_from_slice(&[0, 0, 1, 0x68, 0xCE, 0x3C, 0x80]);
+        let mut probe = VideoProbe { pid: Some(0x100), codec: VideoCodec::H264, in_pes: true, ..VideoProbe::default() };
+        let mut found = None;
+        let started = std::time::Instant::now();
+        for (n, piece) in stream.chunks(184).enumerate() {
+            let mut p = vec![0x47, 0x01, 0x00, 0x10 | (n % 16) as u8];
+            p.extend_from_slice(piece);
+            p.resize(PACKET, 0xFF);
+            if let Some(info) = probe.packet(&p) {
+                found = Some(info);
+                break;
+            }
+        }
+        let info = found.expect("the readable header");
+        assert_eq!((info.width, info.height, info.interlaced), (1920, 1080, true));
+        assert!(probe.buffer.len() < 64 * 1024, "nothing kept it did not need: {}", probe.buffer.len());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "linear: {:?}", started.elapsed());
     }
 
     #[test]

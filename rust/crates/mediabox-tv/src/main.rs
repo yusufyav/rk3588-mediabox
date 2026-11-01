@@ -7097,6 +7097,7 @@ enum DetailAnswer {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    mediabox_core::timeline::init("tv");
     // Before anything that can spawn a thread — the image workers, the state
     // store, tokio, and the Mali driver's own four. A thread inherits the mask
     // of whoever spawned it, and a SIGTERM delivered to one that has it

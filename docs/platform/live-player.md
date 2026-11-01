@@ -170,6 +170,12 @@ Kanky ─USB─> mediabox-dvb ─FIFO (tek servis)─> mediabox-live
   ayrıştırıcı hızlı kipte değilken başlatır. ffmpeg-rockchip geçmeli
   videoda hızlı kipi kapatır (`rkmppdec.c`), gstreamer-rockchip açık bırakır
   (`gstmppdec.c`). Bu yüzden burada `fast-mode=false` ayarlanır.
+  IEP2'nin pulldown kurtarması (PD kipi) kapalıdır
+  (`packaging/mpp-patches/0001-…`): algılayıcısı yalnız 3:2 kadansları
+  tanır (`PD_TYPES_*`), 50 Hz yayında böyle içerik yoktur. Açıkken NTV
+  1080i50'de sıradan görüntüde kadans buldu, alan çifti başına tek kare (ya
+  da hiç) çıkardı: alanlar 20 yerine 80/40/40/40 ms arayla, resimlerin yarısı
+  gitti (**ölçüldü** 2026-11-01, 93 açılışta 3).
 - **Her akış kendi iş parçacığında** (tsdemux'tan sonra `queue`). Bu
   olmadan ses, PTS'sinden 1,35 s sonra sink'e ulaştı; gecikme payı ise 0,83 s
   idi ve aygıt sessizlik çaldı (**ölçüldü**, bölüm 4).
@@ -414,3 +420,30 @@ Oynatıcının kendi durumu, `/run/mediabox/player.sock` üzerinde
 `get_property mediabox-live` ile okunur: kareler, atlananlar, gecikme,
 görüntü gecikmesi, ses önceliği, codec'ler ve ses biçimi. Ortam ayarları
 `rust/crates/mediabox-live/src/main.rs` başında, iz biçimi `trace.rs`'te.
+
+### Birleşik zaman çizelgesi (mbtrace 2)
+
+Kanal isteğinden panelde taranan kareye kadar her süreç (`ctl` denetim
+düzlemi, `dvb` alıcı, `live` oynatıcı, `tv` arayüz) aynı saatte,
+CLOCK_MONOTONIC nanosaniye ile kendi dosyasına yazar. Her süreçteki bir iş
+parçacığı dizine 250 ms'de bir bakar; yeniden başlatma gerekmez, tmpfs
+olduğu için reboot kapatır:
+
+```sh
+mkdir /run/mediabox-trace                          # aç (en geç 250 ms)
+mv /run/mediabox-trace /run/mediabox-trace.done    # kapat: her süreç dosyasını
+sleep 1                                            # flush edip kapatır
+tools/live-trace.py analyze /run/mediabox-trace.done --json out.json --csv frames.csv
+tools/live-trace.py matrix recording.ts   # kanal matrisi: PTS adımı, RAP, PCR, PTS-PCR öndeliği
+tools/live-trace.py selftest              # cevabı bilinen sentetik izler
+```
+
+Olaylar zaman penceresiyle değil kimlikle birleşir: istek `rid` ile (alıcıya
+`select.json` içinde gider), oynatıcı dalı açtığı FIFO yoluyla isteğe, kare
+(oynatıcı run'ı, MBV1 id) çiftiyle (arayüz oynatıcıyı SO_PEERCRED pid'iyle
+adlandırır). Bir karenin taranmasını `commit id=` sonrasındaki ilk
+`flip seq= at=` verir. PCR süreksizliği, kaçan damga ya da akıl dışı bir
+evre koşuyu INVALID yapar ve gecikme raporlanmaz. Olaylar
+`rust/crates/mediabox-core/src/timeline.rs` ve çağrıldıkları yerlerde.
+Ölçülmeyenler: ALSA'nın gerçek çıkış zamanı (htstamp) ve HDMI alıcısının
+yeniden kilitlenmesi; bunlar için harici yakalama gerekir.

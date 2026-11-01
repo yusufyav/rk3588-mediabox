@@ -163,6 +163,9 @@ struct Presentation {
     current: Option<PresentedFrame>,
     pending_previous: Option<PresentedFrame>,
     waiting_for_flip: bool,
+    /// The kernel has been asked for its next vblank (`ask_vblank`) and has
+    /// not answered yet.
+    vblank_asked: bool,
     /// When the last commit reached its vblank.
     last_flip: Option<std::time::Instant>,
     first_frame_logged: bool,
@@ -648,6 +651,16 @@ impl SplitDisplay {
             edid_sha256: offer.edid_sha256.clone(),
         });
         IDENTITY.with(|cell| *cell.borrow_mut() = identity);
+        {
+            let (width, height) = mode.size();
+            let (htotal, vtotal) = (u64::from(mode.hsync().2), u64::from(mode.vsync().2));
+            mediabox_core::timeline!(
+                "mode",
+                "w={width} h={height} hz={} period={} at=start",
+                mode.vrefresh(),
+                htotal * vtotal * 1_000_000 / u64::from(mode.clock()).max(1)
+            );
+        }
         let display = Rc::new(Self {
             kms,
             connector,
@@ -723,14 +736,27 @@ impl SplitDisplay {
             return Ok(());
         }
         loop {
-            let mut events = self.kms.receive_events()?;
-            if let Some(flip) = events.find_map(|event| match event {
-                control::Event::PageFlip(flip) => Some(flip),
-                _ => None,
-            }) {
+            let mut found = None;
+            for event in self.kms.receive_events()? {
+                match event {
+                    control::Event::PageFlip(flip) if found.is_none() => found = Some(flip),
+                    control::Event::Vblank(vblank) => self.vblank_event(&vblank),
+                    _ => {}
+                }
+            }
+            if let Some(flip) = found {
                 crate::video::trace::event('F', 1, 0);
                 crate::video::trace::vblank(flip.frame, flip.duration);
-                self.sink.borrow_mut().vblank(flip.duration.as_nanos() as u64, self.frame_period().as_nanos() as u64);
+                mediabox_core::timeline!(
+                    "flip",
+                    "seq={} at={}",
+                    flip.frame,
+                    flip.duration.as_nanos()
+                );
+                self.sink.borrow_mut().vblank(
+                    flip.duration.as_nanos() as u64,
+                    self.frame_period().as_nanos() as u64,
+                );
                 let old = {
                     let mut state = self.presentation.borrow_mut();
                     state.waiting_for_flip = false;
@@ -1065,24 +1091,32 @@ impl SplitDisplay {
             sink.hdr()
         };
         self.signal_output_colour(hdr);
+        self.ask_vblank();
     }
 
     /// A commit ended: its vblank has passed. Read without waiting -- the
     /// event loop only calls this once the device is readable -- and send
     /// the waiting film frame if the interface is not about to.
     fn flip_done(&self, redraw_due: bool) {
-        let finished = match self.kms.receive_events() {
-            Ok(mut events) => events.find_map(|event| match event {
-                control::Event::PageFlip(flip) => Some(flip),
-                _ => None,
-            }),
-            Err(_) => None,
-        };
+        let mut finished = None;
+        if let Ok(events) = self.kms.receive_events() {
+            for event in events {
+                match event {
+                    control::Event::PageFlip(flip) if finished.is_none() => finished = Some(flip),
+                    // The vblank asked for: the waiting film frame, if it is
+                    // due at the next one, goes from the event loop's
+                    // `pump_video`.
+                    control::Event::Vblank(vblank) => self.vblank_event(&vblank),
+                    _ => {}
+                }
+            }
+        }
         let Some(flip) = finished else {
             return;
         };
         crate::video::trace::event('F', 0, 0);
         crate::video::trace::vblank(flip.frame, flip.duration);
+        mediabox_core::timeline!("flip", "seq={} at={}", flip.frame, flip.duration.as_nanos());
         self.sink.borrow_mut().vblank(flip.duration.as_nanos() as u64, self.frame_period().as_nanos() as u64);
         let old = {
             let mut state = self.presentation.borrow_mut();
@@ -1102,6 +1136,50 @@ impl SplitDisplay {
         {
             eprintln!("mediabox-tv.video {error}");
         }
+    }
+
+    /// Ask the kernel for its next vblank on this CRTC, as an event
+    /// (`DRM_VBLANK_EVENT`): when the grid of the mode is not known -- after a
+    /// mode change, before any page flip of the new mode -- a timed film
+    /// frame waits for it, and the event carries the vblank's own timestamp
+    /// (CLOCK_MONOTONIC, as page flips do). Refused, frames go up as they
+    /// come.
+    fn ask_vblank(&self) {
+        if self.presentation.borrow().vblank_asked || !self.sink.borrow().wants_vblank() {
+            return;
+        }
+        let pipe = self
+            .kms
+            .resource_handles()
+            .ok()
+            .and_then(|resources| resources.crtcs().iter().position(|crtc| *crtc == self.crtc));
+        let asked = pipe.ok_or_else(|| "the CRTC is not the device's".to_string()).and_then(|pipe| {
+            self.kms
+                .wait_vblank(drm::VblankWaitTarget::Relative(1), drm::VblankWaitFlags::EVENT, pipe as u32, 0)
+                .map_err(|error| error.to_string())
+        });
+        match asked {
+            Ok(_) => {
+                mediabox_core::timeline!("vblank-ask", "pipe={}", pipe.unwrap_or(0));
+                self.presentation.borrow_mut().vblank_asked = true;
+            }
+            Err(error) => {
+                eprintln!("mediabox-tv.video the kernel will not report a vblank ({error}); film frames go up as they come");
+                self.sink.borrow_mut().vblank_unavailable();
+            }
+        }
+    }
+
+    /// The vblank asked for (`ask_vblank`) has come.
+    fn vblank_event(&self, vblank: &drm::control::VblankEvent) {
+        if vblank.crtc != self.crtc {
+            return;
+        }
+        self.presentation.borrow_mut().vblank_asked = false;
+        mediabox_core::timeline!("vblank-event", "seq={} at={}", vblank.frame, vblank.time.as_nanos());
+        self.sink
+            .borrow_mut()
+            .vblank(vblank.time.as_nanos() as u64, self.frame_period().as_nanos() as u64);
     }
 
     /// The interface's plane: the one on this CRTC showing its frame.
@@ -1165,10 +1243,18 @@ impl SplitDisplay {
         };
         let staged = committed.map_err(|e| format!("atomic commit: {e}"))?;
         crate::video::trace::event('C', u64::from(ui.is_some()), u64::from(staged.is_some()));
+        let mut film = None;
         if let Some(index) = staged {
-            self.sink.borrow_mut().committed(&self.video, index);
+            film = self.sink.borrow_mut().committed(&self.video, index);
             VIDEO.with(|cell| cell.set(true));
         }
+        mediabox_core::timeline!(
+            "commit",
+            "pid={} id={} ui={}",
+            self.sink.borrow().peer(),
+            film.unwrap_or(0),
+            u8::from(ui.is_some())
+        );
         let mut state = self.presentation.borrow_mut();
         state.waiting_for_flip = true;
         if let Some(frame) = ui {
@@ -1379,6 +1465,12 @@ impl SplitDisplay {
         self.colour.set(colour);
         let (width, height) = mode.size();
         MODE.with(|cell| cell.set((width.into(), height.into(), mode.vrefresh())));
+        mediabox_core::timeline!(
+            "mode-req",
+            "w={width} h={height} hz={} clock_khz={}",
+            mode.vrefresh(),
+            mode.clock()
+        );
         Ok(resized)
     }
 
@@ -1407,6 +1499,15 @@ impl SplitDisplay {
                 self.applied.set(colour);
                 self.signalled.set(None);
                 OUTPUT_ERROR.with(|cell| cell.borrow_mut().take());
+                // The vblanks known were of the mode before.
+                self.sink.borrow_mut().forget_vblank();
+                let (width, height) = mode.size();
+                mediabox_core::timeline!(
+                    "mode",
+                    "w={width} h={height} hz={} period={}",
+                    mode.vrefresh(),
+                    self.frame_period().as_nanos()
+                );
                 eprintln!(
                     "mediabox-tv.platform output now {} {}",
                     self.timing.get().label(),
@@ -1416,6 +1517,7 @@ impl SplitDisplay {
                 self.signal_output_colour(self.asked.get());
             }
             Err(error) => {
+                mediabox_core::timeline!("mode-refused", "hz={}", mode.vrefresh());
                 eprintln!(
                     "mediabox-tv.platform the kernel refused {} {}: {error}; staying on {}",
                     self.timing.get().label(),
@@ -2781,6 +2883,10 @@ impl Platform for SplitPlatform {
             .udev_assign_seat("seat0")
             .map_err(|_| PlatformError::from("libinput could not assign seat0".to_string()))?;
         loop {
+            // Where a pass of the loop spends its time, on the timeline when
+            // one phase holds it past a commit's margin: a film frame due at
+            // a vblank waits for this loop (`loop-slow`).
+            let started = mediabox_core::timeline::now_ns();
             slint::platform::update_timers_and_animations();
             if self.drain_messages() {
                 break;
@@ -2793,7 +2899,9 @@ impl Platform for SplitPlatform {
             {
                 self.window.display.report();
             }
+            let before_render = mediabox_core::timeline::now_ns();
             self.window.render_if_needed()?;
+            let rendered = mediabox_core::timeline::now_ns();
             // A switch the kernel refused has put the old size back.
             if self.window.display.switch.borrow().is_none()
                 && self.window.window.size() != self.window.size()
@@ -2802,6 +2910,18 @@ impl Platform for SplitPlatform {
             }
 
             let repeat = self.repeat_held();
+            // How long until a film frame is due; zero when one is due now,
+            // unless a commit in flight holds it back (its flip sends it).
+            // Read once: a frame that became due between a look that found
+            // it not yet due and the sleep was left for whatever woke the
+            // loop next -- the next frame, in the last 2 ms before the
+            // vblank: the first frame of three openings in 95 missed its
+            // vblank so (measured 2026-11-01).
+            let film = {
+                let presentation = self.window.display.presentation.borrow();
+                let held = presentation.waiting_for_flip || presentation.current.is_none();
+                self.window.display.sink.borrow().until_due().filter(|until| !(held && until.is_zero()))
+            };
             let timeout = if self.window.redraw.get() {
                 0
             } else {
@@ -2810,7 +2930,7 @@ impl Platform for SplitPlatform {
                     .min(Duration::from_millis(250))
                     .min(repeat.unwrap_or(Duration::MAX))
                     // A film frame waiting for its vblank.
-                    .min(self.window.display.sink.borrow().until_due().unwrap_or(Duration::MAX))
+                    .min(film.unwrap_or(Duration::MAX))
                     .as_millis() as i32
             };
             // The third is the player's socket. Its descriptor is the door
@@ -2819,7 +2939,9 @@ impl Platform for SplitPlatform {
             let video = self.window.display.sink.borrow().poll_fd();
             // The display device, while a commit is in flight: its vblank is
             // when the next waiting film frame can go.
-            let drm = if self.window.display.presentation.borrow().waiting_for_flip {
+            let drm = if self.window.display.presentation.borrow().waiting_for_flip
+                || self.window.display.presentation.borrow().vblank_asked
+            {
                 self.window.display.kms.as_fd().as_raw_fd()
             } else {
                 -1
@@ -2846,7 +2968,9 @@ impl Platform for SplitPlatform {
                     revents: 0,
                 },
             ];
+            let polling = mediabox_core::timeline::now_ns();
             let rc = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, timeout) };
+            let polled = mediabox_core::timeline::now_ns();
             if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
                 return Err(format!("event loop poll: {}", std::io::Error::last_os_error()).into());
             }
@@ -2869,6 +2993,41 @@ impl Platform for SplitPlatform {
             // Woken for the socket, or for a waiting film frame's vblank.
             if pollfds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 || self.window.display.sink.borrow().has_pending() {
                 self.window.display.pump_video();
+            }
+            if mediabox_core::timeline::enabled() {
+                {
+                    let presentation = self.window.display.presentation.borrow();
+                    self.window
+                        .display
+                        .sink
+                        .borrow()
+                        .trace_first_wait(presentation.waiting_for_flip, presentation.current.is_some());
+                }
+                let done = mediabox_core::timeline::now_ns();
+                let ms = |ns: u64| ns as f64 / 1e6;
+                let overslept = polled.saturating_sub(polling).saturating_sub(timeout.max(0) as u64 * 1_000_000);
+                if before_render - started > 2_000_000
+                    || rendered - before_render > 2_000_000
+                    || polling - rendered > 2_000_000
+                    || done - polled > 2_000_000
+                    || overslept > 2_000_000
+                {
+                    mediabox_core::timeline::write(
+                        "loop-slow",
+                        format_args!(
+                            "timers={:.2} render={:.2} between={:.2} poll={:.2} timeout={timeout} after={:.2} rc={rc} revents={},{},{},{}",
+                            ms(before_render - started),
+                            ms(rendered - before_render),
+                            ms(polling - rendered),
+                            ms(polled - polling),
+                            ms(done - polled),
+                            pollfds[0].revents,
+                            pollfds[1].revents,
+                            pollfds[2].revents,
+                            pollfds[3].revents
+                        ),
+                    );
+                }
             }
         }
         self.window.display.release_display();

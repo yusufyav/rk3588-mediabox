@@ -14,14 +14,16 @@
 //!                  28 planes
 //! ```
 //!
-//! A frame message carries 8 bytes more than the others: when it is due on
+//! A frame message (kind 5, FRAME_TIMED) carries 8 bytes more than the
+//! others: when it is due on
 //! the panel, CLOCK_MONOTONIC nanoseconds -- the clock of the kernel's
 //! vblank timestamps. It is sent two refreshes ahead of that, and the
 //! interface puts it up at the vblank nearest it, as Android's SurfaceView
 //! does with `MediaCodec.releaseOutputBuffer(index, renderTimestampNs)`:
 //! "for best performance and quality, call this method when you are about
-//! two VSYNCs' time before the desired render time". A reader of the 88
-//! bytes alone (SOCK_SEQPACKET truncates) shows it as it comes, as before.
+//! two VSYNCs' time before the desired render time". Its own kind, not
+//! vo_mediabox's FRAME (0): the socket is a stream, and the interface knows
+//! by the kind how many bytes the message is.
 //!
 //! What this side owes the wire is the same as vo_mediabox's: a frame is kept
 //! -- here, its `gst::Sample`, which is what holds MPP's buffer out of the
@@ -37,7 +39,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const MAGIC: u32 = 0x3156_424d;
-const FRAME: u32 = 0;
+/// A frame with its due time (`TIMED` bytes): the interface reads the 8
+/// more by this kind, the socket being a stream.
+const FRAME_TIMED: u32 = 5;
 const STOP: u32 = 1;
 const RELEASE: u32 = 2;
 const HDR: u32 = 3;
@@ -159,6 +163,7 @@ impl Plane {
             // The sample, and with it MPP's buffer, goes back here.
             state.held.remove(at);
             self.trace.event('R', id, 0);
+            mediabox_core::timeline!("release", "id={id}");
             self.released.notify_all();
         }
     }
@@ -174,7 +179,14 @@ impl Plane {
     /// Put `picture` on the plane, keeping `sample` until the interface gives
     /// it back. Called when the frame is due: the interface shows it at its
     /// next vertical blank.
-    pub fn send(&self, picture: &Picture, sample: gst::Sample, pts_ns: u64, due_ns: u64) -> Sent {
+    pub fn send(
+        &self,
+        picture: &Picture,
+        sample: gst::Sample,
+        generation: u64,
+        pts_ns: u64,
+        due_ns: u64,
+    ) -> Sent {
         let mut state = self.lock();
         if state.gone || state.closed {
             return Sent::Gone;
@@ -195,12 +207,18 @@ impl Plane {
         if state.held.len() >= IN_FLIGHT {
             state.dropped_full += 1;
             self.trace.event('D', 0, pts_ns / 1000);
+            mediabox_core::timeline!(
+                "drop",
+                "gen={generation} pts_us={} why=full held={}",
+                pts_ns / 1000,
+                state.held.len()
+            );
             return Sent::Dropped;
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut message = [0u8; TIMED];
         put32(&mut message, 0, MAGIC);
-        put32(&mut message, 4, FRAME);
+        put32(&mut message, 4, FRAME_TIMED);
         message[8..16].copy_from_slice(&id.to_le_bytes());
         put32(&mut message, 16, picture.fourcc);
         put32(&mut message, 20, picture.width);
@@ -222,7 +240,16 @@ impl Plane {
             return Sent::Gone;
         }
         self.trace.event('S', id, pts_ns / 1000);
-        state.held.push(Held { id, _sample: sample });
+        mediabox_core::timeline!(
+            "send",
+            "gen={generation} id={id} pts_us={} due={due_ns} held={}",
+            pts_ns / 1000,
+            state.held.len() + 1
+        );
+        state.held.push(Held {
+            id,
+            _sample: sample,
+        });
         Sent::Shown
     }
 
@@ -254,6 +281,7 @@ impl Plane {
     /// Let go on a timeout, MPP could decode into a buffer the panel was
     /// still scanning out.
     pub fn stop(&self) {
+        mediabox_core::timeline!("plane-stop", "held={}", self.held());
         let mut message = [0u8; MESSAGE];
         put32(&mut message, 0, MAGIC);
         put32(&mut message, 4, STOP);
