@@ -2878,6 +2878,37 @@ impl Platform for SplitPlatform {
     }
 
     fn run_event_loop(&self) -> Result<(), PlatformError> {
+        /// The display loop's nice where SCHED_FIFO is refused.
+        const DISPLAY_NICE: libc::c_int = -10;
+        // The loop that commits each film frame for its vblank runs at a
+        // real-time priority, as Android's SurfaceFlinger does (SCHED_FIFO,
+        // main_surfaceflinger.cpp). At an ordinary one, with the CPUs busy
+        // (4 spinning threads and 2 copying memory, load 7.6 on 8 cores) it
+        // was held 24-26 ms in one pass and frames missed their vblank: 77
+        // skipped in 25 minutes of NTV, none without the load (measured
+        // 2026-11-01). Threads it starts later are ordinary again
+        // (SCHED_RESET_ON_FORK); the kernel keeps 5 % of each second for
+        // everything else (sched_rt_runtime_us).
+        let param = libc::sched_param { sched_priority: 2 };
+        // SAFETY: sets the calling thread's policy; `param` is valid.
+        let rc = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) };
+        let mut nice = None;
+        if rc != 0 {
+            // Refused where the kernel groups real-time time by cgroup
+            // (CONFIG_RT_GROUP_SCHED) and systemd has the cpu controller on:
+            // a service's group has no real-time budget, root or not. Then
+            // the highest ordinary priority for this thread, as Android also
+            // gives SurfaceFlinger's (PRIORITY_URGENT_DISPLAY, nice -8).
+            let fifo = std::io::Error::last_os_error();
+            // SAFETY: gettid and setpriority on this thread only.
+            let set = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, DISPLAY_NICE) };
+            nice = (set == 0).then_some(DISPLAY_NICE);
+            eprintln!(
+                "mediabox-tv.platform the display loop: no SCHED_FIFO ({fifo}); nice {}",
+                nice.map_or_else(|| format!("refused ({})", std::io::Error::last_os_error()), |n| n.to_string())
+            );
+        }
+        mediabox_core::timeline!("sched", "fifo={} nice={:?}", u8::from(rc == 0), nice);
         let mut libinput = input::Libinput::new_with_udev(DirectInput);
         libinput
             .udev_assign_seat("seat0")

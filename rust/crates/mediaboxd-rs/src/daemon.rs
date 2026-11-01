@@ -336,6 +336,19 @@ impl AppState {
                 self.play_live(service_id, source, title).await
             }
             Request::LiveChannels => Response::success(self.live.channels()),
+            Request::LiveReceiver => {
+                let link = mediabox_core::usblink::link();
+                let (present, speed) = match link {
+                    mediabox_core::usblink::Link::Absent => (false, None),
+                    mediabox_core::usblink::Link::Slow(speed) | mediabox_core::usblink::Link::Ready(speed) => (true, Some(speed)),
+                };
+                Response::success(serde_json::json!({
+                    "present": present,
+                    "speed_mbps": speed,
+                    "usable": matches!(link, mediabox_core::usblink::Link::Ready(_)),
+                    "problem": mediabox_core::usblink::problem(link),
+                }))
+            }
             Request::LiveTkgsUpdate => match self.live.update_tkgs().await {
                 Ok(value) => Response::success(value),
                 Err(error) => Response::failure("tkgs_update_failed", error),

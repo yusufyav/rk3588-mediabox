@@ -145,6 +145,11 @@ pub enum End {
     PlayerNeverOpened,
     UsbDisconnected,
     DeviceNotFound,
+    /// The receiver is on a link too slow for a transport stream
+    /// (`usblink`): full speed, 12 Mbit/s, where 480 is needed.
+    SlowLink,
+    /// Locked, and the receiver sends no transport stream.
+    NoTransport,
     NoLock,
     TuneFailed,
     ServiceNotFound,
@@ -1367,10 +1372,43 @@ fn trace_replay(at: &str, data: &[u8]) {
     );
 }
 
+/// Whether the receiver can be used: present (waited for 3 s, as one just
+/// plugged in enumerates) and at high speed (`usblink`). None: it can.
+fn receiver_link(log: &Log) -> Option<(End, String)> {
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        match crate::usblink::kanky_speed() {
+            Some((_, speed)) if speed >= crate::usblink::NEEDED_MBPS => return None,
+            Some((name, speed)) => {
+                log.line(format!(
+                    "USB LINK: the receiver ({name}) is at {speed} Mbit/s; a transport stream needs {}",
+                    crate::usblink::NEEDED_MBPS
+                ));
+                return Some((End::SlowLink, format!("{speed} Mbit/s")));
+            }
+            None if Instant::now() >= until => {
+                log.line("USB LINK: no receiver on the bus");
+                return Some((End::DeviceNotFound, OpenError::NotFound.to_string()));
+            }
+            None => std::thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
 /// Run the whole service; the final status. The exit code follows `end`.
 pub fn run(options: Options, log: &Log) -> Status {
     let mut reporter = Reporter::new(options.status.clone(), &options);
     reporter.write();
+    // The receiver there, and on a link that can carry a stream, before the
+    // output exists: the control plane starts the player once the FIFO is
+    // there, so an ending found only after it (on opening the USB device)
+    // reached the viewer 6 s late, after a display mode change for a film
+    // that never came (2026-11-01 19:14).
+    if matches!(options.source, Source::Satellite { .. })
+        && let Some((end, message)) = receiver_link(log)
+    {
+        return finish(reporter, None, end, Some(message), log);
+    }
     // A warm receiver does not wait for its player to tune: the demodulator's
     // boot and the lock (5 s cold) run while the player starts, and what
     // arrives before the player opens the FIFO waits for it in the writer.
@@ -1632,6 +1670,20 @@ fn play_satellite(
             }
         };
         open_until = Instant::now();
+        // A link too slow for the stream is not tuned at all: it locks and
+        // delivers nothing (`usblink`). What the viewer is told is the link.
+        if let Some((name, speed)) = crate::usblink::kanky_speed()
+            && speed < crate::usblink::NEEDED_MBPS
+        {
+            log.line(format!(
+                "USB LINK: the receiver ({name}) is at {speed} Mbit/s; a transport stream needs {} -- not tuned",
+                crate::usblink::NEEDED_MBPS
+            ));
+            if let Some(error) = session.release() {
+                log.line(format!("USB release: {error}"));
+            }
+            return (End::SlowLink, Some(format!("{speed} Mbit/s")));
+        }
         reporter.status.sessions += 1;
         reporter.state(State::Tuning, log);
         log.line(format!("source: satellite, session {} {params:?}", reporter.status.sessions));
@@ -1687,7 +1739,6 @@ fn play_satellite(
 }
 
 const TS_DEAD_AFTER: Duration = Duration::from_secs(10);
-const TS_CYCLE_EVERY: Duration = Duration::from_secs(60);
 
 /// The locked receiver's stream, until something ends it. Returns what the
 /// tuner needs to know (the device went away) and, if the stream decided
@@ -1741,7 +1792,10 @@ fn stream(
     // on the first retune after the cable is. Not inferred from the stream:
     // with the cable out the receiver keeps sending (40 000 packets a second).
     let mut lock_checked = Instant::now();
-    // Packets the bridge has delivered, and when that last grew.
+    // TS packets read from the bridge, and when that last grew. Packets,
+    // not completed transfers: a transfer can complete short with nothing in
+    // it (one did on 2026-11-01, the receiver behind a USB hub, and the
+    // stream that never came was reported as a service not found).
     let mut delivered = (0u64, Instant::now());
     let ended = loop {
         if STOP.load(Ordering::SeqCst) {
@@ -1936,11 +1990,11 @@ fn stream(
             None => {}
         }
         // Without a signal the service cannot be found; that is no signal,
-        // not a service missing from the multiplex. Nor is it with no
-        // transfer ever completed: that is a stream gone dead under a lock,
-        // for the power cycle below (both 10 s; this check came first and
-        // ended the receiver "service not found" with 0 bytes read, the
-        // cycle never reached -- 2026-10-31, twice).
+        // not a service missing from the multiplex. Nor is it with no TS
+        // packet ever read: that is a receiver sending no stream, which
+        // ends as that below (both 10 s; this check came first and ended
+        // the receiver "service not found" with 0 bytes read -- 2026-10-31,
+        // twice, and 2026-11-01 behind a USB hub).
         if reporter.status.state != State::NoSignal
             && delivered.0 > 0
             && let Some(failed) = check_service(pipeline, options, since)
@@ -1964,24 +2018,20 @@ fn stream(
                 }
             }
         }
-        // FEC locked and not one transfer for 10 s: the bridge's TS path is
-        // dead (measured 2026-10-29 after a scan: fec_lock 1, completed 0,
-        // through firmware reboots, port resets and demodulator resets) --
-        // a state only power takes it out of. The port's power is cut and
-        // restored, and the receiver comes back as if replugged.
-        if stats.completed != delivered.0 {
-            delivered = (stats.completed, Instant::now());
+        // FEC locked and not one transfer for 10 s: the receiver sends no
+        // stream. The session ends and says so. Its port's power is not cut:
+        // that cycle (in place until 2026-11-01) ran twice that day on a
+        // receiver that had come up at full speed and changed nothing -- the
+        // same firmware, the same 12 Mbit/s link -- and the receiver is not
+        // to be power-cycled by software at all.
+        if reporter.status.integrity.packets != delivered.0 {
+            delivered = (reporter.status.integrity.packets, Instant::now());
         } else if delivered.1.elapsed() >= TS_DEAD_AFTER
             && matches!(demod.lock_flags(bridge), Ok((_, fec)) if fec != 0)
-            && crate::usbpower::may_cycle(TS_CYCLE_EVERY)
         {
-            log.line(format!("TS DEAD: no transfer completed for {:?}; the receiver's port is power-cycled", TS_DEAD_AFTER));
-            match crate::usbpower::cycle_kanky(Duration::from_secs(3)) {
-                Ok(port) => log.line(format!("TS DEAD: port {port} power cut and restored")),
-                Err(error) => log.line(format!("TS DEAD: power cycle failed: {error}")),
-            }
-            no_device = true;
-            break None;
+            let link = crate::usblink::kanky_speed().map_or_else(|| "?".to_string(), |(_, speed)| speed.to_string());
+            log.line(format!("TS DEAD: locked, no transfer completed for {TS_DEAD_AFTER:?} (link {link} Mbit/s); the session ends"));
+            break Some((End::NoTransport, Some(format!("{} sn veri yok", TS_DEAD_AFTER.as_secs()))));
         }
         reporter.status.usb = Some(stats);
         pipeline.report(reporter);

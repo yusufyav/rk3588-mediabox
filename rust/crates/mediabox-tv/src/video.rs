@@ -1186,6 +1186,11 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// timed frame (`snap_offset`): its frames fall on the vblanks, not
     /// between two.
     snap: Option<i64>,
+    /// The snap the film started with (`track_snap` keeps within half a
+    /// period of it), and the due time of the frame last committed, to be
+    /// set against the vblank its page flip reports.
+    snap_first: i64,
+    shown_due: Option<u64>,
     /// When the last frame arrived: whether the film is moving (`moving`).
     arrived: Option<std::time::Instant>,
     on: bool,
@@ -1213,6 +1218,8 @@ impl<D: ControlDevice + Clone> Sink<D> {
             vblank: None,
             no_vblank: false,
             snap: None,
+            snap_first: 0,
+            shown_due: None,
             arrived: None,
             on: false,
             refused: false,
@@ -1390,6 +1397,19 @@ impl<D: ControlDevice + Clone> Sink<D> {
             self.vblank = Some((at_ns, period_ns));
             self.no_vblank = false;
             self.settle_snap();
+            // The frame last committed was scanned out at this vblank.
+            if let (Some(due), Some(snap)) = (self.shown_due.take(), self.snap) {
+                let next = track_snap(snap, self.snap_first, due, at_ns, period_ns);
+                if next != snap {
+                    self.snap = Some(next);
+                    mediabox_core::timeline!(
+                        "resnap",
+                        "pid={} offset={next} was={snap} first={}",
+                        self.server.peer(),
+                        self.snap_first
+                    );
+                }
+            }
         }
     }
 
@@ -1404,6 +1424,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
         };
         let snap = snap_offset(due, last, period);
         self.snap = Some(snap);
+        self.snap_first = snap;
         mediabox_core::timeline!("snap", "pid={} offset={snap} period={period}", self.server.peer());
     }
 
@@ -1588,6 +1609,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
     pub fn committed(&mut self, planes: &[VideoPlane], index: usize) -> Option<u64> {
         let pending = self.pending.pop_front()?;
         let id = pending.id;
+        self.shown_due = pending.due_ns;
         trace::event('c', pending.id, 0);
         planes[index].staged(pending.info.colour);
         if !self.on || self.picture.map(|(picture, _)| picture) != Some(pending.dst) {
@@ -1682,6 +1704,37 @@ fn snap_offset(due: u64, last: u64, period: u64) -> i64 {
     let period = i128::from(period);
     let nearest = (from + period / 2).div_euclid(period) * period;
     (nearest - from) as i64
+}
+
+/// How far a scanned frame may stray from its snapped time before the snap
+/// follows it.
+const TRACK_NS: i64 = 5_000_000;
+
+/// The snap after a frame due at `due` (before the snap) was scanned out at
+/// the vblank `shown`.
+///
+/// Fixed at the first frame, the snap put the film's frames on the vblanks,
+/// but the panel's clock and the broadcast's part by some ppm (12 measured
+/// on NTV, 2026-11-01): after 14 minutes the frames sat half way between
+/// two vblanks and went up at one or the other by turns -- 43 skipped and
+/// 44 shown twice in ten minutes. Followed, the frames stay on the vblanks;
+/// each step is under half a period, so no frame changes vblank by it. Once
+/// the snap has moved half a period from where it started, a whole period
+/// is taken back: one frame shown twice, or one skipped, where the drift
+/// makes that unavoidable (one in 28 minutes at 12 ppm), and picture stays
+/// within half a period of sound. A frame scanned half a period or more
+/// from its time went up late or early, not out of phase: it moves nothing.
+fn track_snap(snap: i64, first: i64, due: u64, shown: u64, period: u64) -> i64 {
+    let period = period as i64;
+    let error = due as i64 + snap - shown as i64;
+    if error.abs() >= period / 2 || error.abs() <= TRACK_NS {
+        return snap;
+    }
+    let mut next = snap - error;
+    if (next - first).abs() > period / 2 {
+        next -= (next - first).signum() * period;
+    }
+    next
 }
 
 /// The vblank a commit made at `now` might or might not still catch: one
@@ -1792,6 +1845,60 @@ mod tests {
     const P50: u64 = 20 * MS;
     /// 1001/60 ms.
     const P5994: u64 = 16_683_333;
+
+    /// An hour of a film whose clock runs `ppm` apart from the panel's,
+    /// vblank timestamps jittering by 50 us: how many frames change by
+    /// other than one vblank from the one before, with the snap followed
+    /// or fixed.
+    fn slot_changes(ppm: f64, follow: bool) -> (usize, usize) {
+        let frames = 3600 * 50;
+        let period = P50 as i64;
+        let first = 3_000_000i64;
+        let mut snap = first;
+        let mut last_slot: Option<i64> = None;
+        let (mut changes, mut flip_flops, mut previous_change) = (0, 0, 0usize);
+        let mut state = 12345u64;
+        for k in 0..frames as i64 {
+            let due = 1_000 * MS as i64 - first + (k as f64 * period as f64 * (1.0 + ppm * 1e-6)) as i64;
+            // The vblank nearest the snapped due, ties to the earlier one,
+            // on a grid known from timestamps that jitter.
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let jitter = (state >> 33) as i64 % 100_000 - 50_000;
+            let at = due + snap - jitter;
+            let slot = (at - period / 2 + period - 1).div_euclid(period);
+            let shown = (slot * period + jitter) as u64;
+            if let Some(last) = last_slot
+                && slot - last != 1
+            {
+                changes += 1;
+                if k as usize - previous_change < 50 * 60 {
+                    flip_flops += 1;
+                }
+                previous_change = k as usize;
+            }
+            last_slot = Some(slot);
+            if follow {
+                snap = track_snap(snap, first, due as u64, shown, P50);
+            }
+        }
+        (changes, flip_flops)
+    }
+
+    #[test]
+    fn a_drifting_film_gets_one_repeat_per_period_of_drift_not_a_burst() {
+        // 12 ppm for an hour: 43 ms, two periods of drift.
+        let (changes, flip_flops) = slot_changes(12.0, true);
+        assert!(changes <= 3, "{changes}");
+        assert_eq!(flip_flops, 0);
+        // 75 ppm (the board's clock against the panel's, measured): 270 ms.
+        let (changes, flip_flops) = slot_changes(75.0, true);
+        assert!(changes <= 15, "{changes}");
+        assert_eq!(flip_flops, 0);
+        // Fixed, the 12 ppm film goes up at one vblank or the other by turns
+        // once half way between them.
+        let (changes, flip_flops) = slot_changes(12.0, false);
+        assert!(flip_flops > 10, "{changes} {flip_flops}");
+    }
 
     #[test]
     fn a_frame_due_exactly_half_way_goes_up_at_the_earlier_vblank() {

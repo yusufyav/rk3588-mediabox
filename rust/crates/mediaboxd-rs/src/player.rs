@@ -625,14 +625,19 @@ impl PlayerManager {
         // Ask first: mpv exits cleanly and gives back the decoder and the
         // compositor surface. systemd stops the unit either way.
         let _ = self.ask(json!({"command": ["quit"]})).await;
-        let _ = Command::new("systemctl")
-            .arg("stop")
-            .arg(UNIT)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        // Not from tests: on a developer's machine the system's systemd asked
+        // for a password (polkit) to stop a unit it does not have, and a test
+        // waited on the dialog.
+        if !cfg!(test) {
+            let _ = Command::new("systemctl")
+                .arg("stop")
+                .arg(UNIT)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
         playing
     }
 

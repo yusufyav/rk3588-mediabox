@@ -10,6 +10,7 @@ mod ethernet;
 mod output;
 mod timing;
 pub mod timeline;
+pub mod usblink;
 pub use output::{
     AppliedOutput, ColourCell, ContentMatch, ContentOutput, DisplayGeneration, DisplayIdentity, DisplayState, LegacyResolution,
     LegacySetting, OUTPUT_SETTING_SCHEMA, OUTPUT_TRIAL_SECONDS, Observed, ObservedOutput,
@@ -1729,6 +1730,10 @@ pub enum Request {
     /// The live channels known: those of the last multiplex the receiver
     /// was on (its SDT), numbered in service-id order.
     LiveChannels,
+    /// The satellite receiver on the bus: there, and at a speed that carries
+    /// a stream (`usblink`). Asked by the interface while live television is
+    /// open.
+    LiveReceiver,
     /// Refresh the channel map from Türksat's broadcast TKGS table: the
     /// channel setup. Answered when it is done.
     LiveTkgsUpdate,

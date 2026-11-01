@@ -226,6 +226,13 @@ fn describe(end: &str, detail: Option<&str>) -> String {
     let text = match end {
         "usb_disconnected" => "Uydu alıcısının USB bağlantısı koptu.",
         "device_not_found" => "Uydu alıcısı bulunamadı.",
+        "slow_link" => "Uydu alıcısı USB'ye düşük hızda bağlandı; yayın için yüksek hız (480 Mbit/s) gerekir. Alıcının bağlantısını kontrol edin.",
+        // Seen after the receiver came back on the bus without losing power
+        // (its bridge still running, firmware 1.12): locked, no stream, every
+        // time; unplugged and plugged in again, it starts cold and streams
+        // (2026-11-01, 2 of 2 warm, 5 of 5 cold). Plugged in again, the
+        // channel opens by itself (the interface watches the receiver).
+        "no_transport" => "Uydu alıcısı sinyale kilitlendi ama yayın verisi göndermiyor. Alıcıyı çıkarıp yeniden takın; kanal kendiliğinden açılır.",
         "no_lock" => "Uydu sinyaline kilitlenilemedi.",
         "tune_failed" => "Uydu alıcısı ayarlanamadı.",
         "service_not_found" => "Kanal bu yayında bulunamadı.",
@@ -679,13 +686,17 @@ impl LiveManager {
             return None;
         }
         self.set(Lifecycle::Stopping);
-        let _ = Command::new("systemctl")
-            .args(["stop", UNIT])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        // Not from tests (see Player::stop): the system's systemd asks a
+        // developer's machine for a password.
+        if !cfg!(test) {
+            let _ = Command::new("systemctl")
+                .args(["stop", UNIT])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
         let last = self.read_status();
         // The receiver's last word on its multiplex, while it is still this start's.
         self.absorb_guide();

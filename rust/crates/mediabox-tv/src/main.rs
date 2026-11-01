@@ -272,6 +272,11 @@ struct App {
     live_signal_on: bool,
     /// The channel the player was last asked to play.
     live_tuned: Option<u16>,
+    /// When the receiver's link was last asked for (`live_receiver_arrived`),
+    /// and whether live television is waiting for it: a channel is opened
+    /// again once it can carry one.
+    live_receiver_asked: Option<Instant>,
+    live_receiver_lost: bool,
     /// The channel last opened again because its player ended without a
     /// reason, and when: once, not over and over (`film_finished`).
     live_reopened: Option<(u16, Instant)>,
@@ -2239,8 +2244,58 @@ impl App {
         live.problem = Some("Kanallar okunuyor…".into());
         self.live = Some(live);
         self.live_asked = Some(Instant::now());
+        // The receiver's link with the channels: on entry the screen says at
+        // once that there is no receiver, or that it is on too slow a link.
+        self.live_receiver_asked = Some(Instant::now());
+        self.live_receiver_lost = false;
         self.open(Route::Live);
         spawn_live_channels();
+        spawn_live_receiver();
+    }
+
+    /// The receiver's link (`mediabox_core::usblink`), asked every second
+    /// while live television is open. Unusable, the screen says why and no
+    /// channel is opened on it; usable again after that, the channel the
+    /// viewer was on opens again by itself -- while its screen is still
+    /// open (Back has closed it), nothing is opening, and the setup is not
+    /// in use. Before this a failed channel stayed failed: the receiver
+    /// plugged back in at 19:26 on 2026-11-01, nothing was asked of it until
+    /// a channel was chosen by hand two minutes later.
+    fn live_receiver_arrived(&mut self, usable: bool, problem: Option<String>) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        if !usable {
+            // A channel opening (or playing) ends by itself on its own
+            // receiver's word; until it has, its banner stays.
+            if self.here.is_none() {
+                if live.problem != problem {
+                    live.problem = problem;
+                    self.paint();
+                }
+                if !self.live_receiver_lost {
+                    eprintln!("mediabox-tv.live waiting for the receiver");
+                }
+                self.live_receiver_lost = true;
+            }
+            return;
+        }
+        if !std::mem::take(&mut self.live_receiver_lost) {
+            return;
+        }
+        if self.here.is_some() || live.layer == screens::live::Layer::Setup {
+            live.problem = None;
+            self.paint();
+            return;
+        }
+        let Some(sid) = live.current.or(self.live_kept.last).filter(|sid| live.channel(*sid).is_some()) else {
+            live.problem = None;
+            self.paint();
+            return;
+        };
+        eprintln!("mediabox-tv.live the receiver is back; channel {sid} opened again");
+        live.tuning(sid, Instant::now());
+        self.tune_live(sid);
     }
 
     fn live_channels_arrived(
@@ -2288,7 +2343,13 @@ impl App {
             self.paint();
             return;
         }
-        if first && live.current.is_none() && let Some(sid) = live.starting_channel(self.live_kept.last) {
+        // Not on a receiver known to be unusable: the screen says so, and the
+        // channel opens once it is (`live_receiver_arrived`).
+        if first
+            && live.current.is_none()
+            && !self.live_receiver_lost
+            && let Some(sid) = live.starting_channel(self.live_kept.last)
+        {
             live.tuning(sid, Instant::now());
             self.tune_live(sid);
             return;
@@ -2363,6 +2424,10 @@ impl App {
         };
         let effect = live.tick(Instant::now());
         self.live_effect(effect);
+        if self.live_receiver_asked.is_none_or(|at| at.elapsed() >= LIVE_RECEIVER_REFRESH) {
+            self.live_receiver_asked = Some(Instant::now());
+            spawn_live_receiver();
+        }
         // What the receiver learns of the multiplex reaches the control
         // plane's store as it arrives; the screen asks for it now and then.
         if self.live_asked.is_none_or(|at| at.elapsed() >= LIVE_REFRESH) {
@@ -7097,13 +7162,15 @@ enum DetailAnswer {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    mediabox_core::timeline::init("tv");
     // Before anything that can spawn a thread — the image workers, the state
-    // store, tokio, and the Mali driver's own four. A thread inherits the mask
-    // of whoever spawned it, and a SIGTERM delivered to one that has it
-    // unblocked kills the process where it stands, without the display ever
-    // being released. See session::block_exit_signals.
+    // store, tokio, the Mali driver's own four, and the timeline's. A thread
+    // inherits the mask of whoever spawned it, and a SIGTERM delivered to one
+    // that has it unblocked kills the process where it stands, without the
+    // display ever being released. See session::block_exit_signals. (The
+    // timeline's thread was started first once: a snapshot's SIGUSR1 landed
+    // on it and killed the interface, 2026-11-01 19:28.)
     session::block_exit_signals();
+    mediabox_core::timeline::init("tv");
 
     // The display device a previous stop left lit, if there is one. Taken
     // before any thread exists; closed once this run's first frame is shown.
@@ -7193,6 +7260,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         live_signal_asked: None,
         live_signal_on: false,
         live_tuned: None,
+        live_receiver_asked: None,
+        live_receiver_lost: false,
         live_reopened: None,
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
@@ -8128,6 +8197,23 @@ struct TkgsResult {
 
 const LIVE_SETUP_REFRESH: Duration = Duration::from_millis(500);
 const LIVE_SIGNAL_REFRESH: Duration = Duration::from_millis(700);
+
+/// How often the receiver's link is asked for while live television is open.
+const LIVE_RECEIVER_REFRESH: Duration = Duration::from_secs(1);
+
+fn spawn_live_receiver() {
+    detached("mediabox-tv-live-receiver", async move {
+        let client = rpc::Client::new(socket_path());
+        match client.call(serde_json::json!({"command": "live_receiver"})).await {
+            Ok(answer) => {
+                let usable = answer.get("usable").and_then(Value::as_bool).unwrap_or(true);
+                let problem = answer.get("problem").and_then(Value::as_str).map(str::to_string);
+                let _ = slint::invoke_from_event_loop(move || with_app(|app| app.live_receiver_arrived(usable, problem)));
+            }
+            Err(error) => eprintln!("mediabox-tv.live receiver link failed: {error}"),
+        }
+    });
+}
 
 fn spawn_live_signal(source: Option<mediabox_core::LiveSource>) {
     detached("mediabox-tv-live-signal", async move {

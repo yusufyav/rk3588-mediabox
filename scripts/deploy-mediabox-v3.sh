@@ -220,6 +220,7 @@ cp_ "$here/packaging/udev/80-mediabox-no-power-switch.rules" \
 cp_ "$here/packaging/systemd/mediabox-display-changed.service" \
     "$here/packaging/systemd/mediabox-display-seed.service" "$MEDIABOX_TARGET:/etc/systemd/system/"
 cp_ "$here/packaging/systemd/logind.conf.d/10-mediabox.conf" "$MEDIABOX_TARGET:/var/tmp/logind-mediabox.conf"
+cp_ "$here/packaging/systemd/system.conf.d/10-mediabox-realtime.conf" "$MEDIABOX_TARGET:/var/tmp/system-mediabox-realtime.conf"
 sh_ "set -e
   install -m 0644 /var/tmp/80-mediabox-no-power-switch.rules \
     /etc/udev/rules.d/80-mediabox-no-power-switch.rules
@@ -229,6 +230,12 @@ sh_ "set -e
   rm -f /var/tmp/81-mediabox-display-hotplug.rules /var/tmp/mediabox-display-changed
   mkdir -p /etc/systemd/logind.conf.d
   install -m 0644 /var/tmp/logind-mediabox.conf /etc/systemd/logind.conf.d/10-mediabox.conf
+  # The display loop's SCHED_FIFO (packaging/systemd/system.conf.d): no cpu
+  # controller. Read by systemd at its next start; a running one keeps the
+  # controller it turned on until the box restarts.
+  mkdir -p /etc/systemd/system.conf.d
+  install -m 0644 /var/tmp/system-mediabox-realtime.conf /etc/systemd/system.conf.d/10-mediabox-realtime.conf
+  rm -f /var/tmp/system-mediabox-realtime.conf
   rm -f /var/tmp/80-mediabox-no-power-switch.rules /var/tmp/logind-mediabox.conf
   systemctl mask ctrl-alt-del.target >/dev/null 2>&1 || true
   udevadm control --reload-rules

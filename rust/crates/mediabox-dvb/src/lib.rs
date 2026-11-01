@@ -41,7 +41,7 @@ pub mod sha256;
 pub mod tkgs;
 pub mod ts;
 pub mod tune;
-pub mod usbpower;
+pub mod usblink;
 pub mod usb;
 
 pub use error::{Error, Result};
