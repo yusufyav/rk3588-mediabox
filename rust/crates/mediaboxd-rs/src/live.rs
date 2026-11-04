@@ -247,6 +247,12 @@ fn describe(end: &str, detail: Option<&str>) -> String {
         "stale_transport" => {
             "Uydu alıcısı yeni yayına geçmedi; yalnız önceki yayının verisi geldi. Servis tanı kodu: DVB-STALE-TS."
         }
+        "wrong_network" => {
+            "Alıcının bulduğu yayın bu kanalın uydu ağına ait değil. Servis tanı kodu: DVB-WRONG-ONID."
+        }
+        "sdt_missing" => {
+            "Yayının kimliği doğrulanamadı: servis tablosu (SDT) gelmedi ya da bozuk. Servis tanı kodu: DVB-NO-SDT."
+        }
         "source_failed" => "Canlı yayın kaynağı açılamadı.",
         "player_never_opened" | "output_failed" => "Canlı yayın oynatıcıya aktarılamadı.",
         "player_closed" => "Oynatıcı kapandı.",
@@ -2081,7 +2087,13 @@ mod tests {
 
     #[test]
     fn a_stream_that_could_not_be_identified_is_not_called_a_missing_channel() {
-        for end in ["no_pat", "psi_corrupt", "stale_transport"] {
+        for end in [
+            "no_pat",
+            "psi_corrupt",
+            "stale_transport",
+            "wrong_network",
+            "sdt_missing",
+        ] {
             let text = describe(end, None);
             assert!(
                 !text.contains("bulunamadı") && text.contains("Servis tanı kodu"),

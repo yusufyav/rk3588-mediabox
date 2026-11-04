@@ -34,7 +34,7 @@ pub const CC_FIRST_KEPT: usize = 8;
 
 /// A continuity_counter error (ISO/IEC 13818-1 2.4.3.3) in an admitted
 /// transport stream: a packet lost, a duplicate excepted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CcError {
     /// The stream's packet, from 1.
     pub packet: u64,
@@ -907,6 +907,7 @@ pub struct Quarantine {
     pub left_tsid: Option<u16>,
     pub want_tsid: Option<u16>,
     pub expect_tsid: Option<u16>,
+    pub expect_onid: Option<u16>,
     pub admitted_tsid: Option<u16>,
     pub admitted_onid: Option<u16>,
     pub reason: Option<Admitted>,
@@ -917,10 +918,19 @@ pub struct Quarantine {
     pub bytes: u64,
     /// Held packets on the programme PIDs of the multiplex left: its tail.
     pub left_pid_packets: u64,
-    /// PAT packets, and whole PAT sections; PSI sections failing their CRC.
+    /// PAT packets, and whole PAT sections; PAT and SDT sections failing
+    /// their CRC, each table on its own: a broken SDT is not a broken PAT.
     pub pat_packets: u64,
     pub pat_sections: u64,
-    pub crc_errors: u64,
+    pub pat_crc_errors: u64,
+    pub sdt_sections: u64,
+    pub sdt_crc_errors: u64,
+    /// PATs like the left multiplex's held for their SDT's network, and
+    /// SDTs of a network that is neither the left one nor the channel's
+    /// (`Expected::onid`): another carrier with the same TSID and PAT.
+    pub awaiting_sdt: u64,
+    pub wrong_onid: Option<u16>,
+    pub wrong_onid_sdts: u64,
     /// PATs of the multiplex left, of others without the service, and of
     /// the same multiplex from before the stop (`StaleClock`).
     pub old_pats: u64,
@@ -968,6 +978,7 @@ impl Gate {
             left_tsid: rule.left.as_ref().map(|left| left.tsid),
             want_tsid: rule.want_tsid,
             expect_tsid: rule.expect.map(|e| e.tsid),
+            expect_onid: rule.expect.and_then(|e| e.onid),
             ..Quarantine::default()
         };
         Self {
@@ -1097,6 +1108,7 @@ impl Gate {
             };
             let mut found = Vec::new();
             let crc_before = self.sections.crc_errors;
+            let mut sdt_actual = 0;
             self.sections.payload(pid, unit_start, payload, |s| {
                 let (table, ext, _, current, body) = section_header(s);
                 if !current {
@@ -1105,10 +1117,17 @@ impl Gate {
                 if pid == PID_PAT && table == TABLE_PAT {
                     found.push((ext, Some(parse_pat(body)), None));
                 } else if pid == PID_SDT && table == TABLE_SDT_ACTUAL && body.len() >= 2 {
+                    sdt_actual += 1;
                     found.push((ext, None, Some(u16::from_be_bytes([body[0], body[1]]))));
                 }
             });
-            self.stats.crc_errors += self.sections.crc_errors - crc_before;
+            let crc_failed = self.sections.crc_errors - crc_before;
+            if pid == PID_PAT {
+                self.stats.pat_crc_errors += crc_failed;
+            } else {
+                self.stats.sdt_crc_errors += crc_failed;
+                self.stats.sdt_sections += sdt_actual;
+            }
             for (tsid, programmes, onid) in found {
                 let verdict = match (programmes, onid) {
                     (Some(programmes), _) => self.decide(tsid, &programmes),
@@ -1176,6 +1195,7 @@ impl Gate {
                 || self.rule.expect.is_some_and(|e| e.onid.is_some());
             if told {
                 self.pending = Some(tsid);
+                self.stats.awaiting_sdt += 1;
             } else {
                 self.stats.old_pats += 1;
             }
@@ -1225,23 +1245,58 @@ impl Gate {
         }
     }
 
-    /// The SDT of a transport stream whose PAT is like the left one's.
+    /// The SDT of a transport stream whose PAT is like the left one's: its
+    /// original_network_id decides. Where the channel list knows the
+    /// channel's network, that is the gate -- only it is admitted, and only
+    /// if it is not the left one's too (then nothing can tell them apart);
+    /// a third network is another carrier, never the channel. Without it,
+    /// any network but the left one's is a stream in its own right.
     fn network(&mut self, tsid: u16, onid: u16) -> Gated {
         if self.pending != Some(tsid) {
             return Gated::Waiting;
         }
         self.pending = None;
         let left = self.rule.left.as_ref().and_then(|left| left.onid);
-        let expected = self.rule.expect.and_then(|e| e.onid);
-        let another =
-            left.is_some_and(|left| left != onid) || (expected == Some(onid) && left != Some(onid));
-        if another {
-            self.stats.admitted_onid = Some(onid);
-            self.admit(Admitted::Network)
-        } else {
-            self.stats.old_pats += 1;
-            Gated::Waiting
+        match network_verdict(left, self.rule.expect.and_then(|e| e.onid), onid) {
+            Network::Admit => {
+                self.stats.admitted_onid = Some(onid);
+                self.admit(Admitted::Network)
+            }
+            Network::Left => {
+                self.stats.old_pats += 1;
+                Gated::Waiting
+            }
+            Network::Wrong => {
+                self.stats.wrong_onid = Some(onid);
+                self.stats.wrong_onid_sdts += 1;
+                Gated::Waiting
+            }
         }
+    }
+}
+
+/// What an SDT's original_network_id makes of a PAT like the left one's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    /// The channel's transport stream (or, the channel's network unknown, one
+    /// of another network than the left one's).
+    Admit,
+    /// The multiplex left: its tail.
+    Left,
+    /// Neither the left network nor the channel's: another carrier.
+    Wrong,
+}
+
+pub fn network_verdict(left: Option<u16>, expected: Option<u16>, incoming: u16) -> Network {
+    if left == Some(incoming) {
+        return Network::Left;
+    }
+    match expected {
+        Some(expected) if expected == incoming => Network::Admit,
+        Some(_) => Network::Wrong,
+        None if left.is_some() => Network::Admit,
+        // Neither known: nothing tells it from the tail.
+        None => Network::Left,
     }
 }
 
@@ -1871,6 +1926,61 @@ const PTS_HZ: f64 = 90_000.0;
 const PCR_WRAP: u64 = (1 << 33) * 300;
 const PTS_WRAP: u64 = 1 << 33;
 
+/// Continuity on a stream as written (the output): every PID, by the same
+/// rule as the input's (`TimingState::continuity`), without allocating.
+pub struct CcCheck {
+    last: Box<[u8; 0x2000]>,
+    pub errors: u64,
+    /// Packets checked; the first errors (`CC_FIRST_KEPT`), at that count.
+    pub packets: u64,
+    pub first: Vec<CcError>,
+}
+
+impl Default for CcCheck {
+    fn default() -> Self {
+        Self {
+            last: Box::new([NO_CC; 0x2000]),
+            errors: 0,
+            packets: 0,
+            first: Vec::with_capacity(CC_FIRST_KEPT),
+        }
+    }
+}
+
+const NO_CC: u8 = 0xFF;
+
+impl CcCheck {
+    /// Another stream: nothing before is compared with what follows.
+    pub fn reset(&mut self) {
+        self.last.fill(NO_CC);
+    }
+
+    /// Whole packets, as written.
+    pub fn check(&mut self, data: &[u8]) {
+        for p in data.chunks_exact(PACKET) {
+            if p[0] != 0x47 || p[1] & 0x80 != 0 || (p[3] >> 4) & 0x1 == 0 {
+                continue;
+            }
+            self.packets += 1;
+            let pid = pid_of(p);
+            let cc = p[3] & 0x0F;
+            let last = std::mem::replace(&mut self.last[pid as usize], cc);
+            if last != NO_CC && !discontinuity_of(p) && cc != last && cc != (last + 1) & 0x0F {
+                self.errors += 1;
+                if self.first.len() < CC_FIRST_KEPT {
+                    self.first.push(CcError {
+                        packet: self.packets,
+                        pid,
+                        previous: last,
+                        got: cc,
+                        pid_packets: 0,
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// The adaptation field's discontinuity_indicator.
 fn discontinuity_of(p: &[u8]) -> bool {
     (p[3] >> 4) & 0x2 != 0 && p[4] > 0 && p[5] & 0x80 != 0
@@ -1896,10 +2006,10 @@ pub(crate) fn pts_of(p: &[u8]) -> Option<u64> {
 }
 
 impl TimingState {
-    fn packet(&mut self, t: &mut Timing, p: &[u8], pid: u16, pcr_pid: Option<u16>, input: u64) {
+    /// Continuity: only packets with a payload count; a repeat is allowed
+    /// once (duplicate), and an announced discontinuity restarts it.
+    fn continuity(&mut self, t: &mut Timing, p: &[u8], pid: u16, input: u64) {
         let announced = discontinuity_of(p);
-        // Continuity: only packets with a payload count; a repeat is allowed
-        // once (duplicate), and an announced discontinuity restarts it.
         if (p[3] >> 4) & 0x1 != 0 {
             let cc = p[3] & 0x0F;
             if let Some(last) = self.cc.insert(pid, cc)
@@ -1919,6 +2029,11 @@ impl TimingState {
                 }
             }
         }
+    }
+
+    fn packet(&mut self, t: &mut Timing, p: &[u8], pid: u16, pcr_pid: Option<u16>, input: u64) {
+        let announced = discontinuity_of(p);
+        self.continuity(t, p, pid, input);
         if Some(pid) == pcr_pid
             && let Some(pcr) = pcr_of(p)
         {
@@ -2060,6 +2175,11 @@ impl Selector {
                 }
             }
             self.selection.pmt_packets += 1;
+            // What is passed on is counted as it came: the output's own
+            // check (`CcCheck`) tells what the passing added.
+            let input = self.selection.input_packets;
+            self.timing
+                .continuity(&mut self.selection.timing, p, pid, input);
             self.emit(p, out);
             return;
         }

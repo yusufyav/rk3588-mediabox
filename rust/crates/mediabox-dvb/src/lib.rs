@@ -30,6 +30,7 @@
 pub mod avl62x1;
 pub mod bridge;
 pub mod error;
+pub mod evidence;
 pub mod firmware;
 pub mod libusb;
 pub mod log;

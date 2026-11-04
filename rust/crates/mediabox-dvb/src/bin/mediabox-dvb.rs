@@ -158,10 +158,11 @@ struct Play {
     expect_tsid: Option<u16>,
     #[arg(long, requires = "expect_tsid")]
     expect_onid: Option<u16>,
-    /// Where a CC error on the service played leaves the raw stream around
-    /// it (at most 4 a session); empty: nowhere.
-    #[arg(long, default_value = "/var/lib/mediabox-dvb/evidence")]
-    evidence_dir: PathBuf,
+    /// Diagnosis only: keep the raw stream around a CC error on the service
+    /// played in this directory (a 24 MiB ring in memory; at most 4 records
+    /// a session, 16 and 256 MiB in the directory). Off unless given.
+    #[arg(long)]
+    evidence_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -258,7 +259,7 @@ fn play(args: Play) -> ExitCode {
             onid: args.expect_onid,
             tsid,
         }),
-        evidence_dir: (!args.evidence_dir.as_os_str().is_empty()).then_some(args.evidence_dir),
+        evidence_dir: args.evidence_dir.filter(|dir| !dir.as_os_str().is_empty()),
     };
     let status = service::run(options, &log);
     match status.end {
