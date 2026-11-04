@@ -391,4 +391,45 @@ mod tests {
         assert_eq!(TS_INIT[11].1, 0x95);
         assert_eq!(TS_INIT[12].1, 0x80);
     }
+
+    /// Found by register, value and mask, not by row number: a row added to
+    /// the table later must not make this pass by accident.
+    fn row(entry: (u16, u8, u8)) -> usize {
+        let rows: Vec<usize> = TS_INIT.iter().enumerate().filter(|(_, e)| **e == entry).map(|(i, _)| i).collect();
+        assert_eq!(rows.len(), 1, "0x{:04X}={:#04X}/{:#04X} written once: {rows:?}", entry.0, entry.1, entry.2);
+        rows[0]
+    }
+
+    #[test]
+    fn the_usb_output_type_is_cleared_inside_the_ep4_reset_window() {
+        let reset = row((0xDA1D, 0x01, 0x01));
+        let release = row((0xDA1D, 0x00, 0x01));
+        assert!(reset < release, "mp2_sw_rst asserted before it is released");
+        assert_eq!(TS_INIT.iter().filter(|e| e.0 == 0xDA1D).count(), 2, "mp2_sw_rst: assert and release only");
+
+        // Bit 0 cleared, bit 0 only, between assert and release.
+        let da05 = row((0xDA05, 0x00, 0x01));
+        let da06 = row((0xDA06, 0x00, 0x01));
+        for (name, at) in [("0xDA05", da05), ("0xDA06", da06)] {
+            assert!(reset < at && at < release, "{name} at row {at}, window {reset}..{release}");
+        }
+        // And nowhere else: no other write of either outside the window.
+        for (at, (address, _, _)) in TS_INIT.iter().enumerate() {
+            if *address == 0xDA05 || *address == 0xDA06 {
+                assert!(reset < at && at < release, "0x{address:04X} written outside the window at row {at}");
+            }
+        }
+
+        // EP4 off, NAK off, on; then the frame and packet sizes; all in the window.
+        let ep4 = [
+            row((0xDD11, 0x00, 0x20)),
+            row((0xDD13, 0x00, 0x20)),
+            row((0xDD11, 0x20, 0x20)),
+            row((0xDD88, 0xD0, 0xFF)),
+            row((0xDD89, 0x95, 0xFF)),
+            row((0xDD0C, 0x80, 0xFF)),
+        ];
+        assert!(ep4.windows(2).all(|w| w[0] < w[1]), "EP4 enable, frame, packet order: {ep4:?}");
+        assert!(reset < ep4[0] && ep4[5] < release, "EP4 setup inside the reset window: {ep4:?}");
+    }
 }

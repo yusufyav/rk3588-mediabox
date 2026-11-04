@@ -1959,4 +1959,50 @@ mod tests {
         assert!(selector.ready());
         assert_eq!(out.chunks(PACKET).filter(|p| pid_of(p) == 2302).count(), 3);
     }
+
+    fn fed(packets: &[Vec<u8>], analyser: &mut Analyser, cache: &mut RapCache) {
+        for p in packets {
+            analyser.feed(p, |_| {});
+            cache.learn(&analyser.pat, &analyser.pmts);
+            cache.packet(p);
+        }
+    }
+
+    #[test]
+    fn a_live_start_is_the_tables_and_nothing_else() {
+        let mut analyser = Analyser::new();
+        let mut cache = RapCache::default();
+        assert!(cache.tables(10801).is_empty(), "nothing known");
+
+        // The PAT alone: no PMT yet, so nothing to start from.
+        let packets = multiplex();
+        fed(&packets[..1], &mut analyser, &mut cache);
+        assert!(cache.tables(10801).is_empty(), "PAT without PMT");
+
+        fed(&packets[1..], &mut analyser, &mut cache);
+        // An access point on each programme's video and stream packets after
+        // it: the replay has them, the tables do not.
+        for (video, audio) in [(2301u16, Some(2401u16)), (2302, None)] {
+            let mut rap = packet(video, true, 0, &[]);
+            rap[3] = 0x30;
+            rap[4] = 1;
+            rap[5] = 0x40;
+            let mut more = vec![rap, packet(video, false, 1, &[1])];
+            more.extend(audio.map(|pid| packet(pid, true, 0, &[0, 0, 1, 0xC0])));
+            fed(&more, &mut analyser, &mut cache);
+        }
+        assert!(!cache.replay(10801).is_empty(), "the replay keeps the streams since the access point");
+
+        let last = |pid: u16| packets.iter().rev().find(|p| pid_of(p) == pid).unwrap().clone();
+        for (program, pmt) in [(10801u16, 34u16), (10802, 35)] {
+            let tables = cache.tables(program);
+            assert_eq!(tables.len(), 2 * PACKET, "programme {program}: two packets");
+            let pids: Vec<u16> = tables.chunks(PACKET).map(pid_of).collect();
+            assert_eq!(pids, [PID_PAT, pmt], "programme {program}: PAT, then its own PMT");
+            // The whole PAT as broadcast (both programmes), and the last PMT.
+            assert_eq!(&tables[..PACKET], last(PID_PAT).as_slice());
+            assert_eq!(&tables[PACKET..], last(pmt).as_slice());
+        }
+        assert!(cache.tables(4242).is_empty(), "unknown service");
+    }
 }
