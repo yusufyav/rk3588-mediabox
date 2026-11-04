@@ -278,7 +278,7 @@ const PACKET: u8 = (512 / 4) as u8;
 /// Linux af9035 it930x_init() for a USB 2.0 high-speed link, single TS (EP4),
 /// serial TS input; the GPIO "suspend" rows and the EP5 frame rows are left
 /// out, as the reference does (Kanky 2.110 IT9300_configOutput sets EP4 only).
-pub const TS_INIT: [(u16, u8, u8); 23] = [
+pub const TS_INIT: [(u16, u8, u8); 25] = [
     (0xDA1A, 0x00, 0x01), // ignore_sync_byte
     (0xF41F, 0x04, 0x04), // dvbt_inten
     (0xDA10, 0x00, 0x01), // mpeg_full_speed
@@ -292,6 +292,16 @@ pub const TS_INIT: [(u16, u8, u8); 23] = [
     (0xDD88, (FRAME & 0xFF) as u8, 0xFF),
     (0xDD89, (FRAME >> 8) as u8, 0xFF),
     (0xDD0C, PACKET, 0xFF),
+    // The USB output type, set on every open whatever the bridge holds: bit 0
+    // of 0xDA05 and 0xDA06 cleared inside the EP4 reset window, as Kanky's
+    // IT9300_configOutput (libdvb_usb_phy.so 0xa8c78) and px4_drv's
+    // it930x_config_stream_output do for USB; Linux's table leaves them. The
+    // bridge firmware's own routine (RAM patch 0x5391) sets 0xDA05 bit 0
+    // when the host comes back on the bus without the receiver losing power
+    // -- every host reboot, 5 of 5 -- and EP4 then sends nothing while the
+    // FEC is locked: 0xDA05=1 no stream, =0 stream, twice each (2026-11-04).
+    (0xDA05, 0x00, 0x01),
+    (0xDA06, 0x00, 0x01),
     (0xDA1D, 0x00, 0x01), // mp2_sw_rst: release
     (0xD833, 0x01, 0xFF), // slew rate
     (0xD830, 0x00, 0xFF), // output driving bit 0
