@@ -227,12 +227,12 @@ fn describe(end: &str, detail: Option<&str>) -> String {
         "usb_disconnected" => "Uydu alıcısının USB bağlantısı koptu.",
         "device_not_found" => "Uydu alıcısı bulunamadı.",
         "slow_link" => "Uydu alıcısı USB'ye düşük hızda bağlandı; yayın için yüksek hız (480 Mbit/s) gerekir. Alıcının bağlantısını kontrol edin.",
-        // Seen after the receiver came back on the bus without losing power
-        // (its bridge still running, firmware 1.12): locked, no stream, every
-        // time; unplugged and plugged in again, it starts cold and streams
-        // (2026-11-01, 2 of 2 warm, 5 of 5 cold). Plugged in again, the
-        // channel opens by itself (the interface watches the receiver).
-        "no_transport" => "Uydu alıcısı sinyale kilitlendi ama yayın verisi göndermiyor. Alıcıyı çıkarıp yeniden takın; kanal kendiliğinden açılır.",
+        // Locked, and not one transfer in 10 s. The receiver sets its USB TS
+        // output up on every open (mediabox-dvb TS init, 0xDA05/0xDA06 in the
+        // EP4 reset window), so this is what is left when that did not bring
+        // the stream: said with a service code, never as something for the
+        // viewer to do to the hardware.
+        "no_transport" => "Uydu alıcısı sinyale kilitlendi; yayın çıkışı otomatik olarak yeniden kuruldu ama veri gelmedi. Servis tanı kodu: DVB-NT-EP4.",
         "no_lock" => "Uydu sinyaline kilitlenilemedi.",
         "tune_failed" => "Uydu alıcısı ayarlanamadı.",
         "service_not_found" => "Kanal bu yayında bulunamadı.",
