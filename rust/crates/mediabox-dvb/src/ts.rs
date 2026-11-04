@@ -27,6 +27,23 @@ pub const PID_EIT: u16 = 0x0012;
 pub const PID_NULL: u16 = 0x1FFF;
 const SYNC_RUN: usize = 5;
 const CC_EVENT_GAP: u64 = 64;
+
+/// The CC errors of a transport stream kept with where they came: its first
+/// few, for the log; every one is counted.
+pub const CC_FIRST_KEPT: usize = 8;
+
+/// A continuity_counter error (ISO/IEC 13818-1 2.4.3.3) in an admitted
+/// transport stream: a packet lost, a duplicate excepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CcError {
+    /// The stream's packet, from 1.
+    pub packet: u64,
+    pub pid: u16,
+    pub previous: u8,
+    pub got: u8,
+    /// The PID's packets before this one.
+    pub pid_packets: u64,
+}
 const TABLE_PAT: u8 = 0x00;
 const TABLE_PMT: u8 = 0x02;
 const TABLE_SDT_ACTUAL: u8 = 0x42;
@@ -481,6 +498,8 @@ pub struct Analyser {
     pids: HashMap<u16, u64>,
     scrambled: HashMap<u16, u64>,
     cc: HashMap<u16, u8>,
+    /// The first CC errors (`CC_FIRST_KEPT`).
+    pub cc_first: Vec<CcError>,
     sections: Sections,
     pub pat: BTreeMap<u16, u16>,
     pub pmts: BTreeMap<u16, Pmt>,
@@ -614,6 +633,15 @@ impl Analyser {
                     self.stats.cc_events += 1;
                 }
                 self.last_cc_error = Some(self.stats.packets);
+                if self.cc_first.len() < CC_FIRST_KEPT {
+                    self.cc_first.push(CcError {
+                        packet: self.stats.packets,
+                        pid,
+                        previous: last,
+                        got: cc,
+                        pid_packets: self.pids.get(&pid).map_or(0, |n| n - 1),
+                    });
+                }
             }
         }
         self.cc.insert(pid, cc);
@@ -2074,6 +2102,23 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn every_cc_error_is_counted_and_the_first_are_kept() {
+        let mut analyser = Analyser::new();
+        let mut packets = vec![packet(PID_NULL, false, 0, &[]); SYNC_RUN];
+        for k in 0..12u8 {
+            packets.push(packet(0x100, false, (k * 2) & 0xF, &[]));
+        }
+        analyser.feed(&packets.concat(), |_| {});
+        assert_eq!(analyser.integrity().cc_errors, 11);
+        assert_eq!(analyser.cc_first.len(), CC_FIRST_KEPT);
+        let e = analyser.cc_first[0];
+        assert_eq!(
+            (e.packet, e.pid, e.previous, e.got, e.pid_packets),
+            (SYNC_RUN as u64 + 2, 0x100, 0, 2, 1)
+        );
     }
 
     #[test]

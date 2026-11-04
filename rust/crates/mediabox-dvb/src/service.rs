@@ -243,7 +243,16 @@ pub struct Status {
     pub switches: u32,
     /// The last stream start's quarantine (`ts::Gate`).
     pub quarantine: Option<Quarantine>,
+    /// Packets lost in the admitted transport stream: on any PID of the
+    /// multiplex, and on the PIDs of the service played.
+    pub continuity: Continuity,
     pub rss_kib: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Continuity {
+    pub mux_cc_errors: u64,
+    pub selected_service_cc_errors: u64,
 }
 
 fn rss_kib() -> u64 {
@@ -290,6 +299,7 @@ impl Reporter {
                 sessions: 0,
                 switches: 0,
                 quarantine: None,
+                continuity: Continuity::default(),
                 rss_kib: 0,
             },
             start: Instant::now(),
@@ -813,6 +823,8 @@ struct Pipeline {
     gate: Option<Gate>,
     /// The programme PIDs of the multiplex left by the last retune.
     left_pids: std::collections::BTreeSet<u16>,
+    /// The analyser's first CC errors already written to the log.
+    cc_logged: usize,
     stream_starts: u32,
     quarantine: Option<Quarantine>,
     /// After a loss, a PAT of another transport stream, twice: retune.
@@ -1151,6 +1163,7 @@ impl Pipeline {
             }));
         }
         self.packets_read += self.analyser.integrity().packets.saturating_sub(analysed);
+        self.log_cc_errors(log);
         if self.raw {
             self.scratch.clear();
             self.scratch.extend_from_slice(chunk);
@@ -1217,6 +1230,30 @@ impl Pipeline {
         self.quarantine = Some(q);
     }
 
+    /// The admitted stream's first CC errors, each once, with whether the
+    /// PID is the service's and whether the multiplex left carried it.
+    fn log_cc_errors(&mut self, log: &Log) {
+        let first = &self.analyser.cc_first;
+        if first.len() < self.cc_logged {
+            self.cc_logged = 0; // another stream
+        }
+        for e in &first[self.cc_logged..] {
+            log.line(format!(
+                "CC ERROR start={} packet={} pid=0x{:04X} prev={} expected={} got={} pid_packets={} selected={} left_pid={}",
+                self.stream_starts,
+                e.packet,
+                e.pid,
+                e.previous,
+                (e.previous + 1) & 0xF,
+                e.got,
+                e.pid_packets,
+                self.selector.selection().pids.contains(&e.pid),
+                self.left_pids.contains(&e.pid),
+            ));
+        }
+        self.cc_logged = first.len();
+    }
+
     /// A scan or TKGS read with no PAT in the time allowed: it takes what
     /// the transponder sends.
     fn open_gate(&mut self, log: &Log) {
@@ -1276,6 +1313,10 @@ impl Pipeline {
         let video_found = status.selection.video.is_none() && self.selector.selection().video.is_some();
         status.selection = self.selector.selection().clone();
         status.integrity = self.analyser.integrity();
+        status.continuity = Continuity {
+            mux_cc_errors: status.integrity.cc_errors,
+            selected_service_cc_errors: status.selection.timing.cc_errors,
+        };
         status.quarantine = self
             .gate
             .as_ref()
@@ -1576,6 +1617,7 @@ fn new_pipeline(options: &Options, writer: Writer) -> Pipeline {
     Pipeline {
         gate: None,
         left_pids: Default::default(),
+        cc_logged: 0,
         stream_starts: 0,
         quarantine: None,
         other_tsid: None,
@@ -3033,6 +3075,49 @@ mod tests {
         let old = OLD.rounds(1).concat();
         pipeline.feed(&old, &mut reporter, &Log::silent());
         assert_eq!(written(pipeline, &out), old);
+    }
+
+    #[test]
+    fn continuity_is_said_for_the_multiplex_and_for_the_service_once_each() {
+        let (mut pipeline, mut reporter, out) = retuned();
+        let path = std::env::temp_dir().join(format!("mediabox-dvb-cc-{}.log", std::process::id()));
+        let mut log = Log::new(Some(&path)).unwrap();
+        log.silent = true;
+        pipeline.feed(&NEW.rounds(1).concat(), &mut reporter, &log);
+        // One packet lost on the service's video, and ten on another PID of
+        // the multiplex (counted all; the first few kept and written once).
+        let other = 0x1FF5;
+        let mut lossy = vec![NEW.es(6), NEW.es(8)];
+        for k in 0..11u8 {
+            lossy.push(ts(other, false, k * 2, &[]));
+        }
+        pipeline.feed(&lossy.concat(), &mut reporter, &log);
+        pipeline.feed(&transfer(&[NEW.es(9)]), &mut reporter, &log);
+        pipeline.report(&mut reporter);
+        let continuity = reporter.status.continuity.clone();
+        assert_eq!(
+            (
+                continuity.mux_cc_errors,
+                continuity.selected_service_cc_errors
+            ),
+            (11, 1)
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains("CC ERROR")).collect();
+        assert_eq!(lines.len(), crate::ts::CC_FIRST_KEPT, "{text}");
+        assert!(
+            lines[0].contains("pid=0x0A32 prev=6 expected=7 got=8")
+                && lines[0].contains("selected=true left_pid=false"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("pid=0x1FF5") && lines[1].contains("selected=false"),
+            "{}",
+            lines[1]
+        );
+        let _ = written(pipeline, &out);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
