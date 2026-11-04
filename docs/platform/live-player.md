@@ -449,3 +449,73 @@ evre koşuyu INVALID yapar ve gecikme raporlanmaz. Olaylar
 `rust/crates/mediabox-core/src/timeline.rs` ve çağrıldıkları yerlerde.
 Ölçülmeyenler: ALSA'nın gerçek çıkış zamanı (htstamp) ve HDMI alıcısının
 yeniden kilitlenmesi; bunlar için harici yakalama gerekir.
+
+## 9. Ses teşhisi (`sound_diag`)
+
+Ses kaybı tek bir "sessizlik" sayacında toplanmaz. Sesin geçtiği her katman
+ayrı sayılır (`health.json` → `sound.layers`):
+
+| Katman | Nerede | Ne sayılır |
+|---|---|---|
+| A transport | `es::Reader`, ses PID'i | yük baytı, PES başlangıcı, TEI, CC kaybı, duplicate, bildirilen süreksizlik, PMT ile ses değişimi |
+| B zaman çizelgesi | ayrıştırıcı çıkışı, kapıdan önce | frame, PTS boşluğu/örtüşmesi/geri gitmesi, DISCONT, kapıda atılan frame |
+| C çözücü | çözücünün giriş ve çıkış pad'i | giriş birimi, PCM tampon ve örnek karesi (bayt ve caps'ten), yeni caps |
+| D çözülmüş PCM | `volume` öğesinin giriş pad'i | kanal başına tepe ve RMS (dBFS), dijital sıfır, eşik altı, PTS boşluğu/örtüşmesi, okunamayan caps, süre alanı ile örnek sayısı uyuşmazlığı |
+| E sink/ALSA | input-selector çıkışı, audiobasesink'in kendi satırları, `/proc/asound` | sink girişinde boşluk/örtüşme, geç tampon, yeniden eşleme (büyüklüğüyle), aygıt yeniden başlaması: bizim açışımız mı XRUN mı |
+| F kullanıcı ve rota | `set_volume`, sink'in açılışı | mute/ses seviyesi, aygıt (HDMI, analog, Bluetooth) ve açılış nedeni |
+
+**Ölçüm noktası.** Zincir: çözücü → audioconvert → audioresample → **volume**
+→ input-selector → alsasink. PCM, `volume`'un giriş pad'inde ölçülür:
+sink'in biçimine çevrilmiş, ama kullanıcının ses seviyesi ve mute'u
+uygulanmamış. Ölçülen caps `health.json` → `sound.format` alanında görünür.
+Mute ölçümü değiştirmez, yalnız kullanıcıya alarm verilip verilmeyeceğini
+belirler. Cihazda mute açıkken PCM sessizliği sayılmadı.
+
+**Sessizlik durum makinesi.**
+- Bir tamponun süresi, bayt sayısı ile biçim/hız/kanal sayısından hesaplanır;
+  tamponun süre alanı kullanılmaz, yalnız uyuşmazlık sayılır.
+- Ardışık sessiz tamponlar, PTS'leri bir örnek toleransla bitişikse aynı
+  koşuya eklenir. PTS boşluğu, örtüşme, geri gitme, DISCONT, kanal veya
+  biçim değişimi koşuyu kapatır.
+- Eşikler: koşuya girmek için -60 dBFS altı, çıkmak için 50 ms boyunca
+  -54 dBFS üstü (histerezis ve bırakma).
+- Ayrı durumlar: dijital sıfır (`decoded_pcm_digital_zero`), eşik altı
+  (`decoded_pcm_below_threshold`), bir kanal sessiz/diğeri sesli,
+  örnek hiç gelmiyor (`decoded_pcm_absent`).
+- Desteklenmeyen caps (S16LE/S32LE/F32LE dışı, 8'den çok kanal) sessiz
+  sayılmaz, ayrı sayılır.
+- Süren sessizlik `sound.ongoing` alanında anında görünür; sesin geri
+  gelmesi beklenmez.
+
+**Standartlar.** Seviyeler dBFS'tir (tam ölçek 1,0; ITU-R BS.1770'in ölçtüğü
+örnek ölçeği). BS.1770 ve EBU R128 bir programın ne kadar yüksek olduğunu
+ölçer. Ne "ses kaybı" için bir eşik ne de bir kök neden tanımlarlar. -60/-54
+dBFS bu izleyicinin kendi eşikleridir. Eşiği geçen şey gözlem olarak
+adlandırılır (`decoded_pcm_below_threshold`), "yayının kendi sessizliği"
+diye adlandırılmaz.
+
+**Olay kaydı.** 200 ms ve üzeri her kayıp veya sessizlik, olayın
+penceresindeki bütün katmanların farkıyla tek bir JSON satırı olur:
+`/run/mediabox-live/sound-incidents.jsonl`, 512 KiB'de eski yarısı silinir.
+Pencere, başlangıçtan 500 ms önce başlar. Kayıtta şunlar var:
+- monotonik zaman, kanal, PID ve codec;
+- A–F farkları, video ve plane düşmeleri;
+- PCM örnek sayısı, tepe/RMS ve sıfır oranı;
+- ALSA kuyruğunun en azı;
+- mute, ses seviyesi ve rota.
+
+Daha kısa sink boşlukları ve yeniden eşlemeler de sınıflanır ve
+`sound.sink_off_by_cause` altında sayılır.
+
+**Nedenler** (`classify`), kanıt yeterliyse:
+`user_muted`, `route_change`, `input_transport_discontinuity`,
+`pes_timestamp_discontinuity`, `decoder_output_silence`, `sink_xrun`,
+`render_starvation`. Hiçbirini göstermeyen durum `unknown`'dır. Yayıncıya
+veya donanıma kanıtsız neden yazılmaz. Çözülmüş PCM sink'ten önce
+ölçüldüğü için sink'teki bir olay, PCM sessizliğini açıklamaz.
+
+**Bilerek kusur (yalnız sınama için).** `MEDIABOX_LIVE_FAULT`: `ts-drop=N`
+(A), `pts-jump=MS` (B), `pcm-zero=MS` (C/D), `audio-drop=N` ve
+`audio-stall=MS` (E). Oynatıcı `systemd-run` ile başladığı için cihazda
+`systemctl set-environment` ile verilir, sonra `unset-environment` ile
+kaldırılır.

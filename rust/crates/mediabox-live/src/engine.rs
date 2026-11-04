@@ -695,7 +695,7 @@ impl Engine {
             let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
             let fault_count = AtomicU64::new(0);
             let fault_stalled = Mutex::new(Instant::now());
-            audio_selector.static_pad("src").expect("input-selector has a src pad").add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            audio_selector.static_pad("src").expect("input-selector has a src pad").add_probe(gst::PadProbeType::BUFFER, move |_, info| {
                 let n = fault_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if faults.audio_drop > 0 && n % faults.audio_drop == 0 {
                     mediabox_core::timeline!("fault", "audio-drop n={n}");
@@ -716,12 +716,6 @@ impl Engine {
                     shared.audio_lead_ns.store(pts.nseconds() as i64 - now, Ordering::Relaxed);
                     let generation = shared.generation.load(Ordering::SeqCst);
                     shared.health.audio(generation, pts.nseconds(), buffer.duration().map(|d| d.nseconds()));
-                    // Decoded sound that is silence, told apart from sound
-                    // lost on the way (`Health::pcm`). PCM only: a
-                    // passthrough burst is not samples.
-                    if let (Some(duration), Some(peak)) = (buffer.duration(), pad.current_caps().and_then(|caps| pcm_peak(&caps, buffer))) {
-                        shared.health.pcm(generation, pts.nseconds(), duration.nseconds(), peak);
-                    }
                     let latency = shared.health.latency_ns.load(Ordering::Relaxed);
                     if latency > 0 {
                         shared.health.audio_lead(pts.nseconds() as i64 + latency + shared.health.audio_offset_ns.load(Ordering::Relaxed) - now);
@@ -752,7 +746,11 @@ impl Engine {
             audio_sink: Mutex::new(None),
             bitstream: AtomicBool::new(false),
             audio: {
-                shared.health.quiet_by_choice.store(options.audio.muted || options.audio.gain <= 0.0, Ordering::Relaxed);
+                let (gain, muted) = (options.audio.gain, options.audio.muted);
+                shared.health.diagnose(|d| {
+                    d.context.gain = gain;
+                    d.context.muted = muted;
+                });
                 Mutex::new(options.audio.clone())
             },
             options,
@@ -766,7 +764,7 @@ impl Engine {
             video_sink: video_sink.clone(),
             fail: Box::new(fail),
         });
-        engine.attach_audio_sink()?;
+        engine.attach_audio_sink("start")?;
         engine.attach_video(&video_sink, plane, trace);
         engine
             .pipeline
@@ -953,8 +951,11 @@ impl Engine {
 
     /// The sound device, opened once and kept: alsasink on the plan's PCM,
     /// slaved to the pipeline's clock.
-    fn attach_audio_sink(&self) -> Result<(), String> {
+    /// `why`: "start", "mode" (PCM or a bitstream), "reopen" (the device
+    /// lost, or asked again), "aid" (sound chosen back on).
+    fn attach_audio_sink(&self, why: &str) -> Result<(), String> {
         let audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        self.shared.health.sink_opened(audio.device.clone(), why);
         let sink = match &audio.device {
             Some(device) => {
                 let sink = make("alsasink")?;
@@ -1000,11 +1001,13 @@ impl Engine {
 
     /// Open the sound device for a bitstream or for PCM, if it is not already.
     fn sound_mode(&self, bitstream: bool) {
+        // A bitstream is not samples: the PCM layers do not apply to it.
+        self.shared.health.diagnose(|d| d.context.passthrough = bitstream);
         if self.bitstream.swap(bitstream, Ordering::SeqCst) == bitstream {
             return;
         }
         self.detach_audio_sink();
-        if let Err(error) = self.attach_audio_sink() {
+        if let Err(error) = self.attach_audio_sink("mode") {
             eprintln!("mediabox-live: ses aygıtı açılamadı: {error}");
         }
     }
@@ -1016,7 +1019,7 @@ impl Engine {
         if self.aid.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
             return;
         }
-        if let Err(error) = self.attach_audio_sink() {
+        if let Err(error) = self.attach_audio_sink("reopen") {
             eprintln!("mediabox-live: ses aygıtı yeniden açılamadı: {error}");
         }
     }
@@ -1727,11 +1730,37 @@ impl Engine {
         // picture up to 350 ms late (measured 2026-11-01, 32 openings).
         {
             let programme = Arc::clone(programme);
+            let shared = Arc::clone(&self.shared);
+            let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+            let jumped = Mutex::new(Instant::now());
             let framed = chain[0].static_pad("src").ok_or("ayrıştırıcının çıkışı yok")?;
             framed.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-                let pts = info.buffer().and_then(|buffer| buffer.pts()).map(|pts| pts.nseconds());
+                if faults.pts_jump_ms > 0
+                    && let Some(buffer) = info.buffer_mut()
+                    && let Some(pts) = buffer.pts()
+                {
+                    let mut at = jumped.lock().unwrap_or_else(|p| p.into_inner());
+                    if at.elapsed() >= std::time::Duration::from_secs(10) {
+                        *at = Instant::now();
+                        mediabox_core::timeline!("fault", "pts-jump ms={}", faults.pts_jump_ms);
+                        buffer.make_mut().set_pts(pts + gst::ClockTime::from_mseconds(faults.pts_jump_ms));
+                    }
+                }
+                let buffer = info.buffer();
+                let pts = buffer.and_then(|buffer| buffer.pts()).map(|pts| pts.nseconds());
+                // B: the frame on the sound's timeline, before the gate.
+                if let Some(buffer) = buffer {
+                    let duration = buffer.duration().map(|d| d.nseconds());
+                    let discont = buffer.flags().contains(gst::BufferFlags::DISCONT);
+                    shared.health.diagnose(|d| d.frame(generation, pts, duration, discont));
+                }
                 let stop = || pad.pad_flags().contains(gst::PadFlags::FLUSHING);
-                if programme.sound(pts, &stop) { gst::PadProbeReturn::Ok } else { gst::PadProbeReturn::Drop }
+                if programme.sound(pts, &stop) {
+                    gst::PadProbeReturn::Ok
+                } else {
+                    shared.health.diagnose(|d| d.c.frames_gated += 1);
+                    gst::PadProbeReturn::Drop
+                }
             });
         }
         if passthrough {
@@ -1761,6 +1790,7 @@ impl Engine {
         chain.push(decoder);
         let head = self.head(&from, &chain, &elements, false)?;
         let decoded = head.last().expect("a chain has elements").static_pad("src").ok_or("çözücünün çıkışı yok")?;
+        self.watch_decoder(head.last().expect("a chain has elements"), generation);
         // How many channels come out is known on the decoder's first caps,
         // and that decides the rest: the sound setting's Dolby Digital
         // encoding for three channels or more -- mpv's
@@ -1792,7 +1822,7 @@ impl Engine {
                 engine.shared.info.lock().unwrap_or_else(|p| p.into_inner()).passthrough = true;
                 return gst::PadProbeReturn::Remove;
             }
-            let tail = match engine.sound_tail(&audio) {
+            let tail = match engine.sound_tail(&audio, generation) {
                 Ok(tail) => tail,
                 Err(error) => {
                     eprintln!("mediabox-live: ses zinciri kurulamadı: {error}");
@@ -1896,11 +1926,107 @@ impl Engine {
     }
 
     /// After the decoder, for PCM: converted, resampled, at the volume.
-    fn sound_tail(&self, audio: &Audio) -> Result<Vec<gst::Element>, String> {
+    /// The decoded sound is measured where it goes into the volume
+    /// (`sound_diag::Meter`): in the sink's format, before the viewer's
+    /// volume and mute, which change what is heard and not what was decoded.
+    fn sound_tail(&self, audio: &Audio, generation: u64) -> Result<Vec<gst::Element>, String> {
         let volume = make("volume")?;
         volume.set_property("volume", audio.gain);
         volume.set_property("mute", audio.muted);
+        let shared = Arc::clone(&self.shared);
+        let input = volume.static_pad("sink").ok_or("ses düzeyinin girişi yok")?;
+        let told = AtomicBool::new(false);
+        input.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
+            let caps = pad.current_caps();
+            let format = caps.as_ref().and_then(|caps| caps.structure(0)).map_or(Err("no caps"), |s| {
+                crate::sound_diag::PcmFormat::from_caps(
+                    s.name().as_str(),
+                    s.get::<&str>("format").ok(),
+                    s.get::<i32>("rate").ok(),
+                    s.get::<i32>("channels").ok(),
+                    s.get::<&str>("layout").ok(),
+                )
+            });
+            if !told.swap(true, Ordering::Relaxed) {
+                mediabox_core::timeline!(
+                    "sound-measured-at",
+                    "gen={generation} pad=volume.sink caps={}",
+                    caps.as_ref().map_or_else(String::new, |c| c.to_string())
+                );
+            }
+            let Ok(map) = buffer.map_readable() else { return gst::PadProbeReturn::Ok };
+            shared.health.pcm(
+                generation,
+                format,
+                buffer.pts().map(|t| t.nseconds()),
+                buffer.duration().map(|d| d.nseconds()),
+                buffer.flags().contains(gst::BufferFlags::DISCONT),
+                map.as_slice(),
+            );
+            gst::PadProbeReturn::Ok
+        });
         Ok(vec![make("audioconvert")?, make("audioresample")?, volume])
+    }
+
+    /// C: the decoder's units in, its PCM out (buffers, sample frames from
+    /// the bytes and the caps), and every new format it puts out. With the
+    /// `pcm-zero` fault, `MS` of its output made zero every ten seconds.
+    fn watch_decoder(&self, decoder: &gst::Element, generation: u64) {
+        let shared = Arc::clone(&self.shared);
+        if let Some(input) = decoder.static_pad("sink") {
+            input.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                shared.health.diagnose(|d| d.c.dec_in += 1);
+                gst::PadProbeReturn::Ok
+            });
+        }
+        let Some(output) = decoder.static_pad("src") else { return };
+        let shared = Arc::clone(&self.shared);
+        let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+        let zeroing = Mutex::new((Instant::now(), None::<Instant>));
+        output.add_probe(gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+            if let Some(gst::PadProbeData::Event(event)) = &info.data {
+                if let gst::EventView::Caps(caps) = event.view() {
+                    mediabox_core::timeline!("decoder-caps", "gen={generation} caps={}", caps.caps());
+                    shared.health.diagnose(|d| d.c.dec_reconfigured += 1);
+                }
+                return gst::PadProbeReturn::Ok;
+            }
+            if faults.pcm_zero_ms > 0
+                && let Some(buffer) = info.buffer_mut()
+            {
+                let mut z = zeroing.lock().unwrap_or_else(|p| p.into_inner());
+                if z.1.is_none() && z.0.elapsed() >= std::time::Duration::from_secs(10) {
+                    *z = (Instant::now(), Some(Instant::now()));
+                    mediabox_core::timeline!("fault", "pcm-zero ms={}", faults.pcm_zero_ms);
+                }
+                if let Some(since) = z.1 {
+                    if since.elapsed() < std::time::Duration::from_millis(faults.pcm_zero_ms) {
+                        if let Ok(mut map) = buffer.make_mut().map_writable() {
+                            map.as_mut_slice().fill(0);
+                        }
+                    } else {
+                        z.1 = None;
+                    }
+                }
+            }
+            let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
+            let frame_bytes = pad.current_caps().and_then(|caps| {
+                let s = caps.structure(0)?;
+                let bytes = match s.get::<&str>("format").ok()? {
+                    "S16LE" => 2,
+                    "S32LE" | "F32LE" => 4,
+                    _ => return None,
+                };
+                Some(bytes * s.get::<i32>("channels").ok()? as usize)
+            });
+            let frames = frame_bytes.map_or(0, |b| (buffer.size() / b) as u64);
+            shared.health.diagnose(|d| {
+                d.c.dec_out_buffers += 1;
+                d.c.dec_out_frames += frames;
+            });
+            gst::PadProbeReturn::Ok
+        });
     }
 
     /// `pad` -> `chain` -> a new input of `selector`, which is switched to.
@@ -2106,7 +2232,7 @@ impl Engine {
             None => self.detach_audio_sink(),
             Some(_) => {
                 if self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).is_none()
-                    && let Err(error) = self.attach_audio_sink()
+                    && let Err(error) = self.attach_audio_sink("aid")
                 {
                     eprintln!("mediabox-live: ses aygıtı açılamadı: {error}");
                 }
@@ -2132,7 +2258,7 @@ impl Engine {
         if let Some(muted) = muted {
             audio.muted = muted;
         }
-        self.shared.health.quiet_by_choice.store(audio.muted || audio.gain <= 0.0, Ordering::Relaxed);
+        self.shared.health.user(audio.gain, audio.muted);
         for element in self.current_elements() {
             if element.factory().is_some_and(|factory| factory.name() == "volume") {
                 element.set_property("volume", audio.gain);
@@ -2303,6 +2429,8 @@ fn read_stream(
     // tables and sound PID, and the last PCR with the running time it was
     // stamped with, to put PTS on that clock.
     let mut reader: Option<(u64, crate::es::Reader)> = None;
+    let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+    let mut ts_dropped = 0u64;
     let mut reference: Option<(u64, u64)> = None;
     loop {
         let read = match file.read(&mut chunk) {
@@ -2375,7 +2503,26 @@ fn read_stream(
             {
                 es.select(*pid, *codec, &mut out);
             }
-            let fed = es.feed(&piece.data);
+            // The `ts-drop` fault: every Nth packet of the sound's PID
+            // never reaches the reader, as if the receiver had lost it.
+            let fed = match (faults.ts_drop, es.sound_pid()) {
+                (n, Some(pid)) if n > 0 => {
+                    let mut kept = Vec::with_capacity(piece.data.len());
+                    for packet in piece.data.chunks(crate::stamp::PACKET) {
+                        let on_sound = packet.len() == crate::stamp::PACKET && ((u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2])) == pid;
+                        if on_sound {
+                            ts_dropped += 1;
+                            if ts_dropped.is_multiple_of(n) {
+                                mediabox_core::timeline!("fault", "ts-drop pid={pid} n={ts_dropped}");
+                                continue;
+                            }
+                        }
+                        kept.extend_from_slice(packet);
+                    }
+                    es.feed(&kept)
+                }
+                _ => es.feed(&piece.data),
+            };
             out.chunks.extend(fed.chunks);
             out.events.extend(fed.events);
             shared.health.ts(generation, &out.events, es.counts(), es.sound_state(), es.codec());
@@ -2471,7 +2618,10 @@ fn push_sound(
     on_sound: &dyn Fn(u64, &crate::es::Switch) -> Option<gst_app::AppSrc>,
 ) {
     let mut target = Some(source.clone());
+    let bytes: usize = chunks.iter().map(|c| c.data.len()).sum();
+    shared.health.diagnose(|d| d.c.ts_payload_bytes += bytes as u64);
     let failed = route_sound(&mut target, chunks, reference, &mut |switch| on_sound(generation, switch), &mut |at| {
+        shared.health.diagnose(|d| d.c.ts_pes_starts += 1);
         shared.health.demuxed(generation, true, arrived as i64 - at as i64);
         let mut starts = shared.sound_starts.lock().unwrap_or_else(|p| p.into_inner());
         starts.push_back(at);
@@ -3063,23 +3213,3 @@ mod sound_spec;
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod engine_spec;
-
-/// The loudest sample of a buffer of interleaved PCM, 0..1, for the formats
-/// the sound reaches the sink in (S16LE, S32LE, F32LE); None for anything
-/// else -- a passthrough burst is not samples.
-fn pcm_peak(caps: &gst::CapsRef, buffer: &gst::BufferRef) -> Option<f32> {
-    let structure = caps.structure(0)?;
-    if structure.name() != "audio/x-raw" {
-        return None;
-    }
-    let format = structure.get::<&str>("format").ok()?;
-    let map = buffer.map_readable().ok()?;
-    let bytes = map.as_slice();
-    let peak = match format {
-        "S16LE" => bytes.as_chunks::<2>().0.iter().map(|b| f32::from(i16::from_le_bytes(*b)).abs() / 32768.0).fold(0.0, f32::max),
-        "S32LE" => bytes.as_chunks::<4>().0.iter().map(|b| (i32::from_le_bytes(*b) as f32).abs() / 2_147_483_648.0).fold(0.0, f32::max),
-        "F32LE" => bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b).abs()).fold(0.0, f32::max),
-        _ => return None,
-    };
-    Some(peak)
-}

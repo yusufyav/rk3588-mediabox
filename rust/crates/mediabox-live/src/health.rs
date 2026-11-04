@@ -17,6 +17,11 @@
 //!   pipeline's (`slave-method` skew). The pipeline's clock now less the
 //!   sound clock now is how late the sound plays against its schedule.
 //!
+//! - The sound's diagnosis (`sound_diag`): every layer the sound passes
+//!   counted apart, the decoded PCM measured before the viewer's volume,
+//!   and each loss or silence of 200 ms or more one record of the window
+//!   it was in (`INCIDENTS`), with a cause only where the counts show one.
+//!
 //! Written to `PATH` every `PERIOD`; cumulative counters, the reader takes
 //! differences.
 
@@ -25,6 +30,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 pub const PATH: &str = "/run/mediabox-live/health.json";
+/// The sound's incidents, one JSON line each; the older half dropped past
+/// `INCIDENTS_BYTES`.
+pub const INCIDENTS: &str = "/run/mediabox-live/sound-incidents.jsonl";
+const INCIDENTS_BYTES: u64 = 512 << 10;
 pub const PERIOD: std::time::Duration = std::time::Duration::from_millis(250);
 /// How far back the broadcast's present is looked for.
 const EDGE_WINDOW_NS: u64 = 2_000_000_000;
@@ -63,34 +72,15 @@ pub struct Health {
     pub ts_push_errors: AtomicU64,
     pub teardown_errors: AtomicU64,
     push_said: Mutex<(u64, u8)>,
-    /// The sound turned down to nothing or muted by the viewer: silence
-    /// then is not a fault (`pcm`).
-    pub quiet_by_choice: std::sync::atomic::AtomicBool,
-    silence: Mutex<Silence>,
+    sound: Mutex<crate::sound_diag::Diag>,
+    /// When the sound device was last opened by us, monotonic ns: a restart
+    /// of the device then is ours, not an XRUN.
+    reopened_ns: AtomicU64,
     /// Pictures the plane gave back because the interface still held every
     /// buffer (`plane::Plane::dropped_full`), set by the reporter.
     pub plane_full_dropped: AtomicU64,
 }
 
-/// Sound that decoded to silence: the broadcast's own, or a stream that
-/// carried nothing, as against sound lost on its way to the device. A run
-/// of `SILENCE_NS` or more is counted, with how long it was.
-#[derive(Default)]
-struct Silence {
-    generation: u64,
-    /// The current silent run: where it began (PTS) and how long it is.
-    start_pts: Option<u64>,
-    run_ns: u64,
-    told: bool,
-    count: u64,
-    total_ns: u64,
-    longest_ns: u64,
-}
-
-/// Peak below this (-60 dBFS) is silence.
-const SILENCE_PEAK: f32 = 0.001;
-/// A silent run this long is counted.
-const SILENCE_NS: u64 = 200_000_000;
 
 /// The transport stream reader's counts (`es::Counts`): the channels before
 /// this one summed, and this one's; each kind of event said once a channel.
@@ -177,6 +167,7 @@ impl Health {
         l.least = Some(l.least.map_or(lead, |x| x.min(lead)));
         if lead < 0 && settled {
             l.late += 1;
+            self.sound().c.sink_behind += 1;
             mediabox_core::timeline!("audio-late", "lead_ms={:.1}", lead as f64 / 1e6);
             eprintln!("mediabox-live: ses çalınacağı andan {:.1} ms sonra geldi", -lead as f64 / 1e6);
         }
@@ -197,10 +188,15 @@ impl Health {
         }
         if message.starts_with("dropping late sample") {
             self.sink_late.fetch_add(1, Ordering::Relaxed);
+            self.sound().c.sink_late += 1;
             mediabox_core::timeline!("audio-sink-late", "");
             eprintln!("mediabox-live: ses aygıtı geç örnek attı (duyulur kesik)");
         } else if message.starts_with("Unexpected discontinuity") {
             self.sink_discont.fetch_add(1, Ordering::Relaxed);
+            // How far the sink jumped to resync, as it says: each one
+            // classified, one of an event's length recorded.
+            let incident = self.sound().sink_discont(mediabox_core::timeline::now_ns(), crate::sound_diag::discont_ns(message));
+            self.incidents(incident.into_iter().collect());
             mediabox_core::timeline!("audio-sink-discont", "{message}");
             eprintln!("mediabox-live: ses aygıtı: {message}");
         }
@@ -285,6 +281,26 @@ impl Health {
         }
         ts.now = counts;
         ts.codec = codec;
+        {
+            use crate::es::Event::*;
+            let mut d = self.sound();
+            d.context.codec = codec.map(|c| c.name());
+            for event in events {
+                let pid = d.context.pid;
+                let on_sound = |p: &u16| pid.is_none_or(|sound| sound == *p);
+                match event {
+                    TransportError { pid } if on_sound(pid) => d.c.ts_tei += 1,
+                    ContinuityLoss { pid, .. } | DuplicateMismatch { pid } if on_sound(pid) => d.c.ts_cc_loss += 1,
+                    Duplicate { pid } | ExcessiveDuplicate { pid } if on_sound(pid) => d.c.ts_duplicate += 1,
+                    AnnouncedDiscontinuity { pid } if on_sound(pid) => d.c.ts_discontinuity += 1,
+                    SoundReset { pid, .. } => {
+                        d.c.ts_sound_resets += 1;
+                        d.context.pid = Some(*pid);
+                    }
+                    _ => {}
+                }
+            }
+        }
         for event in events {
             mediabox_core::timeline!("ts", "gen={generation} {event:?}");
             let bit = kind(event);
@@ -321,39 +337,59 @@ impl Health {
         edge.window.iter().map(|&(_, d)| d).min()
     }
 
-    /// The loudest sample of a decoded sound buffer (`peak`, 0..1) of
-    /// channel `generation` on its way into the sink. Sound turned down or
-    /// muted by the viewer is not counted.
-    pub fn pcm(&self, generation: u64, pts: u64, duration: u64, peak: f32) {
-        let mut s = self.silence.lock().unwrap_or_else(|p| p.into_inner());
-        if s.generation != generation {
-            s.generation = generation;
-            s.start_pts = None;
-            s.run_ns = 0;
-            s.told = false;
+    fn sound(&self) -> std::sync::MutexGuard<'_, crate::sound_diag::Diag> {
+        self.sound.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Run `f` on the diagnosis and say what incidents came of it.
+    pub fn diagnose<T>(&self, f: impl FnOnce(&mut crate::sound_diag::Diag) -> T) -> T {
+        f(&mut self.sound())
+    }
+
+    /// Incidents: on the timeline, in `INCIDENTS`, and on stderr if the
+    /// viewer would hear it -- one line each, of an event 200 ms or longer.
+    pub fn incidents(&self, incidents: Vec<crate::sound_diag::Incident>) {
+        for incident in incidents {
+            let json = incident.json();
+            mediabox_core::timeline!("sound-incident", "{json}");
+            if incident.alarm {
+                eprintln!(
+                    "mediabox-live: ses olayı: {} {:.0} ms, neden {} (ayrıntı {INCIDENTS})",
+                    incident.kind.name(),
+                    incident.duration_ns as f64 / 1e6,
+                    incident.cause.name()
+                );
+            }
+            append_incident(&json);
         }
-        if peak < SILENCE_PEAK && !self.quiet_by_choice.load(Ordering::Relaxed) {
-            if s.start_pts.is_none() {
-                s.start_pts = Some(pts);
-            }
-            s.run_ns += duration;
-            if s.run_ns >= 1_000_000_000 && !s.told {
-                s.told = true;
-                mediabox_core::timeline!("audio-silent", "gen={generation} from_pts={} ms={:.0}", s.start_pts.unwrap_or(0), s.run_ns as f64 / 1e6);
-                eprintln!("mediabox-live: çözülen ses 1 s'dir sessiz (pts {} itibarıyla)", s.start_pts.unwrap_or(0));
-            }
-            return;
-        }
-        if let Some(start) = s.start_pts.take() {
-            let run = std::mem::take(&mut s.run_ns);
-            s.told = false;
-            if run >= SILENCE_NS {
-                s.count += 1;
-                s.total_ns += run;
-                s.longest_ns = s.longest_ns.max(run);
-                mediabox_core::timeline!("audio-silence", "gen={generation} pts={start} ms={:.0}", run as f64 / 1e6);
-                eprintln!("mediabox-live: çözülen seste {:.0} ms sessizlik (pts {start}): yayının ya da akışın kendi sessizliği", run as f64 / 1e6);
-            }
+    }
+
+    /// A buffer of decoded PCM of channel `generation`, before the volume.
+    pub fn pcm(&self, generation: u64, format: Result<crate::sound_diag::PcmFormat, &'static str>, pts: Option<u64>, declared: Option<u64>, discont: bool, data: &[u8]) {
+        let now = mediabox_core::timeline::now_ns();
+        let incidents = self.sound().pcm(now, generation, format, pts, declared, discont, data);
+        self.incidents(incidents);
+    }
+
+    /// The viewer's volume or mute.
+    pub fn user(&self, gain: f64, muted: bool) {
+        let incident = self.sound().user(mediabox_core::timeline::now_ns(), gain, muted);
+        self.incidents(incident.into_iter().collect());
+    }
+
+    /// The sound device opened by us: on `device`, for `why`.
+    pub fn sink_opened(&self, device: Option<String>, why: &str) {
+        let now = mediabox_core::timeline::now_ns();
+        self.reopened_ns.store(now, Ordering::Relaxed);
+        mediabox_core::timeline!("sound-route", "why={why} device={device:?}");
+        let mut d = self.sound();
+        if why == "mode" {
+            d.c.sink_reopens += 1;
+            d.context.route = device;
+        } else if why != "start" {
+            d.route(device);
+        } else {
+            d.context.route = device;
         }
     }
 
@@ -372,9 +408,11 @@ impl Health {
             if off > AUDIO_TOLERANCE_NS {
                 flow.gaps += 1;
                 flow.gap_ns += off as u64;
+                self.sink_off(off);
                 mediabox_core::timeline!("audio-gap", "gen={generation} pts={pts} ms={:.1}", off as f64 / 1e6);
                 eprintln!("mediabox-live: ses akışında {:.1} ms boşluk (pts {pts})", off as f64 / 1e6);
             } else if off < -AUDIO_TOLERANCE_NS {
+                self.sink_off(off);
                 flow.overlaps += 1;
                 flow.overlap_ns += off.unsigned_abs();
                 mediabox_core::timeline!("audio-overlap", "gen={generation} pts={pts} ms={:.1}", -off as f64 / 1e6);
@@ -382,6 +420,31 @@ impl Health {
             }
         }
         flow.end_ns = duration.map(|d| pts + d);
+        self.sound().c.sink_buffers += 1;
+    }
+
+    fn sink_off(&self, off: i64) {
+        let incident = self.sound().sink_off(mediabox_core::timeline::now_ns(), off);
+        self.incidents(incident.into_iter().collect());
+    }
+}
+
+/// One incident into `INCIDENTS`; past its bound the older half goes.
+fn append_incident(json: &serde_json::Value) {
+    use std::io::Write;
+    let path = std::path::Path::new(INCIDENTS);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > INCIDENTS_BYTES)
+        && let Ok(text) = std::fs::read_to_string(path)
+    {
+        let lines: Vec<&str> = text.lines().collect();
+        let kept = lines[lines.len() / 2..].join("\n");
+        let _ = std::fs::write(path, kept + "\n");
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{json}");
     }
 }
 
@@ -392,6 +455,8 @@ pub struct Device {
     params: Option<std::path::PathBuf>,
     trigger: Option<String>,
     pub restarts: u64,
+    /// Of those, the ones the diagnosis has been told of.
+    pub restarts_told: u64,
     /// Least sound queued in the device since the last report, frames.
     least: Option<u64>,
     rate: u64,
@@ -448,6 +513,12 @@ impl Device {
 
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    /// The least queued since the report before, ms, without taking it.
+    fn least_ms(&self) -> Option<f64> {
+        let least = self.least?;
+        (self.rate > 0).then(|| least as f64 * 1000.0 / self.rate as f64)
     }
 
     fn take_least_ms(&mut self) -> Option<f64> {
@@ -513,9 +584,9 @@ pub struct Report {
     pub sound_push_errors: u64,
     pub ts_push_errors: u64,
     pub teardown_errors: u64,
-    pub audio_silences: u64,
-    pub audio_silence_ms: f64,
-    pub audio_silence_longest_ms: f64,
+    /// The sound's diagnosis (`sound_diag::Diag::json`) and its incidents.
+    pub sound: serde_json::Value,
+    pub sound_incidents: u64,
     pub plane_full_dropped: u64,
 }
 
@@ -544,15 +615,34 @@ impl Health {
             let t = self.ts.lock().unwrap_or_else(|p| p.into_inner());
             (t.before.plus(&t.now), t.state.map_or("none", |s| s.name()), t.codec.map(|c| c.name()))
         };
-        let (audio_silences, audio_silence_ms, audio_silence_longest_ms) = {
-            let s = self.silence.lock().unwrap_or_else(|p| p.into_inner());
-            (s.count, s.total_ns as f64 / 1e6, s.longest_ns as f64 / 1e6)
+        let (sound, sound_incidents) = {
+            let now = mediabox_core::timeline::now_ns();
+            let mut incidents = Vec::new();
+            let mut d = self.sound();
+            if d.context.generation != generation {
+                d.new_channel(generation, now);
+            }
+            // The device's restarts since the last report: ours if we
+            // opened it in the second and a half before.
+            let ours = now.saturating_sub(self.reopened_ns.load(Ordering::Relaxed)) < 1_500_000_000;
+            while device.restarts_told < device.restarts {
+                device.restarts_told += 1;
+                incidents.push(d.device_restart(now, ours));
+            }
+            d.c.video_dropped = self.video_dropped.load(Ordering::Relaxed);
+            d.c.plane_full_dropped = self.plane_full_dropped.load(Ordering::Relaxed);
+            let playing = sound_state != "absent-from-pmt";
+            incidents.extend(d.tick(now, playing, device.least_ms()));
+            let json = d.json(now);
+            let count = d.incidents;
+            drop(d);
+            self.incidents(incidents);
+            (json, count)
         };
         let flow = self.audio.lock().unwrap_or_else(|p| p.into_inner());
         Report {
-            audio_silences,
-            audio_silence_ms,
-            audio_silence_longest_ms,
+            sound,
+            sound_incidents,
             plane_full_dropped: self.plane_full_dropped.load(Ordering::Relaxed),
             sound_map_ms: map_diff as f64 / 1e6,
             ts,
@@ -597,7 +687,7 @@ fn this_channel(r: &Report) -> serde_json::Value {
         r.sink_late,
         r.sink_discont,
         r.audio_restarts,
-        r.audio_silences,
+        r.sound_incidents,
         r.video_dropped,
         r.plane_full_dropped,
         r.ts.cc_loss,
@@ -611,7 +701,7 @@ fn this_channel(r: &Report) -> serde_json::Value {
     serde_json::json!({
         "generation": r.generation,
         "audio_gaps": d(0), "audio_overlaps": d(1), "audio_late": d(2), "sink_late": d(3),
-        "sink_discont": d(4), "audio_restarts": d(5), "audio_silences": d(6),
+        "sink_discont": d(4), "audio_restarts": d(5), "sound_incidents": d(6),
         "video_dropped": d(7), "plane_full_dropped": d(8), "cc_loss": d(9),
     })
 }
@@ -644,9 +734,7 @@ pub fn write(report: &Report) {
     json["sound_push_errors"] = r.sound_push_errors.into();
     json["ts_push_errors"] = r.ts_push_errors.into();
     json["teardown_errors"] = r.teardown_errors.into();
-    json["audio_silences"] = r.audio_silences.into();
-    json["audio_silence_ms"] = r.audio_silence_ms.into();
-    json["audio_silence_longest_ms"] = r.audio_silence_longest_ms.into();
+    json["sound"] = r.sound.clone();
     json["plane_full_dropped"] = r.plane_full_dropped.into();
     // Every count above runs for the life of the process, through every
     // channel change: a fault is never taken back by the next channel.
@@ -691,7 +779,11 @@ mod tests {
 /// MEDIABOX_LIVE_FAULT, comma-separated -- `skip=N` leaves out every Nth
 /// picture, `audio-drop=N` every Nth sound buffer, `audio-stall=MS` holds
 /// the sound for MS every five seconds, `video-late=MS` / `audio-late=MS`
-/// shift a sink. Unset, none.
+/// shift a sink; for the sound's diagnosis, one fault a layer:
+/// `ts-drop=N` every Nth packet of the sound's PID kept from the reader,
+/// `pts-jump=MS` a frame's PTS moved on by MS every ten seconds,
+/// `pcm-zero=MS` MS of the decoder's output made zero every ten seconds.
+/// Unset, none.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Faults {
     pub skip: u64,
@@ -699,6 +791,9 @@ pub struct Faults {
     pub audio_stall_ms: u64,
     pub video_late_ms: i64,
     pub audio_late_ms: i64,
+    pub ts_drop: u64,
+    pub pts_jump_ms: u64,
+    pub pcm_zero_ms: u64,
 }
 
 impl Faults {
@@ -714,6 +809,9 @@ impl Faults {
                 "audio-stall" => f.audio_stall_ms = n.max(0) as u64,
                 "video-late" => f.video_late_ms = n,
                 "audio-late" => f.audio_late_ms = n,
+                "ts-drop" => f.ts_drop = n.max(0) as u64,
+                "pts-jump" => f.pts_jump_ms = n.max(0) as u64,
+                "pcm-zero" => f.pcm_zero_ms = n.max(0) as u64,
                 _ => {}
             }
         }

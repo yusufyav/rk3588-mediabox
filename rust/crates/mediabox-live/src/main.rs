@@ -21,6 +21,7 @@ mod es;
 mod health;
 mod ipc;
 mod plane;
+mod sound_diag;
 mod stamp;
 mod trace;
 
