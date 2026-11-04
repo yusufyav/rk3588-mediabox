@@ -204,6 +204,11 @@ pub struct OutputStats {
     /// on its own; the first of them, at the output packet.
     pub cc_errors: u64,
     pub cc_first: Vec<crate::ts::CcError>,
+    /// `cc_errors` and `dropped_chunks` when the service played last
+    /// changed (`Writer::switch_service`): the input's count starts again
+    /// there, so the output's is compared from there too.
+    #[serde(skip)]
+    pub at_switch: (u64, u64),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -299,7 +304,8 @@ fn continuity(mux: u64, selected: u64, output: &OutputStats) -> Continuity {
         mux_cc_errors: mux,
         selected_service_cc_errors: selected,
         output_cc_errors: output.cc_errors,
-        added_cc_errors: output.cc_errors.saturating_sub(selected) + output.dropped_chunks,
+        added_cc_errors: output.cc_errors.saturating_sub(output.at_switch.0).saturating_sub(selected)
+            + output.dropped_chunks.saturating_sub(output.at_switch.1),
         output_dropped_chunks: output.dropped_chunks,
     }
 }
@@ -456,6 +462,8 @@ struct OutputQueue {
     stats: Mutex<OutputStats>,
     /// Whether what is written is whole packets to check (not a raw dump).
     cc_check: AtomicBool,
+    /// The next epoch marker is a switch of service (`switch_service`).
+    switched: AtomicBool,
 }
 
 struct Writer {
@@ -484,6 +492,7 @@ impl Writer {
             error: Mutex::new(None),
             stats: Mutex::new(OutputStats::default()),
             cc_check: AtomicBool::new(true),
+            switched: AtomicBool::new(false),
         });
         let shared = Arc::clone(&queue);
         let thread = std::thread::Builder::new()
@@ -530,6 +539,12 @@ impl Writer {
                     // Another stream epoch (`Writer::new_epoch`).
                     if chunk.is_empty() {
                         cc.reset();
+                        // Everything the service before wrote is counted by
+                        // now: what is counted from here is the next one's.
+                        if shared.switched.swap(false, Ordering::SeqCst) {
+                            let mut stats = shared.stats.lock().unwrap_or_else(|p| p.into_inner());
+                            stats.at_switch.0 = stats.cc_errors;
+                        }
                         continue;
                     }
                     if shared.forget_pending.swap(false, Ordering::SeqCst) {
@@ -743,6 +758,23 @@ impl Writer {
         state.0.push_back(Vec::new());
         state.1 = 0;
         self.queue.forget_pending.store(true, Ordering::SeqCst);
+        self.queue.changed.notify_all();
+    }
+
+    /// Another service is played: `discard`, and the output's counts are
+    /// compared with the input's from here, as the input's start again
+    /// (`Selection` anew). Under the queue's lock: the marker is the first
+    /// thing the output takes after the chunk it is writing.
+    fn switch_service(&self) {
+        let mut state = self.queue.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.0.clear();
+        state.0.push_back(Vec::new());
+        state.1 = 0;
+        self.queue.switched.store(true, Ordering::SeqCst);
+        self.queue.forget_pending.store(true, Ordering::SeqCst);
+        let mut stats = self.queue.stats.lock().unwrap_or_else(|p| p.into_inner());
+        stats.at_switch.1 = stats.dropped_chunks;
+        drop(stats);
         self.queue.changed.notify_all();
     }
 
@@ -1697,7 +1729,7 @@ impl Pipeline {
                 u8::from(retune.is_some())
             );
             self.selector = Selector::new(service_id);
-            self.writer.discard();
+            self.writer.switch_service();
             if retune.is_some() {
                 // Another multiplex: nothing of this one's tables or access
                 // points is of use there.
@@ -3973,6 +4005,44 @@ mod tests {
             ),
             (1, 1, 0)
         );
+    }
+
+    #[test]
+    fn a_loss_the_input_brought_before_a_switch_is_not_the_next_service_s() {
+        let out = Captured::default();
+        let writer = Writer::start(Some(Sink::Plain(Box::new(out.clone()))), 1 << 20, Pressure::Drop, None);
+        // The service before lost packet 2 on the way in (cross 51616 ->
+        // 50809, 2026-11-04): the output shows it as the input did.
+        for cc in [0u8, 1, 3, 4] {
+            writer.send(OLD.es(cc));
+        }
+        // Written before the switch, as live: what is still queued then is
+        // let go, not counted.
+        let drained = |writer: &Writer, packets: u64| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while writer.stats().bytes < packets * crate::ts::PACKET as u64 && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        drained(&writer, 4);
+        // Another service: its input count starts at 0, as `Selector::new`'s.
+        writer.switch_service();
+        for cc in 0..4u8 {
+            writer.send(NEW.es(cc));
+        }
+        let output = writer.finish(true);
+        assert_eq!(output.cc_errors, 1, "the input's loss is in the output");
+        assert_eq!(continuity(0, 0, &output).added_cc_errors, 0);
+        // One the output makes after the switch is still MediaBox's.
+        let writer = Writer::start(Some(Sink::Plain(Box::new(Captured::default()))), 1 << 20, Pressure::Drop, None);
+        writer.send(OLD.es(0));
+        writer.send(OLD.es(2));
+        drained(&writer, 2);
+        writer.switch_service();
+        writer.send(NEW.es(0));
+        writer.send(NEW.es(5));
+        let output = writer.finish(true);
+        assert_eq!((output.cc_errors, continuity(0, 0, &output).added_cc_errors), (2, 1));
     }
 
     #[test]

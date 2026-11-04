@@ -762,6 +762,8 @@ pub struct Diag {
     /// When decoded samples last came, monotonic ns; since when none have.
     last_pcm_ns: Option<u64>,
     absent_since: Option<u64>,
+    /// Whether the last report's tick found the sound playing.
+    playing: bool,
     /// Since when the viewer has had it silenced.
     silenced_since: Option<u64>,
     pub by_cause: [u64; 8],
@@ -804,6 +806,7 @@ impl Diag {
         }
         let mut out = std::mem::take(&mut self.pending);
         // No samples: none while the sound plays, past the event's length.
+        self.playing = playing;
         let expected = playing && !self.context.passthrough && self.last_pcm_ns.is_some();
         match (self.last_pcm_ns, self.absent_since) {
             (Some(last), None) if expected && now_ns.saturating_sub(last) >= EVENT_NS => {
@@ -831,10 +834,26 @@ impl Diag {
         self.frame_next = None;
     }
 
-    /// The decoded samples began again after none came.
-    fn samples_back(&mut self, now_ns: u64) -> Option<Incident> {
-        let since = self.absent_since.take()?;
-        Some(self.record(Kind::PcmAbsent, since, Some(now_ns), now_ns - since, None))
+    /// The decoded samples began again after none came: for an event's
+    /// length or more, whether a report's tick saw them missing or not (a
+    /// tick comes every 250 ms; a stall of 400 ms is missing at one for
+    /// only 200 of them: 4 of 5 stalls were seen so, 2026-11-04).
+    fn samples_back(&mut self, now_ns: u64) -> Vec<Incident> {
+        let mut out = Vec::new();
+        let since = match self.absent_since.take() {
+            Some(since) => since,
+            None => match self.last_pcm_ns {
+                Some(last) if self.playing && !self.context.passthrough && now_ns.saturating_sub(last) >= EVENT_NS => {
+                    let mut events = Vec::new();
+                    self.meter.close(RunEnd::Absent, &mut events);
+                    out.extend(self.meter_events(events, now_ns));
+                    last
+                }
+                _ => return out,
+            },
+        };
+        out.push(self.record(Kind::PcmAbsent, since, Some(now_ns), now_ns - since, None));
+        out
     }
 
     fn record(&mut self, kind: Kind, start_ns: u64, end_ns: Option<u64>, duration_ns: u64, run: Option<(&Run, &'static str)>) -> Incident {

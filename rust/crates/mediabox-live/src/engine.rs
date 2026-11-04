@@ -694,7 +694,10 @@ impl Engine {
             let audio_traced = AtomicU64::new(0);
             let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
             let fault_count = AtomicU64::new(0);
-            let fault_stalled = Mutex::new(Instant::now());
+            // The stall's clock starts at the sound's first buffer: one in
+            // the channel's first second (`Health::settled`) is its start,
+            // which the diagnosis does not judge.
+            let fault_stalled: Mutex<Option<Instant>> = Mutex::new(None);
             audio_selector.static_pad("src").expect("input-selector has a src pad").add_probe(gst::PadProbeType::BUFFER, move |_, info| {
                 let n = fault_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if faults.audio_drop > 0 && n % faults.audio_drop == 0 {
@@ -703,8 +706,9 @@ impl Engine {
                 }
                 if faults.audio_stall_ms > 0 {
                     let mut at = fault_stalled.lock().unwrap_or_else(|p| p.into_inner());
-                    if at.elapsed() >= std::time::Duration::from_secs(5) {
-                        *at = Instant::now();
+                    let since = *at.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= std::time::Duration::from_secs(5) {
+                        *at = Some(Instant::now());
                         mediabox_core::timeline!("fault", "audio-stall ms={}", faults.audio_stall_ms);
                         std::thread::sleep(std::time::Duration::from_millis(faults.audio_stall_ms));
                     }

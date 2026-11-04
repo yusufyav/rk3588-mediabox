@@ -347,6 +347,38 @@ fn a_stalled_stream_is_no_samples_and_the_late_sink_says_why() {
 }
 
 #[test]
+fn a_stall_between_two_reports_is_still_one_event() {
+    // `audio-stall=400` with the reports 250 ms apart: one at 150 ms into
+    // the stall, the next 100 ms after the samples are back.
+    let mut f = Feed::new(2);
+    f.play(500, &[LOUD, LOUD], 1024);
+    f.now += 150 * MS;
+    f.incidents.extend(f.diag.tick(f.now, true, Some(3.0)));
+    f.now += 250 * MS;
+    assert!(f.incidents.is_empty(), "too short at the report");
+    f.diag.c.sink_behind += 1;
+    f.play(100, &[LOUD, LOUD], 1024);
+    let kinds = f.kinds();
+    assert_eq!(kinds.len(), 1, "{kinds:?}");
+    assert_eq!((kinds[0].0, kinds[0].1), (Kind::PcmAbsent, Cause::RenderStarvation));
+    assert!(kinds[0].2 >= 400, "{kinds:?}");
+    // Shorter than an event between them: none.
+    let mut f = Feed::new(2);
+    f.play(500, &[LOUD, LOUD], 1024);
+    f.now += 150 * MS;
+    f.diag.tick(f.now, true, None);
+    f.play(100, &[LOUD, LOUD], 1024);
+    assert!(f.incidents.is_empty());
+    // Not playing (paused, or the sound passed through): none either.
+    let mut f = Feed::new(2);
+    f.play(500, &[LOUD, LOUD], 1024);
+    f.diag.tick(f.now, false, None);
+    f.now += 400 * MS;
+    f.play(100, &[LOUD, LOUD], 1024);
+    assert!(f.incidents.is_empty());
+}
+
+#[test]
 fn a_device_restart_is_an_xrun_unless_it_was_ours() {
     let mut f = Feed::new(2);
     f.play(300, &[LOUD, LOUD], 1024);
