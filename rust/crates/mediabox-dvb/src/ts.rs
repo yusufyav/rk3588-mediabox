@@ -1727,6 +1727,19 @@ impl RapCache {
         kept.extend_from_slice(p);
     }
 
+    /// What a live reader of `program` starts from: its PAT and PMT only, so
+    /// that the demuxer knows the programme at once and decoding begins at
+    /// the next access point as it arrives. Nothing older is handed on: a
+    /// picture or sound from before the broadcast's present would have to be
+    /// shown late or thrown away (ISO/IEC 13818-1 2.4.2, presentation at
+    /// STC = PTS). Empty when the tables are not known yet.
+    pub fn tables(&self, program: u16) -> Vec<u8> {
+        let (Some(pat), Some(pmt)) = (&self.pat, self.pmt.get(&program)) else {
+            return Vec::new();
+        };
+        [pat.as_slice(), pmt.as_slice()].concat()
+    }
+
     /// What `program` can start from now: PAT, PMT, then its streams since
     /// the last access point. Empty when there is no access point yet.
     pub fn replay(&self, program: u16) -> Vec<u8> {

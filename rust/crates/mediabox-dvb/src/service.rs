@@ -1314,13 +1314,17 @@ impl Pipeline {
                 // points is of use there.
                 self.analyser = Analyser::new();
                 self.rap = self.rap.as_ref().map(|_| RapCache::default());
-            } else if let Some(replay) = self.rap.as_ref().map(|rap| rap.replay(service_id)).filter(|r| !r.is_empty()) {
-                // The new channel starts from its last access point, not the next.
+            } else if let Some(replay) = self.rap.as_ref().map(|rap| rap.tables(service_id)).filter(|r| !r.is_empty()) {
+                // The new channel starts at its next access point, live: only
+                // its tables are handed on, nothing from before the switch
+                // (2026-11-01: from the last access point it started up to
+                // 1.1 s behind the broadcast, and catching up threw pictures
+                // and sound away).
                 let mut out = Vec::with_capacity(replay.len());
                 for packet in replay.chunks(crate::ts::PACKET) {
                     self.selector.packet(packet, &mut out);
                 }
-                log.line(format!("SELECT replay {} B from the last access point", out.len()));
+                log.line(format!("SELECT tables {} B; the picture starts at the next access point", out.len()));
                 trace_replay("select", &out);
                 self.writer.send(out);
             }
@@ -1829,8 +1833,8 @@ fn stream(
             }
         }
         if pipeline.writer.wants_start() {
-            let from = pipeline.rap.as_ref().map(|rap| rap.replay(pipeline.service_id)).unwrap_or_default();
-            log.line(format!("READER: starts from the last access point ({} B)", from.len()));
+            let from = pipeline.rap.as_ref().map(|rap| rap.tables(pipeline.service_id)).unwrap_or_default();
+            log.line(format!("READER: starts live, from the tables ({} B)", from.len()));
             trace_replay("reader", &from);
             pipeline.writer.start_from_access_point(from);
         }
