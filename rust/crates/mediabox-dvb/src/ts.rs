@@ -507,6 +507,21 @@ impl Analyser {
         Self::default()
     }
 
+    /// The elementary, PCR and PMT PIDs of the programmes this multiplex
+    /// carries (not the PSI/SI PIDs every multiplex has).
+    pub fn programme_pids(&self) -> BTreeSet<u16> {
+        let streams = self
+            .pmts
+            .values()
+            .flat_map(|pmt| pmt.streams.iter().map(|s| s.pid).chain([pmt.pcr_pid]));
+        self.pat
+            .values()
+            .copied()
+            .chain(streams)
+            .filter(|&pid| pid >= 0x20 && pid != PID_NULL)
+            .collect()
+    }
+
     /// Any chunking: the 188-byte alignment is carried across calls. Every
     /// synchronised packet is also handed to `each`, in order.
     pub fn feed(&mut self, data: &[u8], mut each: impl FnMut(&[u8])) {
@@ -744,6 +759,261 @@ fn find_sync(buffer: &[u8], mut pos: usize) -> Option<usize> {
         pos = found + 1;
     }
     None
+}
+
+// ------------------------------------------------------------------ transport gate
+
+/// What a new tune's stream is let in on.
+///
+/// After a retune the bridge's first transfer still carries the transponder
+/// just left: measured 2026-11-04 over 30 retunes, up to 316 packets of the
+/// old multiplex's PIDs ahead of the new one, once with its PAT. None of it
+/// is the new transport stream, and none of it may reach the selector, the
+/// player, the access-point cache, the guide or the counters. The new stream
+/// is known by its PAT (ISO/IEC 13818-1 2.4.4.3), so everything before the
+/// first PAT that identifies it is held back, and the stream starts at that
+/// PAT's packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admission {
+    /// The service the viewer asked for: a PAT that carries it is the new
+    /// stream. None for a scan or a TKGS read, which take the transponder
+    /// as it is.
+    pub service_id: Option<u16>,
+    /// The transport stream left by the retune: its PATs are its tail.
+    pub left_tsid: Option<u16>,
+    /// After a loss: only this transport stream is the channel's.
+    pub want_tsid: Option<u16>,
+}
+
+/// Why the gate let the stream in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Admitted {
+    /// A PAT with the service asked for.
+    Service,
+    /// The transport stream a lost signal was on.
+    Relock,
+    /// Twice the same transport stream's PAT, none other between: a stream
+    /// in its own right, not a tail -- a scan's or TKGS read's transponder,
+    /// or a carrier without the service (searched on from, as before).
+    Repeated,
+    /// No PAT decided it in the time a service has to appear: a scan or a
+    /// TKGS read takes what there is.
+    Deadline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gated {
+    Waiting,
+    /// The stream from the admitting PAT's packet on (this chunk's rest).
+    Admitted(Vec<u8>),
+    /// After a loss, another transport stream than the channel's, twice.
+    Other(u16),
+}
+
+/// One retune's quarantine, for the log and the status.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Quarantine {
+    pub generation: u32,
+    pub service_id: Option<u16>,
+    pub left_tsid: Option<u16>,
+    pub want_tsid: Option<u16>,
+    pub admitted_tsid: Option<u16>,
+    pub reason: Option<Admitted>,
+    /// Held back: transfers fed, whole packets and bytes (with any bytes
+    /// before the packet alignment was found).
+    pub transfers: u64,
+    pub packets: u64,
+    pub bytes: u64,
+    /// Held packets on the programme PIDs of the multiplex left: its tail.
+    pub left_pid_packets: u64,
+    /// PATs of the transport stream left, and of others without the service.
+    pub old_pats: u64,
+    pub other_pats: u64,
+    /// From the gate's start to the admitting PAT.
+    pub admit_ms: Option<u64>,
+}
+
+pub struct Gate {
+    rule: Admission,
+    left_pids: BTreeSet<u16>,
+    buffer: Vec<u8>,
+    synced: bool,
+    sections: Sections,
+    /// The latest PAT packet's place in `buffer`: where the stream starts if
+    /// its section admits it.
+    pat_start: Option<usize>,
+    /// Where in `buffer` the next packet to look at starts (what is kept
+    /// from the latest PAT on has been looked at).
+    resume: usize,
+    /// A transport stream's PATs in a row, for `Admitted::Repeated`.
+    repeated: Option<(u16, u32)>,
+    started: std::time::Instant,
+    pub stats: Quarantine,
+}
+
+impl Gate {
+    pub fn new(rule: Admission, generation: u32, left_pids: BTreeSet<u16>) -> Self {
+        Self {
+            rule,
+            left_pids,
+            buffer: Vec::new(),
+            synced: false,
+            sections: Sections::default(),
+            pat_start: None,
+            resume: 0,
+            repeated: None,
+            started: std::time::Instant::now(),
+            stats: Quarantine {
+                generation,
+                service_id: rule.service_id,
+                left_tsid: rule.left_tsid,
+                want_tsid: rule.want_tsid,
+                ..Quarantine::default()
+            },
+        }
+    }
+
+    pub fn rule(&self) -> Admission {
+        self.rule
+    }
+
+    pub fn age(&self) -> std::time::Duration {
+        self.started.elapsed()
+    }
+
+    /// Opened without a PAT (`Admitted::Deadline`): what is held is let go.
+    pub fn open(&mut self) {
+        self.drop_front(self.buffer.len());
+        self.stats.reason = Some(Admitted::Deadline);
+        self.stats.admit_ms = Some(self.started.elapsed().as_millis() as u64);
+    }
+
+    fn drop_front(&mut self, n: usize) {
+        self.stats.bytes += n as u64;
+        self.buffer.drain(..n);
+        self.pat_start = self.pat_start.and_then(|at| at.checked_sub(n));
+        self.resume = self.resume.saturating_sub(n);
+    }
+
+    pub fn feed(&mut self, chunk: &[u8]) -> Gated {
+        self.stats.transfers += 1;
+        self.buffer.extend_from_slice(chunk);
+        let mut pos = self.resume;
+        let mut other = None;
+        loop {
+            if !self.synced {
+                match find_sync(&self.buffer, pos) {
+                    Some(found) => {
+                        pos = found;
+                        self.synced = true;
+                    }
+                    None => {
+                        let keep = self
+                            .buffer
+                            .len()
+                            .saturating_sub((SYNC_RUN - 1) * PACKET + 1)
+                            .max(pos);
+                        pos = keep;
+                        break;
+                    }
+                }
+            }
+            if self.buffer.len() - pos < PACKET {
+                break;
+            }
+            if self.buffer[pos] != 0x47 {
+                self.synced = false;
+                self.sections.clear();
+                self.pat_start = None;
+                pos += 1;
+                continue;
+            }
+            let at = pos;
+            pos += PACKET;
+            self.stats.packets += 1;
+            let p = &self.buffer[at..at + PACKET];
+            let pid = pid_of(p);
+            if self.left_pids.contains(&pid) {
+                self.stats.left_pid_packets += 1;
+            }
+            if pid != PID_PAT || p[1] & 0x80 != 0 {
+                continue;
+            }
+            let unit_start = p[1] & 0x40 != 0;
+            if unit_start {
+                self.pat_start = Some(at);
+            }
+            let Some(payload) = payload_of(p) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            self.sections.payload(PID_PAT, unit_start, payload, |s| {
+                let (table, tsid, _, current, body) = section_header(s);
+                if table == TABLE_PAT && current {
+                    found.push((tsid, parse_pat(body)));
+                }
+            });
+            for (tsid, programmes) in found {
+                match self.decide(tsid, &programmes) {
+                    Gated::Waiting => {}
+                    Gated::Admitted(_) => {
+                        let start = self.pat_start.unwrap_or(at);
+                        // The admitting packet is part of the stream, not held.
+                        self.stats.packets -= ((pos - start) / PACKET) as u64;
+                        self.drop_front(start);
+                        self.stats.admitted_tsid = Some(tsid);
+                        self.stats.admit_ms = Some(self.started.elapsed().as_millis() as u64);
+                        return Gated::Admitted(std::mem::take(&mut self.buffer));
+                    }
+                    Gated::Other(tsid) => other = Some(tsid),
+                }
+            }
+        }
+        // Nothing before the latest PAT packet can start the stream.
+        self.resume = pos;
+        let keep_from = self.pat_start.unwrap_or(pos).min(pos);
+        self.drop_front(keep_from);
+        other.map_or(Gated::Waiting, Gated::Other)
+    }
+
+    fn decide(&mut self, tsid: u16, programmes: &BTreeMap<u16, u16>) -> Gated {
+        if self.rule.left_tsid == Some(tsid) {
+            self.stats.old_pats += 1;
+            self.repeated = None;
+            return Gated::Waiting;
+        }
+        let repeated = match self.repeated {
+            Some((seen, count)) if seen == tsid => count + 1,
+            _ => 1,
+        };
+        self.repeated = Some((tsid, repeated));
+        let admitted = match (self.rule.want_tsid, self.rule.service_id) {
+            (Some(want), _) if want == tsid => Some(Admitted::Relock),
+            (Some(_), _) => {
+                self.stats.other_pats += 1;
+                return if repeated >= 2 {
+                    Gated::Other(tsid)
+                } else {
+                    Gated::Waiting
+                };
+            }
+            (None, Some(service)) if programmes.contains_key(&service) => Some(Admitted::Service),
+            (None, service) => {
+                if service.is_some() {
+                    self.stats.other_pats += 1;
+                }
+                (repeated >= 2).then_some(Admitted::Repeated)
+            }
+        };
+        match admitted {
+            Some(reason) => {
+                self.stats.reason = Some(reason);
+                Gated::Admitted(Vec::new())
+            }
+            None => Gated::Waiting,
+        }
+    }
 }
 
 // ------------------------------------------------------------------ video
