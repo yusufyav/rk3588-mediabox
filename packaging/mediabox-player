@@ -74,8 +74,27 @@ if [ "${MEDIABOX_PLAYER_LIVE:-0}" = 1 ]; then
         echo "mediabox-player: $native yok; canlı yayın oynatılamıyor (scripts/build-mediabox-live.sh --install)" >&2
         exit 1
     fi
-    GST_PLUGIN_PATH="/opt/rk3588-mediabox/media-runtime/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
-    export GST_PLUGIN_PATH
+    # mediabox-live runs on its own GStreamer 1.26.11
+    # (/opt/rk3588-mediabox/gstreamer-1.26, through its RUNPATH; plugins and
+    # scanner from there), mppvideodec included: built against it and kept
+    # in its plugin directory (scripts/build-mppvideodec.sh). Only that
+    # directory is searched. The media runtime's lib/gstreamer-1.0 holds the
+    # mppvideodec built against Debian's GStreamer, and a plugin path from
+    # the environment could name Debian's own: either would put a second
+    # GStreamer's plugin in this process.
+    gst=/opt/rk3588-mediabox/gstreamer-1.26
+    if [ ! -e "$gst/BUILD-INFO" ] || [ ! -e "$gst/lib/gstreamer-1.0/libgstrockchipmpp.so" ]; then
+        echo "mediabox-player: $gst ya da içindeki mppvideodec yok; canlı yayın oynatılamıyor (scripts/build-mediabox-live.sh --install)" >&2
+        exit 1
+    fi
+    unset GST_PLUGIN_PATH GST_PLUGIN_PATH_1_0 GST_PLUGIN_SYSTEM_PATH
+    GST_PLUGIN_SYSTEM_PATH_1_0="$gst/lib/gstreamer-1.0"
+    export GST_PLUGIN_SYSTEM_PATH_1_0
+    # Its plugin registry is its own too: one shared with Debian's 1.26.2
+    # would be rebuilt by each in turn.
+    GST_REGISTRY_1_0="/var/cache/mediabox-live/gstreamer-registry.aarch64.bin"
+    export GST_REGISTRY_1_0
+    mkdir -p /var/cache/mediabox-live 2>/dev/null || true
     # MPP's own log level, for the same reason as below.
     export mpp_log_level="${mpp_log_level:-3}"
     exec "$native" "$URL"

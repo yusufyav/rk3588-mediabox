@@ -104,6 +104,60 @@ pub struct Stamp {
     follow: i64,
 }
 
+/// How long after a channel's first PCR its live edge is taken
+/// (`LiveEdge`): the receiver's burst from its last access point arrives
+/// within a few milliseconds, and the stream's own pace after.
+pub const EDGE_WINDOW_NS: u64 = 30_000_000;
+
+/// How far a channel's start lies behind the broadcast.
+///
+/// The receiver starts a channel from its last access point -- data it had
+/// for up to a second, sent at once -- and the pace (`Stamp`) is reckoned
+/// from the first of it: the whole channel played that far behind the
+/// broadcast, 0.19 to 1.02 s, a different amount at every change
+/// (2026-11-01, 32 openings). A receiver's STC follows the newest PCR it
+/// got; the newest data stands for now. Each chunk with a PCR says where the
+/// pace would be anchored had it been the newest (its arrival less its PCR's
+/// distance from the first); the earliest of them, against the first's
+/// arrival, is how far behind the start is. The sinks are then put that far
+/// ahead (`ts-offset`): what came from the access point is decoded, as the
+/// pictures after it need, and passes unshown; the first picture shown is
+/// the one the broadcast is at. The stream's own times are not touched:
+/// timed into the past, tsdemux timed its pictures 2.5 to 50 ms apart for
+/// seconds, and they were caught up by skipping.
+#[derive(Default)]
+pub struct LiveEdge {
+    first: Option<(u64, u64)>,
+    earliest: i64,
+    done: bool,
+}
+
+impl LiveEdge {
+    /// A chunk that arrived at `arrived` with `pcr`; how far behind the
+    /// start is (ns), once, when the window has passed.
+    pub fn observe(&mut self, arrived: u64, pcr: Option<u64>) -> Option<u64> {
+        if self.done {
+            return None;
+        }
+        let Some((first_pcr, first_at)) = self.first else {
+            if let Some(pcr) = pcr {
+                self.first = Some((pcr, arrived));
+                self.earliest = arrived as i64;
+            }
+            return None;
+        };
+        if let Some(pcr) = pcr {
+            let at = arrived as i64 - ticks_to_ns(pcr_ticks(first_pcr, pcr)) as i64;
+            self.earliest = self.earliest.min(at);
+        }
+        if arrived < first_at + EDGE_WINDOW_NS {
+            return None;
+        }
+        self.done = true;
+        Some((first_at as i64 - self.earliest).max(0) as u64)
+    }
+}
+
 impl Stamp {
     /// The time for a chunk of branch `key` that arrived at `arrived` (ns,
     /// running time) carrying `pcr` (its first, 27 MHz) if any.
@@ -175,7 +229,7 @@ fn pcr_of(p: &[u8]) -> Option<u64> {
     })
 }
 
-const PACKET: usize = 188;
+pub const PACKET: usize = 188;
 
 fn pid_of(p: &[u8]) -> u16 {
     (u16::from(p[1] & 0x1F) << 8) | u16::from(p[2])
@@ -187,6 +241,10 @@ fn pid_of(p: &[u8]) -> u16 {
 pub struct Piece {
     pub data: Vec<u8>,
     pub pcr: Option<u64>,
+    /// The discontinuity_indicator of the packet carrying `pcr`: on the
+    /// PCR_PID, a system time-base discontinuity (ISO/IEC 13818-1 2.4.3.5).
+    /// Carried for the clock; `Stamp` does not read it yet.
+    pub discontinuity: bool,
 }
 
 /// The receiver's stream as read from its FIFO, cut where the stamps
@@ -223,7 +281,7 @@ impl Packetizer {
         let mut data = std::mem::take(&mut self.carry);
         data.extend_from_slice(read);
         let mut pieces = Vec::new();
-        let mut piece = Piece { data: Vec::new(), pcr: None };
+        let mut piece = Piece { data: Vec::new(), pcr: None, discontinuity: false };
         let mut at = 0;
         loop {
             // In sync: a packet starts here, and the two after it where they
@@ -248,10 +306,12 @@ impl Packetizer {
             if let Some(pcr) = pcr_of(packet)
                 && *self.pcr_pid.get_or_insert(pid_of(packet)) == pid_of(packet)
             {
+                let discontinuity = packet[5] & 0x80 != 0;
                 if !piece.data.is_empty() || piece.pcr.is_some() {
-                    pieces.push(std::mem::replace(&mut piece, Piece { data: Vec::new(), pcr: Some(pcr) }));
+                    pieces.push(std::mem::replace(&mut piece, Piece { data: Vec::new(), pcr: Some(pcr), discontinuity }));
                 } else {
                     piece.pcr = Some(pcr);
+                    piece.discontinuity = discontinuity;
                 }
             }
             piece.data.extend_from_slice(packet);
@@ -270,6 +330,31 @@ mod tests {
     use super::*;
 
     const MS: u64 = 1_000_000;
+
+    /// A start from the receiver's access point: 680 ms of the broadcast
+    /// arriving within 5 ms, then the stream at its own pace: the start is
+    /// 680 ms behind; a start with no burst is not behind.
+    #[test]
+    fn a_start_from_the_access_point_is_measured_behind_the_broadcast() {
+        let pcr = |ms: u64| 1_000_000_000 + ms * 27_000;
+        let mut edge = LiveEdge::default();
+        let mut behind = None;
+        for i in 0..=17u64 {
+            behind = behind.or(edge.observe(1_000 * MS + i * 300_000, Some(pcr(i * 40))));
+        }
+        for i in 1..=3u64 {
+            behind = behind.or(edge.observe(1_005 * MS + i * 40 * MS, Some(pcr(680 + i * 40))));
+        }
+        let behind = behind.expect("measured once the window has passed");
+        assert!(behind.abs_diff(675 * MS) <= 6 * MS, "{behind}");
+
+        let mut edge = LiveEdge::default();
+        let mut behind = None;
+        for i in 0..5u64 {
+            behind = behind.or(edge.observe(1_000 * MS + i * 40 * MS + 300_000 * (i % 2), Some(pcr(i * 40))));
+        }
+        assert!(behind.expect("measured") <= MS, "{behind:?}");
+    }
     /// One 20 ms field of 50 Hz, in PCR ticks.
     const FIELD_50: u64 = 540_000;
     /// One 1001/60000 s frame of 59.94 Hz, in PCR ticks.

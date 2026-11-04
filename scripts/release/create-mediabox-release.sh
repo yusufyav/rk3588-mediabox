@@ -396,12 +396,17 @@ find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y
   printf 'mpv-hwdec-rkmpp\t%s\n' \
     "$("$PREFIX/player/bin/mpv" --hwdec=help 2>/dev/null | grep rkmpp >/dev/null && echo present || echo absent)"
   # Live television's player and every element it builds its pipeline from,
-  # mppvideodec from the media runtime as the launcher points GStreamer at it.
+  # searched only in its own GStreamer runtime's plugin directory, as the
+  # launcher does (scripts/build-gstreamer-runtime.sh, mppvideodec from
+  # scripts/build-mppvideodec.sh), which travels with the prefix: 1.26.8 or
+  # later.
+  inspect="$PREFIX/gstreamer-1.26/bin/gst-inspect-1.0"
   missing=""
   for e in $LIVE_ELEMENTS mppvideodec; do
-    GST_PLUGIN_PATH="$PREFIX/media-runtime/lib/gstreamer-1.0" gst-inspect-1.0 "$e" >/dev/null 2>&1 || missing="$missing $e"
+    env -u GST_PLUGIN_PATH -u GST_PLUGIN_PATH_1_0 -u GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0="$PREFIX/gstreamer-1.26/lib/gstreamer-1.0" GST_REGISTRY_1_0="${TMPDIR:-/tmp}/mediabox-release-registry.$$" "$inspect" "$e" >/dev/null 2>&1 || missing="$missing $e"
   done
   printf 'live-gstreamer-elements\t%s\n' "$([ -z "$missing" ] && echo present || echo "absent:${missing# }")"
+  printf 'live-gstreamer-version\t%s\n' "$("$inspect" --version 2>/dev/null | sed -n 's/^GStreamer //p' | head -1)"
 } >"$M/capability-baseline.txt"
 
 rm -f "$elf_list"

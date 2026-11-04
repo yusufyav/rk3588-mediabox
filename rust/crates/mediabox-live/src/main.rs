@@ -8,7 +8,8 @@
 //!
 //! Environment, beyond the launcher's own:
 //!   MEDIABOX_LIVE_VIDEO_DECODER    the decoder element (default mppvideodec)
-//!   MEDIABOX_LIVE_DEMUX_LATENCY_MS tsdemux latency (default 700)
+//!   MEDIABOX_LIVE_DEMUX_LATENCY_MS tsdemux latency (default 700: see `DEMUX_LATENCY_MS`)
+//!   MEDIABOX_LIVE_LATENCY_MS       the pipeline's latency (default 150: see `engine::LATENCY_MS`)
 //!   MEDIABOX_LIVE_RENDER_DELAY_MS  how far ahead of its time a frame is sent (default 40: two refreshes at 50 Hz)
 //!   MEDIABOX_LIVE_MAX_LATENESS_MS  later than this, the sink drops a frame (default: never; the panel decides)
 //!   MEDIABOX_LIVE_AUDIO_DEVICE     an ALSA PCM instead of the sound plan's
@@ -16,6 +17,8 @@
 //!   MEDIABOX_VO_TRACE              the frame trace, vo_mediabox's format
 
 mod engine;
+mod es;
+mod health;
 mod ipc;
 mod plane;
 mod stamp;
@@ -33,6 +36,41 @@ use engine::{Audio, Engine, Options, Shared};
 use ipc::{Clients, Command};
 
 const PLATFORM: &str = "/opt/rk3588-mediabox/bin/mediabox-platform";
+
+/// tsdemux's latency: GStreamer's default, 700 ms "for smooth demuxing".
+///
+/// Lowered to 50 ms on 2026-11-01 from pictures alone (no skipped or repeated
+/// frame at 700, 300, 150 or 50 ms; 754, 360, 203 and 110 ms behind the
+/// broadcast), it starved the sound: tsdemux hands a sound PES on only once
+/// the next one starts, and some services carry long ones. The live monitor
+/// (`health`, key M), 30-40 s per service on the Plus with the Kanky,
+/// 2026-11-02 -- sound reaching the sink after its time, and audiobasesink
+/// resyncing because what came was behind its read position:
+///   50 ms  TRT 1 88 late + 12 resyncs
+///   150 ms SD 16300 88 late + 14 resyncs, 10901 12 resyncs, TRT 1 4
+///   300 ms SD 16300 2 resyncs; 10901, TRT 1 clean
+///   700 ms SD 16300, 10901, TRT 1 clean, pictures too
+/// The sound now comes packet by packet (`es`), not from tsdemux, and the
+/// pipeline's latency is set (`engine::LATENCY_MS`), not asked of tsdemux:
+/// this is only what it says when asked.
+///
+/// And what it said was not so. tsdemux uses the property nowhere but in
+/// its answer to the latency query (gst-plugins-bad 1.26.11, tsdemux.c
+/// 418-549 and 626-632): it adds it to its upstream's minimum, H.222.0
+/// Annex D's 700 ms between valid PTS. The pipeline's minimum came out at
+/// 760-800 ms (tsdemux 700, h264parse 40, the picture's sink 60; queried
+/// element by element on the Plus, 2026-11-03) against the 150 ms it is run
+/// at, and gst_pipeline_do_latency warned at every latency message,
+/// "Configured latency is lower than detected minimum latency" (core/Clock,
+/// gstpipeline.c 716): 389 times in an evening's player.log. The latency
+/// the sinks wait by did not change with it -- 150 ms, measured at 150 ms
+/// with no picture or sound late in a 30-minute run (99,446 pictures).
+///
+/// So it says what it holds: tsdemux gives a PES on when the next one on
+/// its PID starts, one access unit -- 40 ms at 25 pictures a second, the
+/// longest a DVB broadcast's picture has. Asked, the pipeline's minimum is
+/// then 140 ms, within the 150 it runs at.
+const DEMUX_LATENCY_MS: u32 = 40;
 
 fn env_u32(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
@@ -94,8 +132,62 @@ fn block_signals() -> libc::sigset_t {
     }
 }
 
+/// Every line this process (GStreamer, MPP and itself) writes to stderr,
+/// stamped with CLOCK_MONOTONIC -- the clock of the timeline, of the
+/// interface's journal and of the page flips -- and the wall clock.
+///
+/// The player's log (`/run/mediabox/player.log`) had no time at all: over a
+/// two-hour match (2026-11-03) when a sound fault was said could only be
+/// guessed from the frame counts. Without a pipe (stderr unchanged) nothing
+/// is stamped and nothing is lost.
+fn stamp_stderr() {
+    use std::io::{BufRead, Write};
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills two descriptors; dup/dup2 on descriptors this
+    // process owns.
+    unsafe {
+        if libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) != 0 {
+            return;
+        }
+        let original = libc::dup(2);
+        if original < 0 || libc::dup2(fds[1], 2) < 0 {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+            return;
+        }
+        libc::close(fds[1]);
+        let reader = std::io::BufReader::new(std::fs::File::from_raw_fd(fds[0]));
+        let mut out = std::fs::File::from_raw_fd(original);
+        let _ = std::thread::Builder::new().name("stderr-stamp".into()).spawn(move || {
+            for line in reader.split(b'\n') {
+                let Ok(line) = line else { break };
+                let mut mono = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                let mut wall = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                let mut tm: libc::tm = std::mem::zeroed();
+                libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut mono);
+                libc::clock_gettime(libc::CLOCK_REALTIME, &mut wall);
+                libc::localtime_r(&wall.tv_sec, &mut tm);
+                let _ = write!(
+                    out,
+                    "[{}.{:06} {:02}:{:02}:{:02}.{:03}] ",
+                    mono.tv_sec,
+                    mono.tv_nsec / 1000,
+                    tm.tm_hour,
+                    tm.tm_min,
+                    tm.tm_sec,
+                    wall.tv_nsec / 1_000_000
+                );
+                let _ = out.write_all(&line);
+                let _ = out.write_all(b"\n");
+            }
+        });
+    }
+}
+
 fn main() {
     let signals = block_signals();
+    stamp_stderr();
     mediabox_core::timeline::init("live");
     let Some(url) = std::env::args().nth(1) else {
         eprintln!("kullanım: mediabox-live <FIFO>");
@@ -149,7 +241,7 @@ fn main() {
     let options = Options {
         video_decoder: std::env::var("MEDIABOX_LIVE_VIDEO_DECODER").unwrap_or_else(|_| "mppvideodec".into()),
         audio,
-        demux_latency_ms: env_u32("MEDIABOX_LIVE_DEMUX_LATENCY_MS", 700),
+        demux_latency_ms: env_u32("MEDIABOX_LIVE_DEMUX_LATENCY_MS", DEMUX_LATENCY_MS),
         render_delay_ms: env_u32("MEDIABOX_LIVE_RENDER_DELAY_MS", 40),
         max_lateness_ms: std::env::var("MEDIABOX_LIVE_MAX_LATENESS_MS").ok().and_then(|value| value.parse().ok()),
     };
@@ -190,6 +282,7 @@ fn main() {
     let mut last_playing = false;
     let mut audio_failed: Option<Instant> = None;
     let mut branch_failed: Option<Instant> = None;
+    let mut latency_told: Option<String> = None;
     // The same channel opened again after an error, without a frame since.
     let mut reopened = 0;
     // Why the player ends, when it ends because it cannot play.
@@ -276,16 +369,51 @@ fn main() {
                 }
                 MessageView::Warning(warning) => {
                     let name = warning.src().map(|source| source.path_string().to_string()).unwrap_or_default();
-                    eprintln!("mediabox-live: uyarı ({name}): {}", warning.error());
+                    let error = warning.error();
+                    let debug = warning.debug().map(|debug| debug.to_string()).unwrap_or_default();
+                    let (domain, code) = error_kind(&error);
+                    let generation = shared.generation.load(Ordering::SeqCst);
+                    eprintln!("mediabox-live: uyarı ({name}) [{domain}/{code}] gen={generation}: {error} -- {debug}");
+                    mediabox_core::timeline!(
+                        "gst-warning",
+                        "gen={generation} src={name} domain={domain} code={code} debug={}",
+                        debug.replace(char::is_whitespace, "_")
+                    );
                 }
                 MessageView::Latency(_) => {
                     engine.recalculate_latency();
+                    let generation = shared.generation.load(Ordering::SeqCst);
+                    let query = engine.latency_query();
                     mediabox_core::timeline!(
                         "latency",
-                        "gen={} s={:?}",
-                        shared.generation.load(Ordering::SeqCst),
-                        engine.latency()
+                        "gen={generation} live={:?} min_ns={:?} max_ns={:?} configured_ns={:?}",
+                        query.map(|(live, _, _)| live),
+                        query.map(|(_, min, _)| min),
+                        query.and_then(|(_, _, max)| max),
+                        engine.configured_latency()
                     );
+                    // Every element's share, for the record: said again
+                    // whenever it is not what was said last.
+                    {
+                        let parts: Vec<String> = engine
+                            .latency_by_element()
+                            .into_iter()
+                            .map(|(name, live, min, max)| {
+                                format!("{name}={}{}/{}", if live { "" } else { "~" }, min / 1_000_000, max.map_or("∞".into(), |max| (max / 1_000_000).to_string()))
+                            })
+                            .collect();
+                        let said = format!("{query:?} {}", parts.join(" "));
+                        if latency_told.as_deref() == Some(said.as_str()) {
+                            continue;
+                        }
+                        latency_told = Some(said);
+                        eprintln!(
+                            "mediabox-live: gecikme sorgusu gen={generation}: boru hattı {:?} ms (en az/en çok), ayarlı {:?} ms; öğeler (en az/en çok ms): {}",
+                            query.map(|(_, min, max)| (min / 1_000_000, max.map(|max| max / 1_000_000))),
+                            engine.configured_latency().map(|ns| ns / 1_000_000),
+                            parts.join(" ")
+                        );
+                    }
                 }
                 MessageView::Qos(qos) => {
                     let (_processed, dropped) = qos.stats();
@@ -453,4 +581,47 @@ fn query(engine: Arc<Engine>, shared: Arc<Shared>, plane: Arc<plane::Plane>) -> 
             _ => return None,
         })
     })
+}
+
+/// A GStreamer error's domain and code, by name: what `GST_ELEMENT_WARNING`
+/// was given (`CORE, CLOCK` and so on), for the log and the timeline.
+fn error_kind(error: &gst::glib::Error) -> (&'static str, String) {
+    if let Some(kind) = error.kind::<gst::CoreError>() {
+        ("core", format!("{kind:?}"))
+    } else if let Some(kind) = error.kind::<gst::StreamError>() {
+        ("stream", format!("{kind:?}"))
+    } else if let Some(kind) = error.kind::<gst::ResourceError>() {
+        ("resource", format!("{kind:?}"))
+    } else if let Some(kind) = error.kind::<gst::LibraryError>() {
+        ("library", format!("{kind:?}"))
+    } else {
+        ("other", "?".into())
+    }
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use super::error_kind;
+    use gst::prelude::*;
+
+    /// A pipeline's latency warning (gstpipeline.c, `GST_ELEMENT_WARNING
+    /// (pipeline, CORE, CLOCK, ...)`) is told as core/Clock with its debug
+    /// text: what the log used to show only as "clock problem".
+    #[test]
+    fn a_warning_is_told_by_domain_code_and_debug() {
+        gst::init().expect("GStreamer");
+        let pipeline = gst::Pipeline::new();
+        let bus = pipeline.bus().unwrap();
+        // The pipeline's own: what gst_pipeline_do_latency posts.
+        let message = gst::message::Warning::builder(gst::CoreError::Clock, "clock problem.")
+            .src(&pipeline)
+            .debug("Configured latency is lower than detected minimum latency: configured 0:00:00.150000000 < min 0:00:00.760000000")
+            .build();
+        bus.post(message).unwrap();
+        let message = bus.timed_pop(gst::ClockTime::from_seconds(1)).expect("the warning");
+        let gst::MessageView::Warning(warning) = message.view() else { panic!("a warning") };
+        let (domain, code) = error_kind(&warning.error());
+        assert_eq!((domain, code.as_str()), ("core", "Clock"));
+        assert!(warning.debug().unwrap().contains("lower than detected minimum latency"));
+    }
 }

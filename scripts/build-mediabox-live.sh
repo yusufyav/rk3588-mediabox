@@ -1,36 +1,65 @@
 #!/usr/bin/env bash
 #
-# Build live television's own player, mediabox-live, and what it stands on.
+# Build live television's own player, mediabox-live, and what it stands on;
+# install it on the appliance only when asked to, with a rollback copy.
 #
-# Three parts, each where it has to be built:
+# Everything is built here, nothing on the appliance:
 #
-#   1. GStreamer from Debian, on the appliance: the core, tsdemux and the video
-#      parsers (-bad), the audio parsers (-good), mpg123 and libav for MPEG-1
-#      Layer II, AC-3 and AAC, and alsasink. Runtime packages, plus the -dev
-#      files the next two steps link against.
-#   2. Rockchip's GStreamer decoder, mppvideodec (gstreamer-rockchip), on the
-#      appliance, against MediaBox's own MPP in the media runtime -- the same
-#      library mpv and Kodi decode with, found through an RPATH as the player's
-#      is (see build-mediabox-player.sh). Debian has neither MPP nor this.
-#      MediaBox's patches to it are in packaging/gstreamer-rockchip and are
-#      applied on the pinned revision.
-#   3. mediabox-live itself, cross-compiled here against the appliance's
-#      libraries (the sysroot build-mediabox-tv.sh keeps), as the interface is.
+#   1. GStreamer 1.26.11 at its own prefix, /opt/rk3588-mediabox/gstreamer-1.26
+#      (scripts/build-gstreamer-runtime.sh). Not Debian trixie's 1.26.2: its
+#      aacparse loses LATM frames until a channel's second StreamMuxConfig
+#      (fixed in 1.26.8). It links against Debian's glib, orc, ALSA, mpg123
+#      and FFmpeg, which the appliance already has; no package is installed.
+#   2. Rockchip's GStreamer decoder, mppvideodec (scripts/build-mppvideodec.sh),
+#      against that runtime and MediaBox's own MPP, into the runtime's own
+#      plugin directory. The media runtime's lib/gstreamer-1.0 plugin, built
+#      against Debian's GStreamer, is not touched and no longer loaded by
+#      live television.
+#   3. mediabox-live itself, cross-compiled against the appliance's libraries
+#      (the sysroot build-mediabox-tv.sh keeps) and the runtime, with a
+#      RUNPATH to the runtime.
 #
-# Usage: build-mediabox-live.sh [--install]
+# The result is a bundle, build/mediabox-live-bundle: the four files, their
+# hashes, and the script that installs them on the appliance.
+#
+# Usage: build-mediabox-live.sh [--dry-run | --install]
+#   (none)     build and bundle; nothing is written to the appliance
+#   --dry-run  also read the appliance (ssh, read-only) and print every
+#              write --install would make, and the checks it would refuse on
+#   --install  copy the bundle to the appliance and install it: refused if
+#              the appliance is not in the state the plan was made for, a
+#              rollback copy first, every file put in place by rename, the
+#              runtime's elements and loader checked before the launcher
+#              switches over; rolled back if a check fails
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=env.sh
-source "$here/scripts/env.sh"
+
+mode=build
+case "$#:${1:-}" in
+  0:) ;;
+  1:--dry-run) mode=dry-run ;;
+  1:--install) mode=install ;;
+  *) echo "usage: build-mediabox-live.sh [--dry-run | --install]" >&2; exit 2 ;;
+esac
+
+# The prefix is not a setting here: the runtime's plugin path and scanner,
+# mppvideodec's RUNPATH, mediabox-live's RUNPATH and the launcher all carry
+# /opt/rk3588-mediabox. Installed anywhere else, the binary would load
+# Debian's GStreamer or nothing.
+fixed_prefix=/opt/rk3588-mediabox
+if [ -n "${MEDIABOX_PREFIX:-}" ] && [ "$MEDIABOX_PREFIX" != "$fixed_prefix" ]; then
+  echo "MEDIABOX_PREFIX=$MEDIABOX_PREFIX, but mediabox-live and its runtime are built for $fixed_prefix" >&2
+  exit 1
+fi
 crate="$here/rust/crates/mediabox-live"
 triple="aarch64-unknown-linux-gnu"
 sysroot="${MEDIABOX_SYSROOT:-$here/.sysroot/aarch64-trixie}"
-media_prefix="$MEDIABOX_MEDIA_PREFIX"
-# gstreamer-rockchip, branch gstreamer-rockchip of JeffyCN/mirrors, as fetched
-# on 2026-10-24.
-gst_rockchip_url="https://github.com/JeffyCN/mirrors.git"
-gst_rockchip_rev="ebc758a13d425d34858a98dbcdb4a4bd702daa0f"
+gst_version=1.26.11
+gst_prefix="$fixed_prefix/gstreamer-1.26"
+gst_tarball="$here/build/gstreamer-runtime/gstreamer-$gst_version-aarch64.tar.xz"
+mpp_plugin="$here/build/gstreamer-rockchip/libgstrockchipmpp.so"
+bundle="$here/build/mediabox-live-bundle"
 
 say() { printf '\n== %s\n' "$*"; }
 
@@ -38,79 +67,77 @@ say() { printf '\n== %s\n' "$*"; }
   echo "no sysroot at $sysroot; run scripts/build-mediabox-tv.sh once first" >&2
   exit 1
 }
-mediabox_ssh "test -e '$media_prefix/lib/pkgconfig/rockchip_mpp.pc'" || {
-  echo "no MediaBox media runtime at $media_prefix; run scripts/build-media-runtime.sh first" >&2
-  exit 1
-}
 
-say "GStreamer packages and mppvideodec on $MEDIABOX_TARGET"
-mediabox_ssh "rm -rf /var/tmp/gstreamer-rockchip-patches && mkdir -p /var/tmp/gstreamer-rockchip-patches"
-mediabox_scp "$here"/packaging/gstreamer-rockchip/*.patch "$MEDIABOX_TARGET:/var/tmp/gstreamer-rockchip-patches/"
-mediabox_ssh "bash -s" <<REMOTE
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends \
-  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-alsa gstreamer1.0-libav \
-  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-  meson ninja-build pkg-config git ca-certificates >/dev/null
+say "GStreamer runtime (scripts/build-gstreamer-runtime.sh)"
+[ -e "$gst_tarball" ] || "$here/scripts/build-gstreamer-runtime.sh"
+sha256sum -c "$gst_tarball.sha256"
 
-src=/var/tmp/gstreamer-rockchip
-if [ ! -d "\$src/.git" ]; then
-  rm -rf "\$src"
-  git clone -q --filter=blob:none -b gstreamer-rockchip "$gst_rockchip_url" "\$src"
+say "mppvideodec (scripts/build-mppvideodec.sh)"
+[ -e "$mpp_plugin" ] || "$here/scripts/build-mppvideodec.sh"
+( cd "${mpp_plugin%/*}" && sha256sum -c libgstrockchipmpp.so.sha256 )
+
+say "sysroot <- the same GStreamer runtime, at the same prefix"
+if ! cmp -s <(tar -xJOf "$gst_tarball" "${gst_prefix#/}/BUILD-INFO") "$sysroot$gst_prefix/BUILD-INFO" 2>/dev/null; then
+  rm -rf "${sysroot:?}$gst_prefix"
+  tar -C "$sysroot" -xJf "$gst_tarball"
 fi
-git -C "\$src" fetch -q origin gstreamer-rockchip || true
-git -C "\$src" checkout -q -f "$gst_rockchip_rev"
-for patch in /var/tmp/gstreamer-rockchip-patches/*.patch; do
-  git -C "\$src" apply "\$patch"
-done
-rm -rf /var/tmp/gstreamer-rockchip-patches
-rm -rf "\$src/build"
-PKG_CONFIG_PATH="$media_prefix/lib/pkgconfig" \
-  meson setup "\$src/build" "\$src" \
-    --prefix="$media_prefix" --libdir=lib --buildtype=release \
-    -Drockchipmpp=enabled -Drga=disabled -Dgpu=disabled -Drkximage=disabled \\
-    -Dkmssrc=disabled -Dvpxalphadec=disabled \\
-    -Dc_link_args="-Wl,-rpath,$media_prefix/lib" >/dev/null
-ninja -C "\$src/build" >/dev/null
-ninja -C "\$src/build" install >/dev/null
-GST_PLUGIN_PATH="$media_prefix/lib/gstreamer-1.0" gst-inspect-1.0 mppvideodec | sed -n '1,12p'
-for element in tsdemux h264parse h265parse mpegvideoparse mpegaudioparse aacparse ac3parse \
-               mpg123audiodec avdec_aac avdec_ac3 avdec_eac3 alsasink appsrc appsink input-selector volume; do
-  gst-inspect-1.0 "\$element" >/dev/null 2>&1 || { echo "missing GStreamer element: \$element" >&2; exit 1; }
-done
-echo "elements present"
-REMOTE
-
-say "sysroot <- the appliance's GStreamer"
-ssh_cmd="ssh -F /dev/null -i $MEDIABOX_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
-rsync -a -e "$ssh_cmd" \
-  --include='libgst*' --include='liborc*' --include='pkgconfig/' --include='pkgconfig/gstreamer*' \
-  --include='pkgconfig/orc*' --exclude='*' \
-  "$MEDIABOX_TARGET:/usr/lib/aarch64-linux-gnu/" "$sysroot/usr/lib/aarch64-linux-gnu/"
-rsync -a -e "$ssh_cmd" \
-  "$MEDIABOX_TARGET:/usr/include/gstreamer-1.0" "$sysroot/usr/include/"
+head -1 "$sysroot$gst_prefix/BUILD-INFO"
 
 say "mediabox-live ($triple, release)"
 export PKG_CONFIG_ALLOW_CROSS=1
 export PKG_CONFIG_SYSROOT_DIR="$sysroot"
-export PKG_CONFIG_LIBDIR="$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig:$sysroot/usr/share/pkgconfig"
+export PKG_CONFIG_LIBDIR="$sysroot$gst_prefix/lib/pkgconfig:$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig:$sysroot/usr/share/pkgconfig"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
-( cd "$crate" && cargo build --release --target "$triple" )
+# Its GStreamer found through a RUNPATH, never Debian's in /usr/lib.
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
+( cd "$crate" && cargo build -q --release --target "$triple" )
 bin="$crate/target/$triple/release/mediabox-live"
-
+aarch64-linux-gnu-readelf -d "$bin" | grep -q "RUNPATH.*\[$gst_prefix/lib\]" ||
+  { echo "mediabox-live has no RUNPATH to $gst_prefix/lib" >&2; exit 1; }
 # The appliance runs glibc 2.41, as for the interface.
 max="$(aarch64-linux-gnu-objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
 [ "${max##*.}" -le 41 ] || { echo "binary needs $max but the appliance has GLIBC_2.41" >&2; exit 1; }
-printf '\n%-20s %s (highest %s)\n' mediabox-live "$(du -h "$bin" | cut -f1)" "$max"
+printf '%-20s %s (highest %s)\n' mediabox-live "$(du -h "$bin" | cut -f1)" "$max"
 
-if [ "${1:-}" = --install ]; then
-  say "install -> $MEDIABOX_TARGET:$MEDIABOX_PREFIX"
-  mediabox_scp "$bin" "$here/packaging/mediabox-player" "$MEDIABOX_TARGET:/var/tmp/"
-  mediabox_ssh "install -m 0755 /var/tmp/mediabox-live $MEDIABOX_PREFIX/bin/mediabox-live &&
-    install -m 0755 /var/tmp/mediabox-player $MEDIABOX_PREFIX/bin/mediabox-player &&
-    rm -f /var/tmp/mediabox-live /var/tmp/mediabox-player"
+say "bundle ($bundle)"
+rm -rf "$bundle" && mkdir -p "$bundle"
+cp "$gst_tarball" "$bundle/runtime.tar.xz"
+cp "$mpp_plugin" "$bundle/libgstrockchipmpp.so"
+cp "$bin" "$bundle/mediabox-live"
+cp "$here/packaging/mediabox-player" "$bundle/mediabox-player"
+# Every regular file of the runtime, by its path under the prefix: checked
+# after it is unpacked on the appliance, before anything points at it.
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+tar -C "$work" -xJf "$gst_tarball"
+( cd "$work$gst_prefix" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$bundle/runtime.files.sha256"
+sed -n 1p "$work$gst_prefix/BUILD-INFO" > "$bundle/runtime.build-info"
+cp "$here/scripts/mediabox-live-install.sh" "$bundle/install.sh"
+( cd "$bundle" && sha256sum runtime.tar.xz libgstrockchipmpp.so mediabox-live mediabox-player \
+    runtime.files.sha256 runtime.build-info install.sh > SHA256SUMS )
+cat "$bundle/SHA256SUMS"
+
+[ "$mode" = build ] && { echo; echo "built; nothing written to the appliance (--dry-run shows the install plan)"; exit 0; }
+
+# shellcheck source=env.sh
+source "$here/scripts/env.sh"
+remote_ssh() { timeout "${REMOTE_TIMEOUT:-120}" ssh -F /dev/null -i "$MEDIABOX_SSH_KEY" -o IdentitiesOnly=yes \
+  -o BatchMode=yes -o ConnectTimeout=10 "$MEDIABOX_TARGET" "$@"; }
+
+# What the appliance holds now and what the plan was made against: the
+# install refuses if they differ (MEDIABOX_EXPECT_LIVE / _PLAYER, sha256).
+: "${MEDIABOX_EXPECT_LIVE:=b682d9bdf5bbd76a6f03f5f682320a2037bd1effade24577c38d8bdc04d1476f}"
+: "${MEDIABOX_EXPECT_PLAYER:=ab1ddc49afc7346df18899bc9939d82194f8790fd67b113f4f788c16088f074d}"
+
+if [ "$mode" = dry-run ]; then
+  say "plan for $MEDIABOX_TARGET (read-only: nothing is written)"
+  remote_ssh "sh -s -- --plan $MEDIABOX_EXPECT_LIVE $MEDIABOX_EXPECT_PLAYER" < "$bundle/install.sh" | sed 's/^/  /'
+  echo
+  echo "copied by --install: $bundle/* -> $MEDIABOX_TARGET:/var/tmp/mediabox-live-bundle/ (removed afterwards)"
+  exit 0
 fi
+
+say "install on $MEDIABOX_TARGET"
+remote_ssh "rm -rf /var/tmp/mediabox-live-bundle && mkdir -m 0700 /var/tmp/mediabox-live-bundle"
+REMOTE_TIMEOUT=300 timeout 300 scp -F /dev/null -i "$MEDIABOX_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o ConnectTimeout=10 "$bundle"/* "$MEDIABOX_TARGET:/var/tmp/mediabox-live-bundle/"
+REMOTE_TIMEOUT=600 remote_ssh "sh /var/tmp/mediabox-live-bundle/install.sh --install $MEDIABOX_EXPECT_LIVE $MEDIABOX_EXPECT_PLAYER; s=\$?; rm -rf /var/tmp/mediabox-live-bundle; exit \$s"

@@ -411,8 +411,10 @@ bildirir):
 ## 8. Kullanım
 
 ```sh
-scripts/build-mediabox-live.sh --install     # MEDIABOX_HOST ayarlı; Debian GStreamer,
-                                             # medya çalışma zamanına karşı mppvideodec, ikili
+scripts/build-mediabox-live.sh               # yalnız yerel derleme ve paket; cihaza yazmaz
+scripts/build-mediabox-live.sh --dry-run     # MEDIABOX_HOST ayarlı; salt okunur kurulum planı
+scripts/build-mediabox-live.sh --install     # GStreamer 1.26.11 + içindeki mppvideodec, ikili,
+                                             # başlatıcı; önce rollback kopyası
 mediaboxctl media live-here 10801 --frequency-khz 12226000 --symbol-rate 27500
 ```
 

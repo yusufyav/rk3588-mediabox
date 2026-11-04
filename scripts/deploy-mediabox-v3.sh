@@ -322,11 +322,11 @@ sh_ "set -e
   rm -f /var/tmp/mediabox-player /var/tmp/mediabox-player-input.conf /var/tmp/mediabox.lua"
 
 # Live television's player is built and installed by
-# scripts/build-mediabox-live.sh --install: GStreamer from Debian, mppvideodec
-# against the media runtime, and the binary. The launcher above starts it for
+# scripts/build-mediabox-live.sh --install: its GStreamer 1.26 runtime with
+# mppvideodec in the runtime's own plugin directory, and the binary. The launcher above starts it for
 # every live channel and has nothing else to start, so its absence is said
 # here rather than found on the television.
-sh_ "test -x $prefix/bin/mediabox-live && test -e $MEDIABOX_MEDIA_PREFIX/lib/gstreamer-1.0/libgstrockchipmpp.so" || {
+sh_ "test -x $prefix/bin/mediabox-live && test -e $prefix/gstreamer-1.26/lib/gstreamer-1.0/libgstrockchipmpp.so && test -x $prefix/gstreamer-1.26/bin/gst-inspect-1.0" || {
   echo "   no mediabox-live at $prefix/bin: live television will not start until you run" >&2
   echo "     scripts/build-mediabox-live.sh --install" >&2
 }
