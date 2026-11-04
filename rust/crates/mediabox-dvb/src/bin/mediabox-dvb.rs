@@ -152,6 +152,16 @@ struct Play {
     /// in select.json.
     #[arg(long, requires = "hold_reader_s")]
     standby: bool,
+    /// The channel's transport stream id, where the channel list knows it:
+    /// with --expect-onid, how a new tune's stream is told from another.
+    #[arg(long)]
+    expect_tsid: Option<u16>,
+    #[arg(long, requires = "expect_tsid")]
+    expect_onid: Option<u16>,
+    /// Where a CC error on the service played leaves the raw stream around
+    /// it (at most 4 a session); empty: nowhere.
+    #[arg(long, default_value = "/var/lib/mediabox-dvb/evidence")]
+    evidence_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -244,6 +254,11 @@ fn play(args: Play) -> ExitCode {
         output_queue_bytes: args.output_queue_bytes,
         hold_reader: (args.hold_reader_s > 0).then(|| Duration::from_secs(args.hold_reader_s)),
         start_standby: args.standby,
+        expect: args.expect_tsid.map(|tsid| mediabox_dvb::ts::Expected {
+            onid: args.expect_onid,
+            tsid,
+        }),
+        evidence_dir: (!args.evidence_dir.as_os_str().is_empty()).then_some(args.evidence_dir),
     };
     let status = service::run(options, &log);
     match status.end {

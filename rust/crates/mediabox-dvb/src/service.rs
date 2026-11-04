@@ -33,7 +33,8 @@ use crate::firmware::Firmware;
 use crate::log::Log;
 use crate::tkgs::TkgsCollector;
 use crate::ts::{
-    Admission, Analyser, Gate, Gated, Integrity, Quarantine, RapCache, Selection, Selector,
+    Admission, Analyser, Expected, Gate, Gated, Integrity, LeftMux, Quarantine, RapCache,
+    Selection, Selector, StaleClock,
 };
 use crate::tune::{self, BAND_SPLIT_KHZ, LnbControl, Streamed, TuneParams, TuneResult};
 use crate::usb::{HardwareAccess, OpenError, Session, StreamStats, TsStream};
@@ -112,6 +113,11 @@ pub struct Options {
     /// Boot, lock, and wait in standby for the first `Play`: the receiver
     /// made ready before anybody watches, as a television's tuner is.
     pub start_standby: bool,
+    /// The channel's transport stream, where the channel list knows it.
+    pub expect: Option<Expected>,
+    /// Where a CC error on the service played leaves its evidence: the raw
+    /// stream around it. None: nowhere.
+    pub evidence_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -155,6 +161,15 @@ pub enum End {
     NoLock,
     TuneFailed,
     ServiceNotFound,
+    /// Transport stream packets, and no whole PAT in them: no programme
+    /// can be found at all (not a service missing from a multiplex).
+    NoPat,
+    /// PAT packets whose sections never pass their CRC.
+    PsiCorrupt,
+    /// After a retune (or out of standby), only what the receiver sent
+    /// before it: the multiplex left, or the same one from before the stop,
+    /// through a quarantine and one more tune.
+    StaleTransport,
     SourceFailed,
     OutputFailed,
 }
@@ -821,6 +836,23 @@ struct Pipeline {
     /// A new stream's quarantine, until its transport stream is admitted;
     /// stream starts so far, and what came of the last one.
     gate: Option<Gate>,
+    /// The multiplex the last retune left; the channel's transport stream
+    /// where known; the programme clock when the stream last stopped.
+    left_mux: Option<LeftMux>,
+    expect: Option<Expected>,
+    stopped_clock: Option<StaleClock>,
+    /// Tunes made by a quarantine since a stream was last admitted or a
+    /// channel asked for: at most one.
+    gate_retunes: u32,
+    /// Transfers fed since the stream started; the raw transfers of the
+    /// last seconds, and evidence being gathered (`Evidence`).
+    transfers: u64,
+    recent: VecDeque<(Instant, Vec<u8>)>,
+    recent_bytes: usize,
+    evidence: Option<Evidence>,
+    evidence_dir: Option<PathBuf>,
+    evidence_written: u32,
+    selected_logged: usize,
     /// The programme PIDs of the multiplex left by the last retune.
     left_pids: std::collections::BTreeSet<u16>,
     /// The analyser's first CC errors already written to the log.
@@ -897,6 +929,11 @@ enum Want {
         /// the old file can never be taken for the new one's.
         #[serde(default)]
         new_fifo: Option<String>,
+        /// The channel's transport stream, where the channel list knows it.
+        #[serde(default)]
+        original_network_id: Option<u16>,
+        #[serde(default)]
+        transport_stream_id: Option<u16>,
     },
     /// Nobody is watching: the USB stream stops, the demodulator stays
     /// booted and locked for the next `Play`.
@@ -1084,6 +1121,8 @@ pub fn guide_of<'a>(analyser: &'a Analyser, token: Option<&'a str>, now: i64) ->
 impl Pipeline {
     /// One chunk of the multiplex. False once the reader is gone.
     fn feed(&mut self, chunk: &[u8], reporter: &mut Reporter, log: &Log) -> bool {
+        self.transfers += 1;
+        self.keep_recent(chunk, log);
         let mut admitted = None;
         if let Some(gate) = self.gate.as_mut() {
             let held = gate.stats.packets;
@@ -1164,6 +1203,7 @@ impl Pipeline {
         }
         self.packets_read += self.analyser.integrity().packets.saturating_sub(analysed);
         self.log_cc_errors(log);
+        self.selected_cc(reporter, log);
         if self.raw {
             self.scratch.clear();
             self.scratch.extend_from_slice(chunk);
@@ -1182,12 +1222,31 @@ impl Pipeline {
         if self.raw {
             return;
         }
+        // Evidence is of one stream: what comes after this is another's.
+        if let Some(mut evidence) = self.evidence.take() {
+            evidence
+                .note
+                .push_str("\n(cut short: the stream ended before the time after the error was in)");
+            evidence.write();
+        }
         self.stream_starts += 1;
+        self.transfers = 0;
         self.other_tsid = None;
+        let service_id = (self.tkgs_started.is_none() && !self.scanning).then_some(self.service_id);
+        let left = self.left_tsid.and(self.left_mux.clone());
+        // The same multiplex again (out of standby, a relock, the first
+        // stream after a stop): what carries the clock of the stop is stale.
+        let stale_clock = if left.is_none() {
+            self.stopped_clock.take()
+        } else {
+            None
+        };
         let rule = Admission {
-            service_id: (self.tkgs_started.is_none() && !self.scanning).then_some(self.service_id),
-            left_tsid: self.left_tsid,
+            service_id,
+            left,
+            expect: service_id.and(self.expect),
             want_tsid: self.relock_tsid,
+            stale_clock,
         };
         let left_pids = if self.left_tsid.is_some() {
             self.left_pids.clone()
@@ -1195,6 +1254,20 @@ impl Pipeline {
             Default::default()
         };
         self.gate = Some(Gate::new(rule, self.stream_starts, left_pids));
+    }
+
+    /// The stream stops: the programme clock then, for the next start of the
+    /// same multiplex to tell the bridge's stale tail by.
+    fn stream_stopped(&mut self) {
+        let selection = self.selector.selection();
+        self.stopped_clock = match (selection.pcr_pid, self.selector.last_pcr()) {
+            (Some(pid), Some(pcr)) => Some(StaleClock {
+                pid,
+                pcr,
+                at: Instant::now(),
+            }),
+            _ => None,
+        };
     }
 
     /// The quarantine ends: one line for it. Admitted, the new transport
@@ -1205,22 +1278,34 @@ impl Pipeline {
         let q = gate.stats;
         log.line(format!(
             "QUARANTINE {outcome}: start={} service={:?} left={:?} want={:?} admitted={:?} reason={:?} \
-             held transfers={} packets={} bytes={} left_pid_packets={} old_pats={} other_pats={} after_ms={:?}",
+             expect={:?} onid={:?} held transfers={} packets={} bytes={} left_pid_packets={} pat_packets={} pats={} \
+             crc_errors={} old_pats={} other_pats={} stale_pats={} stale_clocks={} clock_ahead_ms={:?} stopped_ms={:?} after_ms={:?}",
             q.generation,
             q.service_id,
             q.left_tsid,
             q.want_tsid,
             q.admitted_tsid,
             q.reason,
+            q.expect_tsid,
+            q.admitted_onid,
             q.transfers,
             q.packets,
             q.bytes,
             q.left_pid_packets,
+            q.pat_packets,
+            q.pat_sections,
+            q.crc_errors,
             q.old_pats,
             q.other_pats,
+            q.stale_pats,
+            q.stale_clocks,
+            q.clock_ahead_ms,
+            q.stopped_ms,
             q.admit_ms,
         ));
         if q.reason.is_some() {
+            self.gate_retunes = 0;
+            self.selector.new_epoch();
             self.analyser = Analyser::new();
             if let Some(rap) = self.rap.as_mut() {
                 *rap = RapCache::default();
@@ -1254,11 +1339,106 @@ impl Pipeline {
         self.cc_logged = first.len();
     }
 
-    /// A scan or TKGS read with no PAT in the time allowed: it takes what
-    /// the transponder sends.
+    /// The raw transfers of the last `EVIDENCE_AROUND`, and the evidence
+    /// being gathered: once its time after the error is in, written out.
+    fn keep_recent(&mut self, chunk: &[u8], log: &Log) {
+        if self.evidence_dir.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        self.recent.push_back((now, chunk.to_vec()));
+        self.recent_bytes += chunk.len();
+        while let Some((at, front)) = self.recent.front()
+            && (now.duration_since(*at) > EVIDENCE_AROUND
+                || self.recent_bytes > EVIDENCE_MAX_BYTES / 2)
+        {
+            self.recent_bytes -= front.len();
+            self.recent.pop_front();
+        }
+        if let Some(evidence) = self.evidence.as_mut() {
+            if evidence.data.len() + chunk.len() <= EVIDENCE_MAX_BYTES {
+                evidence.data.extend_from_slice(chunk);
+            }
+            if now >= evidence.due {
+                let evidence = self.evidence.take().unwrap();
+                log.line(format!(
+                    "EVIDENCE: {} ({} bytes)",
+                    evidence.path.display(),
+                    evidence.data.len()
+                ));
+                evidence.write();
+            }
+        }
+    }
+
+    /// A CC error on the service played: said with where it came, and the
+    /// raw stream around it kept (`Options::evidence_dir`), at most
+    /// `EVIDENCE_FILES` times a session.
+    fn selected_cc(&mut self, reporter: &Reporter, log: &Log) {
+        let events = self.selector.cc_events();
+        if events.len() < self.selected_logged {
+            self.selected_logged = 0; // another selection
+        }
+        if events.len() == self.selected_logged {
+            return;
+        }
+        let usb = reporter.status.usb.as_ref();
+        let since_admission = self.analyser.integrity().packets;
+        let mut lines = Vec::new();
+        for e in &events[self.selected_logged..] {
+            lines.push(format!(
+                "SELECTED CC ERROR start={} transfer={} service_packet={} stream_packet={} pid=0x{:04X} prev={} expected={} got={} \
+                 usb completed={:?} short={:?} timeouts={:?} overflow={:?} quarantine_after_ms={:?}",
+                self.stream_starts,
+                self.transfers,
+                e.packet,
+                since_admission,
+                e.pid,
+                e.previous,
+                (e.previous + 1) & 0xF,
+                e.got,
+                usb.map(|u| u.completed),
+                usb.map(|u| u.short_reads),
+                usb.map(|u| u.timeouts),
+                usb.map(|u| u.overflow_bytes),
+                self.quarantine.as_ref().and_then(|q| q.admit_ms),
+            ));
+        }
+        self.selected_logged = events.len();
+        for line in &lines {
+            log.line(line);
+        }
+        if self.evidence.is_none()
+            && self.evidence_written < EVIDENCE_FILES
+            && let Some(dir) = &self.evidence_dir
+        {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            let path = dir.join(format!(
+                "selected-cc-{stamp}-start{}.ts",
+                self.stream_starts
+            ));
+            let mut data = Vec::with_capacity(self.recent_bytes * 2);
+            for (_, chunk) in &self.recent {
+                data.extend_from_slice(chunk);
+            }
+            self.evidence_written += 1;
+            self.evidence = Some(Evidence {
+                path,
+                note: lines.join("\n"),
+                data,
+                due: Instant::now() + EVIDENCE_AROUND,
+            });
+        }
+    }
+
+    /// A scan or TKGS read with no PAT in its time (`PAT_ABSENT`): what was
+    /// held, which nothing identified, is dropped, and the transponder is
+    /// read as it comes; its tables repeat for the read to gather.
     fn open_gate(&mut self, log: &Log) {
         if let Some(gate) = self.gate.as_mut() {
-            gate.open();
+            gate.open_dropping_held();
         }
         self.close_gate("opened", log);
     }
@@ -1400,10 +1580,20 @@ impl Pipeline {
                 self.scanning = false;
                 return Order::Standby;
             }
-            Want::Play { service_id, transponder, new_fifo } => {
+            Want::Play {
+                service_id,
+                transponder,
+                new_fifo,
+                original_network_id,
+                transport_stream_id,
+            } => {
                 if let Some(name) = new_fifo {
                     self.move_output(&name, log);
                 }
+                self.expect = transport_stream_id.map(|tsid| Expected {
+                    onid: original_network_id,
+                    tsid,
+                });
                 self.writer.await_reader();
                 (service_id, transponder, false, false)
             }
@@ -1444,6 +1634,7 @@ impl Pipeline {
             self.service_id = service_id;
             // Another channel: what was being waited for was the last one's.
             self.relock_tsid = None;
+            self.gate_retunes = 0;
             self.retune_at = None;
             // A scan takes whatever the transponder is; it leaves nothing.
             self.left_tsid = retune.as_ref().filter(|_| !scan).and(self.selector.selection().transport_stream_id);
@@ -1460,6 +1651,11 @@ impl Pipeline {
                 // Another multiplex: nothing of this one's tables or access
                 // points is of use there.
                 self.left_pids = self.analyser.programme_pids();
+                self.left_mux = self.left_tsid.map(|tsid| LeftMux {
+                    tsid,
+                    onid: self.analyser.original_network_id,
+                    programmes: self.analyser.pat.clone(),
+                });
                 self.analyser = Analyser::new();
                 self.rap = self.rap.as_ref().map(|_| RapCache::default());
             } else if let Some(replay) = self.rap.as_ref().map(|rap| rap.tables(service_id)).filter(|r| !r.is_empty()) {
@@ -1616,6 +1812,17 @@ pub fn run(options: Options, log: &Log) -> Status {
 fn new_pipeline(options: &Options, writer: Writer) -> Pipeline {
     Pipeline {
         gate: None,
+        left_mux: None,
+        expect: options.expect,
+        stopped_clock: None,
+        gate_retunes: 0,
+        transfers: 0,
+        recent: VecDeque::new(),
+        recent_bytes: 0,
+        evidence: None,
+        evidence_dir: options.evidence_dir.clone(),
+        evidence_written: 0,
+        selected_logged: 0,
         left_pids: Default::default(),
         cc_logged: 0,
         stream_starts: 0,
@@ -1774,31 +1981,101 @@ impl Pacer {
     }
 }
 
-/// A quarantine that has run as long as a service has to appear.
+/// Evidence of a CC error on the service played: the raw transfers from
+/// `EVIDENCE_AROUND` before it to as long after, and what the log said.
+struct Evidence {
+    path: PathBuf,
+    note: String,
+    data: Vec<u8>,
+    due: Instant,
+}
+
+const EVIDENCE_AROUND: Duration = Duration::from_secs(2);
+const EVIDENCE_MAX_BYTES: usize = 64 << 20;
+const EVIDENCE_FILES: u32 = 4;
+
+impl Evidence {
+    /// Off the stream's thread: the stream does not wait for the disk.
+    fn write(self) {
+        std::thread::spawn(move || {
+            if let Some(dir) = self.path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&self.path, &self.data);
+            let _ = std::fs::write(self.path.with_extension("txt"), self.note + "\n");
+        });
+    }
+}
+
+/// A scan's or TKGS read's time for a PAT: one comes at least every 0.5 s
+/// (ETSI TR 101 290 1.3a), so four such intervals without a stream in its
+/// own right are none. Short enough that the read keeps its own time for
+/// the tables: a scan waits 12 s for the NIT (sent every 10 s), TKGS 75 s.
+const PAT_ABSENT: Duration = Duration::from_secs(2);
+
+/// What a quarantine that has run its time comes to.
 #[derive(Debug, PartialEq, Eq)]
 enum AtDeadline {
     Wait,
-    /// Tune again: after a loss, as the loss's own retunes do; or only the
-    /// transport stream left came, so the tuner has not moved (VDR sdt.c,
-    /// tsWrong) -- its PATs alone are no reason before this.
+    /// Tune again, once: only the multiplex left came (the tuner has not
+    /// moved, VDR sdt.c tsWrong), or only the stream from before the stop,
+    /// or a relock found nothing of the channel's. Never before the time:
+    /// a tail is no reason.
     Retune,
     /// A scan or a TKGS read takes what there is.
     Open,
-    /// No PAT with the service: the service is not there.
-    NotFound,
+    /// The session ends, and says which of these it was.
+    End(End),
 }
 
-fn at_deadline(q: &Quarantine, rule: Admission, age: Duration, budget: Duration) -> AtDeadline {
-    if age < budget {
+fn at_deadline(
+    q: &Quarantine,
+    rule: &Admission,
+    age: Duration,
+    budget: Duration,
+    retunes: u32,
+) -> AtDeadline {
+    let reading = rule.service_id.is_none() && rule.want_tsid.is_none();
+    if age < if reading { PAT_ABSENT } else { budget } {
+        return AtDeadline::Wait;
+    }
+    if reading {
+        return AtDeadline::Open;
+    }
+    let stale = q.other_pats == 0 && (q.old_pats > 0 || q.stale_pats > 0);
+    if rule.want_tsid.is_some() || stale {
+        return match (retunes, rule.want_tsid) {
+            (0, _) => AtDeadline::Retune,
+            // A lost signal's own retunes go on while it is lost.
+            (_, Some(_)) => AtDeadline::Wait,
+            _ => AtDeadline::End(End::StaleTransport),
+        };
+    }
+    if q.packets == 0 {
+        // Nothing at all: the stream's own NoTransport says that.
         AtDeadline::Wait
-    } else if rule.want_tsid.is_some()
-        || (rule.left_tsid.is_some() && q.old_pats > 0 && q.other_pats == 0)
-    {
-        AtDeadline::Retune
-    } else if rule.service_id.is_none() {
-        AtDeadline::Open
+    } else if q.pat_sections == 0 && q.pat_packets > 0 && q.crc_errors > 0 {
+        AtDeadline::End(End::PsiCorrupt)
+    } else if q.pat_sections == 0 {
+        AtDeadline::End(End::NoPat)
     } else {
-        AtDeadline::NotFound
+        AtDeadline::End(End::ServiceNotFound)
+    }
+}
+
+/// What a quarantine's ending says, with its numbers.
+fn quarantine_failure(end: End, q: &Quarantine, service_id: u16) -> String {
+    match end {
+        End::NoPat => format!(
+            "{} TS paketi geldi, geçerli PAT yok ({} PAT paketi)",
+            q.packets, q.pat_packets
+        ),
+        End::PsiCorrupt => format!("PAT {} kez CRC denetiminden geçmedi", q.crc_errors),
+        End::StaleTransport => match q.left_tsid {
+            Some(tsid) => format!("yalnız önceki yayının (TSID {tsid}) verisi geldi"),
+            None => "yalnız durdurmadan önceki veri geldi".to_string(),
+        },
+        _ => format!("SID {service_id} bu yayının PAT'ında yok"),
     }
 }
 
@@ -2022,6 +2299,7 @@ fn stream(
                     log.line(format!("STANDBY: TS stream stopped, the demodulator stays locked: {stats:?}"));
                 }
                 pipeline.close_gate("stream stopped", log);
+                pipeline.stream_stopped();
                 pipeline.idle();
                 reporter.state(State::Standby, log);
             }
@@ -2053,6 +2331,8 @@ fn stream(
         {
             let stats = running.stop();
             log.line(format!("STANDBY: no reader for {:?}; TS stream stopped: {stats:?}", options.hold_reader));
+            pipeline.close_gate("stream stopped", log);
+            pipeline.stream_stopped();
             pipeline.idle();
             reporter.state(State::Standby, log);
         }
@@ -2076,15 +2356,23 @@ fn stream(
         // A new stream's quarantine: decided by the time a service has to
         // appear, never by the tail of the transport stream left.
         if let Some(gate) = pipeline.gate.as_ref() {
-            let rule = gate.rule();
-            match at_deadline(&gate.stats, rule, gate.age(), options.service_timeout) {
+            let rule = gate.rule().clone();
+            let q = gate.stats.clone();
+            match at_deadline(
+                &q,
+                &rule,
+                gate.age(),
+                options.service_timeout,
+                pipeline.gate_retunes,
+            ) {
                 AtDeadline::Wait => {}
                 AtDeadline::Retune => {
                     if let Some(tuned) = pipeline.tuned.clone() {
                         log.line(format!(
-                            "RETUNE: no transport stream admitted in {:?} (left {:?}, wanted {:?}); tuning again",
-                            options.service_timeout, rule.left_tsid, rule.want_tsid
+                            "RETUNE: no transport stream admitted in {:?} (left {:?}, wanted {:?}, old PATs {}, stale PATs {}); tuning again, once",
+                            options.service_timeout, q.left_tsid, rule.want_tsid, q.old_pats, q.stale_pats
                         ));
+                        pipeline.gate_retunes += 1;
                         pipeline.close_gate("timed out", log);
                         retune = Some(tuned);
                         relock = true;
@@ -2092,28 +2380,26 @@ fn stream(
                     }
                 }
                 AtDeadline::Open => pipeline.open_gate(log),
-                AtDeadline::NotFound if reporter.status.state != State::NoSignal => {
+                AtDeadline::End(end) if reporter.status.state != State::NoSignal => {
+                    let message = quarantine_failure(end, &q, pipeline.service_id);
                     pipeline.close_gate("timed out", log);
-                    break Some((
-                        End::ServiceNotFound,
-                        Some(format!(
-                            "SID {} bu yayında bulunamadı (geçerli PAT gelmedi)",
-                            pipeline.service_id
-                        )),
-                    ));
+                    break Some((end, Some(message)));
                 }
-                AtDeadline::NotFound => {}
+                AtDeadline::End(_) => {}
             }
         }
         // Found again: only the transport stream the channel was on is let
-        // in; another one, twice, is tuned away from.
+        // in; another one, twice, is tuned away from -- once; then the lost
+        // signal's own retunes carry on.
         if let Some(got) = pipeline.other_tsid.take()
+            && pipeline.gate_retunes == 0
             && let Some(tuned) = pipeline.tuned.clone()
         {
             log.line(format!(
                 "RELOCK: locked transport stream {got}, not {:?}; trying again",
                 pipeline.relock_tsid
             ));
+            pipeline.gate_retunes += 1;
             pipeline.close_gate("other transport stream", log);
             retune = Some(tuned);
             relock = true;
@@ -2318,6 +2604,7 @@ fn stream(
         reporter.status.usb = Some(stats);
     }
     pipeline.close_gate("stream ended", log);
+    pipeline.stream_stopped();
     if retune.is_some() && !relock {
         reporter.state(State::Tuning, log);
     }
@@ -2541,6 +2828,8 @@ mod tests {
             output_queue_bytes: 64 << 20,
             hold_reader: Some(Duration::from_secs(30)),
             start_standby: false,
+            expect: None,
+            evidence_dir: None,
         }
     }
 
@@ -2625,6 +2914,26 @@ mod tests {
         fn es(&self, cc: u8) -> Vec<u8> {
             ts(self.es, false, cc, &[0xAB, self.tsid as u8])
         }
+        /// What a retune away from this multiplex remembers of it.
+        fn left(&self, onid: Option<u16>) -> crate::ts::LeftMux {
+            crate::ts::LeftMux {
+                tsid: self.tsid,
+                onid,
+                programmes: [(self.sid, self.pmt)].into(),
+            }
+        }
+        /// Its SDT actual: the network `onid`, one service.
+        fn sdt(&self, onid: u16, cc: u8) -> Vec<u8> {
+            let [o0, o1] = onid.to_be_bytes();
+            let [s0, s1] = self.sid.to_be_bytes();
+            psi(
+                0x11,
+                cc,
+                0x42,
+                self.tsid,
+                &[o0, o1, 0xFF, s0, s1, 0xFC, 0x80, 0x00],
+            )
+        }
         fn rounds(&self, rounds: u8) -> Vec<Vec<u8>> {
             let mut out = Vec::new();
             for r in 0..rounds {
@@ -2656,6 +2965,7 @@ mod tests {
     fn retuned() -> (Pipeline, Reporter, Captured) {
         let (mut pipeline, reporter, out) = harness(NEW.sid, None);
         pipeline.left_tsid = Some(OLD.tsid);
+        pipeline.left_mux = Some(OLD.left(None));
         pipeline.left_pids = [OLD.pmt, OLD.es].into();
         pipeline.quarantine_stream();
         (pipeline, reporter, out)
@@ -2702,7 +3012,8 @@ mod tests {
                 &gate.stats,
                 gate.rule(),
                 gate.age(),
-                Duration::from_secs(10)
+                Duration::from_secs(10),
+                0
             ),
             AtDeadline::Wait
         );
@@ -2795,7 +3106,8 @@ mod tests {
                 &gate.stats,
                 gate.rule(),
                 Duration::from_secs(9),
-                Duration::from_secs(10)
+                Duration::from_secs(10),
+                0
             ),
             AtDeadline::Wait
         );
@@ -2973,85 +3285,533 @@ mod tests {
         let _ = written(pipeline, &out);
     }
 
+    fn quarantine(f: impl FnOnce(&mut Quarantine)) -> Quarantine {
+        let mut q = Quarantine {
+            packets: 5000,
+            pat_packets: 40,
+            pat_sections: 40,
+            ..Quarantine::default()
+        };
+        f(&mut q);
+        q
+    }
+
     #[test]
-    fn without_a_pat_the_quarantine_ends_in_time_and_says_how() {
-        let (mut pipeline, mut reporter, out) = harness(NEW.sid, None);
-        let log = Log::silent();
-        pipeline.quarantine_stream();
-        pipeline.feed(&[NEW.es(0), NEW.es(1)].concat(), &mut reporter, &log);
-        let gate = pipeline.gate.as_ref().unwrap();
+    fn a_quarantine_ends_in_time_and_says_which_failure_it_was() {
         let ten = Duration::from_secs(10);
-        let rule = gate.rule();
+        let play = Admission {
+            service_id: Some(NEW.sid),
+            ..Admission::default()
+        };
+        let at = |q: &Quarantine, rule: &Admission, age: Duration, retunes: u32| {
+            at_deadline(q, rule, age, ten, retunes)
+        };
+        // Before the time: nothing, whatever came.
         assert_eq!(
-            at_deadline(&gate.stats, rule, Duration::from_secs(3), ten),
+            at(
+                &quarantine(|q| q.old_pats = 9),
+                &play,
+                Duration::from_secs(9),
+                0
+            ),
             AtDeadline::Wait
         );
+        // No PAT at all; PAT packets that never pass their CRC; PATs without the service.
+        let none = quarantine(|q| (q.pat_packets, q.pat_sections) = (0, 0));
+        assert_eq!(at(&none, &play, ten, 0), AtDeadline::End(End::NoPat));
+        let corrupt = quarantine(|q| (q.pat_sections, q.crc_errors) = (0, 37));
         assert_eq!(
-            at_deadline(&gate.stats, rule, ten, ten),
-            AtDeadline::NotFound
+            at(&corrupt, &play, ten, 0),
+            AtDeadline::End(End::PsiCorrupt)
         );
-        // Only the left stream's PATs: the tuner has not moved.
-        let left = crate::ts::Quarantine {
-            old_pats: 4,
-            ..gate.stats.clone()
-        };
+        let incomplete = quarantine(|q| q.pat_sections = 0);
+        assert_eq!(at(&incomplete, &play, ten, 0), AtDeadline::End(End::NoPat));
+        let other = quarantine(|q| q.other_pats = 40);
         assert_eq!(
-            at_deadline(
+            at(&other, &play, ten, 0),
+            AtDeadline::End(End::ServiceNotFound)
+        );
+        // No packet: NoTransport is the stream's to say, not the quarantine's.
+        assert_eq!(
+            at(&quarantine(|q| q.packets = 0), &play, ten, 0),
+            AtDeadline::Wait
+        );
+        // Only the multiplex left (or the stream from before a stop): one
+        // more tune, then said as that -- never a loop.
+        let left = Admission {
+            left: Some(OLD.left(None)),
+            ..play.clone()
+        };
+        let only_left = quarantine(|q| q.old_pats = 40);
+        assert_eq!(at(&only_left, &left, ten, 0), AtDeadline::Retune);
+        assert_eq!(
+            at(&only_left, &left, ten, 1),
+            AtDeadline::End(End::StaleTransport)
+        );
+        let only_stale = quarantine(|q| q.stale_pats = 40);
+        assert_eq!(at(&only_stale, &play, ten, 0), AtDeadline::Retune);
+        assert_eq!(
+            at(&only_stale, &play, ten, 1),
+            AtDeadline::End(End::StaleTransport)
+        );
+        assert_eq!(
+            at(
+                &quarantine(|q| (q.old_pats, q.other_pats) = (3, 9)),
                 &left,
-                Admission {
-                    left_tsid: Some(OLD.tsid),
-                    ..rule
-                },
                 ten,
-                ten
+                0
             ),
-            AtDeadline::Retune
+            AtDeadline::End(End::ServiceNotFound)
         );
-        let mixed = crate::ts::Quarantine {
-            other_pats: 1,
-            ..left.clone()
+        // A relock tries once more, then leaves it to the lost signal's own retunes.
+        let relock = Admission {
+            want_tsid: Some(NEW.tsid),
+            ..play.clone()
         };
+        assert_eq!(at(&quarantine(|_| {}), &relock, ten, 0), AtDeadline::Retune);
+        assert_eq!(at(&quarantine(|_| {}), &relock, ten, 1), AtDeadline::Wait);
+        // A scan or TKGS read: its own, shorter time, then it takes what there is.
+        let read = Admission::default();
         assert_eq!(
-            at_deadline(
-                &mixed,
-                Admission {
-                    left_tsid: Some(OLD.tsid),
-                    ..rule
-                },
-                ten,
-                ten
-            ),
-            AtDeadline::NotFound
+            at(&none, &read, PAT_ABSENT - Duration::from_millis(1), 0),
+            AtDeadline::Wait
         );
-        // A relock tries again; a scan takes what there is.
+        assert_eq!(at(&none, &read, PAT_ABSENT, 0), AtDeadline::Open);
+        // Every path to a retune is counted: replayed for 100 deadlines,
+        // whatever came, at most one retune and then an end or a wait.
+        for q in [&none, &corrupt, &other, &only_left, &only_stale] {
+            for rule in [&play, &left, &relock] {
+                let mut retunes = 0;
+                for _ in 0..100 {
+                    match at(q, rule, ten, retunes) {
+                        AtDeadline::Retune => retunes += 1,
+                        AtDeadline::End(_) | AtDeadline::Wait | AtDeadline::Open => break,
+                    }
+                }
+                assert!(retunes <= 1, "{q:?} {rule:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_quarantine_says_what_failed() {
+        let q =
+            quarantine(|q| (q.pat_sections, q.crc_errors, q.left_tsid) = (0, 37, Some(OLD.tsid)));
+        assert!(quarantine_failure(End::PsiCorrupt, &q, NEW.sid).contains("CRC"));
+        assert!(quarantine_failure(End::NoPat, &q, NEW.sid).contains("PAT yok"));
+        assert!(quarantine_failure(End::StaleTransport, &q, NEW.sid).contains("41402"));
+        assert!(quarantine_failure(End::ServiceNotFound, &q, NEW.sid).contains("51616"));
+    }
+
+    #[test]
+    fn a_scan_whose_time_for_a_pat_is_up_reads_the_new_tables_only() {
+        let (mut pipeline, mut reporter, out) = harness(NEW.sid, None);
+        let log = Log::silent();
+        pipeline.scanning = true;
+        pipeline.quarantine_stream();
+        assert_eq!(pipeline.gate.as_ref().unwrap().rule().service_id, None);
+        // The tail: the old multiplex's SDT, no PAT of its own stream yet.
+        pipeline.feed(&transfer(&[OLD.sdt(1, 0), OLD.es(0)]), &mut reporter, &log);
+        let gate = pipeline.gate.as_ref().unwrap();
         assert_eq!(
             at_deadline(
                 &gate.stats,
-                Admission {
-                    want_tsid: Some(NEW.tsid),
-                    ..rule
-                },
-                ten,
-                ten
-            ),
-            AtDeadline::Retune
-        );
-        assert_eq!(
-            at_deadline(
-                &gate.stats,
-                Admission {
-                    service_id: None,
-                    ..rule
-                },
-                ten,
-                ten
+                gate.rule(),
+                PAT_ABSENT,
+                Duration::from_secs(10),
+                0
             ),
             AtDeadline::Open
         );
         pipeline.open_gate(&log);
+        assert_eq!(
+            pipeline.quarantine.as_ref().unwrap().reason,
+            Some(crate::ts::Admitted::Deadline)
+        );
+        // The new multiplex's tables, as they repeat.
+        for round in 0..2 {
+            pipeline.feed(
+                &transfer(&[NEW.pat(round), NEW.sdt(318, round), NEW.pmt(round)]),
+                &mut reporter,
+                &log,
+            );
+        }
+        assert_eq!(pipeline.analyser.original_network_id, Some(318));
+        assert!(pipeline.analyser.sdt.contains_key(&NEW.sid));
+        assert!(
+            !pipeline.analyser.sdt.contains_key(&OLD.sid),
+            "nothing of the old multiplex"
+        );
+        // Its time leaves the reads theirs: the scan's NIT wait (12 s, the
+        // NIT sent every 10 s) and TKGS's 75 s.
+        assert!(PAT_ABSENT + Duration::from_secs(10) <= Duration::from_secs(12));
+        assert!(PAT_ABSENT < Duration::from_secs(75));
+        let _ = written(pipeline, &out);
+    }
+
+    /// A packet of `pid` carrying the programme clock `pcr` (27 MHz).
+    fn clock(pid: u16, cc: u8, pcr: u64) -> Vec<u8> {
+        let (base, ext) = (pcr / 300, pcr % 300);
+        let mut p = vec![
+            0x47,
+            (pid >> 8) as u8,
+            pid as u8,
+            0x20 | (cc & 0xF),
+            183,
+            0x10,
+        ];
+        p.extend_from_slice(&[
+            (base >> 25) as u8,
+            (base >> 17) as u8,
+            (base >> 9) as u8,
+            (base >> 1) as u8,
+        ]);
+        p.push(((base & 1) as u8) << 7 | 0x7E | (ext >> 8) as u8);
+        p.push(ext as u8);
+        p.resize(crate::ts::PACKET, 0xFF);
+        p
+    }
+
+    /// Video of `mux` marked as from before (0xEE): told from the new by its bytes.
+    fn stale_es(mux: &Mux, cc: u8) -> Vec<u8> {
+        ts(mux.es, false, cc, &[0xEE, 0xEE])
+    }
+
+    fn retuned_from(left: crate::ts::LeftMux, sid: u16) -> (Pipeline, Reporter, Captured) {
+        let (mut pipeline, reporter, out) = harness(sid, None);
+        pipeline.left_tsid = Some(left.tsid);
+        pipeline.left_pids = left.programmes.values().copied().collect();
+        pipeline.left_mux = Some(left);
+        pipeline.quarantine_stream();
+        (pipeline, reporter, out)
+    }
+
+    #[test]
+    fn another_transponder_with_the_same_tsid_and_another_service_is_let_in() {
+        // Two transponders, one TSID: the PAT's programmes tell them apart.
+        let twin = Mux {
+            tsid: OLD.tsid,
+            sid: 51616,
+            pmt: 2616,
+            es: 2610,
+        };
+        let (mut pipeline, mut reporter, out) = retuned_from(OLD.left(Some(1)), twin.sid);
+        let log = Log::silent();
+        pipeline.feed(
+            &[OLD.rounds(1).concat(), twin.rounds(2).concat()].concat(),
+            &mut reporter,
+            &log,
+        );
+        let q = pipeline.quarantine.clone().expect("admitted");
+        // The tail's PAT is the left one's: with its network known it waits
+        // for an SDT, and the twin's PAT admits before one comes.
+        assert_eq!(
+            (q.reason, q.admitted_tsid),
+            (Some(crate::ts::Admitted::Service), Some(OLD.tsid))
+        );
+        let got = pids(&written(pipeline, &out));
+        assert!(
+            got.iter().all(|pid| [0, twin.pmt, twin.es].contains(pid)) && got.contains(&twin.es),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_pat_on_another_network_is_told_by_its_sdt() {
+        // Same TSID, same service and PMT: only the SDT's network differs.
+        let twin = Mux {
+            tsid: OLD.tsid,
+            sid: OLD.sid,
+            pmt: OLD.pmt,
+            es: OLD.es,
+        };
+        let (mut pipeline, mut reporter, out) = retuned_from(OLD.left(Some(1)), OLD.sid);
+        let log = Log::silent();
+        // One transfer: the tail (its PAT, its SDT on network 1, its video),
+        // then the new stream's PAT, SDT on network 318, PMT and video.
+        let tail = [
+            OLD.pat(0),
+            OLD.sdt(1, 0),
+            stale_es(&OLD, 0),
+            stale_es(&OLD, 1),
+        ]
+        .concat();
+        let new = [
+            twin.pat(1),
+            twin.sdt(318, 1),
+            twin.pmt(1),
+            twin.es(2),
+            twin.es(3),
+            twin.es(4),
+        ]
+        .concat();
+        pipeline.feed(&[tail, new].concat(), &mut reporter, &log);
+        let q = pipeline.quarantine.clone().expect("admitted on the SDT");
+        assert_eq!(
+            (q.reason, q.admitted_onid, q.old_pats),
+            (Some(crate::ts::Admitted::Network), Some(318), 1)
+        );
+        let data = written(pipeline, &out);
+        assert_eq!(pids(&data)[0], 0, "from the new PAT");
+        assert!(
+            !data.windows(2).any(|w| w == [0xEE, 0xEE]),
+            "nothing of the tail"
+        );
+        assert!(
+            data.chunks(crate::ts::PACKET)
+                .any(|p| crate::ts::pid_of(p) == twin.es)
+        );
+    }
+
+    #[test]
+    fn the_same_pat_on_the_same_network_is_the_tail_and_ends_bounded() {
+        let (mut pipeline, mut reporter, out) = retuned_from(OLD.left(Some(1)), OLD.sid);
+        let log = Log::silent();
+        for round in 0..5 {
+            pipeline.feed(
+                &transfer(&[OLD.pat(round), OLD.sdt(1, round), stale_es(&OLD, round)]),
+                &mut reporter,
+                &log,
+            );
+        }
+        let gate = pipeline.gate.as_ref().expect("never admitted");
+        assert_eq!((gate.stats.old_pats, pipeline.other_tsid), (5, None));
+        let ten = Duration::from_secs(10);
+        assert_eq!(
+            at_deadline(&gate.stats, gate.rule(), ten, ten, 0),
+            AtDeadline::Retune
+        );
+        assert_eq!(
+            at_deadline(&gate.stats, gate.rule(), ten, ten, 1),
+            AtDeadline::End(End::StaleTransport)
+        );
+        assert!(written(pipeline, &out).is_empty());
+    }
+
+    #[test]
+    fn an_expected_network_tells_the_same_pat_apart_without_the_left_one_s() {
+        let (mut pipeline, mut reporter, out) = harness(OLD.sid, None);
+        let log = Log::silent();
+        pipeline.left_tsid = Some(OLD.tsid);
+        pipeline.left_mux = Some(OLD.left(None));
+        pipeline.expect = Some(crate::ts::Expected {
+            onid: Some(318),
+            tsid: OLD.tsid,
+        });
+        pipeline.quarantine_stream();
+        pipeline.feed(&transfer(&[OLD.pat(0), OLD.sdt(1, 0)]), &mut reporter, &log);
+        assert!(pipeline.gate.is_some(), "network 1 is not the channel's");
+        pipeline.feed(
+            &transfer(&[OLD.pat(1), OLD.sdt(318, 1), OLD.pmt(1), OLD.es(0)]),
+            &mut reporter,
+            &log,
+        );
+        assert_eq!(
+            pipeline.quarantine.as_ref().unwrap().reason,
+            Some(crate::ts::Admitted::Network)
+        );
+        // And a known TSID that is not the PAT's: a carrier without the channel.
+        let (mut other, mut reporter2, out2) = harness(NEW.sid, None);
+        other.expect = Some(crate::ts::Expected {
+            onid: None,
+            tsid: 999,
+        });
+        other.quarantine_stream();
+        other.feed(&transfer(&NEW.rounds(1)), &mut reporter2, &log);
+        assert!(
+            other.gate.is_some(),
+            "carries the service, but is not transport stream 999"
+        );
+        other.feed(&transfer(&NEW.rounds(1)), &mut reporter2, &log);
+        assert_eq!(
+            other.quarantine.as_ref().unwrap().reason,
+            Some(crate::ts::Admitted::Repeated)
+        );
+        let _ = (written(pipeline, &out), written(other, &out2));
+    }
+
+    #[test]
+    fn out_of_standby_the_stale_tail_of_the_same_multiplex_is_held() {
+        let (mut pipeline, mut reporter, out) = harness(NEW.sid, None);
+        let log = Log::silent();
+        let then = 1_000 * 27_000_000u64;
+        pipeline.stopped_clock = Some(crate::ts::StaleClock {
+            pid: NEW.es,
+            pcr: then,
+            at: Instant::now() - Duration::from_secs(30),
+        });
+        pipeline.quarantine_stream();
+        assert!(pipeline.gate.as_ref().unwrap().rule().stale_clock.is_some());
+        assert!(pipeline.stopped_clock.is_none(), "used once");
+        // The bridge's tail: the same PAT, a clock from just after the stop, video.
+        let tail = [
+            NEW.pat(0),
+            clock(NEW.es, 0, then + 27_000_000 / 10),
+            stale_es(&NEW, 1),
+            NEW.pat(1),
+        ];
+        pipeline.feed(&transfer(&tail), &mut reporter, &log);
+        let gate = pipeline.gate.as_ref().expect("held");
+        assert_eq!(gate.stats.stale_pats, 2);
+        // The broadcast now: 30 s on.
+        let now = [
+            clock(NEW.es, 2, then + 30 * 27_000_000),
+            NEW.pat(2),
+            NEW.pmt(2),
+            NEW.es(3),
+            NEW.es(4),
+        ];
+        pipeline.feed(&transfer(&now), &mut reporter, &log);
+        assert_eq!(
+            pipeline.quarantine.as_ref().unwrap().reason,
+            Some(crate::ts::Admitted::Service)
+        );
+        let data = written(pipeline, &out);
+        assert_eq!(pids(&data)[0], 0);
+        assert!(
+            !data.windows(2).any(|w| w == [0xEE, 0xEE]),
+            "no stale picture"
+        );
+    }
+
+    #[test]
+    fn the_same_service_out_of_standby_counts_no_loss_at_the_boundary() {
+        let (mut pipeline, mut reporter, out) = harness(NEW.sid, None);
+        let log = Log::silent();
+        pipeline.quarantine_stream();
+        pipeline.feed(&transfer(&NEW.rounds(2)), &mut reporter, &log);
         assert!(pipeline.gate.is_none());
-        pipeline.feed(&NEW.rounds(1).concat(), &mut reporter, &log);
-        assert!(!written(pipeline, &out).is_empty());
+        // Standby: the stream stops; back, the same selector, counters 9 on.
+        pipeline.stream_stopped();
+        pipeline.quarantine_stream();
+        let back: Vec<Vec<u8>> = (0..3u8)
+            .flat_map(|r| [NEW.pat(r + 9), NEW.pmt(r + 9), NEW.es(r + 9)])
+            .collect();
+        pipeline.feed(&transfer(&back), &mut reporter, &log);
+        assert!(pipeline.gate.is_none());
+        assert_eq!(
+            pipeline.selector.selection().timing.cc_errors,
+            0,
+            "the boundary is not a loss"
+        );
+        assert!(pipeline.selector.cc_events().is_empty());
+        // A loss after it still is.
+        pipeline.feed(&transfer(&[NEW.es(14)]), &mut reporter, &log);
+        assert_eq!(pipeline.selector.selection().timing.cc_errors, 1);
+        let _ = written(pipeline, &out);
+    }
+
+    #[test]
+    fn a_stale_clock_is_only_the_clock_from_before_the_stop() {
+        let at = Instant::now() - Duration::from_secs(20);
+        let c = crate::ts::StaleClock {
+            pid: 1,
+            pcr: 5 * 27_000_000,
+            at,
+        };
+        assert!(c.stale(5 * 27_000_000 + 27_000_000));
+        assert!(c.stale(5 * 27_000_000 - 27_000_000 / 4), "a little behind");
+        assert!(!c.stale(25 * 27_000_000), "the broadcast now");
+        assert!(!c.stale(3), "a discontinuity is the broadcast too");
+        let short = crate::ts::StaleClock {
+            at: Instant::now(),
+            ..c
+        };
+        assert!(!short.stale(5 * 27_000_000), "a stop too short to tell");
+    }
+
+    #[test]
+    fn a_clock_pid_no_longer_sent_does_not_hold_the_stream() {
+        let (mut pipeline, mut reporter, out) = harness(NEW.sid, None);
+        let log = Log::silent();
+        pipeline.stopped_clock = Some(crate::ts::StaleClock {
+            pid: 0x0777,
+            pcr: 0,
+            at: Instant::now() - Duration::from_secs(5),
+        });
+        pipeline.quarantine_stream();
+        pipeline.feed(&transfer(&[NEW.pat(0)]), &mut reporter, &log);
+        assert!(pipeline.gate.is_some());
+        std::thread::sleep(Duration::from_millis(1050));
+        pipeline.feed(&transfer(&NEW.rounds(1)), &mut reporter, &log);
+        assert!(
+            pipeline.gate.is_none(),
+            "a second without the clock's PID: let in"
+        );
+        let _ = written(pipeline, &out);
+    }
+
+    #[test]
+    fn a_cc_error_on_the_service_leaves_the_raw_stream_around_it() {
+        let dir =
+            std::env::temp_dir().join(format!("mediabox-dvb-evidence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let options = Options {
+            evidence_dir: Some(dir.clone()),
+            ..options(NEW.sid, None)
+        };
+        let out = Captured::default();
+        let writer = Writer::start(
+            Some(Sink::Plain(Box::new(out.clone()))),
+            64 << 20,
+            Pressure::Block,
+            None,
+        );
+        let mut pipeline = new_pipeline(&options, writer);
+        let mut reporter = Reporter::new(None, &options);
+        let log = Log::silent();
+        pipeline.quarantine_stream();
+        let before = transfer(&NEW.rounds(1));
+        pipeline.feed(&before, &mut reporter, &log);
+        // A packet of the service's video lost; a mux PID's loss is no trigger.
+        let lossy = transfer(&[NEW.es(6), NEW.es(8)]);
+        pipeline.feed(
+            &transfer(&[ts(0x1FF5, false, 0, &[]), ts(0x1FF5, false, 5, &[])]),
+            &mut reporter,
+            &log,
+        );
+        assert!(pipeline.evidence.is_none());
+        pipeline.feed(&lossy, &mut reporter, &log);
+        assert!(pipeline.evidence.is_some(), "gathering");
+        std::thread::sleep(EVIDENCE_AROUND + Duration::from_millis(50));
+        let after = transfer(&[NEW.es(9)]);
+        pipeline.feed(&after, &mut reporter, &log);
+        assert!(pipeline.evidence.is_none(), "written");
+        std::thread::sleep(Duration::from_millis(200));
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let ts_file = files
+            .iter()
+            .find(|p| p.extension().is_some_and(|e| e == "ts"))
+            .expect("the raw stream");
+        let raw = std::fs::read(ts_file).unwrap();
+        assert!(
+            raw.starts_with(&before) && raw.ends_with(&after),
+            "from before the error to after it"
+        );
+        let note = std::fs::read_to_string(ts_file.with_extension("txt")).unwrap();
+        assert!(
+            note.contains("SELECTED CC ERROR") && note.contains("pid=0x0A32"),
+            "{note}"
+        );
+        // Cut short by the next stream: written then, only this stream's.
+        let mut lossy2 = NEW.rounds(1);
+        lossy2.push(NEW.es(13));
+        pipeline.feed(&transfer(&lossy2), &mut reporter, &log);
+        assert!(pipeline.evidence.is_some());
+        pipeline.quarantine_stream();
+        assert!(pipeline.evidence.is_none(), "written at the stream's end");
+        std::thread::sleep(Duration::from_millis(200));
+        let notes = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
+            .filter(|t| t.contains("cut short"))
+            .count();
+        assert_eq!(notes, 1);
+        let _ = written(pipeline, &out);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3103,7 +3863,21 @@ mod tests {
             (11, 1)
         );
         let text = std::fs::read_to_string(&path).unwrap();
-        let lines: Vec<&str> = text.lines().filter(|l| l.contains("CC ERROR")).collect();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains(" CC ERROR start=") && !l.contains("SELECTED"))
+            .collect();
+        let selected: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("SELECTED CC ERROR"))
+            .collect();
+        assert_eq!(selected.len(), 1, "{text}");
+        assert!(
+            selected[0].contains("pid=0x0A32 prev=6 expected=7 got=8")
+                && selected[0].contains("usb completed="),
+            "{}",
+            selected[0]
+        );
         assert_eq!(lines.len(), crate::ts::CC_FIRST_KEPT, "{text}");
         assert!(
             lines[0].contains("pid=0x0A32 prev=6 expected=7 got=8")
@@ -3136,6 +3910,8 @@ mod tests {
                     polarisation: Polarisation::Vertical,
                 }),
                 new_fifo: None,
+                original_network_id: None,
+                transport_stream_id: None,
             }
         );
         let standby: Select = serde_json::from_str(r#"{"token":"1-1","want":{"kind":"standby"}}"#).unwrap();

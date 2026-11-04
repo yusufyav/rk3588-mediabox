@@ -188,6 +188,8 @@ pub struct Service {
 #[derive(Default)]
 pub(crate) struct Sections {
     buffers: HashMap<u16, Vec<u8>>,
+    /// Whole sections that failed their CRC.
+    pub(crate) crc_errors: u64,
 }
 
 impl Sections {
@@ -198,22 +200,22 @@ impl Sections {
             let tail_end = (1 + pointer as usize).min(payload.len());
             if let Some(mut buffer) = self.buffers.remove(&pid) {
                 buffer.extend_from_slice(&payload[1..tail_end]);
-                Self::take(&mut buffer, &mut done);
+                Self::take(&mut buffer, &mut done, &mut self.crc_errors);
             }
             let mut buffer = payload[tail_end..].to_vec();
-            if Self::take(&mut buffer, &mut done) {
+            if Self::take(&mut buffer, &mut done, &mut self.crc_errors) {
                 self.buffers.insert(pid, buffer);
             }
         } else if let Some(buffer) = self.buffers.get_mut(&pid) {
             buffer.extend_from_slice(payload);
-            if !Self::take(buffer, &mut done) {
+            if !Self::take(buffer, &mut done, &mut self.crc_errors) {
                 self.buffers.remove(&pid);
             }
         }
     }
 
     /// Whole sections off the front; false when the rest is stuffing.
-    fn take(buffer: &mut Vec<u8>, done: &mut impl FnMut(&[u8])) -> bool {
+    fn take(buffer: &mut Vec<u8>, done: &mut impl FnMut(&[u8]), crc_errors: &mut u64) -> bool {
         while buffer.len() >= 3 {
             if buffer[0] == 0xFF {
                 return false;
@@ -225,6 +227,8 @@ impl Sections {
             let section: Vec<u8> = buffer.drain(..3 + length).collect();
             if length >= 9 && crc32_mpeg(&section) == 0 {
                 done(&section);
+            } else {
+                *crc_errors += 1;
             }
         }
         true
@@ -797,20 +801,74 @@ fn find_sync(buffer: &[u8], mut pos: usize) -> Option<usize> {
 /// just left: measured 2026-11-04 over 30 retunes, up to 316 packets of the
 /// old multiplex's PIDs ahead of the new one, once with its PAT. None of it
 /// is the new transport stream, and none of it may reach the selector, the
-/// player, the access-point cache, the guide or the counters. The new stream
-/// is known by its PAT (ISO/IEC 13818-1 2.4.4.3), so everything before the
-/// first PAT that identifies it is held back, and the stream starts at that
-/// PAT's packet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// player, the access-point cache, the guide or the counters. A transport
+/// stream is known by its PAT (ISO/IEC 13818-1 2.4.4.3) and, where the PAT
+/// alone cannot tell two apart, by the original_network_id of its SDT
+/// (EN 300 468 5.2.3): DVB's identity is (ONID, TSID, SID), and two
+/// transponders may share a TSID. Everything before the first PAT that
+/// identifies the stream is held back; the stream starts at that PAT's
+/// packet.
+#[derive(Debug, Clone, Default)]
 pub struct Admission {
     /// The service the viewer asked for: a PAT that carries it is the new
     /// stream. None for a scan or a TKGS read, which take the transponder
     /// as it is.
     pub service_id: Option<u16>,
-    /// The transport stream left by the retune: its PATs are its tail.
-    pub left_tsid: Option<u16>,
+    /// The multiplex a retune left: its tail is not the new stream.
+    pub left: Option<LeftMux>,
+    /// The channel's transport stream, where the channel list knows it.
+    pub expect: Option<Expected>,
     /// After a loss: only this transport stream is the channel's.
     pub want_tsid: Option<u16>,
+    /// The same multiplex again (out of standby, a relock): its programme
+    /// clock when the stream stopped. What carries a clock from then is
+    /// the bridge's stale tail, not the broadcast now.
+    pub stale_clock: Option<StaleClock>,
+}
+
+/// The multiplex left: its PAT's transport stream and programmes, and its
+/// SDT's network if it was read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeftMux {
+    pub tsid: u16,
+    pub onid: Option<u16>,
+    pub programmes: BTreeMap<u16, u16>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Expected {
+    pub onid: Option<u16>,
+    pub tsid: u16,
+}
+
+/// A PCR comes at least every 100 ms (ISO/IEC 13818-1 2.7.2; DVB: 40 ms):
+/// a second without one on the clock's PID is a PID no longer sent.
+const CLOCK_ABSENT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A programme clock reference and when it was the clock.
+#[derive(Debug, Clone, Copy)]
+pub struct StaleClock {
+    pub pid: u16,
+    pub pcr: u64,
+    pub at: std::time::Instant,
+}
+
+impl StaleClock {
+    /// Whether `pcr`, read now, is from before the stop: no further on than
+    /// half the time since (the broadcast's clock has moved on by all of
+    /// it), nor more than half a second behind. Anything else -- a clock
+    /// on by the time stopped, or a discontinuity -- is the broadcast now.
+    /// A stop shorter than 200 ms cannot be told from the broadcast and is
+    /// not held back.
+    pub fn stale(&self, pcr: u64) -> bool {
+        let since = self.at.elapsed();
+        if since < std::time::Duration::from_millis(200) {
+            return false;
+        }
+        let ahead = (pcr + PCR_WRAP - self.pcr) % PCR_WRAP;
+        let half = (since.as_secs_f64() / 2.0 * PCR_HZ) as u64;
+        ahead <= half || PCR_WRAP - ahead <= PCR_HZ as u64 / 2
+    }
 }
 
 /// Why the gate let the stream in.
@@ -821,12 +879,14 @@ pub enum Admitted {
     Service,
     /// The transport stream a lost signal was on.
     Relock,
+    /// A PAT like the multiplex left's, told from it by the SDT's network.
+    Network,
     /// Twice the same transport stream's PAT, none other between: a stream
     /// in its own right, not a tail -- a scan's or TKGS read's transponder,
     /// or a carrier without the service (searched on from, as before).
     Repeated,
-    /// No PAT decided it in the time a service has to appear: a scan or a
-    /// TKGS read takes what there is.
+    /// A scan or TKGS read with no PAT in its time: what was held is
+    /// dropped (nothing identified it) and the stream goes on unheld.
     Deadline,
 }
 
@@ -839,14 +899,16 @@ pub enum Gated {
     Other(u16),
 }
 
-/// One retune's quarantine, for the log and the status.
+/// One stream start's quarantine, for the log and the status.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Quarantine {
     pub generation: u32,
     pub service_id: Option<u16>,
     pub left_tsid: Option<u16>,
     pub want_tsid: Option<u16>,
+    pub expect_tsid: Option<u16>,
     pub admitted_tsid: Option<u16>,
+    pub admitted_onid: Option<u16>,
     pub reason: Option<Admitted>,
     /// Held back: transfers fed, whole packets and bytes (with any bytes
     /// before the packet alignment was found).
@@ -855,11 +917,23 @@ pub struct Quarantine {
     pub bytes: u64,
     /// Held packets on the programme PIDs of the multiplex left: its tail.
     pub left_pid_packets: u64,
-    /// PATs of the transport stream left, and of others without the service.
+    /// PAT packets, and whole PAT sections; PSI sections failing their CRC.
+    pub pat_packets: u64,
+    pub pat_sections: u64,
+    pub crc_errors: u64,
+    /// PATs of the multiplex left, of others without the service, and of
+    /// the same multiplex from before the stop (`StaleClock`).
     pub old_pats: u64,
     pub other_pats: u64,
+    pub stale_pats: u64,
     /// From the gate's start to the admitting PAT.
     pub admit_ms: Option<u64>,
+    /// Out of standby or a relock: clocks from before the stop, and how far
+    /// the first clock of the broadcast now was past the stop's, against
+    /// the time since the stop.
+    pub stale_clocks: u64,
+    pub clock_ahead_ms: Option<i64>,
+    pub stopped_ms: Option<u64>,
 }
 
 pub struct Gate {
@@ -876,13 +950,29 @@ pub struct Gate {
     resume: usize,
     /// A transport stream's PATs in a row, for `Admitted::Repeated`.
     repeated: Option<(u16, u32)>,
+    /// A PAT like the left multiplex's, waiting for its SDT's network.
+    pending: Option<u16>,
+    /// A programme clock from after the stop has been seen; the clock's PID
+    /// at all.
+    fresh: bool,
+    clock_seen: bool,
     started: std::time::Instant,
     pub stats: Quarantine,
 }
 
 impl Gate {
     pub fn new(rule: Admission, generation: u32, left_pids: BTreeSet<u16>) -> Self {
+        let stats = Quarantine {
+            generation,
+            service_id: rule.service_id,
+            left_tsid: rule.left.as_ref().map(|left| left.tsid),
+            want_tsid: rule.want_tsid,
+            expect_tsid: rule.expect.map(|e| e.tsid),
+            ..Quarantine::default()
+        };
         Self {
+            fresh: rule.stale_clock.is_none(),
+            clock_seen: false,
             rule,
             left_pids,
             buffer: Vec::new(),
@@ -891,27 +981,26 @@ impl Gate {
             pat_start: None,
             resume: 0,
             repeated: None,
+            pending: None,
             started: std::time::Instant::now(),
-            stats: Quarantine {
-                generation,
-                service_id: rule.service_id,
-                left_tsid: rule.left_tsid,
-                want_tsid: rule.want_tsid,
-                ..Quarantine::default()
-            },
+            stats,
         }
     }
 
-    pub fn rule(&self) -> Admission {
-        self.rule
+    pub fn rule(&self) -> &Admission {
+        &self.rule
     }
 
     pub fn age(&self) -> std::time::Duration {
         self.started.elapsed()
     }
 
-    /// Opened without a PAT (`Admitted::Deadline`): what is held is let go.
-    pub fn open(&mut self) {
+    /// A scan or TKGS read whose time for a PAT is up: what is held, which
+    /// nothing identified (it may be the tail of the multiplex left), is
+    /// dropped, and the stream goes on unheld from the next transfer; the
+    /// tables it is read for repeat (SDT at least every 2 s, NIT every
+    /// 10 s, EN 300 468 5.1.4).
+    pub fn open_dropping_held(&mut self) {
         self.drop_front(self.buffer.len());
         self.stats.reason = Some(Admitted::Deadline);
         self.stats.admit_ms = Some(self.started.elapsed().as_millis() as u64);
@@ -937,12 +1026,11 @@ impl Gate {
                         self.synced = true;
                     }
                     None => {
-                        let keep = self
+                        pos = self
                             .buffer
                             .len()
                             .saturating_sub((SYNC_RUN - 1) * PACKET + 1)
                             .max(pos);
-                        pos = keep;
                         break;
                     }
                 }
@@ -965,25 +1053,69 @@ impl Gate {
             if self.left_pids.contains(&pid) {
                 self.stats.left_pid_packets += 1;
             }
-            if pid != PID_PAT || p[1] & 0x80 != 0 {
+            if p[1] & 0x80 != 0 {
+                continue;
+            }
+            if !self.fresh
+                && let Some(clock) = self.rule.stale_clock
+            {
+                if clock.pid == pid
+                    && let Some(pcr) = pcr_of(p)
+                {
+                    self.clock_seen = true;
+                    self.fresh = !clock.stale(pcr);
+                    if self.fresh {
+                        let ahead = (pcr + PCR_WRAP - clock.pcr) % PCR_WRAP;
+                        let ahead = if ahead > PCR_WRAP / 2 {
+                            ahead as i64 - PCR_WRAP as i64
+                        } else {
+                            ahead as i64
+                        };
+                        self.stats.clock_ahead_ms = Some(ahead / 27_000);
+                        self.stats.stopped_ms = Some(clock.at.elapsed().as_millis() as u64);
+                    } else {
+                        self.stats.stale_clocks += 1;
+                    }
+                } else if !self.clock_seen && self.started.elapsed() >= CLOCK_ABSENT {
+                    // The clock's PID is not in the stream (the programme is
+                    // gone): it cannot tell, and the tail is long past.
+                    self.fresh = true;
+                }
+            }
+            if pid != PID_PAT && pid != PID_SDT {
                 continue;
             }
             let unit_start = p[1] & 0x40 != 0;
-            if unit_start {
-                self.pat_start = Some(at);
+            if pid == PID_PAT {
+                self.stats.pat_packets += 1;
+                if unit_start {
+                    self.pat_start = Some(at);
+                }
             }
             let Some(payload) = payload_of(p) else {
                 continue;
             };
             let mut found = Vec::new();
-            self.sections.payload(PID_PAT, unit_start, payload, |s| {
-                let (table, tsid, _, current, body) = section_header(s);
-                if table == TABLE_PAT && current {
-                    found.push((tsid, parse_pat(body)));
+            let crc_before = self.sections.crc_errors;
+            self.sections.payload(pid, unit_start, payload, |s| {
+                let (table, ext, _, current, body) = section_header(s);
+                if !current {
+                    return;
+                }
+                if pid == PID_PAT && table == TABLE_PAT {
+                    found.push((ext, Some(parse_pat(body)), None));
+                } else if pid == PID_SDT && table == TABLE_SDT_ACTUAL && body.len() >= 2 {
+                    found.push((ext, None, Some(u16::from_be_bytes([body[0], body[1]]))));
                 }
             });
-            for (tsid, programmes) in found {
-                match self.decide(tsid, &programmes) {
+            self.stats.crc_errors += self.sections.crc_errors - crc_before;
+            for (tsid, programmes, onid) in found {
+                let verdict = match (programmes, onid) {
+                    (Some(programmes), _) => self.decide(tsid, &programmes),
+                    (None, Some(onid)) => self.network(tsid, onid),
+                    (None, None) => Gated::Waiting,
+                };
+                match verdict {
                     Gated::Waiting => {}
                     Gated::Admitted(_) => {
                         let start = self.pat_start.unwrap_or(at);
@@ -998,48 +1130,117 @@ impl Gate {
                 }
             }
         }
-        // Nothing before the latest PAT packet can start the stream.
         self.resume = pos;
+        // Nothing before the latest PAT packet can start the stream.
         let keep_from = self.pat_start.unwrap_or(pos).min(pos);
         self.drop_front(keep_from);
         other.map_or(Gated::Waiting, Gated::Other)
     }
 
-    fn decide(&mut self, tsid: u16, programmes: &BTreeMap<u16, u16>) -> Gated {
-        if self.rule.left_tsid == Some(tsid) {
-            self.stats.old_pats += 1;
-            self.repeated = None;
-            return Gated::Waiting;
-        }
-        let repeated = match self.repeated {
+    fn admit(&mut self, reason: Admitted) -> Gated {
+        self.stats.reason = Some(reason);
+        Gated::Admitted(Vec::new())
+    }
+
+    /// Two of the same transport stream's PATs in a row, none other between.
+    fn twice(&mut self, tsid: u16) -> bool {
+        let count = match self.repeated {
             Some((seen, count)) if seen == tsid => count + 1,
             _ => 1,
         };
-        self.repeated = Some((tsid, repeated));
-        let admitted = match (self.rule.want_tsid, self.rule.service_id) {
-            (Some(want), _) if want == tsid => Some(Admitted::Relock),
-            (Some(_), _) => {
+        self.repeated = Some((tsid, count));
+        count >= 2
+    }
+
+    fn decide(&mut self, tsid: u16, programmes: &BTreeMap<u16, u16>) -> Gated {
+        self.stats.pat_sections += 1;
+        if !self.fresh {
+            self.stats.stale_pats += 1;
+            self.repeated = None;
+            return Gated::Waiting;
+        }
+        // The same PAT as the multiplex left's: its tail -- unless the SDT
+        // says another network (two transponders can share a TSID and even
+        // a programme map).
+        let like_left = self
+            .rule
+            .left
+            .as_ref()
+            .is_some_and(|left| left.tsid == tsid && left.programmes == *programmes);
+        if like_left {
+            let told = self
+                .rule
+                .left
+                .as_ref()
+                .is_some_and(|left| left.onid.is_some())
+                || self.rule.expect.is_some_and(|e| e.onid.is_some());
+            if told {
+                self.pending = Some(tsid);
+            } else {
+                self.stats.old_pats += 1;
+            }
+            self.repeated = None;
+            return Gated::Waiting;
+        }
+        if let Some(want) = self.rule.want_tsid {
+            if want == tsid {
+                return self.admit(Admitted::Relock);
+            }
+            self.stats.other_pats += 1;
+            return if self.twice(tsid) {
+                Gated::Other(tsid)
+            } else {
+                Gated::Waiting
+            };
+        }
+        if let Some(expect) = self.rule.expect
+            && expect.tsid != tsid
+        {
+            // Not the channel's transport stream: a carrier without it,
+            // searched on from once it is a stream in its own right.
+            self.stats.other_pats += 1;
+            return if self.twice(tsid) {
+                self.admit(Admitted::Repeated)
+            } else {
+                Gated::Waiting
+            };
+        }
+        match self.rule.service_id {
+            Some(service) if programmes.contains_key(&service) => self.admit(Admitted::Service),
+            Some(_) => {
                 self.stats.other_pats += 1;
-                return if repeated >= 2 {
-                    Gated::Other(tsid)
+                if self.twice(tsid) {
+                    self.admit(Admitted::Repeated)
                 } else {
                     Gated::Waiting
-                };
-            }
-            (None, Some(service)) if programmes.contains_key(&service) => Some(Admitted::Service),
-            (None, service) => {
-                if service.is_some() {
-                    self.stats.other_pats += 1;
                 }
-                (repeated >= 2).then_some(Admitted::Repeated)
             }
-        };
-        match admitted {
-            Some(reason) => {
-                self.stats.reason = Some(reason);
-                Gated::Admitted(Vec::new())
+            None => {
+                if self.twice(tsid) {
+                    self.admit(Admitted::Repeated)
+                } else {
+                    Gated::Waiting
+                }
             }
-            None => Gated::Waiting,
+        }
+    }
+
+    /// The SDT of a transport stream whose PAT is like the left one's.
+    fn network(&mut self, tsid: u16, onid: u16) -> Gated {
+        if self.pending != Some(tsid) {
+            return Gated::Waiting;
+        }
+        self.pending = None;
+        let left = self.rule.left.as_ref().and_then(|left| left.onid);
+        let expected = self.rule.expect.and_then(|e| e.onid);
+        let another =
+            left.is_some_and(|left| left != onid) || (expected == Some(onid) && left != Some(onid));
+        if another {
+            self.stats.admitted_onid = Some(onid);
+            self.admit(Admitted::Network)
+        } else {
+            self.stats.old_pats += 1;
+            Gated::Waiting
         }
     }
 }
@@ -1660,6 +1861,9 @@ struct TimingState {
     pts: std::collections::BTreeMap<u16, u64>,
     /// The programme's sound and picture PIDs: the ones 2.5 applies to.
     timed: BTreeSet<u16>,
+    /// The first CC errors on the service's PIDs (`CC_FIRST_KEPT`), at the
+    /// selector's input packet.
+    events: Vec<CcError>,
 }
 
 const PCR_HZ: f64 = 27_000_000.0;
@@ -1692,7 +1896,7 @@ pub(crate) fn pts_of(p: &[u8]) -> Option<u64> {
 }
 
 impl TimingState {
-    fn packet(&mut self, t: &mut Timing, p: &[u8], pid: u16, pcr_pid: Option<u16>) {
+    fn packet(&mut self, t: &mut Timing, p: &[u8], pid: u16, pcr_pid: Option<u16>, input: u64) {
         let announced = discontinuity_of(p);
         // Continuity: only packets with a payload count; a repeat is allowed
         // once (duplicate), and an announced discontinuity restarts it.
@@ -1704,6 +1908,15 @@ impl TimingState {
                 && cc != (last + 1) & 0x0F
             {
                 t.cc_errors += 1;
+                if self.events.len() < CC_FIRST_KEPT {
+                    self.events.push(CcError {
+                        packet: input,
+                        pid,
+                        previous: last,
+                        got: cc,
+                        pid_packets: 0,
+                    });
+                }
             }
         }
         if Some(pid) == pcr_pid
@@ -1789,6 +2002,21 @@ impl Selector {
         self.last_pcr
     }
 
+    /// The first CC errors on the service's own PIDs.
+    pub fn cc_events(&self) -> &[CcError] {
+        &self.timing.events
+    }
+
+    /// Another transport stream epoch starts (the stream admitted after a
+    /// tune or out of standby): what was remembered of the counters, the
+    /// clock and the timestamps belongs to the one before and is not
+    /// compared with it. What was counted stays.
+    pub fn new_epoch(&mut self) {
+        self.timing.cc.clear();
+        self.timing.pts.clear();
+        self.timing.last_pcr = None;
+    }
+
     /// Whether the service's programme has been found (PAT and PMT seen).
     pub fn ready(&self) -> bool {
         self.selection.pmt_version.is_some()
@@ -1836,7 +2064,14 @@ impl Selector {
             return;
         }
         if self.ready() && self.pids.contains(&pid) {
-            self.timing.packet(&mut self.selection.timing, p, pid, self.selection.pcr_pid);
+            let input = self.selection.input_packets;
+            self.timing.packet(
+                &mut self.selection.timing,
+                p,
+                pid,
+                self.selection.pcr_pid,
+                input,
+            );
             if Some(pid) == self.selection.pcr_pid
                 && let Some(pcr) = pcr_of(p)
             {

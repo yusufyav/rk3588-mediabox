@@ -236,6 +236,17 @@ fn describe(end: &str, detail: Option<&str>) -> String {
         "no_lock" => "Uydu sinyaline kilitlenilemedi.",
         "tune_failed" => "Uydu alıcısı ayarlanamadı.",
         "service_not_found" => "Kanal bu yayında bulunamadı.",
+        // mediabox-dvb's quarantine of a new stream (ts::Gate): what kept
+        // the channel from being found, not that it is missing.
+        "no_pat" => {
+            "Uydu yayını geliyor ama kanal tablosu (PAT) okunamıyor. Servis tanı kodu: DVB-NO-PAT."
+        }
+        "psi_corrupt" => {
+            "Uydu yayınının kanal tablosu (PAT) bozuk geliyor. Servis tanı kodu: DVB-PSI-CRC."
+        }
+        "stale_transport" => {
+            "Uydu alıcısı yeni yayına geçmedi; yalnız önceki yayının verisi geldi. Servis tanı kodu: DVB-STALE-TS."
+        }
         "source_failed" => "Canlı yayın kaynağı açılamadı.",
         "player_never_opened" | "output_failed" => "Canlı yayın oynatıcıya aktarılamadı.",
         "player_closed" => "Oynatıcı kapandı.",
@@ -348,6 +359,12 @@ impl LiveManager {
                 }
                 if let Some(port) = stored.map_or(default_diseqc_port(), |guide| guide.diseqc_port) {
                     argv.push(format!("--diseqc-port={port}"));
+                }
+                if let (onid, Some(tsid)) = self.expected_ids(service_id, source) {
+                    argv.push(format!("--expect-tsid={tsid}"));
+                    if let Some(onid) = onid {
+                        argv.push(format!("--expect-onid={onid}"));
+                    }
                 }
             }
         }
@@ -549,11 +566,14 @@ impl LiveManager {
             inner.fifos += 1;
             format!("live-{}.ts", inner.fifos)
         });
+        let (onid, tsid) = self.expected_ids(service_id, source);
         self.select(Some(rid), json!({
             "kind": "play",
             "service_id": service_id,
             "transponder": {"frequency_khz": frequency_khz, "symbol_rate_ksps": symbol_rate_ksps, "polarisation": polarisation},
             "new_fifo": name,
+            "original_network_id": onid,
+            "transport_stream_id": tsid,
         }))?;
         if let Some(name) = name {
             self.lock().fifo = Some(self.paths.run_dir.join(name));
@@ -1421,6 +1441,36 @@ impl LiveManager {
     /// Replace a legacy/incomplete satellite source with the exact TKGS
     /// delivery for this service. Frequency and symbol rate are also matched
     /// because service ids are only unique within a transport stream.
+    /// The channel's (ONID, TSID) where the channel list has read them: how
+    /// the receiver tells the channel's transport stream from another with
+    /// the same TSID (`mediabox-dvb` ts::Gate).
+    fn expected_ids(&self, service_id: u16, source: &LiveSource) -> (Option<u16>, Option<u16>) {
+        let LiveSource::Satellite {
+            frequency_khz,
+            symbol_rate_ksps,
+            polarisation,
+        } = *source
+        else {
+            return (None, None);
+        };
+        self.stored_guide()
+            .and_then(|guide| {
+                guide.channels.into_iter().find(|channel| {
+                    channel.service_id == service_id
+                        && channel.transport_stream_id.is_some()
+                        && channel.source
+                            == LiveSource::Satellite {
+                                frequency_khz,
+                                symbol_rate_ksps,
+                                polarisation,
+                            }
+                })
+            })
+            .map_or((None, None), |channel| {
+                (channel.original_network_id, channel.transport_stream_id)
+            })
+    }
+
     fn canonical_source(&self, service_id: u16, source: &LiveSource) -> LiveSource {
         let LiveSource::Satellite { frequency_khz, symbol_rate_ksps, .. } = source else {
             return source.clone();
@@ -2028,6 +2078,21 @@ impl LiveManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_that_could_not_be_identified_is_not_called_a_missing_channel() {
+        for end in ["no_pat", "psi_corrupt", "stale_transport"] {
+            let text = describe(end, None);
+            assert!(
+                !text.contains("bulunamadı") && text.contains("Servis tanı kodu"),
+                "{end}: {text}"
+            );
+        }
+        assert_eq!(
+            describe("service_not_found", None),
+            "Kanal bu yayında bulunamadı."
+        );
+    }
 
     fn manager(dir: &std::path::Path) -> LiveManager {
         LiveManager::new(LivePaths {
