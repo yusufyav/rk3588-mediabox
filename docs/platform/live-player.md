@@ -160,6 +160,33 @@ Kanky ─USB─> mediabox-dvb ─FIFO (tek servis)─> mediabox-live
   ([GStreamer senkron modeli](https://gstreamer.freedesktop.org/documentation/additional/design/synchronisation.html):
   sink, saat `sync_time`'a gelene kadar bekler). alsasink saate skew ile
   bağlıdır. Bu, Android'deki donanım STC'nin yazılım karşılığıdır.
+- **Saat kurtarma (`stamp.rs`).** Her parça, ilk PCR'ın geliş zamanından
+  PCR ile zamanlanır: `at = at0 + E + C(E) + J`.
+  - `E = Σticks·1000/27`: u128'de tam hesaplanır, yuvarlama birikmez.
+  - `C`: parça parça doğrusal ppb düzeltmesidir.
+  - `J`: kalıcı faz adımlarının toplamıdır.
+  - Frekans, ilk PCR'dan 10 s sonra başlar. Her saniyenin en erken
+    gelişinden bir nokta alınır; 60 noktaya en küçük kareler uydurulur, 2 ms
+    üstündeki topaklar dışarıda kalır. Buna 300 s'de kapanan bir faz terimi
+    eklenir (en çok ±20 ppm). Toplam ±100 ppm ile sınırlıdır: yayıncı
+    ±30 ppm (ISO/IEC 13818-1 2.4.2.1), kart 70 ppm. Değişim en çok
+    1 ppm/s'dir ve saniyede bir hesaplanır; PCR sayısından bağımsızdır.
+  - Son 300 ms'nin tüm gelişleri zarftan 40 ms'den geç kalırsa saat bir kez
+    o kadar ileri alınır (`clock-step`). TS ve ses tamponu DISCONT olur;
+    teşhiste `ts_arrival_steps` → `input_transport_discontinuity` sayılır.
+  - `discontinuity_indicator`, geri ya da 1 s'den fazla ileri PCR,
+    yerleşmiş saatte gelişten 250 ms fazla ilerleyen PCR yeni bir dönemdir.
+    `max(son, geliş)` noktasına yeniden çapalanır, frekans korunur.
+  - Damgalanan, FIFO `read` dönüş zamanıdır (CLOCK_MONOTONIC), push
+    sonrası değil. Push bekletse de saat değişmez (test:
+    `a_held_push_does_not_move_the_recovered_clock`).
+  - **2026-11-04'e kadar:** tempo, son 2 s'nin en erken gelişini PCR parçası
+    başına 50 µs izliyordu (saniyede 25–50 PCR → 1,2–2,5 ms/s). 51616'da
+    yayının kendi geliş adımları (ham multiplekste yalnız o servisin PCR
+    PID'inde, +70…+454 ms) bu izlemeyle saniyede ~2,3 ms'lik rampalara
+    dönüştü. Ses PES'leri bu rampayla zamanlandı: 30 dakikada 6680 PCM
+    boşluğu, 1526 görüntü düşmesi ve 524 sink yeniden eşlemesi oldu
+    (**ölçüldü**).
 - **Görüntü.** `appsink sync=true` kareyi zamanı gelince verir, arayüz onu
   bir sonraki vblank'te commit eder. Arayüz RELEASE gönderene kadar kare,
   dolayısıyla MPP tamponu, tutulur. En fazla 4 kare dışarıdadır (vo_mediabox

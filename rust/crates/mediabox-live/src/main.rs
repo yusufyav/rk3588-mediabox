@@ -16,6 +16,7 @@
 //!   MEDIABOX_LIVE_PROGRAM          one service of a whole multiplex (a recording)
 //!   MEDIABOX_VO_TRACE              the frame trace, vo_mediabox's format
 
+mod clock_probe;
 mod engine;
 mod es;
 mod health;

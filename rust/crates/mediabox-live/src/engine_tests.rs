@@ -456,7 +456,7 @@ fn a_refused_buffer_is_told() {
     let _ = source.end_of_stream();
     let chunk = crate::es::Chunk { data: vec![0xFF; 10], pts: Some(90_000), dts: None, start: true, discont: None, new_time_base: false, switch: None };
     let mut target = Some(source);
-    let failed = super::route_sound(&mut target, vec![chunk], Some((0, 0)), &mut |_| None, &mut |_| {});
+    let failed = super::route_sound(&mut target, vec![chunk], Some((0, 0)), false, &mut |_| None, &mut |_| {});
     assert_eq!(failed, vec![gst::FlowError::Eos]);
 }
 

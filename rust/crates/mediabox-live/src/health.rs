@@ -341,6 +341,16 @@ impl Health {
         self.sound.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The arrivals stepped later and the clock with them (`stamp`).
+    pub fn clock_stepped(&self) {
+        self.diagnose(|d| d.c.ts_arrival_steps += 1);
+    }
+
+    /// Every layer's sound counters, for the clock probe.
+    pub fn probe_counters(&self) -> serde_json::Value {
+        self.diagnose(|d| d.c.json())
+    }
+
     /// Run `f` on the diagnosis and say what incidents came of it.
     pub fn diagnose<T>(&self, f: impl FnOnce(&mut crate::sound_diag::Diag) -> T) -> T {
         f(&mut self.sound())
@@ -472,6 +482,12 @@ impl Device {
         let Some(card) = card else { return Self::default() };
         let base = std::path::PathBuf::from(format!("/proc/asound/{card}/pcm{}p/sub0", dev.unwrap_or(0)));
         Self { path: Some(base.join("status")), params: Some(base.join("hw_params")), ..Self::default() }
+    }
+
+    /// The device's state for the clock probe: restarts, least queued
+    /// since the last report (frames), rate, buffer.
+    pub fn probe(&self) -> serde_json::Value {
+        serde_json::json!({ "restarts": self.restarts, "least": self.least, "rate": self.rate, "buffer": self.buffer, "running": self.running })
     }
 
     /// Read the status once; often (every few ms), as a queue running low

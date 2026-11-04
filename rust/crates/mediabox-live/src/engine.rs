@@ -900,6 +900,7 @@ impl Engine {
             let mut device = crate::health::Device::default();
             let mut device_for: Option<String> = None;
             let mut last_report = Instant::now();
+            let mut last_probe = Instant::now();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 let Some(engine) = weak.upgrade() else { return };
@@ -932,6 +933,12 @@ impl Engine {
                         .then(|| pipeline_clock.time().nseconds() as i64 - audio_clock.time().nseconds() as i64)
                 });
                 let generation = engine.shared.generation.load(Ordering::SeqCst);
+                if let Some(probe) = crate::clock_probe::get()
+                    && last_probe.elapsed() >= std::time::Duration::from_secs(1)
+                {
+                    last_probe = Instant::now();
+                    probe.flush(engine.probe_levels(generation, audio_late, &device));
+                }
                 engine.shared.health.plane_full_dropped.store(engine.plane.dropped_full(), Ordering::Relaxed);
                 let report = engine.shared.health.report(
                     generation,
@@ -943,6 +950,40 @@ impl Engine {
                 crate::health::write(&report);
             }
         });
+    }
+
+    /// What the clock probe samples once a second: the transport source's
+    /// and every queue's fill, the sound device's delay and the health
+    /// counters the sound and picture are judged by.
+    fn probe_levels(&self, generation: u64, audio_late: Option<i64>, device: &crate::health::Device) -> serde_json::Value {
+        let mut queues = serde_json::Map::new();
+        let mut source = serde_json::Value::Null;
+        for element in self.pipeline.iterate_recurse().into_iter().flatten() {
+            let factory = element.factory().map(|f| f.name().to_string()).unwrap_or_default();
+            if factory == "queue" {
+                queues.insert(
+                    element.name().to_string(),
+                    serde_json::json!([
+                        element.property::<u64>("current-level-time"),
+                        element.property::<u32>("current-level-buffers"),
+                        element.property::<u32>("current-level-bytes"),
+                    ]),
+                );
+            } else if factory == "appsrc" && element.name() == format!("ts{generation}").as_str() {
+                source = serde_json::json!([element.property::<u64>("current-level-bytes"), element.property::<u64>("current-level-time"), element.property::<u64>("current-level-buffers")]);
+            }
+        }
+        let h = &self.shared.health;
+        serde_json::json!({
+            "generation": generation,
+            "appsrc": source,
+            "queues": queues,
+            "audio_late": audio_late,
+            "device": device.probe(),
+            "video_dropped": h.video_dropped.load(Ordering::Relaxed),
+            "video_lag": self.shared.video_lag_ns.load(Ordering::Relaxed),
+            "sound": h.probe_counters(),
+        })
     }
 
     pub fn bus(&self) -> gst::Bus {
@@ -983,6 +1024,9 @@ impl Engine {
         sink.set_property("async", false);
         sink.set_property("enable-last-sample", false);
         sink.set_property("ts-offset", self.audio_offset());
+        if let Some(pad) = sink.static_pad("sink") {
+            probe_layer(&pad, crate::clock_probe::Layer::Sink, None, &self.shared);
+        }
         self.pipeline.add(&sink).map_err(|e| e.to_string())?;
         self.audio_selector.link(&sink).map_err(|e| e.to_string())?;
         sink.sync_state_with_parent().map_err(|e| e.to_string())?;
@@ -1121,6 +1165,9 @@ impl Engine {
                     if let (Some(clock), Some(base)) = (sink.clock(), sink.base_time()) {
                         let now = clock.time().saturating_sub(base).nseconds() as i64;
                         shared.video_lag_ns.store(now - pts as i64, Ordering::Relaxed);
+                        if let Some(probe) = crate::clock_probe::get() {
+                            probe.video(pts, now as u64);
+                        }
                         // The latency the sinks wait by, asked once a channel.
                         if latency.is_none_or(|(asked_in, _)| asked_in != generation) {
                             // The pipeline's: the one every sink was given.
@@ -1734,6 +1781,7 @@ impl Engine {
             let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
             let jumped = Mutex::new(Instant::now());
             let framed = chain[0].static_pad("src").ok_or("ayrıştırıcının çıkışı yok")?;
+            probe_layer(&framed, crate::clock_probe::Layer::Parser, Some(generation), &shared);
             framed.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
                 if faults.pts_jump_ms > 0
                     && let Some(buffer) = info.buffer_mut()
@@ -1935,6 +1983,7 @@ impl Engine {
         volume.set_property("mute", audio.muted);
         let shared = Arc::clone(&self.shared);
         let input = volume.static_pad("sink").ok_or("ses düzeyinin girişi yok")?;
+        probe_layer(&input, crate::clock_probe::Layer::Convert, Some(generation), &self.shared);
         let told = AtomicBool::new(false);
         input.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
             let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
@@ -1981,6 +2030,7 @@ impl Engine {
             });
         }
         let Some(output) = decoder.static_pad("src") else { return };
+        probe_layer(&output, crate::clock_probe::Layer::Decoder, Some(generation), &self.shared);
         let shared = Arc::clone(&self.shared);
         let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
         let zeroing = Mutex::new((Instant::now(), None::<Instant>));
@@ -2395,6 +2445,62 @@ impl Engine {
     }
 }
 
+/// The clock probe on `pad` (`clock_probe::Layer`), when it is on: each
+/// buffer's PTS against the samples it holds -- from the caps for PCM, from
+/// its duration for coded frames. `generation`: the branch's, or the
+/// current one for the sink's own pad.
+fn probe_layer(pad: &gst::Pad, layer: crate::clock_probe::Layer, generation: Option<u64>, shared: &Arc<Shared>) {
+    if crate::clock_probe::get().is_none() {
+        return;
+    }
+    let shared = Arc::clone(shared);
+    pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+        let (Some(probe), Some(buffer)) = (crate::clock_probe::get(), info.buffer()) else { return gst::PadProbeReturn::Ok };
+        let pcm = pad.current_caps().and_then(|caps| {
+            let s = caps.structure(0)?;
+            if s.name() != "audio/x-raw" {
+                return None;
+            }
+            let bytes = match s.get::<&str>("format").ok()? {
+                "S16LE" => 2,
+                "S32LE" | "F32LE" => 4,
+                _ => return None,
+            };
+            let frame = bytes * s.get::<i32>("channels").ok()? as usize;
+            Some(((buffer.size() / frame) as u64, s.get::<i32>("rate").ok()? as u32))
+        });
+        let generation = generation.unwrap_or_else(|| shared.generation.load(Ordering::Relaxed));
+        probe.layer(
+            layer,
+            generation,
+            buffer.pts().map(|t| t.nseconds()),
+            buffer.duration().map(|d| d.nseconds()),
+            pcm,
+            buffer.flags().contains(gst::BufferFlags::DISCONT),
+        );
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// One read of the FIFO, and the time (CLOCK_MONOTONIC, the pipeline's
+/// clock, ns) its `read` returned at.
+fn read_chunk(file: &mut File, path: &str, chunk: &mut [u8]) -> Result<(usize, u64), String> {
+    loop {
+        let before = crate::clock_probe::mono();
+        let read = match file.read(chunk) {
+            Ok(0) => return Err(format!("yayın akışı bitti ({path})")),
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("{path} okunamadı: {error}")),
+        };
+        let at = crate::clock_probe::mono();
+        if let Some(probe) = crate::clock_probe::get() {
+            probe.read(read, at - before, at, crate::clock_probe::raw());
+        }
+        return Ok((read, at));
+    }
+}
+
 /// Read the receiver's FIFO into the current branch's source, as fast as it
 /// comes: every buffer is stamped with the time it arrived. The end of the
 /// FIFO is the stream's end only while it is the FIFO being read: the
@@ -2432,12 +2538,13 @@ fn read_stream(
     let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
     let mut ts_dropped = 0u64;
     let mut reference: Option<(u64, u64)> = None;
+    // The clock stepped (`Stamped::stepped`): the sound's next buffer is a
+    // DISCONT.
+    let mut sound_discont = false;
     loop {
-        let read = match file.read(&mut chunk) {
-            Ok(0) => return ended(format!("yayın akışı bitti ({path})")),
+        let (read, read_at) = match read_chunk(&mut file, path, &mut chunk) {
             Ok(read) => read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return ended(format!("{path} okunamadı: {error}")),
+            Err(why) => return ended(why),
         };
         if stop.load(Ordering::SeqCst) {
             return;
@@ -2454,7 +2561,9 @@ fn read_stream(
             reader = None;
             reference = None;
         }
-        let arrived = source.current_running_time();
+        // When the read returned, on the source's running time: taken at
+        // the read, never after a push that waited.
+        let arrived = source.base_time().map(|base| gst::ClockTime::from_nseconds(read_at.saturating_sub(base.nseconds())));
         let pieces = packetizer.cut(&chunk[..read]);
         for piece in pieces {
             if let Some(arrived) = arrived
@@ -2528,13 +2637,17 @@ fn read_stream(
             shared.health.ts(generation, &out.events, es.counts(), es.sound_state(), es.codec());
             let chunks = out.chunks;
             let pcr = piece.pcr;
-            if let Some(at) = push_piece(&source, &mut stamp, generation, &mut pushed, piece, arrived, &shared.health)
+            let (at, stepped) = push_piece(&source, &mut stamp, generation, &mut pushed, piece, arrived, &shared.health);
+            if let Some(at) = at
                 && let Some(pcr) = pcr
             {
                 reference = Some((at, pcr));
             }
-            if let (Some((_, _, source)), Some(arrived)) = (&sound, arrived) {
-                push_sound(source, chunks, reference, generation, arrived.nseconds(), shared, on_sound);
+            sound_discont |= stepped;
+            if let (Some((_, _, source)), Some(arrived)) = (&sound, arrived)
+                && !chunks.is_empty()
+            {
+                push_sound(source, chunks, (reference, std::mem::take(&mut sound_discont)), generation, arrived.nseconds(), shared, on_sound);
             }
         }
     }
@@ -2550,8 +2663,9 @@ fn push_piece(
     piece: Piece,
     arrived: Option<gst::ClockTime>,
     health: &crate::health::Health,
-) -> Option<u64> {
+) -> (Option<u64>, bool) {
     let mut stamped = None;
+    let mut step_taken = false;
     {
             let bytes = piece.data.len();
             let pcr = piece.pcr;
@@ -2560,8 +2674,27 @@ fn push_piece(
             let indicated = piece.discontinuity;
             let mut buffer = gst::Buffer::from_mut_slice(piece.data);
             if let Some(arrived) = arrived {
-                let Stamped { at, class, discontinuity } = stamp.time(generation, arrived.nseconds(), pcr);
+                let Stamped { at, class, discontinuity, stepped } = stamp.time(generation, arrived.nseconds(), pcr, indicated);
+                if let Some(step) = stepped {
+                    // A new phase for tsdemux too: on a DISCONT it pushes out
+                    // what it holds and starts its PCR observations again
+                    // (mpegtsbase), rather than taking the step over its 2 s
+                    // window and 125 PCRs of averaging.
+                    buffer.get_mut().expect("a new buffer is writable").set_flags(gst::BufferFlags::DISCONT);
+                    step_taken = true;
+                    eprintln!("mediabox-live: yayın {:.0} ms geç gelmeye başladı; saat o kadar ileri alındı", step as f64 / 1e6);
+                    mediabox_core::timeline!("clock-step", "gen={generation} step_ns={step} at={at}");
+                    health.clock_stepped();
+                }
                 health.chunk(generation, arrived.nseconds(), at);
+                if let Some(probe) = crate::clock_probe::get() {
+                    probe.chunk(arrived.nseconds(), at);
+                    if pcr.is_some()
+                        && let Some(trace) = stamp.trace.take()
+                    {
+                        probe.stamp(trace);
+                    }
+                }
                 stamped = Some(at);
                 *pushed += 1;
                 // A PCR jump is said on the timeline: the times of this
@@ -2583,11 +2716,15 @@ fn push_piece(
             }
             // A source taken down under the push refuses it; the reader goes
             // on for the branch after it. Counted, not dropped unsaid.
+            let held = crate::clock_probe::get().map(|_| crate::clock_probe::mono());
             if let Err(error) = source.push_buffer(buffer) {
                 health.push_failed(generation, "ts", error);
             }
+            if let (Some(probe), Some(from)) = (crate::clock_probe::get(), held) {
+                probe.push(crate::clock_probe::mono() - from);
+            }
     }
-    stamped
+    (stamped, step_taken)
 }
 
 /// A PTS (90 kHz, 33 bits) on the running time, by the last PCR (27 MHz)
@@ -2611,7 +2748,7 @@ pub fn pts_on_clock(pts: u64, reference: (u64, u64)) -> u64 {
 fn push_sound(
     source: &gst_app::AppSrc,
     chunks: Vec<crate::es::Chunk>,
-    reference: Option<(u64, u64)>,
+    (reference, discont): (Option<(u64, u64)>, bool),
     generation: u64,
     arrived: u64,
     shared: &Shared,
@@ -2620,7 +2757,7 @@ fn push_sound(
     let mut target = Some(source.clone());
     let bytes: usize = chunks.iter().map(|c| c.data.len()).sum();
     shared.health.diagnose(|d| d.c.ts_payload_bytes += bytes as u64);
-    let failed = route_sound(&mut target, chunks, reference, &mut |switch| on_sound(generation, switch), &mut |at| {
+    let failed = route_sound(&mut target, chunks, reference, discont, &mut |switch| on_sound(generation, switch), &mut |at| {
         shared.health.diagnose(|d| d.c.ts_pes_starts += 1);
         shared.health.demuxed(generation, true, arrived as i64 - at as i64);
         let mut starts = shared.sound_starts.lock().unwrap_or_else(|p| p.into_inner());
@@ -2646,11 +2783,12 @@ pub fn route_sound(
     target: &mut Option<gst_app::AppSrc>,
     chunks: Vec<crate::es::Chunk>,
     reference: Option<(u64, u64)>,
+    discont: bool,
     on_switch: &mut dyn FnMut(&crate::es::Switch) -> Option<gst_app::AppSrc>,
     on_start: &mut dyn FnMut(u64),
 ) -> Vec<gst::FlowError> {
     let mut failed = Vec::new();
-    let mut lost = false;
+    let mut lost = discont;
     for chunk in chunks {
         if let Some(switch) = &chunk.switch {
             *target = on_switch(switch);
@@ -2675,6 +2813,9 @@ pub fn route_sound(
             let buffer = buffer.get_mut().expect("a new buffer is writable");
             if let Some(pts) = chunk.pts {
                 let at = pts_on_clock(pts, reference);
+                if let Some(probe) = crate::clock_probe::get() {
+                    probe.pes(pts, at);
+                }
                 buffer.set_pts(gst::ClockTime::from_nseconds(at));
                 on_start(at);
             }

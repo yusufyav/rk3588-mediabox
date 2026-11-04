@@ -190,7 +190,7 @@ fn play(case: &Case, packets: Vec<Vec<u8>>, rng: &mut Rng, mux: &mut Mux) -> (Ve
     while at < stream.len() {
         let n = ((1 + rng.below(6) as usize) * PACKET).min(stream.len() - at);
         let fed = reader.feed(&stream[at..at + n]);
-        route_sound(&mut target, fed.chunks, Some(REFERENCE), &mut |_| panic!("no PMT change here"), &mut |_| {});
+        route_sound(&mut target, fed.chunks, Some(REFERENCE), false, &mut |_| panic!("no PMT change here"), &mut |_| {});
         at += n;
     }
     chain.finish()
@@ -373,6 +373,7 @@ fn the_sound_follows_the_pmt_into_a_new_parser_or_the_same() {
                 &mut target,
                 fed.chunks,
                 Some(REFERENCE),
+                false,
                 &mut |switch| {
                     switches.push(*switch);
                     assert!(switch.rebuild, "{label}: another codec is built anew");
@@ -425,6 +426,7 @@ fn the_sound_follows_the_pmt_into_a_new_parser_or_the_same() {
         &mut target,
         fed.chunks,
         Some(REFERENCE),
+        false,
         &mut |switch| {
             assert!(!switch.rebuild && switch.pid == 0x102);
             Some(same.clone())

@@ -510,7 +510,8 @@ macro_rules! counters {
 }
 
 counters! {
-    "transport": ts_payload_bytes, ts_pes_starts, ts_tei, ts_cc_loss, ts_duplicate, ts_discontinuity, ts_sound_resets;
+    "transport": ts_payload_bytes, ts_pes_starts, ts_tei, ts_cc_loss, ts_duplicate, ts_discontinuity, ts_sound_resets,
+        ts_arrival_steps;
     "timeline": frames, frame_gaps, frame_overlaps, frame_backward, frame_discont, frames_gated;
     "decoder": dec_in, dec_out_buffers, dec_out_frames, dec_reconfigured;
     "pcm": pcm_buffers, pcm_frames, pcm_zero_frames, pcm_silent_frames, pcm_gaps, pcm_gap_ns, pcm_overlaps, pcm_overlap_ns,
@@ -643,7 +644,9 @@ pub fn classify(kind: Kind, d: &Counters) -> Cause {
     if d.route_changes > 0 || d.sink_reopens > 0 {
         return Cause::RouteChange;
     }
-    if d.ts_cc_loss + d.ts_tei > 0 {
+    // Lost or damaged on the way in, or held back upstream and come late
+    // for good (`stamp::STEP_NS`): the sound had nothing to play.
+    if d.ts_cc_loss + d.ts_tei + d.ts_arrival_steps > 0 {
         return Cause::InputTransportDiscontinuity;
     }
     if d.frame_gaps + d.frame_overlaps + d.frame_backward + d.frame_discont > 0 {
