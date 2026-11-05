@@ -32,6 +32,7 @@ pub mod bridge;
 pub mod error;
 pub mod evidence;
 pub mod firmware;
+pub mod inject;
 pub mod libusb;
 pub mod log;
 pub mod patch;

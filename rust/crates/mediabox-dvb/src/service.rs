@@ -510,9 +510,11 @@ impl Writer {
                 let mut first_write = false;
                 let mut cc = crate::ts::CcCheck::default();
                 // What each stream epoch's output carried, on the timeline
-                // (`mediabox_core::ts_trace`): only while it is on.
+                // (`mediabox_core::ts_trace`), and a hole asked for there
+                // (`crate::inject`): only while it is on.
                 let mut epoch = 0u64;
                 let mut content = mediabox_core::ts_trace::Content::default();
+                let mut injector = crate::inject::Injector::default();
                 let written = |data: &[u8], cc: &mut crate::ts::CcCheck| {
                     if shared.cc_check.load(Ordering::Relaxed) {
                         let before = cc.errors;
@@ -642,6 +644,7 @@ impl Writer {
                         }
                     }
                     let Some(out) = sink.as_mut() else { return };
+                    let chunk = injector.apply(chunk);
                     match out.write_all(&chunk, &shared.abort) {
                         Ok(true) => {
                             written(&chunk, &mut cc);
