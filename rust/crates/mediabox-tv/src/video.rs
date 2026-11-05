@@ -1153,6 +1153,8 @@ impl Drop for Server {
 struct Pending<D: ControlDevice> {
     id: u64,
     due_ns: Option<u64>,
+    /// When it reached this process (CLOCK_MONOTONIC ns).
+    arrived_ns: u64,
     imported: Imported<D>,
     info: FrameInfo,
     dst: Rect,
@@ -1191,6 +1193,12 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// set against the vblank its page flip reports.
     snap_first: i64,
     shown_due: Option<u64>,
+    /// The due time of the frame last committed, for the live monitor
+    /// when its flip comes (`flipped`).
+    flip_wait: Option<u64>,
+    fault_staged: u64,
+    fault_holding: bool,
+    fault_held: Option<u64>,
     /// When the last frame arrived: whether the film is moving (`moving`).
     arrived: Option<std::time::Instant>,
     on: bool,
@@ -1220,6 +1228,10 @@ impl<D: ControlDevice + Clone> Sink<D> {
             snap: None,
             snap_first: 0,
             shown_due: None,
+            flip_wait: None,
+            fault_staged: 0,
+            fault_holding: false,
+            fault_held: None,
             arrived: None,
             on: false,
             refused: false,
@@ -1249,6 +1261,11 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// arrived within `within`. False while it is paused.
     pub fn moving(&self, within: std::time::Duration) -> bool {
         self.on && self.arrived.is_some_and(|at| at.elapsed() < within)
+    }
+
+    /// When the last frame of the film arrived.
+    pub fn last_arrival(&self) -> Option<std::time::Instant> {
+        self.arrived
     }
 
     pub fn frames(&self) -> u64 {
@@ -1355,11 +1372,19 @@ impl<D: ControlDevice + Clone> Sink<D> {
                                 self.server.peer(),
                                 old.id
                             );
+                            crate::monitor::presenter_dropped(crate::monitor::Drop::Other);
                             self.server.release(old.id);
                         }
                     }
-                    self.pending.push_back(Pending { id, due_ns, imported, info, dst, panel });
+                    let arrived_ns = monotonic_ns();
+                    self.pending.push_back(Pending { id, due_ns, arrived_ns, imported, info, dst, panel });
                     self.settle_snap();
+                    // How far ahead of its vblank's commit deadline it came:
+                    // the player's margin, as the presenter receives it.
+                    if let (Some(due), Some(snap), Some((last, period))) = (due_ns, self.snap, self.vblank) {
+                        let deadline = own_vblank(due.saturating_add_signed(snap), last, period) as i64 - COMMIT_MARGIN_NS as i64;
+                        crate::monitor::arrived(deadline - arrived_ns as i64);
+                    }
                     mediabox_core::timeline!(
                         "arrive",
                         "pid={} id={id} due={} pending={}",
@@ -1388,6 +1413,14 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// Whether a frame is waiting to be committed for the next vblank.
     pub fn has_pending(&self) -> bool {
         self.due_now().is_some()
+    }
+
+    /// The commit's page flip completed at `at_ns` (the kernel's
+    /// timestamp): the frame last committed went up then (`monitor`).
+    pub fn flipped(&mut self, at_ns: u64, period_ns: u64) {
+        if let Some(due) = self.flip_wait.take() {
+            crate::monitor::shown(due, at_ns, period_ns);
+        }
     }
 
     /// A vblank happened at `at_ns` (the kernel's timestamp), the refresh
@@ -1546,16 +1579,68 @@ impl<D: ControlDevice + Clone> Sink<D> {
     ) -> Option<usize> {
         // Frames due at the same vblank as a newer one go back unseen.
         let due = self.due_now()?;
+        // MEDIABOX_TV_FAULT=hold=N: every Nth frame held back one vblank, on
+        // purpose, to show the live monitor sees it. Unset, never.
+        static HOLD: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let hold = *HOLD.get_or_init(|| {
+            let n = std::env::var("MEDIABOX_TV_FAULT")
+                .ok()
+                .and_then(|v| v.strip_prefix("hold=").and_then(|n| n.parse().ok()))
+                .unwrap_or(0);
+            if n > 0 {
+                eprintln!("mediabox-tv.video: BİLEREK KUSUR (monitör sınaması): her {n}. kare bir vblank geç");
+            }
+            n
+        });
+        if hold > 0 && due == 0 {
+            let vblank = self.next_vblank().map(|(at, _)| at);
+            if self.fault_held.is_some() && self.fault_held == vblank {
+                return None;
+            }
+            self.fault_held = None;
+            if !self.fault_holding {
+                self.fault_staged += 1;
+                if self.fault_staged % hold == 0 {
+                    self.fault_holding = true;
+                    self.fault_held = vblank;
+                    mediabox_core::timeline!("fault", "hold n={} vblank={}", self.fault_staged, vblank.unwrap_or(0));
+                    return None;
+                }
+            }
+            self.fault_holding = false;
+        }
         for _ in 0..due {
             if let Some(old) = self.pending.pop_front() {
                 mediabox_core::timeline!(
                     "unseen",
-                    "pid={} id={} why=same-vblank due={} vblank={}",
+                    "pid={} id={} why=same-vblank due={} vblank={} arrived={}",
                     self.server.peer(),
                     old.id,
                     old.due_ns.unwrap_or(0),
-                    self.next_vblank().map_or(0, |(vblank, _)| vblank)
+                    self.next_vblank().map_or(0, |(vblank, _)| vblank),
+                    old.arrived_ns
                 );
+                // Whose: it came after its own vblank's commit deadline
+                // (the player's), or in time and the presenter did not
+                // commit it there (this process's).
+                // Or it shares its vblank with the frame after it: more
+                // frames than vblanks, a rate the panel cannot show.
+                let snap = self.snap.unwrap_or(0);
+                let why = match (old.due_ns, self.vblank) {
+                    (Some(due), Some((last, period))) => {
+                        let vblank = own_vblank(due.saturating_add_signed(snap), last, period);
+                        let next = self.pending.front().and_then(|next| next.due_ns).map(|d| own_vblank(d.saturating_add_signed(snap), last, period));
+                        if next == Some(vblank) {
+                            crate::monitor::Drop::Cadence
+                        } else if old.arrived_ns + COMMIT_MARGIN_NS > vblank {
+                            crate::monitor::Drop::CameLate
+                        } else {
+                            crate::monitor::Drop::NotCommitted
+                        }
+                    }
+                    _ => crate::monitor::Drop::Other,
+                };
+                crate::monitor::presenter_dropped(why);
                 trace::event('A', 0, old.id);
                 self.server.release(old.id);
             }
@@ -1610,6 +1695,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
         let pending = self.pending.pop_front()?;
         let id = pending.id;
         self.shown_due = pending.due_ns;
+        self.flip_wait = pending.due_ns;
         trace::event('c', pending.id, 0);
         planes[index].staged(pending.info.colour);
         if !self.on || self.picture.map(|(picture, _)| picture) != Some(pending.dst) {
@@ -1628,6 +1714,15 @@ impl<D: ControlDevice + Clone> Sink<D> {
         Some(id)
     }
 
+    /// The plane and framebuffer of the film frame committed last: what the
+    /// panel shows once that commit's flip has come (`platform`'s recovery
+    /// of a lost flip event reads the plane against it).
+    pub fn on_panel(&self, planes: &[VideoPlane]) -> Option<(control::plane::Handle, control::framebuffer::Handle)> {
+        let index = self.chosen?;
+        let (_, imported) = self.shown.back()?;
+        Some((planes.get(index)?.plane, imported.framebuffer()))
+    }
+
     /// The commit carrying the waiting frame was refused: it goes back.
     pub fn refused_commit(&mut self, error: &str) {
         if let Some(pending) = self.pending.pop_front() {
@@ -1637,6 +1732,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
                 self.server.peer(),
                 pending.id
             );
+            crate::monitor::presenter_dropped(crate::monitor::Drop::Other);
             if !self.refused {
                 eprintln!("mediabox-tv.video the frame's commit was refused: {error}");
                 self.refused = true;
@@ -1749,6 +1845,16 @@ fn track_snap(snap: i64, first: i64, due: u64, shown: u64, period: u64) -> i64 {
 fn racing(now: u64, last: u64, period: u64) -> Option<u64> {
     let previous = next_vblank_after(now, last, period) - period;
     (previous > now).then_some(previous)
+}
+
+/// The vblank a frame due at `due` (snapped) belongs to: the grid point of
+/// `last` nearest it -- the one `due_index` puts it up at.
+fn own_vblank(due: u64, last: u64, period: u64) -> u64 {
+    // The first vblank V with due <= V + period/2, as `due_index` has it.
+    let from = i128::from(due) - i128::from(last) - i128::from(period / 2);
+    let period = i128::from(period.max(1));
+    let first = -((-from).div_euclid(period)) * period;
+    (i128::from(last) + first).max(0) as u64
 }
 
 /// The next vblank a commit made at `now` still reaches, from the last one
@@ -2160,6 +2266,24 @@ mod tests {
             }
         }
         (shown, unseen)
+    }
+
+    /// The vblank a frame is judged against when it goes back unseen: the
+    /// one `due_index` puts it up at.
+    #[test]
+    fn a_frame_belongs_to_the_vblank_nearest_its_time() {
+        let (last, period) = (1000 * MS, 20 * MS);
+        assert_eq!(own_vblank(1020 * MS, last, period), 1020 * MS);
+        assert_eq!(own_vblank(1029 * MS, last, period), 1020 * MS);
+        assert_eq!(own_vblank(1030 * MS, last, period), 1020 * MS);
+        assert_eq!(own_vblank(1031 * MS, last, period), 1040 * MS);
+        assert_eq!(own_vblank(985 * MS, last, period), 980 * MS);
+        for due in (1011..1300).map(|ms| ms * MS) {
+            let vblank = own_vblank(due, last, period);
+            let next = next_vblank_after(vblank - COMMIT_MARGIN_NS - 1, last, period);
+            assert_eq!(due_index(&[Some(due)], Some((next, period))), Some(0), "due {due}");
+            assert_eq!(next, vblank, "committed just in time, it lands on its own vblank");
+        }
     }
 
     fn one_vblank_each(shown: &[(u64, u64)]) -> bool {

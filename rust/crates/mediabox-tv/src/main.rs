@@ -19,6 +19,7 @@ mod input;
 mod keyboard;
 mod metrics;
 mod model;
+mod monitor;
 mod platform;
 mod prefs;
 mod route;
@@ -277,6 +278,13 @@ struct App {
     /// again once it can carry one.
     live_receiver_asked: Option<Instant>,
     live_receiver_lost: bool,
+    /// The receiver's state as the control plane last reported it
+    /// (`film_moved`): what a stalled channel says.
+    live_receiver_state: Option<String>,
+    /// The live monitor is on the screen (key M on live television).
+    live_monitor: bool,
+    live_monitor_painted: Option<Instant>,
+    live_reports: monitor::PlayerReports,
     /// The channel last opened again because its player ended without a
     /// reason, and when: once, not over and over (`film_finished`).
     live_reopened: Option<(u16, Instant)>,
@@ -554,8 +562,17 @@ impl App {
                 }
             }
             // A keyboard on live television: its digits are the number pad,
-            // G the guide and I the banner.
+            // G the guide, I the banner and M the live monitor.
             Route::Live => {
+                if c == 'm' || c == 'M' {
+                    self.live_monitor = !self.live_monitor;
+                    self.live_monitor_painted = None;
+                    if self.live_monitor {
+                        self.live_reports.read();
+                    }
+                    self.paint();
+                    return;
+                }
                 let action = match c {
                     '0'..='9' => InputAction::of_digit(c as u8 - b'0'),
                     'g' | 'G' => Some(InputAction::Guide),
@@ -2253,6 +2270,43 @@ impl App {
         spawn_live_receiver();
     }
 
+    /// A channel whose pictures stopped after it had shown is not left frozen
+    /// on its last one: that is a picture of the past on a screen that says
+    /// live. While the receiver waited for its USB link to come back (up to
+    /// 20 s) or sent nothing under a lock (10 s), the panel held the last
+    /// frame with nothing said (2026-11-01). After `LIVE_STALL` without a
+    /// new frame the picture is taken off and the receiver's state said;
+    /// the next frame brings it back.
+    fn watch_live_flow(&mut self) {
+        let Some(playing) = self.here.as_ref() else {
+            return;
+        };
+        if !playing.live || !playing.seen {
+            return;
+        }
+        let stalled = platform::video_arrived().is_none_or(|at| at.elapsed() >= LIVE_STALL);
+        let state = self.live_receiver_state.clone();
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        if stalled == live.stalled {
+            return;
+        }
+        live.stalled = stalled;
+        if stalled {
+            eprintln!("mediabox-tv.live pictures stopped (receiver {state:?}); the picture is taken off");
+            if !live.no_signal {
+                live.problem = Some(live_stall_words(state.as_deref()).to_string());
+            }
+        } else {
+            eprintln!("mediabox-tv.live pictures again");
+            if !live.no_signal {
+                live.problem = None;
+            }
+        }
+        self.paint();
+    }
+
     /// The receiver's link (`mediabox_core::usblink`), asked every second
     /// while live television is open. Unusable, the screen says why and no
     /// channel is opened on it; usable again after that, the channel the
@@ -2424,6 +2478,11 @@ impl App {
         };
         let effect = live.tick(Instant::now());
         self.live_effect(effect);
+        self.watch_live_flow();
+        if self.live_monitor && self.live_monitor_painted.is_none_or(|at| at.elapsed() >= Duration::from_millis(500)) {
+            self.live_reports.read();
+            self.paint();
+        }
         if self.live_receiver_asked.is_none_or(|at| at.elapsed() >= LIVE_RECEIVER_REFRESH) {
             self.live_receiver_asked = Some(Instant::now());
             spawn_live_receiver();
@@ -2716,6 +2775,7 @@ impl App {
         if self.here.is_none() {
             return;
         }
+        self.live_receiver_state = status.pointer("/live/receiver/state").and_then(Value::as_str).map(str::to_string);
         // Which film this is, and how the last one ended, are the control
         // plane's to say. A film this interface adopted learns its number
         // here; one it started learned it from the answer to starting it.
@@ -5222,6 +5282,11 @@ impl App {
     }
 
     fn open(&mut self, route: Route) {
+        // The live monitor is a measuring tool asked for with M, each time:
+        // live television never opens with it up.
+        if route == Route::Live {
+            self.live_monitor = false;
+        }
         self.stack.push(route);
         self.paint();
         self.remember();
@@ -5535,6 +5600,9 @@ impl App {
             .here
             .as_ref()
             .is_some_and(|playing| !playing.seen && playing.asked.elapsed() >= Duration::from_millis(1500));
+        if self.live_monitor {
+            self.live_monitor_painted = Some(Instant::now());
+        }
         let Some(live) = self.live.as_mut() else {
             return;
         };
@@ -5546,7 +5614,15 @@ impl App {
 
         // A radio channel has no picture: black, and the reference's words.
         let radio = live.current_channel().is_some_and(|channel| channel.radio);
-        window.set_live_dark(live.no_signal || radio);
+        window.set_live_dark(live.no_signal || live.stalled || radio);
+        window.set_live_monitor_rows(model(if self.live_monitor {
+            monitor::rows(&self.live_reports)
+                .into_iter()
+                .map(|(label, value, state)| LiveMonitorRow { label: label.into(), value: value.into(), state })
+                .collect()
+        } else {
+            Vec::new()
+        }));
         // Nothing is said while a channel opens (Sony: TUNING, no words);
         // only what is so -- no signal, a problem, a radio channel.
         let _ = opening;
@@ -7262,6 +7338,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         live_tuned: None,
         live_receiver_asked: None,
         live_receiver_lost: false,
+        live_receiver_state: None,
+        live_monitor: false,
+        live_monitor_painted: None,
+        live_reports: monitor::PlayerReports::default(),
         live_reopened: None,
         hero_meta: std::collections::HashMap::new(),
         hero_state: std::collections::HashMap::new(),
@@ -8197,6 +8277,20 @@ struct TkgsResult {
 
 const LIVE_SETUP_REFRESH: Duration = Duration::from_millis(500);
 const LIVE_SIGNAL_REFRESH: Duration = Duration::from_millis(700);
+
+/// How long a live channel's pictures may stop before the last one is taken
+/// off the panel: fifty frames at 50 Hz, twenty-five at 25.
+const LIVE_STALL: Duration = Duration::from_secs(1);
+
+/// What a channel whose pictures stopped says, from its receiver's state.
+fn live_stall_words(state: Option<&str>) -> &'static str {
+    match state {
+        Some("reconnecting") => "Uydu alıcısının USB bağlantısı koptu; yeniden bağlanması bekleniyor.",
+        Some("tuning") => "Uydu alıcısı yeniden ayarlanıyor.",
+        Some("no_signal") => "Sinyal yok.",
+        _ => "Yayın akışı durdu; alıcıdan veri bekleniyor.",
+    }
+}
 
 /// How often the receiver's link is asked for while live television is open.
 const LIVE_RECEIVER_REFRESH: Duration = Duration::from_secs(1);

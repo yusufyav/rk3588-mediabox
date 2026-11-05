@@ -21,7 +21,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 
 use drm::Device as DrmDevice;
@@ -47,7 +47,7 @@ use slint::platform::{EventLoopProxy, Platform, PlatformError, WindowAdapter, Wi
 const DESIGN: (f32, f32) = (1920.0, 1080.0);
 
 #[derive(Clone)]
-struct SharedKms(Rc<OwnedFd>);
+struct SharedKms(Arc<OwnedFd>);
 
 impl AsFd for SharedKms {
     fn as_fd(&self) -> BorrowedFd<'_> {
@@ -158,22 +158,669 @@ struct PresentedFrame {
     _uncached: Option<Scanout>,
 }
 
+/// The interface's own frames: the buffers it drew, which only its thread
+/// may touch (GBM). When they go up is the presentation's (`Stage`).
 #[derive(Default)]
 struct Presentation {
     current: Option<PresentedFrame>,
+    /// The frame the panel showed before `current`, released once the
+    /// commit that replaced it (`pending_seq`) has flipped.
     pending_previous: Option<PresentedFrame>,
-    waiting_for_flip: bool,
-    /// The kernel has been asked for its next vblank (`ask_vblank`) and has
-    /// not answered yet.
-    vblank_asked: bool,
-    /// When the last commit reached its vblank.
-    last_flip: Option<std::time::Instant>,
+    pending_seq: u64,
     first_frame_logged: bool,
     /// How many buffers have needed a framebuffer built for them. On a healthy
     /// run this stops at the surface's buffer count — two or three — and the
     /// per-frame import work is gone. A number that keeps climbing means the
     /// cache is not working and is worth seeing in the journal.
     imports: u32,
+}
+
+/// What goes on the panel and when: the film's frames, the commit in
+/// flight, the vblanks. One lock, one owner of the timing.
+///
+/// The film used to be put up by the interface's event loop, between its
+/// drawing and its input: a frame due at a vblank waited for whatever that
+/// loop was doing. Measured on the Plus over a live match (2026-11-03):
+/// opening the channel band drew for 30-31 ms in one pass and the picture
+/// due in that time never went up (`unseen same-vblank`, the live monitor's
+/// "atlanan"); 27 such pictures in two hours, in clusters at key presses and
+/// at a Bluetooth keyboard going away. Now a thread of its own
+/// (`presenter`) reads the player's socket and the display's events and
+/// commits each film frame at its vblank, whatever the interface is doing.
+/// The interface hands over a drawn frame (`SplitDisplay::present_frame`)
+/// and the rare whole-display changes (a mode, a colour, the hand-over)
+/// hold this lock while they talk to the kernel, so only one commit is ever
+/// made at a time and never two in flight on the CRTC.
+struct StageState {
+    sink: crate::video::Sink<SharedKms>,
+    /// The overlays the film can go on (`VideoPlane::candidates`).
+    video: Vec<crate::video::VideoPlane>,
+    /// A commit is in flight: nothing else may be committed until its page
+    /// flip event has been read.
+    waiting_for_flip: bool,
+    /// The interface frame the commit in flight carries, by its number.
+    flip_ui_seq: Option<u64>,
+    /// The interface's frame handed over and not yet committed: its plane,
+    /// framebuffer and number. The presenter puts it in its next commit --
+    /// with the film frame due then, or alone -- so the interface never
+    /// commits and never waits on a CRTC the film keeps busy.
+    ui_next: Option<(control::plane::Handle, control::framebuffer::Handle, u64)>,
+    /// The number of the interface's last frame handed over, and of the last
+    /// one whose flip has been read.
+    ui_seq: u64,
+    ui_done_seq: u64,
+    /// A commit carrying the interface's frame was refused: said to it at
+    /// its next frame, as a commit of its own used to be.
+    ui_error: Option<String>,
+    /// The interface is changing the whole display (a mode, a colour, the
+    /// hand-over): nothing is committed until it lets go (`hold`).
+    hold: bool,
+    /// The commit in flight: what it carries and when it went, for a flip
+    /// event that never comes (`recover_flip`).
+    inflight: Option<Inflight>,
+    /// Since when commits have been refused as busy or not applied, with no
+    /// flip read: past `FLIP_FATAL` the presentation is declared broken.
+    stuck_since: Option<std::time::Instant>,
+    /// Lost flip events, by outcome, and failed reads of the display's
+    /// events: for the journal and the report.
+    flips_reconciled: u64,
+    flips_requeued: u64,
+    read_errors: u64,
+    /// The kernel has been asked for its next vblank and has not answered.
+    vblank_asked: bool,
+    /// When the last commit reached its vblank.
+    last_flip: Option<std::time::Instant>,
+    /// The refresh period of the mode on the wire, and the panel's size.
+    period_ns: u64,
+    panel: (u32, u32),
+    /// The interface has a frame on the panel: a film frame may go up.
+    ui_on_panel: bool,
+    /// The display has been handed over: nothing more goes up.
+    released: bool,
+    /// What the interface last took from here (`sync_presented`).
+    subtitle_seen: u64,
+    hdr_seen: Option<crate::video::HdrStatic>,
+}
+
+struct Stage {
+    state: Mutex<StageState>,
+    /// Notified after every pass of the presenter: a flip read, a frame
+    /// arrived.
+    changed: Condvar,
+    /// Wakes the presenter out of its poll: an interface frame handed over,
+    /// a hold let go.
+    wake: OwnedFd,
+}
+
+impl Stage {
+    fn lock(&self) -> MutexGuard<'_, StageState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn poke(&self) {
+        let one: u64 = 1;
+        // SAFETY: an eventfd this struct owns; eight bytes from the stack.
+        unsafe { libc::write(self.wake.as_raw_fd(), (&one as *const u64).cast(), 8) };
+    }
+}
+
+/// The stage held by the interface (`SplitDisplay::hold`): nothing is
+/// committed while this lives; dropped, the presenter goes on.
+struct Held<'a> {
+    stage: &'a Stage,
+    guard: Option<MutexGuard<'a, StageState>>,
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = StageState;
+    fn deref(&self) -> &StageState {
+        self.guard.as_ref().expect("held until dropped")
+    }
+}
+
+impl std::ops::DerefMut for Held<'_> {
+    fn deref_mut(&mut self) -> &mut StageState {
+        self.guard.as_mut().expect("held until dropped")
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Some(mut guard) = self.guard.take() {
+            guard.hold = false;
+            drop(guard);
+            self.stage.poke();
+        }
+    }
+}
+
+/// How long the interface waits for a commit's page flip before deciding it
+/// is lost. A flip that never comes used to hang the event loop for good.
+const FLIP_LOST: Duration = Duration::from_secs(1);
+
+/// A commit whose flip event has not come.
+#[derive(Clone, Copy)]
+struct Inflight {
+    at: std::time::Instant,
+    /// The interface frame it carries: plane, framebuffer, number.
+    ui: Option<(control::plane::Handle, control::framebuffer::Handle, u64)>,
+    /// The film frame it carries: plane, framebuffer.
+    film: Option<(control::plane::Handle, control::framebuffer::Handle)>,
+    /// The CRTC's vblank count when it was committed: two vblanks later a
+    /// nonblocking commit with nothing before it has been applied.
+    vblank: Option<u32>,
+}
+
+/// The CRTC's vblank count now and when that vblank was (CLOCK_MONOTONIC ns).
+fn vblank_now(kms: &SharedKms, crtc: control::crtc::Handle) -> Option<(u32, Option<u64>)> {
+    let pipe = kms.resource_handles().ok()?.crtcs().iter().position(|c| *c == crtc)?;
+    let reply = kms.wait_vblank(drm::VblankWaitTarget::Relative(0), drm::VblankWaitFlags::empty(), pipe as u32, 0).ok()?;
+    Some((reply.frame(), reply.time().map(|t| t.as_nanos() as u64)))
+}
+
+/// A flip this many periods late is looked for: the vblank count and the
+/// planes. (Three-halves: the vblank after the commit, and half a period
+/// for the event to have been read had it come.)
+const FLIP_OVERDUE_HALF_PERIODS: u32 = 3;
+/// Not on the planes this many periods after the commit: it was not applied.
+const FLIP_UNAPPLIED_PERIODS: u32 = 10;
+/// No flip at all for this long, with recovery tried: the display is broken
+/// and the process says so and ends (systemd starts it again) rather than
+/// leave a frozen picture.
+const FLIP_FATAL: Duration = Duration::from_secs(3);
+
+/// Why a commit did not go.
+enum CommitError {
+    /// The kernel still has a commit of ours pending on the CRTC.
+    Busy,
+    Refused(String),
+}
+
+impl std::fmt::Display for CommitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommitError::Busy => write!(f, "atomic commit: Device or resource busy (a commit of ours still pending)"),
+            CommitError::Refused(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+/// MEDIABOX_TV_FAULT=dropflip=N / readerr=N: every Nth page-flip event
+/// thrown away, or every Nth read of the display's events failed, on
+/// purpose -- to show a lost flip is recovered. Unset, never.
+fn flip_fault() -> (u64, u64) {
+    static FAULT: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    *FAULT.get_or_init(|| {
+        let spec = std::env::var("MEDIABOX_TV_FAULT").unwrap_or_default();
+        let get = |key: &str| {
+            spec.split(',').find_map(|part| part.strip_prefix(key).and_then(|n| n.parse().ok())).unwrap_or(0)
+        };
+        let fault = (get("dropflip="), get("readerr="));
+        if fault != (0, 0) {
+            eprintln!("mediabox-tv.kms: BİLEREK KUSUR: her {}. flip olayı atılıyor, her {}. olay okuması hatalı sayılıyor", fault.0, fault.1);
+        }
+        fault
+    })
+}
+
+/// The refresh period of `mode`, ns.
+fn period_of(mode: &control::Mode) -> u64 {
+    let (_, _, htotal) = mode.hsync();
+    let (_, _, vtotal) = mode.vsync();
+    let clock_khz = u64::from(mode.clock());
+    if clock_khz == 0 || htotal == 0 || vtotal == 0 {
+        return 16_666_667;
+    }
+    u64::from(htotal) * u64::from(vtotal) * 1_000_000 / clock_khz
+}
+
+/// One commit for this vblank: the interface's frame (`ui`, on its plane) if
+/// there is one, the waiting film frame if there is one, or both.
+/// Nonblocking, with an event when the vblank has passed; nothing else is
+/// committed until the presenter has read it. True when something was
+/// committed.
+fn commit_on_stage(
+    kms: &SharedKms,
+    crtc: control::crtc::Handle,
+    s: &mut StageState,
+    ui: Option<(control::plane::Handle, control::framebuffer::Handle, u64)>,
+) -> Result<bool, CommitError> {
+    use control::property::Value;
+    let mut request = control::atomic::AtomicModeReq::new();
+    if let Some((plane, framebuffer, _)) = ui {
+        let fb = find_property(kms, plane, "FB_ID")
+            .ok_or_else(|| CommitError::Refused("no FB_ID on the interface's plane".into()))?;
+        request.add_property(plane, fb, Value::Framebuffer(Some(framebuffer)));
+    }
+    let staged = s.sink.stage(kms, crtc, &s.video, &mut request);
+    if ui.is_none() && staged.is_none() {
+        return Ok(false);
+    }
+    let flags = control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT;
+    let committed = kms.atomic_commit(flags, request);
+    let committed = match (committed, staged, ui) {
+        (Ok(()), _, _) => Ok(staged),
+        // The film's part refused it: the interface's frame goes on its
+        // own rather than the panel freezing on the last one.
+        (Err(error), Some(_), Some((plane, framebuffer, _))) => {
+            s.sink.refused_commit(&error.to_string());
+            let fb = find_property(kms, plane, "FB_ID").ok_or_else(|| CommitError::Refused("no FB_ID".into()))?;
+            let mut alone = control::atomic::AtomicModeReq::new();
+            alone.add_property(plane, fb, Value::Framebuffer(Some(framebuffer)));
+            kms.atomic_commit(flags, alone).map(|()| None)
+        }
+        (Err(error), _, _) => {
+            if staged.is_some() {
+                s.sink.refused_commit(&error.to_string());
+            }
+            Err(error)
+        }
+    };
+    let staged = committed.map_err(|e| {
+        if e.raw_os_error() == Some(libc::EBUSY) {
+            CommitError::Busy
+        } else {
+            CommitError::Refused(format!("atomic commit: {e}"))
+        }
+    })?;
+    crate::video::trace::event('C', u64::from(ui.is_some()), u64::from(staged.is_some()));
+    let mut film = None;
+    if let Some(index) = staged {
+        film = s.sink.committed(&s.video, index);
+        VIDEO.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    mediabox_core::timeline!(
+        "commit",
+        "pid={} id={} ui={} thread={}",
+        s.sink.peer(),
+        film.unwrap_or(0),
+        u8::from(ui.is_some()),
+        std::thread::current().name().unwrap_or("?")
+    );
+    s.waiting_for_flip = true;
+    s.flip_ui_seq = ui.map(|(_, _, seq)| seq);
+    s.inflight = Some(Inflight {
+        at: std::time::Instant::now(),
+        ui,
+        film: if film.is_some() { s.sink.on_panel(&s.video) } else { None },
+        vblank: vblank_now(kms, crtc).map(|(seq, _)| seq),
+    });
+    Ok(true)
+}
+
+/// The commit in flight has reached the panel at `at` (CLOCK_MONOTONIC ns):
+/// read from its page-flip event, or, the event lost, from the planes
+/// (`recover_flip`).
+fn flip_completed(s: &mut StageState, at: u64) {
+    s.sink.flipped(at, s.period_ns);
+    s.sink.vblank(at, s.period_ns);
+    s.waiting_for_flip = false;
+    s.inflight = None;
+    s.stuck_since = None;
+    s.last_flip = Some(std::time::Instant::now());
+    if let Some(seq) = s.flip_ui_seq.take() {
+        s.ui_done_seq = seq;
+    }
+}
+
+/// Every event the display has for this process: page flips end the commit
+/// in flight, vblanks asked for set the grid. A read that fails is said
+/// (errno, and what was in flight) and counted; the commit it may have
+/// carried the flip of is then recovered from the planes (`recover_flip`).
+fn read_display_events(kms: &SharedKms, crtc: control::crtc::Handle, s: &mut StageState) {
+    static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static FLIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (drop_every, fail_every) = flip_fault();
+    let read = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let events = match kms.receive_events() {
+        Ok(events) if fail_every > 0 && read % fail_every == 0 => {
+            drop(events.count());
+            Err(std::io::Error::other("injected (MEDIABOX_TV_FAULT=readerr)"))
+        }
+        result => result,
+    };
+    let events = match events {
+        Ok(events) => events,
+        Err(error) => {
+            s.read_errors += 1;
+            mediabox_core::timeline!("drm-read-error", "errno={:?} waiting={} n={}", error.raw_os_error(), s.waiting_for_flip, s.read_errors);
+            if s.read_errors <= 5 || s.read_errors.is_power_of_two() {
+                eprintln!(
+                    "mediabox-tv.kms reading the display's events failed ({error}); commit in flight={}, {} times so far",
+                    s.waiting_for_flip, s.read_errors
+                );
+            }
+            return;
+        }
+    };
+    for event in events {
+        match event {
+            control::Event::PageFlip(flip) => {
+                let n = FLIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if drop_every > 0 && n % drop_every == 0 {
+                    mediabox_core::timeline!("fault", "dropflip n={n} seq={}", flip.frame);
+                    continue;
+                }
+                crate::video::trace::event('F', 0, 0);
+                crate::video::trace::vblank(flip.frame, flip.duration);
+                let at = flip.duration.as_nanos() as u64;
+                mediabox_core::timeline!("flip", "seq={} at={at}", flip.frame);
+                flip_completed(s, at);
+            }
+            control::Event::Vblank(vblank) if vblank.crtc == crtc => {
+                s.vblank_asked = false;
+                mediabox_core::timeline!("vblank-event", "seq={} at={}", vblank.frame, vblank.time.as_nanos());
+                s.sink.vblank(vblank.time.as_nanos() as u64, s.period_ns);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The commit in flight has had no flip event for `FLIP_OVERDUE_PERIODS`:
+/// the planes say whether it was applied.
+///
+/// - Every plane it set shows what it set: the commit reached the panel and
+///   only its event was lost. The state goes on as if the event had come,
+///   at the vblank the kernel reports now.
+/// - After `FLIP_UNAPPLIED_PERIODS` a plane still shows something else: it
+///   was not applied. Nothing it carried is taken for shown; the
+///   interface's frame goes back to wait for the next commit, and the
+///   buffers on the panel stay held.
+/// - No flip for `FLIP_FATAL` with this tried: the presentation is broken,
+///   and the process says so and ends rather than freeze the picture.
+fn recover_flip(kms: &SharedKms, crtc: control::crtc::Handle, s: &mut StageState) {
+    let Some(inflight) = s.inflight else {
+        return;
+    };
+    let period = Duration::from_nanos(s.period_ns.max(1));
+    let late = inflight.at.elapsed();
+    if late < period * FLIP_OVERDUE_HALF_PERIODS / 2 {
+        return;
+    }
+    // GETPLANE reports the state committed, not what is scanned out: the
+    // planes alone say the commit was taken, the vblank count that a vblank
+    // has passed since -- the one it went up at.
+    let shows = |plane: control::plane::Handle, fb: control::framebuffer::Handle| {
+        kms.get_plane(plane).ok().is_some_and(|info| info.framebuffer() == Some(fb))
+    };
+    let now = vblank_now(kms, crtc);
+    let passed = match (inflight.vblank, now) {
+        (Some(then), Some((seq, _))) => seq.wrapping_sub(then) >= 2 && seq.wrapping_sub(then) < 1 << 30,
+        // No count to go by: three periods, as before.
+        _ => late >= period * 3,
+    };
+    let applied = passed
+        && inflight.ui.is_none_or(|(plane, fb, _)| shows(plane, fb))
+        && inflight.film.is_none_or(|(plane, fb)| shows(plane, fb));
+    let stuck = *s.stuck_since.get_or_insert(inflight.at);
+    if applied && (inflight.ui.is_some() || inflight.film.is_some()) {
+        // It went up at the vblank after its commit: that vblank's time,
+        // from the one the kernel reports now. Unreadable, the time now.
+        let at = match (inflight.vblank, now) {
+            (Some(then), Some((seq, Some(time)))) => {
+                time.saturating_sub(u64::from(seq.wrapping_sub(then).saturating_sub(1)) * s.period_ns)
+            }
+            _ => monotonic_now_ns(),
+        };
+        s.flips_reconciled += 1;
+        mediabox_core::timeline!("flip-reconciled", "late_ms={:.1} ui={} film={}", late.as_secs_f64() * 1e3, inflight.ui.is_some(), inflight.film.is_some());
+        eprintln!(
+            "mediabox-tv.kms the page-flip event of a commit did not come in {:.0} ms; the planes show it, so it is taken as flipped ({} so far)",
+            late.as_secs_f64() * 1e3,
+            s.flips_reconciled
+        );
+        flip_completed(s, at);
+        return;
+    }
+    if late < period * FLIP_UNAPPLIED_PERIODS {
+        return;
+    }
+    if stuck.elapsed() >= FLIP_FATAL {
+        mediabox_core::timeline!("flip-fatal", "stuck_ms={}", stuck.elapsed().as_millis());
+        eprintln!(
+            "mediabox-tv.kms FATAL: no commit has reached the panel for {} ms and recovery did not bring one; ending so the service starts again",
+            stuck.elapsed().as_millis()
+        );
+        std::process::exit(70);
+    }
+    // Not applied: nothing it carried is on the panel.
+    s.flips_requeued += 1;
+    mediabox_core::timeline!("flip-unapplied", "late_ms={:.1} ui={} film={}", late.as_secs_f64() * 1e3, inflight.ui.is_some(), inflight.film.is_some());
+    eprintln!(
+        "mediabox-tv.kms a commit was not applied in {:.0} ms (no flip, the planes unchanged); its interface frame waits for the next commit ({} so far)",
+        late.as_secs_f64() * 1e3,
+        s.flips_requeued
+    );
+    s.waiting_for_flip = false;
+    s.inflight = None;
+    s.flip_ui_seq = None;
+    if let Some(frame) = inflight.ui
+        && s.ui_next.is_none()
+    {
+        s.ui_next = Some(frame);
+    }
+}
+
+fn monotonic_now_ns() -> u64 {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: a valid clock id and a timespec on the stack.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// Ask the kernel for its next vblank on this CRTC, as an event
+/// (`DRM_VBLANK_EVENT`): when the grid of the mode is not known -- after a
+/// mode change, before any page flip of the new mode -- a timed film frame
+/// waits for it, and the event carries the vblank's own timestamp
+/// (CLOCK_MONOTONIC, as page flips do). Refused, frames go up as they come.
+fn ask_vblank_on_stage(kms: &SharedKms, crtc: control::crtc::Handle, s: &mut StageState) {
+    if s.vblank_asked || !s.sink.wants_vblank() {
+        return;
+    }
+    let pipe = kms.resource_handles().ok().and_then(|resources| resources.crtcs().iter().position(|c| *c == crtc));
+    let asked = pipe.ok_or_else(|| "the CRTC is not the device's".to_string()).and_then(|pipe| {
+        kms.wait_vblank(drm::VblankWaitTarget::Relative(1), drm::VblankWaitFlags::EVENT, pipe as u32, 0)
+            .map_err(|error| error.to_string())
+    });
+    match asked {
+        Ok(_) => {
+            mediabox_core::timeline!("vblank-ask", "pipe={}", pipe.unwrap_or(0));
+            s.vblank_asked = true;
+        }
+        Err(error) => {
+            eprintln!("mediabox-tv.video the kernel will not report a vblank ({error}); film frames go up as they come");
+            s.sink.vblank_unavailable();
+        }
+    }
+}
+
+/// The presentation thread: the player's socket and the display's events,
+/// and each film frame committed for its vblank.
+///
+/// It runs at a real-time priority, as Android's SurfaceFlinger does
+/// (SCHED_FIFO, main_surfaceflinger.cpp); a pass is well under a
+/// millisecond (an import, a commit), so the CPUs are not taken from
+/// anything. At an ordinary priority, with the CPUs busy (4 spinning
+/// threads and 2 copying memory, load 7.6 on 8 cores) the loop was held
+/// 24-26 ms in one pass and frames missed their vblank: 77 skipped in 25
+/// minutes of NTV, none without the load (measured 2026-11-01). The kernel
+/// keeps 5 % of each second for everything else (sched_rt_runtime_us).
+fn presenter(stage: Arc<Stage>, kms: SharedKms, crtc: control::crtc::Handle) {
+    /// Where SCHED_FIFO is refused -- on this appliance always: the kernel
+    /// is built with CONFIG_RT_GROUP_SCHED and the root cgroup hands the
+    /// cpu controller down (`cgroup.subtree_control`: cpu memory pids), so
+    /// every service's group has no real-time budget, which cgroup v2 has
+    /// no file to give it, and sched_setscheduler is EPERM for root with
+    /// CAP_SYS_NICE (measured 2026-11-04). The strongest ordinary weight
+    /// instead, well above the interface's (`INTERFACE_NICE`): CFS gives
+    /// nice -20 88761 against nice -5's 3121, and the presenter's passes
+    /// are a fraction of a millisecond.
+    const NICE: libc::c_int = -20;
+    let param = libc::sched_param { sched_priority: 2 };
+    // SAFETY: sets the calling thread's policy; `param` is valid.
+    let rc = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) };
+    let mut nice = None;
+    if rc != 0 {
+        // Refused where the kernel groups real-time time by cgroup
+        // (CONFIG_RT_GROUP_SCHED) and systemd has the cpu controller on.
+        let fifo = std::io::Error::last_os_error();
+        // SAFETY: gettid and setpriority on this thread only.
+        let set = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, NICE) };
+        nice = (set == 0).then_some(NICE);
+        eprintln!(
+            "mediabox-tv.platform the presentation thread: no SCHED_FIFO ({fifo}); nice {}",
+            nice.map_or_else(|| format!("refused ({})", std::io::Error::last_os_error()), |n| n.to_string())
+        );
+    }
+    mediabox_core::timeline!("sched", "thread=present fifo={} nice={:?}", u8::from(rc == 0), nice);
+    /// The interface's frame waits for the film's frame of the vblank it
+    /// would go up at -- until this long before that vblank, and no longer.
+    /// Sent the moment the last vblank passed, it took the CRTC from the
+    /// film frame of that period, which then waited a whole period, the
+    /// next one arrived on top of it and the older was given back unseen:
+    /// 76 of 552 film frames with a key held over a 4K film (2026-10-12).
+    const UI_MARGIN: Duration = Duration::from_millis(4);
+    loop {
+        let (video, timeout) = {
+            let s = stage.lock();
+            if s.released {
+                return;
+            }
+            if mediabox_core::timeline::enabled() {
+                s.sink.trace_first_wait(s.waiting_for_flip, s.ui_on_panel);
+            }
+            let idle = s.waiting_for_flip || !s.ui_on_panel || s.hold;
+            let mut timeout = Duration::from_millis(250);
+            if let Some(until) = s.sink.until_due().filter(|until| !(until.is_zero() && idle)) {
+                timeout = timeout.min(until);
+            }
+            if !idle && s.ui_next.is_some() {
+                timeout = timeout.min(ui_wait(&s, UI_MARGIN));
+            }
+            // A flip overdue is looked for on the planes (`recover_flip`).
+            if let Some(inflight) = s.inflight {
+                let period = Duration::from_nanos(s.period_ns.max(1));
+                let overdue = period * FLIP_OVERDUE_HALF_PERIODS / 2;
+                let next = if inflight.at.elapsed() < overdue {
+                    overdue
+                } else if inflight.at.elapsed() < period * 3 {
+                    period * 3
+                } else {
+                    period * FLIP_UNAPPLIED_PERIODS
+                };
+                timeout = timeout.min(next.saturating_sub(inflight.at.elapsed()).max(Duration::from_millis(1)));
+            }
+            (s.sink.poll_fd(), timeout.as_micros().div_ceil(1000) as i32)
+        };
+        let mut pollfds = [
+            libc::pollfd { fd: video, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: kms.as_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: stage.wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        ];
+        let asleep = mediabox_core::timeline::now_ns();
+        // SAFETY: three valid pollfd entries on the stack.
+        let rc = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, timeout) };
+        // Woken by the timeout: how long past it this thread ran again.
+        let woke_late = (rc == 0).then(|| mediabox_core::timeline::now_ns().saturating_sub(asleep + timeout.max(0) as u64 * 1_000_000));
+        if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            eprintln!("mediabox-tv.platform presentation poll: {}", std::io::Error::last_os_error());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if pollfds[2].revents & libc::POLLIN != 0 {
+            let mut value: u64 = 0;
+            // SAFETY: reads the eventfd's eight-byte counter.
+            unsafe { libc::read(stage.wake.as_raw_fd(), (&mut value as *mut u64).cast(), 8) };
+        }
+        let started = mediabox_core::timeline::now_ns();
+        let mut s = stage.lock();
+        let locked = mediabox_core::timeline::now_ns();
+        if s.released {
+            return;
+        }
+        if pollfds[1].revents & libc::POLLIN != 0 {
+            read_display_events(&kms, crtc, &mut s);
+        }
+        if pollfds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 || s.sink.has_pending() {
+            let (width, height) = s.panel;
+            let into = crate::video::Rect { x: 0, y: 0, width, height };
+            let state = &mut *s;
+            state.sink.pump(&kms, crtc, &state.video, into);
+            VIDEO.store(state.sink.showing() || state.sink.has_pending(), std::sync::atomic::Ordering::Relaxed);
+            *ARRIVED.lock().unwrap_or_else(|e| e.into_inner()) = state.sink.last_arrival();
+            // The interface draws the subtitle and tells the television
+            // about HDR: wake it when either has changed.
+            if state.sink.subtitle().0 != state.subtitle_seen || state.sink.hdr() != state.hdr_seen {
+                let _ = slint::invoke_from_event_loop(|| {});
+            }
+        }
+        if s.waiting_for_flip {
+            recover_flip(&kms, crtc, &mut s);
+        }
+        ask_vblank_on_stage(&kms, crtc, &mut s);
+        if !s.waiting_for_flip && s.ui_on_panel && !s.hold {
+            let film = s.sink.has_pending();
+            let ui = s.ui_next.is_some() && (film || ui_wait(&s, UI_MARGIN).is_zero());
+            if film || ui {
+                let frame = if ui { s.ui_next.take() } else { None };
+                match commit_on_stage(&kms, crtc, &mut s, frame) {
+                    Ok(_) => {}
+                    Err(CommitError::Busy) => {
+                        // A commit of ours the kernel still holds, its flip
+                        // not read: waited for like one in flight, and
+                        // recovered from the planes if it never comes.
+                        mediabox_core::timeline!("commit-busy", "ui={}", frame.is_some());
+                        if frame.is_some() && s.ui_next.is_none() {
+                            s.ui_next = frame;
+                        }
+                        s.waiting_for_flip = true;
+                        s.flip_ui_seq = None;
+                        s.inflight = Some(Inflight { at: std::time::Instant::now(), ui: None, film: None, vblank: None });
+                        s.stuck_since.get_or_insert_with(std::time::Instant::now);
+                    }
+                    Err(error) => {
+                        eprintln!("mediabox-tv.video {error}");
+                        if let Some((_, _, seq)) = frame {
+                            // Not on the panel: the interface hears of it.
+                            s.ui_error = Some(error.to_string());
+                            s.ui_done_seq = s.ui_done_seq.max(seq);
+                        }
+                    }
+                }
+            }
+        }
+        drop(s);
+        stage.changed.notify_all();
+        let done = mediabox_core::timeline::now_ns();
+        crate::monitor::presenter_pass(woke_late, locked - started, done - locked);
+        if mediabox_core::timeline::enabled() && done - started > 2_000_000 {
+            mediabox_core::timeline::write(
+                "present-slow",
+                format_args!(
+                    "lock={:.2} pass={:.2} revents={},{},{}",
+                    (locked - started) as f64 / 1e6,
+                    (done - locked) as f64 / 1e6,
+                    pollfds[0].revents,
+                    pollfds[1].revents,
+                    pollfds[2].revents
+                ),
+            );
+        }
+    }
+}
+
+/// How long the interface's waiting frame still waits for the film's frame
+/// of the coming vblank: zero once no film is moving, or `margin` before
+/// that vblank.
+fn ui_wait(s: &StageState, margin: Duration) -> Duration {
+    if !s.sink.moving(Duration::from_millis(120)) {
+        return Duration::ZERO;
+    }
+    let Some(flip) = s.last_flip else {
+        return Duration::ZERO;
+    };
+    let deadline = flip + Duration::from_nanos(s.period_ns).saturating_sub(margin);
+    deadline.saturating_duration_since(std::time::Instant::now())
 }
 
 /// Where a frame's time actually goes, split at the three boundaries this
@@ -282,8 +929,14 @@ pub fn active_mode() -> (u32, u32, u32) {
     MODE.with(|cell| cell.get())
 }
 
-thread_local! {
-    static VIDEO: Cell<bool> = const { Cell::new(false) };
+/// Set by the presentation thread (`presenter`), read by the interface.
+static VIDEO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// When the film's last frame arrived from its player.
+static ARRIVED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// When the film's last frame arrived from its player, if one has.
+pub fn video_arrived() -> Option<std::time::Instant> {
+    *ARRIVED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Whether a film is on the video plane at this moment.
@@ -292,7 +945,7 @@ thread_local! {
 /// process, not another application — but the plane sits above the primary, so
 /// while this is true the panel is showing the film and not the catalogue.
 pub fn video_showing() -> bool {
-    VIDEO.with(|cell| cell.get())
+    VIDEO.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 thread_local! {
@@ -339,14 +992,12 @@ struct Switch {
 
 struct SplitDisplay {
     kms: SharedKms,
-    /// The overlays the appliance's own player can draw into, best first.
-    /// Enumerated at startup and held for the life of the process: asking the
-    /// display controller for a window while a film is waiting to start is a
-    /// question with a worse moment to ask it.
-    video: Vec<crate::video::VideoPlane>,
-    /// The socket the player hands decoded frames down, and the frames the
-    /// display controller has not finished with.
-    sink: RefCell<crate::video::Sink<SharedKms>>,
+    /// The film's socket, its planes and the commit timing, shared with the
+    /// presentation thread (`presenter`). The overlays the appliance's own
+    /// player can draw into are enumerated at startup and held for the life
+    /// of the process: asking the display controller for a window while a
+    /// film is waiting to start is a question with a worse moment to ask it.
+    stage: Arc<Stage>,
     connector: control::connector::Info,
     crtc: control::crtc::Handle,
     /// The mode on the wire. It changes when a person picks another one in
@@ -499,7 +1150,7 @@ impl SplitDisplay {
             .write(true)
             .open(&kms_path)
             .map_err(|e| format!("open KMS node {kms_path}: {e}"))?;
-        let kms = SharedKms(Rc::new(kms_file.into()));
+        let kms = SharedKms(Arc::new(kms_file.into()));
         kms.acquire_master_lock()
             .or_else(|e| {
                 if e.raw_os_error() == Some(libc::EINVAL) {
@@ -661,6 +1312,53 @@ impl SplitDisplay {
                 htotal * vtotal * 1_000_000 / u64::from(mode.clock()).max(1)
             );
         }
+        let stage = Arc::new(Stage {
+            state: Mutex::new(StageState {
+                sink,
+                video,
+                waiting_for_flip: false,
+                flip_ui_seq: None,
+                ui_next: None,
+                ui_seq: 0,
+                ui_done_seq: 0,
+                ui_error: None,
+                hold: false,
+                inflight: None,
+                stuck_since: None,
+                flips_reconciled: 0,
+                flips_requeued: 0,
+                read_errors: 0,
+                vblank_asked: false,
+                last_flip: None,
+                period_ns: period_of(&mode),
+                panel: {
+                    let (width, height) = mode.size();
+                    (width.into(), height.into())
+                },
+                ui_on_panel: false,
+                released: false,
+                subtitle_seen: 0,
+                hdr_seen: None,
+            }),
+            changed: Condvar::new(),
+            wake: {
+                // SAFETY: eventfd returns a new descriptor or -1.
+                let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+                if fd < 0 {
+                    return Err(format!("eventfd: {}", std::io::Error::last_os_error()).into());
+                }
+                // SAFETY: a descriptor just created and owned by nothing else.
+                unsafe { OwnedFd::from_raw_fd(fd) }
+            },
+        });
+        {
+            let stage = Arc::clone(&stage);
+            let kms = kms.clone();
+            std::thread::Builder::new()
+                .name("mediabox-tv-present".into())
+                .spawn(move || presenter(stage, kms, crtc))
+                .map_err(|e| PlatformError::from(format!("the presentation thread: {e}")))?;
+        }
         let display = Rc::new(Self {
             kms,
             connector,
@@ -680,8 +1378,7 @@ impl SplitDisplay {
             generation: Cell::new(0),
             retired: RefCell::new(None),
             switch: RefCell::new(None),
-            video,
-            sink: RefCell::new(sink),
+            stage: Arc::clone(&stage),
             presentation: RefCell::new(Presentation::default()),
             primary: Cell::new(None),
             released: Cell::new(false),
@@ -731,42 +1428,78 @@ impl SplitDisplay {
         (fit - 1e-6).ceil().clamp(1.0, 4.0)
     }
 
+    /// Until the interface's last frame handed over is on the panel (its
+    /// commit's flip read by the presenter), and the frame before it given
+    /// back to GBM.
     fn wait_for_page_flip(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if !self.presentation.borrow().waiting_for_flip {
-            return Ok(());
-        }
-        loop {
-            let mut found = None;
-            for event in self.kms.receive_events()? {
-                match event {
-                    control::Event::PageFlip(flip) if found.is_none() => found = Some(flip),
-                    control::Event::Vblank(vblank) => self.vblank_event(&vblank),
-                    _ => {}
-                }
+        // Bounded by the presenter: a commit that never reaches the panel
+        // is recovered or ends the process within `FLIP_FATAL`. Past five
+        // seconds here something else is wrong, and it is an error -- the
+        // frame before is never given back while it may still be on the
+        // panel.
+        let mut s = self.stage.lock();
+        let started = std::time::Instant::now();
+        let mut said = 0;
+        while s.ui_on_panel && (s.ui_next.is_some() || s.ui_done_seq < s.ui_seq) {
+            let waited = started.elapsed();
+            if waited >= FLIP_LOST * 5 {
+                mediabox_core::timeline!("ui-frame-lost", "waiting={} hold={}", s.waiting_for_flip, s.hold);
+                return Err(format!(
+                    "the interface's frame did not reach the panel in {waited:?} (commit in flight={}, hold={})",
+                    s.waiting_for_flip, s.hold
+                )
+                .into());
             }
-            if let Some(flip) = found {
-                crate::video::trace::event('F', 1, 0);
-                crate::video::trace::vblank(flip.frame, flip.duration);
-                mediabox_core::timeline!(
-                    "flip",
-                    "seq={} at={}",
-                    flip.frame,
-                    flip.duration.as_nanos()
+            if waited >= FLIP_LOST * (said + 1) {
+                said += 1;
+                eprintln!(
+                    "mediabox-tv.platform the interface's frame is not on the panel after {waited:?} (commit in flight={} hold={})",
+                    s.waiting_for_flip, s.hold
                 );
-                self.sink.borrow_mut().vblank(
-                    flip.duration.as_nanos() as u64,
-                    self.frame_period().as_nanos() as u64,
-                );
-                let old = {
-                    let mut state = self.presentation.borrow_mut();
-                    state.waiting_for_flip = false;
-                    state.last_flip = Some(std::time::Instant::now());
-                    state.pending_previous.take()
-                };
-                drop(old);
-                return Ok(());
             }
+            s = self.stage.changed.wait_timeout(s, FLIP_LOST / 4).unwrap_or_else(|e| e.into_inner()).0;
         }
+        let done = s.ui_done_seq;
+        drop(s);
+        self.release_shown(done);
+        Ok(())
+    }
+
+    /// Nothing more committed until the guard's `hold` is let go
+    /// (`let_go`), and nothing in flight: for whatever changes the whole
+    /// display -- a mode, the connector's colour, the hand-over.
+    fn hold(&self) -> Held<'_> {
+        // Until the commit in flight has flipped -- or been recovered by the
+        // presenter (`recover_flip`), which ends the process if it cannot.
+        // Never going on with a commit still in flight.
+        let mut s = self.stage.lock();
+        s.hold = true;
+        let started = std::time::Instant::now();
+        let mut said = 0;
+        while s.waiting_for_flip && !s.released {
+            let waited = started.elapsed();
+            if waited >= FLIP_LOST * (said + 1) {
+                said += 1;
+                eprintln!("mediabox-tv.platform holding the display: the commit in flight has not flipped after {waited:?}");
+                mediabox_core::timeline!("hold-waiting", "ms={}", waited.as_millis());
+            }
+            s = self.stage.changed.wait_timeout(s, FLIP_LOST / 4).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        Held { stage: &self.stage, guard: Some(s) }
+    }
+
+    /// The interface frame the panel showed before the current one, given
+    /// back to GBM once the commit that replaced it has flipped.
+    fn release_shown(&self, done: u64) {
+        let old = {
+            let mut state = self.presentation.borrow_mut();
+            if state.pending_previous.is_some() && done >= state.pending_seq {
+                state.pending_previous.take()
+            } else {
+                None
+            }
+        };
+        drop(old);
     }
 
     /// Locks whatever the renderer just finished and returns it ready to flip.
@@ -924,8 +1657,15 @@ impl SplitDisplay {
                          the interface stays up and waits for it"
                     );
                 }
+                {
+                    let mut s = self.stage.lock();
+                    s.waiting_for_flip = false;
+                    s.flip_ui_seq = None;
+                    s.ui_next = None;
+                    s.ui_done_seq = s.ui_seq;
+                    s.ui_on_panel = false;
+                }
                 let mut state = self.presentation.borrow_mut();
-                state.waiting_for_flip = false;
                 state.pending_previous = None;
                 state.current = None;
                 Ok(())
@@ -938,35 +1678,51 @@ impl SplitDisplay {
             return self.commit_switch();
         }
         let frame = self.import_front_buffer()?;
-        let mut state = self.presentation.borrow_mut();
-        if state.current.is_none() {
-            self.kms
-                .set_crtc(
+        if self.presentation.borrow().current.is_none() {
+            {
+                // Nothing may be committed while the CRTC is set.
+                let mut s = self.hold();
+                let set = self.kms.set_crtc(
                     self.crtc,
                     Some(frame.framebuffer),
                     (0, 0),
                     &[self.connector.handle()],
                     Some(self.mode.get()),
-                )
-                .map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
-            state.current = Some(frame);
-        } else {
-            // Only one commit may be outstanding on a CRTC. When the wait in
-            // `swap_buffers` was skipped because a free buffer was available,
-            // this is where the pace is kept.
-            if state.waiting_for_flip {
-                drop(state);
-                self.wait_for_page_flip()?;
-            } else {
-                drop(state);
+                );
+                if set.is_ok() {
+                    s.ui_on_panel = true;
+                }
+                drop(s);
+                set.map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
             }
-            // Whatever film frame is waiting goes out with this one, in the
-            // same commit, on the same vblank.
-            self.pump_video_socket();
-            self.wait_for_film_frame();
-            self.commit_frames(Some(frame))?;
-            state = self.presentation.borrow_mut();
+            self.presentation.borrow_mut().current = Some(frame);
+        } else {
+            // One interface frame at a time: the one before is on the panel
+            // and the one before that back with GBM.
+            self.wait_for_page_flip()?;
+            let plane = self.primary_plane().ok_or("the interface's plane is not on the panel")?;
+            let seq = {
+                let mut s = self.stage.lock();
+                if let Some(error) = s.ui_error.take() {
+                    return Err(format!("atomic commit: {error}").into());
+                }
+                s.ui_seq += 1;
+                let seq = s.ui_seq;
+                s.ui_next = Some((plane, frame.framebuffer, seq));
+                seq
+            };
+            // The presenter puts it up, with the film's frame of its vblank.
+            self.stage.poke();
+            let old = {
+                let mut state = self.presentation.borrow_mut();
+                let shown = state.current.replace(frame);
+                state.pending_seq = seq;
+                std::mem::replace(&mut state.pending_previous, shown)
+            };
+            // Its successor's flip was read before this one was handed over.
+            drop(old);
         }
+        let mut state = self.presentation.borrow_mut();
         if !state.first_frame_logged {
             let current = state.current.as_ref().unwrap();
             eprintln!(
@@ -985,201 +1741,26 @@ impl SplitDisplay {
         Ok(())
     }
 
-    /// While the interface draws over a moving film, its commit waits for
-    /// this vblank's film frame -- until 4 ms before the vblank, and no
-    /// longer.
-    ///
-    /// Without it the interface's commit went the moment the last vblank
-    /// passed, and the film frame of that period arrived after it. It then
-    /// waited a whole period, the next one arrived on top of it, and the
-    /// older was given back unseen: a frame dropped and the one before shown
-    /// twice. Measured on the Plus with a 4K HDR film at 23.976 Hz and a
-    /// keyboard's volume key held (frame trace, 2026-10-12): 76 of 552 film
-    /// frames dropped while the interface drew against 36 of 3015 while it
-    /// did not, nearly all of them read 0-5 ms after a vblank. A film frame
-    /// arriving with nothing in flight is committed at once and never had
-    /// this problem; this makes the interface's commit behave the same.
-    ///
-    /// Only while film frames are coming: paused, or with no film, nothing
-    /// waits and the interface answers as fast as it always did.
-    fn wait_for_film_frame(&self) {
-        const MARGIN: Duration = Duration::from_millis(4);
-        let period = self.frame_period();
-        let waiting = {
-            let sink = self.sink.borrow();
-            sink.moving(Duration::from_millis(120)) && !sink.has_pending()
-        };
-        let Some(flip) = self.presentation.borrow().last_flip.filter(|_| waiting) else {
-            return;
-        };
-        let deadline = flip + period.saturating_sub(MARGIN);
-        loop {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return;
-            }
-            let mut fd = libc::pollfd {
-                fd: self.sink.borrow().poll_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let timeout = (deadline - now).as_micros().div_ceil(1000) as i32;
-            let rc = unsafe { libc::poll(&mut fd, 1, timeout) };
-            if rc <= 0 || fd.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
-                return;
-            }
-            self.pump_video_socket();
-            let sink = self.sink.borrow();
-            if sink.has_pending() || !sink.moving(Duration::from_millis(120)) {
-                return;
-            }
-        }
-    }
-
     /// One refresh of the mode on the wire, from its own timing.
     fn frame_period(&self) -> Duration {
-        let mode = self.mode.get();
-        let (_, _, htotal) = mode.hsync();
-        let (_, _, vtotal) = mode.vsync();
-        let clock_khz = u64::from(mode.clock());
-        if clock_khz == 0 || htotal == 0 || vtotal == 0 {
-            return Duration::from_micros(16_667);
-        }
-        Duration::from_micros(u64::from(htotal) * u64::from(vtotal) * 1000 / clock_khz)
+        Duration::from_nanos(period_of(&self.mode.get()))
     }
 
-    /// Everything waiting on the player's socket, put on the panel.
-    ///
-    /// Called from the event loop rather than from a thread of its own: the
-    /// descriptor is polled beside libinput and the wake pipe, so a frame
-    /// arriving wakes the interface exactly the way a key press does, and the
-    /// ioctls that import and show it happen on the thread that holds master.
-    fn pump_video(&self) {
-        if self.released.get() {
-            return;
-        }
-        self.pump_video_socket();
-        // Nothing in flight: the frame goes out now, on its own. Otherwise it
-        // waits for the vblank that ends the commit in flight, or rides with
-        // the interface's next frame, whichever comes first -- and a newer
-        // frame arriving in the meantime replaces it.
-        if !self.presentation.borrow().waiting_for_flip
-            && self.presentation.borrow().current.is_some()
-            && self.sink.borrow().has_pending()
-            && let Err(error) = self.commit_frames(None)
-        {
-            eprintln!("mediabox-tv.video {error}");
-        }
-    }
-
-    /// Takes whatever the player has sent: a frame becomes the waiting one,
-    /// a stop takes the film off the panel.
-    fn pump_video_socket(&self) {
-        let (width, height) = self.mode.get().size();
-        let into = crate::video::Rect {
-            x: 0,
-            y: 0,
-            width: width.into(),
-            height: height.into(),
-        };
+    /// What the presentation thread has for the interface: the picture
+    /// subtitle to draw, and whether the film asks for HDR. Read on every
+    /// pass of the event loop; the presenter wakes it when either changes.
+    fn sync_presented(&self) {
         let hdr = {
-            let mut sink = self.sink.borrow_mut();
-            sink.pump(&self.kms, self.crtc, &self.video, into);
-            VIDEO.with(|cell| cell.set(sink.showing() || sink.has_pending()));
-            let (changes, shown) = sink.subtitle();
+            let mut s = self.stage.lock();
+            let (changes, shown) = s.sink.subtitle();
             publish_subtitle(changes, shown);
-            sink.hdr()
+            s.subtitle_seen = changes;
+            s.hdr_seen = s.sink.hdr();
+            s.hdr_seen
         };
         self.signal_output_colour(hdr);
-        self.ask_vblank();
-    }
-
-    /// A commit ended: its vblank has passed. Read without waiting -- the
-    /// event loop only calls this once the device is readable -- and send
-    /// the waiting film frame if the interface is not about to.
-    fn flip_done(&self, redraw_due: bool) {
-        let mut finished = None;
-        if let Ok(events) = self.kms.receive_events() {
-            for event in events {
-                match event {
-                    control::Event::PageFlip(flip) if finished.is_none() => finished = Some(flip),
-                    // The vblank asked for: the waiting film frame, if it is
-                    // due at the next one, goes from the event loop's
-                    // `pump_video`.
-                    control::Event::Vblank(vblank) => self.vblank_event(&vblank),
-                    _ => {}
-                }
-            }
-        }
-        let Some(flip) = finished else {
-            return;
-        };
-        crate::video::trace::event('F', 0, 0);
-        crate::video::trace::vblank(flip.frame, flip.duration);
-        mediabox_core::timeline!("flip", "seq={} at={}", flip.frame, flip.duration.as_nanos());
-        self.sink.borrow_mut().vblank(flip.duration.as_nanos() as u64, self.frame_period().as_nanos() as u64);
-        let old = {
-            let mut state = self.presentation.borrow_mut();
-            state.waiting_for_flip = false;
-            state.last_flip = Some(std::time::Instant::now());
-            state.pending_previous.take()
-        };
-        drop(old);
-        // With an interface frame about to be drawn, the film frame goes out
-        // with it, in one commit. Sending it on its own first was measured
-        // too (Plus, 24p, ten presses) and was worse: the interface's frame
-        // then missed the next vblank and pushed the film's after it -- 2 to
-        // 5 frames late per five seconds against 0 to 3.
-        if !redraw_due
-            && self.sink.borrow().has_pending()
-            && let Err(error) = self.commit_frames(None)
-        {
-            eprintln!("mediabox-tv.video {error}");
-        }
-    }
-
-    /// Ask the kernel for its next vblank on this CRTC, as an event
-    /// (`DRM_VBLANK_EVENT`): when the grid of the mode is not known -- after a
-    /// mode change, before any page flip of the new mode -- a timed film
-    /// frame waits for it, and the event carries the vblank's own timestamp
-    /// (CLOCK_MONOTONIC, as page flips do). Refused, frames go up as they
-    /// come.
-    fn ask_vblank(&self) {
-        if self.presentation.borrow().vblank_asked || !self.sink.borrow().wants_vblank() {
-            return;
-        }
-        let pipe = self
-            .kms
-            .resource_handles()
-            .ok()
-            .and_then(|resources| resources.crtcs().iter().position(|crtc| *crtc == self.crtc));
-        let asked = pipe.ok_or_else(|| "the CRTC is not the device's".to_string()).and_then(|pipe| {
-            self.kms
-                .wait_vblank(drm::VblankWaitTarget::Relative(1), drm::VblankWaitFlags::EVENT, pipe as u32, 0)
-                .map_err(|error| error.to_string())
-        });
-        match asked {
-            Ok(_) => {
-                mediabox_core::timeline!("vblank-ask", "pipe={}", pipe.unwrap_or(0));
-                self.presentation.borrow_mut().vblank_asked = true;
-            }
-            Err(error) => {
-                eprintln!("mediabox-tv.video the kernel will not report a vblank ({error}); film frames go up as they come");
-                self.sink.borrow_mut().vblank_unavailable();
-            }
-        }
-    }
-
-    /// The vblank asked for (`ask_vblank`) has come.
-    fn vblank_event(&self, vblank: &drm::control::VblankEvent) {
-        if vblank.crtc != self.crtc {
-            return;
-        }
-        self.presentation.borrow_mut().vblank_asked = false;
-        mediabox_core::timeline!("vblank-event", "seq={} at={}", vblank.frame, vblank.time.as_nanos());
-        self.sink
-            .borrow_mut()
-            .vblank(vblank.time.as_nanos() as u64, self.frame_period().as_nanos() as u64);
+        let done = self.stage.lock().ui_done_seq;
+        self.release_shown(done);
     }
 
     /// The interface's plane: the one on this CRTC showing its frame.
@@ -1195,72 +1776,6 @@ impl SplitDisplay {
         })?;
         self.primary.set(Some(plane));
         Some(plane)
-    }
-
-    /// One commit for this vblank: the interface's new frame if there is one,
-    /// the waiting film frame if there is one, or both. Nonblocking, with an
-    /// event when the vblank has passed; nothing else is committed until it
-    /// has.
-    ///
-    /// This replaces a legacy page flip for the interface and a legacy
-    /// `SetPlane` for the film, each waiting for a vblank of its own on the
-    /// same thread. See `VideoPlane::stage` for what that cost.
-    fn commit_frames(&self, ui: Option<PresentedFrame>) -> Result<(), String> {
-        use control::property::Value;
-        let mut request = control::atomic::AtomicModeReq::new();
-        if let Some(frame) = &ui {
-            let plane = self.primary_plane().ok_or("the interface's plane is not on the panel")?;
-            let fb = find_property(&self.kms, plane, "FB_ID").ok_or("no FB_ID on the interface's plane")?;
-            request.add_property(plane, fb, Value::Framebuffer(Some(frame.framebuffer)));
-        }
-        let staged = self
-            .sink
-            .borrow_mut()
-            .stage(&self.kms, self.crtc, &self.video, &mut request);
-        if ui.is_none() && staged.is_none() {
-            return Ok(());
-        }
-        let flags = control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT;
-        let committed = self.kms.atomic_commit(flags, request);
-        let committed = match (committed, staged, &ui) {
-            (Ok(()), _, _) => Ok(staged),
-            // The film's part refused it: the interface's frame goes on its
-            // own rather than the panel freezing on the last one.
-            (Err(error), Some(_), Some(frame)) => {
-                self.sink.borrow_mut().refused_commit(&error.to_string());
-                let plane = self.primary_plane().ok_or("the interface's plane is not on the panel")?;
-                let fb = find_property(&self.kms, plane, "FB_ID").ok_or("no FB_ID")?;
-                let mut alone = control::atomic::AtomicModeReq::new();
-                alone.add_property(plane, fb, Value::Framebuffer(Some(frame.framebuffer)));
-                self.kms.atomic_commit(flags, alone).map(|()| None)
-            }
-            (Err(error), _, _) => {
-                if staged.is_some() {
-                    self.sink.borrow_mut().refused_commit(&error.to_string());
-                }
-                Err(error)
-            }
-        };
-        let staged = committed.map_err(|e| format!("atomic commit: {e}"))?;
-        crate::video::trace::event('C', u64::from(ui.is_some()), u64::from(staged.is_some()));
-        let mut film = None;
-        if let Some(index) = staged {
-            film = self.sink.borrow_mut().committed(&self.video, index);
-            VIDEO.with(|cell| cell.set(true));
-        }
-        mediabox_core::timeline!(
-            "commit",
-            "pid={} id={} ui={}",
-            self.sink.borrow().peer(),
-            film.unwrap_or(0),
-            u8::from(ui.is_some())
-        );
-        let mut state = self.presentation.borrow_mut();
-        state.waiting_for_flip = true;
-        if let Some(frame) = ui {
-            state.pending_previous = state.current.replace(frame);
-        }
-        Ok(())
     }
 
     /// Tell the television what it is being sent.
@@ -1324,6 +1839,8 @@ impl SplitDisplay {
             return;
         }
 
+        // The connector's properties change while nothing is committed.
+        let _held = self.hold();
         let connector = self.connector.handle();
         let Ok(properties) = self.kms.get_properties(connector) else {
             return;
@@ -1484,11 +2001,26 @@ impl SplitDisplay {
         let switch = self.switch.borrow_mut().take().expect("a switch was asked for");
         let mode = self.mode.get();
         let colour = self.colour.get();
-        match self.atomic_modeset(frame.framebuffer, mode, colour) {
+        // The presentation stands still while the mode changes: a film frame
+        // committed in the middle of it would be on the old mode's grid.
+        self.wait_for_page_flip()?;
+        let mut stage = self.hold();
+        let modeset = self.atomic_modeset(frame.framebuffer, mode, colour);
+        if modeset.is_ok() {
+            stage.waiting_for_flip = false;
+            stage.flip_ui_seq = None;
+            stage.period_ns = period_of(&mode);
+            let (width, height) = mode.size();
+            stage.panel = (width.into(), height.into());
+            stage.ui_on_panel = true;
+            // The vblanks known were of the mode before.
+            stage.sink.forget_vblank();
+        }
+        drop(stage);
+        match modeset {
             Ok(()) => {
                 let (pending, current) = {
                     let mut state = self.presentation.borrow_mut();
-                    state.waiting_for_flip = false;
                     (state.pending_previous.take(), state.current.replace(frame))
                 };
                 // The frames of the old size first, then the surface they came
@@ -1499,8 +2031,6 @@ impl SplitDisplay {
                 self.applied.set(colour);
                 self.signalled.set(None);
                 OUTPUT_ERROR.with(|cell| cell.borrow_mut().take());
-                // The vblanks known were of the mode before.
-                self.sink.borrow_mut().forget_vblank();
                 let (width, height) = mode.size();
                 mediabox_core::timeline!(
                     "mode",
@@ -1688,16 +2218,20 @@ impl SplitDisplay {
         if self.released.replace(true) {
             return;
         }
+        // Nothing in flight, and then nothing more from the presentation
+        // thread: it stops at `released`.
+        let _ = self.wait_for_page_flip();
+        let mut stage = self.hold();
+        stage.released = true;
         // The film first: a plane left enabled on a CRTC that is about to be
         // turned off is how the next master inherits a picture it did not draw.
-        self.sink
-            .borrow_mut()
-            .clear(&self.kms, self.crtc, &self.video);
+        let state = &mut *stage;
+        state.sink.clear(&self.kms, self.crtc, &state.video);
+        VIDEO.store(false, std::sync::atomic::Ordering::Relaxed);
         // And the stacking order, which belongs to the connector rather than to
         // whoever set it: Kodi assigns this port's windows for itself and must
         // not inherit a primary this process raised.
         crate::video::lower_interface(&self.kms, self.crtc);
-        let _ = self.wait_for_page_flip();
         // The CRTC is left lit, on this process's last frame, and the device
         // is handed to systemd instead of closed; see `fdstore`. Switching it
         // off here -- as this used to -- is what let the kernel console put the
@@ -1725,6 +2259,8 @@ impl SplitDisplay {
         drop(pending);
         drop(current);
         let _ = self.kms.release_master_lock();
+        drop(stage);
+        self.stage.changed.notify_all();
         eprintln!(
             "mediabox-tv.platform DRM released{}",
             if kept { ", display left lit for the next owner" } else { "" }
@@ -2878,41 +3414,21 @@ impl Platform for SplitPlatform {
     }
 
     fn run_event_loop(&self) -> Result<(), PlatformError> {
-        /// The display loop's nice where SCHED_FIFO is refused.
-        const DISPLAY_NICE: libc::c_int = -10;
-        // The loop that commits each film frame for its vblank runs at a
-        // real-time priority, as Android's SurfaceFlinger does (SCHED_FIFO,
-        // main_surfaceflinger.cpp). At an ordinary one, with the CPUs busy
-        // (4 spinning threads and 2 copying memory, load 7.6 on 8 cores) it
-        // was held 24-26 ms in one pass and frames missed their vblank: 77
-        // skipped in 25 minutes of NTV, none without the load (measured
-        // 2026-11-01). Threads it starts later are ordinary again
-        // (SCHED_RESET_ON_FORK); the kernel keeps 5 % of each second for
-        // everything else (sched_rt_runtime_us).
-        let param = libc::sched_param { sched_priority: 2 };
-        // SAFETY: sets the calling thread's policy; `param` is valid.
-        let rc = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) };
-        let mut nice = None;
-        if rc != 0 {
-            // Refused where the kernel groups real-time time by cgroup
-            // (CONFIG_RT_GROUP_SCHED) and systemd has the cpu controller on:
-            // a service's group has no real-time budget, root or not. Then
-            // the highest ordinary priority for this thread, as Android also
-            // gives SurfaceFlinger's (PRIORITY_URGENT_DISPLAY, nice -8).
-            let fifo = std::io::Error::last_os_error();
-            // SAFETY: gettid and setpriority on this thread only.
-            let set = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, DISPLAY_NICE) };
-            nice = (set == 0).then_some(DISPLAY_NICE);
-            eprintln!(
-                "mediabox-tv.platform the display loop: no SCHED_FIFO ({fifo}); nice {}",
-                nice.map_or_else(|| format!("refused ({})", std::io::Error::last_os_error()), |n| n.to_string())
-            );
-        }
-        mediabox_core::timeline!("sched", "fifo={} nice={:?}", u8::from(rc == 0), nice);
+        /// The interface's own nice: above ordinary work, below the
+        /// presentation thread (SCHED_FIFO, `presenter`), which puts the film
+        /// up whatever this loop is drawing.
+        const INTERFACE_NICE: libc::c_int = -5;
+        // SAFETY: gettid and setpriority on this thread only.
+        let set = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, INTERFACE_NICE) };
+        mediabox_core::timeline!("sched", "thread=interface nice={:?}", (set == 0).then_some(INTERFACE_NICE));
         let mut libinput = input::Libinput::new_with_udev(DirectInput);
         libinput
             .udev_assign_seat("seat0")
             .map_err(|_| PlatformError::from("libinput could not assign seat0".to_string()))?;
+        // Passes that drew for longer than a vblank while a film was on the
+        // panel, said in the journal once a second at most: the film no
+        // longer waits for them (`presenter`), and this is how that is seen.
+        let mut long_draws: (u32, u64, Option<std::time::Instant>) = (0, 0, None);
         loop {
             // Where a pass of the loop spends its time, on the timeline when
             // one phase holds it past a commit's margin: a film frame due at
@@ -2933,6 +3449,20 @@ impl Platform for SplitPlatform {
             let before_render = mediabox_core::timeline::now_ns();
             self.window.render_if_needed()?;
             let rendered = mediabox_core::timeline::now_ns();
+            let drew = rendered - before_render;
+            if drew > self.window.display.frame_period().as_nanos() as u64 && video_showing() {
+                long_draws.0 += 1;
+                long_draws.1 = long_draws.1.max(drew);
+                let now = std::time::Instant::now();
+                if long_draws.2.is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1)) {
+                    eprintln!(
+                        "mediabox-tv.loop: arayüz {} kez bir vblank'ten uzun çizdi (en uzun {:.1} ms); film sunum iş parçacığında",
+                        long_draws.0,
+                        long_draws.1 as f64 / 1e6
+                    );
+                    long_draws = (0, 0, Some(now));
+                }
+            }
             // A switch the kernel refused has put the old size back.
             if self.window.display.switch.borrow().is_none()
                 && self.window.window.size() != self.window.size()
@@ -2941,18 +3471,9 @@ impl Platform for SplitPlatform {
             }
 
             let repeat = self.repeat_held();
-            // How long until a film frame is due; zero when one is due now,
-            // unless a commit in flight holds it back (its flip sends it).
-            // Read once: a frame that became due between a look that found
-            // it not yet due and the sleep was left for whatever woke the
-            // loop next -- the next frame, in the last 2 ms before the
-            // vblank: the first frame of three openings in 95 missed its
-            // vblank so (measured 2026-11-01).
-            let film = {
-                let presentation = self.window.display.presentation.borrow();
-                let held = presentation.waiting_for_flip || presentation.current.is_none();
-                self.window.display.sink.borrow().until_due().filter(|until| !(held && until.is_zero()))
-            };
+            // The film is the presentation thread's; what it has for the
+            // interface (a subtitle, HDR) is taken here.
+            self.window.display.sync_presented();
             let timeout = if self.window.redraw.get() {
                 0
             } else {
@@ -2960,22 +3481,7 @@ impl Platform for SplitPlatform {
                     .unwrap_or(Duration::from_millis(250))
                     .min(Duration::from_millis(250))
                     .min(repeat.unwrap_or(Duration::MAX))
-                    // A film frame waiting for its vblank.
-                    .min(film.unwrap_or(Duration::MAX))
                     .as_millis() as i32
-            };
-            // The third is the player's socket. Its descriptor is the door
-            // while nothing is playing and the player itself once something is,
-            // so it is read again on every pass rather than kept.
-            let video = self.window.display.sink.borrow().poll_fd();
-            // The display device, while a commit is in flight: its vblank is
-            // when the next waiting film frame can go.
-            let drm = if self.window.display.presentation.borrow().waiting_for_flip
-                || self.window.display.presentation.borrow().vblank_asked
-            {
-                self.window.display.kms.as_fd().as_raw_fd()
-            } else {
-                -1
             };
             let mut pollfds = [
                 libc::pollfd {
@@ -2985,16 +3491,6 @@ impl Platform for SplitPlatform {
                 },
                 libc::pollfd {
                     fd: libinput.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: video,
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: drm,
                     events: libc::POLLIN,
                     revents: 0,
                 },
@@ -3018,22 +3514,7 @@ impl Platform for SplitPlatform {
             if pollfds[1].revents & libc::POLLIN != 0 {
                 self.dispatch_input(&mut libinput)?;
             }
-            if pollfds[3].revents & libc::POLLIN != 0 {
-                self.window.display.flip_done(self.window.redraw.get());
-            }
-            // Woken for the socket, or for a waiting film frame's vblank.
-            if pollfds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 || self.window.display.sink.borrow().has_pending() {
-                self.window.display.pump_video();
-            }
             if mediabox_core::timeline::enabled() {
-                {
-                    let presentation = self.window.display.presentation.borrow();
-                    self.window
-                        .display
-                        .sink
-                        .borrow()
-                        .trace_first_wait(presentation.waiting_for_flip, presentation.current.is_some());
-                }
                 let done = mediabox_core::timeline::now_ns();
                 let ms = |ns: u64| ns as f64 / 1e6;
                 let overslept = polled.saturating_sub(polling).saturating_sub(timeout.max(0) as u64 * 1_000_000);
@@ -3046,16 +3527,14 @@ impl Platform for SplitPlatform {
                     mediabox_core::timeline::write(
                         "loop-slow",
                         format_args!(
-                            "timers={:.2} render={:.2} between={:.2} poll={:.2} timeout={timeout} after={:.2} rc={rc} revents={},{},{},{}",
+                            "timers={:.2} render={:.2} between={:.2} poll={:.2} timeout={timeout} after={:.2} rc={rc} revents={},{}",
                             ms(before_render - started),
                             ms(rendered - before_render),
                             ms(polling - rendered),
                             ms(polled - polling),
                             ms(done - polled),
                             pollfds[0].revents,
-                            pollfds[1].revents,
-                            pollfds[2].revents,
-                            pollfds[3].revents
+                            pollfds[1].revents
                         ),
                     );
                 }

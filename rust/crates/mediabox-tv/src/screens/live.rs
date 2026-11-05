@@ -453,6 +453,11 @@ pub struct Live {
     /// The receiver lost the carrier and is locking again (its state
     /// `no_signal`): the picture is taken off and `no_signal` says so.
     pub no_signal: bool,
+    /// The channel's pictures stopped coming after it had shown (`App::
+    /// watch_live_flow`): the last one is not left frozen on the panel as
+    /// if it were live; the picture is taken off and the receiver's state
+    /// said, until pictures come again.
+    pub stalled: bool,
 }
 
 /// The half hour at or before `t`.
@@ -503,6 +508,7 @@ impl Live {
             },
             problem: None,
             no_signal: false,
+            stalled: false,
             zap: None,
         }
     }

@@ -51,6 +51,14 @@ export struct LiveTime {
     x: float,
 }
 
+/// One line of the live monitor (key M): `state` 0 sound, 1 was wrong on
+/// this channel, 2 wrong in the last second, 3 not measured.
+export struct LiveMonitorRow {
+    label: string,
+    value: string,
+    state: int,
+}
+
 export struct LivePanelRow {
     label: string,
     value: string,
@@ -817,6 +825,8 @@ export component LiveTv inherits Rectangle {
     /// No signal: the last picture is not left frozen on the plane below,
     /// it is covered, as the reference does.
     in property <bool> dark;
+    /// The live monitor's rows (key M); none: not shown.
+    in property <[LiveMonitorRow]> monitor-rows;
 
     property <length> dp: Dp.dp;
 
@@ -905,5 +915,61 @@ export component LiveTv inherits Rectangle {
         progress: root.setup-progress;
         actions: root.setup-actions;
         at-action: root.setup-focus;
+    }
+
+    // The live monitor, over everything else on this screen: a small table
+    // in the top right corner, a coloured mark per row.
+    if root.monitor-rows.length > 0: Rectangle {
+        width: 300 * dp;
+        height: (root.monitor-rows.length + 1) * 15 * dp + 12 * dp;
+        x: parent.width - self.width - 16 * dp;
+        y: 16 * dp;
+        background: #000000cc;
+        border-radius: 6 * dp;
+        Text {
+            x: 10 * dp;
+            y: 6 * dp;
+            height: 15 * dp;
+            vertical-alignment: center;
+            text: "Canlı yayın monitörü  ·  M kapatır";
+            color: #ffffffb0;
+            font-size: 7.5 * dp;
+            font-family: "Roboto";
+        }
+        for row[i] in root.monitor-rows: Rectangle {
+            x: 10 * dp;
+            y: 6 * dp + (i + 1) * 15 * dp;
+            width: parent.width - 20 * dp;
+            height: 15 * dp;
+            Rectangle {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                width: 6 * dp;
+                height: 6 * dp;
+                border-radius: 3 * dp;
+                background: row.state == 0 ? #3ccf6e : row.state == 1 ? #f2c230 : row.state == 2 ? #f04848 : #808080;
+            }
+            Text {
+                x: 12 * dp;
+                width: 92 * dp;
+                height: parent.height;
+                vertical-alignment: center;
+                text: row.label;
+                color: #ffffffc8;
+                font-size: 8 * dp;
+                font-family: "Roboto";
+            }
+            Text {
+                x: 106 * dp;
+                width: parent.width - 106 * dp;
+                height: parent.height;
+                vertical-alignment: center;
+                text: row.value;
+                color: #ffffff;
+                font-size: 8 * dp;
+                font-family: "Roboto";
+                overflow: elide;
+            }
+        }
     }
 }

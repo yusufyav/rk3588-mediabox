@@ -18,7 +18,7 @@ import { AudioView, AudioCard } from "audio.slint";
 import { Account } from "account.slint";
 import { WifiScreen, BluetoothScreen, WifiRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
-import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow } from "live.slint";
+import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow, LiveMonitorRow } from "live.slint";
 import { AccountChip } from "chrome.slint";
 export { AccountChip, CaptionStyle }
 import {
@@ -301,6 +301,7 @@ export component MediaBoxWindow inherits Window {
     // ---- live television (screens/live.rs)
     in property <string> live-message;
     in property <bool> live-dark;
+    in property <[LiveMonitorRow]> live-monitor-rows;
     in property <bool> live-banner-shown;
     in property <string> live-banner-number;
     in property <string> live-banner-name;
@@ -903,6 +904,7 @@ export component MediaBoxWindow inherits Window {
             height: 100%;
             message: root.live-message;
             dark: root.live-dark;
+            monitor-rows: root.live-monitor-rows;
             banner-shown: root.live-banner-shown;
             banner-number: root.live-banner-number;
             banner-name: root.live-banner-name;
