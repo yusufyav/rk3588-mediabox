@@ -2284,7 +2284,7 @@ impl App {
         if !playing.live || !playing.seen {
             return;
         }
-        let stalled = platform::video_arrived().is_none_or(|at| at.elapsed() >= LIVE_STALL);
+        let stalled = live_stalled(platform::video_arrived(), std::time::Instant::now());
         let state = self.live_receiver_state.clone();
         let Some(live) = self.live.as_mut() else {
             return;
@@ -8282,6 +8282,16 @@ const LIVE_SIGNAL_REFRESH: Duration = Duration::from_millis(700);
 /// off the panel: fifty frames at 50 Hz, twenty-five at 25.
 const LIVE_STALL: Duration = Duration::from_secs(1);
 
+/// Whether a channel's pictures stopped: one came, and none for
+/// `LIVE_STALL` since. No picture at all is not a stop: a channel change
+/// gives the plane back (`video::Sink::clear`) and the next channel's first
+/// picture is the opening's to wait for, on a dark panel with nothing said.
+/// Taken as a stop, every change said "Yayın akışı durdu" 0.2 s after the
+/// key, 60 of 60 changes (2026-11-05).
+fn live_stalled(arrived: Option<Instant>, now: Instant) -> bool {
+    arrived.is_some_and(|at| now.saturating_duration_since(at) >= LIVE_STALL)
+}
+
 /// What a channel whose pictures stopped says, from its receiver's state.
 fn live_stall_words(state: Option<&str>) -> &'static str {
     match state {
@@ -9436,5 +9446,19 @@ mod tests {
 
         let other = r#"media worker HTTP 502 Bad Gateway: {"error": {"code": "UPSTREAM", "message": "debrid timed out"}}"#;
         assert_eq!(play_refusal(other), "Kaynak açılamadı: debrid timed out");
+    }
+}
+
+#[cfg(test)]
+mod live_flow_tests {
+    use super::*;
+
+    #[test]
+    fn a_channel_change_is_not_a_stop() {
+        let now = Instant::now();
+        // The plane given back at the change: no picture yet, nothing said.
+        assert!(!live_stalled(None, now));
+        assert!(!live_stalled(Some(now - LIVE_STALL / 2), now));
+        assert!(live_stalled(Some(now - LIVE_STALL), now));
     }
 }
