@@ -509,6 +509,10 @@ impl Writer {
                 // The first write to a reader just opened, for the timeline.
                 let mut first_write = false;
                 let mut cc = crate::ts::CcCheck::default();
+                // What each stream epoch's output carried, on the timeline
+                // (`mediabox_core::ts_trace`): only while it is on.
+                let mut epoch = 0u64;
+                let mut content = mediabox_core::ts_trace::Content::default();
                 let written = |data: &[u8], cc: &mut crate::ts::CcCheck| {
                     if shared.cc_check.load(Ordering::Relaxed) {
                         let before = cc.errors;
@@ -539,6 +543,9 @@ impl Writer {
                     // Another stream epoch (`Writer::new_epoch`).
                     if chunk.is_empty() {
                         cc.reset();
+                        epoch += 1;
+                        content.reset();
+                        mediabox_core::timeline!("w-epoch", "epoch={epoch} switched={}", u8::from(shared.switched.load(Ordering::SeqCst)));
                         // Everything the service before wrote is counted by
                         // now: what is counted from here is the next one's.
                         if shared.switched.swap(false, Ordering::SeqCst) {
@@ -599,6 +606,7 @@ impl Writer {
                                     match out.write_all(&waiting, &shared.abort) {
                                         Ok(true) => {
                                             written(&waiting, &mut cc);
+                                            content.trace("w", format_args!("epoch={epoch}"), &waiting);
                                             if std::mem::take(&mut first_write) {
                                                 mediabox_core::timeline!(
                                                     "fifo-write",
@@ -637,6 +645,7 @@ impl Writer {
                     match out.write_all(&chunk, &shared.abort) {
                         Ok(true) => {
                             written(&chunk, &mut cc);
+                            content.trace("w", format_args!("epoch={epoch}"), &chunk);
                             if std::mem::take(&mut first_write) {
                                 mediabox_core::timeline!(
                                     "fifo-write",

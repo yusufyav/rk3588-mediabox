@@ -10,6 +10,7 @@ mod ethernet;
 mod output;
 mod timing;
 pub mod timeline;
+pub mod ts_trace;
 pub mod usblink;
 pub use output::{
     AppliedOutput, ColourCell, ContentMatch, ContentOutput, DisplayGeneration, DisplayIdentity, DisplayState, LegacyResolution,

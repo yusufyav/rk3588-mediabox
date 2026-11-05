@@ -724,6 +724,12 @@ impl Engine {
                     if latency > 0 {
                         shared.health.audio_lead(pts.nseconds() as i64 + latency + shared.health.audio_offset_ns.load(Ordering::Relaxed) - now);
                     }
+                    mediabox_core::timeline!(
+                        "a-out",
+                        "gen={generation} pts={} rt={now} dur={}",
+                        pts.nseconds(),
+                        buffer.duration().map_or(-1, |d| d.nseconds() as i64)
+                    );
                     if audio_traced.swap(generation, Ordering::Relaxed) != generation {
                         mediabox_core::timeline!(
                             "audio-sink",
@@ -1843,6 +1849,19 @@ impl Engine {
         let head = self.head(&from, &chain, &elements, false)?;
         let decoded = head.last().expect("a chain has elements").static_pad("src").ok_or("çözücünün çıkışı yok")?;
         self.watch_decoder(head.last().expect("a chain has elements"), generation);
+        if mediabox_core::timeline::enabled() {
+            decoded.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if let Some(buffer) = info.buffer() {
+                    mediabox_core::timeline!(
+                        "a-dec",
+                        "gen={generation} pts={} dur={}",
+                        buffer.pts().map_or(-1, |t| t.nseconds() as i64),
+                        buffer.duration().map_or(-1, |t| t.nseconds() as i64)
+                    );
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
         // How many channels come out is known on the decoder's first caps,
         // and that decides the rest: the sound setting's Dolby Digital
         // encoding for three channels or more -- mpv's
@@ -2545,6 +2564,10 @@ fn read_stream(
     // The clock stepped (`Stamped::stepped`): the sound's next buffer is a
     // DISCONT.
     let mut sound_discont = false;
+    // What each branch was given, on the timeline (`ts_trace`): told by
+    // what is in the packets, so that a stream before the branch's reaching
+    // it is seen.
+    let mut content = mediabox_core::ts_trace::Content::default();
     loop {
         let (read, read_at) = match read_chunk(&mut file, path, &mut chunk) {
             Ok(read) => read,
@@ -2564,12 +2587,14 @@ fn read_stream(
             edge = LiveEdge::default();
             reader = None;
             reference = None;
+            content.reset();
         }
         // When the read returned, on the source's running time: taken at
         // the read, never after a push that waited.
         let arrived = source.base_time().map(|base| gst::ClockTime::from_nseconds(read_at.saturating_sub(base.nseconds())));
         let pieces = packetizer.cut(&chunk[..read]);
         for piece in pieces {
+            content.trace("r", format_args!("gen={generation}"), &piece.data);
             if let Some(arrived) = arrived
                 && let Some(behind) = edge.observe(arrived.nseconds(), piece.pcr)
             {
@@ -2759,6 +2784,15 @@ fn push_sound(
     on_sound: &dyn Fn(u64, &crate::es::Switch) -> Option<gst_app::AppSrc>,
 ) {
     let mut target = Some(source.clone());
+    if mediabox_core::timeline::enabled()
+        && let Some(reference) = reference
+    {
+        for chunk in chunks.iter().filter(|c| c.start) {
+            if let Some(pts) = chunk.pts {
+                mediabox_core::timeline!("a-pes", "gen={generation} raw={pts} pts={}", pts_on_clock(pts, reference));
+            }
+        }
+    }
     let bytes: usize = chunks.iter().map(|c| c.data.len()).sum();
     shared.health.diagnose(|d| d.c.ts_payload_bytes += bytes as u64);
     let failed = route_sound(&mut target, chunks, reference, discont, &mut |switch| on_sound(generation, switch), &mut |at| {
