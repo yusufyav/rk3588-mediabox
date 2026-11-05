@@ -1026,6 +1026,24 @@ impl Engine {
                 // pipeline is the largest of its sinks'.
                 sink.set_property("buffer-time", 100_000i64);
                 sink.set_property("latency-time", 10_000i64);
+                // The device's sample clock is the board's crystal, the
+                // pipeline's CLOCK_MONOTONIC, which NTP steers off it: they
+                // part by some 17 ppm. audiobasesink's default (`skew`) lets
+                // that grow to half its drift-tolerance (40 ms) and then
+                // moves the clock's calibration by the whole of it, which
+                // the next buffer's alignment to the one before (under the
+                // 40 ms alignment-threshold) takes back: on TRT 1 the sound
+                // stood 2 to 22 ms off its time and jumped by 10 or 20 ms
+                // 14 times in 65 minutes (FAZ 1L, 2026-11-05). `resample`
+                // puts each buffer's samples where the slaved clock says,
+                // its end unaligned, so a sample comes or goes now and then
+                // and the sound stays on its time (gstaudiobasesink.c 1.26,
+                // render: "no stop time align needed: we are slaved"). A
+                // bitstream's bursts are not samples to stretch: it keeps
+                // the default.
+                if !self.bitstream.load(Ordering::SeqCst) {
+                    sink.set_property_from_str("slave-method", "resample");
+                }
                 sink
             }
             None => make("fakesink")?,

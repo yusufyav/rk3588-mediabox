@@ -14,8 +14,9 @@
 //!   started again (`trigger_time` changed): an underrun (XRUN) recovered by
 //!   alsasink, or the device opened again -- either one heard as a break.
 //! - The sound clock: the sink plays by the device's clock, slaved to the
-//!   pipeline's (`slave-method` skew). The pipeline's clock now less the
-//!   sound clock now is how late the sound plays against its schedule.
+//!   pipeline's (`slave-method` resample for PCM, skew for a bitstream).
+//!   The pipeline's clock now less the sound clock now is how late the
+//!   sound plays against its schedule.
 //!
 //! - The sound's diagnosis (`sound_diag`): every layer the sound passes
 //!   counted apart, the decoded PCM measured before the viewer's volume,
