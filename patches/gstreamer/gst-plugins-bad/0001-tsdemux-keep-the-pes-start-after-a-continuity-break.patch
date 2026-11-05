@@ -1,0 +1,25 @@
+tsdemux: a packet that starts a PES after a continuity break is kept
+
+GStreamer 1.26.11 tsdemux drops the pending PES on a continuity_counter
+mismatch -- right, it may be short -- and then the mismatching packet
+itself, even when it starts a new PES. ISO/IEC 13818-1 2.4.3.3: what was
+lost is before it. Replayed (mediabox-live engine_tests
+a_multiplex_hole_*): after a 480 ms hole on every PID the first video
+unit past it was lost; a key frame there costs a GOP.
+
+--- a/gst/mpegtsdemux/tsdemux.c
++++ b/gst/mpegtsdemux/tsdemux.c
+@@ -3898,7 +3898,12 @@
+         }
+         stream->state = PENDING_PACKET_EMPTY;
+ 
+-        return GST_FLOW_OK;
++        /* A packet that starts a PES (payload_unit_start_indicator) begins
++         * a new, whole unit: what was lost is before it (ISO/IEC 13818-1
++         * 2.4.3.3). Dropping it too lost the first unit after every break,
++         * a key frame and a GOP's wait when the break ended at one. */
++        if (!packet->payload_unit_start_indicator)
++          return GST_FLOW_OK;
+       }
+     }
+   }

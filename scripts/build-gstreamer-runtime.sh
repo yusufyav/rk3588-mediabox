@@ -72,7 +72,7 @@ done
 "$engine" run --rm --platform linux/amd64 \
   -e GST_VERSION="$GST_VERSION" -e PREFIX="$PREFIX" -e SNAPSHOT="$SNAPSHOT" \
   -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-  -v "$src:/src:ro" -v "$out:/out" "$IMAGE" bash -euo pipefail -c '
+  -v "$src:/src:ro" -v "$out:/out" -v "$here/patches/gstreamer:/patches:ro" "$IMAGE" bash -euo pipefail -c '
 cat > /etc/apt/sources.list.d/debian.sources <<SOURCES
 Types: deb
 URIs: http://snapshot.debian.org/archive/debian/$SNAPSHOT
@@ -94,7 +94,7 @@ apt-get -qq -o Acquire::Retries=5 update
 # one library must be the same version (Multi-Arch: same).
 DEBIAN_FRONTEND=noninteractive apt-get -qq -o Acquire::Retries=5 -y --allow-downgrades dist-upgrade >/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get -qq -o Acquire::Retries=5 install -y --no-install-recommends \
-  crossbuild-essential-arm64 meson ninja-build pkg-config flex bison python3 xz-utils file \
+  crossbuild-essential-arm64 meson ninja-build pkg-config flex bison python3 xz-utils file patch \
   libglib2.0-dev-bin libglib2.0-dev:arm64 liborc-0.4-dev:arm64 liborc-0.4-dev-bin \
   libasound2-dev:arm64 libmpg123-dev:arm64 zlib1g-dev:arm64 \
   libavcodec-dev:arm64 libavformat-dev:arm64 libavfilter-dev:arm64 libavutil-dev:arm64 \
@@ -127,6 +127,12 @@ declare -A opts=(
 )
 for m in gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav; do
   tar -C /tmp -xf /src/$m-$GST_VERSION.tar.xz
+  # The fixes MediaBox makes to the release, in order: patches/gstreamer/MODULE.
+  for p in /patches/$m/*.patch; do
+    [ -e "$p" ] || continue
+    patch -d /tmp/$m-$GST_VERSION -p1 --forward --quiet < "$p"
+    echo "patched $m: ${p##*/}"
+  done
   case $m in gst-libav) set -- --cross-file /cross.ini --prefix=$PREFIX --libdir=lib --buildtype=release -Ddoc=disabled ;; *) set -- $common ;; esac
   meson setup /tmp/build-$m /tmp/$m-$GST_VERSION "$@" ${opts[$m]} >/tmp/setup-$m.log 2>&1 || { tail -40 /tmp/setup-$m.log; exit 1; }
   ninja -C /tmp/build-$m >/tmp/ninja-$m.log 2>&1 || { tail -60 /tmp/ninja-$m.log; exit 1; }
@@ -139,6 +145,8 @@ done
   echo "image: debian trixie, apt snapshot $SNAPSHOT"
   echo "linked against (arm64 trixie packages):"
   dpkg-query -W -f="  \${Package} \${Version}\n" libglib2.0-0t64:arm64 liborc-0.4-0t64:arm64 libasound2t64:arm64 libmpg123-0t64:arm64 libavcodec61:arm64 libavformat61:arm64 libavfilter10:arm64 libavutil59:arm64 libswresample5:arm64 zlib1g:arm64
+  echo "patches:"
+  for p in /patches/*/*.patch; do [ -e "$p" ] && echo "  ${p#/patches/} $(sha256sum < "$p" | cut -c1-16)"; done
   echo "plugins:"
   ls $PREFIX/lib/gstreamer-1.0/ | sed "s/^/  /"
 } > $PREFIX/BUILD-INFO

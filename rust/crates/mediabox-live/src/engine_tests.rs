@@ -534,3 +534,60 @@ fn a_pmt_change_seconds_after_the_start_still_shows_the_new_picture() {
     let run = play(ts, 0);
     picture_handed_over(&run, true);
 }
+
+/// The multiplex lost for 480 ms, every PID at once, the piece at its start
+/// cut short (TRT 1, 2026-11-05 20:42:39: seven PIDs' counters broken in one
+/// USB transfer, the sound's PCM 480 ms apart). Nothing of the hole is made
+/// up: no unit timed inside it reaches the decoder and the one cut short is
+/// not passed on; the sound is back with its first frame after the hole;
+/// the channel is not opened again; the picture's first unit after the
+/// hole is kept. The units after the hole reach the decoder as they came,
+/// delta units before the next key unit included -- tsdemux marks none of
+/// them DISCONT -- and MPP's decoder puts no picture out that it flags
+/// discarded or in error (gstmppdec.c `mpp_frame_get_discard ||
+/// mpp_frame_get_errinfo`).
+#[test]
+fn a_multiplex_hole_makes_nothing_up_and_the_sound_comes_back_at_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let full = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX }]);
+    // Going out from 2.00 s to 2.48 s: the units of PTS 2.0 s to 2.48 s
+    // past the first.
+    let (from, to) = (180_000u64, 180_000u64 + 43_200);
+    let mut ts = Vec::new();
+    let mut cut = false;
+    for (at, piece) in full {
+        if (from..to).contains(&at) {
+            if !cut {
+                // Its first three packets only: a piece cut short.
+                ts.push((at, piece[..piece.len().min(3 * 188)].to_vec()));
+                cut = true;
+            }
+            continue;
+        }
+        ts.push((at, piece));
+    }
+    let run = play(ts, 0);
+    let generation = run.shared.generation.load(std::sync::atomic::Ordering::SeqCst);
+    let video: Vec<(u64, bool)> = run.video.lock().unwrap().buffers.iter().map(|(_, pts, key)| (*pts, *key)).collect();
+    let audio: Vec<u64> = run.audio.lock().unwrap().buffers.iter().map(|(_, pts, _)| *pts).collect();
+    // Both on the pipeline's running time, from the first picture (PTS
+    // LEAD): the sound's first buffer is not the stream's first frame.
+    let (vfirst, afirst) = (video[0].0, video[0].0);
+    let hole = (from * 1_000_000_000 / 90_000, to * 1_000_000_000 / 90_000);
+    let rel: Vec<u64> = video.iter().map(|(pts, _)| pts - vfirst).collect();
+    let arel: Vec<u64> = audio.iter().filter(|pts| **pts >= afirst).map(|pts| pts - afirst).collect();
+    assert!(rel.iter().all(|pts| *pts < hole.0 || *pts >= hole.1), "a unit of the hole reached the decoder: {:?}", rel.iter().filter(|p| **p >= hole.0 && **p < hole.1).collect::<Vec<_>>());
+    let last = rel.iter().filter(|pts| **pts < hole.0).max().copied().unwrap();
+    assert_eq!(hole.0 - last, 40_000_000, "the picture up to the hole");
+    // The first unit after the hole is whole, and kept: tsdemux 1.26.11
+    // dropped it with the break (patches/gstreamer/gst-plugins-bad/0001).
+    let next = rel.iter().find(|pts| **pts >= hole.1).copied().unwrap();
+    assert_eq!(next, hole.1, "the picture's first unit after the hole, {} ms after it", (next - hole.1) / 1_000_000);
+    let sound = arel.iter().find(|pts| **pts >= hole.0).copied().unwrap();
+    let sound_last = arel.iter().filter(|pts| **pts < hole.0).max().copied().unwrap();
+    // MPEG audio frames are 24 ms: one before the hole, one after it.
+    assert!(sound_last + 24_000_000 + 24_000_000 >= hole.0, "the sound up to the hole: {} ms", sound_last / 1_000_000);
+    assert!(sound - sound_last <= hole.1 - hole.0 + 2 * 24_000_000, "the sound back {} ms after its last", (sound - sound_last) / 1_000_000);
+    assert_eq!(generation, 1, "the channel not opened again");
+}
