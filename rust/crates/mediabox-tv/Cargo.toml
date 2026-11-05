@@ -53,6 +53,8 @@ log = "0.4"
 env_logger = { version = "0.11", default-features = false }
 libc = "0.2.189"
 drm = "0.14.1"
+# drm_mode_modeinfo, to set a mode's pixel clock (platform::on_the_wire).
+drm-ffi = "0.9.1"
 gbm = { version = "0.18.0", default-features = false, features = ["drm-support"] }
 glutin = { version = "0.32.3", default-features = false, features = ["egl"] }
 raw-window-handle = "0.6.2"

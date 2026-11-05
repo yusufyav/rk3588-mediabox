@@ -374,6 +374,84 @@ fn period_of(mode: &control::Mode) -> u64 {
     u64::from(htotal) * u64::from(vtotal) * 1_000_000 / clock_khz
 }
 
+/// The board's crystal's error against CLOCK_MONOTONIC, ppm (positive:
+/// fast): how much faster CLOCK_MONOTONIC_RAW -- the crystal itself, which
+/// the HDMI PHY's PLL runs from -- goes than CLOCK_MONOTONIC, which NTP
+/// slews and the film's frames are due on and the page flips are stamped
+/// with. Measured from this process's start; None for its first
+/// `CRYSTAL_WINDOW` (a mode set then keeps the EDID's clock, and the next
+/// channel's opening sets it right).
+///
+/// The film's frames are due on CLOCK_MONOTONIC at the broadcast's rate
+/// (the PCR came within 0.5 ppm of it, 2026-11-05) and the panel ran at the
+/// crystal's: NTP's freq -11.40 ppm, the vblanks -10.90 ppm against
+/// CLOCK_MONOTONIC, a picture shown twice every 29 min 22 s (22:03:14 and
+/// 22:32:36 on TRT 1). adjtimex(2) would say the same, but the service's
+/// ProtectClock= takes it away; reading the two clocks is not.
+fn crystal_ppm() -> Option<f64> {
+    static START: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    let now = raw_and_monotonic();
+    let start = *START.get_or_init(|| now);
+    let raw = now.0.checked_sub(start.0)?;
+    let mono = now.1.checked_sub(start.1)?;
+    if mono < CRYSTAL_WINDOW.as_nanos() as u64 {
+        return None;
+    }
+    let ppm = (raw as f64 / mono as f64 - 1.0) * 1e6;
+    (ppm.abs() <= CRYSTAL_PPM_MAX).then_some(ppm)
+}
+
+/// How long the two clocks are compared before their rates are believed:
+/// two reads 0.1 us apart over 10 s are 0.01 ppm.
+const CRYSTAL_WINDOW: Duration = Duration::from_secs(10);
+
+/// CLOCK_MONOTONIC_RAW and CLOCK_MONOTONIC at one instant (the raw one read
+/// either side of the other, and halved), ns.
+fn raw_and_monotonic() -> (u64, u64) {
+    let read = |clock| {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a valid clock id and a timespec on the stack.
+        unsafe { libc::clock_gettime(clock, &mut t) };
+        t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
+    };
+    let before = read(libc::CLOCK_MONOTONIC_RAW);
+    let mono = read(libc::CLOCK_MONOTONIC);
+    let after = read(libc::CLOCK_MONOTONIC_RAW);
+    (before + (after - before) / 2, mono)
+}
+
+/// A crystal's error past this is not believed (a board's is ±20 ppm by
+/// spec, NTP's freq is bounded at 500).
+const CRYSTAL_PPM_MAX: f64 = 100.0;
+
+/// `mode` with its pixel clock scaled so that the panel's refresh, made from
+/// the crystal, is the mode's own on CLOCK_MONOTONIC. The PHY makes any rate
+/// to the kHz with its fractional PLL (phy-rockchip-samsung-hdptx-hdmi.c
+/// `hdptx_phy_clk_pll_calc`), and setting it is a modeset like any other:
+/// done where one is done anyway, never while a film plays.
+fn on_the_wire(mode: control::Mode, crystal_ppm: Option<f64>) -> control::Mode {
+    let Some(ppm) = crystal_ppm else { return mode };
+    let mut info: drm_ffi::drm_mode_modeinfo = mode.into();
+    let khz = (f64::from(info.clock) / (1.0 + ppm * 1e-6)).round() as u32;
+    if khz == info.clock || khz == 0 {
+        return mode;
+    }
+    info.clock = khz;
+    control::Mode::from(info)
+}
+
+fn say_wire(mode: &control::Mode, wire: &control::Mode) {
+    if mode.clock() != wire.clock() {
+        let ppm = (f64::from(wire.clock()) / f64::from(mode.clock()) - 1.0) * 1e6;
+        eprintln!(
+            "mediabox-tv.platform pixel clock {} -> {} kHz ({ppm:+.2} ppm): the crystal's error, from the clock discipline",
+            mode.clock(),
+            wire.clock()
+        );
+        mediabox_core::timeline!("wire-clock", "edid_khz={} wire_khz={} ppm={ppm:.2}", mode.clock(), wire.clock());
+    }
+}
+
 /// One commit for this vblank: the interface's frame (`ui`, on its plane) if
 /// there is one, the waiting film frame if there is one, or both.
 /// Nonblocking, with an event when the vblank has passed; nothing else is
@@ -1003,6 +1081,9 @@ struct SplitDisplay {
     /// The mode on the wire. It changes when a person picks another one in
     /// the display settings, without this process starting again.
     mode: Cell<control::Mode>,
+    /// The pixel clock the mode went on the wire with (kHz): the EDID's,
+    /// scaled by the crystal's error (`on_the_wire`).
+    wire_khz: Cell<u32>,
     gbm_device: gbm::Device<OwnedFd>,
     /// What the interface draws into, at the mode's size. Replaced when the
     /// size changes; `generation` counts the replacements so the EGL surface
@@ -1113,6 +1194,8 @@ impl SplitDisplay {
     }
 
     fn new() -> Result<Rc<Self>, PlatformError> {
+        // The two clocks' comparison starts here (`crystal_ppm`).
+        let _ = crystal_ppm();
         let discovered = Self::wait_for_a_television();
         for warning in &discovered.warnings {
             eprintln!("mediabox-tv.platform {warning}");
@@ -1364,6 +1447,7 @@ impl SplitDisplay {
             connector,
             crtc,
             mode: Cell::new(mode),
+            wire_khz: Cell::new(0),
             setting: RefCell::new(setting),
             trial: Cell::new(None),
             source,
@@ -1463,6 +1547,15 @@ impl SplitDisplay {
         drop(s);
         self.release_shown(done);
         Ok(())
+    }
+
+    /// The mode as it goes on the wire, said once, its clock kept.
+    fn wire_mode(&self) -> control::Mode {
+        let mode = self.mode.get();
+        let wire = on_the_wire(mode, crystal_ppm());
+        self.wire_khz.set(wire.clock());
+        say_wire(&mode, &wire);
+        wire
     }
 
     /// Nothing more committed until the guard's `hold` is let go
@@ -1687,7 +1780,7 @@ impl SplitDisplay {
                     Some(frame.framebuffer),
                     (0, 0),
                     &[self.connector.handle()],
-                    Some(self.mode.get()),
+                    Some(self.wire_mode()),
                 );
                 if set.is_ok() {
                     s.ui_on_panel = true;
@@ -2127,10 +2220,13 @@ impl SplitDisplay {
         }
         let connector = self.connector.handle();
         let (width, height) = mode.size();
+        let wire = on_the_wire(mode, crystal_ppm());
         let blob = self
             .kms
-            .create_property_blob(&mode)
+            .create_property_blob(&wire)
             .map_err(|e| format!("mode blob: {e}"))?;
+        self.wire_khz.set(wire.clock());
+        say_wire(&mode, &wire);
         let mut request = control::atomic::AtomicModeReq::new();
         request.add_property(connector, need(&self.kms, connector, "CRTC_ID")?, Value::CRTC(Some(self.crtc)));
         request.add_property(self.crtc, need(&self.kms, self.crtc, "MODE_ID")?, blob);
@@ -2887,7 +2983,11 @@ impl SplitWindow {
             eprintln!("mediabox-tv.platform {} is not in the mode list", target.label);
             return;
         };
-        if mode == display.mode.get() && colour == display.colour.get() {
+        // The same mode with the crystal's error moved on since it was set
+        // (a kHz is 1.7 ppm at 594 MHz) is set again: here, at a channel's
+        // opening, on a dark panel -- never while a film plays.
+        let wire = on_the_wire(mode, crystal_ppm()).clock();
+        if mode == display.mode.get() && colour == display.colour.get() && wire == display.wire_khz.get() {
             *display.setting.borrow_mut() = setting;
             display.trial.set(trial);
             display.report();
@@ -3842,3 +3942,31 @@ fn timing_of(mode: &control::Mode) -> mediabox_platform::video::Timing {
     )
 }
 
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    fn mode_4k50() -> control::Mode {
+        let mut info: drm_ffi::drm_mode_modeinfo = unsafe { std::mem::zeroed() };
+        info.clock = 594_000;
+        (info.hdisplay, info.hsync_start, info.hsync_end, info.htotal) = (3840, 4896, 4984, 5280);
+        (info.vdisplay, info.vsync_start, info.vsync_end, info.vtotal) = (2160, 2168, 2178, 2250);
+        info.vrefresh = 50;
+        control::Mode::from(info)
+    }
+
+    #[test]
+    fn the_crystal_error_moves_the_pixel_clock_the_other_way() {
+        // NTP's freq -11.403 ppm: the crystal 11.403 ppm fast, the clock
+        // asked for that much slower.
+        let wire = on_the_wire(mode_4k50(), Some(11.403));
+        assert_eq!(wire.clock(), 593_993);
+        assert_eq!(wire.size(), (3840, 2160));
+        assert_eq!(on_the_wire(mode_4k50(), Some(-11.403)).clock(), 594_007);
+        // Unsynchronised, or under a kHz: the EDID's.
+        assert_eq!(on_the_wire(mode_4k50(), None).clock(), 594_000);
+        assert_eq!(on_the_wire(mode_4k50(), Some(0.5)).clock(), 594_000);
+        let period = period_of(&wire) as f64;
+        assert!((period / 20e6 - 1.0 - 11.4e-6).abs() < 1e-6, "{period}");
+    }
+}

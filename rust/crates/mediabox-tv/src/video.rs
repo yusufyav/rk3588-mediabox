@@ -2286,6 +2286,106 @@ mod tests {
         }
     }
 
+    /// A 50p film due every 20 ms on CLOCK_MONOTONIC on a panel whose
+    /// vblanks are `ppm` apart from that, for `seconds`: each vblank shows
+    /// the frame `due_index` picks, the snap following what was shown
+    /// (`track_snap`) unless `track` is off. Returns (repeats, skips, the
+    /// times of each, s).
+    fn mismatch(ppm: f64, seconds: u64, track: bool) -> (u64, u64, Vec<f64>) {
+        let period = (20_000_000.0 * (1.0 - ppm * 1e-6)).round() as u64;
+        let frame = 20_000_000u64;
+        let start = 10_000 * MS;
+        // The stamps' own jitter, ±0.6 ms, the same every run.
+        let jitter = |n: u64| ((n.wrapping_mul(2_654_435_761) >> 7) % 1_200_001) as i64 - 600_000;
+        let due = |n: u64| (start + 3 * MS + n * frame).saturating_add_signed(jitter(n));
+        let first = snap_offset(due(0), start, period);
+        let mut snap = first;
+        let (mut last_shown, mut repeats, mut skips, mut at) = (None::<u64>, 0, 0, Vec::new());
+        let vblanks = seconds * 1_000_000_000 / period;
+        for k in 1..vblanks {
+            let vblank = start + k * period;
+            let now = vblank - period + RACE_AFTER_NS;
+            let next = next_vblank_after(now, vblank - period, period);
+            assert_eq!(next, vblank);
+            // Every frame due by then is waiting (they come 38 ms early).
+            let newest = ((vblank + 40 * MS).saturating_sub(start + 3 * MS)) / frame;
+            // The stream's start: its first vblanks are the opening's.
+            let counted = vblank - start > 1_000_000_000;
+            let from = last_shown.map_or(0, |n| n + 1);
+            if from > newest {
+                if counted {
+                    repeats += 1;
+                    at.push((vblank - start) as f64 / 1e9);
+                }
+                continue;
+            }
+            let dues: Vec<Option<u64>> = (from..=newest).map(|n| Some(due(n).saturating_add_signed(snap))).collect();
+            let Some(index) = due_index(&dues, Some((next, period))) else {
+                if counted {
+                    repeats += 1;
+                    at.push((vblank - start) as f64 / 1e9);
+                }
+                continue;
+            };
+            let shown = from + index as u64;
+            if index > 0 && counted {
+                skips += index as u64;
+                at.push((vblank - start) as f64 / 1e9);
+            }
+            if track {
+                snap = track_snap(snap, first, due(shown), vblank, period);
+            }
+            last_shown = Some(shown);
+        }
+        (repeats, skips, at)
+    }
+
+    /// The panel's clock against the film's: each 20 ms the two part by is
+    /// one picture shown twice (panel fast) or left out (slow), once, at a
+    /// whole period's slip -- 1 / (50 * ppm) s apart -- never two together.
+    #[test]
+    fn a_clock_mismatch_costs_one_picture_per_period_slipped() {
+        for ppm in [5.0, 15.0, 30.0, 100.0, -5.0, -15.0, -30.0, -100.0] {
+            let seconds = 7200;
+            let (repeats, skips, at) = mismatch(ppm, seconds, true);
+            // The first half a slip in (the film starts on the vblank,
+            // half a period from where the snap takes one back), then one
+            // every slip.
+            let slip = 1.0 / (50.0 * ppm.abs() * 1e-6);
+            let expected = if (seconds as f64) < slip / 2.0 { 0 } else { ((seconds as f64 - slip / 2.0) / slip) as u64 + 1 };
+            let faults = repeats + skips;
+            assert_eq!(faults, expected, "{ppm} ppm: {at:?}");
+            if ppm > 0.0 { assert_eq!(skips, 0, "{ppm}"); } else { assert_eq!(repeats, 0, "{ppm}"); }
+            for pair in at.windows(2) {
+                // TRACK_NS moves the snap in 5 ms steps: a slip comes up to
+                // 5 ms of drift early or late, never two together.
+                assert!(pair[1] - pair[0] > slip * 0.5, "{ppm} ppm: {pair:?}");
+            }
+        }
+    }
+
+    /// The panel at the crystal's error corrected to 0.5 ppm (what remained
+    /// on 2026-11-05: NTP -11.40, the vblanks -10.90): no picture shown
+    /// twice in 65 minutes, past two of the 29 min 22 s boundaries at 11 ppm.
+    #[test]
+    fn a_corrected_clock_shows_every_picture_once_for_an_hour() {
+        let (repeats, skips, _) = mismatch(11.3, 3900, true);
+        assert_eq!((repeats, skips), (2, 0), "uncorrected: the two of 22:03:14 and 22:32:36");
+        assert_eq!(mismatch(0.5, 3900, true).0 + mismatch(0.5, 3900, true).1, 0);
+        assert_eq!(mismatch(-0.5, 3900, true).0 + mismatch(-0.5, 3900, true).1, 0);
+    }
+
+    /// Without the snap following the panel, a film drifting across the
+    /// half-way point between two vblanks goes up at one or the other by
+    /// turns: many more faults than slips (measured on NTV, 2026-11-01).
+    #[test]
+    fn without_the_snap_following_a_mismatch_is_faults_by_turns() {
+        let (r, s, _) = mismatch(12.0, 7200, true);
+        let (r0, s0, _) = mismatch(12.0, 7200, false);
+        assert_eq!(r + s, 4, "{r} {s}");
+        assert!(r0 + s0 > 2 * (r + s), "untracked {r0} {s0}, tracked {r} {s}");
+    }
+
     fn one_vblank_each(shown: &[(u64, u64)]) -> bool {
         shown.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1 && pair[1].1 == pair[0].1 + 1)
     }
