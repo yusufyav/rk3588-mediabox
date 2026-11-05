@@ -591,3 +591,38 @@ fn a_multiplex_hole_makes_nothing_up_and_the_sound_comes_back_at_once() {
     assert!(sound - sound_last <= hole.1 - hole.0 + 2 * 24_000_000, "the sound back {} ms after its last", (sound - sound_last) / 1_000_000);
     assert_eq!(generation, 1, "the channel not opened again");
 }
+
+/// The sound's first decoded buffer is cut at the key frame's time: the
+/// first sample kept is the first one at or after it, and its PTS and
+/// duration say so. A buffer from that time on is left as it is.
+#[test]
+fn the_sound_starts_at_the_key_frame_s_time_to_the_sample() {
+    gst::init().expect("GStreamer");
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("layout", "interleaved")
+        .field("rate", 48_000i32)
+        .field("channels", 2i32)
+        .build();
+    let start = 1_000_000_000u64;
+    let frame = |pts: u64| {
+        let mut buffer = gst::Buffer::from_mut_slice(vec![0u8; 1152 * 4]);
+        let b = buffer.get_mut().expect("new");
+        b.set_pts(gst::ClockTime::from_nseconds(pts));
+        b.set_duration(gst::ClockTime::from_nseconds(24_000_000));
+        buffer
+    };
+    // 10 ms into a 24 ms frame: 480 frames off its front.
+    let mut buffer = frame(start);
+    assert_eq!(super::trim(&mut buffer, start + 10_000_000, &caps), Some(480));
+    assert_eq!(buffer.size(), (1152 - 480) * 4);
+    assert_eq!(buffer.pts().map(|p| p.nseconds()), Some(start + 10_000_000));
+    assert_eq!(buffer.duration().map(|d| d.nseconds()), Some(14_000_000));
+    // Between two samples: the next one, never one before.
+    let mut buffer = frame(start);
+    assert_eq!(super::trim(&mut buffer, start + 10_000_001, &caps), Some(481));
+    assert!(buffer.pts().expect("timed").nseconds() >= start + 10_000_001);
+    let mut buffer = frame(start + 5);
+    assert_eq!(super::trim(&mut buffer, start, &caps), Some(0));
+    assert_eq!(buffer.size(), 1152 * 4);
+}

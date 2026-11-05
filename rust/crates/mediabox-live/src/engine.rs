@@ -256,6 +256,10 @@ struct Programme {
     /// When sound was first held back: a picture that never comes (its
     /// stream scrambled, say) does not keep the sound away for good.
     held_since: Mutex<Option<Instant>>,
+    /// The sound began with a frame that started before the key frame's
+    /// time: its samples before that time are cut once decoded (`trim`).
+    /// 0: nothing to cut.
+    trim_from: AtomicU64,
 }
 
 /// How long sound waits for a picture that does not come.
@@ -281,6 +285,7 @@ impl Programme {
             waited: AtomicBool::new(false),
             no_picture: AtomicBool::new(false),
             held_since: Mutex::new(None),
+            trim_from: AtomicU64::new(0),
         }
     }
 
@@ -290,7 +295,15 @@ impl Programme {
         self.known.notify_all();
     }
 
-    /// Whether a sound frame at `pts` is played.
+    /// Whether a sound frame at `pts`, `duration` long, is played.
+    ///
+    /// The sound starts where the picture does: with the frame whose time
+    /// takes in the first key frame's, its samples before that time cut
+    /// once decoded (`trim`). Started with the first frame from the key
+    /// frame's time on, it began up to a frame later than the picture --
+    /// MPEG audio's 24 ms: 20 of 63 openings had it more than 20 ms after
+    /// the first picture (FAZ 1M, 2026-11-06). `whole`: frames that cannot
+    /// be cut (a bitstream) start from the key frame's time on.
     ///
     /// Until the key frame's time is known a frame waits here, on the
     /// sound's own thread (its queue takes what comes meanwhile), rather
@@ -300,7 +313,7 @@ impl Programme {
     /// picture 316 ms late (measured 2026-11-01: 35 frames dropped in the
     /// 2.3 ms before the key frame was parsed). `stop`: the branch is being
     /// taken down, and waits no more.
-    fn sound(&self, pts: Option<u64>, stop: &dyn Fn() -> bool) -> bool {
+    fn sound(&self, pts: Option<u64>, duration: Option<u64>, whole: bool, stop: &dyn Fn() -> bool) -> bool {
         if self.sounding.load(Ordering::SeqCst) {
             return true;
         }
@@ -311,6 +324,14 @@ impl Programme {
             let picture = self.picture.lock().unwrap_or_else(|p| p.into_inner());
             match *picture {
                 Some(first) if pts.is_none_or(|pts| pts >= first) => break Some("ilk anahtar karenin zamanından"),
+                Some(first)
+                    if !whole
+                        && let (Some(pts), Some(duration)) = (pts, duration)
+                        && pts + duration > first =>
+                {
+                    self.trim_from.store(first, Ordering::SeqCst);
+                    break Some("ilk anahtar karenin zamanını içeren çerçeveden");
+                }
                 Some(_) => break None,
                 None => {
                     let waited = self.held_since.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Instant::now).elapsed();
@@ -1831,7 +1852,8 @@ impl Engine {
                     shared.health.diagnose(|d| d.frame(generation, pts, duration, discont));
                 }
                 let stop = || pad.pad_flags().contains(gst::PadFlags::FLUSHING);
-                if programme.sound(pts, &stop) {
+                let duration = buffer.and_then(|buffer| buffer.duration()).map(|d| d.nseconds());
+                if programme.sound(pts, duration, passthrough, &stop) {
                     gst::PadProbeReturn::Ok
                 } else {
                     shared.health.diagnose(|d| d.c.frames_gated += 1);
@@ -1867,6 +1889,24 @@ impl Engine {
         let head = self.head(&from, &chain, &elements, false)?;
         let decoded = head.last().expect("a chain has elements").static_pad("src").ok_or("çözücünün çıkışı yok")?;
         self.watch_decoder(head.last().expect("a chain has elements"), generation);
+        {
+            let programme = Arc::clone(programme);
+            decoded.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+                let from = programme.trim_from.swap(0, Ordering::SeqCst);
+                if from == 0 {
+                    return gst::PadProbeReturn::Ok;
+                }
+                let caps = pad.current_caps();
+                let Some(buffer) = info.buffer_mut() else { return gst::PadProbeReturn::Ok };
+                match caps.as_ref().and_then(|caps| trim(buffer, from, caps)) {
+                    Some(0) | None => gst::PadProbeReturn::Ok,
+                    Some(cut) => {
+                        mediabox_core::timeline!("audio-trim", "gen={generation} from={from} frames={cut}");
+                        gst::PadProbeReturn::Ok
+                    }
+                }
+            });
+        }
         if mediabox_core::timeline::enabled() {
             decoded.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
                 if let Some(buffer) = info.buffer() {
@@ -2772,6 +2812,42 @@ fn push_piece(
             }
     }
     (stamped, step_taken)
+}
+
+/// The samples of decoded `buffer` before `from` (running time, ns) cut
+/// off its front, its PTS and duration moved with them: how many frames
+/// were cut. None: the caps are not interleaved PCM this knows, or the
+/// buffer has no time.
+pub fn trim(buffer: &mut gst::Buffer, from: u64, caps: &gst::CapsRef) -> Option<u64> {
+    let s = caps.structure(0)?;
+    let rate = u64::try_from(s.get::<i32>("rate").ok()?).ok()?;
+    let channels = u64::try_from(s.get::<i32>("channels").ok()?).ok()?;
+    let format = s.get::<&str>("format").ok()?;
+    if s.get::<&str>("layout").is_ok_and(|layout| layout != "interleaved") || rate == 0 {
+        return None;
+    }
+    let width = match format {
+        "S8" | "U8" => 1,
+        "S16LE" | "S16BE" | "U16LE" | "U16BE" => 2,
+        "S24LE" | "S24BE" | "U24LE" | "U24BE" => 3,
+        "S32LE" | "S32BE" | "U32LE" | "U32BE" | "F32LE" | "F32BE" | "S24_32LE" | "S24_32BE" => 4,
+        "F64LE" | "F64BE" => 8,
+        _ => return None,
+    };
+    let pts = buffer.pts()?.nseconds();
+    if pts >= from {
+        return Some(0);
+    }
+    let bpf = (width * channels) as usize;
+    let frames = buffer.size() / bpf;
+    // The first sample at or after `from`.
+    let cut = ((u128::from(from - pts) * u128::from(rate)).div_ceil(1_000_000_000) as usize).min(frames);
+    let at = pts + (cut as u64 * 1_000_000_000) / rate;
+    let buffer = buffer.make_mut();
+    buffer.resize(cut * bpf..).ok()?;
+    buffer.set_pts(gst::ClockTime::from_nseconds(at));
+    buffer.set_duration(gst::ClockTime::from_nseconds(((frames - cut) as u64 * 1_000_000_000) / rate));
+    Some(cut as u64)
 }
 
 /// A PTS (90 kHz, 33 bits) on the running time, by the last PCR (27 MHz)
