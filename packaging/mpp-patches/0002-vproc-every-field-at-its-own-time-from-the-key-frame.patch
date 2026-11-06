@@ -94,7 +94,7 @@ index e792548..1ac1115 100644
              RK_U32 fo_from_iep = (ctx->dei_info.dil_order == IEP2_FIELD_ORDER_UND) ?
                                   fo_from_syntax : (ctx->dei_info.dil_order == IEP2_FIELD_ORDER_TFF);
 @@ -588,20 +620,20 @@ MPP_RET dec_vproc_output_dei_v2(MppDecVprocCtxImpl *ctx, MppFrame frm, RK_U32 is
- 
+
              if (is_tff) {
                  vproc_dbg_out("output at I4O2 for tff, frame poc %d\n", mpp_frame_get_poc(frm));
 -                dec_vproc_put_frame(mpp, frm, dst0, first_pts, frame_err);
@@ -120,7 +120,7 @@ index e792548..1ac1115 100644
              }
 @@ -663,12 +695,32 @@ static MPP_RET dec_vproc_dei_v2_deinterlace(MppDecVprocCtxImpl *ctx, MppFrame fr
          ctx->pd_mode = 0;
- 
+
      } else if (ctx->prev_frm0 && ! ctx->prev_frm1) {
 -        vproc_dbg_status("Wait for next frame to turn into I5O2");
 -
@@ -153,7 +153,7 @@ index e792548..1ac1115 100644
 +        else
              ctx->out_buf0 = NULL;
 -        }
- 
+
          if (ctx->out_buf1) {
              mpp_buffer_put(ctx->out_buf1);
 @@ -677,7 +729,10 @@ static MPP_RET dec_vproc_dei_v2_deinterlace(MppDecVprocCtxImpl *ctx, MppFrame fr
@@ -165,13 +165,13 @@ index e792548..1ac1115 100644
 +         * bottom-field-first stream; the other follows (above). */
 +        dil_mode = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_BOT_FIRST) ?
 +                   IEP2_DIL_MODE_I1O1B : IEP2_DIL_MODE_I1O1T;
- 
+
          dec_vproc_config_dei_v2(ctx, frm, dil_mode);
- 
+
 @@ -957,6 +1012,42 @@ static void *dec_vproc_thread(void *data)
              mpp_buf_slot_dequeue(slots, &tmp, QUEUE_DEINTERLACE);
              mpp_assert(tmp == index);
- 
+
 +            /* MediaBox: a picture the decoder marked discard -- an open
 +             * GOP's leading B picture whose references came before the
 +             * point decoding started, an unpaired field -- or in error --
