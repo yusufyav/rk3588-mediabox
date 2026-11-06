@@ -143,11 +143,20 @@ thread_local! {
 /// television with its monitor (key M) up. No input device, no remote: the
 /// heavy-interface gate's commits are the same every run. Unset, nothing.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "ui-test-load"), allow(dead_code))]
 struct UiLoad {
     hz: f64,
     monitor: bool,
 }
 
+/// Only in a build with the `ui-test-load` feature: the product's binary has
+/// neither the variable nor the load.
+#[cfg(not(feature = "ui-test-load"))]
+fn ui_load() -> Option<UiLoad> {
+    None
+}
+
+#[cfg(feature = "ui-test-load")]
 fn ui_load() -> Option<UiLoad> {
     static LOAD: std::sync::OnceLock<Option<UiLoad>> = std::sync::OnceLock::new();
     *LOAD.get_or_init(|| {

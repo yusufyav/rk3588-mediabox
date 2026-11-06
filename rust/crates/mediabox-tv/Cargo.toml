@@ -16,6 +16,11 @@ license = "MIT"
 name = "mediabox-tv"
 path = "src/main.rs"
 
+[features]
+# A test's load on the interface (MEDIABOX_TV_UI_LOAD), for the heavy-interface
+# gate only; never in the product's binary.
+ui-test-load = []
+
 [dependencies]
 # A custom direct-KMS platform, drawn by FemtoVG on GLES. Not the default feature set:
 # `accessibility` pulls AT-SPI over D-Bus and there is no session bus on the
