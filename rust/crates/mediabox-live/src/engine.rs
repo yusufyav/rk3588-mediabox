@@ -1148,6 +1148,16 @@ impl Engine {
             let _ = self.pipeline.remove(&sink);
             return Err(error);
         }
+        // The pipeline's latency before its first buffer, not after: told
+        // through the bus (the main loop's recalculate_latency, up to 20 ms
+        // on), a sink added under a flowing stream sometimes started its
+        // device first and then found every buffer 150 ms late -- "Unexpected
+        // discontinuity ... +0:00:00.150000000, resyncing", 9 of 10 sound
+        // handovers on the Plus (FAZ 2E). Nothing passes the selector while
+        // a sink is swapped in, so this comes first.
+        if let Some(latency) = self.pipeline.latency() {
+            sink.send_event(gst::event::Latency::new(latency));
+        }
         *self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
         Ok(())
     }
