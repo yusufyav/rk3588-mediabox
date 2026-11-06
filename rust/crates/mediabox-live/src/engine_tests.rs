@@ -367,8 +367,73 @@ fn the_sound_device_opened_again_under_the_sound() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
     let ts = stream(&[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX }]);
-    let run = play_doing(ts, 0, Duration::from_secs(2), |engine| engine.reopen_audio_sink());
+    let run = play_doing(ts, 0, Duration::from_secs(2), |engine| engine.reopen_audio_sink(None));
     sound_went_on(&run, 1, 0x101, 3_200_000_000);
+    picture_handed_over(&run, false);
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+}
+
+/// The sound device will not open after a swap (held by another process:
+/// hdmi-codec takes one stream at a time): the sound goes on into a
+/// stand-in, the device is tried again and taken when it is free. The
+/// requests made while it is pending join it -- one swap for three, each
+/// answered with its outcome when it is done. Before, three requests were
+/// three swaps, each answered "success" when asked, and a device that did
+/// not open left the sound stopped for the rest of the channel (2026-11-06,
+/// the Plus).
+#[test]
+fn requests_while_a_swap_is_pending_join_it() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&answers);
+    let run = play_doing(ts, 0, Duration::from_secs(2), move |engine| {
+        engine.audio.lock().unwrap().device = Some("hw:CARD=mediabox-none,DEV=0".into());
+        let waits: Vec<_> = (0..3)
+            .map(|_| {
+                let (reply, wait) = std::sync::mpsc::sync_channel(1);
+                engine.reopen_audio_sink(Some(reply));
+                wait
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(250));
+        engine.audio.lock().unwrap().device = None;
+        for wait in waits {
+            into.lock().unwrap().push(wait.recv_timeout(Duration::from_secs(3)));
+        }
+    });
+    assert_eq!(*answers.lock().unwrap(), vec![Ok(Ok(())), Ok(Ok(())), Ok(Ok(()))]);
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 1, "one open for the three");
+    let health = &run.shared.health;
+    assert!(health.sink_open_failures.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+    assert!(!health.sink_given_up.load(std::sync::atomic::Ordering::Relaxed));
+    sound_went_on(&run, 1, 0x101, 5_000_000_000);
+    picture_handed_over(&run, false);
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+}
+
+/// Never free again: given up on after its tries, said so in the answer
+/// and the health, and the channel goes on -- the picture and the sound's
+/// source with it, into the stand-in.
+#[test]
+fn a_device_that_never_opens_is_given_up_on() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let answer = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&answer);
+    let run = play_doing(ts, 0, Duration::from_secs(2), move |engine| {
+        engine.audio.lock().unwrap().device = Some("hw:CARD=mediabox-none,DEV=0".into());
+        let (reply, wait) = std::sync::mpsc::sync_channel(1);
+        engine.reopen_audio_sink(Some(reply));
+        *into.lock().unwrap() = Some(wait.recv_timeout(Duration::from_secs(3)));
+    });
+    assert!(matches!(*answer.lock().unwrap(), Some(Ok(Err(_)))), "{:?}", answer.lock().unwrap());
+    let health = &run.shared.health;
+    assert_eq!(health.sink_open_failures.load(std::sync::atomic::Ordering::Relaxed), 6);
+    assert!(health.sink_given_up.load(std::sync::atomic::Ordering::Relaxed));
+    sound_went_on(&run, 1, 0x101, 5_000_000_000);
     picture_handed_over(&run, false);
     assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
 }

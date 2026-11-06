@@ -293,7 +293,7 @@ fn main() {
     let dropped_late = Mutex::new(0u64);
     loop {
         match inbox.recv_timeout(Duration::from_millis(20)) {
-            Ok((command, done)) => {
+            Ok((command, mut done)) => {
                 let quit = matches!(command, Command::Quit | Command::Fail(_));
                 let mut result = Ok(());
                 match command {
@@ -314,7 +314,9 @@ fn main() {
                     Command::Aid(aid) => engine.set_aid(aid),
                     Command::Volume { gain, muted } => engine.set_volume(gain, muted),
                     Command::AudioDelay(seconds) => engine.set_audio_delay(seconds),
-                    Command::ReloadSound => engine.reopen_audio_sink(),
+                    // Answered when the device is open again, or given up
+                    // on: not when asked.
+                    Command::ReloadSound => engine.reopen_audio_sink(done.take()),
                     Command::Fail(why) => {
                         eprintln!("mediabox-live: {why}");
                         failure = Some(why);
@@ -344,7 +346,7 @@ fn main() {
                         // away; it is opened again, not given up.
                         if audio_failed.is_none_or(|at| at.elapsed() > Duration::from_secs(1)) {
                             audio_failed = Some(Instant::now());
-                            engine.reopen_audio_sink();
+                            engine.reopen_audio_sink(None);
                         }
                     } else if source.is_some_and(|source| engine.is_current(source))
                         && branch_failed.is_none_or(|at| at.elapsed() > Duration::from_secs(2))

@@ -28,7 +28,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 pub const PATH: &str = "/run/mediabox-live/health.json";
 /// The sound's incidents, one JSON line each; the older half dropped past
@@ -72,6 +72,12 @@ pub struct Health {
     pub sound_push_errors: AtomicU64,
     pub ts_push_errors: AtomicU64,
     pub teardown_errors: AtomicU64,
+    /// Opens of the sound device that failed under a playing channel
+    /// (`Engine::reopen_audio_sink`), each attempt; and whether the device
+    /// is given up on -- every attempt failed, no sound until it is asked
+    /// open again.
+    pub sink_open_failures: AtomicU64,
+    pub sink_given_up: AtomicBool,
     push_said: Mutex<(u64, u8)>,
     sound: Mutex<crate::sound_diag::Diag>,
     /// When the sound device was last opened by us, monotonic ns: a restart
@@ -601,6 +607,9 @@ pub struct Report {
     pub sound_push_errors: u64,
     pub ts_push_errors: u64,
     pub teardown_errors: u64,
+    pub sink_open_failures: u64,
+    /// "open", or "given-up": the sound device could not be opened again.
+    pub sound_device: &'static str,
     /// The sound's diagnosis (`sound_diag::Diag::json`) and its incidents.
     pub sound: serde_json::Value,
     pub sound_incidents: u64,
@@ -668,6 +677,8 @@ impl Health {
             sound_push_errors: self.sound_push_errors.load(Ordering::Relaxed),
             ts_push_errors: self.ts_push_errors.load(Ordering::Relaxed),
             teardown_errors: self.teardown_errors.load(Ordering::Relaxed),
+            sink_open_failures: self.sink_open_failures.load(Ordering::Relaxed),
+            sound_device: if self.sink_given_up.load(Ordering::Relaxed) { "given-up" } else { "open" },
             audio_lead_least_ms: lead_least.map(|l| l as f64 / 1e6),
             audio_late: late,
             sink_late: self.sink_late.load(Ordering::Relaxed),
@@ -751,6 +762,8 @@ pub fn write(report: &Report) {
     json["sound_push_errors"] = r.sound_push_errors.into();
     json["ts_push_errors"] = r.ts_push_errors.into();
     json["teardown_errors"] = r.teardown_errors.into();
+    json["sink_open_failures"] = r.sink_open_failures.into();
+    json["sound_device"] = r.sound_device.into();
     json["sound"] = r.sound.clone();
     json["plane_full_dropped"] = r.plane_full_dropped.into();
     // Every count above runs for the life of the process, through every

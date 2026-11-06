@@ -428,11 +428,40 @@ struct Feed {
 /// tsdemux's sound it had taken 700 ms (`DEMUX_LATENCY_MS`).
 pub const LATENCY_MS: u64 = 150;
 
+/// The waits before each try at the sound device again, after one failed:
+/// 1.55 s in all, then it is given up on until asked again. The HDMI
+/// sound device takes one stream at a time (hdmi-codec.c,
+/// `hdmi_codec_startup`: "Only one simultaneous stream supported"); held
+/// by another process it is free again when that one lets go.
+const SINK_RETRY_MS: [u64; 5] = [50, 100, 200, 400, 800];
+
+/// Where the outcome of a swap of the sound device goes: `ao-reload`'s
+/// answer.
+pub type SinkReply = std::sync::mpsc::SyncSender<Result<(), String>>;
+
+#[derive(Default)]
+struct SinkSwaps {
+    /// Opens of the sound device so far, whatever for.
+    opened: u64,
+    pending: Option<PendingSwap>,
+}
+
+/// A swap asked for and not done yet. Any open of the device after
+/// `after` does it; every request made meanwhile gets its outcome.
+struct PendingSwap {
+    after: u64,
+    failed: usize,
+    replies: Vec<SinkReply>,
+}
+
 pub struct Engine {
     pipeline: gst::Pipeline,
     video_selector: gst::Element,
     audio_selector: gst::Element,
     audio_sink: Mutex<Option<gst::Element>>,
+    /// The sound device's swaps, one at a time (`reopen_audio_sink`,
+    /// `sound_mode`).
+    swaps: Mutex<SinkSwaps>,
     /// The sound device is open for IEC 61937 (non-audio) rather than PCM.
     bitstream: AtomicBool,
     options: Options,
@@ -793,6 +822,7 @@ impl Engine {
             video_selector,
             audio_selector,
             audio_sink: Mutex::new(None),
+            swaps: Mutex::new(SinkSwaps::default()),
             bitstream: AtomicBool::new(false),
             audio: {
                 let (gain, muted) = (options.audio.gain, options.audio.muted);
@@ -1094,11 +1124,39 @@ impl Engine {
         if let Some(pad) = sink.static_pad("sink") {
             probe_layer(&pad, crate::clock_probe::Layer::Sink, None, &self.shared);
         }
+        self.add_audio_sink(sink)
+    }
+
+    /// `sink` in, after the sound selector, in the pipeline's state; taken
+    /// out again if it cannot be (a device that would not open), not left
+    /// in the pipeline half made.
+    fn add_audio_sink(&self, sink: gst::Element) -> Result<(), String> {
         self.pipeline.add(&sink).map_err(|e| e.to_string())?;
-        self.audio_selector.link(&sink).map_err(|e| e.to_string())?;
-        sink.sync_state_with_parent().map_err(|e| e.to_string())?;
+        let added = self
+            .audio_selector
+            .link(&sink)
+            .map_err(|e| e.to_string())
+            .and_then(|()| sink.sync_state_with_parent().map_err(|e| e.to_string()));
+        if let Err(error) = added {
+            self.audio_selector.unlink(&sink);
+            let _ = sink.set_state(gst::State::Null);
+            let _ = self.pipeline.remove(&sink);
+            return Err(error);
+        }
         *self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
         Ok(())
+    }
+
+    /// While the device cannot be opened, the sound goes on into a fakesink
+    /// at the clock's pace: with nothing after the selector, the sound's
+    /// next buffer came back NOT_LINKED and its source stopped.
+    fn attach_stand_in(&self) -> Result<(), String> {
+        let sink = make("fakesink")?;
+        sink.set_property("sync", true);
+        sink.set_property("async", false);
+        sink.set_property("enable-last-sample", false);
+        sink.set_property("ts-offset", self.audio_offset());
+        self.add_audio_sink(sink)
     }
 
     fn detach_audio_sink(&self) {
@@ -1111,20 +1169,64 @@ impl Engine {
     }
 
     /// Open the sound device for a bitstream or for PCM, if it is not already.
-    fn sound_mode(&self, bitstream: bool) {
+    ///
+    /// In line, not at an IDLE probe: it is called only where no sound is
+    /// passing the selector -- building a channel's sound part
+    /// (`sound_branch`: the old part was unlinked from the selector before,
+    /// `take_down_lists`), or at the new decoder's caps, before its part is
+    /// linked to the selector. Measured on the Plus, 2026-11-06, MP2 -> AC-3
+    /// passthrough -> MP2 by the PMT under a playing channel: no channel
+    /// opened again, no buffer refused, the sound on after each change.
+    /// It takes the swaps' lock, so it is never halfway through while
+    /// `reopen_audio_sink` swaps the device.
+    fn sound_mode(self: &Arc<Self>, bitstream: bool) {
         // A bitstream is not samples: the PCM layers do not apply to it.
         self.shared.health.diagnose(|d| d.context.passthrough = bitstream);
+        let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
         if self.bitstream.swap(bitstream, Ordering::SeqCst) == bitstream {
             return;
         }
-        self.detach_audio_sink();
-        if let Err(error) = self.attach_audio_sink("mode") {
+        if let Err(error) = self.swap_sink(&mut swaps, "mode") {
             eprintln!("mediabox-live: ses aygıtı açılamadı: {error}");
+            drop(swaps);
+            self.reopen_audio_sink(None);
         }
     }
 
-    /// The sound device failed under us -- a display mode change takes the
-    /// HDMI sound device away ("Device lost") -- or was asked off.
+    /// The old sink out and a new one in, with the swaps' lock held. A
+    /// device that will not open leaves a stand-in (`attach_stand_in`).
+    fn swap_sink(&self, swaps: &mut SinkSwaps, why: &str) -> Result<(), String> {
+        let started = Instant::now();
+        self.detach_audio_sink();
+        mediabox_core::timeline!("sink-swap", "phase=detached why={why} ms={}", started.elapsed().as_millis());
+        if self.aid.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+            swaps.opened += 1;
+            return Ok(());
+        }
+        let opening = Instant::now();
+        match self.attach_audio_sink(why) {
+            Ok(()) => {
+                mediabox_core::timeline!("sink-swap", "phase=attached ms={}", opening.elapsed().as_millis());
+                swaps.opened += 1;
+                self.shared.health.sink_given_up.store(false, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(error) => {
+                mediabox_core::timeline!("sink-swap", "phase=open-failed ms={} error={error}", opening.elapsed().as_millis());
+                self.shared.health.sink_open_failures.fetch_add(1, Ordering::Relaxed);
+                if let Err(stand_in) = self.attach_stand_in() {
+                    eprintln!("mediabox-live: ses yer tutucusu kurulamadı: {stand_in}");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// The sound device failed under us -- a display mode change stops the
+    /// HDMI sound device's stream (hdmi-codec.c `plugged_cb`, on plug-in:
+    /// `snd_pcm_stop(SETUP)`, inside the mode's commit) -- or was asked
+    /// off. `reply` gets the outcome once the device is open again, or
+    /// given up on.
     ///
     /// The old sink goes and the new one comes while nothing is passing the
     /// sound selector's src pad (an IDLE probe): the sound's thread waits
@@ -1135,27 +1237,78 @@ impl Engine {
     /// cuts10/c05.ts, `ao-reload` after a mode change) -- or stopped without
     /// a word, the sound gone for the rest of the channel (codec-mp2.ts,
     /// the same day).
-    pub fn reopen_audio_sink(self: &Arc<Self>) {
+    ///
+    /// One swap at a time: a request while one is waiting joins it (three
+    /// at once were three swaps, 2026-11-06). A device that will not open
+    /// is tried again after `SINK_RETRY_MS`, a stand-in taking the sound
+    /// meanwhile; before, the sound stopped for the rest of the channel
+    /// and the answer was still "success".
+    pub fn reopen_audio_sink(self: &Arc<Self>, reply: Option<SinkReply>) {
+        let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(pending) = swaps.pending.as_mut() {
+            pending.replies.extend(reply);
+            mediabox_core::timeline!("sink-swap", "phase=joined");
+            return;
+        }
+        let after = swaps.opened;
+        swaps.pending = Some(PendingSwap { after, failed: 0, replies: reply.into_iter().collect() });
+        drop(swaps);
+        mediabox_core::timeline!("sink-swap", "phase=asked");
+        self.queue_swap();
+    }
+
+    fn queue_swap(self: &Arc<Self>) {
         let Some(src) = self.audio_selector.static_pad("src") else {
+            self.end_swap(&mut self.swaps.lock().unwrap_or_else(|p| p.into_inner()), Err("ses seçicisinin çıkışı yok".into()));
             return;
         };
         let asked = Instant::now();
-        mediabox_core::timeline!("sink-swap", "phase=asked");
         let engine = Arc::clone(self);
         src.add_probe(gst::PadProbeType::IDLE, move |_, _| {
             mediabox_core::timeline!("sink-swap", "phase=idle waited_ms={}", asked.elapsed().as_millis());
-            let started = Instant::now();
-            engine.detach_audio_sink();
-            mediabox_core::timeline!("sink-swap", "phase=detached ms={}", started.elapsed().as_millis());
-            if engine.aid.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
-                let opening = Instant::now();
-                if let Err(error) = engine.attach_audio_sink("reopen") {
-                    eprintln!("mediabox-live: ses aygıtı yeniden açılamadı: {error}");
-                }
-                mediabox_core::timeline!("sink-swap", "phase=attached ms={}", opening.elapsed().as_millis());
-            }
+            engine.run_swap();
             gst::PadProbeReturn::Remove
         });
+    }
+
+    fn run_swap(self: &Arc<Self>) {
+        let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+        let Some((after, failed)) = swaps.pending.as_ref().map(|p| (p.after, p.failed)) else { return };
+        // Opened since it was asked (`sound_mode`): done already.
+        let result = if swaps.opened > after { Ok(()) } else { self.swap_sink(&mut swaps, "reopen") };
+        if let (Err(error), Some(&wait)) = (&result, SINK_RETRY_MS.get(failed)) {
+            if let Some(pending) = swaps.pending.as_mut() {
+                pending.failed += 1;
+            }
+            mediabox_core::timeline!("sink-swap", "phase=retry in_ms={wait} tries={}", failed + 1);
+            let engine = Arc::downgrade(self);
+            let spawned = std::thread::Builder::new().name("sink-retry".into()).spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                if let Some(engine) = engine.upgrade() {
+                    engine.queue_swap();
+                }
+            });
+            if spawned.is_ok() {
+                return;
+            }
+            eprintln!("mediabox-live: ses aygıtı yeniden denenemedi: {error}");
+        }
+        self.end_swap(&mut swaps, result);
+    }
+
+    fn end_swap(&self, swaps: &mut SinkSwaps, result: Result<(), String>) {
+        let Some(pending) = swaps.pending.take() else { return };
+        match &result {
+            Ok(()) => mediabox_core::timeline!("sink-swap", "phase=done ok=1 tries={} answers={}", pending.failed + 1, pending.replies.len()),
+            Err(error) => {
+                mediabox_core::timeline!("sink-swap", "phase=done ok=0 tries={} answers={} error={error}", pending.failed + 1, pending.replies.len());
+                eprintln!("mediabox-live: ses aygıtı açılamadı, {} denemeden sonra bırakıldı: {error}", pending.failed + 1);
+                self.shared.health.sink_given_up.store(true, Ordering::Relaxed);
+            }
+        }
+        for reply in pending.replies {
+            let _ = reply.send(result.clone());
+        }
     }
 
     pub fn is_audio_sink(&self, object: &gst::Object) -> bool {
@@ -2395,13 +2548,17 @@ impl Engine {
                 return;
             }
         }
-        match aid {
-            None => self.detach_audio_sink(),
-            Some(_) => {
-                if self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).is_none()
-                    && let Err(error) = self.attach_audio_sink("aid")
-                {
-                    eprintln!("mediabox-live: ses aygıtı açılamadı: {error}");
+        {
+            let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+            match aid {
+                None => self.detach_audio_sink(),
+                Some(_) => {
+                    if self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+                        match self.attach_audio_sink("aid") {
+                            Ok(()) => swaps.opened += 1,
+                            Err(error) => eprintln!("mediabox-live: ses aygıtı açılamadı: {error}"),
+                        }
+                    }
                 }
             }
         }
