@@ -294,6 +294,9 @@ fn picture_handed_over(run: &Run, handed: bool) {
     if !handed {
         assert_eq!(runs.len(), 1, "one input: {:?}", runs.iter().map(|(p, b)| (p, b.len())).collect::<Vec<_>>());
         assert!(runs[0].1.len() >= 90, "the picture went on: {} frames", runs[0].1.len());
+        // Not a picture left out: 25 a second, each 40 ms after the last.
+        let worst = runs[0].1.windows(2).map(|w| w[1].0.saturating_sub(w[0].0)).max().unwrap_or(0);
+        assert!(worst <= 41_000_000, "a step of {} ms in the picture", worst / 1_000_000);
         return;
     }
     assert_eq!(runs.len(), 2, "{:?}", runs.iter().map(|(p, b)| (p, b.len())).collect::<Vec<_>>());
@@ -327,6 +330,20 @@ fn sound_went_on(run: &Run, inputs: usize, pid: u16, after_ns: u64) {
     assert_eq!(run.shared.health.teardown_errors.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
+/// The sound went from the old input to the new one where the old one's
+/// sound ended: no more than a frame (`frame_ns`) apart either way.
+fn sound_continuous(run: &Run, frame_ns: u64) {
+    let seen = run.audio.lock().unwrap();
+    let runs = runs(&seen);
+    assert_eq!(runs.len(), 2, "{:?}", runs.iter().map(|(p, b)| (p, b.len())).collect::<Vec<_>>());
+    let old = &runs[0].1;
+    let step = old[old.len() - 1].0 - old[old.len() - 2].0;
+    let old_end = old[old.len() - 1].0 + step;
+    let new_start = runs[1].1[0].0;
+    let apart = new_start as i64 - old_end as i64;
+    assert!(apart.unsigned_abs() <= frame_ns, "the new sound {} ms from where the old one ended", apart / 1_000_000);
+}
+
 fn ns(pts: u64) -> u64 {
     // The first PCR is 0 and the reader puts it at the running time it came:
     // PTS against the first unit's, as a lower bound.
@@ -353,7 +370,7 @@ fn same_codec_another_pid() {
     let run = play(ts, 0);
     // The same codec: the same input, the reader on the new PID.
     sound_went_on(&run, 1, 0x102, ns(SWITCH) + 500_000_000);
-    picture_handed_over(&run, true);
+    picture_handed_over(&run, false);
     assert_eq!(tracks(&run).len(), 1, "audio_order counted again for the new program generation");
 }
 
@@ -490,9 +507,12 @@ fn same_pid_another_codec() {
         ],
     );
     let run = play(ts, 0);
-    // A new input for AC-3; MPEG audio's never after it.
+    // A new input for AC-3; MPEG audio's never after it, and all of it
+    // played: the new sound goes on where the old one ended. The picture,
+    // the same stream on the same PID, goes on through the change.
     sound_went_on(&run, 2, 0x101, ns(SWITCH) + 500_000_000);
-    picture_handed_over(&run, true);
+    sound_continuous(&run, 24_000_000);
+    picture_handed_over(&run, false);
     assert_eq!(tracks(&run).len(), 1);
 }
 
@@ -510,7 +530,8 @@ fn another_pid_and_codec() {
     );
     let run = play(ts, 0);
     sound_went_on(&run, 2, 0x103, ns(SWITCH) + 500_000_000);
-    picture_handed_over(&run, true);
+    sound_continuous(&run, 24_000_000);
+    picture_handed_over(&run, false);
 }
 
 #[test]
@@ -558,7 +579,7 @@ fn language_kept_when_the_pmt_reorders() {
     // The viewer chose the second track, English.
     let run = play(ts, 1);
     sound_went_on(&run, 1, 0x202, ns(SWITCH) + 500_000_000);
-    picture_handed_over(&run, true);
+    picture_handed_over(&run, false);
     // The tracks counted again for the new program generation: two, not
     // four. (Their languages come in a tag event after the pad, so the
     // list made at pad-added has none -- as before this change.)

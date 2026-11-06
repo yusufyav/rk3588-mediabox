@@ -147,6 +147,23 @@ pub struct SoundParts {
     pub source: gst_app::AppSrc,
     elements: Arc<Mutex<Vec<gst::Element>>>,
     pads: Arc<Mutex<Vec<(gst::Element, gst::Pad)>>>,
+    /// Built to follow another part (`hand_over_sound`): what lets it go.
+    held: Option<SoundRelease>,
+}
+
+/// A sound part built while the one before still plays: its source
+/// blocked, and for a bitstream the sound device's mode and the selector's
+/// input it is to be switched to -- both done when it is let go.
+struct SoundRelease {
+    block: Option<(gst::Pad, gst::PadProbeId)>,
+    activate: Option<gst::Pad>,
+}
+
+/// The sound part playing out after the PMT gave another codec, and what
+/// lets the new one go once it has.
+struct SoundHandover {
+    old: SoundParts,
+    release: SoundRelease,
 }
 
 /// The picture's part of a channel's branch: from tsdemux's pad of one
@@ -467,6 +484,8 @@ pub struct Engine {
     /// The sound device's swaps, one at a time (`reopen_audio_sink`,
     /// `sound_mode`).
     swaps: Mutex<SinkSwaps>,
+    /// A sound part playing out before the next one goes on.
+    sound_handover: Mutex<Option<SoundHandover>>,
     /// The sound device is open for IEC 61937 (non-audio) rather than PCM.
     bitstream: AtomicBool,
     options: Options,
@@ -828,6 +847,7 @@ impl Engine {
             audio_selector,
             audio_sink: Mutex::new(None),
             swaps: Mutex::new(SinkSwaps::default()),
+            sound_handover: Mutex::new(None),
             bitstream: AtomicBool::new(false),
             audio: {
                 let (gain, muted) = (options.audio.gain, options.audio.muted);
@@ -894,33 +914,43 @@ impl Engine {
             let branch = current.as_ref().filter(|b| b.generation == generation)?;
             Arc::clone(&branch.programme)
         };
-        let old = {
-            let mut sound = self.shared.sound.lock().unwrap_or_else(|p| p.into_inner());
-            if !switch.rebuild
-                && let Some(parts) = sound.as_mut().filter(|p| p.generation == generation)
-            {
-                parts.pid = switch.pid;
-                eprintln!("mediabox-live: ses PMT ile PID {:#06x}'e geçti ({})", switch.pid, switch.codec.name());
-                return Some(parts.source.clone());
-            }
-            sound.take()
-        };
-        if let Some(old) = old {
-            self.take_down_sound(old);
+        // Held to the end: tsdemux puts the programme's new sound pad up
+        // while this runs, and with no sound part there `stream` built a
+        // second one of its own, which took the selector and the device's
+        // mode (FAZ 2E, 2026-11-06: `sink-swap why=mode` 5 ms after the
+        // PMT, the reader's part never played).
+        let mut sound = self.shared.sound.lock().unwrap_or_else(|p| p.into_inner());
+        if !switch.rebuild
+            && let Some(parts) = sound.as_mut().filter(|p| p.generation == generation)
+        {
+            parts.pid = switch.pid;
+            eprintln!("mediabox-live: ses PMT ile PID {:#06x}'e geçti ({})", switch.pid, switch.codec.name());
+            return Some(parts.source.clone());
         }
+        let old = sound.take();
         let Some(caps) = sound_caps(switch.codec) else {
+            if let Some(old) = old {
+                self.take_down_sound(old);
+            }
             eprintln!("mediabox-live: ses PMT ile {} oldu: oynatılamıyor", switch.codec.name());
             return None;
         };
-        match self.sound_branch(generation, &caps, &programme) {
+        match self.sound_branch(generation, &caps, &programme, old.is_some()) {
             Ok(mut parts) => {
                 parts.pid = switch.pid;
                 let source = parts.source.clone();
-                *self.shared.sound.lock().unwrap_or_else(|p| p.into_inner()) = Some(parts);
+                let release = parts.held.take();
+                if let (Some(old), Some(release)) = (old, release) {
+                    self.hand_over_sound(old, release);
+                }
+                *sound = Some(parts);
                 eprintln!("mediabox-live: ses PMT ile {} oldu, PID {:#06x}: ses kolu yeniden kuruldu", switch.codec.name(), switch.pid);
                 Some(source)
             }
             Err(error) => {
+                if let Some(old) = old {
+                    self.take_down_sound(old);
+                }
                 eprintln!("mediabox-live: ses kolu {} için kurulamadı: {error}", switch.codec.name());
                 None
             }
@@ -939,8 +969,154 @@ impl Engine {
         self.take_down_lists(format!("video-down-{generation}"), vec![(old.elements, old.pads)]);
     }
 
+    /// The same picture stream under a new program generation -- the PMT
+    /// changed for something else, the sound most often, and tsdemux puts
+    /// every stream up again on a new pad. The picture goes on through the
+    /// same parser and decoder: the new pad takes the old one's place once
+    /// the old one's last data is through (its EOS, held back), or at the
+    /// new one's first data if that comes first. Before, it got a part of
+    /// its own from its first key frame and what the old pad still had was
+    /// thrown away: the panel held 440-480 ms at each PMT change (FAZ 2E,
+    /// 2026-11-06, a 1080p25 fixture whose PMT changed only the sound).
+    /// Another PID or codec is another picture: handed over as before.
+    fn join_video(&self, generation: u64, pad: &gst::Pad, program: &Option<String>, name: &str, programme: &Arc<Programme>) -> bool {
+        let pid = |pad: &gst::Pad| pad.name().rsplit('_').next().map(str::to_string);
+        let mut video = programme.video.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(parts) = video.as_mut() else { return false };
+        let same_codec = parts.pad.current_caps().and_then(|caps| caps.structure(0).map(|s| s.name().to_string())).as_deref() == Some(name);
+        if pid(&parts.pad) != pid(pad) || !same_codec {
+            return false;
+        }
+        let Some(into) = parts.pad.peer() else { return false };
+        let old = std::mem::replace(&mut parts.pad, pad.clone());
+        parts.program = program.clone();
+        drop(video);
+        mediabox_core::timeline!("video-handover", "gen={generation} join={} pad={}", old.name(), pad.name());
+        let joined = Arc::new(AtomicBool::new(false));
+        let join: Arc<dyn Fn(&str) + Send + Sync> = {
+            let (old, new) = (old.clone(), pad.clone());
+            Arc::new(move |why: &str| {
+                if joined.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let _ = old.unlink(&into);
+                let linked = new.link(&into);
+                mediabox_core::timeline!("video-handover", "gen={generation} joined={} why={why}", u8::from(linked.is_ok()));
+            })
+        };
+        {
+            let join = Arc::clone(&join);
+            old.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| match &info.data {
+                Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => {
+                    join("old-drained");
+                    gst::PadProbeReturn::Drop
+                }
+                _ => gst::PadProbeReturn::Ok,
+            });
+        }
+        // It is the same stream going on: its new start, and its caps and
+        // segment where they are the old pad's, are not passed on, nor the
+        // DISCONT on its first buffer. Passed on, the decoder lost the
+        // picture it held at the DISCONT and gave nothing for 200 ms -- one
+        // picture missing at each change, 8 of 8 on the Plus (FAZ 2E).
+        let (caps, segment) = (old.current_caps(), old.sticky_event::<gst::event::Segment>(0));
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            let Some(gst::PadProbeData::Event(event)) = &info.data else { return gst::PadProbeReturn::Ok };
+            let same = match event.view() {
+                gst::EventView::StreamStart(_) => true,
+                gst::EventView::Caps(new) => caps.as_ref().is_some_and(|old| old.as_ref() == new.caps()),
+                gst::EventView::Segment(new) => segment.as_ref().is_some_and(|old| old.segment() == new.segment()),
+                _ => false,
+            };
+            if same { gst::PadProbeReturn::Drop } else { gst::PadProbeReturn::Ok }
+        });
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            join("new-data");
+            if let Some(buffer) = info.buffer_mut()
+                && buffer.flags().contains(gst::BufferFlags::DISCONT)
+            {
+                buffer.make_mut().unset_flags(gst::BufferFlags::DISCONT);
+            }
+            gst::PadProbeReturn::Remove
+        });
+        true
+    }
+
     fn take_down_sound(&self, parts: SoundParts) {
         self.take_down_lists(format!("sound-down-{}", parts.generation), vec![(parts.elements, parts.pads)]);
+    }
+
+    /// The PMT gave the sound another codec: the old part plays out what it
+    /// has, and the new one -- built and fed meanwhile, its source blocked
+    /// -- goes on where the old one ends. The reader is already past the
+    /// change, so everything the old part holds is sound from before it:
+    /// told its end (EOS on its source), it plays to that end, and its EOS
+    /// reaching the selector is when the new part is let go, the device's
+    /// mode and the selector's input switched first. No time is guessed.
+    ///
+    /// Before, the old part was taken down at once with what it held, some
+    /// 270 ms of sound read ahead of the clock -- a gap of 272 ms at each
+    /// change, MP2 to AC-3 and back (FAZ 2E, 2026-11-06).
+    fn hand_over_sound(self: &Arc<Self>, old: SoundParts, release: SoundRelease) {
+        let mut pending = self.sound_handover.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(handover) = pending.as_mut() {
+            // Another change before the last one went on: `old` never
+            // played; the newest waits on the part still playing out.
+            handover.release = release;
+            drop(pending);
+            mediabox_core::timeline!("sound-handover", "gen={} phase=superseded", old.generation);
+            self.take_down_sound(old);
+            return;
+        }
+        let inputs: Vec<gst::Pad> = old
+            .pads
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(element, _)| *element == self.audio_selector)
+            .map(|(_, pad)| pad.clone())
+            .collect();
+        mediabox_core::timeline!("sound-handover", "gen={} phase=asked inputs={}", old.generation, inputs.len());
+        if inputs.is_empty() {
+            // Nothing of it reached the selector yet: nothing to play out.
+            drop(pending);
+            self.let_sound_go(release);
+            self.take_down_sound(old);
+            return;
+        }
+        for input in &inputs {
+            let engine = Arc::downgrade(self);
+            input.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| match &info.data {
+                Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => {
+                    if let Some(engine) = engine.upgrade() {
+                        engine.finish_sound_handover("old-played-out");
+                    }
+                    gst::PadProbeReturn::Drop
+                }
+                _ => gst::PadProbeReturn::Ok,
+            });
+        }
+        let source = old.source.clone();
+        *pending = Some(SoundHandover { old, release });
+        drop(pending);
+        let _ = source.end_of_stream();
+    }
+
+    fn finish_sound_handover(self: &Arc<Self>, why: &str) {
+        let Some(handover) = self.sound_handover.lock().unwrap_or_else(|p| p.into_inner()).take() else { return };
+        mediabox_core::timeline!("sound-handover", "gen={} phase=done why={why}", handover.old.generation);
+        self.let_sound_go(handover.release);
+        self.take_down_sound(handover.old);
+    }
+
+    fn let_sound_go(self: &Arc<Self>, release: SoundRelease) {
+        if let Some(input) = release.activate {
+            self.sound_mode(true);
+            self.audio_selector.set_property("active-pad", &input);
+        }
+        if let Some((pad, id)) = release.block {
+            pad.remove_probe(id);
+        }
     }
 
     /// How late each picture leaves the demultiplexer against its PTS
@@ -1761,6 +1937,9 @@ impl Engine {
                 }
             };
             programme.video_taken.store(true, Ordering::SeqCst);
+            if replacing && self.join_video(generation, pad, &program, name, programme) {
+                return Ok(());
+            }
             let parser = match name {
                 "video/x-h264" => "h264parse",
                 "video/x-h265" => "h265parse",
@@ -2024,7 +2203,7 @@ impl Engine {
             .next()
             .and_then(|hex| u16::from_str_radix(hex, 16).ok())
             .ok_or_else(|| format!("{}: PID okunamadı", pad.name()))?;
-        let mut parts = self.sound_branch(generation, &caps, programme)?;
+        let mut parts = self.sound_branch(generation, &caps, programme, false)?;
         parts.pid = pid;
         self.watch_sound_pad(pad);
         self.discard(pad, elements);
@@ -2038,7 +2217,10 @@ impl Engine {
     /// source (fed by the reader, `route_sound`), a queue, the parser --
     /// gated on the picture (`Programme::sound`) -- and the decoder or the
     /// bitstream path, to a new input of the sound selector.
-    fn sound_branch(self: &Arc<Self>, generation: u64, caps: &gst::Caps, programme: &Arc<Programme>) -> Result<SoundParts, String> {
+    /// With `hold`, built to follow a part still playing out
+    /// (`hand_over_sound`): its source blocked, and for a bitstream the
+    /// device's mode and the selector's input left for its release.
+    fn sound_branch(self: &Arc<Self>, generation: u64, caps: &gst::Caps, programme: &Arc<Programme>, hold: bool) -> Result<SoundParts, String> {
         let structure = caps.structure(0).ok_or("biçimi yok")?;
         let name = structure.name().as_str();
         let version = structure.get::<i32>("mpegversion").ok();
@@ -2056,6 +2238,15 @@ impl Engine {
         self.adopt(&[source.upcast_ref()])?;
         elements.lock().unwrap_or_else(|p| p.into_inner()).push(source.clone().upcast());
         let from = source.static_pad("src").expect("appsrc has a src pad");
+        let block = if hold {
+            from.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_, _| gst::PadProbeReturn::Ok)
+                .map(|id| (from.clone(), id))
+        } else {
+            None
+        };
+        if hold && block.is_none() {
+            return Err("ses kaynağı tutulamadı".into());
+        }
         self.shared.info.lock().unwrap_or_else(|p| p.into_inner()).passthrough = false;
         let audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let passthrough_codec = match name {
@@ -2114,8 +2305,10 @@ impl Engine {
         if passthrough {
             let head = self.head(&from, &chain, &elements, false)?;
             let framed = head.last().expect("a chain has elements").static_pad("src").ok_or("ayrıştırıcının çıkışı yok")?;
-            self.sound_mode(true);
-            self.bitstream_tail(&framed, None, &elements, &pads)?;
+            if !hold {
+                self.sound_mode(true);
+            }
+            let input = self.bitstream_tail(&framed, None, &elements, &pads, !hold)?;
             for element in head.iter().rev() {
                 element.sync_state_with_parent().map_err(|e| e.to_string())?;
             }
@@ -2125,7 +2318,8 @@ impl Engine {
             let mut info = self.shared.info.lock().unwrap_or_else(|p| p.into_inner());
             info.audio_codec = Some(codec);
             info.passthrough = true;
-            return Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads });
+            let held = hold.then(|| SoundRelease { block, activate: Some(input) });
+            return Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads, held });
         }
         let decoder = first_of(decoder_for(caps)).ok_or_else(|| format!("{codec} için ses çözücüsü yok"))?;
         chain.push(decoder);
@@ -2188,7 +2382,7 @@ impl Engine {
             engine.sound_mode(encode.is_some());
             if let Some((kbps, _)) = encode {
                 eprintln!("mediabox-live: ses {channels} kanal -> Dolby Digital {kbps} kb/s (IEC 61937)");
-                if let Err(error) = engine.bitstream_tail(pad, Some(kbps), &elements_tail, &pads_tail) {
+                if let Err(error) = engine.bitstream_tail(pad, Some(kbps), &elements_tail, &pads_tail, true) {
                     eprintln!("mediabox-live: ses zinciri kurulamadı: {error}");
                 }
                 engine.shared.info.lock().unwrap_or_else(|p| p.into_inner()).passthrough = true;
@@ -2213,7 +2407,8 @@ impl Engine {
         from.link(&head[0].static_pad("sink").ok_or("kuyruğun girişi yok")?).map_err(|e| format!("{e:?}"))?;
         source.sync_state_with_parent().map_err(|e| e.to_string())?;
         self.shared.info.lock().unwrap_or_else(|p| p.into_inner()).audio_codec = Some(codec);
-        Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads })
+        let held = hold.then(|| SoundRelease { block, activate: None });
+        Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads, held })
     }
 
     /// After the decoder: AC-3 at `kbps`, made into IEC 61937 bursts here and
@@ -2226,7 +2421,8 @@ impl Engine {
         kbps: Option<u32>,
         elements: &Arc<Mutex<Vec<gst::Element>>>,
         pads: &Arc<Mutex<Vec<(gst::Element, gst::Pad)>>>,
-    ) -> Result<(), String> {
+        activate: bool,
+    ) -> Result<gst::Pad, String> {
         let frames = gst_app::AppSink::builder().sync(false).enable_last_sample(false).max_buffers(0).build();
         frames.set_async(false);
         // `None`: the broadcast's own AC-3, framed by its parser, as it is.
@@ -2265,8 +2461,15 @@ impl Engine {
         bursts.static_pad("src").ok_or("kaynağın çıkışı yok")?.link(&input).map_err(|e| format!("{e:?}"))?;
 
         let feed = bursts.clone();
+        let ended = bursts.clone();
         frames.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
+                // Its end goes on to the bursts: a part playing out before
+                // the next (`hand_over_sound`) is done when it reaches the
+                // selector.
+                .eos(move |_| {
+                    let _ = ended.end_of_stream();
+                })
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let (Some(buffer), Some(segment)) = (sample.buffer(), sample.segment()) else {
@@ -2293,8 +2496,10 @@ impl Engine {
         }
         bursts.sync_state_with_parent().map_err(|e| e.to_string())?;
         from.link(&tail[0].static_pad("sink").ok_or("zincirin girişi yok")?).map_err(|e| format!("{e:?}"))?;
-        self.audio_selector.set_property("active-pad", &input);
-        Ok(())
+        if activate {
+            self.audio_selector.set_property("active-pad", &input);
+        }
+        Ok(input)
     }
 
     /// After the decoder, for PCM: converted, resampled, at the volume.
@@ -2496,6 +2701,9 @@ impl Engine {
     /// told to stop, its elements go to NULL on a thread of their own, and
     /// the selector inputs it had are given back.
     fn take_down(&self, branch: Branch) {
+        if let Some(handover) = self.sound_handover.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            self.take_down_sound(handover.old);
+        }
         let sound = {
             let mut sound = self.shared.sound.lock().unwrap_or_else(|p| p.into_inner());
             if sound.as_ref().is_some_and(|s| s.generation == branch.generation) { sound.take() } else { None }
