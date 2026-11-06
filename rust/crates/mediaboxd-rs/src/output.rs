@@ -123,6 +123,8 @@ struct State {
     /// leaves its match on the wire for the one that follows, so a channel
     /// change is not two mode changes (two re-locks of the television).
     handover: bool,
+    /// The last film match's number (`Content::request`).
+    requests: u64,
 }
 
 /// The display while one film plays. `film` is the player's number for it;
@@ -132,6 +134,28 @@ struct Content {
     film: u64,
     identity: DisplayIdentity,
     output: ContentOutput,
+    /// Its number among every film match asked for: a report, a failure or
+    /// a wait is about one request, not about whichever film holds the
+    /// number now (a live channel's film number stays through a zap).
+    request: u64,
+    /// The timing the setting puts on the wire: what an owner report must
+    /// say for it to be applied.
+    target_key: Option<mediabox_core::TimingKey>,
+    /// The owner could not put it on the wire.
+    failed: Option<String>,
+}
+
+/// How a film's match (`Output::content_start_request`) stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentProgress {
+    /// Sent to the owner, not reported yet.
+    Pending,
+    /// On the wire: the owner reported it, or nothing had to change.
+    Applied,
+    /// The owner reported it could not commit it.
+    Failed(String),
+    /// Another match took its place before it was settled.
+    Superseded,
 }
 
 pub struct Output {
@@ -438,15 +462,34 @@ impl Output {
     /// when there is no sink with an offer to match against. The answer says
     /// what was chosen; `matched: None` when nothing at that size fits.
     pub fn content_start(&self, film: u64, cadence: Cadence) -> Result<ContentOutput, String> {
-        let (output, events) = {
+        self.content_start_request(film, cadence).map(|(output, _)| output)
+    }
+
+    /// [`Output::content_start`], and the request's number for
+    /// [`Output::content_progress`].
+    pub fn content_start_request(&self, film: u64, cadence: Cadence) -> Result<(ContentOutput, u64), String> {
+        let (output, request, events) = {
             let mut state = self.state();
             let mut events = self.follow(&mut state);
             let (output, more) = self.match_film(&mut state, film, cadence)?;
             events.extend(more);
-            (output, events)
+            (output, state.requests, events)
         };
         self.send(events);
-        Ok(output)
+        Ok((output, request))
+    }
+
+    /// How film match `request` stands.
+    pub fn content_progress(&self, request: u64) -> ContentProgress {
+        let state = self.state();
+        match state.content.as_ref() {
+            Some(content) if content.request == request => match (&content.failed, content.output.applied) {
+                (_, true) => ContentProgress::Applied,
+                (Some(why), false) => ContentProgress::Failed(why.clone()),
+                (None, false) => ContentProgress::Pending,
+            },
+            _ => ContentProgress::Superseded,
+        }
     }
 
     /// Match film `film` at `cadence` -- or, with matching off, record it and
@@ -479,12 +522,14 @@ impl Output {
             setting.resolution = ResolutionChoice::Timing { key: matched.timing_key };
         }
         // What the wire carries now: the kept setting, or the film before
-        // this one's match -- a live channel's, handed over to this one.
-        let on_wire = state
+        // this one's match -- a live channel's, handed over to this one --
+        // and whether that is on the wire yet or only asked for.
+        let (on_wire, settled) = state
             .content
             .as_ref()
-            .map(|content| content.output.setting.clone())
-            .unwrap_or_else(|| state.kept.clone());
+            .map(|content| (content.output.setting.clone(), content.output.applied))
+            .unwrap_or_else(|| (state.kept.clone(), true));
+        let target_key = offer.select(&setting).map(|selected| selected.timing_key);
         let output = ContentOutput {
             cadence,
             cadence_label: cadence.label(),
@@ -492,8 +537,12 @@ impl Output {
             setting: setting.clone(),
             // Already on the wire is applied: nothing is sent, so no owner
             // will report it. Waited for, it held a channel's first frame
-            // for the five seconds of the wait (2026-10-22).
-            applied: !changes || on_wire == setting,
+            // for the five seconds of the wait (2026-10-22). The same
+            // setting asked for again while the owner still commits it is
+            // not on the wire yet: taken for it, a channel opened in the
+            // middle of the commit (FAZ 2F). Nor is the kept setting going
+            // back after a film's: it is sent, and reported like any other.
+            applied: on_wire == setting && settled,
         };
         eprintln!(
             "mediaboxd-rs: film {film} at {} fps: {}",
@@ -505,10 +554,14 @@ impl Output {
                 None => "nothing at this size fits; the display is left alone".into(),
             }
         );
+        state.requests += 1;
         state.content = Some(Content {
             film,
             identity: identity.clone(),
             output: output.clone(),
+            request: state.requests,
+            target_key,
+            failed: None,
         });
         let mut events = Vec::new();
         if on_wire != setting {
@@ -832,8 +885,7 @@ impl Output {
                     if applied.trial.is_none()
                         && let Some(content) = state.content.as_mut()
                         && content.identity == applied.identity
-                        && content.output.matched.as_ref().map(|matched| matched.timing_key)
-                            == Some(applied.timing_key)
+                        && content.target_key == Some(applied.timing_key)
                     {
                         content.output.applied = true;
                     }
@@ -841,6 +893,13 @@ impl Output {
                 }
                 OwnerReport::Failed { trial, error, .. } => {
                     eprintln!("mediaboxd-rs: the display's owner could not apply a setting: {error}");
+                    // Not a trial's: the film's match, if one waits for it.
+                    if trial.is_none()
+                        && let Some(content) = state.content.as_mut()
+                        && !content.output.applied
+                    {
+                        content.failed = Some(error.clone());
+                    }
                     state.error = Some(format!("Çekirdek bu ayarı kabul etmedi: {error}"));
                     if let (Some(running), Some(failed)) =
                         (state.trial.as_ref().map(|trial| trial.journal.id), trial)
@@ -1221,6 +1280,46 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         assert_eq!(status.selected.unwrap().label, "3840x2160p60");
     }
 
+    /// Each film match is its own request: asked again for the same mode
+    /// while the owner still commits it, it is not on the wire yet; the
+    /// owner's report of a mode asked for before is not this one's; and a
+    /// commit the owner could not do is said, not waited out. Before, the
+    /// same mode asked twice was taken as on the wire at once -- a live
+    /// channel let go in the middle of the commit (FAZ 2F).
+    #[tokio::test]
+    async fn a_match_is_applied_only_by_the_owners_report_of_it() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        let thirty = Cadence::from_fps(30.0).unwrap();
+        let (_, first) = output.content_start_request(1, thirty).unwrap();
+        let (thirty_hz, _, _) = next_apply(&mut events).await;
+        // The same film (a zap), the same rate, before the owner said a word.
+        let (again, second) = output.content_start_request(1, thirty).unwrap();
+        assert_ne!(first, second);
+        assert!(!again.applied, "asked for, not on the wire");
+        assert_eq!(output.content_progress(first), ContentProgress::Superseded);
+        assert_eq!(output.content_progress(second), ContentProgress::Pending);
+        output.owner_report(applied(&offer, &thirty_hz, None)).unwrap();
+        assert_eq!(output.content_progress(second), ContentProgress::Applied);
+        // Another rate, then the owner's late word on the one before it.
+        let (_, third) = output.content_start_request(1, Cadence::from_fps(50.0).unwrap()).unwrap();
+        let (fifty_hz, _, _) = next_apply(&mut events).await;
+        output.owner_report(applied(&offer, &thirty_hz, None)).unwrap();
+        assert_eq!(output.content_progress(third), ContentProgress::Pending, "a report of the mode before");
+        // The owner could not commit it.
+        output
+            .owner_report(OwnerReport::Failed { identity: offer_identity(&offer), trial: None, error: "commit: EINVAL".into() })
+            .unwrap();
+        assert_eq!(output.content_progress(third), ContentProgress::Failed("commit: EINVAL".into()));
+        let _ = fifty_hz;
+    }
+
+    fn offer_identity(offer: &OutputOffer) -> DisplayIdentity {
+        DisplayIdentity { connector: offer.connector.clone(), edid_sha256: offer.edid_sha256.clone() }
+    }
+
     #[tokio::test]
     async fn a_channel_change_keeps_the_mode_and_is_applied_at_once() {
         let rig = Rig::new();
@@ -1266,10 +1365,14 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         assert_eq!(setting.resolution, ResolutionChoice::Auto);
         assert!(!content);
         assert!(!rig.output().status().content_matching);
-        // The next film is not matched.
-        let chosen = output.content_start(2, Cadence::from_fps(23.976).unwrap()).unwrap();
-        assert!(chosen.applied);
+        // The next film is not matched. The kept mode going back is on its
+        // way, not on the wire, until the owner says so.
+        let (chosen, request) = output.content_start_request(2, Cadence::from_fps(23.976).unwrap()).unwrap();
         assert_eq!(chosen.setting.resolution, ResolutionChoice::Auto);
+        assert!(!chosen.applied);
+        assert_eq!(output.content_progress(request), ContentProgress::Pending);
+        output.owner_report(applied(&offer, &setting, None)).unwrap();
+        assert_eq!(output.content_progress(request), ContentProgress::Applied);
         // On again: the film playing is matched.
         output.set_matching(true).unwrap();
         let (setting, _, content) = next_apply(&mut events).await;
