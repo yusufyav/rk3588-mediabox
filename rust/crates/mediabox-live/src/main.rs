@@ -19,6 +19,7 @@
 mod clock_probe;
 mod engine;
 mod es;
+mod gate;
 mod health;
 mod ipc;
 mod plane;
@@ -272,7 +273,10 @@ fn main() {
         }
     }
 
-    match engine.open(&url) {
+    // The control plane's number for the channel it started this player
+    // on: held at its opening gate until it lets it go (`gate`).
+    let epoch = std::env::var("MEDIABOX_LIVE_EPOCH").ok().and_then(|value| value.parse::<u64>().ok());
+    match engine.open_channel(&url, epoch) {
         Ok(()) => clients.event(json!({"event": "start-file"})),
         Err(error) => {
             let _ = commands.send((Command::Fail(format!("Kanal açılamadı: {error}")), None));
@@ -300,13 +304,14 @@ fn main() {
                     // The next channel in the same player: not the end of
                     // anything, so no end-file. A channel that cannot be
                     // opened is answered with why.
-                    Command::Load(path) => {
+                    Command::Load(path, epoch) => {
                         reopened = 0;
-                        result = engine.open(&path).map_err(|error| format!("Kanal açılamadı: {error}"));
+                        result = engine.open_channel(&path, epoch).map_err(|error| format!("Kanal açılamadı: {error}"));
                         if result.is_ok() {
                             clients.event(json!({"event": "start-file"}));
                         }
                     }
+                    Command::OpenGate { epoch, outcome } => result = engine.open_gate(epoch, &outcome),
                     Command::Pause(paused) => {
                         engine.set_paused(paused);
                         clients.changed("pause", json!(paused));
@@ -333,6 +338,7 @@ fn main() {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        engine.expire_gate();
 
         while let Some(message) = bus.pop() {
             use gst::MessageView;
@@ -582,6 +588,7 @@ fn query(engine: Arc<Engine>, shared: Arc<Shared>, plane: Arc<plane::Plane>) -> 
                 json!(tracks)
             }
             "mediabox-live" => stats(&engine, &shared, &plane),
+            "mediabox-gate" => engine.gate_snapshot(),
             _ => return None,
         })
     })

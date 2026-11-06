@@ -99,6 +99,8 @@ pub struct Shared {
     /// tsdemux's own to be held against (`sound_source`).
     pub sound_starts: Mutex<std::collections::VecDeque<u64>>,
     pub info: Mutex<Info>,
+    /// The opening gate of the channel opened last (`gate`).
+    pub gate: Mutex<Option<Arc<crate::gate::Gate>>>,
     /// Another audio stream chosen while a channel plays (`set_aid`): its
     /// generation and order, for the reader to take the sound to
     /// (`es::Reader::choose`) -- the picture goes on as it is.
@@ -279,10 +281,9 @@ struct Programme {
     video: Mutex<Option<VideoParts>>,
     /// A picture stream is played (the first one; others are drained).
     video_taken: AtomicBool,
-    /// The PTS of the channel's first key frame.
-    picture: Mutex<Option<u64>>,
-    /// `picture` or `no_picture` has been set.
-    known: std::sync::Condvar,
+    /// When the picture starts -- its first key frame, or the first
+    /// picture after its opening gate let it go -- and the gate itself.
+    gate: Arc<crate::gate::Gate>,
     /// Sound has waited for the key frame (traced once).
     waited: AtomicBool,
     /// The programme has no picture (a radio service): its sound waits for
@@ -305,7 +306,7 @@ const LATE_DROP_NS: u64 = 200_000_000;
 const PICTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Programme {
-    fn new(generation: u64) -> Self {
+    fn new(generation: u64, gate: Arc<crate::gate::Gate>) -> Self {
         Self {
             generation,
             opened: Instant::now(),
@@ -315,8 +316,7 @@ impl Programme {
             audio_program: Mutex::new(None),
             video: Mutex::new(None),
             video_taken: AtomicBool::new(false),
-            picture: Mutex::new(None),
-            known: std::sync::Condvar::new(),
+            gate,
             waited: AtomicBool::new(false),
             no_picture: AtomicBool::new(false),
             held_since: Mutex::new(None),
@@ -326,8 +326,7 @@ impl Programme {
 
     /// The first key frame is known, or that there is none to wait for.
     fn picture_known(&self) {
-        let _picture = self.picture.lock().unwrap_or_else(|p| p.into_inner());
-        self.known.notify_all();
+        self.gate.notify();
     }
 
     /// Whether a sound frame at `pts`, `duration` long, is played.
@@ -356,8 +355,8 @@ impl Programme {
             if self.no_picture.load(Ordering::SeqCst) {
                 break Some("görüntüsüz servis");
             }
-            let picture = self.picture.lock().unwrap_or_else(|p| p.into_inner());
-            match *picture {
+            let (picture, held) = self.gate.picture();
+            match picture {
                 Some(first) if pts.is_none_or(|pts| pts >= first) => break Some("ilk anahtar karenin zamanından"),
                 Some(first)
                     if !whole
@@ -369,7 +368,16 @@ impl Programme {
                 }
                 Some(_) => break None,
                 None => {
-                    let waited = self.held_since.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Instant::now).elapsed();
+                    // Pictures held by the opening gate are a picture that
+                    // comes: the gate has its own limit (`gate::HOLD_MAX`),
+                    // and this one counts from when it let them go.
+                    let waited = {
+                        let mut since = self.held_since.lock().unwrap_or_else(|p| p.into_inner());
+                        if held {
+                            *since = Some(Instant::now());
+                        }
+                        since.get_or_insert_with(Instant::now).elapsed()
+                    };
                     if waited >= PICTURE_WAIT {
                         break Some("görüntü gelmedi");
                     }
@@ -384,7 +392,7 @@ impl Programme {
                             pts.map_or(-1, |p| p as i64)
                         );
                     }
-                    let _ = self.known.wait_timeout(picture, std::time::Duration::from_millis(10));
+                    self.gate.wait(std::time::Duration::from_millis(10));
                 }
             }
         };
@@ -1200,13 +1208,14 @@ impl Engine {
                     probe.flush(engine.probe_levels(generation, audio_late, &device));
                 }
                 engine.shared.health.plane_full_dropped.store(engine.plane.dropped_full(), Ordering::Relaxed);
-                let report = engine.shared.health.report(
+                let mut report = engine.shared.health.report(
                     generation,
                     latency + video_offset,
                     latency + audio_offset,
                     audio_late,
                     &mut device,
                 );
+                report.gate = engine.gate_snapshot();
                 crate::health::write(&report);
             }
         });
@@ -1623,6 +1632,19 @@ impl Engine {
                         return Ok(gst::FlowSuccess::Ok);
                     }
                     last = Some((generation, pts));
+                    // The channel's opening gate: shut, the picture is its
+                    // pre-roll -- not sent, not a drop (`gate`).
+                    let gate = shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone().filter(|gate| gate.generation == generation);
+                    let first = match gate.map(|gate| {
+                        gate.frame(pts, described.as_ref().and_then(|found| found.fps), described.as_ref().map_or("", |found| found.interlace.as_str()))
+                    }) {
+                        Some(crate::gate::Frame::Preroll) => {
+                            mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=preroll", pts / 1000);
+                            return Ok(gst::FlowSuccess::Ok);
+                        }
+                        Some(crate::gate::Frame::Show { first }) => first,
+                        None => false,
+                    };
                     let Some(picture) = described.as_ref().and_then(|found| picture(found, buffer)) else {
                         // Not a dma-buf the plane takes: a software decoder.
                         // Traced, never copied -- the whole point is that
@@ -1685,6 +1707,9 @@ impl Engine {
                             return Ok(gst::FlowSuccess::Ok);
                         }
                     }
+                    if first {
+                        mediabox_core::timeline!("gate-first", "gen={generation} pts={pts} due={due}");
+                    }
                     fault_frames += 1;
                     if crate::health::Faults::ON && faults.skip > 0 && fault_frames % faults.skip == 0 {
                         mediabox_core::timeline!("fault", "skip gen={generation} pts_us={}", pts / 1000);
@@ -1713,9 +1738,29 @@ impl Engine {
         );
     }
 
-    /// Open the channel on `path`: a new branch, switched to, and the one
-    /// before it taken down.
+    /// Open the channel on `path` again -- after an error, after a pause --
+    /// as the same channel: its number kept, and not held a second time
+    /// once its gate had let it go (`gate`).
     pub fn open(self: &Arc<Self>, path: &str) -> Result<(), String> {
+        let (epoch, was_open) = self
+            .shared
+            .gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map_or((None, false), |gate| (gate.epoch, gate.is_open()));
+        self.open_with(path, epoch, was_open)
+    }
+
+    /// Open a new channel on `path`, numbered `epoch` by the control plane:
+    /// held at its opening gate until it lets it go (`gate`). `None`: not
+    /// gated, shown as it comes.
+    pub fn open_channel(self: &Arc<Self>, path: &str, epoch: Option<u64>) -> Result<(), String> {
+        self.open_with(path, epoch, false)
+    }
+
+    /// A new branch, switched to, and the one before it taken down.
+    fn open_with(self: &Arc<Self>, path: &str, epoch: Option<u64>, open_already: bool) -> Result<(), String> {
         let generation = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.trace.event('G', generation, 0);
         let opened_ns = mediabox_core::timeline::now_ns();
@@ -1726,6 +1771,14 @@ impl Engine {
             self.options.demux_latency_ms,
             self.options.render_delay_ms
         );
+        let gate = Arc::new(crate::gate::Gate::new(generation, epoch, open_already));
+        mediabox_core::timeline!(
+            "gate-arm",
+            "gen={generation} epoch={} open={}",
+            epoch.map_or(-1, |epoch| epoch as i64),
+            u8::from(gate.is_open())
+        );
+        *self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&gate));
         if std::env::var_os("MEDIABOX_LIVE_OPEN_TRACE").is_some() {
             self.shared.open_probe.store(60, Ordering::Relaxed);
         }
@@ -1760,7 +1813,7 @@ impl Engine {
         if let Some(sink) = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             sink.set_property("ts-offset", self.audio_offset());
         }
-        let (branch, source) = self.build(generation)?;
+        let (branch, source) = self.build(generation, gate)?;
         mediabox_core::timeline!(
             "built",
             "gen={generation} ms={:.1}",
@@ -1809,7 +1862,7 @@ impl Engine {
         self.plane.stop();
     }
 
-    fn build(self: &Arc<Self>, generation: u64) -> Result<(Branch, gst_app::AppSrc), String> {
+    fn build(self: &Arc<Self>, generation: u64, gate: Arc<crate::gate::Gate>) -> Result<(Branch, gst_app::AppSrc), String> {
         let source = gst_app::AppSrc::builder()
             .name(format!("ts{generation}"))
             .is_live(true)
@@ -1837,7 +1890,7 @@ impl Engine {
         source.link(&demux).map_err(|e| e.to_string())?;
 
         let weak = Arc::downgrade(self);
-        let programme = Arc::new(Programme::new(generation));
+        let programme = Arc::new(Programme::new(generation, gate));
         let branch_programme = Arc::clone(&programme);
         {
             let programme = Arc::clone(&programme);
@@ -1989,8 +2042,7 @@ impl Engine {
                     }
                     if let Some(pts) = buffer.pts() {
                         branch_key.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(pts.nseconds());
-                        programme.picture.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(pts.nseconds());
-                        programme.picture_known();
+                        programme.gate.key_frame(pts.nseconds());
                         mediabox_core::timeline!(
                             "parse-key",
                             "gen={} pts={} dts={}",
@@ -2874,6 +2926,48 @@ impl Engine {
     /// is the measure that it does; nothing is shifted to make up for it --
     /// shifting the sinks (2026-11-01) played the sound ahead of a picture
     /// that then lost its first second.
+    /// The control plane lets channel `epoch` go (`gate`): its display shows
+    /// the stream's rate. `outcome`: how it came to (fast, matched,
+    /// mode-timeout, ...), for the timeline and the health file. An error
+    /// for a channel that is not the one opened last.
+    pub fn open_gate(&self, epoch: u64, outcome: &str) -> Result<(), String> {
+        let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let Some(gate) = gate else { return Err(format!("stale: epoch {epoch}, no channel")) };
+        let opened = gate.open(epoch, outcome);
+        mediabox_core::timeline!(
+            "gate-open",
+            "gen={} epoch={epoch} outcome={outcome} result={}",
+            gate.generation,
+            match &opened {
+                Ok(true) => "opened",
+                Ok(false) => "was-open",
+                Err(_) => "stale",
+            }
+        );
+        opened.map(|_| ())
+    }
+
+    /// A gate nobody let go within its limit opens here (`gate::HOLD_MAX`).
+    pub fn expire_gate(&self) {
+        let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(gate) = gate
+            && gate.expire(Instant::now())
+        {
+            mediabox_core::timeline!("gate-open", "gen={} epoch={:?} outcome=player-timeout result=opened", gate.generation, gate.epoch);
+            eprintln!(
+                "mediabox-live: kanal {:?} açılış kapısı {} s içinde açılmadı; görüntü bu modda başlıyor",
+                gate.epoch,
+                crate::gate::HOLD_MAX.as_secs()
+            );
+        }
+    }
+
+    /// The channel's opening gate, as the control socket and the health
+    /// file read it.
+    pub fn gate_snapshot(&self) -> serde_json::Value {
+        self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map_or(serde_json::Value::Null, |gate| gate.snapshot())
+    }
+
     pub fn set_behind(&self, generation: u64, behind: u64) {
         if self.shared.generation.load(Ordering::SeqCst) != generation {
             return;

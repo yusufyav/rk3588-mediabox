@@ -210,6 +210,12 @@ fn play(ts: Vec<(u64, Vec<u8>)>, aid: usize) -> Run {
 
 /// The same, with `action` done on the engine `at` after the stream began.
 fn play_doing(ts: Vec<(u64, Vec<u8>)>, aid: usize, at: Duration, action: impl FnOnce(&Arc<Engine>) + Send + 'static) -> Run {
+    play_with(ts, aid, None, at, action)
+}
+
+/// The same, the channel numbered `epoch` by the control plane: held at its
+/// opening gate until `action` lets it go.
+fn play_with(ts: Vec<(u64, Vec<u8>)>, aid: usize, epoch: Option<u64>, at: Duration, action: impl FnOnce(&Arc<Engine>) + Send + 'static) -> Run {
     gst::init().expect("GStreamer");
     let size: usize = ts.iter().map(|(_, piece)| piece.len()).sum();
     let dir = std::env::temp_dir().join(format!("mediabox-live-engine-{}-{size}", std::process::id()));
@@ -259,7 +265,7 @@ fn play_doing(ts: Vec<(u64, Vec<u8>)>, aid: usize, at: Duration, action: impl Fn
             }
         })
     };
-    engine.open(path.to_str().unwrap()).expect("open");
+    engine.open_channel(path.to_str().unwrap(), epoch).expect("open");
     let doer = {
         let engine = Arc::clone(&engine);
         std::thread::spawn(move || {
@@ -766,4 +772,48 @@ fn the_sound_starts_at_the_key_frame_s_time_to_the_sample() {
     let mut buffer = frame(start + 5);
     assert_eq!(super::trim(&mut buffer, start, &caps), Some(0));
     assert_eq!(buffer.size(), 1152 * 4);
+}
+
+/// A channel numbered by the control plane is held at its opening gate:
+/// its pictures until then are pre-roll, none of them on to the plane; the
+/// first after the gate opens is its first, and the sound starts there --
+/// none of it before, none of it lost after. Another channel's number does
+/// not open it. Before, a channel was shown as it came and its display
+/// matched a second later under its pictures (FAZ 2E: 3-5 of them sent and
+/// never on the panel, every time).
+#[test]
+fn a_gated_channel_starts_where_its_gate_opens() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream(&[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX }]);
+    let stale = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&stale);
+    let run = play_with(ts, 0, Some(5), Duration::from_millis(1_500), move |engine| {
+        *into.lock().unwrap() = Some((engine.open_gate(4, "matched"), engine.gate_snapshot()));
+        engine.open_gate(5, "matched").expect("its own number opens it");
+    });
+    let (refused, before) = stale.lock().unwrap().take().unwrap();
+    assert!(refused.is_err(), "another channel's number");
+    assert_eq!(before["open"], false, "still shut after it");
+    assert!(before["preroll"].as_u64().unwrap() >= 10, "pictures held meanwhile: {before}");
+    let gate = run.engine.gate_snapshot();
+    assert_eq!(gate["open"], true);
+    assert_eq!(gate["outcome"], "matched");
+    let first = gate["picture"].as_u64().expect("the first picture after the gate");
+    let audio = run.audio.lock().unwrap();
+    let sound_start = audio.buffers.iter().map(|(_, pts, _)| *pts).min().expect("sound");
+    // The frame that takes in the first picture's time is cut there.
+    assert!(sound_start + 1_000_000 >= first, "sound {} ms before the first picture", (first - sound_start) / 1_000_000);
+    assert!(sound_start <= first + 24_000_000, "sound {} ms after the first picture", (sound_start - first) / 1_000_000);
+    let steps = audio.buffers.windows(2).map(|w| w[1].1.saturating_sub(w[0].1)).max().unwrap_or(0);
+    assert!(steps <= 25_000_000, "a gap of {} ms in the sound after it started", steps / 1_000_000);
+    // Not a fault of the gate: nothing dropped as late or out of order.
+    assert_eq!(run.shared.health.video_dropped.load(std::sync::atomic::Ordering::Relaxed), run.shared.out_of_order.load(std::sync::atomic::Ordering::Relaxed) + not_dmabuf(&run));
+}
+
+/// The test's pictures are H.264 out of `identity`, not dma-bufs: each one
+/// shown is counted dropped as such, and that is all that is.
+fn not_dmabuf(run: &Run) -> u64 {
+    run.shared.frames.load(std::sync::atomic::Ordering::Relaxed);
+    run.video.lock().unwrap().buffers.len() as u64 - run.engine.gate_snapshot()["preroll"].as_u64().unwrap_or(0)
 }

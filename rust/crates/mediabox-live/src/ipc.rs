@@ -20,7 +20,11 @@ use serde_json::{Value, json};
 
 /// What a client asked that the engine must do on its own thread.
 pub enum Command {
-    Load(String),
+    /// A channel to open, and the control plane's number for it: held at
+    /// its opening gate until let go (`gate`). `None`: not gated.
+    Load(String, Option<u64>),
+    /// The control plane lets channel `epoch` go: its display is matched.
+    OpenGate { epoch: u64, outcome: String },
     /// The channel cannot be played: the player ends, saying why.
     Fail(String),
     Pause(bool),
@@ -124,6 +128,11 @@ fn serve_client(client: u64, stream: UnixStream, clients: &Clients, query: &Quer
 
 const FAILED: &str = "error running command";
 
+/// `mediabox-epoch=N` among loadfile's comma-separated options.
+fn epoch_option(options: &str) -> Option<u64> {
+    options.split(',').find_map(|option| option.strip_prefix("mediabox-epoch=")).and_then(|n| n.trim().parse().ok())
+}
+
 /// Send a command to the engine and wait for it to be done, so an answer of
 /// "success" means it happened; a failure is answered with its reason.
 fn run(commands: &Commands, command: Command) -> String {
@@ -162,9 +171,20 @@ fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, comm
                 .retain(|(owner, watched, _)| !(*owner == client && *watched == id));
             ("success".into(), None)
         }
+        // mpv's form: loadfile <url> [<flags> [<index> [<options>]]]; the
+        // options may carry the control plane's number for the channel,
+        // `mediabox-epoch=N` (`gate`).
         "loadfile" => match word(1) {
             "" => ("invalid parameter".into(), None),
-            url => (run(commands, Command::Load(url.trim_start_matches("file://").to_string())), None),
+            url => (run(commands, Command::Load(url.trim_start_matches("file://").to_string(), epoch_option(word(4)))), None),
+        },
+        "mediabox-gate" => match (word(1), command.get(2).and_then(Value::as_u64)) {
+            ("open", Some(epoch)) => {
+                let outcome = Some(word(3)).filter(|outcome| !outcome.is_empty()).unwrap_or("matched");
+                let outcome = outcome.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+                (run(commands, Command::OpenGate { epoch, outcome }), None)
+            }
+            _ => ("invalid parameter".into(), None),
         },
         "set_property" | "set_property_string" => {
             let value = command.get(2).cloned().unwrap_or(Value::Null);
@@ -208,7 +228,13 @@ fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, comm
             let paused = query("pause").and_then(|value| value.as_bool()).unwrap_or(false);
             (run(commands, Command::Pause(!paused)), None)
         }
-        "ao-reload" => (run(commands, Command::ReloadSound), None),
+        // Answered with the channel the player is on when the device is
+        // open again: the control plane counts it for that channel only.
+        "ao-reload" => {
+            let result = run(commands, Command::ReloadSound);
+            let epoch = query("mediabox-gate").and_then(|gate| gate.get("epoch").cloned()).unwrap_or(Value::Null);
+            (result, Some(json!({"epoch": epoch})))
+        }
         "quit" => {
             let _ = commands.send((Command::Quit, None));
             ("success".into(), None)

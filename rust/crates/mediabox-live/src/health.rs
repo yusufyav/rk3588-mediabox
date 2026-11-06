@@ -574,6 +574,8 @@ fn card_and_device(name: &str) -> (Option<String>, Option<u32>) {
 
 /// What is written for the interface.
 pub struct Report {
+    /// The opening gate of the channel (`gate::Gate::snapshot`).
+    pub gate: serde_json::Value,
     pub at_ns: u64,
     pub generation: u64,
     /// The broadcast's present on the running time is the stamp plus this.
@@ -668,6 +670,7 @@ impl Health {
         };
         let flow = self.audio.lock().unwrap_or_else(|p| p.into_inner());
         Report {
+            gate: serde_json::Value::Null,
             sound,
             sound_incidents,
             plane_full_dropped: self.plane_full_dropped.load(Ordering::Relaxed),
@@ -767,6 +770,7 @@ pub fn write(report: &Report) {
     json["sound_device"] = r.sound_device.into();
     json["sound"] = r.sound.clone();
     json["plane_full_dropped"] = r.plane_full_dropped.into();
+    json["gate"] = r.gate.clone();
     // Every count above runs for the life of the process, through every
     // channel change: a fault is never taken back by the next channel.
     // This channel's own share is apart, from where they stood at its start.
