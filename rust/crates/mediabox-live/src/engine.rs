@@ -222,6 +222,24 @@ pub fn parser_for(caps: &gst::Caps) -> Option<&'static str> {
     }
 }
 
+/// The decoders for sound of `caps`, the first one there is taken.
+///
+/// LATM/LOAS (stream_type 0x11) is aacparse's `loas` out, which avdec_aac
+/// does not take (sink: raw, adts, adif): the branch stopped
+/// not-negotiated and no LATM channel had sound (2026-11-06,
+/// codec-latm-dvb.ts). avdec_aac_latm takes it.
+pub fn decoder_for(caps: &gst::Caps) -> &'static [&'static str] {
+    use crate::es::Codec;
+    match codec_of(caps) {
+        Some(Codec::MpegAudio) => &["mpg123audiodec", "avdec_mp2float", "avdec_mp3"],
+        Some(Codec::AacLatm) => &["avdec_aac_latm"],
+        Some(Codec::AacAdts) => &["avdec_aac", "fdkaacdec", "faad"],
+        Some(Codec::Ac3) => &["a52dec", "avdec_ac3"],
+        Some(Codec::Eac3) => &["avdec_eac3"],
+        _ => &[],
+    }
+}
+
 /// A channel's streams as the demultiplexer finds them, and when its sound
 /// may start: with its picture, as a receiver starts both. Sound comes out of the demultiplexer at once and the picture only
 /// at its first access point, so left to itself the sound played first and
@@ -1901,14 +1919,7 @@ impl Engine {
             info.passthrough = true;
             return Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads });
         }
-        let decoder = match (name, version) {
-            ("audio/mpeg", Some(1)) => first_of(&["mpg123audiodec", "avdec_mp2float", "avdec_mp3"]),
-            ("audio/mpeg", _) => first_of(&["avdec_aac", "fdkaacdec", "faad"]),
-            ("audio/x-ac3", _) => first_of(&["a52dec", "avdec_ac3"]),
-            ("audio/x-eac3", _) => first_of(&["avdec_eac3"]),
-            _ => None,
-        }
-        .ok_or_else(|| format!("{codec} için ses çözücüsü yok"))?;
+        let decoder = first_of(decoder_for(caps)).ok_or_else(|| format!("{codec} için ses çözücüsü yok"))?;
         chain.push(decoder);
         let head = self.head(&from, &chain, &elements, false)?;
         let decoded = head.last().expect("a chain has elements").static_pad("src").ok_or("çözücünün çıkışı yok")?;

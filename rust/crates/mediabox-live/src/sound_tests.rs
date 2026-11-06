@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use gst::prelude::*;
 
-use super::{parser_for, route_sound, sound_caps};
+use super::{decoder_for, parser_for, route_sound, sound_caps};
 use crate::es::spec::{flat, pes, pmt, Mux, Rng, AUDIO, PCR_PID, PMT_PID, PROGRAM};
 use crate::es::{Codec, Reader};
 use crate::stamp::PACKET;
@@ -90,6 +90,16 @@ struct Chain {
 
 impl Chain {
     fn new(codec: Codec) -> Self {
+        Self::build(codec, false)
+    }
+
+    /// The parser and then the decoder the sound branch takes for the caps
+    /// (`decoder_for`): PCM out.
+    fn decoding(codec: Codec) -> Self {
+        Self::build(codec, true)
+    }
+
+    fn build(codec: Codec, decode: bool) -> Self {
         gst::init().expect("GStreamer");
         let caps = sound_caps(codec).expect("caps for the codec");
         let parser = parser_for(&caps).expect("a parser for the caps");
@@ -99,8 +109,17 @@ impl Chain {
         let source = gst_app::AppSrc::builder().caps(&caps).format(gst::Format::Time).build();
         let sink = gst_app::AppSink::builder().sync(false).build();
         let pipeline = gst::Pipeline::new();
-        pipeline.add_many([source.upcast_ref(), &parser, sink.upcast_ref()]).expect("added");
-        gst::Element::link_many([source.upcast_ref(), &parser, sink.upcast_ref()]).expect("linked");
+        let mut chain: Vec<gst::Element> = vec![source.clone().upcast(), parser];
+        if decode {
+            let decoder = decoder_for(&caps)
+                .iter()
+                .find_map(|factory| gst::ElementFactory::make(factory).build().ok())
+                .unwrap_or_else(|| panic!("{codec:?}: none of {:?} is in this GStreamer", decoder_for(&caps)));
+            chain.push(decoder);
+        }
+        chain.push(sink.clone().upcast());
+        pipeline.add_many(&chain).expect("added");
+        gst::Element::link_many(&chain).expect("linked");
         let out = Arc::new(Mutex::new(Vec::new()));
         let into = Arc::clone(&out);
         sink.set_callbacks(
@@ -179,7 +198,10 @@ fn ts(case: &Case, frames: &[Vec<u8>], cuts: &[usize], rng: &mut Rng, mux: &mut 
 
 /// Through the reader and into a chain, in batches of a few packets.
 fn play(case: &Case, packets: Vec<Vec<u8>>, rng: &mut Rng, mux: &mut Mux) -> (Vec<gst::Sample>, Vec<String>) {
-    let chain = Chain::new(case.codec);
+    play_into(Chain::new(case.codec), case, packets, rng, mux)
+}
+
+fn play_into(chain: Chain, case: &Case, packets: Vec<Vec<u8>>, rng: &mut Rng, mux: &mut Mux) -> (Vec<gst::Sample>, Vec<String>) {
     let mut reader = Reader::new();
     let mut out = crate::es::Output::default();
     reader.select(AUDIO, None, &mut out);
@@ -276,6 +298,26 @@ fn every_codec_through_its_real_parser_at_every_kind_of_cut() {
             assert!(errors.is_empty(), "{label}: {errors:?}");
             whole(&case, &frames, &samples, &label);
         }
+    }
+}
+
+/// Each codec decoded by the decoder the sound branch chooses for it, one
+/// PES holding every frame: PCM out, no error. LATM went to avdec_aac,
+/// which refuses aacparse's `loas`: not-negotiated, no sound at all on a
+/// DVB LATM channel (2026-11-06, codec-latm-dvb.ts on the Plus).
+#[test]
+fn every_codec_decodes_with_the_decoder_its_branch_takes() {
+    for case in cases() {
+        let frames = frames(case.codec, case.file);
+        let mut rng = Rng(0xDEC0_0001 ^ case.stream_type as u64);
+        let mut mux = Mux::default();
+        let packets = ts(&case, &frames, &[], &mut rng, &mut mux);
+        let (samples, errors) = play_into(Chain::decoding(case.codec), &case, packets, &mut rng, &mut mux);
+        assert!(errors.is_empty(), "{:?}: {errors:?}", case.codec);
+        let pcm: usize = samples.iter().map(|sample| data(sample).len()).sum();
+        let caps = samples.first().and_then(|sample| sample.caps().map(|caps| caps.to_string())).unwrap_or_default();
+        assert!(caps.starts_with("audio/x-raw"), "{:?}: decoded to {caps}", case.codec);
+        assert!(pcm > 0, "{:?}: no PCM", case.codec);
     }
 }
 

@@ -784,6 +784,24 @@ fn a_branch_built_from_an_older_pmt_is_corrected_at_once() {
     }
 }
 
+/// LATM/LOAS (stream_type 0x11) comes in an MPEG audio PES, stream_id
+/// 110x xxxx (ETSI TS 101 154; H.222.0 Table 2-22). One in a
+/// private_stream_1 PES (0xBD, as FFmpeg's muxer writes it) is not taken
+/// for the sound: counted foreign, nothing passed on.
+#[test]
+fn latm_in_a_private_stream_1_pes_is_foreign() {
+    let mut mux = Mux::default();
+    let mut all = mux.tables(0, PCR_PID, &[(0x11, AUDIO, vec![])]);
+    all.extend(flat(mux.pes(AUDIO, &pes(0xBD, Some(90_000), None, 0, &payload(50, 81), None), &[184])));
+    all.extend(flat(mux.pes(AUDIO, &pes(0xBD, Some(91_920), None, 0, &payload(50, 82), None), &[184])));
+    let mut reader = Reader::new();
+    let mut out = Output::default();
+    reader.select(AUDIO, Some(Codec::AacLatm), &mut out);
+    let fed = reader.feed(&all);
+    assert!(fed.chunks.iter().all(|chunk| chunk.data.is_empty()), "{:?}", fed.chunks);
+    assert_eq!(reader.counts().pes_foreign, 2);
+}
+
 #[test]
 fn pmt_gives_the_same_pid_another_codec() {
     let mut mux = Mux::default();
