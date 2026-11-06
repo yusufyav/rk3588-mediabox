@@ -800,7 +800,8 @@ mod tests {
 /// `ts-drop=N` every Nth packet of the sound's PID kept from the reader,
 /// `pts-jump=MS` a frame's PTS moved on by MS every ten seconds,
 /// `pcm-zero=MS` MS of the decoder's output made zero every ten seconds.
-/// Unset, none.
+/// Unset, none. Only a build with the `fault-injection` feature reads it;
+/// a product build has `Faults::NONE` as a constant, so its branches go.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Faults {
     pub skip: u64,
@@ -814,7 +815,35 @@ pub struct Faults {
 }
 
 impl Faults {
-    pub fn from_env() -> Self {
+    /// A compile-time constant, so a product build's fault branches are
+    /// gone even where the faults are read from a closure's captures.
+    pub const ON: bool = cfg!(feature = "fault-injection");
+
+    #[cfg(not(feature = "fault-injection"))]
+    pub const NONE: Self = Self {
+        skip: 0,
+        audio_drop: 0,
+        audio_stall_ms: 0,
+        video_late_ms: 0,
+        audio_late_ms: 0,
+        ts_drop: 0,
+        pts_jump_ms: 0,
+        pcm_zero_ms: 0,
+    };
+
+    #[cfg(not(feature = "fault-injection"))]
+    #[inline(always)]
+    pub fn get(_: &std::sync::OnceLock<Self>) -> Self {
+        Self::NONE
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn get(cell: &std::sync::OnceLock<Self>) -> Self {
+        *cell.get_or_init(Self::from_env)
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn from_env() -> Self {
         let mut f = Self::default();
         let Ok(spec) = std::env::var("MEDIABOX_LIVE_FAULT") else { return f };
         for part in spec.split(',') {

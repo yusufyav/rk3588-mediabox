@@ -87,6 +87,9 @@ say "2. mediabox-live tests ($triple, qemu)"
 ( cd "$crate" && cargo test --bins --target "$triple" 2>&1 | tee "$work/tests.log" | grep -E '^test result|^running|panicked|FAILED' )
 grep -q '^test result: ok' "$work/tests.log" || { echo "mediabox-live tests failed" >&2; exit 1; }
 if grep -E '^test .* ignored$' "$work/tests.log"; then echo "ignored tests" >&2; exit 1; fi
+# The faults made on purpose (MEDIABOX_LIVE_FAULT) are in no product build;
+# the diagnostic build that has them must still compile.
+( cd "$crate" && cargo check -q --bins --target "$triple" --features fault-injection )
 
 say "3. mediabox-dvb tests"
 ( cd "$here/rust/crates/mediabox-dvb" && env -u CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER cargo test -q 2>&1 | grep '^test result' )
@@ -113,5 +116,6 @@ say "6. release build ($triple)"
 ( cd "$crate" && cargo build -q --release --target "$triple" )
 bin="$crate/target/$triple/release/mediabox-live"
 aarch64-linux-gnu-readelf -d "$bin" | grep -E 'RUNPATH|RPATH'
+if grep -aqE 'MEDIABOX_LIVE_FAULT|BİLEREK KUSUR|audio-stall ms=|pts-jump ms=|pcm-zero ms=|ts-drop pid=' "$bin"; then echo "fault injection in the product build" >&2; exit 1; fi
 sha256sum "$bin"
 echo "gate passed"

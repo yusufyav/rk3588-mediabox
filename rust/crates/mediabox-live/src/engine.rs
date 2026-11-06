@@ -713,7 +713,7 @@ impl Engine {
             let pipeline_clock = clock.clone();
             let weak_pipeline = pipeline.downgrade();
             let audio_traced = AtomicU64::new(0);
-            let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+            let faults = crate::health::Faults::get(&shared.faults);
             let fault_count = AtomicU64::new(0);
             // The stall's clock starts at the sound's first buffer: one in
             // the channel's first second (`Health::settled`) is its start,
@@ -721,11 +721,11 @@ impl Engine {
             let fault_stalled: Mutex<Option<Instant>> = Mutex::new(None);
             audio_selector.static_pad("src").expect("input-selector has a src pad").add_probe(gst::PadProbeType::BUFFER, move |_, info| {
                 let n = fault_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if faults.audio_drop > 0 && n % faults.audio_drop == 0 {
+                if crate::health::Faults::ON && faults.audio_drop > 0 && n % faults.audio_drop == 0 {
                     mediabox_core::timeline!("fault", "audio-drop n={n}");
                     return gst::PadProbeReturn::Drop;
                 }
-                if faults.audio_stall_ms > 0 {
+                if crate::health::Faults::ON && faults.audio_stall_ms > 0 {
                     let mut at = fault_stalled.lock().unwrap_or_else(|p| p.into_inner());
                     let since = *at.get_or_insert_with(Instant::now);
                     if since.elapsed() >= std::time::Duration::from_secs(5) {
@@ -1136,7 +1136,7 @@ impl Engine {
         // each channel with a burst from its last access point -- a PTS can
         // map a few milliseconds earlier than the one before it.
         let mut last: Option<(u64, u64)> = None;
-        let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+        let faults = crate::health::Faults::get(&shared.faults);
         let mut fault_frames = 0u64;
         let mut latency: Option<(u64, u64)> = None;
         let engine = Arc::downgrade(self);
@@ -1261,7 +1261,7 @@ impl Engine {
                         }
                     }
                     fault_frames += 1;
-                    if faults.skip > 0 && fault_frames % faults.skip == 0 {
+                    if crate::health::Faults::ON && faults.skip > 0 && fault_frames % faults.skip == 0 {
                         mediabox_core::timeline!("fault", "skip gen={generation} pts_us={}", pts / 1000);
                         return Ok(gst::FlowSuccess::Ok);
                     }
@@ -1330,7 +1330,7 @@ impl Engine {
             );
         }
         // No offset is carried from a channel before (`set_behind`).
-        let fault = self.shared.faults.get_or_init(crate::health::Faults::from_env).video_late_ms * 1_000_000;
+        let fault = crate::health::Faults::get(&self.shared.faults).video_late_ms * 1_000_000;
         self.video_sink.set_property("ts-offset", fault);
         if let Some(sink) = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             sink.set_property("ts-offset", self.audio_offset());
@@ -1827,12 +1827,13 @@ impl Engine {
         {
             let programme = Arc::clone(programme);
             let shared = Arc::clone(&self.shared);
-            let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+            let faults = crate::health::Faults::get(&shared.faults);
             let jumped = Mutex::new(Instant::now());
             let framed = chain[0].static_pad("src").ok_or("ayrıştırıcının çıkışı yok")?;
             probe_layer(&framed, crate::clock_probe::Layer::Parser, Some(generation), &shared);
             framed.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-                if faults.pts_jump_ms > 0
+                if crate::health::Faults::ON
+                    && faults.pts_jump_ms > 0
                     && let Some(buffer) = info.buffer_mut()
                     && let Some(pts) = buffer.pts()
                 {
@@ -2113,7 +2114,7 @@ impl Engine {
         let Some(output) = decoder.static_pad("src") else { return };
         probe_layer(&output, crate::clock_probe::Layer::Decoder, Some(generation), &self.shared);
         let shared = Arc::clone(&self.shared);
-        let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+        let faults = crate::health::Faults::get(&shared.faults);
         let zeroing = Mutex::new((Instant::now(), None::<Instant>));
         output.add_probe(gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
             if let Some(gst::PadProbeData::Event(event)) = &info.data {
@@ -2123,7 +2124,8 @@ impl Engine {
                 }
                 return gst::PadProbeReturn::Ok;
             }
-            if faults.pcm_zero_ms > 0
+            if crate::health::Faults::ON
+                && faults.pcm_zero_ms > 0
                 && let Some(buffer) = info.buffer_mut()
             {
                 let mut z = zeroing.lock().unwrap_or_else(|p| p.into_inner());
@@ -2408,7 +2410,7 @@ impl Engine {
 
     /// The sound sink's `ts-offset`: the viewer's sound delay.
     fn audio_offset(&self) -> i64 {
-        let fault = self.shared.faults.get_or_init(crate::health::Faults::from_env).audio_late_ms * 1_000_000;
+        let fault = crate::health::Faults::get(&self.shared.faults).audio_late_ms * 1_000_000;
         (*self.audio_delay.lock().unwrap_or_else(|p| p.into_inner()) * 1e9) as i64 + fault
     }
 
@@ -2616,7 +2618,7 @@ fn read_stream(
     // tables and sound PID, and the last PCR with the running time it was
     // stamped with, to put PTS on that clock.
     let mut reader: Option<(u64, crate::es::Reader)> = None;
-    let faults = *shared.faults.get_or_init(crate::health::Faults::from_env);
+    let faults = crate::health::Faults::get(&shared.faults);
     let mut ts_dropped = 0u64;
     let mut reference: Option<(u64, u64)> = None;
     // The clock stepped (`Stamped::stepped`): the sound's next buffer is a
@@ -2702,7 +2704,7 @@ fn read_stream(
             // The `ts-drop` fault: every Nth packet of the sound's PID
             // never reaches the reader, as if the receiver had lost it.
             let fed = match (faults.ts_drop, es.sound_pid()) {
-                (n, Some(pid)) if n > 0 => {
+                (n, Some(pid)) if crate::health::Faults::ON && n > 0 => {
                     let mut kept = Vec::with_capacity(piece.data.len());
                     for packet in piece.data.chunks(crate::stamp::PACKET) {
                         let on_sound = packet.len() == crate::stamp::PACKET && ((u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2])) == pid;

@@ -12,6 +12,13 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+# Faults made on purpose (`MEDIABOX_LIVE_FAULT`, src/health.rs), to show
+# the monitor sees them. Off in every product build: the variable is not
+# read and none of the faults is in the binary. A diagnostic build asks:
+#   cargo build --release --features fault-injection
+[features]
+fault-injection = []
+
 [[bin]]
 name = "mediabox-live"
 path = "src/main.rs"

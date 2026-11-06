@@ -541,7 +541,8 @@ Daha kısa sink boşlukları ve yeniden eşlemeler de sınıflanır ve
 veya donanıma kanıtsız neden yazılmaz. Çözülmüş PCM sink'ten önce
 ölçüldüğü için sink'teki bir olay, PCM sessizliğini açıklamaz.
 
-**Bilerek kusur (yalnız sınama için).** `MEDIABOX_LIVE_FAULT`: `ts-drop=N`
+**Bilerek kusur (yalnız sınama için).** Yalnız `--features fault-injection`
+ile derlenmiş tanı ikilisi okur; ürün ikilisinde yoktur. `MEDIABOX_LIVE_FAULT`: `ts-drop=N`
 (A), `pts-jump=MS` (B), `pcm-zero=MS` (C/D), `audio-drop=N` ve
 `audio-stall=MS` (E). Oynatıcı `systemd-run` ile başladığı için cihazda
 `systemctl set-environment` ile verilir, sonra `unset-environment` ile
