@@ -517,6 +517,8 @@ impl Writer {
                 let mut content = mediabox_core::ts_trace::Content::default();
                 #[cfg(feature = "transport-injection")]
                 let mut injector = crate::inject::Injector::default();
+                #[cfg(feature = "opening-capture")]
+                let mut capture = crate::capture::Capture::default();
                 let written = |data: &[u8], cc: &mut crate::ts::CcCheck| {
                     if shared.cc_check.load(Ordering::Relaxed) {
                         let before = cc.errors;
@@ -651,6 +653,8 @@ impl Writer {
                     match out.write_all(&chunk, &shared.abort) {
                         Ok(true) => {
                             written(&chunk, &mut cc);
+                            #[cfg(feature = "opening-capture")]
+                            capture.written(epoch, &chunk);
                             content.trace("w", format_args!("epoch={epoch}"), &chunk);
                             if std::mem::take(&mut first_write) {
                                 mediabox_core::timeline!(

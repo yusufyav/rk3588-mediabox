@@ -96,6 +96,8 @@ say "3. mediabox-dvb tests"
 # The transport hole (src/inject.rs) is in no product build; its tests run
 # with the diagnostic feature that puts it in.
 ( cd "$here/rust/crates/mediabox-dvb" && env -u CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER cargo test -q --features transport-injection 2>&1 | grep '^test result' )
+# The opening capture (src/capture.rs) is in no product build either.
+( cd "$here/rust/crates/mediabox-dvb" && env -u CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER cargo test -q --features opening-capture 2>&1 | grep '^test result' )
 
 say "4. clippy (mediabox-live)"
 ( cd "$crate" && cargo clippy --bins --tests -q 2>&1 ) > "$work/clippy.log" || true

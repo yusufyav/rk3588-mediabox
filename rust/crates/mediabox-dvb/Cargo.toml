@@ -19,8 +19,13 @@ thiserror.workspace = true
 # Off in every product build: the receiver's output never passes through
 # it, and none of it is in the binary. A diagnostic build asks for it:
 #   cargo build --release -p mediabox-dvb --features transport-injection
+# A channel's opening kept as a file (`src/capture.rs`): the first 2 s of
+# each stream epoch the player read, while the timeline is on. Off in every
+# product build, as above:
+#   cargo build --release -p mediabox-dvb --features opening-capture
 [features]
 transport-injection = []
+opening-capture = []
 
 [[bin]]
 name = "mediabox-dvb"

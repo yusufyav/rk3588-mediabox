@@ -29,6 +29,8 @@
 
 pub mod avl62x1;
 pub mod bridge;
+#[cfg(feature = "opening-capture")]
+pub mod capture;
 pub mod error;
 pub mod evidence;
 pub mod firmware;
