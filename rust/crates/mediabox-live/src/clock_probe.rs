@@ -30,6 +30,25 @@ pub fn get() -> Option<&'static Probe> {
         .as_ref()
 }
 
+static TRACE: OnceLock<Option<mediabox_core::bintrace::Trace>> = OnceLock::new();
+
+/// The player's path record by record (`mediabox_core::bintrace`):
+/// `MEDIABOX_LIVE_TRACE=<file>`, off by default. Kinds:
+///
+/// - 11 a FIFO read: n bytes, a ns `read` waited.
+/// - 12 a TS chunk pushed: n bytes, a ns the push held, b arrival and c
+///   stamp (running time).
+/// - 13 the clock stepped: a the step (ns, as i64), c the stamp.
+/// - 14 a sound PES start: a PTS (90 kHz), c its running time.
+/// - 15..18 a buffer at the parser, decoder, convert, sink: id generation,
+///   n PCM frames (0 coded), a PTS, b duration, c bytes << 8 | 1 if DISCONT.
+/// - 19 a PCR: a PCR (27 MHz), b arrival, c stamp.
+/// - 20 the presentation waited: a its offset, b by how much.
+/// - 21 a picture left tsdemux: a PTS, b when (running time).
+pub fn trace() -> Option<&'static mediabox_core::bintrace::Trace> {
+    TRACE.get_or_init(|| mediabox_core::bintrace::Trace::from_env("MEDIABOX_LIVE_TRACE", 512 << 20)).as_ref()
+}
+
 pub fn clock_ns(id: libc::clockid_t) -> u64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: a valid clock id and a timespec to fill.

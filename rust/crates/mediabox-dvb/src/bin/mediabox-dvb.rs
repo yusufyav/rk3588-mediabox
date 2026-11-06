@@ -382,5 +382,9 @@ fn main() -> ExitCode {
         }
     };
     mediabox_core::timeline::flush();
+    // The trace closed: its last record on the disk, its losses said.
+    if let Some(summary) = mediabox_dvb::trace::finish() {
+        eprintln!("mediabox-dvb: TRACE {}", serde_json::to_string(&summary).unwrap_or_default());
+    }
     code
 }

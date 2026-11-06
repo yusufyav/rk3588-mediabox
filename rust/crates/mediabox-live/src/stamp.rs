@@ -86,8 +86,8 @@ pub struct Stamped {
     /// Its PCR is a jump from the last one (`PCR_JUMP_TICKS`): the times
     /// of this opening are not to be trusted as a measurement.
     pub discontinuity: bool,
-    /// The arrivals stepped later by this much (ns) and the stamps with
-    /// them, at this chunk (`STEP_NS`).
+    /// The arrivals stepped later by this much (ns) at this chunk
+    /// (`STEP_NS`): seen, and kept out of the clock; the stamps go on.
     pub stepped: Option<i64>,
 }
 
@@ -159,9 +159,10 @@ struct Recovery {
     envelope: std::collections::VecDeque<(u64, i64)>,
     base: Option<i64>,
     fitted: Option<i64>,
-    /// The steps taken (`STEP_NS`), summed: a phase, not a frequency.
+    /// The arrivals' steps (`STEP_NS`), summed: lateness, kept out of the
+    /// fit and the phase -- neither a frequency nor this clock's phase.
     jump: i64,
-    /// The step taken at the last chunk, if any.
+    /// The step seen at the last chunk, if any.
     stepped: Option<i64>,
 }
 
@@ -212,8 +213,10 @@ impl Recovery {
         if self.point.is_none_or(|(_, y)| pure - self.jump < y) {
             self.point = Some((e, pure - self.jump));
         }
-        let mut correction = self.correction(e) + self.jump;
-        let mut late = pure - correction;
+        // The map is the PCR's: a step in the arrivals is lateness, said to
+        // the presentation (`Presentation`), never a phase of this clock.
+        let correction = self.correction(e);
+        let mut late = pure - correction - self.jump;
         self.envelope.push_back((arrived, late));
         while self.envelope.front().is_some_and(|&(t, _)| t + ENVELOPE_NS < arrived) {
             self.envelope.pop_front();
@@ -231,7 +234,6 @@ impl Recovery {
                 let step = least - base;
                 self.jump += step;
                 self.stepped = Some(step);
-                correction += step;
                 late -= step;
                 for (_, l) in self.envelope.iter_mut() {
                     *l -= step;
@@ -288,8 +290,140 @@ pub struct Stamp {
     last: Option<u64>,
     last_pcr: Option<(u64, u64)>,
     clock: Recovery,
+    /// The next PCR anchors anew (`reanchor`).
+    reanchor: bool,
     /// The last chunk with a PCR, for the clock probe.
     pub trace: Option<crate::clock_probe::StampTrace>,
+}
+
+/// Lateness of the stream that the presentation takes up: the stamps stay
+/// the PCR's (`Recovery`), the sinks wait longer.
+///
+/// On 51616 (2026-11-05, an hour of the raw multiplex): the service's PCR
+/// and its payload came later together, by 80 to 381 ms at a time (p50
+/// 149, p95 376), 2.7 s in the hour and never back, while the USB
+/// transfers came every 21 ms and the multiplex's other services on time:
+/// a service delivered late at its source, its time base whole. Its
+/// pictures came late 0.4 to 4 s before its PCRs did; of the 151 pictures
+/// lost in 45 minutes, 136 had reached the decoder 40 to 580 ms later than
+/// the minute's before them. Nothing can show that time; the sinks wait it
+/// out once, as a pause, and nothing is dropped or resynced.
+///
+/// What is judged is the pictures' own lateness as they leave tsdemux
+/// (now less PTS, running time): each has its time at the sink the
+/// pipeline's latency (150 ms) and the offset later, and decoding and the
+/// vblank take up to 80 ms of it. Two running more than
+/// `PICTURE_ALLOWED_NS` late, the offset grows by the lateness and
+/// `LATE_MARGIN_NS` (the pictures then `LATE_MARGIN_NS` ahead of their PTS
+/// again). A PCR's lateness is no measure of it: the pictures come ahead of
+/// their PCR by 170 ms here, and the sound by 250.
+///
+/// Only the input moves it: a picture's lateness is measured as it
+/// leaves tsdemux, against the offset already taken, so the sinks' own
+/// wait (`ts-offset`) is never new lateness. A sink-side watch that took a
+/// picture not yet shown for a stop (FAZ 1H, `observe_gap`) fed on its own
+/// waits: on 51616 in two hours (2026-11-05) 79 of its 80 raises came with
+/// the pictures at tsdemux 0.6 to 4 s early for the offset, 17.7 s in all
+/// for about 5 s the service came later, and three rebases. Removed.
+pub const PICTURE_ALLOWED_NS: i64 = 70_000_000;
+pub const LATE_MARGIN_NS: i64 = 20_000_000;
+/// At most this much later than the stamps: the streams' queues hold 6 s
+/// (`STREAM_QUEUE_NS`); past it the channel's time is taken anew at its
+/// arrivals, once, and what waited is skipped. 51616 came 2.7 s later in
+/// an hour: about once in two hours there.
+pub const LATE_MAX_NS: u64 = 5_000_000_000;
+/// Within this of a wait a picture up to `WAIT_SHOW_LATE_NS` past its time
+/// is shown, not thrown away: the wait was taken the moment the stop was
+/// seen, and the pictures already on their way when it was are the ones
+/// it was for (51616, 2026-11-05: 19 pictures in 45 minutes, 20 to 111 ms
+/// late, every one within 0.5 s of a wait).
+pub const WAIT_SHOW_NS: u64 = 1_000_000_000;
+pub const WAIT_SHOW_LATE_NS: u64 = 150_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Late {
+    /// The presentation now waits `offset` (ns) past the stamps, `by` more
+    /// than before.
+    Raised { offset: u64, by: i64 },
+    /// Past `LATE_MAX_NS`: the stamps are to be anchored at the arrivals
+    /// again (`Stamp::reanchor`), the presentation back to 0.
+    Rebase,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Presentation {
+    key: Option<u64>,
+    offset: u64,
+    /// The last picture's lateness past the offset (`observe_picture`), and
+    /// the newest PTS yet.
+    last_picture: Option<i64>,
+    newest: Option<u64>,
+    /// A picture's time: the newest PTS's last step forwards (under 100 ms).
+    frame: Option<u64>,
+    /// A rebase asked for that the reader has not taken (`take_rebase`).
+    rebase: bool,
+    /// When the last wait was taken (running time).
+    waited_at: Option<u64>,
+}
+
+impl Presentation {
+    /// A picture of branch `key` leaving tsdemux at `now`, its PTS `pts`
+    /// (both running time): late twice running, the presentation waits.
+    pub fn observe_picture(&mut self, key: u64, now: u64, pts: u64) -> Option<Late> {
+        if self.key != Some(key) {
+            *self = Presentation { key: Some(key), ..Presentation::default() };
+        }
+        if let Some(newest) = self.newest
+            && pts > newest
+            && pts - newest < 100_000_000
+        {
+            self.frame = Some(pts - newest);
+        }
+        self.newest = Some(self.newest.map_or(pts, |n| n.max(pts)));
+        let late = now as i64 - pts as i64 - self.offset as i64;
+        let before = self.last_picture.replace(late);
+        if late <= PICTURE_ALLOWED_NS || before.is_none_or(|b| b <= PICTURE_ALLOWED_NS) {
+            return None;
+        }
+        self.waited_at = Some(now);
+        self.raise(late)
+    }
+
+    /// The reader takes a rebase asked for here (`Late::Rebase` from a
+    /// picture, on another thread).
+    pub fn take_rebase(&mut self) -> bool {
+        std::mem::take(&mut self.rebase)
+    }
+
+    fn raise(&mut self, late: i64) -> Option<Late> {
+        let offset = self.offset + (late + LATE_MARGIN_NS) as u64;
+        if offset > LATE_MAX_NS {
+            *self = Presentation { key: self.key, rebase: true, ..Presentation::default() };
+            return Some(Late::Rebase);
+        }
+        let by = offset as i64 - self.offset as i64;
+        self.offset = offset;
+        // The pictures that made this raise are spent: the next takes two
+        // more, late past the new offset (a step is waited for once).
+        self.last_picture = None;
+        Some(Late::Raised { offset, by })
+    }
+
+    #[cfg(test)]
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// A picture of branch `key` at `now` (running time) past its time by
+    /// `late`: shown, within a wait (`WAIT_SHOW_NS`, `WAIT_SHOW_LATE_NS`).
+    pub fn shows_late(&self, key: u64, now: u64, late: u64) -> bool {
+        self.key == Some(key) && late <= WAIT_SHOW_LATE_NS && self.waited_at.is_some_and(|at| now.saturating_sub(at) <= WAIT_SHOW_NS)
+    }
+
+    /// The offset for branch `key`: none for another.
+    pub fn offset_for(&self, key: u64) -> u64 {
+        if self.key == Some(key) { self.offset } else { 0 }
+    }
 }
 
 /// How long after a channel's first PCR its live edge is taken
@@ -362,6 +496,7 @@ impl Stamp {
         // wrap is a small step forwards), or -- once settled -- a PCR much
         // further on than the time since the last one.
         let discontinuity = match (self.last_pcr, pcr) {
+            (Some(_), Some(_)) if std::mem::take(&mut self.reanchor) => true,
             (Some((last, last_arrived)), Some(pcr)) => {
                 let step = pcr_ticks(last, pcr);
                 indicated
@@ -413,6 +548,12 @@ impl Stamp {
         self.last = Some(at);
         let stepped = if pcr.is_some() && !discontinuity { self.clock.stepped() } else { None };
         Stamped { at, class, discontinuity, stepped }
+    }
+
+    /// The presentation is too far behind (`Late::Rebase`): the next PCR
+    /// starts a new anchor at its arrival, as a new time base does.
+    pub fn reanchor(&mut self) {
+        self.reanchor = true;
     }
 
     /// The frequency applied, ppb, and the fitted one.
@@ -1089,5 +1230,337 @@ mod tests {
             let a = lump.time(1, 1_000 * MS + board + lumpy(k, board) + held, Some(k * 2 * FIELD_50), false);
             assert_eq!(a.stepped, None, "chunk {k}");
         }
+    }
+
+    // ------------------------------------------------- the stream and its sinks
+
+    /// One broadcast as the reader sees it: a PCR every 20 ms with a
+    /// picture `LEAD_NS` ahead of its time, four chunks of payload between,
+    /// the board's crystal `ppb` off, USB lumps on top. `shape` moves each
+    /// chunk's arrival (and may take its PCR away): (k, chunk within the
+    /// 20 ms, own time, natural arrival) -> (arrival, keep the PCR). The
+    /// picture goes with the PCR's chunk.
+    struct Run {
+        disconts: usize,
+        waits: Vec<i64>,
+        rebases: usize,
+        lost: usize,
+        /// The largest step of the stamps between PCRs off the PCR's own.
+        stamp_step_off: i64,
+        ppb: i64,
+        offset: u64,
+    }
+
+    /// A picture's lead over its PCR (51616: 170 ms), decoding and the
+    /// vblank, and the sinks' latency.
+    const LEAD_NS: u64 = 170 * MS;
+    const DECODE_NS: u64 = 30 * MS;
+    const SINK_LATENCY_NS: u64 = 150 * MS;
+
+    fn run(seconds: u64, ppb: i64, shape: &dyn Fn(u64, u64, u64, u64) -> (u64, bool)) -> Run {
+        let (mut stamp, mut presentation) = (Stamp::default(), Presentation::default());
+        let mut offsets: Vec<(u64, u64)> = vec![(0, 0)];
+        let (mut disconts, mut waits, mut rebases) = (0, Vec::new(), 0);
+        let mut last_pcr_at: Option<(u64, u64)> = None;
+        let mut stamp_step_off = 0i64;
+        let mut pictures: Vec<(u64, u64)> = Vec::new();
+        let mut events: Vec<(u64, u64, u64, bool)> = Vec::new();
+        for k in 0..seconds * 50 {
+            for j in 0..5u64 {
+                let own = k * 20 * MS + j * 4 * MS;
+                let board = (own as i128 + own as i128 * ppb as i128 / 1_000_000_000) as u64;
+                let natural = 1_000 * MS + board + lumpy(k, board) / 4;
+                let (arrived, keep) = shape(k, j, own, natural);
+                events.push((arrived, k, j, keep));
+            }
+        }
+        // The reader takes them in the order they came.
+        events.sort_by_key(|e| (e.0, e.1, e.2));
+        // Each picture's PTS on the stamps' line: where its own time falls.
+        let mut line: Option<(u64, u64)> = None;
+        for (arrived, k, j, keep) in events {
+            let pcr = (j == 0 && keep).then_some(k * FIELD_50);
+            if presentation.take_rebase() {
+                stamp.reanchor();
+            }
+            let stamped = stamp.time(1, arrived, pcr, false);
+            disconts += usize::from(stamped.discontinuity);
+            if let Some(pcr) = pcr {
+                if let Some((p0, a0)) = last_pcr_at {
+                    let own = ticks_to_ns(pcr - p0) as i64;
+                    stamp_step_off = stamp_step_off.max((stamped.at as i64 - a0 as i64 - own).abs());
+                }
+                last_pcr_at = Some((pcr, stamped.at));
+                line = Some((k * 20 * MS, stamped.at));
+            }
+            if j == 0 {
+                let own = k * 20 * MS;
+                let pts = line.map_or(stamped.at, |(own0, at0)| at0 + own.saturating_sub(own0)) + LEAD_NS;
+                match presentation.observe_picture(1, arrived, pts) {
+                    Some(Late::Raised { offset, by }) => {
+                        waits.push(by);
+                        offsets.push((arrived, offset));
+                    }
+                    Some(Late::Rebase) => {
+                        rebases += 1;
+                        offsets.push((arrived, 0));
+                    }
+                    None => {}
+                }
+                pictures.push((arrived, pts));
+            }
+        }
+        // Lost: past its time at the sink when decoded, with the offset then.
+        let offset_at = |t: u64| offsets.iter().rev().find(|&&(at, _)| at <= t).map_or(0, |&(_, o)| o);
+        let lost = pictures.iter().filter(|&&(arrived, pts)| {
+            let ready = arrived + DECODE_NS;
+            ready > pts + offset_at(ready) + SINK_LATENCY_NS
+        }).count();
+        Run { disconts, waits, rebases, lost, stamp_step_off, ppb: stamp.frequency().0, offset: presentation.offset() }
+    }
+
+    const STEADY: i64 = 30_000;
+
+    /// PCRs missing for 50 to 500 ms while the payload comes as ever, and
+    /// back on their line: the clock coasts; nothing is stepped, lost or
+    /// waited for.
+    #[test]
+    fn pcrs_missing_while_the_payload_flows_are_coasted() {
+        for gap in [50u64, 100, 250, 500] {
+            let r = run(120, STEADY, &|k, _, _, natural| (natural, !(3_000..3_000 + gap / 20).contains(&k)));
+            assert_eq!((r.disconts, r.waits.len(), r.rebases, r.lost), (0, 0, 0, 0), "{gap} ms");
+            assert!(r.stamp_step_off <= 2 * MS as i64, "{gap} ms: the stamps on the PCR's line ({} ns off)", r.stamp_step_off);
+        }
+    }
+
+    /// PCRs held up and let go together while the payload came on time:
+    /// coasted, no step, nothing late, the crystal kept.
+    #[test]
+    fn pcrs_bunched_with_their_values_right_are_no_step() {
+        let steady = run(120, STEADY, &|_, _, _, natural| (natural, true));
+        for hold in [50u64, 100, 250, 500] {
+            let release = 1_000 * MS + 60_000 * MS + hold * MS;
+            let r = run(120, STEADY, &|k, j, own, natural| {
+                let held = j == 0 && (60_000 * MS..60_000 * MS + hold * MS).contains(&own);
+                // Let go together, in the order they were sent; their
+                // pictures are in the chunks after them, on time.
+                (if held { release + k } else { natural }, true)
+            });
+            assert_eq!((r.disconts, r.rebases), (0, 0), "{hold} ms");
+            assert!((r.ppb - steady.ppb).abs() <= 500, "{hold} ms: {} ppb against {}", r.ppb, steady.ppb);
+        }
+    }
+
+    /// The whole stream held 50 to 500 ms and let go at once: within the
+    /// pictures' lead nothing happens; past it one wait, nothing lost, no
+    /// step of the clock, the crystal kept.
+    #[test]
+    fn a_stalled_stream_that_catches_up_is_one_wait_and_no_loss() {
+        let steady = run(120, STEADY, &|_, _, _, natural| (natural, true));
+        for hold in [50u64, 100, 250, 500] {
+            let release = 1_000 * MS + 60_000 * MS + hold * MS;
+            let r = run(120, STEADY, &|_, _, own, natural| {
+                let held = (60_000 * MS..60_000 * MS + hold * MS).contains(&own);
+                (if held { release } else { natural }, true)
+            });
+            assert_eq!((r.disconts, r.rebases, r.lost), (0, 0, 0), "{hold} ms: {:?}", r.waits);
+            // Two pictures running: the second, 20 ms later in its own
+            // time, as late less those 20 ms.
+            let expected = usize::from(hold * MS > LEAD_NS + PICTURE_ALLOWED_NS as u64 + 20 * MS);
+            assert_eq!(r.waits.len(), expected, "{hold} ms: {:?}", r.waits);
+            assert!((r.ppb - steady.ppb).abs() <= 500, "{hold} ms: {} ppb against {}", r.ppb, steady.ppb);
+        }
+    }
+
+    /// The stream comes 100 or 300 ms later from a point on and stays so:
+    /// within the lead, nothing; past it, one wait. Nothing lost, the
+    /// stamps whole.
+    #[test]
+    fn a_lasting_latency_step_is_one_wait_and_no_loss() {
+        let steady = run(180, STEADY, &|_, _, _, natural| (natural, true));
+        for step in [100u64, 300] {
+            let r = run(180, STEADY, &|_, _, own, natural| (natural + if own >= 90_000 * MS { step * MS } else { 0 }, true));
+            assert_eq!((r.disconts, r.rebases, r.lost), (0, 0, 0), "{step} ms");
+            assert_eq!(r.waits.len(), usize::from(step * MS > LEAD_NS + PICTURE_ALLOWED_NS as u64), "{step} ms: {:?}", r.waits);
+            assert!(r.stamp_step_off <= 2 * MS as i64, "{step} ms: {}", r.stamp_step_off);
+            assert!((r.ppb - steady.ppb).abs() <= 500, "{step} ms: {} ppb against {}", r.ppb, steady.ppb);
+        }
+    }
+
+    /// 51616's hour (2026-11-05): steps of 80 to 380 ms, 2.0 s in all, with
+    /// the crystal's drift, the lumps, and PCRs missing now and then: a wait
+    /// for each that the lead does not cover, nothing lost, no DISCONT. Then
+    /// 3.5 s more takes the wait past `LATE_MAX_NS`: one rebase, its one
+    /// DISCONT.
+    #[test]
+    fn drift_jitter_sparse_pcrs_and_lasting_steps_together() {
+        let hour: [(u64, u64); 9] =
+            [(300, 111), (600, 200), (900, 89), (1_400, 284), (1_700, 152), (2_000, 373), (2_300, 127), (2_700, 381), (3_000, 326)];
+        let late = |steps: &[(u64, u64)], own: u64| -> u64 { steps.iter().filter(|&&(at, _)| own >= at * 1_000 * MS).map(|&(_, ms)| ms * MS).sum() };
+        for ppb in [-60_000i64, 0, 60_000] {
+            let r = run(3_400, ppb, &|k, _, own, natural| (natural + late(&hour, own), k % 997 > 10));
+            assert_eq!((r.lost, r.disconts, r.rebases), (0, 0, 0), "{ppb}: {:?}", r.waits);
+            // A wait leaves the pictures `LATE_MARGIN_NS` ahead, the lead
+            // the broadcast had taken up in it: a step after waits as well,
+            // and one that stops, then comes, then comes later, twice.
+            assert!(!r.waits.is_empty() && r.waits.len() <= hour.len() + 2, "{ppb}: {:?}", r.waits);
+            assert!((r.ppb - ppb).abs() <= 3_000, "{ppb}: {} ppb", r.ppb);
+            let mut more = hour.to_vec();
+            more.push((3_200, 3_500));
+            let r = run(3_400, ppb, &|k, _, own, natural| (natural + late(&more, own), k % 997 > 10));
+            assert_eq!((r.rebases, r.disconts), (1, 1), "{ppb}: {:?}", r.waits);
+            assert!(r.offset <= LATE_MAX_NS);
+        }
+    }
+
+    /// 51616 at 1040 s (2026-11-05): +124, +121, +108 ms within 1.2 s, past
+    /// what the lead covers. Nothing comes past its time.
+    #[test]
+    fn a_staircase_of_steps_is_waited_ahead() {
+        let stairs = [(60_000u64, 224u64), (60_500, 121), (61_200, 108)];
+        let r = run(120, STEADY, &|_, _, own, natural| {
+            (natural + stairs.iter().filter(|&&(at, _)| own >= at * MS).map(|&(_, ms)| ms * MS).sum::<u64>(), true)
+        });
+        assert_eq!((r.lost, r.disconts, r.rebases), (0, 0, 0), "{:?}", r.waits);
+        assert!(!r.waits.is_empty() && r.waits.len() <= 3, "{:?}", r.waits);
+    }
+
+    /// 51616 (2026-11-05): the pictures came 300 ms late a second before
+    /// the PCRs did: one wait, from the pictures; the PCRs as late after it
+    /// change nothing. One late picture alone is none.
+    #[test]
+    fn pictures_late_before_the_pcrs_are_one_wait() {
+        let r = run(60, STEADY, &|_, j, own, natural| {
+            let picture = j == 0;
+            let late = if own >= 30_000 * MS && (!picture || own >= 29_000 * MS) { 300 * MS } else { 0 };
+            (natural + late, true)
+        });
+        assert_eq!((r.lost, r.disconts, r.waits.len()), (0, 0, 1), "{:?}", r.waits);
+        let mut p = Presentation::default();
+        for k in 0..100u64 {
+            let now = 1_000 * MS + k * 20 * MS;
+            let late = if k == 50 { 400 * MS } else { 0 };
+            assert_eq!(p.observe_picture(1, now, now + LEAD_NS - late), None, "picture {k}");
+        }
+    }
+
+    /// The FAZ 1H fault (51616, 2026-11-05, two hours): the sinks waiting
+    /// on their own offset were taken for a stream stopped, 79 of 80 raises
+    /// with the pictures early at tsdemux. One step of the source is one
+    /// raise; then, the pictures on time at the new lag, thousands of the
+    /// health thread's reads and the appsink's (`offset_for`, `shows_late`)
+    /// while the sink holds its picture change nothing.
+    #[test]
+    fn a_sink_waiting_on_its_own_offset_is_no_new_lateness() {
+        let mut p = Presentation::default();
+        let frame = 40 * MS;
+        let step = 300 * MS;
+        let mut raises = Vec::new();
+        let mut reads = 0u64;
+        // 25 pictures a second, leaving tsdemux 170 ms ahead of their time;
+        // from picture 250 on, 300 ms later for good. Between pictures the
+        // health thread reads every 10 ms, the sink showing nothing.
+        for k in 0..2_000u64 {
+            let pts = 1_000 * MS + k * frame;
+            let now = pts - LEAD_NS + if k >= 250 { step } else { 0 };
+            if let Some(late) = p.observe_picture(1, now, pts) {
+                raises.push(late);
+            }
+            for tick in 0..4u64 {
+                let before = p.clone();
+                let offset = p.offset_for(1);
+                let _ = p.shows_late(1, now + tick * 10 * MS, 100 * MS);
+                assert_eq!(p, before, "a read moved the presentation");
+                assert_eq!(offset, p.offset());
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 8_000);
+        assert_eq!(raises.len(), 1, "one step, one raise: {raises:?}");
+        // The step less the lead, once, and the margin once.
+        let Late::Raised { offset, .. } = raises[0] else { panic!("{raises:?}") };
+        assert_eq!(offset as i64, (step - LEAD_NS) as i64 + LATE_MARGIN_NS, "{raises:?}");
+    }
+
+    /// The pictures that made a raise are spent: a further step needs two
+    /// pictures of its own past the new offset, not one paired with them.
+    #[test]
+    fn a_picture_of_a_step_waited_for_does_not_count_again() {
+        let mut p = Presentation::default();
+        for k in 0..10u64 {
+            let pts = 1_000 * MS + k * 40 * MS;
+            assert_eq!(p.observe_picture(1, pts - LEAD_NS, pts), None);
+        }
+        // Two pictures 200 ms late: a raise to 220 ms.
+        let pts = 1_400 * MS;
+        assert_eq!(p.observe_picture(1, pts + 200 * MS, pts), None);
+        assert_eq!(p.observe_picture(1, pts + 40 * MS + 200 * MS, pts + 40 * MS), Some(Late::Raised { offset: 220 * MS, by: 220 * MS as i64 }));
+        // The source 100 ms later again: its first picture alone is nothing.
+        assert_eq!(p.observe_picture(1, pts + 80 * MS + 300 * MS, pts + 80 * MS), None);
+        assert_eq!(p.observe_picture(1, pts + 120 * MS + 300 * MS, pts + 120 * MS), Some(Late::Raised { offset: 320 * MS, by: 100 * MS as i64 }));
+        // Back on time at that lag: nothing more, however long.
+        for k in 4..1_000u64 {
+            let pts = 1_400 * MS + k * 40 * MS;
+            assert_eq!(p.observe_picture(1, pts + 300 * MS, pts), None, "picture {k}");
+        }
+        assert_eq!(p.offset(), 320 * MS);
+    }
+
+    /// Two steps of the source apart are two raises, each its own size.
+    #[test]
+    fn two_steps_of_the_source_are_two_raises() {
+        let mut p = Presentation::default();
+        let mut raises = Vec::new();
+        for k in 0..3_000u64 {
+            let pts = 1_000 * MS + k * 40 * MS;
+            let lag = match k {
+                ..500 => 0,
+                500..1_500 => 250 * MS,
+                _ => 250 * MS + 150 * MS,
+            };
+            if let Some(late) = p.observe_picture(1, pts - LEAD_NS + lag, pts) {
+                raises.push(late);
+            }
+        }
+        assert_eq!(
+            raises,
+            vec![
+                Late::Raised { offset: 100 * MS, by: 100 * MS as i64 },
+                Late::Raised { offset: 250 * MS, by: 150 * MS as i64 },
+            ]
+        );
+    }
+
+    /// A picture a little late within a second of a wait is shown; later,
+    /// or with no wait near, it is not.
+    #[test]
+    fn within_a_wait_a_picture_a_little_late_is_shown() {
+        let mut p = Presentation::default();
+        for k in 0..10u64 {
+            let pts = 1_000 * MS + k * 20 * MS;
+            p.observe_picture(1, pts - 200 * MS, pts);
+        }
+        assert!(!p.shows_late(1, 2_000 * MS, 50 * MS), "no wait yet");
+        // Two pictures 300 ms late: a wait at 1.5 s.
+        p.observe_picture(1, 1_500 * MS, 1_200 * MS);
+        assert!(matches!(p.observe_picture(1, 1_520 * MS, 1_220 * MS), Some(Late::Raised { .. })));
+        assert!(p.shows_late(1, 1_900 * MS, 100 * MS));
+        assert!(!p.shows_late(1, 1_900 * MS, 200 * MS), "too late");
+        assert!(!p.shows_late(1, 2_600 * MS, 50 * MS), "the wait long past");
+        assert!(!p.shows_late(2, 1_900 * MS, 50 * MS), "another channel");
+    }
+
+    /// The same stream cut into reads two ways is waited for alike.
+    #[test]
+    fn the_presentation_does_not_depend_on_how_the_stream_is_cut() {
+        let shape = |_, _, own: u64, natural: u64| (natural + if own >= 50_000 * MS { 300 * MS } else { 0 }, true);
+        let a = run(90, STEADY, &shape);
+        let b = run(90, STEADY, &|k, j, own, natural| {
+            let (arrived, keep) = shape(k, j, own, natural);
+            // The payload chunks a little later, as if read with the next.
+            (arrived + if j > 0 { 2 * MS } else { 0 }, keep)
+        });
+        assert_eq!(a.waits.len(), b.waits.len());
+        assert!((a.waits[0] - b.waits[0]).abs() <= 2 * MS as i64, "{:?} {:?}", a.waits, b.waits);
     }
 }

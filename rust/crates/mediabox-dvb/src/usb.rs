@@ -274,6 +274,8 @@ impl StreamStats {
 
 struct State {
     queue: VecDeque<Vec<u8>>,
+    /// When each chunk of `queue` completed, CLOCK_MONOTONIC ns.
+    completed_at: VecDeque<u64>,
     queued: usize,
     pending: usize,
     running: bool,
@@ -335,6 +337,7 @@ impl TsStream {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 queue: VecDeque::new(),
+                completed_at: VecDeque::new(),
                 queued: 0,
                 pending: 0,
                 running: false,
@@ -417,8 +420,21 @@ impl TsStream {
             state = self.shared.ready.wait_timeout(state, timeout).unwrap_or_else(|p| p.into_inner()).0;
         }
         let chunk = state.queue.pop_front()?;
+        state.completed_at.pop_front();
         state.queued -= chunk.len();
         Some(chunk)
+    }
+
+    /// `get`, and when the chunk's transfer completed (CLOCK_MONOTONIC ns).
+    pub fn get_timed(&self, timeout: Duration) -> Option<(Vec<u8>, u64)> {
+        let mut state = self.shared.lock();
+        if state.queue.is_empty() {
+            state = self.shared.ready.wait_timeout(state, timeout).unwrap_or_else(|p| p.into_inner()).0;
+        }
+        let chunk = state.queue.pop_front()?;
+        let at = state.completed_at.pop_front().unwrap_or(0);
+        state.queued -= chunk.len();
+        Some((chunk, at))
     }
 
     /// No transfer left in flight although nobody asked to stop: the device is
@@ -487,6 +503,9 @@ impl Drop for TsStream {
 fn submit(lib: &libusb::Lib, transfer: *mut Transfer, index: usize, state: &mut State) {
     // SAFETY: the transfer is set up and not in flight.
     let code = unsafe { (lib.submit_transfer)(transfer) };
+    if let Some(trace) = crate::trace::get() {
+        trace.now(11, index as u16, state.next_seq as u32, 0, code as i64 as u64, 0);
+    }
     if code != 0 {
         state.stats.submit_errors.push(libusb::error_name(code));
         return;
@@ -542,6 +561,8 @@ extern "C" fn completed(transfer: *mut Transfer) {
         (slot, t.status, length, data)
     };
     let shared = &slot.shared;
+    let entered = crate::trace::get().map(|_| mediabox_core::bintrace::raw_now());
+    let at = mediabox_core::timeline::now_ns();
     let mut state = shared.lock();
     state.pending -= 1;
     let seq = state.seq_of[slot.index];
@@ -590,14 +611,33 @@ extern "C" fn completed(transfer: *mut Transfer) {
             state.queued += data.len();
             state.stats.max_queued_bytes = state.stats.max_queued_bytes.max(state.queued);
             state.queue.push_back(data);
+            state.completed_at.push_back(at);
             shared.ready.notify_one();
         }
         state.stats.stream_bytes += length as u64;
+    }
+    if let Some(trace) = crate::trace::get() {
+        let (_, raw) = mediabox_core::bintrace::clocks();
+        trace.put(mediabox_core::bintrace::Record {
+            kind: 1,
+            id: status as u16,
+            n: seq as u32,
+            seq: 0,
+            mono: at,
+            raw,
+            a: length as u64,
+            b: state.queued as u64,
+            c: state.stats.stream_bytes,
+        });
     }
     if state.running {
         submit(slot.lib, transfer, slot.index, &mut state);
     }
     if state.pending == 0 {
         shared.ready.notify_all();
+    }
+    drop(state);
+    if let (Some(trace), Some(entered)) = (crate::trace::get(), entered) {
+        trace.now(12, status as u16, seq as u32, entered, mediabox_core::bintrace::raw_now(), 0);
     }
 }

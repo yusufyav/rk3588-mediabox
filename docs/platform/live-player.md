@@ -161,25 +161,55 @@ Kanky ─USB─> mediabox-dvb ─FIFO (tek servis)─> mediabox-live
   sink, saat `sync_time`'a gelene kadar bekler). alsasink saate skew ile
   bağlıdır. Bu, Android'deki donanım STC'nin yazılım karşılığıdır.
 - **Saat kurtarma (`stamp.rs`).** Her parça, ilk PCR'ın geliş zamanından
-  PCR ile zamanlanır: `at = at0 + E + C(E) + J`.
+  PCR ile zamanlanır: `at = at0 + E + C(E)`.
   - `E = Σticks·1000/27`: u128'de tam hesaplanır, yuvarlama birikmez.
   - `C`: parça parça doğrusal ppb düzeltmesidir.
-  - `J`: kalıcı faz adımlarının toplamıdır.
+  - Varışların gecikmesi bu haritaya girmez (bkz. sunum gecikmesi).
   - Frekans, ilk PCR'dan 10 s sonra başlar. Her saniyenin en erken
     gelişinden bir nokta alınır; 60 noktaya en küçük kareler uydurulur, 2 ms
     üstündeki topaklar dışarıda kalır. Buna 300 s'de kapanan bir faz terimi
     eklenir (en çok ±20 ppm). Toplam ±100 ppm ile sınırlıdır: yayıncı
     ±30 ppm (ISO/IEC 13818-1 2.4.2.1), kart 70 ppm. Değişim en çok
     1 ppm/s'dir ve saniyede bir hesaplanır; PCR sayısından bağımsızdır.
-  - Son 300 ms'nin tüm gelişleri zarftan 40 ms'den geç kalırsa saat bir kez
-    o kadar ileri alınır (`clock-step`). TS ve ses tamponu DISCONT olur;
-    teşhiste `ts_arrival_steps` → `input_transport_discontinuity` sayılır.
+  - Son 300 ms'nin tüm gelişleri zarftan 40 ms'den geç kalırsa bu yalnız
+    gözlemdir (`arrival-step`). Adım, frekans uydurmasından çıkarılır;
+    haritaya ve DISCONT'a dönüşmez.
+  - **Sunum gecikmesi (`stamp::Presentation`) — aday, üretimde değil.**
+    Ölçüt tsdemux'tan çıkan resimdir: `λ = şimdi − PTS − ofset` (koşu
+    zamanı). Arka arkaya iki resim 70 ms'yi (`PICTURE_ALLOWED_NS`) aşarsa
+    ofset `λ + 20 ms` artar. PCR'ın gecikmesi ölçüt değildir. Ofset hiç
+    azalmaz.
+  - Ofset iki sink'in `ts-offset`'ine eklenir; sağlık iş parçacığı onu
+    10 ms içinde uygular, appsink bu arada ikisinin büyüğünü kullanır.
+    Damgalar ve tsdemux'un gördüğü saat değişmez, parser sıfırlanmaz.
+    Bir bekleme içinde (1 s) 150 ms'ye kadar geç resim atılmaz, gösterilir.
+  - Ofset ölçüte zaten girdiği için sink'in kendi beklemesi yeni gecikme
+    sayılmaz. FAZ 1H'deki sink tarafı boşluk gözcüsü (`observe_gap`) bu
+    kuralı bozuyordu ve kaldırıldı: 51616'da 2 saatte 80 artışın 79'unda
+    resimler tsdemux'ta ofsete göre 0,6–4 s erkendi; toplam 17,7 s artış
+    ve 3 yeniden bağlama bundan geldi.
+  - Yalnız ses servisleri bu denetleyicide yoktur: geç gelen ses PES'i
+    yalnız sayılır (`ts_sound_late`).
+  - Ofset 5 s'yi (`LATE_MAX_NS`) aşarsa zaman bir kez gelişe yeniden
+    bağlanır: tek DISCONT olur, bekleyen içerik atlanır. Akış kuyrukları
+    6 s tutar (`STREAM_QUEUE_NS`). Kanal değişiminde ofset sıfırlanır.
+  - Gerçek zaman tabanı değişimi (aşağıda) tek DISCONT ile yeniden
+    bağlanır.
   - `discontinuity_indicator`, geri ya da 1 s'den fazla ileri PCR,
     yerleşmiş saatte gelişten 250 ms fazla ilerleyen PCR yeni bir dönemdir.
     `max(son, geliş)` noktasına yeniden çapalanır, frekans korunur.
   - Damgalanan, FIFO `read` dönüş zamanıdır (CLOCK_MONOTONIC), push
     sonrası değil. Push bekletse de saat değişmez (test:
     `a_held_push_does_not_move_the_recovered_clock`).
+  - **51616 olayının sınıfı (2026-11-05, 1 saatlik ham multipleks izi).**
+    Servisin PCR'ı ve payload'ı birlikte geç geldi: 80–381 ms'lik adımlar
+    (p50 149, p95 376), saatte toplam 2,7 s, geri gelmedi. USB transferleri
+    21 ms arayla düzenliydi; aynı multipleksteki diğer servisler zamanında
+    geldi (155 ve 3606: saatte ~20 ms). PCR değeri sürekliydi,
+    `discontinuity_indicator` yoktu. Ses PTS'inin gelişe göre adımı PCR'ınkine
+    eşitti. Gecikme host USB tamamlanmasının önünde, servis düzeyinde
+    oluşuyor (C sınıfı); zaman tabanı bozulmamıştır. Yayıncı kusuru
+    kanıtlanmadı.
   - **2026-11-04'e kadar:** tempo, son 2 s'nin en erken gelişini PCR parçası
     başına 50 µs izliyordu (saniyede 25–50 PCR → 1,2–2,5 ms/s). 51616'da
     yayının kendi geliş adımları (ham multiplekste yalnız o servisin PCR
@@ -537,7 +567,12 @@ Daha kısa sink boşlukları ve yeniden eşlemeler de sınıflanır ve
 **Nedenler** (`classify`), kanıt yeterliyse:
 `user_muted`, `route_change`, `input_transport_discontinuity`,
 `pes_timestamp_discontinuity`, `decoder_output_silence`, `sink_xrun`,
-`render_starvation`. Hiçbirini göstermeyen durum `unknown`'dır. Yayıncıya
+`render_starvation`, `presentation_wait`. Hiçbirini göstermeyen durum
+`unknown`'dır. `presentation_wait`: PCM bütündür ve oynatıcı sink'lerin
+`ts-offset`'ini kendisi değiştirmiştir. Olay, o anda kuyrukta olan sesin
+bittiği ana (`played_until`) bir rapor süresi kadar uzaklıktadır. Yakınlık
+tek başına neden olmaz; bir beklemenin ardından gelen olay kendiliğinden
+girişe yazılmaz. Yayıncıya
 veya donanıma kanıtsız neden yazılmaz. Çözülmüş PCM sink'ten önce
 ölçüldüğü için sink'teki bir olay, PCM sessizliğini açıklamaz.
 

@@ -206,6 +206,7 @@ impl Avl62x1 {
         while out.len() < length {
             let n = BMS_READ_CHUNK.min(length - out.len());
             let at = address + out.len() as u32;
+            let _one = crate::frontend::transaction();
             bridge.i2c_write(self.addr, &at.to_be_bytes()[1..])?;
             out.extend(bridge.i2c_read(self.addr, n)?);
         }
@@ -219,6 +220,7 @@ impl Avl62x1 {
             let at = address + (i * BMS_WRITE_CHUNK) as u32;
             let mut frame = at.to_be_bytes()[1..].to_vec();
             frame.extend_from_slice(chunk);
+            let _one = crate::frontend::transaction();
             bridge.i2c_write(self.addr, &frame)?;
         }
         Ok(())
@@ -512,6 +514,15 @@ impl Avl62x1 {
 
     pub fn rf_agc_gain(&self, bridge: &mut Bridge) -> Result<u16> {
         self.read16(bridge, REG_RFAGC_GAIN)
+    }
+
+    /// dB x 100.
+    pub fn snr_x100(&self, bridge: &mut Bridge) -> Result<i16> {
+        Ok(self.read16(bridge, REG_SNR_X100)? as i16)
+    }
+
+    pub fn acq_retries(&self, bridge: &mut Bridge) -> Result<u8> {
+        self.read8(bridge, REG_ACQ_RETRY)
     }
 
     pub fn acq_status(&self, bridge: &mut Bridge) -> Result<AcqStatus> {

@@ -341,9 +341,11 @@ impl Health {
         self.sound.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The arrivals stepped later and the clock with them (`stamp`).
+    /// The stream came later than its stamps for good and the sinks were
+    /// moved on to wait for it (`stamp::Presentation`): the input's.
     pub fn clock_stepped(&self) {
-        self.diagnose(|d| d.c.ts_arrival_steps += 1);
+        let now = mediabox_core::timeline::now_ns();
+        self.diagnose(|d| d.waited(now));
     }
 
     /// Every layer's sound counters, for the clock probe.
@@ -375,9 +377,16 @@ impl Health {
     }
 
     /// A buffer of decoded PCM of channel `generation`, before the volume.
-    pub fn pcm(&self, generation: u64, format: Result<crate::sound_diag::PcmFormat, &'static str>, pts: Option<u64>, declared: Option<u64>, discont: bool, data: &[u8]) {
+    /// `due`: when the buffer's samples end at the output (monotonic ns).
+    #[allow(clippy::too_many_arguments)]
+    pub fn pcm(&self, generation: u64, format: Result<crate::sound_diag::PcmFormat, &'static str>, pts: Option<u64>, declared: Option<u64>, discont: bool, data: &[u8], due: Option<u64>) {
         let now = mediabox_core::timeline::now_ns();
-        let incidents = self.sound().pcm(now, generation, format, pts, declared, discont, data);
+        let mut d = self.sound();
+        let incidents = d.pcm(now, generation, format, pts, declared, discont, data);
+        if let Some(due) = due {
+            d.played_until(due);
+        }
+        drop(d);
         self.incidents(incidents);
     }
 

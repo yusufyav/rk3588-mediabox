@@ -38,6 +38,10 @@ pub const EXIT_DBFS: f32 = -54.0;
 pub const RELEASE_NS: u64 = 50_000_000;
 /// Channels measured one by one; more are counted as unsupported.
 pub const MAX_CHANNELS: usize = 8;
+/// A presentation wait reaches the sink once the sound queued before it
+/// has played (`played_until`); events are seen at the reports
+/// (`health::PERIOD`), up to this much after they start.
+const WAIT_SEEN_WITHIN_NS: u64 = 250_000_000;
 /// What a window looks back before an event's start.
 const WINDOW_BEFORE_NS: u64 = 500_000_000;
 /// Snapshots kept of the counters, one a report (`health::PERIOD`).
@@ -511,14 +515,14 @@ macro_rules! counters {
 
 counters! {
     "transport": ts_payload_bytes, ts_pes_starts, ts_tei, ts_cc_loss, ts_duplicate, ts_discontinuity, ts_sound_resets,
-        ts_arrival_steps;
+        ts_sound_late;
     "timeline": frames, frame_gaps, frame_overlaps, frame_backward, frame_discont, frames_gated;
     "decoder": dec_in, dec_out_buffers, dec_out_frames, dec_reconfigured;
     "pcm": pcm_buffers, pcm_frames, pcm_zero_frames, pcm_silent_frames, pcm_gaps, pcm_gap_ns, pcm_overlaps, pcm_overlap_ns,
         pcm_backward,
         pcm_unsupported, pcm_duration_mismatch, pcm_channel_silent;
     "sink": sink_buffers, sink_gaps, sink_overlaps, sink_late, sink_behind, sink_discont, alsa_restarts, alsa_xruns,
-        sink_reopens;
+        sink_reopens, sink_offset_changes;
     "viewer": user_changes, route_changes;
     "picture": video_dropped, plane_full_dropped;
 }
@@ -534,10 +538,11 @@ pub enum Cause {
     SinkXrun,
     UserMuted,
     RouteChange,
+    PresentationWait,
     Unknown,
 }
 
-pub const CAUSES: [Cause; 8] = [
+pub const CAUSES: [Cause; 9] = [
     Cause::InputTransportDiscontinuity,
     Cause::PesTimestampDiscontinuity,
     Cause::DecoderOutputSilence,
@@ -545,6 +550,7 @@ pub const CAUSES: [Cause; 8] = [
     Cause::SinkXrun,
     Cause::UserMuted,
     Cause::RouteChange,
+    Cause::PresentationWait,
     Cause::Unknown,
 ];
 
@@ -558,6 +564,7 @@ impl Cause {
             Cause::SinkXrun => "sink_xrun",
             Cause::UserMuted => "user_muted",
             Cause::RouteChange => "route_change",
+            Cause::PresentationWait => "presentation_wait",
             Cause::Unknown => "unknown",
         }
     }
@@ -644,13 +651,20 @@ pub fn classify(kind: Kind, d: &Counters) -> Cause {
     if d.route_changes > 0 || d.sink_reopens > 0 {
         return Cause::RouteChange;
     }
-    // Lost or damaged on the way in, or held back upstream and come late
-    // for good (`stamp::STEP_NS`): the sound had nothing to play.
-    if d.ts_cc_loss + d.ts_tei + d.ts_arrival_steps > 0 {
+    // Lost or damaged on the way in, or the sound PES itself come late at
+    // the input: the sound had nothing to play.
+    if d.ts_cc_loss + d.ts_tei + d.ts_sound_late > 0 {
         return Cause::InputTransportDiscontinuity;
     }
     if d.frame_gaps + d.frame_overlaps + d.frame_backward + d.frame_discont > 0 {
         return Cause::PesTimestampDiscontinuity;
+    }
+    // The PCM whole and the player moved the sinks' `ts-offset` itself
+    // (`stamp::Presentation`) where the gap reached the sink: the player's
+    // wait, not the input's -- whatever the picture waited for.
+    let whole = d.pcm_gaps + d.pcm_overlaps + d.pcm_backward == 0;
+    if d.sink_offset_changes > 0 && whole && matches!(kind, Kind::SinkGap | Kind::SinkOverlap | Kind::SinkResync | Kind::PcmAbsent) {
+        return Cause::PresentationWait;
     }
     let late = d.sink_late + d.sink_behind + d.sink_discont > 0;
     match kind {
@@ -761,15 +775,24 @@ pub struct Diag {
     frame_next: Option<(u64, u64)>,
     /// When decoded samples last came, monotonic ns; since when none have.
     last_pcm_ns: Option<u64>,
+    /// When the last decoded samples end at the output, monotonic ns
+    /// (`played_until`): a buffer early for its time holds the sink, and
+    /// the next comes no sooner -- that is no absence (51616's first
+    /// buffer, 358 ms early: the next one 340 ms later, its PTS
+    /// contiguous, 2026-11-04).
+    due_ns: Option<u64>,
+    /// The presentation's last wait (`waited`): from when, and until when
+    /// a sound event starting then is the wait's.
+    wait_reach: Option<(u64, u64)>,
     absent_since: Option<u64>,
     /// Whether the last report's tick found the sound playing.
     playing: bool,
     /// Since when the viewer has had it silenced.
     silenced_since: Option<u64>,
-    pub by_cause: [u64; 8],
+    pub by_cause: [u64; CAUSES.len()],
     /// Every sink gap and overlap, whatever its length, by cause: what the
     /// player added is what is not the input's.
-    pub sink_by_cause: [u64; 8],
+    pub sink_by_cause: [u64; CAUSES.len()],
     pub incidents: u64,
     pub last: Option<Incident>,
     alsa_least_ms: Option<f64>,
@@ -794,6 +817,15 @@ impl Diag {
         self.c.since(&before)
     }
 
+    /// What an event starting at `start_ns` is judged on: the window's
+    /// counters, and the player's own wait only where it reaches the sink
+    /// then (`waited`), never by being near.
+    fn evidence(&self, start_ns: u64) -> Counters {
+        let mut delta = self.window(start_ns);
+        delta.sink_offset_changes = u64::from(self.wait_reach.is_some_and(|(from, until)| (from..=until).contains(&start_ns)));
+        delta
+    }
+
     /// A report's tick: a snapshot for windows, and samples that stopped.
     /// Returns what ended or started being an event.
     pub fn tick(&mut self, now_ns: u64, playing: bool, alsa_least_ms: Option<f64>) -> Vec<Incident> {
@@ -808,7 +840,7 @@ impl Diag {
         // No samples: none while the sound plays, past the event's length.
         self.playing = playing;
         let expected = playing && !self.context.passthrough && self.last_pcm_ns.is_some();
-        match (self.last_pcm_ns, self.absent_since) {
+        match (self.missing_from(), self.absent_since) {
             (Some(last), None) if expected && now_ns.saturating_sub(last) >= EVENT_NS => {
                 self.absent_since = Some(last);
                 let mut events = Vec::new();
@@ -830,6 +862,7 @@ impl Diag {
         self.pending.extend(ended);
         self.context.generation = generation;
         self.last_pcm_ns = None;
+        self.due_ns = None;
         self.absent_since = None;
         self.frame_next = None;
     }
@@ -842,7 +875,7 @@ impl Diag {
         let mut out = Vec::new();
         let since = match self.absent_since.take() {
             Some(since) => since,
-            None => match self.last_pcm_ns {
+            None => match self.missing_from() {
                 Some(last) if self.playing && !self.context.passthrough && now_ns.saturating_sub(last) >= EVENT_NS => {
                     let mut events = Vec::new();
                     self.meter.close(RunEnd::Absent, &mut events);
@@ -856,8 +889,32 @@ impl Diag {
         out
     }
 
+    /// From when samples are missing if none come: the last one's arrival,
+    /// or the end of its time at the output if that is later.
+    fn missing_from(&self) -> Option<u64> {
+        let last = self.last_pcm_ns?;
+        Some(self.due_ns.map_or(last, |due| due.max(last)))
+    }
+
+    /// The buffer just given (`pcm`) ends at the output at `due_ns`
+    /// (monotonic ns: base time + PTS + duration).
+    pub fn played_until(&mut self, due_ns: u64) {
+        self.due_ns = Some(due_ns);
+    }
+
+    /// The player moved the sinks' `ts-offset` (`stamp::Presentation`):
+    /// the sound already given plays out first (to `played_until`), and the
+    /// gap reaches the sink then (51616, 2026-11-05: 0.85 s after). An event
+    /// starting from now to that end (and a report's time) is the wait's;
+    /// no other is, however near.
+    pub fn waited(&mut self, now_ns: u64) {
+        self.c.sink_offset_changes += 1;
+        let end = self.due_ns.map_or(now_ns, |due| due.max(now_ns));
+        self.wait_reach = Some((now_ns, end + WAIT_SEEN_WITHIN_NS));
+    }
+
     fn record(&mut self, kind: Kind, start_ns: u64, end_ns: Option<u64>, duration_ns: u64, run: Option<(&Run, &'static str)>) -> Incident {
-        let delta = self.window(start_ns);
+        let delta = self.evidence(start_ns);
         let cause = classify(kind, &delta);
         let silenced = self.context.muted || self.context.gain <= 0.0;
         let incident = Incident {
@@ -937,6 +994,7 @@ impl Diag {
         let mut out: Vec<Incident> = std::mem::take(&mut self.pending);
         out.extend(self.samples_back(now_ns));
         self.last_pcm_ns = Some(now_ns);
+        self.due_ns = None;
         let mut events = Vec::new();
         if let Some(levels) = self.meter.buffer(generation, format, pts, declared_ns, discont, data, &mut events) {
             self.c.pcm_buffers += 1;
@@ -985,7 +1043,7 @@ impl Diag {
             self.c.sink_overlaps += 1;
             (Kind::SinkOverlap, off.unsigned_abs())
         };
-        let cause = classify(kind, &self.window(now_ns.saturating_sub(ns)));
+        let cause = classify(kind, &self.evidence(now_ns.saturating_sub(ns)));
         self.sink_by_cause[cause.index()] += 1;
         (ns >= EVENT_NS).then(|| self.record(kind, now_ns.saturating_sub(ns), Some(now_ns), ns, None))
     }
@@ -995,7 +1053,7 @@ impl Diag {
     pub fn sink_discont(&mut self, now_ns: u64, off: Option<i64>) -> Option<Incident> {
         self.c.sink_discont += 1;
         let ns = off.map_or(0, i64::unsigned_abs);
-        let cause = classify(Kind::SinkResync, &self.window(now_ns.saturating_sub(ns)));
+        let cause = classify(Kind::SinkResync, &self.evidence(now_ns.saturating_sub(ns)));
         self.sink_by_cause[cause.index()] += 1;
         (ns >= EVENT_NS).then(|| self.record(Kind::SinkResync, now_ns.saturating_sub(ns), Some(now_ns), ns, None))
     }
@@ -1055,7 +1113,7 @@ impl Diag {
     }
 
     pub fn json(&self, now_ns: u64) -> serde_json::Value {
-        let by = |counts: &[u64; 8]| {
+        let by = |counts: &[u64; CAUSES.len()]| {
             CAUSES.iter().map(|c| (c.name().to_string(), serde_json::Value::from(counts[c.index()]))).collect::<serde_json::Map<_, _>>()
         };
         let levels = self.meter.last.map(|l| {

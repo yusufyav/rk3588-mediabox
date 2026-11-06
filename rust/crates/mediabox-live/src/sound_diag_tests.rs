@@ -347,6 +347,95 @@ fn a_stalled_stream_is_no_samples_and_the_late_sink_says_why() {
 }
 
 #[test]
+fn a_buffer_early_for_its_time_holding_the_sink_is_no_absence() {
+    // 51616's opening, 2026-11-04: the first buffer 358 ms before its time,
+    // the sink holding the stream until then; the next 340 ms later, its
+    // PTS contiguous. Nothing went missing at the output.
+    let mut f = Feed::new(2);
+    let data = pcm(1152, &[LOUD, LOUD]);
+    let ns = f.format.ns(1152);
+    f.diag.pcm(f.now, 1, Ok(f.format), Some(f.pts), Some(ns), false, &data);
+    f.diag.played_until(f.now + 358 * MS + ns);
+    for _ in 0..14 {
+        f.now += 25 * MS;
+        f.incidents.extend(f.diag.tick(f.now, true, Some(90.0)));
+    }
+    f.pts += ns;
+    f.play(200, &[LOUD, LOUD], 1152);
+    assert!(f.incidents.is_empty(), "{:?}", f.kinds());
+    // Late past its time by an event's length: absent from when it ended.
+    let mut f = Feed::new(2);
+    f.diag.tick(f.now, true, None);
+    f.diag.pcm(f.now, 1, Ok(f.format), Some(f.pts), Some(ns), false, &data);
+    f.diag.played_until(f.now + 40 * MS + ns);
+    f.now += 400 * MS;
+    f.pts += ns;
+    f.diag.c.sink_behind += 1;
+    f.play(100, &[LOUD, LOUD], 1152);
+    let kinds = f.kinds();
+    assert_eq!(kinds.len(), 1, "{kinds:?}");
+    assert_eq!((kinds[0].0, kinds[0].2), (Kind::PcmAbsent, 336));
+}
+
+#[test]
+fn a_gap_from_the_player_s_own_wait_is_the_player_s_not_the_input_s() {
+    // 51616, 2026-11-05: the wait at 805.0 s, the gap at the sink at 805.9 s,
+    // once the sound queued before it had played. The player moved the
+    // sinks: its own wait, whatever the picture waited for.
+    let mut f = Feed::new(2);
+    f.play(500, &[LOUD, LOUD], 1024);
+    // The sound given so far ends at the output 850 ms from now.
+    f.diag.played_until(f.now + 850 * MS);
+    f.diag.waited(f.now);
+    f.play(850, &[LOUD, LOUD], 1024);
+    f.diag.tick(f.now, true, None);
+    f.now += 300 * MS;
+    f.diag.c.sink_discont += 1;
+    f.play(100, &[LOUD, LOUD], 1024);
+    assert_eq!(f.kinds()[0].1, Cause::PresentationWait, "{:?}", f.kinds());
+}
+
+#[test]
+fn a_wait_does_not_make_a_later_gap_the_input_s() {
+    // A gap after the queued sound and a report's time: not the wait's, and
+    // nothing measured at the input -- the sink's own, as before the wait.
+    let mut f = Feed::new(2);
+    f.play(500, &[LOUD, LOUD], 1024);
+    f.diag.played_until(f.now + 100 * MS);
+    f.diag.waited(f.now);
+    f.play(1_500, &[LOUD, LOUD], 1024);
+    f.diag.tick(f.now, true, None);
+    f.now += 300 * MS;
+    f.diag.c.sink_discont += 1;
+    f.play(100, &[LOUD, LOUD], 1024);
+    assert_eq!(f.kinds()[0].1, Cause::RenderStarvation, "{:?}", f.kinds());
+    // And with no layer's evidence at all: unknown, never the input.
+    let mut f = Feed::new(2);
+    f.play(500, &[LOUD, LOUD], 1024);
+    f.diag.waited(f.now);
+    f.play(1_500, &[LOUD, LOUD], 1024);
+    f.diag.tick(f.now, true, None);
+    f.now += 300 * MS;
+    f.play(100, &[LOUD, LOUD], 1024);
+    let kinds = f.kinds();
+    assert!(!kinds.is_empty());
+    assert!(kinds.iter().all(|k| k.1 != Cause::InputTransportDiscontinuity && k.1 != Cause::PresentationWait), "{kinds:?}");
+}
+
+#[test]
+fn sound_that_came_late_at_the_input_is_the_input_s() {
+    // 51616, 2026-11-05: the sound PID stopped for 800 ms, the picture and
+    // the PCRs went on; the sink had nothing for 357 ms.
+    let mut f = Feed::new(2);
+    f.play(500, &[LOUD, LOUD], 1024);
+    f.diag.tick(f.now, true, None);
+    f.now += 400 * MS;
+    f.diag.c.ts_sound_late += 1;
+    f.play(100, &[LOUD, LOUD], 1024);
+    assert_eq!(f.kinds()[0].1, Cause::InputTransportDiscontinuity, "{:?}", f.kinds());
+}
+
+#[test]
 fn a_stall_between_two_reports_is_still_one_event() {
     // `audio-stall=400` with the reports 250 ms apart: one at 150 ms into
     // the stall, the next 100 ms after the samples are back.

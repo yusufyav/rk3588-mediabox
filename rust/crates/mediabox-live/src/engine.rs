@@ -31,7 +31,7 @@ use gst::prelude::*;
 use mediabox_core::AudioCodec;
 
 use crate::plane::{Picture, Plane, Sent};
-use crate::stamp::{Class, LiveEdge, Packetizer, Piece, Stamp, Stamped};
+use crate::stamp::{Class, Late, LiveEdge, Packetizer, Piece, Presentation, Stamp, Stamped};
 
 pub struct Options {
     /// The element that decodes video: `mppvideodec` on the appliance.
@@ -103,6 +103,10 @@ pub struct Shared {
     /// generation and order, for the reader to take the sound to
     /// (`es::Reader::choose`) -- the picture goes on as it is.
     pub aid_request: Mutex<Option<(u64, usize)>>,
+    /// How long past their stamps the sinks present (`stamp::Presentation`):
+    /// moved by the reader (PCRs) and the picture's demuxed pad, applied to
+    /// the sinks by the health thread (`set_late`).
+    pub presentation: Mutex<Presentation>,
 }
 
 #[derive(Default, Clone)]
@@ -389,11 +393,21 @@ struct Feed {
 /// tsdemux's sound it had taken 700 ms (`DEMUX_LATENCY_MS`).
 pub const LATENCY_MS: u64 = 150;
 
+/// What each stream's queue after tsdemux holds, ns: the presentation may
+/// wait up to `stamp::LATE_MAX_NS` past the stamps, and the data waits here.
+pub const STREAM_QUEUE_NS: u64 = 6_000_000_000;
+
+/// A sound PES that comes this far past its stamp (and the presentation's
+/// offset) leaves the sink less than half its latency: late at the input.
+const SOUND_LATE_NS: i64 = (LATENCY_MS as i64) * 1_000_000 / 2;
+
 pub struct Engine {
     pipeline: gst::Pipeline,
     video_selector: gst::Element,
     audio_selector: gst::Element,
     audio_sink: Mutex<Option<gst::Element>>,
+    /// How far past their stamps both sinks present (`set_late`), ns.
+    late_ns: std::sync::atomic::AtomicI64,
     /// The sound device is open for IEC 61937 (non-audio) rather than PCM.
     bitstream: AtomicBool,
     options: Options,
@@ -748,6 +762,7 @@ impl Engine {
             video_selector,
             audio_selector,
             audio_sink: Mutex::new(None),
+            late_ns: std::sync::atomic::AtomicI64::new(0),
             bitstream: AtomicBool::new(false),
             audio: {
                 let (gain, muted) = (options.audio.gain, options.audio.muted);
@@ -890,6 +905,13 @@ impl Engine {
                 }
                 let now = clock.time().nseconds() as i64 - base as i64;
                 shared.health.demuxed(generation, audio, now - pts.nseconds() as i64);
+                if let Some(trace) = crate::clock_probe::trace() {
+                    trace.now(21, generation as u16, 0, pts.nseconds(), now.max(0) as u64, 0);
+                }
+                let late = shared.presentation.lock().unwrap_or_else(|p| p.into_inner()).observe_picture(generation, now.max(0) as u64, pts.nseconds());
+                if let Some(late) = late {
+                    said_late(generation, late, &shared, "picture");
+                }
             }
             gst::PadProbeReturn::Ok
         });
@@ -914,6 +936,13 @@ impl Engine {
                     device_for = name;
                 }
                 device.sample();
+                // The presentation's wait, taken by the demuxed pictures
+                // (`stamp::Presentation`), to both sinks within 10 ms.
+                let generation = engine.shared.generation.load(Ordering::SeqCst);
+                let offset = engine.shared.presentation.lock().unwrap_or_else(|p| p.into_inner()).offset_for(generation);
+                if offset as i64 != engine.late_ns.load(Ordering::SeqCst) {
+                    engine.set_late(generation, offset);
+                }
                 if last_report.elapsed() < crate::health::PERIOD {
                     continue;
                 }
@@ -1188,7 +1217,14 @@ impl Engine {
                         }
                         // And the sink's offset: a channel that started
                         // behind the broadcast is shown that much earlier.
-                        let offset = sink.property::<i64>("ts-offset");
+                        // The presentation's wait as the reader or the
+                        // demuxed pictures have it now: the sink's property
+                        // follows it within 10 ms (`watch_health`), and
+                        // pictures judged by the old one in between were
+                        // dropped that were on time (51616, 2026-11-05).
+                        let waiting = shared.faults.get_or_init(crate::health::Faults::from_env).video_late_ms * 1_000_000
+                            + shared.presentation.lock().unwrap_or_else(|p| p.into_inner()).offset_for(generation) as i64;
+                        let offset = sink.property::<i64>("ts-offset").max(waiting);
                         due = (base.nseconds() + pts + latency.map_or(0, |(_, ns)| ns)).saturating_add_signed(offset);
                         // A picture already well past its time is the past:
                         // live television does not show it. After the stream
@@ -1208,7 +1244,8 @@ impl Engine {
                         // short fast-forward (2026-11-01).
                         let frame = buffer.duration().map_or(20_000_000, |d| d.nseconds()).clamp(10_000_000, LATE_DROP_NS);
                         let late = clock.time().nseconds().saturating_sub(due);
-                        if late > frame {
+                        let waited = shared.presentation.lock().unwrap_or_else(|p| p.into_inner()).shows_late(generation, now.max(0) as u64, late);
+                        if late > frame && !waited {
                             trace.event('L', 0, pts / 1000);
                             mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=late late_ms={}", pts / 1000, late / 1_000_000);
                             shared.health.video_dropped.fetch_add(1, Ordering::Relaxed);
@@ -1284,9 +1321,10 @@ impl Engine {
                 (mediabox_core::timeline::now_ns() - opened_ns) as f64 / 1e6
             );
         }
-        // No offset is carried from a channel before (`set_behind`).
-        let fault = self.shared.faults.get_or_init(crate::health::Faults::from_env).video_late_ms * 1_000_000;
-        self.video_sink.set_property("ts-offset", fault);
+        // No offset is carried from a channel before (`set_behind`,
+        // `set_late`).
+        self.late_ns.store(0, Ordering::SeqCst);
+        self.video_sink.set_property("ts-offset", self.video_offset());
         if let Some(sink) = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             sink.set_property("ts-offset", self.audio_offset());
         }
@@ -2016,6 +2054,11 @@ impl Engine {
                 buffer.duration().map(|d| d.nseconds()),
                 buffer.flags().contains(gst::BufferFlags::DISCONT),
                 map.as_slice(),
+                // On the pipeline's clock: the PTS is running time here.
+                pad.parent_element()
+                    .and_then(|e| e.base_time())
+                    .zip(buffer.pts())
+                    .map(|(base, pts)| (base + pts + buffer.duration().unwrap_or_default()).nseconds()),
             );
             gst::PadProbeReturn::Ok
         });
@@ -2121,7 +2164,7 @@ impl Engine {
         let queue = make("queue")?;
         queue.set_property("max-size-buffers", 0u32);
         queue.set_property("max-size-bytes", 0u32);
-        queue.set_property("max-size-time", 3_000_000_000u64);
+        queue.set_property("max-size-time", STREAM_QUEUE_NS);
         let chain: Vec<gst::Element> = std::iter::once(queue).chain(chain.iter().cloned()).collect();
         let refs: Vec<&gst::Element> = chain.iter().collect();
         self.adopt(&refs)?;
@@ -2332,7 +2375,7 @@ impl Engine {
     /// The sound sink's `ts-offset`: the viewer's sound delay.
     fn audio_offset(&self) -> i64 {
         let fault = self.shared.faults.get_or_init(crate::health::Faults::from_env).audio_late_ms * 1_000_000;
-        (*self.audio_delay.lock().unwrap_or_else(|p| p.into_inner()) * 1e9) as i64 + fault
+        (*self.audio_delay.lock().unwrap_or_else(|p| p.into_inner()) * 1e9) as i64 + fault + self.late_ns.load(Ordering::SeqCst)
     }
 
     /// Channel `generation` started `behind` ns behind the broadcast
@@ -2341,6 +2384,24 @@ impl Engine {
     /// is the measure that it does; nothing is shifted to make up for it --
     /// shifting the sinks (2026-11-01) played the sound ahead of a picture
     /// that then lost its first second.
+    /// The stream of `generation` comes `offset` ns past its stamps
+    /// (`stamp::Presentation`): both sinks wait that much longer, together.
+    pub fn set_late(&self, generation: u64, offset: u64) {
+        if self.shared.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        self.late_ns.store(offset as i64, Ordering::SeqCst);
+        self.video_sink.set_property("ts-offset", self.video_offset());
+        if let Some(sink) = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            sink.set_property("ts-offset", self.audio_offset());
+        }
+    }
+
+    /// The picture sink's `ts-offset`: the presentation's lateness.
+    fn video_offset(&self) -> i64 {
+        self.shared.faults.get_or_init(crate::health::Faults::from_env).video_late_ms * 1_000_000 + self.late_ns.load(Ordering::SeqCst)
+    }
+
     pub fn set_behind(&self, generation: u64, behind: u64) {
         if self.shared.generation.load(Ordering::SeqCst) != generation {
             return;
@@ -2454,12 +2515,12 @@ impl Engine {
 /// its duration for coded frames. `generation`: the branch's, or the
 /// current one for the sink's own pad.
 fn probe_layer(pad: &gst::Pad, layer: crate::clock_probe::Layer, generation: Option<u64>, shared: &Arc<Shared>) {
-    if crate::clock_probe::get().is_none() {
+    if crate::clock_probe::get().is_none() && crate::clock_probe::trace().is_none() {
         return;
     }
     let shared = Arc::clone(shared);
     pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-        let (Some(probe), Some(buffer)) = (crate::clock_probe::get(), info.buffer()) else { return gst::PadProbeReturn::Ok };
+        let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
         let pcm = pad.current_caps().and_then(|caps| {
             let s = caps.structure(0)?;
             if s.name() != "audio/x-raw" {
@@ -2474,16 +2535,41 @@ fn probe_layer(pad: &gst::Pad, layer: crate::clock_probe::Layer, generation: Opt
             Some(((buffer.size() / frame) as u64, s.get::<i32>("rate").ok()? as u32))
         });
         let generation = generation.unwrap_or_else(|| shared.generation.load(Ordering::Relaxed));
-        probe.layer(
-            layer,
-            generation,
-            buffer.pts().map(|t| t.nseconds()),
-            buffer.duration().map(|d| d.nseconds()),
-            pcm,
-            buffer.flags().contains(gst::BufferFlags::DISCONT),
-        );
+        let discont = buffer.flags().contains(gst::BufferFlags::DISCONT);
+        if let Some(trace) = crate::clock_probe::trace() {
+            trace.now(
+                15 + layer as u16,
+                generation as u16,
+                pcm.map_or(0, |(frames, _)| frames as u32),
+                buffer.pts().map_or(u64::MAX, |t| t.nseconds()),
+                buffer.duration().map_or(u64::MAX, |d| d.nseconds()),
+                (buffer.size() as u64) << 8 | u64::from(discont),
+            );
+        }
+        if let Some(probe) = crate::clock_probe::get() {
+            probe.layer(layer, generation, buffer.pts().map(|t| t.nseconds()), buffer.duration().map(|d| d.nseconds()), pcm, discont);
+        }
         gst::PadProbeReturn::Ok
     });
+}
+
+/// The presentation moved on for a stream come late (`Late`), said once
+/// and counted the input's; `by`: what saw it.
+fn said_late(generation: u64, late: Late, shared: &Shared, by: &str) {
+    match late {
+        Late::Raised { offset, by: step } => {
+            eprintln!("mediabox-live: yayın {:.0} ms geç geldi ({by}); sunum o kadar bekletildi (toplam {:.0} ms)", step as f64 / 1e6, offset as f64 / 1e6);
+            mediabox_core::timeline!("late", "gen={generation} by_ns={step} offset_ns={offset} seen={by}");
+            if let Some(trace) = crate::clock_probe::trace() {
+                trace.now(20, generation as u16, 0, offset, step as u64, 0);
+            }
+        }
+        Late::Rebase => {
+            eprintln!("mediabox-live: sunum {} ms sınırını aştı; zaman gelişe yeniden bağlandı", crate::stamp::LATE_MAX_NS / 1_000_000);
+            mediabox_core::timeline!("late-rebase", "gen={generation} seen={by}");
+        }
+    }
+    shared.health.clock_stepped();
 }
 
 /// One read of the FIFO, and the time (CLOCK_MONOTONIC, the pipeline's
@@ -2500,6 +2586,9 @@ fn read_chunk(file: &mut File, path: &str, chunk: &mut [u8]) -> Result<(usize, u
         let at = crate::clock_probe::mono();
         if let Some(probe) = crate::clock_probe::get() {
             probe.read(read, at - before, at, crate::clock_probe::raw());
+        }
+        if let Some(trace) = crate::clock_probe::trace() {
+            trace.now(11, 0, read as u32, at - before, 0, 0);
         }
         return Ok((read, at));
     }
@@ -2647,11 +2736,17 @@ fn read_stream(
             {
                 reference = Some((at, pcr));
             }
+            // A rebase asked for (by a picture, `Late::Rebase`): the next
+            // PCR anchors the stamps at its arrival.
+            if shared.presentation.lock().unwrap_or_else(|p| p.into_inner()).take_rebase() {
+                stamp.reanchor();
+            }
             sound_discont |= stepped;
             if let (Some((_, _, source)), Some(arrived)) = (&sound, arrived)
                 && !chunks.is_empty()
             {
-                push_sound(source, chunks, (reference, std::mem::take(&mut sound_discont)), generation, arrived.nseconds(), shared, on_sound);
+                let offset = shared.presentation.lock().unwrap_or_else(|p| p.into_inner()).offset_for(generation);
+                push_sound(source, chunks, (reference, std::mem::take(&mut sound_discont), offset), generation, arrived.nseconds(), shared, on_sound);
             }
         }
     }
@@ -2679,16 +2774,25 @@ fn push_piece(
             let mut buffer = gst::Buffer::from_mut_slice(piece.data);
             if let Some(arrived) = arrived {
                 let Stamped { at, class, discontinuity, stepped } = stamp.time(generation, arrived.nseconds(), pcr, indicated);
-                if let Some(step) = stepped {
-                    // A new phase for tsdemux too: on a DISCONT it pushes out
-                    // what it holds and starts its PCR observations again
-                    // (mpegtsbase), rather than taking the step over its 2 s
-                    // window and 125 PCRs of averaging.
+                if discontinuity && *pushed > 0 {
+                    // A new time base (or the presentation's rebase,
+                    // `Late::Rebase`): tsdemux pushes out what it holds and
+                    // starts its PCR observations again (mpegtsbase), and the
+                    // sound's next buffer is a DISCONT too. Once, here.
                     buffer.get_mut().expect("a new buffer is writable").set_flags(gst::BufferFlags::DISCONT);
                     step_taken = true;
-                    eprintln!("mediabox-live: yayın {:.0} ms geç gelmeye başladı; saat o kadar ileri alındı", step as f64 / 1e6);
-                    mediabox_core::timeline!("clock-step", "gen={generation} step_ns={step} at={at}");
-                    health.clock_stepped();
+                    mediabox_core::timeline!("time-base", "gen={generation} at={at} ind={}", u8::from(indicated));
+                }
+                // Seen, not acted on: the arrivals' lateness is the
+                // presentation's (`Presentation`), the clock goes on.
+                if let Some(step) = stepped {
+                    mediabox_core::timeline!("arrival-step", "gen={generation} step_ns={step} at={at}");
+                    if let Some(trace) = crate::clock_probe::trace() {
+                        trace.now(13, generation as u16, 0, step as u64, 0, at);
+                    }
+                }
+                if let (Some(trace), Some(pcr)) = (crate::clock_probe::trace(), pcr) {
+                    trace.now(19, generation as u16, 0, pcr, arrived.nseconds(), at);
                 }
                 health.chunk(generation, arrived.nseconds(), at);
                 if let Some(probe) = crate::clock_probe::get() {
@@ -2720,12 +2824,23 @@ fn push_piece(
             }
             // A source taken down under the push refuses it; the reader goes
             // on for the branch after it. Counted, not dropped unsaid.
-            let held = crate::clock_probe::get().map(|_| crate::clock_probe::mono());
+            let traced = crate::clock_probe::trace();
+            let held = (crate::clock_probe::get().is_some() || traced.is_some()).then(crate::clock_probe::mono);
             if let Err(error) = source.push_buffer(buffer) {
                 health.push_failed(generation, "ts", error);
             }
             if let (Some(probe), Some(from)) = (crate::clock_probe::get(), held) {
                 probe.push(crate::clock_probe::mono() - from);
+            }
+            if let (Some(trace), Some(from)) = (traced, held) {
+                trace.now(
+                    12,
+                    generation as u16,
+                    bytes as u32,
+                    crate::clock_probe::mono() - from,
+                    arrived.map_or(0, |a| a.nseconds()),
+                    stamped.unwrap_or(0),
+                );
             }
     }
     (stamped, step_taken)
@@ -2752,7 +2867,7 @@ pub fn pts_on_clock(pts: u64, reference: (u64, u64)) -> u64 {
 fn push_sound(
     source: &gst_app::AppSrc,
     chunks: Vec<crate::es::Chunk>,
-    (reference, discont): (Option<(u64, u64)>, bool),
+    (reference, discont, offset): (Option<(u64, u64)>, bool, u64),
     generation: u64,
     arrived: u64,
     shared: &Shared,
@@ -2764,6 +2879,13 @@ fn push_sound(
     let failed = route_sound(&mut target, chunks, reference, discont, &mut |switch| on_sound(generation, switch), &mut |at| {
         shared.health.diagnose(|d| d.c.ts_pes_starts += 1);
         shared.health.demuxed(generation, true, arrived as i64 - at as i64);
+        // Its time at the sink less half the latency gone by when it came:
+        // the input's lateness, the sound's alone if the rest came on time
+        // (51616, 2026-11-05: its sound PID stopped for 800 ms, the picture
+        // and the PCRs went on).
+        if arrived as i64 - at as i64 - offset as i64 > SOUND_LATE_NS {
+            shared.health.diagnose(|d| d.c.ts_sound_late += 1);
+        }
         let mut starts = shared.sound_starts.lock().unwrap_or_else(|p| p.into_inner());
         starts.push_back(at);
         while starts.len() > 64 {
@@ -2819,6 +2941,9 @@ pub fn route_sound(
                 let at = pts_on_clock(pts, reference);
                 if let Some(probe) = crate::clock_probe::get() {
                     probe.pes(pts, at);
+                }
+                if let Some(trace) = crate::clock_probe::trace() {
+                    trace.now(14, 0, 0, pts, 0, at);
                 }
                 buffer.set_pts(gst::ClockTime::from_nseconds(at));
                 on_start(at);

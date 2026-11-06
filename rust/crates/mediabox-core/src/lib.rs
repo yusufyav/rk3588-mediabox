@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod audio;
+pub mod bintrace;
 mod cadence;
 mod cec;
 mod ethernet;

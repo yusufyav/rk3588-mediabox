@@ -510,6 +510,9 @@ impl Writer {
                 let mut first_write = false;
                 let mut cc = crate::ts::CcCheck::default();
                 let written = |data: &[u8], cc: &mut crate::ts::CcCheck| {
+                    if let Some(trace) = crate::trace::get() {
+                        trace.now(7, 0, data.len() as u32, 0, 0, 0);
+                    }
                     if shared.cc_check.load(Ordering::Relaxed) {
                         let before = cc.errors;
                         cc.check(data);
@@ -572,6 +575,9 @@ impl Writer {
                                 );
                                 first_write = true;
                                 shared.stats.lock().unwrap_or_else(|p| p.into_inner()).readers += 1;
+                                if let Some(trace) = crate::trace::get() {
+                                    trace.now(8, 0, 0, 0, 0, 0);
+                                }
                                 // Live, the reader starts where the broadcast
                                 // is, not where it was when the receiver began:
                                 // what waited is replaced by the channel from
@@ -691,6 +697,9 @@ impl Writer {
             state = self.queue.changed.wait_timeout(state, Duration::from_millis(100)).unwrap_or_else(|p| p.into_inner()).0;
         }
         state.1 += chunk.len();
+        if let Some(trace) = crate::trace::get() {
+            trace.now(6, 0, chunk.len() as u32, 0, state.1 as u64, 0);
+        }
         state.0.push_back(chunk);
         let mut stats = self.queue.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.max_queued_bytes = stats.max_queued_bytes.max(state.1);
@@ -947,6 +956,14 @@ struct Pipeline {
     /// last seconds and the evidence of a CC error on the service played,
     /// where asked for (`Options::evidence_dir`, `evidence::Capture`).
     transfers: u64,
+    /// When the chunk being fed completed on USB (CLOCK_MONOTONIC ns), and
+    /// the last continuity counter of each PID traced (`trace`).
+    chunk_at: u64,
+    traced_cc: std::collections::HashMap<u16, u8>,
+    /// Packets traced since the stream started (not reset with the
+    /// analyser), and the service and multiplex gaps (`gaps`).
+    traced_packets: u64,
+    gaps: crate::gaps::GapWatch,
     capture: Option<Capture>,
     selected_logged: usize,
     /// The programme PIDs of the multiplex left by the last retune.
@@ -1261,6 +1278,99 @@ impl Pipeline {
                 rap_seen = true;
             }
         };
+        // The trace (`trace`): the service's PIDs counted in this chunk,
+        // every PCR of the multiplex, continuity on the service's PIDs.
+        let trace = crate::trace::get();
+        let at = self.chunk_at;
+        let watched: Vec<u16> = match trace {
+            Some(_) => {
+                let selection = self.selector.selection();
+                let mut pids: Vec<u16> = selection.streams.iter().map(|s| s.pid).collect();
+                pids.extend(selection.pcr_pid);
+                pids.extend(selection.pmt_pid);
+                pids.push(0);
+                pids.sort_unstable();
+                pids.dedup();
+                pids
+            }
+            None => Vec::new(),
+        };
+        let mut tally: Vec<(u16, u32, u32, u64)> = Vec::new();
+        let mut index = analysed;
+        if let Some(trace) = trace {
+            trace.now(2, 0, (chunk.len() / crate::ts::PACKET) as u32, at, 0, 0);
+            // First, so a PCR of this chunk is judged with the multiplex's
+            // stop before it known.
+            if let Some(gap) = self.gaps.chunk(at, (chunk.len() / crate::ts::PACKET) as u64) {
+                trace.now(30, gap.class as u16, gap.id, gap.start_ns, gap.end_ns, gap.length_ns);
+            }
+        }
+        let traced_cc = &mut self.traced_cc;
+        let pcr_pid = trace.and(self.selector.selection().pcr_pid);
+        let sync_before = self.analyser.integrity().sync_errors;
+        let traced_packets = &mut self.traced_packets;
+        let gaps = &mut self.gaps;
+        // This chunk's packets, TEI, null packets and continuity errors.
+        let mut counts = (0u32, 0u64, 0u64, 0u32);
+        let mut observe = |packet: &[u8]| {
+            let Some(trace) = trace else { return };
+            index += 1;
+            *traced_packets += 1;
+            let pid = crate::ts::pid_of(packet);
+            counts.0 += 1;
+            counts.1 += u64::from(packet[1] & 0x80 != 0);
+            counts.2 += u64::from(pid == 0x1FFF);
+            // Every PID's continuity, the null one aside.
+            if pid != 0x1FFF && packet[3] & 0x10 != 0 {
+                let cc = packet[3] & 0x0F;
+                if let Some(last) = traced_cc.insert(pid, cc)
+                    && cc != (last + 1) & 0x0F
+                    && cc != last
+                {
+                    counts.3 += 1;
+                    trace.now(5, pid, (u32::from((last + 1) & 0x0F) << 8) | u32::from(cc), index, at, 0);
+                }
+            }
+            let adaptation = packet[3] & 0x20 != 0 && packet[4] > 0;
+            if adaptation && packet[4] >= 7 && packet[5] & 0x10 != 0 {
+                let base = (u64::from(packet[6]) << 25)
+                    | (u64::from(packet[7]) << 17)
+                    | (u64::from(packet[8]) << 9)
+                    | (u64::from(packet[9]) << 1)
+                    | (u64::from(packet[10]) >> 7);
+                let extension = (u64::from(packet[10] & 1) << 8) | u64::from(packet[11]);
+                trace.now(4, pid, u32::from(packet[5] & 0x80 != 0), base * 300 + extension, at, index);
+                if Some(pid) == pcr_pid
+                    && let Some(gap) = gaps.pcr(*traced_packets, at)
+                {
+                    trace.now(30, gap.class as u16, gap.id, gap.start_ns, gap.end_ns, gap.length_ns);
+                }
+            }
+            if watched.binary_search(&pid).is_ok() {
+                let start = u32::from(packet[1] & 0x40 != 0);
+                // A PES header at the payload's start: its PTS.
+                if start == 1 && packet[3] & 0x10 != 0 {
+                    let from = if adaptation { 5 + usize::from(packet[4]) } else { 4 };
+                    let pes = &packet[from.min(packet.len())..];
+                    if pes.len() >= 14 && pes[..3] == [0, 0, 1] && pes[7] & 0x80 != 0 {
+                        let p = &pes[9..14];
+                        let pts = (u64::from(p[0] >> 1 & 0x07) << 30)
+                            | (u64::from(p[1]) << 22)
+                            | (u64::from(p[2] >> 1) << 15)
+                            | (u64::from(p[3]) << 7)
+                            | u64::from(p[4] >> 1);
+                        trace.now(10, pid, 0, pts, at, index);
+                    }
+                }
+                match tally.iter_mut().find(|t| t.0 == pid) {
+                    Some(t) => {
+                        t.1 += 1;
+                        t.2 += start;
+                    }
+                    None => tally.push((pid, 1, start, index)),
+                }
+            }
+        };
         let selector = &mut self.selector;
         let scratch = &mut self.scratch;
         let tkgs = &mut self.tkgs;
@@ -1268,6 +1378,7 @@ impl Pipeline {
             Some(rap) => {
                 rap.learn(&self.analyser.pat, &self.analyser.pmts);
                 self.analyser.feed(chunk, |packet| {
+                    observe(packet);
                     tkgs.packet(packet);
                     rap.packet(packet);
                     rap_check(packet);
@@ -1275,10 +1386,18 @@ impl Pipeline {
                 });
             }
             None => self.analyser.feed(chunk, |packet| {
+                observe(packet);
                 tkgs.packet(packet);
                 rap_check(packet);
                 selector.packet(packet, scratch);
             }),
+        }
+        if let Some(trace) = trace {
+            for (pid, n, starts, first) in tally {
+                trace.now(3, pid, n, u64::from(starts), at, first);
+            }
+            let sync = self.analyser.integrity().sync_errors.saturating_sub(sync_before);
+            trace.now(13, counts.3.min(0xFFFF) as u16, counts.0, sync, counts.1, counts.2);
         }
         if traced {
             self.trace_firsts(rap_seen);
@@ -1730,6 +1849,9 @@ impl Pipeline {
             );
             self.selector = Selector::new(service_id);
             self.writer.switch_service();
+            if let Some(trace) = crate::trace::get() {
+                trace.now(9, service_id, 0, 0, 0, 0);
+            }
             if retune.is_some() {
                 // Another multiplex: nothing of this one's tables or access
                 // points is of use there.
@@ -1904,6 +2026,10 @@ fn new_pipeline(options: &Options, writer: Writer) -> Pipeline {
         stopped_clock: None,
         gate_retunes: 0,
         transfers: 0,
+        chunk_at: 0,
+        traced_cc: Default::default(),
+        traced_packets: 0,
+        gaps: Default::default(),
         capture: options.evidence_dir.clone().map(Capture::new),
         selected_logged: 0,
         left_pids: Default::default(),
@@ -2330,6 +2456,21 @@ const TS_DEAD_AFTER: Duration = Duration::from_secs(10);
 /// The locked receiver's stream, until something ends it. Returns what the
 /// tuner needs to know (the device went away) and, if the stream decided
 /// it, how the whole service ends.
+/// A demodulator query of the stream's own, traced (kind 21) when the trace
+/// is on: when, how long, how long it waited for the sampler's.
+fn queried<T>(which: u16, query: impl FnOnce() -> crate::error::Result<T>, flags: impl Fn(&T) -> (u8, u8)) -> crate::error::Result<T> {
+    let Some(trace) = crate::trace::get() else { return query() };
+    crate::frontend::take_waited();
+    let started = mediabox_core::bintrace::raw_now();
+    let out = query();
+    let n = out.as_ref().map_or(0xFFFF, |v| {
+        let (lock, fec) = flags(v);
+        u32::from(lock) | (u32::from(fec) << 8)
+    });
+    trace.now(21, which, n, started, crate::frontend::take_waited(), 0);
+    out
+}
+
 fn stream(
     session: Arc<Session>,
     bridge: &mut Bridge,
@@ -2364,6 +2505,16 @@ fn stream(
         }
     };
     let since = Instant::now();
+    // The demodulator sampled on a thread of its own for the trace
+    // (`frontend`); stopped and joined when this returns.
+    let _sampler = crate::frontend::every_from_env().and_then(|every| crate::frontend::start(Arc::clone(&session), every));
+    // A tune begins anew: the continuity seen and the gaps watched belong to
+    // the multiplex before (a retune is not a stop of the multiplex).
+    if let Some(trace) = crate::trace::get() {
+        pipeline.traced_cc.clear();
+        pipeline.gaps = crate::gaps::GapWatch::default();
+        trace.now(41, pipeline.service_id, 0, 0, 0, 0);
+    }
     // The first transfer of this lock, for the timeline.
     let mut usb_first = true;
     let mut next_signal = options.signal_every.map(|every| Instant::now() + every);
@@ -2447,7 +2598,13 @@ fn stream(
             reporter.maybe_write();
             continue;
         };
-        let chunk = running.get(Duration::from_millis(100));
+        let chunk = match running.get_timed(Duration::from_millis(100)) {
+            Some((chunk, at)) => {
+                pipeline.chunk_at = at;
+                Some(chunk)
+            }
+            None => None,
+        };
         let stats = running.stats();
         if stats.overflow_chunks != seen_overflow {
             seen_overflow = stats.overflow_chunks;
@@ -2564,7 +2721,7 @@ fn stream(
             && let Some(tuned) = pipeline.tuned.clone()
         {
             lock_checked = Instant::now();
-            match demod.lock_flags(bridge) {
+            match queried(0, || demod.lock_flags(bridge), |&(lock, fec)| (lock, fec)) {
                 Ok((0, _)) => {
                     if reporter.status.state != State::NoSignal {
                         pipeline.relock_tsid = pipeline.selector.selection().transport_stream_id;
@@ -2619,6 +2776,12 @@ fn stream(
             }
             None => {}
         }
+        // The multiplex stopped and not back yet: said while it lasts.
+        if let Some(trace) = crate::trace::get()
+            && let Some(start) = pipeline.gaps.open(mediabox_core::timeline::now_ns())
+        {
+            trace.now(32, crate::gaps::Class::Mux as u16, 0, start, 0, 0);
+        }
         // Without a signal the service cannot be found; that is no signal,
         // not a service missing from the multiplex. Nor is it with no TS
         // packet ever read: that is a receiver sending no stream, which
@@ -2637,7 +2800,7 @@ fn stream(
             && Instant::now() >= at
         {
             next_signal = Some(Instant::now() + every);
-            match demod.acq_status(bridge) {
+            match queried(1, || demod.acq_status(bridge), |s| (s.lock, s.fec)) {
                 Ok(status) => reporter.status.signal = Some(status),
                 Err(error) => {
                     log.line(format!("signal status failed: {error}"));
@@ -2657,7 +2820,7 @@ fn stream(
         if pipeline.packets_read != delivered.0 {
             delivered = (pipeline.packets_read, Instant::now());
         } else if delivered.1.elapsed() >= TS_DEAD_AFTER
-            && matches!(demod.lock_flags(bridge), Ok((_, fec)) if fec != 0)
+            && matches!(queried(2, || demod.lock_flags(bridge), |&(lock, fec)| (lock, fec)), Ok((_, fec)) if fec != 0)
         {
             let link = crate::usblink::kanky_speed().map_or_else(|| "?".to_string(), |(_, speed)| speed.to_string());
             log.line(format!("TS DEAD: locked, no transfer completed for {TS_DEAD_AFTER:?} (link {link} Mbit/s); the session ends"));
