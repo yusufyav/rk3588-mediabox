@@ -1107,14 +1107,37 @@ impl Engine {
 
     /// The sound device failed under us -- a display mode change takes the
     /// HDMI sound device away ("Device lost") -- or was asked off.
-    pub fn reopen_audio_sink(&self) {
-        self.detach_audio_sink();
-        if self.aid.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+    ///
+    /// The old sink goes and the new one comes while nothing is passing the
+    /// sound selector's src pad (an IDLE probe): the sound's thread waits
+    /// there for the new device, and nothing upstream learns of it. Taken
+    /// away under a buffer, the push came back NOT_LINKED or FLUSHING: the
+    /// sound's source stopped, and either posted an error that opened the
+    /// whole channel again -- the picture gone for 3.2 s (2026-11-06,
+    /// cuts10/c05.ts, `ao-reload` after a mode change) -- or stopped without
+    /// a word, the sound gone for the rest of the channel (codec-mp2.ts,
+    /// the same day).
+    pub fn reopen_audio_sink(self: &Arc<Self>) {
+        let Some(src) = self.audio_selector.static_pad("src") else {
             return;
-        }
-        if let Err(error) = self.attach_audio_sink("reopen") {
-            eprintln!("mediabox-live: ses aygıtı yeniden açılamadı: {error}");
-        }
+        };
+        let asked = Instant::now();
+        mediabox_core::timeline!("sink-swap", "phase=asked");
+        let engine = Arc::clone(self);
+        src.add_probe(gst::PadProbeType::IDLE, move |_, _| {
+            mediabox_core::timeline!("sink-swap", "phase=idle waited_ms={}", asked.elapsed().as_millis());
+            let started = Instant::now();
+            engine.detach_audio_sink();
+            mediabox_core::timeline!("sink-swap", "phase=detached ms={}", started.elapsed().as_millis());
+            if engine.aid.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                let opening = Instant::now();
+                if let Err(error) = engine.attach_audio_sink("reopen") {
+                    eprintln!("mediabox-live: ses aygıtı yeniden açılamadı: {error}");
+                }
+                mediabox_core::timeline!("sink-swap", "phase=attached ms={}", opening.elapsed().as_millis());
+            }
+            gst::PadProbeReturn::Remove
+        });
     }
 
     pub fn is_audio_sink(&self, object: &gst::Object) -> bool {

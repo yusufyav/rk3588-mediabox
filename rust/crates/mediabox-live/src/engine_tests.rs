@@ -357,6 +357,22 @@ fn same_codec_another_pid() {
     assert_eq!(tracks(&run).len(), 1, "audio_order counted again for the new program generation");
 }
 
+/// The sound device opened again under a playing channel (`ao-reload`
+/// after a mode change): the sound goes on from the same input, nothing
+/// upstream stops, the picture is not opened again. Taken away under a
+/// buffer, the sound's source stopped (FLUSHING, no word) or posted an
+/// error that opened the whole channel again (2026-11-06, c05.ts).
+#[test]
+fn the_sound_device_opened_again_under_the_sound() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream(&[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX }]);
+    let run = play_doing(ts, 0, Duration::from_secs(2), |engine| engine.reopen_audio_sink());
+    sound_went_on(&run, 1, 0x101, 3_200_000_000);
+    picture_handed_over(&run, false);
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+}
+
 #[test]
 fn same_pid_another_codec() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
