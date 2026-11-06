@@ -122,9 +122,11 @@ say "6. release build ($triple)"
 # below is the bundle's.
 # shellcheck source=mediabox-live-source.sh
 source "$here/scripts/mediabox-live-source.sh"
-source_crate="$(mediabox_live_source "$here")"
+mediabox_live_source "$here"
+source_crate="$MEDIABOX_LIVE_CRATE"
+echo "mediabox-live source: commit $MEDIABOX_LIVE_COMMIT"
 ( cd "$source_crate" && CARGO_TARGET_DIR="$crate/target" \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="--remap-path-prefix=$MEDIABOX_LIVE_SRC=. -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu" \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="$MEDIABOX_LIVE_REMAP -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu" \
     cargo build -q --locked --release --target "$triple" )
 bin="$crate/target/$triple/release/mediabox-live"
 aarch64-linux-gnu-readelf -d "$bin" | grep -E 'RUNPATH|RPATH'

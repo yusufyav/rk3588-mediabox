@@ -94,8 +94,10 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 # builds the same bytes from any worktree, checked 2026-11-06 with two.
 # shellcheck source=mediabox-live-source.sh
 source "$here/scripts/mediabox-live-source.sh"
-source_crate="$(mediabox_live_source "$here")"
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="--remap-path-prefix=$MEDIABOX_LIVE_SRC=. -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
+mediabox_live_source "$here"
+source_crate="$MEDIABOX_LIVE_CRATE"
+echo "mediabox-live source: commit $MEDIABOX_LIVE_COMMIT"
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="$MEDIABOX_LIVE_REMAP -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
 ( cd "$source_crate" && CARGO_TARGET_DIR="$crate/target" cargo build -q --locked --release --target "$triple" )
 bin="$crate/target/$triple/release/mediabox-live"
 aarch64-linux-gnu-readelf -d "$bin" | grep -q "RUNPATH.*\[$gst_prefix/lib\]" ||
