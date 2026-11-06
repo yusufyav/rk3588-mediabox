@@ -120,7 +120,9 @@ build_mpp() {
   echo "== Rockchip MPP"
   checkout mpp "$MPP_REPO" "$MPP_REV"
   # MediaBox's patches to MPP (packaging/mpp-patches), copied over before
-  # this runs: no pulldown recovery on 50 Hz broadcasts.
+  # this runs: no pulldown recovery on 50 Hz broadcasts (0001); every
+  # deinterlaced field at its own time from a key frame on, at a channel's
+  # opening and after a transport loss (0002, scripts/test-mpp-deinterlace.sh).
   for patch in /var/tmp/mediabox-mpp-patches/*.patch; do
     [ -e "\$patch" ] || continue
     git -C "\$src/mpp" apply "\$patch"

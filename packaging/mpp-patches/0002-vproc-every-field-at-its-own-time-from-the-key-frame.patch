@@ -1,0 +1,213 @@
+MediaBox: every deinterlaced field at its own time, from the key frame on.
+
+Measured 2026-11-06 on the Plus (MPP 0986d01, IEP2, deinterlace mode) with
+the streams in tests/mpp, 576i whose every field shows its own time (a bar
+that moves on every field), and on 1080i50 DVB-S2 (vproc_debug=0xc2):
+
+  1. A picture the decoder marks discard -- an open GOP's leading B
+     pictures, whose references came before decoding started -- went into
+     the deinterlacer's history. The first good frame after the key frame
+     was deinterlaced against them; its two pictures came out timed before
+     the key frame or marked in error and were dropped. 3 of 13 openings.
+  2. After the key frame's first field (I1O1T) the next frame put out
+     nothing ("Wait for next frame"), and I5O2 started with the second
+     frame's fields: the key frame's second field was never shown.
+  3. I5O2 gives the centre frame's (prev0's) two fields but timed them half
+     a frame early, the first between prev1 and prev0: every picture showed
+     what was 20 ms after its timestamp, which hid 2 as an even cadence and
+     put the picture 20 ms ahead of the sound on every interlaced stream.
+  4. After a transport loss the pictures decoded from a lost reference
+     (errinfo) went into the history too: the key frame that ends the loss
+     was deinterlaced against them, its pictures marked in error and
+     dropped -- both of its fields, 40 ms, after every loss (a 480 ms hole
+     on TRT 1 and in tests/mpp/open-gop-576i-bar-hole.ts).
+  5. With 3 fixed, a second field timed halfway to the next frame came out
+     80 ms late where the next frame was no neighbour: at a loss on TRT 1
+     the decoder put out POC 48 before POC 40, and at another only every
+     other frame (0, 4, 8, 16), evenly apart, twice as far.
+
+Now a discarded picture comes out untouched (gstmppdec and FFmpeg drop it)
+and leaves the history as it was; a picture in error comes out untouched
+and ends the history, the next good one starting it as a stream's first
+does; the first frame's second field comes out from that field alone
+(I1O1B, or I1O1T bottom field first) half a frame after the first; I5O2's
+pictures carry prev0's time and the time half a frame on, half a frame
+the least that three frames evenly apart measured. The newest frame of the
+history goes unshown when a picture in error ends it: next to the loss in
+tests/mpp the decoder gave such a frame, unmarked, showing what was ten
+fields before its time.
+scripts/test-mpp-deinterlace.sh: without this patch the opening has 47
+pictures, the key frame's second field missing and each picture one field
+ahead of its time, and after the loss the key frame's fields are missing;
+with it the opening has 50 pictures, fields 28 to 77, and after the loss
+every field from the key frame's first, each at its own time. Taking out
+any one of 1-4 fails it; 5 is seen on the broadcast only.
+
+diff --git a/mpp/vproc/mpp_dec_vproc.c b/mpp/vproc/mpp_dec_vproc.c
+index e792548..1ac1115 100644
+--- a/mpp/vproc/mpp_dec_vproc.c
++++ b/mpp/vproc/mpp_dec_vproc.c
+@@ -91,6 +91,11 @@ typedef struct MppDecVprocCtxImpl_t {
+     RK_S32              prev_idx1;
+     MppFrame            prev_frm1;
+     enum IEP2_FF_MODE   pre_ff_mode;
++    /* MediaBox: half a frame, the time from a field to the next: the least
++     * that three frames evenly apart in time measured (frames the decoder
++     * dropped leave the ones it gave evenly apart too, twice as far); 0
++     * not yet. */
++    RK_S64              field_pts;
+     RK_U32              pd_mode;
+     MppBuffer           out_buf0;
+     MppBuffer           out_buf1;
+@@ -569,6 +574,33 @@ MPP_RET dec_vproc_output_dei_v2(MppDecVprocCtxImpl *ctx, MppFrame frm, RK_U32 is
+                 ctx->out_buf0 = NULL;
+             }
+         } else {
++            /* MediaBox: the two pictures are the centre frame's (prev0)
++             * fields, the first at its own time and the second half a
++             * frame on. Upstream timed them half a frame earlier, the
++             * first between prev1 and prev0: measured 2026-11-06 with a
++             * 576i stream whose every field shows its own time, each
++             * picture showed what was 20 ms after its timestamp, the
++             * key frame's second field was never shown and the jump
++             * hidden -- the picture 20 ms ahead of its sound for the
++             * whole of every interlaced broadcast. */
++            RK_S64 next_pts = mpp_frame_get_pts(frm);
++            RK_S64 field0_pts = curr_pts;
++            RK_S64 field1_pts;
++
++            /* The second field half a frame on, as the frames in a row
++             * measured it: not halfway to the next frame, which after a
++             * loss (or a decoder emptying its buffer out of order) is no
++             * neighbour -- measured on TRT 1, a field timed 80 ms late. */
++            if (prev_pts < curr_pts && curr_pts < next_pts &&
++                llabs((next_pts - curr_pts) - (curr_pts - prev_pts)) <= 1 &&
++                (ctx->field_pts == 0 || (next_pts - curr_pts) / 2 < ctx->field_pts))
++                ctx->field_pts = (next_pts - curr_pts) / 2;
++            if (ctx->field_pts > 0)
++                field1_pts = curr_pts + ctx->field_pts;
++            else if (next_pts > curr_pts)
++                field1_pts = (curr_pts + next_pts) / 2;
++            else
++                field1_pts = curr_pts + (curr_pts - prev_pts) / 2;
+             RK_U32 fo_from_syntax = ((mode & MPP_FRAME_FLAG_TOP_FIRST) != 0) ? 1 : 0;
+             RK_U32 fo_from_iep = (ctx->dei_info.dil_order == IEP2_FIELD_ORDER_UND) ?
+                                  fo_from_syntax : (ctx->dei_info.dil_order == IEP2_FIELD_ORDER_TFF);
+@@ -588,20 +620,20 @@ MPP_RET dec_vproc_output_dei_v2(MppDecVprocCtxImpl *ctx, MppFrame frm, RK_U32 is
+ 
+             if (is_tff) {
+                 vproc_dbg_out("output at I4O2 for tff, frame poc %d\n", mpp_frame_get_poc(frm));
+-                dec_vproc_put_frame(mpp, frm, dst0, first_pts, frame_err);
++                dec_vproc_put_frame(mpp, frm, dst0, field0_pts, frame_err);
+                 if (vproc_debug & VPROC_DBG_DUMP_OUT)
+                     dump_mppbuffer(dst0, "/data/dump/dump_output.yuv", hor_stride, ver_stride);
+                 vproc_dbg_out("output at I4O2 for bff, frame poc %d\n", mpp_frame_get_poc(frm));
+-                dec_vproc_put_frame(mpp, frm, dst1, curr_pts, frame_err);
++                dec_vproc_put_frame(mpp, frm, dst1, field1_pts, frame_err);
+                 if (vproc_debug & VPROC_DBG_DUMP_OUT)
+                     dump_mppbuffer(dst1, "/data/dump/dump_output.yuv", hor_stride, ver_stride);
+             } else {
+                 vproc_dbg_out("output at I4O2 for bff, frame poc %d\n", mpp_frame_get_poc(frm));
+-                dec_vproc_put_frame(mpp, frm, dst1, first_pts, frame_err);
++                dec_vproc_put_frame(mpp, frm, dst1, field0_pts, frame_err);
+                 if (vproc_debug & VPROC_DBG_DUMP_OUT)
+                     dump_mppbuffer(dst1, "/data/dump/dump_output.yuv", hor_stride, mpp_frame_get_height(frm));
+                 vproc_dbg_out("output at I4O2 for tff, frame poc %d\n", mpp_frame_get_poc(frm));
+-                dec_vproc_put_frame(mpp, frm, dst0, curr_pts, frame_err);
++                dec_vproc_put_frame(mpp, frm, dst0, field1_pts, frame_err);
+                 if (vproc_debug & VPROC_DBG_DUMP_OUT)
+                     dump_mppbuffer(dst0, "/data/dump/dump_output.yuv", hor_stride, mpp_frame_get_height(frm));
+             }
+@@ -663,12 +695,32 @@ static MPP_RET dec_vproc_dei_v2_deinterlace(MppDecVprocCtxImpl *ctx, MppFrame fr
+         ctx->pd_mode = 0;
+ 
+     } else if (ctx->prev_frm0 && ! ctx->prev_frm1) {
+-        vproc_dbg_status("Wait for next frame to turn into I5O2");
+-
+-        if (ctx->out_buf0) {
+-            mpp_buffer_put(ctx->out_buf0);
++        /* MediaBox: the first frame's second field, from that field
++         * alone, at its own time, half a frame after the first one
++         * (below). Upstream put out nothing here and I5O2 starts with
++         * the second frame's fields: the first frame's second field was
++         * never shown, 40 ms between the first two pictures of every
++         * opening. Spatial for one field, until the history holds three
++         * frames and I5O2 takes over from the second frame on. */
++        MppFrame first = ctx->prev_frm0;
++        RK_U32 first_mode = mpp_frame_get_mode(first);
++        RK_S64 first_pts = mpp_frame_get_pts(first);
++        RK_S64 next_pts = mpp_frame_get_pts(frm);
++        RK_U32 first_err = mpp_frame_get_errinfo(first) + mpp_frame_get_discard(first);
++
++        vproc_dbg_status("first frame's second field, then I5O2");
++        dil_mode = ((first_mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_BOT_FIRST) ?
++                   IEP2_DIL_MODE_I1O1T : IEP2_DIL_MODE_I1O1B;
++        dec_vproc_config_dei_v2(ctx, first, dil_mode);
++        ctx->start_dei((MppDecVprocCtx *)ctx, first_mode);
++        vproc_dbg_out("output second field of first frame, poc %d\n", mpp_frame_get_poc(first));
++        dec_vproc_put_frame(ctx->mpp, first, (dil_mode == IEP2_DIL_MODE_I1O1B) ? ctx->out_buf1 : ctx->out_buf0,
++                            (ctx->field_pts > 0) ? first_pts + ctx->field_pts :
++                            (next_pts > first_pts) ? (first_pts + next_pts) / 2 : first_pts, first_err);
++        if (dil_mode == IEP2_DIL_MODE_I1O1B)
++            ctx->out_buf1 = NULL;
++        else
+             ctx->out_buf0 = NULL;
+-        }
+ 
+         if (ctx->out_buf1) {
+             mpp_buffer_put(ctx->out_buf1);
+@@ -677,7 +729,10 @@ static MPP_RET dec_vproc_dei_v2_deinterlace(MppDecVprocCtxImpl *ctx, MppFrame fr
+     } else {
+         // 2 in 1 out case
+         vproc_dbg_status("2 field in and 1 frame out\n");
+-        dil_mode = IEP2_DIL_MODE_I1O1T;
++        /* MediaBox: the first field in time, the bottom one for a
++         * bottom-field-first stream; the other follows (above). */
++        dil_mode = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_BOT_FIRST) ?
++                   IEP2_DIL_MODE_I1O1B : IEP2_DIL_MODE_I1O1T;
+ 
+         dec_vproc_config_dei_v2(ctx, frm, dil_mode);
+ 
+@@ -957,6 +1012,42 @@ static void *dec_vproc_thread(void *data)
+             mpp_buf_slot_dequeue(slots, &tmp, QUEUE_DEINTERLACE);
+             mpp_assert(tmp == index);
+ 
++            /* MediaBox: a picture the decoder marked discard -- an open
++             * GOP's leading B picture whose references came before the
++             * point decoding started, an unpaired field -- or in error --
++             * decoded from a reference that was lost -- is never shown
++             * (gstmppdec and FFmpeg drop it) and is no neighbour of the
++             * pictures that are: it comes out untouched. A discarded one
++             * leaves the deinterlacer's history as it was; one in error
++             * ends it, the stream's run of good pictures broken there, and
++             * the next good one (the key frame that ends the loss) starts
++             * it again as the first picture of a stream does. (The newest
++             * frame of the history goes with it unshown: next to the loss
++             * the decoder gave a frame showing what was ten fields before
++             * its time, not marked in error -- tests/mpp, bar-hole.) Measured
++             * 2026-11-06, 1080i50 DVB-S2 and an x264 open-GOP 576i
++             * stream: taken into the history, the first good picture after
++             * the key frame of an opening was deinterlaced against the
++             * leading pictures, the key frame after a transport loss
++             * against the pictures in error; their outputs came out timed
++             * before the key frame or marked in error and were dropped --
++             * the key frame's second field and the next one at every such
++             * opening, both of the key frame's fields after every loss. */
++            if ((mpp_frame_get_discard(frm) || mpp_frame_get_errinfo(frm)) && !eos && !ctx->reset) {
++                RK_U32 in_error = mpp_frame_get_errinfo(frm) != 0;
++
++                vproc_dbg_out("output %s frame poc %d untouched\n",
++                              in_error ? "erroneous" : "discarded", mpp_frame_get_poc(frm));
++                dec_vproc_put_frame(mpp, frm, NULL, -1, 0);
++                mpp_buf_slot_clr_flag(slots, index, SLOT_QUEUE_USE);
++                if (in_error)
++                    dec_vproc_clr_prev(ctx);
++                hal_task_hnd_set_status(task, TASK_IDLE);
++                ctx->task_status.val = 0;
++                ctx->task_wait.val = 0;
++                continue;
++            }
++
+             vproc_dbg_status("vproc get buf ready & start process ");
+             if (!ctx->reset && ctx->iep_ctx) {
+                 vproc_dbg_in("processing frame poc %d, mode 0x%x, err %x vs %x, buf slot %x, ptr %p\n",

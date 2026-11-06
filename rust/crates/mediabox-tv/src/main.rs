@@ -136,6 +136,36 @@ thread_local! {
     static APP: RefCell<Option<Rc<RefCell<App>>>> = const { RefCell::new(None) };
 }
 
+/// A test's load on the interface, never the product's:
+/// `MEDIABOX_TV_UI_LOAD=hz=10,monitor=1` draws the interface ten times a
+/// second whether anything changed or not -- each a commit at the next
+/// vblank, as many as a busy screen makes, at a known rate -- and opens live
+/// television with its monitor (key M) up. No input device, no remote: the
+/// heavy-interface gate's commits are the same every run. Unset, nothing.
+#[derive(Debug, Clone, Copy)]
+struct UiLoad {
+    hz: f64,
+    monitor: bool,
+}
+
+fn ui_load() -> Option<UiLoad> {
+    static LOAD: std::sync::OnceLock<Option<UiLoad>> = std::sync::OnceLock::new();
+    *LOAD.get_or_init(|| {
+        let spec = std::env::var("MEDIABOX_TV_UI_LOAD").ok()?;
+        let get = |key: &str| spec.split(',').find_map(|part| part.strip_prefix(key));
+        let load = UiLoad {
+            hz: get("hz=").and_then(|v| v.parse().ok()).filter(|hz: &f64| *hz > 0.0 && *hz <= 120.0)?,
+            monitor: get("monitor=") == Some("1"),
+        };
+        eprintln!(
+            "mediabox-tv: TEST YÜKÜ: arayüz saniyede {} kez çiziliyor, canlı monitör {}",
+            load.hz,
+            if load.monitor { "açık" } else { "kapalı" }
+        );
+        Some(load)
+    })
+}
+
 fn with_app(f: impl FnOnce(&mut App)) {
     let app = APP.with(|slot| slot.borrow().clone());
     if let Some(app) = app {
@@ -5283,9 +5313,14 @@ impl App {
 
     fn open(&mut self, route: Route) {
         // The live monitor is a measuring tool asked for with M, each time:
-        // live television never opens with it up.
+        // live television never opens with it up (but under a test's load,
+        // `ui_load`).
         if route == Route::Live {
-            self.live_monitor = false;
+            self.live_monitor = ui_load().is_some_and(|load| load.monitor);
+            self.live_monitor_painted = None;
+            if self.live_monitor {
+                self.live_reports.read();
+            }
         }
         self.stack.push(route);
         self.paint();
@@ -7511,6 +7546,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // go straight to the video plane -- so this interface asks for the line
     // on screen and draws it. A tenth of a second is the whole of the error
     // this adds to a line's timing, and it asks only while one is on.
+    let loaded = slint::Timer::default();
+    if let Some(load) = ui_load() {
+        loaded.start(slint::TimerMode::Repeated, Duration::from_secs_f64(1.0 / load.hz), || {
+            with_app(|app| {
+                if let Some(window) = app.window.upgrade() {
+                    window.window().request_redraw();
+                }
+            });
+        });
+    }
+
     let captions = slint::Timer::default();
     captions.start(slint::TimerMode::Repeated, Duration::from_millis(100), || {
         with_app(|app| app.poll_caption());
