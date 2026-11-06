@@ -283,7 +283,9 @@ mod tests {
                 mode: RefCell::new(vec![ContentProgress::Pending]),
                 ..Fake::default()
             };
+            let started = tokio::time::Instant::now();
             assert!(matches!(open_channel(&io).await, End::Stale(_)), "at poll {until}");
+            assert!(started.elapsed() < Duration::from_millis(200), "ended at once, not after a wait: {:?} (poll {until})", started.elapsed());
             assert!(io.opened.borrow().is_empty(), "nothing opened for a channel replaced (poll {until})");
             assert_eq!(io.reloads.get(), 0);
         }

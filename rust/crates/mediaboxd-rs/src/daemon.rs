@@ -2741,6 +2741,31 @@ mod tests {
         })
     }
 
+    /// A live channel's opening acts for that channel only: a zap (a new
+    /// epoch, the film number the same) or a stop (a new film) ends it.
+    #[tokio::test]
+    async fn a_live_opening_is_its_channels_only() {
+        use crate::live_gate::GateIo;
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        let epoch = state.player.next_epoch();
+        let gate = LiveGate {
+            player: Arc::clone(&state.player),
+            output: Arc::clone(&state.output),
+            live: Arc::clone(&state.live),
+            film: state.player.film(),
+            epoch,
+            service_id: 11701,
+        };
+        assert!(gate.current());
+        state.player.next_epoch();
+        assert!(!gate.current(), "a zap: same film, newer channel");
+        let gate = LiveGate { epoch: state.player.epoch(), ..gate };
+        assert!(gate.current());
+        state.player.stop().await;
+        assert!(!gate.current(), "stopped: another film");
+    }
+
     #[tokio::test]
     async fn unix_socket_request_returns_structured_response() {
         let dir = tempdir().unwrap();
