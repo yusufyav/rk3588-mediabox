@@ -761,6 +761,22 @@ impl LiveManager {
     /// deinterlaces to one frame per field), a progressive one's frame rate.
     pub fn output_rate(&self) -> Option<f64> {
         let video = self.read_status()?.pointer("/selection/video")?.clone();
+        self.output_rate_of(&video)
+    }
+
+    /// [`LiveManager::output_rate`], only once the receiver has read the
+    /// SPS of service `service_id`: a new selection starts with none, so
+    /// the one before it is never taken for it.
+    pub fn stream_rate(&self, service_id: u16) -> Option<f64> {
+        let status = self.read_status()?;
+        let selection = status.get("selection")?;
+        if selection.get("service_id").and_then(Value::as_u64) != Some(u64::from(service_id)) {
+            return None;
+        }
+        self.output_rate_of(selection.get("video")?)
+    }
+
+    fn output_rate_of(&self, video: &Value) -> Option<f64> {
         let rate = |key: &str| -> Option<f64> {
             let pair = video.get(key)?.as_array()?;
             let (num, den) = (pair.first()?.as_f64()?, pair.get(1)?.as_f64()?);
@@ -2035,7 +2051,7 @@ impl LiveManager {
         {
             let offset = status.pointer("/tune/search_offset_khz").and_then(Value::as_i64).map(|o| o as i32);
             let sid = status.get("service_id").and_then(Value::as_u64).map(|sid| sid as u16);
-            let rate = sid.zip(self.output_rate());
+            let rate = sid.and_then(|sid| self.stream_rate(sid).map(|rate| (sid, rate)));
             changed |= stored.learn(&source, offset, rate);
         }
         if !changed {
@@ -2236,6 +2252,23 @@ mod tests {
         assert!((live.output_rate().unwrap() - 59.94).abs() < 0.01);
         write("null");
         assert_eq!(live.output_rate(), None);
+    }
+
+    /// A zap starts a selection with no SPS read: the service before it is
+    /// not taken for the one now.
+    #[test]
+    fn a_stream_rate_is_the_selected_services_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        live.lock().token = Some("1-5".into());
+        let write = |selection: &str| {
+            std::fs::write(dir.path().join("status.json"), format!(r#"{{"token":"1-5","state":"streaming","selection":{selection}}}"#)).unwrap()
+        };
+        write(r#"{"service_id":11701,"video":{"interlaced":true,"frame_rate":[25,1],"field_rate":[50,1]}}"#);
+        assert_eq!(live.stream_rate(11701), Some(50.0));
+        assert_eq!(live.stream_rate(11702), None, "another service's SPS");
+        write(r#"{"service_id":11702,"video":null}"#);
+        assert_eq!(live.stream_rate(11702), None, "not read yet");
     }
 
     #[tokio::test]

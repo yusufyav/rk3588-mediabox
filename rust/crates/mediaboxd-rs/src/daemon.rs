@@ -1040,7 +1040,7 @@ impl AppState {
         let audio_track = player_audio_track(&session);
         if let Err(error) = self
             .player
-            .start(&local, start_seconds, playing, display_sync, audio_track)
+            .start(&local, start_seconds, playing, display_sync, audio_track, None)
             .await
         {
             self.stop_session(&session_id).await;
@@ -1079,6 +1079,40 @@ impl AppState {
             "sessionId": session_id,
             "startSeconds": start_seconds,
         }))
+    }
+
+    /// Live channel `epoch` (`service_id`) opened in the player: its display
+    /// matched to the stream before it is let go (`live_gate`), in the
+    /// background -- a newer channel ends it.
+    fn open_live_gate(&self, rid: u64, epoch: u64, service_id: u16) {
+        let io = LiveGate {
+            player: Arc::clone(&self.player),
+            output: Arc::clone(&self.output),
+            live: Arc::clone(&self.live),
+            film: self.player.film(),
+            epoch,
+            service_id,
+        };
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            mediabox_core::timeline!("gate-task", "rid={rid} epoch={epoch} film={} sid={service_id}", io.film);
+            let end = crate::live_gate::open_channel(&io).await;
+            mediabox_core::timeline!(
+                "gate-end",
+                "rid={rid} epoch={epoch} end={} ms={}",
+                format!("{end:?}").replace(' ', ""),
+                started.elapsed().as_millis()
+            );
+            match end {
+                crate::live_gate::End::Opened(outcome) if outcome != "fast" && outcome != "matched" => {
+                    eprintln!("mediaboxd-rs: live channel {service_id} (epoch {epoch}) let go: {outcome}");
+                }
+                crate::live_gate::End::Refused(why) => {
+                    eprintln!("mediaboxd-rs: live channel {service_id} (epoch {epoch}): the player did not take its opening: {why}");
+                }
+                _ => {}
+            }
+        });
     }
 
     /// Live television here: one service of the receiver (or of its
@@ -1151,8 +1185,9 @@ impl AppState {
                 Ok(()) => {
                     let fifo = self.live.fifo().display().to_string();
                     let title = title.clone().filter(|title| !title.trim().is_empty());
-                    mediabox_core::timeline!("loadfile", "rid={rid} path={fifo}");
-                    let loaded = self.player.reload_live(&fifo, service_id, title).await;
+                    let epoch = self.player.next_epoch();
+                    mediabox_core::timeline!("loadfile", "rid={rid} path={fifo} epoch={epoch}");
+                    let loaded = self.player.reload_live(&fifo, service_id, title, epoch).await;
                     mediabox_core::timeline!(
                         "loadfile-done",
                         "rid={rid} ok={}",
@@ -1162,28 +1197,11 @@ impl AppState {
                         Ok(()) => {
                             self.playback.relabel_live(film, service_id);
                             // The display follows a channel whose rate is not
-                            // the last one's; the same rate sends nothing. In
-                            // the background: a newer channel is not held
-                            // behind the television re-locking.
-                            if let Some(cadence) = self
-                                .live
-                                .output_rate()
-                                .and_then(mediabox_core::Cadence::from_fps)
-                            {
-                                let (player, output, film) = (
-                                    Arc::clone(&self.player),
-                                    Arc::clone(&self.output),
-                                    self.player.film(),
-                                );
-                                mediabox_core::timeline!(
-                                    "rematch",
-                                    "rid={rid} cadence={}",
-                                    format!("{cadence:?}").replace(' ', "")
-                                );
-                                tokio::spawn(async move {
-                                    rematch_live(&player, &output, film, cadence).await
-                                });
-                            }
+                            // the last one's before its first picture is
+                            // shown (`live_gate`); the same rate lets it go
+                            // at once. In the background: a newer channel
+                            // takes over at once.
+                            self.open_live_gate(rid, epoch, service_id);
                             self.live.playing();
                             return Response::success(json!({
                                 "playing": "here",
@@ -1275,7 +1293,7 @@ impl AppState {
             if cadence.is_some() || starting.called_off() {
                 break;
             }
-            cadence = self.live.output_rate().and_then(mediabox_core::Cadence::from_fps);
+            cadence = self.live.stream_rate(service_id).and_then(mediabox_core::Cadence::from_fps);
             let coming_up = matches!(
                 self.live.receiver_state().as_deref(),
                 Some("starting" | "waiting_for_player" | "tuning" | "reconnecting")
@@ -1296,13 +1314,18 @@ impl AppState {
             format!("{cadence:?}").replace(' ', "")
         );
         if let Some(cadence) = cadence {
-            match self.output.content_start(film_next, cadence) {
-                Ok(chosen) if !chosen.applied => {
+            match self.output.content_start_request(film_next, cadence) {
+                Ok((chosen, request)) if !chosen.applied => {
                     for _ in 0..50 {
-                        if starting.called_off() || self.output.content_applied(film_next) {
+                        if starting.called_off() || self.output.content_progress(request) != crate::output::ContentProgress::Pending {
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    // Committed before the player opens its sound device:
+                    // the device opens on it (`PlayerManager::start`).
+                    if self.output.content_progress(request) == crate::output::ContentProgress::Applied {
+                        self.player.mode_changed();
                     }
                 }
                 Ok(_) => {}
@@ -1314,10 +1337,11 @@ impl AppState {
             return called_off_live(rid, "mode-match");
         }
         let fifo = self.live.fifo().display().to_string();
-        mediabox_core::timeline!("player-start", "rid={rid} path={fifo}");
+        let epoch = self.player.next_epoch();
+        mediabox_core::timeline!("player-start", "rid={rid} path={fifo} epoch={epoch}");
         let started = self
             .player
-            .start(&fifo, 0, playing, self.output.display_sync(), None)
+            .start(&fifo, 0, playing, self.output.display_sync(), None, Some(epoch))
             .await;
         mediabox_core::timeline!(
             "player-started",
@@ -1340,6 +1364,8 @@ impl AppState {
             position: 0,
         });
         self.live.playing();
+        // Its pictures are held until the display shows the stream's rate.
+        self.open_live_gate(rid, epoch, service_id);
         let here = self.player.film();
         tokio::spawn(crate::playback::follow_mpv(
             Arc::clone(&self.playback),
@@ -2970,27 +2996,30 @@ pub(crate) async fn rematch_live(
     cadence: mediabox_core::Cadence,
 ) {
     use std::time::Duration;
-    let applied = output.content_start(film, cadence);
+    let asked = output.content_start_request(film, cadence);
     mediabox_core::timeline!(
         "rematch-start",
         "film={film} already={}",
-        u8::from(matches!(&applied, Ok(chosen) if chosen.applied))
+        u8::from(matches!(&asked, Ok((chosen, _)) if chosen.applied))
     );
-    match applied {
-        Ok(chosen) if chosen.applied => return,
-        Ok(_) => {}
+    let request = match asked {
+        Ok((chosen, _)) if chosen.applied => return,
+        Ok((_, request)) => request,
         Err(why) => {
             eprintln!("mediaboxd-rs: film {film}: display not matched: {why}");
             return;
         }
-    }
+    };
     for _ in 0..50 {
-        if player.film() != film || output.content_applied(film) {
+        if player.film() != film || output.content_progress(request) != crate::output::ContentProgress::Pending {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let applied = output.content_applied(film);
+    let applied = output.content_progress(request) == crate::output::ContentProgress::Applied;
+    if applied {
+        player.mode_changed();
+    }
     mediabox_core::timeline!("rematch-applied", "film={film} ok={}", u8::from(applied));
     match after_rematch(applied, player.film() == film) {
         AfterRematch::Reload => {}
@@ -3017,6 +3046,52 @@ pub(crate) async fn rematch_live(
     }
 }
 
+/// Live channel `epoch`'s opening, done with the daemon's own parts.
+struct LiveGate {
+    player: Arc<PlayerManager>,
+    output: Arc<crate::output::Output>,
+    live: Arc<crate::live::LiveManager>,
+    film: u64,
+    epoch: u64,
+    service_id: u16,
+}
+
+impl crate::live_gate::GateIo for LiveGate {
+    fn current(&self) -> bool {
+        self.player.epoch() == self.epoch && self.player.film() == self.film
+    }
+    fn stream_rate(&self) -> Option<f64> {
+        self.live.stream_rate(self.service_id)
+    }
+    async fn player_gate(&self) -> Option<Value> {
+        self.player
+            .property("mediabox-gate")
+            .await
+            .filter(|gate| gate.get("epoch").and_then(Value::as_u64) == Some(self.epoch))
+    }
+    fn start_mode(&self, cadence: mediabox_core::Cadence) -> Result<(bool, u64), String> {
+        self.output.content_start_request(self.film, cadence).map(|(chosen, request)| (chosen.applied, request))
+    }
+    fn mode_progress(&self, request: u64) -> crate::output::ContentProgress {
+        self.output.content_progress(request)
+    }
+    fn mode_changed(&self) {
+        self.player.mode_changed();
+    }
+    fn sound_current(&self) -> bool {
+        self.player.sound_current()
+    }
+    async fn reload_sound(&self) -> Result<(), String> {
+        self.player.reload_sound().await
+    }
+    async fn open(&self, outcome: &str) -> Result<(), String> {
+        self.player.gate_open(self.epoch, outcome).await
+    }
+    fn matched(&self, cadence: mediabox_core::Cadence) {
+        self.player.set_live_cadence(self.epoch, cadence);
+    }
+}
+
 /// What a display re-match under a live channel goes on to, once the wait
 /// for the owner is over: the sound device opened again only for the film
 /// it was matched for, and only once the mode is on -- a mode that was not
@@ -3036,10 +3111,6 @@ fn after_rematch(applied: bool, same_film: bool) -> AfterRematch {
     }
 }
 
-/// Where a live channel's rate came from when it was remembered rather than
-/// read from the stream.
-const REMEMBERED_RATE: &str = "the rate the channel had last time";
-
 /// The display for the length of one film: matched to its frame rate before a
 /// frame moves, and put back when it ends.
 ///
@@ -3057,11 +3128,11 @@ const REMEMBERED_RATE: &str = "the rate the channel had last time";
 /// then changes under a playing film -- rarer, and later, but right.
 ///
 /// Live television is not held and has no container rate: its display is
-/// matched before the player starts (`Daemon::play_live`), from the rate the
-/// channel had last time or the one its receiver reads from the video's own
+/// matched at its opening, before its first picture is shown
+/// (`live_gate`), to the rate its receiver reads from the video's own
 /// sequence parameter set (`mediabox_dvb::ts::VideoInfo`): for 1080i25 the
-/// 50 fields a second MPP's deinterlacer puts out. Here that is only checked
-/// against what the stream says, and matched again if it differs.
+/// 50 fields a second MPP's deinterlacer puts out. Here only a change of
+/// that rate while it plays is followed (`follow_live_format`).
 ///
 /// Whatever happens, the film is let go: a player never stays held because
 /// the display could not be matched.
@@ -3071,13 +3142,20 @@ async fn follow_film(
     film: u64,
     receiver: Option<Arc<crate::live::LiveManager>>,
 ) {
-    let live = receiver.is_some();
     use std::time::Duration;
+    // Live television: its display was matched at its opening, before its
+    // first picture (`live_gate`); what is left is the stream changing its
+    // format while it plays.
+    if let Some(receiver) = receiver {
+        follow_live_format(&player, &output, film, &receiver).await;
+        output.content_end(film);
+        return;
+    }
     let tick = Duration::from_millis(100);
     let rate = |value: Option<Value>| value.and_then(|value| value.as_f64()).and_then(mediabox_core::Cadence::from_fps);
 
     let mut cadence = None;
-    for _ in 0..if live { 0 } else { 80 } {
+    for _ in 0..80 {
         if player.film() != film {
             return;
         }
@@ -3087,47 +3165,9 @@ async fn follow_film(
         }
         tokio::time::sleep(tick).await;
     }
-    if let Some(receiver) = &receiver {
-        // Let go only once the player answers: a release asked of a player
-        // whose socket is not up yet is lost, and the film stays held.
-        for _ in 0..80 {
-            if player.film() != film || player.answers().await {
-                break;
-            }
-            tokio::time::sleep(tick).await;
-        }
-        // While the receiver is still coming up -- booting the demodulator
-        // (4 s), locking, searching for the carrier -- there is nothing to read
-        // yet, and no frame to hold back either. Once it streams, the SPS is
-        // in the first GOP: three seconds more at most. Measured on the Plus
-        // (2026-10-22), live: first output 6.3 s after the request; a wait of
-        // 4 s let the film go without its rate, and the mode then changed
-        // under the playing film.
-        // A channel played before: its rate is known, and the display is
-        // matched now, while the receiver boots -- the television re-locks
-        // before there is a picture, not under the first one.
-        if let Some(known) = receiver.live_service().and_then(|sid| receiver.known_rate(sid)).and_then(mediabox_core::Cadence::from_fps) {
-            cadence = Some((known, REMEMBERED_RATE));
-        }
-        let mut streaming_since = None;
-        for _ in 0..if cadence.is_some() { 0 } else { 300 } {
-            if player.film() != film {
-                return;
-            }
-            if let Some(found) = receiver.output_rate().and_then(mediabox_core::Cadence::from_fps) {
-                cadence = Some((found, "the stream's SPS"));
-                break;
-            }
-            let coming_up = matches!(receiver.receiver_state().as_deref(), Some("starting" | "waiting_for_player" | "tuning" | "reconnecting"));
-            if !coming_up && streaming_since.get_or_insert_with(std::time::Instant::now).elapsed() > Duration::from_secs(3) {
-                break;
-            }
-            tokio::time::sleep(tick).await;
-        }
-    }
     if cadence.is_none() {
         player.release(film).await;
-        tokio::time::sleep(Duration::from_secs(if live { 1 } else { 3 })).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
         for _ in 0..40 {
             if player.film() != film {
                 return;
@@ -3140,12 +3180,6 @@ async fn follow_film(
         }
     }
     match cadence {
-        // Live and already playing (not held): the display is matched with
-        // the sound put off for the mode change.
-        Some((cadence, from)) if live => {
-            eprintln!("mediaboxd-rs: film {film}: {} fps from {from}", cadence.label());
-            rematch_live(&player, &output, film, cadence).await;
-        }
         Some((cadence, from)) => {
             eprintln!("mediaboxd-rs: film {film}: {} fps from {from}", cadence.label());
             match output.content_start(film, cadence) {
@@ -3159,8 +3193,7 @@ async fn follow_film(
                         tokio::time::sleep(tick).await;
                     }
                     if output.content_applied(film) {
-                        // The television re-locks to the new mode; the live
-                        // player's sound is off until it is let go below.
+                        // The television re-locks to the new mode.
                         tokio::time::sleep(Duration::from_millis(1500)).await;
                     } else {
                         eprintln!("mediaboxd-rs: film {film}: the owner did not report the matched mode");
@@ -3174,14 +3207,6 @@ async fn follow_film(
     }
     player.release(film).await;
 
-    // A live channel matched from what it had last time is checked against
-    // what its stream says now, once it says it: a broadcaster that changed
-    // the channel's format gets the display matched again.
-    let mut confirm = match (&receiver, cadence) {
-        (Some(receiver), Some((expected, from))) if from == REMEMBERED_RATE => Some((Arc::clone(receiver), expected)),
-        _ => None,
-    };
-
     // Until it ends. The player going quiet twice running is the end too:
     // a film that finishes exits by itself and nobody calls stop.
     let mut silent = 0;
@@ -3189,15 +3214,6 @@ async fn follow_film(
         tokio::time::sleep(Duration::from_secs(1)).await;
         if player.film() != film {
             break;
-        }
-        if let Some((receiver, expected)) = &confirm
-            && let Some(actual) = receiver.output_rate().and_then(mediabox_core::Cadence::from_fps)
-        {
-            if actual != *expected {
-                eprintln!("mediaboxd-rs: film {film}: the stream is {} fps, not the {} remembered", actual.label(), expected.label());
-                rematch_live(&player, &output, film, actual).await;
-            }
-            confirm = None;
         }
         if player.answers().await {
             silent = 0;
@@ -3209,4 +3225,39 @@ async fn follow_film(
         }
     }
     output.content_end(film);
+}
+
+/// A live channel as it plays: a stream that changes its rate (a
+/// broadcaster's format change, say) gets the display matched again -- a
+/// format change of its own, under a playing channel, apart from the
+/// channel's opening. Until the channel ends, or the player goes quiet
+/// twice running.
+async fn follow_live_format(player: &PlayerManager, output: &crate::output::Output, film: u64, receiver: &crate::live::LiveManager) {
+    use std::time::Duration;
+    let mut silent = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if player.film() != film {
+            return;
+        }
+        let epoch = player.epoch();
+        if let Some(opened) = player.live_cadence(epoch)
+            && let Some(service_id) = receiver.live_service()
+            && let Some(now) = receiver.stream_rate(service_id).and_then(mediabox_core::Cadence::from_fps)
+            && now != opened
+        {
+            eprintln!("mediaboxd-rs: film {film}: the stream went from {} to {} fps while it played", opened.label(), now.label());
+            mediabox_core::timeline!("format-change", "film={film} epoch={epoch} from={} to={}", opened.label(), now.label());
+            player.set_live_cadence(epoch, now);
+            rematch_live(player, output, film, now).await;
+        }
+        if player.answers().await {
+            silent = 0;
+        } else {
+            silent += 1;
+            if silent >= 2 {
+                return;
+            }
+        }
+    }
 }

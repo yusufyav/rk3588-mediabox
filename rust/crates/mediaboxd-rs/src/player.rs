@@ -97,6 +97,20 @@ pub struct PlayerManager {
     /// Live television's position is the player's clock: the first one read
     /// on a channel, so what is shown is how long it has been on.
     live_origin: std::sync::Mutex<Option<f64>>,
+    /// The number of the live channel opened last (its epoch): moved on
+    /// every open and every zap, so whatever acts for one channel can tell
+    /// it has been replaced -- the film number stays through a zap.
+    epoch: AtomicU64,
+    /// Display mode changes committed under the sound device, counted, and
+    /// the count the device was last opened after: a mode commit stops
+    /// HDMI's sound stream (`rematch_live`), and the device is opened again
+    /// for the change it came after -- not for one that came later.
+    mode_changes: AtomicU64,
+    sound_opened_after: AtomicU64,
+    /// The rate the live channel's display was matched to at its opening,
+    /// and the channel's epoch: a later change in the stream is a format
+    /// change (`follow_film`).
+    live_cadence: std::sync::Mutex<Option<(u64, mediabox_core::Cadence)>>,
 }
 
 impl PlayerManager {
@@ -109,6 +123,52 @@ impl PlayerManager {
             holding: AtomicBool::new(false),
             display_sync: AtomicBool::new(false),
             live_origin: std::sync::Mutex::new(None),
+            epoch: AtomicU64::new(0),
+            mode_changes: AtomicU64::new(0),
+            sound_opened_after: AtomicU64::new(0),
+            live_cadence: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// A new live channel's number (`epoch`).
+    pub fn next_epoch(&self) -> u64 {
+        self.epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The live channel opened last.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    /// A display mode change was committed under the sound device.
+    pub fn mode_changed(&self) {
+        self.mode_changes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The sound device was opened after the last mode change.
+    pub fn sound_current(&self) -> bool {
+        self.sound_opened_after.load(Ordering::SeqCst) >= self.mode_changes.load(Ordering::SeqCst)
+    }
+
+    pub fn set_live_cadence(&self, epoch: u64, cadence: mediabox_core::Cadence) {
+        *self.live_cadence.lock().unwrap_or_else(|p| p.into_inner()) = Some((epoch, cadence));
+    }
+
+    /// The rate channel `epoch`'s display was matched to.
+    pub fn live_cadence(&self, epoch: u64) -> Option<mediabox_core::Cadence> {
+        self.live_cadence.lock().unwrap_or_else(|p| p.into_inner()).filter(|(of, _)| *of == epoch).map(|(_, cadence)| cadence)
+    }
+
+    /// Let live channel `epoch` go: its display is matched (`outcome` says
+    /// how). The player refuses another channel's number.
+    pub async fn gate_open(&self, epoch: u64, outcome: &str) -> Result<(), String> {
+        let answer = self
+            .ask(json!({"command": ["mediabox-gate", "open", epoch, outcome], "request_id": 42}))
+            .await
+            .ok_or(crate::live_gate::NO_ANSWER)?;
+        match answer.get("error").and_then(Value::as_str) {
+            Some("success") => Ok(()),
+            other => Err(other.unwrap_or("no answer").to_string()),
         }
     }
 
@@ -207,13 +267,20 @@ impl PlayerManager {
     /// player answers once it is open, or once it gave up after its tries
     /// (mediabox-live `SINK_RETRY_MS`, 1.55 s): longer than a request's
     /// usual patience.
+    ///
+    /// Counted for the mode changes made before it was asked: one made
+    /// while it was on its way needs another (`sound_current`).
     pub async fn reload_sound(&self) -> Result<(), String> {
+        let after = self.mode_changes.load(Ordering::SeqCst);
         let answer = self
             .ask_within(json!({"command": ["ao-reload"], "request_id": 41}), std::time::Duration::from_secs(3))
             .await
             .ok_or("no answer")?;
         match answer.get("error").and_then(Value::as_str) {
-            Some("success") => Ok(()),
+            Some("success") => {
+                self.sound_opened_after.fetch_max(after, Ordering::SeqCst);
+                Ok(())
+            }
             other => Err(other.unwrap_or("no answer").to_string()),
         }
     }
@@ -330,9 +397,12 @@ impl PlayerManager {
         playing: Playing,
         display_sync: bool,
         audio_track: Option<u32>,
+        epoch: Option<u64>,
     ) -> Result<(), String> {
         self.stop().await;
         self.film.fetch_add(1, Ordering::SeqCst);
+        // A new player opens the sound device on the mode on the wire now.
+        self.sound_opened_after.store(self.mode_changes.load(Ordering::SeqCst), Ordering::SeqCst);
         // Live television is not held: the control plane matches the
         // display before it starts the player (Daemon::play_live), and a
         // held player buffers what the broadcast sends while it waits, then
@@ -409,6 +479,9 @@ impl PlayerManager {
             ))
             // Live television: the launcher starts mediabox-live, not mpv.
             .arg(format!("--setenv=MEDIABOX_PLAYER_LIVE={}", u8::from(playing.live().is_some())))
+            // The live channel's number: held at its opening gate until the
+            // display is matched (`live_gate`). Empty: not gated.
+            .arg(format!("--setenv=MEDIABOX_LIVE_EPOCH={}", epoch.map(|epoch| epoch.to_string()).unwrap_or_default()))
             .arg(self.launcher.as_os_str())
             .arg(url)
             .arg(start_seconds.to_string())
@@ -436,9 +509,9 @@ impl PlayerManager {
     /// Done once the player has the new channel's stream open; its first
     /// picture is the status's `picture`, read for as long as it takes. An
     /// error is the player's own reason.
-    pub async fn reload_live(&self, url: &str, service_id: u16, title: Option<String>) -> Result<(), String> {
+    pub async fn reload_live(&self, url: &str, service_id: u16, title: Option<String>, epoch: u64) -> Result<(), String> {
         let answer = self
-            .ask(json!({"command": ["loadfile", url, "replace"], "request_id": 23}))
+            .ask(json!({"command": ["loadfile", url, "replace", -1, format!("mediabox-epoch={epoch}")], "request_id": 23}))
             .await
             .ok_or("oynatıcı yanıt vermedi")?;
         match answer.get("error").and_then(Value::as_str) {

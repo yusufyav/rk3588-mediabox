@@ -9,6 +9,7 @@ pub mod kodi;
 pub mod leds;
 pub mod lifecycle;
 pub mod live;
+pub mod live_gate;
 pub mod media;
 pub mod owner;
 pub mod playback;
