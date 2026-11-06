@@ -15,6 +15,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+# A transport hole made on purpose, for a measurement (`src/inject.rs`).
+# Off in every product build: the receiver's output never passes through
+# it, and none of it is in the binary. A diagnostic build asks for it:
+#   cargo build --release -p mediabox-dvb --features transport-injection
+[features]
+transport-injection = []
+
 [[bin]]
 name = "mediabox-dvb"
 path = "src/bin/mediabox-dvb.rs"

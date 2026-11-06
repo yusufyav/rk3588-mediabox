@@ -32,6 +32,7 @@ pub mod bridge;
 pub mod error;
 pub mod evidence;
 pub mod firmware;
+#[cfg(feature = "transport-injection")]
 pub mod inject;
 pub mod libusb;
 pub mod log;
