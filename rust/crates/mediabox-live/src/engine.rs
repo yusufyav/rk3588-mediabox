@@ -439,6 +439,11 @@ const SINK_RETRY_MS: [u64; 5] = [50, 100, 200, 400, 800];
 /// answer.
 pub type SinkReply = std::sync::mpsc::SyncSender<Result<(), String>>;
 
+/// How long a swap waits for nothing to be passing the sound selector. A
+/// buffer takes at most the sink's 100 ms to go through; this is a guard
+/// against one that never does, not a wait for anything.
+const SWAP_IDLE_GUARD_MS: u64 = 2_000;
+
 #[derive(Default)]
 struct SinkSwaps {
     /// Opens of the sound device so far, whatever for.
@@ -1263,12 +1268,52 @@ impl Engine {
             return;
         };
         let asked = Instant::now();
+        // Whichever comes first, the selector idle or the guard, has it.
+        let taken = Arc::new(AtomicBool::new(false));
         let engine = Arc::clone(self);
-        src.add_probe(gst::PadProbeType::IDLE, move |_, _| {
-            mediabox_core::timeline!("sink-swap", "phase=idle waited_ms={}", asked.elapsed().as_millis());
-            engine.run_swap();
+        let idle = Arc::clone(&taken);
+        let id = src.add_probe(gst::PadProbeType::IDLE, move |_, _| {
+            if !idle.swap(true, Ordering::SeqCst) {
+                mediabox_core::timeline!("sink-swap", "phase=idle waited_ms={}", asked.elapsed().as_millis());
+                engine.run_swap();
+            }
             gst::PadProbeReturn::Remove
         });
+        // No id: done at once, the pad idle -- or no probe at all.
+        let Some(id) = id else {
+            if !taken.swap(true, Ordering::SeqCst) {
+                self.give_up_waiting("ses seçicisine bekleme konamadı");
+            }
+            return;
+        };
+        // A selector that never goes idle -- its push held for ever, a sink
+        // waiting in PAUSED -- is not left to the caller's timeout: the
+        // requests are answered as failed and the device left as it is.
+        let engine = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new().name("sink-swap-guard".into()).spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(SWAP_IDLE_GUARD_MS));
+            if taken.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            src.remove_probe(id);
+            if let Some(engine) = engine.upgrade() {
+                engine.give_up_waiting("ses seçicisi boşalmadı");
+            }
+        });
+        if spawned.is_err() {
+            eprintln!("mediabox-live: ses değişiminin bekçisi açılamadı");
+        }
+    }
+
+    /// The pending swap answered as failed without touching the device: it
+    /// never got its turn.
+    fn give_up_waiting(&self, why: &str) {
+        let Some(pending) = self.swaps.lock().unwrap_or_else(|p| p.into_inner()).pending.take() else { return };
+        mediabox_core::timeline!("sink-swap", "phase=done ok=0 tries={} answers={} error={why}", pending.failed, pending.replies.len());
+        eprintln!("mediabox-live: ses aygıtı değiştirilemedi: {why}");
+        for reply in pending.replies {
+            let _ = reply.send(Err(why.to_string()));
+        }
     }
 
     fn run_swap(self: &Arc<Self>) {

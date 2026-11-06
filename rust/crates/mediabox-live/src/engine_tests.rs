@@ -413,6 +413,45 @@ fn requests_while_a_swap_is_pending_join_it() {
     assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
 }
 
+/// The sound selector never goes idle -- its push held, here by a blocking
+/// probe, on the appliance a sink waiting in PAUSED: the request is answered
+/// as failed once the guard is up, not left to the caller's timeout, and the
+/// device is left as it was. When the push goes on, nothing is swapped late.
+#[test]
+fn a_swap_that_never_gets_its_turn_is_answered() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let answer = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&answer);
+    let run = play_doing(ts, 0, Duration::from_secs(1), move |engine| {
+        // Held in the sink: the selector's push goes on and on. (A pad
+        // blocked by a probe of its own counts as idle.)
+        let src = engine.audio_sink.lock().unwrap().as_ref().unwrap().static_pad("sink").unwrap();
+        let (held, wait_held) = std::sync::mpsc::sync_channel(1);
+        let block = src
+            .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM | gst::PadProbeType::BUFFER, move |_, _| {
+                let _ = held.try_send(());
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+        wait_held.recv_timeout(Duration::from_secs(3)).expect("the sound held");
+        let (reply, wait) = std::sync::mpsc::sync_channel(1);
+        let asked = std::time::Instant::now();
+        engine.reopen_audio_sink(Some(reply));
+        let got = wait.recv_timeout(Duration::from_secs(4));
+        *into.lock().unwrap() = Some((got, asked.elapsed()));
+        src.remove_probe(block);
+    });
+    let (got, took) = answer.lock().unwrap().take().unwrap();
+    assert!(matches!(got, Ok(Err(_))), "{got:?}");
+    assert!(took < Duration::from_secs(3), "answered after {took:?}");
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 0, "nothing swapped late");
+    assert!(run.engine.swaps.lock().unwrap().pending.is_none());
+    assert!(!run.shared.health.sink_given_up.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+}
+
 /// Never free again: given up on after its tries, said so in the answer
 /// and the health, and the channel goes on -- the picture and the sound's
 /// source with it, into the stand-in.
