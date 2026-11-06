@@ -151,6 +151,10 @@ fn stream_for(seconds: u64, pmts: &[(u64, u8, Streams)], sounds: &[Sound]) -> Ve
 #[derive(Default)]
 struct Seen {
     buffers: Vec<(String, u64, bool)>,
+    /// When each buffer went out.
+    at: Vec<std::time::Instant>,
+    /// Buffers that went out marked DISCONT, by index.
+    discont: Vec<usize>,
     eos: usize,
 }
 
@@ -170,6 +174,11 @@ fn watch(selector: &gst::Element) -> Arc<Mutex<Seen>> {
                     .unwrap_or_default();
                 let pts = buffer.pts().map_or(0, |t| t.nseconds());
                 seen.buffers.push((active, pts, !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT)));
+                seen.at.push(std::time::Instant::now());
+                if buffer.flags().contains(gst::BufferFlags::DISCONT) {
+                    let index = seen.buffers.len() - 1;
+                    seen.discont.push(index);
+                }
             }
             Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => seen.eos += 1,
             _ => {}
@@ -196,6 +205,8 @@ fn runs(seen: &Seen) -> Vec<(String, Vec<(u64, bool)>)> {
 }
 
 struct Run {
+    /// When the writer had written the whole stream.
+    written: std::time::Instant,
     engine: Arc<Engine>,
     shared: Arc<Shared>,
     video: Arc<Mutex<Seen>>,
@@ -274,10 +285,11 @@ fn play_with(ts: Vec<(u64, Vec<u8>)>, aid: usize, epoch: Option<u64>, at: Durati
         })
     };
     writer.join().unwrap();
+    let written = std::time::Instant::now();
     doer.join().unwrap();
     // The last of it played, and the teardown threads done.
     std::thread::sleep(Duration::from_millis(1_500));
-    Run { engine, shared, video, audio }
+    Run { written, engine, shared, video, audio }
 }
 
 impl Drop for Run {
@@ -303,6 +315,9 @@ fn picture_handed_over(run: &Run, handed: bool) {
         // Not a picture left out: 25 a second, each 40 ms after the last.
         let worst = runs[0].1.windows(2).map(|w| w[1].0.saturating_sub(w[0].0)).max().unwrap_or(0);
         assert!(worst <= 41_000_000, "a step of {} ms in the picture", worst / 1_000_000);
+        // The same stream going on: no DISCONT after its start, which made
+        // MPP drop the picture it held (FAZ 2E).
+        assert!(seen.discont.iter().all(|i| *i == 0), "DISCONT on pictures {:?}", seen.discont);
         return;
     }
     assert_eq!(runs.len(), 2, "{:?}", runs.iter().map(|(p, b)| (p, b.len())).collect::<Vec<_>>());
@@ -327,7 +342,17 @@ fn sound_went_on(run: &Run, inputs: usize, pid: u16, after_ns: u64) {
     // at is the reader's (`stamp::Stamp`), not the PCR's zero.
     let first = seen.buffers.iter().map(|(_, pts, _)| *pts).min().unwrap();
     let last = runs.last().unwrap();
-    assert!(last.1.iter().any(|(pts, _)| pts - first >= after_ns), "sound after the change, {} ms in: first={first} last={:?} n={}", after_ns / 1_000_000, last.1.last(), last.1.len());
+    let came = |i: usize| seen.at[i].saturating_duration_since(run.written).as_millis() as i64 - run.written.saturating_duration_since(seen.at[i]).as_millis() as i64;
+    let longest = seen.at.windows(2).enumerate().max_by_key(|(_, w)| w[1] - w[0]).map(|(i, w)| (i, (w[1] - w[0]).as_millis(), seen.buffers[i].1.saturating_sub(first) / 1_000_000));
+    assert!(
+        last.1.iter().any(|(pts, _)| pts - first >= after_ns),
+        "sound after the change, {} ms in: first={first} last={:?} n={} last out {} ms after the stream was written; longest stall between outputs (index, ms, at pts ms) {:?}",
+        after_ns / 1_000_000,
+        last.1.last(),
+        last.1.len(),
+        seen.at.len().checked_sub(1).map_or(0, came),
+        longest
+    );
     assert_eq!(n_pads(&run.engine.audio_selector), 1, "one sound input");
     let sound = run.shared.sound.lock().unwrap();
     let sound = sound.as_ref().expect("a sound part");
@@ -816,4 +841,147 @@ fn a_gated_channel_starts_where_its_gate_opens() {
 fn not_dmabuf(run: &Run) -> u64 {
     run.shared.frames.load(std::sync::atomic::Ordering::Relaxed);
     run.video.lock().unwrap().buffers.len() as u64 - run.engine.gate_snapshot()["preroll"].as_u64().unwrap_or(0)
+}
+
+/// Held in the sound sink until `release` is sent: the selector's push goes
+/// on and on (a pad blocked by a probe of its own counts as idle).
+fn hold_the_sink(engine: &Arc<Engine>) -> (gst::Pad, gst::PadProbeId) {
+    let src = engine.audio_sink.lock().unwrap().as_ref().unwrap().static_pad("sink").unwrap();
+    let (held, wait_held) = std::sync::mpsc::sync_channel(1);
+    let block = src
+        .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM | gst::PadProbeType::BUFFER, move |_, _| {
+            let _ = held.try_send(());
+            gst::PadProbeReturn::Ok
+        })
+        .unwrap();
+    wait_held.recv_timeout(Duration::from_secs(3)).expect("the sound held");
+    (src, block)
+}
+
+/// A swap waiting for its turn when the next channel opens: the sink is the
+/// engine's, not the channel's, so it is swapped for the new channel once
+/// the selector is free, and the request is answered then -- not dropped
+/// with the channel it was asked under. The new channel's sound goes on.
+#[test]
+fn a_swap_pending_across_a_channel_change_is_done_for_the_next() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let answer = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&answer);
+    let run = play_doing(ts, 0, Duration::from_secs(1), move |engine| {
+        let (src, block) = hold_the_sink(engine);
+        let (reply, wait) = std::sync::mpsc::sync_channel(1);
+        engine.reopen_audio_sink(Some(reply));
+        // The same FIFO opened again: a new generation, the old branch down.
+        let path = engine.current_path().unwrap();
+        engine.open(&path).expect("opened again");
+        src.remove_probe(block);
+        *into.lock().unwrap() = Some(wait.recv_timeout(Duration::from_secs(4)));
+    });
+    let got = answer.lock().unwrap().take().unwrap();
+    assert!(matches!(got, Ok(Ok(()))), "{got:?}");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 1, "swapped once");
+    assert!(run.engine.swaps.lock().unwrap().pending.is_none());
+    let audio = run.audio.lock().unwrap();
+    let after = audio.at.iter().filter(|at| at.saturating_duration_since(run.written) > Duration::ZERO).count()
+        + audio.at.iter().rev().take_while(|at| run.written.saturating_duration_since(**at) < Duration::from_millis(1500)).count();
+    assert!(after > 20, "the new channel's sound went on: {after} buffers near the end");
+}
+
+/// The selector's output going away under a waiting swap (its pad
+/// deactivated, as the pipeline going down does): the request is answered
+/// as failed within the guard, nothing hangs, nothing is swapped.
+#[test]
+fn a_swap_waiting_when_the_selector_goes_down_is_answered() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(4, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 4), from: 0, to: u64::MAX }]);
+    let answer = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&answer);
+    let run = play_doing(ts, 0, Duration::from_secs(1), move |engine| {
+        let (src, block) = hold_the_sink(engine);
+        let (reply, wait) = std::sync::mpsc::sync_channel(1);
+        let asked = std::time::Instant::now();
+        engine.reopen_audio_sink(Some(reply));
+        let selector_src = engine.audio_selector.static_pad("src").unwrap();
+        let _ = selector_src.set_active(false);
+        let got = wait.recv_timeout(Duration::from_secs(4));
+        *into.lock().unwrap() = Some((got, asked.elapsed()));
+        src.remove_probe(block);
+    });
+    let (got, took) = answer.lock().unwrap().take().unwrap();
+    assert!(matches!(got, Ok(Err(_))), "{got:?}");
+    assert!(took < Duration::from_millis(super::SWAP_IDLE_GUARD_MS + 500), "answered after {took:?}");
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 0);
+    assert!(run.engine.swaps.lock().unwrap().pending.is_none());
+}
+
+/// A pad the swap cannot wait on (flushing: deactivated before the request)
+/// is answered at once or by the guard -- never left to the caller.
+#[test]
+fn a_swap_on_a_selector_that_takes_no_probe_is_answered() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(3, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 3), from: 0, to: u64::MAX }]);
+    let answer = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&answer);
+    let _run = play_doing(ts, 0, Duration::from_secs(1), move |engine| {
+        let selector_src = engine.audio_selector.static_pad("src").unwrap();
+        let _ = selector_src.set_active(false);
+        let (reply, wait) = std::sync::mpsc::sync_channel(1);
+        let asked = std::time::Instant::now();
+        engine.reopen_audio_sink(Some(reply));
+        let got = wait.recv_timeout(Duration::from_secs(4));
+        *into.lock().unwrap() = Some((got, asked.elapsed()));
+    });
+    let (got, took) = answer.lock().unwrap().take().unwrap();
+    assert!(got.is_ok(), "answered: {got:?}");
+    assert!(took < Duration::from_millis(super::SWAP_IDLE_GUARD_MS + 500), "answered after {took:?}");
+}
+
+/// A sink swapped in is told the pipeline's latency before anything
+/// reaches it: through the bus it came 20 ms late or more, and the sink
+/// had already found its first buffers 150 ms late (FAZ 2E). The sink takes
+/// the LATENCY event and sends it on upstream through its pad: that, and
+/// the buffers, are seen on its pad from the moment it is added.
+#[test]
+fn a_swapped_in_sink_has_the_latency_before_its_first_buffer() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(4, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 4), from: 0, to: u64::MAX }]);
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&seen);
+    let run = play_doing(ts, 0, Duration::from_secs(1), move |engine| {
+        let before = engine.audio_sink.lock().unwrap().clone();
+        let into = Arc::clone(&into);
+        let watching = engine.pipeline.connect_deep_element_added(move |_, _, element| {
+            if element.factory().is_none_or(|f| !f.has_type(gst::ElementFactoryType::SINK)) || element.name().starts_with("video") {
+                return;
+            }
+            let Some(pad) = element.static_pad("sink") else { return };
+            let into = Arc::clone(&into);
+            let name = element.name().to_string();
+            pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM | gst::PadProbeType::BUFFER, move |_, info| {
+                let mut seen = into.lock().unwrap();
+                match &info.data {
+                    Some(gst::PadProbeData::Buffer(_)) => seen.push(format!("{name} buffer")),
+                    Some(gst::PadProbeData::Event(e)) if e.type_() == gst::EventType::Latency => seen.push(format!("{name} latency")),
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            });
+        });
+        let (reply, wait) = std::sync::mpsc::sync_channel(1);
+        engine.reopen_audio_sink(Some(reply));
+        let _ = wait.recv_timeout(Duration::from_secs(3));
+        engine.pipeline.disconnect(watching);
+        assert!(engine.audio_sink.lock().unwrap().clone() != before, "a new sink");
+    });
+    let seen = seen.lock().unwrap().clone();
+    let sink = run.engine.audio_sink.lock().unwrap().as_ref().unwrap().name().to_string();
+    let mine: Vec<&String> = seen.iter().filter(|s| s.starts_with(&format!("{sink} "))).collect();
+    assert!(mine.len() > 5, "{seen:?}");
+    assert_eq!(mine[0], &format!("{sink} latency"), "the latency before the first buffer: {mine:?}");
 }
