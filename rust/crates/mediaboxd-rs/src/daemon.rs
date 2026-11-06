@@ -2131,6 +2131,17 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
+    /// The sound device is opened again after a re-match only when the mode
+    /// is on and the film is the one it was matched for (FAZ 2E: it was sent
+    /// whether the owner had applied the mode or not).
+    #[test]
+    fn a_rematch_reopens_the_sound_only_for_its_film_once_the_mode_is_on() {
+        assert_eq!(after_rematch(true, true), AfterRematch::Reload);
+        assert_eq!(after_rematch(false, true), AfterRematch::NotApplied);
+        assert_eq!(after_rematch(true, false), AfterRematch::FilmChanged);
+        assert_eq!(after_rematch(false, false), AfterRematch::FilmChanged);
+    }
+
     /// One session as `MediaSession.as_dict` spells it, the fields the
     /// daemon reads and a few it does not.
     fn core_session(id: &str, owner: Option<&str>, state: &str) -> Value {
@@ -2979,19 +2990,49 @@ pub(crate) async fn rematch_live(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    mediabox_core::timeline!(
-        "rematch-applied",
-        "film={film} ok={}",
-        u8::from(output.content_applied(film))
-    );
-    mediabox_core::timeline!("ao-reload", "film={film}");
-    if player.film() != film {
-        return;
+    let applied = output.content_applied(film);
+    mediabox_core::timeline!("rematch-applied", "film={film} ok={}", u8::from(applied));
+    match after_rematch(applied, player.film() == film) {
+        AfterRematch::Reload => {}
+        AfterRematch::FilmChanged => {
+            mediabox_core::timeline!("ao-reload", "film={film} skipped=film-changed");
+            return;
+        }
+        AfterRematch::NotApplied => {
+            mediabox_core::timeline!("rematch-failed", "film={film} why=not-applied");
+            eprintln!(
+                "mediaboxd-rs: film {film}: the owner did not report the matched mode in 5 s; the sound device is not opened again"
+            );
+            return;
+        }
     }
+    mediabox_core::timeline!("ao-reload", "film={film}");
     let reopened = player.reload_sound().await;
-    mediabox_core::timeline!("ao-reload-done", "film={film} ok={}", u8::from(reopened.is_ok()));
-    if let Err(why) = reopened {
-        eprintln!("mediaboxd-rs: film {film}: the player did not open its sound again after the mode change: {why}");
+    let ours = player.film() == film;
+    mediabox_core::timeline!("ao-reload-done", "film={film} ok={} same_film={}", u8::from(reopened.is_ok()), u8::from(ours));
+    match reopened {
+        Err(why) => eprintln!("mediaboxd-rs: film {film}: the player did not open its sound again after the mode change: {why}"),
+        Ok(()) if !ours => eprintln!("mediaboxd-rs: film {film}: the sound was opened again after the film changed; not counted for it"),
+        Ok(()) => {}
+    }
+}
+
+/// What a display re-match under a live channel goes on to, once the wait
+/// for the owner is over: the sound device opened again only for the film
+/// it was matched for, and only once the mode is on -- a mode that was not
+/// applied has stopped nothing, and another film's mode is that film's.
+#[derive(Debug, PartialEq, Eq)]
+enum AfterRematch {
+    Reload,
+    NotApplied,
+    FilmChanged,
+}
+
+fn after_rematch(applied: bool, same_film: bool) -> AfterRematch {
+    match (same_film, applied) {
+        (false, _) => AfterRematch::FilmChanged,
+        (true, false) => AfterRematch::NotApplied,
+        (true, true) => AfterRematch::Reload,
     }
 }
 
