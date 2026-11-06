@@ -378,9 +378,9 @@ fn period_of(mode: &control::Mode) -> u64 {
 /// fast): how much faster CLOCK_MONOTONIC_RAW -- the crystal itself, which
 /// the HDMI PHY's PLL runs from -- goes than CLOCK_MONOTONIC, which NTP
 /// slews and the film's frames are due on and the page flips are stamped
-/// with. Measured from this process's start; None for its first
-/// `CRYSTAL_WINDOW` (a mode set then keeps the EDID's clock, and the next
-/// channel's opening sets it right).
+/// with. Measured from this process's start; for its first
+/// `CRYSTAL_WINDOW`, what an earlier process of this boot measured
+/// (`CRYSTAL_FILE`), or None when none did (`crystal_ppm_settled` waits).
 ///
 /// The film's frames are due on CLOCK_MONOTONIC at the broadcast's rate
 /// (the PCR came within 0.5 ppm of it, 2026-11-05) and the panel ran at the
@@ -395,10 +395,58 @@ fn crystal_ppm() -> Option<f64> {
     let raw = now.0.checked_sub(start.0)?;
     let mono = now.1.checked_sub(start.1)?;
     if mono < CRYSTAL_WINDOW.as_nanos() as u64 {
-        return None;
+        return crystal_kept();
     }
     let ppm = (raw as f64 / mono as f64 - 1.0) * 1e6;
-    (ppm.abs() <= CRYSTAL_PPM_MAX).then_some(ppm)
+    let ppm = (ppm.abs() <= CRYSTAL_PPM_MAX).then_some(ppm)?;
+    crystal_keep(ppm);
+    Some(ppm)
+}
+
+/// The crystal's error for a mode set that is about to be made: at once when
+/// it is known, else after the rest of `CRYSTAL_WINDOW` (only a first
+/// process of a boot, in its first seconds). A panel set on the EDID's clock
+/// then would repeat a picture every half hour of the film that follows: the
+/// mode is not set again while it plays (2026-11-06, 10:17:22 restart, a
+/// channel 6 s later on 594000 kHz, a repeat at 10:31:46).
+fn crystal_ppm_settled() -> Option<f64> {
+    if let Some(ppm) = crystal_ppm() {
+        return Some(ppm);
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < CRYSTAL_WINDOW + Duration::from_secs(1) {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(ppm) = crystal_ppm() {
+            eprintln!("mediabox-tv.platform waited {:?} for the crystal's error before the mode", started.elapsed());
+            mediabox_core::timeline!("crystal-wait", "ms={}", started.elapsed().as_millis());
+            return Some(ppm);
+        }
+    }
+    None
+}
+
+/// Where a process's measurement is kept for the next one of the same boot
+/// (a restart of the interface): `boot_id ppm`. A rate measured over
+/// `CRYSTAL_WINDOW` or more, the same the process itself would believe.
+const CRYSTAL_FILE: &str = "/var/lib/mediabox-ui/crystal-ppm";
+
+fn boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok().map(|id| id.trim().to_string())
+}
+
+fn crystal_kept() -> Option<f64> {
+    let kept = std::fs::read_to_string(CRYSTAL_FILE).ok()?;
+    let (boot, ppm) = kept.trim().split_once(' ')?;
+    let ppm: f64 = ppm.parse().ok()?;
+    (Some(boot) == boot_id().as_deref() && ppm.abs() <= CRYSTAL_PPM_MAX).then_some(ppm)
+}
+
+fn crystal_keep(ppm: f64) {
+    let Some(boot) = boot_id() else { return };
+    let temporary = format!("{CRYSTAL_FILE}.new");
+    if std::fs::write(&temporary, format!("{boot} {ppm:.4}\n")).is_ok() {
+        let _ = std::fs::rename(&temporary, CRYSTAL_FILE);
+    }
 }
 
 /// How long the two clocks are compared before their rates are believed:
@@ -1194,8 +1242,13 @@ impl SplitDisplay {
     }
 
     fn new() -> Result<Rc<Self>, PlatformError> {
-        // The two clocks' comparison starts here (`crystal_ppm`).
+        // The two clocks' comparison starts here (`crystal_ppm`), and is
+        // kept for the next process once its window is full.
         let _ = crystal_ppm();
+        let _ = std::thread::Builder::new().name("crystal".into()).spawn(|| {
+            std::thread::sleep(CRYSTAL_WINDOW + Duration::from_millis(100));
+            let _ = crystal_ppm();
+        });
         let discovered = Self::wait_for_a_television();
         for warning in &discovered.warnings {
             eprintln!("mediabox-tv.platform {warning}");
@@ -2986,7 +3039,7 @@ impl SplitWindow {
         // The same mode with the crystal's error moved on since it was set
         // (a kHz is 1.7 ppm at 594 MHz) is set again: here, at a channel's
         // opening, on a dark panel -- never while a film plays.
-        let wire = on_the_wire(mode, crystal_ppm()).clock();
+        let wire = on_the_wire(mode, crystal_ppm_settled()).clock();
         if mode == display.mode.get() && colour == display.colour.get() && wire == display.wire_khz.get() {
             *display.setting.borrow_mut() = setting;
             display.trial.set(trial);
