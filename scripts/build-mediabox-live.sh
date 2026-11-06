@@ -89,11 +89,14 @@ export PKG_CONFIG_SYSROOT_DIR="$sysroot"
 export PKG_CONFIG_LIBDIR="$sysroot$gst_prefix/lib/pkgconfig:$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig:$sysroot/usr/share/pkgconfig"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 # Its GStreamer found through a RUNPATH, never Debian's in /usr/lib.
-# The checkout's own path is not in the binary (panic locations read
-# ./rust/crates/...): the same commit builds the same bytes from any
-# worktree.
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="--remap-path-prefix=$here=. -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
-( cd "$crate" && cargo build -q --release --target "$triple" )
+# Built from one fixed path (mediabox-live-source.sh), named nowhere in
+# the binary (panic locations read ./rust/crates/...): the same commit
+# builds the same bytes from any worktree, checked 2026-11-06 with two.
+# shellcheck source=mediabox-live-source.sh
+source "$here/scripts/mediabox-live-source.sh"
+source_crate="$(mediabox_live_source "$here")"
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="--remap-path-prefix=$MEDIABOX_LIVE_SRC=. -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
+( cd "$source_crate" && CARGO_TARGET_DIR="$crate/target" cargo build -q --locked --release --target "$triple" )
 bin="$crate/target/$triple/release/mediabox-live"
 aarch64-linux-gnu-readelf -d "$bin" | grep -q "RUNPATH.*\[$gst_prefix/lib\]" ||
   { echo "mediabox-live has no RUNPATH to $gst_prefix/lib" >&2; exit 1; }
