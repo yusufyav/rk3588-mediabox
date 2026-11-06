@@ -929,6 +929,10 @@ pub struct Quarantine {
     /// SDTs of a network that is neither the left one nor the channel's
     /// (`Expected::onid`): another carrier with the same TSID and PAT.
     pub awaiting_sdt: u64,
+    /// Of those, PATs of the left one's TSID with other programmes, the
+    /// channel's among them: not its tail -- the tuner moved -- and not the
+    /// channel's either until the SDT says its network.
+    pub twin_pats: u64,
     pub wrong_onid: Option<u16>,
     pub wrong_onid_sdts: u64,
     /// PATs of the multiplex left, of others without the service, and of
@@ -962,6 +966,10 @@ pub struct Gate {
     repeated: Option<(u16, u32)>,
     /// A PAT like the left multiplex's, waiting for its SDT's network.
     pending: Option<u16>,
+    /// The SDT said the channel's network: the transport stream is let in
+    /// at its next PAT, which came after that SDT and so is the new
+    /// stream's -- the PAT that was waiting may be the tail's.
+    confirmed: Option<u16>,
     /// A programme clock from after the stop has been seen; the clock's PID
     /// at all.
     fresh: bool,
@@ -993,6 +1001,7 @@ impl Gate {
             resume: 0,
             repeated: None,
             pending: None,
+            confirmed: None,
             started: std::time::Instant::now(),
             stats,
         }
@@ -1180,22 +1189,40 @@ impl Gate {
         }
         // The same PAT as the multiplex left's: its tail -- unless the SDT
         // says another network (two transponders can share a TSID and even
-        // a programme map).
-        let like_left = self
-            .rule
-            .left
-            .as_ref()
-            .is_some_and(|left| left.tsid == tsid && left.programmes == *programmes);
-        if like_left {
-            let told = self
+        // a programme map). The left one's TSID with other programmes, the
+        // channel's among them, is no tail; but where a network is known
+        // it is the channel's only if the SDT says so (another carrier, on
+        // another network, can have that TSID and that service too).
+        let same_tsid = self.rule.left.as_ref().is_some_and(|left| left.tsid == tsid);
+        let like_left = same_tsid
+            && self
                 .rule
                 .left
                 .as_ref()
-                .is_some_and(|left| left.onid.is_some())
-                || self.rule.expect.is_some_and(|e| e.onid.is_some());
+                .is_some_and(|left| left.programmes == *programmes);
+        let told = self
+            .rule
+            .left
+            .as_ref()
+            .is_some_and(|left| left.onid.is_some())
+            || self.rule.expect.is_some_and(|e| e.onid.is_some());
+        let twin = same_tsid
+            && !like_left
+            && told
+            && self
+                .rule
+                .service_id
+                .is_some_and(|service| programmes.contains_key(&service));
+        if self.confirmed == Some(tsid) && (like_left || twin) {
+            return self.admit(Admitted::Network);
+        }
+        if like_left || twin {
             if told {
                 self.pending = Some(tsid);
                 self.stats.awaiting_sdt += 1;
+                if twin {
+                    self.stats.twin_pats += 1;
+                }
             } else {
                 self.stats.old_pats += 1;
             }
@@ -1260,7 +1287,8 @@ impl Gate {
         match network_verdict(left, self.rule.expect.and_then(|e| e.onid), onid) {
             Network::Admit => {
                 self.stats.admitted_onid = Some(onid);
-                self.admit(Admitted::Network)
+                self.confirmed = Some(tsid);
+                Gated::Waiting
             }
             Network::Left => {
                 self.stats.old_pats += 1;

@@ -1404,7 +1404,7 @@ impl Pipeline {
         log.line(format!(
             "QUARANTINE {outcome}: start={} service={:?} left={:?} want={:?} admitted={:?} reason={:?} \
              expect={:?} onid={:?} held transfers={} packets={} bytes={} left_pid_packets={} pat_packets={} pats={} \
-             pat_crc_errors={} sdt_sections={} sdt_crc_errors={} awaiting_sdt={} wrong_onid={:?} old_pats={} other_pats={} stale_pats={} stale_clocks={} clock_ahead_ms={:?} stopped_ms={:?} after_ms={:?}",
+             pat_crc_errors={} sdt_sections={} sdt_crc_errors={} awaiting_sdt={} twin_pats={} wrong_onid={:?} old_pats={} other_pats={} stale_pats={} stale_clocks={} clock_ahead_ms={:?} stopped_ms={:?} after_ms={:?}",
             q.generation,
             q.service_id,
             q.left_tsid,
@@ -1423,6 +1423,7 @@ impl Pipeline {
             q.sdt_sections,
             q.sdt_crc_errors,
             q.awaiting_sdt,
+            q.twin_pats,
             q.wrong_onid,
             q.old_pats,
             q.other_pats,
@@ -2141,10 +2142,13 @@ fn at_deadline(
     }
     // The channel's network known, and only another's came: no tune finds
     // the channel on a carrier that is not its.
-    if q.wrong_onid_sdts > 0 && q.old_pats == 0 && q.other_pats == 0 {
+    // The left one's tail never says another network: an SDT of a third
+    // one, or the left TSID with other programmes, is the tuner moved,
+    // and a tune again would find the same.
+    if q.wrong_onid_sdts > 0 && q.other_pats == 0 {
         return AtDeadline::End(End::WrongNetwork);
     }
-    let stale = q.other_pats == 0 && (q.old_pats > 0 || q.stale_pats > 0);
+    let stale = q.other_pats == 0 && q.twin_pats == 0 && (q.old_pats > 0 || q.stale_pats > 0);
     if rule.want_tsid.is_some() || stale {
         return match (retunes, rule.want_tsid) {
             (0, _) => AtDeadline::Retune,
@@ -3621,22 +3625,157 @@ mod tests {
         let (mut pipeline, mut reporter, out) = retuned_from(OLD.left(Some(1)), twin.sid);
         let log = Log::silent();
         pipeline.feed(
-            &[OLD.rounds(1).concat(), twin.rounds(2).concat()].concat(),
+            &[OLD.rounds(1).concat(), twin.pat(0), twin.rounds(2).concat()].concat(),
+            &mut reporter,
+            &log,
+        );
+        // The left one's network known, the twin's PAT -- the left TSID, the
+        // channel's service -- waits for its SDT too: another carrier with
+        // that TSID and service would be no different.
+        let gate = pipeline.gate.as_ref().expect("not without an SDT");
+        assert!(gate.stats.twin_pats >= 2, "{:?}", gate.stats);
+        pipeline.feed(
+            &[twin.sdt(318, 0), twin.rounds(1).concat()].concat(),
             &mut reporter,
             &log,
         );
         let q = pipeline.quarantine.clone().expect("admitted");
-        // The tail's PAT is the left one's: with its network known it waits
-        // for an SDT, and the twin's PAT admits before one comes.
         assert_eq!(
-            (q.reason, q.admitted_tsid),
-            (Some(crate::ts::Admitted::Service), Some(OLD.tsid))
+            (q.reason, q.admitted_tsid, q.admitted_onid),
+            (Some(crate::ts::Admitted::Network), Some(OLD.tsid), Some(318))
         );
         let got = pids(&written(pipeline, &out));
         assert!(
             got.iter().all(|pid| [0, twin.pmt, twin.es].contains(pid)) && got.contains(&twin.es),
             "{got:?}"
         );
+    }
+
+    /// Standard transport streams (FFmpeg's muxer: PAT, PMT and SDT with
+    /// their CRCs, H.264 video; `src/fixtures/README.md`), one TSID and the
+    /// same PIDs on two networks: the left one (ONID 1, SID 101) and the
+    /// channel's (ONID 318, SID 202, other pictures), and a third network
+    /// with the channel's PAT (ONID 999). The left one's tail and the new
+    /// one's tables in one transfer, as a retune gives them; the rest in
+    /// transfers of the receiver's size.
+    #[test]
+    fn one_tsid_on_two_networks_only_the_channel_s_opens_from_its_own_pat() {
+        const OLD_TS: &[u8] = include_bytes!("fixtures/same-tsid-old.ts");
+        const NEW_TS: &[u8] = include_bytes!("fixtures/same-tsid-new.ts");
+        const OTHER_TS: &[u8] = include_bytes!("fixtures/same-tsid-other-network.ts");
+        const TWIN_TS: &[u8] = include_bytes!("fixtures/same-tsid-twin.ts");
+        const P: usize = crate::ts::PACKET;
+        let log = Log::silent();
+        let ten = Duration::from_secs(10);
+        let gate_for = |sid: u16| {
+            let (mut pipeline, reporter, out) = harness(sid, None);
+            pipeline.left_tsid = Some(7);
+            pipeline.left_pids = [4096, 256].into();
+            pipeline.left_mux = Some(crate::ts::LeftMux {
+                tsid: 7,
+                onid: Some(1),
+                programmes: [(101, 4096)].into(),
+            });
+            pipeline.expect = Some(crate::ts::Expected {
+                onid: Some(318),
+                tsid: 7,
+            });
+            pipeline.quarantine_stream();
+            (pipeline, reporter, out)
+        };
+        // The tail ends on a PAT of the left one's: the next SDT is the new
+        // stream's, the first thing FFmpeg's muxer sends.
+        let tail = {
+            let packets: Vec<&[u8]> = OLD_TS.chunks(P).collect();
+            let last_pat = packets.iter().rposition(|p| crate::ts::pid_of(p) == 0).unwrap();
+            packets[last_pat - 12..=last_pat + 2].concat()
+        };
+        let feed = |pipeline: &mut Pipeline, reporter: &mut Reporter, new: &[u8]| {
+            let (head, rest) = new.split_at(12 * P);
+            pipeline.feed(&[&tail[..], head].concat(), reporter, &log);
+            for chunk in rest.chunks(20 * P) {
+                pipeline.feed(chunk, reporter, &log);
+            }
+        };
+        // The left one's video packets (other pictures: no packet of the
+        // new streams is one of them); its PAT and PMT can be byte for
+        // byte the twin's.
+        let of = |ts: &[u8]| -> std::collections::HashSet<Vec<u8>> {
+            ts.chunks(P).filter(|p| crate::ts::pid_of(p) == 256).map(<[u8]>::to_vec).collect()
+        };
+        let (old, new_pats) = (
+            of(OLD_TS),
+            NEW_TS
+                .chunks(P)
+                .filter(|p| crate::ts::pid_of(p) == 0)
+                .map(<[u8]>::to_vec)
+                .collect::<std::collections::HashSet<_>>(),
+        );
+
+        // The channel's network: let in, from a PAT of its own, with
+        // nothing of the left one's though its PIDs are the same.
+        let (mut pipeline, mut reporter, out) = gate_for(202);
+        feed(&mut pipeline, &mut reporter, NEW_TS);
+        let q = pipeline.quarantine.clone().expect("admitted");
+        assert_eq!(
+            (q.reason, q.admitted_tsid, q.admitted_onid),
+            (Some(crate::ts::Admitted::Network), Some(7), Some(318))
+        );
+        assert!(q.old_pats + q.awaiting_sdt > 0, "the tail's PATs were held: {q:?}");
+        assert_eq!(pipeline.gate_retunes, 0);
+        let data = written(pipeline, &out);
+        assert!(new_pats.contains(&data[..P]), "the stream starts at the new one's PAT");
+        assert!(pids(&data).contains(&256), "its video");
+        let stale = data.chunks(P).filter(|p| old.contains(*p)).count();
+        assert_eq!(stale, 0, "packets of the left one's written");
+
+        // The left one's very PAT (SID 101) on the channel's network: the
+        // SDT that tells them apart is the new stream's, the PAT waiting
+        // before it the tail's -- let in at the PAT after it.
+        let (mut pipeline, mut reporter, out) = gate_for(101);
+        feed(&mut pipeline, &mut reporter, TWIN_TS);
+        let q = pipeline.quarantine.clone().expect("admitted");
+        assert_eq!((q.reason, q.admitted_onid), (Some(crate::ts::Admitted::Network), Some(318)));
+        let data = written(pipeline, &out);
+        let twin_pats: std::collections::HashSet<Vec<u8>> =
+            TWIN_TS.chunks(P).filter(|p| crate::ts::pid_of(p) == 0).map(<[u8]>::to_vec).collect();
+        assert!(twin_pats.contains(&data[..P]), "the stream starts at the twin's PAT");
+        let stale = data.chunks(P).filter(|p| old.contains(*p)).count();
+        assert_eq!(stale, 0, "packets of the left one's written");
+
+        // Not the channel's SID on its network: nothing of the stream
+        // reaches the player.
+        let (mut pipeline, mut reporter, out) = gate_for(203);
+        feed(&mut pipeline, &mut reporter, NEW_TS);
+        assert!(written(pipeline, &out).is_empty());
+
+        // The channel's PAT on a third network: another carrier, ended as
+        // that at the deadline, not tuned again.
+        let (mut pipeline, mut reporter, out) = gate_for(202);
+        feed(&mut pipeline, &mut reporter, OTHER_TS);
+        let gate = pipeline.gate.as_ref().expect("never admitted");
+        assert_eq!(gate.stats.wrong_onid, Some(999));
+        let end = at_deadline(&gate.stats, gate.rule(), ten, ten, 0);
+        assert_eq!(end, AtDeadline::End(End::WrongNetwork));
+        assert_eq!(serde_json::to_string(&End::WrongNetwork).unwrap(), "\"wrong_network\"");
+        assert!(written(pipeline, &out).is_empty());
+
+        // Its SDT never came: the same TSID as the left one's and nothing
+        // to tell them by -- ended as that, not tuned again.
+        let without_sdt: Vec<u8> = NEW_TS
+            .chunks(P)
+            .filter(|p| crate::ts::pid_of(p) != 0x11)
+            .flatten()
+            .copied()
+            .collect();
+        let (mut pipeline, mut reporter, out) = gate_for(202);
+        feed(&mut pipeline, &mut reporter, &without_sdt);
+        let gate = pipeline.gate.as_ref().expect("never admitted");
+        assert!(gate.stats.twin_pats > 0, "{:?}", gate.stats);
+        let end = at_deadline(&gate.stats, gate.rule(), ten, ten, 0);
+        assert_eq!(end, AtDeadline::End(End::SdtMissing));
+        assert_eq!(serde_json::to_string(&End::SdtMissing).unwrap(), "\"sdt_missing\"");
+        assert!(written(pipeline, &out).is_empty());
     }
 
     #[test]
@@ -3659,9 +3798,12 @@ mod tests {
             stale_es(&OLD, 1),
         ]
         .concat();
+        // Let in at the PAT after the SDT: the one before it may be the
+        // tail's.
         let new = [
             twin.pat(1),
             twin.sdt(318, 1),
+            twin.pat(2),
             twin.pmt(1),
             twin.es(2),
             twin.es(3),
@@ -3725,7 +3867,7 @@ mod tests {
         pipeline.feed(&transfer(&[OLD.pat(0), OLD.sdt(1, 0)]), &mut reporter, &log);
         assert!(pipeline.gate.is_some(), "network 1 is not the channel's");
         pipeline.feed(
-            &transfer(&[OLD.pat(1), OLD.sdt(318, 1), OLD.pmt(1), OLD.es(0)]),
+            &transfer(&[OLD.pat(1), OLD.sdt(318, 1), OLD.pat(2), OLD.pmt(1), OLD.es(0)]),
             &mut reporter,
             &log,
         );
