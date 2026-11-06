@@ -80,9 +80,13 @@ pub struct Health {
     pub sink_given_up: AtomicBool,
     push_said: Mutex<(u64, u8)>,
     sound: Mutex<crate::sound_diag::Diag>,
-    /// When the sound device was last opened by us, monotonic ns: a restart
-    /// of the device then is ours, not an XRUN.
-    reopened_ns: AtomicU64,
+    /// The sound device was opened by us and has not started since: its next
+    /// start is ours, however long the first sound took to come, not an XRUN.
+    /// (By the time since the open, 1.5 s, a reload during a channel change
+    /// was called an XRUN: the first sound came 2.5 s on, the PCM going OPEN
+    /// -> RUNNING with no XRUN state, one trigger_time. FAZ 2E, 10 of 10.)
+    /// The first open is not counted: its start is not a restart.
+    opened_not_started: AtomicBool,
     /// Pictures the plane gave back because the interface still held every
     /// buffer (`plane::Plane::dropped_full`), set by the reporter.
     pub plane_full_dropped: AtomicU64,
@@ -396,8 +400,7 @@ impl Health {
 
     /// The sound device opened by us: on `device`, for `why`.
     pub fn sink_opened(&self, device: Option<String>, why: &str) {
-        let now = mediabox_core::timeline::now_ns();
-        self.reopened_ns.store(now, Ordering::Relaxed);
+        self.opened_not_started.store(why != "start", Ordering::Relaxed);
         mediabox_core::timeline!("sound-route", "why={why} device={device:?}");
         let mut d = self.sound();
         if why == "mode" {
@@ -648,11 +651,9 @@ impl Health {
             if d.context.generation != generation {
                 d.new_channel(generation, now);
             }
-            // The device's restarts since the last report: ours if we
-            // opened it in the second and a half before.
-            let ours = now.saturating_sub(self.reopened_ns.load(Ordering::Relaxed)) < 1_500_000_000;
             while device.restarts_told < device.restarts {
                 device.restarts_told += 1;
+                let ours = self.opened_not_started.swap(false, Ordering::Relaxed);
                 incidents.push(d.device_restart(now, ours));
             }
             d.c.video_dropped = self.video_dropped.load(Ordering::Relaxed);
@@ -785,6 +786,28 @@ pub fn write(report: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first start after we opened the device is ours, however long the
+    /// first sound took; any other start is an XRUN, however soon after.
+    #[test]
+    fn the_first_start_after_an_open_is_not_an_xrun() {
+        let health = Health::default();
+        let mut device = Device::default();
+        let xruns = |health: &Health| health.sound().c.alsa_xruns;
+        health.sink_opened(Some("hw:1,0".into()), "start");
+        device.restarts = 1;
+        health.report(1, 0, 0, None, &mut device);
+        assert_eq!(xruns(&health), 1, "started again with no open of ours");
+        health.sink_opened(Some("hw:1,0".into()), "reopen");
+        // A channel change under it: the first sound 2.5 s on, on the Plus.
+        std::thread::sleep(std::time::Duration::from_millis(1_600));
+        device.restarts = 2;
+        health.report(1, 0, 0, None, &mut device);
+        assert_eq!(xruns(&health), 1, "the reopened device's first start");
+        device.restarts = 3;
+        health.report(1, 0, 0, None, &mut device);
+        assert_eq!(xruns(&health), 2, "the start after that");
+    }
 
     #[test]
     fn alsa_names_find_their_proc_status() {

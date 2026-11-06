@@ -321,7 +321,7 @@ fn sound_went_on(run: &Run, inputs: usize, pid: u16, after_ns: u64) {
     // at is the reader's (`stamp::Stamp`), not the PCR's zero.
     let first = seen.buffers.iter().map(|(_, pts, _)| *pts).min().unwrap();
     let last = runs.last().unwrap();
-    assert!(last.1.iter().any(|(pts, _)| pts - first >= after_ns), "sound after the change, {} ms in", after_ns / 1_000_000);
+    assert!(last.1.iter().any(|(pts, _)| pts - first >= after_ns), "sound after the change, {} ms in: first={first} last={:?} n={}", after_ns / 1_000_000, last.1.last(), last.1.len());
     assert_eq!(n_pads(&run.engine.audio_selector), 1, "one sound input");
     let sound = run.shared.sound.lock().unwrap();
     let sound = sound.as_ref().expect("a sound part");
