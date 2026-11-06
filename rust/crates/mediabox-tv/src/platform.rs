@@ -395,7 +395,7 @@ fn crystal_ppm() -> Option<f64> {
     let raw = now.0.checked_sub(start.0)?;
     let mono = now.1.checked_sub(start.1)?;
     if mono < CRYSTAL_WINDOW.as_nanos() as u64 {
-        return crystal_kept();
+        return crystal_kept().or_else(|| CRYSTAL_EARLY.get().copied());
     }
     let ppm = (raw as f64 / mono as f64 - 1.0) * 1e6;
     let ppm = (ppm.abs() <= CRYSTAL_PPM_MAX).then_some(ppm)?;
@@ -404,7 +404,7 @@ fn crystal_ppm() -> Option<f64> {
 }
 
 /// The crystal's error for a mode set that is about to be made: at once when
-/// it is known, else after the rest of `CRYSTAL_WINDOW` (only a first
+/// it is known, else once `crystal_early` or `CRYSTAL_WINDOW` has it (a first
 /// process of a boot, in its first seconds). A panel set on the EDID's clock
 /// then would repeat a picture every half hour of the film that follows: the
 /// mode is not set again while it plays (2026-11-06, 10:17:22 restart, a
@@ -423,6 +423,37 @@ fn crystal_ppm_settled() -> Option<f64> {
         }
     }
     None
+}
+
+/// The crystal's error from the first seconds, before `CRYSTAL_WINDOW`:
+/// set once two windows of `CRYSTAL_STEP` that share no instant put a 594 MHz
+/// clock on the same kHz (1.7 ppm), the rate over both then. Windows of 10 s
+/// spread by 0.06 ppm on this board (11.20..11.26, 2026-11-06), 2 s ones by
+/// five times that at most: under a kHz's fifth, and a disagreement near a
+/// kHz's edge waits for the next pair, up to the whole window.
+static CRYSTAL_EARLY: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+const CRYSTAL_STEP: Duration = Duration::from_secs(2);
+
+fn crystal_early(start: (u64, u64)) {
+    let rate = |a: (u64, u64), b: (u64, u64)| ((b.0 - a.0) as f64 / (b.1 - a.1) as f64 - 1.0) * 1e6;
+    let khz = |ppm: f64| (594_000.0 / (1.0 + ppm * 1e-6)).round() as u32;
+    let mut points = vec![start];
+    while points.len() * CRYSTAL_STEP.as_secs() as usize <= CRYSTAL_WINDOW.as_secs() as usize {
+        std::thread::sleep(CRYSTAL_STEP);
+        points.push(raw_and_monotonic());
+        let n = points.len();
+        if n < 3 {
+            continue;
+        }
+        let (a, b) = (rate(points[n - 3], points[n - 2]), rate(points[n - 2], points[n - 1]));
+        mediabox_core::timeline!("crystal-step", "a={a:.3} b={b:.3} khz_a={} khz_b={}", khz(a), khz(b));
+        if khz(a) == khz(b) && a.abs() <= CRYSTAL_PPM_MAX {
+            let ppm = rate(start, points[n - 1]);
+            let _ = CRYSTAL_EARLY.set(ppm);
+            eprintln!("mediabox-tv.platform crystal {ppm:+.3} ppm after {:?} ({a:+.3}, {b:+.3})", CRYSTAL_STEP * (n as u32 - 1));
+            return;
+        }
+    }
 }
 
 /// Where a process's measurement is kept for the next one of the same boot
@@ -1245,8 +1276,12 @@ impl SplitDisplay {
         // The two clocks' comparison starts here (`crystal_ppm`), and is
         // kept for the next process once its window is full.
         let _ = crystal_ppm();
-        let _ = std::thread::Builder::new().name("crystal".into()).spawn(|| {
-            std::thread::sleep(CRYSTAL_WINDOW + Duration::from_millis(100));
+        let start = raw_and_monotonic();
+        let _ = std::thread::Builder::new().name("crystal".into()).spawn(move || {
+            if crystal_kept().is_none() {
+                crystal_early(start);
+            }
+            std::thread::sleep(CRYSTAL_WINDOW.saturating_sub(Duration::from_nanos(raw_and_monotonic().1 - start.1)) + Duration::from_millis(100));
             let _ = crystal_ppm();
         });
         let discovered = Self::wait_for_a_television();
@@ -3039,7 +3074,16 @@ impl SplitWindow {
         // The same mode with the crystal's error moved on since it was set
         // (a kHz is 1.7 ppm at 594 MHz) is set again: here, at a channel's
         // opening, on a dark panel -- never while a film plays.
-        let wire = on_the_wire(mode, crystal_ppm_settled()).clock();
+        // Nothing measured yet (a boot's first process, its first seconds):
+        // the panel keeps what it shows, the film too, until it is.
+        let ppm = match crystal_ppm() {
+            Some(ppm) => Some(ppm),
+            None => {
+                let _held = display.hold();
+                crystal_ppm_settled()
+            }
+        };
+        let wire = on_the_wire(mode, ppm).clock();
         if mode == display.mode.get() && colour == display.colour.get() && wire == display.wire_khz.get() {
             *display.setting.borrow_mut() = setting;
             display.trial.set(trial);
