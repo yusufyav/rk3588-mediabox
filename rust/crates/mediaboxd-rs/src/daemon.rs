@@ -2937,11 +2937,15 @@ async fn follow_live(
 }
 
 /// The display matched again under a playing live channel. The mode change
-/// takes the HDMI sound device away, and nothing says so: measured
+/// stops the HDMI sound device's stream, and nothing says so: measured
 /// 2026-10-25, TRT ULTRA's mode changed under it, alsasink posted no error
-/// and the sound stayed off. Once the mode is on and the television has
-/// locked to it, the player opens its sound device again (`ao-reload`); the
-/// picture is not touched.
+/// and the sound stayed off. The kernel stops it inside the mode's commit
+/// (hdmi-codec.c `plugged_cb` on plug-in, `snd_pcm_stop(SETUP)`: the PCM
+/// was in SETUP 40 ms before the commit returned, 2026-11-06), so once the
+/// owner says the mode is on, the player opens its sound device again
+/// (`ao-reload`) at once; the picture is not touched. Its answer comes when
+/// the device is open, or given up on. A fixed 1.5 s wait used to come
+/// first: 1.5 s more of no sound after every mode change.
 /// A live request given up for a newer one, on the timeline.
 fn called_off_live(rid: u64, at: &str) -> Response {
     mediabox_core::timeline!("cancel", "rid={rid} at={at}");
@@ -2980,10 +2984,14 @@ pub(crate) async fn rematch_live(
         "film={film} ok={}",
         u8::from(output.content_applied(film))
     );
-    tokio::time::sleep(Duration::from_millis(1500)).await;
     mediabox_core::timeline!("ao-reload", "film={film}");
-    if player.film() == film && !player.command(json!(["ao-reload"])).await {
-        eprintln!("mediaboxd-rs: film {film}: the player did not open its sound again after the mode change");
+    if player.film() != film {
+        return;
+    }
+    let reopened = player.reload_sound().await;
+    mediabox_core::timeline!("ao-reload-done", "film={film} ok={}", u8::from(reopened.is_ok()));
+    if let Err(why) = reopened {
+        eprintln!("mediaboxd-rs: film {film}: the player did not open its sound again after the mode change: {why}");
     }
 }
 

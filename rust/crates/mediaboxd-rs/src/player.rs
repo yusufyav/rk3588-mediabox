@@ -203,6 +203,21 @@ impl PlayerManager {
             .is_some_and(|answer| answer.get("error").and_then(Value::as_str) == Some("success"))
     }
 
+    /// The player's sound device opened again (`ao-reload`). The live
+    /// player answers once it is open, or once it gave up after its tries
+    /// (mediabox-live `SINK_RETRY_MS`, 1.55 s): longer than a request's
+    /// usual patience.
+    pub async fn reload_sound(&self) -> Result<(), String> {
+        let answer = self
+            .ask_within(json!({"command": ["ao-reload"], "request_id": 41}), std::time::Duration::from_secs(3))
+            .await
+            .ok_or("no answer")?;
+        match answer.get("error").and_then(Value::as_str) {
+            Some("success") => Ok(()),
+            other => Err(other.unwrap_or("no answer").to_string()),
+        }
+    }
+
     /// What the film is made of, as mpv lists it.
     pub async fn tracks(&self) -> Vec<Value> {
         self.property("track-list")
