@@ -203,3 +203,37 @@ fn each_channel_the_evidence_is_kept_for_is_said_once_with_the_players_pid() {
     assert_eq!((lines[0]["generation"].as_u64(), lines[1]["generation"].as_u64()), (Some(1), Some(2)));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_request_pending_at_the_players_end_is_written_cut_not_lost() {
+    // A silence asked for at `at`; the player ends 2 s later, a second
+    // before its after-window (`AFTER_NS`) is due.
+    let dir = scratch("shutdown");
+    let e = filled(dir.clone(), 1 << 30);
+    let end = now() + AFTER_NS - 1_000_000_000;
+    e.write_due(end);
+    assert_eq!(e.dumps.load(Ordering::Relaxed), 0, "not due yet");
+    assert_eq!(e.write_pending_at_shutdown(end), 1);
+    let made = dumps_in(&dir);
+    assert_eq!(made.len(), 1, "{made:?}");
+    let dump = dir.join(&made[0]);
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dump.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["truncated_at_shutdown"], true);
+    assert_eq!(meta["to"].as_u64(), Some(end), "cut where the player ended, no after-window made up");
+    assert!(meta["asked_to"].as_u64().unwrap() > end);
+    assert_eq!(std::fs::read(dump.join("pcm.raw")).unwrap().len(), 4608, "what was gathered is kept");
+    assert_eq!(e.write_pending_at_shutdown(end), 0, "nothing written twice");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_dump_written_in_its_time_is_not_marked_cut() {
+    let dir = scratch("whole");
+    let e = filled(dir.clone(), 1 << 30);
+    e.write_due(now() + AFTER_NS + 1);
+    let made = dumps_in(&dir);
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(&made[0]).join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["truncated_at_shutdown"], false);
+    assert!(meta["asked_to"].is_null());
+    let _ = std::fs::remove_dir_all(&dir);
+}

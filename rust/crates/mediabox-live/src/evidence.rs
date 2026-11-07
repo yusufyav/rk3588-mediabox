@@ -220,6 +220,8 @@ pub struct Request {
     pub from: u64,
     pub to: u64,
     pub note: serde_json::Value,
+    /// Written at the player's end before `to`: the end it was asked for.
+    pub asked_to: Option<u64>,
 }
 
 #[derive(Default)]
@@ -398,7 +400,7 @@ impl Evidence {
             r.to = r.to.max(to);
             return;
         }
-        requests.push(Request { kind: kind.to_string(), from, to, note });
+        requests.push(Request { kind: kind.to_string(), from, to, note, asked_to: None });
     }
 
     /// Writes what is due by `now`.
@@ -410,19 +412,42 @@ impl Evidence {
             due
         };
         for request in due {
-            match self.dump(&request) {
-                Ok(_) => {
-                    self.dumps.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(error) => {
-                    self.write_errors.fetch_add(1, Ordering::Relaxed);
-                    eprintln!("mediabox-live: olay kanıtı yazılamadı ({}): {error}", request.kind);
-                }
+            self.write(&request);
+        }
+    }
+
+    /// At the player's end: what was asked for and is not yet due, written
+    /// as far as it was gathered -- its window cut at `now`, said so in its
+    /// `meta.json` (`truncated_at_shutdown`), never filled with an after it
+    /// did not have. A request whose window has passed is written whole.
+    /// The caller bounds the time it gives this (`main`): a dump cut off by
+    /// the process's exit is a temporary directory, never a half dump.
+    pub fn write_pending_at_shutdown(&self, now: u64) -> usize {
+        let pending: Vec<Request> = std::mem::take(&mut *lock(&self.requests));
+        let count = pending.len();
+        for mut request in pending {
+            if request.to > now {
+                request.asked_to = Some(request.to);
+                request.to = now;
             }
-            if let Err(error) = self.hold_quota() {
+            self.write(&request);
+        }
+        count
+    }
+
+    fn write(&self, request: &Request) {
+        match self.dump(request) {
+            Ok(_) => {
+                self.dumps.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
                 self.write_errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("mediabox-live: kanıt kotası tutulamadı: {error}");
+                eprintln!("mediabox-live: olay kanıtı yazılamadı ({}): {error}", request.kind);
             }
+        }
+        if let Err(error) = self.hold_quota() {
+            self.write_errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("mediabox-live: kanıt kotası tutulamadı: {error}");
         }
     }
 
@@ -482,6 +507,7 @@ impl Evidence {
         lines("clock.jsonl", clock.iter().map(clock_json).collect())?;
         let meta = serde_json::json!({
             "kind": r.kind, "from": r.from, "to": r.to, "note": r.note,
+            "truncated_at_shutdown": r.asked_to.is_some(), "asked_to": r.asked_to,
             "pcm_format": format, "service": service,
             "dropped_total": self.dropped.load(Ordering::Relaxed),
             "quota_bytes": self.quota, "quota_deferred_total": self.quota_deferred.load(Ordering::Relaxed),

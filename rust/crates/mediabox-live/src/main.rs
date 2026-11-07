@@ -514,6 +514,20 @@ fn main() {
     // decoder or a reader blocked on the FIFO kept this process alive for
     // 90 s until systemd killed it (measured 2026-10-24). The picture is
     // already off and the frames given back, so nothing is lost by leaving.
+    // The evidence asked for and not yet due, written as far as it was
+    // gathered: a stop before an event's after-window lost its dump (14658,
+    // FAZ 2H). Given at most 1 s, on a thread of its own.
+    if let Some(evidence) = evidence::get() {
+        let (done, wait) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(evidence.write_pending_at_shutdown(evidence::now()));
+        });
+        match wait.recv_timeout(Duration::from_millis(1000)) {
+            Ok(n) if n > 0 => eprintln!("mediabox-live: kapanışta {n} bekleyen kanıt yazıldı"),
+            Ok(_) => {}
+            Err(_) => eprintln!("mediabox-live: bekleyen kanıt 1 s içinde yazılamadı"),
+        }
+    }
     let (done, wait) = mpsc::channel();
     let engine_for_shutdown = Arc::clone(&engine);
     std::thread::spawn(move || {
