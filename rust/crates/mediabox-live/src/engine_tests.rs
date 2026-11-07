@@ -1073,6 +1073,16 @@ fn a_sound_change_on_a_change_not_yet_played_out_goes_to_the_last() {
             .map(|parts| parts.pads.lock().unwrap().iter().filter(|(element, _)| *element == run.engine.audio_selector).map(|(_, pad)| pad.name().to_string()).collect())
             .unwrap_or_default();
         assert_eq!(inputs.last(), last_input.first(), "held={held}: the last part is the one heard: {inputs:?} {last_input:?}");
+        // The first part played out to its end before the last one began:
+        // what lies between them is the middle part's time, never heard.
+        if held {
+            let seen = run.audio.lock().unwrap();
+            let runs = runs(&seen);
+            let (first, last) = (&runs[0].1, &runs[runs.len() - 1].1);
+            let apart = last[0].0 as i64 - (first[first.len() - 1].0 + 24_000_000) as i64;
+            let middle = (ns(third) - ns(SWITCH)) as i64;
+            assert!((apart - middle).abs() <= 24_000_000, "the first part's end and the last part's start {} ms apart, the middle part's time {} ms", apart / 1_000_000, middle / 1_000_000);
+        }
         // The first part and then the last; the middle one only where the
         // first played out before the last was read.
         assert!(inputs.len() == if held { 2 } else { 3 }, "held={held}: {inputs:?}");
