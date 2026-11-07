@@ -1063,6 +1063,16 @@ fn a_sound_change_on_a_change_not_yet_played_out_goes_to_the_last() {
         let seen = run.audio.lock().unwrap();
         let inputs: Vec<String> = runs(&seen).into_iter().map(|(pad, _)| pad).collect();
         drop(seen);
+        // The sound heard last is the last part's own input of the selector.
+        let last_input: Vec<String> = run
+            .shared
+            .sound
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|parts| parts.pads.lock().unwrap().iter().filter(|(element, _)| *element == run.engine.audio_selector).map(|(_, pad)| pad.name().to_string()).collect())
+            .unwrap_or_default();
+        assert_eq!(inputs.last(), last_input.first(), "held={held}: the last part is the one heard: {inputs:?} {last_input:?}");
         // The first part and then the last; the middle one only where the
         // first played out before the last was read.
         assert!(inputs.len() == if held { 2 } else { 3 }, "held={held}: {inputs:?}");
