@@ -93,6 +93,19 @@ pub(crate) trait GateIo {
     /// receiver ended with `code` as the film's end. False: a newer channel
     /// took over meanwhile, and nothing was done.
     async fn give_up(&self, code: &str) -> bool;
+    /// The code this channel's player failed it with by itself (its own
+    /// limit, a sound device it never got), once that player is gone and the
+    /// channel with it: its last word on this channel. `None`: not that.
+    fn own_failure(&self) -> Option<String> {
+        None
+    }
+}
+
+/// The channel is not the one opened last any more: its player ended it with
+/// its own code, or a newer channel took over at `step`. Nothing is done
+/// either way -- what is on now is not this channel's.
+fn gone<I: GateIo>(io: &I, step: &'static str) -> End {
+    io.own_failure().map_or(End::Stale(step), End::Failed)
 }
 
 /// How an opening ended.
@@ -111,7 +124,7 @@ pub(crate) async fn open_channel<I: GateIo>(io: &I) -> End {
     match open_it(io).await {
         End::Failed(code) => {
             eprintln!("mediaboxd-rs: live channel: not opened: {code}");
-            if io.give_up(&code).await { End::Failed(code) } else { End::Stale("give-up") }
+            if io.current() && io.give_up(&code).await { End::Failed(code) } else { gone(io, "give-up") }
         }
         end => end,
     }
@@ -122,7 +135,7 @@ async fn open_it<I: GateIo>(io: &I) -> End {
     // The stream's rate.
     let found = loop {
         if !io.current() {
-            return End::Stale("rate");
+            return gone(io, "rate");
         }
         if let Some(cadence) = io.stream_rate().and_then(Cadence::from_fps) {
             break Some((cadence, "sps"));
@@ -173,7 +186,7 @@ async fn open_it<I: GateIo>(io: &I) -> End {
         let asked = tokio::time::Instant::now();
         let failed = loop {
             if !io.current() {
-                return End::Stale("mode");
+                return gone(io, "mode");
             }
             match fault.clone().unwrap_or_else(|| io.mode_progress(request)) {
                 ContentProgress::Applied => {
@@ -214,7 +227,7 @@ async fn sound_and_open<I: GateIo>(io: &I, outcome: &str) -> End {
     let device = io.player_gate().await.and_then(|gate| gate.get("sound").and_then(Value::as_str).map(str::to_string));
     if !io.sound_current() || matches!(device.as_deref(), Some("stand-in" | "given-up")) {
         if !io.current() {
-            return End::Stale("sound");
+            return gone(io, "sound");
         }
         let reopened = io.reload_sound().await;
         mediabox_core::timeline!("gate-reload", "ok={}", u8::from(reopened.is_ok()));
@@ -234,7 +247,7 @@ async fn finish<I: GateIo>(io: &I, outcome: &str) -> End {
     let asked = tokio::time::Instant::now();
     loop {
         if !io.current() {
-            return End::Stale("open");
+            return gone(io, "open");
         }
         match io.open(outcome).await {
             Ok(()) => return End::Opened(outcome.to_string()),
@@ -277,6 +290,7 @@ mod tests {
         has_picture: Cell<Option<bool>>,
         given_up: RefCell<Vec<String>>,
         newer_at_give_up: Cell<bool>,
+        own_failure: RefCell<Option<String>>,
     }
 
     impl GateIo for Fake {
@@ -336,6 +350,9 @@ mod tests {
             }
             self.given_up.borrow_mut().push(code.to_string());
             true
+        }
+        fn own_failure(&self) -> Option<String> {
+            self.own_failure.borrow().clone()
         }
     }
 
@@ -527,6 +544,26 @@ mod tests {
         let gate = serde_json::json!({"open": false, "failed": "player-timeout", "preroll": 300, "rate": 30.0});
         let io = Fake { gate: RefCell::new(Some(gate)), has_picture: Cell::new(Some(true)), ..Fake::default() };
         failed_shut(&io, open_channel(&io).await, "player-timeout");
+    }
+
+    /// A player that fails its channel by itself and goes, before the rate is
+    /// read: the channel is not current any more, and its end is that code,
+    /// not a newer channel's taking over. Nothing is ended or let go for it.
+    #[tokio::test(start_paused = true)]
+    async fn a_player_gone_by_its_own_failure_is_that_failure_at_any_step() {
+        for until in [1, 8, 12] {
+            let io = Fake {
+                current_until: Cell::new(Some(until)),
+                sps: RefCell::new(Some(30.0)),
+                sps_after: Cell::new(5),
+                mode: RefCell::new(vec![ContentProgress::Pending]),
+                own_failure: RefCell::new(Some("sound-failed".into())),
+                ..Fake::default()
+            };
+            assert_eq!(open_channel(&io).await, End::Failed("sound-failed".into()), "at poll {until}");
+            assert!(io.opened.borrow().is_empty(), "nothing let go (poll {until})");
+            assert!(io.given_up.borrow().is_empty(), "nothing ended: it is not current (poll {until})");
+        }
     }
 
     #[tokio::test(start_paused = true)]

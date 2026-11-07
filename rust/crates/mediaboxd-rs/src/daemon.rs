@@ -3215,6 +3215,9 @@ impl crate::live_gate::GateIo for LiveGate {
         }
         true
     }
+    fn own_failure(&self) -> Option<String> {
+        player_failure(LIVE_HEALTH, self.epoch)
+    }
 }
 
 /// What a display re-match under a live channel goes on to, once the wait
