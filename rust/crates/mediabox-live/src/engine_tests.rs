@@ -979,6 +979,29 @@ fn every_picture_of_every_channel_has_its_end() {
     }
 }
 
+/// The sound read before its part of the branch is up is not lost: a
+/// channel's first sound frames come with its first picture, in the same
+/// read, before tsdemux has put up the pad its part is built at. Before, the
+/// reader passed them by -- the first 96 ms of the PMT fixture's sound (FAZ
+/// 2F, 4 MP2 frames, there in the stream) -- and the sound began after the
+/// picture.
+#[test]
+fn the_sound_read_before_its_part_is_up_is_played() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream(&[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX }]);
+    let run = play(ts, 0);
+    let picture = run.video.lock().unwrap().buffers.iter().map(|(_, pts, _)| *pts).min().expect("pictures");
+    let audio = run.audio.lock().unwrap();
+    let sound = audio.buffers.iter().map(|(_, pts, _)| *pts).min().expect("sound");
+    // Both start at the stream's first PTS: the sound's first frame is the
+    // picture's, to the clock's rounding.
+    assert!(sound.abs_diff(picture) < 1_000_000, "the sound began {} ms after the picture", (sound as i64 - picture as i64) / 1_000_000);
+    let steps = audio.buffers.windows(2).map(|w| w[1].1.saturating_sub(w[0].1)).max().unwrap_or(0);
+    assert!(steps <= 25_000_000, "a gap of {} ms in the sound", steps / 1_000_000);
+    assert_eq!(run.shared.health.sound_push_errors.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
 /// The test's pictures are H.264 out of `identity`, not dma-bufs: each one
 /// shown is counted dropped as such, and that is all that is.
 fn not_dmabuf(run: &Run) -> u64 {

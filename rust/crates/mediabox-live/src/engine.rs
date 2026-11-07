@@ -3363,6 +3363,8 @@ fn read_stream(
     // what is in the packets, so that a stream before the branch's reaching
     // it is seen.
     let mut content = mediabox_core::ts_trace::Content::default();
+    // What was read before the channel's sound part was up (`SoundBacklog`).
+    let mut backlog = SoundBacklog::default();
     loop {
         let (read, read_at) = match read_chunk(&mut file, path, &mut chunk) {
             Ok(read) => read,
@@ -3383,6 +3385,7 @@ fn read_stream(
             reader = None;
             reference = None;
             content.reset();
+            backlog.clear(generation);
         }
         // When the read returned, on the source's running time: taken at
         // the read, never after a push that waited.
@@ -3436,9 +3439,27 @@ fn read_stream(
             {
                 es.select(*pid, *codec, &mut out);
             }
+            // Its part up: what was read before it, first, each piece on the
+            // clock it was read against.
+            if let Some((_, _, source)) = &sound
+                && !backlog.is_empty()
+            {
+                for held in backlog.take() {
+                    let fed = es.feed(&held.data);
+                    shared.health.ts(generation, &fed.events, es.counts(), es.sound_state(), es.codec());
+                    if !fed.chunks.is_empty() {
+                        push_sound(source, fed.chunks, (held.reference, held.stepped), generation, held.arrived, shared, on_sound);
+                    }
+                }
+            }
+            // Not up yet: the packets wait, read on to the reader when it is.
+            // Fed to the reader now, with no sound PID chosen, its first
+            // frames were passed by (FAZ 2F: 96 ms of the PMT fixture).
+            let waiting = sound.is_none() && es.sound_pid().is_none();
+            let kept = waiting.then(|| piece.data.clone());
             // The `ts-drop` fault: every Nth packet of the sound's PID
             // never reaches the reader, as if the receiver had lost it.
-            let fed = match (faults.ts_drop, es.sound_pid()) {
+            let fed = if waiting { crate::es::Output::default() } else { match (faults.ts_drop, es.sound_pid()) {
                 (n, Some(pid)) if crate::health::Faults::ON && n > 0 => {
                     let mut kept = Vec::with_capacity(piece.data.len());
                     for packet in piece.data.chunks(crate::stamp::PACKET) {
@@ -3455,7 +3476,7 @@ fn read_stream(
                     es.feed(&kept)
                 }
                 _ => es.feed(&piece.data),
-            };
+            } };
             out.chunks.extend(fed.chunks);
             out.events.extend(fed.events);
             shared.health.ts(generation, &out.events, es.counts(), es.sound_state(), es.codec());
@@ -3468,12 +3489,76 @@ fn read_stream(
                 reference = Some((at, pcr));
             }
             sound_discont |= stepped;
+            if let (Some(data), Some(arrived)) = (kept, arrived) {
+                backlog.hold(generation, HeldPiece { data, reference, stepped: std::mem::take(&mut sound_discont), arrived: arrived.nseconds() });
+            }
             if let (Some((_, _, source)), Some(arrived)) = (&sound, arrived)
                 && !chunks.is_empty()
             {
                 push_sound(source, chunks, (reference, std::mem::take(&mut sound_discont)), generation, arrived.nseconds(), shared, on_sound);
             }
         }
+    }
+}
+
+/// A piece of the stream read before its channel's sound part was up: its
+/// packets, the clock reference after it, whether the clock stepped at it,
+/// and when it was read.
+struct HeldPiece {
+    data: Vec<u8>,
+    reference: Option<(u64, u64)>,
+    stepped: bool,
+    arrived: u64,
+}
+
+/// The packets read before a channel's sound part is up, for the reader to
+/// take once it is: tsdemux puts the pad the part is built at up only after
+/// it has parsed the PMT, and the first read of a channel (the receiver's
+/// burst from its last access point) has its first sound frames with its
+/// first picture. Bounded: a programme whose sound never comes keeps the
+/// last `MAX` bytes, the older ones said lost.
+#[derive(Default)]
+struct SoundBacklog {
+    generation: u64,
+    pieces: std::collections::VecDeque<HeldPiece>,
+    bytes: usize,
+}
+
+impl SoundBacklog {
+    /// About 2 s of a 15 Mbit/s service.
+    const MAX: usize = 4 << 20;
+
+    fn clear(&mut self, generation: u64) {
+        self.generation = generation;
+        self.pieces.clear();
+        self.bytes = 0;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    fn hold(&mut self, generation: u64, piece: HeldPiece) {
+        if generation != self.generation {
+            self.clear(generation);
+        }
+        self.bytes += piece.data.len();
+        self.pieces.push_back(piece);
+        while self.bytes > Self::MAX
+            && let Some(old) = self.pieces.pop_front()
+        {
+            self.bytes -= old.data.len();
+            mediabox_core::timeline!("sound-backlog", "gen={generation} lost_bytes={}", old.data.len());
+            // The reader sees a continuity break where it starts again.
+            if let Some(next) = self.pieces.front_mut() {
+                next.stepped = true;
+            }
+        }
+    }
+
+    fn take(&mut self) -> Vec<HeldPiece> {
+        self.bytes = 0;
+        self.pieces.drain(..).collect()
     }
 }
 
