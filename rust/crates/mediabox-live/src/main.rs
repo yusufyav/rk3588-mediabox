@@ -26,6 +26,7 @@ mod audio_clock;
 #[cfg(test)]
 mod audio_replay;
 mod engine;
+mod gst_abi;
 mod es;
 mod evidence;
 mod evidence_classify;

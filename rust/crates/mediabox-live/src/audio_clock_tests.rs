@@ -165,29 +165,6 @@ fn a_calibration_set_by_another_is_taken_and_its_phase_acquired_from_a_seconds_m
     assert!((c.to_internal(t0 as f64) - truth(t0) as f64).abs() < 1_000.0);
 }
 
-#[test]
-#[cfg(all(target_arch = "aarch64", target_pointer_width = "64"))]
-fn the_parents_structs_are_as_large_as_gstreamers_headers_say() {
-    // aarch64-linux-gnu-gcc against the runtime's 1.26 headers: sizeof
-    // GstBaseSink 664 (GstAudioBaseSink.next_sample at 688,
-    // provided_clock at 696), sizeof GstSystemClock 168
-    // (GstAudioClock.user_data at 176, time_offset at 200).
-    assert_eq!(std::mem::size_of::<gst_app::gst_base::ffi::GstBaseSink>(), 664);
-    assert_eq!(std::mem::size_of::<gst::ffi::GstSystemClock>(), 168);
-}
-
-#[test]
-fn the_sinks_fields_are_found_in_alsasink_and_refused_elsewhere() {
-    gst::init().unwrap();
-    if let Ok(sink) = gst::ElementFactory::make("alsasink").build() {
-        let f = fields(&sink).expect("an audiobasesink's fields");
-        // Zero as GObject made it; -1 from its first state change on.
-        assert_eq!(next_sample(&sink, f), Some(0.0));
-    }
-    let fake = gst::ElementFactory::make("fakesink").build().unwrap();
-    assert!(fields(&fake).is_none(), "not an audiobasesink: not read");
-}
-
 fn raw(format: &str, layout: &str, rate: i32, channels: i32) -> gst::Caps {
     gst::Caps::builder("audio/x-raw")
         .field("format", format)
@@ -288,7 +265,7 @@ fn on_a_real_sink_the_contract_is_controlled_a_new_rate_followed_and_another_for
         .build()
         .unwrap();
     let stats = std::sync::Arc::new(Stats::default());
-    assert!(install(&sink, || 7, std::sync::Arc::clone(&stats)));
+    install(&sink, || 7, std::sync::Arc::clone(&stats)).unwrap();
     sink.set_property_from_str("slave-method", "custom");
     // What reaches the sink past the controller, in a format not the
     // contract's.
@@ -320,4 +297,22 @@ fn on_a_real_sink_the_contract_is_controlled_a_new_rate_followed_and_another_for
     assert_eq!(stats.rate_hz.load(Ordering::Relaxed), 44_100);
     assert_eq!(stats.unavailable.load(Ordering::Relaxed), 0);
     assert!(!stats.active());
+}
+
+#[test]
+fn refused_by_the_guard_the_sink_is_left_uncontrolled_never_on_resample_and_says_so() {
+    gst::init().unwrap();
+    let sink = gst::ElementFactory::make("alsasink").build().unwrap();
+    sink.set_property_from_str("slave-method", "custom");
+    let stats = Stats::default();
+    fail_closed(&sink, &stats, "test: another libgstaudio");
+    let method = sink.property_value("slave-method");
+    let method = gst::glib::EnumValue::from_value(&method).unwrap().1.nick();
+    assert_ne!(method, "resample", "not the slaving that steps the sound");
+    assert_eq!(method, UNCONTROLLED_SLAVING);
+    let told = stats.json();
+    assert_eq!(told["controller_active"], false);
+    assert_eq!(told["abi_guard_failed"], true);
+    assert_eq!(told["fallback"], 1);
+    assert_eq!(told["abi_reason"], "test: another libgstaudio");
 }

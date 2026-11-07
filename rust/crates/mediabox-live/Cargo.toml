@@ -32,6 +32,11 @@ mediabox-core = { path = "../mediabox-core" }
 serde_json = "1.0.149"
 libc = "0.2.189"
 
+[build-dependencies]
+# Already in the tree (system-deps'): the headers and libraries
+# src/gst_abi.c is built against.
+pkg-config = "0.3.34"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

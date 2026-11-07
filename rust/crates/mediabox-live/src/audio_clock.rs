@@ -11,9 +11,12 @@
 //! buffer -- 1152 samples played in 991. The crystal's ordinary drift was
 //! followed by a sample repeated or dropped now and then.
 //!
-//! What instead, for PCM (`slave-method=custom`, no callback: audiobasesink
-//! applies the calibration and requests no skew, and aligns each buffer's
-//! start and end to the one before, so it never stretches one):
+//! What instead, for PCM. The sink is on `slave-method=custom` with no
+//! callback, which GStreamer documents as NONE: audiobasesink corrects no
+//! drift of its own -- it applies the audio clock's calibration as it
+//! stands and aligns each buffer's start and end to the one before, so it
+//! never stretches one. The correction is this controller's, all of it:
+//! it sets the calibration and resamples the sound upstream of the sink.
 //!
 //! - `ClockModel`: the calibration -- the audio clock's time against the
 //!   pipeline's -- set by this controller only. Each observation is the
@@ -33,6 +36,13 @@
 //! - `Resampler`: a band-limited (windowed-sinc) resampler by a ratio within
 //!   1 +- `RATE_RANGE`; with no ratio it passes every sample through as it
 //!   came.
+//!
+//! The sink's fields it reads (where the sink writes the next buffer, its
+//! clock, the clock's offset) are read through `gst_abi`, compiled against
+//! GStreamer's headers and guarded against the libraries loaded; the
+//! sound is held to one format (`CONTRACT_FORMAT`). Either refused, the
+//! controller is not on the sound and says so (`fail_closed`,
+//! `admission`).
 //!
 //! The reset contract: the sink beginning again (its next sample unknown),
 //! a DISCONT, a FLUSH, new caps, another channel (generation) or a
@@ -637,6 +647,11 @@ pub struct Stats {
     pub refusing: AtomicBool,
     pub degraded: AtomicU64,
     pub degraded_detail: std::sync::Mutex<Option<serde_json::Value>>,
+    /// The ABI guard refused the sink (`gst_abi`), and why; the sink then
+    /// left to GStreamer's own slaving (`fail_closed`).
+    pub abi_guard_failed: AtomicU64,
+    pub abi_reason: std::sync::Mutex<Option<String>>,
+    pub fallback: AtomicU64,
     /// Buffers that went to the sink without the controller: no time on
     /// them, or no clock on the sink.
     pub unavailable: AtomicU64,
@@ -654,6 +669,8 @@ impl Stats {
         serde_json::json!({
             "controller_active": self.active(), "generations": g(&self.generations),
             "degraded": g(&self.degraded),
+            "abi_guard_failed": g(&self.abi_guard_failed) > 0, "abi_guard_failures": g(&self.abi_guard_failed),
+            "abi_reason": self.abi_reason.lock().unwrap_or_else(|p| p.into_inner()).clone(), "fallback": g(&self.fallback),
             "degraded_last": self.degraded_detail.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             "observations": { "used": g(&self.used), "not_one_moment": g(&self.not_one_moment), "transient": g(&self.transient) },
             "updates": g(&self.updates), "resets": g(&self.resets), "adopted": g(&self.adopted),
@@ -768,71 +785,21 @@ pub fn admission(stats: &Stats, generation: u64, caps: Option<&gst::CapsRef>) ->
     }
 }
 
-/// Where audiobasesink and its GstAudioClock keep, as public instance
-/// fields, the next sample's place and the clock's offset
-/// (gstaudiobasesink.h and gstaudioclock.h, GStreamer 1.26): past their
-/// parents' structs. Found only when the fields around them read back as
-/// the sink's own -- its buffer-time and latency-time, a clock whose user
-/// data is the sink, and (at the first buffer, `provide_clock` giving none
-/// before the ring is acquired) that clock the one the sink provides -- so
-/// another layout is refused, never read.
-#[derive(Debug, Clone, Copy)]
-pub struct Fields {
-    next_sample: usize,
-    time_offset: usize,
-    clock: usize,
-}
+/// The sink with no controller (the ABI guard refused, or the sink's
+/// clock is not the one checked): GStreamer's own default slaving, `skew`
+/// -- never `resample`, whose single late reading of the master moved the
+/// sound 2.4-5.5 ms in one buffer (FAZ 2I) -- told, and counted as a
+/// fallback, so that no product acceptance passes on it.
+pub const UNCONTROLLED_SLAVING: &str = "skew";
 
-pub fn fields(sink: &gst::Element) -> Option<Fields> {
+pub fn fail_closed(sink: &gst::Element, stats: &Stats, reason: &str) {
+    stats.installed.store(false, Ordering::Relaxed);
+    stats.abi_guard_failed.fetch_add(1, Ordering::Relaxed);
+    stats.fallback.fetch_add(1, Ordering::Relaxed);
+    *stats.abi_reason.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.to_string());
     use gst::prelude::*;
-    let audio_base_sink = gst::glib::Type::from_name("GstAudioBaseSink")?;
-    if !sink.type_().is_a(audio_base_sink) {
-        return None;
-    }
-    let base = std::mem::size_of::<gst_app::gst_base::ffi::GstBaseSink>();
-    let clock_base = std::mem::size_of::<gst::ffi::GstSystemClock>();
-    let p = sink.as_ptr() as *const u8;
-    // SAFETY: the sink is alive (held here) and an audiobasesink's instance
-    // is a GstBaseSink followed by its own fields.
-    let (buffer_time, latency_time, clock) = unsafe {
-        (
-            std::ptr::read_unaligned(p.add(base + 8) as *const u64),
-            std::ptr::read_unaligned(p.add(base + 16) as *const u64),
-            std::ptr::read_unaligned(p.add(base + 32) as *const *const u8),
-        )
-    };
-    let sinks = i64::try_from(buffer_time).ok() == Some(sink.property::<i64>("buffer-time"))
-        && i64::try_from(latency_time).ok() == Some(sink.property::<i64>("latency-time"))
-        && !clock.is_null();
-    if !sinks {
-        return None;
-    }
-    // SAFETY: the sink holds its clock from its init to its finalize; a
-    // GstAudioClock's instance is a GstSystemClock followed by its own.
-    let user_data = unsafe { std::ptr::read_unaligned(clock.add(clock_base + 8) as *const usize) };
-    (user_data == sink.as_ptr() as usize).then_some(Fields { next_sample: base + 24, time_offset: clock_base + 32, clock: base + 32 })
-}
-
-/// The sink's clock as its field holds it: the one `provide_clock` gives
-/// once its ring is acquired.
-fn clock_field(sink: &gst::Element, f: Fields) -> usize {
-    use gst::prelude::*;
-    // SAFETY: as `fields`.
-    unsafe { std::ptr::read_unaligned((sink.as_ptr() as *const u8).add(f.clock) as *const usize) }
-}
-
-fn next_sample(sink: &gst::Element, f: Fields) -> Option<f64> {
-    use gst::prelude::*;
-    // SAFETY: `fields` found the layout; the field is written by the
-    // streaming thread this probe runs on.
-    let v = unsafe { std::ptr::read_volatile((sink.as_ptr() as *const u8).add(f.next_sample) as *const u64) };
-    (v != u64::MAX).then_some(v as f64)
-}
-
-fn time_offset(clock: &gst::Clock, f: Fields) -> i64 {
-    use gst::prelude::*;
-    // SAFETY: as `next_sample`; an aligned word, written whole.
-    unsafe { std::ptr::read_volatile((clock.as_ptr() as *const u8).add(f.time_offset) as *const i64) }
+    eprintln!("mediabox-live: audio_clock_degraded abi_guard_failed reason={reason}; ses saati denetleyicisi yok, sink GStreamer varsayılanında ({UNCONTROLLED_SLAVING})");
+    sink.set_property_from_str("slave-method", UNCONTROLLED_SLAVING);
 }
 
 /// The probe's own: the controller for the stream's format, and the
@@ -840,16 +807,17 @@ fn time_offset(clock: &gst::Clock, f: Fields) -> i64 {
 type Probe = (Option<(Format, Controller)>, Vec<f32>);
 
 /// The controller on alsasink's sink pad, before the sink: every buffer of
-/// PCM resampled to its place, the audio clock's calibration set. False,
-/// and nothing installed, when the sink's fields are not where they are
-/// read from: the caller keeps GStreamer's own slaving then.
-pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync + 'static, stats: std::sync::Arc<Stats>) -> bool {
+/// PCM resampled to its place, the audio clock's calibration set, and the
+/// sink on `slave-method=custom` with no callback -- which GStreamer
+/// documents as NONE: the sink corrects no drift of its own; it applies the
+/// calibration this controller sets, and aligns every buffer's both ends to
+/// the one before. Not installed, and why, when the ABI guard refuses the
+/// sink (`gst_abi`): the caller fails closed then (`fail_closed`).
+pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync + 'static, stats: std::sync::Arc<Stats>) -> Result<(), String> {
     use gst::prelude::*;
     use gst_app::gst_base::prelude::*;
-    let (Some(f), Some(pad)) = (fields(sink), sink.static_pad("sink")) else {
-        stats.unavailable.fetch_add(1, Ordering::Relaxed);
-        return false;
-    };
+    let fields = crate::gst_abi::AudioSink::of(sink)?;
+    let pad = sink.static_pad("sink").ok_or("the sink has no sink pad")?;
     let weak = sink.downgrade();
     let pipeline_clock = gst::SystemClock::obtain();
     let state: std::sync::Mutex<Probe> = std::sync::Mutex::new((None, Vec::new()));
@@ -866,13 +834,15 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
             stats.unavailable.fetch_add(1, Ordering::Relaxed);
             return gst::PadProbeReturn::Ok;
         };
-        if audio_clock.as_ptr() as usize != clock_field(&sink, f) {
-            // Not the layout read: GStreamer's own slaving, the probe gone.
-            stats.unavailable.fetch_add(1, Ordering::Relaxed);
-            eprintln!("mediabox-live: ses saati alanı sink'in saati değil; GStreamer resample kullanılıyor");
-            sink.set_property_from_str("slave-method", "resample");
-            return gst::PadProbeReturn::Remove;
-        }
+        let checked = match crate::gst_abi::audio_clock(fields, &audio_clock) {
+            Ok(c) => c,
+            Err(reason) => {
+                // Not the clock the fields are of: no field read, the probe
+                // gone, the sink left uncontrolled and said so.
+                fail_closed(&sink, &stats, &reason);
+                return gst::PadProbeReturn::Remove;
+            }
+        };
         let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
         let (control, samples) = &mut *guard;
         match buffer.map_readable() {
@@ -906,7 +876,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
         let base = sink.base_time().map_or(0, |b| b.nseconds()) as f64;
         let sync = sink.property::<i64>("ts-offset") as f64 - sink.property::<u64>("render-delay") as f64
             + sink.downcast_ref::<gst_app::gst_base::BaseSink>().map_or(0, |b| b.latency().nseconds()) as f64;
-        let offset = time_offset(&audio_clock, f) as f64;
+        let offset = checked.time_offset() as f64;
         let rate = f64::from(format.rate);
         let place = |t: u64, c: &Calibration| -> f64 {
             let running = segment.as_ref().and_then(|s| s.to_running_time(gst::ClockTime::from_nseconds(t))).map_or(t, |r| r.nseconds());
@@ -914,7 +884,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
         };
         let out = control.buffer(
             BufferIn { generation: generation(), pts: pts.nseconds(), frames, samples, discont },
-            Sink { calibration, observation: Observation { before, internal: read, after }, next_sample: next_sample(&sink, f), place: &place },
+            Sink { calibration, observation: Observation { before, internal: read, after }, next_sample: fields.next_sample().map(|n| n as f64), place: &place },
         );
         drop(guard);
         if let Some(c) = out.calibration {
@@ -935,7 +905,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
         info.data = Some(gst::PadProbeData::Buffer(made));
         gst::PadProbeReturn::Ok
     });
-    true
+    Ok(())
 }
 
 #[cfg(test)]

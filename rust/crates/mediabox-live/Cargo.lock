@@ -395,6 +395,7 @@ dependencies = [
  "gstreamer-video",
  "libc",
  "mediabox-core",
+ "pkg-config",
  "serde_json",
 ]
 

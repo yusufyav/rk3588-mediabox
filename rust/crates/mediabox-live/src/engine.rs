@@ -1383,8 +1383,9 @@ impl Engine {
                 // samples played in 991 (FAZ 2H/2I, `audio_replay`). For PCM
                 // the player's own controller follows the device instead
                 // (`audio_clock`, installed below): `custom` with no callback
-                // has audiobasesink apply the calibration the controller sets
-                // and align every buffer's both ends. A bitstream's bursts
+                // is GStreamer's NONE -- the sink corrects nothing itself,
+                // applies the calibration the controller sets and aligns
+                // every buffer's both ends. A bitstream's bursts
                 // are not samples to resample: it keeps the default.
                 sink
             }
@@ -1408,11 +1409,9 @@ impl Engine {
         if audio.device.is_some() && !self.bitstream.load(Ordering::SeqCst) {
             let shared = Arc::downgrade(&self.shared);
             let generation = move || shared.upgrade().map_or(0, |s| s.generation.load(Ordering::SeqCst));
-            if crate::audio_clock::install(&sink, generation, Arc::clone(&self.shared.audio_clock)) {
-                sink.set_property_from_str("slave-method", "custom");
-            } else {
-                eprintln!("mediabox-live: ses saati denetleyicisi kurulamadı (audiobasesink alanları beklenen yerde değil); GStreamer resample kullanılıyor");
-                sink.set_property_from_str("slave-method", "resample");
+            match crate::audio_clock::install(&sink, generation, Arc::clone(&self.shared.audio_clock)) {
+                Ok(()) => sink.set_property_from_str("slave-method", "custom"),
+                Err(reason) => crate::audio_clock::fail_closed(&sink, &self.shared.audio_clock, &reason),
             }
         }
         self.add_audio_sink(sink)
