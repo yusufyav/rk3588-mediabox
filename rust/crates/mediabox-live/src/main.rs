@@ -197,10 +197,8 @@ fn stamp_stderr() {
 }
 
 fn main() {
-    let signals = block_signals();
-    stamp_stderr();
-    mediabox_core::timeline::init("live");
-    // Diagnosis: a dump of `evidence` judged, nothing played.
+    // Diagnosis: a dump of `evidence` judged, nothing played -- and no
+    // trace of a player begun for it.
     if std::env::args().nth(1).as_deref() == Some("--evidence-classify") {
         let mut failed = false;
         for dir in std::env::args().skip(2) {
@@ -214,6 +212,9 @@ fn main() {
         }
         std::process::exit(i32::from(failed));
     }
+    let signals = block_signals();
+    stamp_stderr();
+    mediabox_core::timeline::init("live");
     let Some(url) = std::env::args().nth(1) else {
         eprintln!("kullanım: mediabox-live <FIFO>");
         std::process::exit(2);
