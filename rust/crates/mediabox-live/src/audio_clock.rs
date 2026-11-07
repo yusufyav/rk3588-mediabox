@@ -42,7 +42,7 @@
 //! learned is the device's crystal's and is kept.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// The product's target for a step it adds to the sound's place in one
 /// buffer (a project acceptance target, not a standard's; its limit is
@@ -511,6 +511,7 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(channels: usize, rate: f64, stats: std::sync::Arc<Stats>) -> Self {
+        stats.rate_hz.store(rate as u32, Ordering::Relaxed);
         Self { model: None, resampler: Resampler::new(channels, rate), rate, generation: 0, last_phase: None, stats }
     }
 
@@ -569,7 +570,7 @@ impl Controller {
             s.phase_ns.store(ns.round() as i64, Ordering::Relaxed);
             raise(&s.phase_max_ns, ns.abs().round() as i64);
             if let Some(last) = self.last_phase {
-                raise(&s.step_max_ns, ((p - last).abs() * 1e9 / self.rate).round() as i64);
+                raise(&s.phase_change_max_ns, ((p - last).abs() * 1e9 / self.rate).round() as i64);
             }
             self.last_phase = Some(p);
             raise(&s.stretch_max_millis, ((1.0 - ratio).abs() * input.frames as f64 * 1000.0).round() as i64);
@@ -608,10 +609,15 @@ pub struct Stats {
     pub phase_ns: AtomicI64,
     pub phase_max_ns: AtomicI64,
     /// The largest change of phase from one buffer to the next, ns: the
-    /// step the product adds to the sound's place.
-    pub step_max_ns: AtomicI64,
-    /// The largest stretch of one buffer, in thousandths of a sample.
+    /// sound's moves and the calibration's own (its acquisition) together
+    /// -- not the sound's step.
+    pub phase_change_max_ns: AtomicI64,
+    /// The largest stretch of one buffer, in thousandths of a sample: the
+    /// step the product adds to the sound's place, the sink aligning both
+    /// ends of every buffer.
     pub stretch_max_millis: AtomicI64,
+    /// The sample rate the stretch is counted at.
+    pub rate_hz: AtomicU32,
     pub unsupported: AtomicU64,
     pub unavailable: AtomicU64,
 }
@@ -626,7 +632,8 @@ impl Stats {
             "input_discont": g(&self.input_discont),
             "frames_in": g(&self.frames_in), "frames_out": g(&self.frames_out), "held_at_reset": g(&self.held_at_reset),
             "rate_ppb": i(&self.rate_ppb), "phase_ns": i(&self.phase_ns), "phase_max_ns": i(&self.phase_max_ns),
-            "step_max_ns": i(&self.step_max_ns), "stretch_max_millisamples": i(&self.stretch_max_millis),
+            "phase_change_max_ns": i(&self.phase_change_max_ns), "stretch_max_millisamples": i(&self.stretch_max_millis),
+            "step_max_ns": i(&self.stretch_max_millis) * 1_000_000 / i64::from(self.rate_hz.load(Ordering::Relaxed).max(1)),
             "unsupported_format": g(&self.unsupported), "unavailable": g(&self.unavailable),
         })
     }
