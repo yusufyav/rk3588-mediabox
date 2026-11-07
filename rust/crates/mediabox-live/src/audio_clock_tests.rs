@@ -341,6 +341,17 @@ fn the_heaviest_broadcast_sound_resampled_keeps_within_the_cost_limits() {
     // 5.1 at 48 kHz in AC-3's 1536 frames, a phase held off so every
     // buffer is resampled (every tap), as the probe does it: taken in,
     // controlled, made S16 again.
+    // Timed by the thread's own CPU time: the work, not the test host's
+    // load. Under the gate's qemu each instruction takes many times the
+    // appliance's, so the limits held there are held with room on it.
+    let cpu = || {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a valid timespec to fill.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
+    };
+    // As `install` does, before the first buffer.
+    table();
     let (channels, rate, frames) = (6usize, 48_000.0, 1536usize);
     let stats = std::sync::Arc::new(Stats::default());
     let mut control = Controller::new(channels, rate, std::sync::Arc::clone(&stats));
@@ -351,7 +362,7 @@ fn the_heaviest_broadcast_sound_resampled_keeps_within_the_cost_limits() {
     let mut samples = Vec::new();
     let mut ratios = 0;
     for k in 0..400u64 {
-        let started = std::time::Instant::now();
+        let started = cpu();
         let pts = k * duration;
         to_f32(&bytes, &mut samples);
         let now = pts;
@@ -366,7 +377,7 @@ fn the_heaviest_broadcast_sound_resampled_keeps_within_the_cost_limits() {
             },
         );
         let made = from_f32(control.output());
-        stats.cost.record(started.elapsed().as_nanos() as u64, duration);
+        stats.cost.record(cpu() - started, duration);
         ratios += usize::from(out.frames != frames && k > 0);
         assert_eq!(made.len(), out.frames * channels * 2);
     }

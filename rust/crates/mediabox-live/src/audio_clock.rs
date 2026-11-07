@@ -346,7 +346,7 @@ fn bessel_i0(x: f64) -> f64 {
 
 /// Row q: the 2*HALF taps for the point a fraction q/PHASES past a sample,
 /// each row summing to one.
-fn table() -> &'static [f32] {
+pub fn table() -> &'static [f32] {
     static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
         let taps = 2 * HALF;
@@ -947,6 +947,9 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
     use gst_app::gst_base::prelude::*;
     let fields = crate::gst_abi::AudioSink::of(sink)?;
     let pad = sink.static_pad("sink").ok_or("the sink has no sink pad")?;
+    // The resampler's table made here, not on the streaming thread with the
+    // first buffer.
+    table();
     let weak = sink.downgrade();
     let pipeline_clock = gst::SystemClock::obtain();
     let state: std::sync::Mutex<Probe> = std::sync::Mutex::new((None, Vec::new()));
