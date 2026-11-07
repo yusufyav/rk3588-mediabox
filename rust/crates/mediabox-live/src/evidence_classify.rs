@@ -654,43 +654,62 @@ fn decode_independent(dir: &Path, ts: &[u8], sound: u16, pmts: &[u16]) -> Result
     let last_start = kept.iter().rposition(|p| crate::evidence::pid(*p) == sound && p[1] & 0x40 != 0).ok_or("no sound PES start")?;
     let cut = dir.join("independent-input.ts");
     std::fs::write(&cut, kept[..last_start].iter().flat_map(|p| p.iter().copied()).collect::<Vec<u8>>()).map_err(|e| e.to_string())?;
-    let mut ind = Independent::default();
-    for row in ffprobe(&cut, &["-select_streams", "a:0", "-show_entries", "stream=sample_rate,channels"])? {
-        if let [r, c] = row.as_slice() {
-            ind.rate = *r as u32;
-            ind.channels = *c as usize;
-        }
-    }
-    ind.packets = ffprobe(&cut, &["-select_streams", "a:0", "-show_entries", "packet=pts"])?.into_iter().filter_map(|r| r.first().copied()).collect();
-    ind.frames = ffprobe(&cut, &["-codec:a", "mp2", "-select_streams", "a:0", "-show_entries", "frame=pts,nb_samples"])?
-        .into_iter()
-        .filter_map(|r| match r.as_slice() {
-            [pts, n] => Some((*pts, *n)),
-            _ => None,
-        })
-        .collect();
+    let mut ind = Independent {
+        packets: ffprobe(&cut, &["-select_streams", "a:0", "-show_entries", "packet=pts"])?.into_iter().filter_map(|r| r.first().copied()).collect(),
+        ..Default::default()
+    };
+    // Each frame as the decoder put it out, from the decoding itself
+    // (ashowinfo): ffprobe's choice of decoder (-codec:a) is refused by the
+    // appliance's ffprobe 7.1.5 ("Option not found"; the PC's 9.0.2 has
+    // it), which left the frames empty and every packet "undecoded".
     let out = dir.join("independent.s16");
     let run = std::process::Command::new("ffmpeg")
-        .args(["-nostdin", "-hide_banner", "-v", "warning", "-y", "-c:a", "mp2", "-i"])
+        .args(["-nostdin", "-hide_banner", "-v", "info", "-y", "-copyts", "-c:a", "mp2", "-i"])
         .arg(&cut)
-        .args(["-map", "0:a:0", "-f", "s16le", "-c:a", "pcm_s16le"])
+        .args(["-map", "0:a:0", "-af", "ashowinfo", "-f", "s16le", "-c:a", "pcm_s16le"])
         .arg(&out)
         .output()
         .map_err(|e| format!("ffmpeg: {e}"))?;
     std::fs::write(dir.join("independent-ffmpeg.log"), &run.stderr).map_err(|e| e.to_string())?;
+    for (raw, samples, rate, channels) in ashowinfo_frames(&String::from_utf8_lossy(&run.stderr)) {
+        ind.frames.push((raw, samples));
+        ind.rate = rate;
+        ind.channels = channels;
+    }
     ind.pcm = std::fs::read(&out).map_err(|e| e.to_string())?;
     Ok(ind)
+}
+
+/// The frames of ffmpeg's ashowinfo lines ("n:0 pts:4341588721 ...
+/// channels:2 ... rate:48000 nb_samples:1152"): each one's PTS as the raw
+/// 90 kHz PTS (ashowinfo's is in samples), samples, rate, channels.
+pub fn ashowinfo_frames(log: &str) -> Vec<(u64, u64, u32, usize)> {
+    log.lines()
+        .filter(|l| l.contains("Parsed_ashowinfo") && l.contains(" n:"))
+        .filter_map(|l| {
+            let field = |name: &str| l.split_whitespace().find_map(|f| f.strip_prefix(name)).and_then(|v| v.parse::<u64>().ok());
+            let (pts, rate, samples, channels) = (field("pts:")?, field("rate:")?, field("nb_samples:")?, field("channels:")?);
+            (rate > 0).then(|| (((u128::from(pts) * 90_000 + u128::from(rate) / 2) / u128::from(rate)) as u64, samples, rate as u32, channels as usize))
+        })
+        .collect()
 }
 
 /// Packets whose time is in the event's window (from 100 ms before it to
 /// its end) that the independent decoder put out no frame for: what it
 /// refused or could not find a header in.
-pub fn undecoded_in(packets: &[u64], frames: &[(u64, u64)], pes: &[(u64, u64)], from: u64, to: u64) -> u64 {
-    packets
-        .iter()
-        .filter(|raw| running_of(**raw, pes).is_some_and(|t| t + 100_000_000 >= from && t <= to))
-        .filter(|raw| !frames.iter().any(|(pts, _)| pts == *raw))
-        .count() as u64
+/// None where the decoder gave no frames at all: that is the decoding not
+/// done, which says nothing of the input.
+pub fn undecoded_in(packets: &[u64], frames: &[(u64, u64)], pes: &[(u64, u64)], from: u64, to: u64) -> Option<u64> {
+    if frames.is_empty() {
+        return None;
+    }
+    Some(
+        packets
+            .iter()
+            .filter(|raw| running_of(**raw, pes).is_some_and(|t| t + 100_000_000 >= from && t <= to))
+            .filter(|raw| !frames.iter().any(|(pts, _)| pts == *raw))
+            .count() as u64,
+    )
 }
 
 /// Judge one dump; the result is also written as `classify.json` in it.
@@ -777,8 +796,11 @@ fn classify_silence_dump(
                 let ind_format = PcmFormat { sample: Sample::S16, rate: ind.rate, channels: ind.channels, interleaved: true };
                 let fb = ind.channels * 2;
                 let samples: u64 = ind.frames.iter().map(|(_, n)| n).sum();
-                let whole = ind.rate > 0 && ind.channels > 0 && ind.pcm.len() as u64 == samples * fb as u64;
-                facts.decoder_errors = undecoded_in(&ind.packets, &ind.frames, pes, from, to) + u64::from(!whole);
+                // A decoding not done whole (no frames, or PCM other than
+                // its frames say) is no decoding: the event stays
+                // unclassified, not the input's.
+                let whole = !ind.frames.is_empty() && ind.rate > 0 && ind.channels > 0 && ind.pcm.len() as u64 == samples * fb as u64;
+                facts.decoder_errors = if whole { undecoded_in(&ind.packets, &ind.frames, pes, from, to).unwrap_or(0) } else { 0 };
                 if whole && ind.rate == format.rate && ind.channels == format.channels {
                     let mut at = 0usize;
                     let segments: Vec<Segment> = ind

@@ -200,9 +200,12 @@ fn only_packets_in_the_window_left_undecoded_count_against_the_input() {
     // The first frame of the cut has no header to find (as ffmpeg's first,
     // FAZ 2H): outside the window, not the event's.
     let mut frames: Vec<(u64, u64)> = packets.iter().skip(1).map(|raw| (*raw, 1152)).collect();
-    assert_eq!(undecoded_in(&packets, &frames, &pes, FROM, TO), 0);
+    assert_eq!(undecoded_in(&packets, &frames, &pes, FROM, TO), Some(0));
     frames.retain(|(raw, _)| *raw != 900_000 + 30 * 2160);
-    assert_eq!(undecoded_in(&packets, &frames, &pes, FROM, TO), 1);
+    assert_eq!(undecoded_in(&packets, &frames, &pes, FROM, TO), Some(1));
+    // A decoder that gave no frames at all decoded nothing: not one
+    // packet the input's.
+    assert_eq!(undecoded_in(&packets, &[], &pes, FROM, TO), None);
 }
 
 #[test]
@@ -464,4 +467,15 @@ fn a_device_without_timestamps_is_timed_by_when_its_status_was_read() {
         row.read_at = row.read_at.map(|t| t + 10_000_000);
     }
     assert!(matches!(classify_clock(&clock_facts(&r, 150, 48_000.0, &[], &[])), ClockClass::ProductAudioTimingStep(_)));
+}
+
+#[test]
+fn the_independent_frames_come_from_the_decoding_itself() {
+    // ffmpeg 7.1.5's and 9.0.2's ashowinfo, the same frame: its PTS in
+    // samples at 48 kHz is the raw PTS 8140478852 (90 kHz).
+    let log = "[Parsed_ashowinfo_0 @ 0xffff64002ce0] n:0 pts:4341588721 pts_time:90449.765021 fmt:s16p channels:2 chlayout:stereo rate:48000 nb_samples:1152 checksum:F8B38D35 plane_checksums: [ 002B4999 70BE439C ]
+[mp2 @ 0xaaaab6929d00] Header missing
+[Parsed_ashowinfo_0 @ 0xffff64002ce0] n:1 pts:4341589873 pts_time:90449.789021 fmt:s16p channels:2 chlayout:stereo rate:48000 nb_samples:1152 checksum:54842E95 plane_checksums: [ F6DC97C2 3B8F96C4 ]
+";
+    assert_eq!(ashowinfo_frames(log), vec![(8_140_478_852, 1152, 48_000, 2), (8_140_481_012, 1152, 48_000, 2)]);
 }
