@@ -51,7 +51,11 @@ fn main() {
     // From src/, by a relative name: no build path in the object.
     compile.current_dir(PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("src"));
     compile.args(["-c", "-O2", "-fPIC", "-Wall", "-Werror", "-o"]).arg(&object).arg("gst_abi.c");
-    if let Ok(sysroot) = env::var("PKG_CONFIG_SYSROOT_DIR") {
+    // The sysroot is the target's libc, for a cross build only: a host
+    // build (clippy's, under the cross environment) takes the host's.
+    if let Ok(sysroot) = env::var("PKG_CONFIG_SYSROOT_DIR")
+        && target != host
+    {
         compile.arg(format!("--sysroot={sysroot}"));
     }
     for dir in &audio.include_paths {
