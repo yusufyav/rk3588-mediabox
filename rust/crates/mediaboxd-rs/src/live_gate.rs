@@ -208,7 +208,11 @@ async fn open_it<I: GateIo>(io: &I) -> End {
 /// The sound device, opened again after a commit that stopped it, and the
 /// channel let go.
 async fn sound_and_open<I: GateIo>(io: &I, outcome: &str) -> End {
-    if !io.sound_current() {
+    // Stopped by a commit, or found taken: the player's word on it, read after
+    // the commit's. No answer yet is a player just started, whose own opening
+    // says so if it comes to that.
+    let device = io.player_gate().await.and_then(|gate| gate.get("sound").and_then(Value::as_str).map(str::to_string));
+    if !io.sound_current() || matches!(device.as_deref(), Some("stand-in" | "given-up")) {
         if !io.current() {
             return End::Stale("sound");
         }
@@ -433,6 +437,26 @@ mod tests {
         };
         failed_shut(&io, open_channel(&io).await, "sound-failed");
         assert_eq!(io.reloads.get(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sound_device_found_taken_on_a_display_that_fits_fails_too() {
+        for (device, works) in [("stand-in", true), ("given-up", false)] {
+            let gate = serde_json::json!({"open": false, "sound": device});
+            let reload = if works { Ok(()) } else { Err("busy".to_string()) };
+            let io = Fake { sps: RefCell::new(Some(50.0)), on_wire: Cell::new(true), gate: RefCell::new(Some(gate)), reload: RefCell::new(Some(reload)), ..Fake::default() };
+            let end = open_channel(&io).await;
+            assert_eq!(io.reloads.get(), 1, "{device}");
+            if works {
+                assert_eq!(end, End::Opened("fast".into()), "{device}: opened once it is open");
+            } else {
+                failed_shut(&io, end, "sound-failed");
+            }
+        }
+        let gate = serde_json::json!({"open": false, "sound": "open"});
+        let io = Fake { sps: RefCell::new(Some(50.0)), on_wire: Cell::new(true), gate: RefCell::new(Some(gate)), ..Fake::default() };
+        assert_eq!(open_channel(&io).await, End::Opened("fast".into()));
+        assert_eq!(io.reloads.get(), 0);
     }
 
     #[tokio::test(start_paused = true)]

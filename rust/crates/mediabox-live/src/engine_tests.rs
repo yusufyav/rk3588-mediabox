@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use gst::prelude::*;
 
+use super::{SINK_RETRY_MS, SWAP_BUDGET_MS, after_failed_open, idle_guard_ms};
 use super::{Audio, Engine, Options, Shared};
 use crate::es::spec::{pat, pcr_field, pes, pmt, Mux};
 use crate::plane::Plane;
@@ -835,6 +836,71 @@ fn a_gated_channel_starts_where_its_gate_opens() {
     assert!(steps <= 25_000_000, "a gap of {} ms in the sound after it started", steps / 1_000_000);
     // Not a fault of the gate: nothing dropped as late or out of order.
     assert_eq!(run.shared.health.video_dropped.load(std::sync::atomic::Ordering::Relaxed), run.shared.out_of_order.load(std::sync::atomic::Ordering::Relaxed) + not_dmabuf(&run));
+}
+
+/// The swap's bound, its clock in the test's hands: every try while the time
+/// lasts, none after, whatever the selector made it wait for.
+#[test]
+fn a_swap_is_tried_within_its_budget_and_said_when_it_is_out() {
+    assert_eq!(after_failed_open(0, 0), Some(50));
+    assert_eq!(after_failed_open(4, 750), Some(800));
+    assert_eq!(after_failed_open(5, 1_550), None, "out of tries");
+    assert_eq!(after_failed_open(0, 2_700), None, "50 ms more is past the budget");
+    assert_eq!(after_failed_open(4, 1_950), None);
+    assert_eq!(idle_guard_ms(0), 2_000);
+    assert_eq!(idle_guard_ms(1_750), 1_000);
+    assert_eq!(idle_guard_ms(5_000), 0);
+    // All the tries on time, the sum of the waits inside the budget: what is
+    // given to the selector is what is left.
+    assert!(SINK_RETRY_MS.iter().sum::<u64>() < SWAP_BUDGET_MS);
+}
+
+/// A numbered channel whose device will not open from the player's first
+/// moment: the player does not end there, its pictures wait, and when the
+/// tries are over the channel fails, nothing of it shown.
+#[test]
+fn a_device_taken_from_the_start_fails_the_channel_in_its_bound() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    gst::init().expect("GStreamer");
+    let dir = std::env::temp_dir().join(format!("mediabox-live-busy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("plane");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
+        }
+    });
+    let plane = Plane::connect(socket.to_str().unwrap(), Trace::from_env(), || {}).expect("plane");
+    let shared = Arc::new(Shared::default());
+    let options = Options {
+        video_decoder: "identity".into(),
+        audio: Audio { device: Some("hw:CARD=mediabox-none,DEV=0".into()), passthrough: vec![], gain: 1.0, muted: false, ac3_encode: None },
+        demux_latency_ms: 700,
+        render_delay_ms: 0,
+        max_lateness_ms: None,
+    };
+    let (said, heard) = std::sync::mpsc::channel();
+    let said = Mutex::new(said);
+    let started = std::time::Instant::now();
+    let engine = Engine::new(options, plane, Arc::clone(&shared), Trace::from_env(), move |why| {
+        let _ = said.lock().unwrap().send(why);
+    })
+    .expect("the player goes on, with a stand-in");
+    let path = dir.join("nothing.ts");
+    std::fs::write(&path, b"").unwrap();
+    engine.open_channel(path.to_str().unwrap(), Some(9)).expect("open");
+    assert_eq!(engine.gate_snapshot()["open"], false);
+    let why = heard.recv_timeout(Duration::from_millis(SWAP_BUDGET_MS + 2_000)).expect("said within its bound");
+    assert_eq!(why.as_deref(), Some("Kanal açılamadı (sound-failed)"));
+    assert!(started.elapsed() < Duration::from_millis(SWAP_BUDGET_MS + 2_000));
+    let gate = engine.gate_snapshot();
+    assert_eq!(gate["failed"], "sound-failed", "{gate}");
+    assert_eq!(gate["sound"], "given-up", "{gate}");
+    assert_eq!(shared.frames.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(engine.open_gate(9, "matched").is_err(), "a late answer opens nothing");
+    engine.shutdown();
 }
 
 /// A failed gate lets nothing go, by the control plane's word or by the

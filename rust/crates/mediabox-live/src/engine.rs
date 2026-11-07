@@ -99,6 +99,11 @@ pub struct Shared {
     /// tsdemux's own to be held against (`sound_source`).
     pub sound_starts: Mutex<std::collections::VecDeque<u64>>,
     pub info: Mutex<Info>,
+    /// The sound device could not be opened: a stand-in takes the sound
+    /// meanwhile (`attach_stand_in`).
+    pub stand_in: AtomicBool,
+    /// The channel a buffer of whose sound last reached the device itself.
+    pub sound_reached_device: AtomicU64,
     /// The opening gate of the channel opened last (`gate`).
     pub gate: Mutex<Option<Arc<crate::gate::Gate>>>,
     /// Another audio stream chosen while a channel plays (`set_aid`): its
@@ -471,6 +476,23 @@ pub type SinkReply = std::sync::mpsc::SyncSender<Result<(), String>>;
 /// buffer takes at most the sink's 100 ms to go through; this is a guard
 /// against one that never does, not a wait for anything.
 const SWAP_IDLE_GUARD_MS: u64 = 2_000;
+/// The whole of one swap, every try and every wait for the selector: said
+/// inside the 3 s the control plane waits for its answer (`reload_sound`). By
+/// the guard and the retries alone it could take 12 s, the answer long after
+/// nobody was waiting for it.
+const SWAP_BUDGET_MS: u64 = 2_750;
+
+/// What follows a device that would not open, `failed` tries before this one
+/// and `elapsed_ms` since the swap was asked: try again after a wait, or say
+/// so now.
+fn after_failed_open(failed: usize, elapsed_ms: u64) -> Option<u64> {
+    SINK_RETRY_MS.get(failed).copied().filter(|wait| elapsed_ms + wait < SWAP_BUDGET_MS)
+}
+
+/// How long a swap may wait for the selector, `elapsed_ms` since it was asked.
+fn idle_guard_ms(elapsed_ms: u64) -> u64 {
+    SWAP_IDLE_GUARD_MS.min(SWAP_BUDGET_MS.saturating_sub(elapsed_ms))
+}
 
 #[derive(Default)]
 struct SinkSwaps {
@@ -482,6 +504,7 @@ struct SinkSwaps {
 /// A swap asked for and not done yet. Any open of the device after
 /// `after` does it; every request made meanwhile gets its outcome.
 struct PendingSwap {
+    asked: Instant,
     after: u64,
     failed: usize,
     replies: Vec<SinkReply>,
@@ -881,12 +904,29 @@ impl Engine {
         });
         engine.attach_audio_sink("start")?;
         engine.attach_video(&video_sink, plane, trace);
-        engine
-            .pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|e| format!("pipeline başlatılamadı: {e}"))?;
+        // A sound device taken by something else stops the pipeline's start.
+        // That is the opening's to answer, tried and said in the same bounded
+        // way as any other (`reopen_audio_sink`): the player ending here
+        // told the control plane nothing, and it waited 30 s for its socket.
+        let busy = engine.pipeline.set_state(gst::State::Playing).is_err();
+        if busy {
+            mediabox_core::timeline!("sink-swap", "phase=start-failed");
+            eprintln!("mediabox-live: ses aygıtı açılışta açılamadı");
+            engine.shared.health.sink_open_failures.fetch_add(1, Ordering::Relaxed);
+            let _ = engine.pipeline.set_state(gst::State::Null);
+            engine.detach_audio_sink();
+            engine.shared.stand_in.store(true, Ordering::SeqCst);
+            engine.attach_stand_in()?;
+            engine
+                .pipeline
+                .set_state(gst::State::Playing)
+                .map_err(|e| format!("pipeline başlatılamadı: {e}"))?;
+        }
         engine.watch_health();
         listen_to_audio_sink(&engine.shared);
+        if busy {
+            engine.reopen_audio_sink(None);
+        }
         Ok(engine)
     }
 
@@ -1319,6 +1359,13 @@ impl Engine {
         sink.set_property("ts-offset", self.audio_offset());
         if let Some(pad) = sink.static_pad("sink") {
             probe_layer(&pad, crate::clock_probe::Layer::Sink, None, &self.shared);
+            if audio.device.is_some() {
+                let shared = Arc::clone(&self.shared);
+                pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                    shared.sound_reached_device.store(shared.generation.load(Ordering::SeqCst), Ordering::SeqCst);
+                    gst::PadProbeReturn::Ok
+                });
+            }
         }
         self.add_audio_sink(sink)
     }
@@ -1414,12 +1461,14 @@ impl Engine {
             Ok(()) => {
                 mediabox_core::timeline!("sink-swap", "phase=attached ms={}", opening.elapsed().as_millis());
                 swaps.opened += 1;
+                self.shared.stand_in.store(false, Ordering::SeqCst);
                 self.shared.health.sink_given_up.store(false, Ordering::Relaxed);
                 Ok(())
             }
             Err(error) => {
                 mediabox_core::timeline!("sink-swap", "phase=open-failed ms={} error={error}", opening.elapsed().as_millis());
                 self.shared.health.sink_open_failures.fetch_add(1, Ordering::Relaxed);
+                self.shared.stand_in.store(true, Ordering::SeqCst);
                 if let Err(stand_in) = self.attach_stand_in() {
                     eprintln!("mediabox-live: ses yer tutucusu kurulamadı: {stand_in}");
                 }
@@ -1457,7 +1506,7 @@ impl Engine {
             return;
         }
         let after = swaps.opened;
-        swaps.pending = Some(PendingSwap { after, failed: 0, replies: reply.into_iter().collect() });
+        swaps.pending = Some(PendingSwap { asked: Instant::now(), after, failed: 0, replies: reply.into_iter().collect() });
         drop(swaps);
         mediabox_core::timeline!("sink-swap", "phase=asked");
         self.queue_swap();
@@ -1469,6 +1518,10 @@ impl Engine {
             return;
         };
         let asked = Instant::now();
+        let guard = {
+            let swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+            swaps.pending.as_ref().map_or(SWAP_IDLE_GUARD_MS, |pending| idle_guard_ms(pending.asked.elapsed().as_millis() as u64))
+        };
         // Whichever comes first, the selector idle or the guard, has it.
         let taken = Arc::new(AtomicBool::new(false));
         let engine = Arc::clone(self);
@@ -1492,7 +1545,7 @@ impl Engine {
         // requests are answered as failed and the device left as it is.
         let engine = Arc::downgrade(self);
         let spawned = std::thread::Builder::new().name("sink-swap-guard".into()).spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(SWAP_IDLE_GUARD_MS));
+            std::thread::sleep(std::time::Duration::from_millis(guard));
             if taken.swap(true, Ordering::SeqCst) {
                 return;
             }
@@ -1519,10 +1572,10 @@ impl Engine {
 
     fn run_swap(self: &Arc<Self>) {
         let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
-        let Some((after, failed)) = swaps.pending.as_ref().map(|p| (p.after, p.failed)) else { return };
+        let Some((after, failed, asked)) = swaps.pending.as_ref().map(|p| (p.after, p.failed, p.asked)) else { return };
         // Opened since it was asked (`sound_mode`): done already.
         let result = if swaps.opened > after { Ok(()) } else { self.swap_sink(&mut swaps, "reopen") };
-        if let (Err(error), Some(&wait)) = (&result, SINK_RETRY_MS.get(failed)) {
+        if let (Err(error), Some(wait)) = (&result, after_failed_open(failed, asked.elapsed().as_millis() as u64)) {
             if let Some(pending) = swaps.pending.as_mut() {
                 pending.failed += 1;
             }
@@ -1550,10 +1603,41 @@ impl Engine {
                 mediabox_core::timeline!("sink-swap", "phase=done ok=0 tries={} answers={} error={error}", pending.failed + 1, pending.replies.len());
                 eprintln!("mediabox-live: ses aygıtı açılamadı, {} denemeden sonra bırakıldı: {error}", pending.failed + 1);
                 self.shared.health.sink_given_up.store(true, Ordering::Relaxed);
+                self.fail_opening_without_sound();
             }
         }
         for reply in pending.replies {
             let _ = reply.send(result.clone());
+        }
+    }
+
+    /// A numbered channel none of whose sound ever reached the device, and the
+    /// device given up on: it is not a channel opened with no sound. Its gate
+    /// stays shut if it was, and the player ends, saying so. Later in a
+    /// channel the sound's going is said (`sound_device`) and the picture goes
+    /// on: it may be the television being turned off.
+    fn fail_opening_without_sound(&self) {
+        let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let Some((gate, epoch)) = gate.and_then(|gate| gate.epoch.map(|epoch| (gate, epoch))) else { return };
+        if self.shared.sound_reached_device.load(Ordering::SeqCst) == gate.generation {
+            return;
+        }
+        let _ = gate.fail(epoch, "sound-failed");
+        mediabox_core::timeline!("gate-fail", "gen={} epoch={epoch} code=sound-failed result=failed", gate.generation);
+        (self.fail)(Some("Kanal açılamadı (sound-failed)".to_string()));
+    }
+
+    /// The sound device as the channel stands: `open`, `stand-in` while it
+    /// is being tried, `given-up`, `off` with no sound chosen.
+    fn sound_device(&self) -> &'static str {
+        if self.aid.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+            "off"
+        } else if self.shared.health.sink_given_up.load(Ordering::Relaxed) {
+            "given-up"
+        } else if self.shared.stand_in.load(Ordering::SeqCst) {
+            "stand-in"
+        } else {
+            "open"
         }
     }
 
@@ -1641,6 +1725,16 @@ impl Engine {
                     // The channel's opening gate: shut, the picture is its
                     // pre-roll -- not sent, not a drop (`gate`).
                     let gate = shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone().filter(|gate| gate.generation == generation);
+                    // Nor is a numbered channel's first picture shown while
+                    // its sound device is still being tried: it starts with
+                    // both, or fails (`fail_opening_without_sound`).
+                    if gate.as_ref().is_some_and(|gate| gate.epoch.is_some())
+                        && shared.stand_in.load(Ordering::SeqCst)
+                        && !shared.playing.load(Ordering::SeqCst)
+                    {
+                        mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=preroll", pts / 1000);
+                        return Ok(gst::FlowSuccess::Ok);
+                    }
                     let first = match gate.map(|gate| {
                         gate.frame(pts, described.as_ref().and_then(|found| found.fps), described.as_ref().map_or("", |found| found.interlace.as_str()))
                     }) {
@@ -2987,7 +3081,11 @@ impl Engine {
     /// The channel's opening gate, as the control socket and the health
     /// file read it.
     pub fn gate_snapshot(&self) -> serde_json::Value {
-        self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map_or(serde_json::Value::Null, |gate| gate.snapshot())
+        let mut snapshot = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map_or(serde_json::Value::Null, |gate| gate.snapshot());
+        if let Some(fields) = snapshot.as_object_mut() {
+            fields.insert("sound".into(), self.sound_device().into());
+        }
+        snapshot
     }
 
     pub fn set_behind(&self, generation: u64, behind: u64) {
