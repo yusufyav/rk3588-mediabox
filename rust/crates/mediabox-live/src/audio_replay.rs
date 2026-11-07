@@ -59,7 +59,7 @@ pub struct Cal {
 
 impl Cal {
     /// gstaudiobasesink.c `clock_convert_external`.
-    pub fn to_internal(&self, external: f64) -> f64 {
+    pub fn to_internal(self, external: f64) -> f64 {
         self.internal + (external - self.external) / self.slope
     }
 }
