@@ -62,10 +62,14 @@ fn the_fields_are_read_from_alsasink_and_refused_elsewhere() {
     assert!(audio_clock(fields, &system).is_err());
     sink.set_property("device", "null");
     let pipeline = gst::Pipeline::new();
-    let src = gst::ElementFactory::make("audiotestsrc").property("num-buffers", 3i32).build().unwrap();
-    pipeline.add_many([&src, &sink]).unwrap();
+    let caps = gst::Caps::builder("audio/x-raw").field("format", "S16LE").field("layout", "interleaved").field("rate", 48_000i32).field("channels", 2i32).build();
+    let src = gst_app::AppSrc::builder().caps(&caps).format(gst::Format::Time).build();
+    pipeline.add_many([src.upcast_ref(), &sink]).unwrap();
     src.link(&sink).unwrap();
     pipeline.set_state(gst::State::Paused).unwrap();
+    let mut b = gst::Buffer::from_mut_slice(vec![0u8; 480 * 4]);
+    b.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+    src.push_buffer(b).unwrap();
     let _ = pipeline.state(gst::ClockTime::from_seconds(10));
     let provided = sink.provide_clock().expect("acquired: a clock");
     let clock = audio_clock(fields, &provided).expect("the sink's own");

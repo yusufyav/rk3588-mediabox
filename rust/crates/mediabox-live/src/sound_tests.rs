@@ -86,20 +86,28 @@ struct Chain {
     pipeline: gst::Pipeline,
     source: gst_app::AppSrc,
     out: Arc<Mutex<Vec<gst::Sample>>>,
+    /// The decoder's own output caps.
+    decoded: Arc<Mutex<Option<gst::Caps>>>,
 }
 
 impl Chain {
     fn new(codec: Codec) -> Self {
-        Self::build(codec, false)
+        Self::build(codec, false, false)
     }
 
     /// The parser and then the decoder the sound branch takes for the caps
     /// (`decoder_for`): PCM out.
     fn decoding(codec: Codec) -> Self {
-        Self::build(codec, true)
+        Self::build(codec, true, false)
     }
 
-    fn build(codec: Codec, decode: bool) -> Self {
+    /// And then converted as the PCM branch converts it, to the sound
+    /// clock's format (`audio_clock::contract_filter`).
+    fn to_contract(codec: Codec) -> Self {
+        Self::build(codec, true, true)
+    }
+
+    fn build(codec: Codec, decode: bool, contract: bool) -> Self {
         gst::init().expect("GStreamer");
         let caps = sound_caps(codec).expect("caps for the codec");
         let parser = parser_for(&caps).expect("a parser for the caps");
@@ -117,6 +125,12 @@ impl Chain {
                 .unwrap_or_else(|| panic!("{codec:?}: none of {:?} is in this GStreamer", decoder_for(&caps)));
             chain.push(decoder);
         }
+        if contract {
+            for factory in ["audioconvert", "audioresample"] {
+                chain.push(gst::ElementFactory::make(factory).build().expect(factory));
+            }
+            chain.push(crate::audio_clock::contract_filter().expect("the contract's filter"));
+        }
         chain.push(sink.clone().upcast());
         pipeline.add_many(&chain).expect("added");
         gst::Element::link_many(&chain).expect("linked");
@@ -131,8 +145,20 @@ impl Chain {
                 })
                 .build(),
         );
+        let decoded = Arc::new(Mutex::new(None));
+        if decode {
+            let into = Arc::clone(&decoded);
+            chain[2].static_pad("src").expect("the decoder's output").add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                if let Some(gst::PadProbeData::Event(e)) = &info.data
+                    && let gst::EventView::Caps(c) = e.view()
+                {
+                    *into.lock().unwrap() = Some(c.caps_owned());
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
         pipeline.set_state(gst::State::Playing).expect("playing");
-        Self { pipeline, source, out }
+        Self { pipeline, source, out, decoded }
     }
 
     /// To its end: what the parser gave, and the bus's errors.
@@ -527,4 +553,30 @@ fn latm_with_a_stream_mux_config_now_and_then_comes_out_whole() {
         assert!(errors.is_empty(), "{label}: {errors:?}");
         whole(&case, &frames, &samples, label);
     }
+}
+
+#[test]
+fn every_broadcast_decoders_pcm_reaches_the_sound_clocks_format_at_its_own_rate_and_channels() {
+    let mut converted = 0;
+    for case in cases() {
+        let chain = Chain::to_contract(case.codec);
+        let decoded = Arc::clone(&chain.decoded);
+        for (k, frame) in frames(case.codec, case.file).into_iter().enumerate() {
+            let mut buffer = gst::Buffer::from_mut_slice(frame);
+            buffer.get_mut().unwrap().set_pts(gst::ClockTime::from_nseconds(frame_ns(&case, k)));
+            chain.source.push_buffer(buffer).expect("pushed");
+        }
+        let (samples, errors) = chain.finish();
+        assert!(errors.is_empty(), "{:?}: {errors:?}", case.codec);
+        let decoded = decoded.lock().unwrap().clone().expect("the decoder's caps");
+        let d = decoded.structure(0).unwrap();
+        let (rate, channels) = (d.get::<i32>("rate").unwrap() as u32, d.get::<i32>("channels").unwrap() as usize);
+        if crate::audio_clock::admit(&decoded).is_err() {
+            converted += 1;
+        }
+        let last = samples.last().unwrap_or_else(|| panic!("{:?}: no PCM", case.codec));
+        assert_eq!(crate::audio_clock::admit(last.caps().unwrap()), Ok(crate::audio_clock::Format { rate, channels }), "{:?}: {decoded}", case.codec);
+    }
+    // Not all S16 interleaved already: the conversion is what is tested.
+    assert!(converted > 0, "every decoder gave the contract's format as it is");
 }

@@ -177,28 +177,27 @@ fn raw(format: &str, layout: &str, rate: i32, channels: i32) -> gst::Caps {
 }
 
 #[test]
-fn the_chain_brings_any_decoders_pcm_to_the_contract_at_its_own_rate_and_channels() {
+fn the_chain_brings_any_raw_format_to_the_contract_at_its_own_rate_and_channels() {
     gst::init().unwrap();
-    // What decoders give: mpg123 S16, a52dec/avdec F32 (planar too), S32,
-    // S24, F64.
-    let decoded = [("S16LE", "interleaved"), ("S32LE", "interleaved"), ("S24LE", "interleaved"), ("F32LE", "interleaved"), ("F32LE", "non-interleaved"), ("F64LE", "interleaved")];
     for rate in [32_000, 44_100, 48_000] {
         for channels in [1, 2, 6] {
-            for (format, layout) in decoded {
+            for (format, bytes) in [("S16LE", 2), ("S24LE", 3), ("S32LE", 4), ("F32LE", 4), ("F64LE", 8)] {
                 let pipeline = gst::Pipeline::new();
-                let src = gst::ElementFactory::make("audiotestsrc").property("num-buffers", 2i32).build().unwrap();
-                let given = gst::ElementFactory::make("capsfilter").property("caps", raw(format, layout, rate, channels)).build().unwrap();
+                let src = gst_app::AppSrc::builder().caps(&raw(format, "interleaved", rate, channels)).format(gst::Format::Time).build();
                 let convert = gst::ElementFactory::make("audioconvert").build().unwrap();
                 let resample = gst::ElementFactory::make("audioresample").build().unwrap();
                 let contract = contract_filter().unwrap();
                 let out = gst_app::AppSink::builder().sync(false).build();
-                let chain = [&src, &given, &convert, &resample, &contract, out.upcast_ref()];
+                let chain = [src.upcast_ref(), &convert, &resample, &contract, out.upcast_ref()];
                 pipeline.add_many(chain).unwrap();
                 gst::Element::link_many(chain).unwrap();
                 pipeline.set_state(gst::State::Playing).unwrap();
-                let sample = out.pull_sample().unwrap_or_else(|e| panic!("{format} {layout} {rate} {channels}: {e}"));
+                let mut b = gst::Buffer::from_mut_slice(vec![0u8; 480 * channels as usize * bytes]);
+                b.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+                src.push_buffer(b).unwrap();
+                let sample = out.pull_sample().unwrap_or_else(|e| panic!("{format} {rate} {channels}: {e}"));
                 let caps = sample.caps().unwrap();
-                assert_eq!(admit(caps), Ok(Format { rate: rate as u32, channels: channels as usize }), "{format} {layout} {rate} {channels}: {caps}");
+                assert_eq!(admit(caps), Ok(Format { rate: rate as u32, channels: channels as usize }), "{format} {rate} {channels}: {caps}");
                 pipeline.set_state(gst::State::Null).unwrap();
             }
         }
