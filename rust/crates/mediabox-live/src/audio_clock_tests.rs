@@ -162,3 +162,26 @@ fn a_calibration_set_by_another_is_taken_and_its_phase_acquired_from_a_seconds_m
     assert_eq!(k as usize, BASELINE - 1, "after a second's readings, not one");
     assert!((c.to_internal(t0 as f64) - truth(t0) as f64).abs() < 1_000.0);
 }
+
+#[test]
+#[cfg(all(target_arch = "aarch64", target_pointer_width = "64"))]
+fn the_parents_structs_are_as_large_as_gstreamers_headers_say() {
+    // aarch64-linux-gnu-gcc against the runtime's 1.26 headers: sizeof
+    // GstBaseSink 664 (GstAudioBaseSink.next_sample at 688,
+    // provided_clock at 696), sizeof GstSystemClock 168
+    // (GstAudioClock.user_data at 176, time_offset at 200).
+    assert_eq!(std::mem::size_of::<gst_app::gst_base::ffi::GstBaseSink>(), 664);
+    assert_eq!(std::mem::size_of::<gst::ffi::GstSystemClock>(), 168);
+}
+
+#[test]
+fn the_sinks_fields_are_found_in_alsasink_and_refused_elsewhere() {
+    gst::init().unwrap();
+    if let Ok(sink) = gst::ElementFactory::make("alsasink").build() {
+        let f = fields(&sink).expect("an audiobasesink's fields");
+        // Zero as GObject made it; -1 from its first state change on.
+        assert_eq!(next_sample(&sink, f), Some(0.0));
+    }
+    let fake = gst::ElementFactory::make("fakesink").build().unwrap();
+    assert!(fields(&fake).is_none(), "not an audiobasesink: not read");
+}

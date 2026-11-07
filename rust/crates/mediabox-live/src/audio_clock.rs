@@ -703,37 +703,53 @@ pub fn from_f32(format: Format, samples: &[f32]) -> Vec<u8> {
 /// fields, the next sample's place and the clock's offset
 /// (gstaudiobasesink.h and gstaudioclock.h, GStreamer 1.26): past their
 /// parents' structs. Found only when the fields around them read back as
-/// the sink's own -- its buffer-time, latency-time and clock, the clock's
-/// user data the sink -- so another layout is refused, never read.
+/// the sink's own -- its buffer-time and latency-time, a clock whose user
+/// data is the sink, and (at the first buffer, `provide_clock` giving none
+/// before the ring is acquired) that clock the one the sink provides -- so
+/// another layout is refused, never read.
 #[derive(Debug, Clone, Copy)]
 pub struct Fields {
     next_sample: usize,
     time_offset: usize,
+    clock: usize,
 }
 
 pub fn fields(sink: &gst::Element) -> Option<Fields> {
     use gst::prelude::*;
-    let clock = sink.provide_clock()?;
+    let audio_base_sink = gst::glib::Type::from_name("GstAudioBaseSink")?;
+    if !sink.type_().is_a(audio_base_sink) {
+        return None;
+    }
     let base = std::mem::size_of::<gst_app::gst_base::ffi::GstBaseSink>();
     let clock_base = std::mem::size_of::<gst::ffi::GstSystemClock>();
     let p = sink.as_ptr() as *const u8;
-    let c = clock.as_ptr() as *const u8;
-    // SAFETY: both objects are alive (held here) and at least this large:
-    // an audiobasesink's instance is a GstBaseSink followed by its own
-    // fields, a GstAudioClock's a GstSystemClock followed by its own.
-    let (buffer_time, latency_time, provided, user_data) = unsafe {
+    // SAFETY: the sink is alive (held here) and an audiobasesink's instance
+    // is a GstBaseSink followed by its own fields.
+    let (buffer_time, latency_time, clock) = unsafe {
         (
             std::ptr::read_unaligned(p.add(base + 8) as *const u64),
             std::ptr::read_unaligned(p.add(base + 16) as *const u64),
-            std::ptr::read_unaligned(p.add(base + 32) as *const usize),
-            std::ptr::read_unaligned(c.add(clock_base + 8) as *const usize),
+            std::ptr::read_unaligned(p.add(base + 32) as *const *const u8),
         )
     };
-    let ours = i64::try_from(buffer_time).ok() == Some(sink.property::<i64>("buffer-time"))
+    let sinks = i64::try_from(buffer_time).ok() == Some(sink.property::<i64>("buffer-time"))
         && i64::try_from(latency_time).ok() == Some(sink.property::<i64>("latency-time"))
-        && provided == clock.as_ptr() as usize
-        && user_data == sink.as_ptr() as usize;
-    ours.then_some(Fields { next_sample: base + 24, time_offset: clock_base + 32 })
+        && !clock.is_null();
+    if !sinks {
+        return None;
+    }
+    // SAFETY: the sink holds its clock from its init to its finalize; a
+    // GstAudioClock's instance is a GstSystemClock followed by its own.
+    let user_data = unsafe { std::ptr::read_unaligned(clock.add(clock_base + 8) as *const usize) };
+    (user_data == sink.as_ptr() as usize).then_some(Fields { next_sample: base + 24, time_offset: clock_base + 32, clock: base + 32 })
+}
+
+/// The sink's clock as its field holds it: the one `provide_clock` gives
+/// once its ring is acquired.
+fn clock_field(sink: &gst::Element, f: Fields) -> usize {
+    use gst::prelude::*;
+    // SAFETY: as `fields`.
+    unsafe { std::ptr::read_unaligned((sink.as_ptr() as *const u8).add(f.clock) as *const usize) }
 }
 
 fn next_sample(sink: &gst::Element, f: Fields) -> Option<f64> {
@@ -776,6 +792,13 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
         let (Some(pts), Some(audio_clock)) = (buffer.pts(), sink.provide_clock()) else {
             return gst::PadProbeReturn::Ok;
         };
+        if audio_clock.as_ptr() as usize != clock_field(&sink, f) {
+            // Not the layout read: GStreamer's own slaving, the probe gone.
+            stats.unavailable.fetch_add(1, Ordering::Relaxed);
+            eprintln!("mediabox-live: ses saati alanı sink'in saati değil; GStreamer resample kullanılıyor");
+            sink.set_property_from_str("slave-method", "resample");
+            return gst::PadProbeReturn::Remove;
+        }
         let samples = match buffer.map_readable() {
             Ok(map) => to_f32(format, map.as_slice()),
             Err(_) => return gst::PadProbeReturn::Ok,
