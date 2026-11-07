@@ -176,6 +176,9 @@ pub struct ClockRow {
     pub running: bool,
     pub trigger: Option<u64>,
     pub tstamp: Option<u64>,
+    /// When the status was read (the middle of its read), for a device
+    /// that gives no timestamp of its own (alsasink leaves them off: 0).
+    pub read_at: Option<u64>,
     pub hw_ptr: Option<u64>,
     pub appl_ptr: Option<u64>,
     /// Frames into the sink up to `at` (`sink.jsonl`).
@@ -268,9 +271,11 @@ pub fn clock_facts(rows: &[ClockRow], step: usize, rate: f64) -> ClockFacts {
     let base = median(before.clone()).unwrap_or(0.0);
     let off = rows[step].late.map_or(0.0, |l| l as f64 - base);
     let back_after = rows[step + 1..].iter().position(|r| r.late.is_some_and(|l| (l as f64 - base).abs() <= 1_000_000.0)).map(|n| n + 1);
-    // The device's frames against its timestamps: a line by least squares.
+    // The device's frames against its timestamps -- or, where it keeps
+    // none, the monotonic time its status was read at: a line by least
+    // squares.
     let points: Vec<(f64, f64)> =
-        rows.iter().filter(|r| r.running).filter_map(|r| Some((r.tstamp? as f64, r.hw_ptr? as f64))).filter(|(t, _)| *t > 0.0).collect();
+        rows.iter().filter(|r| r.running).filter_map(|r| Some((r.tstamp.filter(|t| *t > 0).or(r.read_at)? as f64, r.hw_ptr? as f64))).collect();
     let hw_residual_ns = (points.len() >= 20).then(|| {
         let n = points.len() as f64;
         let (t0, p0) = points[0];
@@ -699,6 +704,7 @@ fn classify_clock_dump(dir: &Path, meta: &serde_json::Value) -> Result<serde_jso
                 running: a["running"].as_bool().unwrap_or(false),
                 trigger: u(a, "trigger"),
                 tstamp: u(a, "tstamp"),
+                read_at: u(v, "alsa_read_at").map(|t| t + u(v, "alsa_read_ns").unwrap_or(0) / 2),
                 hw_ptr: u(a, "hw_ptr"),
                 appl_ptr: u(a, "appl_ptr"),
                 fed: 0,

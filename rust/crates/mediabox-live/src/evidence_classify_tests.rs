@@ -221,6 +221,7 @@ fn rows(n: usize) -> Vec<ClockRow> {
                 running: true,
                 trigger: Some(5),
                 tstamp: Some(at - 1_000_000),
+                read_at: Some(at + 30_000),
                 hw_ptr: Some(k as u64 * 480),
                 appl_ptr: Some(4800 + k as u64 * 480),
                 fed: k as u64 * 480,
@@ -288,6 +289,25 @@ fn a_device_started_again_or_without_timestamps_is_unclassified() {
     let mut r = rows(300);
     for row in r.iter_mut() {
         row.tstamp = None;
+        row.read_at = None;
     }
     assert_eq!(classify_clock(&clock_facts(&r, 150, 48_000.0)), ClockClass::Unclassified("no device timestamps"));
+}
+
+#[test]
+fn a_device_without_timestamps_is_timed_by_when_its_status_was_read() {
+    // alsasink leaves the device's timestamps off: tstamp reads 0.
+    let mut r = rows(300);
+    for row in r.iter_mut() {
+        row.tstamp = Some(0);
+    }
+    r[150].late = Some(100_000 + 10_000_000);
+    let f = clock_facts(&r, 150, 48_000.0);
+    assert!(f.hw_residual_ns.unwrap() < 1_000.0, "{f:?}");
+    assert!(matches!(classify_clock(&f), ClockClass::MeasurementArtifact(_)));
+    // Read times that jump where the frames do not show the step.
+    for row in r.iter_mut().skip(150) {
+        row.read_at = row.read_at.map(|t| t + 10_000_000);
+    }
+    assert!(matches!(classify_clock(&clock_facts(&r, 150, 48_000.0)), ClockClass::ProductAudioTimingStep(_)));
 }
