@@ -21,6 +21,7 @@ mod engine;
 mod es;
 mod gate;
 mod health;
+mod ledger;
 mod ipc;
 mod plane;
 mod sound_diag;
@@ -499,6 +500,11 @@ fn main() {
     if wait.recv_timeout(Duration::from_millis(1500)).is_err() {
         eprintln!("mediabox-live: pipeline 1,5 s içinde durmadı; çıkılıyor");
     }
+    // Every picture's end, the channel's last ones with the rest.
+    shared.ledgers.close_all();
+    engine.write_health();
+    trace.flush();
+    mediabox_core::timeline::flush();
     std::process::exit(0);
 }
 

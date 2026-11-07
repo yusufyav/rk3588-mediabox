@@ -948,6 +948,37 @@ fn a_failed_gate_shows_and_plays_nothing_and_the_next_channel_opens() {
     }
 }
 
+/// Every picture decoded has its end, channel by channel, through a channel
+/// change in the same player and the player's end: each ledger closes, and
+/// what the stop left in the player is all its terminal drain is.
+#[test]
+fn every_picture_of_every_channel_has_its_end() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream(&[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX }]);
+    let run = play_with(ts, 0, Some(5), Duration::from_millis(800), move |engine| {
+        engine.open_gate(5, "matched").expect("opened");
+    });
+    // The next channel while this one's pictures still come: a stop with
+    // pictures on their way.
+    run.engine.shutdown_feed_for_test();
+    let path = std::env::temp_dir().join(format!("mediabox-live-ledger-{}", std::process::id()));
+    std::fs::write(&path, b"").unwrap();
+    run.engine.open_channel(path.to_str().unwrap(), Some(6)).expect("open");
+    std::thread::sleep(Duration::from_millis(500));
+    run.shared.ledgers.close_all();
+    let _ = std::fs::remove_file(path);
+    let closed = run.shared.ledgers.closed();
+    let first = closed.iter().find(|(generation, _)| *generation == 1).expect("the first channel's ledger").1.clone();
+    assert_eq!(first.verdict(true), Ok(()), "{first:?}");
+    assert!(first.decoded >= 90, "{first:?}");
+    assert!(first.preroll >= 10, "pictures held before the gate: {first:?}");
+    assert_eq!(first.decoded, first.preroll + first.not_dmabuf + first.terminal_drain_after_stop() + first.cancelled_before_submit() + first.order, "{first:?}");
+    for (generation, ledger) in &closed {
+        assert_eq!(ledger.verdict(true), Ok(()), "channel {generation}: {ledger:?}");
+    }
+}
+
 /// The test's pictures are H.264 out of `identity`, not dma-bufs: each one
 /// shown is counted dropped as such, and that is all that is.
 fn not_dmabuf(run: &Run) -> u64 {

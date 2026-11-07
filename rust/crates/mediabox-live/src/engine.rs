@@ -30,6 +30,7 @@ use std::time::Instant;
 use gst::prelude::*;
 use mediabox_core::AudioCodec;
 
+use crate::ledger::End;
 use crate::plane::{Picture, Plane, Sent};
 use crate::stamp::{Class, LiveEdge, Packetizer, Piece, Stamp, Stamped};
 
@@ -99,6 +100,8 @@ pub struct Shared {
     /// tsdemux's own to be held against (`sound_source`).
     pub sound_starts: Mutex<std::collections::VecDeque<u64>>,
     pub info: Mutex<Info>,
+    /// Where each decoded picture ended, by channel (`ledger`).
+    pub ledgers: crate::ledger::Ledgers,
     /// The sound device could not be opened: a stand-in takes the sound
     /// meanwhile (`attach_stand_in`).
     pub stand_in: AtomicBool,
@@ -1017,7 +1020,7 @@ impl Engine {
             _ => gst::PadProbeReturn::Drop,
         });
         mediabox_core::timeline!("video-handover", "gen={generation} retired={:?}", old.program);
-        self.take_down_lists(format!("video-down-{generation}"), vec![(old.elements, old.pads)]);
+        self.take_down_lists(format!("video-down-{generation}"), vec![(old.elements, old.pads)], None);
     }
 
     /// The same picture stream under a new program generation -- the PMT
@@ -1094,7 +1097,7 @@ impl Engine {
     }
 
     fn take_down_sound(&self, parts: SoundParts) {
-        self.take_down_lists(format!("sound-down-{}", parts.generation), vec![(parts.elements, parts.pads)]);
+        self.take_down_lists(format!("sound-down-{}", parts.generation), vec![(parts.elements, parts.pads)], None);
     }
 
     /// The PMT gave the sound another codec: the old part plays out what it
@@ -1264,6 +1267,7 @@ impl Engine {
         self.shared.health.plane_full_dropped.store(self.plane.dropped_full(), Ordering::Relaxed);
         let mut report = self.shared.health.report(generation, latency + video_offset, latency + audio_offset, audio_late, device);
         report.gate = self.gate_snapshot();
+        report.ledger = self.shared.ledgers.json();
         crate::health::write(&report);
     }
 
@@ -1651,6 +1655,15 @@ impl Engine {
 
     fn attach_video(self: &Arc<Self>, sink: &gst_app::AppSink, plane: Arc<Plane>, trace: crate::trace::Trace) {
         let shared = Arc::clone(&self.shared);
+        if let Some(pad) = sink.static_pad("sink") {
+            let shared = Arc::clone(&shared);
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if let Some(buffer) = info.buffer() {
+                    shared.ledgers.count(buffer.offset_end(), End::SinkIn);
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
         let mut last_caps: Option<gst::Caps> = None;
         let mut described: Option<Described> = None;
         let mut described_for = 0u64;
@@ -1681,6 +1694,7 @@ impl Engine {
                     if buffer.offset_end() != shared.generation.load(Ordering::SeqCst) {
                         trace.event('M', 0, pts / 1000);
                         mediabox_core::timeline!("drop", "gen={} pts_us={} why=stale", buffer.offset_end(), pts / 1000);
+                        shared.ledgers.count(buffer.offset_end(), End::StaleAtSink);
                         return Ok(gst::FlowSuccess::Ok);
                     }
                     // Described again for every channel, not only when the caps
@@ -1719,6 +1733,7 @@ impl Engine {
                         mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=order last_us={}", pts / 1000, shown_pts / 1000);
                         shared.out_of_order.fetch_add(1, Ordering::Relaxed);
                         shared.health.video_dropped.fetch_add(1, Ordering::Relaxed);
+                        shared.ledgers.count(generation, End::Order);
                         return Ok(gst::FlowSuccess::Ok);
                     }
                     last = Some((generation, pts));
@@ -1733,6 +1748,7 @@ impl Engine {
                         && !shared.playing.load(Ordering::SeqCst)
                     {
                         mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=preroll", pts / 1000);
+                        shared.ledgers.count(generation, End::Preroll);
                         return Ok(gst::FlowSuccess::Ok);
                     }
                     let first = match gate.map(|gate| {
@@ -1740,6 +1756,7 @@ impl Engine {
                     }) {
                         Some(crate::gate::Frame::Preroll) => {
                             mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=preroll", pts / 1000);
+                            shared.ledgers.count(generation, End::Preroll);
                             return Ok(gst::FlowSuccess::Ok);
                         }
                         Some(crate::gate::Frame::Show { first }) => first,
@@ -1752,6 +1769,7 @@ impl Engine {
                         trace.event('X', 0, pts / 1000);
                         mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=not-dmabuf", pts / 1000);
                         shared.health.video_dropped.fetch_add(1, Ordering::Relaxed);
+                        shared.ledgers.count(generation, End::NotDmabuf);
                         return Ok(gst::FlowSuccess::Ok);
                     };
                     // When it is due on the panel, on the clock's own time
@@ -1804,6 +1822,7 @@ impl Engine {
                             trace.event('L', 0, pts / 1000);
                             mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=late late_ms={}", pts / 1000, late / 1_000_000);
                             shared.health.video_dropped.fetch_add(1, Ordering::Relaxed);
+                            shared.ledgers.count(generation, End::Late);
                             return Ok(gst::FlowSuccess::Ok);
                         }
                     }
@@ -1813,9 +1832,20 @@ impl Engine {
                     fault_frames += 1;
                     if crate::health::Faults::ON && faults.skip > 0 && fault_frames % faults.skip == 0 {
                         mediabox_core::timeline!("fault", "skip gen={generation} pts_us={}", pts / 1000);
+                        shared.ledgers.count(generation, End::FaultSkipped);
                         return Ok(gst::FlowSuccess::Ok);
                     }
-                    match plane.send(&picture, sample.clone(), generation, pts, due) {
+                    let sent = plane.send(&picture, sample.clone(), generation, pts, due);
+                    shared.ledgers.count(
+                        generation,
+                        match sent {
+                            Sent::Shown => End::Submitted,
+                            Sent::Dropped => End::PlaneFull,
+                            Sent::Gone if plane.is_closed() => End::PlaneClosed,
+                            Sent::Gone => End::PlaneGone,
+                        },
+                    );
+                    match sent {
                         Sent::Shown => {
                             shared.frames.fetch_add(1, Ordering::Relaxed);
                             if !shared.playing.swap(true, Ordering::SeqCst) {
@@ -1901,8 +1931,19 @@ impl Engine {
         let mut target = into.lock().unwrap_or_else(|p| p.into_inner());
         *target = None;
         if let Some(old) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            self.take_down(old);
+            // Its ledger closes once its elements are down and the sink is
+            // flushed: whichever of the two is done last closes it.
+            let left = Arc::new(std::sync::atomic::AtomicU8::new(2));
+            let shared = Arc::clone(&self.shared);
+            let leaving = old.generation;
+            let close: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if left.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    shared.ledgers.close(leaving);
+                }
+            });
+            self.take_down(old, Some(Arc::clone(&close)));
             self.blank();
+            close();
             mediabox_core::timeline!(
                 "blanked",
                 "gen={generation} ms={:.1}",
@@ -2222,7 +2263,9 @@ impl Engine {
                             ),
                         );
                     }
+                    shared.ledgers.count(generation, End::Decoded);
                     if shared.generation.load(Ordering::SeqCst) != generation {
+                        shared.ledgers.count(generation, End::StaleAtDecoder);
                         return gst::PadProbeReturn::Drop;
                     }
                     shared.decoded.fetch_add(1, Ordering::Relaxed);
@@ -2234,6 +2277,7 @@ impl Engine {
                             let key = *branch_key.lock().unwrap_or_else(|p| p.into_inner());
                             if presentation.lock().unwrap_or_else(|p| p.into_inner()).bogus_first(generation, source_pts, key) {
                                 mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=bogus-pts", source_pts / 1000);
+                                shared.ledgers.count(generation, End::BogusPts);
                                 return gst::PadProbeReturn::Drop;
                             }
                             let Some(scheduled) = presentation
@@ -2246,6 +2290,7 @@ impl Engine {
                                 )
                             else {
                                 mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=catch-up", source_pts / 1000);
+                                shared.ledgers.count(generation, End::CatchUp);
                                 return gst::PadProbeReturn::Drop;
                             };
                             if scheduled != source_pts {
@@ -2272,6 +2317,17 @@ impl Engine {
             // them back unseen (2026-10-31, three openings in three). Pushed
             // into a queue the lock is let go at once and MPP decodes ahead.
             let ahead = make("queue")?;
+            for (pad, end) in [("sink", End::QueueIn), ("src", End::QueueOut)] {
+                let shared = Arc::clone(&self.shared);
+                if let Some(pad) = ahead.static_pad(pad) {
+                    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                        if let Some(buffer) = info.buffer() {
+                            shared.ledgers.count(buffer.offset_end(), end);
+                        }
+                        gst::PadProbeReturn::Ok
+                    });
+                }
+            }
             ahead.set_property("max-size-buffers", 3u32);
             ahead.set_property("max-size-bytes", 0u32);
             ahead.set_property("max-size-time", 0u64);
@@ -2854,7 +2910,7 @@ impl Engine {
     /// Take a branch down without holding anything else up: its reader is
     /// told to stop, its elements go to NULL on a thread of their own, and
     /// the selector inputs it had are given back.
-    fn take_down(&self, branch: Branch) {
+    fn take_down(&self, branch: Branch, then: Option<Arc<dyn Fn() + Send + Sync>>) {
         if let Some(handover) = self.sound_handover.lock().unwrap_or_else(|p| p.into_inner()).take() {
             self.take_down_sound(handover.old);
         }
@@ -2866,7 +2922,7 @@ impl Engine {
         let mut lists = vec![(branch.elements, branch.pads)];
         lists.extend(sound.map(|s| (s.elements, s.pads)));
         lists.extend(video.map(|v| (v.elements, v.pads)));
-        self.take_down_lists(format!("teardown-{}", branch.generation), lists);
+        self.take_down_lists(format!("teardown-{}", branch.generation), lists, then);
     }
 
     /// Off the selectors at once: what the old channel (or the old sound)
@@ -2875,7 +2931,12 @@ impl Engine {
     /// one's first. To NULL and out of the pipeline on a thread of its own,
     /// with whatever was added to the lists meanwhile.
     #[allow(clippy::type_complexity)]
-    fn take_down_lists(&self, name: String, lists: Vec<(Arc<Mutex<Vec<gst::Element>>>, Arc<Mutex<Vec<(gst::Element, gst::Pad)>>>)>) {
+    fn take_down_lists(
+        &self,
+        name: String,
+        lists: Vec<(Arc<Mutex<Vec<gst::Element>>>, Arc<Mutex<Vec<(gst::Element, gst::Pad)>>>)>,
+        then: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
         for (_, pads) in &lists {
             for (_, pad) in pads.lock().unwrap_or_else(|p| p.into_inner()).iter() {
                 if let Some(peer) = pad.peer() {
@@ -2901,6 +2962,9 @@ impl Engine {
                 for (selector, pad) in pads.lock().unwrap_or_else(|p| p.into_inner()).drain(..) {
                     selector.release_request_pad(&pad);
                 }
+            }
+            if let Some(then) = then {
+                then();
             }
         });
         if let Err(error) = spawned {

@@ -271,6 +271,10 @@ impl Plane {
         self.lock().closed = true;
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.lock().closed
+    }
+
     /// Take the picture off and wait for every frame to come back, as
     /// vo_mediabox's uninit does. The plane stays usable: a channel change
     /// does this between channels. At the player's end, `close` comes first,
