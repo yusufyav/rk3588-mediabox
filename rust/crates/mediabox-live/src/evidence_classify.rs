@@ -2,10 +2,15 @@
 //! --evidence-classify <dump>`. Diagnosis only; nothing here runs in a
 //! playing player.
 //!
-//! The transport (ETSI TR 101 290 §5.2.1–5.2.2, on the packets the dump
-//! keeps): sync byte, transport_error_indicator, continuity of the sound's
-//! PID, the PAT's and PMT's repetition, the PCR's repetition (40 ms) and
-//! the sound PES's PTS repetition (700 ms) and step.
+//! The transport, by indicators of ETSI TR 101 290 V1.4.1 §5.2.1–5.2.2 as
+//! far as the packets the dump keeps allow: the sync byte of each captured
+//! packet, transport_error_indicator, continuity of the sound's PID, the
+//! PCR's repetition against the standard's 100 ms (and, apart, a stricter
+//! 40 ms of this project's own), the sound PES's PTS repetition (700 ms)
+//! and step. PAT and PMT packets are counted, nothing more: their
+//! repetition, section CRC and version are not measured here, nor
+//! PCR_accuracy, nor TS_sync_loss (the whole stream is not kept); the
+//! output says so rather than a pass.
 //!
 //! The sound, decoded again by a decoder that is not the player's (ffmpeg's
 //! `mp2`, libavcodec; the player's is libmpg123), from the same packets.
@@ -74,7 +79,9 @@ pub fn level_in(segments: &[Segment], format: &PcmFormat, from: u64, to: u64) ->
     (total, coverage)
 }
 
-/// Silent as the meter holds a run silent: every sample under `EXIT_DBFS`.
+/// Silent as the player's meter holds a run silent: every sample's peak
+/// under `EXIT_DBFS`, the meter's own threshold -- not a BS.1770 or R128
+/// loudness, nor a silence limit any standard sets.
 pub fn silent(l: &Levels) -> bool {
     l.frames > 0 && l.peak_max() < 10f32.powf(EXIT_DBFS / 20.0)
 }
@@ -185,9 +192,44 @@ pub struct ClockRow {
     pub fed: u64,
 }
 
+/// Where the device began playing in a window, each on its own: the
+/// trigger time ALSA gives, the first sample RUNNING, the first with a
+/// frame played, the first buffer into the sink (its time and PTS) and the
+/// first counted as fed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Start {
+    pub trigger_ns: Option<u64>,
+    pub first_running_at: Option<u64>,
+    pub first_hw_at: Option<u64>,
+    pub first_sink_at: Option<u64>,
+    pub first_sink_pts: Option<u64>,
+    pub first_fed_at: Option<u64>,
+}
+
+impl Start {
+    pub fn of(rows: &[ClockRow], sink: &[(u64, u64)]) -> Self {
+        Self {
+            trigger_ns: rows.iter().find(|r| r.running).and_then(|r| r.trigger),
+            first_running_at: rows.iter().find(|r| r.running).map(|r| r.at),
+            first_hw_at: rows.iter().find(|r| r.running && r.hw_ptr.is_some_and(|h| h > 0)).map(|r| r.at),
+            first_sink_at: sink.first().map(|s| s.0),
+            first_sink_pts: sink.first().map(|s| s.1),
+            first_fed_at: rows.iter().find(|r| r.fed > 0).map(|r| r.at),
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "alsa_trigger_ns": self.trigger_ns, "first_running_at": self.first_running_at, "first_hw_ptr_at": self.first_hw_at,
+            "first_sink_at": self.first_sink_at, "first_sink_pts": self.first_sink_pts, "first_fed_at": self.first_fed_at,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClockClass {
     MeasurementArtifact(&'static str),
+    StartupMeasurementConvergence(&'static str),
     ProductAudioTimingStep(&'static str),
     Unclassified(&'static str),
 }
@@ -196,6 +238,7 @@ impl ClockClass {
     pub fn name(self) -> &'static str {
         match self {
             ClockClass::MeasurementArtifact(_) => "measurement_artifact",
+            ClockClass::StartupMeasurementConvergence(_) => "startup_measurement_convergence",
             ClockClass::ProductAudioTimingStep(_) => "product_audio_timing_step",
             ClockClass::Unclassified(_) => "unclassified",
         }
@@ -203,13 +246,21 @@ impl ClockClass {
 
     pub fn why(self) -> &'static str {
         match self {
-            ClockClass::MeasurementArtifact(w) | ClockClass::ProductAudioTimingStep(w) | ClockClass::Unclassified(w) => w,
+            ClockClass::MeasurementArtifact(w)
+            | ClockClass::StartupMeasurementConvergence(w)
+            | ClockClass::ProductAudioTimingStep(w)
+            | ClockClass::Unclassified(w) => w,
         }
     }
 }
 
 /// A step of the presentation larger than this is the product's.
 pub const PRESENT_STEP_NS: f64 = 2_000_000.0;
+/// A step this soon after the device began playing is in its start.
+pub const STARTUP_NS: u64 = 3_000_000_000;
+/// Samples (10 ms each) the device must have played on each side of a
+/// step for the feed to be judged.
+pub const LEAST_SIDE: usize = 10;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClockFacts {
@@ -228,17 +279,103 @@ pub struct ClockFacts {
     pub feed_shift_ns: Option<f64>,
     pub device_restarted: bool,
     pub calibration_changed: bool,
+    /// How long after the device began playing (first RUNNING with a
+    /// frame played) the step came; None: it did not in the window.
+    pub since_start_ns: Option<u64>,
+    /// Calibrations the sound clock went through from the start to a
+    /// second after the step.
+    pub calibration_changes: usize,
+    /// The sink's buffers against the PTS plan around the step: the
+    /// largest jump between one's end and the next's start, ns.
+    pub sink_jump_ns: Option<f64>,
+    /// Where audiobasesink put each buffer in its ring against the
+    /// buffer's running time (`placement_steps`), from the device's start
+    /// to 1.5 s after the step: the largest step between two buffers and
+    /// the whole movement, ns. None: no placement log with the dump.
+    pub placement_step_ns: Option<f64>,
+    pub placement_moved_ns: Option<f64>,
+}
+
+/// One buffer as audiobasesink rendered it (its DEBUG log,
+/// gstaudiobasesink.c 1.26: "running: start <t>" then "rendering at
+/// <sample_offset> <samples>/<out_samples>"): its running time and the
+/// ring sample it was put at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub running_ns: u64,
+    pub sample_offset: u64,
+    pub samples: u64,
+    pub out_samples: u64,
+}
+
+fn clock_time(t: &str) -> Option<u64> {
+    let mut parts = t.split(':');
+    let (h, m, rest) = (parts.next()?.parse::<u64>().ok()?, parts.next()?.parse::<u64>().ok()?, parts.next()?);
+    let (sec, ns) = rest.split_once('.')?;
+    Some(((h * 60 + m) * 60 + sec.parse::<u64>().ok()?) * 1_000_000_000 + format!("{ns:0<9}").get(..9)?.parse::<u64>().ok()?)
+}
+
+/// The placements of a GST_DEBUG=audiobasesink:5 log, in order.
+pub fn placements(log: &str) -> Vec<Placement> {
+    let mut out = Vec::new();
+    let mut running = None;
+    for line in log.lines() {
+        if let Some(rest) = line.split("running: start ").nth(1) {
+            running = rest.split_whitespace().next().and_then(clock_time);
+        } else if let Some(rest) = line.split("rendering at ").nth(1) {
+            let mut f = rest.split_whitespace();
+            let offset = f.next().and_then(|v| v.parse::<u64>().ok());
+            let counts = f.next().and_then(|v| v.split_once('/')).and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)));
+            if let (Some(running_ns), Some(sample_offset), Some((samples, out_samples))) = (running.take(), offset, counts) {
+                out.push(Placement { running_ns, sample_offset, samples, out_samples });
+            }
+        }
+    }
+    out
+}
+
+/// Each buffer's place in the ring as time less its running time: where
+/// the device plays it against its PTS plan, up to a constant (the ring is
+/// played in a line: `hw_residual_ns`). Its largest step between two
+/// buffers, and how far it moved in all, ns.
+pub fn placement_steps(p: &[Placement], rate: f64) -> Option<(f64, f64)> {
+    let d: Vec<f64> = p.iter().map(|b| b.sample_offset as f64 / rate * 1e9 - b.running_ns as f64).collect();
+    if d.len() < 2 {
+        return None;
+    }
+    let step = d.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f64::max);
+    let (lo, hi) = d.iter().fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    Some((step, hi - lo))
 }
 
 pub fn classify_clock(f: &ClockFacts) -> ClockClass {
     if f.device_restarted {
-        return ClockClass::Unclassified("the device started again in the window");
+        return ClockClass::ProductAudioTimingStep("the device started again (XRUN or reopen) after it began");
     }
     let Some(hw) = f.hw_residual_ns else { return ClockClass::Unclassified("no device timestamps") };
-    let Some(feed) = f.feed_shift_ns else { return ClockClass::Unclassified("no device pointers against the feed") };
     if hw > PRESENT_STEP_NS {
         return ClockClass::ProductAudioTimingStep("the device's playout stepped against its timestamps");
     }
+    if f.sink_jump_ns.is_some_and(|j| j > PRESENT_STEP_NS) {
+        return ClockClass::ProductAudioTimingStep("the sink's samples jumped on their PTS plan");
+    }
+    if f.placement_step_ns.is_some_and(|s| s > PRESENT_STEP_NS) {
+        return ClockClass::ProductAudioTimingStep("audiobasesink placed a buffer off its PTS plan by more than 2 ms");
+    }
+    // At a start the sink's ring is filling: frames written to the device
+    // less frames fed moves with its fill, not only with samples gained or
+    // lost, and does not decide. Where each buffer was put in the ring
+    // against its running time does.
+    if f.since_start_ns.is_some_and(|s| s <= STARTUP_NS) {
+        return match f.placement_step_ns {
+            None => ClockClass::Unclassified("a step at the start needs the sink's placement of its buffers"),
+            Some(_) if f.calibration_changes >= 2 => {
+                ClockClass::StartupMeasurementConvergence("the sound clock's calibration converging, the playout in a line, no buffer placed 2 ms off")
+            }
+            Some(_) => ClockClass::Unclassified("a step at the start with the calibration still"),
+        };
+    }
+    let Some(feed) = f.feed_shift_ns else { return ClockClass::Unclassified("too little of the device playing on a side of the step") };
     if feed.abs() > PRESENT_STEP_NS {
         return ClockClass::ProductAudioTimingStep("samples written to the device moved against the feed");
     }
@@ -264,9 +401,15 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     Some(v[v.len() / 2])
 }
 
-/// The facts of the clock sample at `step` in `rows`.
-pub fn clock_facts(rows: &[ClockRow], step: usize, rate: f64) -> ClockFacts {
+/// The facts of the clock sample at `step` in `rows`; `sink`: each buffer
+/// into the sink (arrival, PTS, duration).
+pub fn clock_facts(rows: &[ClockRow], step: usize, rate: f64, sink: &[(u64, u64, u64)], placed: &[Placement]) -> ClockFacts {
     let at = rows[step].at;
+    // Only what the device played counts: from its first sample RUNNING
+    // with a frame played. Before it, its status is that of a device being
+    // set up, not one that stopped.
+    let start = rows.iter().position(|r| r.running && r.hw_ptr.is_some_and(|h| h > 0));
+    let playing = |r: &&ClockRow| start.is_some_and(|s| r.at >= rows[s].at);
     let before: Vec<f64> = rows.iter().filter(|r| r.at < at && at - r.at <= 1_000_000_000).filter_map(|r| r.late.map(|l| l as f64)).collect();
     let base = median(before.clone()).unwrap_or(0.0);
     let off = rows[step].late.map_or(0.0, |l| l as f64 - base);
@@ -275,7 +418,7 @@ pub fn clock_facts(rows: &[ClockRow], step: usize, rate: f64) -> ClockFacts {
     // none, the monotonic time its status was read at: a line by least
     // squares.
     let points: Vec<(f64, f64)> =
-        rows.iter().filter(|r| r.running).filter_map(|r| Some((r.tstamp.filter(|t| *t > 0).or(r.read_at)? as f64, r.hw_ptr? as f64))).collect();
+        rows.iter().filter(playing).filter(|r| r.running).filter_map(|r| Some((r.tstamp.filter(|t| *t > 0).or(r.read_at)? as f64, r.hw_ptr? as f64))).collect();
     let hw_residual_ns = (points.len() >= 20).then(|| {
         let n = points.len() as f64;
         let (t0, p0) = points[0];
@@ -293,21 +436,33 @@ pub fn clock_facts(rows: &[ClockRow], step: usize, rate: f64) -> ClockFacts {
     let mean = |lo: i64, hi: i64| {
         let v: Vec<f64> = rows
             .iter()
+            .filter(playing)
             .filter(|r| {
                 let d = r.at as i64 - at as i64;
                 d >= lo && d <= hi
             })
             .filter_map(|r| Some(r.appl_ptr? as f64 - r.fed as f64))
             .collect();
-        (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
+        (v.len() >= LEAST_SIDE).then(|| v.iter().sum::<f64>() / v.len() as f64)
     };
     let feed_shift_ns = match (mean(-1_500_000_000, -200_000_000), mean(200_000_000, 1_500_000_000)) {
         (Some(a), Some(b)) => Some((b - a) / rate * 1e9),
         _ => None,
     };
-    let triggers: Vec<u64> = rows.iter().filter_map(|r| r.trigger).collect();
-    let device_restarted = triggers.windows(2).any(|w| w[0] != w[1]) || rows.iter().any(|r| r.appl_ptr.is_some() && !r.running);
+    let after_start: Vec<&ClockRow> = rows.iter().filter(playing).collect();
+    let triggers: Vec<u64> = after_start.iter().filter_map(|r| r.trigger).collect();
+    let device_restarted = triggers.windows(2).any(|w| w[0] != w[1]) || after_start.iter().any(|r| !r.running);
     let calibration_changed = step > 0 && rows[step].calibration != rows[step - 1].calibration;
+    // Since the device began: by ALSA's own trigger time, or, without it,
+    // a start seen in the window (a sample not playing before the first
+    // that plays). A device playing from the window's first sample began
+    // before it: no start here.
+    let began = rows.iter().find(|r| r.running).and_then(|r| r.trigger).or_else(|| start.filter(|s| *s > 0).map(|s| rows[s].at));
+    let since_start_ns = began.filter(|b| *b <= at).map(|b| at - b);
+    let calibration_changes =
+        after_start.iter().filter(|r| r.at <= at + 1_000_000_000).collect::<Vec<_>>().windows(2).filter(|w| w[0].calibration != w[1].calibration).count();
+    let near: Vec<&(u64, u64, u64)> = sink.iter().filter(|(t, _, _)| t.abs_diff(at) <= 1_500_000_000).collect();
+    let sink_jump_ns = (near.len() >= 2).then(|| near.windows(2).map(|w| (w[1].1 as f64 - (w[0].1 + w[0].2) as f64).abs()).fold(0.0, f64::max));
     ClockFacts {
         off_ns: off as i64,
         read_ns: rows[step].after.saturating_sub(rows[step].at),
@@ -316,6 +471,11 @@ pub fn clock_facts(rows: &[ClockRow], step: usize, rate: f64) -> ClockFacts {
         feed_shift_ns,
         device_restarted,
         calibration_changed,
+        since_start_ns,
+        calibration_changes,
+        sink_jump_ns,
+        placement_step_ns: placement_steps(placed, rate).map(|p| p.0),
+        placement_moved_ns: placement_steps(placed, rate).map(|p| p.1),
     }
 }
 
@@ -547,13 +707,19 @@ pub fn classify_dump(dir: &Path) -> Result<serde_json::Value, String> {
     let mut out = serde_json::json!({
         "dump": dir.file_name().map(|n| n.to_string_lossy().to_string()), "kind": kind,
         "tr101290": {
-            "packets": report.packets, "sync_errors": report.sync_errors, "transport_error": report.tei,
-            "cc_errors": report.cc_errors, "pat": report.pat, "pmt": report.pmt, "pcr": report.pcr,
-            "pcr_max_gap_ms": report.pcr_max_gap_ns as f64 / 1e6, "pcr_repetition_error": report.pcr_max_gap_ns > 40_000_000,
+            "edition": "ETSI TR 101 290 V1.4.1, indicators of §5.2.1-5.2.2 on the captured packets only",
+            "captured_packets": report.packets, "sync_byte_errors_in_captured": report.sync_errors,
+            "transport_error_indicator_packets": report.tei, "continuity_errors_sound_pid": report.cc_errors,
+            "captured_pat_packets": report.pat, "captured_pmt_packets": report.pmt, "pcr_count": report.pcr,
+            "pcr_max_gap_ms": report.pcr_max_gap_ns as f64 / 1e6,
+            "pcr_repetition_error_100ms": report.pcr_max_gap_ns > 100_000_000,
+            "project_strict_pcr_40ms": report.pcr_max_gap_ns > 40_000_000,
             "sound_pes": report.pes.len(), "pts_max_gap_ms": report.pts_max_gap_ns as f64 / 1e6,
-            "pts_error": report.pts_max_gap_ns > 700_000_000, "pts_irregular": report.pts_irregular,
+            "pts_error_700ms": report.pts_max_gap_ns > 700_000_000, "pts_irregular": report.pts_irregular,
+            "not_measured": ["TS_sync_loss (the whole stream is not kept)", "PAT/PMT repetition interval", "PAT/PMT section CRC",
+                             "PAT/PMT version consistency", "PCR_accuracy (arrival is kept per piece, not per packet)",
+                             "PCR_discontinuity_indicator handling"],
         },
-        "pcr_accuracy": "not measured: the dump keeps arrival per piece, not per packet",
     });
     if kind == "clock" {
         out["clock"] = classify_clock_dump(dir, &meta)?;
@@ -666,7 +832,9 @@ fn classify_silence_dump(
         "independent": independent_json, "decoder_lag": lag,
         "input_errors": facts.input_errors, "decoder_errors": facts.decoder_errors,
         "sink_lost_ms": lost as f64 / 1e6, "user_silenced": facts.user_silenced,
-        "threshold_dbfs": EXIT_DBFS,
+        "product_peak_detector_threshold_dbfs": EXIT_DBFS,
+        "threshold_is": "the player's meter's own sample-peak threshold; not BS.1770/R128 loudness, not a standard silence limit",
+        "basis": "two independent decoders (libmpg123, ffmpeg mp2) compared on the same PTS window",
     }))
 }
 
@@ -756,7 +924,21 @@ fn classify_clock_dump(dir: &Path, meta: &serde_json::Value) -> Result<serde_jso
     let Some(step) = u(&meta["note"], "at").and_then(|t| rows.iter().position(|r| r.at >= t)) else {
         return Ok(serde_json::json!({ "class": "unclassified", "why": "the step's sample is not in the dump" }));
     };
-    let facts = clock_facts(&rows, step, rate);
+    let timed: Vec<(u64, u64, u64)> = sink.iter().filter_map(|v| Some((u(v, "at")?, u(v, "pts")?, u(v, "dur")?))).collect();
+    let start = Start::of(&rows, &timed.iter().map(|(a, p, _)| (*a, *p)).collect::<Vec<_>>());
+    // The sink's own placement, where a run kept it (GST_DEBUG=audiobasesink:5
+    // into the dump as gst-audiobasesink.log): its buffers from the
+    // device's start to 1.5 s after the step, by running time against the
+    // sink's own PTS (`sink.jsonl`).
+    let placed: Vec<Placement> = std::fs::read_to_string(dir.join("gst-audiobasesink.log")).map(|t| placements(&t)).unwrap_or_default();
+    let window: Vec<Placement> = match (start.first_sink_pts, start.first_sink_at, u(&meta["note"], "at")) {
+        (Some(pts0), Some(at0), Some(step_at)) => {
+            let until = pts0 + (step_at + 1_500_000_000).saturating_sub(at0);
+            placed.iter().copied().filter(|p| p.running_ns >= pts0 && p.running_ns <= until).collect()
+        }
+        _ => Vec::new(),
+    };
+    let facts = clock_facts(&rows, step, rate, &timed, &window);
     let class = classify_clock(&facts);
     let tstamp_vs_mono = rows.iter().filter_map(|r| Some(r.tstamp? as i64 - r.at as i64)).map(|d| d as f64 / 1e6).fold(f64::NAN, f64::max);
     Ok(serde_json::json!({
@@ -765,6 +947,10 @@ fn classify_clock_dump(dir: &Path, meta: &serde_json::Value) -> Result<serde_jso
         "hw_residual_ms": facts.hw_residual_ns.map(|v| v / 1e6), "feed_shift_ms": facts.feed_shift_ns.map(|v| v / 1e6),
         "device_restarted": facts.device_restarted, "calibration_changed": facts.calibration_changed,
         "samples": rows.len(), "tstamp_minus_mono_ms_max": tstamp_vs_mono,
+        "start": start.json(), "since_start_ms": facts.since_start_ns.map(|v| v as f64 / 1e6),
+        "calibration_changes": facts.calibration_changes, "sink_jump_ms": facts.sink_jump_ns.map(|v| v / 1e6),
+        "placement_buffers": window.len(), "placement_step_ms": facts.placement_step_ns.map(|v| v / 1e6),
+        "placement_moved_ms": facts.placement_moved_ns.map(|v| v / 1e6),
         "threshold_ms": PRESENT_STEP_NS / 1e6,
     }))
 }

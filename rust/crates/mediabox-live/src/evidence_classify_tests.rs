@@ -246,7 +246,7 @@ fn rows(n: usize) -> Vec<ClockRow> {
 fn one_reading_off_and_the_playout_in_a_line_is_the_reading() {
     let mut r = rows(300);
     r[150].late = Some(100_000 + 10_000_000);
-    let f = clock_facts(&r, 150, 48_000.0);
+    let f = clock_facts(&r, 150, 48_000.0, &[], &[]);
     assert_eq!(f.back_after, Some(1));
     assert!(f.hw_residual_ns.unwrap() < 1_000.0);
     assert!(f.feed_shift_ns.unwrap().abs() < 1_000.0);
@@ -262,7 +262,7 @@ fn clocks_read_far_apart_make_a_late_of_their_own() {
         row.late = Some(100_000 - 6_000_000);
     }
     r[150].after = r[150].at + 6_000_000;
-    let f = clock_facts(&r, 150, 48_000.0);
+    let f = clock_facts(&r, 150, 48_000.0, &[], &[]);
     assert_eq!(f.back_after, None);
     assert_eq!(classify_clock(&f), ClockClass::MeasurementArtifact("the two clocks were read that far apart"));
 }
@@ -275,7 +275,7 @@ fn the_device_stepping_against_its_timestamps_is_the_products() {
         // 10 ms of frames (480) skipped by the device.
         row.hw_ptr = Some(k as u64 * 480 + 480);
     }
-    let f = clock_facts(&r, 150, 48_000.0);
+    let f = clock_facts(&r, 150, 48_000.0, &[], &[]);
     assert!(f.hw_residual_ns.unwrap() > PRESENT_STEP_NS, "{f:?}");
     assert!(matches!(classify_clock(&f), ClockClass::ProductAudioTimingStep(_)));
 }
@@ -288,7 +288,7 @@ fn samples_dropped_between_the_feed_and_the_device_are_the_products() {
         // 10 ms of the feed never written to the device.
         row.appl_ptr = row.appl_ptr.map(|a| a - 480);
     }
-    let f = clock_facts(&r, 150, 48_000.0);
+    let f = clock_facts(&r, 150, 48_000.0, &[], &[]);
     assert!((f.feed_shift_ns.unwrap() + 10_000_000.0).abs() < 1_000.0, "{f:?}");
     assert_eq!(classify_clock(&f), ClockClass::ProductAudioTimingStep("samples written to the device moved against the feed"));
 }
@@ -305,22 +305,147 @@ fn a_sawtooth_of_written_less_fed_moving_its_median_is_no_step() {
         row.hw_ptr = Some(k as u64 * 480);
     }
     r[150].late = Some(100_000 + 10_000_000);
-    let f = clock_facts(&r, 150, 48_000.0);
+    let f = clock_facts(&r, 150, 48_000.0, &[], &[]);
     assert!(f.feed_shift_ns.unwrap().abs() < PRESENT_STEP_NS, "{f:?}");
     assert!(matches!(classify_clock(&f), ClockClass::MeasurementArtifact(_)));
 }
 
 #[test]
-fn a_device_started_again_or_without_timestamps_is_unclassified() {
+fn a_device_started_again_is_the_products_and_without_timestamps_unclassified() {
     let mut r = rows(300);
     r[200].trigger = Some(6);
-    assert!(matches!(classify_clock(&clock_facts(&r, 150, 48_000.0)), ClockClass::Unclassified(_)));
+    assert_eq!(
+        classify_clock(&clock_facts(&r, 150, 48_000.0, &[], &[])),
+        ClockClass::ProductAudioTimingStep("the device started again (XRUN or reopen) after it began")
+    );
     let mut r = rows(300);
     for row in r.iter_mut() {
         row.tstamp = None;
         row.read_at = None;
     }
-    assert_eq!(classify_clock(&clock_facts(&r, 150, 48_000.0)), ClockClass::Unclassified("no device timestamps"));
+    assert_eq!(classify_clock(&clock_facts(&r, 150, 48_000.0, &[], &[])), ClockClass::Unclassified("no device timestamps"));
+}
+
+/// A channel's opening: the device set up but not playing for the first
+/// `idle` samples (its status PREPARED, pointers 0), then playing 480
+/// frames each, fed as much; the sound clock's calibration new at every
+/// sample from then on, the reading 4 ms off from the step for 40 samples.
+fn opening(idle: usize, step: usize) -> Vec<ClockRow> {
+    let mut r = rows(400);
+    for (k, row) in r.iter_mut().enumerate() {
+        if k < idle {
+            row.running = false;
+            row.hw_ptr = Some(0);
+            row.appl_ptr = Some(0);
+            row.fed = 0;
+            row.late = None;
+            row.calibration = None;
+        } else {
+            let n = (k - idle) as u64;
+            row.trigger = Some(T0 + idle as u64 * 10_000_000);
+            row.hw_ptr = Some(n * 480 + 1);
+            row.appl_ptr = Some(4800 + n * 480);
+            row.fed = n * 480;
+            row.calibration = Some([n, n + 1, 1, 1]);
+            row.late = Some(if (step..step + 40).contains(&k) { -4_400_000 } else { 0 });
+        }
+    }
+    r
+}
+
+#[test]
+fn a_step_at_the_start_with_the_playout_whole_is_the_clocks_convergence() {
+    let r = opening(100, 150);
+    // Every buffer of 1152 at its own place in the ring: offset and
+    // running time move together, sample for sample.
+    let placed: Vec<Placement> =
+        (0..80u64).map(|k| Placement { running_ns: T0 + k * FRAME_NS, sample_offset: 480_000 + k * 1152, samples: 1152, out_samples: 1152 }).collect();
+    let f = clock_facts(&r, 150, 48_000.0, &[], &placed);
+    assert!(!f.device_restarted, "a device set up before it plays has not restarted: {f:?}");
+    assert_eq!(f.since_start_ns, Some(500_000_000));
+    assert!(f.placement_step_ns.unwrap() < 1_000.0);
+    assert!(matches!(classify_clock(&f), ClockClass::StartupMeasurementConvergence(_)), "{f:?}");
+    // Without the placement the start is not judged by the feed.
+    assert_eq!(
+        classify_clock(&clock_facts(&r, 150, 48_000.0, &[], &[])),
+        ClockClass::Unclassified("a step at the start needs the sink's placement of its buffers")
+    );
+}
+
+#[test]
+fn a_buffer_placed_off_its_pts_plan_at_the_start_is_the_products() {
+    let r = opening(100, 150);
+    // From the 40th buffer on, 3 ms (144 samples) later in the ring than
+    // its running time puts it.
+    let placed: Vec<Placement> = (0..80u64)
+        .map(|k| Placement {
+            running_ns: T0 + k * FRAME_NS,
+            sample_offset: 480_000 + k * 1152 + if k >= 40 { 144 } else { 0 },
+            samples: 1152,
+            out_samples: 1152,
+        })
+        .collect();
+    let f = clock_facts(&r, 150, 48_000.0, &[], &placed);
+    assert!((f.placement_step_ns.unwrap() - 3_000_000.0).abs() < 1_000.0, "{f:?}");
+    assert_eq!(classify_clock(&f), ClockClass::ProductAudioTimingStep("audiobasesink placed a buffer off its PTS plan by more than 2 ms"));
+}
+
+#[test]
+fn the_placement_is_read_from_audiobasesinks_own_log() {
+    let log = "0:00:05.1 1 0x1 DEBUG audiobasesink gstaudiobasesink.c:1913:gst_audio_base_sink_render:<alsasink0> time 0:00:06.952535442, start 0:00:00.000000000, samples 1152
+0:00:05.1 1 0x1 DEBUG audiobasesink gstaudiobasesink.c:2016:gst_audio_base_sink_render:<alsasink0> running: start 0:00:06.952535442 - stop 0:00:06.976535442
+0:00:05.1 1 0x1 DEBUG audiobasesink gstaudiobasesink.c:2156:gst_audio_base_sink_render:<alsasink0> rendering at 2611327 1152/1150
+0:00:05.1 1 0x1 DEBUG audiobasesink gstaudiobasesink.c:2168:gst_audio_base_sink_render:<alsasink0> wrote 1152 of 1152
+";
+    assert_eq!(placements(log), vec![Placement { running_ns: 6_952_535_442, sample_offset: 2_611_327, samples: 1152, out_samples: 1150 }]);
+}
+
+#[test]
+fn at_the_start_the_feed_against_the_device_does_not_decide() {
+    // The ring filling moves written less fed as samples lost would.
+    let mut r = opening(100, 150);
+    for row in r.iter_mut().skip(150) {
+        row.appl_ptr = row.appl_ptr.map(|a| a - 480);
+    }
+    let f = clock_facts(&r, 150, 48_000.0, &[], &[]);
+    assert_eq!(classify_clock(&f), ClockClass::Unclassified("a step at the start needs the sink's placement of its buffers"));
+}
+
+#[test]
+fn a_step_too_soon_after_the_start_to_judge_is_unclassified() {
+    // Five samples played before it: too little to judge the feed by.
+    // Well past the start (4 s), five samples' worth of feed on a side.
+    let mut r = rows(700);
+    for row in r.iter_mut().take(545) {
+        row.appl_ptr = None;
+    }
+    r[550].late = Some(100_000 + 10_000_000);
+    let f = clock_facts(&r, 550, 48_000.0, &[], &[]);
+    assert_eq!(classify_clock(&f), ClockClass::Unclassified("too little of the device playing on a side of the step"));
+}
+
+#[test]
+fn a_step_at_the_start_with_the_calibration_still_is_not_called_convergence() {
+    let mut r = opening(100, 150);
+    for row in r.iter_mut().skip(100) {
+        row.calibration = Some([1, 1, 1, 1]);
+    }
+    let placed: Vec<Placement> =
+        (0..80u64).map(|k| Placement { running_ns: T0 + k * FRAME_NS, sample_offset: 480_000 + k * 1152, samples: 1152, out_samples: 1152 }).collect();
+    let f = clock_facts(&r, 150, 48_000.0, &[], &placed);
+    assert_eq!(classify_clock(&f), ClockClass::Unclassified("a step at the start with the calibration still"));
+}
+
+#[test]
+fn the_sinks_samples_jumping_on_their_pts_plan_are_the_products() {
+    let r = opening(100, 150);
+    // Buffers of 24 ms into the sink, one 10 ms later than the one before
+    // ended.
+    let sink: Vec<(u64, u64, u64)> =
+        (0..100u64).map(|k| (T0 + k * FRAME_NS, 5_000_000_000 + k * FRAME_NS + if k >= 60 { 10_000_000 } else { 0 }, FRAME_NS)).collect();
+    let f = clock_facts(&r, 150, 48_000.0, &sink, &[]);
+    assert!((f.sink_jump_ns.unwrap() - 10_000_000.0).abs() < 1.0, "{f:?}");
+    assert_eq!(classify_clock(&f), ClockClass::ProductAudioTimingStep("the sink's samples jumped on their PTS plan"));
 }
 
 #[test]
@@ -331,12 +456,12 @@ fn a_device_without_timestamps_is_timed_by_when_its_status_was_read() {
         row.tstamp = Some(0);
     }
     r[150].late = Some(100_000 + 10_000_000);
-    let f = clock_facts(&r, 150, 48_000.0);
+    let f = clock_facts(&r, 150, 48_000.0, &[], &[]);
     assert!(f.hw_residual_ns.unwrap() < 1_000.0, "{f:?}");
     assert!(matches!(classify_clock(&f), ClockClass::MeasurementArtifact(_)));
     // Read times that jump where the frames do not show the step.
     for row in r.iter_mut().skip(150) {
         row.read_at = row.read_at.map(|t| t + 10_000_000);
     }
-    assert!(matches!(classify_clock(&clock_facts(&r, 150, 48_000.0)), ClockClass::ProductAudioTimingStep(_)));
+    assert!(matches!(classify_clock(&clock_facts(&r, 150, 48_000.0, &[], &[])), ClockClass::ProductAudioTimingStep(_)));
 }
