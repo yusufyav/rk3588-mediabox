@@ -373,6 +373,9 @@ impl Health {
         for incident in incidents {
             let json = incident.json();
             mediabox_core::timeline!("sound-incident", "{json}");
+            if let Some(evidence) = crate::evidence::get() {
+                evidence.request(incident.kind.name(), incident.start_ns, incident.end_ns.unwrap_or(incident.start_ns), json.clone());
+            }
             if incident.alarm {
                 eprintln!(
                     "mediabox-live: ses olayı: {} {:.0} ms, neden {} (ayrıntı {INCIDENTS})",
@@ -539,6 +542,10 @@ impl Device {
 
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    pub fn status_path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
     }
 
     /// The least queued since the report before, ms, without taking it.

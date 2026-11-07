@@ -849,6 +849,9 @@ impl Engine {
                     shared.audio_lead_ns.store(pts.nseconds() as i64 - now, Ordering::Relaxed);
                     let generation = shared.generation.load(Ordering::SeqCst);
                     shared.health.audio(generation, pts.nseconds(), buffer.duration().map(|d| d.nseconds()));
+                    if let Some(evidence) = crate::evidence::get() {
+                        evidence.sink(generation, pts.nseconds(), buffer.duration().map(|d| d.nseconds()), buffer.size());
+                    }
                     let latency = shared.health.latency_ns.load(Ordering::Relaxed);
                     if latency > 0 {
                         shared.health.audio_lead(pts.nseconds() as i64 + latency + shared.health.audio_offset_ns.load(Ordering::Relaxed) - now);
@@ -951,6 +954,14 @@ impl Engine {
                     .min_by_key(|&at| (at - theirs).abs());
                 if let Some(ours) = ours {
                     shared.health.sound_map(theirs - ours);
+                    // Off by more than half an MPEG frame: what the reader
+                    // had then, for the evidence of why.
+                    if (theirs - ours).abs() > 12_000_000
+                        && let Some(evidence) = crate::evidence::get()
+                    {
+                        let starts: Vec<u64> = shared.sound_starts.lock().unwrap_or_else(|p| p.into_inner()).iter().rev().take(4).copied().collect();
+                        evidence.map(shared.generation.load(Ordering::SeqCst), theirs as u64, starts);
+                    }
                 }
             }
             gst::PadProbeReturn::Ok
@@ -1224,12 +1235,50 @@ impl Engine {
                     device_for = name;
                 }
                 device.sample();
+                if let Some(evidence) = crate::evidence::get() {
+                    engine.evidence_clock(evidence, &device);
+                }
                 if last_report.elapsed() < crate::health::PERIOD {
                     continue;
                 }
                 last_report = Instant::now();
                 engine.write_health_with(&mut device, &mut last_probe);
             }
+        });
+    }
+
+    /// The clock chain for the evidence (`evidence::ClockSample`): the two
+    /// clocks read back to back between monotonic readings, the sound
+    /// clock's internal time and calibration, the ALSA status.
+    fn evidence_clock(&self, evidence: &crate::evidence::Evidence, device: &crate::health::Device) {
+        let sink = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let audio_clock = sink.as_ref().and_then(|s| s.provide_clock());
+        let pipeline_clock = self.pipeline.clock();
+        let at = crate::evidence::now();
+        let pipeline = pipeline_clock.as_ref().map(|c| c.time().nseconds());
+        let audio = audio_clock.as_ref().map(|c| c.time().nseconds());
+        let after = crate::evidence::now();
+        let internal = audio_clock.as_ref().map(|c| c.internal_time().nseconds());
+        let calibration = audio_clock.as_ref().map(|c| {
+            let (internal, external, num, denom) = c.calibration();
+            [internal.nseconds(), external.nseconds(), num, denom]
+        });
+        let alsa_read_at = crate::evidence::now();
+        let alsa = device.status_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| crate::evidence::Alsa::parse(&t));
+        let alsa_read_ns = crate::evidence::now() - alsa_read_at;
+        evidence.clock(crate::evidence::ClockSample {
+            at,
+            after,
+            generation: self.shared.generation.load(Ordering::SeqCst),
+            base: self.shared.health.base_ns.load(Ordering::Relaxed),
+            pipeline,
+            audio,
+            internal,
+            calibration,
+            alsa,
+            alsa_read_at,
+            alsa_read_ns,
+            lead_ns: self.shared.audio_lead_ns.load(Ordering::Relaxed),
         });
     }
 
@@ -2777,6 +2826,10 @@ impl Engine {
                 );
             }
             let Ok(map) = buffer.map_readable() else { return gst::PadProbeReturn::Ok };
+            if let Some(evidence) = crate::evidence::get() {
+                let described = format.map_or_else(|why| format!("unreadable: {why}"), |f| format!("{f:?}"));
+                evidence.pcm(generation, &described, buffer.pts().map(|t| t.nseconds()), buffer.flags().contains(gst::BufferFlags::DISCONT), map.as_slice());
+            }
             shared.health.pcm(
                 generation,
                 format,
@@ -3513,6 +3566,11 @@ fn read_stream(
             out.chunks.extend(fed.chunks);
             out.events.extend(fed.events);
             shared.health.ts(generation, &out.events, es.counts(), es.sound_state(), es.codec());
+            if let Some(evidence) = crate::evidence::get() {
+                let pmts = es.pmt_pids();
+                evidence.service(generation, &pmts, es.sound_pid(), es.pcr_pid(), es.codec().map(|c| c.name()));
+                evidence.ts(generation, &piece.data, &pmts, es.sound_pid(), es.pcr_pid());
+            }
             let chunks = out.chunks;
             let pcr = piece.pcr;
             let (at, stepped) = push_piece(&source, &mut stamp, generation, &mut pushed, piece, arrived, &shared.health);
@@ -3733,6 +3791,13 @@ fn push_sound(
     on_sound: &dyn Fn(u64, &crate::es::Switch) -> Option<gst_app::AppSrc>,
 ) {
     let mut target = Some(source.clone());
+    if let (Some(evidence), Some(reference)) = (crate::evidence::get(), reference) {
+        for chunk in chunks.iter().filter(|c| c.start) {
+            if let Some(pts) = chunk.pts {
+                evidence.pes(generation, pts, pts_on_clock(pts, reference));
+            }
+        }
+    }
     if mediabox_core::timeline::enabled()
         && let Some(reference) = reference
     {

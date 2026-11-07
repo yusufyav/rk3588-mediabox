@@ -706,6 +706,15 @@ impl Reader {
         self.sound.as_ref().map(|s| s.pid)
     }
 
+    /// The program_map_PIDs of the PAT in force, and the PCR_PID.
+    pub fn pmt_pids(&self) -> Vec<u16> {
+        self.pat.values().copied().collect()
+    }
+
+    pub fn pcr_pid(&self) -> Option<u16> {
+        self.pcr_pid
+    }
+
     pub fn codec(&self) -> Option<Codec> {
         self.sound.as_ref().and_then(|s| s.codec)
     }

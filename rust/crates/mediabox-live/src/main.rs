@@ -15,10 +15,17 @@
 //!   MEDIABOX_LIVE_AUDIO_DEVICE     an ALSA PCM instead of the sound plan's
 //!   MEDIABOX_LIVE_PROGRAM          one service of a whole multiplex (a recording)
 //!   MEDIABOX_VO_TRACE              the frame trace, vo_mediabox's format
+//!   MEDIABOX_LIVE_EVIDENCE         a directory for the evidence of sound events (`evidence`; off without it)
+//!   MEDIABOX_LIVE_EVIDENCE_QUOTA_MB its quota (default 1024)
+//!
+//! `mediabox-live --evidence-classify <dump>...` judges dumps of it
+//! (`evidence_classify`) and plays nothing.
 
 mod clock_probe;
 mod engine;
 mod es;
+mod evidence;
+mod evidence_classify;
 mod gate;
 mod health;
 mod ledger;
@@ -193,6 +200,20 @@ fn main() {
     let signals = block_signals();
     stamp_stderr();
     mediabox_core::timeline::init("live");
+    // Diagnosis: a dump of `evidence` judged, nothing played.
+    if std::env::args().nth(1).as_deref() == Some("--evidence-classify") {
+        let mut failed = false;
+        for dir in std::env::args().skip(2) {
+            match evidence_classify::classify_dump(std::path::Path::new(&dir)) {
+                Ok(result) => println!("{result}"),
+                Err(why) => {
+                    failed = true;
+                    eprintln!("mediabox-live: {dir}: {why}");
+                }
+            }
+        }
+        std::process::exit(i32::from(failed));
+    }
     let Some(url) = std::env::args().nth(1) else {
         eprintln!("kullanım: mediabox-live <FIFO>");
         std::process::exit(2);
