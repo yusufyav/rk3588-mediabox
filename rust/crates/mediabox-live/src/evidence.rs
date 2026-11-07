@@ -22,9 +22,17 @@
 //! median by `CLOCK_STEP_NS`) asks for the window from `BEFORE_NS` before
 //! its start to `AFTER_NS` after its end. A thread of its own writes it
 //! once that has passed, into a directory of its own made under a
-//! temporary name and renamed whole. The directory is held to its quota and
-//! `MAX_DUMPS`: the oldest dumps go first. A streaming thread never waits on
+//! temporary name and renamed whole. The directory is held to its quota
+//! (`MEDIABOX_LIVE_EVIDENCE_QUOTA_MB`, 256 MiB if not given: an appliance's
+//! disk) and `MAX_DUMPS`: the oldest dumps go first, under a lock of the
+//! directory's (`.quota.lock`) another player's writer may hold a moment at
+//! a channel change -- not had, the clearing waits for the next dump and is
+//! counted (`quota_deferred`). A streaming thread never waits on any of
 //! this: a ring the writer holds is passed by, and counted (`dropped`).
+//!
+//! Each channel the evidence is kept for is said once in `active.jsonl`:
+//! the player's PID, the channel's generation, and the two settings as this
+//! process has them -- that it was on, from the player itself.
 
 use std::collections::VecDeque;
 use std::io::Write as _;
@@ -41,7 +49,7 @@ pub const CLOCK_STEP_NS: i64 = 2_000_000;
 const CLOCK_SPACING_NS: u64 = 120_000_000_000;
 const MAX_DUMPS: usize = 64;
 const MAX_ITEMS: usize = 8192;
-const DEFAULT_QUOTA: u64 = 1 << 30;
+const DEFAULT_QUOTA: u64 = 256 << 20;
 
 static EVIDENCE: OnceLock<Option<Evidence>> = OnceLock::new();
 
@@ -237,6 +245,10 @@ pub struct Evidence {
     pub dropped: AtomicU64,
     pub dumps: AtomicU64,
     pub write_errors: AtomicU64,
+    pub quota_deferred: AtomicU64,
+    /// Channels begun and not yet said in `active.jsonl`.
+    active: Mutex<Vec<u64>>,
+    active_last: AtomicU64,
     started: std::sync::Once,
     seq: AtomicU64,
 }
@@ -301,6 +313,9 @@ impl Evidence {
             dropped: Default::default(),
             dumps: Default::default(),
             write_errors: Default::default(),
+            quota_deferred: Default::default(),
+            active: Default::default(),
+            active_last: AtomicU64::new(u64::MAX),
             started: std::sync::Once::new(),
             seq: Default::default(),
         }
@@ -311,6 +326,7 @@ impl Evidence {
             let _ = std::thread::Builder::new().name("live-evidence".into()).spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(250));
+                    self.write_active();
                     self.write_due(now());
                 }
             });
@@ -326,6 +342,11 @@ impl Evidence {
 
     /// The service as the reader has it; written down only when it changes.
     pub fn service(&self, generation: u64, pmts: &[u16], sound: Option<u16>, pcr: Option<u16>, codec: Option<&'static str>) {
+        if self.active_last.swap(generation, Ordering::Relaxed) != generation
+            && let Ok(mut active) = self.active.try_lock()
+        {
+            active.push(generation);
+        }
         if let Ok(mut s) = self.service.try_lock() {
             let value = serde_json::json!({ "generation": generation, "pmt_pids": pmts, "sound_pid": sound, "pcr_pid": pcr, "codec": codec });
             if *s != value {
@@ -463,6 +484,7 @@ impl Evidence {
             "kind": r.kind, "from": r.from, "to": r.to, "note": r.note,
             "pcm_format": format, "service": service,
             "dropped_total": self.dropped.load(Ordering::Relaxed),
+            "quota_bytes": self.quota, "quota_deferred_total": self.quota_deferred.load(Ordering::Relaxed),
             "items": { "ts": ts.len(), "pes": pes.len(), "pcm": pcm.len(), "sink": sink.len(), "clock": clock.len(), "map": map.len() },
             "clock": "CLOCK_MONOTONIC ns (mediabox_core::timeline::now_ns), as the timeline and sound-incidents",
         });
@@ -473,8 +495,48 @@ impl Evidence {
         Ok(done)
     }
 
-    /// The oldest dumps go until the rest fit the quota and the count.
+    /// The channels begun since the last call, each a line of
+    /// `active.jsonl`: the writer's thread, never a streaming one.
+    pub fn write_active(&self) {
+        let begun: Vec<u64> = std::mem::take(&mut *lock(&self.active));
+        if begun.is_empty() {
+            return;
+        }
+        let env = |name: &str| std::env::var(name).ok();
+        let result = std::fs::create_dir_all(&self.dir).and_then(|_| {
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join("active.jsonl"))?;
+            for generation in &begun {
+                let line = serde_json::json!({
+                    "event": "evidence-active", "pid": std::process::id(), "generation": generation, "at": now(),
+                    "dir": self.dir, "quota_bytes": self.quota,
+                    "MEDIABOX_LIVE_EVIDENCE": env("MEDIABOX_LIVE_EVIDENCE"),
+                    "MEDIABOX_LIVE_EVIDENCE_QUOTA_MB": env("MEDIABOX_LIVE_EVIDENCE_QUOTA_MB"),
+                });
+                // One write a line: lines of two players do not interleave.
+                f.write_all(format!("{line}\n").as_bytes())?;
+                mediabox_core::timeline!("evidence-active", "gen={generation} quota={}", self.quota);
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            self.write_errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("mediabox-live: kanıt etkinlik kaydı yazılamadı: {error}");
+        }
+    }
+
+    /// The oldest dumps go until the rest fit the quota and the count --
+    /// under the directory's lock, not waited for: held by another
+    /// player's writer, the clearing is left to the next dump.
     pub fn hold_quota(&self) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(self.dir.join(".quota.lock"))?;
+        // SAFETY: a valid descriptor, a lock that goes with it when `file`
+        // closes.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            self.quota_deferred.fetch_add(1, Ordering::Relaxed);
+            mediabox_core::timeline!("evidence-quota-deferred", "n={}", self.quota_deferred.load(Ordering::Relaxed));
+            return Ok(());
+        }
         let mut dumps: Vec<(String, u64)> = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;

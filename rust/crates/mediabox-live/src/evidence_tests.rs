@@ -1,5 +1,16 @@
 use super::*;
 
+/// The dumps in a directory: not its lock, nor what is half made.
+fn dumps_in(dir: &Path) -> Vec<String> {
+    let mut made: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|d| d.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|n| !n.starts_with('.') && n != "active.jsonl")
+        .collect();
+    made.sort();
+    made
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mediabox-evidence-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -99,7 +110,7 @@ fn a_dump_is_written_whole_when_its_window_has_passed() {
     assert_eq!(e.dumps.load(Ordering::Relaxed), 0, "not before its after-window");
     e.write_due(now() + AFTER_NS + 1);
     assert_eq!(e.dumps.load(Ordering::Relaxed), 1);
-    let made: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().to_string()).collect();
+    let made: Vec<String> = dumps_in(&dir);
     assert_eq!(made.len(), 1);
     assert!(!made[0].starts_with('.'), "no temporary left: {made:?}");
     let dump = dir.join(&made[0]);
@@ -120,7 +131,7 @@ fn the_oldest_dumps_go_to_hold_the_quota() {
     e.request("clock", at, at, serde_json::Value::Null);
     e.write_due(now() + AFTER_NS + 1);
     assert_eq!(e.dumps.load(Ordering::Relaxed), 2);
-    let made: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|d| d.unwrap().file_name().to_string_lossy().to_string()).collect();
+    let made: Vec<String> = dumps_in(&dir);
     assert_eq!(made.len(), 1, "{made:?}");
     assert!(made[0].starts_with("0001-clock"), "the newer kept: {made:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -147,4 +158,48 @@ fn a_ring_held_by_the_writer_is_passed_by_not_waited_on() {
     drop(held);
     e.pes(1, 2, 2);
     assert_eq!(e.pes.lock().unwrap().window(0, u64::MAX).len(), 1);
+}
+
+#[test]
+fn the_quota_is_256_mib_unless_given() {
+    assert_eq!(DEFAULT_QUOTA, 256 << 20);
+}
+
+#[test]
+fn a_quota_lock_held_by_another_player_defers_the_clearing_without_waiting() {
+    use std::os::fd::AsRawFd;
+    let dir = scratch("quota-lock");
+    let e = filled(dir.clone(), 7_000);
+    e.write_due(now() + AFTER_NS + 1);
+    // Another player's writer holds the directory's lock.
+    let other = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(".quota.lock")).unwrap();
+    // SAFETY: a valid descriptor.
+    assert_eq!(unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let at = now();
+    e.request("clock", at, at, serde_json::Value::Null);
+    let began = std::time::Instant::now();
+    e.write_due(now() + AFTER_NS + 1);
+    assert!(began.elapsed() < std::time::Duration::from_secs(1), "the lock was waited on");
+    assert_eq!(e.quota_deferred.load(Ordering::Relaxed), 1);
+    assert_eq!(dumps_in(&dir).len(), 2, "nothing cleared while the lock is held");
+    drop(other);
+    e.hold_quota().unwrap();
+    assert_eq!(dumps_in(&dir).len(), 1, "cleared once the lock is free");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn each_channel_the_evidence_is_kept_for_is_said_once_with_the_players_pid() {
+    let dir = scratch("active");
+    let e = Evidence::new(dir.clone(), 1 << 20);
+    e.service(1, &[0x100], Some(0x201), Some(0x101), Some("mpeg-audio"));
+    e.service(1, &[0x100], Some(0x201), Some(0x101), Some("mpeg-audio"));
+    e.service(2, &[0x100], Some(0x202), Some(0x101), Some("mpeg-audio"));
+    e.write_active();
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(dir.join("active.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["event"], "evidence-active");
+    assert_eq!(lines[0]["pid"], std::process::id());
+    assert_eq!((lines[0]["generation"].as_u64(), lines[1]["generation"].as_u64()), (Some(1), Some(2)));
+    let _ = std::fs::remove_dir_all(&dir);
 }
