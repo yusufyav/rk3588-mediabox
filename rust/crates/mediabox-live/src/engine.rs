@@ -1527,13 +1527,40 @@ impl Engine {
             swaps.pending.as_ref().map_or(SWAP_IDLE_GUARD_MS, |pending| idle_guard_ms(pending.asked.elapsed().as_millis() as u64))
         };
         // Whichever comes first, the selector idle or the guard, has it.
+        //
+        // The selector's output is blocked first, then waited for idle. An
+        // IDLE probe on a pad idle when it is put on is called at once, on
+        // this thread, and a buffer pushed meanwhile is not held back: it
+        // went into the sink being taken out, came back NOT_LINKED or
+        // FLUSHING, and the sound's queue stopped for good -- the test of a
+        // device that never opens lost its sound 8 times in 40 under load,
+        // each time after a swap whose wait was 0 ms (FAZ 2F-fix). Blocked,
+        // a buffer waits at the pad until the swap is done; a pad blocked so
+        // counts as idle.
         let taken = Arc::new(AtomicBool::new(false));
+        let Some(block) = src.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_, _| gst::PadProbeReturn::Ok) else {
+            if !taken.swap(true, Ordering::SeqCst) {
+                self.give_up_waiting("ses seçicisi tutulamadı");
+            }
+            return;
+        };
+        let block = Arc::new(Mutex::new(Some(block)));
+        let unblock = {
+            let (src, block) = (src.clone(), Arc::clone(&block));
+            move || {
+                if let Some(id) = block.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                    src.remove_probe(id);
+                }
+            }
+        };
         let engine = Arc::clone(self);
         let idle = Arc::clone(&taken);
+        let unblock_idle = unblock.clone();
         let id = src.add_probe(gst::PadProbeType::IDLE, move |_, _| {
             if !idle.swap(true, Ordering::SeqCst) {
                 mediabox_core::timeline!("sink-swap", "phase=idle waited_ms={}", asked.elapsed().as_millis());
                 engine.run_swap();
+                unblock_idle();
             }
             gst::PadProbeReturn::Remove
         });
@@ -1542,6 +1569,7 @@ impl Engine {
             if !taken.swap(true, Ordering::SeqCst) {
                 self.give_up_waiting("ses seçicisine bekleme konamadı");
             }
+            unblock();
             return;
         };
         // A selector that never goes idle -- its push held for ever, a sink
@@ -1554,6 +1582,7 @@ impl Engine {
                 return;
             }
             src.remove_probe(id);
+            unblock();
             if let Some(engine) = engine.upgrade() {
                 engine.give_up_waiting("ses seçicisi boşalmadı");
             }

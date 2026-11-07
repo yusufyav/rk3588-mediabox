@@ -229,6 +229,10 @@ fn play_doing(ts: Vec<(u64, Vec<u8>)>, aid: usize, at: Duration, action: impl Fn
 /// opening gate until `action` lets it go.
 fn play_with(ts: Vec<(u64, Vec<u8>)>, aid: usize, epoch: Option<u64>, at: Duration, action: impl FnOnce(&Arc<Engine>) + Send + 'static) -> Run {
     gst::init().expect("GStreamer");
+    // MEDIABOX_TRACE_DIR set: the run on the timeline, as on the board.
+    if std::env::var_os("MEDIABOX_TRACE_DIR").is_some() {
+        mediabox_core::timeline::init("live");
+    }
     let size: usize = ts.iter().map(|(_, piece)| piece.len()).sum();
     let dir = std::env::temp_dir().join(format!("mediabox-live-engine-{}-{size}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
