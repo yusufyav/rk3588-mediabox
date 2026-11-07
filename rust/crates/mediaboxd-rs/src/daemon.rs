@@ -2803,6 +2803,22 @@ mod tests {
         assert_eq!(state.playback.current(crate::playback::PlayerKind::Here), Some(next));
     }
 
+    /// A player that failed its channel by itself is gone when the control
+    /// plane gives the channel up: the code is the player's own, read from
+    /// its last health file, and only for that channel.
+    #[test]
+    fn a_player_gone_by_its_own_failure_says_why_in_its_health_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("health.json");
+        let path = path.to_str().unwrap();
+        std::fs::write(path, r#"{"gate":{"epoch":7,"open":false,"failed":"player-timeout"}}"#).unwrap();
+        assert_eq!(player_failure(path, 7).as_deref(), Some("player-timeout"));
+        assert_eq!(player_failure(path, 8), None, "another channel's");
+        std::fs::write(path, r#"{"gate":{"epoch":7,"open":true,"failed":null}}"#).unwrap();
+        assert_eq!(player_failure(path, 7), None);
+        assert_eq!(player_failure(&format!("{path}.none"), 7), None);
+    }
+
     #[tokio::test]
     async fn unix_socket_request_returns_structured_response() {
         let dir = tempdir().unwrap();
@@ -3108,6 +3124,17 @@ pub(crate) async fn rematch_live(
     }
 }
 
+/// The live player's health file (mediabox-live `health::PATH`).
+const LIVE_HEALTH: &str = "/run/mediabox-live/health.json";
+
+/// Why the live player failed channel `epoch` shut by itself, from its last
+/// health file: its gate's `failed`, if the file is that channel's.
+fn player_failure(path: &str, epoch: u64) -> Option<String> {
+    let health: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let gate = health.get("gate")?;
+    (gate.get("epoch").and_then(Value::as_u64) == Some(epoch)).then(|| gate.get("failed").and_then(Value::as_str).map(str::to_string)).flatten()
+}
+
 /// Live channel `epoch`'s opening, done with the daemon's own parts.
 struct LiveGate {
     player: Arc<PlayerManager>,
@@ -3170,9 +3197,17 @@ impl crate::live_gate::GateIo for LiveGate {
             return false;
         }
         mediabox_core::timeline!("gate-fail", "epoch={} code={code}", self.epoch);
-        if let Err(why) = self.player.gate_fail(self.epoch, code).await {
+        // A player gone already ended by its own word: its last health file
+        // says why (`player-timeout`, `sound-failed`), and that is the code,
+        // not what asking a player that is no more came to.
+        let mut code = code.to_string();
+        if let Err(why) = self.player.gate_fail(self.epoch, &code).await {
             eprintln!("mediaboxd-rs: live channel (epoch {}): the player did not take its failure: {why}", self.epoch);
+            if let Some(own) = player_failure(LIVE_HEALTH, self.epoch) {
+                code = own;
+            }
         }
+        mediabox_core::timeline!("gate-fail", "epoch={} code={code}", self.epoch);
         let signal = crate::playback::Signal::EndFile { reason: "error".into(), error: Some(format!("Kanal açılamadı ({code})")) };
         if self.playback.finish(self.playing, signal).is_some() && self.player.film() == self.film {
             self.player.stop().await;
