@@ -215,6 +215,97 @@ pub fn run_resample(seconds: f64, device: Device, faults: &[Fault], regress: boo
     placed
 }
 
+/// The faults the controller's replay takes as well.
+#[derive(Debug, Clone, Copy)]
+pub enum Input {
+    /// The sound's own times jump by this much at this time (a frame lost).
+    Jump { at: f64, by: f64 },
+    /// Another channel at this time: times from `base` on, and the sink's
+    /// start over -- its calibration set again by its sync to the latency,
+    /// `off` from the device's truth (a reading in the race).
+    Channel { at: f64, base: f64, off: f64 },
+}
+
+/// The sound with the player's own controller (`audio_clock::Controller`,
+/// `slave-method=custom`): the same device and faults, the sink aligning
+/// each buffer's start and end, the resampler counted.
+pub fn run_controlled(seconds: f64, device: Device, faults: &[Fault], inputs: &[Input]) -> (Vec<Placed>, std::sync::Arc<crate::audio_clock::Stats>) {
+    use crate::audio_clock::{BufferIn, Calibration, Controller, Observation, Sink as SinkNow, Stats};
+    let start = device.at;
+    let stats = std::sync::Arc::new(Stats::default());
+    let mut control = Controller::new(0, RATE, std::sync::Arc::clone(&stats));
+    let cal_of = |internal: f64, external: f64| Calibration { internal: internal.round() as u64, external: external.round() as u64, num: 1, denom: 1 };
+    let mut clock = cal_of(device.internal(start), start);
+    let mut sink = Sink { next: None, resample: false };
+    let mut placed = Vec::new();
+    let mut done = vec![false; faults.len() + inputs.len()];
+    // The sound's own times, and what makes them the pipeline's (base time
+    // and running time): another channel's begin elsewhere.
+    let mut times = start + 100e6;
+    let mut shift = 0.0;
+    let mut generation = 1;
+    let mut k = 0usize;
+    loop {
+        // When this buffer comes to the sink, 100 ms before its time.
+        let now = start + k as f64 * FRAME_NS;
+        if now > start + seconds * 1e9 {
+            break;
+        }
+        let mut discont = false;
+        for (i, f) in inputs.iter().enumerate() {
+            match *f {
+                Input::Jump { at, by } if !done[faults.len() + i] && at <= now => {
+                    times += by;
+                    discont = false;
+                    done[faults.len() + i] = true;
+                }
+                Input::Channel { at, base, off } if !done[faults.len() + i] && at <= now => {
+                    shift = now + 100e6 - base;
+                    times = base;
+                    generation += 1;
+                    sink.next = None;
+                    // The sink's start: its calibration at the device's
+                    // reading, `off` in the race, the rate kept.
+                    clock = Calibration { internal: (device.internal(now) + off).round() as u64, external: now.round() as u64, ..clock };
+                    done[faults.len() + i] = true;
+                }
+                _ => {}
+            }
+        }
+        let (mut span, mut race) = (2e3, 0.0);
+        for (i, f) in faults.iter().enumerate() {
+            match *f {
+                Fault::LateMasterRead { at, by } if (at - now).abs() < FRAME_NS / 2.0 => span = by,
+                Fault::Race { at, by } if (at - now).abs() < FRAME_NS / 2.0 => race = by,
+                Fault::CalStep { at, by } if !done[i] && at <= now => {
+                    clock.external = (clock.external as f64 + by).round() as u64;
+                    done[i] = true;
+                }
+                _ => {}
+            }
+        }
+        let observation = Observation { before: now as u64, internal: (device.internal(now) + race).round() as u64, after: (now + span) as u64 };
+        let place = |t: u64, c: &Calibration| (c.to_internal(t as f64 + shift) * RATE / 1e9).round();
+        let out = control.buffer(
+            BufferIn { generation, pts: times as u64, frames: FRAME, samples: &[], discont },
+            SinkNow { calibration: clock, observation, next_sample: sink.next, place: &place },
+        );
+        if let Some(c) = out.calibration {
+            clock = c;
+        }
+        if out.discont {
+            sink.next = None;
+        }
+        let cal = Cal { internal: clock.internal as f64, external: clock.external as f64, slope: 1.0 / clock.rate() };
+        if out.frames > 0 {
+            placed.push(sink.place(out.pts as f64 + shift, out.frames, &cal, &device));
+        }
+        times += FRAME_NS;
+        k += 1;
+    }
+    (placed, stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +384,91 @@ mod tests {
         // Under the gate, but a transient reading put into the sound's
         // place: 0.119 of it.
         assert!((worst - 10e6 * 0.119).abs() < 0.1e6, "{worst}");
+    }
+
+    // ------------------------------------------------ the player's own
+
+    use crate::audio_clock::STEP_BUDGET_NS;
+    use std::sync::atomic::Ordering;
+
+    /// The sound's place over the last of the replay: within this of its
+    /// time, ns.
+    fn settled(placed: &[Placed], from: f64) -> f64 {
+        placed.iter().filter(|p| p.external >= from).fold(0.0, |m, p| m.max(p.error_ns.abs()))
+    }
+
+    #[test]
+    fn the_controller_takes_the_same_calibration_steps_without_a_step() {
+        let faults: Vec<Fault> =
+            [2.4e6, 3.35e6, 4.29e6, 5.5e6].iter().enumerate().map(|(i, &by)| Fault::CalStep { at: T0 + (30.0 + 30.0 * i as f64) * 1e9, by }).collect();
+        let (placed, stats) = run_controlled(240.0, device(), &faults, &[]);
+        assert!(largest_step(&placed) < STEP_BUDGET_NS, "{}", largest_step(&placed));
+        assert!(placed.iter().all(|p| (p.samples_out as f64 - p.samples_in as f64).abs() <= 2.0), "no buffer squeezed");
+        assert_eq!(stats.adopted.load(Ordering::Relaxed), 4);
+        // Back on its time once the readings have the phase again.
+        assert!(settled(&placed, T0 + 200e9) < 0.1e6, "{}", settled(&placed, T0 + 200e9));
+    }
+
+    #[test]
+    fn late_master_reads_and_reading_races_leave_the_sound_where_it_was() {
+        let faults = [
+            Fault::LateMasterRead { at: T0 + 40.01e9, by: 20.31e6 },
+            Fault::LateMasterRead { at: T0 + 50.01e9, by: 27.30e6 },
+            Fault::LateMasterRead { at: T0 + 60.01e9, by: 45.52e6 },
+            Fault::Race { at: T0 + 70.01e9, by: -10e6 },
+            Fault::Race { at: T0 + 80.01e9, by: 10e6 },
+        ];
+        let (clean, _) = run_controlled(120.0, device(), &[], &[]);
+        let (placed, stats) = run_controlled(120.0, device(), &faults, &[]);
+        assert_eq!(stats.not_one_moment.load(Ordering::Relaxed), 3);
+        assert_eq!(stats.transient.load(Ordering::Relaxed), 2);
+        // Not a microsecond apart from the replay without them.
+        let apart = clean.iter().zip(&placed).fold(0.0f64, |m, (a, b)| m.max((a.error_ns - b.error_ns).abs()));
+        assert!(apart < 1e3, "{apart}");
+    }
+
+    #[test]
+    fn the_crystal_is_followed_without_a_sample_repeated_and_without_drift() {
+        // Half an hour at -11.8 ppm, then the NTP-steered clock moved to
+        // +5 ppm.
+        let (placed, stats) = run_controlled(1800.0, device(), &[], &[]);
+        assert!(largest_step(&placed) < 50e3, "{}", largest_step(&placed));
+        assert!(settled(&placed, T0 + 120e9) < 0.1e6, "{}", settled(&placed, T0 + 120e9));
+        assert!(settled(&placed, T0 + 1500e9) < 0.05e6, "no drift: {}", settled(&placed, T0 + 1500e9));
+        let rate = stats.rate_ppb.load(Ordering::Relaxed) as f64;
+        assert!((rate + 11_800.0).abs() < 300.0, "the crystal learned: {rate} ppb");
+        let (moved, _) = run_controlled(600.0, Device { rate: 1.0 + 5e-6, ..device() }, &[], &[]);
+        assert!(settled(&moved, T0 + 300e9) < 0.1e6);
+    }
+
+    #[test]
+    fn a_jump_in_the_sounds_times_is_put_at_its_time_and_counted_apart() {
+        // A frame lost on the way: the times 24 ms on.
+        let (placed, stats) = run_controlled(60.0, device(), &[], &[Input::Jump { at: T0 + 30e9, by: FRAME_NS }]);
+        assert_eq!(stats.input_discont.load(Ordering::Relaxed), 1);
+        assert!(settled(&placed, T0 + 31e9) < 0.1e6, "{}", settled(&placed, T0 + 31e9));
+    }
+
+    #[test]
+    fn another_channel_begins_the_phase_and_the_resampler_again() {
+        // A channel whose times begin far from the last's, its sink's start
+        // calibrated 7 ms off in the race.
+        let at = T0 + 30e9;
+        let (placed, stats) = run_controlled(90.0, device(), &[], &[Input::Channel { at, base: 900_000e9, off: 7e6 }]);
+        // The buffer the change comes with, then the new channel's: its
+        // first sample first, at the pipeline's time for it -- nothing of
+        // the last channel's held in the resampler before it.
+        let begins = T0 + ((at - T0) / FRAME_NS).ceil() * FRAME_NS + 100e6;
+        let k = placed.iter().position(|p| p.external >= begins - 1.0).unwrap();
+        assert!((placed[k].external - begins).abs() < 1.0, "{:?}", &placed[k - 1..=k]);
+        assert!(placed[k - 1].external < at + 100e6);
+        assert!(stats.resets.load(Ordering::Relaxed) >= 2);
+        // Put where the sink's start calibration says (7 ms off), then the
+        // readings' median has the phase within a second and the bound takes
+        // the rest without a step.
+        assert!((placed[k].error_ns - 7e6).abs() < 0.1e6, "{}", placed[k].error_ns);
+        assert!(largest_step(&placed[k..]) < STEP_BUDGET_NS, "{}", largest_step(&placed[k..]));
+        assert!(settled(&placed, at + 15e9) < 0.1e6, "{}", settled(&placed, at + 15e9));
     }
 
     #[test]

@@ -616,6 +616,8 @@ pub struct Report {
     pub gate: serde_json::Value,
     /// Where each channel's pictures ended (`ledger`).
     pub ledger: serde_json::Value,
+    /// The sound clock's controller (`audio_clock::Stats`).
+    pub audio_clock: serde_json::Value,
     pub at_ns: u64,
     pub generation: u64,
     /// The broadcast's present on the running time is the stamp plus this.
@@ -722,6 +724,7 @@ impl Health {
         Report {
             gate: serde_json::Value::Null,
             ledger: serde_json::Value::Null,
+            audio_clock: serde_json::Value::Null,
             sound,
             sound_incidents,
             plane_full_dropped: self.plane_full_dropped.load(Ordering::Relaxed),
@@ -827,6 +830,7 @@ pub fn write(report: &Report) {
     json["plane_full_dropped"] = r.plane_full_dropped.into();
     json["gate"] = r.gate.clone();
     json["ledger"] = r.ledger.clone();
+    json["audio_clock"] = r.audio_clock.clone();
     // Every count above runs for the life of the process, through every
     // channel change: a fault is never taken back by the next channel.
     // This channel's own share is apart, from where they stood at its start.

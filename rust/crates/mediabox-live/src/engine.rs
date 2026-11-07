@@ -110,6 +110,8 @@ pub struct Shared {
     /// generation and order, for the reader to take the sound to
     /// (`es::Reader::choose`) -- the picture goes on as it is.
     pub aid_request: Mutex<Option<(u64, usize)>>,
+    /// The sound clock's controller's counts (`audio_clock`).
+    pub audio_clock: Arc<crate::audio_clock::Stats>,
 }
 
 #[derive(Default, Clone)]
@@ -1299,6 +1301,7 @@ impl Engine {
         self.shared.health.plane_full_dropped.store(self.plane.dropped_full(), Ordering::Relaxed);
         let mut report = self.shared.health.report(generation, latency + video_offset, latency + audio_offset, audio_late, device);
         report.gate = self.gate_snapshot();
+        report.audio_clock = self.shared.audio_clock.json();
         report.ledger = self.shared.ledgers.json();
         crate::health::write(&report);
     }
@@ -1369,22 +1372,20 @@ impl Engine {
                 sink.set_property("latency-time", 10_000i64);
                 // The device's sample clock is the board's crystal, the
                 // pipeline's CLOCK_MONOTONIC, which NTP steers off it: they
-                // part by some 17 ppm. audiobasesink's default (`skew`) lets
+                // part by some 12 ppm. audiobasesink's default (`skew`) lets
                 // that grow to half its drift-tolerance (40 ms) and then
                 // moves the clock's calibration by the whole of it, which
-                // the next buffer's alignment to the one before (under the
-                // 40 ms alignment-threshold) takes back: on TRT 1 the sound
-                // stood 2 to 22 ms off its time and jumped by 10 or 20 ms
-                // 14 times in 65 minutes (FAZ 1L, 2026-11-05). `resample`
-                // puts each buffer's samples where the slaved clock says,
-                // its end unaligned, so a sample comes or goes now and then
-                // and the sound stays on its time (gstaudiobasesink.c 1.26,
-                // render: "no stop time align needed: we are slaved"). A
-                // bitstream's bursts are not samples to stretch: it keeps
-                // the default.
-                if !self.bitstream.load(Ordering::SeqCst) {
-                    sink.set_property_from_str("slave-method", "resample");
-                }
+                // the next buffer's alignment to the one before takes back:
+                // on TRT 1 the sound jumped by 10 or 20 ms 14 times in 65
+                // minutes (FAZ 1L). `resample` puts every move of GStreamer's
+                // own slaving into one buffer, whose end it leaves unaligned:
+                // a late reading of the master moved it 2.4-5.5 ms and 1152
+                // samples played in 991 (FAZ 2H/2I, `audio_replay`). For PCM
+                // the player's own controller follows the device instead
+                // (`audio_clock`, installed below): `custom` with no callback
+                // has audiobasesink apply the calibration the controller sets
+                // and align every buffer's both ends. A bitstream's bursts
+                // are not samples to resample: it keeps the default.
                 sink
             }
             None => make("fakesink")?,
@@ -1401,6 +1402,17 @@ impl Engine {
                     shared.sound_reached_device.store(shared.generation.load(Ordering::SeqCst), Ordering::SeqCst);
                     gst::PadProbeReturn::Ok
                 });
+            }
+        }
+        // After the probes above, which see the sound as decoded.
+        if audio.device.is_some() && !self.bitstream.load(Ordering::SeqCst) {
+            let shared = Arc::downgrade(&self.shared);
+            let generation = move || shared.upgrade().map_or(0, |s| s.generation.load(Ordering::SeqCst));
+            if crate::audio_clock::install(&sink, generation, Arc::clone(&self.shared.audio_clock)) {
+                sink.set_property_from_str("slave-method", "custom");
+            } else {
+                eprintln!("mediabox-live: ses saati denetleyicisi kurulamadı (audiobasesink alanları beklenen yerde değil); GStreamer resample kullanılıyor");
+                sink.set_property_from_str("slave-method", "resample");
             }
         }
         self.add_audio_sink(sink)
