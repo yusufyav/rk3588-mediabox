@@ -224,7 +224,7 @@ pub struct ClockFacts {
     /// window: the largest residual off a straight line, ns.
     pub hw_residual_ns: Option<f64>,
     /// Frames written to the device less frames fed into the sink: how
-    /// far its median moved over the step, ns.
+    /// far its mean moved over the step, ns.
     pub feed_shift_ns: Option<f64>,
     pub device_restarted: bool,
     pub calibration_changed: bool,
@@ -285,18 +285,23 @@ pub fn clock_facts(rows: &[ClockRow], step: usize, rate: f64) -> ClockFacts {
         // Residual in frames, as time at the device's rate.
         points.iter().map(|(t, p)| (((p - p0) - mp) - slope * ((t - t0) - mt)).abs()).fold(0.0, f64::max) / rate * 1e9
     });
-    let shift = |lo: i64, hi: i64| {
-        median(
-            rows.iter()
-                .filter(|r| {
-                    let d = r.at as i64 - at as i64;
-                    d >= lo && d <= hi
-                })
-                .filter_map(|r| Some(r.appl_ptr? as f64 - r.fed as f64))
-                .collect(),
-        )
+    // Written less fed runs in a sawtooth (segments of 10 ms against
+    // buffers of 24: a period of 120 ms, steps of 96 frames), so its median
+    // and its extremes move by a step with nothing moved. Its mean over
+    // the 1.3 s each side (ten periods and more) moves with samples gained
+    // or lost.
+    let mean = |lo: i64, hi: i64| {
+        let v: Vec<f64> = rows
+            .iter()
+            .filter(|r| {
+                let d = r.at as i64 - at as i64;
+                d >= lo && d <= hi
+            })
+            .filter_map(|r| Some(r.appl_ptr? as f64 - r.fed as f64))
+            .collect();
+        (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
     };
-    let feed_shift_ns = match (shift(-1_500_000_000, -200_000_000), shift(200_000_000, 1_500_000_000)) {
+    let feed_shift_ns = match (mean(-1_500_000_000, -200_000_000), mean(200_000_000, 1_500_000_000)) {
         (Some(a), Some(b)) => Some((b - a) / rate * 1e9),
         _ => None,
     };

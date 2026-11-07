@@ -282,6 +282,23 @@ fn samples_dropped_between_the_feed_and_the_device_are_the_products() {
 }
 
 #[test]
+fn a_sawtooth_of_written_less_fed_moving_its_median_is_no_step() {
+    // Fed 1152 frames each 24 ms, written 480 each 10 ms: the difference
+    // runs in a sawtooth whose median moves by 96 frames with nothing lost.
+    let mut r = rows(300);
+    for (k, row) in r.iter_mut().enumerate() {
+        let t = k as u64 * 10;
+        row.fed = (t / 24) * 1152;
+        row.appl_ptr = Some(4800 + k as u64 * 480);
+        row.hw_ptr = Some(k as u64 * 480);
+    }
+    r[150].late = Some(100_000 + 10_000_000);
+    let f = clock_facts(&r, 150, 48_000.0);
+    assert!(f.feed_shift_ns.unwrap().abs() < PRESENT_STEP_NS, "{f:?}");
+    assert!(matches!(classify_clock(&f), ClockClass::MeasurementArtifact(_)));
+}
+
+#[test]
 fn a_device_started_again_or_without_timestamps_is_unclassified() {
     let mut r = rows(300);
     r[200].trigger = Some(6);
