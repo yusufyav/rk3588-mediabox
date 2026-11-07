@@ -42,7 +42,7 @@
 //! learned is the device's crystal's and is kept.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// The product's target for a step it adds to the sound's place in one
 /// buffer (a project acceptance target, not a standard's; its limit is
@@ -528,6 +528,9 @@ impl Controller {
         let s = std::sync::Arc::clone(&self.stats);
         let another_channel = input.generation != self.generation;
         if another_channel || input.discont || sink.next_sample.is_none() {
+            if another_channel {
+                s.generations.fetch_add(1, Ordering::Relaxed);
+            }
             self.generation = input.generation;
             self.begin_again(0);
         }
@@ -624,15 +627,34 @@ pub struct Stats {
     pub stretch_max_millis: AtomicI64,
     /// The sample rate the stretch is counted at.
     pub rate_hz: AtomicU32,
+    /// The controller on the sink (`install`).
+    pub installed: AtomicBool,
+    /// Generations whose sound the controller took.
+    pub generations: AtomicU64,
+    /// Buffers refused for their caps (`admission`), and the refusals
+    /// (events) with the last one's generation, caps and reason.
     pub unsupported: AtomicU64,
+    pub refusing: AtomicBool,
+    pub degraded: AtomicU64,
+    pub degraded_detail: std::sync::Mutex<Option<serde_json::Value>>,
+    /// Buffers that went to the sink without the controller: no time on
+    /// them, or no clock on the sink.
     pub unavailable: AtomicU64,
 }
 
 impl Stats {
+    /// The controller is installed and taking the sound.
+    pub fn active(&self) -> bool {
+        self.installed.load(Ordering::Relaxed) && !self.refusing.load(Ordering::Relaxed)
+    }
+
     pub fn json(&self) -> serde_json::Value {
         let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
         let i = |a: &AtomicI64| a.load(Ordering::Relaxed);
         serde_json::json!({
+            "controller_active": self.active(), "generations": g(&self.generations),
+            "degraded": g(&self.degraded),
+            "degraded_last": self.degraded_detail.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             "observations": { "used": g(&self.used), "not_one_moment": g(&self.not_one_moment), "transient": g(&self.transient) },
             "updates": g(&self.updates), "resets": g(&self.resets), "adopted": g(&self.adopted),
             "input_discont": g(&self.input_discont), "channel_starts": g(&self.channel_starts),
@@ -651,65 +673,99 @@ pub fn raise(a: &AtomicI64, v: i64) {
 
 // --------------------------------------------------------------- the sink
 
-/// The sample formats the resampler takes (alsasink's on HDMI).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sample {
-    S16,
-    S32,
-    F32,
+/// The one sample format the controller is given: what every decoder's
+/// PCM came to the device as (S16LE at the sink's input, 11 openings of
+/// 11, FAZ 2I) and what alsasink takes on HDMI. The PCM chain converts to
+/// it before the sink (`contract_filter`), the rate and the channels as
+/// they come; anything else at the sink is refused, never played past the
+/// controller (`admit`).
+pub const CONTRACT_FORMAT: &str = "S16LE";
+const CONTRACT_LAYOUT: &str = "interleaved";
+
+/// The contract's caps: the format and the layout fixed, rate and channels
+/// left to the stream.
+pub fn contract_caps() -> gst::Caps {
+    gst::Caps::builder("audio/x-raw").field("format", CONTRACT_FORMAT).field("layout", CONTRACT_LAYOUT).build()
 }
 
-impl Sample {
-    fn bytes(self) -> usize {
-        match self {
-            Sample::S16 => 2,
-            _ => 4,
-        }
-    }
+/// The PCM chain's last element: the stream held to the contract.
+pub fn contract_filter() -> Result<gst::Element, String> {
+    gst::ElementFactory::make("capsfilter")
+        .property("caps", contract_caps())
+        .build()
+        .map_err(|e| format!("capsfilter: {e}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Format {
-    pub sample: Sample,
     pub rate: u32,
     pub channels: usize,
 }
 
-/// Interleaved little-endian PCM of `caps`, if the resampler takes it.
-pub fn format_of(caps: &gst::CapsRef) -> Option<Format> {
-    let s = caps.structure(0)?;
-    if s.name() != "audio/x-raw" || s.get::<&str>("layout").ok() != Some("interleaved") {
-        return None;
+/// The stream's format if it is the contract's; why not, if not.
+pub fn admit(caps: &gst::CapsRef) -> Result<Format, String> {
+    let s = caps.structure(0).ok_or("no structure")?;
+    if s.name() != "audio/x-raw" {
+        return Err(format!("not raw audio: {}", s.name()));
     }
-    let sample = match s.get::<&str>("format").ok()? {
-        "S16LE" => Sample::S16,
-        "S32LE" => Sample::S32,
-        "F32LE" => Sample::F32,
-        _ => return None,
-    };
-    let rate = u32::try_from(s.get::<i32>("rate").ok()?).ok()?;
-    let channels = usize::try_from(s.get::<i32>("channels").ok()?).ok()?;
-    (rate > 0 && channels > 0).then_some(Format { sample, rate, channels })
+    let layout = s.get::<&str>("layout").unwrap_or("none");
+    if layout != CONTRACT_LAYOUT {
+        return Err(format!("layout {layout}, not {CONTRACT_LAYOUT}"));
+    }
+    let format = s.get::<&str>("format").unwrap_or("none");
+    if format != CONTRACT_FORMAT {
+        return Err(format!("format {format}, not {CONTRACT_FORMAT}"));
+    }
+    let rate = s.get::<i32>("rate").ok().and_then(|r| u32::try_from(r).ok()).filter(|r| *r > 0).ok_or("no rate")?;
+    let channels = s.get::<i32>("channels").ok().and_then(|c| usize::try_from(c).ok()).filter(|c| *c > 0).ok_or("no channels")?;
+    Ok(Format { rate, channels })
 }
 
-pub fn to_f32(format: Format, data: &[u8]) -> Vec<f32> {
-    match format.sample {
-        Sample::S16 => data.as_chunks::<2>().0.iter().map(|b| f32::from(i16::from_le_bytes(*b)) / 32768.0).collect(),
-        Sample::S32 => data.as_chunks::<4>().0.iter().map(|b| (f64::from(i32::from_le_bytes(*b)) / 2_147_483_648.0) as f32).collect(),
-        Sample::F32 => data.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect(),
-    }
+pub fn to_f32(data: &[u8], out: &mut Vec<f32>) {
+    out.clear();
+    out.extend(data.as_chunks::<2>().0.iter().map(|b| f32::from(i16::from_le_bytes(*b)) / 32768.0));
 }
 
-pub fn from_f32(format: Format, samples: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(samples.len() * format.sample.bytes());
+pub fn from_f32(samples: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(samples.len() * 2);
     for &v in samples {
-        match format.sample {
-            Sample::S16 => out.extend_from_slice(&((f64::from(v) * 32768.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes()),
-            Sample::S32 => out.extend_from_slice(&((f64::from(v) * 2_147_483_648.0).round().clamp(-2_147_483_648.0, 2_147_483_647.0) as i32).to_le_bytes()),
-            Sample::F32 => out.extend_from_slice(&v.to_le_bytes()),
-        }
+        out.extend_from_slice(&((f64::from(v) * 32768.0).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes());
     }
     out
+}
+
+/// What the probe does with a buffer, by its caps: the controller's, or
+/// refused -- dropped, counted and told once, the sound stopping rather
+/// than going on past the controller (with `custom` and no callback the
+/// sink would play it with no correction at all).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Admission {
+    Control(Format),
+    Refuse,
+}
+
+/// The caps' verdict, counted: the first refusal of a stream (and the
+/// first after an admission) is an event, told with the generation, the
+/// caps and the reason; every buffer refused is counted.
+pub fn admission(stats: &Stats, generation: u64, caps: Option<&gst::CapsRef>) -> Admission {
+    let verdict = caps.map_or(Err("no caps".to_string()), admit);
+    match verdict {
+        Ok(f) => {
+            stats.refusing.store(false, Ordering::Relaxed);
+            Admission::Control(f)
+        }
+        Err(reason) => {
+            stats.unsupported.fetch_add(1, Ordering::Relaxed);
+            if !stats.refusing.swap(true, Ordering::Relaxed) {
+                stats.degraded.fetch_add(1, Ordering::Relaxed);
+                let caps = caps.map_or_else(String::new, |c| c.to_string());
+                eprintln!("mediabox-live: audio_clock_degraded unsupported_format gen={generation} caps={caps} reason={reason}");
+                *stats.degraded_detail.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(serde_json::json!({ "generation": generation, "caps": caps, "reason": format!("unsupported_format: {reason}") }));
+            }
+            Admission::Refuse
+        }
+    }
 }
 
 /// Where audiobasesink and its GstAudioClock keep, as public instance
@@ -779,6 +835,10 @@ fn time_offset(clock: &gst::Clock, f: Fields) -> i64 {
     unsafe { std::ptr::read_volatile((clock.as_ptr() as *const u8).add(f.time_offset) as *const i64) }
 }
 
+/// The probe's own: the controller for the stream's format, and the
+/// buffer the sound is taken into.
+type Probe = (Option<(Format, Controller)>, Vec<f32>);
+
 /// The controller on alsasink's sink pad, before the sink: every buffer of
 /// PCM resampled to its place, the audio clock's calibration set. False,
 /// and nothing installed, when the sink's fields are not where they are
@@ -792,17 +852,18 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
     };
     let weak = sink.downgrade();
     let pipeline_clock = gst::SystemClock::obtain();
-    let state: std::sync::Mutex<Option<(Format, Controller)>> = std::sync::Mutex::new(None);
+    let state: std::sync::Mutex<Probe> = std::sync::Mutex::new((None, Vec::new()));
+    stats.installed.store(true, Ordering::Relaxed);
     pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-        let (Some(sink), Some(caps)) = (weak.upgrade(), pad.current_caps()) else {
-            return gst::PadProbeReturn::Ok;
-        };
-        let Some(format) = format_of(&caps) else {
-            stats.unsupported.fetch_add(1, Ordering::Relaxed);
-            return gst::PadProbeReturn::Ok;
+        let Some(sink) = weak.upgrade() else { return gst::PadProbeReturn::Ok };
+        let caps = pad.current_caps();
+        let format = match admission(&stats, generation(), caps.as_deref()) {
+            Admission::Control(f) => f,
+            Admission::Refuse => return gst::PadProbeReturn::Drop,
         };
         let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
         let (Some(pts), Some(audio_clock)) = (buffer.pts(), sink.provide_clock()) else {
+            stats.unavailable.fetch_add(1, Ordering::Relaxed);
             return gst::PadProbeReturn::Ok;
         };
         if audio_clock.as_ptr() as usize != clock_field(&sink, f) {
@@ -812,22 +873,26 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
             sink.set_property_from_str("slave-method", "resample");
             return gst::PadProbeReturn::Remove;
         }
-        let samples = match buffer.map_readable() {
-            Ok(map) => to_f32(format, map.as_slice()),
-            Err(_) => return gst::PadProbeReturn::Ok,
-        };
+        let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
+        let (control, samples) = &mut *guard;
+        match buffer.map_readable() {
+            Ok(map) => to_f32(map.as_slice(), samples),
+            Err(_) => {
+                stats.unavailable.fetch_add(1, Ordering::Relaxed);
+                return gst::PadProbeReturn::Ok;
+            }
+        }
         let frames = samples.len() / format.channels;
         let discont = buffer.flags().intersects(gst::BufferFlags::DISCONT | gst::BufferFlags::RESYNC);
-        let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
-        if guard.as_ref().map(|(f, _)| *f) != Some(format) {
+        if control.as_ref().map(|(f, _)| *f) != Some(format) {
             // New caps: the resampler for them; the model, the device's,
             // kept.
-            let model = guard.take().and_then(|(_, c)| c.model);
+            let model = control.take().and_then(|(_, c)| c.model);
             let mut c = Controller::new(format.channels, f64::from(format.rate), std::sync::Arc::clone(&stats));
             c.model = model;
-            *guard = Some((format, c));
+            *control = Some((format, c));
         }
-        let (_, control) = guard.as_mut().expect("set above");
+        let (_, control) = control.as_mut().expect("set above");
         let (internal, external, num, denom) = audio_clock.calibration();
         let calibration = Calibration { internal: internal.nseconds(), external: external.nseconds(), num, denom };
         let before = pipeline_clock.time().nseconds();
@@ -848,7 +913,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
             ((c.to_internal(running as f64 + sync + base) - offset) * rate / 1e9).floor()
         };
         let out = control.buffer(
-            BufferIn { generation: generation(), pts: pts.nseconds(), frames, samples: &samples, discont },
+            BufferIn { generation: generation(), pts: pts.nseconds(), frames, samples, discont },
             Sink { calibration, observation: Observation { before, internal: read, after }, next_sample: next_sample(&sink, f), place: &place },
         );
         drop(guard);
@@ -858,7 +923,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
         if out.frames == 0 {
             return gst::PadProbeReturn::Drop;
         }
-        let mut made = gst::Buffer::from_mut_slice(from_f32(format, &out.samples));
+        let mut made = gst::Buffer::from_mut_slice(from_f32(&out.samples));
         {
             let made = made.get_mut().expect("a new buffer is writable");
             made.set_pts(gst::ClockTime::from_nseconds(out.pts));

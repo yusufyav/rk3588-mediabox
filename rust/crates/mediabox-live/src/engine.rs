@@ -2789,7 +2789,8 @@ impl Engine {
         Ok(input)
     }
 
-    /// After the decoder, for PCM: converted, resampled, at the volume.
+    /// After the decoder, for PCM: converted, resampled, at the volume, in
+    /// the sound clock's format.
     /// The decoded sound is measured where it goes into the volume
     /// (`sound_diag::Meter`): in the sink's format, before the viewer's
     /// volume and mute, which change what is heard and not what was decoded.
@@ -2835,7 +2836,10 @@ impl Engine {
             );
             gst::PadProbeReturn::Ok
         });
-        Ok(vec![make("audioconvert")?, make("audioresample")?, volume])
+        // Last, the sound held to the one format the clock's controller
+        // takes (`audio_clock::contract_filter`): the decoder's, whatever
+        // it is, converted before the volume, its rate and channels kept.
+        Ok(vec![make("audioconvert")?, make("audioresample")?, volume, crate::audio_clock::contract_filter()?])
     }
 
     /// C: the decoder's units in, its PCM out (buffers, sample frames from

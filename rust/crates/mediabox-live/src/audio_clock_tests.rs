@@ -1,4 +1,5 @@
 use super::*;
+use gst::prelude::*;
 
 fn sine(freq: f64, rate: f64, from: f64, frames: usize, channels: usize) -> Vec<f32> {
     let mut v = Vec::with_capacity(frames * channels);
@@ -26,10 +27,11 @@ fn at_one_the_resampler_passes_every_sample_as_it_came() {
     assert_eq!(out.len(), (10 * 1152 - HALF) * 2);
     let worst = out.iter().zip(&fed).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
     assert!(worst < 1e-6, "{worst}");
-    // In S16, sample for sample.
-    let f = Format { sample: Sample::S16, rate: 48_000, channels: 2 };
-    let bytes = from_f32(f, &fed);
-    assert_eq!(from_f32(f, &to_f32(f, &bytes)), bytes);
+    // In the contract's S16, sample for sample.
+    let bytes = from_f32(&fed);
+    let mut back = Vec::new();
+    to_f32(&bytes, &mut back);
+    assert_eq!(from_f32(&back), bytes);
 }
 
 /// The resampled sine against the sine at each output's position: how far
@@ -184,4 +186,138 @@ fn the_sinks_fields_are_found_in_alsasink_and_refused_elsewhere() {
     }
     let fake = gst::ElementFactory::make("fakesink").build().unwrap();
     assert!(fields(&fake).is_none(), "not an audiobasesink: not read");
+}
+
+fn raw(format: &str, layout: &str, rate: i32, channels: i32) -> gst::Caps {
+    gst::Caps::builder("audio/x-raw")
+        .field("format", format)
+        .field("layout", layout)
+        .field("rate", rate)
+        .field("channels", channels)
+        // Six: 5.1's positions, as a decoder gives them.
+        .field_if_some("channel-mask", (channels == 6).then_some(gst::Bitmask::new(0x3f)))
+        .build()
+}
+
+#[test]
+fn the_chain_brings_any_decoders_pcm_to_the_contract_at_its_own_rate_and_channels() {
+    gst::init().unwrap();
+    // What decoders give: mpg123 S16, a52dec/avdec F32 (planar too), S32,
+    // S24, F64.
+    let decoded = [("S16LE", "interleaved"), ("S32LE", "interleaved"), ("S24LE", "interleaved"), ("F32LE", "interleaved"), ("F32LE", "non-interleaved"), ("F64LE", "interleaved")];
+    for rate in [32_000, 44_100, 48_000] {
+        for channels in [1, 2, 6] {
+            for (format, layout) in decoded {
+                let pipeline = gst::Pipeline::new();
+                let src = gst::ElementFactory::make("audiotestsrc").property("num-buffers", 2i32).build().unwrap();
+                let given = gst::ElementFactory::make("capsfilter").property("caps", raw(format, layout, rate, channels)).build().unwrap();
+                let convert = gst::ElementFactory::make("audioconvert").build().unwrap();
+                let resample = gst::ElementFactory::make("audioresample").build().unwrap();
+                let contract = contract_filter().unwrap();
+                let out = gst_app::AppSink::builder().sync(false).build();
+                let chain = [&src, &given, &convert, &resample, &contract, out.upcast_ref()];
+                pipeline.add_many(chain).unwrap();
+                gst::Element::link_many(chain).unwrap();
+                pipeline.set_state(gst::State::Playing).unwrap();
+                let sample = out.pull_sample().unwrap_or_else(|e| panic!("{format} {layout} {rate} {channels}: {e}"));
+                let caps = sample.caps().unwrap();
+                assert_eq!(admit(caps), Ok(Format { rate: rate as u32, channels: channels as usize }), "{format} {layout} {rate} {channels}: {caps}");
+                pipeline.set_state(gst::State::Null).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn a_format_other_than_the_contracts_is_refused_counted_and_told_once() {
+    gst::init().unwrap();
+    let stats = Stats::default();
+    stats.installed.store(true, Ordering::Relaxed);
+    let contract = raw("S16LE", "interleaved", 48_000, 2);
+    assert_eq!(admission(&stats, 1, Some(&contract)), Admission::Control(Format { rate: 48_000, channels: 2 }));
+    assert!(stats.active());
+    let float = raw("F32LE", "interleaved", 48_000, 2);
+    assert_eq!(admission(&stats, 1, Some(&float)), Admission::Refuse);
+    assert_eq!(admission(&stats, 1, Some(&float)), Admission::Refuse);
+    assert!(!stats.active(), "refusing: not the controller's sound");
+    assert_eq!((stats.unsupported.load(Ordering::Relaxed), stats.degraded.load(Ordering::Relaxed)), (2, 1), "every buffer counted, the event once");
+    let told = stats.json();
+    assert_eq!(told["controller_active"], false);
+    assert_eq!(told["degraded_last"]["generation"], 1);
+    assert!(told["degraded_last"]["reason"].as_str().unwrap().contains("format F32LE"), "{told}");
+    // Back on the contract (another rate, other channels): the controller's.
+    let six = raw("S16LE", "interleaved", 44_100, 6);
+    assert_eq!(admission(&stats, 2, Some(&six)), Admission::Control(Format { rate: 44_100, channels: 6 }));
+    assert!(stats.active());
+    let planar = raw("S16LE", "non-interleaved", 48_000, 2);
+    assert_eq!(admission(&stats, 3, Some(&planar)), Admission::Refuse);
+    assert_eq!(admission(&stats, 3, None), Admission::Refuse);
+    assert_eq!(stats.degraded.load(Ordering::Relaxed), 2);
+    assert_eq!(stats.json()["degraded_last"]["generation"], 3);
+}
+
+/// Buffers of `caps` (S16 or F32 at 48 or 44.1 kHz), `count` of `frames`.
+fn push(src: &gst_app::AppSrc, caps: &gst::Caps, count: usize, frames: usize, from: &mut u64) {
+    let s = caps.structure(0).unwrap();
+    let rate = s.get::<i32>("rate").unwrap() as u64;
+    let channels = s.get::<i32>("channels").unwrap() as usize;
+    let bytes = if s.get::<&str>("format").unwrap() == "S16LE" { 2 } else { 4 };
+    src.set_caps(Some(caps));
+    for _ in 0..count {
+        let mut b = gst::Buffer::from_mut_slice(vec![0u8; frames * channels * bytes]);
+        {
+            let b = b.get_mut().unwrap();
+            b.set_pts(gst::ClockTime::from_nseconds(*from));
+            b.set_duration(gst::ClockTime::from_nseconds(frames as u64 * 1_000_000_000 / rate));
+        }
+        *from += frames as u64 * 1_000_000_000 / rate;
+        src.push_buffer(b).unwrap();
+    }
+}
+
+#[test]
+fn on_a_real_sink_the_contract_is_controlled_a_new_rate_followed_and_another_format_never_played() {
+    gst::init().unwrap();
+    let pipeline = gst::Pipeline::new();
+    pipeline.use_clock(Some(&gst::SystemClock::obtain()));
+    let src = gst_app::AppSrc::builder().format(gst::Format::Time).build();
+    let sink = gst::ElementFactory::make("alsasink")
+        .property("device", "null")
+        .property("buffer-time", 100_000i64)
+        .property("latency-time", 10_000i64)
+        .build()
+        .unwrap();
+    let stats = std::sync::Arc::new(Stats::default());
+    assert!(install(&sink, || 7, std::sync::Arc::clone(&stats)));
+    sink.set_property_from_str("slave-method", "custom");
+    // What reaches the sink past the controller, in a format not the
+    // contract's.
+    let passed = std::sync::Arc::new(AtomicU64::new(0));
+    let p = std::sync::Arc::clone(&passed);
+    let pad = sink.static_pad("sink").unwrap();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+        if info.buffer().is_some() && pad.current_caps().is_some_and(|c| admit(&c).is_err()) {
+            p.fetch_add(1, Ordering::Relaxed);
+        }
+        gst::PadProbeReturn::Ok
+    });
+    pipeline.add_many([src.upcast_ref(), &sink]).unwrap();
+    src.link(&sink).unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let mut at = 0;
+    push(&src, &raw("S16LE", "interleaved", 48_000, 2), 40, 1152, &mut at);
+    push(&src, &raw("S16LE", "interleaved", 44_100, 6), 40, 1152, &mut at);
+    push(&src, &raw("F32LE", "interleaved", 48_000, 2), 20, 1152, &mut at);
+    src.end_of_stream().unwrap();
+    let bus = pipeline.bus().unwrap();
+    let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(60), &[gst::MessageType::Eos, gst::MessageType::Error]);
+    pipeline.set_state(gst::State::Null).unwrap();
+    assert!(matches!(msg.as_ref().map(|m| m.view()), Some(gst::MessageView::Eos(_))), "{msg:?}");
+    assert_eq!(stats.unsupported.load(Ordering::Relaxed), 20, "every float buffer refused");
+    assert_eq!(stats.degraded.load(Ordering::Relaxed), 1);
+    assert_eq!(passed.load(Ordering::Relaxed), 0, "no refused buffer reached the sink");
+    assert_eq!(stats.frames_in.load(Ordering::Relaxed), 80 * 1152, "both rates through the controller");
+    assert_eq!(stats.rate_hz.load(Ordering::Relaxed), 44_100);
+    assert_eq!(stats.unavailable.load(Ordering::Relaxed), 0);
+    assert!(!stats.active());
 }
