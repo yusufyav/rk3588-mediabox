@@ -530,6 +530,11 @@ impl Output {
             .map(|content| (content.output.setting.clone(), content.output.applied))
             .unwrap_or_else(|| (state.kept.clone(), true));
         let target_key = offer.select(&setting).map(|selected| selected.timing_key);
+        // A match the owner could not commit is not on the wire, and what is
+        // has not been said since: asked for again, it is sent again. Taken
+        // for on the wire, the next channel at the same rate waited for a
+        // report that was never coming and failed (`mode-timeout`).
+        let after_failure = state.content.as_ref().is_some_and(|content| content.failed.is_some());
         let output = ContentOutput {
             cadence,
             cadence_label: cadence.label(),
@@ -542,7 +547,7 @@ impl Output {
             // not on the wire yet: taken for it, a channel opened in the
             // middle of the commit (FAZ 2F). Nor is the kept setting going
             // back after a film's: it is sent, and reported like any other.
-            applied: on_wire == setting && settled,
+            applied: on_wire == setting && settled && !after_failure,
         };
         eprintln!(
             "mediaboxd-rs: film {film} at {} fps: {}",
@@ -564,7 +569,7 @@ impl Output {
             failed: None,
         });
         let mut events = Vec::new();
-        if on_wire != setting {
+        if on_wire != setting || after_failure {
             events.push(OutputEvent::Apply {
                 identity,
                 setting,
@@ -1314,6 +1319,129 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
             .unwrap();
         assert_eq!(output.content_progress(third), ContentProgress::Failed("commit: EINVAL".into()));
         let _ = fifty_hz;
+    }
+
+    /// `future`, or the test fails saying which step did not come.
+    async fn within<T>(future: impl std::future::Future<Output = T>, what: &str) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(5), future).await.unwrap_or_else(|_| panic!("{what}: not within 5 s"))
+    }
+
+    /// A live channel's opening on the real `Output`, its player and its
+    /// receiver scripted: what the owner reports is the only thing that moves
+    /// a match on.
+    struct OnOutput {
+        output: Arc<Output>,
+        epoch: u64,
+        newest: Arc<std::sync::atomic::AtomicU64>,
+        fps: f64,
+        opened: std::sync::Mutex<Vec<String>>,
+        given_up: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::live_gate::GateIo for OnOutput {
+        fn current(&self) -> bool {
+            self.newest.load(std::sync::atomic::Ordering::SeqCst) == self.epoch
+        }
+        fn stream_rate(&self) -> Option<f64> {
+            Some(self.fps)
+        }
+        fn has_picture(&self) -> Option<bool> {
+            Some(true)
+        }
+        async fn player_gate(&self) -> Option<serde_json::Value> {
+            None
+        }
+        fn start_mode(&self, cadence: Cadence) -> Result<(bool, u64), String> {
+            self.output.content_start_request(1, cadence).map(|(chosen, request)| (chosen.applied, request))
+        }
+        fn mode_progress(&self, request: u64) -> ContentProgress {
+            self.output.content_progress(request)
+        }
+        fn mode_changed(&self) {}
+        fn sound_current(&self) -> bool {
+            true
+        }
+        async fn reload_sound(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn open(&self, outcome: &str) -> Result<(), String> {
+            self.opened.lock().unwrap().push(outcome.to_string());
+            Ok(())
+        }
+        fn matched(&self, _: Cadence) {}
+        async fn give_up(&self, code: &str) -> bool {
+            self.given_up.lock().unwrap().push(code.to_string());
+            true
+        }
+    }
+
+    /// The owner's late report of a match a newer channel has replaced, on
+    /// the real parts and in a fixed order: channel 1 asks for 30 Hz, channel
+    /// 2 for 60 Hz before the owner has said a word, the owner then reports
+    /// 30 Hz and only after it 50 Hz. Channel 1 ends stale and is never let
+    /// go; the report of 30 Hz is not taken for channel 2's 50 Hz, which goes
+    /// only on its own report. Then a channel whose match is failed by the
+    /// owner, and the channel after it.
+    #[tokio::test]
+    async fn a_late_report_of_a_replaced_match_lets_nothing_go() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        let newest = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let channel = |epoch: u64, fps: f64| OnOutput {
+            output: Arc::clone(&output),
+            epoch,
+            newest: Arc::clone(&newest),
+            fps,
+            opened: std::sync::Mutex::new(Vec::new()),
+            given_up: std::sync::Mutex::new(Vec::new()),
+        };
+        let (one, two) = (channel(1, 30.0), channel(2, 60.0));
+        let first = crate::live_gate::open_channel(&one);
+        let script = async {
+            let (thirty, _, _) = within(next_apply(&mut events), "30 Hz asked").await;
+            // The zap: channel 2 is the newest, and asks for its own.
+            newest.store(2, std::sync::atomic::Ordering::SeqCst);
+            let second = crate::live_gate::open_channel(&two);
+            let owner = async {
+                // Channel 2's request is in before the owner's word on 1's.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                output.owner_report(applied(&offer, &thirty, None)).unwrap();
+                let (sixty, _, _) = within(next_apply(&mut events), "60 Hz asked").await;
+                // Several polls of channel 2's wait on the late report.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                assert!(two.opened.lock().unwrap().is_empty(), "the report of 30 Hz let 60 Hz go");
+                output.owner_report(applied(&offer, &sixty, None)).unwrap();
+            };
+            let (end, ()) = tokio::join!(within(second, "channel 2"), owner);
+            end
+        };
+        let (first, second) = tokio::join!(within(first, "channel 1"), script);
+        assert_eq!(first, crate::live_gate::End::Stale("mode"));
+        assert!(one.opened.lock().unwrap().is_empty() && one.given_up.lock().unwrap().is_empty());
+        assert_eq!(second, crate::live_gate::End::Opened("matched".into()));
+        assert_eq!(*two.opened.lock().unwrap(), ["matched"]);
+        // Channel 3 at 30 Hz, failed by the owner; channel 4 at 30 Hz after it.
+        newest.store(3, std::sync::atomic::Ordering::SeqCst);
+        let three = channel(3, 30.0);
+        let owner = async {
+            let _ = within(next_apply(&mut events), "channel 3 asked").await;
+            output
+                .owner_report(OwnerReport::Failed { identity: offer_identity(&offer), trial: None, error: "commit: EINVAL".into() })
+                .unwrap();
+        };
+        let (end, ()) = tokio::join!(within(crate::live_gate::open_channel(&three), "channel 3"), owner);
+        assert_eq!(end, crate::live_gate::End::Failed("mode-failed".into()));
+        assert!(three.opened.lock().unwrap().is_empty());
+        newest.store(4, std::sync::atomic::Ordering::SeqCst);
+        let four = channel(4, 30.0);
+        let owner = async {
+            let (thirty, _, _) = within(next_apply(&mut events), "channel 4 asked: the rate failed before is sent again").await;
+            output.owner_report(applied(&offer, &thirty, None)).unwrap();
+        };
+        let (end, ()) = tokio::join!(within(crate::live_gate::open_channel(&four), "channel 4"), owner);
+        assert_eq!(end, crate::live_gate::End::Opened("matched".into()), "the channel after a failure");
     }
 
     fn offer_identity(offer: &OutputOffer) -> DisplayIdentity {
