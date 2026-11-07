@@ -32,6 +32,7 @@ mod ledger;
 mod ipc;
 mod plane;
 mod sound_diag;
+mod sound_map;
 mod stamp;
 mod trace;
 

@@ -96,9 +96,6 @@ pub struct Shared {
     /// The sound being played, fed packet by packet by the reader (`es`):
     /// its part of the channel's branch.
     pub sound: Mutex<Option<SoundParts>>,
-    /// The running times this reader gave the last sound PES starts, for
-    /// tsdemux's own to be held against (`sound_source`).
-    pub sound_starts: Mutex<std::collections::VecDeque<u64>>,
     pub info: Mutex<Info>,
     /// Where each decoded picture ended, by channel (`ledger`).
     pub ledgers: crate::ledger::Ledgers,
@@ -939,30 +936,16 @@ impl Engine {
     /// tsdemux's pad for the sound played: drained (the reader gives the
     /// sound, `route_sound`: tsdemux gives a PES only once the whole of it
     /// is in, up to 283 ms after its first frame's time), its PES times held
-    /// against the reader's (`Health::sound_map`) -- the two must agree.
+    /// against the reader's records of the same PES (`Health::sound_map`)
+    /// -- the two must agree.
     fn watch_sound_pad(&self, pad: &gst::Pad) {
         let shared = Arc::downgrade(&self.shared);
         pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let (Some(pts), Some(shared)) = (info.buffer().and_then(|b| b.pts()), shared.upgrade()) {
-                let theirs = pts.nseconds() as i64;
-                let ours = shared
-                    .sound_starts
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .iter()
-                    .map(|&at| at as i64)
-                    .min_by_key(|&at| (at - theirs).abs());
-                if let Some(ours) = ours {
-                    shared.health.sound_map(theirs - ours);
-                    // Off by more than half an MPEG frame: what the reader
-                    // had then, for the evidence of why.
-                    if (theirs - ours).abs() > 12_000_000
-                        && let Some(evidence) = crate::evidence::get()
-                    {
-                        let starts: Vec<u64> = shared.sound_starts.lock().unwrap_or_else(|p| p.into_inner()).iter().rev().take(4).copied().collect();
-                        evidence.map(shared.generation.load(Ordering::SeqCst), theirs as u64, starts);
-                    }
-                }
+                // Matched to the reader's record of the same PES, or left to
+                // wait for it (`sound_map::SoundMatch`): never to the PES
+                // before.
+                shared.health.sound_demuxed(shared.generation.load(Ordering::SeqCst), pts.nseconds());
             }
             gst::PadProbeReturn::Ok
         });
@@ -3812,11 +3795,7 @@ fn push_sound(
     let failed = route_sound(&mut target, chunks, reference, discont, &mut |switch| on_sound(generation, switch), &mut |at| {
         shared.health.diagnose(|d| d.c.ts_pes_starts += 1);
         shared.health.demuxed(generation, true, arrived as i64 - at as i64);
-        let mut starts = shared.sound_starts.lock().unwrap_or_else(|p| p.into_inner());
-        starts.push_back(at);
-        while starts.len() > 64 {
-            starts.pop_front();
-        }
+        shared.health.sound_start(generation, at);
     });
     for error in failed {
         shared.health.push_failed(generation, "sound", error);

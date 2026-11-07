@@ -65,6 +65,8 @@ pub struct Health {
     /// worst this channel (`sound_map`).
     map: Mutex<(u64, i64)>,
     map_said: Mutex<u64>,
+    /// tsdemux's PES matched to the reader's records (`sound_map`).
+    map_match: Mutex<crate::sound_map::SoundMatch>,
     ts: Mutex<Ts>,
     /// Buffers a source refused: the sound's (`route_sound`) and the
     /// stream's; and elements that would not go down. Each said once a
@@ -249,6 +251,35 @@ impl Health {
         if now >= *said + 1_000_000_000 {
             *said = now;
             mediabox_core::timeline!("sound-map", "gen={generation} diff_us={}", diff / 1000);
+        }
+    }
+
+    /// The reader's record of a sound PES start: what of tsdemux waited for
+    /// it is measured now.
+    pub fn sound_start(&self, generation: u64, at: u64) {
+        let diffs = self.map_match.lock().unwrap_or_else(|p| p.into_inner()).reader(generation, at, mediabox_core::timeline::now_ns());
+        for diff in diffs {
+            self.sound_map(diff);
+        }
+    }
+
+    /// tsdemux's sound PES at running time `theirs`: measured against the
+    /// reader's record of it, or left waiting for that.
+    pub fn sound_demuxed(&self, generation: u64, theirs: u64) {
+        let (diff, unmatched) = {
+            let mut m = self.map_match.lock().unwrap_or_else(|p| p.into_inner());
+            let before = m.unmatched;
+            let diff = m.demux(generation, theirs, mediabox_core::timeline::now_ns());
+            (diff, (m.unmatched > before).then(|| m.last_unmatched.clone()).flatten())
+        };
+        if let Some(diff) = diff {
+            self.sound_map(diff);
+        }
+        if let Some((theirs, ours)) = unmatched {
+            mediabox_core::timeline!("sound-map-unmatched", "gen={generation} theirs={theirs}");
+            if let Some(evidence) = crate::evidence::get() {
+                evidence.map(generation, theirs, ours);
+            }
         }
     }
 
@@ -613,6 +644,11 @@ pub struct Report {
     pub audio_demux_late_ms: Option<f64>,
     pub video_demux_late_ms: Option<f64>,
     pub sound_map_ms: f64,
+    /// tsdemux's sound PES matched to the reader's, left unmatched (never
+    /// measured against another PES), and waiting: every channel so far.
+    pub sound_map_matched: u64,
+    pub sound_map_unmatched: u64,
+    pub sound_map_pending: u64,
     /// The transport stream reader's counts, every channel so far.
     pub ts: crate::es::Counts,
     /// The sound against its PMT (`es::SoundState`), this channel's.
@@ -651,6 +687,11 @@ impl Health {
             (d.audio, d.video)
         };
         let map_diff = self.map.lock().unwrap_or_else(|p| p.into_inner()).1;
+        let (map_matched, map_unmatched, map_pending) = {
+            let mut m = self.map_match.lock().unwrap_or_else(|p| p.into_inner());
+            m.expire(mediabox_core::timeline::now_ns());
+            (m.matched, m.unmatched, m.pending() as u64)
+        };
         let (ts, sound_state, sound_codec) = {
             let t = self.ts.lock().unwrap_or_else(|p| p.into_inner());
             (t.before.plus(&t.now), t.state.map_or("none", |s| s.name()), t.codec.map(|c| c.name()))
@@ -685,6 +726,9 @@ impl Health {
             sound_incidents,
             plane_full_dropped: self.plane_full_dropped.load(Ordering::Relaxed),
             sound_map_ms: map_diff as f64 / 1e6,
+            sound_map_matched: map_matched,
+            sound_map_unmatched: map_unmatched,
+            sound_map_pending: map_pending,
             ts,
             sound_state,
             sound_codec,
@@ -760,7 +804,8 @@ pub fn write(report: &Report) {
         "audio_lead_least_ms": r.audio_lead_least_ms, "audio_late": r.audio_late,
         "sink_late": r.sink_late, "sink_discont": r.sink_discont,
         "audio_demux_late_ms": r.audio_demux_late_ms, "video_demux_late_ms": r.video_demux_late_ms,
-        "sound_map_ms": r.sound_map_ms,
+        "sound_map_ms": r.sound_map_ms, "sound_map_matched": r.sound_map_matched,
+        "sound_map_unmatched": r.sound_map_unmatched, "sound_map_pending": r.sound_map_pending,
         "sound_state": r.sound_state, "sound_codec": r.sound_codec,
     });
     // Apart: in one json! the macro runs past its recursion limit.
