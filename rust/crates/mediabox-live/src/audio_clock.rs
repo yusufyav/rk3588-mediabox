@@ -515,8 +515,9 @@ impl Controller {
         Self { model: None, resampler: Resampler::new(channels, rate), rate, generation: 0, last_phase: None, stats }
     }
 
-    fn begin_again(&mut self) {
-        let held = self.resampler.reset();
+    /// `again`: frames of the buffer in hand, pushed again after: not lost.
+    fn begin_again(&mut self, again: usize) {
+        let held = self.resampler.reset().saturating_sub(again);
         self.stats.held_at_reset.fetch_add(held as u64, Ordering::Relaxed);
         self.stats.resets.fetch_add(1, Ordering::Relaxed);
         self.last_phase = None;
@@ -525,9 +526,10 @@ impl Controller {
 
     pub fn buffer(&mut self, input: BufferIn, sink: Sink) -> BufferOut {
         let s = std::sync::Arc::clone(&self.stats);
-        if input.generation != self.generation || input.discont || sink.next_sample.is_none() {
+        let another_channel = input.generation != self.generation;
+        if another_channel || input.discont || sink.next_sample.is_none() {
             self.generation = input.generation;
-            self.begin_again();
+            self.begin_again(0);
         }
         let mut calibration = sink.calibration;
         let model = self.model.get_or_insert_with(|| ClockModel::new(calibration));
@@ -556,9 +558,11 @@ impl Controller {
             Decision::Ratio(r) => r,
             Decision::Discont => {
                 // Put at its time by the sink: what the resampler held of
-                // before the jump is not played.
-                self.begin_again();
-                s.input_discont.fetch_add(1, Ordering::Relaxed);
+                // before the jump is not played. Another channel's first
+                // buffer comes this way too (the sink still at the end of
+                // the last channel's): no fault of the input's.
+                self.begin_again(input.frames);
+                if another_channel { &s.channel_starts } else { &s.input_discont }.fetch_add(1, Ordering::Relaxed);
                 self.resampler.push(input.samples, input.frames, input.pts);
                 discont = true;
                 1.0
@@ -596,9 +600,11 @@ pub struct Stats {
     /// Calibrations found set by somebody else (audiobasesink's sync to the
     /// latency), taken.
     pub adopted: AtomicU64,
-    /// Phases beyond `DISCONT_NS`: the sound's times jumped (an input's
-    /// fault), put at their time by the sink.
+    /// Phases beyond `DISCONT_NS` within a channel: the sound's times
+    /// jumped (an input's fault), put at their time by the sink.
     pub input_discont: AtomicU64,
+    /// Another channel's first buffer put at its time.
+    pub channel_starts: AtomicU64,
     pub frames_in: AtomicU64,
     pub frames_out: AtomicU64,
     /// Frames held in the resampler when it began again, not played.
@@ -629,7 +635,7 @@ impl Stats {
         serde_json::json!({
             "observations": { "used": g(&self.used), "not_one_moment": g(&self.not_one_moment), "transient": g(&self.transient) },
             "updates": g(&self.updates), "resets": g(&self.resets), "adopted": g(&self.adopted),
-            "input_discont": g(&self.input_discont),
+            "input_discont": g(&self.input_discont), "channel_starts": g(&self.channel_starts),
             "frames_in": g(&self.frames_in), "frames_out": g(&self.frames_out), "held_at_reset": g(&self.held_at_reset),
             "rate_ppb": i(&self.rate_ppb), "phase_ns": i(&self.phase_ns), "phase_max_ns": i(&self.phase_max_ns),
             "phase_change_max_ns": i(&self.phase_change_max_ns), "stretch_max_millisamples": i(&self.stretch_max_millis),

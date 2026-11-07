@@ -446,6 +446,7 @@ mod tests {
         // A frame lost on the way: the times 24 ms on.
         let (placed, stats) = run_controlled(60.0, device(), &[], &[Input::Jump { at: T0 + 30e9, by: FRAME_NS }]);
         assert_eq!(stats.input_discont.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.channel_starts.load(Ordering::Relaxed), 0);
         assert!(settled(&placed, T0 + 31e9) < 0.1e6, "{}", settled(&placed, T0 + 31e9));
     }
 
@@ -463,6 +464,10 @@ mod tests {
         assert!((placed[k].external - begins).abs() < 1.0, "{:?}", &placed[k - 1..=k]);
         assert!(placed[k - 1].external < at + 100e6);
         assert!(stats.resets.load(Ordering::Relaxed) >= 2);
+        // Another channel is no fault of the input's; nothing of the last
+        // channel's lost but the resampler's taps.
+        assert_eq!(stats.input_discont.load(Ordering::Relaxed), 0);
+        assert!(stats.held_at_reset.load(Ordering::Relaxed) <= 2 * crate::audio_clock::HALF as u64);
         // Put where the sink's start calibration says (7 ms off), then the
         // readings' median has the phase within a second and the bound takes
         // the rest without a step.
