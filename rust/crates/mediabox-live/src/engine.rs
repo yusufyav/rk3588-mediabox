@@ -1302,8 +1302,30 @@ impl Engine {
         let mut report = self.shared.health.report(generation, latency + video_offset, latency + audio_offset, audio_late, device);
         report.gate = self.gate_snapshot();
         report.audio_clock = self.shared.audio_clock.json();
+        report.process = self.process();
         report.ledger = self.shared.ledgers.json();
         crate::health::write(&report);
+    }
+
+    /// The process (`health::process`) and its queues: the most any queue
+    /// holds, in time and bytes, and the transport source's bytes.
+    fn process(&self) -> serde_json::Value {
+        let mut json = crate::health::process();
+        let (mut most_ns, mut bytes, mut source) = (0u64, 0u64, 0u64);
+        for element in self.pipeline.iterate_recurse().into_iter().flatten() {
+            match element.factory().map(|f| f.name().to_string()).as_deref() {
+                Some("queue") => {
+                    most_ns = most_ns.max(element.property::<u64>("current-level-time"));
+                    bytes += u64::from(element.property::<u32>("current-level-bytes"));
+                }
+                Some("appsrc") => source += element.property::<u64>("current-level-bytes"),
+                _ => {}
+            }
+        }
+        json["queue_most_ms"] = (most_ns / 1_000_000).into();
+        json["queue_bytes"] = bytes.into();
+        json["source_bytes"] = source.into();
+        json
     }
 
     /// What the clock probe samples once a second: the transport source's

@@ -498,11 +498,10 @@ pub struct Sink<'a> {
     pub place: &'a dyn Fn(u64, &Calibration) -> f64,
 }
 
-/// The buffer for the sink.
+/// The buffer for the sink; its samples in `Controller::output`.
 pub struct BufferOut {
     pub pts: u64,
     pub frames: usize,
-    pub samples: Vec<f32>,
     pub discont: bool,
     /// A calibration for the audio clock, before the sink renders this.
     pub calibration: Option<Calibration>,
@@ -516,13 +515,27 @@ pub struct Controller {
     rate: f64,
     generation: u64,
     last_phase: Option<f64>,
+    /// The last buffer's samples, kept for the next: no allocation a
+    /// buffer once it is as large as the largest.
+    out: Vec<f32>,
     pub stats: std::sync::Arc<Stats>,
 }
 
 impl Controller {
     pub fn new(channels: usize, rate: f64, stats: std::sync::Arc<Stats>) -> Self {
         stats.rate_hz.store(rate as u32, Ordering::Relaxed);
-        Self { model: None, resampler: Resampler::new(channels, rate), rate, generation: 0, last_phase: None, stats }
+        Self { model: None, resampler: Resampler::new(channels, rate), rate, generation: 0, last_phase: None, out: Vec::new(), stats }
+    }
+
+    /// The samples of the buffer `buffer` returned last.
+    pub fn output(&self) -> &[f32] {
+        &self.out
+    }
+
+    /// The capacity the controller holds (its output and the resampler's
+    /// fifo), for the count of its growths.
+    pub fn capacity(&self) -> usize {
+        self.out.capacity() + self.resampler.fifo.capacity()
     }
 
     /// `again`: frames of the buffer in hand, pushed again after: not lost.
@@ -592,15 +605,129 @@ impl Controller {
             self.last_phase = Some(p);
             raise(&s.stretch_max_millis, ((1.0 - ratio).abs() * input.frames as f64 * 1000.0).round() as i64);
         }
-        let mut samples = Vec::with_capacity(input.samples.len() + 64);
-        let frames = self.resampler.process(ratio, &mut samples);
+        self.out.clear();
+        let frames = self.resampler.process(ratio, &mut self.out);
         s.frames_in.fetch_add(input.frames as u64, Ordering::Relaxed);
         s.frames_out.fetch_add(frames as u64, Ordering::Relaxed);
-        BufferOut { pts: time, frames, samples, discont, calibration: set }
+        BufferOut { pts: time, frames, discont, calibration: set }
     }
 }
 
 // ------------------------------------------------------------ the counts
+
+/// The cost's histograms: elapsed by `COST_STEP_NS` up to
+/// `COST_BUCKETS` steps (20 ms), share of the buffer's duration by a
+/// thousandth up to the whole; the last bucket of each is everything
+/// beyond.
+pub const COST_STEP_NS: u64 = 10_000;
+const COST_BUCKETS: usize = 2_000;
+const SHARE_BUCKETS: usize = 1_000;
+/// The product's limits on the controller's time with a buffer, as shares
+/// of the buffer's duration: the 99th percentile under a quarter, the
+/// longest under a half (FAZ 2J); a buffer done no sooner than its own
+/// duration is a deadline missed -- the sound could not be kept up with.
+pub const COST_P99_LIMIT: f64 = 0.25;
+pub const COST_MAX_LIMIT: f64 = 0.5;
+
+/// The controller's real-time cost, a buffer at a time: how long the probe
+/// took with it (taken in, controlled, resampled, made a buffer again)
+/// against the buffer's own duration. Counted on the streaming thread with
+/// relaxed atomics only, read by the health report.
+pub struct Cost {
+    pub buffers: AtomicU64,
+    elapsed: Vec<AtomicU32>,
+    share: Vec<AtomicU32>,
+    pub max_ns: AtomicU64,
+    /// The largest share, millionths.
+    pub max_share_ppm: AtomicU64,
+    pub deadline_miss: AtomicU64,
+    /// Buffers over `COST_MAX_LIMIT` of their duration.
+    pub over_limit: AtomicU64,
+    /// The times the controller's buffers grew (allocations kept for the
+    /// buffers after).
+    pub growths: AtomicU64,
+}
+
+impl Default for Cost {
+    fn default() -> Self {
+        Self {
+            buffers: AtomicU64::new(0),
+            elapsed: (0..=COST_BUCKETS).map(|_| AtomicU32::new(0)).collect(),
+            share: (0..=SHARE_BUCKETS).map(|_| AtomicU32::new(0)).collect(),
+            max_ns: AtomicU64::new(0),
+            max_share_ppm: AtomicU64::new(0),
+            deadline_miss: AtomicU64::new(0),
+            over_limit: AtomicU64::new(0),
+            growths: AtomicU64::new(0),
+        }
+    }
+}
+
+impl std::fmt::Debug for Cost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cost {}", self.json())
+    }
+}
+
+impl Cost {
+    /// A buffer of `duration_ns` taken `elapsed_ns`.
+    pub fn record(&self, elapsed_ns: u64, duration_ns: u64) {
+        let share = elapsed_ns as f64 / duration_ns.max(1) as f64;
+        self.buffers.fetch_add(1, Ordering::Relaxed);
+        self.elapsed[((elapsed_ns / COST_STEP_NS) as usize).min(COST_BUCKETS)].fetch_add(1, Ordering::Relaxed);
+        self.share[((share * SHARE_BUCKETS as f64) as usize).min(SHARE_BUCKETS)].fetch_add(1, Ordering::Relaxed);
+        self.max_ns.fetch_max(elapsed_ns, Ordering::Relaxed);
+        self.max_share_ppm.fetch_max((share * 1e6).round() as u64, Ordering::Relaxed);
+        if share >= 1.0 {
+            self.deadline_miss.fetch_add(1, Ordering::Relaxed);
+        }
+        if share > COST_MAX_LIMIT {
+            self.over_limit.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The `q` quantile's bucket's upper edge, in buckets.
+    fn quantile(hist: &[AtomicU32], q: f64) -> Option<usize> {
+        let counts: Vec<u64> = hist.iter().map(|a| u64::from(a.load(Ordering::Relaxed))).collect();
+        let total: u64 = counts.iter().sum();
+        if total == 0 {
+            return None;
+        }
+        let want = (q * total as f64).ceil().max(1.0) as u64;
+        let mut seen = 0;
+        counts.iter().position(|c| {
+            seen += c;
+            seen >= want
+        }).map(|k| k + 1)
+    }
+
+    /// The `q` quantile of the elapsed time, µs (at most `COST_STEP_NS`
+    /// over).
+    pub fn elapsed_us(&self, q: f64) -> Option<u64> {
+        Self::quantile(&self.elapsed, q).map(|k| k as u64 * COST_STEP_NS / 1_000)
+    }
+
+    /// The `q` quantile of the share of the buffer's duration (at most a
+    /// thousandth over).
+    pub fn share(&self, q: f64) -> Option<f64> {
+        Self::quantile(&self.share, q).map(|k| k as f64 / SHARE_BUCKETS as f64)
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let p99 = self.share(0.99);
+        let max = g(&self.max_share_ppm) as f64 / 1e6;
+        serde_json::json!({
+            "buffers": g(&self.buffers),
+            "p50_us": self.elapsed_us(0.50), "p95_us": self.elapsed_us(0.95), "p99_us": self.elapsed_us(0.99),
+            "max_us": g(&self.max_ns) / 1_000,
+            "share_p50": self.share(0.50), "share_p95": self.share(0.95), "share_p99": p99, "share_max": max,
+            "deadline_miss": g(&self.deadline_miss), "over_limit": g(&self.over_limit), "growths": g(&self.growths),
+            "within_limits": g(&self.buffers) > 0 && g(&self.deadline_miss) == 0
+                && p99.is_some_and(|p| p < COST_P99_LIMIT) && max < COST_MAX_LIMIT,
+        })
+    }
+}
 
 /// The controller's counts for the health report.
 #[derive(Debug, Default)]
@@ -655,6 +782,7 @@ pub struct Stats {
     /// Buffers that went to the sink without the controller: no time on
     /// them, or no clock on the sink.
     pub unavailable: AtomicU64,
+    pub cost: Cost,
 }
 
 impl Stats {
@@ -680,6 +808,7 @@ impl Stats {
             "phase_change_max_ns": i(&self.phase_change_max_ns), "stretch_max_millisamples": i(&self.stretch_max_millis),
             "step_max_ns": i(&self.stretch_max_millis) * 1_000_000 / i64::from(self.rate_hz.load(Ordering::Relaxed).max(1)),
             "unsupported_format": g(&self.unsupported), "unavailable": g(&self.unavailable),
+            "cost": self.cost.json(),
         })
     }
 }
@@ -830,6 +959,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
             Admission::Refuse => return gst::PadProbeReturn::Drop,
         };
         let Some(buffer) = info.buffer() else { return gst::PadProbeReturn::Ok };
+        let started = std::time::Instant::now();
         let (Some(pts), Some(audio_clock)) = (buffer.pts(), sink.provide_clock()) else {
             stats.unavailable.fetch_add(1, Ordering::Relaxed);
             return gst::PadProbeReturn::Ok;
@@ -845,6 +975,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
         };
         let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
         let (control, samples) = &mut *guard;
+        let held = samples.capacity() + control.as_ref().map_or(0, |(_, c)| c.capacity());
         match buffer.map_readable() {
             Ok(map) => to_f32(map.as_slice(), samples),
             Err(_) => {
@@ -886,14 +1017,20 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
             BufferIn { generation: generation(), pts: pts.nseconds(), frames, samples, discont },
             Sink { calibration, observation: Observation { before, internal: read, after }, next_sample: fields.next_sample().map(|n| n as f64), place: &place },
         );
+        let made = (out.frames > 0).then(|| from_f32(control.output()));
+        if samples.capacity() + control.capacity() > held {
+            stats.cost.growths.fetch_add(1, Ordering::Relaxed);
+        }
         drop(guard);
         if let Some(c) = out.calibration {
             audio_clock.set_calibration(gst::ClockTime::from_nseconds(c.internal), gst::ClockTime::from_nseconds(c.external), c.num, c.denom);
         }
-        if out.frames == 0 {
+        let duration = (frames as f64 * 1e9 / rate).round() as u64;
+        let Some(made) = made else {
+            stats.cost.record(started.elapsed().as_nanos() as u64, duration);
             return gst::PadProbeReturn::Drop;
-        }
-        let mut made = gst::Buffer::from_mut_slice(from_f32(&out.samples));
+        };
+        let mut made = gst::Buffer::from_mut_slice(made);
         {
             let made = made.get_mut().expect("a new buffer is writable");
             made.set_pts(gst::ClockTime::from_nseconds(out.pts));
@@ -903,6 +1040,7 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
             }
         }
         info.data = Some(gst::PadProbeData::Buffer(made));
+        stats.cost.record(started.elapsed().as_nanos() as u64, duration);
         gst::PadProbeReturn::Ok
     });
     Ok(())

@@ -618,6 +618,8 @@ pub struct Report {
     pub ledger: serde_json::Value,
     /// The sound clock's controller (`audio_clock::Stats`).
     pub audio_clock: serde_json::Value,
+    /// The process's CPU, memory and queues (`process`).
+    pub process: serde_json::Value,
     pub at_ns: u64,
     pub generation: u64,
     /// The broadcast's present on the running time is the stamp plus this.
@@ -725,6 +727,7 @@ impl Health {
             gate: serde_json::Value::Null,
             ledger: serde_json::Value::Null,
             audio_clock: serde_json::Value::Null,
+            process: serde_json::Value::Null,
             sound,
             sound_incidents,
             plane_full_dropped: self.plane_full_dropped.load(Ordering::Relaxed),
@@ -831,6 +834,7 @@ pub fn write(report: &Report) {
     json["gate"] = r.gate.clone();
     json["ledger"] = r.ledger.clone();
     json["audio_clock"] = r.audio_clock.clone();
+    json["process"] = r.process.clone();
     // Every count above runs for the life of the process, through every
     // channel change: a fault is never taken back by the next channel.
     // This channel's own share is apart, from where they stood at its start.
@@ -964,4 +968,25 @@ impl Faults {
         eprintln!("mediabox-live: BİLEREK KUSUR (monitör sınaması): {f:?}");
         f
     }
+}
+
+/// The process's own CPU time (user and system, clock ticks), resident
+/// memory and threads, from /proc/self: read by the health thread, the
+/// streaming threads not touched.
+pub fn process() -> serde_json::Value {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    // After the command's closing parenthesis: state is field 3, utime 14,
+    // stime 15, num_threads 20 (proc(5)).
+    let fields: Vec<&str> = stat.rsplit_once(')').map_or(vec![], |(_, rest)| rest.split_whitespace().collect());
+    let field = |n: usize| fields.get(n - 3).and_then(|v| v.parse::<u64>().ok());
+    let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+    let resident = statm.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok());
+    // SAFETY: plain queries of the system's constants.
+    let (tick, page) = unsafe { (libc::sysconf(libc::_SC_CLK_TCK), libc::sysconf(libc::_SC_PAGESIZE)) };
+    serde_json::json!({
+        "cpu_ticks": field(14).zip(field(15)).map(|(u, s)| u + s),
+        "ticks_per_s": tick,
+        "rss_kb": resident.map(|p| p * page.max(0) as u64 / 1024),
+        "threads": field(20),
+    })
 }

@@ -315,3 +315,63 @@ fn refused_by_the_guard_the_sink_is_left_uncontrolled_never_on_resample_and_says
     assert_eq!(told["fallback"], 1);
     assert_eq!(told["abi_reason"], "test: another libgstaudio");
 }
+
+#[test]
+fn the_cost_is_counted_as_a_share_of_each_buffer_and_held_to_its_limits() {
+    let c = Cost::default();
+    assert_eq!(c.json()["within_limits"], false, "nothing measured is no pass");
+    for _ in 0..199 {
+        c.record(1_000_000, 24_000_000);
+    }
+    // One in 200: above the 99th percentile.
+    c.record(5_000_000, 24_000_000);
+    assert_eq!(c.elapsed_us(0.5), Some(1_010));
+    assert!((c.share(0.99).unwrap() - 0.042).abs() < 1e-9, "{:?}", c.share(0.99));
+    assert_eq!(c.json()["within_limits"], true);
+    c.record(13_000_000, 24_000_000);
+    assert_eq!((c.over_limit.load(Ordering::Relaxed), c.deadline_miss.load(Ordering::Relaxed)), (1, 0));
+    assert_eq!(c.json()["within_limits"], false, "one buffer over half its duration");
+    c.record(30_000_000, 24_000_000);
+    assert_eq!(c.deadline_miss.load(Ordering::Relaxed), 1, "longer than the buffer: a deadline missed");
+    assert_eq!(c.json()["max_us"], 30_000);
+}
+
+#[test]
+fn the_heaviest_broadcast_sound_resampled_keeps_within_the_cost_limits() {
+    // 5.1 at 48 kHz in AC-3's 1536 frames, a phase held off so every
+    // buffer is resampled (every tap), as the probe does it: taken in,
+    // controlled, made S16 again.
+    let (channels, rate, frames) = (6usize, 48_000.0, 1536usize);
+    let stats = std::sync::Arc::new(Stats::default());
+    let mut control = Controller::new(channels, rate, std::sync::Arc::clone(&stats));
+    let cal = Calibration { internal: 0, external: 0, num: 1, denom: 1 };
+    let bytes = from_f32(&sine(997.0, rate, 0.0, frames, channels));
+    let place = |t: u64, c: &Calibration| (c.to_internal(t as f64) * rate / 1e9).floor();
+    let duration = (frames as f64 * 1e9 / rate) as u64;
+    let mut samples = Vec::new();
+    let mut ratios = 0;
+    for k in 0..400u64 {
+        let started = std::time::Instant::now();
+        let pts = k * duration;
+        to_f32(&bytes, &mut samples);
+        let now = pts;
+        let out = control.buffer(
+            BufferIn { generation: 1, pts, frames, samples: &samples, discont: false },
+            Sink {
+                calibration: cal,
+                observation: Observation { before: now, internal: now, after: now },
+                // Five samples behind where its time is.
+                next_sample: (k > 0).then(|| place(pts, &cal) + 5.0),
+                place: &place,
+            },
+        );
+        let made = from_f32(control.output());
+        stats.cost.record(started.elapsed().as_nanos() as u64, duration);
+        ratios += usize::from(out.frames != frames && k > 0);
+        assert_eq!(made.len(), out.frames * channels * 2);
+    }
+    assert!(ratios > 300, "resampled, not passed through: {ratios}");
+    let cost = stats.cost.json();
+    eprintln!("cost: {cost}");
+    assert_eq!(cost["within_limits"], true, "{cost}");
+}
