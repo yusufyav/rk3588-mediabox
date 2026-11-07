@@ -25,6 +25,9 @@ pub enum Command {
     Load(String, Option<u64>),
     /// The control plane lets channel `epoch` go: its display is matched.
     OpenGate { epoch: u64, outcome: String },
+    /// The control plane gives channel `epoch` up: its gate stays shut and
+    /// the player ends, saying why (`code`).
+    FailGate { epoch: u64, code: String },
     /// The channel cannot be played: the player ends, saying why.
     Fail(String),
     Pause(bool),
@@ -183,6 +186,11 @@ fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, comm
                 let outcome = Some(word(3)).filter(|outcome| !outcome.is_empty()).unwrap_or("matched");
                 let outcome = outcome.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
                 (run(commands, Command::OpenGate { epoch, outcome }), None)
+            }
+            ("fail", Some(epoch)) => {
+                let code = Some(word(3)).filter(|code| !code.is_empty()).unwrap_or("failed");
+                let code = code.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+                (run(commands, Command::FailGate { epoch, code }), None)
             }
             _ => ("invalid parameter".into(), None),
         },

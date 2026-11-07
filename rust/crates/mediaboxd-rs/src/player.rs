@@ -172,6 +172,20 @@ impl PlayerManager {
         }
     }
 
+    /// Give live channel `epoch` up: the player's gate stays shut and the
+    /// player ends, saying `code`. A player past answering is stopped by the
+    /// caller all the same.
+    pub async fn gate_fail(&self, epoch: u64, code: &str) -> Result<(), String> {
+        let answer = self
+            .ask(json!({"command": ["mediabox-gate", "fail", epoch, code], "request_id": 43}))
+            .await
+            .ok_or(crate::live_gate::NO_ANSWER)?;
+        match answer.get("error").and_then(Value::as_str) {
+            Some("success") => Ok(()),
+            other => Err(other.unwrap_or("no answer").to_string()),
+        }
+    }
+
     /// The player's IPC socket.
     pub fn socket(&self) -> &Path {
         &self.socket

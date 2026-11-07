@@ -22,9 +22,14 @@
 //! before any picture came, the channel starts at its first key frame, as it
 //! always did.
 //!
-//! The control plane answers within its own limits; this side does not wait
-//! for ever either: a gate held [`HOLD_MAX`] after its first picture opens by
-//! itself, and says so (`outcome=player-timeout`).
+//! A gate is opened by the control plane's word and by nothing else. A
+//! channel it cannot let go is failed (`mediabox-gate fail N code`), and a
+//! control plane that does not answer within [`HOLD_MAX`] of the first picture
+//! or [`ARM_MAX`] of the arming fails it here (`player-timeout`): the gate
+//! stays shut for good, nothing of the channel is shown or heard, a late
+//! answer finds it failed, and the player ends saying why. A wrong mode with a
+//! picture on it is not a better answer than an error. A channel with no
+//! number (a diagnostic run) has no gate to wait for and never times out.
 
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -34,6 +39,10 @@ use serde_json::{Value, json};
 /// The longest a channel's pictures are held back. The control plane's own
 /// limits come first: 2 s for the mode's commit, 3 s for the sound device.
 pub const HOLD_MAX: Duration = Duration::from_secs(6);
+/// The longest a numbered channel waits for its answer with no picture at
+/// all. The control plane's come first: 10 s for the stream's rate, then the
+/// mode's and the sound's, then 5 s for a player whose socket is not up yet.
+pub const ARM_MAX: Duration = Duration::from_secs(20);
 
 /// What becomes of a decoded picture at the sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +58,10 @@ pub enum Frame {
 struct State {
     open: bool,
     outcome: Option<String>,
+    /// Failed: shut for good, why.
+    failed: Option<String>,
+    /// The channel was left while it was shut: nobody will open it.
+    retired: bool,
     /// Pictures that came while it was shut.
     preroll: u64,
     first_held: Option<Instant>,
@@ -64,6 +77,8 @@ struct State {
     caps_fps: Option<f64>,
     interlace: Option<String>,
     first_pts: Option<u64>,
+    /// The last picture held: nothing of the sound before it can be heard.
+    last_held: Option<u64>,
     step_ns: Option<u64>,
     opened_after_ms: Option<u64>,
 }
@@ -117,6 +132,7 @@ impl Gate {
         if !state.open {
             state.preroll += 1;
             state.first_held.get_or_insert_with(Instant::now);
+            state.last_held = Some(pts);
             if state.caps_fps.is_none() {
                 state.caps_fps = caps_fps;
                 state.interlace = Some(interlace.to_string());
@@ -143,7 +159,30 @@ impl Gate {
         if self.epoch != Some(epoch) {
             return Err(format!("stale: epoch {epoch}, channel {:?}", self.epoch));
         }
+        if let Some(why) = self.lock().failed.clone() {
+            return Err(format!("failed: {why}"));
+        }
         Ok(self.open_now(outcome))
+    }
+
+    /// The control plane gives channel `epoch` up: shut for good. `Ok(true)`
+    /// failed now, `Ok(false)` it had failed already; an error for another
+    /// channel's number, or one already let go.
+    pub fn fail(&self, epoch: u64, code: &str) -> Result<bool, String> {
+        if self.epoch != Some(epoch) {
+            return Err(format!("stale: epoch {epoch}, channel {:?}", self.epoch));
+        }
+        let mut state = self.lock();
+        if state.open {
+            return Err(format!("open: epoch {epoch}"));
+        }
+        if state.failed.is_some() {
+            return Ok(false);
+        }
+        state.failed = Some(code.to_string());
+        state.outcome = Some(code.to_string());
+        self.changed.notify_all();
+        Ok(true)
     }
 
     fn open_now(&self, outcome: &str) -> bool {
@@ -163,25 +202,55 @@ impl Gate {
         true
     }
 
-    /// Held past [`HOLD_MAX`] since its first picture: opened here.
+    /// No answer within its limits: failed here (`player-timeout`), once.
     pub fn expire(&self, now: Instant) -> bool {
-        let due = {
-            let state = self.lock();
-            !state.open && state.first_held.is_some_and(|at| now.saturating_duration_since(at) >= HOLD_MAX)
-        };
-        due && self.open_now("player-timeout")
+        let mut state = self.lock();
+        let due = !state.open
+            && state.failed.is_none()
+            && (state.first_held.is_some_and(|at| now.saturating_duration_since(at) >= HOLD_MAX)
+                || now.saturating_duration_since(self.armed_at) >= ARM_MAX);
+        if due {
+            state.failed = Some("player-timeout".to_string());
+            state.outcome = Some("player-timeout".to_string());
+            self.changed.notify_all();
+        }
+        due
     }
 
     pub fn is_open(&self) -> bool {
         self.lock().open
     }
 
-    /// Where the picture starts, and whether pictures are being held for a
-    /// gate that is shut: the sound waits for that without the limit it
-    /// keeps for a picture that does not come (`Programme::sound`).
+    /// Where the picture starts, and whether the gate is shut: the sound
+    /// waits for that with no limit of its own (`Programme::sound`) -- it
+    /// goes with the picture or not at all.
     pub fn picture(&self) -> (Option<u64>, bool) {
         let state = self.lock();
-        (state.picture, !state.open && state.preroll > 0)
+        (state.picture, !state.open)
+    }
+
+    /// Sound ending at `end` is before every picture that can still be the
+    /// first: it need not wait to be told so. Waiting, it filled the sound's
+    /// queue in 3 s, the reader behind it stopped, and with it the receiver
+    /// and the pictures: a shut gate held the stream it was waiting to read.
+    /// The channel is being left: whoever waits on this gate stops waiting.
+    /// A sound frame waiting here holds its streaming thread, and setting the
+    /// branch to NULL waits for that thread: without this a channel left
+    /// while it was shut was never taken down.
+    pub fn retire(&self) {
+        self.lock().retired = true;
+        self.changed.notify_all();
+    }
+
+    /// Shut for good: failed or retired. Nothing waits for it any more.
+    pub fn ended(&self) -> bool {
+        let state = self.lock();
+        !state.open && (state.failed.is_some() || state.retired)
+    }
+
+    pub fn behind_held(&self, end: u64) -> bool {
+        let state = self.lock();
+        !state.open && state.last_held.is_some_and(|held| end <= held)
     }
 
     /// Wake whoever waits on the picture (`picture_known`).
@@ -203,6 +272,7 @@ impl Gate {
             "generation": self.generation,
             "epoch": self.epoch,
             "open": state.open,
+            "failed": state.failed,
             "outcome": state.outcome,
             "preroll": state.preroll,
             "caps_fps": state.caps_fps,
@@ -230,7 +300,7 @@ mod tests {
     fn a_gate_opened_before_its_first_picture_costs_nothing() {
         let gate = Gate::new(1, Some(7), false);
         gate.key_frame(1000);
-        assert_eq!(gate.picture(), (None, false), "the sound waits while it is shut");
+        assert_eq!(gate.picture(), (None, true), "the sound waits while it is shut");
         assert_eq!(gate.open(7, "fast"), Ok(true));
         assert_eq!(gate.picture(), (Some(1000), false));
         assert_eq!(gate.frame(1000, Some(50.0), "Progressive"), Frame::Show { first: false });
@@ -254,6 +324,17 @@ mod tests {
     }
 
     #[test]
+    fn sound_before_the_pictures_held_need_not_wait_and_no_other_is_given_up() {
+        let gate = Gate::new(1, Some(7), false);
+        assert!(!gate.behind_held(1000), "no picture held: it may yet be the start");
+        assert_eq!(gate.frame(40_000_000, Some(25.0), "Progressive"), Frame::Preroll);
+        assert!(gate.behind_held(40_000_000));
+        assert!(!gate.behind_held(40_000_001), "reaches past the last one held: may take in the first");
+        assert_eq!(gate.open(7, "matched"), Ok(true));
+        assert!(!gate.behind_held(0), "open: the first picture says");
+    }
+
+    #[test]
     fn another_channels_number_does_not_open_it() {
         let gate = Gate::new(2, Some(8), false);
         assert!(gate.open(7, "matched").is_err());
@@ -263,15 +344,61 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_nobody_opens_opens_itself_after_its_limit_and_says_so() {
+    fn a_gate_nobody_answers_fails_shut_and_stays_shut() {
         let gate = Gate::new(1, Some(7), false);
         let start = Instant::now();
-        assert!(!gate.expire(start + HOLD_MAX), "nothing held: nothing to time");
+        assert!(!gate.expire(start + HOLD_MAX), "nothing held and within its own limit: nothing to time");
         assert_eq!(gate.frame(1000, None, "Progressive"), Frame::Preroll);
         assert!(!gate.expire(Instant::now() + HOLD_MAX - Duration::from_millis(50)));
         assert!(gate.expire(Instant::now() + HOLD_MAX));
-        assert_eq!(gate.snapshot()["outcome"], "player-timeout");
-        assert_eq!(gate.frame(40_000_000, None, "Progressive"), Frame::Show { first: true });
+        assert!(!gate.expire(Instant::now() + HOLD_MAX), "once");
+        let snapshot = gate.snapshot();
+        assert_eq!(snapshot["open"], false);
+        assert_eq!(snapshot["failed"], "player-timeout");
+        assert_eq!(gate.frame(40_000_000, None, "Progressive"), Frame::Preroll, "nothing shown");
+        assert_eq!(gate.picture(), (None, true), "nothing heard");
+        assert_eq!(gate.open(7, "matched"), Err("failed: player-timeout".into()), "a late answer opens nothing");
+        assert!(!gate.is_open());
+    }
+
+    #[test]
+    fn a_gate_with_no_picture_and_no_answer_fails_too() {
+        let gate = Gate::new(1, Some(7), false);
+        assert!(!gate.expire(Instant::now() + ARM_MAX - Duration::from_millis(50)));
+        assert!(gate.expire(Instant::now() + ARM_MAX));
+        assert_eq!(gate.snapshot()["failed"], "player-timeout");
+    }
+
+    #[test]
+    fn a_channel_with_no_number_has_no_gate_to_time_out() {
+        let gate = Gate::new(1, None, false);
+        assert!(!gate.expire(Instant::now() + ARM_MAX + HOLD_MAX));
+        assert!(gate.is_open());
+        assert_eq!(gate.snapshot()["outcome"], "ungated");
+    }
+
+    #[test]
+    fn a_failed_gate_is_failed_for_good_and_only_by_its_own_number() {
+        let gate = Gate::new(2, Some(8), false);
+        assert!(gate.fail(7, "mode-failed").is_err(), "another channel's");
+        assert!(gate.snapshot()["failed"].is_null());
+        assert_eq!(gate.fail(8, "mode-failed"), Ok(true));
+        assert_eq!(gate.fail(8, "mode-timeout"), Ok(false), "the first word stands");
+        assert_eq!(gate.snapshot()["failed"], "mode-failed");
+        assert_eq!(gate.open(8, "matched"), Err("failed: mode-failed".into()));
+        assert_eq!(gate.frame(1000, None, "Progressive"), Frame::Preroll);
+        // The next channel is another gate: nothing of this one is in it.
+        let next = Gate::new(3, Some(9), false);
+        assert_eq!(next.open(9, "matched"), Ok(true));
+        // One let go is not failed after it.
+        assert!(next.fail(9, "mode-failed").is_err());
+        assert!(next.is_open());
+        assert!(!next.ended());
+        assert!(gate.ended());
+        let left = Gate::new(4, Some(10), false);
+        assert!(!left.ended());
+        left.retire();
+        assert!(left.ended(), "left while shut");
     }
 
     #[test]

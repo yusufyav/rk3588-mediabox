@@ -21,6 +21,13 @@ tokio.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.27.0"
 
+# A live channel's mode failing on purpose (`live_gate::injected`), to measure
+# what its failing does on the board without harming the display's owner. Off
+# in every product build: the file is not read and none of it is in the binary.
+#   cargo build --release --features gate-faults
+[features]
+gate-faults = []
+
 [[bin]]
 name = "mediaboxd-rs"
 path = "src/main.rs"

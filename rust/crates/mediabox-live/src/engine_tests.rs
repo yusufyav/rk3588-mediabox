@@ -294,6 +294,7 @@ fn play_with(ts: Vec<(u64, Vec<u8>)>, aid: usize, epoch: Option<u64>, at: Durati
 
 impl Drop for Run {
     fn drop(&mut self) {
+        self.engine.shutdown();
         let _ = self.engine.pipeline.set_state(gst::State::Null);
     }
 }
@@ -834,6 +835,51 @@ fn a_gated_channel_starts_where_its_gate_opens() {
     assert!(steps <= 25_000_000, "a gap of {} ms in the sound after it started", steps / 1_000_000);
     // Not a fault of the gate: nothing dropped as late or out of order.
     assert_eq!(run.shared.health.video_dropped.load(std::sync::atomic::Ordering::Relaxed), run.shared.out_of_order.load(std::sync::atomic::Ordering::Relaxed) + not_dmabuf(&run));
+}
+
+/// A failed gate lets nothing go, by the control plane's word or by the
+/// player's own limit: no picture sent, no sound out -- with pictures held for
+/// longer than the sound's own wait for a picture -- and a late answer opens
+/// nothing. The player's next channel opens as ever.
+#[test]
+fn a_failed_gate_shows_and_plays_nothing_and_the_next_channel_opens() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    for by_the_limit in [false, true] {
+        let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+        let ts = stream(&[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX }]);
+        let answers = Arc::new(Mutex::new(None));
+        let into = Arc::clone(&answers);
+        let run = play_with(ts, 0, Some(5), Duration::from_millis(1_000), move |engine| {
+            let failed = if by_the_limit {
+                let gate = engine.shared.gate.lock().unwrap().clone().unwrap();
+                assert!(gate.expire(std::time::Instant::now() + crate::gate::ARM_MAX), "the player's own limit");
+                Ok(())
+            } else {
+                assert!(engine.fail_gate(4, "mode-failed").is_err(), "another channel's number");
+                engine.fail_gate(5, "mode-failed")
+            };
+            *into.lock().unwrap() = Some((failed, engine.open_gate(5, "matched")));
+        });
+        let (failed, late) = answers.lock().unwrap().take().unwrap();
+        assert_eq!(failed, Ok(()));
+        assert!(late.unwrap_err().starts_with("failed: "), "a late answer opens nothing");
+        let gate = run.engine.gate_snapshot();
+        assert_eq!(gate["open"], false, "{gate}");
+        assert!(gate["preroll"].as_u64().unwrap() >= 50, "pictures held all along: {gate}");
+        assert_eq!(not_dmabuf(&run), 0, "nothing past the gate: {gate}");
+        assert!(run.audio.lock().unwrap().buffers.is_empty(), "no sound");
+        assert_eq!(run.shared.frames.load(std::sync::atomic::Ordering::Relaxed), 0);
+        // The player's next channel: another gate, and its own number opens it.
+        run.engine.shutdown_feed_for_test();
+        let path = std::env::temp_dir().join(format!("mediabox-live-next-{}-{by_the_limit}", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        run.engine.open_channel(path.to_str().unwrap(), Some(6)).expect("open");
+        assert_eq!(run.engine.gate_snapshot()["failed"], serde_json::Value::Null);
+        assert!(run.engine.open_gate(5, "matched").is_err(), "the failed one is stale");
+        run.engine.open_gate(6, "matched").expect("its own number opens it");
+        assert_eq!(run.engine.gate_snapshot()["open"], true);
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// The test's pictures are H.264 out of `identity`, not dma-bufs: each one

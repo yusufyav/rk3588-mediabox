@@ -298,7 +298,7 @@ fn main() {
     loop {
         match inbox.recv_timeout(Duration::from_millis(20)) {
             Ok((command, mut done)) => {
-                let quit = matches!(command, Command::Quit | Command::Fail(_));
+                let mut quit = matches!(command, Command::Quit | Command::Fail(_));
                 let mut result = Ok(());
                 match command {
                     // The next channel in the same player: not the end of
@@ -312,6 +312,14 @@ fn main() {
                         }
                     }
                     Command::OpenGate { epoch, outcome } => result = engine.open_gate(epoch, &outcome),
+                    // Answered, then the end: nothing of it was shown or heard.
+                    Command::FailGate { epoch, code } => {
+                        result = engine.fail_gate(epoch, &code);
+                        if result.is_ok() {
+                            failure = Some(format!("Kanal açılamadı ({code})"));
+                            quit = true;
+                        }
+                    }
                     Command::Pause(paused) => {
                         engine.set_paused(paused);
                         clients.changed("pause", json!(paused));
@@ -338,7 +346,10 @@ fn main() {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        engine.expire_gate();
+        if engine.expire_gate() {
+            failure = Some("Kanal açılamadı (player-timeout)".to_string());
+            break;
+        }
 
         while let Some(message) = bus.pop() {
             use gst::MessageView;
@@ -460,6 +471,9 @@ fn main() {
     }
 
     eprintln!("mediabox-live: {}", stats(&engine, &shared, &plane));
+    // The last word on the channel, for whoever reads the health file after
+    // the player: its gate's result above all (`outcome`, `failed`).
+    engine.write_health();
     // Nothing reaches the plane after this, then the picture is taken off.
     plane.close();
     plane.stop();

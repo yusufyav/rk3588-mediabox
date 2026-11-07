@@ -776,6 +776,18 @@ impl LiveManager {
         self.output_rate_of(selection.get("video")?)
     }
 
+    /// Whether the selected service's PMT, as the receiver reads it, has a
+    /// picture stream. `None`: not read yet, or another service selected.
+    pub fn has_picture(&self, service_id: u16) -> Option<bool> {
+        let status = self.read_status()?;
+        let selection = status.get("selection")?;
+        if selection.get("service_id").and_then(Value::as_u64) != Some(u64::from(service_id)) {
+            return None;
+        }
+        let streams = selection.get("streams")?.as_array()?;
+        (!streams.is_empty()).then(|| streams.iter().any(|stream| stream.get("kind").and_then(Value::as_str) == Some("video")))
+    }
+
     fn output_rate_of(&self, video: &Value) -> Option<f64> {
         let rate = |key: &str| -> Option<f64> {
             let pair = video.get(key)?.as_array()?;

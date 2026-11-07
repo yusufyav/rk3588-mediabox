@@ -152,7 +152,7 @@ pub struct AppState {
     pub live: Arc<crate::live::LiveManager>,
     /// Player, FIFO and the single USB receiver form one channel-change
     /// transaction. Rapid key presses must not run those transactions at once.
-    pub live_change: tokio::sync::Mutex<()>,
+    pub live_change: Arc<tokio::sync::Mutex<()>>,
     /// Where Kodi sends its JSON-RPC notifications (TCP, loopback).
     pub kodi_events: std::net::SocketAddr,
 }
@@ -1084,15 +1084,8 @@ impl AppState {
     /// Live channel `epoch` (`service_id`) opened in the player: its display
     /// matched to the stream before it is let go (`live_gate`), in the
     /// background -- a newer channel ends it.
-    fn open_live_gate(&self, rid: u64, epoch: u64, service_id: u16) {
-        let io = LiveGate {
-            player: Arc::clone(&self.player),
-            output: Arc::clone(&self.output),
-            live: Arc::clone(&self.live),
-            film: self.player.film(),
-            epoch,
-            service_id,
-        };
+    fn open_live_gate(&self, rid: u64, epoch: u64, service_id: u16, playing: u64) {
+        let io = self.live_gate(epoch, service_id, playing);
         tokio::spawn(async move {
             let started = std::time::Instant::now();
             mediabox_core::timeline!("gate-task", "rid={rid} epoch={epoch} film={} sid={service_id}", io.film);
@@ -1103,16 +1096,24 @@ impl AppState {
                 format!("{end:?}").replace(' ', ""),
                 started.elapsed().as_millis()
             );
-            match end {
-                crate::live_gate::End::Opened(outcome) if outcome != "fast" && outcome != "matched" => {
-                    eprintln!("mediaboxd-rs: live channel {service_id} (epoch {epoch}) let go: {outcome}");
-                }
-                crate::live_gate::End::Refused(why) => {
-                    eprintln!("mediaboxd-rs: live channel {service_id} (epoch {epoch}): the player did not take its opening: {why}");
-                }
-                _ => {}
+            if let crate::live_gate::End::Failed(code) = end {
+                eprintln!("mediaboxd-rs: live channel {service_id} (epoch {epoch}) not opened: {code}");
             }
         });
+    }
+
+    fn live_gate(&self, epoch: u64, service_id: u16, playing: u64) -> LiveGate {
+        LiveGate {
+            player: Arc::clone(&self.player),
+            output: Arc::clone(&self.output),
+            live: Arc::clone(&self.live),
+            playback: Arc::clone(&self.playback),
+            live_change: Arc::clone(&self.live_change),
+            film: self.player.film(),
+            playing,
+            epoch,
+            service_id,
+        }
     }
 
     /// Live television here: one service of the receiver (or of its
@@ -1201,7 +1202,7 @@ impl AppState {
                             // shown (`live_gate`); the same rate lets it go
                             // at once. In the background: a newer channel
                             // takes over at once.
-                            self.open_live_gate(rid, epoch, service_id);
+                            self.open_live_gate(rid, epoch, service_id, film);
                             self.live.playing();
                             return Response::success(json!({
                                 "playing": "here",
@@ -1365,7 +1366,7 @@ impl AppState {
         });
         self.live.playing();
         // Its pictures are held until the display shows the stream's rate.
-        self.open_live_gate(rid, epoch, service_id);
+        self.open_live_gate(rid, epoch, service_id, film);
         let here = self.player.film();
         tokio::spawn(crate::playback::follow_mpv(
             Arc::clone(&self.playback),
@@ -2729,7 +2730,7 @@ mod tests {
                 firmware_dir: dir.path().join("firmware"),
                 guide_store: dir.path().join("live-guide.json"),
             })),
-            live_change: tokio::sync::Mutex::new(()),
+            live_change: Arc::new(tokio::sync::Mutex::new(())),
             kodi_events: "127.0.0.1:9".parse().unwrap(),
             applications: ApplicationManager::load(
                 None,
@@ -2749,14 +2750,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let state = test_state(&dir);
         let epoch = state.player.next_epoch();
-        let gate = LiveGate {
-            player: Arc::clone(&state.player),
-            output: Arc::clone(&state.output),
-            live: Arc::clone(&state.live),
-            film: state.player.film(),
-            epoch,
-            service_id: 11701,
-        };
+        let gate = state.live_gate(epoch, 11701, 1);
         assert!(gate.current());
         state.player.next_epoch();
         assert!(!gate.current(), "a zap: same film, newer channel");
@@ -2764,6 +2758,49 @@ mod tests {
         assert!(gate.current());
         state.player.stop().await;
         assert!(!gate.current(), "stopped: another film");
+    }
+
+    /// A channel given up on its real parts: the film ends with the code in
+    /// its end, as the interface and `media status` read it; not when a newer
+    /// channel has taken over; and the lock a channel change holds keeps the
+    /// two apart. The next film is another film.
+    #[tokio::test]
+    async fn a_live_channel_given_up_ends_its_film_with_the_code() {
+        use crate::live_gate::GateIo;
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        let start = || crate::playback::Start {
+            player: crate::playback::PlayerKind::Here,
+            content: crate::playback::Content::Live { service_id: 11701 },
+            duration: None,
+            position: 0,
+        };
+        let film = state.playback.begin(start());
+        let epoch = state.player.next_epoch();
+        let gate = state.live_gate(epoch, 11701, film);
+        // A zap in the middle of its change: waited for, then not touched.
+        let change = state.live_change.clone().lock_owned().await;
+        let waiting = tokio::spawn({
+            let gate = state.live_gate(epoch, 11701, film);
+            async move { gate.give_up("mode-failed").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "a channel change holds the lock");
+        state.player.next_epoch();
+        drop(change);
+        assert!(!waiting.await.unwrap(), "a newer channel took over");
+        assert_eq!(state.playback.current(crate::playback::PlayerKind::Here), Some(film), "its film goes on");
+        // Its own: the film ends, failed, with the code.
+        let gate = LiveGate { epoch: state.player.epoch(), ..gate };
+        assert!(gate.give_up("mode-timeout").await);
+        assert_eq!(state.playback.current(crate::playback::PlayerKind::Here), None);
+        let finished = state.playback.status()["finished"].clone();
+        assert_eq!(finished["outcome"], "failed", "{finished}");
+        assert!(finished["message"].as_str().unwrap().contains("mode-timeout"), "{finished}");
+        // The next channel is a film of its own.
+        let next = state.playback.begin(start());
+        assert_ne!(next, film);
+        assert_eq!(state.playback.current(crate::playback::PlayerKind::Here), Some(next));
     }
 
     #[tokio::test]
@@ -3076,7 +3113,12 @@ struct LiveGate {
     player: Arc<PlayerManager>,
     output: Arc<crate::output::Output>,
     live: Arc<crate::live::LiveManager>,
+    playback: Arc<crate::playback::Supervisor>,
+    live_change: Arc<tokio::sync::Mutex<()>>,
+    /// The player's number for its film.
     film: u64,
+    /// The film's number in the playback's supervisor.
+    playing: u64,
     epoch: u64,
     service_id: u16,
 }
@@ -3087,6 +3129,9 @@ impl crate::live_gate::GateIo for LiveGate {
     }
     fn stream_rate(&self) -> Option<f64> {
         self.live.stream_rate(self.service_id)
+    }
+    fn has_picture(&self) -> Option<bool> {
+        self.live.has_picture(self.service_id)
     }
     async fn player_gate(&self) -> Option<Value> {
         self.player
@@ -3114,6 +3159,26 @@ impl crate::live_gate::GateIo for LiveGate {
     }
     fn matched(&self, cadence: mediabox_core::Cadence) {
         self.player.set_live_cadence(self.epoch, cadence);
+    }
+    /// Under the lock a channel change holds to the end: the channel is
+    /// either still this one, and ended here, or a newer one, and not touched.
+    /// The film ends as a player's own error does (`follow_mpv`); whichever
+    /// of the two comes first stops the player and the receiver.
+    async fn give_up(&self, code: &str) -> bool {
+        let _change = self.live_change.lock().await;
+        if !self.current() {
+            return false;
+        }
+        mediabox_core::timeline!("gate-fail", "epoch={} code={code}", self.epoch);
+        if let Err(why) = self.player.gate_fail(self.epoch, code).await {
+            eprintln!("mediaboxd-rs: live channel (epoch {}): the player did not take its failure: {why}", self.epoch);
+        }
+        let signal = crate::playback::Signal::EndFile { reason: "error".into(), error: Some(format!("Kanal açılamadı ({code})")) };
+        if self.playback.finish(self.playing, signal).is_some() && self.player.film() == self.film {
+            self.player.stop().await;
+            self.live.stop().await;
+        }
+        true
     }
 }
 

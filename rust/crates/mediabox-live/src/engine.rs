@@ -329,6 +329,12 @@ impl Programme {
         self.gate.notify();
     }
 
+    fn waited_for_picture(&self, pts: Option<u64>) {
+        if !self.waited.swap(true, Ordering::Relaxed) {
+            mediabox_core::timeline!("audio-gate", "gen={} wait=1 pts={}", self.generation, pts.map_or(-1, |p| p as i64));
+        }
+    }
+
     /// Whether a sound frame at `pts`, `duration` long, is played.
     ///
     /// The sound starts where the picture does: with the frame whose time
@@ -352,11 +358,21 @@ impl Programme {
             return true;
         }
         let why = loop {
-            if self.no_picture.load(Ordering::SeqCst) {
-                break Some("görüntüsüz servis");
-            }
-            let (picture, held) = self.gate.picture();
+            let (picture, shut) = self.gate.picture();
             match picture {
+                // The sound goes with the picture or not at all: nothing of
+                // a channel is heard before its display is matched, however
+                // long that takes -- the gate has its own limits (`gate`) --
+                // and whatever kind of programme it is.
+                None if shut => {
+                    *self.held_since.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    if stop() || self.gate.ended() || pts.zip(duration).is_some_and(|(pts, duration)| self.gate.behind_held(pts + duration)) {
+                        break None;
+                    }
+                    self.waited_for_picture(pts);
+                    self.gate.wait(std::time::Duration::from_millis(10));
+                }
+                _ if self.no_picture.load(Ordering::SeqCst) => break Some("görüntüsüz servis"),
                 Some(first) if pts.is_none_or(|pts| pts >= first) => break Some("ilk anahtar karenin zamanından"),
                 Some(first)
                     if !whole
@@ -367,31 +383,18 @@ impl Programme {
                     break Some("ilk anahtar karenin zamanını içeren çerçeveden");
                 }
                 Some(_) => break None,
+                // Let go, and no picture yet: one that does not come (its
+                // stream scrambled, say) does not keep the sound away for
+                // good.
                 None => {
-                    // Pictures held by the opening gate are a picture that
-                    // comes: the gate has its own limit (`gate::HOLD_MAX`),
-                    // and this one counts from when it let them go.
-                    let waited = {
-                        let mut since = self.held_since.lock().unwrap_or_else(|p| p.into_inner());
-                        if held {
-                            *since = Some(Instant::now());
-                        }
-                        since.get_or_insert_with(Instant::now).elapsed()
-                    };
+                    let waited = self.held_since.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Instant::now).elapsed();
                     if waited >= PICTURE_WAIT {
                         break Some("görüntü gelmedi");
                     }
                     if stop() {
                         break None;
                     }
-                    if !self.waited.swap(true, Ordering::Relaxed) {
-                        mediabox_core::timeline!(
-                            "audio-gate",
-                            "gen={} wait=1 pts={}",
-                            self.generation,
-                            pts.map_or(-1, |p| p as i64)
-                        );
-                    }
+                    self.waited_for_picture(pts);
                     self.gate.wait(std::time::Duration::from_millis(10));
                 }
             }
@@ -1182,43 +1185,46 @@ impl Engine {
                     continue;
                 }
                 last_report = Instant::now();
-                if let Some(base) = engine.pipeline.base_time() {
-                    engine.shared.health.base_ns.store(base.nseconds(), Ordering::Relaxed);
-                }
-                let latency = engine.shared.health.latency_ns.load(Ordering::Relaxed);
-                let video_offset = engine.video_sink.property::<i64>("ts-offset");
-                let sink = engine.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).clone();
-                let audio_offset = sink.as_ref().map_or(0, |sink| sink.property::<i64>("ts-offset"));
-                engine.shared.health.audio_offset_ns.store(audio_offset, Ordering::Relaxed);
-                // How late the device plays against the schedule: the
-                // pipeline's clock less the sound clock, which is the
-                // device's played samples mapped onto it (audiobasesink's
-                // calibration). Only while sound is flowing.
-                let audio_late = sink.as_ref().filter(|_| device.is_running()).and_then(|sink| {
-                    let audio_clock = sink.provide_clock()?;
-                    let pipeline_clock = engine.pipeline.clock()?;
-                    (sink.current_state() == gst::State::Playing)
-                        .then(|| pipeline_clock.time().nseconds() as i64 - audio_clock.time().nseconds() as i64)
-                });
-                let generation = engine.shared.generation.load(Ordering::SeqCst);
-                if let Some(probe) = crate::clock_probe::get()
-                    && last_probe.elapsed() >= std::time::Duration::from_secs(1)
-                {
-                    last_probe = Instant::now();
-                    probe.flush(engine.probe_levels(generation, audio_late, &device));
-                }
-                engine.shared.health.plane_full_dropped.store(engine.plane.dropped_full(), Ordering::Relaxed);
-                let mut report = engine.shared.health.report(
-                    generation,
-                    latency + video_offset,
-                    latency + audio_offset,
-                    audio_late,
-                    &mut device,
-                );
-                report.gate = engine.gate_snapshot();
-                crate::health::write(&report);
+                engine.write_health_with(&mut device, &mut last_probe);
             }
         });
+    }
+
+    /// The health file now, not at its next period: the player's last word.
+    pub fn write_health(&self) {
+        let mut device = crate::health::Device::default();
+        self.write_health_with(&mut device, &mut Instant::now());
+    }
+
+    fn write_health_with(&self, device: &mut crate::health::Device, last_probe: &mut Instant) {
+        if let Some(base) = self.pipeline.base_time() {
+            self.shared.health.base_ns.store(base.nseconds(), Ordering::Relaxed);
+        }
+        let latency = self.shared.health.latency_ns.load(Ordering::Relaxed);
+        let video_offset = self.video_sink.property::<i64>("ts-offset");
+        let sink = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let audio_offset = sink.as_ref().map_or(0, |sink| sink.property::<i64>("ts-offset"));
+        self.shared.health.audio_offset_ns.store(audio_offset, Ordering::Relaxed);
+        // How late the device plays against the schedule: the pipeline's
+        // clock less the sound clock, which is the device's played samples
+        // mapped onto it (audiobasesink's calibration). Only while sound is
+        // flowing.
+        let audio_late = sink.as_ref().filter(|_| device.is_running()).and_then(|sink| {
+            let audio_clock = sink.provide_clock()?;
+            let pipeline_clock = self.pipeline.clock()?;
+            (sink.current_state() == gst::State::Playing).then(|| pipeline_clock.time().nseconds() as i64 - audio_clock.time().nseconds() as i64)
+        });
+        let generation = self.shared.generation.load(Ordering::SeqCst);
+        if let Some(probe) = crate::clock_probe::get()
+            && last_probe.elapsed() >= std::time::Duration::from_secs(1)
+        {
+            *last_probe = Instant::now();
+            probe.flush(self.probe_levels(generation, audio_late, device));
+        }
+        self.shared.health.plane_full_dropped.store(self.plane.dropped_full(), Ordering::Relaxed);
+        let mut report = self.shared.health.report(generation, latency + video_offset, latency + audio_offset, audio_late, device);
+        report.gate = self.gate_snapshot();
+        crate::health::write(&report);
     }
 
     /// What the clock probe samples once a second: the transport source's
@@ -1778,7 +1784,9 @@ impl Engine {
             epoch.map_or(-1, |epoch| epoch as i64),
             u8::from(gate.is_open())
         );
-        *self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&gate));
+        if let Some(old) = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).replace(Arc::clone(&gate)) {
+            old.retire();
+        }
         if std::env::var_os("MEDIABOX_LIVE_OPEN_TRACE").is_some() {
             self.shared.open_probe.store(60, Ordering::Relaxed);
         }
@@ -2947,19 +2955,33 @@ impl Engine {
         opened.map(|_| ())
     }
 
-    /// A gate nobody let go within its limit opens here (`gate::HOLD_MAX`).
-    pub fn expire_gate(&self) {
+    /// The control plane gives channel `epoch` up (`gate`): an error for a
+    /// channel that is not the one opened last, or one already let go.
+    pub fn fail_gate(&self, epoch: u64, code: &str) -> Result<(), String> {
         let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        if let Some(gate) = gate
-            && gate.expire(Instant::now())
-        {
-            mediabox_core::timeline!("gate-open", "gen={} epoch={:?} outcome=player-timeout result=opened", gate.generation, gate.epoch);
-            eprintln!(
-                "mediabox-live: kanal {:?} açılış kapısı {} s içinde açılmadı; görüntü bu modda başlıyor",
-                gate.epoch,
-                crate::gate::HOLD_MAX.as_secs()
-            );
-        }
+        let Some(gate) = gate else { return Err(format!("stale: epoch {epoch}, no channel")) };
+        let failed = gate.fail(epoch, code);
+        mediabox_core::timeline!(
+            "gate-fail",
+            "gen={} epoch={epoch} code={code} result={}",
+            gate.generation,
+            match &failed {
+                Ok(true) => "failed",
+                Ok(false) => "was-failed",
+                Err(_) => "refused",
+            }
+        );
+        failed.map(|_| ())
+    }
+
+    /// A gate nobody answered within its limits fails here (`gate`): true
+    /// once, when it does.
+    pub fn expire_gate(&self) -> bool {
+        let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let Some(gate) = gate.filter(|gate| gate.expire(Instant::now())) else { return false };
+        mediabox_core::timeline!("gate-fail", "gen={} epoch={:?} code=player-timeout result=failed", gate.generation, gate.epoch);
+        eprintln!("mediabox-live: kanal {:?} açılış kapısına yanıt gelmedi; kanal açılmadı", gate.epoch);
+        true
     }
 
     /// The channel's opening gate, as the control socket and the health
@@ -3067,6 +3089,9 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
+        if let Some(gate) = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            gate.retire();
+        }
         if let Some(feed) = self.feed.lock().unwrap_or_else(|p| p.into_inner()).take() {
             feed.stop.store(true, Ordering::SeqCst);
             *feed.into.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -4027,6 +4052,17 @@ fn listen_to_audio_sink(shared: &Arc<Shared>) {
             }
         });
     });
+}
+
+#[cfg(test)]
+impl Engine {
+    /// The reader let go: the test's next channel reads another file.
+    fn shutdown_feed_for_test(&self) {
+        if let Some(feed) = self.feed.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            feed.stop.store(true, Ordering::SeqCst);
+            *feed.into.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+    }
 }
 
 #[cfg(test)]
