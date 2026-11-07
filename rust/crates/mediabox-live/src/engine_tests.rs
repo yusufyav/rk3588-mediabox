@@ -1002,6 +1002,74 @@ fn the_sound_read_before_its_part_is_up_is_played() {
     assert_eq!(run.shared.health.sound_push_errors.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
+/// Two sound changes, the second before the first has played out, in a
+/// fixed order: the first old part held at the selector by the test until the
+/// third part is the one waiting, then let play out. The part in the middle
+/// never takes the selector or the device's mode, the last one does, and it
+/// alone is left. Then the other order: the old part played out before the
+/// next change is read. No sleep decides the order: the old part cannot reach
+/// its end before the test lets it.
+#[test]
+fn a_sound_change_on_a_change_not_yet_played_out_goes_to_the_last() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    for held in [true, false] {
+        let a: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+        let b: Streams = vec![(0x1B, VIDEO, vec![]), (0x06, 0x103, vec![0x6A, 1, 0])];
+        let c: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x104, vec![])];
+        // The third PMT 40 ms after the second, or a second after it.
+        let third = if held { SWITCH + 3_600 } else { SWITCH + 90_000 };
+        let ts = stream(
+            &[(0, 0, a), (SWITCH - LEAD, 1, b), (third - LEAD, 2, c)],
+            &[
+                Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX },
+                Sound { pid: 0x103, stream_id: 0xBD, units: ac3(), from: SWITCH, to: u64::MAX },
+                Sound { pid: 0x104, stream_id: 0xC0, units: mp2(), from: third, to: u64::MAX },
+            ],
+        );
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let into = Arc::clone(&order);
+        let run = play_doing(ts, 0, Duration::from_millis(1_000), move |engine| {
+            if !held {
+                return;
+            }
+            // The first part's input: everything on it waits for the test.
+            let input = engine.audio_selector.sink_pads().into_iter().next().expect("the first part's input");
+            let (go, wait) = std::sync::mpsc::channel::<()>();
+            let wait = Mutex::new(Some(wait));
+            let id = input
+                .add_probe(gst::PadProbeType::BLOCK | gst::PadProbeType::DATA_DOWNSTREAM, move |_, _| {
+                    if let Some(wait) = wait.lock().unwrap().take() {
+                        let _ = wait.recv();
+                    }
+                    gst::PadProbeReturn::Ok
+                })
+                .expect("a probe");
+            // Until the third part is the one waiting on the first.
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            while engine.shared.sound.lock().unwrap().as_ref().map(|s| s.pid) != Some(0x104) && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            into.lock().unwrap().push(engine.shared.sound.lock().unwrap().as_ref().map(|s| s.pid));
+            input.remove_probe(id);
+            let _ = go.send(());
+        });
+        if held {
+            assert_eq!(*order.lock().unwrap(), [Some(0x104)], "the third part was asked for while the first was held");
+        }
+        let seen = run.audio.lock().unwrap();
+        let inputs: Vec<String> = runs(&seen).into_iter().map(|(pad, _)| pad).collect();
+        drop(seen);
+        // The first part and then the last; the middle one only where the
+        // first played out before the last was read.
+        assert!(inputs.len() == if held { 2 } else { 3 }, "held={held}: {inputs:?}");
+        assert_eq!(n_pads(&run.engine.audio_selector), 1, "held={held}: one input left");
+        assert_eq!(run.shared.sound.lock().unwrap().as_ref().map(|s| s.pid), Some(0x104));
+        assert!(!run.engine.bitstream(), "held={held}: the device in the last part's mode, PCM");
+        assert!(run.engine.sound_handover.lock().unwrap().is_none(), "held={held}: nothing left waiting");
+        sound_went_on(&run, inputs.len(), 0x104, ns(third) + 500_000_000);
+    }
+}
+
 /// The test's pictures are H.264 out of `identity`, not dma-bufs: each one
 /// shown is counted dropped as such, and that is all that is.
 fn not_dmabuf(run: &Run) -> u64 {
