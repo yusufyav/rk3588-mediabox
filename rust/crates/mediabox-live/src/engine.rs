@@ -2333,6 +2333,7 @@ impl Engine {
                             }
                         }
                     }
+                    shared.ledgers.count(generation, End::QueueIn);
                     gst::PadProbeReturn::Ok
                 });
             }
@@ -2347,16 +2348,18 @@ impl Engine {
             // them back unseen (2026-10-31, three openings in three). Pushed
             // into a queue the lock is let go at once and MPP decodes ahead.
             let ahead = make("queue")?;
-            for (pad, end) in [("sink", End::QueueIn), ("src", End::QueueOut)] {
+            // Out of the queue: counted at its output. Into it is counted at
+            // the decoder's, where each picture is handed to it -- one handed
+            // over as the queue is flushed for a channel's end never reaches
+            // a probe of the queue's own (a flushing pad refuses it first).
+            if let Some(pad) = ahead.static_pad("src") {
                 let shared = Arc::clone(&self.shared);
-                if let Some(pad) = ahead.static_pad(pad) {
-                    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-                        if let Some(buffer) = info.buffer() {
-                            shared.ledgers.count(buffer.offset_end(), end);
-                        }
-                        gst::PadProbeReturn::Ok
-                    });
-                }
+                pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                    if let Some(buffer) = info.buffer() {
+                        shared.ledgers.count(buffer.offset_end(), End::QueueOut);
+                    }
+                    gst::PadProbeReturn::Ok
+                });
             }
             ahead.set_property("max-size-buffers", 3u32);
             ahead.set_property("max-size-bytes", 0u32);

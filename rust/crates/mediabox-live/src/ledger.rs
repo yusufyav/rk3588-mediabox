@@ -2,7 +2,7 @@
 //!
 //! A channel's pictures leave the decoder (`decoded`) and each has one end
 //! here: thrown away before the queue behind the decoder (a stale channel's,
-//! a bogus first PTS, a catch-up), or into the queue, out of it, into the
+//! a bogus first PTS, a catch-up), or handed to the queue, out of it, into the
 //! sink and out of it to one of the sink's verdicts -- a stale channel's, out
 //! of order, pre-roll at a shut gate, not a dma-buf, late, full, the plane
 //! gone, or sent to the plane (`submit_attempted`). What the interface did
@@ -21,9 +21,12 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
-/// The queue behind the decoder: 3 in it (`stream`), one counted in and
-/// waiting at its input for room, one taken out and not yet pushed on.
-pub const QUEUE_HOLDS: u64 = 5;
+/// The queue behind the decoder, counted from where each picture is handed
+/// to it: 3 in it (`stream`), one handed over and waiting at its input for
+/// room, one taken out and not yet pushed on, and one handed over as it was
+/// flushed for the channel's end (a flushing pad refuses it before any probe
+/// of the queue's own sees it, FAZ 2F-fix on the board).
+pub const QUEUE_HOLDS: u64 = 6;
 /// The sink: one waiting for its time, one in its own queue (max-buffers 1).
 pub const SINK_HOLDS: u64 = 2;
 
@@ -332,13 +335,13 @@ mod tests {
         let mut ledger = stopped_channel();
         ledger.sink_in += 3;
         ledger.queue_out += 3;
-        ledger.queue_in += 3;
-        ledger.decoded += 3;
+        ledger.queue_in += 4;
+        ledger.decoded += 4;
         assert!(ledger.verdict(true).unwrap_err().contains("more left behind"), "{:?}", ledger.verdict(true));
         // Lost inside the queue beyond what it can hold.
         let mut ledger = stopped_channel();
-        ledger.queue_in += 3;
-        ledger.decoded += 3;
+        ledger.queue_in += 4;
+        ledger.decoded += 4;
         assert!(ledger.verdict(true).unwrap_err().contains("more left behind"), "{:?}", ledger.verdict(true));
         // Decoded and never into the queue, nor thrown away.
         let mut ledger = stopped_channel();
