@@ -440,6 +440,21 @@ fn a_step_at_the_start_with_the_calibration_still_is_not_called_convergence() {
 }
 
 #[test]
+fn a_step_at_the_start_with_the_controllers_one_acquisition_is_convergence() {
+    // audio_clock sets the calibration once in the first second (its phase
+    // from a second's median), not every 100 ms.
+    let mut r = opening(100, 150);
+    for (k, row) in r.iter_mut().enumerate().skip(100) {
+        row.calibration = Some(if k < 140 { [1, 1, 1, 1] } else { [2, 1, 1, 1] });
+    }
+    let placed: Vec<Placement> =
+        (0..80u64).map(|k| Placement { running_ns: T0 + k * FRAME_NS, sample_offset: 480_000 + k * 1152, samples: 1152, out_samples: 1152 }).collect();
+    let f = clock_facts(&r, 150, 48_000.0, &[], &placed);
+    assert_eq!(f.calibration_changes, 1);
+    assert!(matches!(classify_clock(&f), ClockClass::StartupMeasurementConvergence(_)), "{f:?}");
+}
+
+#[test]
 fn the_sinks_samples_jumping_on_their_pts_plan_are_the_products() {
     let r = opening(100, 150);
     // Buffers of 24 ms into the sink, one 10 ms later than the one before

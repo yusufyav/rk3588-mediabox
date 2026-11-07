@@ -365,11 +365,14 @@ pub fn classify_clock(f: &ClockFacts) -> ClockClass {
     // At a start the sink's ring is filling: frames written to the device
     // less frames fed moves with its fill, not only with samples gained or
     // lost, and does not decide. Where each buffer was put in the ring
-    // against its running time does.
+    // against its running time does. The calibration converging: moved
+    // since the start -- by GStreamer's slaving every 100 ms, by the
+    // player's own controller (audio_clock) once, its phase acquired from
+    // the first second's readings.
     if f.since_start_ns.is_some_and(|s| s <= STARTUP_NS) {
         return match f.placement_step_ns {
             None => ClockClass::Unclassified("a step at the start needs the sink's placement of its buffers"),
-            Some(_) if f.calibration_changes >= 2 => {
+            Some(_) if f.calibration_changes >= 1 => {
                 ClockClass::StartupMeasurementConvergence("the sound clock's calibration converging, the playout in a line, no buffer placed 2 ms off")
             }
             Some(_) => ClockClass::Unclassified("a step at the start with the calibration still"),
