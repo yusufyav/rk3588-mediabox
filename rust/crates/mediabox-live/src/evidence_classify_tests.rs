@@ -194,6 +194,18 @@ fn a_pes_missing_is_a_pts_step_off_the_usual() {
 }
 
 #[test]
+fn only_packets_in_the_window_left_undecoded_count_against_the_input() {
+    let pes: Vec<(u64, u64)> = (0..60u64).map(|k| (900_000 + k * 2160, T0 + k * FRAME_NS)).collect();
+    let packets: Vec<u64> = pes.iter().map(|(raw, _)| *raw).collect();
+    // The first frame of the cut has no header to find (as ffmpeg's first,
+    // FAZ 2H): outside the window, not the event's.
+    let mut frames: Vec<(u64, u64)> = packets.iter().skip(1).map(|raw| (*raw, 1152)).collect();
+    assert_eq!(undecoded_in(&packets, &frames, &pes, FROM, TO), 0);
+    frames.retain(|(raw, _)| *raw != 900_000 + 30 * 2160);
+    assert_eq!(undecoded_in(&packets, &frames, &pes, FROM, TO), 1);
+}
+
+#[test]
 fn input_errors_make_the_silence_the_inputs() {
     let source = frames(T0, 60, 20..40);
     let mut f = facts(&source, &source);

@@ -462,35 +462,53 @@ pub fn running_of(raw: u64, pes: &[(u64, u64)]) -> Option<u64> {
 }
 
 /// The independent decoding: ffmpeg's `mp2` decoder on the dump's sound
-/// PES, cut at the last whole one. Its PCM (S16LE, as the stream's rate and
-/// channels), each packet's raw PTS, and the decoder's complaints.
-/// PCM, each packet's raw PTS, complaints, rate, channels.
-type Decoded = (Vec<u8>, Vec<u64>, u64, u32, usize);
+/// PES, cut at the last whole one, with the PAT, PMT and sound packets only
+/// (the PCR_PID's packets the dump keeps are pieces of the picture's PES,
+/// which ffmpeg's demultiplexer took for corrupt ones and lost sound PES
+/// over: 67 of 266 in FAZ 2H's first silence dump). Each decoded frame's
+/// raw PTS and samples (ffprobe, the same decoder), its PCM (S16LE, as the
+/// stream's rate and channels) in their order, and every packet's PTS.
+#[derive(Debug, Default)]
+pub struct Independent {
+    pub pcm: Vec<u8>,
+    pub packets: Vec<u64>,
+    pub frames: Vec<(u64, u64)>,
+    pub rate: u32,
+    pub channels: usize,
+}
 
-fn decode_independent(dir: &Path, ts: &[u8], sound: u16) -> Result<Decoded, String> {
-    let last_start = ts.as_chunks::<188>().0.iter().rposition(|p| crate::evidence::pid(p) == sound && p[1] & 0x40 != 0).ok_or("no sound PES start")?;
-    let cut = dir.join("independent-input.ts");
-    std::fs::write(&cut, &ts[..last_start * 188]).map_err(|e| e.to_string())?;
-    let probe = std::process::Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate,channels:packet=pts", "-of", "compact=p=0:nk=1"])
-        .arg(&cut)
+fn ffprobe(cut: &Path, args: &[&str]) -> Result<Vec<Vec<u64>>, String> {
+    let out = std::process::Command::new("ffprobe")
+        .args(["-v", "error"])
+        .args(args)
+        .args(["-of", "compact=p=0:nk=1"])
+        .arg(cut)
         .output()
         .map_err(|e| format!("ffprobe: {e}"))?;
-    let text = String::from_utf8_lossy(&probe.stdout);
-    let mut packets = Vec::new();
-    let mut rate = 0u32;
-    let mut channels = 0usize;
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split('|').collect();
-        match fields.as_slice() {
-            [pts] => packets.extend(pts.parse::<u64>().ok()),
-            [r, c] => {
-                rate = r.parse().unwrap_or(0);
-                channels = c.parse().unwrap_or(0);
-            }
-            _ => {}
+    Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| l.split('|').filter_map(|f| f.parse::<u64>().ok()).collect()).collect())
+}
+
+fn decode_independent(dir: &Path, ts: &[u8], sound: u16, pmts: &[u16]) -> Result<Independent, String> {
+    let kept: Vec<&[u8; 188]> =
+        ts.as_chunks::<188>().0.iter().filter(|p| matches!(crate::evidence::pid(*p), id if id == 0 || id == sound || pmts.contains(&id))).collect();
+    let last_start = kept.iter().rposition(|p| crate::evidence::pid(*p) == sound && p[1] & 0x40 != 0).ok_or("no sound PES start")?;
+    let cut = dir.join("independent-input.ts");
+    std::fs::write(&cut, kept[..last_start].iter().flat_map(|p| p.iter().copied()).collect::<Vec<u8>>()).map_err(|e| e.to_string())?;
+    let mut ind = Independent::default();
+    for row in ffprobe(&cut, &["-select_streams", "a:0", "-show_entries", "stream=sample_rate,channels"])? {
+        if let [r, c] = row.as_slice() {
+            ind.rate = *r as u32;
+            ind.channels = *c as usize;
         }
     }
+    ind.packets = ffprobe(&cut, &["-select_streams", "a:0", "-show_entries", "packet=pts"])?.into_iter().filter_map(|r| r.first().copied()).collect();
+    ind.frames = ffprobe(&cut, &["-codec:a", "mp2", "-select_streams", "a:0", "-show_entries", "frame=pts,nb_samples"])?
+        .into_iter()
+        .filter_map(|r| match r.as_slice() {
+            [pts, n] => Some((*pts, *n)),
+            _ => None,
+        })
+        .collect();
     let out = dir.join("independent.s16");
     let run = std::process::Command::new("ffmpeg")
         .args(["-nostdin", "-hide_banner", "-v", "warning", "-y", "-c:a", "mp2", "-i"])
@@ -499,11 +517,20 @@ fn decode_independent(dir: &Path, ts: &[u8], sound: u16) -> Result<Decoded, Stri
         .arg(&out)
         .output()
         .map_err(|e| format!("ffmpeg: {e}"))?;
-    let complaints = String::from_utf8_lossy(&run.stderr);
-    std::fs::write(dir.join("independent-ffmpeg.log"), complaints.as_bytes()).map_err(|e| e.to_string())?;
-    let errors = complaints.lines().filter(|l| !l.trim().is_empty()).count() as u64;
-    let pcm = std::fs::read(&out).map_err(|e| e.to_string())?;
-    Ok((pcm, packets, errors, rate, channels))
+    std::fs::write(dir.join("independent-ffmpeg.log"), &run.stderr).map_err(|e| e.to_string())?;
+    ind.pcm = std::fs::read(&out).map_err(|e| e.to_string())?;
+    Ok(ind)
+}
+
+/// Packets whose time is in the event's window (from 100 ms before it to
+/// its end) that the independent decoder put out no frame for: what it
+/// refused or could not find a header in.
+pub fn undecoded_in(packets: &[u64], frames: &[(u64, u64)], pes: &[(u64, u64)], from: u64, to: u64) -> u64 {
+    packets
+        .iter()
+        .filter(|raw| running_of(**raw, pes).is_some_and(|t| t + 100_000_000 >= from && t <= to))
+        .filter(|raw| !frames.iter().any(|(pts, _)| pts == *raw))
+        .count() as u64
 }
 
 /// Judge one dump; the result is also written as `classify.json` in it.
@@ -531,7 +558,7 @@ pub fn classify_dump(dir: &Path) -> Result<serde_json::Value, String> {
     if kind == "clock" {
         out["clock"] = classify_clock_dump(dir, &meta)?;
     } else {
-        out["silence"] = classify_silence_dump(dir, &meta, &ts, sound, &report, &pes)?;
+        out["silence"] = classify_silence_dump(dir, &meta, &ts, (sound, &pmts), &report, &pes)?;
     }
     std::fs::write(dir.join("classify.json"), serde_json::to_vec_pretty(&out).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     Ok(out)
@@ -554,7 +581,7 @@ fn classify_silence_dump(
     dir: &Path,
     meta: &serde_json::Value,
     ts: &[u8],
-    sound: u16,
+    (sound, pmts): (u16, &[u16]),
     report: &TsReport,
     pes: &[(u64, u64)],
 ) -> Result<serde_json::Value, String> {
@@ -579,24 +606,31 @@ fn classify_silence_dump(
     let mut lag = serde_json::Value::Null;
     let codec = meta["service"]["codec"].as_str().unwrap_or_default();
     if codec == "mpeg-audio" {
-        match decode_independent(dir, ts, sound) {
-            Ok((pcm, packets, errors, rate, channels)) => {
-                let ind_format = PcmFormat { sample: Sample::S16, rate, channels, interleaved: true };
-                let per = 1152 * channels * 2;
-                let frames_ok = rate > 0 && channels > 0 && pcm.len() == packets.len() * per;
-                facts.decoder_errors = errors + u64::from(!frames_ok);
-                if frames_ok && rate == format.rate && channels == format.channels {
-                    let segments: Vec<Segment> = packets
+        match decode_independent(dir, ts, sound, pmts) {
+            Ok(ind) => {
+                let ind_format = PcmFormat { sample: Sample::S16, rate: ind.rate, channels: ind.channels, interleaved: true };
+                let fb = ind.channels * 2;
+                let samples: u64 = ind.frames.iter().map(|(_, n)| n).sum();
+                let whole = ind.rate > 0 && ind.channels > 0 && ind.pcm.len() as u64 == samples * fb as u64;
+                facts.decoder_errors = undecoded_in(&ind.packets, &ind.frames, pes, from, to) + u64::from(!whole);
+                if whole && ind.rate == format.rate && ind.channels == format.channels {
+                    let mut at = 0usize;
+                    let segments: Vec<Segment> = ind
+                        .frames
                         .iter()
-                        .enumerate()
-                        .filter_map(|(k, raw)| Some(Segment { pts: running_of(*raw, pes)?, data: &pcm[k * per..(k + 1) * per] }))
+                        .filter_map(|(raw, n)| {
+                            let data = &ind.pcm[at..at + *n as usize * fb];
+                            at += *n as usize * fb;
+                            Some(Segment { pts: running_of(*raw, pes)?, data })
+                        })
                         .collect();
                     facts.independent = Some(level_in(&segments, &ind_format, from, to));
                     lag = decoder_lag(&product, &segments, &format, from);
                 }
                 independent_json = serde_json::json!({
-                    "decoder": "ffmpeg mp2 (libavcodec)", "packets": packets.len(), "rate": rate, "channels": channels,
-                    "samples_whole": frames_ok, "complaints": errors,
+                    "decoder": "ffmpeg mp2 (libavcodec)", "packets": ind.packets.len(), "frames": ind.frames.len(),
+                    "rate": ind.rate, "channels": ind.channels, "samples_whole": whole,
+                    "undecoded_in_window": facts.decoder_errors,
                     "level": facts.independent.as_ref().map(|(l, c)| level_json(l, *c)),
                 });
             }
