@@ -22,6 +22,8 @@
 //! (`evidence_classify`) and plays nothing.
 
 mod clock_probe;
+#[cfg(test)]
+mod audio_replay;
 mod engine;
 mod es;
 mod evidence;
