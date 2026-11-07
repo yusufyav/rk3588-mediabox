@@ -1901,6 +1901,7 @@ impl Engine {
             self.options.demux_latency_ms,
             self.options.render_delay_ms
         );
+        self.shared.ledgers.begin(generation);
         let gate = Arc::new(crate::gate::Gate::new(generation, epoch, open_already));
         mediabox_core::timeline!(
             "gate-arm",

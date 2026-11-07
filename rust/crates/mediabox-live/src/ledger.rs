@@ -21,8 +21,9 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
-/// The queue behind the decoder holds 3 (`stream`), and one more on its way out.
-pub const QUEUE_HOLDS: u64 = 4;
+/// The queue behind the decoder: 3 in it (`stream`), one counted in and
+/// waiting at its input for room, one taken out and not yet pushed on.
+pub const QUEUE_HOLDS: u64 = 5;
 /// The sink: one waiting for its time, one in its own queue (max-buffers 1).
 pub const SINK_HOLDS: u64 = 2;
 
@@ -230,6 +231,13 @@ pub struct Ledgers {
 const KEPT: usize = 8;
 
 impl Ledgers {
+    /// Channel `generation` is opened: its ledger is there from the start, and
+    /// closes with nothing in it if nothing is decoded (a channel failed shut
+    /// before its first picture).
+    pub fn begin(&self, generation: u64) {
+        self.open.lock().unwrap_or_else(|p| p.into_inner()).entry(generation).or_default();
+    }
+
     pub fn count(&self, generation: u64, end: End) {
         self.open.lock().unwrap_or_else(|p| p.into_inner()).entry(generation).or_default().count(end);
     }
@@ -327,6 +335,11 @@ mod tests {
         ledger.queue_in += 3;
         ledger.decoded += 3;
         assert!(ledger.verdict(true).unwrap_err().contains("more left behind"), "{:?}", ledger.verdict(true));
+        // Lost inside the queue beyond what it can hold.
+        let mut ledger = stopped_channel();
+        ledger.queue_in += 3;
+        ledger.decoded += 3;
+        assert!(ledger.verdict(true).unwrap_err().contains("more left behind"), "{:?}", ledger.verdict(true));
         // Decoded and never into the queue, nor thrown away.
         let mut ledger = stopped_channel();
         ledger.decoded += 1;
@@ -349,6 +362,7 @@ mod tests {
     #[test]
     fn ledgers_close_once_and_keep_the_last() {
         let ledgers = Ledgers::default();
+        ledgers.begin(11);
         for generation in 1..=10 {
             ledgers.count(generation, End::Decoded);
             ledgers.count(generation, End::QueueIn);
@@ -358,10 +372,11 @@ mod tests {
             ledgers.close(generation);
         }
         assert_eq!(ledgers.closed().len(), KEPT);
-        assert_eq!(ledgers.json()["open"].as_array().unwrap().len(), 1);
+        assert_eq!(ledgers.json()["open"].as_array().unwrap().len(), 2);
         ledgers.close_all();
         let closed = ledgers.closed();
-        assert_eq!(closed.last().unwrap().0, 10);
+        assert_eq!(closed.last().unwrap().0, 11, "one with nothing decoded closes too");
+        assert_eq!(closed.last().unwrap().1, Ledger::default());
         assert!(closed.iter().all(|(_, ledger)| ledger.verdict(true).is_ok()));
     }
 }

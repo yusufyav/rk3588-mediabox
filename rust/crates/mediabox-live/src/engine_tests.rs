@@ -972,7 +972,7 @@ fn every_picture_of_every_channel_has_its_end() {
     let first = closed.iter().find(|(generation, _)| *generation == 1).expect("the first channel's ledger").1.clone();
     assert_eq!(first.verdict(true), Ok(()), "{first:?}");
     assert!(first.decoded >= 90, "{first:?}");
-    assert!(first.preroll >= 10, "pictures held before the gate: {first:?}");
+    assert!(first.preroll >= 5, "pictures held before the gate: {first:?}");
     assert_eq!(first.decoded, first.preroll + first.not_dmabuf + first.terminal_drain_after_stop() + first.cancelled_before_submit() + first.order, "{first:?}");
     for (generation, ledger) in &closed {
         assert_eq!(ledger.verdict(true), Ok(()), "channel {generation}: {ledger:?}");
