@@ -123,6 +123,17 @@ struct Inner {
     probe: Option<(ScanRestore, LiveSource)>,
 }
 
+impl Inner {
+    /// The receiver failed, for `reason`; the caller holds the lock.
+    fn fail(&mut self, reason: String) {
+        self.failure = Some(reason);
+        if self.lifecycle != Lifecycle::Failed {
+            eprintln!("mediaboxd-rs: live {:?} -> {:?}", self.lifecycle, Lifecycle::Failed);
+            self.lifecycle = Lifecycle::Failed;
+        }
+    }
+}
+
 /// How far the channel setup has got, for its progress, and whether it was
 /// called off.
 #[derive(Debug, Clone, Copy, Default)]
@@ -230,6 +241,10 @@ pub struct LiveManager {
 struct TestSeam {
     unit_active: std::sync::atomic::AtomicBool,
     waiting: tokio::sync::Notify,
+    /// Hold `final_end` between reading a final status and publishing it.
+    hold_final: std::sync::atomic::AtomicBool,
+    final_read: tokio::sync::Notify,
+    resume_final: tokio::sync::Notify,
 }
 
 /// What the receiver's ending means to the viewer.
@@ -708,15 +723,25 @@ impl LiveManager {
             if let Some(status) = self.read_status_of(&token)
                 && let Some((end, message)) = Self::final_of(&status)
             {
-                self.lock().last = Some(status);
+                #[cfg(test)]
+                if self.seam.hold_final.load(Ordering::SeqCst) {
+                    self.seam.final_read.notify_one();
+                    self.seam.resume_final.notified().await;
+                }
                 let natural = end == "recording_end";
                 let text = (!natural).then(|| describe(&end, message.as_deref()));
                 // The player going, or a stop that was asked for, is not the
                 // receiver failing: only its own faults are recorded as one.
-                if let Some(text) = &text
-                    && !matches!(end.as_str(), "stopped" | "player_closed")
-                {
-                    self.fail_of(&token, text.clone(), false);
+                let fault = text.is_some() && !matches!(end.as_str(), "stopped" | "player_closed");
+                // Read outside the lock, accepted under it: only while this
+                // start still owns the receiver.
+                let mut inner = self.lock();
+                if inner.token.as_deref() != Some(token.as_str()) {
+                    return None;
+                }
+                inner.last = Some(status);
+                if fault && let Some(text) = &text {
+                    inner.fail(text.clone());
                 }
                 return Some(SourceEnd { natural, message: text });
             }
@@ -726,7 +751,7 @@ impl LiveManager {
                 }
                 // A unit stopped on request is not one that died.
                 let text = "Uydu alıcısı süreci beklenmedik biçimde kapandı.".to_string();
-                return self.fail_of(&token, text.clone(), true).then_some(SourceEnd { natural: false, message: Some(text) });
+                return self.fail_of(&token, text.clone()).then_some(SourceEnd { natural: false, message: Some(text) });
             }
             #[cfg(test)]
             self.seam.waiting.notify_one();
@@ -735,20 +760,14 @@ impl LiveManager {
     }
 
     /// [`LiveManager::fail`], only while start `token` is still the
-    /// receiver's and, with `unless_stopping`, no stop has been asked of it;
-    /// checked and recorded under one lock. Whether it was recorded.
-    fn fail_of(&self, token: &str, reason: String, unless_stopping: bool) -> bool {
+    /// receiver's and no stop has been asked of it; checked and recorded
+    /// under one lock. Whether it was recorded.
+    fn fail_of(&self, token: &str, reason: String) -> bool {
         let mut inner = self.lock();
-        if inner.token.as_deref() != Some(token)
-            || (unless_stopping && matches!(inner.lifecycle, Lifecycle::Stopping | Lifecycle::Cleaned))
-        {
+        if inner.token.as_deref() != Some(token) || matches!(inner.lifecycle, Lifecycle::Stopping | Lifecycle::Cleaned) {
             return false;
         }
-        inner.failure = Some(reason);
-        if inner.lifecycle != Lifecycle::Failed {
-            eprintln!("mediaboxd-rs: live {:?} -> {:?}", inner.lifecycle, Lifecycle::Failed);
-            inner.lifecycle = Lifecycle::Failed;
-        }
+        inner.fail(reason);
         true
     }
 
@@ -2410,6 +2429,40 @@ mod tests {
         assert_eq!(end.message.as_deref(), Some("Uydu alıcısı süreci beklenmedik biçimde kapandı."));
         assert_eq!(live.lifecycle(), Lifecycle::Failed);
         assert_eq!(live.status()["failure"], "Uydu alıcısı süreci beklenmedik biçimde kapandı.");
+    }
+
+    /// An end read for one start and published after another has replaced
+    /// it would be the old receiver's fault reported against the new one.
+    #[tokio::test(start_paused = true)]
+    async fn a_final_status_read_for_a_replaced_start_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        live.lock().token = Some("1-10".into());
+        live.set(Lifecycle::Playing);
+        std::fs::write(
+            dir.path().join("status.json"),
+            r#"{"token":"1-10","state":"failed","end":"usb_disconnected","message":"cihaz geri gelmedi"}"#,
+        )
+        .unwrap();
+        live.seam.hold_final.store(true, Ordering::SeqCst);
+        let (end, ()) = tokio::join!(live.final_end(), async {
+            live.seam.final_read.notified().await;
+            // The old start stopped, a new one set up (as `start_with` does).
+            live.stop().await;
+            {
+                let mut inner = live.lock();
+                inner.token = Some("1-11".into());
+                inner.failure = None;
+                inner.last = None;
+            }
+            live.set(Lifecycle::Starting);
+            live.seam.resume_final.notify_one();
+        });
+        assert_eq!(end, None, "the old start's end is not the new one's");
+        assert_eq!(live.lifecycle(), Lifecycle::Starting);
+        assert!(live.status()["failure"].is_null());
+        assert!(live.lock().last.is_none(), "nothing recorded against the new start");
+        assert_eq!(live.lock().token.as_deref(), Some("1-11"));
     }
 
     fn event(start: i64, minutes: u32, title: &str) -> LiveEvent {
