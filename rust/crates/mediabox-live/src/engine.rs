@@ -38,6 +38,9 @@ pub struct Options {
     /// The element that decodes video: `mppvideodec` on the appliance.
     pub video_decoder: String,
     pub audio: Audio,
+    /// "Oynatımı görüntüye eşitle": every plan is played as PCM
+    /// (`Audio::from_plan`).
+    pub display_sync: bool,
     /// tsdemux's `latency`: how far a PTS may run ahead of its PCR.
     pub demux_latency_ms: u32,
     /// From the sink's wake-up to the light on the panel: the interface
@@ -53,7 +56,7 @@ pub struct Options {
     pub max_lateness_ms: Option<u32>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Audio {
     /// The ALSA PCM; `None`: sound goes nowhere.
     pub device: Option<String>,
@@ -64,6 +67,62 @@ pub struct Audio {
     /// The sound setting's Dolby Digital encoding: (kbit/s, fewest channels
     /// encoded). Multichannel PCM is sent as AC-3; fewer channels stay PCM.
     pub ac3_encode: Option<(u32, u32)>,
+}
+
+impl Audio {
+    /// What a plan is played with: its device's PCM, what it passes through
+    /// and encodes, its level -- the headset's own volume at full here
+    /// (`AudioPlan::player_volume`). "Oynatımı görüntüye eşitle"
+    /// (`display_sync`) sends PCM, as films do (Kodi: no passthrough and
+    /// no encoding while usedisplayasclock is on).
+    pub fn from_plan(plan: &mediabox_core::AudioPlan, display_sync: bool) -> Self {
+        let volume = f64::from(plan.player_volume()) / 100.0;
+        Self {
+            device: plan.device.as_ref().map(|device| device.pcm.clone()),
+            passthrough: if display_sync { Vec::new() } else { plan.passthrough.clone() },
+            gain: volume.powi(3),
+            muted: plan.muted,
+            ac3_encode: plan
+                .ac3_encode
+                .filter(|_| !display_sync)
+                .map(|encode| (encode.kbps.unwrap_or(448), u32::from(encode.min_channels))),
+        }
+    }
+
+    /// The same device and the same forms: at most the level differs.
+    fn same_way(&self, other: &Audio) -> bool {
+        self.device == other.device && self.passthrough == other.passthrough && self.ac3_encode == other.ac3_encode
+    }
+
+    /// Whether the device can take a bitstream: the plan sends one.
+    fn takes_bitstream(&self) -> bool {
+        self.device.is_some() && (!self.passthrough.is_empty() || self.ac3_encode.is_some())
+    }
+}
+
+/// What a channel's sound part is built to send.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Form {
+    Pcm,
+    /// The broadcast's AC-3 as it came.
+    Passthrough,
+    /// Decoded and made AC-3 at this rate.
+    Encode(u32),
+}
+
+/// The PCM a bitstream is sent on: the device's, with the channel status
+/// saying so (non-audio, no copyright, original, 48 kHz), in the form ALSA
+/// parses -- mpv's. GStreamer's own IEC958 open appends ":{AES0 ...}" to the
+/// name, which on "hdmi:CARD=x,DEV=0" ALSA refuses ("Parameter DEV must be
+/// an integer", measured 2026-10-24), so alsasink never offers AC-3 on this
+/// board.
+fn bitstream_pcm(device: &str) -> String {
+    // The tests' devices are ALSA's own `null`, which takes no arguments.
+    #[cfg(test)]
+    if !device.contains(':') {
+        return device.to_string();
+    }
+    format!("{device},AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02")
 }
 
 /// What the control socket reads.
@@ -110,6 +169,10 @@ pub struct Shared {
     /// generation and order, for the reader to take the sound to
     /// (`es::Reader::choose`) -- the picture goes on as it is.
     pub aid_request: Mutex<Option<(u64, usize)>>,
+    /// The sound plan changed the form the sound is sent in: the reader
+    /// builds that channel's sound part again from its next PES
+    /// (`es::Reader::rebuild`), and takes the request.
+    pub sound_rebuild: Mutex<Option<u64>>,
     /// The sound clock's controller's counts (`audio_clock`).
     pub audio_clock: Arc<crate::audio_clock::Stats>,
 }
@@ -510,6 +573,67 @@ struct PendingSwap {
     after: u64,
     failed: usize,
     replies: Vec<SinkReply>,
+    /// The device opened again was asked for (`reopen_audio_sink`).
+    reopen: bool,
+    /// The sound plan's change waits for this swap (`Plans`, `PlanWay::Swap`).
+    plan: bool,
+}
+
+/// How long a plan that builds the sound part again waits for the reader
+/// to take its request: the next PES of a playing sound comes within a
+/// few hundred milliseconds. A sound that does not come leaves the plan
+/// before it in force, answered so.
+const PLAN_REBUILD_GUARD_MS: u64 = 1_500;
+
+/// A sound plan the control plane asked for.
+pub struct PlanRequest {
+    pub audio: Audio,
+    pub epoch: Option<u64>,
+    pub seq: u64,
+}
+
+/// How a plan's change is made.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PlanWay {
+    /// The same form, another device: the sink swapped while nothing passes
+    /// the sound selector (`queue_swap`), the sound part as it is.
+    Swap,
+    /// Another form: the sound part built again for it, handed over as for
+    /// a PMT's change (`hand_over_sound`); the device swapped as the old
+    /// part ends (`let_sound_go`).
+    Rebuild,
+}
+
+/// A plan's change under way.
+struct PlanChange {
+    id: u64,
+    target: Audio,
+    previous: Audio,
+    generation: u64,
+    way: PlanWay,
+    /// None: the plan before put back after a failed change, which nobody
+    /// waits for.
+    reply: Option<SinkReply>,
+}
+
+/// The sound plan's changes, one at a time, started by one thread
+/// (`plan_worker`): the newest request made while one is under way waits,
+/// any before it answered as superseded. `active` is held from a change's
+/// start to its answer -- a failed one's putting back included -- so no
+/// other starts meanwhile.
+#[derive(Default)]
+struct Plans {
+    /// The highest request number taken: an older one is not done after it.
+    seq: u64,
+    active: Option<PlanChange>,
+    waiting: Option<(PlanRequest, Option<SinkReply>)>,
+    ids: u64,
+}
+
+fn answer(reply: Option<SinkReply>, result: Result<(), String>) {
+    if let Some(reply) = reply {
+        let _ = reply.send(result);
+    }
 }
 
 pub struct Engine {
@@ -524,6 +648,12 @@ pub struct Engine {
     sound_handover: Mutex<Option<SoundHandover>>,
     /// The sound device is open for IEC 61937 (non-audio) rather than PCM.
     bitstream: AtomicBool,
+    /// The plan's device the sound sink has open: None for none, for the
+    /// stand-in, and with no device.
+    sink_device: Mutex<Option<String>>,
+    /// The control plane's sound plans (`set_audio_plan`).
+    plans: Mutex<Plans>,
+    plans_changed: std::sync::Condvar,
     options: Options,
     audio: Mutex<Audio>,
     shared: Arc<Shared>,
@@ -734,6 +864,51 @@ impl PresentationTimeline {
     }
 }
 
+/// The plans' thread: starts the waiting plan once none is under way.
+fn plan_worker(engine: &std::sync::Weak<Engine>) {
+    loop {
+        let Some(this) = engine.upgrade() else { return };
+        let next = {
+            let mut plans = this.plans.lock().unwrap_or_else(|p| p.into_inner());
+            if plans.active.is_none() && plans.waiting.is_some() {
+                plans.waiting.take()
+            } else {
+                // Woken by a request or an answer; looked at again in any
+                // case, for the engine going.
+                let _ = this.plans_changed.wait_timeout(plans, std::time::Duration::from_millis(200));
+                None
+            }
+        };
+        if let Some((request, reply)) = next {
+            this.start_plan(request, reply);
+        }
+    }
+}
+
+/// The form `audio` sends a sound of `codec` in, `channels` decoded:
+/// unknown (None) when that depends on the channels, not known yet.
+fn form_of(audio: &Audio, codec: Option<crate::es::Codec>, channels: Option<i32>) -> Option<Form> {
+    if codec == Some(crate::es::Codec::Ac3) && audio.device.is_some() && audio.passthrough.contains(&AudioCodec::Ac3) {
+        return Some(Form::Passthrough);
+    }
+    match audio.ac3_encode {
+        None => Some(Form::Pcm),
+        Some((kbps, min)) => channels.map(|channels| if channels >= min as i32 { Form::Encode(kbps) } else { Form::Pcm }),
+    }
+}
+
+/// The plan's device opened and closed again before anything is taken
+/// down for it: a headset whose link is gone is refused here, and the
+/// sound goes on as it was.
+fn try_device(audio: &Audio) -> Result<(), String> {
+    let Some(device) = &audio.device else { return Ok(()) };
+    let sink = make("alsasink")?;
+    sink.set_property("device", device);
+    let opened = sink.set_state(gst::State::Ready).map(|_| ()).map_err(|_| format!("ses aygıtı açılamadı: {device}"));
+    let _ = sink.set_state(gst::State::Null);
+    opened
+}
+
 fn make(factory: &str) -> Result<gst::Element, String> {
     gst::ElementFactory::make(factory)
         .build()
@@ -888,6 +1063,9 @@ impl Engine {
             swaps: Mutex::new(SinkSwaps::default()),
             sound_handover: Mutex::new(None),
             bitstream: AtomicBool::new(false),
+            sink_device: Mutex::new(None),
+            plans: Mutex::new(Plans::default()),
+            plans_changed: std::sync::Condvar::new(),
             audio: {
                 let (gain, muted) = (options.audio.gain, options.audio.muted);
                 shared.health.diagnose(|d| {
@@ -908,6 +1086,13 @@ impl Engine {
             fail: Box::new(fail),
         });
         engine.attach_audio_sink("start")?;
+        {
+            let engine = Arc::downgrade(&engine);
+            std::thread::Builder::new()
+                .name("sound-plan".into())
+                .spawn(move || plan_worker(&engine))
+                .map_err(|e| format!("ses planı iş parçacığı açılamadı: {e}"))?;
+        }
         engine.attach_video(&video_sink, plane, trace);
         // A sound device taken by something else stops the pipeline's start.
         // That is the opening's to answer, tried and said in the same bounded
@@ -1130,7 +1315,7 @@ impl Engine {
         if inputs.is_empty() {
             // Nothing of it reached the selector yet: nothing to play out.
             drop(pending);
-            self.let_sound_go(release);
+            self.let_sound_go(old.generation, release);
             self.take_down_sound(old);
             return;
         }
@@ -1155,14 +1340,23 @@ impl Engine {
     fn finish_sound_handover(self: &Arc<Self>, why: &str) {
         let Some(handover) = self.sound_handover.lock().unwrap_or_else(|p| p.into_inner()).take() else { return };
         mediabox_core::timeline!("sound-handover", "gen={} phase=done why={why}", handover.old.generation);
-        self.let_sound_go(handover.release);
+        self.let_sound_go(handover.old.generation, handover.release);
         self.take_down_sound(handover.old);
     }
 
-    fn let_sound_go(self: &Arc<Self>, release: SoundRelease) {
-        if let Some(input) = release.activate {
-            self.sound_mode(true);
-            self.audio_selector.set_property("active-pad", &input);
+    /// The new part of channel `generation` let go: the device's mode and
+    /// the selector's input switched first -- and the device itself, when a
+    /// sound plan built the part (`PlanWay::Rebuild`): nothing passes the
+    /// selector here, the old part ended and the new one still held.
+    fn let_sound_go(self: &Arc<Self>, generation: u64, release: SoundRelease) {
+        match self.plan_at_handover(generation) {
+            Some(id) => self.finish_plan_at_handover(id, release.activate.as_ref()),
+            None => {
+                if let Some(input) = &release.activate {
+                    self.sound_mode(true);
+                    self.audio_selector.set_property("active-pad", input);
+                }
+            }
         }
         if let Some((pad, id)) = release.block {
             pad.remove_probe(id);
@@ -1376,17 +1570,7 @@ impl Engine {
         let sink = match &audio.device {
             Some(device) => {
                 let sink = make("alsasink")?;
-                // A bitstream goes out with the channel status saying so
-                // (non-audio, no copyright, original, 48 kHz), in the form ALSA
-                // parses -- mpv's. GStreamer's own IEC958 open appends
-                // ":{AES0 ...}" to the name, which on "hdmi:CARD=x,DEV=0"
-                // ALSA refuses ("Parameter DEV must be an integer", measured
-                // 2026-10-24), so alsasink never offers AC-3 on this board.
-                let device = if self.bitstream.load(Ordering::SeqCst) {
-                    format!("{device},AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02")
-                } else {
-                    device.clone()
-                };
+                let device = if self.bitstream.load(Ordering::SeqCst) { bitstream_pcm(device) } else { device.clone() };
                 sink.set_property("device", &device);
                 // Lower than the default 200 ms: the latency of the whole
                 // pipeline is the largest of its sinks'.
@@ -1436,7 +1620,14 @@ impl Engine {
                 Err(reason) => crate::audio_clock::fail_closed(&sink, &self.shared.audio_clock, &reason),
             }
         }
-        self.add_audio_sink(sink)
+        self.add_audio_sink(sink)?;
+        *self.sink_device.lock().unwrap_or_else(|p| p.into_inner()) = audio.device;
+        Ok(())
+    }
+
+    /// The ALSA PCM the sound sink has open, as the plan names it.
+    pub fn sound_device_open(&self) -> Option<String> {
+        self.sink_device.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// `sink` in, after the sound selector, in the pipeline's state; taken
@@ -1478,10 +1669,12 @@ impl Engine {
         sink.set_property("async", false);
         sink.set_property("enable-last-sample", false);
         sink.set_property("ts-offset", self.audio_offset());
+        *self.sink_device.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.add_audio_sink(sink)
     }
 
     fn detach_audio_sink(&self) {
+        *self.sink_device.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let Some(sink) = self.audio_sink.lock().unwrap_or_else(|p| p.into_inner()).take() else {
             return;
         };
@@ -1571,11 +1764,12 @@ impl Engine {
         let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(pending) = swaps.pending.as_mut() {
             pending.replies.extend(reply);
+            pending.reopen = true;
             mediabox_core::timeline!("sink-swap", "phase=joined");
             return;
         }
         let after = swaps.opened;
-        swaps.pending = Some(PendingSwap { asked: Instant::now(), after, failed: 0, replies: reply.into_iter().collect() });
+        swaps.pending = Some(PendingSwap { asked: Instant::now(), after, failed: 0, replies: reply.into_iter().collect(), reopen: true, plan: false });
         drop(swaps);
         mediabox_core::timeline!("sink-swap", "phase=asked");
         self.queue_swap();
@@ -1659,8 +1853,11 @@ impl Engine {
 
     /// The pending swap answered as failed without touching the device: it
     /// never got its turn.
-    fn give_up_waiting(&self, why: &str) {
+    fn give_up_waiting(self: &Arc<Self>, why: &str) {
         let Some(pending) = self.swaps.lock().unwrap_or_else(|p| p.into_inner()).pending.take() else { return };
+        if pending.plan {
+            self.complete_plan(PlanWay::Swap, None, Err(why.to_string()));
+        }
         mediabox_core::timeline!("sink-swap", "phase=done ok=0 tries={} answers={} error={why}", pending.failed, pending.replies.len());
         eprintln!("mediabox-live: ses aygıtı değiştirilemedi: {why}");
         for reply in pending.replies {
@@ -1670,6 +1867,14 @@ impl Engine {
 
     fn run_swap(self: &Arc<Self>) {
         let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+        if swaps.pending.as_ref().is_some_and(|p| p.plan) {
+            self.run_plan_swap(&mut swaps);
+            let reopen = swaps.pending.as_ref().is_some_and(|p| p.reopen);
+            if !reopen {
+                swaps.pending = None;
+                return;
+            }
+        }
         let Some((after, failed, asked)) = swaps.pending.as_ref().map(|p| (p.after, p.failed, p.asked)) else { return };
         // Opened since it was asked (`sound_mode`): done already.
         let result = if swaps.opened > after { Ok(()) } else { self.swap_sink(&mut swaps, "reopen") };
@@ -1695,6 +1900,9 @@ impl Engine {
 
     fn end_swap(&self, swaps: &mut SinkSwaps, result: Result<(), String>) {
         let Some(pending) = swaps.pending.take() else { return };
+        if pending.plan {
+            self.complete_plan(PlanWay::Swap, None, result.clone());
+        }
         match &result {
             Ok(()) => mediabox_core::timeline!("sink-swap", "phase=done ok=1 tries={} answers={}", pending.failed + 1, pending.replies.len()),
             Err(error) => {
@@ -1985,6 +2193,8 @@ impl Engine {
 
     /// A new branch, switched to, and the one before it taken down.
     fn open_with(self: &Arc<Self>, path: &str, epoch: Option<u64>, open_already: bool) -> Result<(), String> {
+        // A plan asked for the channel being left is not made on the next.
+        self.cancel_plans("kanal değişti");
         let generation = self.shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.trace.event('G', generation, 0);
         let opened_ns = mediabox_core::timeline::now_ns();
@@ -2626,6 +2836,8 @@ impl Engine {
             let mut info = self.shared.info.lock().unwrap_or_else(|p| p.into_inner());
             info.audio_codec = Some(codec);
             info.passthrough = true;
+            // Nothing is decoded: no parameters of a part before it stay.
+            info.audio_decoded = None;
             let held = hold.then(|| SoundRelease { block, activate: Some(input) });
             return Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads, held });
         }
@@ -3161,6 +3373,339 @@ impl Engine {
         *self.aid.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The control plane's number for the channel playing.
+    fn channel_epoch(&self) -> Option<u64> {
+        self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|gate| gate.epoch)
+    }
+
+    /// The control plane's sound plan (`mediabox-audio-plan`) for its
+    /// channel `epoch`: taken as one, started by the plans' own thread
+    /// (`plan_worker`) and answered through `reply` once it is in force --
+    /// the device it names open -- or with why not, the plan before it in
+    /// force. A request for another channel, or older than one taken, is
+    /// refused here; one made while another is under way waits for it, and
+    /// a newer one made meanwhile takes its place.
+    pub fn set_audio_plan(self: &Arc<Self>, request: PlanRequest, reply: Option<SinkReply>) {
+        let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+        if request.seq != 0 && request.seq <= plans.seq {
+            let why = format!("ses planı {} eski: {} alındı", request.seq, plans.seq);
+            drop(plans);
+            mediabox_core::timeline!("sound-plan", "phase=refused seq={} why=old", request.seq);
+            answer(reply, Err(why));
+            return;
+        }
+        let on = self.channel_epoch();
+        if request.epoch != on {
+            drop(plans);
+            mediabox_core::timeline!("sound-plan", "phase=refused seq={} why=channel asked={:?} on={on:?}", request.seq, request.epoch);
+            answer(reply, Err(mediabox_core::audio::LIVE_PLAN_OTHER_CHANNEL.to_string()));
+            return;
+        }
+        plans.seq = plans.seq.max(request.seq);
+        mediabox_core::timeline!("sound-plan", "phase=asked seq={} device={:?}", request.seq, request.audio.device);
+        if let Some((older, superseded)) = plans.waiting.replace((request, reply)) {
+            mediabox_core::timeline!("sound-plan", "phase=superseded seq={}", older.seq);
+            answer(superseded, Err("ses planının yerine daha yenisi istendi".into()));
+        }
+        self.plans_changed.notify_all();
+    }
+
+    /// One plan's change, begun. On the plans' thread: nothing else is
+    /// under way.
+    fn start_plan(self: &Arc<Self>, request: PlanRequest, reply: Option<SinkReply>) {
+        let seq = request.seq;
+        // Waited for a change before it: the channel may have changed since.
+        if request.epoch != self.channel_epoch() {
+            mediabox_core::timeline!("sound-plan", "phase=refused seq={seq} why=channel");
+            answer(reply, Err(mediabox_core::audio::LIVE_PLAN_OTHER_CHANNEL.to_string()));
+            return;
+        }
+        let current = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let target = request.audio;
+        if current.same_way(&target) {
+            // The level only: on the sound part as it plays, no device opened.
+            self.set_volume(Some(target.gain), Some(target.muted));
+            mediabox_core::timeline!("sound-plan", "phase=done seq={seq} way=level");
+            answer(reply, Ok(()));
+            return;
+        }
+        let generation = self.shared.generation.load(Ordering::SeqCst);
+        let way = if self.form_changes(&target, generation) { PlanWay::Rebuild } else { PlanWay::Swap };
+        // Another device, for which the part is taken down: tried first, so
+        // that one which will not open leaves everything as it is.
+        if way == PlanWay::Rebuild
+            && target.device != current.device
+            && let Err(error) = try_device(&target)
+        {
+            self.shared.health.sink_open_failures.fetch_add(1, Ordering::Relaxed);
+            mediabox_core::timeline!("sound-plan", "phase=failed seq={seq} way=rebuild error={error}");
+            answer(reply, Err(error));
+            return;
+        }
+        let id = {
+            let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+            plans.ids += 1;
+            let id = plans.ids;
+            plans.active = Some(PlanChange { id, target: target.clone(), previous: current, generation, way, reply });
+            id
+        };
+        mediabox_core::timeline!("sound-plan", "phase=start seq={seq} id={id} way={way:?} gen={generation} device={:?}", target.device);
+        match way {
+            PlanWay::Swap => {
+                let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(pending) = swaps.pending.as_mut() {
+                    // A swap is waiting already: the plan is made at its turn.
+                    pending.plan = true;
+                    return;
+                }
+                let after = swaps.opened;
+                swaps.pending = Some(PendingSwap { asked: Instant::now(), after, failed: 0, replies: Vec::new(), reopen: false, plan: true });
+                drop(swaps);
+                self.queue_swap();
+            }
+            PlanWay::Rebuild => {
+                *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = target;
+                self.request_rebuild(generation, id);
+            }
+        }
+    }
+
+    /// Whether `target` sends channel `generation`'s sound in another form
+    /// than the part playing it is built for: only a new part can.
+    fn form_changes(&self, target: &Audio, generation: u64) -> bool {
+        let codec = match self.shared.sound.lock().unwrap_or_else(|p| p.into_inner()).as_ref().filter(|s| s.generation == generation) {
+            Some(parts) => parts.codec,
+            None => return false,
+        };
+        let channels = self.shared.info.lock().unwrap_or_else(|p| p.into_inner()).audio_decoded.map(|(_, channels)| channels);
+        let now = if !self.bitstream.load(Ordering::SeqCst) {
+            Form::Pcm
+        } else if channels.is_none() {
+            Form::Passthrough
+        } else {
+            Form::Encode(self.audio.lock().unwrap_or_else(|p| p.into_inner()).ac3_encode.map_or(448, |(kbps, _)| kbps))
+        };
+        form_of(target, codec, channels) != Some(now)
+    }
+
+    /// The reader is to build channel `generation`'s sound part again;
+    /// plan `id` is answered when it is let go (`let_sound_go`), or, if the
+    /// reader never takes the request, with the plan before back.
+    fn request_rebuild(self: &Arc<Self>, generation: u64, id: u64) {
+        *self.shared.sound_rebuild.lock().unwrap_or_else(|p| p.into_inner()) = Some(generation);
+        let engine = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new().name("sound-plan-guard".into()).spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(PLAN_REBUILD_GUARD_MS));
+            if let Some(engine) = engine.upgrade() {
+                engine.rebuild_not_taken(id);
+            }
+        });
+        if spawned.is_err() {
+            eprintln!("mediabox-live: ses planının bekçisi açılamadı");
+        }
+    }
+
+    /// Plan `id`'s part was never built again: no sound came. Nothing was
+    /// changed but the plan, which goes back.
+    fn rebuild_not_taken(&self, id: u64) {
+        let change = {
+            let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(change) = plans.active.as_ref().filter(|c| c.id == id && c.way == PlanWay::Rebuild) else { return };
+            let mut request = self.shared.sound_rebuild.lock().unwrap_or_else(|p| p.into_inner());
+            if *request != Some(change.generation) {
+                // Taken: the handover answers it.
+                return;
+            }
+            *request = None;
+            plans.active.take().expect("checked above")
+        };
+        *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = change.previous;
+        mediabox_core::timeline!("sound-plan", "phase=failed id={id} way=rebuild why=no-sound");
+        answer(change.reply, Err("ses kolu yeniden kurulamadı: bu kanalda ses akmıyor".into()));
+        self.plans_changed.notify_all();
+    }
+
+    /// The change under way answered and ended, if it is one made `way`
+    /// (and plan `id`, when given).
+    fn complete_plan(&self, way: PlanWay, id: Option<u64>, result: Result<(), String>) {
+        let change = {
+            let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+            if !plans.active.as_ref().is_some_and(|c| c.way == way && id.is_none_or(|id| c.id == id)) {
+                return;
+            }
+            plans.active.take()
+        };
+        if let Some(change) = change {
+            mediabox_core::timeline!("sound-plan", "phase={} id={} way={way:?}", if result.is_ok() { "done" } else { "failed" }, change.id);
+            answer(change.reply, result);
+            self.plans_changed.notify_all();
+        }
+    }
+
+    /// The plan's swap, at the swap's turn: nothing passes the sound
+    /// selector, the swaps held. The device that will not open leaves the
+    /// one before open again and the answer says why.
+    fn run_plan_swap(&self, swaps: &mut SinkSwaps) {
+        if let Some(pending) = swaps.pending.as_mut() {
+            pending.plan = false;
+        }
+        let Some((id, target)) = self
+            .plans
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .active
+            .as_ref()
+            .filter(|c| c.way == PlanWay::Swap)
+            .map(|c| (c.id, c.target.clone()))
+        else {
+            // Called off meanwhile.
+            return;
+        };
+        let previous = std::mem::replace(&mut *self.audio.lock().unwrap_or_else(|p| p.into_inner()), target.clone());
+        let result = match self.swap_sink(swaps, "plan") {
+            Ok(()) => {
+                self.set_volume(Some(target.gain), Some(target.muted));
+                Ok(())
+            }
+            Err(error) => {
+                *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = previous;
+                if let Err(back) = self.swap_sink(swaps, "rollback") {
+                    // Tried again as any device lost is: the stand-in
+                    // meanwhile, its retries, said when given up on.
+                    eprintln!("mediabox-live: önceki ses aygıtı da açılamadı: {back}");
+                    if let Some(pending) = swaps.pending.as_mut() {
+                        pending.reopen = true;
+                    }
+                }
+                Err(error)
+            }
+        };
+        self.complete_plan(PlanWay::Swap, Some(id), result);
+    }
+
+    /// The plan under way, if it built channel `generation`'s part that is
+    /// being let go.
+    fn plan_at_handover(&self, generation: u64) -> Option<u64> {
+        let plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+        let change = plans.active.as_ref().filter(|c| c.way == PlanWay::Rebuild && c.generation == generation)?;
+        let taken = *self.shared.sound_rebuild.lock().unwrap_or_else(|p| p.into_inner()) != Some(generation);
+        taken.then_some(change.id)
+    }
+
+    /// Plan `id`'s part let go: the device the plan names opened for it,
+    /// in the part's form (`activate`: a bitstream's input). A device that
+    /// will not open: the one before, if it takes the part's form (the
+    /// stand-in if not), and the part built again for the plan before.
+    fn finish_plan_at_handover(self: &Arc<Self>, id: u64, activate: Option<&gst::Pad>) {
+        let bitstream = activate.is_some();
+        let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+        let Some((previous, generation, restoring)) = self
+            .plans
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .active
+            .as_ref()
+            .filter(|c| c.id == id)
+            .map(|c| (c.previous.clone(), c.generation, c.reply.is_none()))
+        else {
+            // Called off meanwhile: let go as any part is.
+            drop(swaps);
+            if let Some(input) = activate {
+                self.sound_mode(true);
+                self.audio_selector.set_property("active-pad", input);
+            }
+            return;
+        };
+        self.shared.health.diagnose(|d| d.context.passthrough = bitstream);
+        self.bitstream.store(bitstream, Ordering::SeqCst);
+        let opened = self.swap_sink(&mut swaps, "plan");
+        if let Some(input) = activate {
+            self.audio_selector.set_property("active-pad", input);
+        }
+        let Err(error) = opened else {
+            drop(swaps);
+            self.complete_plan(PlanWay::Rebuild, Some(id), Ok(()));
+            return;
+        };
+        *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = previous.clone();
+        if (!bitstream || previous.takes_bitstream())
+            && let Err(back) = self.swap_sink(&mut swaps, "rollback")
+        {
+            eprintln!("mediabox-live: önceki ses aygıtı da açılamadı: {back}");
+        }
+        drop(swaps);
+        if restoring {
+            // Putting the plan before back did not open its device either:
+            // tried again as any device lost is.
+            self.complete_plan(PlanWay::Rebuild, Some(id), Err(error));
+            self.reopen_audio_sink(None);
+            return;
+        }
+        // Answered now; the slot held by the plan before, built again.
+        let restore = {
+            let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+            plans.ids += 1;
+            let restore = plans.ids;
+            let failed = plans.active.replace(PlanChange { id: restore, target: previous.clone(), previous, generation, way: PlanWay::Rebuild, reply: None });
+            if let Some(failed) = failed {
+                mediabox_core::timeline!("sound-plan", "phase=failed id={} way=rebuild error={error}", failed.id);
+                answer(failed.reply, Err(error));
+            }
+            restore
+        };
+        mediabox_core::timeline!("sound-plan", "phase=start id={restore} way=restore gen={generation}");
+        self.request_rebuild(generation, restore);
+    }
+
+    /// Whatever plan is under way or waiting: given up, said why, the plan
+    /// before it in force. The device is as it was: a swap had not been
+    /// done, a part built again had not been let go.
+    fn cancel_plans(&self, why: &str) {
+        let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+        let (active, waiting) = {
+            let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+            (plans.active.take(), plans.waiting.take())
+        };
+        if let Some(change) = active {
+            match change.way {
+                PlanWay::Swap => {
+                    let reopen = swaps.pending.as_ref().is_some_and(|p| p.reopen);
+                    if let Some(pending) = swaps.pending.as_mut() {
+                        pending.plan = false;
+                    }
+                    if !reopen {
+                        swaps.pending = None;
+                    }
+                }
+                PlanWay::Rebuild => {
+                    *self.shared.sound_rebuild.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = change.previous;
+                }
+            }
+            mediabox_core::timeline!("sound-plan", "phase=called-off id={} why={why}", change.id);
+            answer(change.reply, Err(why.to_string()));
+        }
+        drop(swaps);
+        if let Some((request, reply)) = waiting {
+            mediabox_core::timeline!("sound-plan", "phase=called-off seq={} why={why}", request.seq);
+            answer(reply, Err(why.to_string()));
+        }
+        self.plans_changed.notify_all();
+    }
+
+    /// A request for the sound's way out, from the control socket. What is
+    /// answered later takes `reply`; what is left in it is done now.
+    pub fn sound_command(self: &Arc<Self>, command: crate::ipc::SoundCommand, reply: &mut Option<SinkReply>) {
+        match command {
+            crate::ipc::SoundCommand::Volume { gain, muted } => self.set_volume(gain, muted),
+            crate::ipc::SoundCommand::Reload => self.reopen_audio_sink(reply.take()),
+            crate::ipc::SoundCommand::Plan { plan, epoch, seq } => {
+                let audio = Audio::from_plan(&plan, self.options.display_sync);
+                self.set_audio_plan(PlanRequest { audio, epoch, seq }, reply.take());
+            }
+        }
+    }
+
     pub fn set_volume(&self, gain: Option<f64>, muted: Option<bool>) {
         let mut audio = self.audio.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(gain) = gain {
@@ -3536,6 +4081,22 @@ fn read_stream(
                         mediabox_core::timeline!("aid-switch", "gen={generation} order={order} pid={} codec={}", switch.pid, switch.codec.name());
                     }
                     None => eprintln!("mediabox-live: ses izi {} yok ya da zaten çalıyor", order + 1),
+                }
+            }
+            // The sound plan changed the form the sound is sent in: its part
+            // built again from the next PES (`Engine::start_plan`). Taken
+            // only when it can be; a request for a channel before goes.
+            {
+                let mut request = shared.sound_rebuild.lock().unwrap_or_else(|p| p.into_inner());
+                match *request {
+                    Some(asked_in) if asked_in == generation => {
+                        if let Some(switch) = es.rebuild() {
+                            *request = None;
+                            mediabox_core::timeline!("plan-rebuild", "gen={generation} pid={} codec={}", switch.pid, switch.codec.name());
+                        }
+                    }
+                    Some(asked_in) if asked_in < generation => *request = None,
+                    _ => {}
                 }
             }
             // The sound to start with is the demultiplexer pad's; from then

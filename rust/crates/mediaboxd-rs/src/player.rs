@@ -111,7 +111,18 @@ pub struct PlayerManager {
     /// and the channel's epoch: a later change in the stream is a format
     /// change (`follow_film`).
     live_cadence: std::sync::Mutex<Option<(u64, mediabox_core::Cadence)>>,
+    /// The number of the last sound plan sent to the live player.
+    audio_seq: AtomicU64,
 }
+
+/// How long the live player has to put a plan in force: a part built again
+/// waits for the old one to play out and for the next PES (mediabox-live
+/// `PLAN_REBUILD_GUARD_MS`), a swap for the sound selector (its guard, 2 s).
+const LIVE_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(6);
+/// A plan refused as another channel's is asked again this often, while a
+/// channel change is under way (the player opens it within a second).
+const LIVE_PLAN_TRIES: usize = 10;
+const LIVE_PLAN_AGAIN: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl PlayerManager {
     pub fn new(launcher: impl Into<PathBuf>, socket: impl Into<PathBuf>) -> Self {
@@ -127,6 +138,7 @@ impl PlayerManager {
             mode_changes: AtomicU64::new(0),
             sound_opened_after: AtomicU64::new(0),
             live_cadence: std::sync::Mutex::new(None),
+            audio_seq: AtomicU64::new(0),
         }
     }
 
@@ -217,14 +229,20 @@ impl PlayerManager {
             .filter(|value| !value.is_null())
     }
 
-    /// Put a changed sound plan into the running film: the volume always,
-    /// and the device, the passthrough formats and the encoder when they
-    /// moved -- mpv reopens its output for those, a moment of silence rather
-    /// than a restart. Nothing when nothing is playing: the next film is
-    /// started from the plan anyway.
-    pub async fn apply_audio(&self, before: &mediabox_core::AudioPlan, after: &mediabox_core::AudioPlan) {
-        if self.playing().await.is_none() {
-            return;
+    /// Put a changed sound plan into what is playing. Nothing when nothing
+    /// is: the next film or channel is started from the plan anyway.
+    ///
+    /// A film (mpv): the volume always, and the device, the passthrough
+    /// formats and the encoder when they moved -- mpv reopens its output for
+    /// those, a moment of silence rather than a restart.
+    ///
+    /// Live television (mediabox-live): the whole plan in one request
+    /// (`apply_live_audio`), done once the device it names is open there.
+    /// An error is the player's: the plan before it is still in force.
+    pub async fn apply_audio(&self, before: &mediabox_core::AudioPlan, after: &mediabox_core::AudioPlan) -> Result<(), String> {
+        let Some(playing) = self.playing().await else { return Ok(()) };
+        if playing.live().is_some() {
+            return self.apply_live_audio(after).await;
         }
         let set = |name: &str, value: Value| json!({"command": ["set_property", name, value], "request_id": 30});
         if before.mpv_device() != after.mpv_device() && after.device.is_some() {
@@ -241,6 +259,44 @@ impl PlayerManager {
         }
         let _ = self.ask(set("volume", json!(after.player_volume()))).await;
         let _ = self.ask(set("mute", json!(after.muted))).await;
+        Ok(())
+    }
+
+    /// The whole plan to the live player, for the channel on now (its
+    /// epoch) and numbered, so that an older request that comes late is
+    /// not done after a newer one. Done when the player says the device it
+    /// opened is the plan's. A channel opened meanwhile -- the player not
+    /// on the channel asked for -- is asked again, for the one on now.
+    async fn apply_live_audio(&self, plan: &mediabox_core::AudioPlan) -> Result<(), String> {
+        let wanted = plan.device.as_ref().map(|device| device.pcm.clone());
+        let mut why = String::new();
+        for _ in 0..LIVE_PLAN_TRIES {
+            let epoch = self.epoch();
+            let seq = self.audio_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let answer = self
+                .ask_within(
+                    json!({"command": ["mediabox-audio-plan", plan, epoch, seq], "request_id": 44}),
+                    LIVE_PLAN_PATIENCE,
+                )
+                .await
+                .ok_or("canlı oynatıcı ses planına yanıt vermedi")?;
+            match answer.get("error").and_then(Value::as_str) {
+                Some("success") => {
+                    let opened = answer.get("data").and_then(Value::as_str).map(str::to_owned);
+                    return if opened == wanted {
+                        Ok(())
+                    } else {
+                        Err(format!("canlı oynatıcı {opened:?} açtı, plan {wanted:?}"))
+                    };
+                }
+                Some(other) if other == mediabox_core::audio::LIVE_PLAN_OTHER_CHANNEL => {
+                    why = other.to_string();
+                    tokio::time::sleep(LIVE_PLAN_AGAIN).await;
+                }
+                other => return Err(other.unwrap_or("canlı oynatıcı yanıt vermedi").to_string()),
+            }
+        }
+        Err(format!("canlı oynatıcı ses planını almadı: {why}"))
     }
 
     /// What the film's sound is and what leaves the box, as its player says.
@@ -784,5 +840,98 @@ impl PlayerManager {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    fn plan(pcm: &str) -> mediabox_core::AudioPlan {
+        serde_json::from_value(json!({
+            "device": {"id": "bluetooth:x", "label": "x", "kind": "bluetooth", "card_id": "bluealsa", "pcm": pcm, "bitstream": false},
+            "passthrough": [], "volume": 60, "muted": false
+        }))
+        .unwrap()
+    }
+
+    /// A live player on `socket` answering each request with the next of
+    /// `answers` (an `error` and the device open), and keeping what it got.
+    fn live_player(socket: &Path, answers: Vec<(&'static str, Value)>) -> std::sync::Arc<std::sync::Mutex<Vec<Value>>> {
+        let listener = UnixListener::bind(socket).unwrap();
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let into = std::sync::Arc::clone(&got);
+        tokio::spawn(async move {
+            for (error, data) in answers {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(reader).read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                into.lock().unwrap().push(request.clone());
+                let answer = json!({"error": error, "data": data, "request_id": request["request_id"]});
+                writer.write_all(format!("{answer}\n").as_bytes()).await.unwrap();
+            }
+        });
+        got
+    }
+
+    async fn on_live(dir: &Path) -> PlayerManager {
+        let player = PlayerManager::new("/nonexistent", dir.join("player.sock"));
+        *player.playing.lock().await = Some(Playing { content: Playback::Live { service_id: 10603 }, title: None, duration: None });
+        player.next_epoch();
+        player
+    }
+
+    /// The live player is sent the whole plan in one request, for the
+    /// channel on, numbered; done when it opened the plan's device.
+    #[tokio::test]
+    async fn the_live_player_is_sent_the_whole_plan_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let player = on_live(dir.path()).await;
+        let got = live_player(&player.socket, vec![("success", json!("bluealsa:DEV=1"))]);
+        let before = plan("hdmi:CARD=x,DEV=0");
+        assert_eq!(player.apply_audio(&before, &plan("bluealsa:DEV=1")).await, Ok(()));
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 1, "one request: {got:?}");
+        let command = got[0]["command"].as_array().unwrap();
+        assert_eq!(command[0], "mediabox-audio-plan");
+        assert_eq!(serde_json::from_value::<mediabox_core::AudioPlan>(command[1].clone()).unwrap(), plan("bluealsa:DEV=1"));
+        assert_eq!(command[2], json!(1), "the channel's epoch");
+        assert_eq!(command[3], json!(1), "the first plan sent");
+    }
+
+    /// Not done: said so, never taken for done -- the player's own reason,
+    /// or a device open that is not the plan's.
+    #[tokio::test]
+    async fn a_plan_the_live_player_did_not_put_in_force_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let player = on_live(dir.path()).await;
+        let _got = live_player(&player.socket, vec![("ses aygıtı açılamadı", Value::Null), ("success", json!("hdmi:CARD=x,DEV=0"))]);
+        let before = plan("hdmi:CARD=x,DEV=0");
+        let refused = player.apply_audio(&before, &plan("bluealsa:DEV=1")).await;
+        assert_eq!(refused, Err("ses aygıtı açılamadı".into()));
+        let other = player.apply_audio(&before, &plan("bluealsa:DEV=1")).await;
+        assert!(other.is_err(), "{other:?}");
+    }
+
+    /// Refused as another channel's while a channel change is under way:
+    /// asked again, a newer number, for the channel on now.
+    #[tokio::test]
+    async fn a_plan_refused_as_another_channel_s_is_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let player = on_live(dir.path()).await;
+        let got = live_player(
+            &player.socket,
+            vec![(mediabox_core::audio::LIVE_PLAN_OTHER_CHANNEL, Value::Null), ("success", json!("bluealsa:DEV=1"))],
+        );
+        player.next_epoch();
+        let before = plan("hdmi:CARD=x,DEV=0");
+        assert_eq!(player.apply_audio(&before, &plan("bluealsa:DEV=1")).await, Ok(()));
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0]["command"][3].clone(), got[1]["command"][3].clone()), (json!(1), json!(2)), "a newer number");
+        assert_eq!(got[1]["command"][2], json!(2), "the channel on now");
     }
 }

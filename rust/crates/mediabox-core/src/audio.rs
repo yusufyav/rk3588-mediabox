@@ -445,6 +445,11 @@ const AC3_RATES: [u32; 19] = [
     32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
 ];
 
+/// The live player's answer to a sound plan (`mediabox-audio-plan`) for a
+/// channel it is not playing: one it has left, or one it has not opened
+/// yet. The control plane asks again for the channel that is on.
+pub const LIVE_PLAN_OTHER_CHANNEL: &str = "sound plan for another channel";
+
 /// What a player is started with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioPlan {

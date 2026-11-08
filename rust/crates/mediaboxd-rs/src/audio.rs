@@ -436,7 +436,9 @@ pub async fn follow_headsets(
                         .ok()
                         .flatten();
                     if let Some((before, after)) = moved {
-                        player.apply_audio(&before, &after).await;
+                        if let Err(why) = player.apply_audio(&before, &after).await {
+                            eprintln!("mediaboxd.audio: kulaklığın düzeyi oynatıcıya uygulanamadı: {why}");
+                        }
                         kodi_says_volume(&kodi, &after);
                         last = Some(after);
                     }
@@ -486,8 +488,13 @@ async fn reroute(
         return Some(after);
     }
     let label = |plan: &AudioPlan| plan.device.as_ref().map(|d| d.label.clone()).unwrap_or_else(|| "yok".into());
+    // Said as the player has it: a route the live player could not open is
+    // not the route, and the next change of the headsets tries it again.
+    if let Err(why) = player.apply_audio(&before, &after).await {
+        eprintln!("mediaboxd.audio route: {} -> {} uygulanamadı, ses {} üzerinde kaldı: {why}", label(&before), label(&after), label(&before));
+        return Some(before);
+    }
     eprintln!("mediaboxd.audio route: {} -> {}", label(&before), label(&after));
-    player.apply_audio(&before, &after).await;
     kodi_follow(kodi, &after).await;
     let restore = std::sync::Arc::clone(audio);
     let _ = tokio::task::spawn_blocking(move || restore.restore()).await;

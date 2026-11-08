@@ -228,6 +228,11 @@ fn play_doing(ts: Vec<(u64, Vec<u8>)>, aid: usize, at: Duration, action: impl Fn
 /// The same, the channel numbered `epoch` by the control plane: held at its
 /// opening gate until `action` lets it go.
 fn play_with(ts: Vec<(u64, Vec<u8>)>, aid: usize, epoch: Option<u64>, at: Duration, action: impl FnOnce(&Arc<Engine>) + Send + 'static) -> Run {
+    play_on(ts, aid, Audio { device: None, passthrough: vec![], gain: 1.0, muted: false, ac3_encode: None }, epoch, at, action)
+}
+
+/// The same, the sound going where `audio` says.
+fn play_on(ts: Vec<(u64, Vec<u8>)>, aid: usize, audio: Audio, epoch: Option<u64>, at: Duration, action: impl FnOnce(&Arc<Engine>) + Send + 'static) -> Run {
     gst::init().expect("GStreamer");
     // MEDIABOX_TRACE_DIR set: the run on the timeline, as on the board.
     if std::env::var_os("MEDIABOX_TRACE_DIR").is_some() {
@@ -248,7 +253,8 @@ fn play_with(ts: Vec<(u64, Vec<u8>)>, aid: usize, epoch: Option<u64>, at: Durati
     let shared = Arc::new(Shared::default());
     let options = Options {
         video_decoder: "identity".into(),
-        audio: Audio { device: None, passthrough: vec![], gain: 1.0, muted: false, ac3_encode: None },
+        audio,
+        display_sync: false,
         demux_latency_ms: 700,
         render_delay_ms: 0,
         max_lateness_ms: None,
@@ -881,6 +887,7 @@ fn a_device_taken_from_the_start_fails_the_channel_in_its_bound() {
     let options = Options {
         video_decoder: "identity".into(),
         audio: Audio { device: Some("hw:CARD=mediabox-none,DEV=0".into()), passthrough: vec![], gain: 1.0, muted: false, ac3_encode: None },
+        display_sync: false,
         demux_latency_ms: 700,
         render_delay_ms: 0,
         max_lateness_ms: None,
@@ -1242,4 +1249,431 @@ fn a_swapped_in_sink_has_the_latency_before_its_first_buffer() {
     let mine: Vec<&String> = seen.iter().filter(|s| s.starts_with(&format!("{sink} "))).collect();
     assert!(mine.len() > 5, "{seen:?}");
     assert_eq!(mine[0], &format!("{sink} latency"), "the latency before the first buffer: {mine:?}");
+}
+
+// The sound plan changed while a channel plays: the control plane's
+// `mediabox-audio-plan`, through the control socket as the player's main
+// loop carries it out. The devices are ALSA's own `null` PCM -- a real
+// alsasink and a real device clock, no hardware -- under two names: one for
+// the television's HDMI, one for a Bluetooth headset. A device that never
+// opens is a card that is not there.
+
+const HDMI_PCM: &str = "null";
+const HEADSET_PCM: &str = "plug:null";
+const ABSENT_PCM: &str = "hw:CARD=mediabox-none,DEV=0";
+
+fn device(id: &str, kind: &str, pcm: &str, bitstream: bool) -> serde_json::Value {
+    serde_json::json!({"id": id, "label": id, "kind": kind, "card_id": "test", "pcm": pcm, "bitstream": bitstream})
+}
+
+/// The plan the control plane sends: the sound to a Bluetooth headset, PCM
+/// only, its volume the headset's own.
+fn headset_plan(pcm: &str) -> serde_json::Value {
+    serde_json::json!({"device": device("bluetooth:20:AF:1B:19:E8:D2", "bluetooth", pcm, false), "passthrough": [], "volume": 60, "muted": false})
+}
+
+/// ... and the television's, AC-3 passed through if `passthrough`.
+fn hdmi_plan(volume: u8, muted: bool, passthrough: bool) -> serde_json::Value {
+    let passthrough: Vec<&str> = if passthrough { vec!["ac3"] } else { vec![] };
+    serde_json::json!({"device": device("display:hdmi", "hdmi", HDMI_PCM, true), "passthrough": passthrough, "volume": volume, "muted": muted})
+}
+
+fn on_hdmi() -> Audio {
+    Audio { device: Some(HDMI_PCM.into()), passthrough: vec![], gain: 1.0, muted: false, ac3_encode: None }
+}
+
+/// A plan asked of the engine as the main loop hands it on; its answer
+/// comes on the receiver.
+fn ask_plan(engine: &Arc<Engine>, plan: serde_json::Value, epoch: Option<u64>, seq: u64) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    let plan: mediabox_core::AudioPlan = serde_json::from_value(plan).expect("a plan");
+    let (reply, wait) = std::sync::mpsc::sync_channel(1);
+    engine.set_audio_plan(super::PlanRequest { audio: Audio::from_plan(&plan, false), epoch, seq }, Some(reply));
+    wait
+}
+
+fn answered(wait: &std::sync::mpsc::Receiver<Result<(), String>>) -> Result<(), String> {
+    wait.recv_timeout(Duration::from_secs(4)).unwrap_or_else(|e| Err(format!("no answer: {e}")))
+}
+
+/// The level the PCM part plays at: its volume element's.
+fn level(engine: &Engine) -> Option<(f64, bool)> {
+    engine
+        .current_elements()
+        .into_iter()
+        .find(|e| e.factory().is_some_and(|f| f.name() == "volume"))
+        .map(|e| (e.property::<f64>("volume"), e.property::<bool>("mute")))
+}
+
+/// Nothing lost or doubled anywhere on the sound's way, the device never
+/// given up nor stood in for at the end, and the sound clock taken anew on
+/// each of `sinks` sinks opened after the first: a new controller and
+/// model each (`audio_clock::install`), none of the sink before's.
+fn sound_clean(run: &Run, sinks: u64) {
+    let c = run.shared.health.diagnose(|d| d.c);
+    assert_eq!(
+        (c.frame_gaps, c.frame_overlaps, c.pcm_gaps, c.pcm_overlaps, c.pcm_backward, c.sink_gaps, c.sink_overlaps, c.alsa_xruns, c.alsa_restarts),
+        (0, 0, 0, 0, 0, 0, 0, 0, 0),
+        "{c:?}"
+    );
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst), "no stand-in left");
+    assert!(!run.shared.health.sink_given_up.load(std::sync::atomic::Ordering::Relaxed));
+    let clock = &run.shared.audio_clock;
+    let o = std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(
+        clock.generations.load(o),
+        1 + sinks,
+        "the sound clock taken on each sink: used={} adopted={} resets={} fallback={} degraded={} unavailable={} unsupported={}",
+        clock.used.load(o),
+        clock.adopted.load(o),
+        clock.resets.load(o),
+        clock.fallback.load(o),
+        clock.degraded.load(o),
+        clock.unavailable.load(o),
+        clock.unsupported.load(o)
+    );
+    assert_eq!(clock.abi_guard_failed.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(clock.used.load(std::sync::atomic::Ordering::Relaxed) > 0, "the sound clock followed the device");
+    // No buffer out of the selector held up by the change: a 20-40 ms
+    // frame's interval, not a wait.
+    let audio = run.audio.lock().unwrap();
+    let longest = audio.at.windows(2).map(|w| w[1] - w[0]).max().unwrap_or_default();
+    assert!(longest < Duration::from_millis(250), "the sound stopped for {longest:?}");
+}
+
+/// The ALSA PCM the sound sink in the pipeline has open, if it is one.
+fn sink_device(engine: &Engine) -> Option<String> {
+    let sink = engine.audio_sink.lock().unwrap().clone()?;
+    (sink.factory()?.name() == "alsasink").then(|| sink.property::<Option<String>>("device")).flatten()
+}
+
+/// The control socket's handling, with the sound's commands carried out on
+/// a thread of their own as the main loop carries them out.
+struct Control {
+    commands: crate::ipc::Commands,
+    clients: crate::ipc::Clients,
+    query: crate::ipc::Query,
+}
+
+impl Control {
+    fn new(engine: &Arc<Engine>) -> Self {
+        let (commands, inbox) = std::sync::mpsc::channel::<(crate::ipc::Command, Option<super::SinkReply>)>();
+        let carrier = Arc::clone(engine);
+        std::thread::spawn(move || {
+            for (command, done) in inbox {
+                let mut done = done;
+                match command {
+                    crate::ipc::Command::Sound(command) => carrier.sound_command(command, &mut done),
+                    _ => {
+                        if let Some(done) = done.take() {
+                            let _ = done.send(Err("not carried out in this test".into()));
+                        }
+                    }
+                }
+                if let Some(done) = done {
+                    let _ = done.send(Ok(()));
+                }
+            }
+        });
+        let weak = Arc::downgrade(engine);
+        let query: crate::ipc::Query = Arc::new(move |name: &str| match name {
+            "audio-device" => weak.upgrade().map(|engine| serde_json::json!(sink_device(&engine))),
+            _ => None,
+        });
+        Self { commands, clients: crate::ipc::Clients::default(), query }
+    }
+
+    fn ask(&self, command: &[serde_json::Value]) -> (String, Option<serde_json::Value>) {
+        crate::ipc::handle(1, command, &self.clients, &self.query, &self.commands)
+    }
+}
+
+/// HDMI to a Bluetooth headset under a playing channel, as the control
+/// plane asks it: the device the player has open is the headset's, said
+/// only once it is, and nothing else of the channel is touched. At 284efd1
+/// the player had no such request ("invalid parameter"), and what the
+/// control plane sent for a route change -- `audio-device` -- it does not
+/// have either ("property unavailable"): the sound stayed on HDMI.
+#[test]
+fn a_headset_plan_moves_the_sound_device_under_the_channel() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, on_hdmi(), None, Duration::from_secs(2), move |engine| {
+        let control = Control::new(engine);
+        let before = sink_device(engine);
+        let old_way = control.ask(&[serde_json::json!("set_property"), serde_json::json!("audio-device"), serde_json::json!(format!("alsa/{HEADSET_PCM}"))]);
+        let answer = control.ask(&[serde_json::json!("mediabox-audio-plan"), headset_plan(HEADSET_PCM), serde_json::Value::Null, serde_json::json!(1)]);
+        *into.lock().unwrap() = Some((before, old_way, answer, sink_device(engine)));
+    });
+    let (before, old_way, answer, after) = got.lock().unwrap().take().unwrap();
+    assert_eq!(before.as_deref(), Some(HDMI_PCM), "the channel opened on HDMI");
+    assert_eq!(old_way.0, "property unavailable", "audio-device is not made to look done");
+    assert_eq!(answer.0, "success", "the headset plan: {answer:?}");
+    assert_eq!(answer.1, Some(serde_json::json!(HEADSET_PCM)), "the answer says the device open");
+    assert_eq!(after.as_deref(), Some(HEADSET_PCM), "the sound device the player has open");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    sound_went_on(&run, 1, 0x101, 4_500_000_000);
+    picture_handed_over(&run, false);
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 1, "one swap");
+    sound_clean(&run, 1);
+}
+
+/// To the headset and back: the device and the level back where they were
+/// (B), on the same channel, the same sound part, the same picture.
+#[test]
+fn a_headset_and_back_puts_the_television_s_sound_back() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let start = Audio { gain: 0.6f64.powi(3), ..on_hdmi() };
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start, None, Duration::from_millis(1500), move |engine| {
+        let mut into = into.lock().unwrap();
+        into.push((answered(&ask_plan(engine, headset_plan(HEADSET_PCM), None, 1)), sink_device(engine), level(engine)));
+        std::thread::sleep(Duration::from_millis(1500));
+        into.push((answered(&ask_plan(engine, hdmi_plan(60, false, false), None, 2)), sink_device(engine), level(engine)));
+    });
+    let got = got.lock().unwrap();
+    // The volume element keeps its level as a float.
+    let at = |level: Option<(f64, bool)>, want: f64| level.is_some_and(|(gain, muted)| (gain - want).abs() < 1e-6 && !muted);
+    assert_eq!((&got[0].0, got[0].1.as_deref()), (&Ok(()), Some(HEADSET_PCM)), "on the headset");
+    assert!(at(got[0].2, 1.0), "at the headset's own volume: {:?}", got[0].2);
+    assert_eq!((&got[1].0, got[1].1.as_deref()), (&Ok(()), Some(HDMI_PCM)), "back on HDMI");
+    assert!(at(got[1].2, 0.6f64.powi(3)), "at the television's volume: {:?}", got[1].2);
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 2, "two swaps");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    sound_went_on(&run, 1, 0x101, 4_500_000_000);
+    picture_handed_over(&run, false);
+    sound_clean(&run, 2);
+}
+
+/// The level and mute alone (C): on the part as it plays, no device opened.
+#[test]
+fn a_plan_that_changes_the_level_only_opens_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(5, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 5), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, on_hdmi(), None, Duration::from_millis(1500), move |engine| {
+        let mut into = into.lock().unwrap();
+        into.push((answered(&ask_plan(engine, hdmi_plan(50, false, false), None, 1)), level(engine)));
+        into.push((answered(&ask_plan(engine, hdmi_plan(50, true, false), None, 2)), level(engine)));
+    });
+    let got = got.lock().unwrap();
+    let at = |level: Option<(f64, bool)>, muted: bool| level.is_some_and(|(gain, m)| (gain - 0.125).abs() < 1e-6 && m == muted);
+    assert!(got[0].0.is_ok() && at(got[0].1, false), "{:?}", got[0]);
+    assert!(got[1].0.is_ok() && at(got[1].1, true), "{:?}", got[1]);
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 0, "no swap");
+    assert_eq!(sink_device(&run.engine).as_deref(), Some(HDMI_PCM));
+    sound_went_on(&run, 1, 0x101, 3_500_000_000);
+    picture_handed_over(&run, false);
+    sound_clean(&run, 0);
+}
+
+/// The headset's device will not open (D): answered so, the television's
+/// device open again at once, the plan before in force, the sound on.
+#[test]
+fn a_headset_that_will_not_open_leaves_the_television_s_sound() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, on_hdmi(), None, Duration::from_millis(1500), move |engine| {
+        let answer = answered(&ask_plan(engine, headset_plan(ABSENT_PCM), None, 1));
+        *into.lock().unwrap() = Some((answer, sink_device(engine), engine.audio()));
+    });
+    let (answer, device, audio) = got.lock().unwrap().take().unwrap();
+    assert!(answer.is_err(), "not answered as done: {answer:?}");
+    assert_eq!(device.as_deref(), Some(HDMI_PCM), "the television's device open again");
+    assert_eq!(audio, on_hdmi(), "the plan before in force");
+    assert_eq!(run.shared.health.sink_open_failures.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1);
+    sound_went_on(&run, 1, 0x101, 4_500_000_000);
+    picture_handed_over(&run, false);
+    // The failed open and the one back: two sinks after the first, the
+    // second the television's again.
+    sound_clean(&run, 1);
+}
+
+/// Requests one after another while one waits for its turn (E): the one
+/// under way is answered only once its device is open; those after it but
+/// the newest are answered superseded; the newest is done after it. The
+/// headset's change does not undo the newer one's, and nothing is opened
+/// for the ones that never were.
+#[test]
+fn the_newest_plan_wins_and_an_older_one_done_undoes_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, on_hdmi(), None, Duration::from_millis(1500), move |engine| {
+        let (src, block) = hold_the_sink(engine);
+        let headset = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        let back = ask_plan(engine, hdmi_plan(100, false, false), None, 2);
+        let again = ask_plan(engine, headset_plan(HEADSET_PCM), None, 3);
+        let last = ask_plan(engine, hdmi_plan(100, false, false), None, 4);
+        // Nothing passes the selector: nothing is done, nothing answered.
+        let early = headset.recv_timeout(Duration::from_millis(400));
+        src.remove_probe(block);
+        let answers = (answered(&headset), answered(&back), answered(&again), answered(&last));
+        *into.lock().unwrap() = Some((early, answers, sink_device(engine)));
+    });
+    let (early, (headset, back, again, last), device) = got.lock().unwrap().take().unwrap();
+    assert!(early.is_err(), "answered before its device was open: {early:?}");
+    assert_eq!(headset, Ok(()));
+    assert!(back.is_err() && again.is_err(), "the superseded: {back:?} {again:?}");
+    assert_eq!(last, Ok(()));
+    assert_eq!(device.as_deref(), Some(HDMI_PCM), "the newest plan in force");
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 2, "to the headset and back: no third");
+    sound_went_on(&run, 1, 0x101, 4_500_000_000);
+    picture_handed_over(&run, false);
+}
+
+/// A plan asked for the channel being left (F): called off by the change,
+/// never made on the next; one for another channel's number refused; the
+/// next channel opened on the plan in force, and the plan asked again for
+/// it done on it.
+#[test]
+fn a_plan_for_the_channel_left_is_not_made_on_the_next() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(7, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 7), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, on_hdmi(), None, Duration::from_millis(1500), move |engine| {
+        let (src, block) = hold_the_sink(engine);
+        let left = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        let path = engine.current_path().unwrap();
+        engine.open(&path).expect("the next channel");
+        src.remove_probe(block);
+        let left = answered(&left);
+        std::thread::sleep(Duration::from_millis(1000));
+        let after_change = sink_device(engine);
+        let other = answered(&ask_plan(engine, headset_plan(HEADSET_PCM), Some(9), 2));
+        let asked_again = answered(&ask_plan(engine, headset_plan(HEADSET_PCM), None, 3));
+        *into.lock().unwrap() = Some((left, after_change, other, asked_again, sink_device(engine)));
+    });
+    let (left, after_change, other, asked_again, device) = got.lock().unwrap().take().unwrap();
+    assert!(left.is_err(), "called off: {left:?}");
+    assert_eq!(after_change.as_deref(), Some(HDMI_PCM), "the next channel on the plan in force");
+    assert_eq!(other, Err(mediabox_core::audio::LIVE_PLAN_OTHER_CHANNEL.to_string()));
+    assert_eq!(asked_again, Ok(()));
+    assert_eq!(device.as_deref(), Some(HEADSET_PCM));
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 1, "one swap, on the next channel");
+}
+
+/// AC-3 passed through to the television, to the headset and back (G):
+/// the sound part built again for PCM and then for the bitstream, each
+/// let go where the one before ended; the device opened in each part's
+/// form; the picture, its decoder and the channel as they were.
+#[test]
+fn a_passed_through_sound_goes_to_the_headset_as_pcm_and_back() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x06, 0x101, vec![0x6A, 1, 0])];
+    let ts = stream_for(7, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xBD, units: repeated(ac3(), 7), from: 0, to: u64::MAX }]);
+    let start = Audio { passthrough: vec![mediabox_core::AudioCodec::Ac3], ..on_hdmi() };
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start, None, Duration::from_millis(1500), move |engine| {
+        let mut into = into.lock().unwrap();
+        let form = |engine: &Engine| (sink_device(engine), engine.bitstream(), engine.shared.info.lock().unwrap().passthrough);
+        into.push((Ok(()), form(engine)));
+        into.push((answered(&ask_plan(engine, headset_plan(HEADSET_PCM), None, 1)), form(engine)));
+        std::thread::sleep(Duration::from_millis(1500));
+        into.push((answered(&ask_plan(engine, hdmi_plan(100, false, true), None, 2)), form(engine)));
+    });
+    let got = got.lock().unwrap();
+    assert_eq!(got[0], (Ok(()), (Some(HDMI_PCM.into()), true, true)), "passed through to the television");
+    assert_eq!(got[1], (Ok(()), (Some(HEADSET_PCM.into()), false, false)), "PCM to the headset");
+    assert_eq!(got[2], (Ok(()), (Some(HDMI_PCM.into()), true, true)), "passed through again");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    // Three parts one after the other, the old never after the new.
+    sound_went_on(&run, 3, 0x101, 5_500_000_000);
+    picture_handed_over(&run, false);
+    let c = run.shared.health.diagnose(|d| d.c);
+    assert_eq!((c.frame_gaps, c.frame_overlaps, c.pcm_gaps, c.pcm_overlaps, c.alsa_xruns), (0, 0, 0, 0, 0), "{c:?}");
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+    let audio = run.audio.lock().unwrap();
+    let longest = audio.at.windows(2).map(|w| w[1] - w[0]).max().unwrap_or_default();
+    assert!(longest < Duration::from_millis(250), "the sound stopped for {longest:?}");
+}
+
+/// A headset that will not open, for a passed-through sound (D, G): tried
+/// before anything is taken down, and nothing is.
+#[test]
+fn a_headset_that_will_not_open_takes_nothing_down() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x06, 0x101, vec![0x6A, 1, 0])];
+    let ts = stream_for(5, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xBD, units: repeated(ac3(), 5), from: 0, to: u64::MAX }]);
+    let start = Audio { passthrough: vec![mediabox_core::AudioCodec::Ac3], ..on_hdmi() };
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let opened = engine.swaps.lock().unwrap().opened;
+        let answer = answered(&ask_plan(engine, headset_plan(ABSENT_PCM), None, 1));
+        std::thread::sleep(Duration::from_millis(500));
+        let swapped = engine.swaps.lock().unwrap().opened - opened;
+        *into.lock().unwrap() = Some((answer, sink_device(engine), engine.bitstream(), engine.audio(), swapped));
+    });
+    let (answer, device, bitstream, audio, swapped) = got.lock().unwrap().take().unwrap();
+    assert!(answer.is_err(), "{answer:?}");
+    assert_eq!((device.as_deref(), bitstream), (Some(HDMI_PCM), true));
+    assert_eq!(audio, start);
+    assert_eq!(swapped, 0, "nothing swapped");
+    sound_went_on(&run, 1, 0x101, 3_500_000_000);
+    picture_handed_over(&run, false);
+}
+
+/// `ao-reload` after a mode change (H) opens the plan in force again --
+/// the same device -- and one asked while a plan's swap waits is done by
+/// that swap's open: the headset's, not the device before.
+#[test]
+fn a_reload_opens_the_plan_in_force_again() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, on_hdmi(), None, Duration::from_millis(1500), move |engine| {
+        let mut into = into.lock().unwrap();
+        let (reply, wait) = std::sync::mpsc::sync_channel(1);
+        engine.reopen_audio_sink(Some(reply));
+        into.push((answered(&wait), sink_device(engine)));
+        // Played on before it is held: its sound clock taken too.
+        std::thread::sleep(Duration::from_millis(300));
+        let (src, block) = hold_the_sink(engine);
+        let plan = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        let (reply, reload) = std::sync::mpsc::sync_channel(1);
+        engine.reopen_audio_sink(Some(reply));
+        src.remove_probe(block);
+        into.push((answered(&plan), sink_device(engine)));
+        into.push((answered(&reload), sink_device(engine)));
+    });
+    let got = got.lock().unwrap();
+    assert_eq!(got[0], (Ok(()), Some(HDMI_PCM.into())), "the same device again");
+    assert_eq!(got[1], (Ok(()), Some(HEADSET_PCM.into())));
+    assert_eq!(got[2], (Ok(()), Some(HEADSET_PCM.into())), "the reload done by the plan's open");
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 2, "the reload, then the plan's");
+    // Every sink after the first played: the reload's and the headset's.
+    assert_eq!(run.engine.audio().device.as_deref(), Some(HEADSET_PCM));
+    sound_went_on(&run, 1, 0x101, 4_500_000_000);
+    picture_handed_over(&run, false);
+    sound_clean(&run, 2);
+}
+
+/// The PCM a bitstream goes on: the device's own, its channel status in
+/// mpv's form. (The tests' `null` devices take no arguments.)
+#[test]
+fn a_bitstream_is_sent_on_the_device_with_its_channel_status() {
+    assert_eq!(super::bitstream_pcm("hdmi:CARD=rockchiphdmi0,DEV=0"), "hdmi:CARD=rockchiphdmi0,DEV=0,AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02");
 }

@@ -6,10 +6,10 @@
 //! channel opened in the running player, `get_property` for where it is and
 //! whether it shows the channel, `observe_property eof-reached`, `aid`,
 //! `volume`/`mute`, `audio-delay`, `ao-reload` after a display mode change,
-//! `quit`. Only what is done is answered
-//! "success": a property this player does not have is "property
-//! unavailable", a command it does not carry out an error, and a channel that
-//! cannot be opened answers with why.
+//! `mediabox-audio-plan` when the sound's way out changes, `quit`. Only
+//! what is done is answered "success": a property this player does not
+//! have is "property unavailable", a command it does not carry out an
+//! error, and a channel that cannot be opened answers with why.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -32,12 +32,25 @@ pub enum Command {
     Fail(String),
     Pause(bool),
     Aid(Option<usize>),
-    Volume { gain: Option<f64>, muted: Option<bool> },
+    /// The sound device and its level: carried out by the engine alone
+    /// (`Engine::sound_command`).
+    Sound(SoundCommand),
     AudioDelay(f64),
-    /// mpv's `ao-reload`: the sound device opened again, on the display
-    /// mode that is on now.
-    ReloadSound,
     Quit,
+}
+
+/// What is asked of the sound's way out.
+pub enum SoundCommand {
+    Volume { gain: Option<f64>, muted: Option<bool> },
+    /// mpv's `ao-reload`: the sound device opened again, on the display
+    /// mode that is on now -- the same plan, the same device.
+    Reload,
+    /// The control plane's whole sound plan (`mediabox-audio-plan`), for
+    /// its channel `epoch`, its `seq`-th: the device, what is passed
+    /// through or encoded, the level -- taken as one, never a property at
+    /// a time. Answered once the device it names is open, or with why not
+    /// and the plan before it back in force.
+    Plan { plan: Box<mediabox_core::AudioPlan>, epoch: Option<u64>, seq: u64 },
 }
 
 /// Answers the engine gives without a round trip: read from shared state by
@@ -150,7 +163,7 @@ fn run(commands: &Commands, command: Command) -> String {
     }
 }
 
-fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, commands: &Commands) -> (String, Option<Value>) {
+pub(crate) fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, commands: &Commands) -> (String, Option<Value>) {
     let word = |at: usize| command.get(at).and_then(Value::as_str).unwrap_or_default();
     match word(0) {
         "get_property" | "get_property_string" => match query(word(1)) {
@@ -194,6 +207,18 @@ fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, comm
             }
             _ => ("invalid parameter".into(), None),
         },
+        // ["mediabox-audio-plan", <AudioPlan>, <epoch>, <seq>]: answered with
+        // the device the player has open once the plan is in force.
+        "mediabox-audio-plan" => {
+            let Some(plan) = command.get(1).cloned().and_then(|plan| serde_json::from_value::<mediabox_core::AudioPlan>(plan).ok()) else {
+                return ("invalid parameter".into(), None);
+            };
+            let epoch = command.get(2).and_then(Value::as_u64);
+            let seq = command.get(3).and_then(Value::as_u64).unwrap_or(0);
+            let result = run(commands, Command::Sound(SoundCommand::Plan { plan: Box::new(plan), epoch, seq }));
+            let device = (result == "success").then(|| query("audio-device").unwrap_or(Value::Null));
+            (result, device)
+        }
         "set_property" | "set_property_string" => {
             let value = command.get(2).cloned().unwrap_or(Value::Null);
             let number = || value.as_f64().or_else(|| value.as_str().and_then(|text| text.parse().ok()));
@@ -218,11 +243,11 @@ fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, comm
                 }
                 "volume" => match number() {
                     // mpv's volume curve is cubic.
-                    Some(volume) => (run(commands, Command::Volume { gain: Some((volume / 100.0).max(0.0).powi(3)), muted: None }), None),
+                    Some(volume) => (run(commands, Command::Sound(SoundCommand::Volume { gain: Some((volume / 100.0).max(0.0).powi(3)), muted: None })), None),
                     None => ("invalid parameter".into(), None),
                 },
                 "mute" => match flag() {
-                    Some(muted) => (run(commands, Command::Volume { gain: None, muted: Some(muted) }), None),
+                    Some(muted) => (run(commands, Command::Sound(SoundCommand::Volume { gain: None, muted: Some(muted) })), None),
                     None => ("invalid parameter".into(), None),
                 },
                 "audio-delay" => match number() {
@@ -239,7 +264,7 @@ fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, comm
         // Answered with the channel the player is on when the device is
         // open again: the control plane counts it for that channel only.
         "ao-reload" => {
-            let result = run(commands, Command::ReloadSound);
+            let result = run(commands, Command::Sound(SoundCommand::Reload));
             let epoch = query("mediabox-gate").and_then(|gate| gate.get("epoch").cloned()).unwrap_or(Value::Null);
             (result, Some(json!({"epoch": epoch})))
         }

@@ -241,10 +241,11 @@ impl AppState {
             Request::AudioSet { setting } => {
                 let audio = Arc::clone(&self.audio);
                 match tokio::task::spawn_blocking(move || audio.set(setting)).await {
-                    Ok(Ok((before, after))) => {
-                        self.player.apply_audio(&before, &after).await;
-                        Response::success(self.audio_status().await)
-                    }
+                    Ok(Ok((before, after))) => match self.player.apply_audio(&before, &after).await {
+                        Ok(()) => Response::success(self.audio_status().await),
+                        // Kept, but not what plays: said, not shown as done.
+                        Err(why) => Response::failure("AUDIO_NOT_APPLIED", format!("Ses ayarı kaydedildi, oynatıcı uygulayamadı: {why}")),
+                    },
                     Ok(Err(why)) => Response::failure("AUDIO_REFUSED", why),
                     Err(error) => Response::failure("INTERNAL_ERROR", error.to_string()),
                 }
@@ -266,10 +267,10 @@ impl AppState {
                 let audio = Arc::clone(&self.audio);
                 let before = self.audio.now().2;
                 match tokio::task::spawn_blocking(move || audio.volume(change)).await {
-                    Ok(Ok(after)) => {
-                        self.player.apply_audio(&before, &after).await;
-                        Response::success(self.audio_status().await)
-                    }
+                    Ok(Ok(after)) => match self.player.apply_audio(&before, &after).await {
+                        Ok(()) => Response::success(self.audio_status().await),
+                        Err(why) => Response::failure("AUDIO_NOT_APPLIED", format!("Ses düzeyi kaydedildi, oynatıcı uygulayamadı: {why}")),
+                    },
                     Ok(Err(why)) => Response::failure("AUDIO_REFUSED", why),
                     Err(error) => Response::failure("INTERNAL_ERROR", error.to_string()),
                 }

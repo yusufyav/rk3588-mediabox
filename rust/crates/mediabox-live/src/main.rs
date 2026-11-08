@@ -92,10 +92,15 @@ fn env_u32(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
 }
 
+/// "Oynatımı görüntüye eşitle": sound as PCM, as films send it then.
+fn display_sync() -> bool {
+    std::env::var("MEDIABOX_PLAYER_DISPLAY_SYNC").as_deref() == Ok("1")
+}
+
 /// Where the sound goes, from the kept sound setting (`mediabox-platform
-/// audio-plan`), the plan films are played with too.
+/// audio-plan`), the plan films are played with too. Later plans come from
+/// the control plane over the control socket (`mediabox-audio-plan`).
 fn sound_plan() -> Audio {
-    let display_sync = std::env::var("MEDIABOX_PLAYER_DISPLAY_SYNC").as_deref() == Ok("1");
     if let Ok(device) = std::env::var("MEDIABOX_LIVE_AUDIO_DEVICE") {
         return Audio {
             device: (!device.is_empty() && device != "none").then_some(device),
@@ -116,21 +121,7 @@ fn sound_plan() -> Audio {
         eprintln!("mediabox-live: ses planı okunamadı; ses gönderilmiyor");
         return Audio { device: None, passthrough: Vec::new(), gain: 1.0, muted: false, ac3_encode: None };
     };
-    let volume = f64::from(plan.player_volume()) / 100.0;
-    Audio {
-        device: plan.device.as_ref().map(|device| device.pcm.clone()),
-        // "Oynatımı görüntüye eşitle" sends PCM, as films do (Kodi: no
-        // passthrough while usedisplayasclock is on).
-        passthrough: if display_sync { Vec::new() } else { plan.passthrough.clone() },
-        gain: volume.powi(3),
-        muted: plan.muted,
-        // The setting's Dolby Digital encoding; off with "Oynatımı görüntüye
-        // eşitle", as for films.
-        ac3_encode: plan
-            .ac3_encode
-            .filter(|_| !display_sync)
-            .map(|encode| (encode.kbps.unwrap_or(448), u32::from(encode.min_channels))),
-    }
+    Audio::from_plan(&plan, display_sync())
 }
 
 /// SIGTERM and SIGINT end the film the way `quit` does: the picture is taken
@@ -272,6 +263,7 @@ fn main() {
     let options = Options {
         video_decoder: std::env::var("MEDIABOX_LIVE_VIDEO_DECODER").unwrap_or_else(|_| "mppvideodec".into()),
         audio,
+        display_sync: display_sync(),
         demux_latency_ms: env_u32("MEDIABOX_LIVE_DEMUX_LATENCY_MS", DEMUX_LATENCY_MS),
         render_delay_ms: env_u32("MEDIABOX_LIVE_RENDER_DELAY_MS", 40),
         max_lateness_ms: std::env::var("MEDIABOX_LIVE_MAX_LATENESS_MS").ok().and_then(|value| value.parse().ok()),
@@ -353,11 +345,10 @@ fn main() {
                         clients.changed("pause", json!(paused));
                     }
                     Command::Aid(aid) => engine.set_aid(aid),
-                    Command::Volume { gain, muted } => engine.set_volume(gain, muted),
                     Command::AudioDelay(seconds) => engine.set_audio_delay(seconds),
-                    // Answered when the device is open again, or given up
-                    // on: not when asked.
-                    Command::ReloadSound => engine.reopen_audio_sink(done.take()),
+                    // A device opened again is answered when it is open, or
+                    // given up on: not when asked.
+                    Command::Sound(command) => engine.sound_command(command, &mut done),
                     Command::Fail(why) => {
                         eprintln!("mediabox-live: {why}");
                         failure = Some(why);
@@ -625,6 +616,10 @@ fn query(engine: Arc<Engine>, shared: Arc<Shared>, plane: Arc<plane::Plane>) -> 
                     json!({"format": format, "samplerate": rate, "channels": layout(channels), "channel-count": channels})
                 }
             }
+            // The ALSA PCM the sound sink has open -- the plan's device once
+            // it opened, not the plan: null with none, the stand-in, or no
+            // device.
+            "audio-device" => json!(engine.sound_device_open()),
             "volume" => json!((engine.audio().gain.cbrt() * 100.0).round()),
             "mute" => json!(engine.audio().muted),
             "aid" => match engine.aid() {

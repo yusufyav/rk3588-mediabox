@@ -796,6 +796,21 @@ impl Reader {
         Some(switch)
     }
 
+    /// The sound's part built again for the stream it is on, from its next
+    /// PES (`Switch::rebuild`): the sound plan changed the form it is sent
+    /// in -- passed through, encoded or PCM -- and only a new part can send
+    /// it so. The old part plays out what it holds first. None when no
+    /// sound is playing, or its codec is not known yet.
+    pub fn rebuild(&mut self) -> Option<Switch> {
+        let sound = self.sound.as_mut()?;
+        if sound.state != SoundState::Playing {
+            return None;
+        }
+        let switch = Switch { pid: sound.pid, codec: sound.codec?, rebuild: true };
+        sound.switch = Some(switch);
+        Some(switch)
+    }
+
     fn event(&mut self, event: Event, out: &mut Output) {
         self.counts.add(&event);
         out.events.push(event);
