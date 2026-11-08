@@ -219,6 +219,17 @@ pub struct LiveManager {
     paths: LivePaths,
     inner: Mutex<Inner>,
     starts: AtomicU64,
+    #[cfg(test)]
+    seam: TestSeam,
+}
+
+/// What a test stands in for: the receiver's unit, and the moment
+/// `final_end` waits on the receiver.
+#[cfg(test)]
+#[derive(Default)]
+struct TestSeam {
+    unit_active: std::sync::atomic::AtomicBool,
+    waiting: tokio::sync::Notify,
 }
 
 /// What the receiver's ending means to the viewer.
@@ -282,6 +293,8 @@ impl LiveManager {
                 setup: None,
             }),
             starts: AtomicU64::new(0),
+            #[cfg(test)]
+            seam: TestSeam::default(),
         }
     }
 
@@ -380,9 +393,14 @@ impl LiveManager {
     /// The receiver's status, if it is this start's.
     pub fn read_status(&self) -> Option<Value> {
         let token = self.lock().token.clone()?;
+        self.read_status_of(&token)
+    }
+
+    /// The receiver's status, if it is start `token`'s.
+    fn read_status_of(&self, token: &str) -> Option<Value> {
         let text = std::fs::read_to_string(self.paths.status()).ok()?;
         let status: Value = serde_json::from_str(&text).ok()?;
-        (status.get("token").and_then(Value::as_str) == Some(token.as_str())).then_some(status)
+        (status.get("token").and_then(Value::as_str) == Some(token)).then_some(status)
     }
 
     fn final_of(status: &Value) -> Option<(String, Option<String>)> {
@@ -676,11 +694,18 @@ impl LiveManager {
     /// stream: the receiver writes its last status before it closes the
     /// FIFO, so it is there, or about to be. None while the receiver still
     /// runs (the player went first).
+    ///
+    /// The end is that of the start running when it is asked: once a stop
+    /// that was asked for has cleared that start, or another has replaced
+    /// it, there is none to report, and nothing is recorded against it.
     pub async fn final_end(&self) -> Option<SourceEnd> {
-        self.lock().token.as_ref()?;
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let token = self.lock().token.clone()?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
-            if let Some(status) = self.read_status()
+            if self.lock().token.as_deref() != Some(token.as_str()) {
+                return None;
+            }
+            if let Some(status) = self.read_status_of(&token)
                 && let Some((end, message)) = Self::final_of(&status)
             {
                 self.lock().last = Some(status);
@@ -691,19 +716,47 @@ impl LiveManager {
                 if let Some(text) = &text
                     && !matches!(end.as_str(), "stopped" | "player_closed")
                 {
-                    self.fail(text.clone());
+                    self.fail_of(&token, text.clone(), false);
                 }
                 return Some(SourceEnd { natural, message: text });
             }
-            if Instant::now() > deadline {
-                return (!Self::unit_active().await).then(|| {
-                    let text = "Uydu alıcısı süreci beklenmedik biçimde kapandı.".to_string();
-                    self.fail(text.clone());
-                    SourceEnd { natural: false, message: Some(text) }
-                });
+            if tokio::time::Instant::now() > deadline {
+                if self.receiver_unit_active().await {
+                    return None;
+                }
+                // A unit stopped on request is not one that died.
+                let text = "Uydu alıcısı süreci beklenmedik biçimde kapandı.".to_string();
+                return self.fail_of(&token, text.clone(), true).then_some(SourceEnd { natural: false, message: Some(text) });
             }
+            #[cfg(test)]
+            self.seam.waiting.notify_one();
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// [`LiveManager::fail`], only while start `token` is still the
+    /// receiver's and, with `unless_stopping`, no stop has been asked of it;
+    /// checked and recorded under one lock. Whether it was recorded.
+    fn fail_of(&self, token: &str, reason: String, unless_stopping: bool) -> bool {
+        let mut inner = self.lock();
+        if inner.token.as_deref() != Some(token)
+            || (unless_stopping && matches!(inner.lifecycle, Lifecycle::Stopping | Lifecycle::Cleaned))
+        {
+            return false;
+        }
+        inner.failure = Some(reason);
+        if inner.lifecycle != Lifecycle::Failed {
+            eprintln!("mediaboxd-rs: live {:?} -> {:?}", inner.lifecycle, Lifecycle::Failed);
+            inner.lifecycle = Lifecycle::Failed;
+        }
+        true
+    }
+
+    async fn receiver_unit_active(&self) -> bool {
+        #[cfg(test)]
+        return self.seam.unit_active.load(Ordering::SeqCst);
+        #[cfg(not(test))]
+        Self::unit_active().await
     }
 
     /// Stop the receiver and wait for its cleanup. Quiet when none runs.
@@ -2294,6 +2347,69 @@ mod tests {
         assert_eq!(end.message.as_deref(), Some("Oynatıcı kapandı."));
         assert_eq!(live.lifecycle(), Lifecycle::Idle, "but the receiver did not fail");
         assert!(live.status()["failure"].is_null());
+    }
+
+    /// FAZ 3A (2026-11-08): Back stopped a live channel while its player's
+    /// end waited on the receiver's last word. The stop cleared the start's
+    /// token, the wait read no status of its start any more, and 3 s later
+    /// took the stopped unit for a receiver that died: Cleaned -> Failed.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_asked_for_while_the_end_is_awaited_is_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        live.lock().token = Some("1-6".into());
+        live.set(Lifecycle::Playing);
+        let status = dir.path().join("status.json");
+        std::fs::write(&status, r#"{"token":"1-6","state":"streaming"}"#).unwrap();
+        let (end, ()) = tokio::join!(live.final_end(), async {
+            live.seam.waiting.notified().await;
+            assert_eq!(live.lifecycle(), Lifecycle::Playing, "waiting on a running receiver");
+            // The stop: SIGTERM, the receiver's last status, its unit gone.
+            std::fs::write(&status, r#"{"token":"1-6","state":"ended","end":"stopped"}"#).unwrap();
+            live.stop().await;
+            assert_eq!(live.lifecycle(), Lifecycle::Cleaned);
+        });
+        assert!(!live.seam.unit_active.load(Ordering::SeqCst));
+        assert_eq!(end, None, "a stop that was asked for is no end of the source's");
+        assert_eq!(live.lifecycle(), Lifecycle::Cleaned);
+        assert!(live.status()["failure"].is_null());
+    }
+
+    /// The wait for one start's end does not touch the receiver started
+    /// after it.
+    #[tokio::test(start_paused = true)]
+    async fn the_end_awaited_for_one_start_leaves_the_next_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        live.lock().token = Some("1-6".into());
+        live.set(Lifecycle::Playing);
+        std::fs::write(dir.path().join("status.json"), r#"{"token":"1-6","state":"streaming"}"#).unwrap();
+        let (end, ()) = tokio::join!(live.final_end(), async {
+            live.seam.waiting.notified().await;
+            live.stop().await;
+            live.lock().token = Some("1-7".into());
+            live.set(Lifecycle::Starting);
+        });
+        assert_eq!(end, None);
+        assert_eq!(live.lifecycle(), Lifecycle::Starting);
+        assert!(live.status()["failure"].is_null());
+    }
+
+    /// A receiver of this start gone without a last word, nothing having
+    /// asked it to stop, is a failure; another start's status says nothing
+    /// of it.
+    #[tokio::test(start_paused = true)]
+    async fn a_receiver_that_vanishes_unasked_is_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        live.lock().token = Some("1-8".into());
+        live.set(Lifecycle::Playing);
+        std::fs::write(dir.path().join("status.json"), r#"{"token":"1-7","state":"failed","end":"no_lock"}"#).unwrap();
+        let end = live.final_end().await.unwrap();
+        assert!(!end.natural);
+        assert_eq!(end.message.as_deref(), Some("Uydu alıcısı süreci beklenmedik biçimde kapandı."));
+        assert_eq!(live.lifecycle(), Lifecycle::Failed);
+        assert_eq!(live.status()["failure"], "Uydu alıcısı süreci beklenmedik biçimde kapandı.");
     }
 
     fn event(start: i64, minutes: u32, title: &str) -> LiveEvent {
