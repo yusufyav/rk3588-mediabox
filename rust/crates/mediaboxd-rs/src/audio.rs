@@ -33,6 +33,130 @@ pub enum VolumeChange {
     ToggleMute,
 }
 
+/// The plan sound goes out on, as it is in force.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Route {
+    /// Put in force by the player playing, which said it opened the plan's
+    /// device.
+    Applied(AudioPlan),
+    /// Nothing of ours was playing: what the next player is opened with,
+    /// and what Kodi and the browser were moved to.
+    Selected(AudioPlan),
+}
+
+impl Route {
+    pub fn plan(&self) -> &AudioPlan {
+        match self {
+            Route::Applied(plan) | Route::Selected(plan) => plan,
+        }
+    }
+}
+
+/// Who took a plan: the player playing, or nobody -- nothing of ours was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taken {
+    Player,
+    Nothing,
+}
+
+/// Where a plan is put in force: the interface's player
+/// ([`crate::player::PlayerManager`]). An error is the player's: the plan
+/// before still in force there, unless the error says the failed state
+/// ([`mediabox_core::audio::LIVE_PLAN_FAILED_STATE`]).
+pub trait PlanTaker: Send + Sync {
+    fn take<'a>(
+        &'a self,
+        before: &'a AudioPlan,
+        after: &'a AudioPlan,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Taken, String>> + Send + 'a>>;
+}
+
+/// A change asked of [`Audio::change`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Want {
+    /// The setting, as the interface chose it.
+    Setting(AudioSetting),
+    /// The volume alone: the remote's keys, the slider.
+    Volume(VolumeChange),
+    /// The headset playing the sound moved its own volume (AVRCP, 0-127).
+    HeadsetLevel { address: String, level: u8 },
+    /// The devices changed (a headset came or went): the setting's plan on
+    /// the devices found now, if it names another device.
+    Route,
+}
+
+/// A change not made, and what that left.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChangeError {
+    /// Not a setting that can be chosen here: nothing tried.
+    Refused(String),
+    /// The player did not put it in force: nothing changed.
+    NotApplied(String),
+    /// Put in force, then not written down: the player put back on the
+    /// plan before, nothing kept.
+    NotKept(String),
+    /// Neither it nor the plan before is known to be in force: the sound's
+    /// failed state, in the status until a change is made.
+    Failed(String),
+}
+
+impl ChangeError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            ChangeError::Refused(_) => "AUDIO_REFUSED",
+            ChangeError::NotApplied(_) => "AUDIO_NOT_APPLIED",
+            ChangeError::NotKept(_) => "AUDIO_NOT_KEPT",
+            ChangeError::Failed(_) => "AUDIO_FAILED_STATE",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            ChangeError::Refused(why) | ChangeError::NotApplied(why) | ChangeError::NotKept(why) | ChangeError::Failed(why) => why,
+        }
+    }
+}
+
+/// A change made: the plan in force before it and the one in force now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change {
+    pub before: AudioPlan,
+    pub after: AudioPlan,
+}
+
+/// What a change made puts on the card or the headset once it is kept.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Say {
+    /// The level, on the softvol control or the headset.
+    Level,
+    /// Nothing said back to the headset its own level came from -- only
+    /// its mute, if that moved -- and the interface told.
+    HeadsetOwn,
+}
+
+/// A change worked out against the devices found now, not made yet.
+struct Resolved {
+    wanted: AudioSetting,
+    kept: AudioSetting,
+    before: AudioPlan,
+    after: AudioPlan,
+    say: Say,
+}
+
+/// Sound's three states, each with one owner:
+///
+/// - the setting: what a person chose, kept in `audio.json`;
+/// - the candidate: what the setting means on the devices found now
+///   (`now`), worked out on every look and never put anywhere by looking;
+/// - the route: the plan in force ([`Route`]), changed only by a change
+///   the player took (`change`).
+///
+/// A change is one transaction, one at a time end to end (`changes`): the
+/// candidate worked out and checked, put in force by the player, then
+/// written down, then kept in memory and said to the card. A player that
+/// does not take it leaves all three as they were; a setting that cannot
+/// be written after the player took it is taken back from the player
+/// before the answer.
 pub struct Audio {
     setting_path: PathBuf,
     setting: Mutex<AudioSetting>,
@@ -42,12 +166,14 @@ pub struct Audio {
     softvol: Box<dyn Fn(&AudioPlan) + Send + Sync>,
     /// What the interface should show that it did not ask for.
     events: tokio::sync::broadcast::Sender<mediabox_core::AudioEvent>,
-    /// The device the last plan worked out sends sound to.
-    active: std::sync::Mutex<Option<AudioDevice>>,
-    /// One change to the setting at a time, read and written under it: a held
-    /// key's steps arrive together, and each read the same level and wrote
-    /// the same next one when they were not serialised.
-    serial: std::sync::Mutex<()>,
+    /// The plan in force.
+    route: Mutex<Option<Route>>,
+    /// The failed state the last change left, until one is made.
+    fault: Mutex<Option<String>>,
+    /// One change at a time, from its working out to its keeping: the
+    /// interface's requests, the volume keys and the headsets' coming and
+    /// going alike.
+    changes: tokio::sync::Mutex<()>,
 }
 
 impl Audio {
@@ -67,58 +193,30 @@ impl Audio {
             discover: Box::new(discover),
             softvol: Box::new(softvol),
             events: tokio::sync::broadcast::channel(16).0,
-            active: std::sync::Mutex::new(None),
-            serial: std::sync::Mutex::new(()),
+            route: Mutex::new(None),
+            fault: Mutex::new(None),
+            changes: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// The device sound goes to, as last worked out.
+    /// The device sound goes to: the route's. Kodi's headset keymap and
+    /// the headsets' keys follow this, never the candidate.
     pub fn active_device(&self) -> Option<AudioDevice> {
-        self.active.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.route().and_then(|route| route.plan().device.clone())
+    }
+
+    /// The plan in force.
+    pub fn route(&self) -> Option<Route> {
+        self.route.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The failed state the last change left, if it did.
+    pub fn fault(&self) -> Option<String> {
+        self.fault.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<mediabox_core::AudioEvent> {
         self.events.subscribe()
-    }
-
-    /// The headset playing the sound moved its own volume to `level` (AVRCP,
-    /// 0-127): the box's volume follows, as Android's does, and the
-    /// interface is told so it can show it. A level that is the box's own
-    /// coming back from the headset changes nothing and says nothing.
-    /// Returns the plan before and after when it changed.
-    pub fn headset_volume(&self, address: &str, level: u8) -> Option<(AudioPlan, AudioPlan)> {
-        let _serial = self.serial.lock().unwrap_or_else(|e| e.into_inner());
-        let (setting, _, before) = self.now();
-        let playing = before
-            .device
-            .as_ref()
-            .is_some_and(|device| device.id == format!("bluetooth:{address}"));
-        let volume = mediabox_core::audio::from_avrcp(level);
-        if !playing || volume == setting.volume {
-            return None;
-        }
-        let mut wanted = setting.clone();
-        wanted.volume = volume;
-        // Turning it up is unmuting it, as on every television.
-        if volume > setting.volume {
-            wanted.muted = false;
-        }
-        // Android's FLAG_BLUETOOTH_ABS_VOLUME: a level that came from the
-        // headset is kept and shown, and never said back to the headset --
-        // AudioService posts a level to AVRCP only when that flag is absent.
-        // Saying it back is what made the loop: the headset answered, the
-        // answer looked like a press, and it was said back again.
-        let (before, after) = self.keep(wanted).ok()?;
-        if before.muted != after.muted
-            && let Some(device) = &after.device
-        {
-            set_headset_mute(device, after.muted);
-        }
-        let _ = self.events.send(mediabox_core::AudioEvent::Volume {
-            volume: after.volume,
-            muted: after.muted,
-        });
-        Some((before, after))
     }
 
     /// The appliance's own: the platform's discovery, and `amixer` on the
@@ -142,78 +240,162 @@ impl Audio {
         )
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, AudioSetting> {
-        self.setting.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     pub fn setting(&self) -> AudioSetting {
-        self.lock().clone()
+        self.setting.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// The kept setting, the devices found now, and what the one means on
-    /// the other.
+    /// The kept setting, the devices found now, and the candidate: what the
+    /// one means on the other. Only looks.
     pub fn now(&self) -> (AudioSetting, Vec<AudioDevice>, AudioPlan) {
         let setting = self.setting();
         let devices = (self.discover)();
         let plan = mediabox_core::audio::plan(&setting, &devices);
-        *self.active.lock().unwrap_or_else(|e| e.into_inner()) = plan.device.clone();
         (setting, devices, plan)
     }
 
-    /// Keep `wanted`, if it can be chosen on the devices here: written down
-    /// first, then in force. Returns the plan before and after.
-    pub fn set(&self, wanted: AudioSetting) -> Result<(AudioPlan, AudioPlan), String> {
-        let _serial = self.serial.lock().unwrap_or_else(|e| e.into_inner());
-        self.set_serialised(wanted)
+    /// The plan in force, or -- before anything was -- the candidate.
+    pub fn in_force(&self) -> AudioPlan {
+        match self.route() {
+            Some(route) => route.plan().clone(),
+            None => self.now().2,
+        }
     }
 
-    fn set_serialised(&self, wanted: AudioSetting) -> Result<(AudioPlan, AudioPlan), String> {
-        let (before, after) = self.keep(wanted)?;
-        (self.softvol)(&after);
-        Ok((before, after))
+    /// Put the level of the plan in force back on the softvol control: at
+    /// start, and when the device it lives on has come back. At start,
+    /// nothing of ours playing, the candidate is the route selected for
+    /// the next player.
+    pub fn restore(&self) {
+        let plan = {
+            let mut route = self.route.lock().unwrap_or_else(|e| e.into_inner());
+            if route.is_none() {
+                *route = Some(Route::Selected(self.now().2));
+            }
+            route.as_ref().expect("set above").plan().clone()
+        };
+        (self.softvol)(&plan);
     }
 
-    /// `set` without putting the level on the card or the headset: for a
-    /// level that is already there because the headset itself set it.
-    fn keep(&self, wanted: AudioSetting) -> Result<(AudioPlan, AudioPlan), String> {
+    /// One change, as one transaction (see [`Audio`]). `Ok(None)`: nothing
+    /// to change.
+    pub async fn change(self: &std::sync::Arc<Self>, taker: &dyn PlanTaker, want: Want) -> Result<Option<Change>, ChangeError> {
+        let _one = self.changes.lock().await;
+        let this = std::sync::Arc::clone(self);
+        let resolved = tokio::task::spawn_blocking(move || this.resolve(want))
+            .await
+            .map_err(|error| ChangeError::Refused(error.to_string()))??;
+        let Some(Resolved { wanted, kept, before, after, say }) = resolved else { return Ok(None) };
+        let taken = match taker.take(&before, &after).await {
+            Ok(taken) => taken,
+            Err(why) if why.starts_with(mediabox_core::audio::LIVE_PLAN_FAILED_STATE) => {
+                *self.fault.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+                return Err(ChangeError::Failed(why));
+            }
+            Err(why) => return Err(ChangeError::NotApplied(why)),
+        };
+        if wanted != kept {
+            let (path, text) = (self.setting_path.clone(), wanted.to_stored());
+            let written = tokio::task::spawn_blocking(move || crate::output::write_atomic(&path, &text))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|written| written);
+            if let Err(error) = written {
+                let why = format!("Ses ayarı kaydedilemedi: {error}");
+                if taken == Taken::Player
+                    && let Err(back) = taker.take(&after, &before).await
+                {
+                    // In force there, not kept here: said, and the route is
+                    // what the player has.
+                    let why = format!("{why}; oynatıcı önceki plana döndürülemedi: {back}");
+                    *self.route.lock().unwrap_or_else(|e| e.into_inner()) = Some(Route::Applied(after));
+                    *self.fault.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+                    return Err(ChangeError::Failed(why));
+                }
+                return Err(ChangeError::NotKept(why));
+            }
+        }
+        *self.setting.lock().unwrap_or_else(|e| e.into_inner()) = wanted;
+        *self.route.lock().unwrap_or_else(|e| e.into_inner()) = Some(match taken {
+            Taken::Player => Route::Applied(after.clone()),
+            Taken::Nothing => Route::Selected(after.clone()),
+        });
+        *self.fault.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let this = std::sync::Arc::clone(self);
+        let (said_before, said_after) = (before.clone(), after.clone());
+        let _ = tokio::task::spawn_blocking(move || this.say(say, &said_before, &said_after)).await;
+        Ok(Some(Change { before, after }))
+    }
+
+    /// The change `want` on the devices found now. Blocking: it discovers.
+    fn resolve(&self, want: Want) -> Result<Option<Resolved>, ChangeError> {
         let devices = (self.discover)();
-        let mut kept = self.lock();
-        mediabox_core::audio::check(&wanted, &devices, &kept)?;
-        let before = mediabox_core::audio::plan(&kept, &devices);
-        crate::output::write_atomic(&self.setting_path, &wanted.to_stored())
-            .map_err(|error| format!("Ses ayarı kaydedilemedi: {error}"))?;
-        *kept = wanted;
-        let after = mediabox_core::audio::plan(&kept, &devices);
-        drop(kept);
-        *self.active.lock().unwrap_or_else(|e| e.into_inner()) = after.device.clone();
-        Ok((before, after))
-    }
-
-    /// The volume alone. Kept like the rest: a volume that comes back as
-    /// something else after a restart is not a volume.
-    pub fn volume(&self, change: VolumeChange) -> Result<AudioPlan, String> {
-        let _serial = self.serial.lock().unwrap_or_else(|e| e.into_inner());
-        let mut wanted = self.setting();
-        match change {
-            VolumeChange::Set(volume) => wanted.volume = volume.min(100),
-            VolumeChange::Step(step) => {
-                wanted.volume = (i16::from(wanted.volume) + step).clamp(0, 100) as u8;
+        let kept = self.setting();
+        let before = self.route().map(|route| route.plan().clone()).unwrap_or_else(|| mediabox_core::audio::plan(&kept, &devices));
+        let (wanted, say) = match want {
+            Want::Setting(wanted) => (wanted, Say::Level),
+            Want::Volume(change) => {
+                let mut wanted = kept.clone();
+                match change {
+                    VolumeChange::Set(volume) => wanted.volume = volume.min(100),
+                    VolumeChange::Step(step) => {
+                        wanted.volume = (i16::from(wanted.volume) + step).clamp(0, 100) as u8;
+                        // Turning it up is unmuting it, as on every television.
+                        if step > 0 {
+                            wanted.muted = false;
+                        }
+                    }
+                    VolumeChange::Mute(muted) => wanted.muted = muted,
+                    VolumeChange::ToggleMute => wanted.muted = !wanted.muted,
+                }
+                (wanted, Say::Level)
+            }
+            Want::HeadsetLevel { address, level } => {
+                let playing = before.device.as_ref().is_some_and(|device| device.id == format!("bluetooth:{address}"));
+                let volume = mediabox_core::audio::from_avrcp(level);
+                if !playing || volume == kept.volume {
+                    return Ok(None);
+                }
+                let mut wanted = kept.clone();
+                wanted.volume = volume;
                 // Turning it up is unmuting it, as on every television.
-                if step > 0 {
+                if volume > kept.volume {
                     wanted.muted = false;
                 }
+                (wanted, Say::HeadsetOwn)
             }
-            VolumeChange::Mute(muted) => wanted.muted = muted,
-            VolumeChange::ToggleMute => wanted.muted = !wanted.muted,
-        }
-        self.set_serialised(wanted).map(|(_, after)| after)
+            Want::Route => {
+                let after = mediabox_core::audio::plan(&kept, &devices);
+                let id = |plan: &AudioPlan| plan.device.as_ref().map(|device| device.id.clone());
+                if id(&after) == id(&before) {
+                    return Ok(None);
+                }
+                return Ok(Some(Resolved { wanted: kept.clone(), kept, before, after, say: Say::Level }));
+            }
+        };
+        mediabox_core::audio::check(&wanted, &devices, &kept).map_err(ChangeError::Refused)?;
+        let after = mediabox_core::audio::plan(&wanted, &devices);
+        Ok(Some(Resolved { wanted, kept, before, after, say }))
     }
 
-    /// Put the kept volume back on the softvol control: at start, and when
-    /// the device it lives on has come back.
-    pub fn restore(&self) {
-        let (_, _, plan) = self.now();
-        (self.softvol)(&plan);
+    /// What a change kept puts on the card or the headset.
+    fn say(&self, say: Say, before: &AudioPlan, after: &AudioPlan) {
+        match say {
+            Say::Level => (self.softvol)(after),
+            Say::HeadsetOwn => {
+                // Android's FLAG_BLUETOOTH_ABS_VOLUME: a level that came from
+                // the headset is kept and shown, and never said back to the
+                // headset -- AudioService posts a level to AVRCP only when
+                // that flag is absent. Saying it back is what made the loop:
+                // the headset answered, the answer looked like a press, and
+                // it was said back again.
+                if before.muted != after.muted
+                    && let Some(device) = &after.device
+                {
+                    set_headset_mute(device, after.muted);
+                }
+                let _ = self.events.send(mediabox_core::AudioEvent::Volume { volume: after.volume, muted: after.muted });
+            }
+        }
     }
 }
 
@@ -400,7 +582,6 @@ pub async fn follow_headsets(
 ) {
     use tokio::io::AsyncBufReadExt;
     let cli = mediabox_platform::sound::BLUEALSA_CLI;
-    let mut last = plan_now(&audio).await;
     loop {
         if !Path::new(cli).is_file() {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -417,11 +598,11 @@ pub async fn follow_headsets(
             && let Some(stdout) = child.stdout.take()
         {
             // Whatever changed while nothing was listening.
-            last = reroute(&audio, &player, &kodi, last).await;
+            reroute(&audio, &*player, &kodi).await;
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.starts_with("PCMAdded") || line.starts_with("PCMRemoved") {
-                    last = reroute(&audio, &player, &kodi, last).await;
+                    reroute(&audio, &*player, &kodi).await;
                 } else if let Some((address, level)) = headset_level(&line) {
                     let own = HEADSET
                         .lock()
@@ -430,23 +611,16 @@ pub async fn follow_headsets(
                     if !own {
                         continue;
                     }
-                    let follow = std::sync::Arc::clone(&audio);
-                    let moved = tokio::task::spawn_blocking(move || follow.headset_volume(&address, level))
-                        .await
-                        .ok()
-                        .flatten();
-                    if let Some((before, after)) = moved {
-                        if let Err(why) = player.apply_audio(&before, &after).await {
-                            eprintln!("mediaboxd.audio: kulaklığın düzeyi oynatıcıya uygulanamadı: {why}");
-                        }
-                        kodi_says_volume(&kodi, &after);
-                        last = Some(after);
+                    match audio.change(&*player, Want::HeadsetLevel { address, level }).await {
+                        Ok(Some(change)) => kodi_says_volume(&kodi, &change.after),
+                        Ok(None) => {}
+                        Err(error) => eprintln!("mediaboxd.audio: kulaklığın düzeyi uygulanamadı: {}", error.message()),
                     }
                 }
             }
         }
         // bluez-alsa went away or restarted; its PCMs went with it.
-        last = reroute(&audio, &player, &kodi, last).await;
+        reroute(&audio, &*player, &kodi).await;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
@@ -470,35 +644,36 @@ fn headset_level(line: &str) -> Option<(String, u8)> {
     Some((device.trim_start_matches("dev_").replace('_', ":"), level))
 }
 
-async fn plan_now(audio: &std::sync::Arc<Audio>) -> Option<AudioPlan> {
-    let audio = std::sync::Arc::clone(audio);
-    tokio::task::spawn_blocking(move || audio.now().2).await.ok()
+/// The devices changed: the setting's plan on the devices found now put in
+/// force when it names another device (`Want::Route`). Said as the player
+/// has it: a route the player could not open is not the route -- the
+/// device in force, Kodi's keymap and the headsets' keys stay as they were
+/// -- and the next coming or going of a headset tries it again.
+async fn reroute(audio: &std::sync::Arc<Audio>, player: &dyn PlanTaker, kodi: &crate::kodi::KodiClient) {
+    let label = |plan: &AudioPlan| plan.device.as_ref().map(|d| d.label.clone()).unwrap_or_else(|| "yok".into());
+    match audio.change(player, Want::Route).await {
+        Ok(None) => {}
+        Ok(Some(change)) => {
+            eprintln!("mediaboxd.audio route: {} -> {}", label(&change.before), label(&change.after));
+            kodi_follow(kodi, &change.after).await;
+            let restore = std::sync::Arc::clone(audio);
+            let _ = tokio::task::spawn_blocking(move || restore.restore()).await;
+        }
+        Err(ChangeError::Failed(why)) => eprintln!("mediaboxd.audio route: yeni yol uygulanamadı, ses durumu bilinmiyor: {why}"),
+        Err(error) => {
+            let in_force = audio.active_device().map(|d| d.label).unwrap_or_else(|| "yok".into());
+            eprintln!("mediaboxd.audio route: yeni yol uygulanamadı, ses {in_force} üzerinde kaldı: {}", error.message());
+        }
+    }
 }
 
-async fn reroute(
-    audio: &std::sync::Arc<Audio>,
-    player: &crate::player::PlayerManager,
-    kodi: &crate::kodi::KodiClient,
-    before: Option<AudioPlan>,
-) -> Option<AudioPlan> {
-    let after = plan_now(audio).await?;
-    let id = |plan: &AudioPlan| plan.device.as_ref().map(|device| device.id.clone());
-    let Some(before) = before else { return Some(after) };
-    if id(&before) == id(&after) {
-        return Some(after);
-    }
-    let label = |plan: &AudioPlan| plan.device.as_ref().map(|d| d.label.clone()).unwrap_or_else(|| "yok".into());
-    // Said as the player has it: a route the live player could not open is
-    // not the route, and the next change of the headsets tries it again.
-    if let Err(why) = player.apply_audio(&before, &after).await {
-        eprintln!("mediaboxd.audio route: {} -> {} uygulanamadı, ses {} üzerinde kaldı: {why}", label(&before), label(&after), label(&before));
-        return Some(before);
-    }
-    eprintln!("mediaboxd.audio route: {} -> {}", label(&before), label(&after));
-    kodi_follow(kodi, &after).await;
-    let restore = std::sync::Arc::clone(audio);
-    let _ = tokio::task::spawn_blocking(move || restore.restore()).await;
-    Some(after)
+/// The headset the sound is in force on, by its label: what Kodi's keymap
+/// and the headsets' keys follow -- the route, never the candidate.
+pub fn headset_in_force(audio: &Audio) -> Option<String> {
+    audio
+        .active_device()
+        .filter(|device| device.kind == mediabox_core::AudioKind::Bluetooth)
+        .map(|device| device.label)
 }
 
 /// Kodi's keymap for a Bluetooth headset (packaging/mediabox-kodi-bluetooth-keymap.xml).
@@ -527,6 +702,7 @@ pub const KEY_STEP: i16 = 5;
 /// then is handed back to Kodi as its own action.
 pub async fn follow_kodi_keys(
     audio: std::sync::Arc<Audio>,
+    player: std::sync::Arc<crate::player::PlayerManager>,
     kodi: std::sync::Arc<crate::kodi::KodiClient>,
     events: std::net::SocketAddr,
 ) {
@@ -545,18 +721,16 @@ pub async fn follow_kodi_keys(
             buffer.extend_from_slice(&chunk[..read]);
             for message in crate::playback::split_json(&mut buffer) {
                 let Some(key) = kodi_volume_key_of(&message) else { continue };
-                let on_headset = audio
-                    .active_device()
-                    .is_some_and(|device| device.kind == mediabox_core::AudioKind::Bluetooth);
-                if on_headset {
+                if headset_in_force(&audio).is_some() {
                     let change = match key {
                         "volume_up" => VolumeChange::Step(KEY_STEP),
                         "volume_down" => VolumeChange::Step(-KEY_STEP),
                         _ => VolumeChange::ToggleMute,
                     };
-                    let step = std::sync::Arc::clone(&audio);
-                    if let Ok(Ok(after)) = tokio::task::spawn_blocking(move || step.volume(change)).await {
-                        kodi_says_volume(&kodi, &after);
+                    match audio.change(&*player, Want::Volume(change)).await {
+                        Ok(Some(change)) => kodi_says_volume(&kodi, &change.after),
+                        Ok(None) => {}
+                        Err(error) => eprintln!("mediaboxd.audio: ses tuşu uygulanamadı: {}", error.message()),
                     }
                 } else {
                     let action = match key {
@@ -634,14 +808,9 @@ fn kodi_says_volume(kodi: &std::sync::Arc<crate::kodi::KodiClient>, plan: &Audio
 /// (Linux 5.11), which silences a device for every reader. Polled, because
 /// the input device comes a moment after the headset connects.
 pub async fn follow_route(audio: std::sync::Arc<Audio>, kodi: std::sync::Arc<crate::kodi::KodiClient>) {
-    let first = std::sync::Arc::clone(&audio);
-    let _ = tokio::task::spawn_blocking(move || first.now()).await;
     let mut keymap_for: Option<Option<String>> = None;
     loop {
-        let headset = audio
-            .active_device()
-            .filter(|device| device.kind == mediabox_core::AudioKind::Bluetooth)
-            .map(|device| device.label);
+        let headset = headset_in_force(&audio);
         if keymap_for.as_ref() != Some(&headset) {
             let content = match headset {
                 Some(_) => std::fs::read_to_string(KODI_BLUETOOTH_KEYMAP).unwrap_or_else(|_| EMPTY_KEYMAP.into()),
@@ -785,13 +954,35 @@ mod tests {
         }
     }
 
-    fn rig(dir: &Path) -> (Audio, Arc<AtomicU32>) {
+    fn rig(dir: &Path) -> (Arc<Audio>, Arc<AtomicU32>) {
         let softvol = Arc::new(AtomicU32::new(u32::MAX));
         let seen = Arc::clone(&softvol);
         let audio = Audio::new(dir.join("audio.json"), || vec![hdmi()], move |plan: &AudioPlan| {
             seen.store(if plan.muted { 0 } else { u32::from(plan.volume) }, Ordering::SeqCst);
         });
-        (audio, softvol)
+        (Arc::new(audio), softvol)
+    }
+
+    /// Nothing of ours playing.
+    struct NoPlayer;
+
+    impl PlanTaker for NoPlayer {
+        fn take<'a>(
+            &'a self,
+            _: &'a AudioPlan,
+            _: &'a AudioPlan,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Taken, String>> + Send + 'a>> {
+            Box::pin(async { Ok(Taken::Nothing) })
+        }
+    }
+
+    /// A change as the daemon makes it, nothing of ours playing.
+    fn change(audio: &Arc<Audio>, want: Want) -> Result<Option<Change>, ChangeError> {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(audio.change(&NoPlayer, want))
+    }
+
+    fn level(address: &str, level: u8) -> Want {
+        Want::HeadsetLevel { address: address.into(), level }
     }
 
     #[test]
@@ -854,12 +1045,12 @@ mod tests {
     fn steps_that_arrive_together_are_all_taken() {
         let dir = tempfile::tempdir().unwrap();
         let audio = std::sync::Arc::new(Audio::new(dir.path().join("audio.json"), || vec![hdmi()], |_| {}));
-        audio.volume(VolumeChange::Set(100)).unwrap();
+        change(&audio, Want::Volume(VolumeChange::Set(100))).unwrap();
         // A held key: twenty steps down at once.
         let threads: Vec<_> = (0..20)
             .map(|_| {
                 let audio = std::sync::Arc::clone(&audio);
-                std::thread::spawn(move || audio.volume(VolumeChange::Step(-5)).unwrap())
+                std::thread::spawn(move || change(&audio, Want::Volume(VolumeChange::Step(-5))).unwrap())
             })
             .collect();
         for thread in threads {
@@ -885,10 +1076,10 @@ mod tests {
         };
         let writes = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let counted = std::sync::Arc::clone(&writes);
-        let audio = Audio::new(dir.path().join("audio.json"), move || vec![hdmi(), headset.clone()], move |_: &AudioPlan| {
+        let audio = Arc::new(Audio::new(dir.path().join("audio.json"), move || vec![hdmi(), headset.clone()], move |_: &AudioPlan| {
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        });
-        assert!(audio.headset_volume("20:AF:1B:19:E8:D2", 76).is_some());
+        }));
+        assert!(change(&audio, level("20:AF:1B:19:E8:D2", 76)).unwrap().is_some());
         assert_eq!(audio.setting().volume, 60);
         assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing said back");
     }
@@ -921,22 +1112,22 @@ mod tests {
             sink: None,
         };
         let devices = vec![hdmi(), headset];
-        let audio = Audio::new(dir.path().join("audio.json"), move || devices.clone(), |_| {});
+        let audio = Arc::new(Audio::new(dir.path().join("audio.json"), move || devices.clone(), |_| {}));
         let mut events = audio.subscribe();
         // Playing on it ("Otomatik"): 76 of 127 is 60 here, and is said.
-        assert!(audio.headset_volume("20:AF:1B:19:E8:D2", 76).is_some());
+        assert!(change(&audio, level("20:AF:1B:19:E8:D2", 76)).unwrap().is_some());
         assert_eq!(audio.setting().volume, 60);
         assert_eq!(events.try_recv().unwrap(), mediabox_core::AudioEvent::Volume { volume: 60, muted: false });
         // Its own level coming back changes nothing and says nothing.
-        assert!(audio.headset_volume("20:AF:1B:19:E8:D2", mediabox_core::audio::to_avrcp(60)).is_none());
+        assert!(change(&audio, level("20:AF:1B:19:E8:D2", mediabox_core::audio::to_avrcp(60))).unwrap().is_none());
         assert!(events.try_recv().is_err());
         // Another device's buttons do not move this one.
-        assert!(audio.headset_volume("11:22:33:44:55:66", 10).is_none());
+        assert!(change(&audio, level("11:22:33:44:55:66", 10)).unwrap().is_none());
         // Nor the headset's while the sound is on HDMI by choice.
         let mut hdmi_chosen = audio.setting();
         hdmi_chosen.device = mediabox_core::AudioDeviceChoice::Device { id: hdmi().id };
-        audio.set(hdmi_chosen).unwrap();
-        assert!(audio.headset_volume("20:AF:1B:19:E8:D2", 17).is_none());
+        change(&audio, Want::Setting(hdmi_chosen)).unwrap();
+        assert!(change(&audio, level("20:AF:1B:19:E8:D2", 17)).unwrap().is_none());
         assert_eq!(audio.setting().volume, 60);
     }
 
@@ -946,7 +1137,7 @@ mod tests {
         let (audio, softvol) = rig(dir.path());
         assert_eq!(audio.setting(), AudioSetting::default());
         let wanted = AudioSetting { ac3_transcode: true, volume: 60, ..Default::default() };
-        let (before, after) = audio.set(wanted.clone()).unwrap();
+        let Change { before, after } = change(&audio, Want::Setting(wanted.clone())).unwrap().unwrap();
         assert!(before.ac3_encode.is_none());
         assert!(after.ac3_encode.is_some());
         assert_eq!(softvol.load(Ordering::SeqCst), 60);
@@ -963,12 +1154,12 @@ mod tests {
             formats: Some(vec![AudioCodec::Dts]),
             ..Default::default()
         };
-        assert!(audio.set(dts).is_err());
+        assert!(change(&audio, Want::Setting(dts)).is_err());
         let gone = AudioSetting {
             device: AudioDeviceChoice::Device { id: "usb:nothing".into() },
             ..Default::default()
         };
-        assert!(audio.set(gone).is_err());
+        assert!(change(&audio, Want::Setting(gone)).is_err());
         assert_eq!(audio.setting(), AudioSetting::default());
         assert!(!dir.path().join("audio.json").exists());
     }
@@ -977,17 +1168,87 @@ mod tests {
     fn the_volume_steps_mutes_and_turning_it_up_unmutes() {
         let dir = tempfile::TempDir::new().unwrap();
         let (audio, softvol) = rig(dir.path());
-        audio.volume(VolumeChange::Step(-30)).unwrap();
+        change(&audio, Want::Volume(VolumeChange::Step(-30))).unwrap();
         assert_eq!(audio.setting().volume, 70);
-        audio.volume(VolumeChange::ToggleMute).unwrap();
+        change(&audio, Want::Volume(VolumeChange::ToggleMute)).unwrap();
         assert!(audio.setting().muted);
         assert_eq!(softvol.load(Ordering::SeqCst), 0, "muted is silence on the control");
-        audio.volume(VolumeChange::Step(5)).unwrap();
+        change(&audio, Want::Volume(VolumeChange::Step(5))).unwrap();
         assert!(!audio.setting().muted);
         assert_eq!(audio.setting().volume, 75);
-        audio.volume(VolumeChange::Step(200)).unwrap();
+        change(&audio, Want::Volume(VolumeChange::Step(200))).unwrap();
         assert_eq!(audio.setting().volume, 100);
-        audio.volume(VolumeChange::Set(250)).unwrap();
+        change(&audio, Want::Volume(VolumeChange::Set(250))).unwrap();
         assert_eq!(audio.setting().volume, 100);
+    }
+
+    fn headset() -> AudioDevice {
+        AudioDevice {
+            id: "bluetooth:20:AF:1B:19:E8:D2".into(),
+            label: "Arctis GameBuds".into(),
+            kind: AudioKind::Bluetooth,
+            card_id: "bluealsa".into(),
+            card_index: None,
+            pcm: "bluealsa:DEV=20:AF:1B:19:E8:D2,PROFILE=a2dp".into(),
+            bitstream: false,
+            connector: None,
+            display: false,
+            sink: None,
+        }
+    }
+
+    /// Sound on the devices of `found`, which a test changes: a headset
+    /// connecting is one more in it.
+    fn on(dir: &Path, found: &Arc<std::sync::Mutex<Vec<AudioDevice>>>) -> Arc<Audio> {
+        let found = Arc::clone(found);
+        Arc::new(Audio::new(dir.join("audio.json"), move || found.lock().unwrap().clone(), |_| {}))
+    }
+
+    /// (1) Looking at the sound -- the status, a plan worked out -- moves
+    /// nothing: the device in force is the one put in force.
+    #[test]
+    fn looking_at_the_sound_moves_no_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = Arc::new(std::sync::Mutex::new(vec![hdmi()]));
+        let audio = on(dir.path(), &found);
+        audio.restore();
+        found.lock().unwrap().push(headset());
+        let (_, _, plan) = audio.now();
+        assert_eq!(plan.device.map(|d| d.id), Some(headset().id), "what the setting would mean now");
+        assert_eq!(audio.active_device().map(|d| d.id), Some(hdmi().id), "what is in force");
+    }
+
+    /// (2) A headset the live player cannot open: the sound, the device in
+    /// force and with it Kodi's keymap and the headset keys' owner stay on
+    /// HDMI; the headset's next coming is tried again.
+    #[tokio::test]
+    async fn a_headset_the_live_player_cannot_open_moves_no_route_nor_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = Arc::new(std::sync::Mutex::new(vec![hdmi()]));
+        let audio = on(dir.path(), &found);
+        audio.restore();
+        let player = crate::player::PlayerManager::new("/bin/true", dir.path().join("player.sock"));
+        player.pretend_live().await;
+        let mut inbox = crate::player::fake::live(&dir.path().join("player.sock"));
+        let asked = tokio::spawn(async move {
+            let mut asked = Vec::new();
+            while let Some((request, answer)) = inbox.recv().await {
+                asked.push(crate::player::fake::device_of(&request));
+                let _ = answer.send(("ses aygıtı açılamadı".into(), serde_json::Value::Null));
+                if asked.len() == 2 {
+                    return asked;
+                }
+            }
+            asked
+        });
+        let kodi = crate::kodi::KodiClient::new("http://127.0.0.1:9/jsonrpc", std::time::Duration::from_millis(20)).unwrap();
+        found.lock().unwrap().push(headset());
+        reroute(&audio, &player, &kodi).await;
+        assert_eq!(audio.active_device().map(|d| d.id), Some(hdmi().id), "the device in force");
+        assert_eq!(audio.active_device().map(|d| d.kind), Some(AudioKind::Hdmi), "keymap and keys stay the television's");
+        // The headset's next coming: tried again.
+        reroute(&audio, &player, &kodi).await;
+        let asked = asked.await.unwrap();
+        assert_eq!(asked, vec![serde_json::Value::String(headset().pcm); 2], "asked each time");
     }
 }

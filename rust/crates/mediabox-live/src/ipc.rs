@@ -51,6 +51,9 @@ pub enum SoundCommand {
     /// a time. Answered once the device it names is open, or with why not
     /// and the plan before it back in force.
     Plan { plan: Box<mediabox_core::AudioPlan>, epoch: Option<u64>, seq: u64 },
+    /// Plan `seq`'s requester stopped waiting for it (`run_plan`): it is
+    /// not done after that.
+    Abandon { seq: u64 },
 }
 
 /// Answers the engine gives without a round trip: read from shared state by
@@ -163,6 +166,27 @@ fn run(commands: &Commands, command: Command) -> String {
     }
 }
 
+/// A sound plan sent to the engine and waited for longer than its every
+/// deadline (`LIVE_PLAN_ANSWER_MS`, which the engine's are inside): its
+/// answer is the engine's. Not answered by then -- the engine itself held
+/// up -- the plan is abandoned, so it is not done after this answer, and
+/// the answer says the sound's state is not known.
+fn run_plan(commands: &Commands, command: Command, seq: u64) -> String {
+    let (done, wait) = std::sync::mpsc::sync_channel(1);
+    if commands.send((command, Some(done))).is_err() {
+        return FAILED.into();
+    }
+    let patience = std::time::Duration::from_millis(mediabox_core::audio::LIVE_PLAN_ANSWER_MS);
+    match wait.recv_timeout(patience) {
+        Ok(Ok(())) => "success".into(),
+        Ok(Err(why)) => why,
+        Err(_) => {
+            let _ = commands.send((Command::Sound(SoundCommand::Abandon { seq }), None));
+            format!("{}: {} ms içinde yanıt yok", mediabox_core::audio::LIVE_PLAN_FAILED_STATE, patience.as_millis())
+        }
+    }
+}
+
 pub(crate) fn handle(client: u64, command: &[Value], clients: &Clients, query: &Query, commands: &Commands) -> (String, Option<Value>) {
     let word = |at: usize| command.get(at).and_then(Value::as_str).unwrap_or_default();
     match word(0) {
@@ -208,14 +232,22 @@ pub(crate) fn handle(client: u64, command: &[Value], clients: &Clients, query: &
             _ => ("invalid parameter".into(), None),
         },
         // ["mediabox-audio-plan", <AudioPlan>, <epoch>, <seq>]: answered with
-        // the device the player has open once the plan is in force.
+        // the device the player has open once the plan is in force. All
+        // four, always: the channel's number (null only for a channel
+        // opened without one, which the engine checks) and the request's,
+        // from 1. Anything else is not queued.
         "mediabox-audio-plan" => {
-            let Some(plan) = command.get(1).cloned().and_then(|plan| serde_json::from_value::<mediabox_core::AudioPlan>(plan).ok()) else {
+            let plan = command.get(1).cloned().and_then(|plan| serde_json::from_value::<mediabox_core::AudioPlan>(plan).ok());
+            let epoch = match command.get(2) {
+                Some(Value::Null) => Some(None),
+                Some(epoch) => epoch.as_u64().map(Some),
+                None => None,
+            };
+            let seq = command.get(3).and_then(Value::as_u64).filter(|seq| *seq > 0);
+            let (Some(plan), Some(epoch), Some(seq), 4) = (plan, epoch, seq, command.len()) else {
                 return ("invalid parameter".into(), None);
             };
-            let epoch = command.get(2).and_then(Value::as_u64);
-            let seq = command.get(3).and_then(Value::as_u64).unwrap_or(0);
-            let result = run(commands, Command::Sound(SoundCommand::Plan { plan: Box::new(plan), epoch, seq }));
+            let result = run_plan(commands, Command::Sound(SoundCommand::Plan { plan: Box::new(plan), epoch, seq }), seq);
             let device = (result == "success").then(|| query("audio-device").unwrap_or(Value::Null));
             (result, device)
         }

@@ -450,6 +450,20 @@ const AC3_RATES: [u32; 19] = [
 /// yet. The control plane asks again for the channel that is on.
 pub const LIVE_PLAN_OTHER_CHANNEL: &str = "sound plan for another channel";
 
+/// How long the live player may take to answer a sound plan, from the
+/// request to its answer -- the plan in force, or the plan before it back
+/// in force, or its failed state said. The player's own deadline for a
+/// plan and for putting the one before back both end inside it; the
+/// control plane waits longer than this, so no answer it gave up on is
+/// ever acted on after.
+pub const LIVE_PLAN_ANSWER_MS: u64 = 8_000;
+
+/// The start of the live player's answer to a sound plan that left neither
+/// it nor the plan before it in force -- the device before would not open
+/// again, or the part before was not back in its time. Not "the route
+/// before is kept": the control plane says the sound is in a failed state.
+pub const LIVE_PLAN_FAILED_STATE: &str = "sound plan failed state";
+
 /// What a player is started with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioPlan {

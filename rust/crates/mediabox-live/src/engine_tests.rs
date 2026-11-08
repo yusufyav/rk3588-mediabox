@@ -1287,7 +1287,7 @@ fn on_hdmi() -> Audio {
 fn ask_plan(engine: &Arc<Engine>, plan: serde_json::Value, epoch: Option<u64>, seq: u64) -> std::sync::mpsc::Receiver<Result<(), String>> {
     let plan: mediabox_core::AudioPlan = serde_json::from_value(plan).expect("a plan");
     let (reply, wait) = std::sync::mpsc::sync_channel(1);
-    engine.set_audio_plan(super::PlanRequest { audio: Audio::from_plan(&plan, false), epoch, seq }, Some(reply));
+    engine.set_audio_plan(super::PlanRequest::new(Audio::from_plan(&plan, false), epoch, seq), Some(reply));
     wait
 }
 
@@ -1676,4 +1676,227 @@ fn a_reload_opens_the_plan_in_force_again() {
 #[test]
 fn a_bitstream_is_sent_on_the_device_with_its_channel_status() {
     assert_eq!(super::bitstream_pcm("hdmi:CARD=rockchiphdmi0,DEV=0"), "hdmi:CARD=rockchiphdmi0,DEV=0,AES0=0x06,AES1=0x82,AES2=0x00,AES3=0x02");
+}
+
+// FAZ 3E.1: a plan's change as one transaction, with one deadline of its
+// own. The sound part's end is held where a test says (`hold_sound_end`),
+// the reader and the rest of the channel going on: the turn of a part built
+// again for a plan waits as long as the part before it has not ended.
+
+/// The sound part playing now: its end, when it is told it (a plan's or a
+/// PMT's part built again), held at its source until the probe is taken
+/// off. Everything before the end goes on.
+fn hold_sound_end(engine: &Arc<Engine>) -> (gst::Pad, gst::PadProbeId) {
+    let source = engine.shared.sound.lock().unwrap().as_ref().expect("a sound part").source.clone();
+    let src = source.static_pad("src").unwrap();
+    let id = src
+        .add_probe(gst::PadProbeType::BLOCK | gst::PadProbeType::EVENT_DOWNSTREAM, |_, info| match &info.data {
+            Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => gst::PadProbeReturn::Ok,
+            _ => gst::PadProbeReturn::Pass,
+        })
+        .unwrap();
+    (src, id)
+}
+
+/// Whether the engine reached `state` within `within`: looked at every
+/// 5 ms, never a time taken for it.
+fn until(within: Duration, state: impl Fn() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < within {
+        if state() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    state()
+}
+
+fn handover_pending(engine: &Engine) -> bool {
+    engine.sound_handover.lock().unwrap().is_some()
+}
+
+/// Buffers out of the sound selector from now on.
+fn count_sound_out(engine: &Engine) -> Arc<std::sync::atomic::AtomicU64> {
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let into = Arc::clone(&count);
+    engine.audio_selector.static_pad("src").unwrap().add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+        into.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gst::PadProbeReturn::Ok
+    });
+    count
+}
+
+fn passed_through() -> (Vec<(u64, Vec<u8>)>, Audio) {
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x06, 0x101, vec![0x6A, 1, 0])];
+    let ts = stream_for(9, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xBD, units: repeated(ac3(), 9), from: 0, to: u64::MAX }]);
+    (ts, Audio { passthrough: vec![mediabox_core::AudioCodec::Ac3], ..on_hdmi() })
+}
+
+/// A headset that opened for its try and is gone when its turn comes (6):
+/// the answer comes only once the television's sound is back as it was --
+/// its device open for the bitstream, a part built again for it, the plan
+/// before in force -- and says why. The headset is gone between its try
+/// and its turn (`alsa_pcm`: `lost-after-try:`).
+#[test]
+fn a_headset_lost_after_its_try_is_answered_only_with_the_television_s_sound_back() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let gone = std::env::temp_dir().join(format!("mediabox-live-headset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&gone);
+    std::fs::create_dir_all(&gone).unwrap();
+    let pcm = format!("lost-after-try:{}", gone.display());
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let (src, held) = hold_sound_end(engine);
+        let wait = ask_plan(engine, headset_plan(&pcm), None, 1);
+        let pending = until(Duration::from_secs(3), || handover_pending(engine));
+        std::fs::remove_dir_all(&gone).unwrap();
+        src.remove_probe(held);
+        let answer = answered(&wait);
+        let form = || (sink_device(engine), engine.bitstream(), engine.shared.info.lock().unwrap().passthrough, engine.audio());
+        let at_answer = form();
+        // And so it stays while the sound goes on: nothing of the parts
+        // taken down sets the device after the answer.
+        let out = count_sound_out(engine);
+        let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+        *into.lock().unwrap() = Some((pending, answer, at_answer, playing, form()));
+    });
+    let (pending, answer, form, playing, later) = got.lock().unwrap().take().unwrap();
+    assert!(pending, "the headset's part waiting for its turn: {answer:?}");
+    assert!(answer.as_ref().is_err_and(|why| !why.is_empty()), "said why: {answer:?}");
+    assert_eq!(form, (Some(HDMI_PCM.into()), true, true, start.clone()), "the television's sound back when answered: {answer:?}");
+    assert!(playing, "the sound goes on");
+    assert_eq!(later, (Some(HDMI_PCM.into()), true, true, start), "and so it stays");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    picture_handed_over(&run, false);
+}
+
+/// A plan whose part was built and whose turn never comes (7): its
+/// deadline ends it, the client answered before its own patience runs out
+/// and only with the television's sound in force; the part's turn coming
+/// after that changes neither the device nor the plan.
+#[test]
+fn a_plan_whose_turn_never_comes_ends_at_its_deadline_and_never_after() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let control = Control::new(engine);
+        let (src, held) = hold_sound_end(engine);
+        let opened = engine.swaps.lock().unwrap().opened;
+        let asked = std::time::Instant::now();
+        let (pending, answer) = std::thread::scope(|s| {
+            let asking = s.spawn(|| control.ask(&[serde_json::json!("mediabox-audio-plan"), headset_plan(HEADSET_PCM), serde_json::Value::Null, serde_json::json!(1)]));
+            let pending = until(Duration::from_secs(3), || handover_pending(engine));
+            (pending, asking.join().unwrap())
+        });
+        let took = asked.elapsed();
+        let at_answer = (sink_device(engine), engine.bitstream(), engine.audio());
+        let out = count_sound_out(engine);
+        src.remove_probe(held);
+        let turned = until(Duration::from_secs(3), || !handover_pending(engine) && out.load(std::sync::atomic::Ordering::SeqCst) >= 10);
+        let after = (sink_device(engine), engine.bitstream(), engine.audio(), engine.swaps.lock().unwrap().opened - opened);
+        *into.lock().unwrap() = Some((pending, answer, took, at_answer, turned, after));
+    });
+    let (pending, answer, took, at_answer, turned, after) = got.lock().unwrap().take().unwrap();
+    assert!(pending, "the headset's part built and waiting for its turn");
+    assert_ne!(answer.0, "success", "{answer:?}");
+    assert!(took < Duration::from_millis(mediabox_core::audio::LIVE_PLAN_ANSWER_MS), "answered in {took:?}");
+    assert_eq!(at_answer, (Some(HDMI_PCM.into()), true, start.clone()), "answered with the television's sound in force");
+    assert!(turned, "the part after the held one played");
+    assert_eq!(after, (Some(HDMI_PCM.into()), true, start, 0), "nothing changed by the turn that came late");
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A plan without its channel's number or its own (9): refused as asked
+/// wrongly, before it is queued; nothing changes. The channel here has a
+/// number (5).
+#[test]
+fn a_plan_without_its_channel_or_number_is_refused_before_it_is_queued() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(5, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 5), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, on_hdmi(), Some(5), Duration::from_millis(1500), move |engine| {
+        engine.open_gate(5, "matched").expect("its gate");
+        let control = Control::new(engine);
+        let plan = || headset_plan(HEADSET_PCM);
+        let word = |w: &str| serde_json::json!(w);
+        let wrong = [
+            control.ask(&[word("mediabox-audio-plan"), plan()]),
+            control.ask(&[word("mediabox-audio-plan"), plan(), serde_json::json!(5)]),
+            control.ask(&[word("mediabox-audio-plan"), plan(), serde_json::json!(5), serde_json::json!(0)]),
+            control.ask(&[word("mediabox-audio-plan"), plan(), serde_json::Value::Null, serde_json::json!(1)]),
+            control.ask(&[word("mediabox-audio-plan"), plan(), word("5"), serde_json::json!(1)]),
+            control.ask(&[word("mediabox-audio-plan"), plan(), serde_json::json!(5), serde_json::json!(-1)]),
+        ];
+        let queued = engine.plans.lock().unwrap().seq;
+        let device = sink_device(engine);
+        let right = control.ask(&[word("mediabox-audio-plan"), plan(), serde_json::json!(5), serde_json::json!(1)]);
+        *into.lock().unwrap() = Some((wrong, queued, device, right));
+    });
+    let (wrong, queued, device, right) = got.lock().unwrap().take().unwrap();
+    for (n, answer) in wrong.iter().enumerate() {
+        assert_eq!(answer.0, "invalid parameter", "request {n}: {answer:?}");
+    }
+    assert_eq!(queued, 0, "none of them taken");
+    assert_eq!(device.as_deref(), Some(HDMI_PCM));
+    assert_eq!(right, ("success".to_string(), Some(serde_json::json!(HEADSET_PCM))));
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 1);
+}
+
+/// A channel change and a plan's deadline at once (8), its part built and
+/// waiting for its turn: released together by a barrier, in whichever
+/// order they take the engine. The plan is answered as not done, the next
+/// channel opens on the plan before, and nothing of the plan for the
+/// channel left -- its part's turn, its deadline's putting back -- is
+/// done on the next.
+#[test]
+fn a_channel_change_at_a_plan_s_deadline_leaves_the_plan_to_the_channel_left() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let (src, held) = hold_sound_end(engine);
+        let opened = engine.swaps.lock().unwrap().opened;
+        let wait = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+        let pending = until(Duration::from_secs(3), || handover_pending(engine));
+        let id = engine.plans.lock().unwrap().active.as_ref().map(|c| c.id).expect("the plan under way");
+        let path = engine.current_path().unwrap();
+        let both = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                both.wait();
+                engine.open(&path).expect("the next channel");
+            });
+            s.spawn(|| {
+                both.wait();
+                engine.plan_deadline(id);
+            });
+        });
+        let answer = answered(&wait);
+        src.remove_probe(held);
+        let out = count_sound_out(engine);
+        let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+        let after = (sink_device(engine), engine.bitstream(), engine.audio(), engine.swaps.lock().unwrap().opened - opened);
+        let left = engine.plans.lock().unwrap().active.is_none() && engine.shared.sound_rebuild.lock().unwrap().is_none();
+        *into.lock().unwrap() = Some((pending, answer, playing, after, left));
+    });
+    let (pending, answer, playing, after, left) = got.lock().unwrap().take().unwrap();
+    assert!(pending, "the headset's part built and waiting for its turn");
+    assert!(answer.is_err(), "not done: {answer:?}");
+    // Called off by the change, the plan before in force on the next: not
+    // a failed state, which is what a plan left to its putting back on a
+    // channel that is gone would end in.
+    assert!(answer.as_ref().is_err_and(|why| !why.starts_with(mediabox_core::audio::LIVE_PLAN_FAILED_STATE)), "{answer:?}");
+    assert!(playing, "the next channel's sound plays");
+    assert_eq!(after, (Some(HDMI_PCM.into()), true, start, 0), "the next channel on the plan before, nothing swapped");
+    assert!(left, "nothing of the plan left");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
 }

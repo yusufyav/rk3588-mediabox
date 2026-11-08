@@ -255,6 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is on keeps its media keys.
     tokio::spawn(mediaboxd_rs::audio::follow_kodi_keys(
         Arc::clone(&state.audio),
+        Arc::clone(&state.player),
         Arc::clone(&state.kodi),
         state.kodi_events,
     ));

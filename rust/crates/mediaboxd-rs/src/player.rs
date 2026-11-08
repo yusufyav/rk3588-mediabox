@@ -115,14 +115,27 @@ pub struct PlayerManager {
     audio_seq: AtomicU64,
 }
 
-/// How long the live player has to put a plan in force: a part built again
-/// waits for the old one to play out and for the next PES (mediabox-live
-/// `PLAN_REBUILD_GUARD_MS`), a swap for the sound selector (its guard, 2 s).
-const LIVE_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(6);
+/// How long the live player's answer to a plan is waited for: longer than
+/// it may take (`LIVE_PLAN_ANSWER_MS`, inside which its own deadline and
+/// the plan before put back both end), so that an answer given up on here
+/// is never one the player acts on after -- it abandons a plan its own
+/// socket stopped waiting for.
+const LIVE_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_millis(mediabox_core::audio::LIVE_PLAN_ANSWER_MS + 2_000);
 /// A plan refused as another channel's is asked again this often, while a
 /// channel change is under way (the player opens it within a second).
 const LIVE_PLAN_TRIES: usize = 10;
 const LIVE_PLAN_AGAIN: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The interface's player takes the sound plan (`apply_audio`).
+impl crate::audio::PlanTaker for PlayerManager {
+    fn take<'a>(
+        &'a self,
+        before: &'a mediabox_core::AudioPlan,
+        after: &'a mediabox_core::AudioPlan,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::audio::Taken, String>> + Send + 'a>> {
+        Box::pin(self.apply_audio(before, after))
+    }
+}
 
 impl PlayerManager {
     pub fn new(launcher: impl Into<PathBuf>, socket: impl Into<PathBuf>) -> Self {
@@ -239,14 +252,19 @@ impl PlayerManager {
     /// Live television (mediabox-live): the whole plan in one request
     /// (`apply_live_audio`), done once the device it names is open there.
     /// An error is the player's: the plan before it is still in force.
-    pub async fn apply_audio(&self, before: &mediabox_core::AudioPlan, after: &mediabox_core::AudioPlan) -> Result<(), String> {
-        let Some(playing) = self.playing().await else { return Ok(()) };
+    pub async fn apply_audio(&self, before: &mediabox_core::AudioPlan, after: &mediabox_core::AudioPlan) -> Result<crate::audio::Taken, String> {
+        let Some(playing) = self.playing().await else { return Ok(crate::audio::Taken::Nothing) };
         if playing.live().is_some() {
-            return self.apply_live_audio(after).await;
+            return self.apply_live_audio(after).await.map(|()| crate::audio::Taken::Player);
         }
         let set = |name: &str, value: Value| json!({"command": ["set_property", name, value], "request_id": 30});
         if before.mpv_device() != after.mpv_device() && after.device.is_some() {
-            let _ = self.ask(set("audio-device", json!(after.mpv_device()))).await;
+            // The device is what the route is: not taken, not in force.
+            let answer = self.ask(set("audio-device", json!(after.mpv_device()))).await;
+            match answer.as_ref().and_then(|answer| answer.get("error")).and_then(Value::as_str) {
+                Some("success") => {}
+                other => return Err(format!("oynatıcı ses aygıtını almadı: {}", other.unwrap_or("yanıt yok"))),
+            }
         }
         // Timed to the display, the film never had passthrough (Kodi: no
         // passthrough while usedisplayasclock is on) and does not get it now.
@@ -259,7 +277,7 @@ impl PlayerManager {
         }
         let _ = self.ask(set("volume", json!(after.player_volume()))).await;
         let _ = self.ask(set("mute", json!(after.muted))).await;
-        Ok(())
+        Ok(crate::audio::Taken::Player)
     }
 
     /// The whole plan to the live player, for the channel on now (its
@@ -271,7 +289,9 @@ impl PlayerManager {
         let wanted = plan.device.as_ref().map(|device| device.pcm.clone());
         let mut why = String::new();
         for _ in 0..LIVE_PLAN_TRIES {
-            let epoch = self.epoch();
+            // The channel's number; none (null) only before any channel had
+            // one, which the player accepts only for a channel opened so.
+            let epoch = Some(self.epoch()).filter(|epoch| *epoch > 0);
             let seq = self.audio_seq.fetch_add(1, Ordering::SeqCst) + 1;
             let answer = self
                 .ask_within(
@@ -843,6 +863,76 @@ impl PlayerManager {
     }
 }
 
+/// A live player for tests: every request handed to the test, which says
+/// when and what it is answered.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+
+    pub type Request = (Value, tokio::sync::oneshot::Sender<(String, Value)>);
+
+    /// Listening on `socket`; each sound plan request comes on the receiver
+    /// with where to answer it (an `error`, and `data`). Anything else --
+    /// the status's properties -- is answered here as a property this
+    /// player does not have.
+    pub fn live(socket: &Path) -> tokio::sync::mpsc::UnboundedReceiver<Request> {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let (requests, inbox) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let requests = requests.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut line = String::new();
+                    if BufReader::new(reader).read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let Ok(request) = serde_json::from_str::<Value>(&line) else { return };
+                    let (error, data) = if request["command"][0] == "mediabox-audio-plan" {
+                        let (answer, answered) = tokio::sync::oneshot::channel();
+                        if requests.send((request.clone(), answer)).is_err() {
+                            return;
+                        }
+                        let Ok(answer) = answered.await else { return };
+                        answer
+                    } else {
+                        ("property unavailable".to_string(), Value::Null)
+                    };
+                    let answer = json!({"error": error, "data": data, "request_id": request["request_id"]});
+                    let _ = writer.write_all(format!("{answer}\n").as_bytes()).await;
+                });
+            }
+        });
+        inbox
+    }
+
+    /// The device a plan request names.
+    pub fn device_of(request: &Value) -> Value {
+        request["command"][1]["device"]["pcm"].clone()
+    }
+
+    /// Every request answered as the player that opens what it is asked.
+    pub fn opening_all(mut inbox: tokio::sync::mpsc::UnboundedReceiver<Request>) -> std::sync::Arc<std::sync::Mutex<Vec<Value>>> {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let into = std::sync::Arc::clone(&got);
+        tokio::spawn(async move {
+            while let Some((request, answer)) = inbox.recv().await {
+                into.lock().unwrap().push(request.clone());
+                let _ = answer.send(("success".into(), device_of(&request)));
+            }
+        });
+        got
+    }
+
+    impl PlayerManager {
+        /// Live television on, as after a channel's start.
+        pub async fn pretend_live(&self) {
+            *self.playing.lock().await = Some(Playing { content: Playback::Live { service_id: 10603 }, title: None, duration: None });
+            self.next_epoch();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,7 +982,7 @@ mod tests {
         let player = on_live(dir.path()).await;
         let got = live_player(&player.socket, vec![("success", json!("bluealsa:DEV=1"))]);
         let before = plan("hdmi:CARD=x,DEV=0");
-        assert_eq!(player.apply_audio(&before, &plan("bluealsa:DEV=1")).await, Ok(()));
+        assert_eq!(player.apply_audio(&before, &plan("bluealsa:DEV=1")).await, Ok(crate::audio::Taken::Player));
         let got = got.lock().unwrap();
         assert_eq!(got.len(), 1, "one request: {got:?}");
         let command = got[0]["command"].as_array().unwrap();
@@ -928,7 +1018,7 @@ mod tests {
         );
         player.next_epoch();
         let before = plan("hdmi:CARD=x,DEV=0");
-        assert_eq!(player.apply_audio(&before, &plan("bluealsa:DEV=1")).await, Ok(()));
+        assert_eq!(player.apply_audio(&before, &plan("bluealsa:DEV=1")).await, Ok(crate::audio::Taken::Player));
         let got = got.lock().unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!((got[0]["command"][3].clone(), got[1]["command"][3].clone()), (json!(1), json!(2)), "a newer number");

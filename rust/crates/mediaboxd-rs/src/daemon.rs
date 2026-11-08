@@ -238,18 +238,12 @@ impl AppState {
             Request::EthernetKeep => ethernet_result(self.ethernet.keep().await),
             Request::EthernetRevert => ethernet_result(self.ethernet.revert().await),
             Request::AudioStatus => Response::success(self.audio_status().await),
-            Request::AudioSet { setting } => {
-                let audio = Arc::clone(&self.audio);
-                match tokio::task::spawn_blocking(move || audio.set(setting)).await {
-                    Ok(Ok((before, after))) => match self.player.apply_audio(&before, &after).await {
-                        Ok(()) => Response::success(self.audio_status().await),
-                        // Kept, but not what plays: said, not shown as done.
-                        Err(why) => Response::failure("AUDIO_NOT_APPLIED", format!("Ses ayarı kaydedildi, oynatıcı uygulayamadı: {why}")),
-                    },
-                    Ok(Err(why)) => Response::failure("AUDIO_REFUSED", why),
-                    Err(error) => Response::failure("INTERNAL_ERROR", error.to_string()),
-                }
-            }
+            // One transaction each (`audio::Audio::change`): kept only once
+            // the player put it in force, nothing changed when it did not.
+            Request::AudioSet { setting } => match self.audio.change(&*self.player, crate::audio::Want::Setting(setting)).await {
+                Ok(_) => Response::success(self.audio_status().await),
+                Err(error) => Response::failure(error.code(), error.message()),
+            },
             Request::AudioVolume { volume, step, muted, toggle_mute } => {
                 use crate::audio::VolumeChange;
                 let change = match (volume, step, muted, toggle_mute) {
@@ -264,15 +258,9 @@ impl AppState {
                         );
                     }
                 };
-                let audio = Arc::clone(&self.audio);
-                let before = self.audio.now().2;
-                match tokio::task::spawn_blocking(move || audio.volume(change)).await {
-                    Ok(Ok(after)) => match self.player.apply_audio(&before, &after).await {
-                        Ok(()) => Response::success(self.audio_status().await),
-                        Err(why) => Response::failure("AUDIO_NOT_APPLIED", format!("Ses düzeyi kaydedildi, oynatıcı uygulayamadı: {why}")),
-                    },
-                    Ok(Err(why)) => Response::failure("AUDIO_REFUSED", why),
-                    Err(error) => Response::failure("INTERNAL_ERROR", error.to_string()),
+                match self.audio.change(&*self.player, crate::audio::Want::Volume(change)).await {
+                    Ok(_) => Response::success(self.audio_status().await),
+                    Err(error) => Response::failure(error.code(), error.message()),
                 }
             }
             Request::FanStatus => Response::success(self.fan.status()),
@@ -1918,11 +1906,19 @@ impl AppState {
         }
     }
 
-    /// Sound as it is now: the devices, the kept setting and its plan, and
-    /// what the film playing is sending.
+    /// Sound as it is now: the devices, the kept setting, the plan in force
+    /// -- the route, not what the setting would mean on the devices now,
+    /// which differ while a change the player did not take is tried again
+    /// -- what the film playing is sending, and a failed state if a change
+    /// left one.
     async fn audio_status(&self) -> mediabox_core::AudioStatus {
         let audio = Arc::clone(&self.audio);
-        let (setting, devices, plan) = match tokio::task::spawn_blocking(move || audio.now()).await {
+        let looked = tokio::task::spawn_blocking(move || {
+            let (setting, devices, candidate) = audio.now();
+            let plan = audio.route().map(|route| route.plan().clone()).unwrap_or(candidate);
+            (setting, devices, plan, audio.fault())
+        });
+        let (setting, devices, plan, fault) = match looked.await {
             Ok(now) => now,
             Err(error) => {
                 return mediabox_core::AudioStatus {
@@ -1936,7 +1932,7 @@ impl AppState {
             devices,
             plan: Some(plan),
             stream: self.player.audio_stream().await,
-            error: None,
+            error: fault,
         }
     }
 }
@@ -2974,6 +2970,169 @@ mod tests {
             serde_json::from_str::<Request>(r#"{"command":"exec","command_line":"reboot"}"#);
         assert!(parsed.is_err());
     }
+
+    // FAZ 3E.1: a sound setting is kept only once the player put it in
+    // force, one change at a time, end to end.
+
+    fn tv() -> mediabox_core::AudioDevice {
+        mediabox_core::AudioDevice {
+            id: "display:fdea0000.hdmi".into(),
+            label: "HDMI-A-2 · SONY TV".into(),
+            kind: mediabox_core::AudioKind::Hdmi,
+            card_id: "rockchiphdmi1".into(),
+            card_index: Some(2),
+            pcm: "hdmi:CARD=rockchiphdmi1,DEV=0".into(),
+            bitstream: false,
+            connector: Some("HDMI-A-2".into()),
+            display: true,
+            sink: None,
+        }
+    }
+
+    fn buds() -> mediabox_core::AudioDevice {
+        mediabox_core::AudioDevice {
+            id: "bluetooth:20:AF:1B:19:E8:D2".into(),
+            label: "Arctis GameBuds".into(),
+            kind: mediabox_core::AudioKind::Bluetooth,
+            card_id: "bluealsa".into(),
+            card_index: None,
+            pcm: "bluealsa:DEV=20:AF:1B:19:E8:D2,PROFILE=a2dp".into(),
+            bitstream: false,
+            connector: None,
+            display: false,
+            sink: None,
+        }
+    }
+
+    fn choosing(device: &mediabox_core::AudioDevice) -> mediabox_core::AudioSetting {
+        mediabox_core::AudioSetting { device: mediabox_core::AudioDeviceChoice::Device { id: device.id.clone() }, ..Default::default() }
+    }
+
+    /// Live television on with the television and the headset both there,
+    /// the television chosen and kept in `<dir>/audio/audio.json`; the
+    /// live player is the test's.
+    async fn live_with_both(dir: &tempfile::TempDir) -> (Arc<AppState>, tokio::sync::mpsc::UnboundedReceiver<crate::player::fake::Request>, std::path::PathBuf) {
+        let kept = dir.path().join("audio");
+        std::fs::create_dir_all(&kept).unwrap();
+        let setting = kept.join("audio.json");
+        std::fs::write(&setting, choosing(&tv()).to_stored()).unwrap();
+        let mut state = Arc::try_unwrap(test_state(dir)).ok().unwrap();
+        state.audio = Arc::new(crate::audio::Audio::new(&setting, || vec![tv(), buds()], |_| {}));
+        state.audio.restore();
+        state.player = Arc::new(PlayerManager::new("/bin/true", dir.path().join("player.sock")));
+        state.player.pretend_live().await;
+        let inbox = crate::player::fake::live(&dir.path().join("player.sock"));
+        (Arc::new(state), inbox, setting)
+    }
+
+    fn plan_device(status: &Response) -> Option<String> {
+        status.result.as_ref()?.pointer("/plan/device/id")?.as_str().map(str::to_owned)
+    }
+
+    /// (3) A setting the live player cannot put in force: refused, not
+    /// kept on disk nor in memory, the status still the plan in force.
+    #[tokio::test]
+    async fn a_sound_setting_the_player_cannot_put_in_force_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, mut inbox, setting) = live_with_both(&dir).await;
+        let stored = std::fs::read_to_string(&setting).unwrap();
+        tokio::spawn(async move {
+            while let Some((_, answer)) = inbox.recv().await {
+                let _ = answer.send(("ses aygıtı açılamadı".into(), Value::Null));
+            }
+        });
+        let answer = state.handle(Request::AudioSet { setting: choosing(&buds()) }).await;
+        assert!(!answer.ok, "{answer:?}");
+        assert_eq!(std::fs::read_to_string(&setting).unwrap(), stored, "not written");
+        assert_eq!(state.audio.setting(), choosing(&tv()), "not kept");
+        assert_eq!(state.audio.active_device().map(|d| d.id), Some(tv().id));
+        let status = state.handle(Request::AudioStatus).await;
+        assert_eq!(plan_device(&status), Some(tv().id), "the status says the plan in force: {status:?}");
+    }
+
+    /// (4) Put in force and then not written down: the player put back on
+    /// the plan before before the answer, nothing kept.
+    #[tokio::test]
+    async fn a_sound_setting_that_cannot_be_written_is_taken_back_from_the_player() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (state, inbox, setting) = live_with_both(&dir).await;
+        let asked = crate::player::fake::opening_all(inbox);
+        let kept = setting.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let answer = state.handle(Request::AudioSet { setting: choosing(&buds()) }).await;
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!answer.ok, "{answer:?}");
+        assert_eq!(state.audio.setting(), choosing(&tv()), "not kept");
+        assert_eq!(state.audio.active_device().map(|d| d.id), Some(tv().id));
+        let asked: Vec<Value> = asked.lock().unwrap().iter().map(crate::player::fake::device_of).collect();
+        assert!(asked.last().is_none_or(|last| *last == json!(tv().pcm)), "the player left on the plan before: {asked:?}");
+    }
+
+    /// The live player's failed state -- neither the plan nor the one
+    /// before in force -- is said as such, in the answer and the status,
+    /// never as the route before kept.
+    #[tokio::test]
+    async fn a_failed_state_is_said_and_not_shown_as_the_route_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, mut inbox, setting) = live_with_both(&dir).await;
+        let stored = std::fs::read_to_string(&setting).unwrap();
+        tokio::spawn(async move {
+            while let Some((_, answer)) = inbox.recv().await {
+                let why = format!("{}: önceki ses aygıtı da açılamadı", mediabox_core::audio::LIVE_PLAN_FAILED_STATE);
+                let _ = answer.send((why, Value::Null));
+            }
+        });
+        let answer = state.handle(Request::AudioSet { setting: choosing(&buds()) }).await;
+        assert_eq!(answer.error.as_ref().map(|e| e.code.as_str()), Some("AUDIO_FAILED_STATE"), "{answer:?}");
+        assert_eq!(std::fs::read_to_string(&setting).unwrap(), stored, "not written");
+        let status = state.handle(Request::AudioStatus).await;
+        let error = status.result.as_ref().and_then(|r| r.get("error")).and_then(Value::as_str).unwrap_or_default().to_string();
+        assert!(error.starts_with(mediabox_core::audio::LIVE_PLAN_FAILED_STATE), "the status says it: {status:?}");
+    }
+
+    /// (5) Two changes at once, the second asked while the first is with
+    /// the player: what is kept is what the player was last given, and
+    /// the second goes to the player only after the first is answered.
+    #[tokio::test]
+    async fn two_sound_changes_at_once_keep_what_the_player_was_given_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, mut inbox, setting) = live_with_both(&dir).await;
+        let to_buds = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.handle(Request::AudioSet { setting: choosing(&buds()) }).await })
+        };
+        // The first with the player, held there.
+        let (first, first_answer) = inbox.recv().await.unwrap();
+        let to_tv = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.handle(Request::AudioSet { setting: choosing(&tv()) }).await })
+        };
+        let mut given = Vec::new();
+        // The second, if it comes while the first is held: the bound is
+        // only how long it is waited for, never what is concluded.
+        let early = tokio::time::timeout(std::time::Duration::from_secs(1), inbox.recv()).await.ok().flatten();
+        let came_early = early.is_some();
+        if let Some((second, answer)) = early {
+            given.push(crate::player::fake::device_of(&second));
+            let _ = answer.send(("success".into(), crate::player::fake::device_of(&second)));
+        }
+        given.push(crate::player::fake::device_of(&first));
+        let _ = first_answer.send(("success".into(), crate::player::fake::device_of(&first)));
+        if !came_early {
+            let (second, answer) = inbox.recv().await.unwrap();
+            given.push(crate::player::fake::device_of(&second));
+            let _ = answer.send(("success".into(), crate::player::fake::device_of(&second)));
+        }
+        assert!(to_buds.await.unwrap().ok);
+        let to_tv = to_tv.await.unwrap();
+        assert!(to_tv.ok, "{to_tv:?}");
+        let kept = mediabox_core::AudioSetting::parse(&std::fs::read_to_string(&setting).unwrap()).unwrap();
+        let kept_pcm = if kept == choosing(&tv()) { json!(tv().pcm) } else { json!(buds().pcm) };
+        assert_eq!(given.last(), Some(&kept_pcm), "kept {kept:?}, the player given {given:?}");
+        assert_eq!(state.audio.active_device().map(|d| json!(d.pcm)), Some(kept_pcm));
+        assert!(!came_early, "the second went to the player while the first was there");
+    }
 }
 
 /// Record the display owner, and say so if it cannot be recorded.
@@ -3389,4 +3548,5 @@ async fn follow_live_format(player: &PlayerManager, output: &crate::output::Outp
             }
         }
     }
+
 }
