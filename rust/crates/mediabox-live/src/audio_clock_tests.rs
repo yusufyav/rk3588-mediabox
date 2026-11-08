@@ -336,53 +336,147 @@ fn the_cost_is_counted_as_a_share_of_each_buffer_and_held_to_its_limits() {
     assert_eq!(c.json()["max_us"], 30_000);
 }
 
+/// Allocations made on this thread, counted for the test binary only (a
+/// global allocator in a `cfg(test)` module: the product's is untouched).
+struct Counting;
+
+thread_local! {
+    static ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn allocations() -> u64 {
+    ALLOCATIONS.try_with(std::cell::Cell::get).unwrap_or(0)
+}
+
+fn count_allocation() {
+    let _ = ALLOCATIONS.try_with(|c| c.set(c.get() + 1));
+}
+
+// SAFETY: every call goes to the system allocator as it came.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        count_allocation();
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        count_allocation();
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        count_allocation();
+        unsafe { std::alloc::System.realloc(ptr, layout, size) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// The resampler's work as the appliance accepted it (FAZ 2J, ec1c26a: p99
+/// 0.197 of a buffer, no deadline missed in 60 minutes): taps a sample and
+/// the table's phases. More is a heavier controller than the one measured.
+const ACCEPTED_TAPS: usize = 64;
+const ACCEPTED_PHASES: usize = 512;
+/// Allocations a buffer, settled: the S16 buffer for the sink and the
+/// model's median of its window (`median`), measured on ec1c26a.
+const ACCEPTED_ALLOCATIONS: u64 = 2;
+
+/// The heaviest broadcast sound through the controller as the probe takes
+/// it, its work counted, not timed: deterministic under any emulator.
+/// The real-time budget (p99 under a quarter of a buffer, none over a half,
+/// no deadline missed) is the appliance's gate, `audio_clock.cost` in its
+/// health report: an emulator's clock says nothing of it.
 #[test]
-fn the_heaviest_broadcast_sound_resampled_keeps_within_the_cost_limits() {
-    // 5.1 at 48 kHz in AC-3's 1536 frames, a phase held off so every
-    // buffer is resampled (every tap), as the probe does it: taken in,
-    // controlled, made S16 again.
-    // Timed by the thread's own CPU time: the work, not the test host's
-    // load. Under the gate's qemu each instruction takes many times the
-    // appliance's, so the limits held there are held with room on it.
-    let cpu = || {
-        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        // SAFETY: a valid timespec to fill.
-        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
-        t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
-    };
-    // As `install` does, before the first buffer.
-    table();
+fn the_heaviest_broadcast_sound_does_bounded_work_its_realtime_budget_is_the_devices_gate() {
+    // As `install` does, before the first buffer: made once.
+    let made_at = table().as_ptr();
+    assert_eq!(2 * HALF, ACCEPTED_TAPS, "taps a sample");
+    assert_eq!(table().len(), (ACCEPTED_PHASES + 1) * ACCEPTED_TAPS, "the table's rows");
+    // 5.1 at 48 kHz in AC-3's 1536 frames; the sink 200 samples (4.2 ms,
+    // under DISCONT_NS) off where the time is, so every buffer is
+    // resampled at the bound.
     let (channels, rate, frames) = (6usize, 48_000.0, 1536usize);
     let stats = std::sync::Arc::new(Stats::default());
     let mut control = Controller::new(channels, rate, std::sync::Arc::clone(&stats));
-    let cal = Calibration { internal: 0, external: 0, num: 1, denom: 1 };
-    let bytes = from_f32(&sine(997.0, rate, 0.0, frames, channels));
+    // The clock's calibration, set by the controller as the probe sets it.
+    let mut cal = Calibration { internal: 0, external: 0, num: 1, denom: 1 };
     let place = |t: u64, c: &Calibration| (c.to_internal(t as f64) * rate / 1e9).floor();
     let duration = (frames as f64 * 1e9 / rate) as u64;
+    let bound = RATE_RANGE * frames as f64;
     let mut samples = Vec::new();
-    let mut ratios = 0;
+    let (mut frames_in, mut frames_out, mut at_bound) = (0usize, 0usize, 0usize);
     for k in 0..400u64 {
-        let started = cpu();
         let pts = k * duration;
+        // The sound goes on from buffer to buffer, as a decoder's.
+        let bytes = from_f32(&sine(997.0, rate, (k as usize * frames) as f64, frames, channels));
+        let before = allocations();
         to_f32(&bytes, &mut samples);
-        let now = pts;
         let out = control.buffer(
             BufferIn { generation: 1, pts, frames, samples: &samples, discont: false },
             Sink {
                 calibration: cal,
-                observation: Observation { before: now, internal: now, after: now },
-                // Five samples behind where its time is.
-                next_sample: (k > 0).then(|| place(pts, &cal) + 5.0),
+                observation: Observation { before: pts, internal: pts, after: pts },
+                next_sample: (k > 0).then(|| place(pts, &cal) + 200.0),
                 place: &place,
             },
         );
         let made = from_f32(control.output());
-        stats.cost.record(cpu() - started, duration);
-        ratios += usize::from(out.frames != frames && k > 0);
-        assert_eq!(made.len(), out.frames * channels * 2);
+        let allocated = allocations() - before;
+        if let Some(c) = out.calibration {
+            cal = c;
+        }
+        assert_eq!(table().as_ptr(), made_at, "buffer {k}: the table made again");
+        // Once the model's second of readings is full (its window at its
+        // last capacity), a buffer allocates as the accepted controller
+        // does: the buffer handed to the sink and the median's scratch.
+        if k >= 2 * BASELINE as u64 {
+            assert!(allocated <= ACCEPTED_ALLOCATIONS, "buffer {k}: {allocated} allocations");
+        }
+        assert_eq!(made.len(), out.frames * channels * 2, "S16 out, every channel");
+        assert!(control.output().iter().all(|v| v.is_finite() && v.abs() <= 0.5 + 1e-3), "buffer {k}: a sample off the sine's range");
+        if k >= 2 {
+            // No more than the bound's stretch (a frame's rounding): the work
+            // a buffer is its frames out times the taps times the channels.
+            let off = out.frames as f64 - frames as f64;
+            assert!(off.abs() <= bound + 1.0, "buffer {k}: {} frames out of {frames}", out.frames);
+            at_bound += usize::from(off.abs() >= bound - 1.0);
+            assert!(out.frames * ACCEPTED_TAPS * channels <= ((frames as f64 + bound + 1.0) as usize) * ACCEPTED_TAPS * channels);
+        }
+        frames_in += frames;
+        frames_out += out.frames;
     }
-    assert!(ratios > 300, "resampled, not passed through: {ratios}");
-    let cost = stats.cost.json();
-    eprintln!("cost: {cost}");
-    assert_eq!(cost["within_limits"], true, "{cost}");
+    assert!(at_bound > 390, "resampled at the bound, not passed through: {at_bound}");
+    assert_eq!(stats.frames_in.load(Ordering::Relaxed) as usize, frames_in);
+    assert_eq!(stats.frames_out.load(Ordering::Relaxed) as usize, frames_out);
+    assert_eq!(stats.input_discont.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn six_channels_at_the_rate_bound_are_each_the_sounds_value() {
+    // The heavy case's output, channel by channel, against the sine at each
+    // output's position (as `fidelity`, for 5.1).
+    let (channels, rate, freq) = (6usize, 48_000.0, 997.0);
+    for ratio in [1.0 + RATE_RANGE, 1.0 - RATE_RANGE] {
+        let mut r = Resampler::new(channels, rate);
+        let mut out = Vec::new();
+        for k in 0..20 {
+            let input = sine(freq, rate, (k * 1536) as f64, 1536, channels);
+            r.push(&input, 1536, 0);
+            r.process(ratio, &mut out);
+        }
+        let n_out = out.len() / channels;
+        for c in 0..channels {
+            let sign = if c == 0 { 1.0 } else { -1.0 };
+            let (mut err, mut sig) = (0.0, 0.0);
+            for n in (2 * HALF)..(n_out - 4 * HALF) {
+                let x = sign * (2.0 * std::f64::consts::PI * freq * (n as f64 / ratio) / rate).sin() * 0.5;
+                err += (f64::from(out[n * channels + c]) - x).powi(2);
+                sig += x * x;
+            }
+            let db = 10.0 * (err / sig).log10();
+            assert!(db < -90.0, "channel {c} at {ratio}: {db:.1} dB");
+        }
+    }
 }
