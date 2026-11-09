@@ -1772,6 +1772,85 @@ fn a_headset_lost_after_its_try_is_answered_only_with_the_television_s_sound_bac
     picture_handed_over(&run, false);
 }
 
+/// The device opened again while a plan's part waits for its turn (FAZ
+/// 3E.4): the plan before's -- its part is the one playing -- in the form
+/// before, never the plan's ahead of its part; the plan's device opened at
+/// the part's turn, once.
+#[test]
+fn a_device_opened_again_while_a_plan_s_part_waits_is_the_plan_before_s() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start, None, Duration::from_millis(1500), move |engine| {
+        let (src, held) = hold_sound_end(engine);
+        let wait = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+        let pending = until(Duration::from_secs(3), || handover_pending(engine));
+        let (reply, reload) = std::sync::mpsc::sync_channel(1);
+        engine.reopen_audio_sink(Some(reply));
+        let reloaded = answered(&reload);
+        let waiting = (sink_device(engine), engine.bitstream(), engine.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+        let opened = engine.swaps.lock().unwrap().opened;
+        src.remove_probe(held);
+        let answer = answered(&wait);
+        let after = (sink_device(engine), engine.bitstream(), engine.swaps.lock().unwrap().opened - opened);
+        *into.lock().unwrap() = Some((pending, reloaded, waiting, answer, after));
+    });
+    let (pending, reloaded, waiting, answer, after) = got.lock().unwrap().take().unwrap();
+    assert!(pending, "the headset's part waiting for its turn");
+    assert_eq!(reloaded, Ok(()));
+    assert_eq!(waiting, (Some(HDMI_PCM.into()), true, false), "the television, for its bitstream, until the headset's part's turn");
+    assert_eq!(answer, Ok(()));
+    assert_eq!(after, (Some(HEADSET_PCM.into()), false, 1), "the headset opened once, at its part's turn");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    picture_handed_over(&run, false);
+}
+
+/// The headset lost under a change back to the television (FAZ 3E.3, F2):
+/// while the television's part waits for its turn the sound goes to the
+/// stand-in, not to the television in the headset's form; the television
+/// opened for its bitstream at the part's turn, once, and the device lost
+/// answered by that open.
+#[test]
+fn a_headset_lost_under_a_change_back_waits_on_the_stand_in() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, _) = passed_through();
+    let gone = std::env::temp_dir().join(format!("mediabox-live-lost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&gone);
+    std::fs::create_dir_all(&gone).unwrap();
+    let pcm = format!("lost-after-try:{}", gone.display());
+    let start = Audio { device: Some(pcm.clone()), ..on_hdmi() };
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start, None, Duration::from_millis(1500), move |engine| {
+        let (src, held) = hold_sound_end(engine);
+        let wait = ask_plan(engine, hdmi_plan(100, false, true), None, 1);
+        let pending = until(Duration::from_secs(3), || handover_pending(engine));
+        std::fs::remove_dir_all(&gone).unwrap();
+        let (reply, lost) = std::sync::mpsc::sync_channel(1);
+        engine.reopen_audio_sink(Some(reply));
+        let stand_in = until(Duration::from_secs(1), || engine.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+        // Its retries go on meanwhile: none opens the television.
+        std::thread::sleep(Duration::from_millis(400));
+        let waiting = (sink_device(engine), engine.bitstream(), engine.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+        let opened = engine.swaps.lock().unwrap().opened;
+        src.remove_probe(held);
+        let answer = answered(&wait);
+        let lost = answered(&lost);
+        let after = (sink_device(engine), engine.bitstream(), engine.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst), engine.swaps.lock().unwrap().opened - opened);
+        *into.lock().unwrap() = Some((pending, stand_in, waiting, answer, lost, after));
+    });
+    let (pending, stand_in, waiting, answer, lost, after) = got.lock().unwrap().take().unwrap();
+    assert!(pending, "the television's part waiting for its turn");
+    assert!(stand_in, "the stand-in for the headset lost");
+    assert_eq!(waiting, (None, false, true), "nothing opened for the television ahead of its part");
+    assert_eq!(answer, Ok(()));
+    assert_eq!(lost, Ok(()), "the device lost answered by the plan's open");
+    assert_eq!(after, (Some(HDMI_PCM.into()), true, false, 1), "the television opened once, for its bitstream");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    picture_handed_over(&run, false);
+}
+
 /// A plan whose part was built and whose turn never comes (7): its
 /// deadline ends it, the client answered before its own patience runs out
 /// and only with the television's sound in force; the part's turn coming
