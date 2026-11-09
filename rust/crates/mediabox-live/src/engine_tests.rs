@@ -1926,6 +1926,24 @@ fn a_plan_s_device_is_open_before_the_sound_before_it_ends() {
     assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
 }
 
+/// The format a plan's device is opened in ahead of its turn is the one
+/// the part brings: the BlueALSA PCM's range, a 5.1 AC-3 decoded, is what
+/// audioconvert and audioresample made of it on the Plus (FAZ 3E.5,
+/// `sound-measured-at`): 48 kHz stereo with its channel mask. With the
+/// sound's rate and channels not known yet, none is guessed: the guess was
+/// the lowest rate the PCM lists, 4000 Hz, and the headset refused it.
+#[test]
+fn a_plan_s_device_is_set_to_the_sound_s_own_format_and_never_a_guess() {
+    gst::init().unwrap();
+    let headset: gst::Caps = "audio/x-raw, format=(string)S16LE, layout=(string)interleaved, rate=(int)[ 4000, 48000 ], channels=(int)[ 1, 2 ]".parse().unwrap();
+    let measured: gst::Caps =
+        "audio/x-raw, rate=(int)48000, format=(string)S16LE, channels=(int)2, layout=(string)interleaved, channel-mask=(bitmask)0x0000000000000003".parse().unwrap();
+    let got = super::prepared_caps(&headset, Some((48000, 6))).expect("a format");
+    assert_eq!(got, measured);
+    assert_eq!(super::prepared_caps(&headset, None), None, "no guess");
+    assert_eq!(super::prepared_caps(&gst::Caps::new_empty(), Some((48000, 2))), None);
+}
+
 /// The opening of a plan's device held where it is said ready: it waits on
 /// what the test sends.
 fn latch_prepare(engine: &Engine) -> std::sync::mpsc::SyncSender<()> {
