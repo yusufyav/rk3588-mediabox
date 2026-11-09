@@ -725,6 +725,13 @@ struct Prepared {
     /// Its own bus while out of the pipeline: an error on it (a device lost
     /// after it opened) and it is not used.
     bus: gst::Bus,
+    /// Its format set and its ring buffer acquired. Not when the sound's
+    /// rate and channels were not known yet (a channel just opened): the
+    /// device is open and the turn acquires it, as before.
+    acquired: bool,
+    /// The device refused the format it was given: closed, and the turn
+    /// opens the device itself, as before.
+    usable: bool,
 }
 
 impl PlanChange {
@@ -1052,8 +1059,12 @@ fn burst_caps() -> gst::Caps {
 /// device takes in the sound clock's format (`allowed`), the rate and the
 /// channels nearest the sound's own (`layout`) -- audioresample's and
 /// audioconvert's choice when the part negotiates it -- with the channel
-/// mask audioconvert gives stereo. None: the device takes nothing of it.
+/// mask audioconvert gives stereo. None: the device takes nothing of it, or
+/// the sound's own rate and channels are not known -- no format is guessed
+/// (a guess, the lowest rate the BlueALSA PCM lists, 4000 Hz, was refused
+/// by the headset and failed a plan asked as a channel opened, FAZ 3E.5).
 fn prepared_caps(allowed: &gst::Caps, layout: Option<(i32, i32)>) -> Option<gst::Caps> {
+    let (rate, channels) = layout?;
     if allowed.is_empty() || allowed.is_any() {
         return None;
     }
@@ -1061,10 +1072,8 @@ fn prepared_caps(allowed: &gst::Caps, layout: Option<(i32, i32)>) -> Option<gst:
     caps.truncate();
     {
         let s = caps.make_mut().structure_mut(0)?;
-        if let Some((rate, channels)) = layout {
-            s.fixate_field_nearest_int("rate", rate);
-            s.fixate_field_nearest_int("channels", channels);
-        }
+        s.fixate_field_nearest_int("rate", rate);
+        s.fixate_field_nearest_int("channels", channels);
     }
     caps.fixate();
     {
@@ -1949,21 +1958,25 @@ impl Engine {
             return Err(failed("girişi yok"));
         };
         let caps = if bitstream { Some(burst_caps()) } else { prepared_caps(&pad.query_caps(Some(&crate::audio_clock::contract_caps())), layout) };
-        let Some(caps) = caps else {
-            close(&sink);
-            return Err(failed("biçimi yok"));
-        };
         if sink.set_state(gst::State::Paused).is_err() {
             close(&sink);
             return Err(failed("hazırlanamadı"));
         }
-        pad.send_event(gst::event::StreamStart::new(&format!("mediabox-prepare-{id}")));
-        if !pad.send_event(gst::event::Caps::new(&caps)) {
-            close(&sink);
-            return Err(failed(&format!("{caps} açılmadı")));
-        }
         let pcm = alsa_pcm(device);
-        Ok(Prepared { id, device: Some(device.to_string()), pcm, bitstream, sink, bus })
+        let mut prepared = Prepared { id, device: Some(device.to_string()), pcm, bitstream, sink, bus, acquired: false, usable: true };
+        // The device is open. Its format, when known, set too: refused, the
+        // device is not used, and the turn opens it as before -- not a
+        // device that will not open.
+        if let Some(caps) = caps {
+            pad.send_event(gst::event::StreamStart::new(&format!("mediabox-prepare-{id}")));
+            prepared.acquired = pad.send_event(gst::event::Caps::new(&caps));
+            if !prepared.acquired {
+                mediabox_core::timeline!("sound-prepare", "phase=refused id={id} caps={caps}");
+                prepared.usable = false;
+                close(&prepared.sink);
+            }
+        }
+        Ok(prepared)
     }
 
     /// The ALSA PCM the sound sink has open, as the plan names it.
@@ -4006,7 +4019,13 @@ impl Engine {
         change.preparing = false;
         let (way, token, target) = (change.way, change.token(), change.target.clone());
         let caps = prepared.sink.static_pad("sink").and_then(|pad| pad.current_caps()).map_or_else(String::new, |caps| caps.to_string());
-        mediabox_core::timeline!("sound-prepare", "phase=ready id={id} ms={ms} pcm={:?} caps={caps}", prepared.pcm);
+        mediabox_core::timeline!(
+            "sound-prepare",
+            "phase=ready id={id} ms={ms} pcm={:?} acquired={} usable={} caps={caps}",
+            prepared.pcm,
+            u8::from(prepared.acquired),
+            u8::from(prepared.usable)
+        );
         if let Some(old) = self.prepared.lock().unwrap_or_else(|p| p.into_inner()).replace(prepared) {
             let _ = old.sink.set_state(gst::State::Null);
         }
@@ -4031,7 +4050,7 @@ impl Engine {
         let prepared = self.prepared.lock().unwrap_or_else(|p| p.into_inner()).take()?;
         let failed = prepared.bus.pop_filtered(&[gst::MessageType::Error]);
         let pcm = device.as_deref().map(alsa_pcm);
-        if prepared.id != id || prepared.device != *device || prepared.bitstream != bitstream || pcm.as_ref() != Some(&prepared.pcm) || failed.is_some() {
+        if !prepared.usable || prepared.id != id || prepared.device != *device || prepared.bitstream != bitstream || pcm.as_ref() != Some(&prepared.pcm) || failed.is_some() {
             mediabox_core::timeline!("sound-prepare", "phase=unused id={} for={id} failed={}", prepared.id, u8::from(failed.is_some()));
             let _ = prepared.sink.set_state(gst::State::Null);
             return None;
