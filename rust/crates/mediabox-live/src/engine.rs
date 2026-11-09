@@ -780,6 +780,10 @@ pub struct Engine {
     /// A plan's device opened ahead of its turn (`prepare_device`). Taken
     /// after the swaps and the plans, never before.
     prepared: Mutex<Option<Prepared>>,
+    /// Tests: the opening of a plan's device waits here once it has opened,
+    /// before it is said ready.
+    #[cfg(test)]
+    prepare_latch: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// The control plane's sound plans (`set_audio_plan`).
     plans: Mutex<Plans>,
     plans_changed: std::sync::Condvar,
@@ -1228,6 +1232,8 @@ impl Engine {
             bitstream: AtomicBool::new(false),
             sink_device: Mutex::new(None),
             prepared: Mutex::new(None),
+            #[cfg(test)]
+            prepare_latch: Mutex::new(None),
             plans: Mutex::new(Plans::default()),
             plans_changed: std::sync::Condvar::new(),
             audio: {
@@ -3923,6 +3929,13 @@ impl Engine {
         let spawned = std::thread::Builder::new().name("sound-prepare".into()).spawn(move || {
             let Some(engine) = engine.upgrade() else { return };
             let opened = engine.open_prepared(id, &device, bitstream, layout);
+            #[cfg(test)]
+            if opened.is_ok() {
+                let latch = engine.prepare_latch.lock().unwrap_or_else(|p| p.into_inner()).take();
+                if let Some(latch) = latch {
+                    let _ = latch.recv_timeout(std::time::Duration::from_secs(10));
+                }
+            }
             engine.prepared_ready(id, opened, started);
         });
         if spawned.is_err() {
