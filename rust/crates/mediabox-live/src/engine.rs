@@ -702,6 +702,29 @@ struct PlanChange {
     /// Who owned the sound before the change: given it back when the change
     /// is called off before its part was asked for.
     owner_before: Option<PlanToken>,
+    /// Its device being opened ahead of its turn (`prepare_device`): its
+    /// token does not own the sound yet, no part is asked for it, and the
+    /// device before plays on.
+    preparing: bool,
+}
+
+/// A plan's device opened ahead of the plan's turn (`prepare_device`):
+/// opened, its stream's format set and its ring buffer acquired -- the
+/// Bluetooth headset's A2DP stream started -- out of the pipeline, linked to
+/// nothing. Not the route nor the sound's owner: no buffer reaches it until
+/// its plan's turn takes it (`take_prepared`) in place of the device before,
+/// in one swap.
+struct Prepared {
+    /// The plan's change it was opened for.
+    id: u64,
+    device: Option<String>,
+    /// The ALSA PCM it opened (`alsa_pcm` of `device`).
+    pcm: String,
+    bitstream: bool,
+    sink: gst::Element,
+    /// Its own bus while out of the pipeline: an error on it (a device lost
+    /// after it opened) and it is not used.
+    bus: gst::Bus,
 }
 
 impl PlanChange {
@@ -754,6 +777,9 @@ pub struct Engine {
     /// The plan's device the sound sink has open: None for none, for the
     /// stand-in, and with no device.
     sink_device: Mutex<Option<String>>,
+    /// A plan's device opened ahead of its turn (`prepare_device`). Taken
+    /// after the swaps and the plans, never before.
+    prepared: Mutex<Option<Prepared>>,
     /// The control plane's sound plans (`set_audio_plan`).
     plans: Mutex<Plans>,
     plans_changed: std::sync::Condvar,
@@ -1007,16 +1033,43 @@ fn form_of(audio: &Audio, codec: Option<crate::es::Codec>, channels: Option<i32>
     }
 }
 
-/// The plan's device opened and closed again before anything is taken
-/// down for it: a headset whose link is gone is refused here, and the
-/// sound goes on as it was.
-fn try_device(audio: &Audio) -> Result<(), String> {
-    let Some(device) = &audio.device else { return Ok(()) };
-    let sink = make("alsasink")?;
-    sink.set_property("device", alsa_pcm(device));
-    let opened = sink.set_state(gst::State::Ready).map(|_| ()).map_err(|_| format!("ses aygıtı açılamadı: {device}"));
-    let _ = sink.set_state(gst::State::Null);
-    opened
+/// A bitstream's format at the sound sink: IEC 61937 bursts in a 48 kHz
+/// stereo S16LE frame (`bitstream_tail`).
+fn burst_caps() -> gst::Caps {
+    gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("layout", "interleaved")
+        .field("rate", 48000i32)
+        .field("channels", 2i32)
+        .build()
+}
+
+/// The PCM format a device opened ahead of its turn is set to: of what the
+/// device takes in the sound clock's format (`allowed`), the rate and the
+/// channels nearest the sound's own (`layout`) -- audioresample's and
+/// audioconvert's choice when the part negotiates it -- with the channel
+/// mask audioconvert gives stereo. None: the device takes nothing of it.
+fn prepared_caps(allowed: &gst::Caps, layout: Option<(i32, i32)>) -> Option<gst::Caps> {
+    if allowed.is_empty() || allowed.is_any() {
+        return None;
+    }
+    let mut caps = allowed.clone();
+    caps.truncate();
+    {
+        let s = caps.make_mut().structure_mut(0)?;
+        if let Some((rate, channels)) = layout {
+            s.fixate_field_nearest_int("rate", rate);
+            s.fixate_field_nearest_int("channels", channels);
+        }
+    }
+    caps.fixate();
+    {
+        let s = caps.make_mut().structure_mut(0)?;
+        if s.get::<i32>("channels").ok() == Some(2) && !s.has_field("channel-mask") {
+            s.set("channel-mask", gst::Bitmask::new(0x3));
+        }
+    }
+    Some(caps)
 }
 
 fn make(factory: &str) -> Result<gst::Element, String> {
@@ -1174,6 +1227,7 @@ impl Engine {
             sound_handover: Mutex::new(None),
             bitstream: AtomicBool::new(false),
             sink_device: Mutex::new(None),
+            prepared: Mutex::new(None),
             plans: Mutex::new(Plans::default()),
             plans_changed: std::sync::Condvar::new(),
             audio: {
@@ -1776,16 +1830,30 @@ impl Engine {
     /// lost, or asked again), "aid" (sound chosen back on).
     fn attach_audio_sink(&self, why: &str) -> Result<(), String> {
         let audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        self.attach_audio_sink_on(why, audio)
+        self.attach_audio_sink_on(why, audio, None)
     }
 
-    /// `attach_audio_sink` on `audio`'s device, whatever the plan says.
-    fn attach_audio_sink_on(&self, why: &str, audio: Audio) -> Result<(), String> {
+    /// `attach_audio_sink` on `audio`'s device, whatever the plan says --
+    /// the device opened ahead of the plan's turn for it, if there is one
+    /// (`prepared`).
+    fn attach_audio_sink_on(&self, why: &str, audio: Audio, prepared: Option<gst::Element>) -> Result<(), String> {
         self.shared.health.sink_opened(audio.device.clone(), why);
-        let sink = match &audio.device {
+        let sink = match prepared {
+            Some(sink) => sink,
+            None => self.make_audio_sink(audio.device.as_deref(), self.bitstream.load(Ordering::SeqCst))?,
+        };
+        self.add_audio_sink(sink)?;
+        *self.sink_device.lock().unwrap_or_else(|p| p.into_inner()) = audio.device;
+        Ok(())
+    }
+
+    /// The sound sink for `device` (None: no device, a fakesink), for a
+    /// bitstream or for PCM, set up and not yet anywhere.
+    fn make_audio_sink(&self, device: Option<&str>, bitstream: bool) -> Result<gst::Element, String> {
+        let sink = match device {
             Some(device) => {
                 let sink = make("alsasink")?;
-                let device = if self.bitstream.load(Ordering::SeqCst) { bitstream_pcm(&alsa_pcm(device)) } else { alsa_pcm(device) };
+                let device = if bitstream { bitstream_pcm(&alsa_pcm(device)) } else { alsa_pcm(device) };
                 sink.set_property("device", &device);
                 // Lower than the default 200 ms: the latency of the whole
                 // pipeline is the largest of its sinks'.
@@ -1818,7 +1886,7 @@ impl Engine {
         sink.set_property("ts-offset", self.audio_offset());
         if let Some(pad) = sink.static_pad("sink") {
             probe_layer(&pad, crate::clock_probe::Layer::Sink, None, &self.shared);
-            if audio.device.is_some() {
+            if device.is_some() {
                 let shared = Arc::clone(&self.shared);
                 pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
                     shared.sound_reached_device.store(shared.generation.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -1827,7 +1895,7 @@ impl Engine {
             }
         }
         // After the probes above, which see the sound as decoded.
-        if audio.device.is_some() && !self.bitstream.load(Ordering::SeqCst) {
+        if device.is_some() && !bitstream {
             let shared = Arc::downgrade(&self.shared);
             let generation = move || shared.upgrade().map_or(0, |s| s.generation.load(Ordering::SeqCst));
             match crate::audio_clock::install(&sink, generation, Arc::clone(&self.shared.audio_clock)) {
@@ -1835,9 +1903,48 @@ impl Engine {
                 Err(reason) => crate::audio_clock::fail_closed(&sink, &self.shared.audio_clock, &reason),
             }
         }
-        self.add_audio_sink(sink)?;
-        *self.sink_device.lock().unwrap_or_else(|p| p.into_inner()) = audio.device;
-        Ok(())
+        Ok(sink)
+    }
+
+    /// Change `id`'s device opened ahead of its turn (`prepare_device`): the
+    /// sink as the turn would make it, in PAUSED out of the pipeline, its
+    /// stream's format set -- the ring buffer acquired, the device's stream
+    /// started -- with nothing sent to it. The format is the one the part
+    /// will bring (`prepared_caps`): the same at the turn, the sink keeps
+    /// its ring buffer as it is (gstaudiobasesink.c setcaps, "caps haven't
+    /// changed"); another, and the sink acquires it again then, as before.
+    fn open_prepared(&self, id: u64, device: &str, bitstream: bool, layout: Option<(i32, i32)>) -> Result<Prepared, String> {
+        let failed = |why: &str| format!("ses aygıtı açılamadı: {device}: {why}");
+        let sink = self.make_audio_sink(Some(device), bitstream)?;
+        let bus = gst::Bus::new();
+        sink.set_bus(Some(&bus));
+        let close = |sink: &gst::Element| {
+            let _ = sink.set_state(gst::State::Null);
+        };
+        if sink.set_state(gst::State::Ready).is_err() {
+            close(&sink);
+            return Err(failed("açılmadı"));
+        }
+        let Some(pad) = sink.static_pad("sink") else {
+            close(&sink);
+            return Err(failed("girişi yok"));
+        };
+        let caps = if bitstream { Some(burst_caps()) } else { prepared_caps(&pad.query_caps(Some(&crate::audio_clock::contract_caps())), layout) };
+        let Some(caps) = caps else {
+            close(&sink);
+            return Err(failed("biçimi yok"));
+        };
+        if sink.set_state(gst::State::Paused).is_err() {
+            close(&sink);
+            return Err(failed("hazırlanamadı"));
+        }
+        pad.send_event(gst::event::StreamStart::new(&format!("mediabox-prepare-{id}")));
+        if !pad.send_event(gst::event::Caps::new(&caps)) {
+            close(&sink);
+            return Err(failed(&format!("{caps} açılmadı")));
+        }
+        let pcm = alsa_pcm(device);
+        Ok(Prepared { id, device: Some(device.to_string()), pcm, bitstream, sink, bus })
     }
 
     /// The ALSA PCM the sound sink has open, as the plan names it.
@@ -1945,7 +2052,7 @@ impl Engine {
             return Ok(());
         }
         let audio = self.sink_audio();
-        self.swap_sink_on(swaps, "mode", audio)
+        self.swap_sink_on(swaps, "mode", audio, None)
     }
 
     /// The plan the sound device is opened for when it is opened again
@@ -1975,20 +2082,25 @@ impl Engine {
     /// device that will not open leaves a stand-in (`attach_stand_in`).
     fn swap_sink(&self, swaps: &mut SinkSwaps, why: &str) -> Result<(), String> {
         let audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        self.swap_sink_on(swaps, why, audio)
+        self.swap_sink_on(swaps, why, audio, None)
     }
 
     /// `swap_sink` on `audio`'s device.
-    fn swap_sink_on(&self, swaps: &mut SinkSwaps, why: &str, audio: Audio) -> Result<(), String> {
+    /// `prepared`: the device opened ahead of a plan's turn for `audio`,
+    /// put in place of the device before; closed if no sound is chosen.
+    fn swap_sink_on(&self, swaps: &mut SinkSwaps, why: &str, audio: Audio, prepared: Option<gst::Element>) -> Result<(), String> {
         let started = Instant::now();
         self.detach_audio_sink();
         mediabox_core::timeline!("sink-swap", "phase=detached why={why} ms={}", started.elapsed().as_millis());
         if self.aid.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+            if let Some(sink) = prepared {
+                let _ = sink.set_state(gst::State::Null);
+            }
             swaps.opened += 1;
             return Ok(());
         }
         let opening = Instant::now();
-        match self.attach_audio_sink_on(why, audio) {
+        match self.attach_audio_sink_on(why, audio, prepared) {
             Ok(()) => {
                 mediabox_core::timeline!("sink-swap", "phase=attached ms={}", opening.elapsed().as_millis());
                 swaps.opened += 1;
@@ -2150,7 +2262,7 @@ impl Engine {
             Ok(())
         } else {
             let audio = self.sink_audio();
-            self.swap_sink_on(&mut swaps, "reopen", audio)
+            self.swap_sink_on(&mut swaps, "reopen", audio, None)
         };
         if let (Err(error), Some(wait)) = (&result, after_failed_open(failed, asked.elapsed().as_millis() as u64)) {
             if let Some(pending) = swaps.pending.as_mut() {
@@ -3245,14 +3357,7 @@ impl Engine {
 
         let bursts = gst_app::AppSrc::builder()
             .format(gst::Format::Time)
-            .caps(
-                &gst::Caps::builder("audio/x-raw")
-                    .field("format", "S16LE")
-                    .field("layout", "interleaved")
-                    .field("rate", 48000i32)
-                    .field("channels", 2i32)
-                    .build(),
-            )
+            .caps(&burst_caps())
             .block(true)
             .build();
         self.adopt(&[bursts.upcast_ref()])?;
@@ -3727,18 +3832,17 @@ impl Engine {
         let forms = self.plan_forms(&target, generation);
         let way = if forms.is_some_and(|(form, now)| form != Some(now)) { PlanWay::Rebuild } else { PlanWay::Swap };
         let (form, form_before) = forms.map_or((None, None), |(form, now)| (form, Some(now)));
-        // Another device, for which the part is taken down: tried first, so
-        // that one which will not open leaves everything as it is.
-        if way == PlanWay::Rebuild
-            && target.device != current.device
-            && let Err(error) = try_device(&target)
-        {
-            self.shared.health.sink_open_failures.fetch_add(1, Ordering::Relaxed);
-            mediabox_core::timeline!("sound-plan", "phase=failed seq={seq} way=rebuild error={error}");
-            answer(reply, Err(error));
-            return;
-        }
         let bitstream_before = self.bitstream.load(Ordering::SeqCst);
+        // Another device: opened first, ahead of the change's turn, the
+        // device before playing on meanwhile (`prepare_device`). One that
+        // will not open leaves everything as it is.
+        let prepare = target.device.clone().filter(|_| target.device != current.device).map(|device| {
+            let bitstream = match way {
+                PlanWay::Rebuild => form.is_some_and(|form| form != Form::Pcm),
+                PlanWay::Swap => bitstream_before,
+            };
+            (device, bitstream)
+        });
         let (id, token) = {
             let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
             plans.ids += 1;
@@ -3757,15 +3861,30 @@ impl Engine {
                 form,
                 form_before,
                 owner_before: plans.owner,
+                preparing: prepare.is_some(),
             };
             let token = change.token();
-            if way == PlanWay::Rebuild {
+            if way == PlanWay::Rebuild && prepare.is_none() {
                 plans.owner = Some(token);
             }
             plans.active = Some(change);
             (id, token)
         };
         mediabox_core::timeline!("sound-plan", "phase=start seq={seq} id={id} way={way:?} gen={generation} form={form:?} device={:?}", target.device);
+        // Its deadline, from its request: what waiting took is its own.
+        let left = PLAN_DEADLINE_MS.saturating_sub(request.asked.elapsed().as_millis() as u64);
+        if let Some((device, bitstream)) = prepare {
+            self.arm_deadline(id, left);
+            self.prepare_device(id, device, bitstream);
+            return;
+        }
+        self.go_on_with_plan(way, token, target);
+        self.arm_deadline(id, left);
+    }
+
+    /// The change `token` made, its device open: a swap asked for, or its
+    /// part asked of the reader -- from here on its token owns the sound.
+    fn go_on_with_plan(self: &Arc<Self>, way: PlanWay, token: PlanToken, target: Audio) {
         match way {
             PlanWay::Swap => {
                 let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
@@ -3784,9 +3903,127 @@ impl Engine {
                 self.request_rebuild(token);
             }
         }
-        // Its deadline, from its request: what waiting took is its own.
-        let left = PLAN_DEADLINE_MS.saturating_sub(request.asked.elapsed().as_millis() as u64);
-        self.arm_deadline(id, left);
+    }
+
+    /// Change `id`'s device opened ahead of its turn, on a thread of its
+    /// own: opened, its stream's format set and its ring buffer acquired
+    /// (`open_prepared`), out of the pipeline. A Bluetooth headset's A2DP
+    /// stream starts there -- 272-448 ms on the Plus with the GameBuds, on
+    /// the sound's own thread when the device was opened at its part's turn,
+    /// the clock going on meanwhile: the part's first 4-9 buffers, 125-282
+    /// ms, came after their time and the sink threw them away, 8 changes in
+    /// 8 (FAZ 3E.5, 2026-11-09, `dropping late sample`). The device before
+    /// plays the sound meanwhile; the change goes on once this one is open
+    /// (`prepared_ready`), and its turn takes it in one swap.
+    fn prepare_device(self: &Arc<Self>, id: u64, device: String, bitstream: bool) {
+        mediabox_core::timeline!("sound-prepare", "phase=start id={id} device={device:?} bitstream={}", u8::from(bitstream));
+        let layout = if bitstream { None } else { self.stream_layout() };
+        let engine = Arc::downgrade(self);
+        let started = Instant::now();
+        let spawned = std::thread::Builder::new().name("sound-prepare".into()).spawn(move || {
+            let Some(engine) = engine.upgrade() else { return };
+            let opened = engine.open_prepared(id, &device, bitstream, layout);
+            engine.prepared_ready(id, opened, started);
+        });
+        if spawned.is_err() {
+            self.prepared_ready(id, Err("ses aygıtı açılamadı: iş parçacığı kurulamadı".into()), started);
+        }
+    }
+
+    /// Change `id`'s device opened, or not. Decided with the swaps and the
+    /// plans held, as the deadline is: a change called off meanwhile -- its
+    /// deadline, a channel opened -- finds its device closed again here,
+    /// nothing of it done; a device that will not open answers the change
+    /// with why and leaves the device before, the route and the sound's
+    /// owner as they were. Opened, the device is kept for the change's
+    /// turn, and the change goes on: its token owns the sound from here.
+    fn prepared_ready(self: &Arc<Self>, id: u64, opened: Result<Prepared, String>, started: Instant) {
+        let ms = started.elapsed().as_millis();
+        let swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+        let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+        if !plans.active.as_ref().is_some_and(|c| c.id == id && c.preparing) {
+            drop((plans, swaps));
+            mediabox_core::timeline!("sound-prepare", "phase=stale id={id} ms={ms}");
+            if let Ok(prepared) = opened {
+                let _ = prepared.sink.set_state(gst::State::Null);
+            }
+            return;
+        }
+        let prepared = match opened {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let change = plans.active.take().expect("checked above");
+                drop((plans, swaps));
+                self.shared.health.sink_open_failures.fetch_add(1, Ordering::Relaxed);
+                mediabox_core::timeline!("sound-prepare", "phase=failed id={id} ms={ms} error={error}");
+                mediabox_core::timeline!("sound-plan", "phase=failed id={id} seq={} way={:?} error={error}", change.seq, change.way);
+                answer(change.reply, Err(error));
+                self.plans_changed.notify_all();
+                return;
+            }
+        };
+        let change = plans.active.as_mut().expect("checked above");
+        change.preparing = false;
+        let (way, token, target) = (change.way, change.token(), change.target.clone());
+        let caps = prepared.sink.static_pad("sink").and_then(|pad| pad.current_caps()).map_or_else(String::new, |caps| caps.to_string());
+        mediabox_core::timeline!("sound-prepare", "phase=ready id={id} ms={ms} pcm={:?} caps={caps}", prepared.pcm);
+        if let Some(old) = self.prepared.lock().unwrap_or_else(|p| p.into_inner()).replace(prepared) {
+            let _ = old.sink.set_state(gst::State::Null);
+        }
+        match way {
+            PlanWay::Rebuild => {
+                plans.owner = Some(token);
+                *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = target;
+                self.request_rebuild(token);
+                drop((plans, swaps));
+            }
+            PlanWay::Swap => {
+                drop((plans, swaps));
+                self.go_on_with_plan(way, token, target);
+            }
+        }
+    }
+
+    /// The device opened ahead of change `id`'s turn, for `device` in this
+    /// form, if it is still good: one opened for another change, device or
+    /// form, or that said it failed since, is closed and not used.
+    fn take_prepared(&self, id: u64, device: &Option<String>, bitstream: bool) -> Option<gst::Element> {
+        let prepared = self.prepared.lock().unwrap_or_else(|p| p.into_inner()).take()?;
+        let failed = prepared.bus.pop_filtered(&[gst::MessageType::Error]);
+        let pcm = device.as_deref().map(alsa_pcm);
+        if prepared.id != id || prepared.device != *device || prepared.bitstream != bitstream || pcm.as_ref() != Some(&prepared.pcm) || failed.is_some() {
+            mediabox_core::timeline!("sound-prepare", "phase=unused id={} for={id} failed={}", prepared.id, u8::from(failed.is_some()));
+            let _ = prepared.sink.set_state(gst::State::Null);
+            return None;
+        }
+        mediabox_core::timeline!("sound-prepare", "phase=used id={id}");
+        Some(prepared.sink)
+    }
+
+    /// The device opened ahead of a change's turn closed: the change was
+    /// called off (`id`), or every one was (None).
+    fn discard_prepared(&self, id: Option<u64>, why: &str) {
+        let prepared = self.prepared.lock().unwrap_or_else(|p| p.into_inner()).take_if(|p| id.is_none_or(|id| p.id == id));
+        if let Some(prepared) = prepared {
+            mediabox_core::timeline!("sound-prepare", "phase=closed id={} why={why}", prepared.id);
+            let _ = prepared.sink.set_state(gst::State::Null);
+        }
+    }
+
+    /// The rate and channels of the sound playing: decoded, or -- passed
+    /// through -- as its parser read them. What a device opened for PCM
+    /// ahead of its turn is set to, as the sound's own convert and resample
+    /// will negotiate it (`prepared_caps`).
+    fn stream_layout(&self) -> Option<(i32, i32)> {
+        if let Some(decoded) = self.shared.info.lock().unwrap_or_else(|p| p.into_inner()).audio_decoded {
+            return Some(decoded);
+        }
+        let sound = self.shared.sound.lock().unwrap_or_else(|p| p.into_inner());
+        let elements = sound.as_ref()?.elements.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        elements.iter().filter_map(|e| e.static_pad("src")?.current_caps()).find_map(|caps| {
+            let s = caps.structure(0)?;
+            Some((s.get::<i32>("rate").ok()?, s.get::<i32>("channels").ok()?))
+        })
     }
 
     /// The form `target` sends channel `generation`'s sound in, and the
@@ -3869,8 +4106,12 @@ impl Engine {
         let Some(change) = plans.active.as_ref().filter(|c| c.id == id) else { return };
         let (way, restoring, token) = (change.way, change.cause.is_some(), change.token());
         let mut rebuild = self.shared.sound_rebuild.lock().unwrap_or_else(|p| p.into_inner());
-        let taken = way == PlanWay::Rebuild && rebuild.asked != Some(token);
+        // Its device still being opened: no part asked for, nothing taken.
+        let preparing = change.preparing;
+        let taken = way == PlanWay::Rebuild && !preparing && rebuild.asked != Some(token);
         let change = plans.active.take().expect("checked above");
+        // Its device opened ahead of its turn, closed: never the route.
+        self.discard_prepared(Some(id), "deadline");
         if restoring {
             if !taken {
                 rebuild.asked = None;
@@ -3894,6 +4135,7 @@ impl Engine {
                 way: PlanWay::Rebuild,
                 cause: Some(why),
                 form: change.form_before,
+                preparing: false,
                 ..change
             };
             let token = restore.token();
@@ -3918,7 +4160,9 @@ impl Engine {
                 }
             }
             PlanWay::Rebuild => {
-                rebuild.asked = None;
+                if !preparing {
+                    rebuild.asked = None;
+                }
                 drop(rebuild);
                 plans.owner = change.owner_before;
                 *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = change.previous.clone();
@@ -3927,7 +4171,14 @@ impl Engine {
         drop(plans);
         let back = self.in_force(&change.previous.device, change.bitstream_before);
         drop(swaps);
-        mediabox_core::timeline!("sound-plan", "phase=deadline id={id} seq={} epoch={:?} way={way:?} back={}", change.seq, change.epoch, u8::from(back));
+        mediabox_core::timeline!(
+            "sound-plan",
+            "phase=deadline id={id} seq={} epoch={:?} way={way:?} back={} preparing={}",
+            change.seq,
+            change.epoch,
+            u8::from(back),
+            u8::from(preparing)
+        );
         answer(change.reply, Err(if back { why } else { failed_state(&why) }));
         self.plans_changed.notify_all();
     }
@@ -3970,7 +4221,9 @@ impl Engine {
             return;
         };
         let previous = std::mem::replace(&mut *self.audio.lock().unwrap_or_else(|p| p.into_inner()), target.clone());
-        let result = match self.swap_sink(swaps, "plan") {
+        let prepared = self.take_prepared(id, &target.device, self.bitstream.load(Ordering::SeqCst));
+        self.discard_prepared(Some(id), "other");
+        let result = match self.swap_sink_on(swaps, "plan", target.clone(), prepared) {
             Ok(()) => {
                 self.set_volume(Some(target.gain), Some(target.muted));
                 Ok(())
@@ -4016,8 +4269,10 @@ impl Engine {
             Ok(())
         } else {
             self.bitstream.store(bitstream, Ordering::SeqCst);
-            self.swap_sink(&mut swaps, "plan")
+            let prepared = self.take_prepared(id, &change.target.device, bitstream);
+            self.swap_sink_on(&mut swaps, "plan", change.target.clone(), prepared)
         };
+        self.discard_prepared(Some(id), "in-force");
         if let Some(cause) = change.cause.clone() {
             if let Some(input) = activate {
                 self.audio_selector.set_property("active-pad", input);
@@ -4068,6 +4323,7 @@ impl Engine {
             previous,
             cause: Some(error.clone()),
             form: change.form_before,
+            preparing: false,
             ..change
         };
         let token = restore.token();
@@ -4115,6 +4371,7 @@ impl Engine {
             plans.owner = None;
             (plans.active.take(), plans.waiting.take())
         };
+        self.discard_prepared(None, why);
         if let Some(change) = active {
             match change.way {
                 PlanWay::Swap => {

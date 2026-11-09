@@ -1475,7 +1475,9 @@ fn a_plan_that_changes_the_level_only_opens_nothing() {
 }
 
 /// The headset's device will not open (D): answered so, the television's
-/// device open again at once, the plan before in force, the sound on.
+/// device as it was -- the same sink, never closed: the headset is opened
+/// ahead of its turn (FAZ 3E.5) and failed there -- the plan before in
+/// force, the sound on.
 #[test]
 fn a_headset_that_will_not_open_leaves_the_television_s_sound() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
@@ -1484,20 +1486,22 @@ fn a_headset_that_will_not_open_leaves_the_television_s_sound() {
     let got = Arc::new(Mutex::new(None));
     let into = Arc::clone(&got);
     let run = play_on(ts, 0, on_hdmi(), None, Duration::from_millis(1500), move |engine| {
+        let sink = engine.audio_sink.lock().unwrap().clone();
         let answer = answered(&ask_plan(engine, headset_plan(ABSENT_PCM), None, 1));
-        *into.lock().unwrap() = Some((answer, sink_device(engine), engine.audio()));
+        let same = engine.audio_sink.lock().unwrap().clone() == sink;
+        *into.lock().unwrap() = Some((answer, sink_device(engine), engine.audio(), same));
     });
-    let (answer, device, audio) = got.lock().unwrap().take().unwrap();
+    let (answer, device, audio, same) = got.lock().unwrap().take().unwrap();
     assert!(answer.is_err(), "not answered as done: {answer:?}");
-    assert_eq!(device.as_deref(), Some(HDMI_PCM), "the television's device open again");
+    assert_eq!(device.as_deref(), Some(HDMI_PCM), "the television's device");
+    assert!(same, "the television's sink never closed");
     assert_eq!(audio, on_hdmi(), "the plan before in force");
     assert_eq!(run.shared.health.sink_open_failures.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1);
     sound_went_on(&run, 1, 0x101, 4_500_000_000);
     picture_handed_over(&run, false);
-    // The failed open and the one back: two sinks after the first, the
-    // second the television's again.
-    sound_clean(&run, 1);
+    // No sink after the first.
+    sound_clean(&run, 0);
 }
 
 /// Requests one after another while one waits for its turn (E): the one
