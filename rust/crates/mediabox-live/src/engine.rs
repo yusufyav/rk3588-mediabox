@@ -1776,6 +1776,11 @@ impl Engine {
     /// lost, or asked again), "aid" (sound chosen back on).
     fn attach_audio_sink(&self, why: &str) -> Result<(), String> {
         let audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        self.attach_audio_sink_on(why, audio)
+    }
+
+    /// `attach_audio_sink` on `audio`'s device, whatever the plan says.
+    fn attach_audio_sink_on(&self, why: &str, audio: Audio) -> Result<(), String> {
         self.shared.health.sink_opened(audio.device.clone(), why);
         let sink = match &audio.device {
             Some(device) => {
@@ -1939,12 +1944,42 @@ impl Engine {
         if self.bitstream.swap(bitstream, Ordering::SeqCst) == bitstream {
             return Ok(());
         }
-        self.swap_sink(swaps, "mode")
+        let audio = self.sink_audio();
+        self.swap_sink_on(swaps, "mode", audio)
+    }
+
+    /// The plan the sound device is opened for when it is opened again
+    /// under the sound (a mode, a device lost): the plan in force -- while a
+    /// plan's part built again waits for its turn (`PlanWay::Rebuild`), the
+    /// plan before's. `audio` is the new plan's from the change's start (the
+    /// part is built for it), but the device is the plan before's until
+    /// that part is let go (`finish_plan_at_handover`): opened for the new
+    /// plan ahead of it, the part playing out went there in the form before
+    /// -- a headset lost under a change back to the television opened the
+    /// television 40-140 ms before the change's turn, 5 times in 5, the
+    /// headset's PCM played on it until then (FAZ 3E.3, 2026-11-09). That
+    /// device not opening leaves the stand-in, never the plan's.
+    /// Takes the plans: never called with them held.
+    fn sink_audio(&self) -> Audio {
+        let plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
+        match plans.active.as_ref().filter(|change| change.way == PlanWay::Rebuild) {
+            Some(change) => change.previous.clone(),
+            None => {
+                drop(plans);
+                self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone()
+            }
+        }
     }
 
     /// The old sink out and a new one in, with the swaps' lock held. A
     /// device that will not open leaves a stand-in (`attach_stand_in`).
     fn swap_sink(&self, swaps: &mut SinkSwaps, why: &str) -> Result<(), String> {
+        let audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        self.swap_sink_on(swaps, why, audio)
+    }
+
+    /// `swap_sink` on `audio`'s device.
+    fn swap_sink_on(&self, swaps: &mut SinkSwaps, why: &str, audio: Audio) -> Result<(), String> {
         let started = Instant::now();
         self.detach_audio_sink();
         mediabox_core::timeline!("sink-swap", "phase=detached why={why} ms={}", started.elapsed().as_millis());
@@ -1953,7 +1988,7 @@ impl Engine {
             return Ok(());
         }
         let opening = Instant::now();
-        match self.attach_audio_sink(why) {
+        match self.attach_audio_sink_on(why, audio) {
             Ok(()) => {
                 mediabox_core::timeline!("sink-swap", "phase=attached ms={}", opening.elapsed().as_millis());
                 swaps.opened += 1;
@@ -2111,7 +2146,12 @@ impl Engine {
         }
         let Some((after, failed, asked)) = swaps.pending.as_ref().map(|p| (p.after, p.failed, p.asked)) else { return };
         // Opened since it was asked (`part_sound_mode`): done already.
-        let result = if swaps.opened > after { Ok(()) } else { self.swap_sink(&mut swaps, "reopen") };
+        let result = if swaps.opened > after {
+            Ok(())
+        } else {
+            let audio = self.sink_audio();
+            self.swap_sink_on(&mut swaps, "reopen", audio)
+        };
         if let (Err(error), Some(wait)) = (&result, after_failed_open(failed, asked.elapsed().as_millis() as u64)) {
             if let Some(pending) = swaps.pending.as_mut() {
                 pending.failed += 1;
