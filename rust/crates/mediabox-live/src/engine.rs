@@ -1551,6 +1551,19 @@ impl Engine {
             input.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| match &info.data {
                 Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => {
                     if let Some(engine) = engine.upgrade() {
+                        let faults = crate::health::Faults::get(&engine.shared.faults);
+                        if crate::health::Faults::ON && faults.hold_eos_ms > 0 {
+                            mediabox_core::timeline!("fault", "hold-eos ms={}", faults.hold_eos_ms);
+                            let later = Arc::downgrade(&engine);
+                            let held = std::time::Duration::from_millis(faults.hold_eos_ms);
+                            let _ = std::thread::Builder::new().name("fault-hold-eos".into()).spawn(move || {
+                                std::thread::sleep(held);
+                                if let Some(engine) = later.upgrade() {
+                                    engine.finish_sound_handover("old-played-out");
+                                }
+                            });
+                            return gst::PadProbeReturn::Drop;
+                        }
                         engine.finish_sound_handover("old-played-out");
                     }
                     gst::PadProbeReturn::Drop
@@ -3936,6 +3949,20 @@ impl Engine {
                     let _ = latch.recv_timeout(std::time::Duration::from_secs(10));
                 }
             }
+            let faults = crate::health::Faults::get(&engine.shared.faults);
+            if crate::health::Faults::ON && faults.prepare_delay_ms > 0 {
+                mediabox_core::timeline!("fault", "prepare-delay ms={}", faults.prepare_delay_ms);
+                std::thread::sleep(std::time::Duration::from_millis(faults.prepare_delay_ms));
+            }
+            let opened = if crate::health::Faults::ON && faults.prepare_fail {
+                mediabox_core::timeline!("fault", "prepare-fail id={id}");
+                if let Ok(prepared) = opened {
+                    let _ = prepared.sink.set_state(gst::State::Null);
+                }
+                Err(format!("ses aygıtı açılamadı: {device} (bilerek)"))
+            } else {
+                opened
+            };
             engine.prepared_ready(id, opened, started);
         });
         if spawned.is_err() {
@@ -4011,6 +4038,19 @@ impl Engine {
         }
         mediabox_core::timeline!("sound-prepare", "phase=used id={id}");
         Some(prepared.sink)
+    }
+
+    /// Fault injection only (`stale-reopen`): an open of the device asked
+    /// for before a plan's turn (`after` the opens then), come after it.
+    fn stale_reopen(self: &Arc<Self>, after: u64) {
+        let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
+        if swaps.pending.is_some() {
+            return;
+        }
+        swaps.pending = Some(PendingSwap { asked: Instant::now(), after, failed: 0, replies: Vec::new(), reopen: true, plan: false });
+        drop(swaps);
+        mediabox_core::timeline!("fault", "stale-reopen after={after}");
+        self.queue_swap();
     }
 
     /// The device opened ahead of a change's turn closed: the change was
@@ -4116,7 +4156,12 @@ impl Engine {
     fn plan_deadline(self: &Arc<Self>, id: u64) {
         let mut swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
         let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(change) = plans.active.as_ref().filter(|c| c.id == id) else { return };
+        let Some(change) = plans.active.as_ref().filter(|c| c.id == id) else {
+            if crate::health::Faults::ON {
+                mediabox_core::timeline!("sound-plan", "phase=deadline-none id={id}");
+            }
+            return;
+        };
         let (way, restoring, token) = (change.way, change.cause.is_some(), change.token());
         let mut rebuild = self.shared.sound_rebuild.lock().unwrap_or_else(|p| p.into_inner());
         // Its device still being opened: no part asked for, nothing taken.
@@ -4277,6 +4322,7 @@ impl Engine {
     fn finish_plan_at_handover(self: &Arc<Self>, mut swaps: std::sync::MutexGuard<'_, SinkSwaps>, change: PlanChange, activate: Option<&gst::Pad>) -> bool {
         let id = change.id;
         let bitstream = activate.is_some();
+        let opened_before = swaps.opened;
         self.shared.health.diagnose(|d| d.context.passthrough = bitstream);
         let opened = if self.in_force(&change.target.device, bitstream) {
             Ok(())
@@ -4309,6 +4355,9 @@ impl Engine {
                 mediabox_core::timeline!("sound-plan", "phase=done id={id} seq={} way=Rebuild", change.seq);
                 answer(change.reply, Ok(()));
                 self.plans_changed.notify_all();
+                if crate::health::Faults::ON && crate::health::Faults::get(&self.shared.faults).stale_reopen {
+                    self.stale_reopen(opened_before);
+                }
                 return true;
             }
             Err(error) => error,

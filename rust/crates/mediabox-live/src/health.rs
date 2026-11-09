@@ -916,6 +916,16 @@ pub struct Faults {
     pub ts_drop: u64,
     pub pts_jump_ms: u64,
     pub pcm_zero_ms: u64,
+    /// A plan's device opened ahead of its turn said not to open.
+    pub prepare_fail: bool,
+    /// ... said open this much later than it did.
+    pub prepare_delay_ms: u64,
+    /// The end of a sound part playing out before a plan's part, held this
+    /// long at the selector: the plan's deadline before the part's turn.
+    pub hold_eos_ms: u64,
+    /// After a plan's part took the sound, an open of the device asked for
+    /// before it, come late.
+    pub stale_reopen: bool,
 }
 
 impl Faults {
@@ -933,6 +943,10 @@ impl Faults {
         ts_drop: 0,
         pts_jump_ms: 0,
         pcm_zero_ms: 0,
+        prepare_fail: false,
+        prepare_delay_ms: 0,
+        hold_eos_ms: 0,
+        stale_reopen: false,
     };
 
     #[cfg(not(feature = "fault-injection"))]
@@ -962,6 +976,10 @@ impl Faults {
                 "ts-drop" => f.ts_drop = n.max(0) as u64,
                 "pts-jump" => f.pts_jump_ms = n.max(0) as u64,
                 "pcm-zero" => f.pcm_zero_ms = n.max(0) as u64,
+                "prepare-fail" => f.prepare_fail = n > 0,
+                "prepare-delay" => f.prepare_delay_ms = n.max(0) as u64,
+                "hold-eos" => f.hold_eos_ms = n.max(0) as u64,
+                "stale-reopen" => f.stale_reopen = n > 0,
                 _ => {}
             }
         }

@@ -544,6 +544,10 @@ veya donanıma kanıtsız neden yazılmaz. Çözülmüş PCM sink'ten önce
 **Bilerek kusur (yalnız sınama için).** Yalnız `--features fault-injection`
 ile derlenmiş tanı ikilisi okur; ürün ikilisinde yoktur. `MEDIABOX_LIVE_FAULT`: `ts-drop=N`
 (A), `pts-jump=MS` (B), `pcm-zero=MS` (C/D), `audio-drop=N` ve
-`audio-stall=MS` (E). Oynatıcı `systemd-run` ile başladığı için cihazda
+`audio-stall=MS` (E). Ses planının devri için: `prepare-fail=1` (önceden
+açılan hedef aygıt açılmamış sayılır), `prepare-delay=MS` (hedef MS geç
+hazır olur), `hold-eos=MS` (önceki parçanın sonu seçicide MS tutulur:
+deadline devirden önce) ve `stale-reopen=1` (devirden önce istenmiş bir
+reopen devirden sonra gelir). Oynatıcı `systemd-run` ile başladığı için cihazda
 `systemctl set-environment` ile verilir, sonra `unset-environment` ile
 kaldırılır.

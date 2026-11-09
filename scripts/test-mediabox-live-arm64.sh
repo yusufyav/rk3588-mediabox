@@ -130,6 +130,6 @@ echo "mediabox-live source: commit $MEDIABOX_LIVE_COMMIT"
     cargo build -q --locked --release --target "$triple" )
 bin="$crate/target/$triple/release/mediabox-live"
 aarch64-linux-gnu-readelf -d "$bin" | grep -E 'RUNPATH|RPATH'
-if grep -aqE 'MEDIABOX_LIVE_FAULT|BİLEREK KUSUR|audio-stall ms=|pts-jump ms=|pcm-zero ms=|ts-drop pid=' "$bin"; then echo "fault injection in the product build" >&2; exit 1; fi
+if grep -aqE 'MEDIABOX_LIVE_FAULT|BİLEREK KUSUR|audio-stall ms=|pts-jump ms=|pcm-zero ms=|ts-drop pid=|prepare-delay ms=|prepare-fail id=|hold-eos ms=|stale-reopen after=|phase=deadline-none' "$bin"; then echo "fault injection in the product build" >&2; exit 1; fi
 sha256sum "$bin"
 echo "gate passed"
