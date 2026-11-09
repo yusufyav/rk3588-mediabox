@@ -464,6 +464,33 @@ pub const LIVE_PLAN_ANSWER_MS: u64 = 8_000;
 /// before is kept": the control plane says the sound is in a failed state.
 pub const LIVE_PLAN_FAILED_STATE: &str = "sound plan failed state";
 
+/// The environment variable the live player is started with its sound plan
+/// in: the control plane's plan in force, the only one it opens at its
+/// start (`plan_to_env`).
+pub const LIVE_PLAN_ENV: &str = "MEDIABOX_LIVE_AUDIO_PLAN";
+
+/// A plan as one environment value: its JSON in hex, so that nothing in it
+/// -- a headset's name with `%`, `$`, quotes or spaces -- is read by
+/// systemd-run, systemd or the launcher's shell on the way. The player gets
+/// the whole plan or none: [`plan_from_env`] refuses anything else.
+pub fn plan_to_env(plan: &AudioPlan) -> String {
+    let json = serde_json::to_vec(plan).unwrap_or_default();
+    json.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The plan [`plan_to_env`] wrote, or why it is not one.
+pub fn plan_from_env(value: &str) -> Result<AudioPlan, String> {
+    if value.is_empty() || !value.is_ascii() || !value.len().is_multiple_of(2) {
+        return Err(format!("{LIVE_PLAN_ENV}: {} bayt, çift sayıda onaltılık rakam değil", value.len()));
+    }
+    let bytes = (0..value.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&value[at..at + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|error| format!("{LIVE_PLAN_ENV}: onaltılık değil: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("{LIVE_PLAN_ENV}: ses planı değil: {error}"))
+}
+
 /// What a player is started with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioPlan {
@@ -1035,5 +1062,29 @@ mod tests {
         );
         assert!(!pcm.bitstream);
         assert_eq!(pcm.summary, "PCM stereo");
+    }
+
+    /// The plan the live player is started with goes through its
+    /// environment whole: the same plan back, whatever a device's name
+    /// holds; anything else is refused, never read as some other plan.
+    #[test]
+    fn a_plan_goes_to_the_live_player_whole_or_not_at_all() {
+        let mut device = hdmi(None);
+        device.label = "Kulaklık %h $HOME \"ü\" 'x' = ;".into();
+        let plan = AudioPlan {
+            device: Some(device),
+            fallback: true,
+            passthrough: vec![AudioCodec::Ac3],
+            ac3_encode: None,
+            volume: 37,
+            muted: true,
+            notes: vec!["not".into()],
+        };
+        let value = plan_to_env(&plan);
+        assert!(value.bytes().all(|b| b.is_ascii_hexdigit()), "{value}");
+        assert_eq!(plan_from_env(&value), Ok(plan));
+        for wrong in ["", "7", "zz", "ü0", &value[..value.len() - 2]] {
+            assert!(plan_from_env(wrong).is_err(), "{wrong:?}");
+        }
     }
 }

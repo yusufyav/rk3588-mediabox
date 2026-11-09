@@ -126,6 +126,24 @@ const LIVE_PLAN_PATIENCE: std::time::Duration = std::time::Duration::from_millis
 const LIVE_PLAN_TRIES: usize = 10;
 const LIVE_PLAN_AGAIN: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How long a live player just started is given to answer on its socket,
+/// as its opening gate gives it (`live_gate::OPEN_PATIENCE`), and then to
+/// have its plan's device open: what it may take for its own tries of a
+/// device busy at its start, within what a plan's answer may take.
+const LIVE_SOCKET_PATIENCE: std::time::Duration = crate::live_gate::OPEN_PATIENCE;
+const LIVE_SOUND_PATIENCE: std::time::Duration = std::time::Duration::from_millis(mediabox_core::audio::LIVE_PLAN_ANSWER_MS);
+const LIVE_SOUND_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// The live player's start was called off (Back) while its device was
+/// being checked.
+pub const START_CALLED_OFF: &str = "called off";
+
+/// The launch argument that hands the live player its sound plan, whole
+/// (`mediabox_core::audio::plan_to_env`).
+pub fn live_plan_arg(plan: &mediabox_core::AudioPlan) -> String {
+    format!("--setenv={}={}", mediabox_core::audio::LIVE_PLAN_ENV, mediabox_core::audio::plan_to_env(plan))
+}
+
 /// The interface's player takes the sound plan (`apply_audio`).
 impl crate::audio::PlanTaker for PlayerManager {
     fn take<'a>(
@@ -487,7 +505,7 @@ impl PlayerManager {
         playing: Playing,
         display_sync: bool,
         audio_track: Option<u32>,
-        epoch: Option<u64>,
+        live: Option<(u64, &mediabox_core::AudioPlan)>,
     ) -> Result<(), String> {
         self.stop().await;
         self.film.fetch_add(1, Ordering::SeqCst);
@@ -571,7 +589,10 @@ impl PlayerManager {
             .arg(format!("--setenv=MEDIABOX_PLAYER_LIVE={}", u8::from(playing.live().is_some())))
             // The live channel's number: held at its opening gate until the
             // display is matched (`live_gate`). Empty: not gated.
-            .arg(format!("--setenv=MEDIABOX_LIVE_EPOCH={}", epoch.map(|epoch| epoch.to_string()).unwrap_or_default()))
+            .arg(format!("--setenv=MEDIABOX_LIVE_EPOCH={}", live.map(|(epoch, _)| epoch.to_string()).unwrap_or_default()))
+            // Live television's sound plan: the one in force, which the
+            // player opens and works out nothing of its own (`start_live`).
+            .args(live.filter(|_| playing.live().is_some()).map(|(_, plan)| live_plan_arg(plan)))
             .arg(self.launcher.as_os_str())
             .arg(url)
             .arg(start_seconds.to_string())
@@ -591,6 +612,103 @@ impl PlayerManager {
 
         *self.playing.lock().await = Some(playing);
         Ok(())
+    }
+
+    /// Start live television's player and put its sound in force as one
+    /// change of the sound's (`Audio::starting`): the player is started on
+    /// the plan in force -- the route's, whose one owner is `audio`; the
+    /// player works out none of its own -- and only once it says on its
+    /// socket that the device it has open is that plan's is it the route
+    /// applied. Not so within its time: the player is stopped and the
+    /// route is not applied (`Starting::not_applied`); the error says why.
+    /// No change of the sound runs meanwhile: a headset coming while the
+    /// player starts is put to it after, as a change of its own.
+    pub async fn start_live(
+        &self,
+        audio: &crate::audio::Audio,
+        url: &str,
+        playing: Playing,
+        display_sync: bool,
+        epoch: u64,
+        called_off: impl Fn() -> bool + Sync,
+    ) -> Result<(), String> {
+        self.start_live_with(
+            audio,
+            |plan| async move { self.start(url, 0, playing, display_sync, None, Some((epoch, &plan))).await },
+            called_off,
+            (LIVE_SOCKET_PATIENCE, LIVE_SOUND_PATIENCE),
+        )
+        .await
+    }
+
+    /// `start_live`, the player launched by `launch` on the plan given it.
+    pub(crate) async fn start_live_with<F, Fut>(
+        &self,
+        audio: &crate::audio::Audio,
+        launch: F,
+        called_off: impl Fn() -> bool + Sync,
+        patience: (std::time::Duration, std::time::Duration),
+    ) -> Result<(), String>
+    where
+        F: FnOnce(mediabox_core::AudioPlan) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        let sound = audio.starting().await;
+        let plan = sound.plan().clone();
+        if let Err(error) = launch(plan.clone()).await {
+            sound.not_applied();
+            return Err(error);
+        }
+        match self.live_sound_opened(&plan, &called_off, patience).await {
+            Ok(()) => {
+                sound.applied();
+                Ok(())
+            }
+            Err(error) => {
+                sound.not_applied();
+                self.stop().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether the live player just started has `plan`'s device open, as it
+    /// says on its socket (`audio-device`: the PCM its sound sink has open,
+    /// null for none or a stand-in): asked until it does, its socket up
+    /// within the first patience and the device within the second after.
+    async fn live_sound_opened(
+        &self,
+        plan: &mediabox_core::AudioPlan,
+        called_off: &(dyn Fn() -> bool + Sync),
+        (socket_patience, sound_patience): (std::time::Duration, std::time::Duration),
+    ) -> Result<(), String> {
+        let wanted = plan.device.as_ref().map(|device| device.pcm.clone());
+        let started = tokio::time::Instant::now();
+        let mut answered: Option<tokio::time::Instant> = None;
+        let mut opened: Option<String> = None;
+        loop {
+            if called_off() {
+                return Err(START_CALLED_OFF.into());
+            }
+            if let Some(answer) = self.ask(json!({"command": ["get_property", "audio-device"], "request_id": 45})).await {
+                answered.get_or_insert_with(tokio::time::Instant::now);
+                opened = (answer.get("error").and_then(Value::as_str) == Some("success"))
+                    .then(|| answer.get("data").and_then(Value::as_str).map(str::to_owned))
+                    .flatten();
+                if opened == wanted {
+                    return Ok(());
+                }
+            }
+            match answered {
+                None if started.elapsed() >= socket_patience => {
+                    return Err(format!("canlı oynatıcının soketi {} ms içinde açılmadı", socket_patience.as_millis()));
+                }
+                Some(at) if at.elapsed() >= sound_patience => {
+                    return Err(format!("canlı oynatıcı {opened:?} açtı, plan {wanted:?}"));
+                }
+                _ => tokio::time::sleep(LIVE_SOUND_POLL).await,
+            }
+        }
     }
 
     /// Open live channel `service_id`, on `url`, in the player that is
@@ -922,6 +1040,57 @@ pub(crate) mod fake {
             }
         });
         got
+    }
+
+    /// A live player that keeps the device its sound sink has open, as
+    /// mediabox-live does: started on a plan it opens that plan's device --
+    /// none (its stand-in) if `refuses` names it; asked a plan, it opens its
+    /// device, or keeps the one before and says why if it refuses it.
+    /// `audio-device` says what is open.
+    #[derive(Default)]
+    pub struct Sink {
+        pub opened: std::sync::Mutex<Option<String>>,
+        pub refuses: std::sync::Mutex<Vec<String>>,
+        /// Every plan's device asked of it, in order.
+        pub asked: std::sync::Mutex<Vec<Value>>,
+    }
+
+    /// A player on `sink`, started on `plan`, listening on `socket`.
+    pub fn sink_player(socket: &Path, sink: std::sync::Arc<Sink>, plan: &mediabox_core::AudioPlan) {
+        let _ = std::fs::remove_file(socket);
+        let pcm = plan.device.as_ref().map(|device| device.pcm.clone());
+        *sink.opened.lock().unwrap() = pcm.filter(|pcm| !sink.refuses.lock().unwrap().contains(pcm));
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let sink = std::sync::Arc::clone(&sink);
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut line = String::new();
+                    if BufReader::new(reader).read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let Ok(request) = serde_json::from_str::<Value>(&line) else { return };
+                    let (error, data) = match (request["command"][0].as_str(), request["command"][1].as_str()) {
+                        (Some("get_property"), Some("audio-device")) => ("success", json!(*sink.opened.lock().unwrap())),
+                        (Some("mediabox-audio-plan"), _) => {
+                            let device = device_of(&request);
+                            sink.asked.lock().unwrap().push(device.clone());
+                            let pcm = device.as_str().map(str::to_owned);
+                            if pcm.as_ref().is_some_and(|pcm| sink.refuses.lock().unwrap().contains(pcm)) {
+                                ("ses aygıtı açılamadı", Value::Null)
+                            } else {
+                                *sink.opened.lock().unwrap() = pcm;
+                                ("success", device)
+                            }
+                        }
+                        _ => ("property unavailable", Value::Null),
+                    };
+                    let answer = json!({"error": error, "data": data, "request_id": request["request_id"]});
+                    let _ = writer.write_all(format!("{answer}\n").as_bytes()).await;
+                });
+            }
+        });
     }
 
     impl PlayerManager {

@@ -143,6 +143,37 @@ struct Resolved {
     say: Say,
 }
 
+/// A player of ours being started on the plan in force (`Audio::starting`):
+/// no change runs from the plan's choice to the player's word on the device
+/// it opened. The plan is the route's -- this daemon's, the one owner --
+/// never the candidate worked out again, by the player or here.
+pub struct Starting<'a> {
+    audio: &'a Audio,
+    _one: tokio::sync::MutexGuard<'a, ()>,
+    plan: AudioPlan,
+}
+
+impl Starting<'_> {
+    /// The plan the player is started with.
+    pub fn plan(&self) -> &AudioPlan {
+        &self.plan
+    }
+
+    /// The player has the plan's device open: the route in force, and no
+    /// failed state left.
+    pub fn applied(self) {
+        *self.audio.route.lock().unwrap_or_else(|e| e.into_inner()) = Some(Route::Applied(self.plan));
+        *self.audio.fault.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// It has not (it did not start, or opened another device or none, and
+    /// it was stopped): nothing of ours has the plan in force; it is what
+    /// the next player is started with.
+    pub fn not_applied(self) {
+        *self.audio.route.lock().unwrap_or_else(|e| e.into_inner()) = Some(Route::Selected(self.plan));
+    }
+}
+
 /// Sound's three states, each with one owner:
 ///
 /// - the setting: what a person chose, kept in `audio.json`;
@@ -259,6 +290,14 @@ impl Audio {
             Some(route) => route.plan().clone(),
             None => self.now().2,
         }
+    }
+
+    /// A player of ours to be started: on the plan in force, with the
+    /// changes held until it says what it opened ([`Starting`]).
+    pub async fn starting(&self) -> Starting<'_> {
+        let one = self.changes.lock().await;
+        let plan = self.in_force();
+        Starting { audio: self, _one: one, plan }
     }
 
     /// Put the level of the plan in force back on the softvol control: at
@@ -648,8 +687,9 @@ fn headset_level(line: &str) -> Option<(String, u8)> {
 /// force when it names another device (`Want::Route`). Said as the player
 /// has it: a route the player could not open is not the route -- the
 /// device in force, Kodi's keymap and the headsets' keys stay as they were
-/// -- and the next coming or going of a headset tries it again.
-async fn reroute(audio: &std::sync::Arc<Audio>, player: &dyn PlanTaker, kodi: &crate::kodi::KodiClient) {
+/// -- and the next coming or going of a headset, or the next channel
+/// started or changed, tries it again.
+pub async fn reroute(audio: &std::sync::Arc<Audio>, player: &dyn PlanTaker, kodi: &crate::kodi::KodiClient) {
     let label = |plan: &AudioPlan| plan.device.as_ref().map(|d| d.label.clone()).unwrap_or_else(|| "yok".into());
     match audio.change(player, Want::Route).await {
         Ok(None) => {}

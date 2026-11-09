@@ -1105,6 +1105,14 @@ impl AppState {
         }
     }
 
+    /// The setting's plan on the devices found now tried as a change of the
+    /// sound, in the background (`audio::reroute`): what a channel's start
+    /// or change does for a route that was not put in force before.
+    fn retry_route(&self) {
+        let (audio, player, kodi) = (Arc::clone(&self.audio), Arc::clone(&self.player), Arc::clone(&self.kodi));
+        tokio::spawn(async move { crate::audio::reroute(&audio, &*player, &kodi).await });
+    }
+
     /// Live television here: one service of the receiver (or of its
     /// recording), in the interface's own player. Started in a film's order
     /// (`play_here`) and with Back having the same last word over it; what it
@@ -1186,6 +1194,7 @@ impl AppState {
                     match loaded {
                         Ok(()) => {
                             self.playback.relabel_live(film, service_id);
+                            self.retry_route();
                             // The display follows a channel whose rate is not
                             // the last one's before its first picture is
                             // shown (`live_gate`); the same rate lets it go
@@ -1329,9 +1338,12 @@ impl AppState {
         let fifo = self.live.fifo().display().to_string();
         let epoch = self.player.next_epoch();
         mediabox_core::timeline!("player-start", "rid={rid} path={fifo} epoch={epoch}");
+        // Started on the sound plan in force, the route's own, and the
+        // route applied only once the player says that plan's device is the
+        // one it has open; no change of the sound in between.
         let started = self
             .player
-            .start(&fifo, 0, playing, self.output.display_sync(), None, Some(epoch))
+            .start_live(&self.audio, &fifo, playing, self.output.display_sync(), epoch, || starting.called_off())
             .await;
         mediabox_core::timeline!(
             "player-started",
@@ -1340,8 +1352,15 @@ impl AppState {
         );
         if let Err(error) = started {
             self.live.stop().await;
+            if starting.called_off() {
+                return called_off_live(rid, "player-start");
+            }
             return Response::failure("PLAYER_FAILED", error);
         }
+        // A route its change could not put in force -- a headset that would
+        // not open, still found -- is tried again on the new player, as a
+        // change of its own: the player plays the route meanwhile.
+        self.retry_route();
         if starting.called_off() {
             self.player.stop().await;
             self.live.stop().await;
@@ -3132,6 +3151,213 @@ mod tests {
         assert_eq!(given.last(), Some(&kept_pcm), "kept {kept:?}, the player given {given:?}");
         assert_eq!(state.audio.active_device().map(|d| json!(d.pcm)), Some(kept_pcm));
         assert!(!came_early, "the second went to the player while the first was there");
+    }
+
+    // FAZ 3E.2: a live player is started on the daemon's plan in force and
+    // the route applied only once the player's open device is checked.
+
+    /// Short bounds for a player in a test, which answers at once.
+    const QUICK: (std::time::Duration, std::time::Duration) = (std::time::Duration::from_millis(500), std::time::Duration::from_millis(300));
+
+    /// The headset chosen and kept, the devices found what `found` holds
+    /// (the television alone at first): the route selected, nothing of ours
+    /// playing, the players the test's (`fake::Sink`).
+    fn headset_chosen(dir: &tempfile::TempDir) -> (Arc<AppState>, Arc<std::sync::Mutex<Vec<mediabox_core::AudioDevice>>>, Arc<crate::player::fake::Sink>) {
+        let setting = dir.path().join("audio.json");
+        std::fs::write(&setting, choosing(&buds()).to_stored()).unwrap();
+        let found = Arc::new(std::sync::Mutex::new(vec![tv()]));
+        let seen = Arc::clone(&found);
+        let mut state = Arc::try_unwrap(test_state(dir)).ok().unwrap();
+        state.audio = Arc::new(crate::audio::Audio::new(&setting, move || seen.lock().unwrap().clone(), |_| {}));
+        state.audio.restore();
+        state.player = Arc::new(PlayerManager::new("/bin/true", dir.path().join("player.sock")));
+        (Arc::new(state), found, Arc::new(crate::player::fake::Sink::default()))
+    }
+
+    /// A live player started as `start_live` starts one, the launch the
+    /// test's: a player on `sink`, started on the plan it is given -- as
+    /// mediabox-live opens the plan in its environment and nothing else.
+    /// The plan given is kept in `given`.
+    async fn start_on(state: &AppState, sink: &Arc<crate::player::fake::Sink>, given: &std::sync::Mutex<Vec<mediabox_core::AudioPlan>>) -> Result<(), String> {
+        let socket = state.player.socket().to_path_buf();
+        let player = Arc::clone(&state.player);
+        state
+            .player
+            .start_live_with(
+                &state.audio,
+                |plan| async move {
+                    given.lock().unwrap().push(plan.clone());
+                    crate::player::fake::sink_player(&socket, Arc::clone(sink), &plan);
+                    player.pretend_live().await;
+                    Ok(())
+                },
+                || false,
+                QUICK,
+            )
+            .await
+    }
+
+    /// The device sound leaves on, as each says it: the player's open PCM,
+    /// the route's, the status's plan, and the headset whose keys the
+    /// keymap and the inputs give over (none for the television).
+    async fn where_sound_is(state: &AppState, sink: &crate::player::fake::Sink) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+        let status = state.handle(Request::AudioStatus).await;
+        let shown = status.result.as_ref().and_then(|r| r.pointer("/plan/device/pcm")).and_then(Value::as_str).map(str::to_owned);
+        let keys = crate::audio::headset_in_force(&state.audio).map(|label| {
+            assert_eq!(label, buds().label);
+            buds().pcm
+        });
+        (sink.opened.lock().unwrap().clone(), state.audio.active_device().map(|d| d.pcm), shown, keys)
+    }
+
+    fn all_on(device: &mediabox_core::AudioDevice) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+        let pcm = Some(device.pcm.clone());
+        let keys = (device.kind == mediabox_core::AudioKind::Bluetooth).then(|| device.pcm.clone());
+        (pcm.clone(), pcm.clone(), pcm, keys)
+    }
+
+    /// (1) A headset whose change failed and which is still found, then a
+    /// channel opened in a new player: the player is started on the route
+    /// -- the television -- not on the candidate the headset makes, and the
+    /// headset is tried again as a change of its own. Its sink, the route,
+    /// the status and the keys say one device at every step. Started on the
+    /// candidate, the player played the headset with the route, Kodi's
+    /// keymap and the keys on the television.
+    #[tokio::test]
+    async fn a_headset_that_failed_and_is_still_found_is_not_where_the_next_player_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, found, sink) = headset_chosen(&dir);
+        let given = std::sync::Mutex::new(Vec::new());
+        start_on(&state, &sink, &given).await.expect("started");
+        assert_eq!(where_sound_is(&state, &sink).await, all_on(&tv()));
+        // The headset comes and will not open: the change fails.
+        found.lock().unwrap().push(buds());
+        sink.refuses.lock().unwrap().push(buds().pcm);
+        let change = state.audio.change(&*state.player, crate::audio::Want::Route).await;
+        assert!(matches!(change, Err(crate::audio::ChangeError::NotApplied(_))), "{change:?}");
+        assert_eq!(where_sound_is(&state, &sink).await, all_on(&tv()), "the route stays");
+        // A channel in a new player.
+        start_on(&state, &sink, &given).await.expect("started");
+        assert_eq!(given.lock().unwrap()[1].device.as_ref().map(|d| d.id.clone()), Some(tv().id), "started on the route, not the candidate");
+        assert_eq!(where_sound_is(&state, &sink).await, all_on(&tv()));
+        // Tried again, as a channel's start does (`retry_route`): refused
+        // again, then taken once the headset opens -- one device each time.
+        crate::audio::reroute(&state.audio, &*state.player, &state.kodi).await;
+        assert_eq!(where_sound_is(&state, &sink).await, all_on(&tv()));
+        assert_eq!(sink.asked.lock().unwrap().len(), 2, "tried again on the new player");
+        sink.refuses.lock().unwrap().clear();
+        crate::audio::reroute(&state.audio, &*state.player, &state.kodi).await;
+        assert_eq!(where_sound_is(&state, &sink).await, all_on(&buds()));
+        assert!(matches!(state.audio.route(), Some(crate::audio::Route::Applied(_))));
+    }
+
+    /// (2) A player started while the route is selected and the devices
+    /// found now make another candidate: it is given the route's plan,
+    /// whole -- what its launch hands it decodes to that plan -- and the
+    /// device it opens is that plan's.
+    #[tokio::test]
+    async fn a_new_live_player_opens_the_daemon_s_plan_whatever_the_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, found, sink) = headset_chosen(&dir);
+        // The headset found, no change run for it yet: the candidate moves,
+        // the route does not.
+        found.lock().unwrap().push(buds());
+        let selected = state.audio.route().map(|route| route.plan().clone()).unwrap();
+        assert_eq!(selected.device.as_ref().map(|d| d.id.clone()), Some(tv().id));
+        assert_eq!(state.audio.now().2.device.map(|d| d.id), Some(buds().id), "the candidate is the headset");
+        let given = std::sync::Mutex::new(Vec::new());
+        start_on(&state, &sink, &given).await.expect("started");
+        let given = given.lock().unwrap()[0].clone();
+        assert_eq!(given, selected, "the route's plan, whole");
+        let arg = crate::player::live_plan_arg(&given);
+        let env = arg.strip_prefix(&format!("--setenv={}=", mediabox_core::audio::LIVE_PLAN_ENV)).unwrap();
+        assert_eq!(mediabox_core::audio::plan_from_env(env), Ok(selected), "handed over whole");
+        assert_eq!(where_sound_is(&state, &sink).await, all_on(&tv()));
+        assert_eq!(state.audio.route(), Some(crate::audio::Route::Applied(given)));
+    }
+
+    /// (3) A headset comes while a player starts: its change waits for the
+    /// start -- the plan the player was started on applied first -- and is
+    /// then put to the new player. The last change made is where the
+    /// daemon and the sink both are.
+    #[tokio::test]
+    async fn a_headset_coming_while_a_player_starts_waits_and_is_put_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, found, sink) = headset_chosen(&dir);
+        let (launching, launched) = tokio::sync::oneshot::channel::<()>();
+        let (go, gone) = tokio::sync::oneshot::channel::<()>();
+        let starting = {
+            let state = Arc::clone(&state);
+            let sink = Arc::clone(&sink);
+            tokio::spawn(async move {
+                let socket = state.player.socket().to_path_buf();
+                let player = Arc::clone(&state.player);
+                state
+                    .player
+                    .start_live_with(
+                        &state.audio,
+                        |plan| async move {
+                            let _ = launching.send(());
+                            let _ = gone.await;
+                            crate::player::fake::sink_player(&socket, sink, &plan);
+                            player.pretend_live().await;
+                            Ok(())
+                        },
+                        || false,
+                        QUICK,
+                    )
+                    .await
+            })
+        };
+        launched.await.unwrap();
+        found.lock().unwrap().push(buds());
+        let mut change = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.audio.change(&*state.player, crate::audio::Want::Route).await })
+        };
+        // While the player is being launched the change cannot run: the
+        // bound is how long that is looked at, never what decides it.
+        let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut change).await;
+        assert!(early.is_err(), "the change ran during the start: {early:?}");
+        assert!(sink.asked.lock().unwrap().is_empty());
+        go.send(()).unwrap();
+        starting.await.unwrap().expect("started");
+        let change = change.await.unwrap();
+        let change = change.expect("the headset put in force").expect("a change");
+        assert_eq!(change.after.device.as_ref().map(|d| d.id.clone()), Some(buds().id));
+        assert_eq!(where_sound_is(&state, &sink).await, all_on(&buds()));
+        assert_eq!(*sink.asked.lock().unwrap(), vec![json!(buds().pcm)]);
+    }
+
+    /// (4) The player's socket up but not the plan's device open (a stand-in,
+    /// or another device): no route applied and no success; the player is
+    /// stopped. Nor a player whose socket never comes up.
+    #[tokio::test]
+    async fn a_player_that_did_not_open_the_plan_s_device_applies_no_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _found, sink) = headset_chosen(&dir);
+        sink.refuses.lock().unwrap().push(tv().pcm);
+        let given = std::sync::Mutex::new(Vec::new());
+        let started = start_on(&state, &sink, &given).await;
+        assert!(started.as_ref().is_err_and(|why| why.contains(&tv().pcm)), "{started:?}");
+        assert!(matches!(state.audio.route(), Some(crate::audio::Route::Selected(_))), "{:?}", state.audio.route());
+        assert!(state.player.playing().await.is_none(), "stopped");
+        let socket = state.player.socket().to_path_buf();
+        let silent = state
+            .player
+            .start_live_with(
+                &state.audio,
+                |_| async move {
+                    // As `start` does: no socket left behind answers for it.
+                    let _ = std::fs::remove_file(&socket);
+                    Ok(())
+                },
+                || false,
+                QUICK,
+            )
+            .await;
+        assert!(silent.as_ref().is_err_and(|why| why.contains("soketi")), "{silent:?}");
+        assert!(matches!(state.audio.route(), Some(crate::audio::Route::Selected(_))));
     }
 }
 

@@ -1884,7 +1884,7 @@ fn a_channel_change_at_a_plan_s_deadline_leaves_the_plan_to_the_channel_left() {
         let out = count_sound_out(engine);
         let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
         let after = (sink_device(engine), engine.bitstream(), engine.audio(), engine.swaps.lock().unwrap().opened - opened);
-        let left = engine.plans.lock().unwrap().active.is_none() && engine.shared.sound_rebuild.lock().unwrap().is_none();
+        let left = engine.plans.lock().unwrap().active.is_none() && { let r = engine.shared.sound_rebuild.lock().unwrap(); r.asked.is_none() && r.taken.is_none() };
         *into.lock().unwrap() = Some((pending, answer, playing, after, left));
     });
     let (pending, answer, playing, after, left) = got.lock().unwrap().take().unwrap();
@@ -1899,4 +1899,282 @@ fn a_channel_change_at_a_plan_s_deadline_leaves_the_plan_to_the_channel_left() {
     assert!(left, "nothing of the plan left");
     assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+// FAZ 3E.2: whose a part built again for a plan is (`PlanToken`). The
+// plan's change and the plan before put back each have their own token;
+// only the one that owns the sound may set the device's mode, give the
+// selector its input, swap the device, let its part pass or answer. The
+// deadline and the plan part's turn decide under the same locks, and
+// whichever comes first is the outcome -- forced here in each order, and
+// left to a barrier.
+
+/// The change under way's token.
+fn plan_token(engine: &Engine) -> super::PlanToken {
+    engine.plans.lock().unwrap().active.as_ref().map(|change| change.token()).expect("a plan under way")
+}
+
+/// The sound part whose token is `token`, built: its source's next pad,
+/// where everything of it that passes its hold goes first.
+fn part_of(engine: &Engine, token: super::PlanToken) -> Option<gst::Pad> {
+    let sound = engine.shared.sound.lock().unwrap();
+    let parts = sound.as_ref().filter(|parts| parts.token == Some(token))?;
+    parts.source.static_pad("src")?.peer()
+}
+
+/// Buffers that pass `pad` from now on.
+fn count_on(pad: &gst::Pad) -> Arc<std::sync::atomic::AtomicU64> {
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let into = Arc::clone(&count);
+    pad.add_probe(gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST, move |_, _| {
+        into.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gst::PadProbeReturn::Ok
+    });
+    count
+}
+
+/// The sound selector's input now, and whether it is one of the inputs of
+/// the part whose token is `token`.
+fn selector_given(engine: &Engine, token: super::PlanToken) -> (Option<String>, bool) {
+    let active = engine.audio_selector.property::<Option<gst::Pad>>("active-pad");
+    let sound = engine.shared.sound.lock().unwrap();
+    let theirs = sound.as_ref().filter(|parts| parts.token == Some(token)).is_some_and(|parts| {
+        parts.pads.lock().unwrap().iter().any(|(element, pad)| *element == engine.audio_selector && Some(pad) == active.as_ref())
+    });
+    (active.map(|pad| pad.name().to_string()), theirs)
+}
+
+/// The part after the one that played out was refused at its turn.
+fn refused_at_turn(engine: &Engine) -> bool {
+    engine.sound_handover.lock().unwrap().as_ref().is_some_and(|handover| handover.old.is_none())
+}
+
+/// A plan whose part is built and waits for its turn.
+struct Waiting {
+    /// The end of the part before it, held.
+    held: (gst::Pad, gst::PadProbeId),
+    /// Where its answer comes.
+    wait: std::sync::mpsc::Receiver<Result<(), String>>,
+    token: super::PlanToken,
+    /// Buffers of its part that passed its hold.
+    counted: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// A headset plan asked under AC-3 passed through to the television, its
+/// part built and waiting for its turn (the television's part's end held).
+fn plan_waiting(engine: &Arc<Engine>) -> Waiting {
+    let held = hold_sound_end(engine);
+    let wait = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+    assert!(until(Duration::from_secs(3), || handover_pending(engine)), "the plan's part built and waiting");
+    let token = plan_token(engine);
+    assert!(until(Duration::from_secs(1), || part_of(engine, token).is_some()), "its part is the token's");
+    let counted = count_on(&part_of(engine, token).unwrap());
+    Waiting { held, wait, token, counted }
+}
+
+/// (5)(7) The deadline first, then the part before's end -- the plan's
+/// part's turn: the plan's token is retired, the part never passes (not
+/// one buffer reaches its parser, let alone the selector or the device),
+/// the device's mode, the device and the selector's input stay the plan
+/// before's, and a part for it under a token of its own goes on in its
+/// place. The reader is held meanwhile where it takes a plan's part, so
+/// that the turn comes before the plan before's part is built.
+#[test]
+fn a_plan_called_off_at_its_deadline_never_passes_a_buffer_when_its_turn_comes() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let Waiting { held: (src, held), wait, token, counted } = plan_waiting(engine);
+        // The device: its PCM, its form, the swaps made.
+        let device = |engine: &Engine| (sink_device(engine), engine.bitstream(), engine.swaps.lock().unwrap().opened);
+        let before = device(engine);
+        let reader = engine.shared.aid_request.lock().unwrap();
+        engine.plan_deadline(token.id);
+        let restore = plan_token(engine);
+        src.remove_probe(held);
+        let refused = until(Duration::from_secs(3), || refused_at_turn(engine));
+        let at_turn = (counted.load(std::sync::atomic::Ordering::SeqCst), device(engine), selector_given(engine, token).1);
+        // Its decoder's first caps, late, as they would come if anything of
+        // it had passed: the mode is not set, the device not swapped.
+        let caps = engine.part_sound_mode(false, Some(&std::sync::atomic::AtomicBool::new(false)), Some(token));
+        let after_caps = (device(engine), selector_given(engine, token).1);
+        drop(reader);
+        let answer = answered(&wait);
+        let out = count_sound_out(engine);
+        let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+        let later = (counted.load(std::sync::atomic::Ordering::SeqCst), sink_device(engine), engine.bitstream(), engine.audio());
+        *into.lock().unwrap() = Some((token, restore, before, refused, at_turn, caps, after_caps, answer, playing, later));
+    });
+    let (token, restore, before, refused, at_turn, caps, after_caps, answer, playing, later) = got.lock().unwrap().take().unwrap();
+    assert_ne!(restore, token, "the plan before put back under a token of its own");
+    assert_eq!((restore.generation, restore.seq), (token.generation, token.seq));
+    assert!(refused, "the plan's part refused at its turn");
+    assert_eq!(at_turn, (0, before.clone(), false), "not one buffer, the device as it was, the selector not given its input");
+    assert!(!caps, "its caps set no mode");
+    assert_eq!(after_caps, (before, false), "nor swapped the device");
+    assert!(answer.as_ref().is_err_and(|why| !why.starts_with(mediabox_core::audio::LIVE_PLAN_FAILED_STATE)), "the plan before back: {answer:?}");
+    assert!(playing, "the plan before's part plays");
+    assert_eq!(later, (0, Some(HDMI_PCM.into()), true, start), "and nothing of the plan's part ever passed");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// (8) The plan's part's turn first: the plan in force, answered so; its
+/// deadline coming after that -- as its own thread brings it -- takes
+/// nothing back.
+#[test]
+fn a_plan_in_force_is_not_undone_by_its_deadline_after() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start, None, Duration::from_millis(1500), move |engine| {
+        let Waiting { held: (src, held), wait, token, counted } = plan_waiting(engine);
+        src.remove_probe(held);
+        let answer = answered(&wait);
+        let at_answer = (sink_device(engine), engine.bitstream(), engine.audio());
+        engine.plan_deadline(token.id);
+        let out = count_sound_out(engine);
+        let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+        let after = (sink_device(engine), engine.bitstream(), engine.audio());
+        let passed = counted.load(std::sync::atomic::Ordering::SeqCst);
+        let left = engine.plans.lock().unwrap().active.is_none() && engine.plans.lock().unwrap().owner == Some(token);
+        *into.lock().unwrap() = Some((answer, at_answer, after, passed, playing, left));
+    });
+    let (answer, at_answer, after, passed, playing, left) = got.lock().unwrap().take().unwrap();
+    let headset = Audio { device: Some(HEADSET_PCM.into()), passthrough: vec![], gain: 0.216, muted: false, ac3_encode: None };
+    assert_eq!(answer, Ok(()));
+    assert_eq!((at_answer.0.as_deref(), at_answer.1), (Some(HEADSET_PCM), false), "PCM to the headset");
+    assert_eq!(after, at_answer, "the deadline after it took nothing back");
+    assert_eq!(after.2.device, headset.device);
+    assert!(passed > 0 && playing, "the plan's part plays");
+    assert!(left, "the plan done, its token the sound's");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// (5) The deadline and the part before's end released together by one
+/// barrier: one of the two outcomes, whole -- the plan in force (its part
+/// passing, the headset open in PCM, answered done), or the plan before
+/// (not one buffer of the plan's part, the television open for the
+/// bitstream, answered not done and not as the failed state). Nothing in
+/// between, and nothing of the loser after.
+#[test]
+fn a_deadline_and_a_turn_at_once_end_in_one_outcome() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let Waiting { held: (src, held), wait, token, counted } = plan_waiting(engine);
+        let both = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                both.wait();
+                engine.plan_deadline(token.id);
+            });
+            s.spawn(|| {
+                both.wait();
+                src.remove_probe(held);
+            });
+        });
+        let answer = answered(&wait);
+        let out = count_sound_out(engine);
+        let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+        let after = (sink_device(engine), engine.bitstream(), engine.audio().device);
+        let passed = counted.load(std::sync::atomic::Ordering::SeqCst);
+        let owner = engine.plans.lock().unwrap().owner;
+        *into.lock().unwrap() = Some((token, answer, playing, after, passed, owner));
+    });
+    let (token, answer, playing, after, passed, owner) = got.lock().unwrap().take().unwrap();
+    assert!(playing, "the sound goes on");
+    match &answer {
+        Ok(()) => {
+            assert_eq!(after, (Some(HEADSET_PCM.into()), false, Some(HEADSET_PCM.into())), "the plan in force, whole");
+            assert!(passed > 0, "its part plays");
+            assert_eq!(owner, Some(token));
+        }
+        Err(why) => {
+            assert!(!why.starts_with(mediabox_core::audio::LIVE_PLAN_FAILED_STATE), "{why}");
+            assert_eq!(after, (Some(HDMI_PCM.into()), true, start.device.clone()), "the plan before, whole");
+            assert_eq!(passed, 0, "not one buffer of the plan's part");
+            assert_ne!(owner, Some(token), "its token retired");
+        }
+    }
+    eprintln!("deadline-turn outcome: {}", if answer.is_ok() { "turn" } else { "deadline" });
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// (9) A channel opened retires every token of the channel left: the plan
+/// part's turn is refused, its caps set no mode, its deadline does
+/// nothing, and the next channel plays on the plan before.
+#[test]
+fn a_channel_opened_retires_every_token_of_the_channel_left() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let Waiting { held: (src, held), wait, token, .. } = plan_waiting(engine);
+        let path = engine.current_path().unwrap();
+        engine.open(&path).expect("the next channel");
+        let answer = answered(&wait);
+        // The device: its PCM, its form, the swaps made. (The selector's
+        // input is the next channel's to change meanwhile.)
+        let device = |engine: &Engine| (sink_device(engine), engine.bitstream(), engine.swaps.lock().unwrap().opened);
+        let before = device(engine);
+        let caps = engine.part_sound_mode(false, Some(&std::sync::atomic::AtomicBool::new(false)), Some(token));
+        let turn = engine.let_sound_go(token.generation, super::SoundRelease { block: None, activate: None, token: Some(token) }).is_err();
+        engine.plan_deadline(token.id);
+        let after = (device(engine), selector_given(engine, token).1);
+        src.remove_probe(held);
+        let out = count_sound_out(engine);
+        let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+        let left = engine.plans.lock().unwrap().active.is_none() && engine.plans.lock().unwrap().owner.is_none();
+        *into.lock().unwrap() = Some((answer, before, caps, turn, after, playing, left, sink_device(engine), engine.bitstream()));
+    });
+    let (answer, before, caps, turn, after, playing, left, device, bitstream) = got.lock().unwrap().take().unwrap();
+    assert!(answer.is_err(), "called off: {answer:?}");
+    assert!(!caps, "its caps set no mode");
+    assert!(turn, "its turn refused");
+    assert_eq!(after, (before, false), "nothing of it moved the device or took the selector");
+    assert!(playing && left);
+    assert_eq!((device.as_deref(), bitstream), (Some(HDMI_PCM), true), "the next channel on the plan before");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// FAZ 3E.2, the start: the player opens the control plane's plan in force
+/// -- handed over whole in its environment -- and nothing else; the
+/// platform's candidate (a headset still found after its change failed) is
+/// never asked for. No plan, or one not whole: no start, and still the
+/// platform is not asked. Only a developer's run says otherwise.
+#[test]
+fn the_player_starts_on_the_control_plane_s_plan_and_never_the_platform_s() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let plan: mediabox_core::AudioPlan = serde_json::from_value(hdmi_plan(80, false, false)).unwrap();
+    let candidate: mediabox_core::AudioPlan = serde_json::from_value(headset_plan(HEADSET_PCM)).unwrap();
+    let value = mediabox_core::audio::plan_to_env(&plan);
+    let env = |name: &str| (name == mediabox_core::audio::LIVE_PLAN_ENV).then(|| value.clone());
+    let never = || -> Option<mediabox_core::AudioPlan> { panic!("the platform's candidate was asked for") };
+    let audio = crate::sound_plan_from(env, never, false).expect("the plan");
+    assert_eq!(audio, Audio::from_plan(&plan, false));
+    assert!(crate::sound_plan_from(|_| None, never, false).is_err(), "no plan, no start");
+    let broken = |name: &str| (name == mediabox_core::audio::LIVE_PLAN_ENV).then(|| value[..value.len() - 2].to_string());
+    assert!(crate::sound_plan_from(broken, never, false).is_err(), "a plan not whole, no start");
+    let developer = |name: &str| (name == "MEDIABOX_LIVE_AUDIO_FROM_PLATFORM").then(|| "1".to_string());
+    let asked = crate::sound_plan_from(developer, || Some(candidate.clone()), false).expect("asked for");
+    assert_eq!(asked.device.as_deref(), Some(HEADSET_PCM), "only when a developer's run says so");
+    // And what it opens is that plan's device.
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(3, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 3), from: 0, to: u64::MAX }]);
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    play_on(ts, 0, audio, None, Duration::from_millis(800), move |engine| {
+        *into.lock().unwrap() = Some((sink_device(engine), engine.audio()));
+    });
+    let (opened, audio) = got.lock().unwrap().take().unwrap();
+    assert_eq!(opened, plan.device.as_ref().map(|device| device.pcm.clone()));
+    assert_eq!(audio, Audio::from_plan(&plan, false));
 }

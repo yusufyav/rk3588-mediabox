@@ -97,31 +97,63 @@ fn display_sync() -> bool {
     std::env::var("MEDIABOX_PLAYER_DISPLAY_SYNC").as_deref() == Ok("1")
 }
 
-/// Where the sound goes, from the kept sound setting (`mediabox-platform
-/// audio-plan`), the plan films are played with too. Later plans come from
-/// the control plane over the control socket (`mediabox-audio-plan`).
-fn sound_plan() -> Audio {
-    if let Ok(device) = std::env::var("MEDIABOX_LIVE_AUDIO_DEVICE") {
-        return Audio {
+/// Where the sound goes at the start: the control plane's plan in force,
+/// handed over whole in the environment (`LIVE_PLAN_ENV`) by the player's
+/// launch (`PlayerManager::start`). The control plane is the sound route's
+/// only owner: the plan is not worked out again here from the kept setting
+/// and the devices found now -- that candidate could name a headset whose
+/// change had failed, and the sound would go there with the route, Kodi's
+/// keymap and the headset keys left on the television. Later plans come
+/// over the control socket (`mediabox-audio-plan`).
+///
+/// A plan that is there but not whole is refused, and so is none at all:
+/// the player does not start. Only a developer's run started by hand may
+/// say otherwise, and must say it: `MEDIABOX_LIVE_AUDIO_DEVICE` (that PCM,
+/// or none), or `MEDIABOX_LIVE_AUDIO_FROM_PLATFORM=1` (`mediabox-platform
+/// audio-plan`).
+fn sound_plan() -> Result<Audio, String> {
+    let platform = || {
+        std::process::Command::new(PLATFORM)
+            .arg("audio-plan")
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<mediabox_core::AudioPlan>(&output.stdout).ok())
+    };
+    sound_plan_from(|name| std::env::var(name).ok(), platform, display_sync())
+}
+
+/// `sound_plan`, from `env` and -- only when a developer's run asks for it
+/// -- the platform's candidate.
+fn sound_plan_from(
+    env: impl Fn(&str) -> Option<String>,
+    platform: impl FnOnce() -> Option<mediabox_core::AudioPlan>,
+    display_sync: bool,
+) -> Result<Audio, String> {
+    if let Some(value) = env(mediabox_core::audio::LIVE_PLAN_ENV) {
+        return mediabox_core::audio::plan_from_env(&value).map(|plan| Audio::from_plan(&plan, display_sync));
+    }
+    if let Some(device) = env("MEDIABOX_LIVE_AUDIO_DEVICE") {
+        eprintln!("mediabox-live: geliştirici çalıştırması: ses MEDIABOX_LIVE_AUDIO_DEVICE={device}");
+        return Ok(Audio {
             device: (!device.is_empty() && device != "none").then_some(device),
             passthrough: Vec::new(),
             gain: 1.0,
             muted: false,
             ac3_encode: None,
-        };
+        });
     }
-    let plan = std::process::Command::new(PLATFORM)
-        .arg("audio-plan")
-        .stderr(std::process::Stdio::inherit())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice::<mediabox_core::AudioPlan>(&output.stdout).ok());
-    let Some(plan) = plan else {
-        eprintln!("mediabox-live: ses planı okunamadı; ses gönderilmiyor");
-        return Audio { device: None, passthrough: Vec::new(), gain: 1.0, muted: false, ac3_encode: None };
-    };
-    Audio::from_plan(&plan, display_sync())
+    if env("MEDIABOX_LIVE_AUDIO_FROM_PLATFORM").as_deref() == Some("1") {
+        eprintln!("mediabox-live: geliştirici çalıştırması: ses planı mediabox-platform audio-plan'dan");
+        return platform()
+            .map(|plan| Audio::from_plan(&plan, display_sync))
+            .ok_or_else(|| "mediabox-platform audio-plan okunamadı".to_string());
+    }
+    Err(format!(
+        "ses planı verilmedi ({} yok); denetim düzleminin planı olmadan açılmıyor",
+        mediabox_core::audio::LIVE_PLAN_ENV
+    ))
 }
 
 /// SIGTERM and SIGINT end the film the way `quit` does: the picture is taken
@@ -252,7 +284,14 @@ fn main() {
     };
     eprintln!("mediabox-live: MediaBox video düzlemine çiziliyor ({socket})");
 
-    let audio = sound_plan();
+    let audio = match sound_plan() {
+        Ok(audio) => audio,
+        Err(error) => {
+            eprintln!("mediabox-live: {error}");
+            plane.stop();
+            std::process::exit(1);
+        }
+    };
     eprintln!(
         "mediabox-live: ses: {} geçiş {:?} kazanç {:.3}{}",
         audio.device.as_deref().unwrap_or("yok"),

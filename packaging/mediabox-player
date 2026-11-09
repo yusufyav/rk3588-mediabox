@@ -65,7 +65,9 @@ fi
 # demultiplexed and timed by GStreamer (tsdemux on the PCR, one
 # CLOCK_MONOTONIC for picture and sound), decoded by MPP (mppvideodec,
 # MediaBox's own build in the media runtime), shown on this same video plane
-# and heard on the sound plan's ALSA device, which it reads itself. See
+# and heard on the ALSA device of the sound plan the control plane starts it
+# with (MEDIABOX_LIVE_AUDIO_PLAN, set by systemd-run; it works out none of
+# its own). See
 # docs/platform/live-player.md. There is no other live player: without it,
 # live television does not start, and says why.
 if [ "${MEDIABOX_PLAYER_LIVE:-0}" = 1 ]; then
