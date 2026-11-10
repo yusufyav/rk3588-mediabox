@@ -2890,3 +2890,65 @@ fn a_bitstream_start_is_not_held() {
     assert!(shown, "{snapshot}");
     assert_eq!((snapshot["sound_hold"].clone(), snapshot["sound_outcome"].clone()), (serde_json::json!(false), serde_json::Value::Null), "{snapshot}");
 }
+
+/// Two MPEG audio streams, the second's times a 90 kHz tick after the
+/// first's: its frame ending at the first's end and a tick past it holds no
+/// whole sample after it -- dropped, not given whole (on the Plus, MP2 to
+/// MP2 on TRT BELGESEL: a frame 1 ns past the end given whole, 24 ms heard
+/// twice, 4 changes in 10). The sound goes on to within a sample.
+#[test]
+fn a_frame_a_tick_past_the_old_streams_end_is_not_heard_twice() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![]), (0x04, 0x102, vec![])];
+    let later: Vec<(u64, Vec<u8>)> = mp2().into_iter().map(|(pts, unit)| (pts + 1, unit)).collect();
+    let ts = stream(
+        &[(0, 0, streams)],
+        &[
+            Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX },
+            Sound { pid: 0x102, stream_id: 0xC1, units: later, from: 0, to: u64::MAX },
+        ],
+    );
+    let run = play_doing(ts, 0, Duration::from_millis(1_800), move |engine| engine.set_aid(Some(1)));
+    sound_went_on(&run, 2, 0x102, 2_500_000_000);
+    sound_continuous(&run, 20_834);
+    let seen = run.audio.lock().unwrap();
+    let runs = runs(&seen);
+    let (old, new) = (&runs[0].1, &runs[1].1);
+    assert!(new[0].0 >= old[old.len() - 1].0 + (old[old.len() - 1].0 - old[old.len() - 2].0), "nothing of the new stream before the old one's end");
+}
+
+/// The chosen stream's part is built while the stream playing goes on --
+/// the reader held here until it is -- and the change only hands it the
+/// sound: built at the change, on the reader's thread, a channel's first
+/// decoder of a codec held the reader 217 ms and the sound ran 30.8 ms late
+/// (FAZ 3E.7 kX). Taken once, none left after; the sound continuous.
+#[test]
+fn a_chosen_streams_part_is_built_before_the_change_and_taken_there() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![]), (0x06, 0x103, vec![0x6A, 1, 0])];
+    let ts = stream(
+        &[(0, 0, streams)],
+        &[
+            Sound { pid: 0x101, stream_id: 0xC0, units: mp2(), from: 0, to: u64::MAX },
+            Sound { pid: 0x103, stream_id: 0xBD, units: ac3(), from: 0, to: u64::MAX },
+        ],
+    );
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_doing(ts, 0, Duration::from_millis(1_800), move |engine| {
+        let (go, latch) = std::sync::mpsc::sync_channel(1);
+        *engine.choice_latch.lock().unwrap() = Some(latch);
+        engine.set_aid(Some(1));
+        let built = until(Duration::from_secs(5), || engine.chosen_part.lock().unwrap().is_some());
+        let playing = engine.shared.sound.lock().unwrap().as_ref().map(|s| s.pid);
+        let _ = go.send(());
+        *into.lock().unwrap() = Some((built, playing));
+    });
+    let (built, playing) = got.lock().unwrap().take().unwrap();
+    assert!(built, "the part built while the reader waited");
+    assert_eq!(playing, Some(0x101), "the stream playing until the change");
+    sound_went_on(&run, 2, 0x103, 2_500_000_000);
+    sound_continuous(&run, 20_834);
+    assert_eq!(run.engine.chosen_taken.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(run.engine.chosen_part.lock().unwrap().is_none());
+}

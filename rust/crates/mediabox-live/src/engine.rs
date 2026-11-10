@@ -820,6 +820,13 @@ pub struct Engine {
     /// Tests: no decoder for any sound (`sound_branch` refuses).
     #[cfg(test)]
     no_decoder: AtomicBool,
+    /// Tests: the reader, once it has asked for a chosen stream's part,
+    /// waits here (`prepare_choice`); and the parts so built taken at the
+    /// change.
+    #[cfg(test)]
+    choice_latch: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    #[cfg(test)]
+    chosen_taken: AtomicU64,
     /// The part for an audio stream the viewer chose, built while the
     /// stream playing goes on (`prepare_choice`): the PID it is for.
     chosen_part: Mutex<Option<(u16, SoundParts)>>,
@@ -1283,6 +1290,10 @@ impl Engine {
             start_hold_limit: Mutex::new(None),
             #[cfg(test)]
             no_decoder: AtomicBool::new(false),
+            #[cfg(test)]
+            choice_latch: Mutex::new(None),
+            #[cfg(test)]
+            chosen_taken: AtomicU64::new(0),
             chosen_part: Mutex::new(None),
             plans: Mutex::new(Plans::default()),
             plans_changed: std::sync::Condvar::new(),
@@ -1446,6 +1457,8 @@ impl Engine {
             }
             (None, Some(parts)) => {
                 mediabox_core::timeline!("aid-part", "gen={generation} phase=prebuilt pid={}", switch.pid);
+                #[cfg(test)]
+                self.chosen_taken.fetch_add(1, Ordering::SeqCst);
                 self.show_part(&parts);
                 Ok(parts)
             }
@@ -4021,6 +4034,13 @@ impl Engine {
         });
         if let Err(error) = built {
             eprintln!("mediabox-live: seçilen ses izinin kolu için iş parçacığı yok: {error}");
+        }
+        #[cfg(test)]
+        {
+            let latch = self.choice_latch.lock().unwrap_or_else(|p| p.into_inner()).take();
+            if let Some(latch) = latch {
+                let _ = latch.recv_timeout(std::time::Duration::from_secs(30));
+            }
         }
     }
 
