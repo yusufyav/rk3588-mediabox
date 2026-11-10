@@ -17,6 +17,9 @@
 //!   MEDIABOX_VO_TRACE              the frame trace, vo_mediabox's format
 //!   MEDIABOX_LIVE_EVIDENCE         a directory for the evidence of sound events (`evidence`; off without it)
 //!   MEDIABOX_LIVE_EVIDENCE_QUOTA_MB its quota (default 1024)
+//!   MEDIABOX_LIVE_GST_DEBUG        GStreamer's log, for diagnosis only, on tmpfs and bounded (`gst_debug`);
+//!                                  without it GST_DEBUG and GST_DEBUG_FILE from outside are cleared
+//!   MEDIABOX_LIVE_GST_DEBUG_FILE   its file, under /run/ (default /run/mediabox-live/gst-debug.log)
 //!
 //! `mediabox-live --evidence-classify <dump>...` judges dumps of it
 //! (`evidence_classify`) and plays nothing.
@@ -31,6 +34,7 @@ mod es;
 mod evidence;
 mod evidence_classify;
 mod gate;
+mod gst_debug;
 mod health;
 mod ledger;
 mod ipc;
@@ -240,6 +244,9 @@ fn main() {
         }
         std::process::exit(i32::from(failed));
     }
+    // Before any thread and before gst::init reads them.
+    let gst_debug = gst_debug::plan(|name| std::env::var(name).ok());
+    gst_debug::apply(&gst_debug);
     let signals = block_signals();
     stamp_stderr();
     mediabox_core::timeline::init("live");
@@ -251,6 +258,12 @@ fn main() {
     if let Err(error) = gst::init() {
         eprintln!("mediabox-live: GStreamer başlatılamadı: {error}");
         std::process::exit(1);
+    }
+    if let Some(file) = gst_debug.file {
+        gst_debug::bound(file, gst_debug::MAX_BYTES, Duration::from_secs(1), || {
+            gst::log::remove_default_log_function();
+            eprintln!("mediabox-live: GStreamer tanı günlüğü {} MiB sınırına ulaştı; dosyaya yazım durdu", gst_debug::MAX_BYTES >> 20);
+        });
     }
 
     let (commands, inbox) = mpsc::channel::<(Command, Option<mpsc::SyncSender<Result<(), String>>>)>();

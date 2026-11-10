@@ -266,7 +266,7 @@ MEDIABOX_VO_TRACE'ten (CLOCK_MONOTONIC) alındı: karenin arayüze verildiği an
 Değişim süresi: istekten, eski kanalın kareleri durduktan sonra yeni
 kanalın arayüze verilen ilk karesine kadar geçen süre.
 
-**Ses** (GST_DEBUG=audiobasesink ve oynatıcının kendi sayaçlarıyla):
+**Ses** (GST_DEBUG=audiobasesink ve oynatıcının kendi sayaçlarıyla; bugün yalnız `MEDIABOX_LIVE_GST_DEBUG=audiobasesink:5` ile, günlük tmpfs’te, bkz. `gst_debug.rs`):
 
 | | queue'dan önce | sonra |
 |---|---|---|
