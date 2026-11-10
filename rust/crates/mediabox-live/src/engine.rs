@@ -4000,7 +4000,7 @@ impl Engine {
         let left = PLAN_DEADLINE_MS.saturating_sub(request.asked.elapsed().as_millis() as u64);
         if prepare.is_some() || build {
             self.arm_deadline(id, left);
-            self.prepare_plan(id, prepare, build.then(|| (generation, token, target)));
+            self.prepare_plan(id, prepare, build.then_some((generation, token, target)));
             return;
         }
         self.go_on_with_plan(way, token, target);
