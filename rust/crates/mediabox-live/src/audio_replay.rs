@@ -285,10 +285,11 @@ pub fn run_controlled(seconds: f64, device: Device, faults: &[Fault], inputs: &[
             }
         }
         let observation = Observation { before: now as u64, internal: (device.internal(now) + race).round() as u64, after: (now + span) as u64 };
-        let place = |t: u64, c: &Calibration| (c.to_internal(t as f64 + shift) * RATE / 1e9).round();
+        let place = |t: u64, c: &Calibration| c.to_internal(t as f64 + shift) * RATE / 1e9;
+        let sample = |t: u64, c: &Calibration| place(t, c).round() as i64;
         let out = control.buffer(
             BufferIn { generation, pts: times as u64, frames: FRAME, samples: &[], discont },
-            SinkNow { calibration: clock, observation, next_sample: sink.next, place: &place },
+            SinkNow { calibration: clock, observation, next_sample: sink.next, place: &place, sample: &sample },
         );
         if let Some(c) = out.calibration {
             clock = c;
@@ -298,12 +299,144 @@ pub fn run_controlled(seconds: f64, device: Device, faults: &[Fault], inputs: &[
         }
         let cal = Cal { internal: clock.internal as f64, external: clock.external as f64, slope: 1.0 / clock.rate() };
         if out.frames > 0 {
-            placed.push(sink.place(out.pts as f64 + shift, out.frames, &cal, &device));
+            // The sink puts the time it is stamped with; its sound's own is
+            // what it is heard against.
+            let mut p = sink.place(out.pts as f64 + shift, out.frames, &cal, &device);
+            p.external = out.content as f64 + shift;
+            p.error_ns = p.start * 1e9 / RATE - device.internal(p.external);
+            placed.push(p);
         }
         times += FRAME_NS;
         k += 1;
     }
     (placed, stats)
+}
+
+/// audiobasesink as the product runs it (`slave-method=custom`, no
+/// callback; gstaudiobasesink.c 1.26 render and
+/// `gst_audio_base_sink_get_alignment`): the buffer's sample from its time
+/// in the sink's own arithmetic (`audio_clock::sink_sample`), aligned to
+/// the end of the buffer before when within the alignment-threshold --
+/// unless that writes it back behind the read segment (`headroom`
+/// samples): then it is put at its own sample, a resync.
+#[derive(Debug, Default)]
+pub struct GstSink {
+    pub next: Option<i64>,
+    pub headroom: i64,
+    /// Each resync: its sample less the end of the buffer before.
+    pub resyncs: Vec<i64>,
+    /// Each alignment the sink made: the end of the buffer before less the buffer's sample.
+    pub aligns: std::collections::BTreeMap<i64, u64>,
+}
+
+impl GstSink {
+    /// The sample of a time (running time, sync offset and base time) as
+    /// gstaudiobasesink.c 1.26 renders it with no slaving of its own:
+    /// `clock_convert_external` (`gst_util_uint64_scale`, rounding down),
+    /// the clock's time offset 0, then `gst_util_uint64_scale_int` to the
+    /// rate. The test's own: not the product's (`audio_clock::sink_sample`).
+    pub fn sample_of(external: u64, c: &crate::audio_clock::Calibration) -> i64 {
+        let scale = |v: u64, num: u64, denom: u64| (u128::from(v) * u128::from(num) / u128::from(denom)) as u64;
+        let (num, denom) = if c.num == 0 { (1, 1) } else { (c.num, c.denom) };
+        let internal = if external >= c.external {
+            scale(external - c.external, denom, num) + c.internal
+        } else {
+            c.internal.saturating_sub(scale(c.external - external, denom, num))
+        };
+        scale(internal, RATE as u64, 1_000_000_000) as i64
+    }
+
+    pub fn render(&mut self, sample: i64, samples: usize, discont: bool) -> i64 {
+        let start = match self.next {
+            Some(next) if !discont => {
+                let align = next - sample;
+                *self.aligns.entry(align).or_default() += 1;
+                let allow = !(align.abs() > self.headroom && align < 0);
+                if align.abs() < ALIGN_SAMPLES as i64 && allow {
+                    next
+                } else {
+                    self.resyncs.push(-align);
+                    sample
+                }
+            }
+            _ => sample,
+        };
+        self.next = Some(start + samples as i64);
+        start
+    }
+}
+
+/// A replay through the product's controller to `GstSink`.
+pub struct GstRun {
+    pub placed: Vec<Placed>,
+    pub resyncs: Vec<i64>,
+    pub aligns: std::collections::BTreeMap<i64, u64>,
+    /// Each buffer's first sample's own time and the time it is stamped with.
+    pub stamped: Vec<(u64, u64)>,
+    pub stats: std::sync::Arc<crate::audio_clock::Stats>,
+}
+
+/// The sound as a parser gives it: PES of `per_pes` frames of `frame`
+/// samples, each frame's time its PES's time on the clock plus its place
+/// in it -- the PES's own time put on the clock off the frames' by
+/// `jitter` ns (the reader's mapping of the PTS through the PCR in force,
+/// a PES after another), in turn; `jumps` (at, by ns) move the sound's
+/// times (a frame lost), a DISCONT on the buffer there. The sink
+/// `headroom` samples ahead of its read segment; the device's crystal off
+/// the pipeline's clock.
+pub fn run_on_gst_sink(seconds: f64, device: Device, frame: usize, per_pes: usize, jitter: &[i64], headroom: i64, jumps: &[(f64, i64)]) -> GstRun {
+    use crate::audio_clock::{BufferIn, Calibration, Controller, Observation, Sink as SinkNow, Stats, sink_sample};
+    let start = device.at;
+    let frame_ns = (frame as u64 * 1_000_000_000) / RATE as u64;
+    let stats = std::sync::Arc::new(Stats::default());
+    let mut control = Controller::new(0, RATE, std::sync::Arc::clone(&stats));
+    let mut clock = Calibration { internal: device.internal(start).round() as u64, external: start.round() as u64, num: 1, denom: 1 };
+    let mut sink = GstSink { headroom, ..GstSink::default() };
+    let (mut placed, mut stamped) = (Vec::new(), Vec::new());
+    // The sound's times: base and running time make them the pipeline's.
+    let shift: i128 = 100_000_000;
+    let mut pes_at = start as u64 + 100_000_000;
+    let mut moved = 0i64;
+    let mut done = vec![false; jumps.len()];
+    let mut k = 0usize;
+    'run: loop {
+        let pes = k / per_pes;
+        let now = start + k as f64 * frame_ns as f64;
+        if now > start + seconds * 1e9 {
+            break 'run;
+        }
+        let mut discont = false;
+        for (i, &(at, by)) in jumps.iter().enumerate() {
+            if !done[i] && at <= now {
+                moved += by;
+                done[i] = true;
+                discont = true;
+            }
+        }
+        let content = (pes_at as i64 + moved + jitter.get(pes % jitter.len().max(1)).copied().unwrap_or(0)) as u64 + (k % per_pes) as u64 * frame_ns;
+        let observation = Observation { before: now as u64, internal: device.internal(now).round() as u64, after: now as u64 };
+        let place = |t: u64, c: &Calibration| c.to_internal((t as i128 + shift) as f64) * RATE / 1e9;
+        let sample = |t: u64, c: &Calibration| sink_sample(t as i128 + shift, c, 0, RATE as u64);
+        let out = control.buffer(
+            BufferIn { generation: 1, pts: content, frames: frame, samples: &[], discont },
+            SinkNow { calibration: clock, observation, next_sample: sink.next.map(|n| n as f64), place: &place, sample: &sample },
+        );
+        if let Some(c) = out.calibration {
+            clock = c;
+        }
+        if out.frames > 0 {
+            let sample = GstSink::sample_of((out.pts as i128 + shift) as u64, &clock);
+            let at = sink.render(sample, out.frames, out.discont);
+            let external = (out.content as i128 + shift) as f64;
+            stamped.push((out.content, out.pts));
+            placed.push(Placed { external, samples_in: frame, samples_out: out.frames, start: at as f64, error_ns: at as f64 * 1e9 / RATE - device.internal(external) });
+        }
+        k += 1;
+        if k.is_multiple_of(per_pes) {
+            pes_at += per_pes as u64 * frame_ns;
+        }
+    }
+    GstRun { placed, resyncs: sink.resyncs, aligns: sink.aligns, stamped, stats }
 }
 
 #[cfg(test)]
@@ -485,5 +618,97 @@ mod tests {
         let stretched = placed.iter().skip(200).filter(|p| p.samples_out != p.samples_in).count();
         assert!(stretched > 0);
         assert!(largest_step(&placed[200..]) < 0.1e6);
+    }
+
+    // ------------------------------------------- on audiobasesink's own
+
+    /// The sound's place against the device over a window of the replay:
+    /// the largest and the mean error, ns.
+    fn window(placed: &[Placed], from: f64, to: f64) -> (f64, f64) {
+        let w: Vec<f64> = placed.iter().filter(|p| p.external >= from && p.external < to).map(|p| p.error_ns).collect();
+        (w.iter().fold(0.0f64, |m, e| m.max(e.abs())), w.iter().sum::<f64>() / w.len().max(1) as f64)
+    }
+
+    /// FAZ 3E.6/3E.7: on the headset (no headroom before the read segment)
+    /// the sink resynced by one sample, at PES starts (+20.833 us,
+    /// `p-g`: 123 in 90 s). The controller stamped a buffer with its
+    /// sound's own time and left the sample between that and the end of
+    /// the buffer before for the sink to align back -- which the sink does
+    /// not do without headroom: it resyncs, a sample of nothing. Now each
+    /// buffer is stamped where the sink writes it, the end of the one
+    /// before to the fraction carried, its phase the resampler's: every
+    /// alignment 0, no resync, the sound's place not drifting off.
+    ///
+    /// The old controller, on the same replay (2026-11-10): 170 resyncs in
+    /// 300 s for a crystal 11.8 ppm fast, 231-346 with PES times off their
+    /// frames' by 15 us; each +1 sample.
+    #[test]
+    fn a_buffer_is_written_where_the_one_before_ends_and_never_left_for_the_sink_to_align_back() {
+        for rate in [1.0 - 11.8e-6, 1.0 + 11.8e-6, 1.0 + 100e-6, 1.0] {
+            for jitter in [vec![0i64], vec![7_000], vec![0, 3_000, -2_000, 1_000, -3_000, 2_000], vec![0, 15_000, -10_000]] {
+                for (frame, per) in [(1536usize, 9usize), (1152, 9), (1152, 1)] {
+                    let r = run_on_gst_sink(300.0, Device { rate, ..device() }, frame, per, &jitter, 0, &[]);
+                    let case = format!("crystal {rate} jitter {jitter:?} frame {frame}x{per}");
+                    assert_eq!(r.resyncs, Vec::<i64>::new(), "{case}");
+                    assert_eq!(r.aligns.keys().copied().collect::<Vec<_>>(), vec![0], "{case}: {:?}", r.aligns);
+                    assert_eq!(r.stats.unplaced.load(Ordering::Relaxed), 0, "{case}");
+                    // Written without a gap or an overlap, sample after sample.
+                    for w in r.placed.windows(2) {
+                        assert_eq!(w[1].start, w[0].start + w[0].samples_out as f64, "{case}");
+                    }
+                    // The sound where its time is, and staying there: the
+                    // last minute no further off than the second.
+                    let (early, _) = window(&r.placed, T0 + 60e9, T0 + 120e9);
+                    let (late, mean) = window(&r.placed, T0 + 240e9, T0 + 300e9);
+                    assert!(late <= early.max(1e9 / RATE) + 1e9 / RATE, "{case}: {early} then {late}");
+                    assert!(mean.abs() < 2.0 * 1e9 / RATE, "{case}: mean {mean}");
+                    assert!(r.stats.stretch_max_millis.load(Ordering::Relaxed) <= (RATE_RANGE * frame as f64 * 1000.0).ceil() as i64, "{case}");
+                }
+            }
+        }
+    }
+
+    use crate::audio_clock::RATE_RANGE;
+
+    /// With the device's clock the pipeline's, the time stamped on each
+    /// buffer is its sound's own to the nanosecond: the fraction carried is
+    /// the sound's, not reset to the sample nor kept across a DISCONT --
+    /// after a jump of 14.4 samples, and one of 50 ms, the times are the
+    /// new ones.
+    #[test]
+    fn with_no_drift_each_buffer_keeps_its_own_time_across_a_discont() {
+        let jumps = [(T0 + 20e9, 300_007i64), (T0 + 40e9, 50_000_000)];
+        for (frame, per) in [(1152usize, 9usize), (1536, 9)] {
+            let r = run_on_gst_sink(60.0, Device { rate: 1.0, ..device() }, frame, per, &[7_000], 0, &jumps);
+            // To the nanosecond the resampler rounds its times to.
+            for (k, (content, stamped)) in r.stamped.iter().enumerate() {
+                assert!(content.abs_diff(*stamped) <= 1, "buffer {k} of {frame}: {content} stamped {stamped}");
+            }
+            // Not a sample stretched: no phase made up where there is none.
+            assert_eq!(r.stats.stretch_max_millis.load(Ordering::Relaxed), 0);
+            assert_eq!(r.resyncs, Vec::<i64>::new());
+            assert_eq!(r.aligns.keys().copied().collect::<Vec<_>>(), vec![0]);
+        }
+    }
+
+    /// A DISCONT on a buffer that begins where the sound before ended, to
+    /// within a sample (the first buffer of a part cut to the end of the
+    /// part before): the sound goes on -- not begun again, nothing the
+    /// resampler held dropped, the sink not resynced. A DISCONT a sample
+    /// or more off is one.
+    #[test]
+    fn a_discont_within_a_sample_of_the_sound_before_is_the_sound_going_on() {
+        let r = run_on_gst_sink(30.0, Device { rate: 1.0, ..device() }, 1152, 9, &[7_000], 0, &[(T0 + 10e9, 20_000)]);
+        assert_eq!(r.stats.joined.load(Ordering::Relaxed), 1);
+        assert_eq!(r.stats.resets.load(Ordering::Relaxed), 1, "only the channel's start");
+        assert_eq!(r.stats.held_at_reset.load(Ordering::Relaxed), 0);
+        assert_eq!(r.resyncs, Vec::<i64>::new());
+        assert_eq!(r.aligns.keys().copied().collect::<Vec<_>>(), vec![0]);
+        for w in r.placed.windows(2) {
+            assert_eq!(w[1].start, w[0].start + w[0].samples_out as f64);
+        }
+        let r = run_on_gst_sink(30.0, Device { rate: 1.0, ..device() }, 1152, 9, &[7_000], 0, &[(T0 + 10e9, 21_000)]);
+        assert_eq!(r.stats.joined.load(Ordering::Relaxed), 0);
+        assert_eq!(r.stats.resets.load(Ordering::Relaxed), 2);
     }
 }

@@ -662,7 +662,10 @@ fn a_refused_buffer_is_told() {
 /// to AC-3 of the same PMT. Only the sound changes hands -- the generation,
 /// the picture's input and its pictures go on as they were, without a gap;
 /// the sound goes from the MPEG audio input to a new one for AC-3, the old
-/// one never after it, and the reader is on the AC-3 PID.
+/// one never after it, and the reader is on the AC-3 PID. The AC-3 sound
+/// begins where the MPEG audio's ended, to within a sample: the old stream
+/// played to the chosen one's first PES, the chosen one cut to the old
+/// one's end (FAZ 3E.7: 24-288 ms lost at each change before, TRT WORLD).
 #[test]
 fn an_audio_stream_change_leaves_the_picture_alone() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
@@ -697,8 +700,10 @@ fn an_audio_stream_change_leaves_the_picture_alone() {
     // The sound: MPEG audio's input, then AC-3's, one left; the reader on
     // the AC-3 PID; nothing refused or left behind.
     sound_went_on(&run, 2, 0x103, 2_500_000_000);
+    sound_continuous(&run, 20_834);
     assert_eq!(run.shared.sound.lock().unwrap().as_ref().unwrap().codec, Some(crate::es::Codec::Ac3));
     assert_eq!(run.engine.aid(), Some(1));
+    assert_eq!(run.shared.info.lock().unwrap().aid, Some(1));
 }
 
 /// A PMT change well after the channel began (3.2 s in): the new part's
@@ -2811,4 +2816,77 @@ fn headset_television_headset_in_quick_succession_lose_nothing() {
     let audio = run.audio.lock().unwrap();
     let longest = audio.at.windows(2).map(|w| w[1] - w[0]).max().unwrap_or_default();
     assert!(longest < Duration::from_millis(250), "the sound stopped for {longest:?}");
+}
+
+// ---- a channel's start and its sound, the cases at its edges (FAZ 3E.7) ----
+
+/// A start on the headset, its gate's snapshot once its first picture is
+/// shown (or 6 s on), `before` done on the engine first.
+fn start_seen(ts: Vec<(u64, Vec<u8>)>, audio: Audio, before: impl FnOnce(&Arc<Engine>)) -> (bool, serde_json::Value, Run) {
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on_with(ts, 0, audio, None, before, Duration::ZERO, move |engine| {
+        let gate = the_gate(engine);
+        let shown = until(Duration::from_secs(6), || gate.picture().0.is_some());
+        *into.lock().unwrap() = Some((shown, gate.snapshot()));
+    });
+    let (shown, snapshot) = got.lock().unwrap().take().unwrap();
+    (shown, snapshot, run)
+}
+
+/// No sound in the PMT: the start is never held for one -- its picture goes
+/// as soon as it can.
+#[test]
+fn a_channel_with_no_sound_is_never_held_for_one() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let ts = stream_for(4, &[(0, 0, vec![(0x1B, VIDEO, vec![])])], &[]);
+    let (shown, snapshot, _run) = start_seen(ts, on_headset(), |engine| {
+        *engine.start_hold_limit.lock().unwrap() = Some(Duration::from_secs(60));
+    });
+    assert!(shown, "{snapshot}");
+    assert_eq!((snapshot["sound_hold"].clone(), snapshot["sound_outcome"].clone()), (serde_json::json!(false), serde_json::Value::Null), "{snapshot}");
+}
+
+/// A sound no part can be built for (no decoder): said, and the start let
+/// go at once -- not held to the limit (60 s here) for a device it will
+/// never make ready.
+#[test]
+fn a_sound_with_no_part_lets_the_start_go_at_once() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(4, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 4), from: 0, to: u64::MAX }]);
+    let (shown, snapshot, _run) = start_seen(ts, on_headset(), |engine| {
+        *engine.start_hold_limit.lock().unwrap() = Some(Duration::from_secs(60));
+        engine.no_decoder.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    assert!(shown, "{snapshot}");
+    assert_eq!(snapshot["sound_outcome"], "unbuilt", "{snapshot}");
+}
+
+/// A sound the PMT gives that never comes: the start is held no longer than
+/// its limit, then goes without it -- no deadlock, the pictures shown.
+#[test]
+fn a_sound_that_never_comes_holds_the_start_no_longer_than_its_limit() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(5, &[(0, 0, streams)], &[]);
+    let (shown, snapshot, _run) = start_seen(ts, on_headset(), |engine| {
+        *engine.start_hold_limit.lock().unwrap() = Some(Duration::from_millis(500));
+    });
+    assert!(shown, "{snapshot}");
+    assert_eq!(snapshot["sound_outcome"], "timeout", "held, and let go at the limit: {snapshot}");
+    assert_eq!(snapshot["sound_hold"], false);
+}
+
+/// AC-3 passed through on the television: the part sets the device's form
+/// itself, so the start is not held at all.
+#[test]
+fn a_bitstream_start_is_not_held() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, audio) = passed_through();
+    let (shown, snapshot, _run) = start_seen(ts, audio, |engine| {
+        *engine.start_hold_limit.lock().unwrap() = Some(Duration::from_secs(60));
+    });
+    assert!(shown, "{snapshot}");
+    assert_eq!((snapshot["sound_hold"].clone(), snapshot["sound_outcome"].clone()), (serde_json::json!(false), serde_json::Value::Null), "{snapshot}");
 }

@@ -251,8 +251,6 @@ struct Run {
 enum Step {
     Feed(Vec<u8>),
     Select(u16),
-    /// The viewer's choice of audio stream, by its order (`Reader::choose`).
-    Choose(usize),
     NewChannel,
 }
 
@@ -277,12 +275,6 @@ fn run(steps: Vec<Step>) -> Run {
                 let r = reader.get_or_insert_with(Reader::new);
                 let mut o = Output::default();
                 r.select(pid, None, &mut o);
-                take(o, &mut out);
-            }
-            Step::Choose(order) => {
-                let r = reader.get_or_insert_with(Reader::new);
-                let mut o = Output::default();
-                r.choose(order, &mut o);
                 take(o, &mut out);
             }
             Step::NewChannel => {
@@ -1230,27 +1222,199 @@ fn property_damage_never_gives_wrong_bytes() {
     }
 }
 
+// ---- the viewer's choice of audio stream (`Reader::choose`) ---------------
+
+const CHOSEN: u16 = 0x103;
+
+fn two_sounds(mux: &mut Mux) -> Vec<u8> {
+    mux.tables(0, PCR_PID, &[(0x04, AUDIO, vec![]), (0x06, CHOSEN, vec![0x6A, 1, 0])])
+}
+
+fn old(mux: &mut Mux, pts: u64) -> Vec<u8> {
+    flat(mux.pes(AUDIO, &sound(pts, &payload(50, (pts / 3600) as u8)), &[184]))
+}
+
+fn new(mux: &mut Mux, pts: u64) -> Vec<u8> {
+    flat(mux.pes(CHOSEN, &pes(0xBD, Some(pts), None, 0, &payload(50, 100 + (pts / 3600) as u8), None), &[184]))
+}
+
+/// A unit given: its PTS, its break, its switch, its bytes.
+type Given = (Option<u64>, Option<String>, Option<String>, Vec<u8>);
+
+/// A reader on AUDIO fed `before`, then `steps`: bytes fed (Ok) or a stream
+/// chosen by its order (Err). Its units and its events.
+fn choosing(before: Vec<u8>, steps: Vec<Result<Vec<u8>, usize>>) -> (Vec<Given>, Vec<Event>) {
+    let mut reader = Reader::new();
+    let mut units: Vec<Given> = Vec::new();
+    let mut events = Vec::new();
+    let mut take = |o: Output| {
+        for c in o.chunks {
+            if c.start || units.is_empty() {
+                let switch = c.switch.map(|w| format!("{:#x} {} {}", w.pid, w.codec.name(), w.rebuild));
+                units.push((c.pts, c.discont.map(|b| format!("{b:?}")), switch, c.data));
+            } else {
+                units.last_mut().unwrap().3.extend(c.data);
+            }
+        }
+        events.extend(o.events);
+    };
+    let mut o = Output::default();
+    reader.select(AUDIO, None, &mut o);
+    take(o);
+    take(reader.feed(&before));
+    for step in steps {
+        match step {
+            Ok(bytes) => take(reader.feed(&bytes)),
+            Err(order) => {
+                let mut o = Output::default();
+                reader.choose(order, &mut o);
+                take(o);
+            }
+        }
+    }
+    (units, events)
+}
+
+fn pts_of(units: &[Given]) -> Vec<(Option<u64>, Option<String>)> {
+    units.iter().map(|u| (u.0, u.2.clone())).collect()
+}
+
 /// The viewer chose the second audio stream while the first played: the
-/// sound goes to it from its next PES, as a new branch whatever its codec
-/// (`rebuild`), and nothing more of the first stream is given.
+/// first plays on, every PES of it until the chosen stream's first PES's
+/// time, and the chosen one from that PES -- kept while the first reached
+/// it -- as a new branch (`rebuild`). The first's PES at that time is not
+/// given: nothing of either lost to the change, nothing given twice.
 #[test]
-fn the_viewers_choice_moves_the_sound_from_the_next_pes_as_a_new_branch() {
+fn the_viewers_choice_takes_over_where_the_stream_playing_reaches_the_chosen_ones_first_pes() {
     let mut mux = Mux::default();
-    let streams = [(0x04, AUDIO, vec![]), (0x06, 0x103, vec![0x6A, 1, 0])];
-    let mut all = mux.tables(0, PCR_PID, &streams);
-    all.extend(flat(mux.pes(AUDIO, &sound(90_000, &payload(50, 60)), &[184])));
-    let mut later = flat(mux.pes(AUDIO, &sound(93_600, &payload(50, 61)), &[184]));
-    later.extend(flat(mux.pes(0x103, &pes(0xBD, Some(93_600), None, 0, &payload(50, 62), None), &[184])));
-    later.extend(flat(mux.pes(AUDIO, &sound(97_200, &payload(50, 63)), &[184])));
-    later.extend(flat(mux.pes(0x103, &pes(0xBD, Some(97_200), None, 0, &payload(50, 64), None), &[184])));
-    let r = run(vec![Step::Select(AUDIO), Step::Feed(all), Step::Choose(1), Step::Feed(later)]);
+    let mut all = two_sounds(&mut mux);
+    all.extend(old(&mut mux, 90_000));
+    let mut later = old(&mut mux, 93_600);
+    later.extend(new(&mut mux, 93_600));
+    later.extend(old(&mut mux, 97_200));
+    later.extend(new(&mut mux, 97_200));
+    later.extend(old(&mut mux, 100_800));
+    later.extend(new(&mut mux, 100_800));
+    let (units, events) = choosing(all, vec![Err(1), Ok(later)]);
     assert_eq!(
-        shape(&r),
-        vec![(Some(90_000), some("Start"), None), (Some(93_600), some("Reset"), some("0x103 ac3 true")), (Some(97_200), None, None)],
-        "{r:?}"
+        pts_of(&units),
+        vec![(Some(90_000), None), (Some(93_600), None), (Some(93_600), some("0x103 ac3 true")), (Some(97_200), None), (Some(100_800), None)],
+        "{units:?}"
     );
-    assert_eq!(r.units[1].data, payload(50, 62));
-    assert_eq!(r.units[2].data, payload(50, 64));
+    assert_eq!(units[1].3, payload(50, 26), "the first stream's PES before the change, whole");
+    assert_eq!(units[2].1.as_deref(), Some("Reset"));
+    assert_eq!(units[2].3, payload(50, 126));
+    assert_eq!(units[4].3, payload(50, 128));
+    let told: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::SoundChosen { .. } | Event::ChoiceRefused { .. })).collect();
+    assert_eq!(told, vec![&Event::SoundChosen { pid: CHOSEN, from: Some(93_600), until: Some(97_200) }]);
+}
+
+/// The chosen stream behind the one playing in the multiplex: its first
+/// PES comes after the playing one's of the same time and the next. The
+/// change is at the playing one's next PES start: what it gave stays
+/// given, the chosen stream from its first PES.
+#[test]
+fn a_chosen_stream_behind_in_the_multiplex_takes_over_at_the_next_pes_of_the_one_playing() {
+    let mut mux = Mux::default();
+    let mut all = two_sounds(&mut mux);
+    all.extend(old(&mut mux, 90_000));
+    let mut later = old(&mut mux, 93_600);
+    later.extend(old(&mut mux, 97_200));
+    later.extend(new(&mut mux, 93_600));
+    later.extend(old(&mut mux, 100_800));
+    later.extend(new(&mut mux, 97_200));
+    let (units, events) = choosing(all, vec![Err(1), Ok(later)]);
+    assert_eq!(
+        pts_of(&units),
+        vec![(Some(90_000), None), (Some(93_600), None), (Some(97_200), None), (Some(93_600), some("0x103 ac3 true")), (Some(97_200), None)],
+        "{units:?}"
+    );
+    assert!(events.contains(&Event::SoundChosen { pid: CHOSEN, from: Some(93_600), until: Some(100_800) }));
+}
+
+/// The chosen stream gives no PES: the stream playing goes on, every PES of
+/// it, and the choice is refused once it has run `CHOICE_WAIT` (2 s) on --
+/// told, once.
+#[test]
+fn a_chosen_stream_that_gives_nothing_is_refused_and_the_one_playing_goes_on() {
+    let mut mux = Mux::default();
+    let mut all = two_sounds(&mut mux);
+    all.extend(old(&mut mux, 90_000));
+    let mut later = Vec::new();
+    for k in 1..=60u64 {
+        later.extend(old(&mut mux, 90_000 + k * 3_600));
+    }
+    let (units, events) = choosing(all, vec![Err(1), Ok(later)]);
+    assert_eq!(units.len(), 61, "every PES of the stream playing given");
+    assert!(units.iter().all(|u| u.2.is_none()));
+    let refused: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::ChoiceRefused { .. })).collect();
+    assert_eq!(refused, vec![&Event::ChoiceRefused { pid: CHOSEN, why: "the stream chosen gave no PES" }]);
+}
+
+/// The chosen stream gone from the PMT before the change, or the stream
+/// playing chosen back: refused, the stream playing goes on, nothing of the
+/// chosen one given.
+#[test]
+fn a_choice_whose_stream_is_gone_or_called_back_is_refused() {
+    for back in [false, true] {
+        let mut mux = Mux::default();
+        let mut all = two_sounds(&mut mux);
+        all.extend(old(&mut mux, 90_000));
+        let mut first = old(&mut mux, 93_600);
+        first.extend(new(&mut mux, 93_600));
+        let mut steps = vec![Err(1), Ok(first)];
+        if back {
+            steps.push(Err(0));
+        } else {
+            steps.push(Ok(mux.section(PMT_PID, &pmt(PROGRAM, 1, PCR_PID, &[(0x04, AUDIO, vec![])]))));
+        }
+        let mut then = old(&mut mux, 97_200);
+        then.extend(new(&mut mux, 97_200));
+        then.extend(old(&mut mux, 100_800));
+        steps.push(Ok(then));
+        let (units, events) = choosing(all, steps);
+        assert_eq!(pts_of(&units), vec![(Some(90_000), None), (Some(93_600), None), (Some(97_200), None), (Some(100_800), None)], "back {back}: {units:?}");
+        let why = if back { "the stream playing chosen again" } else { "the stream chosen is gone from the PMT" };
+        let told: Vec<&Event> = events.iter().filter(|e| matches!(e, Event::SoundChosen { .. } | Event::ChoiceRefused { .. })).collect();
+        assert_eq!(told, vec![&Event::ChoiceRefused { pid: CHOSEN, why }], "back {back}");
+    }
+}
+
+/// A new time base while the choice is on its way: the two streams' times
+/// are not to be compared across it -- the change at the next PES start of
+/// the stream playing, whatever its time.
+#[test]
+fn a_new_time_base_on_the_way_takes_the_choice_over_at_the_next_pes() {
+    let mut mux = Mux::default();
+    let mut all = two_sounds(&mut mux);
+    all.extend(old(&mut mux, 90_000));
+    let mut later = old(&mut mux, 93_600);
+    later.extend(new(&mut mux, 93_600));
+    let cc = mux.next(PCR_PID);
+    later.extend(packet(PCR_PID, false, cc, Some((0x90, &pcr_field(1_000))), &[]));
+    later.extend(old(&mut mux, 3_600));
+    later.extend(new(&mut mux, 7_200));
+    let (units, events) = choosing(all, vec![Err(1), Ok(later)]);
+    assert_eq!(pts_of(&units), vec![(Some(90_000), None), (Some(93_600), None), (Some(93_600), some("0x103 ac3 true")), (Some(7_200), None)], "{units:?}");
+    assert!(events.contains(&Event::SoundChosen { pid: CHOSEN, from: Some(93_600), until: Some(3_600) }));
+}
+
+/// The stream playing gives nothing more: the chosen one, kept, takes over
+/// once it holds `CHOICE_WAIT` of sound.
+#[test]
+fn with_the_stream_playing_silent_the_chosen_one_takes_over_once_it_holds_the_wait() {
+    let mut mux = Mux::default();
+    let mut all = two_sounds(&mut mux);
+    all.extend(old(&mut mux, 90_000));
+    let mut later = Vec::new();
+    for k in 0..=50u64 {
+        later.extend(new(&mut mux, 93_600 + k * 3_600));
+    }
+    let (units, events) = choosing(all, vec![Err(1), Ok(later)]);
+    assert_eq!(units.len(), 52, "{units:?}");
+    assert_eq!(units[1].0, Some(93_600));
+    assert_eq!(units[1].2.as_deref(), Some("0x103 ac3 true"));
+    assert!(events.contains(&Event::SoundChosen { pid: CHOSEN, from: Some(93_600), until: Some(90_000) }));
 }
 
 /// The stream already playing, or one the PMT does not have: nothing.

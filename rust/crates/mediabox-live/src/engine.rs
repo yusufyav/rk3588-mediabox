@@ -817,6 +817,9 @@ pub struct Engine {
     /// Tests: the start's hold limit, for an emulator's pace.
     #[cfg(test)]
     start_hold_limit: Mutex<Option<std::time::Duration>>,
+    /// Tests: no decoder for any sound (`sound_branch` refuses).
+    #[cfg(test)]
+    no_decoder: AtomicBool,
     /// The control plane's sound plans (`set_audio_plan`).
     plans: Mutex<Plans>,
     plans_changed: std::sync::Condvar,
@@ -1275,6 +1278,8 @@ impl Engine {
             start_latch: Mutex::new(None),
             #[cfg(test)]
             start_hold_limit: Mutex::new(None),
+            #[cfg(test)]
+            no_decoder: AtomicBool::new(false),
             plans: Mutex::new(Plans::default()),
             plans_changed: std::sync::Condvar::new(),
             audio: {
@@ -3242,6 +3247,10 @@ impl Engine {
     /// (`hand_over_sound`): its source blocked, and for a bitstream the
     /// device's mode and the selector's input left for its release.
     fn sound_branch(self: &Arc<Self>, generation: u64, caps: &gst::Caps, programme: &Arc<Programme>, hold: bool, token: Option<PlanToken>) -> Result<SoundParts, String> {
+        #[cfg(test)]
+        if self.no_decoder.load(Ordering::SeqCst) {
+            return Err("test: no decoder".into());
+        }
         let parts = self.sound_part(generation, caps, programme, hold, token, None)?;
         self.show_part(&parts);
         Ok(parts)

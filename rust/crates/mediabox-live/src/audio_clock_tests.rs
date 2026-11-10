@@ -402,7 +402,8 @@ fn the_heaviest_broadcast_sound_does_bounded_work_its_realtime_budget_is_the_dev
     let mut control = Controller::new(channels, rate, std::sync::Arc::clone(&stats));
     // The clock's calibration, set by the controller as the probe sets it.
     let mut cal = Calibration { internal: 0, external: 0, num: 1, denom: 1 };
-    let place = |t: u64, c: &Calibration| (c.to_internal(t as f64) * rate / 1e9).floor();
+    let place = |t: u64, c: &Calibration| c.to_internal(t as f64) * rate / 1e9;
+    let sample = |t: u64, c: &Calibration| place(t, c).floor() as i64;
     let duration = (frames as f64 * 1e9 / rate) as u64;
     let bound = RATE_RANGE * frames as f64;
     let mut samples = Vec::new();
@@ -418,8 +419,9 @@ fn the_heaviest_broadcast_sound_does_bounded_work_its_realtime_budget_is_the_dev
             Sink {
                 calibration: cal,
                 observation: Observation { before: pts, internal: pts, after: pts },
-                next_sample: (k > 0).then(|| place(pts, &cal) + 200.0),
+                next_sample: (k > 0).then(|| place(pts, &cal).floor() + 200.0),
                 place: &place,
+                sample: &sample,
             },
         );
         let made = from_f32(control.output());
