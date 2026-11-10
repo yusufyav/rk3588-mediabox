@@ -43,6 +43,11 @@ pub const HOLD_MAX: Duration = Duration::from_secs(6);
 /// all. The control plane's come first: 10 s for the stream's rate, then the
 /// mode's and the sound's, then 5 s for a player whose socket is not up yet.
 pub const ARM_MAX: Duration = Duration::from_secs(20);
+/// The longest the start waits for the sound's device to be made ready
+/// (`hold_for_sound`): the GameBuds' A2DP stream took 0.5-1.3 s to start on
+/// the Plus (FAZ 3E.5/3E.6). Past it the channel starts without it, the
+/// device opened at the sound's turn as before.
+pub const SOUND_HOLD_MAX: Duration = Duration::from_secs(2);
 
 /// What becomes of a decoded picture at the sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +86,21 @@ struct State {
     last_held: Option<u64>,
     step_ns: Option<u64>,
     opened_after_ms: Option<u64>,
+    /// A picture was sent to the panel: the channel has started.
+    shown: bool,
+    /// The start waits for the sound's device (`hold_for_sound`), since,
+    /// and for how long at most.
+    sound_hold: Option<Instant>,
+    sound_limit: Duration,
+    sound_outcome: Option<String>,
+}
+
+impl State {
+    /// The channel goes: the control plane let it, and its sound's device
+    /// is not being made ready.
+    fn going(&self) -> bool {
+        self.open && self.sound_hold.is_none()
+    }
 }
 
 pub struct Gate {
@@ -120,7 +140,7 @@ impl Gate {
     pub fn key_frame(&self, pts: u64) {
         let mut state = self.lock();
         state.key_pts.get_or_insert(pts);
-        if state.open && !state.first_pending && state.picture.is_none() {
+        if state.going() && !state.first_pending && state.picture.is_none() {
             state.picture = Some(pts);
             self.changed.notify_all();
         }
@@ -128,8 +148,14 @@ impl Gate {
 
     /// A decoded picture reaching the sink.
     pub fn frame(&self, pts: u64, caps_fps: Option<f64>, interlace: &str) -> Frame {
+        self.frame_at(pts, caps_fps, interlace, Instant::now())
+    }
+
+    /// `frame`, `now` being the time it is.
+    pub fn frame_at(&self, pts: u64, caps_fps: Option<f64>, interlace: &str, now: Instant) -> Frame {
         let mut state = self.lock();
-        if !state.open {
+        self.sound_overdue(&mut state, now);
+        if !state.going() {
             state.preroll += 1;
             state.first_held.get_or_insert_with(Instant::now);
             state.last_held = Some(pts);
@@ -144,6 +170,7 @@ impl Gate {
             }
             return Frame::Preroll;
         }
+        state.shown = true;
         if state.first_pending {
             state.first_pending = false;
             state.picture = Some(pts);
@@ -193,13 +220,75 @@ impl Gate {
         state.open = true;
         state.outcome = Some(outcome.to_string());
         state.opened_after_ms = Some(self.armed_at.elapsed().as_millis() as u64);
+        if state.going() {
+            Self::begin(&mut state);
+        }
+        self.changed.notify_all();
+        true
+    }
+
+    /// Where the picture starts, now that the channel goes: the next picture
+    /// if any came while it waited, its key frame if not.
+    fn begin(state: &mut State) {
         if state.preroll > 0 {
             state.first_pending = true;
         } else if let Some(key) = state.key_pts {
             state.picture.get_or_insert(key);
         }
+    }
+
+    /// The start waits while the sound's device is made ready (the
+    /// engine's `start_sound`): its picture and with it its sound, so that
+    /// the clock does not run on through the sound's first buffers while
+    /// the device starts, and they are not thrown away as late. The
+    /// pictures meanwhile are pre-roll, as while the gate is shut; nothing
+    /// is moved in time. Only before the channel has started -- no picture
+    /// shown, none chosen to start with, so no sound let go either: false
+    /// when it has, and nothing waits. At most `limit` (`SOUND_HOLD_MAX`).
+    pub fn hold_for_sound(&self, limit: Duration) -> bool {
+        self.hold_for_sound_at(Instant::now(), limit)
+    }
+
+    pub fn hold_for_sound_at(&self, now: Instant, limit: Duration) -> bool {
+        let mut state = self.lock();
+        if state.shown || state.picture.is_some() || state.failed.is_some() || state.retired || state.sound_hold.is_some() {
+            return false;
+        }
+        state.sound_hold = Some(now);
+        state.sound_limit = limit;
+        state.sound_outcome = None;
         self.changed.notify_all();
         true
+    }
+
+    /// The sound's device ready, or given up on: the start goes on.
+    pub fn release_sound(&self, outcome: &str) {
+        let mut state = self.lock();
+        if state.sound_hold.take().is_none() {
+            return;
+        }
+        state.sound_outcome = Some(outcome.to_string());
+        if state.open {
+            Self::begin(&mut state);
+        }
+        self.changed.notify_all();
+    }
+
+    pub fn sound_held(&self) -> bool {
+        self.lock().sound_hold.is_some()
+    }
+
+    /// A hold past its limit given up: the device still being made ready
+    /// takes the sound's own format after, as it would have.
+    fn sound_overdue(&self, state: &mut State, now: Instant) {
+        if state.sound_hold.is_some_and(|at| now.saturating_duration_since(at) >= state.sound_limit) {
+            state.sound_hold = None;
+            state.sound_outcome = Some("timeout".to_string());
+            if state.open {
+                Self::begin(state);
+            }
+            self.changed.notify_all();
+        }
     }
 
     /// No answer within its limits: failed here (`player-timeout`), once.
@@ -225,8 +314,13 @@ impl Gate {
     /// waits for that with no limit of its own (`Programme::sound`) -- it
     /// goes with the picture or not at all.
     pub fn picture(&self) -> (Option<u64>, bool) {
-        let state = self.lock();
-        (state.picture, !state.open)
+        self.picture_at(Instant::now())
+    }
+
+    pub fn picture_at(&self, now: Instant) -> (Option<u64>, bool) {
+        let mut state = self.lock();
+        self.sound_overdue(&mut state, now);
+        (state.picture, !state.going())
     }
 
     /// Sound ending at `end` is before every picture that can still be the
@@ -245,12 +339,12 @@ impl Gate {
     /// Shut for good: failed or retired. Nothing waits for it any more.
     pub fn ended(&self) -> bool {
         let state = self.lock();
-        !state.open && (state.failed.is_some() || state.retired)
+        !state.going() && (state.failed.is_some() || state.retired)
     }
 
     pub fn behind_held(&self, end: u64) -> bool {
         let state = self.lock();
-        !state.open && state.last_held.is_some_and(|held| end <= held)
+        !state.going() && state.last_held.is_some_and(|held| end <= held)
     }
 
     /// Wake whoever waits on the picture (`picture_known`).
@@ -280,6 +374,8 @@ impl Gate {
             "rate": state.step_ns.filter(|step| *step > 0).map(|step| 1e9 / step as f64),
             "picture": state.picture,
             "opened_after_ms": state.opened_after_ms,
+            "sound_hold": state.sound_hold.is_some(),
+            "sound_outcome": state.sound_outcome,
         })
     }
 }
