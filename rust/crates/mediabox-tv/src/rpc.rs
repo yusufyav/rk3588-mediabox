@@ -367,6 +367,12 @@ impl Client {
             .await
     }
 
+    /// The live receiver's startup method, kept for the next receiver. The
+    /// answer is the method as the daemon kept it.
+    pub async fn live_startup_policy_set(&self, policy: mediabox_core::LiveReceiverStartupPolicy) -> Result<Value> {
+        self.call(json!({"command": "live_startup_policy_set", "policy": policy})).await
+    }
+
     pub async fn leds_set(&self, mode: mediabox_core::LedMode) -> Result<Value> {
         self.call(json!({"command": "leds_set", "mode": mode}))
             .await

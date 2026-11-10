@@ -1,6 +1,6 @@
 //! What the box can be told, from the sofa.
 //!
-//! Seven categories down the left, the chosen one's contents on the right, and
+//! Eight categories down the left, the chosen one's contents on the right, and
 //! the same rule as the rest of the interface: the remote is on exactly one
 //! place at a time, crossing between the column and the right-hand side is
 //! Left and Right, and Back always goes one level up, never a guess.
@@ -17,7 +17,9 @@
 //! The destructive rows are the reason [`Action::confirms`] exists. Nothing on
 //! this screen restarts or shuts down the appliance on one press.
 
-use mediabox_core::{CecChange, CecPowerTarget, CecSettings, CecSourceLost, FanStatus, LedMode};
+use mediabox_core::{
+    CecChange, CecPowerTarget, CecSettings, CecSourceLost, FanStatus, LedMode, LiveReceiverStartupPolicy,
+};
 use serde_json::Value;
 
 use crate::model::DisplayStatus;
@@ -64,6 +66,11 @@ pub enum Action {
     ChooseCecTarget,
     /// Opens the two answers to the television going to another input.
     ChooseCecSourceLost,
+    /// Opens the live receiver's two startup methods.
+    ChooseLiveStartup,
+    /// Keep this startup method for the next receiver: what choosing one in
+    /// that list does. Shown once the daemon has kept it, not before.
+    SetLiveStartup(LiveReceiverStartupPolicy),
 }
 
 impl Action {
@@ -101,6 +108,7 @@ impl Action {
                 | Action::ChooseLeds
                 | Action::ChooseCecTarget
                 | Action::ChooseCecSourceLost
+                | Action::ChooseLiveStartup
         )
     }
 }
@@ -349,6 +357,7 @@ enum ChoiceKind {
     Leds,
     CecTarget,
     CecSourceLost,
+    LiveStartup,
 }
 
 const SOURCE_LOST: [CecSourceLost; 2] = [CecSourceLost::StayOn, CecSourceLost::Standby];
@@ -361,6 +370,19 @@ pub struct ChoiceView {
     pub focus: usize,
     /// (title, line under it, chosen now)
     pub items: Vec<(String, String, bool)>,
+}
+
+const LIVE_STARTUP: &str = "Alıcı başlangıç yöntemi";
+
+/// What each startup method means for the viewer, under its name. Neither
+/// cuts the receiver's power, and neither line says so.
+fn live_startup_line(policy: LiveReceiverStartupPolicy) -> &'static str {
+    match policy {
+        LiveReceiverStartupPolicy::FullInit => "Daha uzun açılır; alıcı her seferinde sıfırdan hazırlanır.",
+        LiveReceiverStartupPolicy::ResumeIfValid => {
+            "Uygun durum korunmuşsa daha hızlı açılır; doğrulama başarısızsa tam başlatılır."
+        }
+    }
 }
 
 /// What each of the lights' modes does, in the list that chooses one.
@@ -389,6 +411,8 @@ pub struct Settings {
     choice_kind: ChoiceKind,
     /// The HDMI-CEC panel as the daemon last reported it.
     cec: Option<CecSettings>,
+    /// The live receiver's startup method, as the daemon last kept it.
+    live_startup: Option<LiveReceiverStartupPolicy>,
     /// The fan curve editor, which is the whole of the "Soğutma" page: a
     /// graph and a list of points rather than rows of readings.
     pub cooling: super::cooling::Cooling,
@@ -417,6 +441,7 @@ impl Settings {
             choice: None,
             choice_kind: ChoiceKind::Leds,
             cec: None,
+            live_startup: None,
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
             ethernet: super::ethernet::Ethernet::new(),
@@ -535,8 +560,18 @@ impl Settings {
         true
     }
 
+    /// Opens the startup methods on the one the daemon keeps. Nothing
+    /// changes until one is chosen and the daemon has kept it.
+    pub fn open_live_startup(&mut self) -> bool {
+        let Some(policy) = self.live_startup else { return false };
+        self.choice = Some(LiveReceiverStartupPolicy::ALL.iter().position(|p| *p == policy).unwrap_or(0));
+        self.choice_kind = ChoiceKind::LiveStartup;
+        true
+    }
+
     fn choice_len(&self) -> usize {
         match self.choice_kind {
+            ChoiceKind::LiveStartup => LiveReceiverStartupPolicy::ALL.len(),
             ChoiceKind::Leds => LedMode::ALL.len(),
             ChoiceKind::CecTarget => CecPowerTarget::ALL.len(),
             ChoiceKind::CecSourceLost => SOURCE_LOST.len(),
@@ -547,6 +582,10 @@ impl Settings {
     pub fn choose(&mut self) -> Option<Action> {
         let at = self.choice.take()?;
         match self.choice_kind {
+            ChoiceKind::LiveStartup => {
+                let policy = LiveReceiverStartupPolicy::ALL.get(at).copied()?;
+                (self.live_startup? != policy).then_some(Action::SetLiveStartup(policy))
+            }
             ChoiceKind::Leds => {
                 let mode = LedMode::ALL.get(at).copied()?;
                 (self.leds != Some(mode)).then_some(Action::SetLeds(mode))
@@ -567,6 +606,19 @@ impl Settings {
 
     pub fn choice_view(&self) -> Option<ChoiceView> {
         let focus = self.choice?;
+        if self.choice_kind == ChoiceKind::LiveStartup {
+            return Some(ChoiceView {
+                title: LIVE_STARTUP.into(),
+                note: String::new(),
+                focus,
+                items: LiveReceiverStartupPolicy::ALL
+                    .iter()
+                    .map(|policy| {
+                        (policy.label().to_string(), live_startup_line(*policy).to_string(), self.live_startup == Some(*policy))
+                    })
+                    .collect(),
+            });
+        }
         if self.choice_kind == ChoiceKind::CecSourceLost {
             let kept = self.cec.map(|settings| settings.on_active_source_lost);
             return Some(ChoiceView {
@@ -802,10 +854,12 @@ impl Settings {
         self.audio.load(audio_status(status));
         self.leds = led_mode(status);
         self.cec = cec_status(status).map(|cec| cec.settings);
+        self.live_startup = live_startup(status);
         // Lights that stopped answering have nothing left to choose, and a
         // CEC turned off has no target to choose.
         match self.choice_kind {
             ChoiceKind::Leds if self.leds.is_none() => self.choice = None,
+            ChoiceKind::LiveStartup if self.live_startup.is_none() => self.choice = None,
             ChoiceKind::CecTarget | ChoiceKind::CecSourceLost
                 if !self.cec.is_some_and(|settings| settings.enabled) =>
             {
@@ -1208,6 +1262,31 @@ fn duration(seconds: u64) -> String {
     }
 }
 
+/// The live receiver's startup method the daemon keeps; none before it has
+/// answered. A value this build does not know reads as the default, as the
+/// daemon itself reads it.
+fn live_startup(status: Option<&Value>) -> Option<LiveReceiverStartupPolicy> {
+    let settings = status?.get("live_receiver")?;
+    Some(serde_json::from_value::<mediabox_core::LiveReceiverSettings>(settings.clone()).unwrap_or_default().startup_policy)
+}
+
+/// The method the daemon says it kept, from its answer to the change.
+pub fn kept_live_startup(answer: &Value) -> Result<LiveReceiverStartupPolicy, String> {
+    answer
+        .get("configured_startup_policy")
+        .and_then(|policy| serde_json::from_value(policy.clone()).ok())
+        .ok_or_else(|| "denetim düzleminin yanıtı okunamadı".to_string())
+}
+
+/// The "Canlı TV" category: the receiver's startup method, a card that
+/// opens its two answers.
+fn live_tv(status: Option<&Value>) -> Vec<Row> {
+    match live_startup(status) {
+        Some(policy) => vec![Row { value: policy.label().into(), ..Row::act(LIVE_STARTUP, Action::ChooseLiveStartup) }],
+        None => vec![Row::reading(LIVE_STARTUP, "Okunuyor…")],
+    }
+}
+
 /// The mode the lights are in, when the board has lights anybody can set.
 fn led_mode(status: Option<&Value>) -> Option<LedMode> {
     if flag(status, "/leds/available") != Some(true) {
@@ -1491,6 +1570,12 @@ fn compose(
             rows: tv_and_remote(status),
         },
         Group {
+            title: "Canlı TV".into(),
+            blurb: "Uydu alıcısının açılışı",
+            icon: "tv",
+            rows: live_tv(status),
+        },
+        Group {
             title: "Cihaz".into(),
             blurb: "Led ve soğutma",
             icon: "chip",
@@ -1587,6 +1672,7 @@ mod tests {
                 "Görüntü ve Ses",
                 "Bağlantılar",
                 "TV ve Kumanda",
+                "Canlı TV",
                 "Cihaz",
                 "Sistem",
                 "Tanılama"

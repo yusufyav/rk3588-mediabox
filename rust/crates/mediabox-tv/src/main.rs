@@ -1078,6 +1078,23 @@ impl App {
         self.recompose_settings();
     }
 
+    /// The daemon's answer to a startup method being chosen: kept, it is
+    /// what the row shows; refused, the row stays as it was and says why.
+    fn live_startup_answered(&mut self, answer: Result<mediabox_core::LiveReceiverStartupPolicy, String>) {
+        match answer {
+            Ok(policy) => {
+                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+                    status.insert(
+                        "live_receiver".into(),
+                        serde_json::to_value(mediabox_core::LiveReceiverSettings { startup_policy: policy }).unwrap_or_default(),
+                    );
+                }
+            }
+            Err(message) => self.say(format!("Alıcı başlangıç yöntemi kaydedilemedi: {message}")),
+        }
+        self.recompose_settings();
+    }
+
     fn leds_answered(&mut self, answer: Option<Value>) {
         self.leds_pending = None;
         if let Some(leds) = answer {
@@ -5091,6 +5108,19 @@ impl App {
                 if self.settings.open_cec_source_lost() {
                     self.paint();
                 }
+            }
+            Action::ChooseLiveStartup => {
+                if self.settings.open_live_startup() {
+                    self.paint();
+                }
+            }
+            Action::SetLiveStartup(policy) => {
+                // Not drawn until the daemon has kept it: the row keeps the
+                // method in force until then, and after a refusal. Nothing
+                // here touches a channel playing; the next receiver takes it.
+                self.clear_notice();
+                self.paint();
+                spawn_live_startup(policy);
             }
             Action::Cec(change) => {
                 let Some(kept) = screens::settings::cec_settings(self.status.as_ref()) else {
@@ -9129,6 +9159,26 @@ fn spawn_cec_settings(settings: mediabox_core::CecSettings) {
         });
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| app.cec_answered(answer));
+        });
+    });
+}
+
+fn spawn_live_startup(policy: mediabox_core::LiveReceiverStartupPolicy) {
+    detached("mediabox-tv-live-startup", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client
+            .live_startup_policy_set(policy)
+            .await
+            .map_err(|error| {
+                eprintln!("mediabox-tv.live-startup failed: {error}");
+                match error {
+                    rpc::Error::Refused { message, .. } => message,
+                    other => other.to_string(),
+                }
+            })
+            .and_then(|kept| screens::settings::kept_live_startup(&kept));
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.live_startup_answered(answer));
         });
     });
 }
