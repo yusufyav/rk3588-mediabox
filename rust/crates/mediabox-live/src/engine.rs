@@ -4674,17 +4674,15 @@ impl Engine {
         let previous = change.previous.clone();
         *self.audio.lock().unwrap_or_else(|p| p.into_inner()) = previous.clone();
         self.bitstream.store(change.bitstream_before, Ordering::SeqCst);
+        // No device is opened back here: nothing passes the selector until
+        // the plan before's part is let go -- the plan's part is refused, the
+        // one before played out -- and that part's turn opens the device
+        // before itself (here, as the restore's change), in its form, the
+        // failed state said if it will not open either. The stand-in has
+        // the selector meanwhile (`swap_sink_on`). A device opened back here
+        // first was only one opened sooner, nothing played on it (FAZ 3E.5
+        // M7, FAZ 3E.6).
         let mut plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
-        if let Err(back) = self.swap_sink(&mut swaps, "rollback") {
-            plans.owner = None;
-            drop((plans, swaps));
-            let why = failed_state(&format!("{error}; önceki ses aygıtı da açılamadı: {back}"));
-            mediabox_core::timeline!("sound-plan", "phase=failed id={id} seq={} way=Rebuild", change.seq);
-            answer(change.reply, Err(why));
-            self.plans_changed.notify_all();
-            self.reopen_audio_sink(None);
-            return false;
-        }
         // The part built again for the plan before; the request answered
         // when it is let go, or the failed state at its deadline.
         plans.ids += 1;
