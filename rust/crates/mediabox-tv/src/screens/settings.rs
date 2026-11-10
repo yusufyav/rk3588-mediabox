@@ -379,9 +379,7 @@ const LIVE_STARTUP: &str = "Alıcı başlangıç yöntemi";
 fn live_startup_line(policy: LiveReceiverStartupPolicy) -> &'static str {
     match policy {
         LiveReceiverStartupPolicy::FullInit => "Daha uzun açılır; alıcı her seferinde sıfırdan hazırlanır.",
-        LiveReceiverStartupPolicy::ResumeIfValid => {
-            "Uygun durum korunmuşsa daha hızlı açılır; doğrulama başarısızsa tam başlatılır."
-        }
+        LiveReceiverStartupPolicy::ResumeIfValid => "Uygunsa hızlı açılır; değilse tam başlatılır.",
     }
 }
 
@@ -1689,7 +1687,7 @@ mod tests {
                 ("Tam başlatma".to_string(), "Daha uzun açılır; alıcı her seferinde sıfırdan hazırlanır.".to_string(), true),
                 (
                     "Hızlı devam".to_string(),
-                    "Uygun durum korunmuşsa daha hızlı açılır; doğrulama başarısızsa tam başlatılır.".to_string(),
+                    "Uygunsa hızlı açılır; değilse tam başlatılır.".to_string(),
                     false,
                 ),
             ]
