@@ -129,6 +129,8 @@ fn kind(event: &crate::es::Event) -> u32 {
         PmtVersion { .. } => 14,
         PcrPidChanged { .. } => 15,
         SoundReset { .. } => 16,
+        SoundChosen { .. } => 17,
+        ChoiceRefused { .. } => 18,
     }
 }
 
@@ -823,6 +825,7 @@ pub fn write(report: &Report) {
             "timebase_discontinuity": r.ts.timebase_discontinuity, "recovered": r.ts.recovered,
             "pid_reset": r.ts.pid_reset, "pmt_changes": r.ts.pmt_changes,
             "pcr_pid_changes": r.ts.pcr_pid_changes, "psi_bad": r.ts.psi_bad,
+            "chosen": r.ts.chosen, "choice_refused": r.ts.choice_refused,
         });
     json["sound_push_errors"] = r.sound_push_errors.into();
     json["ts_push_errors"] = r.ts_push_errors.into();

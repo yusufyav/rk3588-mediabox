@@ -238,6 +238,14 @@ pub struct SoundParts {
     /// What the status says of it once it plays (`show_part`): its codec,
     /// and whether it is passed through.
     shown_as: (String, bool),
+    /// The end of the last frame it gave on (ns, its parser's times; 0
+    /// none yet).
+    ends: Arc<AtomicU64>,
+    /// The end of the part it follows (`hand_over_sound`), once that part
+    /// has given its last: none of this part's sound before it is given --
+    /// a frame ending by then dropped, one across it cut to it (PCM) or
+    /// dropped (a bitstream's frame cannot be cut). Nothing heard twice.
+    follows: Arc<Mutex<Option<Arc<AtomicU64>>>>,
 }
 
 /// A sound part built while the one before still plays: its source
@@ -1419,6 +1427,9 @@ impl Engine {
         match built {
             Ok(mut parts) => {
                 parts.pid = switch.pid;
+                if let Some(old) = &old {
+                    *parts.follows.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&old.ends));
+                }
                 let source = parts.source.clone();
                 let release = parts.held.take();
                 match (old, release) {
@@ -2755,7 +2766,12 @@ impl Engine {
                         }
                     };
                     let on_sound = |generation: u64, switch: &crate::es::Switch| engine.upgrade().and_then(|engine| engine.sound_changed(generation, switch));
-                    read_stream(&reader_path, &reader_into, &reader_stop, &shared, &on_behind, &on_sound);
+                    let on_choice = |generation: u64, playing: Option<usize>| {
+                        if let Some(engine) = engine.upgrade() {
+                            engine.choice_refused(generation, playing);
+                        }
+                    };
+                    read_stream(&reader_path, &reader_into, &reader_stop, &shared, &on_behind, &on_sound, &on_choice);
                     reader_stop.store(true, Ordering::SeqCst);
                 })
                 .map_err(|e| e.to_string())?;
@@ -3195,8 +3211,20 @@ impl Engine {
         // The channel's first part: its start held from here, before any
         // picture can be chosen to start with, until its device is made
         // ready at the parser's first caps (`start_sound`).
-        self.hold_start(generation);
-        let mut parts = self.sound_branch(generation, &caps, programme, false, None)?;
+        self.hold_start(generation, codec_of(&caps));
+        let mut parts = match self.sound_branch(generation, &caps, programme, false, None) {
+            Ok(parts) => parts,
+            Err(error) => {
+                // No part for this sound (no decoder, say): nothing to make
+                // a device ready for -- the picture is not held for it.
+                if let Some(gate) = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone().filter(|g| g.generation == generation) {
+                    gate.release_sound("unbuilt");
+                }
+                mediabox_core::timeline!("sound-start", "gen={generation} phase=done outcome=unbuilt");
+                eprintln!("mediabox-live: ses kolu kurulamadı, görüntü beklemiyor: {error}");
+                return Err(error);
+            }
+        };
         parts.pid = pid;
         self.watch_sound_pad(pad);
         self.discard(pad, elements);
@@ -3282,6 +3310,10 @@ impl Engine {
             && audio.passthrough.contains(&AudioCodec::Ac3)
             && audio.device.is_some();
         let mut chain = vec![make(parser)?];
+        let ends = Arc::new(AtomicU64::new(0));
+        let follows: Arc<Mutex<Option<Arc<AtomicU64>>>> = Arc::new(Mutex::new(None));
+        // A frame across the end of the part before: decoded, then cut to it.
+        let cut_from = Arc::new(AtomicU64::new(0));
         // Gated frame by frame, after the parser (`Programme::sound`): a
         // PES can hold up to 350 ms of sound, and the one holding the key
         // frame's time began before it -- gated whole, the sound joined the
@@ -3291,6 +3323,7 @@ impl Engine {
             let shared = Arc::clone(&self.shared);
             let faults = crate::health::Faults::get(&shared.faults);
             let jumped = Mutex::new(Instant::now());
+            let (ends, follows, cut_from) = (Arc::clone(&ends), Arc::clone(&follows), Arc::clone(&cut_from));
             let framed = chain[0].static_pad("src").ok_or("ayrıştırıcının çıkışı yok")?;
             probe_layer(&framed, crate::clock_probe::Layer::Parser, Some(generation), &shared);
             // The sound's own rate and channels, as its parser read them off
@@ -3330,7 +3363,22 @@ impl Engine {
                 }
                 let stop = || pad.pad_flags().contains(gst::PadFlags::FLUSHING);
                 let duration = buffer.and_then(|buffer| buffer.duration()).map(|d| d.nseconds());
+                // On from the part before: from its end on, not before.
+                let before = follows.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|e| e.load(Ordering::SeqCst)).filter(|&e| e > 0);
+                if let (Some(end), Some(pts), Some(duration)) = (before, pts, duration) {
+                    if pts + duration <= end || (pts < end && passthrough) {
+                        mediabox_core::timeline!("audio-cut", "gen={generation} drop pts={pts} dur={duration} before={end}");
+                        return gst::PadProbeReturn::Drop;
+                    }
+                    if pts < end {
+                        cut_from.store(end, Ordering::SeqCst);
+                        mediabox_core::timeline!("audio-cut", "gen={generation} cut pts={pts} dur={duration} from={end}");
+                    }
+                }
                 if programme.sound(pts, duration, passthrough, &stop) {
+                    if let (Some(pts), Some(duration)) = (pts, duration) {
+                        ends.fetch_max(pts + duration, Ordering::SeqCst);
+                    }
                     gst::PadProbeReturn::Ok
                 } else {
                     shared.health.diagnose(|d| d.c.frames_gated += 1);
@@ -3352,7 +3400,7 @@ impl Engine {
             source.sync_state_with_parent().map_err(|e| e.to_string())?;
             eprintln!("mediabox-live: ses AC-3 olduğu gibi (IEC 61937)");
             let held = hold.then(|| SoundRelease { block, activate: Some(input), token });
-            return Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads, held, retired, token, shown_as: (codec, true) });
+            return Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads, held, retired, token, shown_as: (codec, true), ends, follows });
         }
         let decoder = first_of(decoder_for(caps)).ok_or_else(|| format!("{codec} için ses çözücüsü yok"))?;
         chain.push(decoder);
@@ -3397,6 +3445,7 @@ impl Engine {
         // PCM below that.
         let weak = Arc::downgrade(self);
         let (elements_tail, pads_tail, retired_tail) = (Arc::clone(&elements), Arc::clone(&pads), Arc::clone(&retired));
+        let cut_tail = Arc::clone(&cut_from);
         decoded.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
             let Some(gst::PadProbeData::Event(event)) = &info.data else { return gst::PadProbeReturn::Ok };
             let gst::EventView::Caps(caps) = event.view() else { return gst::PadProbeReturn::Ok };
@@ -3435,6 +3484,24 @@ impl Engine {
                 }
             };
             eprintln!("mediabox-live: ses {channels} kanal -> PCM");
+            // The frame across the end of the part before cut to it, where
+            // the sound is one interleaved format (the decoders' may be
+            // planar).
+            if let Some(out) = tail.last().and_then(|last| last.static_pad("src")) {
+                let cut = Arc::clone(&cut_tail);
+                out.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+                    let from = cut.swap(0, Ordering::SeqCst);
+                    if from == 0 {
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    let caps = pad.current_caps();
+                    if let (Some(buffer), Some(caps)) = (info.buffer_mut(), caps.as_ref()) {
+                        let frames = trim(buffer, from, caps);
+                        mediabox_core::timeline!("audio-cut", "gen={generation} trimmed from={from} frames={frames:?}");
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
             if let Err(error) = engine.tail(pad, &tail, &engine.audio_selector, &elements_tail, &pads_tail) {
                 eprintln!("mediabox-live: ses zinciri bağlanamadı: {error}");
             }
@@ -3446,7 +3513,7 @@ impl Engine {
         from.link(&head[0].static_pad("sink").ok_or("kuyruğun girişi yok")?).map_err(|e| format!("{e:?}"))?;
         source.sync_state_with_parent().map_err(|e| e.to_string())?;
         let held = hold.then(|| SoundRelease { block, activate: None, token });
-        Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads, held, retired, token, shown_as: (codec, false) })
+        Ok(SoundParts { generation, pid: 0, codec: codec_of(caps), source, elements, pads, held, retired, token, shown_as: (codec, false), ends, follows })
     }
 
     /// After the decoder: AC-3 at `kbps`, made into IEC 61937 bursts here and
@@ -3884,6 +3951,19 @@ impl Engine {
         *self.aid.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The viewer's choice of channel `generation` not made (no such
+    /// stream, or none given by it): the choice is the stream playing again,
+    /// so that asking for that stream once more is asked anew.
+    fn choice_refused(&self, generation: u64, playing: Option<usize>) {
+        if self.shared.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        if let Some(playing) = playing {
+            *self.aid.lock().unwrap_or_else(|p| p.into_inner()) = Some(playing);
+            self.shared.info.lock().unwrap_or_else(|p| p.into_inner()).aid = Some(playing);
+        }
+    }
+
     /// The control plane's number for the channel playing.
     fn channel_epoch(&self) -> Option<u64> {
         self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|gate| gate.epoch)
@@ -4062,9 +4142,15 @@ impl Engine {
     /// caps: a key frame parsed first chose the start, and nothing could be
     /// held (16 ms apart on a test stream). Let go at the caps if nothing
     /// is to be made ready (`start_sound`), or at its limit.
-    fn hold_start(&self, generation: u64) {
+    fn hold_start(&self, generation: u64, codec: Option<crate::es::Codec>) {
         let Some(gate) = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone().filter(|g| g.generation == generation) else { return };
-        let Some(device) = self.audio.lock().unwrap_or_else(|p| p.into_inner()).device.clone() else { return };
+        let audio = self.audio.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        // Passed through, the part sets the device's form itself: there is
+        // no PCM format to make ready, nothing to hold the start for.
+        if form_of(&audio, codec, None) == Some(Form::Passthrough) {
+            return;
+        }
+        let Some(device) = audio.device else { return };
         {
             let _swaps = self.swaps.lock().unwrap_or_else(|p| p.into_inner());
             let plans = self.plans.lock().unwrap_or_else(|p| p.into_inner());
@@ -5102,6 +5188,7 @@ fn read_stream(
     shared: &Shared,
     on_behind: &dyn Fn(u64, u64),
     on_sound: &dyn Fn(u64, &crate::es::Switch) -> Option<gst_app::AppSrc>,
+    on_choice: &dyn Fn(u64, Option<usize>),
 ) {
     let ended = |why: String| {
         if !stop.load(Ordering::SeqCst) {
@@ -5197,11 +5284,15 @@ fn read_stream(
             if let Some(order) = chosen {
                 match es.choose(order, &mut out) {
                     Some(switch) => {
-                        eprintln!("mediabox-live: ses izi {} seçildi: PID {:#06x} {}", order + 1, switch.pid, switch.codec.name());
-                        shared.info.lock().unwrap_or_else(|p| p.into_inner()).aid = Some(order);
+                        eprintln!("mediabox-live: ses izi {} seçildi: PID {:#06x} {}, ilk PES'inde geçilecek", order + 1, switch.pid, switch.codec.name());
                         mediabox_core::timeline!("aid-switch", "gen={generation} order={order} pid={} codec={}", switch.pid, switch.codec.name());
                     }
-                    None => eprintln!("mediabox-live: ses izi {} yok ya da zaten çalıyor", order + 1),
+                    None => {
+                        eprintln!("mediabox-live: ses izi {} yok ya da zaten çalıyor", order + 1);
+                        if !es.choosing() {
+                            on_choice(generation, es.sound_index());
+                        }
+                    }
                 }
             }
             // The sound plan changed the form the sound is sent in: its part
@@ -5268,6 +5359,22 @@ fn read_stream(
             } };
             out.chunks.extend(fed.chunks);
             out.events.extend(fed.events);
+            // The viewer's choice made, or refused with the sound playing
+            // kept: the status says the one heard.
+            for event in &out.events {
+                match event {
+                    crate::es::Event::SoundChosen { pid, from, until } => {
+                        mediabox_core::timeline!("aid-cut", "gen={generation} pid={pid} from={from:?} until={until:?}");
+                        shared.info.lock().unwrap_or_else(|p| p.into_inner()).aid = es.sound_index();
+                    }
+                    crate::es::Event::ChoiceRefused { pid, why } => {
+                        eprintln!("mediabox-live: ses izi PID {pid:#06x} seçilemedi: {why}; çalan iz sürüyor");
+                        mediabox_core::timeline!("aid-refused", "gen={generation} pid={pid} why={why}");
+                        on_choice(generation, es.sound_index());
+                    }
+                    _ => {}
+                }
+            }
             shared.health.ts(generation, &out.events, es.counts(), es.sound_state(), es.codec());
             if let Some(evidence) = crate::evidence::get() {
                 let pmts = es.pmt_pids();

@@ -122,6 +122,12 @@ pub enum Event {
     /// The sound's state was set back: chosen again, gone from the PMT,
     /// back in it, or another codec.
     SoundReset { pid: u16, why: &'static str },
+    /// The viewer's choice took over (`Reader::choose`): the stream chosen
+    /// from its PES at `from`, the one before up to its PES at `until`
+    /// (PTS, 90 kHz), which is not given.
+    SoundChosen { pid: u16, from: Option<u64>, until: Option<u64> },
+    /// The viewer's choice refused: the sound playing goes on.
+    ChoiceRefused { pid: u16, why: &'static str },
 }
 
 /// Every event, counted by kind; cumulative.
@@ -143,6 +149,8 @@ pub struct Counts {
     pub pmt_changes: u64,
     pub pcr_pid_changes: u64,
     pub psi_bad: u64,
+    pub chosen: u64,
+    pub choice_refused: u64,
 }
 
 impl Counts {
@@ -164,6 +172,8 @@ impl Counts {
             Event::PmtVersion { .. } => &mut self.pmt_changes,
             Event::PcrPidChanged { .. } => &mut self.pcr_pid_changes,
             Event::PsiError { .. } => &mut self.psi_bad,
+            Event::SoundChosen { .. } => &mut self.chosen,
+            Event::ChoiceRefused { .. } => &mut self.choice_refused,
         };
         *n += 1;
     }
@@ -186,6 +196,8 @@ impl Counts {
         self.pmt_changes += other.pmt_changes;
         self.pcr_pid_changes += other.pcr_pid_changes;
         self.psi_bad += other.psi_bad;
+        self.chosen += other.chosen;
+        self.choice_refused += other.choice_refused;
         self
     }
 }
@@ -630,6 +642,8 @@ struct Sound {
     new_time_base: bool,
     /// The PMT moved it: told on the first chunk of the new sound.
     switch: Option<Switch>,
+    /// The PTS of the last PES it gave.
+    last_pts: Option<u64>,
 }
 
 impl Sound {
@@ -648,6 +662,7 @@ impl Sound {
             pending: Some(first),
             new_time_base: false,
             switch: None,
+            last_pts: None,
         }
     }
 
@@ -686,7 +701,49 @@ pub struct Reader {
     /// time base is told once, at the PCR that starts it.
     time_base_told: bool,
     sound: Option<Sound>,
+    /// The viewer's choice on its way (`choose`).
+    next: Option<Next>,
+    /// The sound playing reached the point the choice takes over at: its
+    /// PES there, not given.
+    cut: bool,
+    cut_at: Option<u64>,
     counts: Counts,
+}
+
+/// How far the sound playing may run on, in its own PTS (90 kHz), with the
+/// stream chosen giving no PES (the choice refused), or with that stream's
+/// first PES not reached (the choice taken over at once): the bound the
+/// channel's start holds its picture for a sound to come (2 s,
+/// `gate::SOUND_HOLD_MAX`).
+pub const CHOICE_WAIT: u64 = 2 * 90_000;
+
+/// The viewer's choice on its way: the stream chosen read alongside the one
+/// playing, every chunk of it from its first PES start kept, until the
+/// sound playing reaches that PES's time -- then the one playing ends at
+/// its PES before, the chosen one starts with what was kept: nothing of
+/// either lost to the change, nothing given twice.
+struct Next {
+    sound: Sound,
+    held: Vec<Chunk>,
+    /// Its first PES's PTS, and its last one's.
+    first: Option<u64>,
+    last: Option<u64>,
+    /// The sound playing's last PTS when the choice was made.
+    asked: Option<u64>,
+    /// Taken over at the next PES start of the sound playing, whatever its
+    /// time: the times are not comparable (a new time base) or the wait is
+    /// over.
+    now: bool,
+}
+
+/// `a` at or after `b` on the 33-bit PTS clock.
+fn at_or_after(a: u64, b: u64) -> bool {
+    a.wrapping_sub(b) & ((1 << 33) - 1) < (1 << 32)
+}
+
+/// `a` less `b` on the 33-bit PTS clock, `a` at or after `b`.
+fn ticks_since(a: u64, b: u64) -> u64 {
+    a.wrapping_sub(b) & ((1 << 33) - 1)
 }
 
 impl Reader {
@@ -771,29 +828,74 @@ impl Reader {
     }
 
     /// The viewer's choice: the sound to the `order`-th sound stream of the
-    /// programme's PMT in force, from that stream's next PES. Always a new
-    /// branch (`Switch::rebuild`), whatever the codec: nothing the old
-    /// stream's part still holds may be heard after the new one starts.
-    /// None when there is no such stream, or it is the one playing.
+    /// programme's PMT in force. The stream playing goes on while the one
+    /// chosen is read alongside it and kept from its first PES start
+    /// (`Next`); the change is made where the stream playing reaches that
+    /// PES's time: its own PES from there on is not given, the chosen
+    /// stream's kept chunks are, the first with the change
+    /// (`Switch::rebuild`: always a new branch, whatever the codec). Told
+    /// then (`Event::SoundChosen`), or refused with the sound playing kept
+    /// (`Event::ChoiceRefused`) when the stream chosen gives no PES within
+    /// `CHOICE_WAIT` of the sound playing. None when there is no such
+    /// stream, or it is the one playing or on its way already.
     pub fn choose(&mut self, order: usize, out: &mut Output) -> Option<Switch> {
-        let sound = self.sound.as_mut()?;
+        let sound = self.sound.as_ref()?;
+        let (playing, pid, last_pts) = (sound.state == SoundState::Playing, sound.pid, sound.last_pts);
         let program = sound.program.or_else(|| (self.pmts.len() == 1).then(|| self.pmts.keys().next().copied()).flatten())?;
         let pmt = self.pmts.get(&program)?;
         let stream = *pmt.streams.iter().filter(|s| s.codec.is_sound()).nth(order)?;
-        if stream.pid == sound.pid && sound.state == SoundState::Playing {
+        if stream.pid == pid && playing {
+            // Chosen back before the change was made: nothing changes.
+            if let Some(next) = self.next.take() {
+                self.event(Event::ChoiceRefused { pid: next.sound.pid, why: "the stream playing chosen again" }, out);
+            }
             return None;
         }
-        sound.pid = stream.pid;
-        sound.reset();
-        sound.state = SoundState::Playing;
-        sound.program = Some(program);
-        sound.codec = Some(stream.codec);
-        sound.language = stream.language;
-        sound.index = Some(order);
-        let switch = Switch { pid: stream.pid, codec: stream.codec, rebuild: true };
-        sound.switch = Some(switch);
-        self.event(Event::SoundReset { pid: stream.pid, why: "the viewer chose another audio stream" }, out);
-        Some(switch)
+        if self.next.as_ref().is_some_and(|n| n.sound.pid == stream.pid) {
+            return None;
+        }
+        if let Some(next) = self.next.take() {
+            self.event(Event::ChoiceRefused { pid: next.sound.pid, why: "another stream chosen" }, out);
+        }
+        let mut chosen = Sound::new(stream.pid, Break::Reset);
+        chosen.program = Some(program);
+        chosen.codec = Some(stream.codec);
+        chosen.language = stream.language;
+        chosen.index = Some(order);
+        // Nothing playing to go on with: the change at the chosen stream's
+        // first PES.
+        let now = !playing;
+        self.next = Some(Next { sound: chosen, held: Vec::new(), first: None, last: None, asked: last_pts, now });
+        Some(Switch { pid: stream.pid, codec: stream.codec, rebuild: true })
+    }
+
+    /// A choice on its way (`choose`).
+    pub fn choosing(&self) -> bool {
+        self.next.is_some()
+    }
+
+    /// The place among its programme's sound streams of the sound playing.
+    pub fn sound_index(&self) -> Option<usize> {
+        self.sound.as_ref().and_then(|s| s.index)
+    }
+
+    /// The change to the stream chosen: the sound playing ends where it is,
+    /// the stream chosen goes on with what was kept of it.
+    fn take_over(&mut self, until: Option<u64>, out: &mut Output) {
+        self.cut = false;
+        let Some(next) = self.next.take() else { return };
+        let mut sound = next.sound;
+        let Some(codec) = sound.codec else { return };
+        self.event(Event::SoundReset { pid: sound.pid, why: "the viewer chose another audio stream" }, out);
+        self.event(Event::SoundChosen { pid: sound.pid, from: next.first, until }, out);
+        let mut held = next.held;
+        let switch = Switch { pid: sound.pid, codec, rebuild: true };
+        match held.first_mut() {
+            Some(first) => first.switch = Some(switch),
+            None => sound.switch = Some(switch),
+        }
+        out.chunks.extend(held);
+        self.sound = Some(sound);
     }
 
     /// The sound's part built again for the stream it is on, from its next
@@ -849,6 +951,39 @@ impl Reader {
                 self.sound_packet(&mut sound, pid, p, tei, out);
             }
             self.sound = Some(sound);
+            if self.cut {
+                let until = self.cut_at.take();
+                self.take_over(until, out);
+                return;
+            }
+        }
+        if let Some(mut next) = self.next.take() {
+            if next.sound.pid == pid {
+                // Read as the sound is, kept, not given.
+                let mut kept = Output::default();
+                self.sound_packet(&mut next.sound, pid, p, tei, &mut kept);
+                out.events.append(&mut kept.events);
+                for chunk in kept.chunks {
+                    if chunk.start {
+                        next.first = next.first.or(chunk.pts);
+                        next.last = chunk.pts.or(next.last);
+                    }
+                    if next.first.is_some() {
+                        next.held.push(chunk);
+                    }
+                }
+                // Nothing playing reaches it (gone, or on and on before it):
+                // taken over at once.
+                let waited = matches!((next.first, next.last), (Some(f), Some(l)) if ticks_since(l, f) >= CHOICE_WAIT);
+                let now = next.first.is_some() && (next.now || waited);
+                self.next = Some(next);
+                if now {
+                    let until = self.sound.as_ref().and_then(|s| s.last_pts);
+                    self.take_over(until, out);
+                }
+                return;
+            }
+            self.next = Some(next);
         }
     }
 
@@ -866,6 +1001,12 @@ impl Reader {
             self.event(Event::TimeBaseDiscontinuity { pid }, out);
             if let Some(sound) = self.sound.as_mut() {
                 sound.new_time_base = true;
+            }
+            // The two streams' times no longer comparable: the change at the
+            // next PES start of the sound playing.
+            if let Some(next) = self.next.as_mut() {
+                next.now = true;
+                next.sound.new_time_base = true;
             }
         }
     }
@@ -959,6 +1100,19 @@ impl Reader {
         }
         for event in told {
             self.event(event, out);
+        }
+        // A choice on its way against the new PMT: its stream gone, or the
+        // sound moved by the PMT meanwhile -- the choice was of a list that
+        // is no more: refused, the sound as the PMT has it.
+        let moved = self.sound.as_ref().is_some_and(|s| s.switch.is_some());
+        if let Some(next) = self.next.take_if(|n| n.sound.program == Some(program)) {
+            let kept = pmt.streams.iter().any(|st| st.pid == next.sound.pid && st.codec.is_sound() && Some(st.codec) == next.sound.codec);
+            if kept && !moved {
+                self.next = Some(next);
+            } else {
+                let why = if moved { "the PMT moved the sound meanwhile" } else { "the stream chosen is gone from the PMT" };
+                self.event(Event::ChoiceRefused { pid: next.sound.pid, why }, out);
+            }
         }
         self.pmts.insert(program, pmt);
     }
@@ -1221,6 +1375,27 @@ impl Reader {
             }
             return;
         }
+        if let (Some(next), Some(at)) = (self.next.as_mut(), pts) {
+            let asked = *next.asked.get_or_insert(at);
+            let waited = at_or_after(at, asked) && ticks_since(at, asked) >= CHOICE_WAIT;
+            match next.first {
+                // The sound playing at the chosen stream's first PES: it ends
+                // with the PES before, this one is not given.
+                Some(first) if next.now || at_or_after(at, first) || waited => {
+                    self.cut = true;
+                    self.cut_at = Some(at);
+                    sound.pes = Pes::Skip;
+                    return;
+                }
+                None if waited => {
+                    let pid = next.sound.pid;
+                    self.next = None;
+                    self.event(Event::ChoiceRefused { pid, why: "the stream chosen gave no PES" }, out);
+                }
+                _ => {}
+            }
+        }
+        sound.last_pts = pts.or(sound.last_pts);
         let discont = sound.pending.take();
         if let Some(after) = discont.filter(|b| b.is_error()) {
             self.event(Event::Recovered { pid, after }, out);
