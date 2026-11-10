@@ -820,6 +820,9 @@ pub struct Engine {
     /// Tests: no decoder for any sound (`sound_branch` refuses).
     #[cfg(test)]
     no_decoder: AtomicBool,
+    /// The part for an audio stream the viewer chose, built while the
+    /// stream playing goes on (`prepare_choice`): the PID it is for.
+    chosen_part: Mutex<Option<(u16, SoundParts)>>,
     /// The control plane's sound plans (`set_audio_plan`).
     plans: Mutex<Plans>,
     plans_changed: std::sync::Condvar,
@@ -1280,6 +1283,7 @@ impl Engine {
             start_hold_limit: Mutex::new(None),
             #[cfg(test)]
             no_decoder: AtomicBool::new(false),
+            chosen_part: Mutex::new(None),
             plans: Mutex::new(Plans::default()),
             plans_changed: std::sync::Condvar::new(),
             audio: {
@@ -1421,13 +1425,31 @@ impl Engine {
             eprintln!("mediabox-live: ses PMT ile {} oldu: oynatılamıyor", switch.codec.name());
             return None;
         };
-        let built = match prebuilt {
-            Some(parts) => {
+        // Built ahead for this chosen stream (`prepare_choice`) -- for the
+        // sound's form as it stands -- it goes on from here; another's is
+        // taken down.
+        let chosen = self.chosen_part.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let passthrough = form_of(&self.audio.lock().unwrap_or_else(|p| p.into_inner()), Some(switch.codec), None) == Some(Form::Passthrough);
+        let chosen = match chosen {
+            Some((pid, part)) if token.is_none() && prebuilt.is_none() && pid == switch.pid && part.generation == generation && part.codec == Some(switch.codec) && part.shown_as.1 == passthrough => Some(part),
+            Some((_, part)) => {
+                self.drop_prebuilt(part, "other");
+                None
+            }
+            None => None,
+        };
+        let built = match (prebuilt, chosen) {
+            (Some(parts), _) => {
                 mediabox_core::timeline!("plan-rebuild", "gen={generation} phase=prebuilt id={:?}", parts.token.map(|t| t.id));
                 self.show_part(&parts);
                 Ok(parts)
             }
-            None => self.sound_branch(generation, &caps, &programme, old.is_some(), token),
+            (None, Some(parts)) => {
+                mediabox_core::timeline!("aid-part", "gen={generation} phase=prebuilt pid={}", switch.pid);
+                self.show_part(&parts);
+                Ok(parts)
+            }
+            (None, None) => self.sound_branch(generation, &caps, &programme, old.is_some(), token),
         };
         match built {
             Ok(mut parts) => {
@@ -2776,7 +2798,12 @@ impl Engine {
                             engine.choice_refused(generation, playing);
                         }
                     };
-                    read_stream(&reader_path, &reader_into, &reader_stop, &shared, &on_behind, &on_sound, &on_choice);
+                    let on_chosen = |generation: u64, switch: crate::es::Switch| {
+                        if let Some(engine) = engine.upgrade() {
+                            engine.prepare_choice(generation, switch);
+                        }
+                    };
+                    read_stream(&reader_path, &reader_into, &reader_stop, &shared, &on_behind, &on_sound, &on_choice, &on_chosen);
                     reader_stop.store(true, Ordering::SeqCst);
                 })
                 .map_err(|e| e.to_string())?;
@@ -3216,6 +3243,7 @@ impl Engine {
         // The channel's first part: its start held from here, before any
         // picture can be chosen to start with, until its device is made
         // ready at the parser's first caps (`start_sound`).
+        self.drop_chosen("channel");
         self.hold_start(generation, codec_of(&caps));
         let mut parts = match self.sound_branch(generation, &caps, programme, false, None) {
             Ok(parts) => parts,
@@ -3375,7 +3403,12 @@ impl Engine {
                 // On from the part before: from its end on, not before.
                 let before = follows.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|e| e.load(Ordering::SeqCst)).filter(|&e| e > 0);
                 if let (Some(end), Some(pts), Some(duration)) = (before, pts, duration) {
-                    if pts + duration <= end || (pts < end && passthrough) {
+                    // Ending by then: not a whole sample of it after the end
+                    // (the two streams' times put on the clock a nanosecond
+                    // or a 90 kHz tick apart, FAZ 3E.7: MP2 to MP2, a frame
+                    // 1 ns past the end given whole, 24 ms twice).
+                    let sample = pad.current_caps().and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("rate").ok())).filter(|&r| r > 0).map_or(0, |r| 1_000_000_000 / r as u64);
+                    if pts + duration < end + sample.max(1) || (pts < end && passthrough) {
                         mediabox_core::timeline!("audio-cut", "gen={generation} drop pts={pts} dur={duration} before={end}");
                         return gst::PadProbeReturn::Drop;
                     }
@@ -3507,6 +3540,10 @@ impl Engine {
                     if let (Some(buffer), Some(caps)) = (info.buffer_mut(), caps.as_ref()) {
                         let frames = trim(buffer, from, caps);
                         mediabox_core::timeline!("audio-cut", "gen={generation} trimmed from={from} frames={frames:?}");
+                        // Nothing of it left after the end: not given.
+                        if frames.is_none() && buffer.pts().is_some_and(|pts| pts.nseconds() < from) {
+                            return gst::PadProbeReturn::Drop;
+                        }
                     }
                     gst::PadProbeReturn::Ok
                 });
@@ -3960,10 +3997,64 @@ impl Engine {
         *self.aid.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The viewer chose `switch`'s stream on channel `generation`: its part
+    /// built now, on a thread of its own, its source held, while the stream
+    /// playing goes on -- at the change the reader only hands it the sound
+    /// (`sound_changed`). Built at the change, on the reader's thread, a
+    /// channel's first decoder of a codec held the reader 217 ms: the part
+    /// playing out ran dry, the sound 30.8 ms late at the selector (FAZ 3E.7
+    /// kX, MP2 to AC-3 5.1).
+    fn prepare_choice(self: &Arc<Self>, generation: u64, switch: crate::es::Switch) {
+        let Some(caps) = sound_caps(switch.codec) else { return };
+        let programme = {
+            let current = self.current.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(branch) = current.as_ref().filter(|b| b.generation == generation) else { return };
+            Arc::clone(&branch.programme)
+        };
+        let engine = Arc::clone(self);
+        let built = std::thread::Builder::new().name("choice-part".into()).spawn(move || {
+            mediabox_core::timeline!("aid-part", "gen={generation} phase=build pid={}", switch.pid);
+            match engine.sound_part(generation, &caps, &programme, true, None, None) {
+                Ok(part) => engine.keep_chosen(generation, switch.pid, part),
+                Err(error) => eprintln!("mediabox-live: seçilen ses izinin kolu önceden kurulamadı: {error}"),
+            }
+        });
+        if let Err(error) = built {
+            eprintln!("mediabox-live: seçilen ses izinin kolu için iş parçacığı yok: {error}");
+        }
+    }
+
+    /// A chosen stream's part built: kept for the change, unless the change
+    /// was made meanwhile (built there), or the channel is another.
+    fn keep_chosen(&self, generation: u64, pid: u16, part: SoundParts) {
+        let sound = self.shared.sound.lock().unwrap_or_else(|p| p.into_inner());
+        let done = sound.as_ref().is_none_or(|s| s.generation != generation || s.pid == pid);
+        if done || self.shared.generation.load(Ordering::SeqCst) != generation {
+            drop(sound);
+            self.drop_prebuilt(part, "late");
+            return;
+        }
+        let before = self.chosen_part.lock().unwrap_or_else(|p| p.into_inner()).replace((pid, part));
+        drop(sound);
+        mediabox_core::timeline!("aid-part", "gen={generation} phase=ready pid={pid}");
+        if let Some((_, old)) = before {
+            self.drop_prebuilt(old, "replaced");
+        }
+    }
+
+    /// A chosen stream's part no change will take: taken down.
+    fn drop_chosen(&self, why: &str) {
+        let part = self.chosen_part.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some((_, part)) = part {
+            self.drop_prebuilt(part, why);
+        }
+    }
+
     /// The viewer's choice of channel `generation` not made (no such
     /// stream, or none given by it): the choice is the stream playing again,
     /// so that asking for that stream once more is asked anew.
     fn choice_refused(&self, generation: u64, playing: Option<usize>) {
+        self.drop_chosen("refused");
         if self.shared.generation.load(Ordering::SeqCst) != generation {
             return;
         }
@@ -5190,6 +5281,7 @@ fn read_chunk(file: &mut File, path: &str, chunk: &mut [u8]) -> Result<(usize, u
 /// comes: every buffer is stamped with the time it arrived. The end of the
 /// FIFO is the stream's end only while it is the FIFO being read: the
 /// receiver lets the reader of a FIFO it has moved away from go that way.
+#[allow(clippy::too_many_arguments)]
 fn read_stream(
     path: &str,
     into: &Mutex<Option<gst_app::AppSrc>>,
@@ -5198,6 +5290,7 @@ fn read_stream(
     on_behind: &dyn Fn(u64, u64),
     on_sound: &dyn Fn(u64, &crate::es::Switch) -> Option<gst_app::AppSrc>,
     on_choice: &dyn Fn(u64, Option<usize>),
+    on_chosen: &dyn Fn(u64, crate::es::Switch),
 ) {
     let ended = |why: String| {
         if !stop.load(Ordering::SeqCst) {
@@ -5295,6 +5388,7 @@ fn read_stream(
                     Some(switch) => {
                         eprintln!("mediabox-live: ses izi {} seçildi: PID {:#06x} {}, ilk PES'inde geçilecek", order + 1, switch.pid, switch.codec.name());
                         mediabox_core::timeline!("aid-switch", "gen={generation} order={order} pid={} codec={}", switch.pid, switch.codec.name());
+                        on_chosen(generation, switch);
                     }
                     None => {
                         eprintln!("mediabox-live: ses izi {} yok ya da zaten çalıyor", order + 1);
