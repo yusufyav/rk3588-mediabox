@@ -2950,6 +2950,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_status_says_which_policy_a_receiver_was_started_with() {
+        let recording = options(1, None);
+        assert_eq!(Reporter::new(None, &recording).status.startup_policy, None, "a recording has no demodulator");
+        let satellite = Options {
+            source: Source::Satellite {
+                params: TuneParams {
+                    rf_khz: 1_588_000,
+                    symbol_rate_ksps: 27_500,
+                    lnb: None,
+                    lock_timeout_ms: None,
+                    search_offsets_khz: Vec::new(),
+                    first_offset_khz: None,
+                    wrong_offsets_khz: Vec::new(),
+                },
+                firmware_dir: PathBuf::new(),
+                access: crate::usb::HardwareAccess::chosen_with_hardware_flag(),
+            },
+            startup_policy: LiveReceiverStartupPolicy::ResumeIfValid,
+            ..options(1, None)
+        };
+        let status = serde_json::to_value(&Reporter::new(None, &satellite).status).unwrap();
+        assert_eq!(status["startup_policy"], "resume_if_valid");
+        let summary = TuneSummary::from(&TuneResult {
+            startup_path: Some(StartupPath::Resumed),
+            ..TuneResult::default()
+        });
+        let summary = serde_json::to_value(summary).unwrap();
+        assert_eq!((summary["startup_path"].as_str(), summary["resume_rejected_reason"].as_str()), (Some("resumed"), None));
+    }
+
     fn options(service_id: u16, status: Option<PathBuf>) -> Options {
         Options {
             service_id,

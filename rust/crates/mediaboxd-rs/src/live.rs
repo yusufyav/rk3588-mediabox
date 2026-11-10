@@ -2270,6 +2270,83 @@ mod tests {
         })
     }
 
+    fn satellite() -> LiveSource {
+        LiveSource::Satellite { frequency_khz: 12_188_000, symbol_rate_ksps: 27_500, polarisation: SatellitePolarisation::Vertical }
+    }
+
+    #[test]
+    fn the_kept_policy_reaches_the_next_receiver_s_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        let argv = |live: &LiveManager| live.argv(10801, &satellite(), "7-1");
+        // Nothing kept: the default, said explicitly.
+        assert!(argv(&live).contains(&"--startup-policy=full-init".to_string()));
+        live.set_startup_policy(LiveReceiverStartupPolicy::ResumeIfValid).unwrap();
+        assert!(argv(&live).contains(&"--startup-policy=resume-if-valid".to_string()));
+        live.set_startup_policy(LiveReceiverStartupPolicy::FullInit).unwrap();
+        assert!(argv(&live).contains(&"--startup-policy=full-init".to_string()));
+        // A recording has no demodulator to bring up.
+        assert!(!live.argv(10801, &LiveSource::Recording, "7-2").join(" ").contains("--startup-policy"));
+    }
+
+    #[test]
+    fn the_policy_is_kept_whole_across_daemons_or_not_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        assert_eq!(live.receiver_settings().startup_policy, LiveReceiverStartupPolicy::FullInit, "no file");
+        let answer = live.set_startup_policy(LiveReceiverStartupPolicy::ResumeIfValid).unwrap();
+        assert_eq!(answer["configured_startup_policy"], "resume_if_valid");
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["live-receiver.json"], "written beside and renamed over");
+        // Another daemon, after a restart, reads it back.
+        assert_eq!(manager(dir.path()).receiver_settings().startup_policy, LiveReceiverStartupPolicy::ResumeIfValid);
+        // A file it cannot read is the safe default.
+        std::fs::write(dir.path().join("live-receiver.json"), "{\"startup_policy\":\"standby\"}").unwrap();
+        assert_eq!(live.receiver_settings().startup_policy, LiveReceiverStartupPolicy::FullInit);
+        // A write that fails keeps what was kept, and says so.
+        live.set_startup_policy(LiveReceiverStartupPolicy::ResumeIfValid).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let refused = live.set_startup_policy(LiveReceiverStartupPolicy::FullInit);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.is_err_and(|error| error.contains("alıcı ayarı yazılamadı")));
+        assert_eq!(live.receiver_settings().startup_policy, LiveReceiverStartupPolicy::ResumeIfValid);
+    }
+
+    #[test]
+    fn a_policy_changed_while_a_channel_plays_leaves_its_receiver_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        live.set(Lifecycle::Playing);
+        live.lock().token = Some("3-1".into());
+        let status = r#"{"token":"3-1","state":"streaming","startup_policy":"full_init","tune":{"startup_path":"full_init","resume_rejected_reason":"policy_full_init"}}"#;
+        std::fs::write(dir.path().join("status.json"), status).unwrap();
+        live.set_startup_policy(LiveReceiverStartupPolicy::ResumeIfValid).unwrap();
+        assert_eq!(live.lifecycle(), Lifecycle::Playing);
+        assert_eq!(live.lock().token.as_deref(), Some("3-1"));
+        assert!(!dir.path().join("select.json").exists(), "no channel asked of it");
+        assert_eq!(std::fs::read_to_string(dir.path().join("status.json")).unwrap(), status);
+        // What is kept, and what the receiver up now was started with and did.
+        let startup = live.startup_status();
+        assert_eq!(startup["configured_startup_policy"], "resume_if_valid");
+        assert_eq!(startup["active_startup_policy"], "full_init");
+        assert_eq!(startup["actual_startup_path"], "full_init");
+        assert_eq!(startup["resume_rejected_reason"], "policy_full_init");
+        assert_eq!(live.status()["startup"], startup);
+        // A receiver that resumed says so, with no reason.
+        std::fs::write(
+            dir.path().join("status.json"),
+            r#"{"token":"3-1","startup_policy":"resume_if_valid","tune":{"startup_path":"resumed","resume_rejected_reason":null}}"#,
+        )
+        .unwrap();
+        let startup = live.startup_status();
+        assert_eq!((startup["actual_startup_path"].as_str(), startup["resume_rejected_reason"].as_str()), (Some("resumed"), None));
+        // None up and none before: nothing to say but the kept policy.
+        let idle = manager(tempfile::tempdir().unwrap().path()).startup_status();
+        assert_eq!(idle["configured_startup_policy"], "full_init");
+        assert!(idle["active_startup_policy"].is_null() && idle["actual_startup_path"].is_null());
+    }
+
     #[test]
     fn the_receiver_is_a_bound_unit_with_typed_arguments_only() {
         let dir = tempfile::tempdir().unwrap();

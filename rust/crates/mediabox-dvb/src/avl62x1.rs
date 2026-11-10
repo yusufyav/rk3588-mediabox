@@ -733,6 +733,16 @@ mod tests {
     }
 
     #[test]
+    fn the_first_check_that_fails_is_the_one_named() {
+        let patch = (1, 2, 3);
+        assert_eq!(core_mismatch(CHIP_ID, 0, CORE_READY_WORD, patch, patch), None);
+        assert_eq!(core_mismatch(0x1234_5678, 1, 0, (0, 0, 0), patch), Some(CoreMismatch::ChipId));
+        assert_eq!(core_mismatch(CHIP_ID, 1, 0, (0, 0, 0), patch), Some(CoreMismatch::SoftReset));
+        assert_eq!(core_mismatch(CHIP_ID, 0, 0, (0, 0, 0), patch), Some(CoreMismatch::ReadyWord));
+        assert_eq!(core_mismatch(CHIP_ID, 0, CORE_READY_WORD, (1, 2, 4), patch), Some(CoreMismatch::PatchVersion));
+    }
+
+    #[test]
     fn only_a_ready_core_on_the_same_patch_is_kept() {
         let patch = (1, 2, 3);
         assert!(kept(CHIP_ID, 0, CORE_READY_WORD, patch, patch));

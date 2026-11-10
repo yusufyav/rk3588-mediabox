@@ -395,3 +395,23 @@ fn main() -> ExitCode {
     mediabox_core::timeline::flush();
     code
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(extra: &[&str]) -> Option<LiveReceiverStartupPolicy> {
+        let argv = ["mediabox-dvb", "play", "--service", "1", "--recording", "r.ts", "--stdout"];
+        let cli = Cli::try_parse_from(argv.iter().chain(extra)).ok()?;
+        let Command::Play(play) = cli.command else { return None };
+        Some(play.startup_policy)
+    }
+
+    #[test]
+    fn without_a_policy_the_receiver_boots_from_reset() {
+        assert_eq!(policy(&[]), Some(LiveReceiverStartupPolicy::FullInit));
+        assert_eq!(policy(&["--startup-policy", "full-init"]), Some(LiveReceiverStartupPolicy::FullInit));
+        assert_eq!(policy(&["--startup-policy=resume-if-valid"]), Some(LiveReceiverStartupPolicy::ResumeIfValid));
+        assert_eq!(policy(&["--startup-policy", "resume"]), None);
+    }
+}

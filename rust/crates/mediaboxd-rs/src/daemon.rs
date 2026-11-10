@@ -2913,6 +2913,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_receiver_s_startup_policy_is_the_daemon_s_to_keep() {
+        let dir = tempdir().unwrap();
+        let state = test_state(&dir);
+        assert_eq!(state.status().await.live_receiver.startup_policy, mediabox_core::LiveReceiverStartupPolicy::FullInit);
+        let policy = mediabox_core::LiveReceiverStartupPolicy::ResumeIfValid;
+        let set = state.handle(Request::LiveStartupPolicySet { policy }).await;
+        assert!(set.ok);
+        assert_eq!(set.result.unwrap()["configured_startup_policy"], "resume_if_valid");
+        assert_eq!(state.status().await.live_receiver.startup_policy, policy);
+        let receiver = state.handle(Request::LiveReceiver).await.result.unwrap();
+        assert_eq!(receiver["startup"]["configured_startup_policy"], "resume_if_valid");
+        assert!(receiver["startup"]["actual_startup_path"].is_null(), "no receiver has run");
+    }
+
+    #[tokio::test]
     async fn with_cec_off_every_cec_command_is_refused_by_the_daemon() {
         let dir = tempdir().unwrap();
         let state = test_state(&dir);

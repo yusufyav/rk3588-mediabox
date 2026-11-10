@@ -806,6 +806,149 @@ fn cleanup(bridge: &mut Bridge, demod: &mut Avl62x1, res: &mut TuneResult, untou
 mod tests {
     use super::*;
 
+    use crate::usb::UsbError;
+
+    /// The demodulator as `start` sees it: what each step answers, and
+    /// how often each was asked.
+    #[derive(Default)]
+    struct Fake {
+        probe: Option<std::result::Result<Option<ResumeRejected>, Error>>,
+        resume: Option<std::result::Result<(), Error>>,
+        full: Option<std::result::Result<(), Error>>,
+        calls: Vec<&'static str>,
+    }
+
+    fn gone() -> Error {
+        Error::Usb(UsbError { code: crate::libusb::ERROR_NO_DEVICE, name: "LIBUSB_ERROR_NO_DEVICE".into(), during: "test" })
+    }
+
+    impl DemodStart for Fake {
+        type Boot = &'static str;
+        fn probe(&mut self) -> Result<Option<ResumeRejected>> {
+            self.calls.push("probe");
+            self.probe.take().unwrap_or(Ok(None))
+        }
+        fn resume(&mut self) -> Result<&'static str> {
+            self.calls.push("resume");
+            self.resume.take().unwrap_or(Ok(())).map(|()| "resumed")
+        }
+        fn full_init(&mut self) -> Result<&'static str> {
+            self.calls.push("full_init");
+            self.full.take().unwrap_or(Ok(())).map(|()| "reset and patch")
+        }
+        fn note(&mut self, _line: String) {}
+    }
+
+    const FULL: LiveReceiverStartupPolicy = LiveReceiverStartupPolicy::FullInit;
+    const RESUME: LiveReceiverStartupPolicy = LiveReceiverStartupPolicy::ResumeIfValid;
+
+    #[test]
+    fn full_init_reads_nothing_for_a_resume_and_resets_once() {
+        for ineligible in [None, Some(ResumeRejected::BridgeCold), Some(ResumeRejected::ResetLineHeld)] {
+            let mut fake = Fake::default();
+            let started = start(&mut fake, FULL, ineligible).unwrap();
+            assert_eq!(fake.calls, ["full_init"], "{ineligible:?}");
+            assert_eq!((started.boot, started.path), ("reset and patch", StartupPath::FullInit));
+            assert_eq!(started.rejected, Some(ResumeRejected::PolicyFullInit));
+        }
+    }
+
+    #[test]
+    fn resume_if_valid_resumes_only_when_every_check_holds() {
+        let mut fake = Fake::default();
+        let started = start(&mut fake, RESUME, None).unwrap();
+        assert_eq!(fake.calls, ["probe", "resume"]);
+        assert_eq!((started.boot, started.path, started.rejected), ("resumed", StartupPath::Resumed, None));
+    }
+
+    #[test]
+    fn every_reason_not_to_resume_is_one_full_init_named_for_it() {
+        // Known before any read: the bridge, the reset line.
+        for reason in [ResumeRejected::BridgeCold, ResumeRejected::BridgeForeignFirmware, ResumeRejected::ResetLineHeld] {
+            let mut fake = Fake::default();
+            let started = start(&mut fake, RESUME, Some(reason)).unwrap();
+            assert_eq!(fake.calls, ["full_init"], "{reason:?}: nothing read");
+            assert_eq!((started.path, started.rejected), (StartupPath::FullInit, Some(reason)));
+        }
+        // Read: the core and the LNB pins.
+        for reason in [
+            ResumeRejected::ChipIdMismatch,
+            ResumeRejected::SoftResetActive,
+            ResumeRejected::ReadyWordMismatch,
+            ResumeRejected::PatchVersionMismatch,
+            ResumeRejected::LnbPinsNotHighZ,
+        ] {
+            let mut fake = Fake { probe: Some(Ok(Some(reason))), ..Fake::default() };
+            let started = start(&mut fake, RESUME, None).unwrap();
+            assert_eq!(fake.calls, ["probe", "full_init"], "{reason:?}");
+            assert_eq!((started.path, started.rejected), (StartupPath::FullInit, Some(reason)));
+        }
+        let mut unread = Fake { probe: Some(Err(Error::Protocol("short reply".into()))), ..Fake::default() };
+        let started = start(&mut unread, RESUME, None).unwrap();
+        assert_eq!(unread.calls, ["probe", "full_init"]);
+        assert_eq!(started.rejected, Some(ResumeRejected::StateUnreadable));
+        assert_eq!(ResumeRejected::from(CoreMismatch::ChipId), ResumeRejected::ChipIdMismatch);
+        assert_eq!(ResumeRejected::from(CoreMismatch::SoftReset), ResumeRejected::SoftResetActive);
+        assert_eq!(ResumeRejected::from(CoreMismatch::ReadyWord), ResumeRejected::ReadyWordMismatch);
+        assert_eq!(ResumeRejected::from(CoreMismatch::PatchVersion), ResumeRejected::PatchVersionMismatch);
+    }
+
+    #[test]
+    fn a_resume_that_fails_is_followed_by_exactly_one_full_init() {
+        let mut fake = Fake { resume: Some(Err(Error::Demod("ready word 0".into()))), ..Fake::default() };
+        let started = start(&mut fake, RESUME, None).unwrap();
+        assert_eq!(fake.calls, ["probe", "resume", "full_init"]);
+        assert_eq!((started.path, started.rejected), (StartupPath::FullInit, Some(ResumeRejected::ResumeTailFailed)));
+        // The full init failing as well is the session's end, not a second try.
+        let mut both = Fake {
+            resume: Some(Err(Error::Demod("ready word 0".into()))),
+            full: Some(Err(Error::Protocol("short reply".into()))),
+            ..Fake::default()
+        };
+        assert!(start(&mut both, RESUME, None).is_err());
+        assert_eq!(both.calls, ["probe", "resume", "full_init"]);
+    }
+
+    #[test]
+    fn the_device_going_away_is_never_taken_for_a_failed_check() {
+        let mut probed = Fake { probe: Some(Err(gone())), ..Fake::default() };
+        assert!(start(&mut probed, RESUME, None).is_err_and(|error| error.is_no_device()));
+        assert_eq!(probed.calls, ["probe"]);
+        let mut resumed = Fake { resume: Some(Err(gone())), ..Fake::default() };
+        assert!(start(&mut resumed, RESUME, None).is_err_and(|error| error.is_no_device()));
+        assert_eq!(resumed.calls, ["probe", "resume"]);
+        let mut full = Fake { full: Some(Err(gone())), ..Fake::default() };
+        assert!(start(&mut full, FULL, None).is_err_and(|error| error.is_no_device()));
+        assert_eq!(full.calls, ["full_init"]);
+    }
+
+    #[test]
+    fn the_startup_is_reported_by_name() {
+        let res = TuneResult {
+            startup_path: Some(StartupPath::FullInit),
+            resume_rejected_reason: Some(ResumeRejected::LnbPinsNotHighZ),
+            ..TuneResult::default()
+        };
+        let value = serde_json::to_value(&res).unwrap();
+        assert_eq!(value["startup_path"], "full_init");
+        assert_eq!(value["resume_rejected_reason"], "lnb_pins_not_high_z");
+        assert_eq!(serde_json::to_value(StartupPath::Resumed).unwrap(), "resumed");
+        for (reason, name) in [
+            (ResumeRejected::PolicyFullInit, "policy_full_init"),
+            (ResumeRejected::BridgeCold, "bridge_cold"),
+            (ResumeRejected::BridgeForeignFirmware, "bridge_foreign_firmware"),
+            (ResumeRejected::ResetLineHeld, "reset_line_held"),
+            (ResumeRejected::ChipIdMismatch, "chip_id_mismatch"),
+            (ResumeRejected::SoftResetActive, "soft_reset_active"),
+            (ResumeRejected::ReadyWordMismatch, "ready_word_mismatch"),
+            (ResumeRejected::PatchVersionMismatch, "patch_version_mismatch"),
+            (ResumeRejected::StateUnreadable, "state_unreadable"),
+            (ResumeRejected::ResumeTailFailed, "resume_tail_failed"),
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), name);
+        }
+    }
+
     #[test]
     fn only_a_released_reset_line_may_keep_the_demodulator() {
         let snapshot = |values: [u8; 3]| GpioSnapshot {

@@ -1660,6 +1660,83 @@ mod tests {
         }
     }
 
+    fn live_status(policy: &str) -> Value {
+        serde_json::json!({"live_receiver": {"startup_policy": policy}})
+    }
+
+    fn open_live_tv(settings: &mut Settings) {
+        section(settings, "Canlı TV");
+        settings.pane = Pane::Rows;
+    }
+
+    #[test]
+    fn the_startup_method_is_one_card_under_live_tv_with_two_answers() {
+        let mut settings = Settings::new();
+        settings.compose(Some(&live_status("full_init")), None, None);
+        open_live_tv(&mut settings);
+        let row = settings.focused().cloned().unwrap();
+        assert_eq!((row.label.as_str(), row.value.as_str()), ("Alıcı başlangıç yöntemi", "Tam başlatma"));
+        assert_eq!(row.action, Some(Action::ChooseLiveStartup));
+        assert_eq!(row.kind(), Kind::Link);
+        assert!(!Action::ChooseLiveStartup.confirms());
+        assert!(settings.open_live_startup());
+        let view = settings.choice_view().unwrap();
+        assert_eq!(view.title, "Alıcı başlangıç yöntemi");
+        assert_eq!(view.focus, 0, "on the method kept");
+        assert_eq!(
+            view.items,
+            [
+                ("Tam başlatma".to_string(), "Daha uzun açılır; alıcı her seferinde sıfırdan hazırlanır.".to_string(), true),
+                (
+                    "Hızlı devam".to_string(),
+                    "Uygun durum korunmuşsa daha hızlı açılır; doğrulama başarısızsa tam başlatılır.".to_string(),
+                    false,
+                ),
+            ]
+        );
+        // Nothing on it claims a saving or a power-off the receiver does not do.
+        for (title, line, _) in &view.items {
+            for word in ["tasarruf", "enerji", "kapan", "kapalı", "güç"] {
+                assert!(!title.to_lowercase().contains(word) && !line.to_lowercase().contains(word), "{word}: {title} / {line}");
+            }
+        }
+        // Ok on the one kept changes nothing.
+        assert_eq!(settings.choose(), None);
+        assert!(settings.open_live_startup());
+        assert!(settings.step(0, 1));
+        assert_eq!(settings.choose(), Some(Action::SetLiveStartup(LiveReceiverStartupPolicy::ResumeIfValid)));
+    }
+
+    #[test]
+    fn the_method_shown_is_the_one_the_daemon_kept() {
+        let mut settings = Settings::new();
+        settings.compose(Some(&live_status("resume_if_valid")), None, None);
+        open_live_tv(&mut settings);
+        assert_eq!(settings.focused().unwrap().value, "Hızlı devam");
+        assert!(settings.open_live_startup());
+        assert_eq!(settings.choice_view().unwrap().focus, 1);
+        assert!(settings.step(0, -1));
+        assert_eq!(settings.choose(), Some(Action::SetLiveStartup(LiveReceiverStartupPolicy::FullInit)));
+        // Chosen and not yet kept, or refused: the status is still the
+        // daemon's, and so is the row.
+        settings.compose(Some(&live_status("resume_if_valid")), None, None);
+        assert_eq!(settings.focused().unwrap().value, "Hızlı devam");
+        assert!(kept_live_startup(&serde_json::json!({"configured_startup_policy": "full_init"}))
+            .is_ok_and(|policy| policy == LiveReceiverStartupPolicy::FullInit));
+        assert!(kept_live_startup(&serde_json::json!({})).is_err());
+        assert!(kept_live_startup(&serde_json::json!({"configured_startup_policy": "standby"})).is_err());
+        // Before the daemon has answered there is nothing to choose.
+        let mut unanswered = Settings::new();
+        unanswered.compose(Some(&serde_json::json!({})), None, None);
+        open_live_tv(&mut unanswered);
+        assert!(!unanswered.open_live_startup());
+        let row = &unanswered.groups[unanswered.section].rows[0];
+        assert_eq!((row.label.as_str(), row.action), ("Alıcı başlangıç yöntemi", None));
+        // One this build does not know reads as the default, as the daemon reads it.
+        unanswered.compose(Some(&live_status("standby")), None, None);
+        assert_eq!(unanswered.groups[unanswered.section].rows[0].value, "Tam başlatma");
+    }
+
     /// The categories of the design, in its order.
     #[test]
     fn the_categories_are_the_design_s() {

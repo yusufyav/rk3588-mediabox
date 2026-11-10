@@ -2146,6 +2146,39 @@ pub struct ApiError {
 
 #[cfg(test)]
 mod tests {
+    use super::{LiveReceiverSettings, LiveReceiverStartupPolicy};
+
+    #[test]
+    fn a_missing_old_or_unknown_receiver_setting_is_a_full_init() {
+        for text in ["", "{}", "{\"other\":1}", "{\"startup_policy\":\"sleep\"}", "{\"startup_policy\":7}", "not json"] {
+            assert_eq!(LiveReceiverSettings::parse(text).startup_policy, LiveReceiverStartupPolicy::FullInit, "{text:?}");
+        }
+        assert_eq!(LiveReceiverStartupPolicy::default(), LiveReceiverStartupPolicy::FullInit);
+        let resume = LiveReceiverSettings::parse("{\"startup_policy\":\"resume_if_valid\",\"later\":true}");
+        assert_eq!(resume.startup_policy, LiveReceiverStartupPolicy::ResumeIfValid);
+    }
+
+    #[test]
+    fn the_startup_policy_has_one_name_on_the_wire_and_one_on_the_command_line() {
+        for (policy, wire, arg, label) in [
+            (LiveReceiverStartupPolicy::FullInit, "\"full_init\"", "full-init", "Tam başlatma"),
+            (LiveReceiverStartupPolicy::ResumeIfValid, "\"resume_if_valid\"", "resume-if-valid", "Hızlı devam"),
+        ] {
+            assert_eq!(serde_json::to_string(&policy).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<LiveReceiverStartupPolicy>(wire).unwrap(), policy);
+            assert_eq!(policy.arg(), arg);
+            assert_eq!(LiveReceiverStartupPolicy::from_arg(arg), Some(policy));
+            assert_eq!(policy.label(), label);
+        }
+        assert_eq!(LiveReceiverStartupPolicy::from_arg("full_init"), None);
+        assert!(serde_json::from_str::<LiveReceiverStartupPolicy>("\"sleep\"").is_err());
+        let set: super::Request =
+            serde_json::from_str(r#"{"command":"live_startup_policy_set","policy":"resume_if_valid"}"#).unwrap();
+        assert_eq!(set, super::Request::LiveStartupPolicySet { policy: LiveReceiverStartupPolicy::ResumeIfValid });
+        // A policy this build does not know is refused, never guessed.
+        assert!(serde_json::from_str::<super::Request>(r#"{"command":"live_startup_policy_set","policy":"off"}"#).is_err());
+    }
+
     use super::*;
 
     #[test]
