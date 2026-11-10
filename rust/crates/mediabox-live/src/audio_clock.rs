@@ -527,7 +527,9 @@ pub struct BufferOut {
     /// The time the sink writes it at: on from the buffer before, the end
     /// of that one (`written_at`); else its first sample's own.
     pub pts: u64,
-    /// Its first sample's own time: the sound's, through the resampler.
+    /// Its first sample's own time: the sound's, through the resampler
+    /// (read by the replay, `audio_replay`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub content: u64,
     pub frames: usize,
     pub discont: bool,
