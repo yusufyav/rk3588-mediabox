@@ -298,6 +298,34 @@ impl Avl62x1 {
         let mut executor = patch::Executor::new(script)?;
         let commands = executor.run(&mut PatchTarget { demod: self, bridge, polls: 0 })?;
         bridge.log.line(format!("DEMOD patch script: {commands} commands executed"));
+        self.finish_boot(bridge, expected, commands)
+    }
+
+    /// Read only, before any reset: the core's ready word and the patch it
+    /// runs. Some when it is out of soft reset, ready, and runs `script`'s
+    /// patch -- a demodulator nothing has reset since the last receiver.
+    pub fn kept_patch(&self, bridge: &mut Bridge, script: &[u8]) -> Result<Option<(u32, u32, u32)>> {
+        let expected = patch::parse_header(script)?.version();
+        let chip = self.chip_id(bridge)?;
+        let (srst, ready) = self.core_state(bridge)?;
+        let running = patch_version(self.read32(bridge, REG_PATCH_VER)?);
+        bridge.log.line(format!(
+            "DEMOD before reset: chip=0x{chip:08X} srst={srst} ready=0x{ready:08X} patch={}.{}.{}",
+            running.0, running.1, running.2
+        ));
+        Ok(kept(chip, srst, ready, running, expected).then_some(running))
+    }
+
+    /// The boot's tail on a core that already runs `script`'s patch: the
+    /// clocks, LD_DEFAULT and every check of a cold boot, without the
+    /// download (3.2 s of 32-byte I2C writes, measured 2026-11-10).
+    pub fn resume(&mut self, bridge: &mut Bridge, script: &[u8]) -> Result<BootInfo> {
+        let expected = patch::parse_header(script)?.version();
+        bridge.log.line("DEMOD patch kept: reset and download skipped");
+        self.finish_boot(bridge, expected, 0)
+    }
+
+    fn finish_boot(&mut self, bridge: &mut Bridge, expected: (u32, u32, u32), commands: u32) -> Result<BootInfo> {
         self.write32(bridge, REG_MPEG_CLK, KANKY_MPEG_REF_CLK_HZ)?;
         self.write8(bridge, REG_XTAL, XTAL_27MHZ)?;
         if !self.send_cmd(bridge, CMD_LD_DEFAULT)? {
@@ -325,8 +353,7 @@ impl Avl62x1 {
         if word != CORE_READY_WORD {
             return Err(Error::Demod(format!("ready word 0x{word:08X} != 0x{CORE_READY_WORD:08X}")));
         }
-        let raw = self.read32(bridge, REG_PATCH_VER)?;
-        let running = (raw >> 24, (raw >> 16) & 0xFF, raw & 0xFFFF);
+        let running = patch_version(self.read32(bridge, REG_PATCH_VER)?);
         if running != expected {
             return Err(Error::Demod(format!("running patch {running:?} != downloaded {expected:?}")));
         }
@@ -599,6 +626,20 @@ pub fn rf_strength_pct(gain: u16) -> u32 {
     }
     (RFAGC_WEAK - gain) as u32 * 90 / (RFAGC_WEAK - RFAGC_STRONG) as u32 + 10
 }
+
+/// REG_PATCH_VER as (major, minor, build).
+fn patch_version(raw: u32) -> (u32, u32, u32) {
+    (raw >> 24, (raw >> 16) & 0xFF, raw & 0xFFFF)
+}
+
+/// The core keeps the patch it would be given: this chip, out of soft
+/// reset, the ready word, the same version.
+fn kept(chip: u32, srst: u32, ready: u32, running: (u32, u32, u32), expected: (u32, u32, u32)) -> bool {
+    chip == CHIP_ID && srst == 0 && ready == CORE_READY_WORD && running == expected
+}
+
+/// What the LNB pins read after the demodulator's reset (2 = high-Z).
+pub const LNB_PINS_AT_RESET: (u32, u32) = (2, 2);
 
 /// A coarse verdict from the samples taken after ACQUIRE.
 pub fn classify_acquisition(trace: &[AcqStatus]) -> &'static str {
