@@ -659,6 +659,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_released_reset_line_may_keep_the_demodulator() {
+        let snapshot = |values: [u8; 3]| GpioSnapshot {
+            gpio: GPIO2,
+            initial: [(GPIO2.o, values[0]), (GPIO2.en, values[1]), (GPIO2.on, values[2])],
+        };
+        assert!(reset_released(&snapshot([1, 1, 1])));
+        // Bit 0 is the line; the other bits are not.
+        assert!(reset_released(&snapshot([0x81, 1, 1])));
+        for held in [[0, 1, 1], [1, 0, 1], [1, 1, 0], [0, 0, 0]] {
+            assert!(!reset_released(&snapshot(held)), "{held:?}");
+        }
+    }
+
+    #[test]
     fn the_offset_that_locked_last_time_is_tried_first() {
         let params = |first| TuneParams {
             rf_khz: 1_588_000,

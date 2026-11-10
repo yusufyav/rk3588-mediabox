@@ -701,6 +701,19 @@ mod tests {
     }
 
     #[test]
+    fn only_a_ready_core_on_the_same_patch_is_kept() {
+        let patch = (1, 2, 3);
+        assert!(kept(CHIP_ID, 0, CORE_READY_WORD, patch, patch));
+        // Another chip, held in soft reset, not ready, another patch: booted from reset.
+        assert!(!kept(0x1234_5678, 0, CORE_READY_WORD, patch, patch));
+        assert!(!kept(CHIP_ID, 1, CORE_READY_WORD, patch, patch));
+        assert!(!kept(CHIP_ID, 0, 0, patch, patch));
+        assert!(!kept(CHIP_ID, 0, CORE_READY_WORD, (1, 2, 4), patch));
+        assert!(!kept(CHIP_ID, 0, CORE_READY_WORD, (0, 0, 0), patch));
+        assert_eq!(patch_version(0x0102_0003), (1, 2, 3));
+    }
+
+    #[test]
     fn strength_follows_upstream() {
         assert_eq!(rf_strength_pct(65535), 10);
         assert_eq!(rf_strength_pct(20000), 100);
