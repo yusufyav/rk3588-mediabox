@@ -802,6 +802,13 @@ pub struct Engine {
     /// before it is said ready.
     #[cfg(test)]
     prepare_latch: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Tests: a start's device, made ready, waits here before it is put in
+    /// place (`start_sound`).
+    #[cfg(test)]
+    start_latch: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Tests: the start's hold limit, for an emulator's pace.
+    #[cfg(test)]
+    start_hold_limit: Mutex<Option<std::time::Duration>>,
     /// The control plane's sound plans (`set_audio_plan`).
     plans: Mutex<Plans>,
     plans_changed: std::sync::Condvar,
@@ -1256,6 +1263,10 @@ impl Engine {
             start_sound: Mutex::new(None),
             #[cfg(test)]
             prepare_latch: Mutex::new(None),
+            #[cfg(test)]
+            start_latch: Mutex::new(None),
+            #[cfg(test)]
+            start_hold_limit: Mutex::new(None),
             plans: Mutex::new(Plans::default()),
             plans_changed: std::sync::Condvar::new(),
             audio: {
@@ -4067,6 +4078,10 @@ impl Engine {
     }
 
     fn start_hold_limit(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(limit) = *self.start_hold_limit.lock().unwrap_or_else(|p| p.into_inner()) {
+            return limit;
+        }
         crate::gate::SOUND_HOLD_MAX
     }
 
@@ -4122,6 +4137,13 @@ impl Engine {
                     if pad.send_event(gst::event::Caps::new(&caps)) { format!("ready caps={caps}") } else { "refused".to_string() }
                 }
             };
+            #[cfg(test)]
+            {
+                let latch = engine.start_latch.lock().unwrap_or_else(|p| p.into_inner()).take();
+                if let Some(latch) = latch {
+                    let _ = latch.recv_timeout(std::time::Duration::from_secs(10));
+                }
+            }
             mediabox_core::timeline!("sound-start", "gen={generation} phase=done ms={} outcome={outcome}", started.elapsed().as_millis());
             held.release_sound(if outcome.starts_with("ready") { "ready" } else { "without" });
         });

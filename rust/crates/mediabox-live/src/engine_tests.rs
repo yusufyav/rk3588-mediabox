@@ -233,6 +233,19 @@ fn play_with(ts: Vec<(u64, Vec<u8>)>, aid: usize, epoch: Option<u64>, at: Durati
 
 /// The same, the sound going where `audio` says.
 fn play_on(ts: Vec<(u64, Vec<u8>)>, aid: usize, audio: Audio, epoch: Option<u64>, at: Duration, action: impl FnOnce(&Arc<Engine>) + Send + 'static) -> Run {
+    play_on_with(ts, aid, audio, epoch, |_| {}, at, action)
+}
+
+/// The same, `before` done on the engine before the channel is opened.
+fn play_on_with(
+    ts: Vec<(u64, Vec<u8>)>,
+    aid: usize,
+    audio: Audio,
+    epoch: Option<u64>,
+    before: impl FnOnce(&Arc<Engine>),
+    at: Duration,
+    action: impl FnOnce(&Arc<Engine>) + Send + 'static,
+) -> Run {
     gst::init().expect("GStreamer");
     // MEDIABOX_TRACE_DIR set: the run on the timeline, as on the board.
     if std::env::var_os("MEDIABOX_TRACE_DIR").is_some() {
@@ -287,6 +300,7 @@ fn play_on(ts: Vec<(u64, Vec<u8>)>, aid: usize, audio: Audio, epoch: Option<u64>
             }
         })
     };
+    before(&engine);
     engine.open_channel(path.to_str().unwrap(), epoch).expect("open");
     let doer = {
         let engine = Arc::clone(&engine);
@@ -2585,4 +2599,216 @@ fn the_player_starts_on_the_control_plane_s_plan_and_never_the_platform_s() {
     let (opened, audio) = got.lock().unwrap().take().unwrap();
     assert_eq!(opened, plan.device.as_ref().map(|device| device.pcm.clone()));
     assert_eq!(audio, Audio::from_plan(&plan, false));
+}
+
+// ---------------------------------------------------------------- FAZ 3E.6
+// The start, the first change and a change back each in one lifecycle:
+// prepared (the device opened, the part built), ready, handed over in one
+// step, the one before retired.
+
+fn on_headset() -> Audio {
+    Audio { device: Some(HEADSET_PCM.into()), passthrough: vec![], gain: 1.0, muted: false, ac3_encode: None }
+}
+
+/// A channel's start's device, once made ready, held where it is said so:
+/// it waits on what the test sends.
+fn latch_start(engine: &Engine) -> std::sync::mpsc::SyncSender<()> {
+    let (go, latch) = std::sync::mpsc::sync_channel(1);
+    *engine.start_latch.lock().unwrap() = Some(latch);
+    // The latch alone lets the start go: not the limit, on an emulator.
+    *engine.start_hold_limit.lock().unwrap() = Some(Duration::from_secs(60));
+    go
+}
+
+fn the_gate(engine: &Engine) -> Arc<crate::gate::Gate> {
+    engine.shared.gate.lock().unwrap().clone().expect("a channel's gate")
+}
+
+/// A channel opened with its sound on the headset (A): the start waits
+/// while the device in force is given the sound's own format -- read off
+/// its parser before anything is decoded -- where it is: its ring buffer
+/// acquired, its stream started. Meanwhile the pictures come and go as
+/// pre-roll and nothing of the sound passes: the clock does not run
+/// through the sound's first buffers. Ready, the start goes on, the sound
+/// from the first picture shown; the device keeps its ring buffer for the
+/// part's own caps -- acquired once, before the first buffer. On the Plus
+/// the device acquired at the decoder's first caps instead, the clock
+/// going on: 18-31 buffers thrown away as late each time (FAZ 3E.6).
+#[test]
+fn a_channel_opened_on_the_headset_starts_once_its_device_is_ready() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let streams: Streams = vec![(0x1B, VIDEO, vec![]), (0x04, 0x101, vec![])];
+    let ts = stream_for(6, &[(0, 0, streams)], &[Sound { pid: 0x101, stream_id: 0xC0, units: repeated(mp2(), 6), from: 0, to: u64::MAX }]);
+    let acquires = Acquires::watch();
+    let seen = Arc::clone(&acquires.seen);
+    let of = move |sink: &str| seen.lock().unwrap().iter().filter(|(name, _)| name == sink).count();
+    let go: Arc<Mutex<Option<std::sync::mpsc::SyncSender<()>>>> = Arc::default();
+    let set = Arc::clone(&go);
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on_with(
+        ts,
+        0,
+        on_headset(),
+        None,
+        move |engine| *set.lock().unwrap() = Some(latch_start(engine)),
+        Duration::ZERO,
+        move |engine| {
+            let out = count_sound_out(engine);
+            let ready = until(Duration::from_secs(4), || engine.start_latch.lock().unwrap().is_none());
+            let gate = the_gate(engine);
+            let sink = engine.audio_sink.lock().unwrap().clone().unwrap().name().to_string();
+            // Held: pictures come as pre-roll, no sound passes.
+            let prerolled = until(Duration::from_secs(4), || gate.snapshot()["preroll"].as_u64().unwrap_or(0) >= 10);
+            let held = (gate.sound_held(), gate.picture().0, out.load(std::sync::atomic::Ordering::SeqCst), of(&sink));
+            let _ = go.lock().unwrap().take().unwrap().send(());
+            let sounding = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+            let after = engine.audio_sink.lock().unwrap().clone().unwrap().name().to_string();
+            let acquired = of(&after);
+            *into.lock().unwrap() = Some((ready, prerolled, held, sink, after, sounding, gate.snapshot(), sink_device(engine), acquired));
+        },
+    );
+    let (ready, prerolled, held, sink, after, sounding, snapshot, device, acquired) = got.lock().unwrap().take().unwrap();
+    assert!(ready, "the headset given its format at the start");
+    assert!(prerolled, "pictures came meanwhile: {snapshot}");
+    assert_eq!(held, (true, None, 0, 1), "held: acquired, no picture started, nothing of the sound passed");
+    assert_eq!(sink, after, "the device in force, where it is: not opened again");
+    assert!(sounding, "the sound goes on once it is ready");
+    assert_eq!(snapshot["sound_outcome"], "ready");
+    assert_eq!(device, Some(HEADSET_PCM.into()));
+    assert_eq!(acquired, 1, "its ring buffer kept for the part's caps: {:?}", acquires.seen.lock().unwrap());
+    let c = run.shared.health.diagnose(|d| d.c);
+    assert_eq!((c.frame_gaps, c.frame_overlaps, c.pcm_gaps, c.pcm_overlaps, c.sink_late, c.alsa_xruns), (0, 0, 0, 0, 0, 0), "{c:?}");
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(run.engine.swaps.lock().unwrap().opened, 0, "no swap");
+}
+
+/// The first change to the headset after a channel opened on the
+/// television (B): the headset's part -- its first decoder -- is built
+/// while the device is opened, before the reader is asked to switch; the
+/// part playing goes on, its token owns nothing, and no part is asked
+/// for. At the switch the part built ahead is the one that plays: nothing
+/// is built on the reader's thread. On the Plus that build, at the switch,
+/// took 79-243 ms, the part before played out meanwhile (FAZ 3E.6).
+#[test]
+fn the_first_change_to_the_headset_builds_its_part_before_the_cut() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start, None, Duration::from_millis(1500), move |engine| {
+        let go = latch_prepare(engine);
+        let wait = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+        let held = prepare_held(engine);
+        let built = engine.prebuilt.lock().unwrap().as_ref().map(|p| (p.source.name().to_string(), p.token.map(|t| t.id)));
+        let out = count_sound_out(engine);
+        let played_on = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 10);
+        let waiting = (engine.plans.lock().unwrap().owner, engine.shared.sound_rebuild.lock().unwrap().asked, sink_device(engine));
+        go.send(()).unwrap();
+        let answer = answered(&wait);
+        let playing = engine.shared.sound.lock().unwrap().as_ref().map(|p| (p.source.name().to_string(), p.token.map(|t| t.id)));
+        *into.lock().unwrap() = Some((held, built, played_on, waiting, answer, playing, engine.prebuilt.lock().unwrap().is_none(), sink_device(engine)));
+    });
+    let (held, built, played_on, waiting, answer, playing, taken, device) = got.lock().unwrap().take().unwrap();
+    assert!(held, "the headset opened and held");
+    assert!(built.as_ref().is_some_and(|(_, id)| *id == Some(1)), "its part built ahead: {built:?}");
+    assert!(played_on, "the television's part plays on meanwhile");
+    assert_eq!(waiting, (None, None, Some(HDMI_PCM.into())), "no owner, no switch asked, the route as it was");
+    assert_eq!(answer, Ok(()));
+    assert_eq!(playing, built, "the part built ahead is the one playing");
+    assert!(taken, "nothing left built ahead");
+    assert_eq!(device, Some(HEADSET_PCM.into()));
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    picture_handed_over(&run, false);
+    let c = run.shared.health.diagnose(|d| d.c);
+    assert_eq!((c.frame_gaps, c.frame_overlaps, c.pcm_gaps, c.pcm_overlaps, c.alsa_xruns), (0, 0, 0, 0, 0), "{c:?}");
+    let audio = run.audio.lock().unwrap();
+    let longest = audio.at.windows(2).map(|w| w[1] - w[0]).max().unwrap_or_default();
+    assert!(longest < Duration::from_millis(250), "the sound stopped for {longest:?}");
+}
+
+/// A plan called off while its part waits, built ahead (its deadline,
+/// here the control plane giving up on it): the part is retired and taken
+/// down, nothing of it ever reaches the selector or sets the device, and
+/// the device opened for it is closed when it comes. The television's
+/// sound plays on, as it was.
+#[test]
+fn a_plan_called_off_takes_down_the_part_it_built_ahead() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(None));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start.clone(), None, Duration::from_millis(1500), move |engine| {
+        let go = latch_prepare(engine);
+        let wait = ask_plan(engine, headset_plan(HEADSET_PCM), None, 1);
+        let held = prepare_held(engine);
+        // A decoding part: its input of the selector comes with its
+        // decoder's first caps -- none while it is held.
+        let (retired, inputs, source) = {
+            let built = engine.prebuilt.lock().unwrap();
+            let built = built.as_ref().expect("built ahead");
+            (Arc::clone(&built.retired), built.pads.lock().unwrap().len(), built.source.static_pad("src").unwrap())
+        };
+        let reached = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        {
+            let reached = Arc::clone(&reached);
+            source.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                gst::PadProbeReturn::Ok
+            });
+        }
+        engine.abandon_plan(1);
+        let answer = answered(&wait);
+        let down = (retired.load(std::sync::atomic::Ordering::SeqCst), engine.prebuilt.lock().unwrap().is_none());
+        go.send(()).unwrap();
+        let closed = until(Duration::from_secs(3), || engine.prepared.lock().unwrap().is_none());
+        let out = count_sound_out(engine);
+        let playing = until(Duration::from_secs(3), || out.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+        let form = (sink_device(engine), engine.bitstream(), engine.audio(), engine.plans.lock().unwrap().owner);
+        *into.lock().unwrap() = Some((held, answer, down, closed, playing, reached.load(std::sync::atomic::Ordering::SeqCst), form, inputs));
+    });
+    let (held, answer, down, closed, playing, reached, form, inputs) = got.lock().unwrap().take().unwrap();
+    assert!(held);
+    assert!(answer.is_err(), "answered as called off: {answer:?}");
+    assert_eq!(down, (true, true), "retired and taken down");
+    assert!(closed, "the device opened for it closed");
+    assert!(playing, "the television's sound plays on");
+    assert_eq!(inputs, 0, "never an input of the selector");
+    assert_eq!(reached, 0, "nothing of the sound went into it");
+    assert_eq!(form, (Some(HDMI_PCM.into()), true, start, None), "the route, the form and the owner as they were");
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// The television to the headset, back and to the headset again, each
+/// asked the moment the one before is answered (C): each a part built
+/// ahead and a device opened ahead, one swap each; every answer success,
+/// nothing lost, nothing doubled, the sound never stopped and the channel
+/// never opened again.
+#[test]
+fn headset_television_headset_in_quick_succession_lose_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let (ts, start) = passed_through();
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = Arc::clone(&got);
+    let run = play_on(ts, 0, start, None, Duration::from_millis(1500), move |engine| {
+        let form = |engine: &Engine| (sink_device(engine), engine.bitstream());
+        let mut into = into.lock().unwrap();
+        into.push((answered(&ask_plan(engine, headset_plan(HEADSET_PCM), None, 1)), form(engine)));
+        into.push((answered(&ask_plan(engine, hdmi_plan(100, false, true), None, 2)), form(engine)));
+        into.push((answered(&ask_plan(engine, headset_plan(HEADSET_PCM), None, 3)), form(engine)));
+    });
+    let got = got.lock().unwrap();
+    assert_eq!(
+        *got,
+        vec![(Ok(()), (Some(HEADSET_PCM.into()), false)), (Ok(()), (Some(HDMI_PCM.into()), true)), (Ok(()), (Some(HEADSET_PCM.into()), false))]
+    );
+    assert_eq!(run.shared.generation.load(std::sync::atomic::Ordering::SeqCst), 1, "the channel was not opened again");
+    assert!(run.engine.prebuilt.lock().unwrap().is_none() && run.engine.prepared.lock().unwrap().is_none(), "nothing left ahead");
+    picture_handed_over(&run, false);
+    let c = run.shared.health.diagnose(|d| d.c);
+    assert_eq!((c.frame_gaps, c.frame_overlaps, c.pcm_gaps, c.pcm_overlaps, c.alsa_xruns), (0, 0, 0, 0, 0), "{c:?}");
+    assert!(!run.shared.stand_in.load(std::sync::atomic::Ordering::SeqCst));
+    let audio = run.audio.lock().unwrap();
+    let longest = audio.at.windows(2).map(|w| w[1] - w[0]).max().unwrap_or_default();
+    assert!(longest < Duration::from_millis(250), "the sound stopped for {longest:?}");
 }

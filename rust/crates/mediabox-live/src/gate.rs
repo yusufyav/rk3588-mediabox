@@ -503,4 +503,98 @@ mod tests {
         assert!(gate.is_open());
         assert_eq!(gate.frame(1000, None, "Progressive"), Frame::Show { first: false });
     }
+
+    // FAZ 3E.6: the start waits for its sound's device (`hold_for_sound`).
+
+    /// Opened before its first picture, the start held for the sound's
+    /// device: no picture shown, no start for the sound -- nothing of the
+    /// sound's timeline is let go -- until the device is ready; then the
+    /// next picture is the first and the sound starts at its time.
+    #[test]
+    fn a_start_held_for_its_sound_device_starts_on_the_picture_after_it() {
+        let gate = Gate::new(1, Some(7), false);
+        assert_eq!(gate.open(7, "fast"), Ok(true));
+        let at = Instant::now();
+        assert!(gate.hold_for_sound_at(at, SOUND_HOLD_MAX));
+        assert!(gate.sound_held());
+        gate.key_frame(1000);
+        assert_eq!(gate.picture_at(at), (None, true), "the sound waits: the start is held");
+        assert_eq!(gate.frame_at(1000, Some(50.0), "Progressive", at), Frame::Preroll);
+        assert_eq!(gate.frame_at(20_001_000, Some(50.0), "Progressive", at), Frame::Preroll);
+        assert!(gate.behind_held(20_001_000), "sound before the pictures held is not waited for");
+        gate.release_sound("ready");
+        assert!(!gate.sound_held());
+        assert_eq!(gate.picture_at(at), (None, false), "the key frame was never shown");
+        assert_eq!(gate.frame_at(40_001_000, Some(50.0), "Progressive", at), Frame::Show { first: true });
+        assert_eq!(gate.picture_at(at), (Some(40_001_000), false), "the sound starts at the first picture shown");
+        assert_eq!(gate.snapshot()["sound_outcome"], "ready");
+    }
+
+    /// Held before the control plane let it go: its word alone does not
+    /// start it, the device ready does -- and the other way round.
+    #[test]
+    fn a_start_goes_only_when_both_the_control_plane_and_the_sound_device_let_it() {
+        let gate = Gate::new(1, Some(7), false);
+        let at = Instant::now();
+        assert!(gate.hold_for_sound_at(at, SOUND_HOLD_MAX));
+        gate.key_frame(1000);
+        assert_eq!(gate.open(7, "matched"), Ok(true));
+        assert_eq!(gate.picture_at(at), (None, true), "open, the device not ready");
+        gate.release_sound("ready");
+        assert_eq!(gate.picture_at(at), (Some(1000), false), "both: the key frame, nothing held");
+
+        let gate = Gate::new(2, Some(8), false);
+        assert!(gate.hold_for_sound_at(at, SOUND_HOLD_MAX));
+        gate.release_sound("ready");
+        gate.key_frame(1000);
+        assert_eq!(gate.picture_at(at), (None, true), "the device ready, the control plane not");
+        assert_eq!(gate.open(8, "matched"), Ok(true));
+        assert_eq!(gate.picture_at(at), (Some(1000), false));
+    }
+
+    /// Too late to hold: a picture shown, or one chosen to start with --
+    /// the sound may be going -- and nothing is held.
+    #[test]
+    fn a_start_already_going_is_not_held_for_its_sound() {
+        let gate = Gate::new(1, None, false);
+        gate.key_frame(1000);
+        assert!(!gate.hold_for_sound(SOUND_HOLD_MAX), "the key frame is the start, the sound goes with it");
+        assert_eq!(gate.picture(), (Some(1000), false));
+        let gate = Gate::new(2, Some(8), false);
+        assert_eq!(gate.open(8, "fast"), Ok(true));
+        assert_eq!(gate.frame(1000, None, "Progressive"), Frame::Show { first: false });
+        assert!(!gate.hold_for_sound(SOUND_HOLD_MAX), "a picture shown");
+        let gate = Gate::new(3, Some(9), false);
+        assert_eq!(gate.fail(9, "mode-failed"), Ok(true));
+        assert!(!gate.hold_for_sound(SOUND_HOLD_MAX), "failed");
+    }
+
+    /// A device that does not get ready in `SOUND_HOLD_MAX`: the start goes
+    /// on without it; its word after that changes nothing.
+    #[test]
+    fn a_sound_device_late_past_its_limit_is_not_waited_for_nor_put_in_place() {
+        let gate = Gate::new(1, Some(7), false);
+        assert_eq!(gate.open(7, "fast"), Ok(true));
+        let at = Instant::now();
+        assert!(gate.hold_for_sound_at(at, SOUND_HOLD_MAX));
+        gate.key_frame(1000);
+        assert_eq!(gate.frame_at(1000, None, "Progressive", at + SOUND_HOLD_MAX - Duration::from_millis(1)), Frame::Preroll);
+        assert_eq!(gate.frame_at(20_001_000, None, "Progressive", at + SOUND_HOLD_MAX), Frame::Show { first: true });
+        assert!(!gate.sound_held());
+        assert_eq!(gate.snapshot()["sound_outcome"], "timeout");
+        gate.release_sound("ready");
+        assert_eq!(gate.snapshot()["sound_outcome"], "timeout", "late: changes nothing");
+        assert_eq!(gate.picture(), (Some(20_001_000), false));
+    }
+
+    /// Left while held: whoever waits on it stops waiting.
+    #[test]
+    fn a_channel_left_while_held_for_its_sound_has_ended() {
+        let gate = Gate::new(1, Some(7), false);
+        assert_eq!(gate.open(7, "fast"), Ok(true));
+        assert!(gate.hold_for_sound(SOUND_HOLD_MAX));
+        assert!(!gate.ended());
+        gate.retire();
+        assert!(gate.ended(), "the sound waiting on it lets go");
+    }
 }
