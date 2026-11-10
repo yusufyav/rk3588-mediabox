@@ -446,6 +446,20 @@ mod tests {
         m
     }
 
+    /// The player's own drops are `video_dropped`; the sink's QoS count
+    /// (`late_dropped`, the IPC's, never in health.json) is not shown as one.
+    #[test]
+    fn the_player_s_drops_are_its_video_dropped() {
+        let at = mediabox_core::timeline::now_ns();
+        let reports = PlayerReports {
+            now: Some(serde_json::json!({"at_ns": at, "video_dropped": 4, "late_dropped": 99})),
+            before: Some(serde_json::json!({"at_ns": at - 1_000_000_000, "video_dropped": 1, "late_dropped": 0})),
+        };
+        let rows = rows(&reports);
+        let row = rows.iter().find(|(label, _, _)| label == "Oynatıcının bilerek attığı").expect("the row");
+        assert_eq!((row.1.as_str(), row.2), ("4 kare", NOW));
+    }
+
     #[test]
     fn a_steady_film_has_no_faults() {
         let steps: Vec<_> = (0..100).map(|i| (1000 * MS + i * 40 * MS, 1005 * MS + i * 40 * MS)).collect();

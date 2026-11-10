@@ -592,14 +592,30 @@ fn main() {
     std::process::exit(0);
 }
 
-fn stats(engine: &Engine, shared: &Shared, plane: &plane::Plane) -> Value {
-    let info = shared.info.lock().unwrap_or_else(|p| p.into_inner()).clone();
+/// The picture's counts, since the player started (every channel's, as
+/// `health.json`'s), each its own:
+/// - `video_dropped`: the pictures the player did not send -- late (past one
+///   frame's time, `engine::drop_if_late`), out of order, not a dma-buf. A
+///   channel's pre-roll held at its gate is not one. The count to show.
+/// - `late_dropped`: the video sink's QoS drops (GStreamer's, from its QoS
+///   message). Kept for the clients that read it, with that meaning only:
+///   0 while the sink's `max-lateness` is off, as it is by default.
+/// - `full_dropped`: frames the interface's plane had no room for.
+fn picture_counts(shared: &Shared, full_dropped: u64) -> Value {
     json!({
         "frames": shared.frames.load(Ordering::Relaxed),
         "decoded": shared.decoded.load(Ordering::Relaxed),
         "out_of_order": shared.out_of_order.load(Ordering::Relaxed),
+        "video_dropped": shared.health.video_dropped.load(Ordering::Relaxed),
         "late_dropped": shared.late.load(Ordering::Relaxed),
-        "full_dropped": plane.dropped_full(),
+        "full_dropped": full_dropped,
+    })
+}
+
+fn stats(engine: &Engine, shared: &Shared, plane: &plane::Plane) -> Value {
+    let info = shared.info.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let mut stats = picture_counts(shared, plane.dropped_full());
+    stats.as_object_mut().expect("an object").extend(json!({
         "held": plane.held(),
         "first_frame_ms": info.first_frame_ms,
         "latency_s": engine.latency(),
@@ -612,7 +628,8 @@ fn stats(engine: &Engine, shared: &Shared, plane: &plane::Plane) -> Value {
         "audio": info.audio_codec,
         "passthrough": info.passthrough,
         "audio_caps": engine.audio_caps(),
-    })
+    }).as_object().expect("an object").clone());
+    stats
 }
 
 /// A channel count as mpv names the layout.
@@ -715,6 +732,42 @@ fn error_kind(error: &gst::glib::Error) -> (&'static str, String) {
         ("library", format!("{kind:?}"))
     } else {
         ("other", "?".into())
+    }
+}
+
+#[cfg(test)]
+mod picture_count_tests {
+    use super::{Shared, picture_counts};
+    use std::sync::atomic::Ordering;
+
+    const MS: u64 = 1_000_000;
+
+    /// The player's own late drop is `video_dropped`, one a picture; the
+    /// sink's QoS stays apart in `late_dropped`; and the IPC's answer says
+    /// both, as the clients before read it.
+    #[test]
+    fn a_picture_dropped_late_is_video_dropped_and_qos_stays_apart() {
+        let shared = Shared::default();
+        // On time, and late by less than its 20 ms: shown.
+        assert_eq!(crate::engine::drop_if_late(&shared.health, 100 * MS, 100 * MS, Some(20 * MS)), None);
+        assert_eq!(crate::engine::drop_if_late(&shared.health, 120 * MS, 100 * MS, Some(20 * MS)), None);
+        assert_eq!(shared.health.video_dropped.load(Ordering::Relaxed), 0);
+        // Late by more than its frame: dropped, counted once.
+        assert_eq!(crate::engine::drop_if_late(&shared.health, 121 * MS, 100 * MS, Some(20 * MS)), Some(21 * MS));
+        assert_eq!(shared.health.video_dropped.load(Ordering::Relaxed), 1);
+        // A frame's time is at most 200 ms.
+        assert_eq!(crate::engine::drop_if_late(&shared.health, 301 * MS, 100 * MS, Some(1000 * MS)), Some(201 * MS));
+        assert_eq!(shared.health.video_dropped.load(Ordering::Relaxed), 2);
+        assert_eq!(shared.late.load(Ordering::Relaxed), 0, "the sink's QoS is not the player's drop");
+
+        shared.late.store(7, Ordering::Relaxed);
+        let counts = picture_counts(&shared, 3);
+        assert_eq!(counts["video_dropped"], 2);
+        assert_eq!(counts["late_dropped"], 7);
+        assert_eq!(counts["full_dropped"], 3);
+        for field in ["frames", "decoded", "out_of_order"] {
+            assert_eq!(counts[field], 0, "{field}");
+        }
     }
 }
 

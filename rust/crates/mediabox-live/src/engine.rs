@@ -435,6 +435,19 @@ struct Programme {
 /// duration (`attach_video`): it is one frame's time.
 const LATE_DROP_NS: u64 = 200_000_000;
 
+/// The player's own drop of a picture past its time (`attach_video`): later
+/// than one frame's time (`duration`, 10 ms to `LATE_DROP_NS`) at `now`
+/// against `due`, it is counted in `health.video_dropped` -- the product's
+/// count, not the sink's QoS (`Shared::late`) -- and how late it is said.
+pub(crate) fn drop_if_late(health: &crate::health::Health, now: u64, due: u64, duration: Option<u64>) -> Option<u64> {
+    let frame = duration.unwrap_or(20_000_000).clamp(10_000_000, LATE_DROP_NS);
+    let late = now.saturating_sub(due);
+    (late > frame).then(|| {
+        health.video_dropped.fetch_add(1, Ordering::Relaxed);
+        late
+    })
+}
+
 const PICTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Programme {
@@ -2640,12 +2653,9 @@ impl Engine {
                         // were let through within 200 ms and piled up on
                         // one vblank, ten of them a channel, the start a
                         // short fast-forward (2026-11-01).
-                        let frame = buffer.duration().map_or(20_000_000, |d| d.nseconds()).clamp(10_000_000, LATE_DROP_NS);
-                        let late = clock.time().nseconds().saturating_sub(due);
-                        if late > frame {
+                        if let Some(late) = drop_if_late(&shared.health, clock.time().nseconds(), due, buffer.duration().map(|d| d.nseconds())) {
                             trace.event('L', 0, pts / 1000);
                             mediabox_core::timeline!("drop", "gen={generation} pts_us={} why=late late_ms={}", pts / 1000, late / 1_000_000);
-                            shared.health.video_dropped.fetch_add(1, Ordering::Relaxed);
                             shared.ledgers.count(generation, End::Late);
                             return Ok(gst::FlowSuccess::Ok);
                         }
