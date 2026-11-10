@@ -302,9 +302,10 @@ impl Avl62x1 {
     }
 
     /// Read only, before any reset: the core's ready word and the patch it
-    /// runs. Some when it is out of soft reset, ready, and runs `script`'s
-    /// patch -- a demodulator nothing has reset since the last receiver.
-    pub fn kept_patch(&self, bridge: &mut Bridge, script: &[u8]) -> Result<Option<(u32, u32, u32)>> {
+    /// runs. None when it is out of soft reset, ready, and runs `script`'s
+    /// patch -- a demodulator nothing has reset since the last receiver;
+    /// otherwise the first check that did not hold.
+    pub fn kept_patch(&self, bridge: &mut Bridge, script: &[u8]) -> Result<Option<CoreMismatch>> {
         let expected = patch::parse_header(script)?.version();
         let chip = self.chip_id(bridge)?;
         let (srst, ready) = self.core_state(bridge)?;
@@ -313,7 +314,7 @@ impl Avl62x1 {
             "DEMOD before reset: chip=0x{chip:08X} srst={srst} ready=0x{ready:08X} patch={}.{}.{}",
             running.0, running.1, running.2
         ));
-        Ok(kept(chip, srst, ready, running, expected).then_some(running))
+        Ok(core_mismatch(chip, srst, ready, running, expected))
     }
 
     /// The boot's tail on a core that already runs `script`'s patch: the
@@ -632,10 +633,41 @@ fn patch_version(raw: u32) -> (u32, u32, u32) {
     (raw >> 24, (raw >> 16) & 0xFF, raw & 0xFFFF)
 }
 
+/// Which of the kept core's checks did not hold, in the order they are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreMismatch {
+    ChipId,
+    SoftReset,
+    ReadyWord,
+    PatchVersion,
+}
+
 /// The core keeps the patch it would be given: this chip, out of soft
-/// reset, the ready word, the same version.
+/// reset, the ready word, the same version. None when it does; otherwise
+/// the first check that did not hold.
+fn core_mismatch(
+    chip: u32,
+    srst: u32,
+    ready: u32,
+    running: (u32, u32, u32),
+    expected: (u32, u32, u32),
+) -> Option<CoreMismatch> {
+    if chip != CHIP_ID {
+        Some(CoreMismatch::ChipId)
+    } else if srst != 0 {
+        Some(CoreMismatch::SoftReset)
+    } else if ready != CORE_READY_WORD {
+        Some(CoreMismatch::ReadyWord)
+    } else if running != expected {
+        Some(CoreMismatch::PatchVersion)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
 fn kept(chip: u32, srst: u32, ready: u32, running: (u32, u32, u32), expected: (u32, u32, u32)) -> bool {
-    chip == CHIP_ID && srst == 0 && ready == CORE_READY_WORD && running == expected
+    core_mismatch(chip, srst, ready, running, expected).is_none()
 }
 
 /// What the LNB pins read after the demodulator's reset (2 = high-Z).

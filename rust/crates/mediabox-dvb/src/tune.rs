@@ -4,8 +4,9 @@
 //! ```text
 //! bridge firmware 1.4.0.0 (loaded first if the device came up COLD)
 //!   -> GPIO2 reset -> AVL62X1 boot -> tuner I2C
-//!      (a core still running the patch, gpiot2 never pulsed since: no
-//!      reset, no download; the boot's tail and checks only)
+//!      (`ResumeIfValid` only: a core still running the patch, gpiot2 never
+//!      pulsed since: no reset, no download; the boot's tail and checks only.
+//!      `FullInit`, the default, never reads for it)
 //!   -> receiver init (ADC, polarity, AGC, MPEG serial, MPEG out on)
 //!   -> repeater on, RDA5815M init, repeater off
 //!   -> LNB power/polarisation and 22 kHz band selection
@@ -21,9 +22,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use mediabox_core::LiveReceiverStartupPolicy;
 use serde::Serialize;
 
-use crate::avl62x1::{self, AcqStatus, Avl62x1, BootInfo, Carrier, Scope};
+use crate::avl62x1::{self, AcqStatus, Avl62x1, BootInfo, Carrier, CoreMismatch, Scope};
 use crate::bridge::{self, Bridge, GPIO2, GPIO5, GPIO14, GpioSnapshot};
 use crate::error::{Error, Result};
 use crate::firmware::Firmware;
@@ -97,6 +99,55 @@ impl TuneParams {
     }
 }
 
+/// How the demodulator was really brought up in a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupPath {
+    /// Reset pulse and patch download, in the vendor's order.
+    FullInit,
+    /// Every check held; neither reset nor download.
+    Resumed,
+}
+
+/// Why a session's demodulator was not resumed: one value, the first
+/// reason met. With `FullInit` it is the policy itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeRejected {
+    /// The policy is `FullInit`: nothing was read for a resume.
+    PolicyFullInit,
+    /// The bridge came up COLD (plug-in, power): its firmware, and so the
+    /// demodulator behind it, are new.
+    BridgeCold,
+    /// The bridge ran another firmware and was rebooted to its ROM.
+    BridgeForeignFirmware,
+    /// gpiot2, the demodulator's active-low reset, not released and high.
+    ResetLineHeld,
+    ChipIdMismatch,
+    /// The core is held in soft reset.
+    SoftResetActive,
+    ReadyWordMismatch,
+    /// It runs another patch than the one it would be given.
+    PatchVersionMismatch,
+    /// The LNB pins are not high-Z as the demodulator's reset leaves them.
+    LnbPinsNotHighZ,
+    /// A read for the checks failed (not the device going away).
+    StateUnreadable,
+    /// Every check held and the boot's tail failed.
+    ResumeTailFailed,
+}
+
+impl From<CoreMismatch> for ResumeRejected {
+    fn from(mismatch: CoreMismatch) -> Self {
+        match mismatch {
+            CoreMismatch::ChipId => Self::ChipIdMismatch,
+            CoreMismatch::SoftReset => Self::SoftResetActive,
+            CoreMismatch::ReadyWord => Self::ReadyWordMismatch,
+            CoreMismatch::PatchVersion => Self::PatchVersionMismatch,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TuneResult {
     /// The last lock search gave up for a newer tune.
@@ -105,6 +156,11 @@ pub struct TuneResult {
     /// The bridge firmware was loaded in this session (the device was COLD).
     pub firmware_loaded: bool,
     pub boot: Option<BootInfo>,
+    /// What the session really did to bring the demodulator up; none
+    /// before the decision was carried out (device gone, bridge stopped).
+    pub startup_path: Option<StartupPath>,
+    /// With `full_init`: why it was not resumed.
+    pub resume_rejected_reason: Option<ResumeRejected>,
     pub tuner: Option<TunerInit>,
     pub carrier: Option<Carrier>,
     /// The offset from the nominal IF the carrier was locked at, kHz.
@@ -190,17 +246,20 @@ fn with_repeater<T>(
 /// ever), tvheadend's frontend monitor and Android's tuner session
 /// (TunerSessionWorker: VIDEO_UNAVAILABLE_REASON_WEAK_SIGNAL, retry) do.
 /// Without it a carrier that does not lock ends the run (one-off tunes).
+/// `policy`: how the demodulator is brought up (`start`).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     bridge: &mut Bridge,
     firmware: &Firmware,
     params: &TuneParams,
+    policy: LiveReceiverStartupPolicy,
     keep_tuning: bool,
     stop: &AtomicBool,
     superseded: &dyn Fn() -> bool,
     stream: impl FnMut(&mut Bridge, &mut Avl62x1, &TuneResult) -> Streamed,
 ) -> TuneResult {
     let mut res = TuneResult::default();
-    if let Err(error) = run_inner(bridge, firmware, params, keep_tuning, stop, superseded, stream, &mut res) {
+    if let Err(error) = run_inner(bridge, firmware, params, policy, keep_tuning, stop, superseded, stream, &mut res) {
         res.no_device |= error.is_no_device();
         bridge.log.line(format!("UNEXPECTED (cleanup attempted, nothing retried): {error}"));
         res.error.get_or_insert(error.to_string());
@@ -213,6 +272,7 @@ fn run_inner(
     bridge: &mut Bridge,
     firmware: &Firmware,
     params: &TuneParams,
+    policy: LiveReceiverStartupPolicy,
     keep_tuning: bool,
     stop: &AtomicBool,
     superseded: &dyn Fn() -> bool,
@@ -225,7 +285,13 @@ fn run_inner(
     bridge.log.line(format!("Bridge firmware: {}", bridge::dotted(&version)));
     // Kanky's firmware already running: the bridge, and so the demodulator
     // behind it, kept since the last receiver (no plug-in, no reboot).
-    let bridge_kept = version == bridge::VERIFIED_FIRMWARE;
+    let bridge_new = if version == [0; 4] {
+        Some(ResumeRejected::BridgeCold)
+    } else if version != bridge::VERIFIED_FIRMWARE {
+        Some(ResumeRejected::BridgeForeignFirmware)
+    } else {
+        None
+    };
     if version != [0; 4] && version != bridge::VERIFIED_FIRMWARE {
         // Kanky IT9300_initialize: another firmware runs (Linux's 1.4.0.0
         // from an older MediaBox): reboot the bridge to its ROM and load its own.
@@ -253,9 +319,10 @@ fn run_inner(
     let untouched_before = [bridge::snapshot(bridge, GPIO5)?, bridge::snapshot(bridge, GPIO14)?];
     let mut demod = Avl62x1::new([Scope::Agc, Scope::Lnb]);
     let guard = bridge::snapshot(bridge, GPIO2)?;
-    let may_be_kept = bridge_kept && reset_released(&guard);
+    let ineligible = bridge_new.or_else(|| (!reset_released(&guard)).then_some(ResumeRejected::ResetLineHeld));
 
-    let staged = stages(bridge, &mut demod, firmware, params, may_be_kept, keep_tuning, stop, superseded, stream, res);
+    let staged =
+        stages(bridge, &mut demod, firmware, params, (policy, ineligible), keep_tuning, stop, superseded, stream, res);
     cleanup(bridge, &mut demod, res, &untouched_before);
     res.gpio_restored = Some(bridge::restore(bridge, &guard));
     res.cleanup_done = true;
@@ -284,13 +351,12 @@ fn stopping(stop: &AtomicBool, res: &mut TuneResult, bridge: &Bridge) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn stages(
     bridge: &mut Bridge,
     demod: &mut Avl62x1,
     firmware: &Firmware,
     params: &TuneParams,
-    may_be_kept: bool,
+    (policy, ineligible): (LiveReceiverStartupPolicy, Option<ResumeRejected>),
     keep_tuning: bool,
     stop: &AtomicBool,
     superseded: &dyn Fn() -> bool,
@@ -298,40 +364,23 @@ fn stages(
     res: &mut TuneResult,
 ) -> Result<()> {
     // The reset pulse and the patch download (3.8 s of the 4.6 s from the
-    // receiver's start to its tune, measured 2026-11-10) only for a core
-    // that does not already run the patch, as the bridge's own firmware is
-    // loaded only when the bridge comes up COLD.
-    let mut resumed = None;
-    if may_be_kept {
-        match kept_demod(bridge, demod, &firmware.patch) {
-            Ok(true) => match demod.resume(bridge, &firmware.patch) {
-                Ok(boot) => resumed = Some(boot),
-                Err(error) if !error.is_no_device() => {
-                    bridge.log.line(format!("DEMOD resume failed ({error}): booted from reset"));
-                }
-                Err(error) => return Err(error),
-            },
-            Ok(false) => {}
-            Err(error) if !error.is_no_device() => bridge.log.line(format!("DEMOD state unread ({error}): booted from reset")),
-            Err(error) => return Err(error),
-        }
-    }
-    let boot = if let Some(boot) = resumed {
-        res.lnb_pins_at_reset = Some(avl62x1::LNB_PINS_AT_RESET);
-        Ok(boot)
-    } else {
-        bridge::demod_reset_pulse(bridge)?;
-        if demod.chip_id(bridge)? != avl62x1::CHIP_ID {
+    // receiver's start to its tune, measured 2026-11-10) skipped only by
+    // `ResumeIfValid`, for a core that already runs the patch.
+    let started = start(&mut OnBridge { bridge, demod, patch: &firmware.patch, res }, policy, ineligible)?;
+    res.startup_path = Some(started.path);
+    res.resume_rejected_reason = started.rejected;
+    bridge.log.line(format!(
+        "STARTUP policy={} path={:?} resume_rejected={:?}",
+        policy.arg(),
+        started.path,
+        started.rejected
+    ));
+    let boot = match started.boot {
+        Booted::Ready(boot) => boot,
+        Booted::WrongChip => {
             res.stopped = Some("unexpected chip id".into());
             return Ok(());
         }
-        let lnb_reset_state = demod.lnb_pins(bridge)?;
-        res.lnb_pins_at_reset = Some(lnb_reset_state);
-        bridge.log.line(format!(
-            "LNB pins after the demod reset: enable=0x{:X} select=0x{:X} (read only; 2 = high-Z)",
-            lnb_reset_state.0, lnb_reset_state.1
-        ));
-        demod.boot(bridge, &firmware.patch)
     };
     let boot = match boot {
         Ok(boot) => boot,
@@ -433,14 +482,113 @@ fn reset_released(guard: &GpioSnapshot) -> bool {
 
 /// Read only: the core runs the patch, and its LNB pins are high-Z as its
 /// reset leaves them -- what a cold boot would give, so what the cleanup
-/// puts back is the same.
-fn kept_demod(bridge: &mut Bridge, demod: &Avl62x1, patch: &[u8]) -> Result<bool> {
-    if demod.kept_patch(bridge, patch)?.is_none() {
-        return Ok(false);
+/// puts back is the same. None when all of it holds.
+fn kept_demod(bridge: &mut Bridge, demod: &Avl62x1, patch: &[u8]) -> Result<Option<ResumeRejected>> {
+    if let Some(mismatch) = demod.kept_patch(bridge, patch)? {
+        return Ok(Some(mismatch.into()));
     }
     let pins = demod.lnb_pins(bridge)?;
     bridge.log.line(format!("LNB pins before reset: enable=0x{:X} select=0x{:X}", pins.0, pins.1));
-    Ok(pins == avl62x1::LNB_PINS_AT_RESET)
+    Ok((pins != avl62x1::LNB_PINS_AT_RESET).then_some(ResumeRejected::LnbPinsNotHighZ))
+}
+
+/// What bringing the demodulator up needs of it, apart from the decision:
+/// the receiver's on the bridge, a stand-in in the tests.
+trait DemodStart {
+    type Boot;
+    /// Read only, no reset: None when the core may be kept, else why not.
+    fn probe(&mut self) -> Result<Option<ResumeRejected>>;
+    /// The boot's tail on a kept core, every check of a cold boot.
+    fn resume(&mut self) -> Result<Self::Boot>;
+    /// Reset pulse, chip, patch download, the boot's tail.
+    fn full_init(&mut self) -> Result<Self::Boot>;
+    fn note(&mut self, line: String);
+}
+
+struct Started<B> {
+    boot: B,
+    path: StartupPath,
+    rejected: Option<ResumeRejected>,
+}
+
+/// The policy, carried out. `FullInit` reads nothing for a resume: reset
+/// and patch, every time. `ResumeIfValid` resumes a core every check holds
+/// for; anything else -- `ineligible` (the bridge, the reset line), a check
+/// that fails, a read that fails, a resume that fails -- is one full init,
+/// never a second resume. The device going away is never taken for a
+/// failed check: it ends the session.
+fn start<S: DemodStart>(
+    demod: &mut S,
+    policy: LiveReceiverStartupPolicy,
+    ineligible: Option<ResumeRejected>,
+) -> Result<Started<S::Boot>> {
+    let rejected = match (policy, ineligible) {
+        (LiveReceiverStartupPolicy::FullInit, _) => ResumeRejected::PolicyFullInit,
+        (LiveReceiverStartupPolicy::ResumeIfValid, Some(reason)) => reason,
+        (LiveReceiverStartupPolicy::ResumeIfValid, None) => match demod.probe() {
+            Ok(None) => match demod.resume() {
+                Ok(boot) => return Ok(Started { boot, path: StartupPath::Resumed, rejected: None }),
+                Err(error) if error.is_no_device() => return Err(error),
+                Err(error) => {
+                    demod.note(format!("DEMOD resume failed ({error}): booted from reset"));
+                    ResumeRejected::ResumeTailFailed
+                }
+            },
+            Ok(Some(reason)) => reason,
+            Err(error) if error.is_no_device() => return Err(error),
+            Err(error) => {
+                demod.note(format!("DEMOD state unread ({error}): booted from reset"));
+                ResumeRejected::StateUnreadable
+            }
+        },
+    };
+    let boot = demod.full_init()?;
+    Ok(Started { boot, path: StartupPath::FullInit, rejected: Some(rejected) })
+}
+
+/// A booted demodulator, or a chip that is not the AVL62X1 after its reset.
+enum Booted {
+    Ready(Result<BootInfo>),
+    WrongChip,
+}
+
+struct OnBridge<'r, 'b> {
+    bridge: &'r mut Bridge<'b>,
+    demod: &'r mut Avl62x1,
+    patch: &'r [u8],
+    res: &'r mut TuneResult,
+}
+
+impl DemodStart for OnBridge<'_, '_> {
+    type Boot = Booted;
+
+    fn probe(&mut self) -> Result<Option<ResumeRejected>> {
+        kept_demod(self.bridge, self.demod, self.patch)
+    }
+
+    fn resume(&mut self) -> Result<Booted> {
+        let boot = self.demod.resume(self.bridge, self.patch)?;
+        self.res.lnb_pins_at_reset = Some(avl62x1::LNB_PINS_AT_RESET);
+        Ok(Booted::Ready(Ok(boot)))
+    }
+
+    fn full_init(&mut self) -> Result<Booted> {
+        bridge::demod_reset_pulse(self.bridge)?;
+        if self.demod.chip_id(self.bridge)? != avl62x1::CHIP_ID {
+            return Ok(Booted::WrongChip);
+        }
+        let lnb_reset_state = self.demod.lnb_pins(self.bridge)?;
+        self.res.lnb_pins_at_reset = Some(lnb_reset_state);
+        self.bridge.log.line(format!(
+            "LNB pins after the demod reset: enable=0x{:X} select=0x{:X} (read only; 2 = high-Z)",
+            lnb_reset_state.0, lnb_reset_state.1
+        ));
+        Ok(Booted::Ready(self.demod.boot(self.bridge, self.patch)))
+    }
+
+    fn note(&mut self, line: String) {
+        self.bridge.log.line(line);
+    }
 }
 
 fn steer_lnb(bridge: &mut Bridge, demod: &mut Avl62x1, control: Option<LnbControl>) -> Result<()> {

@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use mediabox_core::LiveReceiverStartupPolicy;
 use mediabox_dvb::log::Log;
 use mediabox_dvb::service::{self, Options, Output, Source};
 use mediabox_dvb::tkgs::TkgsCollector;
@@ -163,6 +164,15 @@ struct Play {
     /// a session, 16 and 256 MiB in the directory). Off unless given.
     #[arg(long)]
     evidence_dir: Option<PathBuf>,
+    /// How the demodulator is brought up: full-init (reset and patch
+    /// download, every receiver) or resume-if-valid (a core that still runs
+    /// the patch, every check held, is kept; otherwise one full init).
+    #[arg(long, default_value = "full-init", value_parser = startup_policy)]
+    startup_policy: LiveReceiverStartupPolicy,
+}
+
+fn startup_policy(arg: &str) -> Result<LiveReceiverStartupPolicy, String> {
+    LiveReceiverStartupPolicy::from_arg(arg).ok_or_else(|| format!("'{arg}': full-init or resume-if-valid"))
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -260,6 +270,7 @@ fn play(args: Play) -> ExitCode {
             tsid,
         }),
         evidence_dir: args.evidence_dir.filter(|dir| !dir.as_os_str().is_empty()),
+        startup_policy: args.startup_policy,
     };
     let status = service::run(options, &log);
     match status.end {

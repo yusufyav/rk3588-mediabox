@@ -155,6 +155,63 @@ pub enum LiveScanKeep {
     Radio,
 }
 
+/// How a new receiver process brings the AVL62X1 demodulator up. A Kanky /
+/// IT9303 / AVL62X1 product rule, not DVB's: the standard says nothing of
+/// the demodulator's firmware between sessions. Neither cuts the USB
+/// supply; the LNB is unpowered between receivers either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveReceiverStartupPolicy {
+    /// Every receiver pulses the demodulator's reset and downloads its patch,
+    /// in the vendor's order: what every receiver did from a100e00 on.
+    #[default]
+    FullInit,
+    /// A demodulator that still runs the same patch, its reset line
+    /// released and its LNB pins high-Z, is kept (04c0c64's checks, all of
+    /// them); any check that fails, or a resume that fails, boots it from
+    /// reset once, as `FullInit`.
+    ResumeIfValid,
+}
+
+impl LiveReceiverStartupPolicy {
+    pub const ALL: [LiveReceiverStartupPolicy; 2] = [Self::FullInit, Self::ResumeIfValid];
+
+    /// `mediabox-dvb play --startup-policy`'s value.
+    pub fn arg(self) -> &'static str {
+        match self {
+            Self::FullInit => "full-init",
+            Self::ResumeIfValid => "resume-if-valid",
+        }
+    }
+
+    pub fn from_arg(arg: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|policy| policy.arg() == arg)
+    }
+
+    /// The settings list's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FullInit => "Tam başlatma",
+            Self::ResumeIfValid => "Hızlı devam",
+        }
+    }
+}
+
+/// The live receiver's settings, kept by the daemon across boots. A file
+/// that is missing, unreadable, or names a policy this build does not
+/// know reads as the default: `FullInit`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveReceiverSettings {
+    #[serde(default)]
+    pub startup_policy: LiveReceiverStartupPolicy,
+}
+
+impl LiveReceiverSettings {
+    pub fn parse(text: &str) -> Self {
+        serde_json::from_str(text).unwrap_or_default()
+    }
+}
+
 impl LiveSource {
     /// A universal LNB's band and a DVB-S2 symbol rate the receiver takes.
     pub fn validate(&self) -> Result<(), String> {
@@ -1462,6 +1519,9 @@ pub struct SystemStatus {
     /// is playing.
     #[serde(default)]
     pub audio: AudioStatus,
+    /// The live receiver's kept settings: what the next receiver starts with.
+    #[serde(default)]
+    pub live_receiver: LiveReceiverSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1789,6 +1849,9 @@ pub enum Request {
     LiveTkgsModeSet { off: bool },
     /// Whether TKGS's categories are the channel list's groups.
     LiveTkgsCategoriesSet { shown: bool },
+    /// How the next receiver brings the demodulator up; kept across boots.
+    /// A receiver up now keeps the one it was started with.
+    LiveStartupPolicySet { policy: LiveReceiverStartupPolicy },
     /// The broadcast programme guide of the known channels between `from`
     /// and `to` (UTC seconds): only what the multiplex's EIT carried.
     LiveGuide { from: i64, to: i64 },

@@ -37,7 +37,8 @@ use crate::ts::{
     Admission, Analyser, Expected, Gate, Gated, Integrity, LeftMux, Quarantine, RapCache,
     Selection, Selector, StaleClock,
 };
-use crate::tune::{self, BAND_SPLIT_KHZ, LnbControl, Streamed, TuneParams, TuneResult};
+use crate::tune::{self, BAND_SPLIT_KHZ, LnbControl, ResumeRejected, StartupPath, Streamed, TuneParams, TuneResult};
+use mediabox_core::LiveReceiverStartupPolicy;
 use crate::usb::{HardwareAccess, OpenError, Session, StreamStats, TsStream};
 
 /// Set by SIGTERM / SIGINT / SIGHUP: end gracefully, clean up, exit.
@@ -119,6 +120,8 @@ pub struct Options {
     /// Where a CC error on the service played leaves its evidence: the raw
     /// stream around it. None: nowhere.
     pub evidence_dir: Option<PathBuf>,
+    /// How the receiver's demodulator is brought up (`tune::start`).
+    pub startup_policy: LiveReceiverStartupPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -220,6 +223,8 @@ pub struct TuneSummary {
     pub rf_verdict: Option<&'static str>,
     pub stopped: Option<String>,
     pub error: Option<String>,
+    pub startup_path: Option<StartupPath>,
+    pub resume_rejected_reason: Option<ResumeRejected>,
     /// Read only; MediaBox never powers or steers the LNB.
     pub lnb_pins_at_reset: Option<(u32, u32)>,
     pub lnb_pins_untouched: Option<bool>,
@@ -240,6 +245,8 @@ impl From<&TuneResult> for TuneSummary {
             rf_verdict: res.rf_verdict,
             stopped: res.stopped.clone(),
             error: res.error.clone(),
+            startup_path: res.startup_path,
+            resume_rejected_reason: res.resume_rejected_reason,
             lnb_pins_at_reset: res.lnb_pins_at_reset,
             lnb_pins_untouched: res.lnb_pins_untouched,
             ts_ep4_off: res.ts_ep4_off,
@@ -258,6 +265,8 @@ pub struct Status {
     pub end: Option<End>,
     pub message: Option<String>,
     pub source: &'static str,
+    /// The policy this receiver was started with; none for a recording.
+    pub startup_policy: Option<LiveReceiverStartupPolicy>,
     pub service_id: u16,
     pub service_name: Option<String>,
     pub pid: u32,
@@ -340,6 +349,7 @@ impl Reporter {
                 end: None,
                 message: None,
                 source,
+                startup_policy: matches!(options.source, Source::Satellite { .. }).then_some(options.startup_policy),
                 service_id: options.service_id,
                 service_name: None,
                 pid: std::process::id(),
@@ -2309,7 +2319,8 @@ fn play_satellite(
                 modified.is_some() && modified != *select_seen.lock().unwrap_or_else(|p| p.into_inner())
             })
         };
-        let res = tune::run(&mut bridge, &firmware, params, keep_tuning, &STOP, &superseded, |bridge, demod, tuned| {
+        let policy = options.startup_policy;
+        let res = tune::run(&mut bridge, &firmware, params, policy, keep_tuning, &STOP, &superseded, |bridge, demod, tuned| {
             reporter.status.tune = Some(TuneSummary::from(tuned));
             pipeline.unconfirmed_offset = tuned.fec_locked().then_some(tuned.search_offset_khz).flatten();
             // Tuned and not locked: no signal, until the lock says otherwise.
@@ -2960,6 +2971,7 @@ mod tests {
             start_standby: false,
             expect: None,
             evidence_dir: None,
+            startup_policy: LiveReceiverStartupPolicy::FullInit,
         }
     }
 

@@ -336,6 +336,7 @@ impl AppState {
                     "speed_mbps": speed,
                     "usable": matches!(link, mediabox_core::usblink::Link::Ready(_)),
                     "problem": mediabox_core::usblink::problem(link),
+                    "startup": self.live.startup_status(),
                 }))
             }
             Request::LiveTkgsUpdate => match self.live.update_tkgs().await {
@@ -371,6 +372,10 @@ impl AppState {
             Request::LiveTkgsModeSet { off } => match self.live.set_tkgs_mode(off) {
                 Ok(value) => Response::success(value),
                 Err(error) => Response::failure("tkgs_mode_failed", error),
+            },
+            Request::LiveStartupPolicySet { policy } => match self.live.set_startup_policy(policy) {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("live_startup_policy_failed", error),
             },
             Request::LiveTkgsCategoriesSet { shown } => match self.live.set_tkgs_categories(shown) {
                 Ok(value) => Response::success(value),
@@ -1922,6 +1927,7 @@ impl AppState {
             fan: self.fan.status(),
             ethernet: self.ethernet.status(),
             audio: self.audio_status().await,
+            live_receiver: self.live.receiver_settings(),
         }
     }
 
@@ -2745,6 +2751,7 @@ mod tests {
                 recording: dir.path().join("recording.ts"),
                 firmware_dir: dir.path().join("firmware"),
                 guide_store: dir.path().join("live-guide.json"),
+                settings: dir.path().join("live-receiver.json"),
             })),
             live_change: Arc::new(tokio::sync::Mutex::new(())),
             kodi_events: "127.0.0.1:9".parse().unwrap(),

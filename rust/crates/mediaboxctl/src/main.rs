@@ -526,6 +526,9 @@ enum MediaCommand {
     },
     /// The live channels known (the last multiplex the receiver was on).
     LiveChannels,
+    /// The receiver on the bus, and its startup: the policy kept, the one
+    /// the receiver up now or last was started with, and what it did.
+    LiveReceiver,
     /// Refresh the live channel list from Türksat's broadcast TKGS table.
     LiveTkgsUpdate,
     /// How far the TKGS channel setup has got.
@@ -546,6 +549,12 @@ enum MediaCommand {
     LiveTkgsCategories {
         #[arg(value_parser = ["on", "off"])]
         shown: String,
+    },
+    /// How the next receiver brings the demodulator up: full-init (reset and
+    /// patch every time) or resume-if-valid (a checked, kept patch).
+    LiveStartupPolicy {
+        #[arg(value_parser = ["full-init", "resume-if-valid"])]
+        policy: String,
     },
     /// Manually scan one satellite transponder; what it carries joins the
     /// channel list. Its progress and cancel are live-tkgs-progress/-cancel.
@@ -826,12 +835,16 @@ fn to_request(command: &Command) -> Request {
             MediaCommand::StopHere => Request::MediaStopHere,
             MediaCommand::StatusHere => Request::MediaStatusHere,
             MediaCommand::LiveChannels => Request::LiveChannels,
+            MediaCommand::LiveReceiver => Request::LiveReceiver,
             MediaCommand::LiveTkgsUpdate => Request::LiveTkgsUpdate,
             MediaCommand::LiveTkgsProgress => Request::LiveTkgsProgress,
             MediaCommand::LiveTkgsCancel => Request::LiveTkgsCancel,
             MediaCommand::LiveTkgsOrder { first } => Request::LiveTkgsOrderingSet { hd_first: first == "hd" },
             MediaCommand::LiveTkgsMode { mode } => Request::LiveTkgsModeSet { off: mode == "off" },
             MediaCommand::LiveTkgsCategories { shown } => Request::LiveTkgsCategoriesSet { shown: shown == "on" },
+            MediaCommand::LiveStartupPolicy { policy } => Request::LiveStartupPolicySet {
+                policy: mediabox_core::LiveReceiverStartupPolicy::from_arg(policy).unwrap_or_default(),
+            },
             MediaCommand::LiveSatelliteScan { free_only } => Request::LiveSatelliteScan { add_only: false, free_only: *free_only, scrambled_only: false, keep: mediabox_core::LiveScanKeep::All },
             MediaCommand::LiveScan { frequency_khz, symbol_rate, polarisation, free_only, keep } => Request::LiveScan {
                 source: mediabox_core::LiveSource::Satellite {

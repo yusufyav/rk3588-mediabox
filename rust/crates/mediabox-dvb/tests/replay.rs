@@ -29,6 +29,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+use mediabox_core::LiveReceiverStartupPolicy;
 use mediabox_dvb::bridge::{Bridge, checksum};
 use mediabox_dvb::firmware::Firmware;
 use mediabox_dvb::log::Log;
@@ -288,7 +289,7 @@ fn every_recorded_hardware_session_is_replayed_frame_for_frame() {
         let mut streamed = false;
         // A one-off tune, as the reference's sessions were: no retrying a
         // carrier that does not lock, nothing superseding it.
-        let res = tune::run(&mut bridge, &firmware, &params, false, &stop, &|| false, |_, _, _| {
+        let res = tune::run(&mut bridge, &firmware, &params, LiveReceiverStartupPolicy::FullInit, false, &stop, &|| false, |_, _, _| {
             streamed = true;
             Streamed { no_device: false, retune: None, relock: false }
         });

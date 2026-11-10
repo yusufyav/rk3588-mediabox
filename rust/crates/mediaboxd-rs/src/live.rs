@@ -26,7 +26,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mediabox_core::{LiveChannel, LiveEvent, LiveScanKeep, LiveSource, SatellitePolarisation};
+use mediabox_core::{
+    LiveChannel, LiveEvent, LiveReceiverSettings, LiveReceiverStartupPolicy, LiveScanKeep, LiveSource, SatellitePolarisation,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -51,6 +53,9 @@ pub struct LivePaths {
     /// The channels and programme guide of the last multiplex the receiver
     /// was on, kept across receivers and boots.
     pub guide_store: PathBuf,
+    /// The receiver's own settings (its startup policy), kept across boots
+    /// apart from the channel list, which is rewritten while a channel plays.
+    pub settings: PathBuf,
 }
 
 impl LivePaths {
@@ -61,6 +66,7 @@ impl LivePaths {
             recording: "/var/lib/mediabox-dvb/recording.ts".into(),
             firmware_dir: "/var/lib/mediabox-dvb/firmware".into(),
             guide_store: "/var/lib/mediabox/live-guide.json".into(),
+            settings: "/var/lib/mediabox/live-receiver.json".into(),
         }
     }
 
@@ -230,6 +236,8 @@ pub struct LiveManager {
     paths: LivePaths,
     inner: Mutex<Inner>,
     starts: AtomicU64,
+    /// One settings write at a time: they share the file beside.
+    settings_lock: Mutex<()>,
     #[cfg(test)]
     seam: TestSeam,
 }
@@ -308,6 +316,7 @@ impl LiveManager {
                 setup: None,
             }),
             starts: AtomicU64::new(0),
+            settings_lock: Mutex::new(()),
             #[cfg(test)]
             seam: TestSeam::default(),
         }
@@ -384,6 +393,9 @@ impl LiveManager {
                 // Warm between players: a channel change is a new service
                 // for the selector (`switch`), not a new receiver.
                 argv.extend(["--hold-reader-s".into(), HOLD_READER_S.to_string()]);
+                // The kept policy, read as this receiver starts: a change
+                // reaches the next receiver, never the one up now.
+                argv.push(format!("--startup-policy={}", self.receiver_settings().startup_policy.arg()));
                 if standby {
                     argv.push("--standby".into());
                 }
@@ -893,9 +905,50 @@ impl LiveManager {
             "service_id": inner.service_id,
             "source": inner.source,
             "failure": inner.failure,
-            "receiver": receiver.or_else(|| inner.last.clone()),
             "setup": self.setup_progress_of(&inner),
+            "startup": self.startup_of(receiver.as_ref().or(inner.last.as_ref())),
+            "receiver": receiver.or_else(|| inner.last.clone()),
         })
+    }
+
+    /// The receiver's startup: the policy kept now, and the one the receiver
+    /// up now -- or the last one -- was started with and what it really did
+    /// (`mediabox-dvb` status: `startup_policy`, `tune.startup_path`,
+    /// `tune.resume_rejected_reason`). None of the three for a receiver that
+    /// has not booted the demodulator, or a recording.
+    fn startup_of(&self, receiver: Option<&Value>) -> Value {
+        let field = |pointer: &str| receiver.and_then(|status| status.pointer(pointer)).cloned().unwrap_or(Value::Null);
+        json!({
+            "configured_startup_policy": self.receiver_settings().startup_policy,
+            "active_startup_policy": field("/startup_policy"),
+            "actual_startup_path": field("/tune/startup_path"),
+            "resume_rejected_reason": field("/tune/resume_rejected_reason"),
+        })
+    }
+
+    /// `LiveReceiver`'s startup part: what the receiver up now or last did.
+    pub fn startup_status(&self) -> Value {
+        let receiver = self.read_status();
+        let inner = self.lock();
+        self.startup_of(receiver.as_ref().or(inner.last.as_ref()))
+    }
+
+    /// The kept settings; the default (`FullInit`) for a file that is
+    /// missing or that this build cannot read.
+    pub fn receiver_settings(&self) -> LiveReceiverSettings {
+        std::fs::read_to_string(&self.paths.settings).map(|text| LiveReceiverSettings::parse(&text)).unwrap_or_default()
+    }
+
+    /// Kept, written beside and renamed over, for the next receiver. The
+    /// receiver up now, if any, is not touched: it keeps the policy it was
+    /// started with.
+    pub fn set_startup_policy(&self, policy: LiveReceiverStartupPolicy) -> Result<Value, String> {
+        let _writing = self.settings_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let settings = LiveReceiverSettings { startup_policy: policy };
+        let text = serde_json::to_string(&settings).map_err(|error| format!("alıcı ayarı yazılamadı: {error}"))?;
+        crate::output::write_atomic(&self.paths.settings, &text).map_err(|error| format!("alıcı ayarı yazılamadı: {error}"))?;
+        eprintln!("mediaboxd-rs: live startup policy kept: {}", policy.arg());
+        Ok(json!({"configured_startup_policy": policy}))
     }
 
     fn setup_progress_of(&self, inner: &Inner) -> Value {
@@ -2213,6 +2266,7 @@ mod tests {
             recording: "/var/lib/mediabox-dvb/recording.ts".into(),
             firmware_dir: "/var/lib/mediabox-dvb/firmware".into(),
             guide_store: dir.join("live-guide.json"),
+            settings: dir.join("live-receiver.json"),
         })
     }
 
@@ -2231,7 +2285,7 @@ mod tests {
         assert!(joined.contains("--property=RuntimeDirectoryPreserve=yes"));
         assert!(joined.ends_with(&format!(
             "play --service 10801 --fifo {0}/live.ts --status {0}/status.json --token 7-1 \
-             --hardware --transponder 12188000 --sr 27500 --polarisation=vertical --firmware-dir /var/lib/mediabox-dvb/firmware --reconnect-s 20 --hold-reader-s 30 --diseqc-port=0",
+             --hardware --transponder 12188000 --sr 27500 --polarisation=vertical --firmware-dir /var/lib/mediabox-dvb/firmware --reconnect-s 20 --hold-reader-s 30 --startup-policy=full-init --diseqc-port=0",
             dir.path().display()
         )));
         let recording = live.argv(10801, &LiveSource::Recording, "7-2").join(" ");
