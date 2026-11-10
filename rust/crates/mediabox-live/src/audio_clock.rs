@@ -124,6 +124,26 @@ impl Calibration {
     }
 }
 
+/// Where audiobasesink writes a buffer whose time is `external` (its
+/// running time, the sync offset and the base time, ns): the sample it
+/// works out in its own integer arithmetic (gstaudiobasesink.c 1.26
+/// `clock_convert_external`, the clock's `time_offset`, then
+/// `gst_util_uint64_scale_int` to the rate), each step rounded down as
+/// there. The buffer before ended at `next_sample`; one put after it by
+/// even a sample is aligned back only with headroom before the read
+/// segment, resynced if not (`gst_audio_base_sink_get_alignment`).
+pub fn sink_sample(external: i128, c: &Calibration, time_offset: i64, rate: u64) -> i64 {
+    let external = external.max(0) as u128;
+    let (num, denom) = if c.num == 0 { (1, 1) } else { (u128::from(c.num), u128::from(c.denom)) };
+    let (ci, ce) = (u128::from(c.internal), u128::from(c.external));
+    let internal = if external >= ce { (external - ce) * denom / num + ci } else { ci.saturating_sub((ce - external) * denom / num) };
+    // `render_start > time_offset`: a GstClockTime against a gint64, as
+    // unsigned.
+    let offset = u128::from(time_offset as u64);
+    let internal = if time_offset == 0 { internal } else { internal.saturating_sub(offset) };
+    (internal * u128::from(rate) / 1_000_000_000) as i64
+}
+
 /// The audio clock read between two readings of the pipeline's, ns.
 #[derive(Debug, Clone, Copy)]
 pub struct Observation {
@@ -494,13 +514,21 @@ pub struct Sink<'a> {
     /// Where the sink will write the buffer (the end of the one before);
     /// none when it will put it at its time.
     pub next_sample: Option<f64>,
-    /// Where the sink puts a time with a calibration, samples.
+    /// Where a time falls with a calibration, samples, to the fraction:
+    /// the sink's arithmetic without its rounding down.
     pub place: &'a dyn Fn(u64, &Calibration) -> f64,
+    /// The sample the sink writes a time at with a calibration, in its own
+    /// arithmetic (`sink_sample`).
+    pub sample: &'a dyn Fn(u64, &Calibration) -> i64,
 }
 
 /// The buffer for the sink; its samples in `Controller::output`.
 pub struct BufferOut {
+    /// The time the sink writes it at: on from the buffer before, the end
+    /// of that one (`written_at`); else its first sample's own.
     pub pts: u64,
+    /// Its first sample's own time: the sound's, through the resampler.
+    pub content: u64,
     pub frames: usize,
     pub discont: bool,
     /// A calibration for the audio clock, before the sink renders this.
@@ -515,6 +543,14 @@ pub struct Controller {
     rate: f64,
     generation: u64,
     last_phase: Option<f64>,
+    /// Where the sound written so far ends, in the sink's samples to the
+    /// fraction: the end of the buffer before, the sink's `next_sample`
+    /// plus the fraction of the place the first buffer since the sink
+    /// began again was put at -- carried from buffer to buffer, so the
+    /// phase is the sound's against it to the fraction, not to the sample.
+    written: Option<f64>,
+    /// The end of the last buffer in, its own time (ns).
+    input_end: Option<u64>,
     /// The last buffer's samples, kept for the next: no allocation a
     /// buffer once it is as large as the largest.
     out: Vec<f32>,
@@ -524,7 +560,7 @@ pub struct Controller {
 impl Controller {
     pub fn new(channels: usize, rate: f64, stats: std::sync::Arc<Stats>) -> Self {
         stats.rate_hz.store(rate as u32, Ordering::Relaxed);
-        Self { model: None, resampler: Resampler::new(channels, rate), rate, generation: 0, last_phase: None, out: Vec::new(), stats }
+        Self { model: None, resampler: Resampler::new(channels, rate), rate, generation: 0, last_phase: None, written: None, input_end: None, out: Vec::new(), stats }
     }
 
     /// The samples of the buffer `buffer` returned last.
@@ -544,12 +580,28 @@ impl Controller {
         self.stats.held_at_reset.fetch_add(held as u64, Ordering::Relaxed);
         self.stats.resets.fetch_add(1, Ordering::Relaxed);
         self.last_phase = None;
+        self.written = None;
         self.stats.phase_max_ns.store(0, Ordering::Relaxed);
     }
 
     pub fn buffer(&mut self, input: BufferIn, sink: Sink) -> BufferOut {
         let s = std::sync::Arc::clone(&self.stats);
         let another_channel = input.generation != self.generation;
+        // A DISCONT on a buffer that begins where the one before ended, to
+        // within a sample -- less than any sample left out or given twice
+        // -- is no break in the sound's times: the first buffer of a part
+        // after the part before (an audio stream chosen, a sound plan's
+        // part), cut to the end of that one. The sound goes on through the
+        // resampler, nothing it holds dropped; counted.
+        let joined = input.discont
+            && !another_channel
+            && sink.next_sample.is_some()
+            && self.input_end.is_some_and(|end| (input.pts as f64 - end as f64).abs() * self.rate / 1e9 < 1.0);
+        if joined {
+            s.joined.fetch_add(1, Ordering::Relaxed);
+        }
+        let input = BufferIn { discont: input.discont && !joined, ..input };
+        self.input_end = Some(input.pts + (input.frames as f64 * 1e9 / self.rate).round() as u64);
         if another_channel || input.discont || sink.next_sample.is_none() {
             if another_channel {
                 s.generations.fetch_add(1, Ordering::Relaxed);
@@ -578,7 +630,17 @@ impl Controller {
 
         self.resampler.push(input.samples, input.frames, input.pts);
         let time = self.resampler.next_time().unwrap_or(input.pts);
-        let phase = sink.next_sample.map(|next| next - (sink.place)(time, &calibration));
+        let at = (sink.place)(time, &calibration);
+        // The end of what was written: carried, or -- the sink's own having
+        // moved under it (it began again) -- the sink's with this buffer's
+        // fraction, as the first buffer after a beginning is put.
+        // A DISCONT is put at its time by the sink, whatever the end of the
+        // sound before: no phase against that end, nothing of it carried.
+        let written = sink.next_sample.filter(|_| !input.discont).map(|next| match self.written {
+            Some(w) if w.floor() == next => w,
+            _ => next + (at - at.floor()),
+        });
+        let phase = written.map(|w| w - at);
         let mut discont = input.discont;
         let ratio = match decide(phase, input.frames, self.rate) {
             Decision::Ratio(r) => r,
@@ -595,6 +657,23 @@ impl Controller {
             }
         };
         let time = self.resampler.next_time().unwrap_or(input.pts);
+        // On from the sound before: stamped with the time the sink writes
+        // at the end of it, to the fraction carried -- the buffer's start
+        // and end on the samples written, its phase the resampler's to
+        // take out, nothing left for the sink to align back (which, with no
+        // headroom before its read segment, it does not: it resyncs, FAZ
+        // 3E.6). Put at its time otherwise, and the fraction taken from
+        // there.
+        let (pts, from) = match (written, sink.next_sample, discont) {
+            (Some(w), Some(next), false) => match written_at(time, w, next as i64, &calibration, &sink) {
+                Some(t) => (t, w),
+                None => {
+                    s.unplaced.fetch_add(1, Ordering::Relaxed);
+                    (time, w)
+                }
+            },
+            _ => (time, (sink.place)(time, &calibration)),
+        };
         if let (Some(p), false) = (phase, discont) {
             let ns = p * 1e9 / self.rate;
             s.phase_ns.store(ns.round() as i64, Ordering::Relaxed);
@@ -607,10 +686,33 @@ impl Controller {
         }
         self.out.clear();
         let frames = self.resampler.process(ratio, &mut self.out);
+        self.written = Some(from + frames as f64);
         s.frames_in.fetch_add(input.frames as u64, Ordering::Relaxed);
         s.frames_out.fetch_add(frames as u64, Ordering::Relaxed);
-        BufferOut { pts: time, frames, discont, calibration: set }
+        BufferOut { pts, content: time, frames, discont, calibration: set }
     }
+}
+
+/// The time nearest `written` (the end of the sound before, in the sink's
+/// samples to the fraction) that the sink writes at `next` in its own
+/// arithmetic (`Sink::sample`): found from the place's slope at `time` and
+/// then by the nanosecond, at most a few samples' worth either way. None
+/// if there is none so near (a calibration with no slope).
+fn written_at(time: u64, written: f64, next: i64, c: &Calibration, sink: &Sink) -> Option<u64> {
+    let here = (sink.place)(time, c);
+    let per_ns = ((sink.place)(time + 1_000_000, c) - here) / 1e6;
+    if per_ns.is_nan() || per_ns <= 0.0 {
+        return None;
+    }
+    let mut t = (time as f64 + (written - here) / per_ns).round().max(0.0) as u64;
+    for _ in 0..256 {
+        match (sink.sample)(t, c).cmp(&next) {
+            std::cmp::Ordering::Less => t += 1,
+            std::cmp::Ordering::Greater => t = t.checked_sub(1)?,
+            std::cmp::Ordering::Equal => return Some(t),
+        }
+    }
+    None
 }
 
 // ------------------------------------------------------------ the counts
@@ -782,6 +884,12 @@ pub struct Stats {
     /// Buffers that went to the sink without the controller: no time on
     /// them, or no clock on the sink.
     pub unavailable: AtomicU64,
+    /// DISCONTs on buffers that begin where the one before ended (to within
+    /// a sample), taken as the sound going on.
+    pub joined: AtomicU64,
+    /// Buffers on from the one before for which no time the sink writes at
+    /// its end was found (`written_at`): stamped with their own.
+    pub unplaced: AtomicU64,
     pub cost: Cost,
 }
 
@@ -807,7 +915,7 @@ impl Stats {
             "rate_ppb": i(&self.rate_ppb), "phase_ns": i(&self.phase_ns), "phase_max_ns": i(&self.phase_max_ns),
             "phase_change_max_ns": i(&self.phase_change_max_ns), "stretch_max_millisamples": i(&self.stretch_max_millis),
             "step_max_ns": i(&self.stretch_max_millis) * 1_000_000 / i64::from(self.rate_hz.load(Ordering::Relaxed).max(1)),
-            "unsupported_format": g(&self.unsupported), "unavailable": g(&self.unavailable),
+            "unsupported_format": g(&self.unsupported), "unavailable": g(&self.unavailable), "unplaced": g(&self.unplaced), "joined": g(&self.joined),
             "cost": self.cost.json(),
         })
     }
@@ -1007,18 +1115,20 @@ pub fn install(sink: &gst::Element, generation: impl Fn() -> u64 + Send + Sync +
         // base time, through the calibration, less the clock's offset.
         let segment = pad.sticky_event::<gst::event::Segment>(0);
         let segment = segment.as_ref().and_then(|e| e.segment().downcast_ref::<gst::ClockTime>().cloned());
-        let base = sink.base_time().map_or(0, |b| b.nseconds()) as f64;
-        let sync = sink.property::<i64>("ts-offset") as f64 - sink.property::<u64>("render-delay") as f64
-            + sink.downcast_ref::<gst_app::gst_base::BaseSink>().map_or(0, |b| b.latency().nseconds()) as f64;
-        let offset = checked.time_offset() as f64;
+        let base = i128::from(sink.base_time().map_or(0, |b| b.nseconds()));
+        let sync = i128::from(sink.property::<i64>("ts-offset")) - i128::from(sink.property::<u64>("render-delay"))
+            + i128::from(sink.downcast_ref::<gst_app::gst_base::BaseSink>().map_or(0, |b| b.latency().nseconds()));
+        let time_offset = checked.time_offset();
         let rate = f64::from(format.rate);
-        let place = |t: u64, c: &Calibration| -> f64 {
+        let external = |t: u64| -> i128 {
             let running = segment.as_ref().and_then(|s| s.to_running_time(gst::ClockTime::from_nseconds(t))).map_or(t, |r| r.nseconds());
-            ((c.to_internal(running as f64 + sync + base) - offset) * rate / 1e9).floor()
+            i128::from(running) + sync + base
         };
+        let place = |t: u64, c: &Calibration| -> f64 { (c.to_internal(external(t) as f64) - time_offset as f64) * rate / 1e9 };
+        let sample = |t: u64, c: &Calibration| -> i64 { sink_sample(external(t), c, time_offset, u64::from(format.rate)) };
         let out = control.buffer(
             BufferIn { generation: generation(), pts: pts.nseconds(), frames, samples, discont },
-            Sink { calibration, observation: Observation { before, internal: read, after }, next_sample: fields.next_sample().map(|n| n as f64), place: &place },
+            Sink { calibration, observation: Observation { before, internal: read, after }, next_sample: fields.next_sample().map(|n| n as f64), place: &place, sample: &sample },
         );
         let made = (out.frames > 0).then(|| from_f32(control.output()));
         if samples.capacity() + control.capacity() > held {
