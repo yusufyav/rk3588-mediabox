@@ -43,8 +43,11 @@ pub enum Command {
 pub enum SoundCommand {
     Volume { gain: Option<f64>, muted: Option<bool> },
     /// mpv's `ao-reload`: the sound device opened again, on the display
-    /// mode that is on now -- the same plan, the same device.
-    Reload,
+    /// mode that is on now -- the same plan, the same device. The control
+    /// plane names the change of the wire it follows (`generation`), for
+    /// the health record alone; without it (a control plane from before)
+    /// it is reloaded the same, its generation not known.
+    Reload { generation: Option<u64> },
     /// The control plane's whole sound plan (`mediabox-audio-plan`), for
     /// its channel `epoch`, its `seq`-th: the device, what is passed
     /// through or encoded, the level -- taken as one, never a property at
@@ -296,14 +299,47 @@ pub(crate) fn handle(client: u64, command: &[Value], clients: &Clients, query: &
         // Answered with the channel the player is on when the device is
         // open again: the control plane counts it for that channel only.
         "ao-reload" => {
-            let result = run(commands, Command::Sound(SoundCommand::Reload));
+            let generation = command.get(1).and_then(Value::as_u64);
+            let result = run(commands, Command::Sound(SoundCommand::Reload { generation }));
             let epoch = query("mediabox-gate").and_then(|gate| gate.get("epoch").cloned()).unwrap_or(Value::Null);
-            (result, Some(json!({"epoch": epoch})))
+            (result, Some(json!({"epoch": epoch, "generation": generation})))
         }
         "quit" => {
             let _ = commands.send((Command::Quit, None));
             ("success".into(), None)
         }
         _ => ("invalid parameter".into(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `ao-reload` asks of the engine, answered as the engine does.
+    fn reload(command: Value) -> (String, Option<Value>, Option<u64>) {
+        let (commands, inbox) = std::sync::mpsc::channel::<(Command, Option<SyncSender<Result<(), String>>>)>();
+        let carried = std::thread::spawn(move || match inbox.recv() {
+            Ok((Command::Sound(SoundCommand::Reload { generation }), Some(done))) => {
+                let _ = done.send(Ok(()));
+                generation
+            }
+            _ => panic!("not a reload"),
+        });
+        let query: Query = Arc::new(|_| None);
+        let (error, data) = handle(1, command.as_array().unwrap(), &Clients::default(), &query, &commands);
+        (error, data, carried.join().unwrap())
+    }
+
+    /// FAZ 3J.3C: the control plane's generation goes to the engine; asked
+    /// without one (a control plane from before), it is reloaded the same.
+    #[test]
+    fn ao_reload_carries_its_generation_and_takes_none() {
+        let (error, data, generation) = reload(json!(["ao-reload", 13]));
+        assert_eq!((error.as_str(), generation), ("success", Some(13)));
+        assert_eq!(data.unwrap()["generation"], 13);
+        let (error, data, generation) = reload(json!(["ao-reload"]));
+        assert_eq!((error.as_str(), generation), ("success", None));
+        assert_eq!(data.unwrap()["generation"], Value::Null);
     }
 }

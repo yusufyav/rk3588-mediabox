@@ -598,24 +598,160 @@ fn a_restart_of_ours_with_no_format_change_is_not_explained_away() {
 /// seen, though its start is its offset back.
 #[test]
 fn sink_resyncs_are_counted_by_kind_and_around_a_reload() {
-    const S: u64 = 1_000_000_000;
     let mut d = Diag::default();
     let off = Some(300_000_000);
     assert!(d.sink_discont(10 * S, off).is_some());
-    d.reload.asked(20 * S);
+    d.reload.asked(Some(1), 20 * S);
     assert!(d.sink_discont(20 * S + S / 10, off).is_some());
     d.reload.ended(20 * S + S / 5, true);
     // Seen after the reload, its offset reaching back before it.
     assert!(d.sink_discont(21 * S, Some(5 * S as i64)).is_some());
     assert_eq!(d.by_kind.get("sink_resync"), Some(&3));
     assert_eq!((d.reload.requested, d.reload.completed, d.reload.failed), (1, 1, 0));
-    assert_eq!((d.reload.during_sink_resync, d.reload.after_sink_resync), (1, 1));
+    let at = current(&d);
+    assert_eq!((at.before_request.sink_resync, at.pending.sink_resync, at.after_completion.sink_resync), (1, 1, 1));
     let json = d.json(22 * S);
     assert_eq!(json["by_kind"]["sink_resync"], 3);
-    assert_eq!(json["reload"]["after"]["sink_resync"], 1);
+    assert_eq!(json["reload"]["current"]["after_completion"]["by_kind"]["sink_resync"], 1);
     assert_eq!(json["reload"]["last_ms"], 200.0);
     // A reload that could not open the device is a failure.
-    d.reload.asked(30 * S);
+    d.reload.asked(Some(2), 30 * S);
     d.reload.ended(31 * S, false);
     assert_eq!(d.reload.failed, 1);
+    assert_eq!(current(&d).state, ReloadState::Failed);
+}
+
+// FAZ 3J.3C: what bore on a reload, in the order it was seen. On the Plus
+// (FAZ 3J.3B, 2026-11-11) a starved render's resync seen 10 ms before
+// generation 13's reload was asked was counted after generation 12's: the
+// last reload's end stood until the next one was asked, and the next one
+// asked did not part the two.
+
+const S: u64 = 1_000_000_000;
+
+/// A sink resync of a starved render, seen at `at`: one incident.
+fn starved_resync(d: &mut Diag, at: u64) {
+    d.c.dec_out_frames += 1536;
+    d.c.sink_behind += 1;
+    let i = d.sink_discont(at, Some(300_000_000)).expect("an event");
+    assert_eq!((i.kind, i.cause), (Kind::SinkResync, Cause::RenderStarvation));
+}
+
+fn current(d: &Diag) -> &ReloadGen {
+    d.reload.current.as_ref().expect("a reload asked")
+}
+
+const ONE: Stretch = Stretch { incidents: 1, sink_resync: 1, render_starvation: 1 };
+const NONE: Stretch = Stretch { incidents: 0, sink_resync: 0, render_starvation: 0 };
+
+/// A: generation 12 done, an incident, generation 13 asked: the incident is
+/// before 13's request, not after 12's, and none is lost.
+#[test]
+fn an_incident_between_two_reloads_is_before_the_next_one_s_request() {
+    let mut d = Diag::default();
+    d.reload.asked(Some(12), 10 * S);
+    d.reload.ended(10 * S + S / 10, true);
+    starved_resync(&mut d, 20 * S);
+    assert_eq!(current(&d).after_completion, ONE, "after 12's, as long as 13 is not asked");
+    d.reload.asked(Some(13), 20 * S + 10_000_000);
+    let at = current(&d);
+    assert_eq!(at.generation, Some(13));
+    assert_eq!((at.before_request, at.pending, at.after_completion), (ONE, NONE, NONE));
+    assert_eq!(d.reload.previous, Some((Some(12), ReloadState::Completed)));
+    assert_eq!(d.reload.counted(), ONE);
+    assert_eq!(d.incidents, 1);
+    let json = d.json(21 * S);
+    assert_eq!(json["reload"]["current"]["generation"], 13);
+    assert_eq!(json["reload"]["current"]["before_request"]["incidents"], 1);
+    assert_eq!(json["reload"]["current"]["after_completion"]["incidents"], 0);
+    assert_eq!(json["reload"]["previous"]["generation"], 12);
+}
+
+/// B: seen while the reload is on its way: the mode change's own, only.
+#[test]
+fn an_incident_while_a_reload_is_on_its_way_is_its_pending() {
+    let mut d = Diag::default();
+    d.reload.asked(Some(12), 10 * S);
+    starved_resync(&mut d, 10 * S + S / 10);
+    let at = current(&d);
+    assert_eq!((at.before_request, at.pending, at.after_completion), (NONE, ONE, NONE));
+    d.reload.ended(10 * S + S / 5, true);
+    let at = current(&d);
+    assert_eq!((at.before_request, at.pending, at.after_completion), (NONE, ONE, NONE));
+}
+
+/// C: seen after the reload came back: after it, only. One seen before it
+/// was asked but told after is before its request.
+#[test]
+fn an_incident_after_a_reload_is_after_it_and_a_late_word_goes_by_when_seen() {
+    let mut d = Diag::default();
+    d.reload.asked(Some(12), 10 * S);
+    d.reload.ended(10 * S + S / 10, true);
+    starved_resync(&mut d, 11 * S);
+    let at = current(&d);
+    assert_eq!((at.before_request, at.pending, at.after_completion), (NONE, NONE, ONE));
+    starved_resync(&mut d, 10 * S - S / 10);
+    starved_resync(&mut d, 10 * S + S / 20);
+    let at = current(&d);
+    assert_eq!((at.before_request, at.pending, at.after_completion), (ONE, ONE, ONE));
+}
+
+/// D: a sink resync of a starved render is one incident, on both views.
+#[test]
+fn a_starved_resync_is_one_incident_seen_by_kind_and_by_cause() {
+    let mut d = Diag::default();
+    starved_resync(&mut d, 10 * S);
+    assert_eq!(d.incidents, 1);
+    assert_eq!(d.by_kind.get("sink_resync"), Some(&1));
+    assert_eq!(d.by_cause[Cause::RenderStarvation.index()], 1);
+    assert_eq!(d.reload.counted(), ONE);
+    let json = d.json(11 * S);
+    assert_eq!(json["incidents"], 1);
+    assert_eq!(json["reload"]["counted"]["incidents"], 1);
+    assert_eq!(json["reload"]["counted"]["by_kind"]["sink_resync"], 1);
+    assert_eq!(json["reload"]["counted"]["by_cause"]["render_starvation"], 1);
+    assert_eq!(json["reload"]["before_first"]["incidents"], 1);
+}
+
+/// E: generations one after the other, and one asked while the last is on
+/// its way (it joins the swap): each named as asked, every incident in one
+/// place only.
+#[test]
+fn reloads_in_quick_succession_keep_their_generations_and_every_incident() {
+    let mut d = Diag::default();
+    let ms = 1_000_000;
+    d.reload.asked(Some(12), 10_000 * ms);
+    d.reload.ended(10_100 * ms, true);
+    starved_resync(&mut d, 10_200 * ms);
+    d.reload.asked(Some(13), 10_300 * ms);
+    starved_resync(&mut d, 10_350 * ms);
+    d.reload.ended(10_400 * ms, true);
+    starved_resync(&mut d, 10_500 * ms);
+    let at = current(&d);
+    assert_eq!((at.generation, at.before_request, at.pending, at.after_completion), (Some(13), ONE, ONE, ONE));
+    assert_eq!(d.reload.previous, Some((Some(12), ReloadState::Completed)));
+    d.reload.asked(Some(14), 11_000 * ms);
+    d.reload.asked(Some(15), 11_050 * ms);
+    starved_resync(&mut d, 11_060 * ms);
+    d.reload.ended(11_100 * ms, true);
+    let at = current(&d);
+    assert_eq!((at.generation, at.state, at.pending_since), (Some(15), ReloadState::Completed, 11_000 * ms));
+    assert_eq!((at.before_request, at.pending, at.after_completion), (NONE, ONE, NONE));
+    assert_eq!(d.reload.previous, Some((Some(14), ReloadState::Joined)));
+    assert_eq!((d.reload.requested, d.reload.completed, d.reload.failed), (4, 3, 0));
+    assert_eq!(d.incidents, 4);
+    let counted = d.reload.counted();
+    assert_eq!((counted.incidents, counted.sink_resync, counted.render_starvation), (4, 4, 4));
+    assert_eq!(d.reload.earlier.incidents, 3);
+}
+
+/// F: asked without a generation (a control plane from before): counted
+/// the same, its generation said not to be known.
+#[test]
+fn a_reload_asked_without_a_generation_is_legacy() {
+    let mut d = Diag::default();
+    d.reload.asked(None, 10 * S);
+    d.reload.ended(10 * S + S / 10, true);
+    assert_eq!((d.reload.requested, d.reload.completed), (1, 1));
+    assert_eq!(d.json(11 * S)["reload"]["current"]["generation"], "legacy");
 }

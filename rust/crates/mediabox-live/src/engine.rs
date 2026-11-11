@@ -5044,8 +5044,8 @@ impl Engine {
     pub fn sound_command(self: &Arc<Self>, command: crate::ipc::SoundCommand, reply: &mut Option<SinkReply>) {
         match command {
             crate::ipc::SoundCommand::Volume { gain, muted } => self.set_volume(gain, muted),
-            crate::ipc::SoundCommand::Reload => {
-                self.shared.health.diagnose(|d| d.reload.asked(mediabox_core::timeline::now_ns()));
+            crate::ipc::SoundCommand::Reload { generation } => {
+                self.shared.health.diagnose(|d| d.reload.asked(generation, mediabox_core::timeline::now_ns()));
                 self.reopen_audio_sink(reply.take())
             }
             crate::ipc::SoundCommand::Plan { plan, epoch, seq } => {

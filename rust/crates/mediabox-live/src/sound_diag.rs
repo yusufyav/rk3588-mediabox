@@ -773,30 +773,151 @@ fn finite(v: f32) -> f32 {
     if v.is_finite() { v } else { -200.0 }
 }
 
+/// The incidents in one stretch of a reload's time that bear on it: those
+/// whose kind is a sink resync or whose cause is a starved render. Each is
+/// counted once (`incidents`); `sink_resync` and `render_starvation` are
+/// the same incidents seen by kind and by cause -- a resync of a starved
+/// render is one incident on both, not two.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stretch {
+    pub incidents: u64,
+    pub sink_resync: u64,
+    pub render_starvation: u64,
+}
+
+impl Stretch {
+    fn add(&mut self, resync: bool, starved: bool) {
+        self.incidents += 1;
+        self.sink_resync += u64::from(resync);
+        self.render_starvation += u64::from(starved);
+    }
+
+    fn absorb(&mut self, other: Stretch) {
+        self.incidents += other.incidents;
+        self.sink_resync += other.sink_resync;
+        self.render_starvation += other.render_starvation;
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "incidents": self.incidents,
+            "by_kind": {"sink_resync": self.sink_resync},
+            "by_cause": {"render_starvation": self.render_starvation},
+        })
+    }
+}
+
+/// Where one reload is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadState {
+    Pending,
+    Completed,
+    Failed,
+    /// Asked again before it ended: the next one joined its swap, and it
+    /// ended with that one.
+    Joined,
+}
+
+impl ReloadState {
+    pub fn name(self) -> &'static str {
+        match self {
+            ReloadState::Pending => "pending",
+            ReloadState::Completed => "completed",
+            ReloadState::Failed => "failed",
+            ReloadState::Joined => "joined_next",
+        }
+    }
+}
+
+/// One `ao-reload`, for the control plane's change of the wire
+/// `generation` (`None`: asked without one, by a control plane from
+/// before), and what bore on it, by when it was seen: from the reload
+/// before it ended to this one asked, while it was on its way, and since it
+/// ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReloadGen {
+    pub generation: Option<u64>,
+    pub state: ReloadState,
+    /// Since when its swap has been on its way (a joined one's: the first
+    /// asked), and when it ended.
+    pub pending_since: u64,
+    pub done_ns: Option<u64>,
+    pub before_request: Stretch,
+    pub pending: Stretch,
+    pub after_completion: Stretch,
+}
+
+impl ReloadGen {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "generation": self.generation.map_or(serde_json::json!("legacy"), serde_json::Value::from),
+            "state": self.state.name(),
+            "before_request": self.before_request.json(),
+            "pending": self.pending.json(),
+            "after_completion": self.after_completion.json(),
+        })
+    }
+}
+
 /// The sound device opened again for a change of the display (`ao-reload`),
-/// counted, and the sink's resyncs and its starved renders around it: the
-/// ones while a reload was on its way are the mode change's own (the HDMI
-/// stream stopped by the commit); one after it came back is not.
+/// counted, and the sink's resyncs and its starved renders around it, in
+/// the order they were seen: those while a reload was on its way are the
+/// mode change's own (the HDMI stream stopped by the commit); one after it
+/// came back is not -- until the next one is asked, which takes what came
+/// since the last ended as before its request. Nothing is dropped: what is
+/// no longer the current reload's is in `earlier`.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct Reloads {
     pub requested: u64,
     pub completed: u64,
     pub failed: u64,
-    /// Since when one has been on its way, and when the last one ended.
+    /// Since when one has been on its way.
     pub pending_since: Option<u64>,
-    pub done_at: Option<u64>,
-    pub during_sink_resync: u64,
-    pub during_render_starvation: u64,
-    pub after_sink_resync: u64,
-    pub after_render_starvation: u64,
     /// From the last one asked to its device open again, ns.
     pub last_ns: u64,
+    /// Seen before any was asked.
+    pub before_first: Stretch,
+    /// The last one asked.
+    pub current: Option<ReloadGen>,
+    /// The one before it: its generation and how it ended.
+    pub previous: Option<(Option<u64>, ReloadState)>,
+    /// What bore on the ones before the current one, not handed to it:
+    /// their `before_request` and `pending`.
+    pub earlier: Stretch,
 }
 
 impl Reloads {
-    pub fn asked(&mut self, now_ns: u64) {
+    /// Asked, for change `generation` if the control plane said which. One
+    /// asked while another is on its way joins its swap and takes over what
+    /// was seen while it was.
+    pub fn asked(&mut self, generation: Option<u64>, now_ns: u64) {
         self.requested += 1;
-        self.pending_since.get_or_insert(now_ns);
+        let joined = self.pending_since.is_some();
+        let since = *self.pending_since.get_or_insert(now_ns);
+        let mut next = ReloadGen {
+            generation,
+            state: ReloadState::Pending,
+            pending_since: since,
+            done_ns: None,
+            before_request: Stretch::default(),
+            pending: Stretch::default(),
+            after_completion: Stretch::default(),
+        };
+        match self.current.take() {
+            None => next.before_request = std::mem::take(&mut self.before_first),
+            Some(last) if joined => {
+                self.earlier.absorb(last.before_request);
+                next.pending = last.pending;
+                self.previous = Some((last.generation, ReloadState::Joined));
+            }
+            Some(last) => {
+                self.earlier.absorb(last.before_request);
+                self.earlier.absorb(last.pending);
+                next.before_request = last.after_completion;
+                self.previous = Some((last.generation, last.state));
+            }
+        }
+        self.current = Some(next);
     }
 
     /// The swap it joined ended (`ok`: the device open again).
@@ -808,34 +929,58 @@ impl Reloads {
             self.failed += 1;
         }
         self.last_ns = now_ns.saturating_sub(since);
-        self.done_at = Some(now_ns);
+        if let Some(current) = self.current.as_mut() {
+            current.done_ns = Some(now_ns);
+            current.state = if ok { ReloadState::Completed } else { ReloadState::Failed };
+        }
     }
 
+    /// An incident, by when it was seen: before the current reload was
+    /// asked, while it was on its way, or after it ended.
     fn incident(&mut self, kind: Kind, cause: Cause, seen_ns: u64) {
         let (resync, starved) = (kind == Kind::SinkResync, cause == Cause::RenderStarvation);
         if !resync && !starved {
             return;
         }
-        let after = match (self.pending_since, self.done_at) {
-            (Some(_), _) => false,
-            (None, Some(done)) if seen_ns >= done => true,
-            _ => return,
+        let Some(current) = self.current.as_mut() else {
+            self.before_first.add(resync, starved);
+            return;
         };
-        let (resyncs, starvations) = if after {
-            (&mut self.after_sink_resync, &mut self.after_render_starvation)
+        let stretch = if seen_ns < current.pending_since {
+            &mut current.before_request
+        } else if current.done_ns.is_none_or(|done| seen_ns < done) {
+            &mut current.pending
         } else {
-            (&mut self.during_sink_resync, &mut self.during_render_starvation)
+            &mut current.after_completion
         };
-        *resyncs += u64::from(resync);
-        *starvations += u64::from(starved);
+        stretch.add(resync, starved);
+    }
+
+    /// Every incident that bore on a reload, wherever it is now.
+    pub fn counted(&self) -> Stretch {
+        let mut all = self.before_first;
+        all.absorb(self.earlier);
+        if let Some(current) = &self.current {
+            all.absorb(current.before_request);
+            all.absorb(current.pending);
+            all.absorb(current.after_completion);
+        }
+        all
     }
 
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "requested": self.requested, "completed": self.completed, "failed": self.failed,
-            "pending": self.pending_since.is_some(), "last_ms": self.last_ns as f64 / 1e6,
-            "during": {"sink_resync": self.during_sink_resync, "render_starvation": self.during_render_starvation},
-            "after": {"sink_resync": self.after_sink_resync, "render_starvation": self.after_render_starvation},
+            "in_flight": self.pending_since.is_some(), "last_ms": self.last_ns as f64 / 1e6,
+            "counts": "incidents whose kind is sink_resync or whose cause is render_starvation, each once; by_kind and by_cause are two views of the same incidents",
+            "current": self.current.as_ref().map(ReloadGen::json),
+            "previous": self.previous.map(|(generation, state)| serde_json::json!({
+                "generation": generation.map_or(serde_json::json!("legacy"), serde_json::Value::from),
+                "state": state.name(),
+            })),
+            "before_first": self.before_first.json(),
+            "earlier": self.earlier.json(),
+            "counted": self.counted().json(),
         })
     }
 }
