@@ -549,55 +549,40 @@ fn commit_on_stage(
             .ok_or_else(|| CommitError::Refused("no FB_ID on the interface's plane".into()))?;
         request.add_property(plane, fb, Value::Framebuffer(Some(framebuffer)));
     }
-    let staged = s.sink.stage(kms, crtc, &s.video, &mut request);
-    // No film frame: the film's plane veiled while a player is connected,
-    // so the film's first frame does not turn a 4K video plane on in its
-    // own commit (`video::yuv_4k`).
-    let veil = if staged.is_none() && s.sink.wants_veil() {
-        s.sink.stage_veil(kms, crtc, &s.video, s.panel, &mut request)
-    } else {
-        None
-    };
-    if ui.is_none() && staged.is_none() && veil.is_none() {
+    // The film's part: its waiting frame, or the veil the player's film
+    // goes up under (`video::Sink::stage_next`).
+    let staged = s.sink.stage_next(kms, crtc, &s.video, s.panel, &mut request);
+    if ui.is_none() && staged.is_none() {
         return Ok(false);
     }
     let flags = control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT;
     let committed = kms.atomic_commit(flags, request);
-    if let Some(index) = veil {
-        match &committed {
-            Ok(()) => s.sink.veil_committed(&s.video, index),
-            Err(error) => s.sink.veil_refused(&error.to_string()),
-        }
+    let mut film = None;
+    if let Some(part) = staged {
+        let error = committed.as_ref().err().map(ToString::to_string);
+        film = s.sink.settle(&s.video, part, error.as_deref().map_or(Ok(()), Err));
     }
-    let committed = match (committed, staged.or(veil), ui) {
+    let committed = match (committed, staged, ui) {
         (Ok(()), _, _) => Ok(staged),
         // The film's part refused it: the interface's frame goes on its
         // own rather than the panel freezing on the last one.
-        (Err(error), Some(_), Some((plane, framebuffer, _))) => {
-            s.sink.refused_commit(&error.to_string());
+        (Err(_), Some(_), Some((plane, framebuffer, _))) => {
             let fb = find_property(kms, plane, "FB_ID").ok_or_else(|| CommitError::Refused("no FB_ID".into()))?;
             let mut alone = control::atomic::AtomicModeReq::new();
             alone.add_property(plane, fb, Value::Framebuffer(Some(framebuffer)));
             kms.atomic_commit(flags, alone).map(|()| None)
         }
-        (Err(error), _, _) => {
-            if staged.is_some() {
-                s.sink.refused_commit(&error.to_string());
-            }
-            Err(error)
-        }
+        (Err(error), _, _) => Err(error),
     };
-    let staged = committed.map_err(|e| {
+    committed.map_err(|e| {
         if e.raw_os_error() == Some(libc::EBUSY) {
             CommitError::Busy
         } else {
             CommitError::Refused(format!("atomic commit: {e}"))
         }
     })?;
-    crate::video::trace::event('C', u64::from(ui.is_some()), u64::from(staged.is_some()));
-    let mut film = None;
-    if let Some(index) = staged {
-        film = s.sink.committed(&s.video, index);
+    crate::video::trace::event('C', u64::from(ui.is_some()), u64::from(film.is_some()));
+    if film.is_some() {
         VIDEO.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     mediabox_core::timeline!(
@@ -2428,7 +2413,7 @@ impl SplitDisplay {
         // The film first: a plane left enabled on a CRTC that is about to be
         // turned off is how the next master inherits a picture it did not draw.
         let state = &mut *stage;
-        state.sink.clear(&self.kms, self.crtc, &state.video);
+        state.sink.clear(&self.kms, self.crtc, &state.video, true);
         VIDEO.store(false, std::sync::atomic::Ordering::Relaxed);
         // And the stacking order, which belongs to the connector rather than to
         // whoever set it: Kodi assigns this port's windows for itself and must

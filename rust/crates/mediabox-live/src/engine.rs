@@ -2884,10 +2884,18 @@ impl Engine {
         let branch_programme = Arc::clone(&programme);
         {
             let programme = Arc::clone(&programme);
+            let weak = weak.clone();
             demux.connect_no_more_pads(move |_| {
                 if !programme.video_taken.load(Ordering::SeqCst) {
                     programme.no_picture.store(true, Ordering::SeqCst);
                     programme.picture_known();
+                    // The interface keeps nothing up for a picture that
+                    // will not come -- this channel's, not one after it.
+                    if let Some(engine) = weak.upgrade()
+                        && engine.shared.generation.load(Ordering::SeqCst) == generation
+                    {
+                        engine.plane.no_picture();
+                    }
                 }
             });
         }

@@ -361,15 +361,29 @@ pub fn yuv_4k(fourcc: DrmFourcc, width: u32, height: u32) -> bool {
     yuv && (width > 2560 || height > 2560)
 }
 
-/// Whether the film's plane should go on veiled now: a player is connected
-/// and no film is on the panel or waiting for it, and the plane is not
-/// veiled already (nor could not be). Veiled, the plane is a 4K video plane
-/// to the kernel from the moment the player connects -- seconds before its
-/// first frame -- so the memory controller's rate is settled by a commit
-/// nothing is timed by, and the first frame's own commit changes nothing
-/// the kernel counts (`yuv_4k`).
-pub fn veil_wanted(connected: bool, film: bool, waiting: bool, veiled: bool, failed: bool) -> bool {
-    connected && !film && !waiting && !veiled && !failed
+/// Whether the film's plane should go on veiled now: a player is connected,
+/// no film is on the panel, the player has not said its programme has no
+/// picture, and the plane is not veiled already (nor could not be). Veiled,
+/// the plane is a 4K video plane to the kernel from the moment the player
+/// connects -- seconds before its first frame -- so the memory controller's
+/// rate is settled by a commit nothing is timed by, and the first frame's
+/// own commit changes nothing the kernel counts (`yuv_4k`).
+///
+/// `waiting`: whether the frame waiting first, if one is, is a 4K video
+/// frame. One that is goes up only after the veil: it waits for the veil's
+/// commit (taken down by a change of the whole display, `drop_veil`, the
+/// veil goes up again before it). One that is not needs no veil.
+pub fn veil_wanted(connected: bool, film: bool, no_picture: bool, waiting: Option<bool>, veiled: bool, failed: bool) -> bool {
+    connected && !film && !no_picture && waiting != Some(false) && !veiled && !failed
+}
+
+/// What the presenter's next commit carries of the film (`Sink::stage_next`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staged {
+    /// The waiting frame, on `planes[index]`.
+    Film(usize),
+    /// The veil, on `planes[index]`.
+    Veil(usize),
 }
 
 /// A black UHD NV12 frame in a buffer of the display's own, for the veil.
@@ -854,6 +868,9 @@ const KIND_SUBTITLE: u32 = 4;
 /// A frame with when it is due: `MESSAGE` bytes as `KIND_FRAME`, then the
 /// due time, 8 bytes, in the same `sendmsg` (mediabox-live).
 const KIND_FRAME_TIMED: u32 = 5;
+/// The programme has no picture (mediabox-live, at its demuxer's last pad).
+/// A television that does not know it says so and goes on.
+const KIND_NO_PICTURE: u32 = 6;
 
 /// One fixed-size message per `sendmsg`, so a frame and its descriptors can
 /// never be split across reads:
@@ -906,6 +923,9 @@ pub enum Incoming {
     Subtitle(Option<SubtitleImage>),
     /// The player is finished with the plane but is still there.
     Stop,
+    /// The player's programme has no picture (a radio service): nothing
+    /// will come until the next channel's (after a `Stop`).
+    NoPicture,
     /// The player went away.
     Gone,
 }
@@ -1209,6 +1229,7 @@ impl Server {
                     }
                     match u32_at(&bytes, 4) {
                         KIND_STOP => received.push(Incoming::Stop),
+                        KIND_NO_PICTURE => received.push(Incoming::NoPicture),
                         KIND_SUBTITLE => match read_subtitle(&bytes, &fds) {
                             Ok(image) => received.push(Incoming::Subtitle(image)),
                             Err(error) => eprintln!("mediabox-tv.video {error}"),
@@ -1365,6 +1386,13 @@ pub struct Sink<D: ControlDevice + Clone> {
     veil: Option<Imported<D>>,
     veiled: Option<usize>,
     veil_failed: bool,
+    /// The player said its programme has no picture (`Incoming::NoPicture`),
+    /// until the next channel.
+    no_picture: bool,
+    /// Makes the veil's frame (`make_veil`; a test's own in tests), and how
+    /// many it has made.
+    veil_maker: fn(&D) -> Result<Imported<D>, String>,
+    veils_made: u64,
 }
 
 impl<D: ControlDevice + Clone> Sink<D> {
@@ -1394,6 +1422,9 @@ impl<D: ControlDevice + Clone> Sink<D> {
             veil: None,
             veiled: None,
             veil_failed: false,
+            no_picture: false,
+            veil_maker: make_veil::<D>,
+            veils_made: 0,
         })
     }
 
@@ -1452,7 +1483,49 @@ impl<D: ControlDevice + Clone> Sink<D> {
 
     /// Whether the presenter should put the veil up now (`veil_wanted`).
     pub fn wants_veil(&self) -> bool {
-        veil_wanted(self.server.connected(), self.on, !self.pending.is_empty(), self.veiled.is_some(), self.veil_failed)
+        let waiting = self.pending.front().map(|frame| yuv_4k(frame.info.fourcc, frame.info.width, frame.info.height));
+        veil_wanted(self.server.connected(), self.on, self.no_picture, waiting, self.veiled.is_some(), self.veil_failed)
+    }
+
+    /// What the presenter's next commit carries of the film, added to
+    /// `request`: the veil while it is wanted (`wants_veil`) -- before a
+    /// waiting 4K frame, which then waits for the veil's commit to have
+    /// flipped -- or else the waiting frame (`stage`). The veil refused,
+    /// the frame goes up as it did before there was one.
+    pub fn stage_next(
+        &mut self,
+        device: &D,
+        crtc: control::crtc::Handle,
+        planes: &[VideoPlane],
+        panel: (u32, u32),
+        request: &mut control::atomic::AtomicModeReq,
+    ) -> Option<Staged> {
+        if self.wants_veil()
+            && let Some(index) = self.stage_veil(device, crtc, planes, panel, request)
+        {
+            return Some(Staged::Veil(index));
+        }
+        self.stage(device, crtc, planes, request).map(Staged::Film)
+    }
+
+    /// The commit carrying `staged` was made (`Ok`) or refused. The film's
+    /// frame id, when it was the film's.
+    pub fn settle(&mut self, planes: &[VideoPlane], staged: Staged, made: Result<(), &str>) -> Option<u64> {
+        match (staged, made) {
+            (Staged::Film(index), Ok(())) => self.committed(planes, index),
+            (Staged::Film(_), Err(error)) => {
+                self.refused_commit(error);
+                None
+            }
+            (Staged::Veil(index), Ok(())) => {
+                self.veil_committed(planes, index);
+                None
+            }
+            (Staged::Veil(_), Err(error)) => {
+                self.veil_refused(error);
+                None
+            }
+        }
     }
 
     /// Adds the veil to `request`, on the plane the film went on last (or
@@ -1467,8 +1540,12 @@ impl<D: ControlDevice + Clone> Sink<D> {
         request: &mut control::atomic::AtomicModeReq,
     ) -> Option<usize> {
         if self.veil.is_none() {
-            match make_veil(device) {
-                Ok(veil) => self.veil = Some(veil),
+            match (self.veil_maker)(device) {
+                Ok(veil) => {
+                    self.veils_made += 1;
+                    mediabox_core::timeline!("veil-made", "n={} fb={:?}", self.veils_made, veil.framebuffer);
+                    self.veil = Some(veil);
+                }
                 Err(error) => {
                     self.veil_refused(&error);
                     return None;
@@ -1523,6 +1600,13 @@ impl<D: ControlDevice + Clone> Sink<D> {
         }
     }
 
+    /// The veil off, and its frame given back to the display: the player
+    /// went, or its programme has no picture.
+    fn free_veil(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
+        self.drop_veil(device, crtc, planes);
+        self.veil = None;
+    }
+
     /// Reads whatever is waiting and puts it on the panel.
     ///
     /// `into` is the whole area the film may use, in the panel's own pixels;
@@ -1539,7 +1623,13 @@ impl<D: ControlDevice + Clone> Sink<D> {
             match message {
                 Incoming::Hdr(hdr) => self.hdr = Some(hdr),
                 Incoming::Subtitle(image) => self.set_subtitle(image),
-                Incoming::Stop | Incoming::Gone => self.clear(device, crtc, planes),
+                Incoming::Stop => self.clear(device, crtc, planes, false),
+                Incoming::Gone => self.clear(device, crtc, planes, true),
+                Incoming::NoPicture => {
+                    mediabox_core::timeline!("no-picture", "pid={} veiled={}", self.server.peer(), self.veiled.is_some());
+                    self.no_picture = true;
+                    self.free_veil(device, crtc, planes);
+                }
                 Incoming::Frame {
                     id,
                     frame,
@@ -1547,6 +1637,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
                     fds,
                     due_ns,
                 } => {
+                    self.no_picture = false;
                     self.present(device, crtc, planes, &frame, display, into, id, &fds, due_ns);
                 }
             }
@@ -1912,6 +2003,13 @@ impl<D: ControlDevice + Clone> Sink<D> {
             self.server.release(old.id);
             return None;
         };
+        // Lifting the veil, the plane is the film's from scratch: every
+        // colour property and its depth written again with the frame, none
+        // taken as already there from the veil's (SDR) commit.
+        if self.veiled.is_some() {
+            planes[index].applied.set(None);
+            planes[index].sunk.set(false);
+        }
         if !planes[index].stage(request, crtc, &pending.imported, &pending.info, pending.dst) {
             return None;
         }
@@ -1993,8 +2091,12 @@ impl<D: ControlDevice + Clone> Sink<D> {
     }
 
     /// Take the film off the panel and give every buffer back.
-    pub fn clear(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
+    /// `gone`: the player went, not only its film -- the veil's frame is
+    /// given back, and a veil refused is tried again with the next player.
+    pub fn clear(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane], gone: bool) {
         self.hdr = None;
+        // The next channel's picture is not known yet.
+        self.no_picture = false;
         self.set_subtitle(None);
         if self.picture.take().is_some() {
             self.subtitle_changes += 1;
@@ -2020,7 +2122,12 @@ impl<D: ControlDevice + Clone> Sink<D> {
         if self.veiled.is_some_and(|veiled| Some(veiled) == self.chosen) {
             self.veiled = None;
         }
-        self.drop_veil(device, crtc, planes);
+        if gone {
+            self.free_veil(device, crtc, planes);
+            self.veil_failed = false;
+        } else {
+            self.drop_veil(device, crtc, planes);
+        }
         while let Some((id, _)) = self.shown.pop_front() {
             self.server.release(id);
         }
@@ -2186,7 +2293,7 @@ mod tests {
     #[test]
     fn a_uhd_films_first_frame_does_not_turn_a_4k_video_plane_on() {
         // A player connected and nothing of its film yet: the veil goes up.
-        assert!(veil_wanted(true, false, false, false, false));
+        assert!(veil_wanted(true, false, false, None, false, false));
         // To the kernel it is a 4K video plane, as a UHD film's frames are.
         assert!(yuv_4k(VEIL_FOURCC, VEIL_SIZE.0, VEIL_SIZE.1));
         for fourcc in [DrmFourcc::Nv12, DrmFourcc::Nv15] {
@@ -2199,12 +2306,508 @@ mod tests {
 
     #[test]
     fn the_veil_waits_for_a_player_and_gives_way_to_its_film() {
-        // No player; its film on; its frame waiting; up already; refused.
-        assert!(!veil_wanted(false, false, false, false, false));
-        assert!(!veil_wanted(true, true, false, false, false));
-        assert!(!veil_wanted(true, false, true, false, false));
-        assert!(!veil_wanted(true, false, false, true, false));
-        assert!(!veil_wanted(true, false, false, false, true));
+        // No player; its film on; no picture; an HD frame waiting; up
+        // already; refused.
+        assert!(!veil_wanted(false, false, false, None, false, false));
+        assert!(!veil_wanted(true, true, false, None, false, false));
+        assert!(!veil_wanted(true, false, true, None, false, false));
+        assert!(!veil_wanted(true, false, false, Some(false), false, false));
+        assert!(!veil_wanted(true, false, false, None, true, false));
+        assert!(!veil_wanted(true, false, false, None, false, true));
+        // A 4K frame waiting with the veil down: the veil first.
+        assert!(veil_wanted(true, false, false, Some(true), false, false));
+    }
+
+    /// A `Sink` driven the way the presenter drives it -- a player on a real
+    /// socket, frames with descriptors, `stage_next` and `settle` -- on a
+    /// display that records every request it is given.
+    mod veil {
+        use super::super::*;
+        use std::cell::RefCell;
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::os::fd::AsRawFd;
+        use std::rc::Rc;
+
+        /// A request's properties: (object, property) -> value.
+        pub type Props = BTreeMap<(u32, u32), u64>;
+
+        #[derive(Default)]
+        pub struct Log {
+            /// Every real commit: (object, property) -> value.
+            pub commits: Vec<Props>,
+            pub refuse_test: bool,
+            pub fbs: BTreeSet<u32>,
+            pub gems: BTreeSet<u32>,
+            pub hidden: Vec<u32>,
+            next: u32,
+        }
+
+        #[derive(Clone)]
+        pub struct Kms {
+            file: Rc<std::fs::File>,
+            pub log: Rc<RefCell<Log>>,
+        }
+
+        impl AsFd for Kms {
+            fn as_fd(&self) -> BorrowedFd<'_> {
+                self.file.as_fd()
+            }
+        }
+        impl drm::Device for Kms {}
+        impl ControlDevice for Kms {
+            fn atomic_commit(&self, flags: control::AtomicCommitFlags, req: control::atomic::AtomicModeReq) -> io::Result<()> {
+                let mut log = self.log.borrow_mut();
+                if flags.contains(control::AtomicCommitFlags::TEST_ONLY) {
+                    return if log.refuse_test { Err(io::Error::from_raw_os_error(libc::EINVAL)) } else { Ok(()) };
+                }
+                log.commits.push(parse(&req));
+                Ok(())
+            }
+            fn add_planar_framebuffer<B: PlanarBuffer + ?Sized>(&self, _: &B, _: control::FbCmd2Flags) -> io::Result<control::framebuffer::Handle> {
+                let mut log = self.log.borrow_mut();
+                log.next += 1;
+                let id = 1000 + log.next;
+                log.fbs.insert(id);
+                Ok(control::from_u32(id).unwrap())
+            }
+            fn destroy_framebuffer(&self, handle: control::framebuffer::Handle) -> io::Result<()> {
+                assert!(self.log.borrow_mut().fbs.remove(&u32::from(handle)), "a framebuffer destroyed twice");
+                Ok(())
+            }
+            fn prime_fd_to_buffer(&self, fd: BorrowedFd<'_>) -> io::Result<BufferHandle> {
+                let id = 500 + fd.as_raw_fd() as u32;
+                self.log.borrow_mut().gems.insert(id);
+                Ok(BufferHandle::from(std::num::NonZeroU32::new(id).unwrap()))
+            }
+            fn close_buffer(&self, handle: BufferHandle) -> io::Result<()> {
+                self.log.borrow_mut().gems.remove(&u32::from(handle));
+                Ok(())
+            }
+            fn set_plane(
+                &self,
+                plane: control::plane::Handle,
+                _: control::crtc::Handle,
+                framebuffer: Option<control::framebuffer::Handle>,
+                _: u32,
+                _: (i32, i32, u32, u32),
+                _: (u32, u32, u32, u32),
+            ) -> io::Result<()> {
+                if framebuffer.is_none() {
+                    self.log.borrow_mut().hidden.push(u32::from(plane));
+                }
+                Ok(())
+            }
+        }
+
+        /// The request's properties, read from its `Debug` (its fields are
+        /// the crate's own).
+        fn parse(req: &control::atomic::AtomicModeReq) -> Props {
+            let text = format!("{req:?}");
+            let list = |name: &str| -> Vec<u64> {
+                let start = text.find(&format!("{name}: [")).unwrap() + name.len() + 3;
+                let end = start + text[start..].find(']').unwrap();
+                text[start..end]
+                    .split(',')
+                    .filter_map(|item| item.chars().filter(char::is_ascii_digit).collect::<String>().parse().ok())
+                    .collect()
+            };
+            let (objects, counts, props, values) = (list("objects"), list("count_props_per_object"), list("props"), list("values"));
+            let mut out = BTreeMap::new();
+            let mut at = 0;
+            for (object, count) in objects.iter().zip(counts) {
+                for _ in 0..count {
+                    out.insert((*object as u32, props[at] as u32), values[at]);
+                    at += 1;
+                }
+            }
+            out
+        }
+
+        fn fake_veil(kms: &Kms) -> Result<Imported<Kms>, String> {
+            let handle = {
+                let mut log = kms.log.borrow_mut();
+                log.next += 1;
+                let id = 900 + log.next;
+                log.gems.insert(id);
+                BufferHandle::from(std::num::NonZeroU32::new(id).unwrap())
+            };
+            let planar = Planar {
+                fourcc: VEIL_FOURCC,
+                size: VEIL_SIZE,
+                pitches: [3840, 3840, 0, 0],
+                handles: [Some(handle), Some(handle), None, None],
+                offsets: [0, 3840 * 2160, 0, 0],
+                modifier: DrmModifier::Linear,
+            };
+            let framebuffer = kms.add_planar_framebuffer(&planar, control::FbCmd2Flags::MODIFIERS).unwrap();
+            Ok(Imported { device: kms.clone(), framebuffer, handles: vec![handle] })
+        }
+
+        fn failing_veil(_: &Kms) -> Result<Imported<Kms>, String> {
+            Err("no memory".into())
+        }
+
+        /// Property numbers: plane id * 100 + n.
+        pub const FB: u32 = 1;
+        pub const CRTC: u32 = 2;
+        pub const SRC_W: u32 = 5;
+        pub const ENCODING: u32 = 10;
+        pub const RANGE: u32 = 11;
+        pub const EOTF: u32 = 12;
+        pub const ZPOS: u32 = 13;
+        pub const ALPHA: u32 = 15;
+
+        pub fn plane(id: u32, formats: &[DrmFourcc], alpha: bool) -> VideoPlane {
+            let p = |n: u32| control::from_u32::<control::property::Handle>(id * 100 + n).unwrap();
+            VideoPlane {
+                plane: control::from_u32(id).unwrap(),
+                formats: formats.iter().map(|f| *f as u32).collect(),
+                encoding: Some(p(ENCODING)),
+                range: Some(p(RANGE)),
+                eotf: Some(p(EOTF)),
+                depth: Some(p(ZPOS)),
+                props: Some(PlaneProps {
+                    fb: p(FB),
+                    crtc: p(CRTC),
+                    src: [p(3), p(4), p(SRC_W), p(6)],
+                    dst: [p(7), p(8), p(9), p(14)],
+                    alpha: alpha.then(|| p(ALPHA)),
+                }),
+                sunk: std::cell::Cell::new(false),
+                applied: std::cell::Cell::new(None),
+                name: format!("plane{id}"),
+            }
+        }
+
+        pub const SDR: Colour = Colour { encoding: 1, range: 0, eotf: 0 };
+        pub const HDR10: Colour = Colour { encoding: 2, range: 0, eotf: 2 };
+
+        pub struct Rig {
+            pub sink: Sink<Kms>,
+            pub kms: Kms,
+            pub planes: Vec<VideoPlane>,
+            client: Option<UnixStream>,
+            path: PathBuf,
+            next_id: u64,
+        }
+
+        impl Rig {
+            pub fn new(name: &str, planes: Vec<VideoPlane>) -> Self {
+                let path = std::env::temp_dir().join(format!("mbveil-{}-{name}.sock", std::process::id()));
+                let mut sink = Sink::bind(&path).unwrap();
+                sink.veil_maker = fake_veil;
+                sink.vblank_unavailable();
+                let kms = Kms { file: Rc::new(std::fs::File::open("/dev/null").unwrap()), log: Rc::default() };
+                Self { sink, kms, planes, client: None, path, next_id: 0 }
+            }
+            pub fn failing_maker(&mut self) {
+                self.sink.veil_maker = failing_veil;
+            }
+            fn crtc() -> control::crtc::Handle {
+                control::from_u32(89).unwrap()
+            }
+            pub fn pump(&mut self) {
+                let into = Rect { x: 0, y: 0, width: 3840, height: 2160 };
+                self.sink.pump(&self.kms, Self::crtc(), &self.planes, into);
+            }
+            pub fn connect(&mut self) {
+                self.client = Some(UnixStream::connect(&self.path).unwrap());
+                self.pump();
+                assert!(self.sink.server.connected());
+            }
+            pub fn gone(&mut self) {
+                self.client = None;
+                self.pump();
+            }
+            fn send(&mut self, bytes: &[u8], fd: Option<RawFd>) {
+                let client = self.client.as_ref().unwrap();
+                let mut iov = libc::iovec { iov_base: bytes.as_ptr() as *mut _, iov_len: bytes.len() };
+                let mut space = [0u8; 64];
+                // SAFETY: a header over the iovec and control space above.
+                let sent = unsafe {
+                    let mut header: libc::msghdr = std::mem::zeroed();
+                    header.msg_iov = &mut iov;
+                    header.msg_iovlen = 1;
+                    if let Some(fd) = fd {
+                        header.msg_control = space.as_mut_ptr().cast();
+                        header.msg_controllen = libc::CMSG_SPACE(size_of::<RawFd>() as u32) as _;
+                        let cmsg = libc::CMSG_FIRSTHDR(&header);
+                        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+                        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+                        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as u32) as _;
+                        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>(), fd);
+                    }
+                    libc::sendmsg(client.as_raw_fd(), &header, 0)
+                };
+                assert_eq!(sent, bytes.len() as isize);
+                self.pump();
+            }
+            pub fn control(&mut self, kind: u32) {
+                let mut bytes = [0u8; MESSAGE];
+                bytes[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+                bytes[4..8].copy_from_slice(&kind.to_le_bytes());
+                self.send(&bytes, None);
+            }
+            /// An untimed frame: up at the next commit.
+            pub fn frame(&mut self, fourcc: DrmFourcc, width: u32, height: u32, colour: Colour) {
+                self.next_id += 1;
+                let mut bytes = [0u8; MESSAGE];
+                let mut put = |at: usize, value: u32| bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                put(0, MAGIC);
+                put(4, KIND_FRAME);
+                put(16, fourcc as u32);
+                put(20, width);
+                put(24, height);
+                put(28, 2);
+                put(32, width);
+                put(36, width);
+                put(52, width * height);
+                put(72, 1);
+                put(76, colour.encoding as u32 | (colour.range as u32) << 4 | (colour.eotf as u32) << 8);
+                put(80, width);
+                put(84, height);
+                bytes[8..16].copy_from_slice(&self.next_id.to_le_bytes());
+                let fd = std::fs::File::open("/dev/null").unwrap();
+                self.send(&bytes, Some(fd.as_raw_fd()));
+            }
+            /// What the presenter does at its next commit: the film's part,
+            /// committed, and what the commit carried.
+            pub fn commit(&mut self) -> Option<(Staged, Props)> {
+                let mut request = control::atomic::AtomicModeReq::new();
+                let staged = self.sink.stage_next(&self.kms, Self::crtc(), &self.planes, (3840, 2160), &mut request)?;
+                self.kms.atomic_commit(control::AtomicCommitFlags::NONBLOCK, request).unwrap();
+                self.sink.settle(&self.planes, staged, Ok(()));
+                Some((staged, self.kms.log.borrow().commits.last().unwrap().clone()))
+            }
+            /// What `SplitDisplay::hold` does before a change of the display.
+            pub fn hold(&mut self) {
+                self.sink.drop_veil(&self.kms, Self::crtc(), &self.planes);
+            }
+            pub fn veil_fb(&self) -> Option<u32> {
+                self.sink.veil.as_ref().map(|veil| u32::from(veil.framebuffer))
+            }
+        }
+
+        impl Drop for Rig {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+
+        pub fn get(request: &Props, plane: u32, prop: u32) -> Option<u64> {
+            request.get(&(plane, plane * 100 + prop)).copied()
+        }
+
+        fn one_plane(name: &str) -> Rig {
+            Rig::new(name, vec![plane(73, &[DrmFourcc::Nv12, DrmFourcc::Nv15], true)])
+        }
+
+        /// The veil's commit: the plane on, the veil's frame, at UHD, alpha
+        /// 0, read as SDR, at the bottom.
+        fn assert_veil(rig: &Rig, staged: Staged, request: &Props, plane: u32) {
+            assert_eq!(staged, Staged::Veil(rig.planes.iter().position(|p| u32::from(p.plane) == plane).unwrap()));
+            assert_eq!(get(request, plane, FB), rig.veil_fb().map(u64::from));
+            assert_eq!(get(request, plane, CRTC), Some(89));
+            assert_eq!(get(request, plane, SRC_W), Some(3840 << 16));
+            assert_eq!(get(request, plane, ALPHA), Some(0));
+            assert_eq!(get(request, plane, ENCODING), Some(1));
+            assert_eq!(get(request, plane, RANGE), Some(0));
+            assert_eq!(get(request, plane, EOTF), Some(0));
+            assert_eq!(get(request, plane, ZPOS), Some(0));
+        }
+
+        /// The film's first commit on `plane`: its frame, opaque, at its own
+        /// size, every colour property and the depth written.
+        fn assert_film(rig: &Rig, request: &Props, plane: u32, width: u32, colour: Colour) {
+            let fb = get(request, plane, FB).unwrap();
+            assert_ne!(Some(fb), rig.veil_fb().map(u64::from));
+            assert!(rig.kms.log.borrow().fbs.contains(&(fb as u32)));
+            assert_eq!(get(request, plane, ALPHA), Some(ALPHA_OPAQUE));
+            assert_eq!(get(request, plane, SRC_W), Some(u64::from(width) << 16));
+            assert_eq!(get(request, plane, ENCODING), Some(colour.encoding));
+            assert_eq!(get(request, plane, RANGE), Some(colour.range));
+            assert_eq!(get(request, plane, EOTF), Some(colour.eotf));
+            assert_eq!(get(request, plane, ZPOS), Some(0));
+        }
+
+        #[test]
+        fn uhd_veil_then_uhd_film_keeps_one_4k_video_plane() {
+            let mut rig = one_plane("uhd");
+            rig.connect();
+            let (staged, request) = rig.commit().unwrap();
+            assert_veil(&rig, staged, &request, 73);
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, SDR);
+            let (staged, request) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(0));
+            assert_film(&rig, &request, 73, 3840, SDR);
+            assert!(yuv_4k(VEIL_FOURCC, VEIL_SIZE.0, VEIL_SIZE.1) && yuv_4k(DrmFourcc::Nv15, 3840, 2160));
+            assert!(rig.sink.veiled.is_none());
+        }
+
+        #[test]
+        fn uhd_veil_gives_way_to_an_hd_or_sd_film_in_its_first_commit() {
+            for (width, height) in [(1920, 1080), (720, 576)] {
+                let mut rig = one_plane(&format!("hd{width}"));
+                rig.connect();
+                rig.commit().unwrap();
+                rig.frame(DrmFourcc::Nv12, width, height, SDR);
+                // No veil wanted for a frame that is not 4K: straight up.
+                let (staged, request) = rig.commit().unwrap();
+                assert_eq!(staged, Staged::Film(0));
+                assert_film(&rig, &request, 73, width, SDR);
+                assert!(!yuv_4k(DrmFourcc::Nv12, width, height));
+            }
+        }
+
+        #[test]
+        fn the_veils_plane_goes_off_with_the_film_on_another() {
+            let planes = vec![plane(73, &[DrmFourcc::Nv12], true), plane(75, &[DrmFourcc::Nv12, DrmFourcc::Nv15], true)];
+            let mut rig = Rig::new("two", planes);
+            rig.connect();
+            let (staged, request) = rig.commit().unwrap();
+            assert_veil(&rig, staged, &request, 73);
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, HDR10);
+            let (staged, request) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(1));
+            assert_film(&rig, &request, 75, 3840, HDR10);
+            // In the same request: the veil's plane off.
+            assert_eq!(get(&request, 73, FB), Some(0));
+            assert_eq!(get(&request, 73, CRTC), Some(0));
+        }
+
+        #[test]
+        fn after_a_change_of_the_display_a_waiting_uhd_frame_waits_for_the_veil() {
+            let mut rig = one_plane("hold");
+            rig.connect();
+            rig.commit().unwrap();
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, SDR);
+            // The display changed as a whole with the frame waiting.
+            rig.hold();
+            assert_eq!(rig.kms.log.borrow().hidden, vec![73]);
+            // The veil before the frame, the frame kept...
+            let (staged, request) = rig.commit().unwrap();
+            assert_veil(&rig, staged, &request, 73);
+            assert_eq!(rig.sink.pending.len(), 1);
+            // ...and up at the commit after the veil's.
+            let (staged, request) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(0));
+            assert_film(&rig, &request, 73, 3840, SDR);
+        }
+
+        #[test]
+        fn after_a_change_of_the_display_a_waiting_hd_frame_goes_straight_up() {
+            let mut rig = one_plane("holdhd");
+            rig.connect();
+            rig.commit().unwrap();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            rig.hold();
+            let (staged, _) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(0));
+        }
+
+        #[test]
+        fn a_stop_veils_the_plane_again_and_the_player_going_takes_it_all_back() {
+            let mut rig = one_plane("stop");
+            rig.connect();
+            rig.commit().unwrap();
+            let veil = rig.veil_fb();
+            for _ in 0..5 {
+                rig.frame(DrmFourcc::Nv15, 3840, 2160, SDR);
+                assert_eq!(rig.commit().unwrap().0, Staged::Film(0));
+                rig.control(KIND_STOP);
+                let (staged, request) = rig.commit().unwrap();
+                assert_veil(&rig, staged, &request, 73);
+            }
+            // One veil frame for the connection.
+            assert_eq!(rig.sink.veils_made, 1);
+            assert_eq!(rig.veil_fb(), veil);
+            rig.gone();
+            assert_eq!(rig.kms.log.borrow().hidden.last(), Some(&73));
+            assert!(rig.veil_fb().is_none());
+            assert!(rig.commit().is_none());
+            // Every framebuffer and buffer object of the frames and the veil
+            // given back.
+            assert!(rig.kms.log.borrow().fbs.is_empty(), "{:?}", rig.kms.log.borrow().fbs);
+            assert!(rig.kms.log.borrow().gems.is_empty(), "{:?}", rig.kms.log.borrow().gems);
+            // The next player: a veil of its own, given back with it.
+            rig.connect();
+            rig.commit().unwrap();
+            assert_eq!(rig.sink.veils_made, 2);
+            rig.gone();
+            assert!(rig.kms.log.borrow().fbs.is_empty());
+        }
+
+        #[test]
+        fn a_programme_with_no_picture_takes_the_veil_down_until_the_next_channel() {
+            let mut rig = one_plane("radio");
+            rig.connect();
+            rig.commit().unwrap();
+            rig.control(KIND_NO_PICTURE);
+            assert_eq!(rig.kms.log.borrow().hidden, vec![73]);
+            assert!(rig.veil_fb().is_none());
+            assert!(rig.kms.log.borrow().fbs.is_empty());
+            // Not put up again while the radio service plays.
+            assert!(rig.commit().is_none());
+            assert!(rig.commit().is_none());
+            // The next channel: veiled again.
+            rig.control(KIND_STOP);
+            let (staged, request) = rig.commit().unwrap();
+            assert_veil(&rig, staged, &request, 73);
+        }
+
+        #[test]
+        fn an_hdr_film_after_the_sdr_veil_writes_its_colour_on_the_same_plane() {
+            let mut rig = one_plane("hdr");
+            rig.connect();
+            rig.commit().unwrap();
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, HDR10);
+            let (_, request) = rig.commit().unwrap();
+            assert_film(&rig, &request, 73, 3840, HDR10);
+        }
+
+        #[test]
+        fn an_sdr_film_after_the_sdr_veil_writes_every_colour_property_again() {
+            let mut rig = one_plane("sdr");
+            rig.connect();
+            rig.commit().unwrap();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (_, request) = rig.commit().unwrap();
+            assert_film(&rig, &request, 73, 1920, SDR);
+        }
+
+        #[test]
+        fn no_veil_on_a_plane_without_alpha_and_the_film_goes_up_as_before() {
+            let mut rig = Rig::new("alpha", vec![plane(73, &[DrmFourcc::Nv12, DrmFourcc::Nv15], false)]);
+            rig.connect();
+            assert!(rig.commit().is_none());
+            assert!(rig.kms.log.borrow().commits.is_empty());
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, SDR);
+            let (staged, request) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(0));
+            assert_eq!(get(&request, 73, ALPHA), None);
+        }
+
+        #[test]
+        fn a_veil_that_cannot_be_made_or_is_refused_leaves_the_film_as_before() {
+            let mut rig = one_plane("nomem");
+            rig.failing_maker();
+            rig.connect();
+            assert!(rig.commit().is_none());
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, SDR);
+            assert_eq!(rig.commit().unwrap().0, Staged::Film(0));
+
+            let mut rig = one_plane("refused");
+            rig.connect();
+            rig.kms.log.borrow_mut().refuse_test = true;
+            assert!(rig.commit().is_none());
+            rig.kms.log.borrow_mut().refuse_test = false;
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, SDR);
+            assert_eq!(rig.commit().unwrap().0, Staged::Film(0));
+            // Tried again with the next player.
+            rig.gone();
+            rig.connect();
+            assert!(matches!(rig.commit().unwrap().0, Staged::Veil(0)));
+        }
     }
 
     fn frame(width: u32, height: u32) -> Frame {

@@ -45,6 +45,9 @@ const FRAME_TIMED: u32 = 5;
 const STOP: u32 = 1;
 const RELEASE: u32 = 2;
 const HDR: u32 = 3;
+/// The programme has no picture (a radio service): the interface takes
+/// down what it put up for one (mediabox-tv's veil) until the next STOP.
+const NO_PICTURE: u32 = 6;
 const MESSAGE: usize = 88;
 const TIMED: usize = MESSAGE + 8;
 const REPLY: usize = 16;
@@ -263,6 +266,17 @@ impl Plane {
         put32(&mut message, 8, u32::from(eotf));
         if let Err(error) = self.send_message(&message, &[]) {
             eprintln!("mediabox-live: HDR bilgisi gönderilemedi: {error}");
+        }
+    }
+
+    /// The programme has no picture: nothing comes until the next channel's.
+    pub fn no_picture(&self) {
+        mediabox_core::timeline!("plane-no-picture");
+        let mut message = [0u8; MESSAGE];
+        put32(&mut message, 0, MAGIC);
+        put32(&mut message, 4, NO_PICTURE);
+        if let Err(error) = self.send_message(&message, &[]) {
+            eprintln!("mediabox-live: görüntüsüz servis bildirilemedi: {error}");
         }
     }
 
