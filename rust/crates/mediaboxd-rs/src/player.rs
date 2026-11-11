@@ -81,6 +81,15 @@ impl Playing {
     }
 }
 
+/// `ao-reload` for the change of the wire it follows, generation
+/// `generation`: said to the live player for its health only (FAZ 3J.3C),
+/// which reloads the same with it or without it. A live player from before
+/// reads the first word alone; one from after takes no argument as a
+/// request whose generation is not known.
+fn reload_request(generation: u64) -> Value {
+    json!({"command": ["ao-reload", generation], "request_id": 41})
+}
+
 pub struct PlayerManager {
     launcher: PathBuf,
     socket: PathBuf,
@@ -272,7 +281,7 @@ impl PlayerManager {
             }
             self.follow().requested += 1;
             mediabox_core::timeline!("ao-reload", "film={film} epoch={epoch} gen={generation}");
-            let answer = self.ask_within(json!({"command": ["ao-reload"], "request_id": 41}), std::time::Duration::from_secs(3)).await;
+            let answer = self.ask_within(reload_request(generation), std::time::Duration::from_secs(3)).await;
             let error = answer.as_ref().and_then(|answer| answer.get("error")).and_then(Value::as_str).unwrap_or("no answer").to_string();
             let ours = self.film() == film && self.epoch() == epoch;
             mediabox_core::timeline!("ao-reload-done", "film={film} epoch={epoch} gen={generation} ok={} same={}", u8::from(error == "success"), u8::from(ours));
@@ -491,7 +500,7 @@ impl PlayerManager {
         let _one = self.sound_one.lock().await;
         let after = self.mode_changes.load(Ordering::SeqCst);
         let answer = self
-            .ask_within(json!({"command": ["ao-reload"], "request_id": 41}), std::time::Duration::from_secs(3))
+            .ask_within(reload_request(after), std::time::Duration::from_secs(3))
             .await
             .ok_or("no answer")?;
         match answer.get("error").and_then(Value::as_str) {
@@ -1269,9 +1278,10 @@ mod tests {
         tokio::spawn(async move { player.make_sound_current(film, epoch).await })
     }
 
-    async fn next_reload(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<fake::Request>) -> tokio::sync::oneshot::Sender<(String, Value)> {
+    /// The next `ao-reload`, which names the change of the wire it is for.
+    async fn next_reload(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<fake::Request>, generation: u64) -> tokio::sync::oneshot::Sender<(String, Value)> {
         let (request, answer) = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv()).await.unwrap().unwrap();
-        assert_eq!(request["command"], json!(["ao-reload"]));
+        assert_eq!(request["command"], json!(["ao-reload", generation]));
         answer
     }
 
@@ -1283,7 +1293,7 @@ mod tests {
         let (player, mut inbox) = followed(dir.path()).await;
         player.mode_applied(1);
         let outcome = reopen(&player);
-        next_reload(&mut inbox).await.send(("success".into(), Value::Null)).unwrap();
+        next_reload(&mut inbox, 1).await.send(("success".into(), Value::Null)).unwrap();
         assert_eq!(outcome.await.unwrap(), SoundOutcome::Reloaded { generation: 1 });
         player.mode_applied(1);
         assert_eq!(reopen(&player).await.unwrap(), SoundOutcome::Current);
@@ -1301,10 +1311,10 @@ mod tests {
         let (player, mut inbox) = followed(dir.path()).await;
         player.mode_applied(1);
         let outcome = reopen(&player);
-        let first = next_reload(&mut inbox).await;
+        let first = next_reload(&mut inbox, 1).await;
         player.mode_applied(2);
         first.send(("success".into(), Value::Null)).unwrap();
-        let second = next_reload(&mut inbox).await;
+        let second = next_reload(&mut inbox, 2).await;
         assert_eq!(player.sound_generations(), (1, 2), "the first answer is the first change's");
         assert!(!player.sound_current());
         second.send(("success".into(), Value::Null)).unwrap();
@@ -1322,7 +1332,7 @@ mod tests {
         let (player, mut inbox) = followed(dir.path()).await;
         player.mode_applied(1);
         let outcome = reopen(&player);
-        let answer = next_reload(&mut inbox).await;
+        let answer = next_reload(&mut inbox, 1).await;
         player.next_epoch();
         answer.send(("success".into(), Value::Null)).unwrap();
         assert_eq!(outcome.await.unwrap(), SoundOutcome::Stale);
@@ -1341,11 +1351,25 @@ mod tests {
         let (player, mut inbox) = followed(dir.path()).await;
         player.mode_applied(1);
         let outcome = reopen(&player);
-        next_reload(&mut inbox).await.send(("ses aygıtı açılamadı".into(), Value::Null)).unwrap();
+        next_reload(&mut inbox, 1).await.send(("ses aygıtı açılamadı".into(), Value::Null)).unwrap();
         assert_eq!(outcome.await.unwrap(), SoundOutcome::Failed("ses aygıtı açılamadı".into()));
         let follow = player.sound_follow();
         assert_eq!((follow.failed, follow.completed, follow.last_error.as_deref()), (1, 0, Some("ses aygıtı açılamadı")));
         assert!(!player.sound_current());
+    }
+
+    /// FAZ 3J.3C: the gate's own reload names the change of the wire it is
+    /// for, as the one that follows the wire does.
+    #[tokio::test]
+    async fn the_gate_s_reload_names_its_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (player, mut inbox) = followed(dir.path()).await;
+        player.mode_applied(3);
+        let asked = Arc::clone(&player);
+        let done = tokio::spawn(async move { asked.reload_sound().await });
+        next_reload(&mut inbox, 3).await.send(("success".into(), Value::Null)).unwrap();
+        assert_eq!(done.await.unwrap(), Ok(()));
+        assert!(player.sound_current());
     }
 
     /// The live player is sent the whole plan in one request, for the
