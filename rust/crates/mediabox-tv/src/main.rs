@@ -2889,6 +2889,7 @@ impl App {
             && !playing.seen
             && status.get("picture").and_then(Value::as_bool) == Some(true)
             && status.get("live_service").and_then(Value::as_u64) == self.live_tuned.map(u64::from)
+            && platform::video_visible()
         {
             eprintln!("mediabox-tv.live first frame {} ms after the key (status)", playing.asked.elapsed().as_millis());
             playing.seen = true;
@@ -3106,7 +3107,9 @@ impl App {
         let Some(playing) = self.here.as_mut() else {
             return;
         };
-        let mut showing = platform::video_showing();
+        // Seen, not only committed: a real flip, and the plane holding the
+        // frame opaque under the interface (`platform::video_visible`).
+        let mut showing = platform::video_visible();
         if playing.continued {
             showing = playing.seen;
         } else if playing.previous_on_plane {

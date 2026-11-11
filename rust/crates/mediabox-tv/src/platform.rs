@@ -662,6 +662,10 @@ fn read_display_events(kms: &SharedKms, crtc: control::crtc::Handle, s: &mut Sta
                 let at = flip.duration.as_nanos() as u64;
                 mediabox_core::timeline!("flip", "seq={} at={at}", flip.frame);
                 flip_completed(s, at);
+                // Only a real flip says the picture is seen (`verify_flip`).
+                let state = &mut *s;
+                state.sink.verify_flip(kms, crtc, &state.video);
+                VISIBLE.store(state.sink.picture_visible(), std::sync::atomic::Ordering::Relaxed);
             }
             control::Event::Vblank(vblank) if vblank.crtc == crtc => {
                 s.vblank_asked = false;
@@ -903,6 +907,7 @@ fn presenter(stage: Arc<Stage>, kms: SharedKms, crtc: control::crtc::Handle) {
             let state = &mut *s;
             state.sink.pump(&kms, crtc, &state.video, into);
             VIDEO.store(state.sink.showing() || state.sink.has_pending(), std::sync::atomic::Ordering::Relaxed);
+            VISIBLE.store(state.sink.picture_visible(), std::sync::atomic::Ordering::Relaxed);
             *ARRIVED.lock().unwrap_or_else(|e| e.into_inner()) = state.sink.last_arrival();
             // The interface draws the subtitle and tells the television
             // about HDR: wake it when either has changed.
@@ -1102,6 +1107,15 @@ pub fn video_arrived() -> Option<std::time::Instant> {
 /// while this is true the panel is showing the film and not the catalogue.
 pub fn video_showing() -> bool {
     VIDEO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The film's picture is seen: a real page flip came for it and the plane
+/// holds it, opaque, under the interface (`video::Sink::verify_flip`).
+/// `video_showing` is only that a frame was committed or is waiting.
+static VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn video_visible() -> bool {
+    VISIBLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 thread_local! {
@@ -1448,8 +1462,10 @@ impl SplitDisplay {
         // way to reach the panel, and the interface is what outlives a film.
         let socket = std::env::var("MEDIABOX_VIDEO_SOCKET")
             .unwrap_or_else(|_| crate::video::DEFAULT_SOCKET.to_string());
-        let sink = crate::video::Sink::bind(&socket)
+        let mut sink = crate::video::Sink::bind(&socket)
             .map_err(|e| format!("listen for the player on {socket}: {e}"))?;
+        // What the planes were left with by whoever had them before.
+        sink.adopt_planes(&kms, &video);
         eprintln!("mediabox-tv.video listening on {socket}");
 
         if let Some(offer) = &offer
@@ -2415,6 +2431,7 @@ impl SplitDisplay {
         let state = &mut *stage;
         state.sink.clear(&self.kms, self.crtc, &state.video, true);
         VIDEO.store(false, std::sync::atomic::Ordering::Relaxed);
+        VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
         // And the stacking order, which belongs to the connector rather than to
         // whoever set it: Kodi assigns this port's windows for itself and must
         // not inherit a primary this process raised.

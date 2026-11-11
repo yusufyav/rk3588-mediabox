@@ -327,6 +327,37 @@ fn plane_props<D: ControlDevice>(device: &D, plane: control::plane::Handle) -> O
 /// A plane fully opaque, as the `alpha` property has it.
 const ALPHA_OPAQUE: u64 = 0xffff;
 
+/// What the kernel holds for a video plane now, read back from it: the
+/// properties a picture needs to be seen (`VideoPlane::unseen`). `None`
+/// where the plane has no such property.
+///
+/// Read because none of it is reset when a process lets go of the plane:
+/// only the driver's plane reset at boot (`vop2_atomic_plane_reset` ->
+/// `__drm_atomic_helper_plane_reset`, alpha = opaque) does, and the device
+/// is kept across a restart besides (`fdstore`). Measured 2026-11-11: the
+/// veil's alpha 0 outlived its binary, and the one put back after it, which
+/// never wrote alpha, played every channel on a transparent plane, the
+/// sound and the interface there, until a reboot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlaneReadout {
+    pub fb: u64,
+    pub crtc: u64,
+    pub alpha: Option<u64>,
+    pub zpos: Option<u64>,
+    pub encoding: Option<u64>,
+    pub range: Option<u64>,
+    pub eotf: Option<u64>,
+}
+
+/// A plane's properties, read with `GETPROPERTIES` (one ioctl).
+fn read_plane<D: ControlDevice>(device: &D, plane: &VideoPlane) -> Option<PlaneReadout> {
+    let properties = device.get_properties(plane.plane).ok()?;
+    let (handles, values) = properties.as_props_and_values();
+    let values: std::collections::HashMap<control::property::Handle, u64> =
+        handles.iter().copied().zip(values.iter().copied()).collect();
+    plane.readout(|handle| values.get(&handle).copied())
+}
+
 /// The veil's frame: black, 8-bit, 4:2:0, at UHD.
 const VEIL_FOURCC: DrmFourcc = DrmFourcc::Nv12;
 const VEIL_SIZE: (u32, u32) = (3840, 2160);
@@ -575,6 +606,57 @@ impl VideoPlane {
         self.formats.contains(&(fourcc as u32))
     }
 
+    /// This plane's readout, from a lookup of property values by handle.
+    fn readout(&self, value: impl Fn(control::property::Handle) -> Option<u64>) -> Option<PlaneReadout> {
+        let props = self.props?;
+        Some(PlaneReadout {
+            fb: value(props.fb)?,
+            crtc: value(props.crtc)?,
+            alpha: props.alpha.and_then(&value),
+            zpos: self.depth.and_then(&value),
+            encoding: self.encoding.and_then(&value),
+            range: self.range.and_then(&value),
+            eotf: self.eotf.and_then(&value),
+        })
+    }
+
+    /// Why a picture committed on this plane -- `framebuffer` on `crtc`,
+    /// read as `colour` -- is not seen, by what the plane holds now; `None`
+    /// when nothing stands in its way.
+    fn unseen(
+        &self,
+        now: &PlaneReadout,
+        crtc: control::crtc::Handle,
+        framebuffer: control::framebuffer::Handle,
+        colour: Option<Colour>,
+    ) -> Option<String> {
+        let mut wrong = Vec::new();
+        if now.fb != u64::from(u32::from(framebuffer)) {
+            wrong.push(format!("FB_ID={} not {}", now.fb, u32::from(framebuffer)));
+        }
+        if now.crtc != u64::from(u32::from(crtc)) {
+            wrong.push(format!("CRTC_ID={} not {}", now.crtc, u32::from(crtc)));
+        }
+        if let Some(alpha) = now.alpha.filter(|&alpha| alpha != ALPHA_OPAQUE) {
+            wrong.push(format!("alpha={alpha:#x}"));
+        }
+        if let Some(zpos) = now.zpos.filter(|&zpos| zpos != 0) {
+            wrong.push(format!("zpos={zpos} not under the interface"));
+        }
+        if let Some(colour) = colour {
+            for (name, now, want) in [
+                ("COLOR_ENCODING", now.encoding, colour.encoding),
+                ("COLOR_RANGE", now.range, colour.range),
+                ("EOTF", now.eotf, colour.eotf),
+            ] {
+                if let Some(now) = now.filter(|&now| now != want) {
+                    wrong.push(format!("{name}={now} not {want}"));
+                }
+            }
+        }
+        (!wrong.is_empty()).then(|| wrong.join(", "))
+    }
+
     /// Imports a frame's dma-buf planes and gives them a framebuffer.
     pub fn import<D: ControlDevice>(
         &self,
@@ -744,12 +826,17 @@ impl VideoPlane {
     }
 
     /// Puts the plane's going off into an atomic request: the film went up
-    /// on another plane than the veil's, in the same commit.
+    /// on another plane than the veil's, in the same commit. Opaque again
+    /// as it goes: whoever uses the plane next -- another binary, Kodi --
+    /// may not write alpha, and gets the kernel's own default back.
     fn stage_off(&self, request: &mut control::atomic::AtomicModeReq) {
         use control::property::Value;
         let Some(props) = self.props else { return };
         request.add_property(self.plane, props.fb, Value::Framebuffer(None));
         request.add_property(self.plane, props.crtc, Value::CRTC(None));
+        if let Some(alpha) = props.alpha {
+            request.add_property(self.plane, alpha, Value::UnsignedRange(ALPHA_OPAQUE));
+        }
     }
 
     /// The request that carried `stage`'s properties was committed.
@@ -813,9 +900,21 @@ impl VideoPlane {
 
     /// Takes the video off the panel. The interface is drawing underneath it
     /// and does not need to be told.
+    ///
+    /// One blocking atomic commit -- what the driver's legacy `SetPlane`
+    /// with no framebuffer does inside (`rockchip_atomic_helper_disable_plane`)
+    /// -- with the plane's alpha put back to opaque in it (`stage_off`).
     pub fn hide<D: ControlDevice>(&self, device: &D, crtc: control::crtc::Handle) {
         self.applied.set(None);
         self.sunk.set(false);
+        if self.props.is_some() {
+            let mut request = control::atomic::AtomicModeReq::new();
+            self.stage_off(&mut request);
+            match device.atomic_commit(control::AtomicCommitFlags::empty(), request) {
+                Ok(()) => return,
+                Err(e) => eprintln!("mediabox-tv.video could not clear the plane atomically: {e}"),
+            }
+        }
         // A null framebuffer is what turns a plane off; the CRTC is named only
         // because the ioctl has a field for it.
         if let Err(e) = device.set_plane(self.plane, crtc, None, 0, (0, 0, 0, 0), (0, 0, 0, 0)) {
@@ -1400,6 +1499,36 @@ pub struct Sink<D: ControlDevice + Clone> {
     reconfigured: Option<u64>,
     /// How many frames that has given back, since the sink was made.
     modeset_stale: u64,
+    /// The next film commit writes the plane's whole state -- alpha, zpos,
+    /// every colour property, besides the framebuffer and the rectangles
+    /// it always writes -- none taken as left there by a process, a veil,
+    /// a channel or a mode before. Set from the start, at every new
+    /// presentation (`new_presentation`) and at a mode change.
+    restage: bool,
+    /// Whether the picture is seen (`verify_flip`).
+    visibility: Visibility,
+    /// The next real page flip is checked against the plane
+    /// (`verify_flip`): a commit that wrote the whole state has gone.
+    verify_armed: bool,
+    /// The one full restage a picture not seen gets in a presentation.
+    restaged_once: bool,
+    /// Reads a plane's properties back (`read_plane`; a test's own in tests).
+    plane_reader: fn(&D, &VideoPlane) -> Option<PlaneReadout>,
+}
+
+/// Whether the film's picture is seen, by the plane's own state after a
+/// real page flip (`Sink::verify_flip`). A frame committed, or a plane
+/// chosen, is not that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Visibility {
+    /// No flip of this presentation checked yet.
+    Unverified,
+    /// Flipped, and the plane holds the frame, opaque, under the interface,
+    /// in the frame's colour.
+    Visible,
+    /// Flipped twice -- the second after a full restage -- and still not
+    /// seen: `video_plane_invisible`.
+    Invisible,
 }
 
 impl<D: ControlDevice + Clone> Sink<D> {
@@ -1434,7 +1563,93 @@ impl<D: ControlDevice + Clone> Sink<D> {
             veils_made: 0,
             reconfigured: None,
             modeset_stale: 0,
+            restage: true,
+            visibility: Visibility::Unverified,
+            verify_armed: false,
+            restaged_once: false,
+            plane_reader: read_plane::<D>,
         })
+    }
+
+    /// At start: what the candidate planes hold, said, and an idle one left
+    /// transparent by whoever had the display before -- a veil's binary, a
+    /// crash -- made opaque again. A plane carrying a picture is only said:
+    /// it may be the interface's own, put up already.
+    pub fn adopt_planes(&mut self, device: &D, planes: &[VideoPlane]) {
+        use control::property::Value;
+        for plane in planes {
+            let Some(now) = (self.plane_reader)(device, plane) else {
+                continue;
+            };
+            eprintln!("mediabox-tv.video inherited {} {now:?}", plane.name);
+            let (Some(handle), Some(alpha)) = (plane.props.and_then(|props| props.alpha), now.alpha) else {
+                continue;
+            };
+            if now.fb != 0 || alpha == ALPHA_OPAQUE {
+                continue;
+            }
+            let mut request = control::atomic::AtomicModeReq::new();
+            request.add_property(plane.plane, handle, Value::UnsignedRange(ALPHA_OPAQUE));
+            match device.atomic_commit(control::AtomicCommitFlags::empty(), request) {
+                Ok(()) => eprintln!("mediabox-tv.video {} was left at alpha {alpha:#x}: opaque again", plane.name),
+                Err(e) => eprintln!("mediabox-tv.video {} was left at alpha {alpha:#x}, and stays: {e}", plane.name),
+            }
+        }
+    }
+
+    /// A new presentation -- a stop, a programme with no picture, a player
+    /// gone: its first frame writes the plane's whole state and is checked
+    /// by its flip, as the first ever is.
+    fn new_presentation(&mut self) {
+        self.restage = true;
+        self.visibility = Visibility::Unverified;
+        self.verify_armed = false;
+        self.restaged_once = false;
+    }
+
+    /// Whether the film's picture is on the panel and seen: flipped, and the
+    /// plane checked (`verify_flip`).
+    pub fn picture_visible(&self) -> bool {
+        self.on && self.visibility == Visibility::Visible
+    }
+
+    /// A real page flip came for the commit in flight. If that commit wrote
+    /// the plane's whole state, the plane is read back: the frame committed
+    /// on it, on this CRTC, opaque, under the interface, in its colour. The
+    /// first time it is not, the next frame writes the whole state again;
+    /// the second, it is said as `video_plane_invisible`, with everything
+    /// the plane holds, and not tried again until the next presentation.
+    pub fn verify_flip(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
+        if !std::mem::take(&mut self.verify_armed) {
+            return;
+        }
+        let Some((index, framebuffer)) = self.chosen.zip(self.shown.back().map(|(_, imported)| imported.framebuffer)) else {
+            return;
+        };
+        let Some(plane) = planes.get(index) else { return };
+        let now = (self.plane_reader)(device, plane);
+        let why = match &now {
+            Some(now) => plane.unseen(now, crtc, framebuffer, plane.applied.get()),
+            None => Some("the plane's properties could not be read".into()),
+        };
+        let Some(why) = why else {
+            if self.visibility != Visibility::Visible {
+                eprintln!("mediabox-tv.video picture seen on {} {now:?}", plane.name);
+            }
+            mediabox_core::timeline!("visible", "pid={} plane={} fb={}", self.server.peer(), plane.name, u32::from(framebuffer));
+            self.visibility = Visibility::Visible;
+            return;
+        };
+        mediabox_core::timeline!("unseen-plane", "pid={} plane={} why={why:?} restaged={}", self.server.peer(), plane.name, self.restaged_once);
+        if !self.restaged_once {
+            eprintln!("mediabox-tv.video picture not seen on {} ({why}): its whole state again {now:?}", plane.name);
+            self.restaged_once = true;
+            self.restage = true;
+            self.visibility = Visibility::Unverified;
+        } else {
+            eprintln!("mediabox-tv.video video_plane_invisible plane={} id={} ({why}) {now:?}", plane.name, u32::from(plane.plane));
+            self.visibility = Visibility::Invisible;
+        }
     }
 
     pub fn poll_fd(&self) -> RawFd {
@@ -1638,6 +1853,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
                     mediabox_core::timeline!("no-picture", "pid={} veiled={}", self.server.peer(), self.veiled.is_some());
                     self.no_picture = true;
                     self.free_veil(device, crtc, planes);
+                    self.new_presentation();
                 }
                 Incoming::Frame {
                     id,
@@ -1809,6 +2025,8 @@ impl<D: ControlDevice + Clone> Sink<D> {
         self.shown_due = None;
         let film = self.on || !self.pending.is_empty();
         self.reconfigured = film.then(monotonic_ns);
+        // The mode's first film frame writes the plane's whole state.
+        self.restage = true;
         mediabox_core::timeline!("vblank-forget", "epoch={} pending={}", u8::from(film), self.pending.len());
     }
 
@@ -2081,10 +2299,12 @@ impl<D: ControlDevice + Clone> Sink<D> {
             self.server.release(old.id);
             return None;
         };
-        // Lifting the veil, the plane is the film's from scratch: every
-        // colour property and its depth written again with the frame, none
-        // taken as already there from the veil's (SDR) commit.
-        if self.veiled.is_some() {
+        // The first frame of a presentation -- of the process, after a stop,
+        // a mode change, the veil (SDR), a restage -- writes every colour
+        // property and the depth again with the frame (alpha, the frame and
+        // its rectangles go with every frame): none of it is taken as left
+        // there by whatever had the plane before.
+        if self.restage || self.veiled.is_some() {
             planes[index].applied.set(None);
             planes[index].sunk.set(false);
         }
@@ -2120,6 +2340,11 @@ impl<D: ControlDevice + Clone> Sink<D> {
             crate::monitor::reconfigured();
         }
         planes[index].staged(pending.info.colour);
+        // A frame that wrote the whole state, or the picture not yet seen:
+        // its flip is checked against the plane (`verify_flip`).
+        if std::mem::take(&mut self.restage) || self.visibility == Visibility::Unverified {
+            self.verify_armed = true;
+        }
         if let Some(veiled) = self.veiled.take() {
             let info = &pending.info;
             mediabox_core::timeline!(
@@ -2229,6 +2454,7 @@ impl<D: ControlDevice + Clone> Sink<D> {
         }
         self.on = false;
         self.frames = 0;
+        self.new_presentation();
     }
 }
 
@@ -2435,6 +2661,12 @@ mod tests {
             pub fbs: BTreeSet<u32>,
             pub gems: BTreeSet<u32>,
             pub hidden: Vec<u32>,
+            /// What the kernel holds now, every real commit applied:
+            /// (object, property) -> value (`fake_reader`).
+            pub state: Props,
+            /// Values a commit does not change, whatever it writes: a
+            /// driver that leaves a property where it was.
+            pub stuck: Props,
             next: u32,
         }
 
@@ -2456,7 +2688,17 @@ mod tests {
                 if flags.contains(control::AtomicCommitFlags::TEST_ONLY) {
                     return if log.refuse_test { Err(io::Error::from_raw_os_error(libc::EINVAL)) } else { Ok(()) };
                 }
-                log.commits.push(parse(&req));
+                let props = parse(&req);
+                for (&(object, property), &value) in &props {
+                    // A blocking commit turning a plane off: `hide`.
+                    if property == object * 100 + FB && value == 0 && !flags.contains(control::AtomicCommitFlags::NONBLOCK) {
+                        log.hidden.push(object);
+                    }
+                    log.state.insert((object, property), value);
+                }
+                let stuck = log.stuck.clone();
+                log.state.extend(stuck);
+                log.commits.push(props);
                 Ok(())
             }
             fn add_planar_framebuffer<B: PlanarBuffer + ?Sized>(&self, _: &B, _: control::FbCmd2Flags) -> io::Result<control::framebuffer::Handle> {
@@ -2539,6 +2781,13 @@ mod tests {
             Ok(Imported { device: kms.clone(), framebuffer, handles: vec![handle] })
         }
 
+        /// The plane's properties as the fake kernel holds them.
+        fn fake_reader(kms: &Kms, plane: &VideoPlane) -> Option<PlaneReadout> {
+            let id = u32::from(plane.plane);
+            let log = kms.log.borrow();
+            plane.readout(|handle| log.state.get(&(id, u32::from(handle))).copied())
+        }
+
         fn failing_veil(_: &Kms) -> Result<Imported<Kms>, String> {
             Err("no memory".into())
         }
@@ -2592,8 +2841,18 @@ mod tests {
                 let path = std::env::temp_dir().join(format!("mbveil-{}-{name}.sock", std::process::id()));
                 let mut sink = Sink::bind(&path).unwrap();
                 sink.veil_maker = fake_veil;
+                sink.plane_reader = fake_reader;
                 sink.vblank_unavailable();
                 let kms = Kms { file: Rc::new(std::fs::File::open("/dev/null").unwrap()), log: Rc::default() };
+                // Each plane as the driver's reset leaves it: off, opaque,
+                // at its own depth, BT.601 limited, no curve.
+                for plane in &planes {
+                    let id = u32::from(plane.plane);
+                    let mut log = kms.log.borrow_mut();
+                    for (property, value) in [(FB, 0), (CRTC, 0), (ALPHA, ALPHA_OPAQUE), (ZPOS, 11), (ENCODING, 0), (RANGE, 0), (EOTF, 0)] {
+                        log.state.insert((id, id * 100 + property), value);
+                    }
+                }
                 Self { sink, kms, planes, client: None, path, next_id: 0 }
             }
             pub fn failing_maker(&mut self) {
@@ -2694,6 +2953,22 @@ mod tests {
                 self.kms.atomic_commit(control::AtomicCommitFlags::NONBLOCK, request).unwrap();
                 self.sink.settle(&self.planes, staged, Ok(()));
                 Some((staged, self.kms.log.borrow().commits.last().unwrap().clone()))
+            }
+            /// The real page flip of the commit last made: the plane checked.
+            pub fn flip(&mut self) -> Visibility {
+                self.sink.verify_flip(&self.kms, Self::crtc(), &self.planes);
+                self.sink.visibility
+            }
+            /// What `plane` holds now, as the kernel would say.
+            pub fn now(&self, plane: u32, prop: u32) -> Option<u64> {
+                self.kms.log.borrow().state.get(&(plane, plane * 100 + prop)).copied()
+            }
+            /// What a process before this one left on `plane`.
+            pub fn left(&self, plane: u32, values: &[(u32, u64)]) {
+                let mut log = self.kms.log.borrow_mut();
+                for &(prop, value) in values {
+                    log.state.insert((plane, plane * 100 + prop), value);
+                }
             }
             /// What `SplitDisplay::hold` does before a change of the display.
             pub fn hold(&mut self) {
@@ -3060,6 +3335,249 @@ mod tests {
             rig.commit().unwrap();
             assert_eq!(rig.shown(), Some(late));
             assert_eq!(rig.sink.modeset_stale, 0);
+        }
+
+        // FAZ 3J.2R: the plane's state is never taken as left there.
+
+        /// No veil (one could not be made): the film's own first commit is
+        /// all that turns the plane on.
+        fn unveiled(name: &str) -> Rig {
+            let mut rig = one_plane(name);
+            rig.failing_maker();
+            rig
+        }
+
+        /// The whole state of the film's commit is what the plane holds.
+        fn assert_holds(rig: &Rig, plane: u32, colour: Colour) {
+            assert_eq!(rig.now(plane, ALPHA), Some(ALPHA_OPAQUE));
+            assert_eq!(rig.now(plane, ZPOS), Some(0));
+            assert_eq!(rig.now(plane, ENCODING), Some(colour.encoding));
+            assert_eq!(rig.now(plane, RANGE), Some(colour.range));
+            assert_eq!(rig.now(plane, EOTF), Some(colour.eotf));
+            assert_eq!(rig.now(plane, CRTC), Some(89));
+            assert_ne!(rig.now(plane, FB), Some(0));
+        }
+
+        /// Case 1: The veil's binary left the plane transparent; the first film
+        /// commit of this one makes it opaque.
+        #[test]
+        fn a_plane_left_at_alpha_0_is_opaque_with_the_first_film_frame() {
+            let mut rig = unveiled("alpha0");
+            rig.left(73, &[(ALPHA, 0)]);
+            rig.connect();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (staged, request) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(0));
+            assert_eq!(get(&request, 73, ALPHA), Some(ALPHA_OPAQUE));
+            assert_holds(&rig, 73, SDR);
+            assert_eq!(rig.flip(), Visibility::Visible);
+        }
+
+        /// Case 2: Colour, curve and depth left wrong: all written with the
+        /// first frame, SDR over an HDR curve and HDR over SDR alike.
+        #[test]
+        fn wrong_colour_curve_and_depth_left_behind_are_all_written_again() {
+            for (name, left, film) in [("leftsdr", HDR10, SDR), ("lefthdr", SDR, HDR10)] {
+                let mut rig = unveiled(name);
+                rig.left(73, &[(ENCODING, left.encoding), (RANGE, 1), (EOTF, left.eotf), (ZPOS, 5), (ALPHA, 0)]);
+                rig.connect();
+                rig.frame(DrmFourcc::Nv15, 3840, 2160, film);
+                let (_, request) = rig.commit().unwrap();
+                assert_film(&rig, &request, 73, 3840, film);
+                assert_holds(&rig, 73, film);
+                assert_eq!(rig.flip(), Visibility::Visible, "{name}");
+            }
+        }
+
+        /// Case 3, 4: Veil -> SDR film and veil -> HDR film, on the veil's plane:
+        /// the veil's alpha 0 and its SDR colour do not stay.
+        #[test]
+        fn veil_then_sdr_or_hdr_film_is_seen() {
+            for (name, colour) in [("veilsdr", SDR), ("veilhdr", HDR10)] {
+                let mut rig = one_plane(name);
+                rig.connect();
+                assert!(matches!(rig.commit().unwrap().0, Staged::Veil(0)));
+                assert_eq!(rig.now(73, ALPHA), Some(0));
+                rig.frame(DrmFourcc::Nv15, 3840, 2160, colour);
+                let (_, request) = rig.commit().unwrap();
+                assert_film(&rig, &request, 73, 3840, colour);
+                assert_holds(&rig, 73, colour);
+                assert!(!rig.sink.picture_visible(), "committed is not seen");
+                assert_eq!(rig.flip(), Visibility::Visible);
+                assert!(rig.sink.picture_visible());
+            }
+        }
+
+        /// Case 5: Veil on one plane, film on another: the veil's plane goes off
+        /// opaque, so whoever takes it next sees what it puts there.
+        #[test]
+        fn the_veils_other_plane_goes_off_opaque() {
+            let planes = vec![plane(73, &[DrmFourcc::Nv12], true), plane(75, &[DrmFourcc::Nv12, DrmFourcc::Nv15], true)];
+            let mut rig = Rig::new("twoopaque", planes);
+            rig.connect();
+            rig.commit().unwrap();
+            assert_eq!(rig.now(73, ALPHA), Some(0));
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, HDR10);
+            let (staged, request) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(1));
+            assert_eq!(get(&request, 73, ALPHA), Some(ALPHA_OPAQUE));
+            assert_eq!((rig.now(73, FB), rig.now(73, ALPHA)), (Some(0), Some(ALPHA_OPAQUE)));
+            assert_holds(&rig, 75, HDR10);
+            assert_eq!(rig.flip(), Visibility::Visible);
+        }
+
+        /// Case 6: A radio service, then a channel with a picture: its first
+        /// frame writes the whole state and is checked.
+        #[test]
+        fn radio_then_a_channel_with_a_picture_is_a_new_presentation() {
+            let mut rig = one_plane("radiofilm");
+            rig.connect();
+            rig.commit().unwrap();
+            rig.control(KIND_NO_PICTURE);
+            assert_eq!((rig.now(73, FB), rig.now(73, ALPHA)), (Some(0), Some(ALPHA_OPAQUE)));
+            rig.left(73, &[(ENCODING, 0), (ZPOS, 5)]);
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (staged, request) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(0));
+            assert_film(&rig, &request, 73, 1920, SDR);
+            assert_eq!(rig.flip(), Visibility::Visible);
+        }
+
+        /// Case 7: A mode change under a film: the mode's first film frame
+        /// writes the whole state again, and is checked.
+        #[test]
+        fn the_first_film_frame_after_a_mode_change_writes_the_whole_state() {
+            let mut rig = unveiled("modeset");
+            rig.connect();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            rig.commit().unwrap();
+            assert_eq!(rig.flip(), Visibility::Visible);
+            // A steady frame writes no colour.
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (_, request) = rig.commit().unwrap();
+            assert_eq!(get(&request, 73, ENCODING), None);
+            rig.hold();
+            rig.sink.forget_vblank();
+            rig.sink.vblank_unavailable();
+            rig.left(73, &[(ENCODING, 0), (EOTF, 2), (ZPOS, 5)]);
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (_, request) = rig.commit().unwrap();
+            assert_film(&rig, &request, 73, 1920, SDR);
+            assert_holds(&rig, 73, SDR);
+            assert_eq!(rig.flip(), Visibility::Visible);
+        }
+
+        /// Case 8: Stop and a new player: the plane off and opaque at the stop,
+        /// the next channel's first frame written whole and checked again.
+        #[test]
+        fn stop_and_reconnect_start_a_presentation_from_scratch() {
+            let mut rig = unveiled("stopreconnect");
+            rig.connect();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            rig.commit().unwrap();
+            assert_eq!(rig.flip(), Visibility::Visible);
+            rig.control(KIND_STOP);
+            assert_eq!((rig.now(73, FB), rig.now(73, CRTC), rig.now(73, ALPHA)), (Some(0), Some(0), Some(ALPHA_OPAQUE)));
+            assert_eq!(rig.sink.visibility, Visibility::Unverified);
+            rig.gone();
+            rig.connect();
+            rig.left(73, &[(ALPHA, 0), (ZPOS, 5)]);
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, HDR10);
+            let (_, request) = rig.commit().unwrap();
+            assert_film(&rig, &request, 73, 1920, HDR10);
+            assert_eq!(rig.flip(), Visibility::Visible);
+        }
+
+        /// Case 9: A restarted interface on a plane the process before left
+        /// transparent and wrong: made opaque at start, an idle plane only;
+        /// the first film frame writes the rest.
+        #[test]
+        fn a_restarted_interface_makes_an_idle_plane_left_transparent_opaque() {
+            let planes = vec![plane(73, &[DrmFourcc::Nv12], true), plane(75, &[DrmFourcc::Nv12], true)];
+            let mut rig = Rig::new("restart", planes);
+            rig.failing_maker();
+            rig.left(73, &[(ALPHA, 0), (ZPOS, 5), (EOTF, 2)]);
+            // 75 carries a picture: not this process's to touch at start.
+            rig.left(75, &[(ALPHA, 0x8000), (FB, 77), (CRTC, 89)]);
+            rig.sink.adopt_planes(&rig.kms, &rig.planes);
+            assert_eq!(rig.now(73, ALPHA), Some(ALPHA_OPAQUE));
+            assert_eq!(rig.now(75, ALPHA), Some(0x8000));
+            rig.connect();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            rig.commit().unwrap();
+            assert_holds(&rig, 73, SDR);
+            assert_eq!(rig.flip(), Visibility::Visible);
+        }
+
+        /// Case 10: Flipped, and the plane still transparent: not seen. Once the
+        /// whole state again; then `video_plane_invisible`, and no more
+        /// tries in this presentation.
+        #[test]
+        fn a_flip_on_a_transparent_plane_is_not_a_first_frame() {
+            let mut rig = unveiled("invisible");
+            rig.kms.log.borrow_mut().stuck.insert((73, 73 * 100 + ALPHA), 0);
+            rig.connect();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (_, request) = rig.commit().unwrap();
+            assert_eq!(get(&request, 73, ALPHA), Some(ALPHA_OPAQUE));
+            assert_eq!(rig.flip(), Visibility::Unverified);
+            assert!(!rig.sink.picture_visible());
+            // The one restage: the whole state again.
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (_, request) = rig.commit().unwrap();
+            assert_film(&rig, &request, 73, 1920, SDR);
+            assert_eq!(rig.flip(), Visibility::Invisible);
+            assert!(!rig.sink.picture_visible());
+            // No more: frames go on, nothing is restaged or checked.
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            let (_, request) = rig.commit().unwrap();
+            assert_eq!(get(&request, 73, ENCODING), None);
+            assert!(!rig.sink.verify_armed);
+            assert_eq!(rig.flip(), Visibility::Invisible);
+            // The next channel is checked again.
+            rig.control(KIND_STOP);
+            assert_eq!(rig.sink.visibility, Visibility::Unverified);
+        }
+
+        /// Case 11: Seen only at the real flip of an opaque plane holding the
+        /// frame -- not at the commit, and not by a flip of something else.
+        #[test]
+        fn the_first_frame_is_seen_at_its_flip() {
+            let mut rig = unveiled("seen");
+            rig.connect();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            rig.commit().unwrap();
+            assert!(rig.sink.showing());
+            assert!(!rig.sink.picture_visible(), "committed, not flipped");
+            // The flip came, and the plane holds another frame: not seen.
+            rig.left(73, &[(FB, 4242)]);
+            assert_eq!(rig.flip(), Visibility::Unverified);
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            rig.commit().unwrap();
+            assert_eq!(rig.flip(), Visibility::Visible);
+            assert!(rig.sink.picture_visible());
+        }
+
+        /// Case 12: A clean end: every plane this process put up goes off -- no
+        /// framebuffer, no CRTC -- and opaque, the film's and the veil's.
+        #[test]
+        fn a_clean_end_leaves_every_plane_off_and_opaque() {
+            let planes = vec![plane(73, &[DrmFourcc::Nv12], true), plane(75, &[DrmFourcc::Nv12, DrmFourcc::Nv15], true)];
+            let mut rig = Rig::new("cleanend", planes);
+            rig.connect();
+            rig.frame(DrmFourcc::Nv15, 3840, 2160, SDR);
+            rig.commit().unwrap();
+            rig.commit().unwrap();
+            assert_eq!(rig.flip(), Visibility::Visible);
+            // The next channel veiled again, then the player goes.
+            rig.control(KIND_STOP);
+            rig.commit().unwrap();
+            assert_eq!(rig.now(75, ALPHA), Some(0));
+            rig.gone();
+            for plane in [73, 75] {
+                assert_eq!((rig.now(plane, FB), rig.now(plane, CRTC), rig.now(plane, ALPHA)), (Some(0), Some(0), Some(ALPHA_OPAQUE)), "plane {plane}");
+            }
+            assert!(!rig.sink.picture_visible());
         }
     }
 
