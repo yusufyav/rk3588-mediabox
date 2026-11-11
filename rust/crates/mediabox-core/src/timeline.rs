@@ -32,7 +32,6 @@
 //! local to a process (a frame's) unique: the pair (run, id).
 
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -137,7 +136,7 @@ pub fn tick() {
     let here = std::fs::metadata(dir())
         .ok()
         .filter(std::fs::Metadata::is_dir)
-        .map(|m| (m.dev(), m.ino()));
+        .and_then(|m| dir_id(&m));
     match (out.as_mut(), here) {
         (Some(writer), Some(here)) if writer.dir == here => {
             let _ = writer.out.flush();
@@ -156,6 +155,20 @@ pub fn tick() {
         (None, None) => {}
     }
     ON.store(out.is_some(), Ordering::SeqCst);
+}
+
+/// The directory's identity, its device and inode: a new directory under
+/// the name is another one. Unix has it; elsewhere (the web interface's
+/// wasm32) there is none, and the timeline stays off.
+#[cfg(unix)]
+fn dir_id(m: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn dir_id(_: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 fn open(dir_id: (u64, u64)) -> Option<Writer> {
