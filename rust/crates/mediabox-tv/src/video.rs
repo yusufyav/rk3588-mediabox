@@ -1393,6 +1393,13 @@ pub struct Sink<D: ControlDevice + Clone> {
     /// many it has made.
     veil_maker: fn(&D) -> Result<Imported<D>, String>,
     veils_made: u64,
+    /// The output's mode changed under a film (`forget_vblank`): when, until
+    /// the first frame of the new presentation epoch is committed. Frames
+    /// whose own vblank has gone by meanwhile go back unseen
+    /// (`drop_stale`) instead of going up late, one after another.
+    reconfigured: Option<u64>,
+    /// How many frames that has given back, since the sink was made.
+    modeset_stale: u64,
 }
 
 impl<D: ControlDevice + Clone> Sink<D> {
@@ -1425,6 +1432,8 @@ impl<D: ControlDevice + Clone> Sink<D> {
             no_picture: false,
             veil_maker: make_veil::<D>,
             veils_made: 0,
+            reconfigured: None,
+            modeset_stale: 0,
         })
     }
 
@@ -1770,7 +1779,12 @@ impl<D: ControlDevice + Clone> Sink<D> {
         if self.snap.is_some() {
             return;
         }
-        let (Some((last, period)), Some(due)) = (self.vblank, self.pending.iter().find_map(|frame| frame.due_ns)) else {
+        // In a new presentation epoch, from the first frame still on time:
+        // one whose vblank went by during the mode change says nothing
+        // about where the film is now.
+        let now = monotonic_ns();
+        let first = self.pending.iter().filter_map(|frame| frame.due_ns).find(|&due| !self.stale_at(due, now));
+        let (Some((last, period)), Some(due)) = (self.vblank, first) else {
             return;
         };
         let snap = snap_offset(due, last, period);
@@ -1781,10 +1795,72 @@ impl<D: ControlDevice + Clone> Sink<D> {
 
     /// The mode changed: the vblanks known so far are of the mode before.
     /// Until the kernel reports one of the new mode, a timed frame waits.
+    ///
+    /// A film playing through it goes on in a new presentation epoch: its
+    /// frames are still on the player's clock (PCR/STC; the sound goes on),
+    /// but the ones due while the television re-locked are of the epoch
+    /// before. Put up late one per vblank, they ran the film fast-forward
+    /// from a picture 190 ms old; given back in a heap, they read as frames
+    /// sharing a vblank (`same-vblank`, measured 2026-11-11: three, the
+    /// stale one up, two more, then a picture 203 ms short).
     pub fn forget_vblank(&mut self) {
         self.vblank = None;
         self.snap = None;
-        mediabox_core::timeline!("vblank-forget");
+        self.shown_due = None;
+        let film = self.on || !self.pending.is_empty();
+        self.reconfigured = film.then(monotonic_ns);
+        mediabox_core::timeline!("vblank-forget", "epoch={} pending={}", u8::from(film), self.pending.len());
+    }
+
+    /// In a new presentation epoch, whether a frame due at `due` (the
+    /// player's time, before the snap) can no longer go up at its own
+    /// vblank: that vblank is before the next one a commit made at `now`
+    /// reaches.
+    fn stale_at(&self, due: u64, now: u64) -> bool {
+        let (Some(_), Some((last, period))) = (self.reconfigured, self.vblank) else {
+            return false;
+        };
+        let due = due.saturating_add_signed(self.snap.unwrap_or(0));
+        own_vblank(due, last, period) < next_vblank_after(now, last, period)
+    }
+
+    /// The frames of the epoch before, given back: every waiting frame, in
+    /// order, whose own vblank has gone by. Once the new grid is known; for
+    /// at most `EPOCH_OPENING_NS` -- a player whose every frame comes late
+    /// is late, not reconfigured, and its frames go up late as always.
+    fn drop_stale(&mut self, now: u64) {
+        let Some(since) = self.reconfigured else {
+            return;
+        };
+        if self.vblank.is_none() {
+            return;
+        }
+        if now.saturating_sub(since) > EPOCH_OPENING_NS {
+            self.reconfigured = None;
+            mediabox_core::timeline!("epoch-open", "pid={} why=no-frame-on-time stale={}", self.server.peer(), self.modeset_stale);
+            return;
+        }
+        while let Some(due) = self.pending.front().and_then(|frame| frame.due_ns) {
+            if !self.stale_at(due, now) {
+                break;
+            }
+            let Some(old) = self.pending.pop_front() else {
+                break;
+            };
+            self.modeset_stale += 1;
+            mediabox_core::timeline!(
+                "unseen",
+                "pid={} id={} why=modeset-stale due={due} next={} arrived={}",
+                self.server.peer(),
+                old.id,
+                self.next_vblank_at(now).map_or(0, |(vblank, _)| vblank),
+                old.arrived_ns
+            );
+            crate::monitor::presenter_dropped(crate::monitor::Drop::ModesetStale);
+            trace::event('A', 0, old.id);
+            self.server.release(old.id);
+        }
+        self.settle_snap();
     }
 
     /// A timed frame waits for the vblank grid, and the kernel has to be
@@ -1895,7 +1971,9 @@ impl<D: ControlDevice + Clone> Sink<D> {
         planes: &[VideoPlane],
         request: &mut control::atomic::AtomicModeReq,
     ) -> Option<usize> {
-        // Frames due at the same vblank as a newer one go back unseen.
+        // The epoch before a mode change first; then frames due at the same
+        // vblank as a newer one go back unseen.
+        self.drop_stale(monotonic_ns());
         let due = self.due_now()?;
         // MEDIABOX_TV_FAULT=hold=N: every Nth frame held back one vblank, on
         // purpose, to show the live monitor sees it. Unset, never.
@@ -2031,6 +2109,16 @@ impl<D: ControlDevice + Clone> Sink<D> {
         self.shown_due = pending.due_ns;
         self.flip_wait = pending.due_ns;
         trace::event('c', pending.id, 0);
+        if self.reconfigured.take().is_some() {
+            mediabox_core::timeline!(
+                "epoch-open",
+                "pid={} id={id} due={} stale={}",
+                self.server.peer(),
+                pending.due_ns.unwrap_or(0),
+                self.modeset_stale
+            );
+            crate::monitor::reconfigured();
+        }
         planes[index].staged(pending.info.colour);
         if let Some(veiled) = self.veiled.take() {
             let info = &pending.info;
@@ -2102,8 +2190,10 @@ impl<D: ControlDevice + Clone> Sink<D> {
             self.subtitle_changes += 1;
         }
         self.arrived = None;
-        // The next film (the next channel) has a phase of its own.
+        // The next film (the next channel) has a phase of its own, and no
+        // frame of this one waits for a new epoch.
         self.snap = None;
+        self.reconfigured = None;
         while let Some(pending) = self.pending.pop_front() {
             mediabox_core::timeline!(
                 "unseen",
@@ -2146,6 +2236,12 @@ impl<D: ControlDevice + Clone> Sink<D> {
 const COMMIT_MARGIN_NS: u64 = 2_000_000;
 /// How long after a vblank a held commit goes: past it, for certain.
 const RACE_AFTER_NS: u64 = 500_000;
+/// How long after a mode change frames whose time passed are given back
+/// rather than put up late. The player was held for the length of the
+/// commit (257-262 ms measured, 2026-11-11) and is on time again three
+/// frames after it; one second is past any re-lock and short of hiding a
+/// player that is late on its own.
+const EPOCH_OPENING_NS: u64 = 1_000_000_000;
 
 /// What to add to a film's due times so that its first timed frame, due at
 /// `due`, is due on the vblank nearest it (on the grid of `last`): never
@@ -2550,11 +2646,20 @@ mod tests {
             }
             /// An untimed frame: up at the next commit.
             pub fn frame(&mut self, fourcc: DrmFourcc, width: u32, height: u32, colour: Colour) {
+                self.send_frame(fourcc, width, height, colour, None);
+            }
+            /// A frame due at `due` (CLOCK_MONOTONIC ns), as the live player
+            /// sends it; its id.
+            pub fn timed(&mut self, width: u32, height: u32, due: u64) -> u64 {
+                self.send_frame(DrmFourcc::Nv12, width, height, SDR, Some(due));
+                self.next_id
+            }
+            fn send_frame(&mut self, fourcc: DrmFourcc, width: u32, height: u32, colour: Colour, due: Option<u64>) {
                 self.next_id += 1;
-                let mut bytes = [0u8; MESSAGE];
+                let mut bytes = [0u8; TIMED];
                 let mut put = |at: usize, value: u32| bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
                 put(0, MAGIC);
-                put(4, KIND_FRAME);
+                put(4, if due.is_some() { KIND_FRAME_TIMED } else { KIND_FRAME });
                 put(16, fourcc as u32);
                 put(20, width);
                 put(24, height);
@@ -2567,8 +2672,19 @@ mod tests {
                 put(80, width);
                 put(84, height);
                 bytes[8..16].copy_from_slice(&self.next_id.to_le_bytes());
+                let length = match due {
+                    Some(due) => {
+                        bytes[MESSAGE..].copy_from_slice(&due.to_le_bytes());
+                        TIMED
+                    }
+                    None => MESSAGE,
+                };
                 let fd = std::fs::File::open("/dev/null").unwrap();
-                self.send(&bytes, Some(fd.as_raw_fd()));
+                self.send(&bytes[..length], Some(fd.as_raw_fd()));
+            }
+            /// The id of the film frame committed last.
+            pub fn shown(&self) -> Option<u64> {
+                self.sink.shown.back().map(|(id, _)| *id)
             }
             /// What the presenter does at its next commit: the film's part,
             /// committed, and what the commit carried.
@@ -2807,6 +2923,143 @@ mod tests {
             rig.gone();
             rig.connect();
             assert!(matches!(rig.commit().unwrap().0, Staged::Veil(0)));
+        }
+
+        const MS: u64 = 1_000_000;
+        const P50: u64 = 20 * MS;
+
+        /// A film playing on the panel (its first frame up, the veil gone),
+        /// on a grid of `P50`, ready for a mode change under it.
+        fn playing(name: &str) -> Rig {
+            let mut rig = one_plane(name);
+            rig.connect();
+            rig.commit().unwrap();
+            rig.frame(DrmFourcc::Nv12, 1920, 1080, SDR);
+            assert_eq!(rig.commit().unwrap().0, Staged::Film(0));
+            // The kernel reports its vblanks.
+            first_vblank(&mut rig);
+            rig
+        }
+
+        /// The new mode's first vblank: 5 ms ago, so the next one a commit
+        /// reaches is 15 ms from now. Returns that one.
+        fn first_vblank(rig: &mut Rig) -> u64 {
+            let last = monotonic_ns() - 5 * MS;
+            rig.sink.vblank(last, P50);
+            last + P50
+        }
+
+        /// Six frames waiting through a mode change (the presenter held, the
+        /// player's frames piling up, all due before the new mode's first
+        /// vblank): none of them goes up, each is counted as the mode
+        /// change's, and the first frame up is the one due at the first
+        /// vblank the new mode lets a commit reach.
+        #[test]
+        fn six_frames_waiting_through_a_mode_change_are_not_run_off() {
+            let mut rig = playing("epoch6");
+            let now = monotonic_ns();
+            for n in 0..6 {
+                rig.timed(1920, 1080, now - 220 * MS + n * P50);
+            }
+            rig.hold();
+            rig.sink.forget_vblank();
+            assert!(rig.commit().is_none(), "no grid yet: nothing goes up");
+            let next = first_vblank(&mut rig);
+            let current = rig.timed(1920, 1080, next);
+            let after = rig.timed(1920, 1080, next + P50);
+            let (staged, _) = rig.commit().unwrap();
+            assert_eq!(staged, Staged::Film(0));
+            assert_eq!(rig.shown(), Some(current));
+            assert_eq!(rig.sink.modeset_stale, 6);
+            // The epoch is open: the frame after waits for its own vblank.
+            assert!(rig.sink.reconfigured.is_none());
+            assert_eq!(rig.sink.pending.len(), 1);
+            assert_eq!(rig.sink.pending.front().map(|frame| frame.id), Some(after));
+        }
+
+        /// Frames that come after the mode change and still too late for
+        /// their own vblank (the player catching up on the buffers it got
+        /// back) are the mode change's too; the snap is taken from the
+        /// first frame still on time, not from one of them.
+        #[test]
+        fn the_new_epoch_starts_at_the_first_frame_still_on_time() {
+            let mut rig = playing("epochnow");
+            rig.hold();
+            rig.sink.forget_vblank();
+            let next = first_vblank(&mut rig);
+            // Due at the vblank that has gone by, and at the one before it.
+            rig.timed(1920, 1080, next - 2 * P50 + 3 * MS);
+            rig.timed(1920, 1080, next - P50 + 3 * MS);
+            let current = rig.timed(1920, 1080, next + 3 * MS);
+            assert_eq!(rig.sink.snap, Some(-3 * MS as i64));
+            rig.commit().unwrap();
+            assert_eq!(rig.shown(), Some(current));
+            assert_eq!(rig.sink.modeset_stale, 2);
+            // Once open, a frame late on its own goes up late as always.
+            let late = rig.timed(1920, 1080, next - P50);
+            rig.sink.drop_stale(monotonic_ns());
+            assert_eq!(rig.sink.pending.front().map(|frame| frame.id), Some(late));
+            assert_eq!(rig.sink.modeset_stale, 2);
+        }
+
+        /// A stop in the middle of a mode change (a channel change) takes
+        /// the epoch before with it: its frames go back as the stop's, and
+        /// the next film's first frame is not held for an epoch that is
+        /// not its own.
+        #[test]
+        fn a_stop_during_a_mode_change_ends_the_old_epoch() {
+            let mut rig = playing("epochstop");
+            let now = monotonic_ns();
+            for n in 0..6 {
+                rig.timed(1920, 1080, now - 200 * MS + n * P50);
+            }
+            rig.hold();
+            rig.sink.forget_vblank();
+            assert!(rig.sink.reconfigured.is_some());
+            rig.control(KIND_STOP);
+            assert!(rig.sink.pending.is_empty());
+            assert!(rig.sink.reconfigured.is_none());
+            let next = first_vblank(&mut rig);
+            // The next channel: veiled, then its first frame, late.
+            assert!(matches!(rig.commit().unwrap().0, Staged::Veil(_)));
+            let first = rig.timed(1920, 1080, next - P50);
+            rig.commit().unwrap();
+            assert_eq!(rig.shown(), Some(first));
+            assert_eq!(rig.sink.modeset_stale, 0);
+        }
+
+        /// A mode change with no film on the panel or waiting (a channel's
+        /// opening matched under the veil) opens no epoch: the channel's
+        /// first frame is its opening's, whenever it comes.
+        #[test]
+        fn a_mode_change_with_no_film_opens_no_epoch() {
+            let mut rig = one_plane("epochnone");
+            rig.connect();
+            rig.commit().unwrap();
+            rig.hold();
+            rig.sink.forget_vblank();
+            assert!(rig.sink.reconfigured.is_none());
+            let next = first_vblank(&mut rig);
+            let first = rig.timed(1920, 1080, next - P50);
+            rig.commit().unwrap();
+            assert_eq!(rig.shown(), Some(first));
+            assert_eq!(rig.sink.modeset_stale, 0);
+        }
+
+        /// A player whose every frame comes late after the mode change is
+        /// late, not reconfigured: past `EPOCH_OPENING_NS` its frames go up
+        /// late as before, the film is not left dark.
+        #[test]
+        fn an_epoch_with_no_frame_on_time_ends() {
+            let mut rig = playing("epochlate");
+            rig.hold();
+            rig.sink.forget_vblank();
+            rig.sink.reconfigured = Some(monotonic_ns() - EPOCH_OPENING_NS - MS);
+            let next = first_vblank(&mut rig);
+            let late = rig.timed(1920, 1080, next - P50);
+            rig.commit().unwrap();
+            assert_eq!(rig.shown(), Some(late));
+            assert_eq!(rig.sink.modeset_stale, 0);
         }
     }
 

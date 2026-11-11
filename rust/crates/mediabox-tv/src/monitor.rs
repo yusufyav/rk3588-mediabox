@@ -10,7 +10,10 @@
 //! - repeated: a picture stayed up a vblank or more longer than its time
 //!   (`flip` steps further than `due`): the panel showed it again;
 //! - short: a picture went down a vblank or more early;
-//! - late: flip time less due time, every picture.
+//! - late: flip time less due time, every picture;
+//! - reconfigured: pictures not shown across a change of the output's mode
+//!   (`reconfigured`): the television re-locking and the frames whose time
+//!   passed meanwhile -- counted, apart from the faults above.
 //!
 //! The player's side (`/run/mediabox-live/health.json`, mediabox-live's
 //! `health`) adds the sound and the broadcast's clock; `text` puts both on
@@ -23,6 +26,7 @@ pub struct Counts {
     pub skipped: u64,
     pub repeated: u64,
     pub short: u64,
+    pub reconfigured: u64,
     pub late_min: i64,
     pub late_max: i64,
     late_sum: i64,
@@ -64,6 +68,9 @@ pub enum Drop {
     Cadence,
     /// Replaced untimed, or its commit refused.
     Other,
+    /// Its time passed while the output's mode changed under the film: a
+    /// new presentation epoch starts at the first frame still on time.
+    ModesetStale,
 }
 
 /// The presentation path's own account, beside what the panel showed: each
@@ -75,6 +82,7 @@ pub struct Path {
     pub not_committed: u64,
     pub cadence: u64,
     pub other: u64,
+    pub modeset_stale: u64,
     /// The least margin a frame came with before its vblank's commit
     /// deadline, ns (negative: after it).
     pub margin_min: Option<i64>,
@@ -87,7 +95,7 @@ pub struct Path {
 
 impl Path {
     pub fn dropped(&self) -> u64 {
-        self.came_late + self.not_committed + self.cadence + self.other
+        self.came_late + self.not_committed + self.cadence + self.other + self.modeset_stale
     }
 }
 
@@ -95,6 +103,9 @@ impl Path {
 pub struct Monitor {
     /// The picture last shown: (due, flip).
     last: Option<(u64, u64)>,
+    /// The output's mode changed since: the next picture starts a new
+    /// presentation epoch (`reconfigured`).
+    epoch: bool,
     /// One picture's time: the least step between dues seen in this stream
     /// `FRAME_CONFIRM` times running.
     frame: Option<u64>,
@@ -141,6 +152,7 @@ impl Monitor {
                 Drop::NotCommitted => path.not_committed += 1,
                 Drop::Cadence => path.cadence += 1,
                 Drop::Other => path.other += 1,
+                Drop::ModesetStale => path.modeset_stale += 1,
             }
         }
     }
@@ -152,11 +164,40 @@ impl Monitor {
         p.pass_max = p.pass_max.max(pass);
     }
 
+    /// The output's mode changed under the film: the next picture shown is
+    /// the first of a new presentation epoch. Between it and the one before,
+    /// the television re-locked and frames went by unshown -- counted as
+    /// `reconfigured`, not as skips, and the gap in flips is not a repeat.
+    pub fn reconfigured(&mut self) {
+        self.epoch = true;
+    }
+
     /// A picture due at `due` went up at `flip` (CLOCK_MONOTONIC ns), the
     /// panel refreshing every `period` ns.
     pub fn shown(&mut self, due: u64, flip: u64, period: u64) {
         self.period = period;
         let late = flip as i64 - due as i64;
+        if std::mem::take(&mut self.epoch)
+            && let Some((last_due, last_flip)) = self.last
+            && due > last_due
+            && due - last_due <= NEW_STREAM_NS as u64
+        {
+            let step = due - last_due;
+            let frame = self.frame.unwrap_or(step).max(1);
+            let missed = ((step + frame / 2) / frame).saturating_sub(1);
+            mediabox_core::timeline!(
+                "mon-epoch",
+                "due={due} step={step} frame={frame} missed={missed} gap_ms={:.1}",
+                (flip as i64 - last_flip as i64) as f64 / 1e6
+            );
+            for counts in [&mut self.stream, &mut self.second, &mut self.total] {
+                counts.reconfigured += missed;
+                counts.late(late);
+            }
+            self.last = Some((due, flip));
+            self.roll(flip);
+            return;
+        }
         if let Some((last_due, last_flip)) = self.last {
             let step = due as i64 - last_due as i64;
             if step <= 0 || step > NEW_STREAM_NS {
@@ -223,16 +264,17 @@ impl Monitor {
         }
         let second = std::mem::take(&mut self.second);
         let path = std::mem::take(&mut self.path);
-        if second.faults() > 0 || path.dropped() > 0 {
+        if second.faults() > 0 || second.reconfigured > 0 || path.dropped() > 0 {
             eprintln!(
-                "mediabox-tv.monitor: son saniyede {} kare: {} atlanan, {} tekrar, {} kısa; geç kalma {:.1}..{:.1} ms; \
-                 sunum bıraktı {} (geç gelen {}, işlenmeyen {}, kadans {}, diğer {}); en az pay {}; \
+                "mediabox-tv.monitor: son saniyede {} kare: {} atlanan, {} tekrar, {} kısa, {} çıkış değişiminde gösterilmeyen; geç kalma {:.1}..{:.1} ms; \
+                 sunum bıraktı {} (geç gelen {}, işlenmeyen {}, kadans {}, diğer {}, çıkış değişimi {}); en az pay {}; \
                  sunucu en geç uyanış {:.1} ms, kilit {:.1} ms, tur {:.1} ms; \
                  oturum toplamı {} kare: {} atlanan, {} tekrar, {} kısa; sunum bıraktı {} (geç gelen {}, işlenmeyen {})",
                 second.frames,
                 second.skipped,
                 second.repeated,
                 second.short,
+                second.reconfigured,
                 second.late_min as f64 / 1e6,
                 second.late_max as f64 / 1e6,
                 path.dropped(),
@@ -240,6 +282,7 @@ impl Monitor {
                 path.not_committed,
                 path.cadence,
                 path.other,
+                path.modeset_stale,
                 path.margin_min.map_or("-".into(), |m| format!("{:.1} ms", m as f64 / 1e6)),
                 path.woke_late_max as f64 / 1e6,
                 path.lock_max as f64 / 1e6,
@@ -256,11 +299,12 @@ impl Monitor {
         self.last_path = path;
         mediabox_core::timeline!(
             "mon-second",
-            "frames={} skipped={} repeated={} short={} late_min={} late_max={} late_mean={}",
+            "frames={} skipped={} repeated={} short={} reconfigured={} late_min={} late_max={} late_mean={}",
             second.frames,
             second.skipped,
             second.repeated,
             second.short,
+            second.reconfigured,
             second.late_min,
             second.late_max,
             second.late_mean()
@@ -291,6 +335,11 @@ pub fn arrived(margin: i64) {
 pub fn presenter_dropped(why: Drop) {
     let mut guard = MONITOR.lock().unwrap_or_else(|e| e.into_inner());
     guard.get_or_insert_with(Monitor::default).presenter_dropped(why);
+}
+
+pub fn reconfigured() {
+    let mut guard = MONITOR.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(Monitor::default).reconfigured();
 }
 
 pub fn presenter_pass(woke_late: Option<u64>, lock: u64, pass: u64) {
@@ -356,7 +405,15 @@ pub fn rows(reports: &PlayerReports) -> Vec<(String, String, i32)> {
         let (p, pl) = (&m.path_stream, &m.last_path);
         rows.push((
             "Sunumun bıraktığı".into(),
-            format!("{}  (geç gelen {} · işlenmeyen {} · kadans {})  son 1 s: {}", p.dropped(), p.came_late, p.not_committed, p.cadence, pl.dropped()),
+            format!(
+                "{}  (geç gelen {} · işlenmeyen {} · kadans {} · çıkış değişimi {})  son 1 s: {}",
+                p.dropped(),
+                p.came_late,
+                p.not_committed,
+                p.cadence,
+                p.modeset_stale,
+                pl.dropped()
+            ),
             state(pl.dropped(), p.dropped()),
         ));
         rows.push(("Tekrar / kısa kare".into(), format!("{} / {}  (son 1 s: {} / {})", s.repeated, s.short, l.repeated, l.short), state(l.repeated + l.short, s.repeated + s.short)));
@@ -552,6 +609,36 @@ mod tests {
             m.shown(due, due, 20 * MS);
         }
         assert_eq!(m.frame(), Some(20 * MS));
+        assert_eq!(m.stream.skipped, 1);
+    }
+
+    /// Across a mode change the pictures not shown are the mode change's:
+    /// neither skips nor the re-lock's gap a repeat; the presenter's own
+    /// drops in it are counted apart from same-vblank ones.
+    #[test]
+    fn a_mode_change_counts_its_missing_pictures_apart() {
+        let mut m = Monitor::default();
+        let mut due = 1000 * MS;
+        for _ in 0..10 {
+            due += 20 * MS;
+            m.shown(due, due, 20 * MS);
+        }
+        m.reconfigured();
+        for _ in 0..6 {
+            m.presenter_dropped(Drop::ModesetStale);
+        }
+        // 13 frames' time later, flipped 300 ms after the last.
+        let flip = due + 300 * MS;
+        due += 260 * MS;
+        m.shown(due, flip, 20 * MS);
+        for i in 1..5 {
+            m.shown(due + i * 20 * MS, flip + i * 20 * MS, 20 * MS);
+        }
+        assert_eq!((m.stream.skipped, m.stream.repeated, m.stream.short), (0, 0, 0));
+        assert_eq!(m.stream.reconfigured, 12);
+        assert_eq!((m.path_total.modeset_stale, m.path_total.cadence, m.path_total.dropped()), (6, 0, 6));
+        // Only the next picture: a skip after it is a skip.
+        m.shown(due + 120 * MS, flip + 120 * MS, 20 * MS);
         assert_eq!(m.stream.skipped, 1);
     }
 
