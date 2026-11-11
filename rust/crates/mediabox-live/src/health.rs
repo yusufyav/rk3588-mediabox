@@ -440,8 +440,7 @@ impl Health {
         mediabox_core::timeline!("sound-route", "why={why} device={device:?}");
         let mut d = self.sound();
         if why == "mode" {
-            d.c.sink_reopens += 1;
-            d.context.route = device;
+            d.format_change(device);
         } else if why != "start" {
             d.route(device);
         } else {

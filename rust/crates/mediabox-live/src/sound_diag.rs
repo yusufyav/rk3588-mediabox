@@ -534,10 +534,13 @@ pub enum Cause {
     SinkXrun,
     UserMuted,
     RouteChange,
+    /// The sink opened again on the same device for the stream's new form
+    /// (PCM, or a bitstream passed through), nothing lost on the way.
+    StreamFormatChange,
     Unknown,
 }
 
-pub const CAUSES: [Cause; 8] = [
+pub const CAUSES: [Cause; 9] = [
     Cause::InputTransportDiscontinuity,
     Cause::PesTimestampDiscontinuity,
     Cause::DecoderOutputSilence,
@@ -545,6 +548,7 @@ pub const CAUSES: [Cause; 8] = [
     Cause::SinkXrun,
     Cause::UserMuted,
     Cause::RouteChange,
+    Cause::StreamFormatChange,
     Cause::Unknown,
 ];
 
@@ -558,6 +562,7 @@ impl Cause {
             Cause::SinkXrun => "sink_xrun",
             Cause::UserMuted => "user_muted",
             Cause::RouteChange => "route_change",
+            Cause::StreamFormatChange => "stream_format_change",
             Cause::Unknown => "unknown",
         }
     }
@@ -624,8 +629,10 @@ impl Kind {
 }
 
 /// The cause the window's counts show. First what explains anything after
-/// it: the viewer's choice; the route changed (or the sink was opened
-/// again) under the sound; packets of the sound lost before the player had
+/// it: the viewer's choice; the route changed under the sound; the device
+/// started again because the sink was opened again on it for the stream's
+/// new form, and nothing at all was lost (`format_change_clean`); packets
+/// of the sound lost before the player had
 /// them; the timeline broken without a packet lost. Then by where the event
 /// was seen, from what comes before that place only -- the decoded PCM is
 /// measured before the sink, so nothing at the sink explains its silence:
@@ -641,8 +648,11 @@ pub fn classify(kind: Kind, d: &Counters) -> Cause {
     if kind == Kind::UserSilenced {
         return Cause::UserMuted;
     }
-    if d.route_changes > 0 || d.sink_reopens > 0 {
+    if d.route_changes > 0 {
         return Cause::RouteChange;
+    }
+    if kind == Kind::DeviceRestart && format_change_clean(d) {
+        return Cause::StreamFormatChange;
     }
     // Lost or damaged on the way in, or held back upstream and come late
     // for good (`stamp::STEP_NS`): the sound had nothing to play.
@@ -670,6 +680,20 @@ pub fn classify(kind: Kind, d: &Counters) -> Cause {
         }
         _ => Cause::Unknown,
     }
+}
+
+/// The device's restart is the stream's change of form, and only that: the
+/// sink was opened again for it in the window (`Diag::format_change`, on
+/// the device it was on), the restart was ours (no XRUN), and nothing was
+/// lost or late -- no PCM gap, overlap or step back, nothing missing or
+/// doubled into the sink, nothing late there and no resync. Any of them and
+/// the restart is classified as any other, its alarm kept.
+fn format_change_clean(d: &Counters) -> bool {
+    d.sink_reopens > 0
+        && d.alsa_xruns == 0
+        && d.pcm_gaps + d.pcm_overlaps + d.pcm_backward == 0
+        && d.sink_gaps + d.sink_overlaps == 0
+        && d.sink_late + d.sink_behind + d.sink_discont == 0
 }
 
 // --------------------------------------------------------------- the whole
@@ -766,10 +790,10 @@ pub struct Diag {
     playing: bool,
     /// Since when the viewer has had it silenced.
     silenced_since: Option<u64>,
-    pub by_cause: [u64; 8],
+    pub by_cause: [u64; 9],
     /// Every sink gap and overlap, whatever its length, by cause: what the
     /// player added is what is not the input's.
-    pub sink_by_cause: [u64; 8],
+    pub sink_by_cause: [u64; 9],
     pub incidents: u64,
     pub last: Option<Incident>,
     alsa_least_ms: Option<f64>,
@@ -875,7 +899,7 @@ impl Diag {
             zero_ratio: run.filter(|(r, _)| r.frames > 0).map(|(r, _)| r.zero_frames as f32 / r.frames as f32),
             mask: run.filter(|(r, _)| r.mask != 0).map(|(r, _)| r.mask),
             ended_by: run.map(|(_, by)| by),
-            alarm: !silenced && cause != Cause::UserMuted,
+            alarm: !silenced && cause != Cause::UserMuted && cause != Cause::StreamFormatChange,
             alsa_least_ms: self.alsa_least_ms.take(),
         };
         self.by_cause[cause.index()] += 1;
@@ -1033,6 +1057,17 @@ impl Diag {
         (ns >= EVENT_NS).then(|| self.record(Kind::UserSilenced, since, Some(now_ns), ns, None))
     }
 
+    /// E: the sink opened again for the stream's new form (PCM or a
+    /// bitstream) on `device`. On the device it was on, a reopen of the
+    /// sink, not a route; on another, the route changed.
+    pub fn format_change(&mut self, device: Option<String>) {
+        if device != self.context.route {
+            self.route(device);
+        } else {
+            self.c.sink_reopens += 1;
+        }
+    }
+
     /// F: the sound goes to another device, or the same is opened again.
     pub fn route(&mut self, device: Option<String>) {
         self.c.route_changes += 1;
@@ -1055,7 +1090,7 @@ impl Diag {
     }
 
     pub fn json(&self, now_ns: u64) -> serde_json::Value {
-        let by = |counts: &[u64; 8]| {
+        let by = |counts: &[u64; 9]| {
             CAUSES.iter().map(|c| (c.name().to_string(), serde_json::Value::from(counts[c.index()]))).collect::<serde_json::Map<_, _>>()
         };
         let levels = self.meter.last.map(|l| {

@@ -492,3 +492,102 @@ fn the_sink_s_resync_is_read_from_its_own_words() {
     assert_eq!(i.cause, Cause::Unknown);
     assert_eq!(i.json()["pcm_timestamp_gap_ms"], 0.5);
 }
+
+const HDMI: &str = "hdmi:CARD=rockchiphdmi0,DEV=0";
+
+/// MP2 PCM and E-AC-3 passthrough by turns on the same HDMI device: the
+/// sink opened again for the stream's new form, the device's restart ours.
+/// Measured on the Plus (FAZ 3I.1, 2026-11-11, TRT 4K and A Haber): two
+/// restarts, `route_changes=0`, every loss counter 0, and still
+/// `cause=route_change alarm=true`.
+fn handover(f: &mut Feed, passthrough: bool) -> Incident {
+    f.diag.context.route = Some(HDMI.into());
+    f.diag.context.passthrough = passthrough;
+    f.diag.format_change(Some(HDMI.into()));
+    f.now += 30 * MS;
+    f.diag.device_restart(f.now, true)
+}
+
+#[test]
+fn pcm_to_passthrough_on_the_same_device_is_a_format_change_not_a_route_change() {
+    let mut f = Feed::new(2);
+    f.play(300, &[LOUD, LOUD], 1024);
+    let before = f.diag.c;
+    let i = handover(&mut f, true);
+    assert_eq!((i.kind, i.cause, i.alarm), (Kind::DeviceRestart, Cause::StreamFormatChange, false));
+    let d = f.diag.c.since(&before);
+    assert_eq!((d.route_changes, d.sink_reopens, d.alsa_restarts, d.alsa_xruns), (0, 1, 1, 0));
+    assert_eq!(i.json()["cause"], "stream_format_change");
+}
+
+#[test]
+fn passthrough_to_pcm_on_the_same_device_is_a_format_change_too() {
+    let mut f = Feed::new(2);
+    f.diag.context.passthrough = true;
+    let i = handover(&mut f, false);
+    assert_eq!((i.cause, i.alarm), (Cause::StreamFormatChange, false));
+    f.play(300, &[LOUD, LOUD], 1024);
+    assert!(f.incidents.is_empty(), "{:?}", f.kinds());
+}
+
+#[test]
+fn a_real_route_change_to_bluetooth_stays_a_route_change_with_its_alarm() {
+    let mut f = Feed::new(2);
+    f.play(300, &[LOUD, LOUD], 1024);
+    f.diag.context.route = Some(HDMI.into());
+    f.diag.route(Some("bluealsa:DEV=20:AF:1B:19:E8:D2,PROFILE=a2dp".into()));
+    let i = f.diag.device_restart(f.now, true);
+    assert_eq!((i.cause, i.alarm), (Cause::RouteChange, true));
+    // A form's reopen that lands on another device is that device's route.
+    let mut f = Feed::new(2);
+    f.diag.context.route = Some(HDMI.into());
+    f.diag.format_change(Some("bluealsa:DEV=20:AF:1B:19:E8:D2,PROFILE=a2dp".into()));
+    assert_eq!((f.diag.c.route_changes, f.diag.c.sink_reopens), (1, 0));
+    let i = f.diag.device_restart(f.now, true);
+    assert_eq!((i.cause, i.alarm), (Cause::RouteChange, true));
+}
+
+#[test]
+fn an_xrun_in_a_format_change_is_an_xrun_with_its_alarm() {
+    let mut f = Feed::new(2);
+    f.play(300, &[LOUD, LOUD], 1024);
+    f.diag.context.route = Some(HDMI.into());
+    f.diag.format_change(Some(HDMI.into()));
+    let i = f.diag.device_restart(f.now, false);
+    assert_eq!((i.cause, i.alarm), (Cause::SinkXrun, true));
+}
+
+#[test]
+fn a_pcm_gap_or_a_late_sink_in_a_format_change_keeps_its_alarm() {
+    let mut f = Feed::new(2);
+    f.play(300, &[LOUD, LOUD], 1024);
+    f.pts += 40 * MS;
+    f.play(100, &[LOUD, LOUD], 1024);
+    assert_eq!(f.diag.c.pcm_gaps, 1);
+    let i = handover(&mut f, true);
+    assert_ne!(i.cause, Cause::StreamFormatChange);
+    assert!(i.alarm);
+    for late in [|c: &mut Counters| c.sink_late += 1, |c: &mut Counters| c.sink_discont += 1, |c: &mut Counters| c.sink_gaps += 1] {
+        let mut f = Feed::new(2);
+        f.play(300, &[LOUD, LOUD], 1024);
+        late(&mut f.diag.c);
+        let i = handover(&mut f, true);
+        assert_ne!(i.cause, Cause::StreamFormatChange);
+        assert!(i.alarm);
+    }
+}
+
+#[test]
+fn a_restart_of_ours_with_no_format_change_is_not_explained_away() {
+    let mut f = Feed::new(2);
+    f.play(300, &[LOUD, LOUD], 1024);
+    let i = f.diag.device_restart(f.now, true);
+    assert_eq!((i.cause, i.alarm), (Cause::Unknown, true));
+    // A format change long before is out of the window.
+    let mut f = Feed::new(2);
+    f.diag.context.route = Some(HDMI.into());
+    f.diag.format_change(Some(HDMI.into()));
+    f.play(2_000, &[LOUD, LOUD], 1024);
+    let i = f.diag.device_restart(f.now, true);
+    assert_eq!((i.cause, i.alarm), (Cause::Unknown, true));
+}
