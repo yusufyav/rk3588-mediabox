@@ -125,6 +125,14 @@ struct State {
     handover: bool,
     /// The last film match's number (`Content::request`).
     requests: u64,
+    /// The film playing while a person's trial holds the display, and its
+    /// rate: matched again the moment the trial ends, however it ends
+    /// (`rematch`). A trial started under a 50 fps channel left it at the
+    /// trial's 60 Hz until the next channel (measured 2026-11-11).
+    suspended: Option<(u64, Cadence)>,
+    /// That match, sent, for the film's follower to see through: the film
+    /// and the match's number (`take_rematch`).
+    rematched: Option<(u64, u64)>,
 }
 
 /// The display while one film plays. `film` is the player's number for it;
@@ -273,8 +281,9 @@ impl Output {
             // A match made for the last sink is not tried on this one; the
             // owner is put back by the recovery below.
             state.content = None;
+            state.suspended = None;
             if let Some(trial) = state.trial.take() {
-                events.extend(self.taken_back(trial, false, "ekran değişti"));
+                events.extend(self.taken_back(state, trial, false, "ekran değişti"));
             }
             (self.recover)();
         }
@@ -446,7 +455,7 @@ impl Output {
             let mut state = self.state();
             state.matching = enabled;
             match state.content.as_ref().map(|content| (content.film, content.output.cadence)) {
-                Some((film, cadence)) => self.match_film(&mut state, film, cadence)?.1,
+                Some((film, cadence)) => self.match_film(&mut state, film, cadence, None)?.1,
                 None => vec![OutputEvent::Changed],
             }
         };
@@ -471,7 +480,7 @@ impl Output {
         let (output, request, events) = {
             let mut state = self.state();
             let mut events = self.follow(&mut state);
-            let (output, more) = self.match_film(&mut state, film, cadence)?;
+            let (output, more) = self.match_film(&mut state, film, cadence, None)?;
             events.extend(more);
             (output, state.requests, events)
         };
@@ -494,16 +503,24 @@ impl Output {
 
     /// Match film `film` at `cadence` -- or, with matching off, record it and
     /// keep the kept mode -- and the events that put it on the wire.
+    ///
+    /// `wire`: what is on the wire, and whether it is settled there, when
+    /// it is not what the film before left (a trial that has just ended);
+    /// `None`, worked out as below.
+    ///
+    /// While a person's trial holds the display the film does not touch it:
+    /// it plays on the trial's mode and is matched when the trial ends
+    /// (`suspended`). Nothing is sent and nothing waited for, so the answer
+    /// is applied; refused, a channel opened during a trial failed outright
+    /// (`mode-refused`, 2026-11-11).
     fn match_film(
         &self,
         state: &mut State,
         film: u64,
         cadence: Cadence,
+        wire: Option<(OutputSetting, bool)>,
     ) -> Result<(ContentOutput, Vec<OutputEvent>), String> {
         state.handover = false;
-        if state.trial.is_some() {
-            return Err("Ekran ayarı onay bekliyor; film için değiştirilmedi.".into());
-        }
         let (Some(offer), Some(identity)) = (
             state.snapshot.as_ref().and_then(|snapshot| snapshot.offer.clone()),
             state.identity.clone(),
@@ -511,6 +528,14 @@ impl Output {
             return Err("Ekranın mod listesi henüz okunmadı.".into());
         };
         let matched = offer.content_mode(&state.kept, cadence);
+        if let Some(trial) = state.trial.as_ref() {
+            eprintln!("mediaboxd-rs: film {film} at {} fps: a display trial is running; matched when it ends", cadence.label());
+            let setting = trial.journal.setting.clone();
+            state.content = None;
+            state.suspended = Some((film, cadence));
+            let output = ContentOutput { cadence, cadence_label: cadence.label(), matched, setting, applied: true };
+            return Ok((output, vec![OutputEvent::Changed]));
+        }
         let mut setting = state.kept.clone();
         setting.edid_sha256 = offer.edid_sha256.clone();
         let kept_key = offer.select(&state.kept).map(|selected| selected.timing_key);
@@ -524,11 +549,16 @@ impl Output {
         // What the wire carries now: the kept setting, or the film before
         // this one's match -- a live channel's, handed over to this one --
         // and whether that is on the wire yet or only asked for.
-        let (on_wire, settled) = state
-            .content
-            .as_ref()
-            .map(|content| (content.output.setting.clone(), content.output.applied))
-            .unwrap_or_else(|| (state.kept.clone(), true));
+        // A trial that ended before its owner reported it: what the wire
+        // carries is not known, and the match is sent whatever it is.
+        let unknown = wire.as_ref().is_some_and(|(_, settled)| !settled);
+        let (on_wire, settled) = wire.unwrap_or_else(|| {
+            state
+                .content
+                .as_ref()
+                .map(|content| (content.output.setting.clone(), content.output.applied))
+                .unwrap_or_else(|| (state.kept.clone(), true))
+        });
         let target_key = offer.select(&setting).map(|selected| selected.timing_key);
         // A match the owner could not commit is not on the wire, and what is
         // has not been said since: asked for again, it is sent again. Taken
@@ -569,7 +599,7 @@ impl Output {
             failed: None,
         });
         let mut events = Vec::new();
-        if on_wire != setting || after_failure {
+        if on_wire != setting || unknown || after_failure {
             events.push(OutputEvent::Apply {
                 identity,
                 setting,
@@ -587,6 +617,9 @@ impl Output {
     pub fn content_end(&self, film: u64) {
         let events = {
             let mut state = self.state();
+            if state.suspended.is_some_and(|(suspended, _)| suspended == film) && !state.handover {
+                state.suspended = None;
+            }
             match &state.content {
                 Some(content) if content.film == film => {}
                 _ => return,
@@ -695,9 +728,12 @@ impl Output {
                     }
                 }
             }
-            // A person changing the display ends a film's match: what they
-            // chose is what goes on the wire.
-            state.content = None;
+            // A person changing the display sets a film's match aside: what
+            // they chose is what goes on the wire, for as long as the trial
+            // runs; when it ends the film is matched again (`rematch`).
+            if let Some(content) = state.content.take() {
+                state.suspended = Some((content.film, content.output.cadence));
+            }
             // A second change during a trial is measured against the setting
             // that was kept, not against the one still on trial.
             let previous = state.kept.clone();
@@ -780,6 +816,7 @@ impl Output {
                 return Err("Ayar ekrana henüz uygulanmadı; onaylanamaz.".into());
             }
             let setting = trial.journal.setting.clone();
+            let identity = trial.journal.identity.clone();
             write_atomic(&self.paths.setting, &setting.to_stored())
                 .map_err(|error| format!("Ayar kaydedilemedi: {error}"))?;
             // Written down: from here the journal only says what the file
@@ -787,9 +824,11 @@ impl Output {
             let _ = std::fs::remove_file(&self.paths.trial);
             state.trial = None;
             state.stored = Some(StoredSetting::Current(setting.clone()));
-            state.kept = setting;
+            state.kept = setting.clone();
             state.error = None;
             self.write_plan(&mut state);
+            // The film playing is matched again, from the setting kept.
+            events.extend(self.rematch(&mut state, &identity, (setting, true)));
             events.push(OutputEvent::Kept { trial: id });
             events
         };
@@ -812,8 +851,9 @@ impl Output {
             let mut state = self.state();
             state.applied = None;
             state.content = None;
+            state.suspended = None;
             match state.trial.take() {
-                Some(trial) => self.taken_back(trial, false, "ekran başka bir uygulamaya geçti"),
+                Some(trial) => self.taken_back(&mut state, trial, false, "ekran başka bir uygulamaya geçti"),
                 None => Vec::new(),
             }
         };
@@ -867,6 +907,7 @@ impl Output {
                                 }
                             } else if let Some(trial) = state.trial.take() {
                                 events.extend(self.taken_back(
+                                    &mut state,
                                     trial,
                                     false,
                                     "ekrana istenenden başka bir ayar uygulandı",
@@ -879,6 +920,7 @@ impl Output {
                         (Some(_), None) => {
                             if let Some(trial) = state.trial.take() {
                                 events.extend(self.taken_back(
+                                    &mut state,
                                     trial,
                                     false,
                                     "ekranın sahibi denemeyi sürdürmedi",
@@ -911,7 +953,7 @@ impl Output {
                         && running == failed
                         && let Some(trial) = state.trial.take()
                     {
-                        events.extend(self.taken_back(trial, false, "uygulanamadı"));
+                        events.extend(self.taken_back(&mut state, trial, false, "uygulanamadı"));
                     }
                 }
             }
@@ -931,7 +973,7 @@ impl Output {
                 _ => return false,
             }
             let trial = state.trial.take().expect("checked above");
-            self.taken_back(trial, timed_out, reason)
+            self.taken_back(&mut state, trial, timed_out, reason)
         };
         self.send(events);
         true
@@ -939,27 +981,73 @@ impl Output {
 
     /// A trial that ends without being kept: the journal goes, and the owner
     /// is told to put the earlier setting back -- on the sink the trial was
-    /// for, and no other.
-    fn taken_back(&self, trial: Trial, timed_out: bool, reason: &str) -> Vec<OutputEvent> {
+    /// for, and no other. With a film playing, the earlier setting is the
+    /// film's match, sent at once: one mode change back, not the kept mode
+    /// and then the film's.
+    fn taken_back(&self, state: &mut State, trial: Trial, timed_out: bool, reason: &str) -> Vec<OutputEvent> {
         let _ = std::fs::remove_file(&self.paths.trial);
         eprintln!(
             "mediaboxd-rs: output trial {} taken back: {reason}",
             trial.journal.id
         );
-        vec![
-            OutputEvent::Apply {
+        let wire = (trial.journal.setting.clone(), trial.applied);
+        let mut events = self.rematch(state, &trial.journal.identity, wire);
+        if events.is_empty() {
+            events.push(OutputEvent::Apply {
                 identity: trial.journal.identity,
                 setting: trial.journal.previous,
                 trial: None,
                 trial_seconds: None,
                 content: false,
-            },
-            OutputEvent::Reverted {
-                trial: trial.journal.id,
-                timed_out,
-                reason: Some(reason.to_string()),
-            },
-        ]
+            });
+        }
+        events.push(OutputEvent::Reverted {
+            trial: trial.journal.id,
+            timed_out,
+            reason: Some(reason.to_string()),
+        });
+        events
+    }
+
+    /// The trial is over: the film it set aside (`State::suspended`), if one
+    /// is still playing on this sink, matched again -- once, by the same
+    /// rule as at its start, against `wire` (the trial's setting, and
+    /// whether its owner had reported it). Its events; none when there is
+    /// no film to match.
+    fn rematch(&self, state: &mut State, identity: &DisplayIdentity, wire: (OutputSetting, bool)) -> Vec<OutputEvent> {
+        let Some((film, cadence)) = state.suspended.take() else {
+            return Vec::new();
+        };
+        if Some(identity) != state.identity.as_ref() {
+            return Vec::new();
+        }
+        match self.match_film(state, film, cadence, Some(wire)) {
+            Ok((output, events)) => {
+                eprintln!("mediaboxd-rs: film {film}: the display trial ended; matched again");
+                if !output.applied {
+                    state.rematched = Some((film, state.requests));
+                }
+                events
+            }
+            Err(why) => {
+                eprintln!("mediaboxd-rs: film {film}: not matched again after the trial: {why}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// The match `rematch` sent for film `film` after a trial, once: its
+    /// number, for the film's follower to wait for it and open the sound
+    /// again (`daemon::settle_rematch`).
+    pub fn take_rematch(&self, film: u64) -> Option<u64> {
+        let mut state = self.state();
+        match state.rematched {
+            Some((rematched, request)) if rematched == film => {
+                state.rematched = None;
+                Some(request)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1066,6 +1154,8 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
     fn kernel() -> Vec<Timing> {
         vec![
             Timing::new(3840, 2160, 594_000, 4400, 2250, false, true),
+            // 50 Hz, as the Plus's kernel lists it for this set.
+            Timing::new(3840, 2160, 594_000, 5280, 2250, false, false),
             Timing::new(3840, 2160, 297_000, 4400, 2250, false, false),
             Timing::new(3840, 2160, 297_000, 5500, 2250, false, false),
             Timing::new(3840, 2160, 296_703, 5500, 2250, false, false),
@@ -1551,11 +1641,15 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
         let output = rig.output();
         let film = Cadence::from_fps(24.0).unwrap();
-        // During a trial the film does not touch the display.
+        // During a trial the film does not touch the display: it plays on
+        // the trial's mode, and is matched when the trial ends.
         let trial = output.try_setting(thirty(&offer), None, true).unwrap().trial.unwrap();
-        assert!(output.content_start(1, film).is_err());
+        let chosen = output.content_start(1, film).unwrap();
+        assert!(chosen.applied, "nothing sent, nothing to wait for");
+        assert!(output.status().content.is_none());
         output.revert(trial.id).unwrap();
-        // A trial started during a film ends the film's match.
+        assert_eq!(output.status().content.map(|content| content.cadence), Some(film));
+        // A trial started during a film sets the film's match aside.
         output.content_start(2, film).unwrap();
         output.try_setting(thirty(&offer), None, true).unwrap();
         assert!(output.status().content.is_none());
@@ -1566,6 +1660,137 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         rig.observe(2, Some(&bytes(SONY_300)));
         assert!(output.status().content.is_none());
         assert!(!output.content_applied(3));
+    }
+
+    /// Everything on the event stream now: the Applies (setting's label,
+    /// trial, content) and whether a Reverted came.
+    fn drain(offer: &OutputOffer, events: &mut broadcast::Receiver<OutputEvent>) -> (Vec<(String, Option<u64>, bool)>, bool) {
+        let (mut applies, mut reverted) = (Vec::new(), false);
+        while let Ok(event) = events.try_recv() {
+            match event {
+                OutputEvent::Apply { setting, trial, content, .. } => {
+                    applies.push((offer.select(&setting).unwrap().label, trial, content))
+                }
+                OutputEvent::Reverted { .. } => reverted = true,
+                _ => {}
+            }
+        }
+        (applies, reverted)
+    }
+
+    /// A 50 fps channel on its matched 50 Hz, and a person's trial of the
+    /// 60 Hz kept mode running and committed: the trial's id.
+    async fn fifty_under_a_trial(output: &Arc<Output>, offer: &OutputOffer, events: &mut broadcast::Receiver<OutputEvent>, film: u64) -> u64 {
+        let fifty = Cadence::from_fps(50.0).unwrap();
+        output.content_start_request(film, fifty).unwrap();
+        let (fifty_hz, _, content) = next_apply(events).await;
+        assert!(content);
+        assert_eq!(offer.select(&fifty_hz).unwrap().label, "3840x2160p50");
+        output.owner_report(applied(offer, &fifty_hz, None)).unwrap();
+        assert!(output.content_applied(film));
+        let trial = output.try_setting(ResolutionChoice::Auto, None, true).unwrap().trial.unwrap();
+        let (sixty, id, _) = next_apply(events).await;
+        assert_eq!((offer.select(&sixty).unwrap().label.as_str(), id), ("3840x2160p60", Some(trial.id)));
+        output.owner_report(applied(offer, &sixty, Some(trial.id))).unwrap();
+        trial.id
+    }
+
+    /// The match sent when the trial ended, reported by the owner: applied,
+    /// handed to the film's follower once, and nothing after it -- no
+    /// going back and forth between 50 and 60.
+    fn rematch_settles(output: &Arc<Output>, offer: &OutputOffer, events: &mut broadcast::Receiver<OutputEvent>, film: u64) {
+        let request = output.take_rematch(film).expect("the follower is told");
+        assert_eq!(output.content_progress(request), ContentProgress::Pending);
+        let setting = output.status().content.unwrap().setting;
+        output.owner_report(applied(offer, &setting, None)).unwrap();
+        assert_eq!(output.content_progress(request), ContentProgress::Applied);
+        assert!(output.take_rematch(film).is_none(), "once");
+        assert!(drain(offer, events).0.is_empty(), "one mode change, not two");
+    }
+
+    /// FAZ 3J.1: a trial taken back under a 50 fps channel left it at 60 Hz
+    /// until the next channel. Taken back now, the channel's 50 Hz goes on
+    /// the wire at once, as its one Apply -- not the kept mode first.
+    #[tokio::test]
+    async fn a_trial_taken_back_under_a_50_fps_channel_goes_back_to_50_hz() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        let id = fifty_under_a_trial(&output, &offer, &mut events, 7).await;
+        assert!(output.status().content.is_none(), "set aside while the trial runs");
+        output.revert(id).unwrap();
+        let (applies, reverted) = drain(&offer, &mut events);
+        assert_eq!(applies, [("3840x2160p50".to_string(), None, true)]);
+        assert!(reverted);
+        rematch_settles(&output, &offer, &mut events, 7);
+    }
+
+    /// Kept, the trial's setting is the kept one, and the channel is
+    /// matched from it: 30 Hz kept, the 50 fps channel back on 50 Hz.
+    #[tokio::test]
+    async fn a_trial_kept_under_a_50_fps_channel_matches_it_from_the_new_setting() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        let fifty = Cadence::from_fps(50.0).unwrap();
+        output.content_start_request(7, fifty).unwrap();
+        let (fifty_hz, _, _) = next_apply(&mut events).await;
+        output.owner_report(applied(&offer, &fifty_hz, None)).unwrap();
+        let id = applied_trial(&output, &offer);
+        drain(&offer, &mut events);
+        output.keep(id).unwrap();
+        assert_eq!(output.status().setting.resolution, thirty(&offer));
+        let (applies, _) = drain(&offer, &mut events);
+        assert_eq!(applies, [("3840x2160p50".to_string(), None, true)]);
+        rematch_settles(&output, &offer, &mut events, 7);
+    }
+
+    /// Nobody answered: the trial times out, and the channel is back on
+    /// 50 Hz the same way.
+    #[tokio::test(start_paused = true)]
+    async fn a_trial_timing_out_under_a_50_fps_channel_goes_back_to_50_hz() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        fifty_under_a_trial(&output, &offer, &mut events, 7).await;
+        tokio::time::sleep(Duration::from_secs(u64::from(OUTPUT_TRIAL_SECONDS) + 1)).await;
+        let (applies, reverted) = drain(&offer, &mut events);
+        assert_eq!(applies, [("3840x2160p50".to_string(), None, true)]);
+        assert!(reverted);
+        rematch_settles(&output, &offer, &mut events, 7);
+    }
+
+    /// A channel opened while a trial runs: it opens on the trial's mode
+    /// (nothing sent, nothing waited for, not refused), and is matched when
+    /// the trial ends. One that ended before that is not matched at all.
+    #[tokio::test]
+    async fn a_channel_opened_during_a_trial_is_matched_when_it_ends() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        let fifty = Cadence::from_fps(50.0).unwrap();
+        let id = applied_trial(&output, &offer);
+        drain(&offer, &mut events);
+        let (chosen, _) = output.content_start_request(8, fifty).unwrap();
+        assert!(chosen.applied);
+        assert!(drain(&offer, &mut events).0.is_empty(), "the trial's mode stays");
+        output.revert(id).unwrap();
+        let (applies, _) = drain(&offer, &mut events);
+        assert_eq!(applies, [("3840x2160p50".to_string(), None, true)]);
+        rematch_settles(&output, &offer, &mut events, 8);
+        // Over before the trial: the kept setting goes back, nothing else.
+        let id = applied_trial(&output, &offer);
+        output.content_start_request(9, fifty).unwrap();
+        output.content_end(9);
+        drain(&offer, &mut events);
+        output.revert(id).unwrap();
+        let (applies, _) = drain(&offer, &mut events);
+        assert_eq!(applies, [("3840x2160p60".to_string(), None, false)]);
+        assert!(output.take_rematch(9).is_none());
     }
 
     #[tokio::test]

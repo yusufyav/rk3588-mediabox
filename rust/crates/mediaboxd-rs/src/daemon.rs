@@ -3481,7 +3481,6 @@ pub(crate) async fn rematch_live(
     film: u64,
     cadence: mediabox_core::Cadence,
 ) {
-    use std::time::Duration;
     let asked = output.content_start_request(film, cadence);
     mediabox_core::timeline!(
         "rematch-start",
@@ -3496,6 +3495,14 @@ pub(crate) async fn rematch_live(
             return;
         }
     };
+    settle_rematch(player, output, film, request).await;
+}
+
+/// A match sent under playing film `film` (`rematch_live`, or the one that
+/// ends a display trial): waited for, and the sound device opened again on
+/// the new mode.
+async fn settle_rematch(player: &PlayerManager, output: &crate::output::Output, film: u64, request: u64) {
+    use std::time::Duration;
     for _ in 0..50 {
         if player.film() != film || output.content_progress(request) != crate::output::ContentProgress::Pending {
             break;
@@ -3786,6 +3793,12 @@ async fn follow_live_format(player: &PlayerManager, output: &crate::output::Outp
             mediabox_core::timeline!("format-change", "film={film} epoch={epoch} from={} to={}", opened.label(), now.label());
             player.set_live_cadence(epoch, now);
             rematch_live(player, output, film, now).await;
+        }
+        // A display trial that held the display under it has ended, and
+        // the channel was matched again on the spot (`Output::rematch`).
+        if let Some(request) = output.take_rematch(film) {
+            mediabox_core::timeline!("rematch-start", "film={film} after=trial request={request}");
+            settle_rematch(player, output, film, request).await;
         }
         if player.answers().await {
             silent = 0;
