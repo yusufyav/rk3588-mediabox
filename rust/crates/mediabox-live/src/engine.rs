@@ -2435,6 +2435,8 @@ impl Engine {
 
     fn end_swap(&self, swaps: &mut SinkSwaps, result: Result<(), String>) {
         let Some(pending) = swaps.pending.take() else { return };
+        // An `ao-reload` that joined this swap ends with it.
+        self.shared.health.diagnose(|d| d.reload.ended(mediabox_core::timeline::now_ns(), result.is_ok()));
         if pending.plan {
             self.complete_plan(PlanWay::Swap, None, result.clone());
         }
@@ -5042,7 +5044,10 @@ impl Engine {
     pub fn sound_command(self: &Arc<Self>, command: crate::ipc::SoundCommand, reply: &mut Option<SinkReply>) {
         match command {
             crate::ipc::SoundCommand::Volume { gain, muted } => self.set_volume(gain, muted),
-            crate::ipc::SoundCommand::Reload => self.reopen_audio_sink(reply.take()),
+            crate::ipc::SoundCommand::Reload => {
+                self.shared.health.diagnose(|d| d.reload.asked(mediabox_core::timeline::now_ns()));
+                self.reopen_audio_sink(reply.take())
+            }
             crate::ipc::SoundCommand::Plan { plan, epoch, seq } => {
                 let audio = Audio::from_plan(&plan, self.options.display_sync);
                 self.set_audio_plan(PlanRequest::new(audio, epoch, seq), reply.take());

@@ -773,6 +773,73 @@ fn finite(v: f32) -> f32 {
     if v.is_finite() { v } else { -200.0 }
 }
 
+/// The sound device opened again for a change of the display (`ao-reload`),
+/// counted, and the sink's resyncs and its starved renders around it: the
+/// ones while a reload was on its way are the mode change's own (the HDMI
+/// stream stopped by the commit); one after it came back is not.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct Reloads {
+    pub requested: u64,
+    pub completed: u64,
+    pub failed: u64,
+    /// Since when one has been on its way, and when the last one ended.
+    pub pending_since: Option<u64>,
+    pub done_at: Option<u64>,
+    pub during_sink_resync: u64,
+    pub during_render_starvation: u64,
+    pub after_sink_resync: u64,
+    pub after_render_starvation: u64,
+    /// From the last one asked to its device open again, ns.
+    pub last_ns: u64,
+}
+
+impl Reloads {
+    pub fn asked(&mut self, now_ns: u64) {
+        self.requested += 1;
+        self.pending_since.get_or_insert(now_ns);
+    }
+
+    /// The swap it joined ended (`ok`: the device open again).
+    pub fn ended(&mut self, now_ns: u64, ok: bool) {
+        let Some(since) = self.pending_since.take() else { return };
+        if ok {
+            self.completed += 1;
+        } else {
+            self.failed += 1;
+        }
+        self.last_ns = now_ns.saturating_sub(since);
+        self.done_at = Some(now_ns);
+    }
+
+    fn incident(&mut self, kind: Kind, cause: Cause, seen_ns: u64) {
+        let (resync, starved) = (kind == Kind::SinkResync, cause == Cause::RenderStarvation);
+        if !resync && !starved {
+            return;
+        }
+        let after = match (self.pending_since, self.done_at) {
+            (Some(_), _) => false,
+            (None, Some(done)) if seen_ns >= done => true,
+            _ => return,
+        };
+        let (resyncs, starvations) = if after {
+            (&mut self.after_sink_resync, &mut self.after_render_starvation)
+        } else {
+            (&mut self.during_sink_resync, &mut self.during_render_starvation)
+        };
+        *resyncs += u64::from(resync);
+        *starvations += u64::from(starved);
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "requested": self.requested, "completed": self.completed, "failed": self.failed,
+            "pending": self.pending_since.is_some(), "last_ms": self.last_ns as f64 / 1e6,
+            "during": {"sink_resync": self.during_sink_resync, "render_starvation": self.during_render_starvation},
+            "after": {"sink_resync": self.after_sink_resync, "render_starvation": self.after_render_starvation},
+        })
+    }
+}
+
 /// The diagnosis of one process: counters, the meter, the window's history
 /// and what came of it.
 #[derive(Default)]
@@ -795,6 +862,11 @@ pub struct Diag {
     /// player added is what is not the input's.
     pub sink_by_cause: [u64; 9],
     pub incidents: u64,
+    /// Every incident by its kind (`Kind::name`): a sink resync is counted
+    /// as one, not only as its cause.
+    pub by_kind: std::collections::BTreeMap<&'static str, u64>,
+    /// The sound device opened again for a change of the display (`ao-reload`).
+    pub reload: Reloads,
     pub last: Option<Incident>,
     alsa_least_ms: Option<f64>,
     /// The largest PCM gap or overlap, ns: how far off the timestamps were.
@@ -903,6 +975,10 @@ impl Diag {
             alsa_least_ms: self.alsa_least_ms.take(),
         };
         self.by_cause[cause.index()] += 1;
+        *self.by_kind.entry(kind.name()).or_default() += 1;
+        // When it was seen: a resync's start is its offset back, which
+        // can be far before the reload it came after.
+        self.reload.incident(kind, cause, end_ns.unwrap_or(start_ns));
         self.incidents += 1;
         self.last = Some(incident.clone());
         incident
@@ -1105,6 +1181,8 @@ impl Diag {
             "ongoing": self.ongoing_json(now_ns),
             "incidents": self.incidents,
             "by_cause": by(&self.by_cause),
+            "by_kind": self.by_kind,
+            "reload": self.reload.json(),
             "sink_off_by_cause": by(&self.sink_by_cause),
             "last": self.last.as_ref().map(Incident::json),
             "layers": self.c.json(),

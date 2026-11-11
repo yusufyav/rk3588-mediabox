@@ -591,3 +591,31 @@ fn a_restart_of_ours_with_no_format_change_is_not_explained_away() {
     let i = f.diag.device_restart(f.now, true);
     assert_eq!((i.cause, i.alarm), (Cause::Unknown, true));
 }
+
+/// FAZ 3J.3A: every sink resync is counted as one, by its kind, and those
+/// around an `ao-reload` apart: while it is on its way (the mode change's
+/// own), and after its device opened again (a fault) -- by when it was
+/// seen, though its start is its offset back.
+#[test]
+fn sink_resyncs_are_counted_by_kind_and_around_a_reload() {
+    const S: u64 = 1_000_000_000;
+    let mut d = Diag::default();
+    let off = Some(300_000_000);
+    assert!(d.sink_discont(10 * S, off).is_some());
+    d.reload.asked(20 * S);
+    assert!(d.sink_discont(20 * S + S / 10, off).is_some());
+    d.reload.ended(20 * S + S / 5, true);
+    // Seen after the reload, its offset reaching back before it.
+    assert!(d.sink_discont(21 * S, Some(5 * S as i64)).is_some());
+    assert_eq!(d.by_kind.get("sink_resync"), Some(&3));
+    assert_eq!((d.reload.requested, d.reload.completed, d.reload.failed), (1, 1, 0));
+    assert_eq!((d.reload.during_sink_resync, d.reload.after_sink_resync), (1, 1));
+    let json = d.json(22 * S);
+    assert_eq!(json["by_kind"]["sink_resync"], 3);
+    assert_eq!(json["reload"]["after"]["sink_resync"], 1);
+    assert_eq!(json["reload"]["last_ms"], 200.0);
+    // A reload that could not open the device is a failure.
+    d.reload.asked(30 * S);
+    d.reload.ended(31 * S, false);
+    assert_eq!(d.reload.failed, 1);
+}
