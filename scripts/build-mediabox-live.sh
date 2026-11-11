@@ -70,7 +70,9 @@ say() { printf '\n== %s\n' "$*"; }
 
 say "GStreamer runtime (scripts/build-gstreamer-runtime.sh)"
 [ -e "$gst_tarball" ] || "$here/scripts/build-gstreamer-runtime.sh"
-sha256sum -c "$gst_tarball.sha256"
+# The .sha256 names the tarball by its bare name: checked where it lies, as
+# mppvideodec's is below, whatever directory this script is run from.
+( cd "${gst_tarball%/*}" && sha256sum -c "${gst_tarball##*/}.sha256" )
 
 say "mppvideodec (scripts/build-mppvideodec.sh)"
 [ -e "$mpp_plugin" ] || "$here/scripts/build-mppvideodec.sh"
