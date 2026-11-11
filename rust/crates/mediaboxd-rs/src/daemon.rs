@@ -1329,7 +1329,7 @@ impl AppState {
                     // Committed before the player opens its sound device:
                     // the device opens on it (`PlayerManager::start`).
                     if self.output.content_progress(request) == crate::output::ContentProgress::Applied {
-                        self.player.mode_changed();
+                        self.player.mode_applied(self.output.mode_generation());
                     }
                 }
                 Ok(_) => {}
@@ -2183,6 +2183,28 @@ mod tests {
     /// The sound device is opened again after a re-match only when the mode
     /// is on and the film is the one it was matched for (FAZ 2E: it was sent
     /// whether the owner had applied the mode or not).
+    /// Case 11: a change of HDMI-A-1 touches sound on HDMI-A-1's own
+    /// device only: not a headset's, not an analogue output's, not another
+    /// connector's.
+    #[test]
+    fn a_change_of_the_wire_touches_only_its_own_connectors_sound() {
+        let plan = |device: Value| -> mediabox_core::AudioPlan {
+            serde_json::from_value(json!({"device": device, "passthrough": [], "volume": 60, "muted": false})).unwrap()
+        };
+        let device = |kind: &str, connector: Option<&str>| {
+            let mut device = json!({"id": kind, "label": kind, "kind": kind, "card_id": "c", "pcm": "p", "bitstream": false});
+            if let Some(connector) = connector {
+                device["connector"] = json!(connector);
+            }
+            device
+        };
+        assert!(route_touched(&plan(device("hdmi", Some("HDMI-A-1"))), "HDMI-A-1"));
+        assert!(!route_touched(&plan(device("hdmi", Some("HDMI-A-2"))), "HDMI-A-1"));
+        assert!(!route_touched(&plan(device("bluetooth", None)), "HDMI-A-1"));
+        assert!(!route_touched(&plan(device("analog", None)), "HDMI-A-1"));
+        assert!(!route_touched(&plan(Value::Null), "HDMI-A-1"));
+    }
+
     #[test]
     fn a_rematch_reopens_the_sound_only_for_its_film_once_the_mode_is_on() {
         assert_eq!(after_rematch(true, true), AfterRematch::Reload);
@@ -3510,33 +3532,123 @@ async fn settle_rematch(player: &PlayerManager, output: &crate::output::Output, 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let applied = output.content_progress(request) == crate::output::ContentProgress::Applied;
-    if applied {
-        player.mode_changed();
-    }
     mediabox_core::timeline!("rematch-applied", "film={film} ok={}", u8::from(applied));
     match after_rematch(applied, player.film() == film) {
+        // The sound is opened again where every change of the wire has it
+        // opened (`follow_output_modes`), from the owner's report: not a
+        // second time here.
         AfterRematch::Reload => {}
-        AfterRematch::FilmChanged => {
-            mediabox_core::timeline!("ao-reload", "film={film} skipped=film-changed");
-            return;
-        }
+        AfterRematch::FilmChanged => {}
         AfterRematch::NotApplied => {
             mediabox_core::timeline!("rematch-failed", "film={film} why=not-applied");
-            eprintln!(
-                "mediaboxd-rs: film {film}: the owner did not report the matched mode in 5 s; the sound device is not opened again"
-            );
-            return;
+            eprintln!("mediaboxd-rs: film {film}: the owner did not report the matched mode in 5 s");
         }
     }
-    mediabox_core::timeline!("ao-reload", "film={film}");
-    let reopened = player.reload_sound().await;
-    let ours = player.film() == film;
-    mediabox_core::timeline!("ao-reload-done", "film={film} ok={} same_film={}", u8::from(reopened.is_ok()), u8::from(ours));
-    match reopened {
-        Err(why) => eprintln!("mediaboxd-rs: film {film}: the player did not open its sound again after the mode change: {why}"),
-        Ok(()) if !ours => eprintln!("mediaboxd-rs: film {film}: the sound was opened again after the film changed; not counted for it"),
-        Ok(()) => {}
+}
+
+/// Where following the wire's changes is said (`follow_output_modes`).
+pub const OUTPUT_SOUND_HEALTH: &str = "/run/mediabox/output-sound.json";
+
+/// Why a change of the wire did not have the sound opened again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundSkip {
+    /// No live channel plays.
+    NotPlaying,
+    /// The channel is still opening: its gate checks its sound itself.
+    Opening,
+    /// The sound goes somewhere the change did not touch (a headset, a USB
+    /// device, another connector's).
+    OtherRoute,
+}
+
+/// Whether a change of `connector`'s wire touches sound going to `plan`'s
+/// device: the device is that connector's own.
+pub fn route_touched(plan: &mediabox_core::AudioPlan, connector: &str) -> bool {
+    plan.device.as_ref().and_then(|device| device.connector.as_deref()) == Some(connector)
+}
+
+/// Every change of the wire its owner reports (`output::ModeApplied`) --
+/// a film's match, a person's trial, its end kept or taken back or timed
+/// out, a colour format -- has the live channel's sound opened again on
+/// it, at once and once (`PlayerManager::make_sound_current`): the commit
+/// stopped HDMI's sound stream and nothing else says so (measured
+/// 2026-11-11: a trial's 60 Hz kept the channel silent for its 15 s).
+pub async fn follow_output_modes(
+    output: Arc<crate::output::Output>,
+    player: Arc<PlayerManager>,
+    audio: Arc<crate::audio::Audio>,
+    health: std::path::PathBuf,
+) {
+    let mut modes = output.modes();
+    let mut counts = OutputSoundHealth::default();
+    while modes.changed().await.is_ok() {
+        let Some(change) = modes.borrow_and_update().clone() else { continue };
+        let received = std::time::Instant::now();
+        counts.mode_changes += 1;
+        player.mode_applied(change.generation);
+        let outcome = follow_one(&player, &audio, &change).await;
+        let ms = received.elapsed().as_millis() as u64;
+        match &outcome {
+            Ok(crate::player::SoundOutcome::Reloaded { generation }) => {
+                counts.not_current_ms_last = ms;
+                counts.not_current_ms_total += ms;
+                eprintln!("mediaboxd-rs: output generation {}: sound opened again (after {generation}) in {ms} ms", change.generation);
+            }
+            Ok(crate::player::SoundOutcome::Failed(why)) => {
+                counts.alarm = Some(format!("generation {}: {why}", change.generation));
+                eprintln!("mediaboxd-rs: output generation {}: the sound was not opened again: {why}", change.generation);
+            }
+            Ok(other) => mediabox_core::timeline!("sound-follow", "gen={} outcome={other:?}", change.generation),
+            Err(skip) => {
+                *counts.skipped.entry(format!("{skip:?}")).or_default() += 1;
+                mediabox_core::timeline!("sound-follow", "gen={} skipped={skip:?}", change.generation);
+            }
+        }
+        counts.last = Some(change.current.clone());
+        counts.follow = player.sound_follow();
+        let (sound, mode) = player.sound_generations();
+        counts.sound_current = sound >= mode;
+        if let Ok(text) = serde_json::to_string_pretty(&counts) {
+            let temporary = health.with_extension("json.tmp");
+            if std::fs::write(&temporary, text).is_ok() {
+                let _ = std::fs::rename(&temporary, &health);
+            }
+        }
     }
+}
+
+/// One change of the wire, followed: the sound made current, or why not.
+async fn follow_one(
+    player: &PlayerManager,
+    audio: &crate::audio::Audio,
+    change: &crate::output::ModeApplied,
+) -> Result<crate::player::SoundOutcome, SoundSkip> {
+    if player.playing().await.and_then(|playing| playing.live()).is_none() {
+        return Err(SoundSkip::NotPlaying);
+    }
+    let (film, epoch) = (player.film(), player.epoch());
+    if !player.live_open(epoch) {
+        return Err(SoundSkip::Opening);
+    }
+    if !route_touched(&audio.in_force(), &change.connector) {
+        return Err(SoundSkip::OtherRoute);
+    }
+    Ok(player.make_sound_current(film, epoch).await)
+}
+
+/// The health file of following the wire (`OUTPUT_SOUND_HEALTH`).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct OutputSoundHealth {
+    pub mode_changes: u64,
+    pub last: Option<String>,
+    pub sound_current: bool,
+    /// From the owner's report to the sound open again, ms: the last and
+    /// all of them.
+    pub not_current_ms_last: u64,
+    pub not_current_ms_total: u64,
+    pub skipped: std::collections::BTreeMap<String, u64>,
+    pub alarm: Option<String>,
+    pub follow: crate::player::SoundFollow,
 }
 
 /// The live player's health file (mediabox-live `health::PATH`).
@@ -3588,7 +3700,7 @@ impl crate::live_gate::GateIo for LiveGate {
         self.output.content_progress(request)
     }
     fn mode_changed(&self) {
-        self.player.mode_changed();
+        self.player.mode_applied(self.output.mode_generation());
     }
     fn sound_current(&self) -> bool {
         self.player.sound_current()

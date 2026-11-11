@@ -133,6 +133,53 @@ struct State {
     /// That match, sent, for the film's follower to see through: the film
     /// and the match's number (`take_rematch`).
     rematched: Option<(u64, u64)>,
+    /// How many real changes of the wire the owner has reported
+    /// (`ModeApplied::generation`).
+    mode_generation: u64,
+}
+
+/// A change of what is on the wire, reported by its owner as committed: a
+/// timing or a colour format other than the one it reported before. The
+/// commit stops HDMI's sound stream (hdmi-codec `plugged_cb`), and nothing
+/// else says so; whoever plays sound on that connector opens it again for
+/// this `generation` (`daemon::follow_output_modes`). A report repeated, or
+/// one that changes only the HDR signalling, is not one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModeApplied {
+    pub generation: u64,
+    pub connector: String,
+    pub previous: Option<String>,
+    pub current: String,
+    pub reason: ModeReason,
+}
+
+/// What a change of the wire was for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeReason {
+    /// A person's trial of a setting.
+    Trial,
+    /// A film's (a channel's) frame rate matched, or a trial ending.
+    Content,
+    /// Anything else: the kept setting put back, an owner restarted.
+    Other,
+}
+
+impl ModeReason {
+    pub fn name(self) -> &'static str {
+        match self {
+            ModeReason::Trial => "trial",
+            ModeReason::Content => "content",
+            ModeReason::Other => "other",
+        }
+    }
+}
+
+/// Whether `after` changes the wire from `before`: the sink, the timing or
+/// the colour format; not the HDR signalling alone.
+pub fn wire_changed(before: Option<&AppliedOutput>, after: &AppliedOutput) -> bool {
+    before.is_none_or(|before| {
+        before.identity != after.identity || before.timing_key != after.timing_key || before.colour != after.colour
+    })
 }
 
 /// The display while one film plays. `film` is the player's number for it;
@@ -170,6 +217,9 @@ pub struct Output {
     paths: Paths,
     state: Mutex<State>,
     events: broadcast::Sender<OutputEvent>,
+    /// The last change of the wire (`ModeApplied`): its follower needs the
+    /// newest one, and its generation says how many came before it.
+    modes: tokio::sync::watch::Sender<Option<ModeApplied>>,
     /// Asks for the display's owner to be put back on a sink that changed:
     /// `mediabox-display-changed`, which compares against its own record and
     /// does nothing when there is nothing to do.
@@ -221,12 +271,23 @@ impl Output {
                 ..Default::default()
             }),
             events,
+            modes: tokio::sync::watch::channel(None).0,
             recover: Box::new(recover),
         })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<OutputEvent> {
         self.events.subscribe()
+    }
+
+    /// Every change of the wire the owner reports (`ModeApplied`).
+    pub fn modes(&self) -> tokio::sync::watch::Receiver<Option<ModeApplied>> {
+        self.modes.subscribe()
+    }
+
+    /// The number of the last change of the wire.
+    pub fn mode_generation(&self) -> u64 {
+        self.state().mode_generation
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -935,6 +996,37 @@ impl Output {
                         && content.target_key == Some(applied.timing_key)
                     {
                         content.output.applied = true;
+                    }
+                    if wire_changed(state.applied.as_ref(), &applied) {
+                        state.mode_generation += 1;
+                        let reason = match applied.trial {
+                            Some(_) => ModeReason::Trial,
+                            None if state.content.as_ref().is_some_and(|content| content.target_key == Some(applied.timing_key)) => ModeReason::Content,
+                            None => ModeReason::Other,
+                        };
+                        let change = ModeApplied {
+                            generation: state.mode_generation,
+                            connector: applied.identity.connector.clone(),
+                            previous: state.applied.as_ref().map(|before| before.label.clone()),
+                            current: applied.label.clone(),
+                            reason,
+                        };
+                        eprintln!(
+                            "mediaboxd-rs: output mode {} -> {} on {} ({}), generation {}",
+                            change.previous.as_deref().unwrap_or("?"),
+                            change.current,
+                            change.connector,
+                            reason.name(),
+                            change.generation
+                        );
+                        mediabox_core::timeline!(
+                            "mode-applied",
+                            "gen={} label={} reason={}",
+                            change.generation,
+                            change.current,
+                            reason.name()
+                        );
+                        self.modes.send_replace(Some(change));
                     }
                     state.applied = Some(applied);
                 }
@@ -1791,6 +1883,117 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         let (applies, _) = drain(&offer, &mut events);
         assert_eq!(applies, [("3840x2160p60".to_string(), None, false)]);
         assert!(output.take_rematch(9).is_none());
+    }
+
+    // FAZ 3J.3A: every change of the wire is one `ModeApplied`, from the
+    // owner's report, and only a real one.
+
+    /// The last change of the wire: (generation, previous, current, reason).
+    fn last_mode(output: &Arc<Output>) -> Option<(u64, Option<String>, String, ModeReason)> {
+        output.modes().borrow().clone().map(|m| (m.generation, m.previous, m.current, m.reason))
+    }
+
+    /// Cases 1, 2, 4, 5: a channel's 50 Hz, a trial's 60, taken back by
+    /// hand: one generation each, at the owner's report and not at the
+    /// asking; the same report twice is one.
+    #[tokio::test]
+    async fn each_real_change_of_the_wire_is_one_generation_at_the_owners_report() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        output.content_start_request(7, Cadence::from_fps(50.0).unwrap()).unwrap();
+        let (fifty, _, _) = next_apply(&mut events).await;
+        assert_eq!(output.mode_generation(), 0, "asked, not applied");
+        assert!(last_mode(&output).is_none());
+        output.owner_report(applied(&offer, &fifty, None)).unwrap();
+        assert_eq!(last_mode(&output), Some((1, None, "3840x2160p50".into(), ModeReason::Content)));
+        // Reported again: not a change.
+        output.owner_report(applied(&offer, &fifty, None)).unwrap();
+        assert_eq!(output.mode_generation(), 1);
+        let trial = output.try_setting(ResolutionChoice::Auto, None, true).unwrap().trial.unwrap();
+        let (sixty, _, _) = next_apply(&mut events).await;
+        assert_eq!(output.mode_generation(), 1, "the trial asked, not applied");
+        output.owner_report(applied(&offer, &sixty, Some(trial.id))).unwrap();
+        assert_eq!(
+            last_mode(&output),
+            Some((2, Some("3840x2160p50".into()), "3840x2160p60".into(), ModeReason::Trial))
+        );
+        output.owner_report(applied(&offer, &sixty, Some(trial.id))).unwrap();
+        assert_eq!(output.mode_generation(), 2, "the same report twice is one change");
+        output.revert(trial.id).unwrap();
+        let (back, _, content) = next_apply(&mut events).await;
+        assert!(content);
+        assert_eq!(output.mode_generation(), 2);
+        output.owner_report(applied(&offer, &back, None)).unwrap();
+        assert_eq!(
+            last_mode(&output),
+            Some((3, Some("3840x2160p60".into()), "3840x2160p50".into(), ModeReason::Content))
+        );
+    }
+
+    /// Case 3: a change the owner could not commit is none.
+    #[tokio::test]
+    async fn a_change_the_owner_could_not_commit_is_not_one() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        output.content_start_request(7, Cadence::from_fps(50.0).unwrap()).unwrap();
+        next_apply(&mut events).await;
+        output
+            .owner_report(OwnerReport::Failed { identity: offer_identity(&offer), trial: None, error: "commit: EINVAL".into() })
+            .unwrap();
+        assert_eq!(output.mode_generation(), 0);
+        assert!(last_mode(&output).is_none());
+    }
+
+    /// Case 6: a trial timing out under a 50 fps channel: its 60 Hz one
+    /// change, the 50 Hz back another.
+    #[tokio::test(start_paused = true)]
+    async fn a_trial_timing_out_is_one_change_back() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        fifty_under_a_trial(&output, &offer, &mut events, 7).await;
+        assert_eq!(output.mode_generation(), 2);
+        tokio::time::sleep(Duration::from_secs(u64::from(OUTPUT_TRIAL_SECONDS) + 1)).await;
+        let (applies, _) = drain(&offer, &mut events);
+        assert_eq!(applies.len(), 1);
+        output.owner_report(applied(&offer, &output.status().content.unwrap().setting, None)).unwrap();
+        assert_eq!(last_mode(&output).map(|m| (m.0, m.2)), Some((3, "3840x2160p50".into())));
+    }
+
+    /// Cases 7, 8: a trial kept stays on the wire -- no change; with a 50
+    /// fps channel playing, its match back to 50 Hz is the one real change.
+    #[tokio::test]
+    async fn a_trial_kept_changes_the_wire_only_when_a_channel_is_matched_again() {
+        let rig = Rig::new();
+        let offer = rig.observe(1, Some(&bytes(SONY))).unwrap();
+        let output = rig.output();
+        let mut events = output.subscribe();
+        // Nothing playing: kept, nothing more.
+        let id = applied_trial(&output, &offer);
+        assert_eq!(output.mode_generation(), 1);
+        output.keep(id).unwrap();
+        assert!(drain(&offer, &mut events).0.iter().all(|(label, _, _)| label == "3840x2160p30"));
+        assert_eq!(output.mode_generation(), 1, "keeping is not a change");
+        // A 50 fps channel, a trial of 60 kept: the channel back on 50.
+        output.content_start_request(8, Cadence::from_fps(50.0).unwrap()).unwrap();
+        let (fifty, _, _) = next_apply(&mut events).await;
+        output.owner_report(applied(&offer, &fifty, None)).unwrap();
+        assert_eq!(output.mode_generation(), 2);
+        let trial = output.try_setting(ResolutionChoice::Auto, None, true).unwrap().trial.unwrap();
+        let (sixty, _, _) = next_apply(&mut events).await;
+        output.owner_report(applied(&offer, &sixty, Some(trial.id))).unwrap();
+        assert_eq!(output.mode_generation(), 3);
+        output.keep(trial.id).unwrap();
+        let (applies, _) = drain(&offer, &mut events);
+        assert_eq!(applies, [("3840x2160p50".to_string(), None, true)]);
+        assert_eq!(output.mode_generation(), 3, "asked, not applied");
+        output.owner_report(applied(&offer, &output.status().content.unwrap().setting, None)).unwrap();
+        assert_eq!(last_mode(&output).map(|m| (m.0, m.2, m.3)), Some((4, "3840x2160p50".into(), ModeReason::Content)));
     }
 
     #[tokio::test]

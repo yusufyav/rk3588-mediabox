@@ -263,6 +263,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&state.audio),
         Arc::clone(&state.kodi),
     ));
+    // Every change of the wire has the live channel's sound opened again.
+    tokio::spawn(mediaboxd_rs::daemon::follow_output_modes(
+        Arc::clone(&state.output),
+        Arc::clone(&state.player),
+        Arc::clone(&state.audio),
+        mediaboxd_rs::daemon::OUTPUT_SOUND_HEALTH.into(),
+    ));
     // Android's floor under a BLE peripheral's connection interval: a 7.5 ms
     // keyboard starved a Bluetooth headset of air time (bt_le.rs).
     let _ = std::thread::Builder::new()

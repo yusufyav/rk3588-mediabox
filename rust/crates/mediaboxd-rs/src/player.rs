@@ -107,12 +107,50 @@ pub struct PlayerManager {
     /// for the change it came after -- not for one that came later.
     mode_changes: AtomicU64,
     sound_opened_after: AtomicU64,
+    /// One sound reopen at a time (`make_sound_current`, `reload_sound`):
+    /// whoever comes second finds the sound current, or opens it for the
+    /// change that came meanwhile.
+    sound_one: tokio::sync::Mutex<()>,
+    /// The live channel whose gate opened last (`gate_open`): only a channel
+    /// past its opening is followed through a change of the wire -- its
+    /// opening checks its sound itself (`live_gate::sound_and_open`).
+    opened_epoch: AtomicU64,
+    /// What following the wire has done, for health (`SoundFollow`).
+    follow: std::sync::Mutex<SoundFollow>,
     /// The rate the live channel's display was matched to at its opening,
     /// and the channel's epoch: a later change in the stream is a format
     /// change (`follow_film`).
     live_cadence: std::sync::Mutex<Option<(u64, mediabox_core::Cadence)>>,
     /// The number of the last sound plan sent to the live player.
     audio_seq: AtomicU64,
+}
+
+/// What following the wire has done to the sound (`make_sound_current`),
+/// counted: for the health file (`daemon::follow_output_modes`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SoundFollow {
+    /// The last change of the wire, and the one the sound was last opened
+    /// after by following it.
+    pub mode_generation: u64,
+    pub sound_generation: u64,
+    pub requested: u64,
+    pub completed: u64,
+    pub failed: u64,
+    /// Answers for a film or a channel no longer on, not counted for it.
+    pub stale: u64,
+    pub last_error: Option<String>,
+}
+
+/// How `make_sound_current` ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SoundOutcome {
+    /// Current already: nothing asked.
+    Current,
+    /// Opened again, after change `generation`.
+    Reloaded { generation: u64 },
+    /// The film or the channel changed: nothing counted for it.
+    Stale,
+    Failed(String),
 }
 
 /// How long the live player's answer to a plan is waited for: longer than
@@ -168,6 +206,9 @@ impl PlayerManager {
             epoch: AtomicU64::new(0),
             mode_changes: AtomicU64::new(0),
             sound_opened_after: AtomicU64::new(0),
+            sound_one: tokio::sync::Mutex::new(()),
+            opened_epoch: AtomicU64::new(0),
+            follow: std::sync::Mutex::new(SoundFollow::default()),
             live_cadence: std::sync::Mutex::new(None),
             audio_seq: AtomicU64::new(0),
         }
@@ -183,9 +224,74 @@ impl PlayerManager {
         self.epoch.load(Ordering::SeqCst)
     }
 
-    /// A display mode change was committed under the sound device.
-    pub fn mode_changed(&self) {
-        self.mode_changes.fetch_add(1, Ordering::SeqCst);
+    /// The wire changed, its owner reported it committed: change
+    /// `generation` (`output::ModeApplied`), the sound device's stream
+    /// stopped under it. Numbered by the output, so a change counted by
+    /// whoever saw it first is not counted twice.
+    pub fn mode_applied(&self, generation: u64) {
+        self.mode_changes.fetch_max(generation, Ordering::SeqCst);
+        let mut follow = self.follow();
+        follow.mode_generation = follow.mode_generation.max(generation);
+    }
+
+    /// The change the sound device was last opened after, and the last one.
+    pub fn sound_generations(&self) -> (u64, u64) {
+        (self.sound_opened_after.load(Ordering::SeqCst), self.mode_changes.load(Ordering::SeqCst))
+    }
+
+    fn follow(&self) -> std::sync::MutexGuard<'_, SoundFollow> {
+        self.follow.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// What following the wire has done so far.
+    pub fn sound_follow(&self) -> SoundFollow {
+        self.follow().clone()
+    }
+
+    /// Whether live channel `epoch` is past its opening (`gate_open`).
+    pub fn live_open(&self, epoch: u64) -> bool {
+        epoch != 0 && self.opened_epoch.load(Ordering::SeqCst) == epoch
+    }
+
+    /// The sound of film `film`, live channel `epoch`, made current for the
+    /// last change of the wire: `ao-reload` asked at once, unless it is
+    /// current already; asked again if another change came while it was on
+    /// its way; never for a film or a channel that is not the one on any
+    /// more, and its answer not counted for one. One at a time.
+    pub async fn make_sound_current(&self, film: u64, epoch: u64) -> SoundOutcome {
+        let _one = self.sound_one.lock().await;
+        let mut opened = None;
+        loop {
+            if self.film() != film || self.epoch() != epoch {
+                self.follow().stale += 1;
+                return SoundOutcome::Stale;
+            }
+            let generation = self.mode_changes.load(Ordering::SeqCst);
+            if self.sound_opened_after.load(Ordering::SeqCst) >= generation {
+                return opened.map_or(SoundOutcome::Current, |generation| SoundOutcome::Reloaded { generation });
+            }
+            self.follow().requested += 1;
+            mediabox_core::timeline!("ao-reload", "film={film} epoch={epoch} gen={generation}");
+            let answer = self.ask_within(json!({"command": ["ao-reload"], "request_id": 41}), std::time::Duration::from_secs(3)).await;
+            let error = answer.as_ref().and_then(|answer| answer.get("error")).and_then(Value::as_str).unwrap_or("no answer").to_string();
+            let ours = self.film() == film && self.epoch() == epoch;
+            mediabox_core::timeline!("ao-reload-done", "film={film} epoch={epoch} gen={generation} ok={} same={}", u8::from(error == "success"), u8::from(ours));
+            if !ours {
+                self.follow().stale += 1;
+                return SoundOutcome::Stale;
+            }
+            if error != "success" {
+                let mut follow = self.follow();
+                follow.failed += 1;
+                follow.last_error = Some(error.clone());
+                return SoundOutcome::Failed(error);
+            }
+            self.sound_opened_after.fetch_max(generation, Ordering::SeqCst);
+            let mut follow = self.follow();
+            follow.completed += 1;
+            follow.sound_generation = follow.sound_generation.max(generation);
+            opened = Some(generation);
+        }
     }
 
     /// The sound device was opened after the last mode change.
@@ -210,7 +316,10 @@ impl PlayerManager {
             .await
             .ok_or(crate::live_gate::NO_ANSWER)?;
         match answer.get("error").and_then(Value::as_str) {
-            Some("success") => Ok(()),
+            Some("success") => {
+                self.opened_epoch.store(epoch, Ordering::SeqCst);
+                Ok(())
+            }
             other => Err(other.unwrap_or("no answer").to_string()),
         }
     }
@@ -379,6 +488,7 @@ impl PlayerManager {
     /// Counted for the mode changes made before it was asked: one made
     /// while it was on its way needs another (`sound_current`).
     pub async fn reload_sound(&self) -> Result<(), String> {
+        let _one = self.sound_one.lock().await;
         let after = self.mode_changes.load(Ordering::SeqCst);
         let answer = self
             .ask_within(json!({"command": ["ao-reload"], "request_id": 41}), std::time::Duration::from_secs(3))
@@ -1006,7 +1116,7 @@ pub(crate) mod fake {
                         return;
                     }
                     let Ok(request) = serde_json::from_str::<Value>(&line) else { return };
-                    let (error, data) = if request["command"][0] == "mediabox-audio-plan" {
+                    let (error, data) = if request["command"][0] == "mediabox-audio-plan" || request["command"][0] == "ao-reload" {
                         let (answer, answered) = tokio::sync::oneshot::channel();
                         if requests.send((request.clone(), answer)).is_err() {
                             return;
@@ -1141,6 +1251,101 @@ mod tests {
         *player.playing.lock().await = Some(Playing { content: Playback::Live { service_id: 10603 }, title: None, duration: None });
         player.next_epoch();
         player
+    }
+
+    // FAZ 3J.3A: the sound made current for the last change of the wire.
+    use std::sync::Arc;
+
+    /// A live channel past its opening, its player listening.
+    async fn followed(dir: &Path) -> (Arc<PlayerManager>, tokio::sync::mpsc::UnboundedReceiver<fake::Request>) {
+        let player = Arc::new(on_live(dir).await);
+        let inbox = fake::live(&player.socket);
+        player.opened_epoch.store(player.epoch(), Ordering::SeqCst);
+        (player, inbox)
+    }
+
+    fn reopen(player: &Arc<PlayerManager>) -> tokio::task::JoinHandle<SoundOutcome> {
+        let (player, film, epoch) = (Arc::clone(player), player.film(), player.epoch());
+        tokio::spawn(async move { player.make_sound_current(film, epoch).await })
+    }
+
+    async fn next_reload(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<fake::Request>) -> tokio::sync::oneshot::Sender<(String, Value)> {
+        let (request, answer) = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv()).await.unwrap().unwrap();
+        assert_eq!(request["command"], json!(["ao-reload"]));
+        answer
+    }
+
+    /// Cases 1, 4: one change, one reload; asked again for the same change,
+    /// or the change reported twice, nothing more.
+    #[tokio::test]
+    async fn one_change_of_the_wire_is_one_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (player, mut inbox) = followed(dir.path()).await;
+        player.mode_applied(1);
+        let outcome = reopen(&player);
+        next_reload(&mut inbox).await.send(("success".into(), Value::Null)).unwrap();
+        assert_eq!(outcome.await.unwrap(), SoundOutcome::Reloaded { generation: 1 });
+        player.mode_applied(1);
+        assert_eq!(reopen(&player).await.unwrap(), SoundOutcome::Current);
+        assert!(inbox.try_recv().is_err(), "no second reload");
+        let follow = player.sound_follow();
+        assert_eq!((follow.requested, follow.completed, follow.mode_generation, follow.sound_generation), (1, 1, 1, 1));
+    }
+
+    /// Case 9: a second change while the first reload is on its way: the
+    /// first answer counts for the first change only, and the sound is
+    /// opened once more, for the second.
+    #[tokio::test]
+    async fn a_change_during_a_reload_has_the_sound_opened_for_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (player, mut inbox) = followed(dir.path()).await;
+        player.mode_applied(1);
+        let outcome = reopen(&player);
+        let first = next_reload(&mut inbox).await;
+        player.mode_applied(2);
+        first.send(("success".into(), Value::Null)).unwrap();
+        let second = next_reload(&mut inbox).await;
+        assert_eq!(player.sound_generations(), (1, 2), "the first answer is the first change's");
+        assert!(!player.sound_current());
+        second.send(("success".into(), Value::Null)).unwrap();
+        assert_eq!(outcome.await.unwrap(), SoundOutcome::Reloaded { generation: 2 });
+        assert!(player.sound_current());
+        let follow = player.sound_follow();
+        assert_eq!((follow.requested, follow.completed), (2, 2));
+    }
+
+    /// Case 10: the channel changed while the reload was on its way: its
+    /// answer is not counted for the channel on now.
+    #[tokio::test]
+    async fn a_reload_answered_after_the_channel_changed_is_not_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (player, mut inbox) = followed(dir.path()).await;
+        player.mode_applied(1);
+        let outcome = reopen(&player);
+        let answer = next_reload(&mut inbox).await;
+        player.next_epoch();
+        answer.send(("success".into(), Value::Null)).unwrap();
+        assert_eq!(outcome.await.unwrap(), SoundOutcome::Stale);
+        assert_eq!(player.sound_generations(), (0, 1));
+        let follow = player.sound_follow();
+        assert_eq!((follow.completed, follow.stale), (0, 1));
+        // Nor is one asked for a channel that is not the one on.
+        assert_eq!(player.make_sound_current(player.film(), player.epoch() - 1).await, SoundOutcome::Stale);
+        assert!(inbox.try_recv().is_err());
+    }
+
+    /// Case 12: refused, said -- counted as failed, with the player's reason.
+    #[tokio::test]
+    async fn a_reload_refused_is_a_failure_with_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let (player, mut inbox) = followed(dir.path()).await;
+        player.mode_applied(1);
+        let outcome = reopen(&player);
+        next_reload(&mut inbox).await.send(("ses aygıtı açılamadı".into(), Value::Null)).unwrap();
+        assert_eq!(outcome.await.unwrap(), SoundOutcome::Failed("ses aygıtı açılamadı".into()));
+        let follow = player.sound_follow();
+        assert_eq!((follow.failed, follow.completed, follow.last_error.as_deref()), (1, 0, Some("ses aygıtı açılamadı")));
+        assert!(!player.sound_current());
     }
 
     /// The live player is sent the whole plan in one request, for the
