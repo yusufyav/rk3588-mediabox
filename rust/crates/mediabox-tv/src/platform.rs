@@ -550,12 +550,26 @@ fn commit_on_stage(
         request.add_property(plane, fb, Value::Framebuffer(Some(framebuffer)));
     }
     let staged = s.sink.stage(kms, crtc, &s.video, &mut request);
-    if ui.is_none() && staged.is_none() {
+    // No film frame: the film's plane veiled while a player is connected,
+    // so the film's first frame does not turn a 4K video plane on in its
+    // own commit (`video::yuv_4k`).
+    let veil = if staged.is_none() && s.sink.wants_veil() {
+        s.sink.stage_veil(kms, crtc, &s.video, s.panel, &mut request)
+    } else {
+        None
+    };
+    if ui.is_none() && staged.is_none() && veil.is_none() {
         return Ok(false);
     }
     let flags = control::AtomicCommitFlags::NONBLOCK | control::AtomicCommitFlags::PAGE_FLIP_EVENT;
     let committed = kms.atomic_commit(flags, request);
-    let committed = match (committed, staged, ui) {
+    if let Some(index) = veil {
+        match &committed {
+            Ok(()) => s.sink.veil_committed(&s.video, index),
+            Err(error) => s.sink.veil_refused(&error.to_string()),
+        }
+    }
+    let committed = match (committed, staged.or(veil), ui) {
         (Ok(()), _, _) => Ok(staged),
         // The film's part refused it: the interface's frame goes on its
         // own rather than the panel freezing on the last one.
@@ -916,7 +930,7 @@ fn presenter(stage: Arc<Stage>, kms: SharedKms, crtc: control::crtc::Handle) {
         }
         ask_vblank_on_stage(&kms, crtc, &mut s);
         if !s.waiting_for_flip && s.ui_on_panel && !s.hold {
-            let film = s.sink.has_pending();
+            let film = s.sink.has_pending() || s.sink.wants_veil();
             let ui = s.ui_next.is_some() && (film || ui_wait(&s, UI_MARGIN).is_zero());
             if film || ui {
                 let frame = if ui { s.ui_next.take() } else { None };
@@ -1666,6 +1680,10 @@ impl SplitDisplay {
             }
             s = self.stage.changed.wait_timeout(s, FLIP_LOST / 4).unwrap_or_else(|e| e.into_inner()).0;
         }
+        // Not under a change of the whole display: the veil's rectangle is
+        // the mode's before it.
+        let state = &mut *s;
+        state.sink.drop_veil(&self.kms, self.crtc, &state.video);
         Held { stage: &self.stage, guard: Some(s) }
     }
 

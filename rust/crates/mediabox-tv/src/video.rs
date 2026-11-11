@@ -299,6 +299,9 @@ struct PlaneProps {
     crtc: control::property::Handle,
     src: [control::property::Handle; 4],
     dst: [control::property::Handle; 4],
+    /// The plane's own opacity, 0..=0xffff; without it the plane is never
+    /// veiled (`stage_veil`).
+    alpha: Option<control::property::Handle>,
 }
 
 fn plane_props<D: ControlDevice>(device: &D, plane: control::plane::Handle) -> Option<PlaneProps> {
@@ -317,7 +320,95 @@ fn plane_props<D: ControlDevice>(device: &D, plane: control::plane::Handle) -> O
         crtc: get("CRTC_ID")?,
         src: [get("SRC_X")?, get("SRC_Y")?, get("SRC_W")?, get("SRC_H")?],
         dst: [get("CRTC_X")?, get("CRTC_Y")?, get("CRTC_W")?, get("CRTC_H")?],
+        alpha: get("alpha"),
     })
+}
+
+/// A plane fully opaque, as the `alpha` property has it.
+const ALPHA_OPAQUE: u64 = 0xffff;
+
+/// The veil's frame: black, 8-bit, 4:2:0, at UHD.
+const VEIL_FOURCC: DrmFourcc = DrmFourcc::Nv12;
+const VEIL_SIZE: (u32, u32) = (3840, 2160);
+/// What the veil is read as: BT.709, limited, SDR.
+const VEIL_COLOUR: Colour = Colour { encoding: 1, range: 0, eotf: 0 };
+
+/// Whether the vendor driver counts a plane carrying this frame as a 4K
+/// video plane (`plane_num_4k`, rockchip_drm_vop2.c `vop2_crtc_bandwidth`:
+/// `fb->format->is_yuv && (act_w > 2560 || act_h > 2560)`). The first
+/// commit of a CRTC's state with such a plane, after one without, raises
+/// the memory controller's floor (`rockchip_dmcfreq_vop_bandwidth_update`,
+/// `vop_req_rate` 0 -> `video_4k_rate`) and has the governor choose a rate
+/// again -- in the commit's own worker, before its planes are flushed. A
+/// change of rate is made by the DDR MCU at a vblank: measured on the Plus
+/// (2026-11-11), 13.5 to 18.5 ms, done 0.04 to 0.66 ms after a vblank, so
+/// the commit's flush missed the vblank it was made for and its flip came a
+/// period late: the film's first frame, 2 of 10 openings of TRT 4K.
+pub fn yuv_4k(fourcc: DrmFourcc, width: u32, height: u32) -> bool {
+    let yuv = matches!(
+        fourcc,
+        DrmFourcc::Nv12
+            | DrmFourcc::Nv21
+            | DrmFourcc::Nv15
+            | DrmFourcc::Nv16
+            | DrmFourcc::Nv61
+            | DrmFourcc::Nv24
+            | DrmFourcc::Nv42
+            | DrmFourcc::P010
+            | DrmFourcc::Yuyv
+            | DrmFourcc::Uyvy
+    );
+    yuv && (width > 2560 || height > 2560)
+}
+
+/// Whether the film's plane should go on veiled now: a player is connected
+/// and no film is on the panel or waiting for it, and the plane is not
+/// veiled already (nor could not be). Veiled, the plane is a 4K video plane
+/// to the kernel from the moment the player connects -- seconds before its
+/// first frame -- so the memory controller's rate is settled by a commit
+/// nothing is timed by, and the first frame's own commit changes nothing
+/// the kernel counts (`yuv_4k`).
+pub fn veil_wanted(connected: bool, film: bool, waiting: bool, veiled: bool, failed: bool) -> bool {
+    connected && !film && !waiting && !veiled && !failed
+}
+
+/// A black UHD NV12 frame in a buffer of the display's own, for the veil.
+fn make_veil<D: ControlDevice + Clone>(device: &D) -> Result<Imported<D>, String> {
+    let (width, height) = VEIL_SIZE;
+    // One 8-bit buffer: the luma's rows, then the chroma's half as many.
+    let mut dumb = device
+        .create_dumb_buffer((width, height + height / 2), DrmFourcc::C8, 8)
+        .map_err(|e| format!("DRM_IOCTL_MODE_CREATE_DUMB(veil): {e}"))?;
+    let handle = drm::buffer::Buffer::handle(&dumb);
+    let pitch = drm::buffer::Buffer::pitch(&dumb);
+    let luma = pitch as usize * height as usize;
+    match device.map_dumb_buffer(&mut dumb) {
+        Ok(mut map) => {
+            let bytes: &mut [u8] = map.as_mut();
+            let split = luma.min(bytes.len());
+            bytes[..split].fill(16);
+            bytes[split..].fill(128);
+        }
+        Err(e) => {
+            let _ = device.close_buffer(handle);
+            return Err(format!("DRM_IOCTL_MODE_MAP_DUMB(veil): {e}"));
+        }
+    }
+    let planar = Planar {
+        fourcc: VEIL_FOURCC,
+        size: VEIL_SIZE,
+        pitches: [pitch, pitch, 0, 0],
+        handles: [Some(handle), Some(handle), None, None],
+        offsets: [0, luma as u32, 0, 0],
+        modifier: DrmModifier::Linear,
+    };
+    match device.add_planar_framebuffer(&planar, control::FbCmd2Flags::MODIFIERS) {
+        Ok(framebuffer) => Ok(Imported { device: device.clone(), framebuffer, handles: vec![handle] }),
+        Err(e) => {
+            let _ = device.close_buffer(handle);
+            Err(format!("DRM_IOCTL_MODE_ADDFB2(veil): {e}"))
+        }
+    }
 }
 
 /// `COLOR_ENCODING`, `COLOR_RANGE` and `EOTF` on one plane, by name.
@@ -572,6 +663,10 @@ impl VideoPlane {
         request.add_property(self.plane, props.dst[1], Value::SignedRange(dst.y.into()));
         request.add_property(self.plane, props.dst[2], Value::UnsignedRange(dst.width.into()));
         request.add_property(self.plane, props.dst[3], Value::UnsignedRange(dst.height.into()));
+        // Seen: the veil, if the plane carried it, is lifted with this frame.
+        if let Some(alpha) = props.alpha {
+            request.add_property(self.plane, alpha, Value::UnsignedRange(ALPHA_OPAQUE));
+        }
         if self.applied.get() != Some(frame.colour) {
             for (property, value) in [
                 (self.encoding, frame.colour.encoding),
@@ -591,6 +686,56 @@ impl VideoPlane {
             request.add_property(self.plane, depth, Value::UnsignedRange(0));
         }
         true
+    }
+
+    /// Puts the veil into an atomic request: the plane on, under the
+    /// interface, carrying a 4K video frame no one sees -- its alpha 0, and
+    /// the frame black besides -- read as SDR, so that no curve the last
+    /// film left on the plane is taken for this one. False on a plane with
+    /// no alpha: it is not put up where it might be seen.
+    fn stage_veil(
+        &self,
+        request: &mut control::atomic::AtomicModeReq,
+        crtc: control::crtc::Handle,
+        veil: &Imported<impl ControlDevice>,
+        panel: (u32, u32),
+    ) -> bool {
+        use control::property::Value;
+        let Some(props) = self.props else { return false };
+        let Some(alpha) = props.alpha else { return false };
+        request.add_property(self.plane, alpha, Value::UnsignedRange(0));
+        request.add_property(self.plane, props.fb, Value::Framebuffer(Some(veil.framebuffer)));
+        request.add_property(self.plane, props.crtc, Value::CRTC(Some(crtc)));
+        let src = [0, 0, u64::from(VEIL_SIZE.0) << 16, u64::from(VEIL_SIZE.1) << 16];
+        for (handle, value) in props.src.iter().zip(src) {
+            request.add_property(self.plane, *handle, Value::UnsignedRange(value));
+        }
+        request.add_property(self.plane, props.dst[0], Value::SignedRange(0));
+        request.add_property(self.plane, props.dst[1], Value::SignedRange(0));
+        request.add_property(self.plane, props.dst[2], Value::UnsignedRange(panel.0.into()));
+        request.add_property(self.plane, props.dst[3], Value::UnsignedRange(panel.1.into()));
+        for (property, value) in [
+            (self.encoding, VEIL_COLOUR.encoding),
+            (self.range, VEIL_COLOUR.range),
+            (self.eotf, VEIL_COLOUR.eotf),
+        ] {
+            if let Some(property) = property {
+                request.add_property(self.plane, property, Value::UnsignedRange(value));
+            }
+        }
+        if let Some(depth) = self.depth {
+            request.add_property(self.plane, depth, Value::UnsignedRange(0));
+        }
+        true
+    }
+
+    /// Puts the plane's going off into an atomic request: the film went up
+    /// on another plane than the veil's, in the same commit.
+    fn stage_off(&self, request: &mut control::atomic::AtomicModeReq) {
+        use control::property::Value;
+        let Some(props) = self.props else { return };
+        request.add_property(self.plane, props.fb, Value::Framebuffer(None));
+        request.add_property(self.plane, props.crtc, Value::CRTC(None));
     }
 
     /// The request that carried `stage`'s properties was committed.
@@ -1214,6 +1359,12 @@ pub struct Sink<D: ControlDevice + Clone> {
     picture: Option<(Rect, (u32, u32))>,
     /// Counts every change to either, for whoever draws the subtitle.
     subtitle_changes: u64,
+    /// The veil's frame, made once (`make_veil`); the plane carrying it now,
+    /// if one does; and whether it could not be put up, so it is not tried
+    /// again on every pass.
+    veil: Option<Imported<D>>,
+    veiled: Option<usize>,
+    veil_failed: bool,
 }
 
 impl<D: ControlDevice + Clone> Sink<D> {
@@ -1240,6 +1391,9 @@ impl<D: ControlDevice + Clone> Sink<D> {
             subtitle: None,
             picture: None,
             subtitle_changes: 0,
+            veil: None,
+            veiled: None,
+            veil_failed: false,
         })
     }
 
@@ -1293,6 +1447,79 @@ impl<D: ControlDevice + Clone> Sink<D> {
         if self.subtitle != image {
             self.subtitle = image;
             self.subtitle_changes += 1;
+        }
+    }
+
+    /// Whether the presenter should put the veil up now (`veil_wanted`).
+    pub fn wants_veil(&self) -> bool {
+        veil_wanted(self.server.connected(), self.on, !self.pending.is_empty(), self.veiled.is_some(), self.veil_failed)
+    }
+
+    /// Adds the veil to `request`, on the plane the film went on last (or
+    /// the first that takes it, asked with `TEST_ONLY`). Returns the plane,
+    /// for `veil_committed`; None, and not tried again, if it cannot go up.
+    pub fn stage_veil(
+        &mut self,
+        device: &D,
+        crtc: control::crtc::Handle,
+        planes: &[VideoPlane],
+        panel: (u32, u32),
+        request: &mut control::atomic::AtomicModeReq,
+    ) -> Option<usize> {
+        if self.veil.is_none() {
+            match make_veil(device) {
+                Ok(veil) => self.veil = Some(veil),
+                Err(error) => {
+                    self.veil_refused(&error);
+                    return None;
+                }
+            }
+        }
+        let veil = self.veil.as_ref()?;
+        let order: Vec<usize> = match self.chosen {
+            Some(index) => vec![index],
+            None => (0..planes.len()).filter(|&index| planes[index].accepts(VEIL_FOURCC)).collect(),
+        };
+        for index in order {
+            let mut test = request.clone();
+            if !planes[index].stage_veil(&mut test, crtc, veil, panel) {
+                continue;
+            }
+            if device.atomic_commit(control::AtomicCommitFlags::TEST_ONLY, test.clone()).is_ok() {
+                *request = test;
+                return Some(index);
+            }
+        }
+        self.veil_refused("no plane on this video port would take it");
+        None
+    }
+
+    /// The veil is up on `planes[index]`.
+    pub fn veil_committed(&mut self, planes: &[VideoPlane], index: usize) {
+        self.veiled = Some(index);
+        planes[index].staged(VEIL_COLOUR);
+        mediabox_core::timeline!("veil", "pid={} plane={}", self.server.peer(), planes[index].name);
+    }
+
+    /// The veil could not go up: the first frame of each film turns the
+    /// plane on itself, as it did before there was one.
+    pub fn veil_refused(&mut self, error: &str) {
+        if !self.veil_failed {
+            eprintln!("mediabox-tv.video the veil cannot go up: {error}");
+        }
+        mediabox_core::timeline!("veil-refused", "error={error:?}");
+        self.veil_failed = true;
+    }
+
+    /// Takes the veil down, before the display is changed as a whole (a
+    /// mode, the hand-over) and when the player goes; put up again by the
+    /// presenter while a player is still connected (`wants_veil`).
+    pub fn drop_veil(&mut self, device: &D, crtc: control::crtc::Handle, planes: &[VideoPlane]) {
+        if let Some(index) = self.veiled.take()
+            && let Some(plane) = planes.get(index)
+        {
+            plane.hide(device, crtc);
+            mediabox_core::timeline!("veil-off", "plane={}", plane.name);
         }
     }
 
@@ -1655,6 +1882,9 @@ impl<D: ControlDevice + Clone> Sink<D> {
                 if !plane.stage(&mut test, crtc, &pending.imported, &pending.info, pending.dst) {
                     continue;
                 }
+                if let Some(veiled) = self.veiled.filter(|&veiled| veiled != index) {
+                    planes[veiled].stage_off(&mut test);
+                }
                 let flags = control::AtomicCommitFlags::TEST_ONLY;
                 if device.atomic_commit(flags, test).is_ok() {
                     eprintln!(
@@ -1682,9 +1912,15 @@ impl<D: ControlDevice + Clone> Sink<D> {
             self.server.release(old.id);
             return None;
         };
-        planes[index]
-            .stage(request, crtc, &pending.imported, &pending.info, pending.dst)
-            .then_some(index)
+        if !planes[index].stage(request, crtc, &pending.imported, &pending.info, pending.dst) {
+            return None;
+        }
+        // The veil gives way to the film in the film's own commit: one 4K
+        // video plane before it and after it (`yuv_4k`).
+        if let Some(veiled) = self.veiled.filter(|&veiled| veiled != index) {
+            planes[veiled].stage_off(request);
+        }
+        Some(index)
     }
 
     /// The request `stage` added the waiting frame to was committed: it is on
@@ -1698,6 +1934,21 @@ impl<D: ControlDevice + Clone> Sink<D> {
         self.flip_wait = pending.due_ns;
         trace::event('c', pending.id, 0);
         planes[index].staged(pending.info.colour);
+        if let Some(veiled) = self.veiled.take() {
+            let info = &pending.info;
+            mediabox_core::timeline!(
+                "veil-lifted",
+                "pid={} id={id} veil_4k={} film_4k={} same_plane={}",
+                self.server.peer(),
+                yuv_4k(VEIL_FOURCC, VEIL_SIZE.0, VEIL_SIZE.1),
+                yuv_4k(info.fourcc, info.width, info.height),
+                veiled == index
+            );
+            if veiled != index {
+                planes[veiled].applied.set(None);
+                planes[veiled].sunk.set(false);
+            }
+        }
         if !self.on || self.picture.map(|(picture, _)| picture) != Some(pending.dst) {
             self.picture = Some((pending.dst, pending.panel));
             self.subtitle_changes += 1;
@@ -1766,6 +2017,10 @@ impl<D: ControlDevice + Clone> Sink<D> {
         {
             plane.hide(device, crtc);
         }
+        if self.veiled.is_some_and(|veiled| Some(veiled) == self.chosen) {
+            self.veiled = None;
+        }
+        self.drop_veil(device, crtc, planes);
         while let Some((id, _)) = self.shown.pop_front() {
             self.server.release(id);
         }
@@ -1921,6 +2176,36 @@ fn fit(display: (u32, u32), frame: &Frame, into: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TRT 4K, 2 openings in 10 (the Plus, 2026-11-11): the first frame's
+    /// commit was the one that turned a 4K video plane on, the kernel moved
+    /// the memory controller's rate in that commit's worker until the vblank
+    /// had passed (18.5 ms), and the frame went up a period late. With the
+    /// veil up from the player's connecting, the first frame's commit leaves
+    /// the kernel's count of 4K video planes as it was.
+    #[test]
+    fn a_uhd_films_first_frame_does_not_turn_a_4k_video_plane_on() {
+        // A player connected and nothing of its film yet: the veil goes up.
+        assert!(veil_wanted(true, false, false, false, false));
+        // To the kernel it is a 4K video plane, as a UHD film's frames are.
+        assert!(yuv_4k(VEIL_FOURCC, VEIL_SIZE.0, VEIL_SIZE.1));
+        for fourcc in [DrmFourcc::Nv12, DrmFourcc::Nv15] {
+            assert!(yuv_4k(fourcc, 3840, 2160));
+        }
+        // An HD film's frame takes the count down, which moves nothing.
+        assert!(!yuv_4k(DrmFourcc::Nv12, 1920, 1080));
+        assert!(!yuv_4k(DrmFourcc::Argb8888, 3840, 2160));
+    }
+
+    #[test]
+    fn the_veil_waits_for_a_player_and_gives_way_to_its_film() {
+        // No player; its film on; its frame waiting; up already; refused.
+        assert!(!veil_wanted(false, false, false, false, false));
+        assert!(!veil_wanted(true, true, false, false, false));
+        assert!(!veil_wanted(true, false, true, false, false));
+        assert!(!veil_wanted(true, false, false, true, false));
+        assert!(!veil_wanted(true, false, false, false, true));
+    }
 
     fn frame(width: u32, height: u32) -> Frame {
         Frame {
