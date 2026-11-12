@@ -180,6 +180,13 @@ ADDON_CACHE_SECONDS = 300.0
 #: How long the account's picture is kept before Stremio is asked again. It
 #: changes when somebody changes it, on another device, rarely.
 AVATAR_CACHE_SECONDS = 3600.0
+#: How long a subtitle addon that answered with something that cannot be a
+#: subtitle list -- a refusal (HTTP 4xx) or a page that is not JSON -- is left
+#: out of the subtitle search. Such an answer is the endpoint's, not the
+#: network's: the legacy OpenSubtitles addon answers every request with its
+#: HTML landing page, and asking it again on every film is a request that can
+#: only fail. A timeout or a 5xx is not this: the next film asks again.
+SUBTITLE_ADDON_SUSPEND_SECONDS = 6 * 3600.0
 
 #: Catalogues shown on the home surface, per addon, so one addon with forty
 #: catalogues cannot fill the screen by itself.
@@ -296,6 +303,11 @@ class HeadlessStremio:
         # Told whenever one of those requests finishes.
         self._stream_answered = threading.Condition(self._lock)
         self._meta_cache: dict[tuple[str, str], tuple[float, Meta]] = {}
+        # Subtitle addons left out after an answer that cannot be a subtitle
+        # list: addon id -> (until, why).
+        self._subtitle_suspended: dict[str, tuple[float, str]] = {}
+        # What each subtitle addon did on the last search: id -> its state.
+        self._subtitle_sources: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ session
 
@@ -1045,18 +1057,46 @@ class HeadlessStremio:
         target = video_id or item_id
         found: list[Subtitle] = []
         seen: set[str] = set()
+        sources: dict[str, dict[str, Any]] = {}
         for addon in addons_supporting(self.addons(), "subtitles", type_name, target):
+            now = self._clock()
+            with self._lock:
+                suspended = self._subtitle_suspended.get(addon.id)
+            if suspended is not None and suspended[0] > now:
+                sources[addon.id] = {"id": addon.id, "name": addon.name, "state": "suspended", "reason": suspended[1]}
+                continue
             try:
                 subtitles = self.addons_client.subtitles(addon, type_name, target, extra)
             except UpstreamError as exc:
-                LOG.info("Subtitles from %s unavailable: %s", addon.id, exc.message)
+                why = _dead_subtitle_answer(exc)
+                if why is not None:
+                    with self._lock:
+                        self._subtitle_suspended[addon.id] = (now + SUBTITLE_ADDON_SUSPEND_SECONDS, why)
+                    LOG.warning(
+                        "Subtitles from %s unavailable (%s): left out of the subtitle search for %d s",
+                        addon.id, why, int(SUBTITLE_ADDON_SUSPEND_SECONDS),
+                    )
+                    sources[addon.id] = {"id": addon.id, "name": addon.name, "state": "suspended", "reason": why}
+                else:
+                    LOG.info("Subtitles from %s unavailable: %s", addon.id, exc.message)
+                    sources[addon.id] = {"id": addon.id, "name": addon.name, "state": "failed", "reason": "unreachable"}
                 continue
+            with self._lock:
+                self._subtitle_suspended.pop(addon.id, None)
+            sources[addon.id] = {"id": addon.id, "name": addon.name, "state": "ok", "count": len(subtitles)}
             for subtitle in subtitles:
                 if subtitle.url in seen:
                     continue
                 seen.add(subtitle.url)
                 found.append(subtitle)
+        with self._lock:
+            self._subtitle_sources = sources
         return found
+
+    def subtitle_sources(self) -> list[dict[str, Any]]:
+        """What each subtitle addon did on the last search, for diagnostics."""
+        with self._lock:
+            return [dict(source) for source in self._subtitle_sources.values()]
 
     # ------------------------------------------------------------------ library
 
@@ -1105,3 +1145,16 @@ class HeadlessStremio:
             [preview for _, preview in library],
             [preview for _, preview in watching[:CONTINUE_WATCHING_SIZE]],
         )
+
+
+def _dead_subtitle_answer(exc: UpstreamError) -> str | None:
+    """Why an addon's subtitle answer says the endpoint itself is gone, or
+    None when the failure may be the network's (no status, a 5xx, 408, 429)."""
+    status = exc.details.get("status") if isinstance(exc.details, dict) else None
+    if not isinstance(status, int):
+        return None
+    if status < 400:
+        return "not-json"
+    if status < 500 and status not in (408, 429):
+        return f"http-{status}"
+    return None

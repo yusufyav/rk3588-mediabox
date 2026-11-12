@@ -397,6 +397,17 @@ class SubtitleService:
             context.candidates = {candidate_id(s): s for s in offered}
             context.order = [candidate_id(s) for s in offered]
         exhausted = self.opensubtitles is not None and self.opensubtitles.exhausted()
+        sources = self._sources()
+        by_provider: dict[str, int] = {}
+        for subtitle in found:
+            name = subtitle.provider or subtitle.addon_id or "?"
+            by_provider[name] = by_provider.get(name, 0) + 1
+        LOG.info(
+            "subtitle candidates video=%s found=%d offered=%d by_provider=%s sources=%s",
+            context.identity or "?", len(found), len(offered),
+            ",".join(f"{k}:{v}" for k, v in sorted(by_provider.items())) or "-",
+            ",".join(f"{s['id']}:{s['state']}" + (f"({s['reason']})" if s.get("reason") else "") for s in sources) or "-",
+        )
         return {
             "video": context.as_dict(),
             "candidates": [
@@ -409,7 +420,15 @@ class SubtitleService:
                 for rank_index, s in enumerate(offered)
             ],
             "providers": self.providers(),
+            # Each subtitle addon's part in this list: ok, failed (the network,
+            # asked again next film) or suspended (an answer that cannot be a
+            # subtitle list; left out for a while).
+            "sources": sources,
         }
+
+    def _sources(self) -> list[dict[str, Any]]:
+        read = getattr(self.stremio, "subtitle_sources", None)
+        return read() if callable(read) else []
 
     def providers(self) -> dict[str, Any]:
         """The direct providers' state, for diagnostics: no credential in it."""

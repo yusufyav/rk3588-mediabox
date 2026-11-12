@@ -408,6 +408,9 @@ impl AppState {
                 // where it came from and how it is timed.
                 let tracks = status["tracks"].as_array().cloned().unwrap_or_default();
                 status["subtitles"] = self.subtitles.unified(&tracks);
+                // Why nothing is on although a language was asked for, and
+                // which providers are not taking part.
+                status["subtitle_status"] = self.subtitles.status();
                 // The settings panel's "Tercih edilen altyazı dili".
                 let preferences = self.subtitles.preferences();
                 status["subtitle_preference"] = json!(match preferences.enabled {

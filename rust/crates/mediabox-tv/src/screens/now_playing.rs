@@ -268,6 +268,13 @@ pub struct NowPlaying {
     /// Its "AutoSync uyumsuz altyazıları göster". None until the control
     /// plane has said, which reads as off -- its own default.
     pub subtitle_show_incompatible: Option<bool>,
+    /// Why no subtitle is on although one was asked for ("Bu sürümle
+    /// eşleşen Türkçe altyazı bulunamadı"), from the control plane; empty
+    /// when there is nothing to say.
+    pub subtitle_outcome: String,
+    /// The subtitle providers not taking part, as the panel says them
+    /// ("OpenSubtitles.com yapılandırılmadı").
+    pub subtitle_providers: String,
     /// "Tercih edilen ses dili", as the control plane keeps it. None until
     /// it has said; it says English until one is chosen.
     pub audio_language: Option<String>,
@@ -643,11 +650,17 @@ impl NowPlaying {
 
     /// How the subtitle that is on was timed, for the subtitle panel.
     pub fn subtitle_note(&self) -> String {
-        self.subtitles
+        let timing = self
+            .subtitles
             .iter()
             .find(|track| track.selected)
             .map(|track| track.note.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        [timing.as_str(), self.subtitle_outcome.as_str(), self.subtitle_providers.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     /// Whether a subtitle is on at all: the line on screen is only asked for
@@ -852,6 +865,17 @@ impl NowPlaying {
             if let Some(fresh) = self.subtitles.iter().find(|t| t.fresh) {
                 self.pill = fresh.note.clone();
                 self.pill_until = Some(std::time::Instant::now() + PILL_LINGER * 2);
+            }
+            // Nothing fits although a language was asked for: said once, as
+            // a timing put on is, and kept in the panel.
+            if let Some(subtitle_status) = status.get("subtitle_status") {
+                let outcome = subtitle_outcome(subtitle_status);
+                if !outcome.is_empty() && outcome != self.subtitle_outcome {
+                    self.pill = outcome.clone();
+                    self.pill_until = Some(std::time::Instant::now() + PILL_LINGER * 2);
+                }
+                self.subtitle_outcome = outcome;
+                self.subtitle_providers = idle_providers(subtitle_status);
             }
             self.audio = read_tracks(tracks, "audio");
         }
@@ -1152,6 +1176,37 @@ mod tests {
             note(serde_json::json!({"state": "applied", "model": "offset", "offset": -0.5, "confidence": 0.804})),
             "Otomatik eşitleme · -0,50 sn · %80"
         );
+    }
+
+    #[test]
+    fn nothing_fitting_is_said_in_the_panel_and_once_in_the_pill() {
+        let mut now = NowPlaying::new();
+        let status = serde_json::json!({
+            "tracks": [],
+            "subtitles": [],
+            "subtitle_status": {"outcome": "no-match", "language": "tr", "providers": [
+                {"name": "OpenSubtitles.com", "state": "not-configured"},
+                {"name": "OpenSubtitles", "state": "suspended"}
+            ]}
+        });
+        now.take_here(&status);
+        assert_eq!(
+            now.subtitle_note(),
+            "Bu sürümle eşleşen Türkçe altyazı bulunamadı · OpenSubtitles.com yapılandırılmadı"
+        );
+        assert_eq!(now.pill, "Bu sürümle eşleşen Türkçe altyazı bulunamadı");
+        // Said once: the next answer with the same verdict does not say it again.
+        now.pill.clear();
+        now.take_here(&status);
+        assert!(now.pill.is_empty());
+        // None in the language at all is a different sentence.
+        now.take_here(&serde_json::json!({"tracks": [], "subtitles": [],
+            "subtitle_status": {"outcome": "none-found", "language": "tr", "providers": []}}));
+        assert_eq!(now.subtitle_note(), "Türkçe altyazı bulunamadı");
+        // One fits after all: nothing to say.
+        now.take_here(&serde_json::json!({"tracks": [], "subtitles": [],
+            "subtitle_status": {"outcome": null, "language": null, "providers": []}}));
+        assert_eq!(now.subtitle_note(), "");
     }
 
     #[test]
@@ -1601,6 +1656,42 @@ fn sync_note(sync: Option<&Value>) -> String {
         "ready" => "Otomatik eşitleme hazır · Tamam ile uygula".into(),
         _ => String::new(),
     }
+}
+
+/// What the panel says when the automatic choice left subtitles off although
+/// a language was asked for. Only the control plane's verdict: a release no
+/// fetched subtitle fits, or none in the language at all.
+fn subtitle_outcome(status: &Value) -> String {
+    let language = status
+        .get("language")
+        .and_then(Value::as_str)
+        .map(language_name)
+        .unwrap_or_default();
+    match status.get("outcome").and_then(Value::as_str) {
+        Some("no-match") => format!("Bu sürümle eşleşen {language} altyazı bulunamadı"),
+        Some("none-found") => format!("{language} altyazı bulunamadı"),
+        _ => String::new(),
+    }
+}
+
+/// The providers not taking part, said once each. OpenSubtitles.com
+/// without an account is the clean installation's own state, and the reason
+/// its subtitles are missing from the list.
+fn idle_providers(status: &Value) -> String {
+    let mut said: Vec<String> = Vec::new();
+    for provider in status.get("providers").and_then(Value::as_array).into_iter().flatten() {
+        let name = provider.get("name").and_then(Value::as_str).unwrap_or_default();
+        let line = match provider.get("state").and_then(Value::as_str) {
+            Some("not-configured") => format!("{name} yapılandırılmadı"),
+            Some("quota-exhausted") => format!("{name} indirme kotası doldu"),
+            Some("login-refused") => format!("{name} girişi reddedildi"),
+            _ => continue,
+        };
+        if !name.is_empty() && !said.contains(&line) {
+            said.push(line);
+        }
+    }
+    said.join(" · ")
 }
 
 fn signed_seconds(seconds: f64) -> String {

@@ -276,6 +276,29 @@ class Prepare(Harness):
         self.assertEqual(status, 404)
 
 
+class CleanInstall(Harness):
+    """A clean installation: no OpenSubtitles.com credentials anywhere. The
+    credential-free v3 addon is the list; OpenSubtitles.com says it is not
+    configured instead of being silently missing."""
+
+    def test_without_credentials_v3_answers_and_the_direct_provider_says_why_it_is_absent(self):
+        self.assertFalse(self.core.subtitles.opensubtitles.configured)
+        self.addon_subtitles = addon([{"id": "v1", "url": f"{self.origin}/v3.srt", "lang": "tur"}])
+        self.register("c" * 32)
+        status, answer = self.call(
+            "POST", "/media/subtitles/prepare",
+            {"sessionId": "c" * 32, "type": "movie", "id": "tt0780504", "languages": ["tur"]},
+        )
+        self.assertEqual(status, 200, answer)
+        self.assertEqual([(c["provider"], c["providerName"]) for c in answer["candidates"]],
+                         [("opensubtitles_v3", "OpenSubtitles v3")])
+        direct = answer["providers"]["opensubtitles_com"]
+        self.assertEqual((direct["state"], direct["configured"]), ("not-configured", False))
+        # Nothing secret in what the interface is given.
+        self.assertNotIn("key", json.dumps(answer["providers"]).lower().replace("monkey", ""))
+        self.assertIn("sources", answer)
+
+
 class LoadAndSync(Harness):
     SESSION = "d" * 32
 

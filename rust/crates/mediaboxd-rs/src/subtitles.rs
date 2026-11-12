@@ -270,6 +270,14 @@ struct Film {
     selected: Option<String>,
     /// Automatic candidates already tried, in order.
     tried: Vec<String>,
+    /// The automatic choice ended with subtitles off although the viewer
+    /// asked for this language: nothing fetched fits this release and the
+    /// file has no track in it. Cleared by anything put on.
+    nothing_for: Option<String>,
+    /// The worker's subtitle providers and addons that are not taking part
+    /// (name, state): `not-configured`, `quota-exhausted`, `suspended`,
+    /// `failed`. Ones that answered are not listed.
+    providers: Vec<(String, String)>,
 }
 
 /// What the automatic choice comes to.
@@ -404,6 +412,10 @@ impl Subtitles {
                         candidates.len(),
                         answer.pointer("/video/identity").and_then(Value::as_str).unwrap_or("?")
                     );
+                    let providers = idle_providers(&answer);
+                    if !providers.is_empty() {
+                        eprintln!("mediaboxd-rs: film {number}: subtitle providers not taking part: {providers:?}");
+                    }
                     self.with_film(number, |film| {
                         for candidate in &candidates {
                             if let Some(timing) = candidate.metadata_timing() {
@@ -411,6 +423,7 @@ impl Subtitles {
                             }
                         }
                         film.candidates = candidates;
+                        film.providers = providers;
                     });
                 }
                 Err(error) => eprintln!("mediaboxd-rs: film {number}: no external subtitles: {error}"),
@@ -477,6 +490,7 @@ impl Subtitles {
         self.with_film(number, |film| {
             film.selected = Some(id.to_owned());
             film.manual_delay = false;
+            film.nothing_for = None;
         });
         true
     }
@@ -844,6 +858,7 @@ impl Subtitles {
             .with_film(number, |film| {
                 film.manual = true;
                 film.manual_delay = false;
+                film.nothing_for = None;
             })
             .is_none()
         {
@@ -943,12 +958,21 @@ impl Subtitles {
             Choice::Leave | Choice::External(_) => {}
             Choice::Off => {
                 self.player.select_subtitle(None).await;
-                self.with_film(number, |film| film.selected = Some("off".into()));
+                // Off although a language was asked for: said, not silent.
+                let preferences = self.preferences();
+                let wanted = preferences.language.filter(|_| preferences.enabled == Some(true));
+                self.with_film(number, |film| {
+                    film.selected = Some("off".into());
+                    film.nothing_for = wanted;
+                });
             }
             Choice::Embedded(id) => {
                 self.player.select_subtitle(Some(id)).await;
                 self.player.subtitle_timing(0.0, 1.0).await;
-                self.with_film(number, |film| film.selected = Some(format!("emb:{id}")));
+                self.with_film(number, |film| {
+                    film.selected = Some(format!("emb:{id}"));
+                    film.nothing_for = None;
+                });
             }
         }
     }
@@ -1058,6 +1082,46 @@ impl Subtitles {
             film.map(|film| (&film.candidates, &film.loaded, &film.timing)),
             show,
         ))
+    }
+
+    /// Why the film has no subtitle on although one was asked for, and the
+    /// providers not taking part -- for the panel to say.
+    ///
+    /// `outcome`: `no-match` when candidates in the language were found and
+    /// none fits this release (refused for its cut or timebase, or untimed
+    /// with incompatible ones hidden); `none-found` when there was none in
+    /// the language at all; null otherwise, and as soon as one in the
+    /// language turns out to fit.
+    pub fn status(&self) -> Value {
+        let number = self.player.film();
+        let film = self.film.lock().unwrap();
+        let Some(film) = film.as_ref().filter(|film| film.number == number) else {
+            return json!({"outcome": null, "language": null, "providers": []});
+        };
+        let providers: Vec<Value> = film
+            .providers
+            .iter()
+            .map(|(name, state)| json!({"name": name, "state": state}))
+            .collect();
+        let outcome = film.nothing_for.as_deref().and_then(|language| {
+            let of_language: Vec<&Candidate> =
+                film.candidates.iter().filter(|c| c.language.as_deref() == Some(language)).collect();
+            let fits = of_language.iter().any(|c| {
+                film.timing
+                    .get(&c.id)
+                    .is_some_and(|timing| timing.state == "ready" || timing.state == "applied")
+            });
+            match (film.selected.as_deref(), fits, of_language.is_empty()) {
+                (Some("off"), false, false) => Some(("no-match", language)),
+                (Some("off"), false, true) => Some(("none-found", language)),
+                _ => None,
+            }
+        });
+        json!({
+            "outcome": outcome.map(|(what, _)| what),
+            "language": outcome.map(|(_, language)| language),
+            "providers": providers,
+        })
     }
 
     /// The line on screen, for the interface to draw.
@@ -1263,6 +1327,26 @@ fn fallback_choice(preferences: &Preferences, tracks: &[Value]) -> Choice {
         Choice::Embedded(id) => Choice::Embedded(id),
         _ => Choice::Off,
     }
+}
+
+/// The providers and addons of a `prepare` answer that are not taking part,
+/// as (name, state): OpenSubtitles.com without credentials, a used-up quota,
+/// an addon left out or unreachable.
+fn idle_providers(answer: &Value) -> Vec<(String, String)> {
+    let mut idle = Vec::new();
+    let entry = |value: &Value| {
+        let state = value.get("state").and_then(Value::as_str)?;
+        let name = value.get("name").and_then(Value::as_str).or_else(|| value.get("id").and_then(Value::as_str))?;
+        (!matches!(state, "ok" | "ready"))
+            .then(|| (name.to_owned(), state.to_owned()))
+    };
+    if let Some(providers) = answer.get("providers").and_then(Value::as_object) {
+        idle.extend(providers.values().filter_map(entry));
+    }
+    if let Some(sources) = answer.get("sources").and_then(Value::as_array) {
+        idle.extend(sources.iter().filter_map(entry));
+    }
+    idle
 }
 
 fn timing_from(job: &Value, state: &str) -> Timing {
@@ -1872,6 +1956,13 @@ mod flows {
                         {"id": "ext:tr2", "source": "addon_external", "language": "tr",
                          "provider": "opensubtitles_v3", "providerName": "OpenSubtitles v3"},
                         {"id": "ext:en1", "source": "stream_external", "language": "en"},
+                    ],
+                    // A clean installation: OpenSubtitles.com without an
+                    // account, a dead addon left out, v3 answering.
+                    "providers": {"opensubtitles_com": {"name": "OpenSubtitles.com", "state": "not-configured"}},
+                    "sources": [
+                        {"id": "org.legacy", "name": "OpenSubtitles", "state": "suspended", "reason": "not-json"},
+                        {"id": "org.v3", "name": "OpenSubtitles v3", "state": "ok", "count": 2},
                     ]})
                 } else if line.starts_with("POST /media/subtitles/load") {
                     let candidate: Value = serde_json::from_str(&body).unwrap();
@@ -2127,6 +2218,44 @@ mod flows {
         let list = rig.subtitles.unified(&rig.subtitles.player.tracks().await);
         assert_eq!(entry(&list, "ext:tr1").unwrap()["sync"]["eligibility"], "REJECT_PARTIAL");
         assert_eq!(entry(&list, "ext:tr2").unwrap()["sync"]["eligibility"], "REJECT_TIMEBASE_MISMATCH");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_release_is_never_put_on_and_nothing_fitting_is_said() {
+        // Both Turkish ones are for another release. Neither is left on --
+        // not as a last resort, not untimed -- and the control plane says
+        // why subtitles are off rather than leaving them silently off.
+        let rig = rig(Worker { apply: Value::Null, refusal: Some("REJECT_WRONG_RELEASE"), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let seen = Arc::clone(&rig.seen);
+        until("both were answered", || syncs(&seen) >= 2).await;
+        let subtitles = Arc::clone(&rig.subtitles);
+        until("the outcome is said", || subtitles.status()["outcome"] == "no-match").await;
+        assert_eq!(rig.mpv.lock().unwrap().sid, None);
+        let status = rig.subtitles.status();
+        assert_eq!(status["language"], "tr");
+        assert_eq!(
+            status["providers"],
+            json!([{"name": "OpenSubtitles.com", "state": "not-configured"},
+                   {"name": "OpenSubtitles", "state": "suspended"}])
+        );
+        // Even with incompatible ones shown, a wrong release is not put on.
+        rig.subtitles.set_show_incompatible(true).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(rig.mpv.lock().unwrap().sid, None);
+        // The viewer picks one anyway: their choice, and nothing more to say.
+        assert!(rig.subtitles.choose("ext:tr1").await);
+        assert_eq!(rig.subtitles.status()["outcome"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn one_that_fits_says_nothing() {
+        let rig = rig(Worker { apply: properties(), ..Worker::default() }, turkish()).await;
+        rig.subtitles.begin(0, "s".repeat(32), watch(), Some(5400));
+        let mpv = Arc::clone(&rig.mpv);
+        until("the timing is in effect", || (mpv.lock().unwrap().delay - 1.82).abs() < 1e-9).await;
+        assert!(rig.mpv.lock().unwrap().sid.is_some());
+        assert_eq!(rig.subtitles.status()["outcome"], Value::Null);
     }
 
     fn shown() -> Preferences {

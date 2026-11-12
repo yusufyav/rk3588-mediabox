@@ -14,7 +14,9 @@ from ..stremio.addons import (
     encode_extra,
     parse_manifest,
     parse_stream,
+    parse_subtitles,
 )
+from ..stremio import adapter as adapter_module
 from ..stremio.adapter import HeadlessStremio, video_id_for
 from ..stremio.models import MetaPreview, StreamKind
 from ..stremio.server import StreamingServer
@@ -219,6 +221,75 @@ class _FakeAddonClient:
         if addon.id in self.failing:
             raise UpstreamError(f"{addon.id} is down")
         return self.table.get(("subtitles", addon.id, type_name, item_id), [])
+
+
+class SubtitleAddonSuspension(unittest.TestCase):
+    """A subtitle addon whose endpoint is gone -- the legacy OpenSubtitles
+    addon answers every request with its HTML page; another may answer 403 --
+    is left out for a while; v3 keeps answering, and a network failure is
+    asked again on the next film."""
+
+    LEGACY = {"id": "legacy", "name": "OpenSubtitles", "resources": ["subtitles"], "types": ["movie"], "catalogs": []}
+    V3 = {"id": "v3", "name": "OpenSubtitles v3", "resources": ["subtitles"], "types": ["movie"], "catalogs": []}
+
+    def _adapter(self, failure: UpstreamError):
+        now = [1000.0]
+        adapter = HeadlessStremio(clock=lambda: now[0])
+        adapter._addons = tuple(
+            parse_manifest(f"https://addon{i}/manifest.json", m) for i, m in enumerate((self.LEGACY, self.V3))
+        )
+        adapter._addons_fetched_at = now[0]
+        v3 = parse_subtitles([{"id": "1", "url": "https://v3/tr.srt", "lang": "tur"}], "v3", addon_name="OpenSubtitles v3")
+        client = _FakeAddonClient({("subtitles", "v3", "movie", "tt0780504"): v3})
+        original = client.subtitles
+
+        def subtitles(addon, type_name, item_id, extra=None):
+            if addon.id == "legacy":
+                client.calls.append(("subtitles", addon.id, type_name, item_id))
+                raise failure
+            return original(addon, type_name, item_id, extra)
+
+        client.subtitles = subtitles
+        adapter.addons_client = client
+        return adapter, client, now
+
+    def _asked(self, client, addon_id):
+        return sum(1 for call in client.calls if call[:2] == ("subtitles", addon_id))
+
+    def test_legacy_403_is_left_out_and_v3_still_answers(self):
+        adapter, client, now = self._adapter(UpstreamError("https://legacy returned HTTP 403", {"status": 403}))
+        first = adapter.subtitles("movie", "tt0780504")
+        self.assertEqual([s.url for s in first], ["https://v3/tr.srt"])
+        states = {s["id"]: (s["state"], s.get("reason")) for s in adapter.subtitle_sources()}
+        self.assertEqual(states, {"legacy": ("suspended", "http-403"), "v3": ("ok", None)})
+        # The next film: the dead one is not asked again; v3 is.
+        now[0] += 60
+        second = adapter.subtitles("movie", "tt0780504")
+        self.assertEqual([s.url for s in second], ["https://v3/tr.srt"])
+        self.assertEqual((self._asked(client, "legacy"), self._asked(client, "v3")), (1, 2))
+        # Once the window is over it is asked again.
+        now[0] += adapter_module.SUBTITLE_ADDON_SUSPEND_SECONDS
+        adapter._addons_fetched_at = now[0]
+        adapter.subtitles("movie", "tt0780504")
+        self.assertEqual(self._asked(client, "legacy"), 2)
+
+    def test_an_html_page_instead_of_json_is_the_same(self):
+        adapter, client, now = self._adapter(UpstreamError("https://legacy did not return JSON", {"status": 200}))
+        adapter.subtitles("movie", "tt0780504")
+        now[0] += 60
+        adapter.subtitles("movie", "tt0780504")
+        self.assertEqual(self._asked(client, "legacy"), 1)
+        self.assertEqual(adapter.subtitle_sources()[0]["reason"], "not-json")
+
+    def test_a_network_failure_is_asked_again_next_film(self):
+        for failure in (UpstreamError("timed out"), UpstreamError("bad gateway", {"status": 503}),
+                        UpstreamError("slow down", {"status": 429})):
+            adapter, client, now = self._adapter(failure)
+            adapter.subtitles("movie", "tt0780504")
+            now[0] += 60
+            self.assertEqual([s.url for s in adapter.subtitles("movie", "tt0780504")], ["https://v3/tr.srt"])
+            self.assertEqual(self._asked(client, "legacy"), 2, failure.message)
+            self.assertEqual(adapter.subtitle_sources()[0]["state"], "failed")
 
 
 class AdapterTests(unittest.TestCase):
