@@ -163,6 +163,7 @@ export PKG_CONFIG_LIBDIR=$PREFIX/lib/pkgconfig:$MEDIA_PREFIX/lib/pkgconfig:/usr/
   echo "against: $(head -1 $PREFIX/BUILD-INFO)"
   echo "  pkg-config gstreamer-1.0 $(pkg-config --modversion gstreamer-1.0) from $(pkg-config --variable=prefix gstreamer-1.0)"
   echo "  rockchip_mpp $(pkg-config --modversion rockchip_mpp) from $(pkg-config --variable=prefix rockchip_mpp), librockchip_mpp.so.0 $(sha256sum < $MEDIA_PREFIX/lib/librockchip_mpp.so.0 | cut -c1-64)"
+  echo "  mpp revision: $(aarch64-linux-gnu-strings $MEDIA_PREFIX/lib/librockchip_mpp.so.0 | grep -m1 -oE "^[0-9a-f]{7,} author: .*" || echo unreadable)"
   echo "image: debian trixie, apt snapshot $SNAPSHOT"
   echo "installs at: $PREFIX/lib/gstreamer-1.0/libgstrockchipmpp.so"
   aarch64-linux-gnu-readelf -d $so | grep -E "NEEDED|RUNPATH" | sed "s/^ */  /"
