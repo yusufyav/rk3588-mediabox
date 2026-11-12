@@ -770,6 +770,15 @@ else
   "$here/tests/check-release-scope.sh" | sed 's/^/     /'
   failures=$((failures + 1))
 fi
+# Every runtime path to a package, alternatives links through readlink -f, and
+# a path nobody owns a gate failure rather than a capture that stops silently.
+if "$here/tests/check-release-owners.sh" >/dev/null 2>&1; then
+  echo "ok   RELEASE_OWNERS=PASS"
+else
+  echo "FAIL RELEASE_OWNERS:"
+  "$here/tests/check-release-owners.sh" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
 # The text, too, so a verifier that grows a readelf back is caught even if the
 # fixture ever stops exercising the line that would use it.
 if strip_sh "$here/packaging/mediabox-product-verify" |

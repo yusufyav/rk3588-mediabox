@@ -77,6 +77,8 @@ mediabox_ssh "mkdir -p '$stage/rootfs/etc/systemd/system' \
 # inventory, the gates and the archive alike (scripts/release/release-scope.sh).
 # It sits beside meta/, not in it, so the archive does not carry it.
 mediabox_scp -q "$here/scripts/release/release-scope.sh" "$MEDIABOX_TARGET:$stage/release-scope.sh"
+# And which package a path belongs to, alternatives links included.
+mediabox_scp -q "$here/scripts/release/release-owners.sh" "$MEDIABOX_TARGET:$stage/release-owners.sh"
 
 # repo path <TAB> installed path
 repo_integration=$(cat <<'EOF'
@@ -198,6 +200,8 @@ LIVE_ELEMENTS="appsrc appsink queue input-selector capsfilter fakesink tsdemux h
 # The prefix's inventory, minus what is not the product (release-scope.sh).
 # shellcheck source=/dev/null
 . "$STAGE/release-scope.sh"
+# shellcheck source=/dev/null
+. "$STAGE/release-owners.sh"
 : >"$M/artifact-manifest.tsv"
 : >"$M/SHA256SUMS"
 elf_list="$(mktemp)"
@@ -276,12 +280,13 @@ release_inventory "" "$PREFIX" "$M" "$elf_list"
 # runtime-packages.txt: the Debian packages that own the libraries and the
 # commands the product actually resolves. Derived from the closure above, not
 # copied from a deploy script's apt line. No compiler and no -dev package: the
-# installer has no build step to feed them to.
+# installer has no build step to feed them to. A path no package owns goes to
+# unowned-runtime-paths.txt, and the gate below fails on it (release-owners.sh).
+: >"$M/unowned-runtime-paths.txt"
 {
   awk -F'\t' '$4=="OS_RUNTIME"{print $3}' "$M/elf-closure.txt" |
     sed 's|^/lib/|/usr/lib/|' | sort -u |
-    while read -r l; do dpkg-query -S "$l" 2>/dev/null | cut -d: -f1; done |
-    tr ',' '\n' | tr -d ' '
+    while read -r l; do release_owner "$l" "$M/unowned-runtime-paths.txt"; done
   # ffprobe is not linked into anything, so no ELF closure finds it -- and it is
   # the first thing the worker runs on every source. The board this was first
   # captured from happened to have Debian's ffmpeg installed; the clean board
@@ -299,14 +304,14 @@ release_inventory "" "$PREFIX" "$M" "$elf_list"
   # the board's BSP and are already on a clean image; these two are not.
   for c in python3 ffprobe ffmpeg sway swaymsg chromium amixer modetest chvt openvt setterm kbd_mode fc-list fc-match bluetoothctl btattach rfkill bluealsa bluealsa-cli; do
     p="$(command -v "$c" 2>/dev/null)" || continue
-    dpkg-query -S "$(readlink -f "$p")" 2>/dev/null | cut -d: -f1
-  done | tr ',' '\n' | tr -d ' '
+    release_owner "$(readlink -f "$p")" "$M/unowned-runtime-paths.txt"
+  done
   # Bluetooth sound (docs/bluetooth.md): bluez-alsa's daemon and its command
   # line above, and its ALSA plugin here, which alsa-lib loads by name when a
   # player opens `mediabox_bluetooth` -- nothing links it, so no closure does.
   for f in /usr/lib/*/alsa-lib/libasound_module_pcm_bluealsa.so; do
-    [ -e "$f" ] && dpkg-query -S "$f" 2>/dev/null | cut -d: -f1
-  done | tr ',' '\n' | tr -d ' '
+    if [ -e "$f" ]; then release_owner "$f" "$M/unowned-runtime-paths.txt"; fi
+  done
   # Live television (mediabox-live): GStreamer loads every element's plugin
   # by name at run time, so no closure reaches them either. The plugin
   # behind each element its pipeline makes (rust/crates/mediabox-live/src/
@@ -316,10 +321,9 @@ release_inventory "" "$PREFIX" "$M" "$elf_list"
     for e in $LIVE_ELEMENTS; do
       gst-inspect-1.0 "$e" 2>/dev/null | awk '$1 == "Filename" && !seen { print $2; seen = 1 }'
     done | sed '/^$/d' | sort -u |
-      while read -r f; do dpkg-query -S "$f" 2>/dev/null | cut -d: -f1; done |
-      tr ',' '\n' | tr -d ' '
+      while read -r f; do release_owner "$f" "$M/unowned-runtime-paths.txt"; done
     p="$(command -v gst-inspect-1.0)"
-    dpkg-query -S "$(readlink -f "$p")" 2>/dev/null | cut -d: -f1
+    release_owner "$(readlink -f "$p")" "$M/unowned-runtime-paths.txt"
   fi
 
   # The fonts the interface actually draws with.
@@ -342,8 +346,7 @@ release_inventory "" "$PREFIX" "$M" "$elf_list"
       fc-list ":charset=$ch" file 2>/dev/null | head -1 | cut -d: -f1
     done
   } | sed '/^$/d' | sort -u |
-    while read -r f; do dpkg-query -S "$f" 2>/dev/null | cut -d: -f1; done |
-    tr ',' '\n' | tr -d ' '
+    while read -r f; do release_owner "$f" "$M/unowned-runtime-paths.txt"; done
 } | sed '/^$/d' | sort -u >"$M/runtime-packages.txt"
 
 # capability-baseline.txt: what the kernel underneath the golden binaries
@@ -499,6 +502,16 @@ if [ "$ui_face" = "$UI_FONT" ] && [ -n "$ui_face_pkg" ] && grep -qx "$ui_face_pk
   g "interface font $UI_FONT ($ui_face_pkg)" PASS
 else
   g "interface font $UI_FONT (matched '${ui_face:-nothing}', package '${ui_face_pkg:-none}')" FAIL
+fi
+
+# And every path the product resolves to a package, or the clean board
+# installs a release that is missing it.
+# shellcheck source=/dev/null
+. "$STAGE/release-owners.sh"
+if release_unowned_report "$M/unowned-runtime-paths.txt"; then
+  g "runtime paths owned by a package" PASS
+else
+  g "runtime paths owned by a package" FAIL
 fi
 
 # And no compiler in the runtime package list.
