@@ -33,8 +33,13 @@ MEDIA_PREFIX="/opt/rk3588-mediabox/media-runtime"
 # on 2026-10-24; MediaBox's patches in packaging/gstreamer-rockchip.
 ROCKCHIP_URL="https://github.com/JeffyCN/mirrors.git"
 ROCKCHIP_REV="ebc758a13d425d34858a98dbcdb4a4bd702daa0f"
-# MediaBox's MPP 1.3.10 as built on the appliance on 2026-11-01.
-MPP_SHA256="05c615de06b7628eb64b84da07f6cf11ab593d2f390fa377fa72b1d4ef518857"
+# MediaBox's MPP 1.3.10: rockchip-linux/mpp 0986d01 with packaging/mpp-patches
+# 0001 (no pulldown recovery), 0002 (every deinterlaced field at its own
+# time) and 0003 (MPEG-2's first picture timed from its own PTS), as built and
+# installed on the appliance by scripts/build-media-runtime.sh on 2026-11-12.
+# A rebuild of the same sources is not the same bytes: the pin is that
+# artefact, read back off the appliance.
+MPP_SHA256="bd86814b3d49f42ead97195097f27da237662075c922a179d420254667f9385b"
 # The runtime's own pins.
 IMAGE="debian@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1"
 SNAPSHOT="20261101T000000Z"
@@ -53,18 +58,31 @@ engine="$(command -v docker || command -v podman || true)"
 # whatever directory this script is run from (as build-mediabox-live.sh).
 ( cd "${runtime%/*}" && sha256sum -c --quiet "${runtime##*/}.sha256" )
 
-if [ ! -e "$sdk${MEDIA_PREFIX}/lib/librockchip_mpp.so.0" ]; then
+mpp_of() { sha256sum < "$1$MEDIA_PREFIX/lib/librockchip_mpp.so.0" 2>/dev/null | cut -c1-64; }
+# The SDK read before is used only while it is the pinned MPP: a cache of
+# another one (the appliance's before a rebuild of MPP) would build against
+# something no longer there and hide that it changed. It is read again from
+# the appliance, once, and that is checked against the pin too.
+if [ "$(mpp_of "$sdk")" != "$MPP_SHA256" ]; then
+  if [ -e "$sdk$MEDIA_PREFIX/lib/librockchip_mpp.so.0" ]; then
+    echo "build/media-runtime-sdk has MPP $(mpp_of "$sdk"), not the pinned $MPP_SHA256: read again from the appliance" >&2
+  fi
   # shellcheck source=env.sh
   source "$here/scripts/env.sh"
-  rm -rf "$sdk" && mkdir -p "$sdk"
+  rm -rf "$sdk.new" && mkdir -p "$sdk.new"
   m="${MEDIA_PREFIX#/}"
   timeout 120 ssh -F /dev/null -i "$MEDIABOX_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
     -o ConnectTimeout=10 "$MEDIABOX_TARGET" \
     "tar -C / -cf - $m/include/rockchip $m/lib/librockchip_mpp.so $m/lib/librockchip_mpp.so.0 $m/lib/librockchip_mpp.so.1 $m/lib/pkgconfig/rockchip_mpp.pc" |
-    tar -C "$sdk" -xf -
+    tar -C "$sdk.new" -xf -
+  got="$(mpp_of "$sdk.new")"
+  if [ "$got" != "$MPP_SHA256" ]; then
+    rm -rf "$sdk.new"
+    echo "MPP on the appliance is ${got:-unreadable}, not the one this build is pinned to ($MPP_SHA256)" >&2
+    exit 1
+  fi
+  rm -rf "$sdk" && mv "$sdk.new" "$sdk"
 fi
-echo "$MPP_SHA256  $sdk$MEDIA_PREFIX/lib/librockchip_mpp.so.0" | sha256sum -c --quiet - ||
-  { echo "MPP on the appliance is not the one this build is pinned to" >&2; exit 1; }
 
 src="$out/src"
 if [ ! -d "$src/.git" ]; then
