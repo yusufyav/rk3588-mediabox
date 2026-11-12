@@ -122,7 +122,8 @@ build_mpp() {
   # MediaBox's patches to MPP (packaging/mpp-patches), copied over before
   # this runs: no pulldown recovery on 50 Hz broadcasts (0001); every
   # deinterlaced field at its own time from a key frame on, at a channel's
-  # opening and after a transport loss (0002, scripts/test-mpp-deinterlace.sh).
+  # opening and after a transport loss (0002, scripts/test-mpp-deinterlace.sh);
+  # MPEG-2's first picture timed from its own PTS at any PTS (0003, the same).
   for patch in /var/tmp/mediabox-mpp-patches/*.patch; do
     [ -e "\$patch" ] || continue
     git -C "\$src/mpp" apply "\$patch"

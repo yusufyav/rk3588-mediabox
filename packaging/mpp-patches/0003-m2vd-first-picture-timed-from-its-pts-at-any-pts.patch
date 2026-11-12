@@ -1,0 +1,54 @@
+MediaBox: m2vd times a decoder's first picture from its PTS, at any PTS.
+
+Measured 2026-11-12 on the Plus (MPP 0986d01) with a 576i DVB-S MPEG-2
+broadcast (12092 H, service 10912, top field first, open GOP of 12, two
+B pictures before each key frame), through the live engine's chain
+(tsdemux -> mpegvideoparse -> mppvideodec, PTS in microseconds as
+gstreamer-rockchip 0001 gives them):
+
+At 4 of 7 openings the key frame came out timed 80 ms (its
+temporal_reference, 2, times 40 ms, from 0) and its second field halfway
+from there to the next picture (22 s), and the next P picture early too:
+both of the key frame's fields and both of the P picture's were dropped
+(gstmppdec, as timed before the last shown; the live engine, as bogus),
+the opening's first 200 ms showing 60 ms missing after its third picture.
+The openings that went wrong were the ones whose key frame PTS fell
+between 39.77 and 79.54 s (mod 79.54 s) of the stream's running time,
+every one of them, and only those.
+
+m2vd_alloc_frame() compares twice the PTS step with the predicted step in
+an RK_S32, where the step (tmp_frame_period, RK_S64) at a decoder's first
+picture is the whole PTS at 27 MHz (pre_pts_27M is 0): from 2^31 / 54 us
+on its low 32 bits read negative for every other 39.77 s, the comparison
+holds, and the picture is timed from pre_pts_27M (0) plus the predicted
+step instead of from its PTS. The next reference picture, compared with
+that, the same.
+
+Now the comparison is in 64 bits. scripts/test-mpp-deinterlace.sh,
+tests/mpp/open-gop-576i-mpeg2-bar.ts (its key frame 46.12 s in): without
+this patch 57 pictures from field 27, the key frame's two fields and the P
+picture's missing; with it 61, fields 25 to 85, each at its own time.
+
+diff --git a/mpp/codec/dec/m2v/m2vd_parser.c b/mpp/codec/dec/m2v/m2vd_parser.c
+--- a/mpp/codec/dec/m2v/m2vd_parser.c
++++ b/mpp/codec/dec/m2v/m2vd_parser.c
+@@ -1197,7 +1197,18 @@
+
+             if ((pts_27M > ctx->pre_pts_27M)
+                 && (pic_head->temporal_reference > (RK_S32)ctx->prechange_temporal_ref)) {
+-                RK_S32 theshold_frame_period = tmp_frame_period * 2;
++                /* MediaBox: 64 bits, as tmp_frame_period is. At a decoder's
++                 * first picture the period is the whole PTS (pre_pts_27M is
++                 * 0): in microseconds, from 39.77 s on, twice it no longer
++                 * fits in 32 bits, and for every other 39.77 s its low half
++                 * reads negative. The picture was then timed from 0 instead
++                 * of its PTS (the key frame of an opening at 80 ms, its
++                 * second field halfway to the next) and the next reference
++                 * frame too: measured 2026-11-12 on a 576i DVB-S MPEG-2
++                 * broadcast, at 4 of 7 openings, the key frame's fields and
++                 * the next P picture's were dropped, 60 ms missing in the
++                 * opening's first 200 ms. */
++                RK_S64 theshold_frame_period = tmp_frame_period * 2;
+                 RK_S32 last_frame_period = ctx->preframe_period ? ctx->preframe_period : ctx->frame_period;
+                 RK_S32 predict_frame_period =
+                     (pic_head->temporal_reference - ctx->prechange_temporal_ref) * last_frame_period;
