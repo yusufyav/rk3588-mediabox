@@ -73,6 +73,10 @@ mediabox_ssh "mkdir -p '$stage/rootfs/etc/systemd/system' \
   '$stage/rootfs/etc/systemd/logind.conf.d' '$stage/rootfs/etc/udev/rules.d' \
   '$stage/rootfs/etc/systemd/system/bluealsa.service.d' '$stage/rootfs/etc/alsa/conf.d' \
   '$stage/rootfs/etc/mediabox' '$stage/rootfs/etc/chromium/policies/managed' '$stage/meta'"
+# What of the prefix is the product: one list, read on the board by the
+# inventory, the gates and the archive alike (scripts/release/release-scope.sh).
+# It sits beside meta/, not in it, so the archive does not carry it.
+mediabox_scp -q "$here/scripts/release/release-scope.sh" "$MEDIABOX_TARGET:$stage/release-scope.sh"
 
 # repo path <TAB> installed path
 repo_integration=$(cat <<'EOF'
@@ -191,38 +195,13 @@ LIVE_ELEMENTS="appsrc appsink queue input-selector capsfilter fakesink tsdemux h
   mpegvideoparse mpegaudioparse aacparse ac3parse mpg123audiodec avdec_aac avdec_eac3 avdec_ac3
   avenc_ac3 audioconvert audioresample volume alsasink"
 
-# What the archive will and will not carry. The backup binary is a copy of a
-# previous interface left beside the current one; the caches are generated.
-is_excluded() {
-  case "$1" in
-    */bin/mediabox-tv.pre-account) return 0 ;;
-    */__pycache__/*|*.pyc)         return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# artifact-manifest.tsv: one line per object, with the mode, the ownership as
-# it will be written, the size and -- for regular files -- the digest.
+# The prefix's inventory, minus what is not the product (release-scope.sh).
+# shellcheck source=/dev/null
+. "$STAGE/release-scope.sh"
 : >"$M/artifact-manifest.tsv"
 : >"$M/SHA256SUMS"
 elf_list="$(mktemp)"
-find "$PREFIX" -xdev -mindepth 1 \( -type f -o -type l -o -type d \) -printf '%y\t%m\t%s\t%p\n' |
-  sort -k4 |
-  while IFS=$'\t' read -r kind mode size path; do
-    is_excluded "$path" && continue
-    rel="rootfs${path}"
-    case "$kind" in
-      d) printf 'dir\t%s\t-\t-\t%s\n' "$mode" "$rel" >>"$M/artifact-manifest.tsv" ;;
-      l) printf 'link\t%s\t-\t%s\t%s\n' "$mode" "$(readlink "$path")" "$rel" >>"$M/artifact-manifest.tsv" ;;
-      f) sum="$(sha256sum "$path" | cut -d' ' -f1)"
-         printf 'file\t%s\t%s\t%s\t%s\n' "$mode" "$size" "$sum" "$rel" >>"$M/artifact-manifest.tsv"
-         printf '%s  %s\n' "$sum" "$rel" >>"$M/SHA256SUMS"
-         if [ "$(head -c4 "$path" 2>/dev/null | od -An -tx1 | tr -d ' ')" = 7f454c46 ]; then
-           printf '%s\n' "$path" >>"$elf_list"
-         fi
-         ;;
-    esac
-  done
+release_inventory "" "$PREFIX" "$M" "$elf_list"
 
 # The integration files staged a moment ago belong in the same digest list.
 ( cd "$STAGE" && find rootfs/etc -type f -exec sha256sum {} + ) >>"$M/SHA256SUMS" || true
@@ -455,6 +434,8 @@ set -euo pipefail
 M="$STAGE/meta"
 fail=0
 g() { printf '  %-34s %s\n' "$1" "$2"; [ "$2" = PASS ] || fail=$((fail + 1)); }
+# shellcheck source=/dev/null
+. "$STAGE/release-scope.sh"
 
 test -x "$PREFIX/player/bin/mpv" && g "mpv present" PASS || g "mpv present" GOLDEN_RELEASE_NOT_READY
 grep -q '^mpv-vo-mediabox	present$'  "$M/capability-baseline.txt" && g "mpv vo_mediabox" PASS || g "mpv vo_mediabox" FAIL
@@ -491,7 +472,7 @@ while IFS=$'\t' read -r _ _ p cls; do
 done < <(tail -n +2 "$M/systemd-closure.txt")
 [ "$missing" -eq 0 ] && g "unit paths in manifest ($missing)" PASS || g "unit paths in manifest ($missing)" FAIL
 
-n="$(find "$PREFIX" -xdev -xtype l | wc -l)"
+n="$(release_find "" "$PREFIX" -xtype l -print | wc -l)"
 [ "$n" -eq 0 ] && g "broken symlinks ($n)" PASS || g "broken symlinks ($n)" FAIL
 
 # A symlink inside the prefix may point outside it only if the target is also
@@ -550,12 +531,7 @@ esac
 # tree was tidied away. A capture taken in between would have shipped a release
 # that breaks the first time anybody cleans up, so the check is on the prefix
 # the binary was configured with rather than on whether the tree is there today.
-leftovers="$(
-  { find "$PREFIX" -xdev -mindepth 1 \
-      \( -name '*.orig' -o -name '*.bak' -o -name '*candidate*' \
-         -o -name 'staging' -o -name 'kodi-src' \) -printf '%P\n' 2>/dev/null
-    find "$PREFIX" -xdev -mindepth 1 -maxdepth 2 -name 'build' -printf '%P\n' 2>/dev/null
-  } | sort -u)"
+leftovers="$(release_leftovers "" "$PREFIX")"
 n="$(printf '%s' "$leftovers" | grep -c . || true)"
 [ "$n" -eq 0 ] && g "staging leftovers ($n)" PASS \
   || { printf '%s\n' "$leftovers" | sed 's/^/    /'; g "staging leftovers ($n)" FAIL; }
@@ -587,11 +563,7 @@ command -v zstd >/dev/null || die "zstd is needed on this workstation to write t
 # The tar is built on the board and compressed here. The golden board has no
 # zstd and it is not going to get one: installing a package to make a release is
 # a change to the appliance the release is supposed to be a copy of.
-mediabox_ssh "cd '$stage' && tar --numeric-owner --owner=0 --group=0 --xattrs --acls \
-    --exclude='*/__pycache__' --exclude='*.pyc' \
-    --exclude='opt/rk3588-mediabox/bin/mediabox-tv.pre-account' \
-    -cf - meta rootfs/etc \
-    -C / --transform='s,^opt/,rootfs/opt/,' opt/rk3588-mediabox" \
+mediabox_ssh "cd '$stage' && bash -c '. ./release-scope.sh && release_tar \"\" \"\$0\"' '$MEDIABOX_PREFIX'" \
   | zstd -T0 -6 -c >"$out_dir/$asset"
 
 [ -s "$out_dir/$asset" ] || die "the archive came back empty"

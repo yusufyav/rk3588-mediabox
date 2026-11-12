@@ -761,6 +761,15 @@ else
   "$here/tests/check-static-verify.sh" | sed 's/^/     /'
   failures=$((failures + 1))
 fi
+# rollback/ is not the product: the verifier passes it and the release leaves it
+# out of the manifest and the archive alike; development leftovers fail both.
+if "$here/tests/check-release-scope.sh" >/dev/null 2>&1; then
+  echo "ok   RELEASE_SCOPE=PASS"
+else
+  echo "FAIL RELEASE_SCOPE:"
+  "$here/tests/check-release-scope.sh" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
 # The text, too, so a verifier that grows a readelf back is caught even if the
 # fixture ever stops exercising the line that would use it.
 if strip_sh "$here/packaging/mediabox-product-verify" |

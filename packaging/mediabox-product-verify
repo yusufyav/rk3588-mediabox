@@ -293,11 +293,24 @@ fi
 # `build` is bounded to the top two levels because npm vendors directories of
 # that name inside node_modules and those are package contents, not staging. A
 # build tree that shipped by accident would be at $P/build or $P/<component>/build.
+#
+# $P/rollback is not looked in: it is the install-time undo history the deploy
+# scripts keep, a candidate's copy there included, and not the product -- the
+# release leaves it out the same way (scripts/release/release-scope.sh).
+#
+# And by name, the leftovers the live-television work left in the prefix:
+# binaries kept as bin/*.pre-faz3j*, and the media core's old and
+# subtitle-test copies.
 leftovers="$(
-  { find "$P" -xdev -mindepth 1 \
+  { find "$P" -xdev -mindepth 1 -path "$P/rollback" -prune -o \
       \( -name '*.orig' -o -name '*.bak' -o -name '*candidate*' \
          -o -name 'staging' -o -name 'kodi-src' \) -printf '%P\n' 2>/dev/null
-    find "$P" -xdev -mindepth 1 -maxdepth 2 -name 'build' -printf '%P\n' 2>/dev/null
+    find "$P" -xdev -mindepth 1 -maxdepth 2 -path "$P/rollback" -prune -o \
+      -name 'build' -printf '%P\n' 2>/dev/null
+    find "$P/bin" -mindepth 1 -maxdepth 1 -name '*.pre-faz3j*' -printf 'bin/%P\n' 2>/dev/null || true
+    for d in media.old media.subtitles-test; do
+      if [ -e "$P/$d" ] || [ -L "$P/$d" ]; then printf '%s\n' "$d"; fi
+    done
   } | sort -u
 )"
 if [ -z "$leftovers" ]; then
