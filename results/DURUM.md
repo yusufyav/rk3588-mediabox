@@ -729,28 +729,24 @@ Kabul edilen ikililer (Plus'ta okunan = host derleme kaydı, tam SHA-256):
 * Plus HDMI-A-1/VP0 HDR karma kompozisyonun yeniden ölçümü.
 * Stok vendor çekirdekle temiz kurulum doğrulaması.
 
-### Golden — BLOKE (12 Kasım 2026)
+### Golden — blocker kapandı, capture main'den yapılacak (12 Kasım 2026)
 
-`scripts/release/create-mediabox-release.sh` `/opt/rk3588-mediabox`'ın
-tamamını tar'lıyor; yalnız `bin/mediabox-tv.pre-account` ve `__pycache__`
-dışlanıyor. Plus'ta prefix içinde geliştirme kalıntısı var, capture
-çalıştırılmadı:
+İlk denemede capture çalıştırılmadı: betik `/opt/rk3588-mediabox`'ın
+tamamını tar'lıyordu ve `mediabox-product-verify`
+`rollback/…/mediabox-tv.candidate-10b18f4` yüzünden FAIL veriyordu.
 
-| Kalıntı | Dosya | Bayt |
-|---|---|---|
-| `rollback/` (9 dizin) | 35 | 169 821 557 |
-| `bin/*.pre-faz3j*` (4 ikili) | 4 | 51 081 472 |
-| `media.old/` | 94 | 1 212 789 |
-| `media.subtitles-test/` | 61 | 631 117 |
-
-`mediabox-product-verify` aynı nedenle FAIL:
-`no staging leftovers rollback/mediabox-tv-20261111-151135/mediabox-tv.candidate-10b18f4`.
-Diğer kapılar: `build-media-runtime.sh verify` PASS, ScreenBridge prefix
-referansı yok, kırık symlink 0.
-
-Golden'ın açılması için kalıntıların prefix dışına alınması (kullanıcı
-kararı) ya da capture betiğinin bunları dışlaması gerekir; ardından
-capture ve arşiv doğrulaması.
+* **Release aracı düzeltildi.** `rollback/` kurulum geri dönüş geçmişi,
+  ürün değil. `scripts/release/release-scope.sh` bunu manifest,
+  SHA256SUMS, ELF listesi, tar ve kapılar için tek yerde dışlıyor;
+  manifest = tar. Verifier `rollback/` altına bakmıyor;
+  `bin/*.pre-faz3j*`, `media.old` ve `media.subtitles-test` adıyla FAIL.
+  Test: `tests/check-release-scope.sh`.
+* **Gerçek kalıntılar karantinada.** Plus'ta silinmeden taşındı:
+  `/var/tmp/mediabox-golden-quarantine-20261112T113349Z/` (159 dosya,
+  52 925 378 bayt; önce/sonra manifesti aynı). `rollback/` yerinde.
+* Güncel verifier Plus'ta kurulmadan çalıştırıldı: PASS.
+* **Sıradaki:** feature dalı main'e fast-forward + push, ardından
+  main'den Golden capture ve arşiv doğrulaması.
 
 ### Golden sonrası zorunlu kapı
 
