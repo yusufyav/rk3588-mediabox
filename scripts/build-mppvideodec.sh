@@ -49,7 +49,9 @@ engine="$(command -v docker || command -v podman || true)"
 [ -n "$engine" ] || { echo "docker or podman is needed" >&2; exit 1; }
 
 [ -e "$runtime" ] || "$here/scripts/build-gstreamer-runtime.sh"
-sha256sum -c --quiet "$runtime.sha256"
+# The .sha256 names the tarball by its bare name: checked where it lies,
+# whatever directory this script is run from (as build-mediabox-live.sh).
+( cd "${runtime%/*}" && sha256sum -c --quiet "${runtime##*/}.sha256" )
 
 if [ ! -e "$sdk${MEDIA_PREFIX}/lib/librockchip_mpp.so.0" ]; then
   # shellcheck source=env.sh
