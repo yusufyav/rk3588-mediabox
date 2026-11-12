@@ -687,6 +687,79 @@ yazan her şey kartlardan birinde yanlış televizyona sesleniyordu.
 3. Stok çekirdekle MediaBox'ı açmayı dene: HDMI RX yaması TX'i ilgilendirmiyor,
    ama bu hâlâ çıkarım.
 
+## 8b. Canlı TV — ürün kabul durumu (12 Kasım 2026)
+
+Kabul edilen main commit: `b7ac271f9e5d868ef1c205a6da67aa8a1279cd7a`.
+Kaynak cihaz: Orange Pi 5 Plus, `6.1.115-vendor-rk35xx`, Armbian 26.8.2
+trixie, aarch64, kök `/dev/mmcblk1p1`.
+
+Kabul edilen ikililer (Plus'ta okunan = host derleme kaydı, tam SHA-256):
+
+| İkili | SHA-256 |
+|---|---|
+| `media-runtime/lib/librockchip_mpp.so.0` | `bd86814b3d49f42ead97195097f27da237662075c922a179d420254667f9385b` |
+| `bin/mediabox-live` | `acdd5713aaa7e3e4a4c21b49f64c2d198d60e16164d99b0984b8009019df8d7f` |
+| `bin/mediaboxd-rs` | `fbacf39decc216dbd93c330e8ebf1fa6e50c2de81bf4bf5688c6a0860cf937a0` |
+| `bin/mediabox-tv` | `81f3210790c952ea85ac79cfe509ea616548352f43089b3f41189e55c3d5ab21` |
+| `gstreamer-1.26.11/lib/gstreamer-1.0/libgstrockchipmpp.so` | `7bbf5d5d5fc05dfb38f963ef57566c1202beaca7bc274340cbbb6f186074baf4` |
+
+### Tamamlananlar
+
+* DVB transport admission ve eski transponder karantinası.
+* PAT/PMT/ONID/TSID servis doğruluğu.
+* Continuity/CC ölçümü; giriş kaybı ile ürün kaybının ayrımı.
+* PCR/STC tabanlı ses/görüntü saat modeli.
+* ASRC ve uzun yayında ses kararlılığı.
+* MPP donanım decode, DMA-BUF ve KMS gerçek page-flip.
+* Video plane görünürlüğü ve modeset epoch yönetimi.
+* HDMI modeset sonrası nesil başına tek ses reload.
+* Bluetooth hedefini önce hazırlayıp tek-sahipli devir.
+* Sıcak/soğuk/tam-kapalı tuner yaşam döngüsü seçenekleri.
+* MPEG-2 m2vd 32-bit PTS taşması düzeltmesi
+  (`packaging/mpp-patches/0003`); `scripts/test-mpp-deinterlace.sh`
+  12 Kasım'da Plus'ta: H.264 açılış PASS (50 resim, alan 28..77), H.264
+  kayıp sonrası PASS (kayıptan sonra 112'den), MPEG-2 PASS (61 resim, alan
+  25..85).
+
+### Açık, Golden'ı bloke etmeyen
+
+* Kabul kapısından önce görülebilen parser edinim süreksizliklerinin daha
+  ayrıntılı zaman izi.
+* Yüksek-TMDS aynı-sink hotplug/SCDC toparlanması (bkz. §8 "Sonraki kapı").
+* Plus HDMI-A-1/VP0 HDR karma kompozisyonun yeniden ölçümü.
+* Stok vendor çekirdekle temiz kurulum doğrulaması.
+
+### Golden — BLOKE (12 Kasım 2026)
+
+`scripts/release/create-mediabox-release.sh` `/opt/rk3588-mediabox`'ın
+tamamını tar'lıyor; yalnız `bin/mediabox-tv.pre-account` ve `__pycache__`
+dışlanıyor. Plus'ta prefix içinde geliştirme kalıntısı var, capture
+çalıştırılmadı:
+
+| Kalıntı | Dosya | Bayt |
+|---|---|---|
+| `rollback/` (9 dizin) | 35 | 169 821 557 |
+| `bin/*.pre-faz3j*` (4 ikili) | 4 | 51 081 472 |
+| `media.old/` | 94 | 1 212 789 |
+| `media.subtitles-test/` | 61 | 631 117 |
+
+`mediabox-product-verify` aynı nedenle FAIL:
+`no staging leftovers rollback/mediabox-tv-20261111-151135/mediabox-tv.candidate-10b18f4`.
+Diğer kapılar: `build-media-runtime.sh verify` PASS, ScreenBridge prefix
+referansı yok, kırık symlink 0.
+
+Golden'ın açılması için kalıntıların prefix dışına alınması (kullanıcı
+kararı) ya da capture betiğinin bunları dışlaması gerekir; ardından
+capture ve arşiv doğrulaması.
+
+### Golden sonrası zorunlu kapı
+
+1. Üretilen appliance arşivini temiz Armbian üzerine yeniden kurma.
+2. Manifest/hash doğrulaması.
+3. Ürün verify ve kısa Canlı TV kabulü.
+4. Yalnız bu tekrar kurulum geçince release yayınlama / `current.env`
+   güncelleme.
+
 ## 9. Nerede ne var
 
 ```
