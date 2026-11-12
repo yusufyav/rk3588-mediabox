@@ -19,6 +19,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The production install path: the entry point and every product helper it runs.
 targets=(
   scripts/install/install-mediabox.sh
+  scripts/install/bootstrap.sh
   packaging/mediabox-product-verify
   packaging/mediabox-playback-smoke
   releases/current.env

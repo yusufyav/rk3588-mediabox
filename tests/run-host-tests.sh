@@ -779,6 +779,14 @@ else
   "$here/tests/check-release-owners.sh" | sed 's/^/     /'
   failures=$((failures + 1))
 fi
+# zstd before the unpack on both install paths; curl and the CA only to fetch.
+if "$here/tests/check-install-bootstrap.sh" >/dev/null 2>&1; then
+  echo "ok   INSTALL_BOOTSTRAP=PASS"
+else
+  echo "FAIL INSTALL_BOOTSTRAP:"
+  "$here/tests/check-install-bootstrap.sh" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
 # The text, too, so a verifier that grows a readelf back is caught even if the
 # fixture ever stops exercising the line that would use it.
 if strip_sh "$here/packaging/mediabox-product-verify" |

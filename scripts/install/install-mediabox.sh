@@ -138,22 +138,16 @@ step "the appliance archive"
 work="$(mktemp -d /var/tmp/mediabox-install-XXXXXX)"
 trap 'rm -rf "$work"' EXIT
 
+# zstd for the unpack, either way; curl and the CA bundle only to fetch.
+# shellcheck source=scripts/install/bootstrap.sh
+. "$here/scripts/install/bootstrap.sh"
 if [ -n "$bundle" ]; then
   [ -f "$bundle" ] || die "no such bundle: $bundle"
+  mediabox_bootstrap 0 "$verify_only"
   archive="$bundle"
   note "offline bundle $archive"
 else
-  need_bootstrap=""
-  command -v curl >/dev/null || need_bootstrap="$need_bootstrap curl"
-  command -v zstd >/dev/null || need_bootstrap="$need_bootstrap zstd"
-  [ -e /etc/ssl/certs/ca-certificates.crt ] || need_bootstrap="$need_bootstrap ca-certificates"
-  if [ -n "$need_bootstrap" ]; then
-    [ "$(id -u)" -eq 0 ] || die "need$need_bootstrap to fetch the release; re-run with sudo"
-    note "fetching$need_bootstrap"
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    # shellcheck disable=SC2086
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $need_bootstrap
-  fi
+  mediabox_bootstrap 1 "$verify_only"
   # An exact tag and an exact digest. Never "latest": a moving target is a
   # product that differs between two boards installed on two afternoons.
   #
