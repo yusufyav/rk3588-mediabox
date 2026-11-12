@@ -87,7 +87,7 @@ every TRT access point, GOP 1.0 s), held for the player until it opens the
 FIFO. The display keeps its mode through the change
 (`Output::content_handover`).
 
-## Files on the appliance (the owner's, never in Git or a release)
+## Files on the appliance
 
 | Path | What |
 |---|---|
@@ -95,6 +95,11 @@ FIFO. The display keeps its mode through the change
 | `/var/lib/mediabox-dvb/firmware/dvb-usb-it9303-01.fw` | bridge firmware (Linux), SHA-256 checked; loaded when the device comes up COLD (every plug-in) |
 | `/var/lib/mediabox-dvb/recording.ts` | a captured multiplex, for `source: recording` |
 | `/var/lib/mediabox/live-guide.json` | the multiplexes the receiver has been on: services and EIT events (the control plane's) |
+
+The two firmware files are not committed to Git, but they are immutable runtime
+dependencies and are carried by the private appliance release.  The installer
+places and verifies them even when no receiver is attached.  `recording.ts` and
+`live-guide.json` remain per-device mutable state and are never released.
 
 `mediabox-dvb firmware-check` verifies the first two without touching USB.
 `mediabox-dvb selftest [--recording FILE]` checks libusb's symbols (no

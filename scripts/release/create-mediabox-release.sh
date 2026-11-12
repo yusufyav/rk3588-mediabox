@@ -177,6 +177,21 @@ mediabox_scp -q "$integration_manifest" "$MEDIABOX_TARGET:$stage/meta/integratio
 rm -f "$integration_manifest"
 echo "  integration files differing from the repository: $drift"
 
+# The receiver firmware is immutable product support data.  It is deliberately
+# absent from Git, but a self-contained appliance release must carry the exact
+# bytes accepted on the golden board; requiring them here keeps a missing tuner
+# from hiding an incomplete release.
+dvb_fw=/var/lib/mediabox-dvb/firmware
+mediabox_ssh "test -f '$dvb_fw/libdvb_usb_phy.so' -a -f '$dvb_fw/dvb-usb-it9303-01.fw'" \
+  || die "DVB firmware is absent on the golden board: $dvb_fw"
+mediabox_ssh "'$MEDIABOX_PREFIX/bin/mediabox-dvb' firmware-check --firmware-dir '$dvb_fw' >/dev/null" \
+  || die "DVB firmware on the golden board failed firmware-check"
+mediabox_ssh "test \"\$(sha256sum '$dvb_fw/dvb-usb-it9303-01.fw' | cut -d' ' -f1)\" = \
+  5213a5a38872661277a2cc1b2dfdfe88faf06f41205f460f3b51857f0568b484" \
+  || die "DVB bridge firmware on the golden board has the wrong digest"
+mediabox_ssh "install -d -m 0700 '$stage/rootfs$dvb_fw' && \
+  install -m 0600 '$dvb_fw/libdvb_usb_phy.so' '$dvb_fw/dvb-usb-it9303-01.fw' '$stage/rootfs$dvb_fw/'"
+
 # ------------------------------------------------------------ the inventory
 
 say "inventory, closure and capability baseline"
@@ -208,8 +223,8 @@ elf_list="$(mktemp)"
 release_inventory "" "$PREFIX" "$M" "$elf_list"
 
 # The integration files staged a moment ago belong in the same digest list.
-( cd "$STAGE" && find rootfs/etc -type f -exec sha256sum {} + ) >>"$M/SHA256SUMS" || true
-( cd "$STAGE" && find rootfs/etc \( -type f -o -type d \) -printf '%y\t%m\t%s\t%p\n' |
+( cd "$STAGE" && find rootfs/etc rootfs/var/lib/mediabox-dvb -type f -exec sha256sum {} + ) >>"$M/SHA256SUMS" || true
+( cd "$STAGE" && find rootfs/etc rootfs/var/lib/mediabox-dvb \( -type f -o -type d \) -printf '%y\t%m\t%s\t%p\n' |
   sed -E 's/^f\t([0-9]+)\t([0-9]+)\t(.*)$/file\t\1\t\2\t-\t\3/; s/^d\t([0-9]+)\t[0-9]+\t(.*)$/dir\t\1\t-\t-\t\2/' ) \
   >>"$M/artifact-manifest.tsv"
 
@@ -450,6 +465,8 @@ readelf -d "$PREFIX/player/bin/mpv" 2>/dev/null | grep "$PREFIX/media-runtime/li
   && g "mpv RUNPATH" PASS || g "mpv RUNPATH" FAIL
 test -x "$PREFIX/kodi/lib/kodi/kodi-gbm" && g "kodi present" PASS || g "kodi present" FAIL
 test -x "$PREFIX/bin/mediabox-live" && g "mediabox-live present" PASS || g "mediabox-live present" FAIL
+"$PREFIX/bin/mediabox-dvb" firmware-check --firmware-dir /var/lib/mediabox-dvb/firmware >/dev/null 2>&1 \
+  && g "DVB firmware" PASS || g "DVB firmware" FAIL
 grep -q '^live-gstreamer-elements	present$' "$M/capability-baseline.txt" \
   && g "live GStreamer elements" PASS || g "live GStreamer elements" FAIL
 readelf -d "$PREFIX/kodi/lib/kodi/kodi-gbm" 2>/dev/null | grep "$PREFIX/media-runtime/lib" >/dev/null \

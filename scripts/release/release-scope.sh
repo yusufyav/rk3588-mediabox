@@ -74,11 +74,13 @@ release_inventory() {
 # list, so the archive carries exactly what the manifest names.
 release_tar() {
   local root="$1" rel="${2#/}" p
+  local staged=(meta rootfs/etc)
+  [ -d rootfs/var/lib/mediabox-dvb ] && staged+=(rootfs/var/lib/mediabox-dvb)
   local ex=(--exclude='*/__pycache__' --exclude='*.pyc'
             --exclude="$rel/bin/mediabox-tv.pre-account")
   for p in $RELEASE_NOT_PRODUCT; do ex+=(--exclude="$rel/$p"); done
   tar --numeric-owner --owner=0 --group=0 --xattrs --acls "${ex[@]}" \
-    -cf - meta rootfs/etc -C "$root/" --transform='s,^opt/,rootfs/opt/,' "$rel"
+    -cf - "${staged[@]}" -C "$root/" --transform='s,^opt/,rootfs/opt/,' "$rel"
 }
 
 # release_leftovers <root> <prefix>: what in the product part of the prefix is

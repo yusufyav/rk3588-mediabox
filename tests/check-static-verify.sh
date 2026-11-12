@@ -101,11 +101,12 @@ build_archive() {
   mkdir -p "$P"/{bin,player/bin,player/share,media-runtime/lib,media-runtime/lib/dri,mali-g24p0-root} \
            "$P"/{mali-g24p0-runtime/lib,node/bin,stremio-server,media,ui} \
            "$P"/kodi/lib/kodi "$P"/kodi/share/kodi/system/settings "$M" \
+           "$root"/rootfs/var/lib/mediabox-dvb/firmware \
            "$root"/rootfs/etc/systemd/system "$root"/rootfs/etc/mediabox \
            "$root"/rootfs/etc/udev/rules.d "$root"/rootfs/etc/systemd/logind.conf.d \
            "$root"/rootfs/etc/alsa/conf.d
 
-  for b in mediaboxd-rs mediaboxctl mediabox-platform mediabox-tv mediabox-player \
+  for b in mediaboxd-rs mediaboxctl mediabox-platform mediabox-tv mediabox-player mediabox-dvb \
            mediabox-browser-verify; do
     : >"$P/bin/$b"; chmod 755 "$P/bin/$b"
   done
@@ -115,6 +116,8 @@ build_archive() {
   : >"$P/media-runtime/lib/dri/rockchip_drv_video.so"
   : >"$P/node/bin/node"; chmod 755 "$P/node/bin/node"
   : >"$P/stremio-server/server.js"
+  : >"$root/rootfs/var/lib/mediabox-dvb/firmware/libdvb_usb_phy.so"
+  : >"$root/rootfs/var/lib/mediabox-dvb/firmware/dvb-usb-it9303-01.fw"
   : >"$P/kodi/share/kodi/system/settings/settings.xml"
 
   make_elf "$P/player/bin/mpv" "$mpv_rp"
@@ -217,6 +220,11 @@ echo "-- an archive that disagrees with its own capture is still a failure"
 build_archive "$work/drift" "$RP" "$RP" /opt/rk3588-mediabox/media-runtime/lib:/somewhere/else
 fails_with "recorded runpath differing from the binary" \
   "the capture recorded" run_verify "$work/drift"
+
+echo "-- an archive without DVB firmware is still a failure"
+build_archive "$work/no-dvb-firmware" "$RP" "$RP" "$RP"
+rm "$work/no-dvb-firmware/rootfs/var/lib/mediabox-dvb/firmware/libdvb_usb_phy.so"
+fails_with "missing DVB firmware" "DVB demodulator firmware" run_verify "$work/no-dvb-firmware"
 
 echo
 if [ "$failures" -eq 0 ]; then

@@ -32,6 +32,7 @@ STATIC="${MEDIABOX_VERIFY_STATIC_ONLY:-0}"
 NO_DISPLAY="${MEDIABOX_VERIFY_NO_DISPLAY:-0}"
 P="$ROOT/opt/rk3588-mediabox"
 ETC="$ROOT/etc"
+DVB_FW="$ROOT/var/lib/mediabox-dvb/firmware"
 fails=0
 skips=0
 
@@ -71,6 +72,7 @@ skip() { printf '  SKIP  %-40s %s\n' "$1" "${2:-}"; skips=$((skips + 1)); }
 req_exec() { [ -x "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
 req_dir()  { [ -d "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
 req_file() { [ -f "$P/$1" ] && pass "$2" "$1" || fail "$2" "MISSING $P/$1"; }
+req_abs_file() { [ -f "$1" ] && pass "$2" "$1" || fail "$2" "MISSING $1"; }
 
 echo "== MediaBox product verify${ROOT:+ (archive at $ROOT)}"
 
@@ -80,6 +82,7 @@ req_exec bin/mediaboxctl          "control client"
 req_exec bin/mediabox-platform    "platform discovery"
 req_exec bin/mediabox-tv          "television interface"
 req_exec bin/mediabox-player      "player launcher"
+req_exec bin/mediabox-dvb         "DVB receiver"
 req_exec bin/mediabox-browser-verify "browser decode verifier"
 req_dir  media-runtime            "media runtime"
 req_dir  media-runtime/lib        "media runtime libraries"
@@ -96,6 +99,24 @@ req_file stremio-server/server.js "Stremio server"
 req_exec kodi/lib/kodi/kodi-gbm   "Kodi"
 req_dir  media                    "media worker package"
 req_dir  ui                       "interface assets"
+
+# DVB firmware is immutable product support data, not channel/user state.  A
+# release without it can install cleanly yet every TKGS/live start fails before
+# opening the receiver, so it is part of the appliance closure even when no
+# tuner is attached during installation.
+req_abs_file "$DVB_FW/libdvb_usb_phy.so" "DVB demodulator firmware"
+req_abs_file "$DVB_FW/dvb-usb-it9303-01.fw" "DVB bridge firmware"
+if [ "$STATIC" != 1 ] && [ -x "$P/bin/mediabox-dvb" ]; then
+  if "$P/bin/mediabox-dvb" firmware-check --firmware-dir "$DVB_FW" >/dev/null 2>&1; then
+    pass "DVB firmware integrity" "mediabox-dvb firmware-check"
+  else
+    fail "DVB firmware integrity" "firmware-check failed"
+  fi
+  bridge_sum="$(sha256sum "$DVB_FW/dvb-usb-it9303-01.fw" 2>/dev/null | cut -d' ' -f1 || true)"
+  [ "$bridge_sum" = 5213a5a38872661277a2cc1b2dfdfe88faf06f41205f460f3b51857f0568b484 ] \
+    && pass "DVB bridge firmware integrity" "$bridge_sum" \
+    || fail "DVB bridge firmware integrity" "unexpected sha256 ${bridge_sum:-missing}"
+fi
 
 # ------------------------------------------------- what the player can do
 #

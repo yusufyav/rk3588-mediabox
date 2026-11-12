@@ -278,6 +278,7 @@ fi
 ok "service user stremio"
 install -d -m 0750 -o root -g root /var/lib/mediabox /var/lib/mediabox-ui \
                                    /var/lib/mediabox-browser /var/lib/mediabox-media-worker
+install -d -m 0700 -o root -g root /var/lib/mediabox-dvb /var/lib/mediabox-dvb/firmware
 install -d -m 0755 -o stremio -g stremio /var/lib/stremio-server
 install -d -m 0755 /var/tmp/kodi-home
 ok "state directories"
@@ -301,6 +302,18 @@ else
   mv "$new" "$prefix"
   ok "installed"
 fi
+
+# Firmware is shipped by the private appliance bundle, not fetched and not
+# supplied by the user after installation.  Install it before any service can
+# start a TKGS/live receiver and prove it without touching USB.
+dvb_fw_src="$staging/rootfs/var/lib/mediabox-dvb/firmware"
+[ -f "$dvb_fw_src/libdvb_usb_phy.so" ] && [ -f "$dvb_fw_src/dvb-usb-it9303-01.fw" ] \
+  || die "the release carries no complete DVB firmware payload"
+install -m 0600 "$dvb_fw_src/libdvb_usb_phy.so" "$dvb_fw_src/dvb-usb-it9303-01.fw" \
+  /var/lib/mediabox-dvb/firmware/
+"$prefix/bin/mediabox-dvb" firmware-check --firmware-dir /var/lib/mediabox-dvb/firmware >/dev/null \
+  || die "the installed DVB firmware failed verification"
+ok "DVB firmware installed and verified"
 
 # ------------------------------------------------ 11. /etc integration files
 #
