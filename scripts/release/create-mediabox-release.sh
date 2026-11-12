@@ -79,6 +79,9 @@ mediabox_ssh "mkdir -p '$stage/rootfs/etc/systemd/system' \
 mediabox_scp -q "$here/scripts/release/release-scope.sh" "$MEDIABOX_TARGET:$stage/release-scope.sh"
 # And which package a path belongs to, alternatives links included.
 mediabox_scp -q "$here/scripts/release/release-owners.sh" "$MEDIABOX_TARGET:$stage/release-owners.sh"
+# A clean appliance deliberately carries no binutils.  Capture reads RUNPATH
+# structurally with this small helper instead of assuming readelf is installed.
+mediabox_scp -q "$here/scripts/release/elf-runpath.py" "$MEDIABOX_TARGET:$stage/elf-runpath.py"
 
 # repo path <TAB> installed path
 repo_integration=$(cat <<'EOF'
@@ -257,15 +260,13 @@ release_inventory "" "$PREFIX" "$M" "$elf_list"
 # The verifier reads the same thing out of the archived binaries itself -- it
 # has to, since a release cut before this file existed does not carry it -- and
 # this is the second opinion it checks that reading against. It is written here
-# because the capture runs on a development machine where readelf exists; the
-# target is a clean Minimal image where it does not, and the archive is checked
-# there before a single package is installed.
+# with the same structural ELF question on a clean Minimal image; no binutils
+# package is part of the appliance.
 {
   echo "# binary<TAB>runpath"
   for b in player/bin/mpv kodi/lib/kodi/kodi-gbm; do
     [ -f "$PREFIX/$b" ] || continue
-    printf '%s\t%s\n' "$b" "$(readelf -d "$PREFIX/$b" 2>/dev/null |
-      sed -n 's/.*R\(UN\)\?PATH).*\[\(.*\)\]/\2/p' | head -1)"
+    printf '%s\t%s\n' "$b" "$(python3 "$STAGE/elf-runpath.py" "$PREFIX/$b")"
   done
 } >"$M/runpath.tsv"
 
@@ -458,10 +459,7 @@ g() { printf '  %-34s %s\n' "$1" "$2"; [ "$2" = PASS ] || fail=$((fail + 1)); }
 test -x "$PREFIX/player/bin/mpv" && g "mpv present" PASS || g "mpv present" GOLDEN_RELEASE_NOT_READY
 grep -q '^mpv-vo-mediabox	present$'  "$M/capability-baseline.txt" && g "mpv vo_mediabox" PASS || g "mpv vo_mediabox" FAIL
 grep -q '^mpv-hwdec-rkmpp	present$' "$M/capability-baseline.txt" && g "mpv hwdec rkmpp" PASS || g "mpv hwdec rkmpp" FAIL
-# Not grep -q. RUNPATH is near the top of readelf's output; under pipefail a
-# grep that leaves on the match can SIGPIPE readelf, and the gate then failed
-# an unchanged mpv 14 times in 40 on the golden Plus.
-readelf -d "$PREFIX/player/bin/mpv" 2>/dev/null | grep "$PREFIX/media-runtime/lib" >/dev/null \
+python3 "$STAGE/elf-runpath.py" "$PREFIX/player/bin/mpv" | grep "$PREFIX/media-runtime/lib" >/dev/null \
   && g "mpv RUNPATH" PASS || g "mpv RUNPATH" FAIL
 test -x "$PREFIX/kodi/lib/kodi/kodi-gbm" && g "kodi present" PASS || g "kodi present" FAIL
 test -x "$PREFIX/bin/mediabox-live" && g "mediabox-live present" PASS || g "mediabox-live present" FAIL
@@ -469,7 +467,7 @@ test -x "$PREFIX/bin/mediabox-live" && g "mediabox-live present" PASS || g "medi
   && g "DVB firmware" PASS || g "DVB firmware" FAIL
 grep -q '^live-gstreamer-elements	present$' "$M/capability-baseline.txt" \
   && g "live GStreamer elements" PASS || g "live GStreamer elements" FAIL
-readelf -d "$PREFIX/kodi/lib/kodi/kodi-gbm" 2>/dev/null | grep "$PREFIX/media-runtime/lib" >/dev/null \
+python3 "$STAGE/elf-runpath.py" "$PREFIX/kodi/lib/kodi/kodi-gbm" | grep "$PREFIX/media-runtime/lib" >/dev/null \
   && g "kodi RUNPATH" PASS || g "kodi RUNPATH" FAIL
 
 grep -q "^player/bin/mpv	.*$PREFIX/media-runtime/lib" "$M/runpath.tsv" \
