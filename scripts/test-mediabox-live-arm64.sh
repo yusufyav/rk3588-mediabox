@@ -75,8 +75,8 @@ export PKG_CONFIG_SYSROOT_DIR="$sysroot"
 export PKG_CONFIG_LIBDIR="$sysroot$gst_prefix/lib/pkgconfig:$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig:$sysroot/usr/share/pkgconfig"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 # The checkout's own path is not in the binary (panic locations read
-# ./rust/crates/...): the same commit builds the same bytes from any
-# worktree.
+# ./rust/crates/...): the same sources -- a commit, or a dirty tree's same
+# snapshot -- build the same bytes from any worktree.
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="--remap-path-prefix=$here=. -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
 # qemu resolves every absolute path in the sysroot first: the binary's
 # RUNPATH, the plugin path and the scanner compiled into libgstreamer are
@@ -124,7 +124,7 @@ say "6. release build ($triple)"
 source "$here/scripts/mediabox-live-source.sh"
 mediabox_live_source "$here"
 source_crate="$MEDIABOX_LIVE_CRATE"
-echo "mediabox-live source: commit $MEDIABOX_LIVE_COMMIT"
+echo "mediabox-live source: $MEDIABOX_LIVE_SOURCE (snapshot $MEDIABOX_LIVE_SNAPSHOT)"
 ( cd "$source_crate" && CARGO_TARGET_DIR="$crate/target" \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="$MEDIABOX_LIVE_REMAP -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu" \
     cargo build -q --locked --release --target "$triple" )

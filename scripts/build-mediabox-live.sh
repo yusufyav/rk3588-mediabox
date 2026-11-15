@@ -92,13 +92,20 @@ export PKG_CONFIG_LIBDIR="$sysroot$gst_prefix/lib/pkgconfig:$sysroot/usr/lib/aar
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 # Its GStreamer found through a RUNPATH, never Debian's in /usr/lib.
 # Built from one fixed path (mediabox-live-source.sh), named nowhere in
-# the binary (panic locations read ./rust/crates/...): the same commit
-# builds the same bytes from any worktree, checked 2026-11-06 with two.
+# the binary (panic locations read ./rust/crates/...): the same sources --
+# a commit, or a dirty tree's same snapshot -- build the same bytes from any
+# worktree (checked 2026-11-06 with two of a commit).
 # shellcheck source=mediabox-live-source.sh
 source "$here/scripts/mediabox-live-source.sh"
 mediabox_live_source "$here"
 source_crate="$MEDIABOX_LIVE_CRATE"
-echo "mediabox-live source: commit $MEDIABOX_LIVE_COMMIT"
+if [ "$MEDIABOX_LIVE_DIRTY" = 1 ]; then
+  echo "mediabox-live source: $MEDIABOX_LIVE_SOURCE" >&2
+  echo "  WARNING: rust/ has uncommitted changes; a development binary, traced by snapshot $MEDIABOX_LIVE_SNAPSHOT" >&2
+else
+  echo "mediabox-live source: commit $MEDIABOX_LIVE_COMMIT"
+fi
+echo "mediabox-live snapshot: $MEDIABOX_LIVE_SNAPSHOT"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="$MEDIABOX_LIVE_REMAP -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
 ( cd "$source_crate" && CARGO_TARGET_DIR="$crate/target" cargo build -q --locked --release --target "$triple" )
 bin="$crate/target/$triple/release/mediabox-live"
@@ -122,8 +129,12 @@ tar -C "$work" -xJf "$gst_tarball"
 ( cd "$work$gst_prefix" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$bundle/runtime.files.sha256"
 sed -n 1p "$work$gst_prefix/BUILD-INFO" > "$bundle/runtime.build-info"
 cp "$here/scripts/mediabox-live-install.sh" "$bundle/install.sh"
+# What the binary was built from: traceability, not a gate (the install
+# checks this file only for the transfer, as every file listed).
+printf 'source %s\ncommit %s\ndirty %s\nsnapshot %s\n' "$MEDIABOX_LIVE_SOURCE" "$MEDIABOX_LIVE_COMMIT" \
+  "$MEDIABOX_LIVE_DIRTY" "$MEDIABOX_LIVE_SNAPSHOT" > "$bundle/source.txt"
 ( cd "$bundle" && sha256sum runtime.tar.xz libgstrockchipmpp.so mediabox-live mediabox-player \
-    runtime.files.sha256 runtime.build-info install.sh > SHA256SUMS )
+    runtime.files.sha256 runtime.build-info install.sh source.txt > SHA256SUMS )
 cat "$bundle/SHA256SUMS"
 
 [ "$mode" = build ] && { echo; echo "built; nothing written to the appliance (--dry-run shows the install plan)"; exit 0; }

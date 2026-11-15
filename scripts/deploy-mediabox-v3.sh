@@ -12,7 +12,21 @@
 # media worker gains its library, then the control plane is restarted — so at
 # no point is a new daemon serving an old UI, or an old daemon asked for a
 # command it does not have.
+#
+# --only <binary>[,<binary>...]: a development install of some of the
+# product's own binaries and nothing else -- built, put in place by rename
+# after a rollback copy, the services that run them restarted, and checked
+# by sha256 on disk and in the running process. A full deploy rebuilds and
+# reinstalls the whole product (four builds, packages, overlays, udev,
+# units, the smoke) for a change to one binary: 1-5 minutes each time.
 set -euo pipefail
+
+only=""
+case "${1:-}" in
+  "") ;;
+  --only) only="${2:?--only needs a list: mediaboxd-rs,mediaboxctl,mediabox-dvb,mediabox-tv,mediabox-platform,mediabox-display-observer}" ;;
+  *) echo "usage: deploy-mediabox-v3.sh [--only <binary>[,<binary>...]]" >&2; exit 2 ;;
+esac
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=env.sh
@@ -86,6 +100,89 @@ sh_ "test -e '$MEDIABOX_MEDIA_PREFIX/lib/dri/rockchip_drv_video.so'" || {
   echo "   the fallback decode path is absent; build it with" >&2
   echo "     scripts/build-vaapi-driver.sh" >&2
 }
+
+if [ -n "$only" ]; then
+  # Which service runs each binary, restarted after it is in place. The
+  # receiver is started for each channel: the next one runs the new binary.
+  service_of() {
+    case "$1" in
+      mediaboxd-rs) echo mediaboxd-rs.service ;;
+      mediabox-tv) echo mediabox-tv-ui.service ;;
+      mediabox-display-observer) echo mediabox-display-observer.service ;;
+      mediaboxctl | mediabox-dvb | mediabox-platform) echo "" ;;
+      *) echo "--only: $1 is not one of the product's binaries" >&2; return 1 ;;
+    esac
+  }
+  names=(${only//,/ })
+  services=()
+  for name in "${names[@]}"; do
+    service="$(service_of "$name")" || exit 2
+    [ -n "$service" ] && services+=("$service")
+  done
+  stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
+  for name in "${names[@]}"; do
+    if [ "$name" = mediabox-tv ]; then
+      say "mediabox-tv (native, $target_triple)"
+      "$here/scripts/build-mediabox-tv.sh"
+      cp "$here/rust/crates/mediabox-tv/target/$target_triple/release/mediabox-tv" "$stage/"
+    else
+      say "$name (cross-compile, $target_triple)"
+      ( cd "$here/rust" && cargo build --release --target "$target_triple" --bin "$name" )
+      cp "$here/rust/target/$target_triple/release/$name" "$stage/"
+    fi
+  done
+  ( cd "$stage" && sha256sum "${names[@]}" > SHA256SUMS )
+  say "only: ${names[*]} -> $prefix/bin"
+  cat "$stage/SHA256SUMS"
+  # Run on the appliance: <prefix> <services...> -- with the binaries and
+  # their SHA256SUMS beside it.
+  cat > "$stage/install.sh" <<'REMOTE'
+#!/bin/sh
+set -e
+prefix=$1; shift
+here=$(cd "$(dirname "$0")" && pwd)
+cd "$here"
+sha256sum -c --quiet SHA256SUMS
+names=$(awk '{print $2}' SHA256SUMS)
+R=$prefix/rollback/only-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$R/bin"
+for b in $names; do [ -e "$prefix/bin/$b" ] && cp -a "$prefix/bin/$b" "$R/bin/"; done
+( cd "$R" && sha256sum bin/* > SHA256SUMS )
+{
+  echo '#!/bin/sh'
+  echo 'set -e'
+  echo 'cd "$(dirname "$0")"'
+  echo 'sha256sum -c SHA256SUMS'
+  echo "for f in \$(awk '{print \$2}' SHA256SUMS); do install -m 0755 \$f $prefix/\$f; done"
+  [ $# -gt 0 ] && echo "systemctl restart $*"
+} > "$R/rollback.sh"
+chmod 0755 "$R/rollback.sh"
+for b in $names; do
+  install -m 0755 "$b" "$prefix/bin/.$b.new"
+  mv -f "$prefix/bin/.$b.new" "$prefix/bin/$b"
+done
+for u in "$@"; do
+  # The interface is not started by an install: which process owns the
+  # display is the control plane's to say.
+  if [ "$u" = mediabox-tv-ui.service ] && ! systemctl is-active --quiet "$u"; then continue; fi
+  systemctl restart "$u"
+done
+( cd "$prefix/bin" && sha256sum -c --quiet "$here/SHA256SUMS" ) || { echo "installed binaries differ: sh $R/rollback.sh" >&2; exit 1; }
+sleep 2
+for u in "$@"; do
+  [ "$u" = mediabox-tv-ui.service ] && ! systemctl is-active --quiet "$u" && continue
+  systemctl is-active --quiet "$u" || { echo "$u is not active: sh $R/rollback.sh" >&2; exit 1; }
+  pid=$(systemctl show -p MainPID --value "$u")
+  echo "$u active, pid $pid, running $(sha256sum /proc/$pid/exe | cut -c1-16)"
+done
+echo "rollback: sh $R/rollback.sh"
+REMOTE
+  remote=/var/tmp/mediabox-only
+  sh_ "rm -rf $remote && mkdir -p $remote"
+  cp_ "$stage"/* "$MEDIABOX_TARGET:$remote/"
+  sh_ "sh $remote/install.sh $prefix ${services[*]:-}; s=\$?; rm -rf $remote; exit \$s"
+  exit 0
+fi
 
 say "control plane (cross-compile, $target_triple)"
 ( cd "$here/rust" && cargo build --release --target "$target_triple" )

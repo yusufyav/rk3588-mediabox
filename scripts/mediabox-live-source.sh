@@ -12,14 +12,21 @@
 # 2026-11-06). Built from one fixed path, the two came out the same.
 #
 #   mediabox_live_source <checkout>
-#     exports the checkout's HEAD commit's rust/ (git archive: what is
-#     committed, nothing untracked or changed) to $MEDIABOX_LIVE_SRC, holds a
-#     lock on it until the calling script ends (one build at a time), and
-#     puts the crate's directory there in $MEDIABOX_LIVE_CRATE. Called in
-#     the script's own shell, not $(...): a subshell let the lock go as it
-#     ended. Refused while rust/ has changes or
-#     untracked files: a binary is the commit's or it is not built. Its
-#     commit is in $MEDIABOX_LIVE_COMMIT.
+#     copies the checkout's rust/ as it is in the working tree -- tracked
+#     files with their uncommitted changes, and untracked files that are not
+#     ignored; never what .gitignore leaves out (target/, build output) -- to
+#     $MEDIABOX_LIVE_SRC, holds a lock on it until the calling script ends
+#     (one build at a time), and puts the crate's directory there in
+#     $MEDIABOX_LIVE_CRATE. Called in the script's own shell, not $(...): a
+#     subshell let the lock go as it ended.
+#
+#     What it was built from: $MEDIABOX_LIVE_COMMIT (HEAD),
+#     $MEDIABOX_LIVE_DIRTY (1 when rust/ differs from it), $MEDIABOX_LIVE_SNAPSHOT
+#     (sha256 over every copied file's path and contents, sorted) and
+#     $MEDIABOX_LIVE_SOURCE: the commit for a clean tree, "<commit>+dirty"
+#     otherwise -- never the commit alone for what is not the commit's. A
+#     dirty tree is built, and said so; it is a development binary, traced by
+#     its snapshot, not refused.
 #
 # The fixed path is the same for every user and home; Cargo's own home
 # ($CARGO_HOME, its registry's sources in panic locations) is remapped
@@ -30,17 +37,28 @@ MEDIABOX_LIVE_REMAP="--remap-path-prefix=$MEDIABOX_LIVE_SRC=. --remap-path-prefi
 
 mediabox_live_source() {
   local checkout=$1
-  if [ -n "$(git -C "$checkout" status --porcelain --untracked-files=all -- rust)" ]; then
-    git -C "$checkout" status --short -- rust >&2
-    echo "rust/ is not the commit's: commit or stash first" >&2
-    return 1
-  fi
   MEDIABOX_LIVE_COMMIT="$(git -C "$checkout" rev-parse HEAD)"
+  if [ -n "$(git -C "$checkout" status --porcelain --untracked-files=normal -- rust)" ]; then
+    MEDIABOX_LIVE_DIRTY=1
+    MEDIABOX_LIVE_SOURCE="$MEDIABOX_LIVE_COMMIT+dirty"
+  else
+    MEDIABOX_LIVE_DIRTY=0
+    MEDIABOX_LIVE_SOURCE="$MEDIABOX_LIVE_COMMIT"
+  fi
   mkdir -p "${MEDIABOX_LIVE_SRC%/*}"
   exec {mediabox_live_lock}>"$MEDIABOX_LIVE_SRC.lock"
   flock "$mediabox_live_lock"
   rm -rf "${MEDIABOX_LIVE_SRC:?}"
   mkdir -p "$MEDIABOX_LIVE_SRC"
-  git -C "$checkout" archive "$MEDIABOX_LIVE_COMMIT" rust | tar -C "$MEDIABOX_LIVE_SRC" -xf -
+  # Tracked files as the working tree has them, and untracked ones not
+  # ignored. A tracked file deleted in the tree is not there to copy.
+  ( cd "$checkout" &&
+    git ls-files -z --cached --others --exclude-standard -- rust |
+      while IFS= read -r -d '' path; do
+        if [ -e "$path" ] || [ -L "$path" ]; then printf '%s\0' "$path"; fi
+      done |
+      tar --null -T - -cf - ) | tar -C "$MEDIABOX_LIVE_SRC" -xf -
+  MEDIABOX_LIVE_SNAPSHOT="$(cd "$MEDIABOX_LIVE_SRC" &&
+    find rust \( -type f -o -type l \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)"
   MEDIABOX_LIVE_CRATE="$MEDIABOX_LIVE_SRC/rust/crates/mediabox-live"
 }
