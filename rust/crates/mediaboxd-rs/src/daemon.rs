@@ -377,6 +377,10 @@ impl AppState {
                 Ok(value) => Response::success(value),
                 Err(error) => Response::failure("live_startup_policy_failed", error),
             },
+            Request::LiveSignalToleranceSet { tolerance } => match self.live.set_signal_tolerance(tolerance) {
+                Ok(value) => Response::success(value),
+                Err(error) => Response::failure("live_signal_tolerance_failed", error),
+            },
             Request::LiveTkgsCategoriesSet { shown } => match self.live.set_tkgs_categories(shown) {
                 Ok(value) => Response::success(value),
                 Err(error) => Response::failure("tkgs_categories_failed", error),
@@ -2947,6 +2951,11 @@ mod tests {
         assert!(set.ok);
         assert_eq!(set.result.unwrap()["configured_startup_policy"], "resume_if_valid");
         assert_eq!(state.status().await.live_receiver.startup_policy, policy);
+        let tolerance = mediabox_core::LiveSignalTolerance::High;
+        let set = state.handle(Request::LiveSignalToleranceSet { tolerance }).await;
+        assert!(set.ok);
+        assert_eq!(set.result.unwrap()["signal_tolerance"], "high");
+        assert_eq!(state.status().await.live_receiver, mediabox_core::LiveReceiverSettings { startup_policy: policy, signal_tolerance: tolerance });
         let receiver = state.handle(Request::LiveReceiver).await.result.unwrap();
         assert_eq!(receiver["startup"]["configured_startup_policy"], "resume_if_valid");
         assert!(receiver["startup"]["actual_startup_path"].is_null(), "no receiver has run");
@@ -3689,6 +3698,12 @@ impl crate::live_gate::GateIo for LiveGate {
     }
     fn has_picture(&self) -> Option<bool> {
         self.live.has_picture(self.service_id)
+    }
+    fn receiver_waiting(&self) -> bool {
+        self.live.receiver_waiting()
+    }
+    async fn keep_waiting(&self) -> Result<(), String> {
+        self.player.gate_wait(self.epoch).await
     }
     async fn player_gate(&self) -> Option<Value> {
         self.player

@@ -197,13 +197,92 @@ impl LiveReceiverStartupPolicy {
     }
 }
 
+/// How long the live screen goes on showing a channel whose receiver says
+/// `no_signal`, and whose pictures stopped, before it goes black and says
+/// so. A presentation rule only: the receiver reports the loss at once
+/// whichever is chosen, and nothing of its retuning, its transport-stream
+/// checks or its packet filtering depends on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveSignalTolerance {
+    /// What MediaBox always did: black and the words at the receiver's
+    /// first `no_signal`, and after one second without a new picture.
+    #[default]
+    Low,
+    /// A loss shorter than 1.5 s is not shown; pictures may stop for 2 s.
+    Balanced,
+    /// A loss shorter than 3 s is not shown, and whatever the player still
+    /// decodes stays on the panel, damaged or not; pictures may stop for 3 s.
+    High,
+}
+
+impl LiveSignalTolerance {
+    pub const ALL: [LiveSignalTolerance; 3] = [Self::Low, Self::Balanced, Self::High];
+
+    /// Its name on the wire and on `mediaboxctl`'s command line.
+    pub fn arg(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Balanced => "balanced",
+            Self::High => "high",
+        }
+    }
+
+    /// None for a name this build does not know: never guessed.
+    pub fn from_arg(arg: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tolerance| tolerance.arg() == arg)
+    }
+
+    /// The settings list's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Düşük",
+            Self::Balanced => "Dengeli",
+            Self::High => "Yüksek",
+        }
+    }
+
+    /// How long the receiver's `no_signal` must last, unbroken, before the
+    /// picture is taken off and the loss said.
+    pub fn no_signal_delay(self) -> std::time::Duration {
+        match self {
+            Self::Low => std::time::Duration::ZERO,
+            Self::Balanced => std::time::Duration::from_millis(1_500),
+            Self::High => std::time::Duration::from_secs(3),
+        }
+    }
+
+    /// How long a channel's pictures may stop, once it has shown one,
+    /// before the last one is taken off the panel.
+    pub fn stall(self) -> std::time::Duration {
+        match self {
+            Self::Low => std::time::Duration::from_secs(1),
+            Self::Balanced => std::time::Duration::from_secs(2),
+            Self::High => std::time::Duration::from_secs(3),
+        }
+    }
+}
+
+/// A field of a kept settings file read on its own: a value this build does
+/// not know is that field's default, and the other fields are kept.
+fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
+}
+
 /// The live receiver's settings, kept by the daemon across boots. A file
-/// that is missing, unreadable, or names a policy this build does not
-/// know reads as the default: `FullInit`.
+/// that is missing or unreadable reads as the defaults (`FullInit`, `Low`);
+/// a field naming a value this build does not know reads as that field's
+/// default, the other field kept.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveReceiverSettings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub startup_policy: LiveReceiverStartupPolicy,
+    #[serde(default, deserialize_with = "lenient")]
+    pub signal_tolerance: LiveSignalTolerance,
 }
 
 impl LiveReceiverSettings {
@@ -1852,6 +1931,10 @@ pub enum Request {
     /// How the next receiver brings the demodulator up; kept across boots.
     /// A receiver up now keeps the one it was started with.
     LiveStartupPolicySet { policy: LiveReceiverStartupPolicy },
+    /// How long the live screen goes on showing a channel whose receiver
+    /// says `no_signal`; kept across boots, and in force at once on the
+    /// channel playing. The receiver is not told: it is not its rule.
+    LiveSignalToleranceSet { tolerance: LiveSignalTolerance },
     /// The broadcast programme guide of the known channels between `from`
     /// and `to` (UTC seconds): only what the multiplex's EIT carried.
     LiveGuide { from: i64, to: i64 },
@@ -2146,7 +2229,68 @@ pub struct ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{LiveReceiverSettings, LiveReceiverStartupPolicy};
+    use super::{LiveReceiverSettings, LiveReceiverStartupPolicy, LiveSignalTolerance};
+
+    #[test]
+    fn an_old_file_keeps_today_s_tolerance() {
+        for text in ["", "{}", "not json", "{\"startup_policy\":\"full_init\"}"] {
+            assert_eq!(LiveReceiverSettings::parse(text).signal_tolerance, LiveSignalTolerance::Low, "{text:?}");
+        }
+        let old = LiveReceiverSettings::parse("{\"startup_policy\":\"resume_if_valid\"}");
+        assert_eq!(old, LiveReceiverSettings { startup_policy: LiveReceiverStartupPolicy::ResumeIfValid, signal_tolerance: LiveSignalTolerance::Low });
+        assert_eq!(LiveSignalTolerance::default(), LiveSignalTolerance::Low);
+    }
+
+    #[test]
+    fn the_tolerance_round_trips_and_an_unknown_one_is_low_alone() {
+        for (tolerance, wire, label) in [
+            (LiveSignalTolerance::Low, "low", "Düşük"),
+            (LiveSignalTolerance::Balanced, "balanced", "Dengeli"),
+            (LiveSignalTolerance::High, "high", "Yüksek"),
+        ] {
+            assert_eq!(serde_json::to_value(tolerance).unwrap(), wire);
+            assert_eq!(tolerance.arg(), wire);
+            assert_eq!(LiveSignalTolerance::from_arg(wire), Some(tolerance));
+            assert_eq!(tolerance.label(), label);
+            let settings = LiveReceiverSettings { startup_policy: LiveReceiverStartupPolicy::ResumeIfValid, signal_tolerance: tolerance };
+            let text = serde_json::to_string(&settings).unwrap();
+            assert_eq!(LiveReceiverSettings::parse(&text), settings, "{text}");
+        }
+        assert_eq!(LiveSignalTolerance::from_arg("max"), None);
+        assert_eq!(LiveSignalTolerance::from_arg("Low"), None);
+        // A tolerance this build does not know is the safe one; the startup
+        // method next to it is kept.
+        for unknown in ["\"max\"", "3", "null", "{}"] {
+            let text = format!("{{\"startup_policy\":\"resume_if_valid\",\"signal_tolerance\":{unknown}}}");
+            let settings = LiveReceiverSettings::parse(&text);
+            assert_eq!(settings.signal_tolerance, LiveSignalTolerance::Low, "{text}");
+            assert_eq!(settings.startup_policy, LiveReceiverStartupPolicy::ResumeIfValid, "{text}");
+        }
+        let both = LiveReceiverSettings::parse("{\"startup_policy\":\"sleep\",\"signal_tolerance\":\"high\"}");
+        assert_eq!(both.startup_policy, LiveReceiverStartupPolicy::FullInit);
+        assert_eq!(both.signal_tolerance, LiveSignalTolerance::High);
+    }
+
+    #[test]
+    fn the_tolerances_wait_longer_in_order() {
+        use std::time::Duration;
+        assert_eq!(LiveSignalTolerance::Low.no_signal_delay(), Duration::ZERO);
+        assert_eq!(LiveSignalTolerance::Low.stall(), Duration::from_secs(1), "today's LIVE_STALL");
+        assert_eq!(LiveSignalTolerance::Balanced.no_signal_delay(), Duration::from_millis(1500));
+        assert_eq!(LiveSignalTolerance::Balanced.stall(), Duration::from_secs(2));
+        assert_eq!(LiveSignalTolerance::High.no_signal_delay(), Duration::from_secs(3));
+        assert_eq!(LiveSignalTolerance::High.stall(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn the_tolerance_request_has_one_name_on_the_wire() {
+        let set = super::Request::LiveSignalToleranceSet { tolerance: LiveSignalTolerance::Balanced };
+        let wire = serde_json::to_value(&set).unwrap();
+        assert_eq!(wire, serde_json::json!({"command": "live_signal_tolerance_set", "tolerance": "balanced"}));
+        assert_eq!(serde_json::from_value::<super::Request>(wire).unwrap(), set);
+        // A tolerance this build does not know is refused, never guessed.
+        assert!(serde_json::from_str::<super::Request>(r#"{"command":"live_signal_tolerance_set","tolerance":"max"}"#).is_err());
+    }
 
     #[test]
     fn a_missing_old_or_unknown_receiver_setting_is_a_full_init() {

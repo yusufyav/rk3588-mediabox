@@ -5116,6 +5116,13 @@ impl Engine {
 
     /// The control plane gives channel `epoch` up (`gate`): an error for a
     /// channel that is not the one opened last, or one already let go.
+    /// The control plane waits for the receiver (`Gate::keep_waiting`).
+    pub fn wait_gate(&self, epoch: u64) -> Result<(), String> {
+        let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let Some(gate) = gate else { return Err(format!("stale: epoch {epoch}, no channel")) };
+        gate.keep_waiting(epoch, Instant::now()).map(|_| ())
+    }
+
     pub fn fail_gate(&self, epoch: u64, code: &str) -> Result<(), String> {
         let gate = self.shared.gate.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let Some(gate) = gate else { return Err(format!("stale: epoch {epoch}, no channel")) };

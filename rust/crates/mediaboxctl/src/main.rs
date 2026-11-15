@@ -556,6 +556,12 @@ enum MediaCommand {
         #[arg(value_parser = ["full-init", "resume-if-valid"])]
         policy: String,
     },
+    /// How long the live screen goes on showing a channel whose receiver
+    /// has no signal: low (at once), balanced (1.5 s) or high (3 s).
+    LiveSignalTolerance {
+        #[arg(value_parser = ["low", "balanced", "high"])]
+        tolerance: String,
+    },
     /// Manually scan one satellite transponder; what it carries joins the
     /// channel list. Its progress and cancel are live-tkgs-progress/-cancel.
     LiveScan {
@@ -844,6 +850,10 @@ fn to_request(command: &Command) -> Request {
             MediaCommand::LiveTkgsCategories { shown } => Request::LiveTkgsCategoriesSet { shown: shown == "on" },
             MediaCommand::LiveStartupPolicy { policy } => Request::LiveStartupPolicySet {
                 policy: mediabox_core::LiveReceiverStartupPolicy::from_arg(policy).unwrap_or_default(),
+            },
+            MediaCommand::LiveSignalTolerance { tolerance } => Request::LiveSignalToleranceSet {
+                // clap allows the three names alone.
+                tolerance: mediabox_core::LiveSignalTolerance::from_arg(tolerance).unwrap_or_default(),
             },
             MediaCommand::LiveSatelliteScan { free_only } => Request::LiveSatelliteScan { add_only: false, free_only: *free_only, scrambled_only: false, keep: mediabox_core::LiveScanKeep::All },
             MediaCommand::LiveScan { frequency_khz, symbol_rate, polarisation, free_only, keep } => Request::LiveScan {
@@ -1500,6 +1510,19 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_signal_tolerance_takes_its_three_names_and_refuses_the_rest() {
+        use clap::Parser;
+        use mediabox_core::LiveSignalTolerance;
+        for tolerance in LiveSignalTolerance::ALL {
+            let args = Args::try_parse_from(["mediaboxctl", "media", "live-signal-tolerance", tolerance.arg()]).unwrap();
+            assert_eq!(to_request(&args.command), Request::LiveSignalToleranceSet { tolerance });
+        }
+        for unknown in ["max", "Low", "dengeli", ""] {
+            assert!(Args::try_parse_from(["mediaboxctl", "media", "live-signal-tolerance", unknown]).is_err(), "{unknown:?}");
+        }
+    }
 
     #[test]
     fn cec_set_names_every_panel_row_and_refuses_the_rest() {

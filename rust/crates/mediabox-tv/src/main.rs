@@ -1082,17 +1082,30 @@ impl App {
     /// what the row shows; refused, the row stays as it was and says why.
     fn live_startup_answered(&mut self, answer: Result<mediabox_core::LiveReceiverStartupPolicy, String>) {
         match answer {
-            Ok(policy) => {
-                if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
-                    status.insert(
-                        "live_receiver".into(),
-                        serde_json::to_value(mediabox_core::LiveReceiverSettings { startup_policy: policy }).unwrap_or_default(),
-                    );
-                }
-            }
+            Ok(policy) => self.keep_live_receiver(|settings| settings.startup_policy = policy),
             Err(message) => self.say(format!("Alıcı başlangıç yöntemi kaydedilemedi: {message}")),
         }
         self.recompose_settings();
+    }
+
+    /// The daemon's answer to a tolerance being chosen: kept, it is what the
+    /// row shows and what the channel playing is held to from now on.
+    fn live_tolerance_answered(&mut self, answer: Result<mediabox_core::LiveSignalTolerance, String>) {
+        match answer {
+            Ok(tolerance) => self.keep_live_receiver(|settings| settings.signal_tolerance = tolerance),
+            Err(message) => self.say(format!("Sinyal bozulmasına tolerans kaydedilemedi: {message}")),
+        }
+        self.recompose_settings();
+    }
+
+    /// One field of the receiver settings in the status, as the daemon kept
+    /// it; the other left as the status had it.
+    fn keep_live_receiver(&mut self, change: impl FnOnce(&mut mediabox_core::LiveReceiverSettings)) {
+        let mut settings = screens::settings::live_receiver(self.status.as_ref()).unwrap_or_default();
+        change(&mut settings);
+        if let Some(status) = self.status.as_mut().and_then(Value::as_object_mut) {
+            status.insert("live_receiver".into(), serde_json::to_value(settings).unwrap_or_default());
+        }
     }
 
     fn leds_answered(&mut self, answer: Option<Value>) {
@@ -2330,9 +2343,10 @@ impl App {
     /// on its last one: that is a picture of the past on a screen that says
     /// live. While the receiver waited for its USB link to come back (up to
     /// 20 s) or sent nothing under a lock (10 s), the panel held the last
-    /// frame with nothing said (2026-11-01). After `LIVE_STALL` without a
-    /// new frame the picture is taken off and the receiver's state said;
-    /// the next frame brings it back.
+    /// frame with nothing said (2026-11-01). After the chosen tolerance's
+    /// stall (`LiveSignalTolerance::stall`, 1 s at `Low`) without a new
+    /// frame the picture is taken off and the receiver's state said; the
+    /// next frame brings it back.
     fn watch_live_flow(&mut self) {
         let Some(playing) = self.here.as_ref() else {
             return;
@@ -2340,27 +2354,47 @@ impl App {
         if !playing.live || !playing.seen {
             return;
         }
-        let stalled = live_stalled(platform::video_arrived(), std::time::Instant::now());
+        let stalled = live_stalled(platform::video_arrived(), std::time::Instant::now(), self.live_tolerance().stall());
         let state = self.live_receiver_state.clone();
         let Some(live) = self.live.as_mut() else {
             return;
         };
-        if stalled == live.stalled {
+        if !live_stall_changes(stalled, live.stalled, live.signal_pending()) {
             return;
         }
         live.stalled = stalled;
         if stalled {
             eprintln!("mediabox-tv.live pictures stopped (receiver {state:?}); the picture is taken off");
-            if !live.no_signal {
+            if !live.receiver_speaks() {
                 live.problem = Some(live_stall_words(state.as_deref()).to_string());
             }
         } else {
             eprintln!("mediabox-tv.live pictures again");
-            if !live.no_signal {
+            if !live.receiver_speaks() {
                 live.problem = None;
             }
         }
         self.paint();
+    }
+
+    /// The signal's loss shown (`Some(true)`) or its end shown (`Some(false)`):
+    /// the black's words, and a paint.
+    fn live_signal_shown(&mut self, shown: Option<bool>) {
+        let (Some(lost), Some(live)) = (shown, self.live.as_mut()) else { return };
+        live.problem = if lost { live.current_channel().map(screens::live::no_signal) } else { None };
+        eprintln!("mediabox-tv.live signal {}", if lost { "lost" } else { "back" });
+        self.paint();
+    }
+
+    /// The signal-loss tolerance the daemon keeps; today's (`Low`) before it
+    /// has answered.
+    fn live_tolerance(&self) -> mediabox_core::LiveSignalTolerance {
+        self.status
+            .as_ref()
+            .and_then(|status| status.pointer("/live_receiver/signal_tolerance"))
+            .and_then(|tolerance| tolerance.as_str())
+            .and_then(mediabox_core::LiveSignalTolerance::from_arg)
+            .unwrap_or_default()
     }
 
     /// The receiver's link (`mediabox_core::usblink`), asked every second
@@ -2534,6 +2568,15 @@ impl App {
         };
         let effect = live.tick(Instant::now());
         self.live_effect(effect);
+        // A loss the receiver still reports is shown when it has lasted the
+        // tolerance, whether or not a status comes at that moment.
+        if self.here.as_ref().is_some_and(|playing| playing.live)
+            && self.live.as_ref().is_some_and(screens::live::Live::signal_pending)
+        {
+            let tolerance = self.live_tolerance();
+            let shown = self.live.as_mut().and_then(|live| live.settle_signal(tolerance, Instant::now()));
+            self.live_signal_shown(shown);
+        }
         self.watch_live_flow();
         if self.live_monitor && self.live_monitor_painted.is_none_or(|at| at.elapsed() >= Duration::from_millis(500)) {
             self.live_reports.read();
@@ -2740,9 +2783,14 @@ impl App {
         }
         if let Some(live) = self.live.as_mut() {
             live.current = Some(sid);
-            if !live.no_signal {
-                live.problem = None;
+            // Adopted, the channel is judged by its own receiver statuses,
+            // under the tolerance kept, as one tuned here is; a loss shown
+            // before gives the banner back its own time.
+            if live.display_no_signal {
+                live.signal_back(Instant::now());
             }
+            live.forget_signal();
+            live.problem = live.receiver_gone.then(|| screens::live::RECEIVER_GONE.to_string());
         }
         self.live_tuned = Some(sid);
         if let Some(playing) = self.here.as_mut() {
@@ -2896,32 +2944,48 @@ impl App {
             self.now.note = String::new();
             if let Some(live) = self.live.as_mut() {
                 live.picture_arrived(Instant::now());
-                if !live.no_signal {
+                if !live.receiver_speaks() {
                     live.problem = None;
                 }
             }
             self.paint();
         }
         // The receiver lost the carrier (the dish's cable out) and is locking
-        // again: the picture goes black with the reference's words over it,
-        // and both go when the stream is back. The channel stays tuned.
-        if self.here.as_ref().is_some_and(|playing| playing.live) {
-            let lost = status.pointer("/live/receiver/state").and_then(Value::as_str) == Some("no_signal");
+        // again: once that has lasted the chosen tolerance the picture goes
+        // black with the reference's words over it, and both go when the
+        // stream is back. The channel stays tuned. The receiver's state is
+        // taken as it is; only what is shown waits.
+        // A status naming another service is the channel before's (the
+        // receiver names the new one as soon as it is asked for it): it says
+        // nothing of this one, and is left out.
+        let about_this = live_status_is_about(&status, self.live_tuned);
+        if about_this && self.here.as_ref().is_some_and(|playing| playing.live) {
+            let state = status.pointer("/live/receiver/state").and_then(Value::as_str);
+            let lost = state == Some("no_signal");
+            let tolerance = self.live_tolerance();
+            // The device before its signal: gone, it is said at once and
+            // nothing of the signal is read until it is back.
             if let Some(live) = self.live.as_mut()
-                && lost != live.no_signal
+                && let Some(gone) = receiver_device_gone(state)
+                && let Some(gone) = live.receiver_presence(gone, Instant::now())
             {
-                if lost {
-                    live.signal_lost();
-                } else {
-                    live.signal_back(Instant::now());
-                }
-                live.problem = if lost {
-                    live.current_channel().map(screens::live::no_signal)
+                live.problem = if gone {
+                    Some(screens::live::RECEIVER_GONE.to_string())
+                } else if live.stalled {
+                    Some(live_stall_words(state).to_string())
                 } else {
                     None
                 };
-                eprintln!("mediabox-tv.live signal {}", if lost { "lost" } else { "back" });
+                eprintln!("mediabox-tv.live receiver {} (state {state:?})", if gone { "gone" } else { "back" });
                 self.paint();
+            }
+            if let Some(live) = self.live.as_mut().filter(|live| !live.receiver_gone) {
+                let was = live.receiver_no_signal;
+                let shown = live.receiver_signal(lost, tolerance, Instant::now());
+                if lost != was && shown.is_none() {
+                    eprintln!("mediabox-tv.live receiver signal {} ({tolerance:?}: not shown)", if lost { "lost" } else { "back" });
+                }
+                self.live_signal_shown(shown);
             }
         }
         // A live channel the receiver finds encrypted will never show a
@@ -3155,7 +3219,7 @@ impl App {
                 // The picture is back: what was said over the black goes.
                 if playing.live
                     && let Some(live) = self.live.as_mut()
-                    && !live.no_signal
+                    && !live.receiver_speaks()
                 {
                     live.problem = None;
                 }
@@ -3273,6 +3337,9 @@ impl App {
         if let Some(live) = self.live.as_mut() {
             self.here = None;
             self.now.film = false;
+            // The receiver that said its device was gone has ended: what is
+            // known of the device from here is the link's (`live_receiver_arrived`).
+            live.receiver_gone = false;
             live.problem = notice;
             self.paint();
             return;
@@ -5125,6 +5192,18 @@ impl App {
                 self.paint();
                 spawn_live_startup(policy);
             }
+            Action::ChooseLiveTolerance => {
+                if self.settings.open_live_tolerance() {
+                    self.paint();
+                }
+            }
+            Action::SetLiveTolerance(tolerance) => {
+                // Not drawn until the daemon has kept it; then in force on
+                // the channel playing too, from the status it is read from.
+                self.clear_notice();
+                self.paint();
+                spawn_live_tolerance(tolerance);
+            }
             Action::Cec(change) => {
                 let Some(kept) = screens::settings::cec_settings(self.status.as_ref()) else {
                     return;
@@ -5691,7 +5770,7 @@ impl App {
 
         // A radio channel has no picture: black, and the reference's words.
         let radio = live.current_channel().is_some_and(|channel| channel.radio);
-        window.set_live_dark(live.no_signal || live.stalled || radio);
+        window.set_live_dark(live.receiver_speaks() || live.stalled || radio);
         window.set_live_monitor_rows(model(if self.live_monitor {
             monitor::rows(&self.live_reports)
                 .into_iter()
@@ -8366,24 +8445,54 @@ struct TkgsResult {
 const LIVE_SETUP_REFRESH: Duration = Duration::from_millis(500);
 const LIVE_SIGNAL_REFRESH: Duration = Duration::from_millis(700);
 
-/// How long a live channel's pictures may stop before the last one is taken
-/// off the panel: fifty frames at 50 Hz, twenty-five at 25.
-const LIVE_STALL: Duration = Duration::from_secs(1);
-
-/// Whether a channel's pictures stopped: one came, and none for
-/// `LIVE_STALL` since. No picture at all is not a stop: a channel change
-/// gives the plane back (`video::Sink::clear`) and the next channel's first
-/// picture is the opening's to wait for, on a dark panel with nothing said.
+/// Whether a channel's pictures stopped: one came, and none for `stall`
+/// since -- the chosen tolerance's (`LiveSignalTolerance::stall`; 1 s at
+/// `Low`, fifty frames at 50 Hz, twenty-five at 25). No picture at all is
+/// not a stop: a channel change gives the plane back (`video::Sink::clear`)
+/// and the next channel's first picture is the opening's to wait for, on a
+/// dark panel with nothing said.
 /// Taken as a stop, every change said "Yayın akışı durdu" 0.2 s after the
 /// key, 60 of 60 changes (2026-11-05).
-fn live_stalled(arrived: Option<Instant>, now: Instant) -> bool {
-    arrived.is_some_and(|at| now.saturating_duration_since(at) >= LIVE_STALL)
+fn live_stalled(arrived: Option<Instant>, now: Instant, stall: Duration) -> bool {
+    arrived.is_some_and(|at| now.saturating_duration_since(at) >= stall)
+}
+
+/// Whether the stall shown changes. A stop that begins while the receiver's
+/// `no_signal` waits out its tolerance is not shown: that wait decides, and
+/// it ends within the tolerance -- shown as the loss, or called off, after
+/// which a stop that is still a stop is shown at the next look. A stop
+/// already shown stays until a picture comes.
+fn live_stall_changes(stalled: bool, shown: bool, signal_pending: bool) -> bool {
+    stalled != shown && !(stalled && signal_pending)
+}
+
+/// What a receiver state says of its USB device: gone (`reconnecting`),
+/// there (a state only a receiver with its device reaches), or nothing --
+/// a receiver that ended or failed says nothing of whether the device came
+/// back (Plus, 2026-11-15 15:34:33: `failed` with the USB cable still out
+/// was taken for the device back).
+fn receiver_device_gone(state: Option<&str>) -> Option<bool> {
+    match state? {
+        "reconnecting" => Some(true),
+        "starting" | "waiting_for_player" | "tuning" | "streaming" | "standby" | "no_signal" => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether a player status's receiver part is about channel `tuned`: true
+/// unless it names another service. A status with no selection (an older
+/// receiver) is taken as it always was.
+fn live_status_is_about(status: &Value, tuned: Option<u16>) -> bool {
+    status
+        .pointer("/live/receiver/selection/service_id")
+        .and_then(Value::as_u64)
+        .is_none_or(|sid| tuned.is_some_and(|tuned| u64::from(tuned) == sid))
 }
 
 /// What a channel whose pictures stopped says, from its receiver's state.
 fn live_stall_words(state: Option<&str>) -> &'static str {
     match state {
-        Some("reconnecting") => "Uydu alıcısının USB bağlantısı koptu; yeniden bağlanması bekleniyor.",
+        Some("reconnecting") => screens::live::RECEIVER_GONE,
         Some("tuning") => "Uydu alıcısı yeniden ayarlanıyor.",
         Some("no_signal") => "Sinyal yok.",
         _ => "Yayın akışı durdu; alıcıdan veri bekleniyor.",
@@ -9186,6 +9295,26 @@ fn spawn_live_startup(policy: mediabox_core::LiveReceiverStartupPolicy) {
     });
 }
 
+fn spawn_live_tolerance(tolerance: mediabox_core::LiveSignalTolerance) {
+    detached("mediabox-tv-live-tolerance", async move {
+        let client = rpc::Client::new(socket_path());
+        let answer = client
+            .live_signal_tolerance_set(tolerance)
+            .await
+            .map_err(|error| {
+                eprintln!("mediabox-tv.live-tolerance failed: {error}");
+                match error {
+                    rpc::Error::Refused { message, .. } => message,
+                    other => other.to_string(),
+                }
+            })
+            .and_then(|kept| screens::settings::kept_live_tolerance(&kept));
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| app.live_tolerance_answered(answer));
+        });
+    });
+}
+
 fn spawn_leds(mode: mediabox_core::LedMode) {
     detached("mediabox-tv-leds", async move {
         let client = rpc::Client::new(socket_path());
@@ -9564,9 +9693,61 @@ mod live_flow_tests {
     #[test]
     fn a_channel_change_is_not_a_stop() {
         let now = Instant::now();
-        // The plane given back at the change: no picture yet, nothing said.
-        assert!(!live_stalled(None, now));
-        assert!(!live_stalled(Some(now - LIVE_STALL / 2), now));
-        assert!(live_stalled(Some(now - LIVE_STALL), now));
+        for tolerance in mediabox_core::LiveSignalTolerance::ALL {
+            let stall = tolerance.stall();
+            // The plane given back at the change: no picture yet, nothing said.
+            assert!(!live_stalled(None, now, stall));
+            assert!(!live_stalled(Some(now - stall / 2), now, stall));
+            assert!(live_stalled(Some(now - stall), now, stall));
+        }
+    }
+
+    #[test]
+    fn a_stop_does_not_cut_short_the_wait_for_the_signal() {
+        // Not stalled before, stopped now, the receiver's no_signal waiting:
+        // nothing shown yet.
+        assert!(!live_stall_changes(true, false, true));
+        // The same stop with nothing pending (Low, or the wait over): shown.
+        assert!(live_stall_changes(true, false, false));
+        // A stop already shown is not lifted by a wait, only by a picture.
+        assert!(!live_stall_changes(true, true, true));
+        assert!(live_stall_changes(false, true, true));
+        assert!(!live_stall_changes(false, false, true));
+    }
+
+    #[test]
+    fn only_a_receiver_with_its_device_says_the_device_is_back() {
+        assert_eq!(receiver_device_gone(Some("reconnecting")), Some(true));
+        for there in ["starting", "waiting_for_player", "tuning", "streaming", "standby", "no_signal"] {
+            assert_eq!(receiver_device_gone(Some(there)), Some(false), "{there}");
+        }
+        for silent in ["failed", "ended", "stopping", "something_new"] {
+            assert_eq!(receiver_device_gone(Some(silent)), None, "{silent}");
+        }
+        assert_eq!(receiver_device_gone(None), None);
+    }
+
+    #[test]
+    fn a_status_of_the_channel_before_says_nothing_of_this_one() {
+        let of = |sid: u64| serde_json::json!({"live": {"receiver": {"state": "no_signal", "selection": {"service_id": sid}}}});
+        assert!(live_status_is_about(&of(10801), Some(10801)));
+        assert!(!live_status_is_about(&of(10801), Some(10802)), "the zap's old channel");
+        assert!(!live_status_is_about(&of(10801), None));
+        let bare = serde_json::json!({"live": {"receiver": {"state": "no_signal"}}});
+        assert!(live_status_is_about(&bare, Some(10802)), "no selection: taken as before");
+    }
+
+    #[test]
+    fn the_stall_follows_the_tolerance() {
+        use mediabox_core::LiveSignalTolerance::{Balanced, High, Low};
+        let now = Instant::now();
+        let stopped = Some(now - Duration::from_millis(1_500));
+        assert!(live_stalled(stopped, now, Low.stall()), "today's 1 s");
+        assert!(!live_stalled(stopped, now, Balanced.stall()));
+        assert!(!live_stalled(stopped, now, High.stall()));
+        let stopped = Some(now - Duration::from_millis(2_500));
+        assert!(live_stalled(stopped, now, Balanced.stall()));
+        assert!(!live_stalled(stopped, now, High.stall()));
+        assert!(live_stalled(Some(now - Duration::from_secs(3)), now, High.stall()));
     }
 }

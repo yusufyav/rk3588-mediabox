@@ -192,9 +192,12 @@ export component Settings inherits Rectangle {
         }
     }
 
+    // Wider than a dialog's own width: the lines under the options (the
+    // signal tolerance's run to 79 characters) are one line each and elide.
     if choice-open: ChoiceSheet {
         width: 100%;
         height: 100%;
+        panel-w: Metrics.dialog-w * 1.3;
         title: choice-title;
         items: choice;
         focus-at: choice-focus;

@@ -43,6 +43,11 @@ pub const MODE_WAIT: Duration = Duration::from_secs(2);
 /// matched (a scrambled picture, a stream with no sequence header): failed.
 pub const RATE_PATIENCE: Duration = Duration::from_secs(10);
 
+/// How often a player whose channel waits for its receiver is told so: well
+/// inside its own limits (mediabox-live `gate::HOLD_MAX`, 6 s, and
+/// `ARM_MAX`, 20 s).
+pub const KEEP_WAITING_EVERY: Duration = Duration::from_secs(1);
+
 /// The next opening's mode failing on purpose (`gate-faults`): one word in
 /// [`FAULT_FILE`], taken once, so the channel after it opens as ever. The
 /// display's owner is not asked, so nothing of a real commit is touched. A
@@ -77,6 +82,17 @@ pub(crate) trait GateIo {
     /// The receiver's reading of its PMT: whether it has a picture stream.
     /// `None`: not read yet.
     fn has_picture(&self) -> Option<bool>;
+    /// The receiver has no stream to read yet (starting, tuning, no signal,
+    /// its USB device gone): the rate's patience does not run.
+    fn receiver_waiting(&self) -> bool {
+        false
+    }
+    /// Tell the player the control plane is there and waits for the
+    /// receiver, so its own limits (`player-timeout`) do not end the
+    /// channel meanwhile.
+    async fn keep_waiting(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// The player's gate (`mediabox-gate`), if it answers.
     async fn player_gate(&self) -> Option<Value>;
     /// Match the display to `cadence`: whether it is on the wire already,
@@ -132,6 +148,15 @@ pub(crate) async fn open_channel<I: GateIo>(io: &I) -> End {
 
 async fn open_it<I: GateIo>(io: &I) -> End {
     let started = tokio::time::Instant::now();
+    // The patience is for a stream that comes and cannot be read (scrambled,
+    // no sequence header): it runs only while the receiver has one. A
+    // channel opened with the dish's cable out waits, as a television does,
+    // with the receiver's own words (Plus, 2026-11-15 15:36: failed
+    // `no-service` 10 s into the receiver's no signal, and stayed so).
+    let mut patience_from = started;
+    // The player told that the wait is the receiver's, once a second.
+    let mut told: Option<tokio::time::Instant> = None;
+    let mut told_failed = false;
     // The stream's rate.
     let found = loop {
         if !io.current() {
@@ -160,7 +185,19 @@ async fn open_it<I: GateIo>(io: &I) -> End {
                 break Some((cadence, "decoder"));
             }
         }
-        if started.elapsed() >= RATE_PATIENCE {
+        if io.receiver_waiting() {
+            let now = tokio::time::Instant::now();
+            patience_from = now;
+            if told.is_none_or(|at| now.saturating_duration_since(at) >= KEEP_WAITING_EVERY) {
+                told = Some(now);
+                if let Err(why) = io.keep_waiting().await
+                    && !std::mem::replace(&mut told_failed, true)
+                {
+                    eprintln!("mediaboxd-rs: live channel: the player was not told the receiver is waited for: {why}");
+                }
+            }
+        }
+        if patience_from.elapsed() >= RATE_PATIENCE {
             return End::Failed(if io.has_picture().is_some() { "no-rate" } else { "no-service" }.to_string());
         }
         tokio::time::sleep(POLL).await;
@@ -288,6 +325,9 @@ mod tests {
         silent_opens: Cell<u32>,
         matched: RefCell<Option<Cadence>>,
         has_picture: Cell<Option<bool>>,
+        /// Polls through which the receiver has no stream.
+        waiting_until: Cell<usize>,
+        kept_waiting: Cell<u32>,
         given_up: RefCell<Vec<String>>,
         newer_at_give_up: Cell<bool>,
         own_failure: RefCell<Option<String>>,
@@ -303,6 +343,13 @@ mod tests {
         }
         fn has_picture(&self) -> Option<bool> {
             self.has_picture.get()
+        }
+        fn receiver_waiting(&self) -> bool {
+            self.polls.get() <= self.waiting_until.get()
+        }
+        async fn keep_waiting(&self) -> Result<(), String> {
+            self.kept_waiting.set(self.kept_waiting.get() + 1);
+            Ok(())
         }
         async fn player_gate(&self) -> Option<Value> {
             self.gate.borrow().clone()
@@ -537,6 +584,24 @@ mod tests {
         assert!(started.elapsed() >= RATE_PATIENCE);
         let io = Fake::default();
         failed_shut(&io, open_channel(&io).await, "no-service");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_channel_with_no_signal_is_waited_for_not_given_up_by_the_clock() {
+        // The dish's cable out for a minute (6000 polls of 10 ms), then the
+        // stream and its SPS: opened, never failed `no-service`.
+        let io = Fake { waiting_until: Cell::new(6_000), sps: RefCell::new(Some(50.0)), sps_after: Cell::new(6_050), on_wire: Cell::new(true), ..Fake::default() };
+        let started = tokio::time::Instant::now();
+        assert_eq!(open_channel(&io).await, End::Opened("fast".into()));
+        assert!(started.elapsed() >= Duration::from_secs(60));
+        // The player told once a second while it waited, not at every poll.
+        assert!((60..=61).contains(&io.kept_waiting.get()), "{}", io.kept_waiting.get());
+        // The stream back and still unreadable: the patience runs from then.
+        let io = Fake { waiting_until: Cell::new(3_000), has_picture: Cell::new(Some(true)), ..Fake::default() };
+        let started = tokio::time::Instant::now();
+        failed_shut(&io, open_channel(&io).await, "no-rate");
+        // 3000 polls of the receiver waiting (the first at 0), then the patience.
+        assert!(started.elapsed() >= Duration::from_millis(29_990) + RATE_PATIENCE, "{:?}", started.elapsed());
     }
 
     #[tokio::test(start_paused = true)]

@@ -384,6 +384,7 @@ fn main() {
                         }
                     }
                     Command::OpenGate { epoch, outcome } => result = engine.open_gate(epoch, &outcome),
+                    Command::WaitGate { epoch } => result = engine.wait_gate(epoch),
                     // Answered, then the end: nothing of it was shown or heard.
                     Command::FailGate { epoch, code } => {
                         result = engine.fail_gate(epoch, &code);

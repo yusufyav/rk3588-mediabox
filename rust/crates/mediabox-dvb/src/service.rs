@@ -1360,6 +1360,35 @@ impl Pipeline {
     /// A stream starts (after a tune, or out of standby): held back until
     /// its transport stream is known (`ts::Gate`). Not the raw multiplex,
     /// which is written unchanged by contract, for diagnostics.
+    /// The receiver went away under the channel (a USB disconnect): what
+    /// comes back must be the channel's own transport stream again, as
+    /// after a lost signal (`SIGNAL LOST`), and only a PAT read after it
+    /// counts. Without it the session after the reconnect admitted another
+    /// transponder's stream: the dish's cable out on the Plus, 2026-11-15
+    /// 14:28:34, the carrier search's -10 MHz locked TSID 43305 and the
+    /// gate let it in as `Repeated` for the channel of 43105.
+    fn receiver_gone(&mut self) {
+        if self.relock_tsid.is_none() {
+            self.relock_tsid = self.channel_tsid();
+        }
+        self.analyser = Analyser::new();
+    }
+
+    /// The transport stream a lost signal must come back on: the one the
+    /// channel was read from, or, before any was, the channel list's. The
+    /// demodulator locks what is in its range: the dish's cable put back
+    /// into a channel opened without it, a neighbour 10 MHz up (TSID 43305
+    /// for 43105) was let in as `Repeated`, and the channel ended as not
+    /// found (Plus, 2026-11-15 18:11:36). Not for a scan or a TKGS read,
+    /// which take whatever the transponder is.
+    fn channel_tsid(&self) -> Option<u16> {
+        let reading = self.tkgs_started.is_some() || self.scanning;
+        self.selector
+            .selection()
+            .transport_stream_id
+            .or_else(|| self.expect.filter(|_| !reading).map(|expect| expect.tsid))
+    }
+
     fn quarantine_stream(&mut self) {
         if self.raw {
             return;
@@ -2226,18 +2255,29 @@ fn closed(pipeline: &Pipeline) -> (End, Option<String>) {
 enum AfterSession {
     /// The device went away under a running service: wait for it.
     Reconnect,
+    /// A session opened while the device was still coming back from a
+    /// disconnect ended on the link (`TuneResult::link_error`): part of
+    /// the same disconnect, so the device is opened again -- within the
+    /// window the disconnect opened, which is not extended.
+    RetryInWindow,
     End(End, Option<String>),
 }
 
+/// `in_window`: the session was opened within a reconnect window
+/// (`Options::reconnect` after the last disconnect) that is still open.
 fn after_session(
     res: &TuneResult,
     outcome: Option<(End, Option<String>)>,
     stopping: bool,
     reconnect: Duration,
     player_gone: bool,
+    in_window: bool,
 ) -> AfterSession {
     if res.no_device && !stopping && !reconnect.is_zero() && !player_gone {
         return AfterSession::Reconnect;
+    }
+    if in_window && res.link_error && outcome.is_none() && !stopping && !reconnect.is_zero() && !player_gone {
+        return AfterSession::RetryInWindow;
     }
     let (end, message) = match outcome {
         Some(ended) => ended,
@@ -2327,7 +2367,12 @@ fn play_satellite(
             // Given up for a newer channel is not that: the stream reads it.
             if !tuned.fec_locked() && !tuned.superseded && reporter.status.state != State::NoSignal {
                 log.line("SIGNAL NONE: not locked after the tune; trying again in 10 s");
-                pipeline.relock_tsid = None;
+                // The transport stream a reconnect waits for (`receiver_gone`)
+                // is kept; a first tune waits for the channel list's
+                // (`channel_tsid`); a new channel clears it (`select`).
+                if pipeline.relock_tsid.is_none() {
+                    pipeline.relock_tsid = pipeline.channel_tsid();
+                }
                 pipeline.retune_at = Some(Instant::now() + Duration::from_secs(10));
                 reporter.state(State::NoSignal, log);
             } else if tuned.fec_locked() && reporter.status.state == State::NoSignal && pipeline.relock_tsid.is_none() {
@@ -2348,11 +2393,25 @@ fn play_satellite(
         }
         drop(session);
 
-        match after_session(&res, outcome, STOP.load(Ordering::SeqCst), options.reconnect, pipeline.writer.closed()) {
+        let in_window = reconnect_until.is_some_and(|until| Instant::now() < until);
+        match after_session(&res, outcome, STOP.load(Ordering::SeqCst), options.reconnect, pipeline.writer.closed(), in_window) {
             AfterSession::Reconnect => {
-                log.line(format!("USB disconnected; waiting up to {:?} for the receiver", options.reconnect));
+                pipeline.receiver_gone();
+                log.line(format!(
+                    "USB disconnected; waiting up to {:?} for the receiver, transport stream {:?}",
+                    options.reconnect, pipeline.relock_tsid
+                ));
                 reporter.state(State::Reconnecting, log);
                 reconnect_until = Some(Instant::now() + options.reconnect);
+            }
+            AfterSession::RetryInWindow => {
+                let left = reconnect_until.map(|until| until.saturating_duration_since(Instant::now())).unwrap_or_default();
+                log.line(format!(
+                    "USB link not settled after the disconnect ({}); the receiver is opened again, {left:?} of the window left",
+                    res.error.as_deref().unwrap_or("?")
+                ));
+                reporter.state(State::Reconnecting, log);
+                std::thread::sleep(Duration::from_millis(250));
             }
             AfterSession::End(end, message) => return (end, message),
         }
@@ -2360,6 +2419,16 @@ fn play_satellite(
 }
 
 const TS_DEAD_AFTER: Duration = Duration::from_secs(10);
+
+/// Whether nobody has read the output for the hold, and the receiver goes
+/// to standby. Not without a signal: there is nothing to read, and the
+/// output looks for its reader only when there is (`Writer::start`), so a
+/// player waiting on a channel opened with the dish's cable out counted as
+/// none -- standby 30 s in, the channel failed (Plus, 2026-11-15 16:51:37).
+/// A player that goes meanwhile is the control plane's to stop.
+fn standby_due(state: State, unread: Option<Duration>, hold: Option<Duration>) -> bool {
+    state != State::NoSignal && hold.is_some_and(|hold| unread.is_some_and(|gone| gone > hold))
+}
 
 /// The locked receiver's stream, until something ends it. Returns what the
 /// tuner needs to know (the device went away) and, if the stream decided
@@ -2461,11 +2530,18 @@ fn stream(
             trace_replay("reader", &from);
             pipeline.writer.start_from_access_point(from);
         }
+        // Without a signal there is nothing to read, so the hold starts
+        // when the signal is back: counted through the outage, it ran out
+        // the moment the cable went back in -- standby 26 ms after the
+        // lock, the channel failed (Plus, 2026-11-15 18:08:10).
+        if reporter.status.state == State::NoSignal {
+            pipeline.writer.await_reader();
+        }
         // Nobody has read for the hold: standby, as if asked.
         if stream.is_some()
             && pipeline.tkgs_started.is_none()
             && !pipeline.scanning
-            && options.hold_reader.is_some_and(|hold| pipeline.writer.unread_for().is_some_and(|gone| gone > hold))
+            && standby_due(reporter.status.state, pipeline.writer.unread_for(), options.hold_reader)
             && let Some(mut running) = stream.take()
         {
             let stats = running.stop();
@@ -2601,20 +2677,13 @@ fn stream(
             match demod.lock_flags(bridge) {
                 Ok((0, _)) => {
                     if reporter.status.state != State::NoSignal {
-                        pipeline.relock_tsid = pipeline.selector.selection().transport_stream_id;
+                        pipeline.relock_tsid = pipeline.channel_tsid();
                         pipeline.retune_at = Some(Instant::now() + Duration::from_secs(12));
                         log.line(format!("SIGNAL LOST: lock status 0; transport stream {:?}", pipeline.relock_tsid));
                         reporter.state(State::NoSignal, log);
                         // What it said about the transport stream was before
                         // the loss; only a PAT after it counts.
                         pipeline.analyser = Analyser::new();
-                    }
-                    if pipeline.retune_at.is_none_or(|at| Instant::now() >= at) {
-                        pipeline.retune_at = Some(Instant::now() + Duration::from_secs(10));
-                        pipeline.analyser = Analyser::new();
-                        retune = Some(tuned);
-                        relock = true;
-                        break None;
                     }
                 }
                 // Locked again, with no transport stream to tell it by (lost
@@ -2630,6 +2699,18 @@ fn stream(
                     break None;
                 }
                 Err(error) => log.line(format!("lock status failed: {error}")),
+            }
+            // Without a signal the receiver is tuned again every 10 s until
+            // the channel's transport stream is back, whatever the lock
+            // flags say: the dish's cable put back, the demodulator said
+            // locked with no stream out of it, and nothing tuned again --
+            // the channel waited for good (Plus, 2026-11-16 00:43:25).
+            if reporter.status.state == State::NoSignal && pipeline.retune_at.is_none_or(|at| Instant::now() >= at) {
+                pipeline.retune_at = Some(Instant::now() + Duration::from_secs(10));
+                pipeline.analyser = Analyser::new();
+                retune = Some(tuned);
+                relock = true;
+                break None;
             }
         }
         match chunk {
@@ -2769,18 +2850,18 @@ mod tests {
     #[test]
     fn a_disconnect_under_a_running_service_waits_for_the_receiver() {
         let twenty = Duration::from_secs(20);
-        assert_eq!(after_session(&session(true, true), None, false, twenty, false), AfterSession::Reconnect);
+        assert_eq!(after_session(&session(true, true), None, false, twenty, false, false), AfterSession::Reconnect);
         // ... unless it is being stopped, the player is gone, or nobody asked for reconnects.
         assert_eq!(
-            after_session(&session(true, true), Some((End::Stopped, None)), true, twenty, false),
+            after_session(&session(true, true), Some((End::Stopped, None)), true, twenty, false, false),
             AfterSession::End(End::Stopped, None)
         );
         assert_eq!(
-            after_session(&session(true, true), Some((End::PlayerClosed, None)), false, twenty, true),
+            after_session(&session(true, true), Some((End::PlayerClosed, None)), false, twenty, true, false),
             AfterSession::End(End::PlayerClosed, None)
         );
         assert!(matches!(
-            after_session(&session(true, true), None, false, Duration::ZERO, false),
+            after_session(&session(true, true), None, false, Duration::ZERO, false, false),
             AfterSession::End(End::UsbDisconnected, _)
         ));
     }
@@ -2788,7 +2869,7 @@ mod tests {
     #[test]
     fn a_session_that_ends_by_itself_says_why() {
         let none = Duration::ZERO;
-        assert!(matches!(after_session(&session(false, true), None, true, none, false), AfterSession::End(End::Stopped, _)));
+        assert!(matches!(after_session(&session(false, true), None, true, none, false, false), AfterSession::End(End::Stopped, _)));
         let mut unlocked = session(false, false);
         unlocked.boot = Some(crate::avl62x1::BootInfo {
             sys_clk_hz: 1,
@@ -2800,8 +2881,52 @@ mod tests {
             running_patch: String::new(),
             patch_commands: 0,
         });
-        assert!(matches!(after_session(&unlocked, None, false, none, false), AfterSession::End(End::NoLock, _)));
-        assert!(matches!(after_session(&session(false, false), None, false, none, false), AfterSession::End(End::TuneFailed, _)));
+        assert!(matches!(after_session(&unlocked, None, false, none, false, false), AfterSession::End(End::NoLock, _)));
+        assert!(matches!(after_session(&session(false, false), None, false, none, false, false), AfterSession::End(End::TuneFailed, _)));
+    }
+
+    #[test]
+    fn no_reader_is_standby_only_where_there_is_something_to_read() {
+        let hold = Some(Duration::from_secs(30));
+        let long = Some(Duration::from_secs(31));
+        assert!(standby_due(State::Streaming, long, hold));
+        assert!(!standby_due(State::Streaming, Some(Duration::from_secs(29)), hold));
+        assert!(!standby_due(State::Streaming, None, hold), "a reader there");
+        assert!(!standby_due(State::Streaming, long, None), "no hold asked for");
+        // 2026-11-15 16:51: the channel opened with the cable out.
+        assert!(!standby_due(State::NoSignal, long, hold));
+        assert!(!standby_due(State::NoSignal, Some(Duration::from_secs(600)), hold));
+    }
+
+    #[test]
+    fn a_receiver_still_coming_back_is_opened_again_within_the_window_only() {
+        let twenty = Duration::from_secs(20);
+        // 2026-11-15 on the Plus: the dish's cable put back, the Kanky came
+        // back with a descriptor error and answered its first command with
+        // five bytes. Within the window: opened again.
+        let flaky = TuneResult { link_error: true, error: Some("protocol: unexpected reply length: 5".into()), ..Default::default() };
+        assert_eq!(after_session(&flaky, None, false, twenty, false, true), AfterSession::RetryInWindow);
+        // The window over (or never opened): the end it always was.
+        assert!(matches!(after_session(&flaky, None, false, twenty, false, false), AfterSession::End(End::TuneFailed, _)));
+        // Stopped, the player gone, reconnects not asked for: never opened again.
+        assert!(matches!(after_session(&flaky, None, true, twenty, false, true), AfterSession::End(End::Stopped, _)));
+        assert!(matches!(
+            after_session(&flaky, Some((End::PlayerClosed, None)), false, twenty, true, true),
+            AfterSession::End(End::PlayerClosed, None)
+        ));
+        assert!(matches!(after_session(&flaky, None, false, Duration::ZERO, false, true), AfterSession::End(End::TuneFailed, _)));
+        // What the stream decided stands.
+        assert!(matches!(
+            after_session(&flaky, Some((End::SlowLink, None)), false, twenty, false, true),
+            AfterSession::End(End::SlowLink, _)
+        ));
+        // Not a link error (the demodulator, the patch, the LNB): the end,
+        // in the window or not.
+        let demod = TuneResult { error: Some("demod: not ready".into()), ..Default::default() };
+        assert!(matches!(after_session(&demod, None, false, twenty, false, true), AfterSession::End(End::TuneFailed, _)));
+        // A disconnect is still a disconnect: a new window.
+        let gone = TuneResult { no_device: true, link_error: true, ..Default::default() };
+        assert_eq!(after_session(&gone, None, false, twenty, false, true), AfterSession::Reconnect);
     }
 
     #[test]
@@ -3355,6 +3480,79 @@ mod tests {
         );
         let got = pids(&written(pipeline, &out));
         assert!(!got.contains(&other.es) && got.contains(&NEW.es));
+    }
+
+    #[test]
+    fn a_channel_opened_without_a_signal_waits_for_the_channel_list_s_transport_stream() {
+        let (mut pipeline, mut reporter, out) = harness(NEW.sid, None);
+        let log = Log::silent();
+        assert_eq!(pipeline.channel_tsid(), None, "nothing to go by");
+        pipeline.expect = Some(crate::ts::Expected {
+            onid: None,
+            tsid: NEW.tsid,
+        });
+        // No lock after the tune: nothing read yet, the list says which.
+        pipeline.relock_tsid = pipeline.channel_tsid();
+        assert_eq!(pipeline.relock_tsid, Some(NEW.tsid));
+        pipeline.quarantine_stream();
+        // The cable back: the neighbour the demodulator locked, twice.
+        let neighbour = Mux {
+            tsid: 7,
+            sid: 11701,
+            pmt: 1701,
+            es: 1702,
+        };
+        pipeline.feed(&transfer(&[neighbour.pat(0), neighbour.es(0)]), &mut reporter, &log);
+        pipeline.feed(&transfer(&[neighbour.pat(1), neighbour.es(1)]), &mut reporter, &log);
+        assert_eq!(pipeline.other_tsid, Some(7), "tuned away from, not let in as Repeated");
+        assert!(pipeline.gate.is_some());
+        pipeline.other_tsid = None;
+        pipeline.feed(&NEW.rounds(1).concat(), &mut reporter, &log);
+        assert_eq!(
+            pipeline.quarantine.as_ref().unwrap().reason,
+            Some(crate::ts::Admitted::Relock)
+        );
+        let got = pids(&written(pipeline, &out));
+        assert!(!got.contains(&neighbour.es) && got.contains(&NEW.es));
+        // A scan takes whatever the transponder is.
+        let (mut scan, _, _) = harness(NEW.sid, None);
+        scan.expect = Some(crate::ts::Expected {
+            onid: None,
+            tsid: NEW.tsid,
+        });
+        scan.scanning = true;
+        assert_eq!(scan.channel_tsid(), None);
+    }
+
+    #[test]
+    fn a_receiver_that_came_back_lets_in_only_the_channel_s_transport_stream() {
+        let (mut pipeline, mut reporter, out) = harness(NEW.sid, None);
+        let log = Log::silent();
+        pipeline.quarantine_stream();
+        pipeline.feed(&NEW.rounds(2).concat(), &mut reporter, &log);
+        assert_eq!(pipeline.selector.selection().transport_stream_id, Some(NEW.tsid), "playing");
+        assert_eq!(pipeline.relock_tsid, None);
+        // The USB disconnect: the channel's stream is what is waited for, and
+        // what the analyser read before it is not taken for the stream after.
+        pipeline.receiver_gone();
+        assert_eq!(pipeline.relock_tsid, Some(NEW.tsid));
+        assert_eq!(pipeline.analyser.integrity().transport_stream_id, None);
+        // A second disconnect before anything came back keeps it.
+        pipeline.receiver_gone();
+        assert_eq!(pipeline.relock_tsid, Some(NEW.tsid));
+        // The next session: a neighbour's stream, twice, is tuned away from,
+        // never admitted as `Repeated`.
+        pipeline.quarantine_stream();
+        let neighbour = Mux { tsid: 43_305, sid: 11701, pmt: 1701, es: 1702 };
+        pipeline.feed(&transfer(&[neighbour.pat(0), neighbour.es(0)]), &mut reporter, &log);
+        pipeline.feed(&transfer(&[neighbour.pat(1), neighbour.es(1)]), &mut reporter, &log);
+        assert_eq!(pipeline.other_tsid, Some(43_305));
+        assert!(pipeline.gate.is_some(), "held, not let in");
+        pipeline.other_tsid = None;
+        pipeline.feed(&NEW.rounds(1).concat(), &mut reporter, &log);
+        assert_eq!(pipeline.quarantine.as_ref().unwrap().reason, Some(crate::ts::Admitted::Relock));
+        let got = pids(&written(pipeline, &out));
+        assert!(!got.contains(&neighbour.es), "nothing of the neighbour's: {got:?}");
     }
 
     #[test]

@@ -70,6 +70,9 @@ struct State {
     /// Pictures that came while it was shut.
     preroll: u64,
     first_held: Option<Instant>,
+    /// The control plane's last word that it is there and waiting for the
+    /// receiver (`mediabox-gate wait N`): the limits run from it.
+    waited_at: Option<Instant>,
     /// The parser's first key frame.
     key_pts: Option<u64>,
     /// Opened on pre-roll: the next picture is the first.
@@ -291,13 +294,35 @@ impl Gate {
         }
     }
 
+    /// The control plane says it is there and waits for the receiver, which
+    /// has no stream yet (no signal, tuning, its USB device gone): the
+    /// limits run again from now. A control plane that stops saying so is
+    /// one that does not answer, and the limits fail the channel as ever.
+    /// Measured on the Plus, 2026-11-15 15:54: a channel opened with the
+    /// dish's cable out failed `player-timeout` 19 s in, and stayed so.
+    pub fn keep_waiting(&self, epoch: u64, now: Instant) -> Result<bool, String> {
+        if self.epoch != Some(epoch) {
+            return Err(format!("stale: epoch {epoch}, channel {:?}", self.epoch));
+        }
+        let mut state = self.lock();
+        if let Some(why) = state.failed.clone() {
+            return Err(format!("failed: {why}"));
+        }
+        if state.open {
+            return Ok(false);
+        }
+        state.waited_at = Some(now);
+        Ok(true)
+    }
+
     /// No answer within its limits: failed here (`player-timeout`), once.
     pub fn expire(&self, now: Instant) -> bool {
         let mut state = self.lock();
+        let from = |at: Instant| state.waited_at.map_or(at, |waited| waited.max(at));
         let due = !state.open
             && state.failed.is_none()
-            && (state.first_held.is_some_and(|at| now.saturating_duration_since(at) >= HOLD_MAX)
-                || now.saturating_duration_since(self.armed_at) >= ARM_MAX);
+            && (state.first_held.is_some_and(|at| now.saturating_duration_since(from(at)) >= HOLD_MAX)
+                || now.saturating_duration_since(from(self.armed_at)) >= ARM_MAX);
         if due {
             state.failed = Some("player-timeout".to_string());
             state.outcome = Some("player-timeout".to_string());
@@ -463,6 +488,32 @@ mod tests {
         assert!(!gate.expire(Instant::now() + ARM_MAX - Duration::from_millis(50)));
         assert!(gate.expire(Instant::now() + ARM_MAX));
         assert_eq!(gate.snapshot()["failed"], "player-timeout");
+    }
+
+    #[test]
+    fn a_control_plane_that_waits_for_the_receiver_keeps_the_gate() {
+        let gate = Gate::new(1, Some(7), false);
+        let start = Instant::now();
+        // Told every second for a minute: never timed out.
+        for second in 1..=60 {
+            let now = start + Duration::from_secs(second);
+            assert_eq!(gate.keep_waiting(7, now), Ok(true));
+            assert!(!gate.expire(now + Duration::from_millis(999)), "{second} s");
+        }
+        // A picture held while it waits: its limit runs from the last word too.
+        assert_eq!(gate.frame(1000, None, "Progressive"), Frame::Preroll);
+        let last = start + Duration::from_secs(60);
+        assert!(!gate.expire(last + HOLD_MAX - Duration::from_millis(50)));
+        // Silent after that: failed as ever, at the hold's limit from the last word.
+        assert!(gate.expire(last + HOLD_MAX.max(Duration::from_secs(61) - Duration::from_secs(60)) + ARM_MAX));
+        assert_eq!(gate.snapshot()["failed"], "player-timeout");
+        // A word after the failure, or for another channel, changes nothing.
+        assert_eq!(gate.keep_waiting(7, last), Err("failed: player-timeout".into()));
+        assert!(gate.keep_waiting(8, last).is_err());
+        // An open gate has nothing to wait for.
+        let open = Gate::new(2, Some(9), false);
+        assert_eq!(open.open(9, "matched"), Ok(true));
+        assert_eq!(open.keep_waiting(9, Instant::now()), Ok(false));
     }
 
     #[test]

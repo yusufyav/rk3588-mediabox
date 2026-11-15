@@ -28,6 +28,9 @@ pub enum Command {
     /// The control plane gives channel `epoch` up: its gate stays shut and
     /// the player ends, saying why (`code`).
     FailGate { epoch: u64, code: String },
+    /// The control plane is there and waits for the receiver of channel
+    /// `epoch`, which has no stream yet: its gate's limits run again.
+    WaitGate { epoch: u64 },
     /// The channel cannot be played: the player ends, saying why.
     Fail(String),
     Pause(bool),
@@ -227,6 +230,7 @@ pub(crate) fn handle(client: u64, command: &[Value], clients: &Clients, query: &
                 let outcome = outcome.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
                 (run(commands, Command::OpenGate { epoch, outcome }), None)
             }
+            ("wait", Some(epoch)) => (run(commands, Command::WaitGate { epoch }), None),
             ("fail", Some(epoch)) => {
                 let code = Some(word(3)).filter(|code| !code.is_empty()).unwrap_or("failed");
                 let code = code.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();

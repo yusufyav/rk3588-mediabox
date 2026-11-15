@@ -176,6 +176,12 @@ pub struct TuneResult {
     pub error: Option<String>,
     /// The device went away during the session.
     pub no_device: bool,
+    /// The session ended on a USB or protocol error -- what a receiver
+    /// that is still coming back after a disconnect answers with (measured
+    /// on the Plus, 2026-11-15: the dish's cable put back, the Kanky
+    /// enumerated with a descriptor error and answered its first command
+    /// with five bytes, then went again).
+    pub link_error: bool,
     /// The LNB pins (enable, select) as the demodulator's reset leaves them,
     /// and whether they were still so at the end. Read, never written.
     pub lnb_pins_at_reset: Option<(u32, u32)>,
@@ -261,6 +267,7 @@ pub fn run(
     let mut res = TuneResult::default();
     if let Err(error) = run_inner(bridge, firmware, params, policy, keep_tuning, stop, superseded, stream, &mut res) {
         res.no_device |= error.is_no_device();
+        res.link_error |= matches!(error, Error::Usb(_) | Error::Protocol(_));
         bridge.log.line(format!("UNEXPECTED (cleanup attempted, nothing retried): {error}"));
         res.error.get_or_insert(error.to_string());
     }

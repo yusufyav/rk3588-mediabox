@@ -373,6 +373,12 @@ impl Client {
         self.call(json!({"command": "live_startup_policy_set", "policy": policy})).await
     }
 
+    /// The signal-loss tolerance, kept and in force at once. The answer is
+    /// the tolerance as the daemon kept it.
+    pub async fn live_signal_tolerance_set(&self, tolerance: mediabox_core::LiveSignalTolerance) -> Result<Value> {
+        self.call(json!({"command": "live_signal_tolerance_set", "tolerance": tolerance})).await
+    }
+
     pub async fn leds_set(&self, mode: mediabox_core::LedMode) -> Result<Value> {
         self.call(json!({"command": "leds_set", "mode": mode}))
             .await

@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use mediabox_core::{InputAction, LiveChannel, LiveEvent, LiveScanKeep, LiveSource, SatellitePolarisation};
+use mediabox_core::{InputAction, LiveChannel, LiveEvent, LiveScanKeep, LiveSignalTolerance, LiveSource, SatellitePolarisation};
 
 pub const BANNER_SHOW: Duration = Duration::from_millis(8000);
 pub const KEYPAD_SHOW: Duration = Duration::from_millis(2000);
@@ -450,9 +450,23 @@ pub struct Live {
     /// What is wrong with the channel on now, in words, if anything is: a
     /// failed tune, no picture. Drawn over the black.
     pub problem: Option<String>,
-    /// The receiver lost the carrier and is locking again (its state
-    /// `no_signal`): the picture is taken off and `no_signal` says so.
-    pub no_signal: bool,
+    /// The loss as shown: the receiver's `no_signal` has lasted the chosen
+    /// tolerance (`LiveSignalTolerance::no_signal_delay`), the picture is
+    /// taken off and the loss said. Set by `receiver_signal`/`settle_signal`
+    /// only, never straight from the receiver's status.
+    pub display_no_signal: bool,
+    /// The receiver's own state, as its last status said: `no_signal`, at
+    /// once and untouched by any tolerance.
+    pub receiver_no_signal: bool,
+    /// The receiver itself is gone (its status `reconnecting`: the USB
+    /// device went away). Said at once and before anything of its signal,
+    /// whatever came first: there is no signal to speak of without the
+    /// device it would come from.
+    pub receiver_gone: bool,
+    /// When the receiver's `no_signal` began: kept from its first status
+    /// saying so until a status says otherwise, never moved by the ones in
+    /// between.
+    pub no_signal_since: Option<Instant>,
     /// The channel's pictures stopped coming after it had shown (`App::
     /// watch_live_flow`): the last one is not left frozen on the panel as
     /// if it were live; the picture is taken off and the receiver's state
@@ -507,7 +521,10 @@ impl Live {
                 kinds: [0; 3],
             },
             problem: None,
-            no_signal: false,
+            display_no_signal: false,
+            receiver_gone: false,
+            receiver_no_signal: false,
+            no_signal_since: None,
             stalled: false,
             zap: None,
         }
@@ -1039,24 +1056,106 @@ impl Live {
         self.recent.insert(0, sid);
         self.recent.truncate(RECENT + 1);
         self.problem = self.channel(sid).filter(|channel| channel.scrambled).map(|_| SCRAMBLED.to_string());
+        self.forget_signal();
+        // The device is not the channel's: still gone, still said.
+        if self.receiver_gone {
+            self.problem = Some(RECEIVER_GONE.to_string());
+        }
         self.layer = Layer::None;
         self.layer_until = None;
         self.banner_until = Some(at + BANNER_SHOW);
         self.banner_detail = false;
     }
 
+    /// Another channel, or the same one opened again: what was pending or
+    /// shown of the signal was the one before's. The next channel is judged
+    /// by its own receiver statuses alone, its tolerance from its first
+    /// `no_signal`. The banner is left to the caller.
+    pub fn forget_signal(&mut self) {
+        self.display_no_signal = false;
+        self.receiver_no_signal = false;
+        self.no_signal_since = None;
+    }
+
+    /// Whether the receiver's own state is what the black says -- its device
+    /// gone, or its signal lost and shown -- and so not to be written over
+    /// by a stop of the pictures or taken off by one coming.
+    pub fn receiver_speaks(&self) -> bool {
+        self.receiver_gone || self.display_no_signal
+    }
+
+    /// The receiver's device gone (`true`) or back (`false`), from one
+    /// status: `Some` when that changed. Gone, what was pending or shown of
+    /// its signal is forgotten -- it was the device's that went -- and the
+    /// banner stays, as for a lost signal. Back, the signal is judged from
+    /// the statuses after it, its tolerance from nothing.
+    pub fn receiver_presence(&mut self, gone: bool, at: Instant) -> Option<bool> {
+        if gone == self.receiver_gone {
+            return None;
+        }
+        self.receiver_gone = gone;
+        self.forget_signal();
+        if gone {
+            if self.current.is_some() {
+                self.banner_until = Some(at + Duration::from_secs(86_400));
+            }
+        } else if self.banner_until.is_some() {
+            self.banner_until = Some(at + BANNER_SHOW);
+        }
+        Some(gone)
+    }
+
+    /// A loss the receiver reports that is not shown yet: the picture stays
+    /// up and its stop is not said until the tolerance has run out.
+    pub fn signal_pending(&self) -> bool {
+        self.receiver_no_signal && !self.display_no_signal
+    }
+
+    /// The receiver's state from one status: `lost` when it says
+    /// `no_signal`. What is shown changes only when the loss has lasted
+    /// `tolerance` (shown: `Some(true)`) or when a loss shown ends
+    /// (`Some(false)`); a loss that ends before is never shown.
+    pub fn receiver_signal(&mut self, lost: bool, tolerance: LiveSignalTolerance, at: Instant) -> Option<bool> {
+        if lost {
+            if !self.receiver_no_signal {
+                self.receiver_no_signal = true;
+                self.no_signal_since = Some(at);
+            }
+            return self.settle_signal(tolerance, at);
+        }
+        self.receiver_no_signal = false;
+        self.no_signal_since = None;
+        if self.display_no_signal {
+            self.signal_back(at);
+            return Some(false);
+        }
+        None
+    }
+
+    /// A loss the receiver still reports that has now lasted `tolerance`:
+    /// shown (`Some(true)`). Asked at every status and every tick, so a
+    /// tolerance changed while it waits applies at once.
+    pub fn settle_signal(&mut self, tolerance: LiveSignalTolerance, at: Instant) -> Option<bool> {
+        let since = self.no_signal_since.filter(|_| self.signal_pending())?;
+        if at.saturating_duration_since(since) < tolerance.no_signal_delay() {
+            return None;
+        }
+        self.signal_lost();
+        Some(true)
+    }
+
     /// The tuner has no signal: Sony cancels the banner's timeout
     /// ("Canceling banner timeout", 2026-10-25) and the banner stays until
     /// the signal is back; `picture_arrived` then gives it its full time.
     pub fn signal_lost(&mut self) {
-        self.no_signal = true;
+        self.display_no_signal = true;
         if self.current.is_some() {
             self.banner_until = Some(Instant::now() + Duration::from_secs(86_400));
         }
     }
 
     pub fn signal_back(&mut self, at: Instant) {
-        self.no_signal = false;
+        self.display_no_signal = false;
         if self.banner_until.is_some() {
             self.banner_until = Some(at + BANNER_SHOW);
         }
@@ -1807,6 +1906,9 @@ pub fn no_signal(channel: &LiveChannel) -> String {
     }
 }
 
+/// What the black says while the receiver's USB device is gone.
+pub const RECEIVER_GONE: &str = "Uydu alıcısının USB bağlantısı koptu; yeniden bağlanması bekleniyor.";
+
 pub const SCRAMBLED: &str = "Bu kanal şu an şifreli yayınlanıyor; MediaBox şifreli yayın açamaz.";
 
 pub fn utc_now() -> i64 {
@@ -1893,6 +1995,180 @@ mod tests {
         assert!(live.banner_shown(at), "a channel change shows the banner");
         assert_eq!(live.key(InputAction::PreviousChannel, at, NOW), Effect::Tune(10_800));
         assert_eq!(live.key(InputAction::PreviousChannel, at, NOW), Effect::Tune(10_802));
+    }
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    #[test]
+    fn low_shows_a_loss_at_the_first_status() {
+        let at = Instant::now();
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        assert_eq!(live.receiver_signal(true, LiveSignalTolerance::Low, at), Some(true));
+        assert!(live.display_no_signal && live.receiver_no_signal);
+        assert_eq!(live.receiver_signal(true, LiveSignalTolerance::Low, at + MS(700)), None, "said once");
+        assert_eq!(live.receiver_signal(false, LiveSignalTolerance::Low, at + MS(800)), Some(false));
+        assert!(!live.display_no_signal && !live.receiver_no_signal && live.no_signal_since.is_none());
+    }
+
+    #[test]
+    fn balanced_hides_a_short_loss_and_shows_a_long_one() {
+        let at = Instant::now();
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        let t = LiveSignalTolerance::Balanced;
+        // 1.4 s of no_signal, then the signal: never shown.
+        assert_eq!(live.receiver_signal(true, t, at), None);
+        assert_eq!(live.settle_signal(t, at + MS(1_000)), None);
+        assert_eq!(live.receiver_signal(true, t, at + MS(1_400)), None);
+        assert!(!live.display_no_signal && live.receiver_no_signal);
+        assert_eq!(live.receiver_signal(false, t, at + MS(1_450)), None, "nothing was shown, nothing to take back");
+        assert!(live.no_signal_since.is_none(), "the pending loss is called off");
+        assert_eq!(live.settle_signal(t, at + MS(5_000)), None, "and does not fire later");
+        // A loss lasting 1.5 s is shown, by the tick alone.
+        let lost = at + MS(6_000);
+        assert_eq!(live.receiver_signal(true, t, lost), None);
+        assert_eq!(live.settle_signal(t, lost + MS(1_499)), None);
+        assert_eq!(live.settle_signal(t, lost + MS(1_500)), Some(true));
+        assert!(live.display_no_signal);
+        assert_eq!(live.settle_signal(t, lost + MS(2_000)), None, "shown once");
+        assert_eq!(live.receiver_signal(false, t, lost + MS(2_100)), Some(false));
+        assert!(!live.display_no_signal);
+    }
+
+    #[test]
+    fn high_hides_a_loss_under_three_seconds() {
+        let at = Instant::now();
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        let t = LiveSignalTolerance::High;
+        assert_eq!(live.receiver_signal(true, t, at), None);
+        assert_eq!(live.settle_signal(t, at + MS(2_900)), None);
+        assert!(!live.display_no_signal, "no black under 3 s");
+        assert_eq!(live.receiver_signal(false, t, at + MS(2_950)), None);
+        assert!(!live.display_no_signal && live.problem.is_none());
+        assert_eq!(live.receiver_signal(true, t, at + MS(4_000)), None);
+        assert_eq!(live.settle_signal(t, at + MS(7_000)), Some(true));
+    }
+
+    #[test]
+    fn statuses_during_a_loss_do_not_restart_its_clock() {
+        let at = Instant::now();
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        let t = LiveSignalTolerance::Balanced;
+        for step in 0..=4 {
+            assert_eq!(live.receiver_signal(true, t, at + MS(step * 350)), None);
+            assert_eq!(live.no_signal_since, Some(at), "the loss began at its first status");
+        }
+        assert_eq!(live.receiver_signal(true, t, at + MS(1_500)), Some(true));
+    }
+
+    #[test]
+    fn a_tolerance_changed_while_a_loss_waits_applies_at_once() {
+        use LiveSignalTolerance::{Balanced, High, Low};
+        let at = Instant::now();
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        // High -> Balanced after 1.6 s: the time already gone counts.
+        assert_eq!(live.receiver_signal(true, High, at), None);
+        assert_eq!(live.settle_signal(High, at + MS(1_600)), None);
+        assert_eq!(live.settle_signal(Balanced, at + MS(1_600)), Some(true));
+        // High -> Low: shown at the next look.
+        live.tuning(10_801, at + MS(2_000));
+        assert_eq!(live.receiver_signal(true, High, at + MS(2_000)), None);
+        assert_eq!(live.settle_signal(Low, at + MS(2_250)), Some(true));
+        // Low -> Balanced/High while a status says no_signal: measured from
+        // its first status, not from the change.
+        for (raised, shown_at) in [(Balanced, 1_500), (High, 3_000)] {
+            let start = at + MS(10_000);
+            let mut live = Live::new();
+            live.receiver_no_signal = true;
+            live.no_signal_since = Some(start);
+            assert_eq!(live.settle_signal(raised, start + MS(shown_at - 1)), None);
+            assert_eq!(live.settle_signal(raised, start + MS(shown_at)), Some(true));
+        }
+    }
+
+    #[test]
+    fn a_loss_shown_is_not_hidden_by_a_higher_tolerance() {
+        let at = Instant::now();
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        assert_eq!(live.receiver_signal(true, LiveSignalTolerance::Low, at), Some(true));
+        // Raised to High 0.5 s into the loss, statuses still no_signal.
+        for step in 1..=10 {
+            assert_eq!(live.receiver_signal(true, LiveSignalTolerance::High, at + MS(step * 500)), None);
+            assert_eq!(live.settle_signal(LiveSignalTolerance::High, at + MS(step * 500)), None);
+            assert!(live.display_no_signal, "still shown at {} ms", step * 500);
+        }
+        assert_eq!(live.receiver_signal(false, LiveSignalTolerance::High, at + MS(6_000)), Some(false));
+    }
+
+    #[test]
+    fn a_channel_change_calls_off_a_pending_loss() {
+        let at = Instant::now();
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        let t = LiveSignalTolerance::High;
+        assert_eq!(live.receiver_signal(true, t, at), None);
+        live.tuning(10_801, at + MS(2_000));
+        assert!(!live.receiver_no_signal && live.no_signal_since.is_none());
+        // The next channel's own no_signal starts its own wait.
+        assert_eq!(live.receiver_signal(true, t, at + MS(2_500)), None);
+        assert_eq!(live.settle_signal(t, at + MS(3_100)), None, "not the first channel's clock");
+        assert_eq!(live.settle_signal(t, at + MS(5_500)), Some(true));
+        // A loss shown on one channel is not carried onto the next: that
+        // one is judged by its own statuses, from nothing.
+        live.tuning(10_800, at + MS(6_000));
+        assert!(!live.display_no_signal && !live.receiver_no_signal && live.no_signal_since.is_none());
+        assert_eq!(live.problem, None, "no words of the channel before");
+        assert!(live.banner_shown(at + MS(6_000)) && !live.banner_shown(at + MS(6_000) + BANNER_SHOW), "the banner has its own time, not the loss's");
+        assert_eq!(live.settle_signal(t, at + MS(20_000)), None, "nothing pending");
+        // The same channel opened again is a new start as well.
+        assert_eq!(live.receiver_signal(true, LiveSignalTolerance::Low, at + MS(7_000)), Some(true));
+        live.tuning(10_800, at + MS(8_000));
+        assert!(!live.display_no_signal && !live.receiver_no_signal);
+        // A new session starts with nothing pending.
+        let fresh = Live::new();
+        assert!(!fresh.display_no_signal && !fresh.receiver_no_signal && fresh.no_signal_since.is_none());
+    }
+
+    #[test]
+    fn the_receiver_gone_comes_before_its_signal_whatever_the_order() {
+        let at = Instant::now();
+        let t = LiveSignalTolerance::Balanced;
+        // The dish's cable first, then the USB cable (2026-11-15 14:46).
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        assert_eq!(live.receiver_signal(true, t, at), None);
+        assert_eq!(live.settle_signal(t, at + MS(1_500)), Some(true));
+        assert_eq!(live.receiver_presence(true, at + MS(4_000)), Some(true));
+        assert!(live.receiver_gone && !live.display_no_signal && !live.signal_pending());
+        assert!(live.receiver_speaks());
+        assert_eq!(live.receiver_presence(true, at + MS(4_700)), None, "said once");
+        // The USB cable first: nothing of the signal is pending while it is gone.
+        let mut first = live_fresh(at);
+        assert_eq!(first.receiver_presence(true, at), Some(true));
+        assert!(first.receiver_speaks() && !first.signal_pending());
+        // Back: the signal from nothing; a no_signal now waits its tolerance.
+        assert_eq!(first.receiver_presence(false, at + MS(5_000)), Some(false));
+        assert!(!first.receiver_speaks());
+        assert_eq!(first.receiver_signal(true, t, at + MS(6_000)), None);
+        assert_eq!(first.settle_signal(t, at + MS(7_499)), None);
+        assert_eq!(first.settle_signal(t, at + MS(7_500)), Some(true));
+        // A channel change while it is gone: still said.
+        let mut zap = live_fresh(at);
+        zap.receiver_presence(true, at);
+        zap.tuning(10_801, at + MS(1_000));
+        assert_eq!(zap.problem.as_deref(), Some(RECEIVER_GONE));
+        assert!(zap.receiver_gone);
+    }
+
+    fn live_fresh(at: Instant) -> Live {
+        let mut live = live(2);
+        live.tuning(10_800, at);
+        live
     }
 
     #[test]

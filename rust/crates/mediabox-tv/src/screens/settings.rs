@@ -18,7 +18,7 @@
 //! this screen restarts or shuts down the appliance on one press.
 
 use mediabox_core::{
-    CecChange, CecPowerTarget, CecSettings, CecSourceLost, FanStatus, LedMode, LiveReceiverStartupPolicy,
+    CecChange, CecPowerTarget, CecSettings, CecSourceLost, FanStatus, LedMode, LiveReceiverStartupPolicy, LiveSignalTolerance,
 };
 use serde_json::Value;
 
@@ -71,6 +71,11 @@ pub enum Action {
     /// Keep this startup method for the next receiver: what choosing one in
     /// that list does. Shown once the daemon has kept it, not before.
     SetLiveStartup(LiveReceiverStartupPolicy),
+    /// Opens the three signal-loss tolerances.
+    ChooseLiveTolerance,
+    /// Keep this tolerance: what choosing one in that list does. Shown once
+    /// the daemon has kept it, not before.
+    SetLiveTolerance(LiveSignalTolerance),
 }
 
 impl Action {
@@ -109,6 +114,7 @@ impl Action {
                 | Action::ChooseCecTarget
                 | Action::ChooseCecSourceLost
                 | Action::ChooseLiveStartup
+                | Action::ChooseLiveTolerance
         )
     }
 }
@@ -358,6 +364,7 @@ enum ChoiceKind {
     CecTarget,
     CecSourceLost,
     LiveStartup,
+    LiveTolerance,
 }
 
 const SOURCE_LOST: [CecSourceLost; 2] = [CecSourceLost::StayOn, CecSourceLost::Standby];
@@ -380,6 +387,17 @@ fn live_startup_line(policy: LiveReceiverStartupPolicy) -> &'static str {
     match policy {
         LiveReceiverStartupPolicy::FullInit => "Daha uzun açılır; alıcı her seferinde sıfırdan hazırlanır.",
         LiveReceiverStartupPolicy::ResumeIfValid => "Uygunsa hızlı açılır; değilse tam başlatılır.",
+    }
+}
+
+const LIVE_TOLERANCE: &str = "Sinyal bozulmasına tolerans";
+
+/// What each tolerance means for the viewer, under its name.
+fn live_tolerance_line(tolerance: LiveSignalTolerance) -> &'static str {
+    match tolerance {
+        LiveSignalTolerance::Low => "Sinyal kaybında görüntüyü ve sesi hemen gizler.",
+        LiveSignalTolerance::Balanced => "Kısa sinyal dalgalanmalarını ekrana yansıtmadan toparlanmayı bekler.",
+        LiveSignalTolerance::High => "Yayın çözülebildiği sürece görüntüyü korur; kısa süreli bozulmalar görülebilir.",
     }
 }
 
@@ -411,6 +429,8 @@ pub struct Settings {
     cec: Option<CecSettings>,
     /// The live receiver's startup method, as the daemon last kept it.
     live_startup: Option<LiveReceiverStartupPolicy>,
+    /// The signal-loss tolerance, as the daemon last kept it.
+    live_tolerance: Option<LiveSignalTolerance>,
     /// The fan curve editor, which is the whole of the "Soğutma" page: a
     /// graph and a list of points rather than rows of readings.
     pub cooling: super::cooling::Cooling,
@@ -440,6 +460,7 @@ impl Settings {
             choice_kind: ChoiceKind::Leds,
             cec: None,
             live_startup: None,
+            live_tolerance: None,
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
             ethernet: super::ethernet::Ethernet::new(),
@@ -567,8 +588,17 @@ impl Settings {
         true
     }
 
+    /// Opens the tolerances on the one the daemon keeps.
+    pub fn open_live_tolerance(&mut self) -> bool {
+        let Some(tolerance) = self.live_tolerance else { return false };
+        self.choice = Some(LiveSignalTolerance::ALL.iter().position(|t| *t == tolerance).unwrap_or(0));
+        self.choice_kind = ChoiceKind::LiveTolerance;
+        true
+    }
+
     fn choice_len(&self) -> usize {
         match self.choice_kind {
+            ChoiceKind::LiveTolerance => LiveSignalTolerance::ALL.len(),
             ChoiceKind::LiveStartup => LiveReceiverStartupPolicy::ALL.len(),
             ChoiceKind::Leds => LedMode::ALL.len(),
             ChoiceKind::CecTarget => CecPowerTarget::ALL.len(),
@@ -583,6 +613,10 @@ impl Settings {
             ChoiceKind::LiveStartup => {
                 let policy = LiveReceiverStartupPolicy::ALL.get(at).copied()?;
                 (self.live_startup? != policy).then_some(Action::SetLiveStartup(policy))
+            }
+            ChoiceKind::LiveTolerance => {
+                let tolerance = LiveSignalTolerance::ALL.get(at).copied()?;
+                (self.live_tolerance? != tolerance).then_some(Action::SetLiveTolerance(tolerance))
             }
             ChoiceKind::Leds => {
                 let mode = LedMode::ALL.get(at).copied()?;
@@ -614,6 +648,17 @@ impl Settings {
                     .map(|policy| {
                         (policy.label().to_string(), live_startup_line(*policy).to_string(), self.live_startup == Some(*policy))
                     })
+                    .collect(),
+            });
+        }
+        if self.choice_kind == ChoiceKind::LiveTolerance {
+            return Some(ChoiceView {
+                title: LIVE_TOLERANCE.into(),
+                note: String::new(),
+                focus,
+                items: LiveSignalTolerance::ALL
+                    .iter()
+                    .map(|t| (t.label().to_string(), live_tolerance_line(*t).to_string(), self.live_tolerance == Some(*t)))
                     .collect(),
             });
         }
@@ -853,11 +898,13 @@ impl Settings {
         self.leds = led_mode(status);
         self.cec = cec_status(status).map(|cec| cec.settings);
         self.live_startup = live_startup(status);
+        self.live_tolerance = live_receiver(status).map(|settings| settings.signal_tolerance);
         // Lights that stopped answering have nothing left to choose, and a
         // CEC turned off has no target to choose.
         match self.choice_kind {
             ChoiceKind::Leds if self.leds.is_none() => self.choice = None,
             ChoiceKind::LiveStartup if self.live_startup.is_none() => self.choice = None,
+            ChoiceKind::LiveTolerance if self.live_tolerance.is_none() => self.choice = None,
             ChoiceKind::CecTarget | ChoiceKind::CecSourceLost
                 if !self.cec.is_some_and(|settings| settings.enabled) =>
             {
@@ -1264,8 +1311,21 @@ fn duration(seconds: u64) -> String {
 /// answered. A value this build does not know reads as the default, as the
 /// daemon itself reads it.
 fn live_startup(status: Option<&Value>) -> Option<LiveReceiverStartupPolicy> {
+    live_receiver(status).map(|settings| settings.startup_policy)
+}
+
+/// The live receiver's kept settings; none before the daemon has answered.
+pub fn live_receiver(status: Option<&Value>) -> Option<mediabox_core::LiveReceiverSettings> {
     let settings = status?.get("live_receiver")?;
-    Some(serde_json::from_value::<mediabox_core::LiveReceiverSettings>(settings.clone()).unwrap_or_default().startup_policy)
+    Some(serde_json::from_value::<mediabox_core::LiveReceiverSettings>(settings.clone()).unwrap_or_default())
+}
+
+/// The tolerance the daemon says it kept, from its answer to the change.
+pub fn kept_live_tolerance(answer: &Value) -> Result<LiveSignalTolerance, String> {
+    answer
+        .get("signal_tolerance")
+        .and_then(|tolerance| serde_json::from_value(tolerance.clone()).ok())
+        .ok_or_else(|| "denetim düzleminin yanıtı okunamadı".to_string())
 }
 
 /// The method the daemon says it kept, from its answer to the change.
@@ -1276,12 +1336,15 @@ pub fn kept_live_startup(answer: &Value) -> Result<LiveReceiverStartupPolicy, St
         .ok_or_else(|| "denetim düzleminin yanıtı okunamadı".to_string())
 }
 
-/// The "Canlı TV" category: the receiver's startup method, a card that
-/// opens its two answers.
+/// The "Canlı TV" category: the receiver's startup method and the
+/// signal-loss tolerance, each a card that opens its answers.
 fn live_tv(status: Option<&Value>) -> Vec<Row> {
-    match live_startup(status) {
-        Some(policy) => vec![Row { value: policy.label().into(), ..Row::act(LIVE_STARTUP, Action::ChooseLiveStartup) }],
-        None => vec![Row::reading(LIVE_STARTUP, "Okunuyor…")],
+    match live_receiver(status) {
+        Some(settings) => vec![
+            Row { value: settings.startup_policy.label().into(), ..Row::act(LIVE_STARTUP, Action::ChooseLiveStartup) },
+            Row { value: settings.signal_tolerance.label().into(), ..Row::act(LIVE_TOLERANCE, Action::ChooseLiveTolerance) },
+        ],
+        None => vec![Row::reading(LIVE_STARTUP, "Okunuyor…"), Row::reading(LIVE_TOLERANCE, "Okunuyor…")],
     }
 }
 
@@ -1569,7 +1632,7 @@ fn compose(
         },
         Group {
             title: "Canlı TV".into(),
-            blurb: "Uydu alıcısının açılışı",
+            blurb: "Uydu alıcısının açılışı ve sinyal kaybı",
             icon: "tv",
             rows: live_tv(status),
         },
@@ -1733,6 +1796,62 @@ mod tests {
         // One this build does not know reads as the default, as the daemon reads it.
         unanswered.compose(Some(&live_status("standby")), None, None);
         assert_eq!(unanswered.groups[unanswered.section].rows[0].value, "Tam başlatma");
+    }
+
+    #[test]
+    fn the_tolerance_is_the_second_card_under_live_tv_with_three_answers() {
+        let mut settings = Settings::new();
+        let status = serde_json::json!({"live_receiver": {"startup_policy": "resume_if_valid", "signal_tolerance": "balanced"}});
+        settings.compose(Some(&status), None, None);
+        open_live_tv(&mut settings);
+        let rows: Vec<(String, String)> =
+            settings.groups[settings.section].rows.iter().map(|row| (row.label.clone(), row.value.clone())).collect();
+        assert_eq!(
+            rows,
+            [
+                ("Alıcı başlangıç yöntemi".to_string(), "Hızlı devam".to_string()),
+                ("Sinyal bozulmasına tolerans".to_string(), "Dengeli".to_string()),
+            ]
+        );
+        assert!(settings.step(0, 1), "down to the second row");
+        let row = settings.focused().cloned().unwrap();
+        assert_eq!(row.action, Some(Action::ChooseLiveTolerance));
+        assert_eq!(row.kind(), Kind::Link);
+        assert!(!Action::ChooseLiveTolerance.confirms());
+        assert!(settings.open_live_tolerance());
+        let view = settings.choice_view().unwrap();
+        assert_eq!(view.title, "Sinyal bozulmasına tolerans");
+        assert_eq!(view.focus, 1, "on the tolerance kept");
+        assert_eq!(
+            view.items,
+            [
+                ("Düşük".to_string(), "Sinyal kaybında görüntüyü ve sesi hemen gizler.".to_string(), false),
+                ("Dengeli".to_string(), "Kısa sinyal dalgalanmalarını ekrana yansıtmadan toparlanmayı bekler.".to_string(), true),
+                (
+                    "Yüksek".to_string(),
+                    "Yayın çözülebildiği sürece görüntüyü korur; kısa süreli bozulmalar görülebilir.".to_string(),
+                    false,
+                ),
+            ]
+        );
+        // Ok on the one kept changes nothing; another is asked for.
+        assert_eq!(settings.choose(), None);
+        assert!(settings.open_live_tolerance());
+        assert!(settings.step(0, 1));
+        assert_eq!(settings.choose(), Some(Action::SetLiveTolerance(LiveSignalTolerance::High)));
+        // Until the daemon keeps it, the row is the daemon's.
+        settings.compose(Some(&status), None, None);
+        assert_eq!(settings.focused().unwrap().value, "Dengeli");
+        assert!(kept_live_tolerance(&serde_json::json!({"signal_tolerance": "high"}))
+            .is_ok_and(|tolerance| tolerance == LiveSignalTolerance::High));
+        assert!(kept_live_tolerance(&serde_json::json!({"signal_tolerance": "max"})).is_err());
+        // An old status, the startup method alone, is today's behaviour.
+        settings.compose(Some(&live_status("full_init")), None, None);
+        assert_eq!(settings.groups[settings.section].rows[1].value, "Düşük");
+        // Before the daemon has answered there is nothing to choose.
+        let mut unanswered = Settings::new();
+        unanswered.compose(Some(&serde_json::json!({})), None, None);
+        assert!(!unanswered.open_live_tolerance());
     }
 
     /// The categories of the design, in its order.

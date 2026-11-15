@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mediabox_core::{
-    LiveChannel, LiveEvent, LiveReceiverSettings, LiveReceiverStartupPolicy, LiveScanKeep, LiveSource, SatellitePolarisation,
+    LiveChannel, LiveEvent, LiveReceiverSettings, LiveReceiverStartupPolicy, LiveScanKeep, LiveSignalTolerance, LiveSource, SatellitePolarisation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -862,6 +862,15 @@ impl LiveManager {
 
     /// Whether the selected service's PMT, as the receiver reads it, has a
     /// picture stream. `None`: not read yet, or another service selected.
+    /// The receiver has no stream to read yet: it is starting, tuning, has
+    /// no signal, or its USB device is gone and waited for. Its status as
+    /// `mediabox-dvb` writes it (`State`, snake_case).
+    pub fn receiver_waiting(&self) -> bool {
+        self.read_status()
+            .and_then(|status| status.get("state").and_then(Value::as_str).map(str::to_owned))
+            .is_some_and(|state| receiver_state_waits(&state))
+    }
+
     pub fn has_picture(&self, service_id: u16) -> Option<bool> {
         let status = self.read_status()?;
         let selection = status.get("selection")?;
@@ -943,12 +952,31 @@ impl LiveManager {
     /// receiver up now, if any, is not touched: it keeps the policy it was
     /// started with.
     pub fn set_startup_policy(&self, policy: LiveReceiverStartupPolicy) -> Result<Value, String> {
+        let kept = self.change_receiver_settings(|settings| settings.startup_policy = policy)?;
+        eprintln!("mediaboxd-rs: live startup policy kept: {}", kept.startup_policy.arg());
+        Ok(json!({"configured_startup_policy": kept.startup_policy}))
+    }
+
+    /// Kept beside the startup method, which it leaves as it is. Nothing is
+    /// asked of the receiver: the live screen reads it from the status and
+    /// applies it to the channel playing.
+    pub fn set_signal_tolerance(&self, tolerance: LiveSignalTolerance) -> Result<Value, String> {
+        let kept = self.change_receiver_settings(|settings| settings.signal_tolerance = tolerance)?;
+        eprintln!("mediaboxd-rs: live signal tolerance kept: {}", kept.signal_tolerance.arg());
+        Ok(json!({"signal_tolerance": kept.signal_tolerance}))
+    }
+
+    /// One field of the kept settings changed, the others read back and
+    /// written with it, beside and renamed over, under one lock. The answer
+    /// is what was written; nothing is kept in memory, so a write that
+    /// fails leaves the file -- and every later read -- as it was.
+    fn change_receiver_settings(&self, change: impl FnOnce(&mut LiveReceiverSettings)) -> Result<LiveReceiverSettings, String> {
         let _writing = self.settings_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let settings = LiveReceiverSettings { startup_policy: policy };
+        let mut settings = self.receiver_settings();
+        change(&mut settings);
         let text = serde_json::to_string(&settings).map_err(|error| format!("alıcı ayarı yazılamadı: {error}"))?;
         crate::output::write_atomic(&self.paths.settings, &text).map_err(|error| format!("alıcı ayarı yazılamadı: {error}"))?;
-        eprintln!("mediaboxd-rs: live startup policy kept: {}", policy.arg());
-        Ok(json!({"configured_startup_policy": policy}))
+        Ok(settings)
     }
 
     fn setup_progress_of(&self, inner: &Inner) -> Value {
@@ -2234,6 +2262,11 @@ impl LiveManager {
     }
 }
 
+/// Whether a receiver in `state` has no stream to read yet.
+pub(crate) fn receiver_state_waits(state: &str) -> bool {
+    matches!(state, "starting" | "waiting_for_player" | "tuning" | "no_signal" | "reconnecting")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2311,6 +2344,74 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(refused.is_err_and(|error| error.contains("alıcı ayarı yazılamadı")));
         assert_eq!(live.receiver_settings().startup_policy, LiveReceiverStartupPolicy::ResumeIfValid);
+    }
+
+    #[test]
+    fn a_receiver_waits_only_while_it_has_no_stream() {
+        for state in ["starting", "waiting_for_player", "tuning", "no_signal", "reconnecting"] {
+            assert!(receiver_state_waits(state), "{state}");
+        }
+        for state in ["streaming", "standby", "stopping", "ended", "failed", ""] {
+            assert!(!receiver_state_waits(state), "{state}");
+        }
+    }
+
+    #[test]
+    fn each_receiver_setting_is_changed_without_the_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        let kept = || LiveReceiverSettings::parse(&std::fs::read_to_string(dir.path().join("live-receiver.json")).unwrap());
+        // An old file, the startup method alone: the tolerance is today's.
+        std::fs::write(dir.path().join("live-receiver.json"), "{\"startup_policy\":\"resume_if_valid\"}").unwrap();
+        assert_eq!(live.receiver_settings().signal_tolerance, LiveSignalTolerance::Low);
+        let answer = live.set_signal_tolerance(LiveSignalTolerance::High).unwrap();
+        assert_eq!(answer["signal_tolerance"], "high");
+        assert_eq!(kept(), LiveReceiverSettings { startup_policy: LiveReceiverStartupPolicy::ResumeIfValid, signal_tolerance: LiveSignalTolerance::High });
+        live.set_startup_policy(LiveReceiverStartupPolicy::FullInit).unwrap();
+        assert_eq!(kept(), LiveReceiverSettings { startup_policy: LiveReceiverStartupPolicy::FullInit, signal_tolerance: LiveSignalTolerance::High });
+        live.set_signal_tolerance(LiveSignalTolerance::Balanced).unwrap();
+        assert_eq!(kept(), LiveReceiverSettings { startup_policy: LiveReceiverStartupPolicy::FullInit, signal_tolerance: LiveSignalTolerance::Balanced });
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["live-receiver.json"], "written beside and renamed over");
+        // The receiver's command line does not carry it.
+        assert!(!live.argv(10801, &satellite(), "7-1").join(" ").contains("tolerance"));
+        // A write that fails is refused and leaves both fields as they were.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let refused = live.set_signal_tolerance(LiveSignalTolerance::Low);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.is_err_and(|error| error.contains("alıcı ayarı yazılamadı")));
+        assert_eq!(live.receiver_settings(), LiveReceiverSettings { startup_policy: LiveReceiverStartupPolicy::FullInit, signal_tolerance: LiveSignalTolerance::Balanced });
+    }
+
+    #[test]
+    fn two_settings_changed_at_once_keep_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = manager(dir.path());
+        let rounds = 200;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for round in 0..rounds {
+                    let tolerance = LiveSignalTolerance::ALL[round % 3];
+                    live.set_signal_tolerance(tolerance).unwrap();
+                }
+            });
+            scope.spawn(|| {
+                for round in 0..rounds {
+                    let policy = LiveReceiverStartupPolicy::ALL[round % 2];
+                    live.set_startup_policy(policy).unwrap();
+                }
+            });
+        });
+        // Each thread's last change is what is kept: neither wrote over the
+        // other's field with a value it had read before.
+        assert_eq!(
+            live.receiver_settings(),
+            LiveReceiverSettings {
+                startup_policy: LiveReceiverStartupPolicy::ALL[(rounds - 1) % 2],
+                signal_tolerance: LiveSignalTolerance::ALL[(rounds - 1) % 3],
+            }
+        );
     }
 
     #[test]

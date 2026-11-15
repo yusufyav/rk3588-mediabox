@@ -319,6 +319,19 @@ impl PlayerManager {
 
     /// Let live channel `epoch` go: its display is matched (`outcome` says
     /// how). The player refuses another channel's number.
+    /// Channel `epoch`'s player told the control plane is there and waits
+    /// for the receiver (`mediabox-gate wait`): its gate's limits run again.
+    pub async fn gate_wait(&self, epoch: u64) -> Result<(), String> {
+        let answer = self
+            .ask(json!({"command": ["mediabox-gate", "wait", epoch], "request_id": 44}))
+            .await
+            .ok_or(crate::live_gate::NO_ANSWER)?;
+        match answer.get("error").and_then(Value::as_str) {
+            Some("success") => Ok(()),
+            other => Err(other.unwrap_or("no answer").to_string()),
+        }
+    }
+
     pub async fn gate_open(&self, epoch: u64, outcome: &str) -> Result<(), String> {
         let answer = self
             .ask(json!({"command": ["mediabox-gate", "open", epoch, outcome], "request_id": 42}))
