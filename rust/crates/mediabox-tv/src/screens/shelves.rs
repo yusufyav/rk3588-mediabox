@@ -167,6 +167,24 @@ impl Shelves {
         }
     }
 
+    /// The remote onto a poster a pointer is over -- or "Tümünü Gör", one
+    /// past the shelf's last poster -- as Up, Down, Left and Right would put
+    /// it there.
+    pub fn point(&mut self, row: usize, column: usize) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if column >= self.stops(row) {
+            return Aim::Refused;
+        }
+        if self.columns.len() <= row {
+            self.columns.resize(row + 1, 0);
+        }
+        let mut place = (self.row, self.columns[row]);
+        let aim = Aim::set(&mut place, (row, column), true);
+        self.row = place.0;
+        self.columns[row] = place.1;
+        aim
+    }
+
     /// Up or down a shelf, stepping over the ones that arrived empty. False
     /// when there is no shelf that way, so the caller can decide what is past
     /// the edge.

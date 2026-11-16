@@ -22,3 +22,15 @@ pub mod search;
 pub mod settings;
 pub mod shelves;
 pub mod wireless;
+
+/// What a pointer is over on one of the catalogue's screens, as they draw
+/// it: a place down the left, the search box across the top (both in the
+/// shared frame, ui/chrome.slint), a poster of a grid, a poster of a shelf
+/// (row, column; the column past the last poster is "Tümünü Gör").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogTarget {
+    Place(usize),
+    SearchBox,
+    Item(usize),
+    Shelf(usize, usize),
+}

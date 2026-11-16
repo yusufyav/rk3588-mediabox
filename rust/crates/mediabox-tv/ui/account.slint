@@ -1,5 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { KeyRow, KeyCap, Keyboard } from "components.slint";
+import { PointerTarget } from "pointer.slint";
 
 // Signing in to a Stremio account from the sofa.
 //
@@ -86,6 +87,7 @@ export component Account inherits Rectangle {
             property <bool> focused: focus-at == "email";
             property <bool> active: editing == "email";
             height: field-h;
+            PointerTarget { zone: "account-form"; index: 0; }
             border-radius: Theme.radius * 0.7;
             background: focused ? Theme.focus-fill : #ffffff0d;
             border-width: focused || active ? 2px : 1px;
@@ -161,6 +163,8 @@ export component Account inherits Rectangle {
             property <bool> focused: focus-at == "password";
             property <bool> active: editing == "password";
             height: field-h;
+            // First, so the switch inside the field takes its own click.
+            PointerTarget { zone: "account-form"; index: 1; }
             border-radius: Theme.radius * 0.7;
             background: focused ? Theme.focus-fill : #ffffff0d;
             border-width: focused || active ? 2px : 1px;
@@ -188,6 +192,7 @@ export component Account inherits Rectangle {
                     font-size: Metrics.root-font * 0.72;
                     font-weight: 700;
                 }
+                PointerTarget { zone: "account-form"; index: 2; }
             }
 
             // Bullets and a length. Whatever was typed is not in this file.
@@ -253,6 +258,7 @@ export component Account inherits Rectangle {
             key-row: root.key-row;
             key-col: root.key-col;
             active: focus-at == "keys";
+            pointer-zone: "account-keys";
         }
 
         // ------------------------------------------------------------- button
@@ -280,6 +286,10 @@ export component Account inherits Rectangle {
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
+            // Not refused while the form is incomplete: Ok on it then says
+            // what is missing, as the remote's does. While a sign-in runs
+            // there is nothing to press.
+            if !busy: PointerTarget { zone: "account-form"; index: 3; }
         }
 
         // One line, and it has to stay one line: the column already reaches

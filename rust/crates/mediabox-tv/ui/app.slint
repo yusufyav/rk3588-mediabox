@@ -20,7 +20,8 @@ import { WifiScreen, BluetoothScreen, WifiRow } from "wireless.slint";
 import { Diagnostics } from "diagnostics.slint";
 import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow, LiveMonitorRow } from "live.slint";
 import { AccountChip } from "chrome.slint";
-export { AccountChip, CaptionStyle }
+import { PointerHub, PointerArrow } from "pointer.slint";
+export { AccountChip, CaptionStyle, PointerHub }
 import {
     RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup,
     SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
@@ -112,6 +113,13 @@ export component MediaBoxWindow inherits Window {
     // ---- home
     in property <[AppTile]> apps;
     in property <int> focus-col;
+
+    // ---- a pointer, wherever src/pointer.rs allows one: where its arrow's
+    // tip is, and whether it is drawn. Rust hides it at a key, and wherever
+    // the pointer is disabled.
+    in property <bool> pointer-shown;
+    in property <length> pointer-x;
+    in property <length> pointer-y;
 
     // ---- the catalogue
     in property <[RailModel]> media-rails;
@@ -809,6 +817,8 @@ export component MediaBoxWindow inherits Window {
             focus-col: root.media-col;
             active: screen == "media" && root.media-row == 0;
             vitals: root.vitals;
+            // Home is where Back has nowhere to go.
+            back: screen != "home";
             heading: screen == "media" ? "Filmler ve Diziler"
                 : screen == "search" ? "Ara"
                 : screen == "discover" ? "Keşfet"
@@ -974,6 +984,12 @@ export component MediaBoxWindow inherits Window {
             title: root.device-toast-title;
             connected: root.device-toast-connected;
             shown: root.device-toast-shown;
+        }
+
+        // The pointer's arrow, over everything.
+        if pointer-shown: PointerArrow {
+            tip-x: root.pointer-x;
+            tip-y: root.pointer-y;
         }
     }
 

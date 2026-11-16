@@ -21,6 +21,8 @@
 //! (`mediabox_platform::output`), and the daemon checks a setting again before
 //! it goes on trial.
 
+use super::settings::EditorTarget;
+use crate::pointer::Aim;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -592,6 +594,147 @@ impl Output {
                 self.cell = cell;
             }
         }
+    }
+
+    /// The focus onto what a pointer is over, as the remote would move it
+    /// there: a card or a button of the simple face; a size, a rate, a
+    /// colour cell or a button of the advanced face; or -- only while one is
+    /// open -- an option of the list or an answer to the question.
+    pub fn point(&mut self, target: EditorTarget) -> Aim {
+        if let Sheet::Confirm { focus, since, .. } = &mut self.sheet {
+            // "Koru" takes nothing until the guard is over, as it is drawn.
+            let ready = since.elapsed() >= CONFIRM_GUARD;
+            return match target {
+                EditorTarget::Confirm(at) => Aim::set(focus, at, at == 1 || (at == 0 && ready)),
+                _ => Aim::Refused,
+            };
+        }
+        if self.sheet == Sheet::Edid {
+            // One button, "Kapat", already under the focus.
+            return if target == EditorTarget::Confirm(0) {
+                Aim::Here
+            } else {
+                Aim::Refused
+            };
+        }
+        if let Some(picker) = self.picker {
+            return match target {
+                EditorTarget::Picker(at) => {
+                    // An option drawn as not available takes nothing.
+                    let enabled = self
+                        .choices(picker.kind)
+                        .get(at)
+                        .is_some_and(|(view, _)| view.enabled);
+                    let mut focus = picker.focus;
+                    let aim = Aim::set(&mut focus, at, enabled);
+                    self.picker = Some(Picker { focus, ..picker });
+                    aim
+                }
+                _ => Aim::Refused,
+            };
+        }
+        let before = (
+            self.face,
+            self.simple,
+            self.simple_act,
+            self.zone,
+            self.res,
+            self.rate,
+            self.cell,
+            self.act,
+            self.open,
+        );
+        // What is drawn as not available takes nothing: a size or a rate
+        // that does not fit ("SIĞMAZ"), a button that cannot be pressed.
+        let unsaved = self.unsaved();
+        let size_fits = |at: usize| {
+            at == 0
+                || self
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.offer.as_ref())
+                    .and_then(|offer| offer.groups.get(at - 1))
+                    .is_some_and(|group| {
+                        group
+                            .modes
+                            .iter()
+                            .any(|mode| mode.allowed().next().is_some())
+                    })
+        };
+        let rate_fits = |at: usize| {
+            self.open_modes()
+                .get(at)
+                .is_some_and(|mode| mode.allowed().next().is_some())
+        };
+        let act_enabled = |at: usize| match ACTS.get(at) {
+            Some(Act::Apply | Act::Undo) => unsaved,
+            Some(Act::Auto) => self.draft() != Draft::default(),
+            Some(Act::Edid) => true,
+            None => false,
+        };
+        let size_ok =
+            matches!(target, EditorTarget::Resolution(at) if at <= self.groups() && size_fits(at));
+        let rate_ok = matches!(target, EditorTarget::Rate(at) if rate_fits(at));
+        let act_ok = matches!(target, EditorTarget::Action(at) if act_enabled(at));
+        match (self.face, target) {
+            (Face::Simple, EditorTarget::Card(at)) if at < SIMPLE_ROWS => self.simple = at,
+            (Face::Simple, EditorTarget::Action(at)) if at < SIMPLE_ACTIONS && unsaved => {
+                self.simple = SIMPLE_ROWS;
+                self.simple_act = at;
+            }
+            (Face::Advanced, EditorTarget::Resolution(at)) if size_ok => {
+                self.zone = Zone::Resolutions;
+                if at != self.res {
+                    self.res = at;
+                    // The rates beside follow the size under the focus.
+                    self.open = match at {
+                        0 => self.group_of(ResolutionChoice::Auto).unwrap_or(0),
+                        at => at - 1,
+                    };
+                    self.rate = self.rate_of_draft();
+                }
+            }
+            (Face::Advanced, EditorTarget::Rate(at)) if rate_ok => {
+                self.zone = Zone::Rates;
+                self.rate = at;
+            }
+            (Face::Advanced, EditorTarget::Colour(at)) if at <= self.cells().len() => {
+                self.zone = Zone::Colours;
+                self.cell = at;
+            }
+            (Face::Advanced, EditorTarget::Action(at)) if act_ok => {
+                if self.zone != Zone::Actions {
+                    self.above = self.zone;
+                }
+                self.zone = Zone::Actions;
+                self.act = at;
+            }
+            _ => return Aim::Refused,
+        }
+        self.settle();
+        if before
+            == (
+                self.face,
+                self.simple,
+                self.simple_act,
+                self.zone,
+                self.res,
+                self.rate,
+                self.cell,
+                self.act,
+                self.open,
+            )
+        {
+            Aim::Here
+        } else {
+            self.note.clear();
+            Aim::Moved
+        }
+    }
+
+    /// Whether a list or a question is over the page.
+    pub fn modal(&self) -> bool {
+        self.picker.is_some() || self.sheet != Sheet::None
     }
 
     // ------------------------------------------------------------ pressing
@@ -1910,7 +2053,15 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         screen.trial(OUTPUT_TRIAL_SECONDS);
         assert!(screen.asking());
         assert_eq!(screen.view().sheet, 1);
+        // While "Koru" is drawn off -- the guard -- a pointer cannot take it,
+        // and the question is all a pointer reaches.
+        use crate::pointer::Aim;
+        assert!(screen.modal());
+        assert_eq!(screen.point(EditorTarget::Confirm(1)), Aim::Moved);
+        assert_eq!(screen.point(EditorTarget::Confirm(0)), Aim::Refused);
+        assert_eq!(screen.point(EditorTarget::Resolution(0)), Aim::Refused);
         after_guard(&mut screen);
+        assert_eq!(screen.point(EditorTarget::Confirm(0)), Aim::Moved);
         assert_eq!(screen.press(), Press::Keep(41), "Koru under the focus, for that trial");
         screen.step(1, 0);
         assert_eq!(screen.press(), Press::Revert(41));
@@ -2068,6 +2219,75 @@ b3000101010101010101023a801871382d40582c45009f295300001e011d007251d01e206e285500
         screen.step(1, 0);
         assert_eq!(screen.press(), Press::Changed);
         assert!(!screen.unsaved());
+    }
+
+    /// A pointer on the simple face moves the same focus the remote does;
+    /// a click on a card is that card's Ok; a list over the page is all it
+    /// reaches while it is open.
+    #[test]
+    fn a_pointer_walks_the_simple_face_and_its_list() {
+        use crate::pointer::Aim;
+        let mut screen = simple();
+        assert_eq!(screen.point(EditorTarget::Card(0)), Aim::Here);
+        assert_eq!(screen.point(EditorTarget::Card(2)), Aim::Moved);
+        assert_eq!(screen.simple_focus().1, 2);
+        assert_eq!(
+            screen.point(EditorTarget::Card(SIMPLE_ROWS)),
+            Aim::Refused,
+            "past the cards"
+        );
+        // Nothing to apply or undo: both buttons are drawn off, and refuse it.
+        assert_eq!(screen.point(EditorTarget::Action(0)), Aim::Refused);
+        assert_eq!(screen.point(EditorTarget::Action(1)), Aim::Refused);
+        assert_eq!(
+            screen.point(EditorTarget::Resolution(0)),
+            Aim::Refused,
+            "the advanced face is not up"
+        );
+        assert_eq!(screen.point(EditorTarget::Card(0)), Aim::Moved);
+        assert_eq!(screen.press(), Press::Changed, "the sizes' list");
+        assert!(screen.modal());
+        assert_eq!(
+            screen.point(EditorTarget::Card(1)),
+            Aim::Refused,
+            "under the list"
+        );
+        assert_eq!(screen.point(EditorTarget::Picker(1)), Aim::Moved);
+        assert_eq!(screen.simple_focus().2.map(|(_, at)| at), Some(1));
+        assert_eq!(screen.point(EditorTarget::Picker(999)), Aim::Refused);
+    }
+
+    /// On the advanced face a size, a rate, a colour cell and a button are
+    /// each the remote's focus; the rates follow the size pointed at.
+    #[test]
+    fn a_pointer_walks_the_advanced_face() {
+        use crate::pointer::Aim;
+        let mut screen = screen();
+        assert_eq!(
+            screen.point(EditorTarget::Card(0)),
+            Aim::Refused,
+            "the simple face is not up"
+        );
+        assert_eq!(screen.point(EditorTarget::Resolution(1)), Aim::Moved);
+        assert_eq!((screen.focus().0, screen.focus().1), (Zone::Resolutions, 1));
+        assert_eq!(screen.point(EditorTarget::Rate(0)), Aim::Moved);
+        assert_eq!(screen.focus().0, Zone::Rates);
+        assert_eq!(screen.point(EditorTarget::Rate(999)), Aim::Refused);
+        assert_eq!(screen.point(EditorTarget::Colour(0)), Aim::Moved);
+        assert_eq!((screen.focus().0, screen.focus().3), (Zone::Colours, 0));
+        // As drawn: Uygula, Geri al and Otomatiğe dön are off with nothing
+        // changed; EDID bilgileri is always on.
+        for (at, act) in ACTS.iter().enumerate() {
+            let on = matches!(act, Act::Edid);
+            assert_eq!(
+                screen.point(EditorTarget::Action(at)).taken(),
+                on,
+                "{act:?}"
+            );
+        }
+        assert_eq!(screen.focus().0, Zone::Actions);
+        assert_eq!(screen.point(EditorTarget::Action(ACTS.len())), Aim::Refused);
+        assert!(!screen.modal());
     }
 
     /// The advanced face is one card away, and Left or Back from it comes back

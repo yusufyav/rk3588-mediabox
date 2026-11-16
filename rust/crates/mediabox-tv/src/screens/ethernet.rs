@@ -11,6 +11,8 @@
 //! `mediabox_core::EthernetConfig::validate`, which the daemon runs again
 //! before anything reaches netplan.
 
+use super::settings::EditorTarget;
+use crate::pointer::Aim;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -447,6 +449,55 @@ impl Ethernet {
             self.note.clear();
             Nav::Moved
         }
+    }
+
+    /// The focus onto what a pointer is over: a card, a button, or -- only
+    /// while one is open -- an option of the list, a key of the pad, an
+    /// answer to the question.
+    pub fn point(&mut self, target: EditorTarget) -> Aim {
+        let rows = self.fields().len();
+        let aim = match (&mut self.sheet, target) {
+            (Sheet::None, EditorTarget::Card(at)) => Aim::set(&mut self.row, at, at < rows),
+            (Sheet::None, EditorTarget::Action(at)) => {
+                // As the buttons are drawn: Uygula with a draft that is an
+                // address, Bırak with any draft.
+                let enabled =
+                    at <= 1 && self.unsaved() && (at == 1 || self.draft().config().is_ok());
+                let mut place = (self.row, self.act);
+                let aim = Aim::set(&mut place, (rows, at), enabled);
+                (self.row, self.act) = place;
+                aim
+            }
+            (Sheet::Pick { kind, focus }, EditorTarget::Picker(at)) => {
+                let count = match kind {
+                    Pick::Mode => 2,
+                    Pick::Mask => PREFIXES.count(),
+                };
+                Aim::set(focus, at, at < count)
+            }
+            (Sheet::Entry(entry), EditorTarget::Pad(row, col)) => {
+                let exists = PAD.get(row).is_some_and(|keys| col < keys.len());
+                let mut place = (entry.row, entry.col);
+                let aim = Aim::set(&mut place, (row, col), exists);
+                (entry.row, entry.col) = place;
+                aim
+            }
+            // "Koru" takes nothing until the guard is over, as it is drawn.
+            (Sheet::Confirm { focus, since, .. }, EditorTarget::Confirm(at)) => {
+                let ready = since.elapsed() >= CONFIRM_GUARD;
+                Aim::set(focus, at, at == 1 || (at == 0 && ready))
+            }
+            _ => Aim::Refused,
+        };
+        if aim == Aim::Moved {
+            self.note.clear();
+        }
+        aim
+    }
+
+    /// Whether a list, the pad or the question is over the page.
+    pub fn modal(&self) -> bool {
+        self.sheet != Sheet::None
     }
 
     // ------------------------------------------------------------ pressing
@@ -991,6 +1042,62 @@ mod tests {
         entry.row = 3;
         entry.col = 1;
         page.press();
+    }
+
+    /// A pointer on a card or a button is the remote on it; the list and
+    /// the pad over the page are all it reaches while they are open, and a
+    /// key of the pad pointed at is the key Ok types.
+    #[test]
+    fn a_pointer_walks_the_port_s_page_its_list_and_its_pad() {
+        use crate::pointer::Aim;
+        let mut page = page();
+        assert_eq!(page.point(EditorTarget::Card(0)), Aim::Here);
+        assert_eq!(
+            page.point(EditorTarget::Card(1)),
+            Aim::Refused,
+            "a DHCP port has one card"
+        );
+        // Nothing changed: "Uygula" and "Bırak" are drawn off, and refuse it.
+        assert!(!page.unsaved());
+        assert_eq!(page.point(EditorTarget::Action(0)), Aim::Refused);
+        assert_eq!(page.point(EditorTarget::Action(1)), Aim::Refused);
+        assert_eq!(page.point(EditorTarget::Action(2)), Aim::Refused);
+        assert_eq!(page.press(), Press::Changed, "the list");
+        assert!(page.modal());
+        assert_eq!(
+            page.point(EditorTarget::Card(0)),
+            Aim::Refused,
+            "under the list"
+        );
+        assert_eq!(page.point(EditorTarget::Picker(1)), Aim::Moved, "Elle");
+        assert_eq!(page.press(), Press::Changed);
+        assert!(!page.modal());
+        // The address card, and its pad.
+        // A draft now: both buttons are on.
+        assert!(page.unsaved());
+        assert_eq!(page.point(EditorTarget::Action(1)), Aim::Moved);
+        assert_eq!(page.point(EditorTarget::Card(1)), Aim::Moved);
+        page.press();
+        assert!(page.modal());
+        let Sheet::Entry(entry) = &mut page.sheet else {
+            panic!("no pad")
+        };
+        entry.text.clear();
+        let (row, col) = PAD
+            .iter()
+            .enumerate()
+            .find_map(|(r, keys)| keys.iter().position(|(l, _)| *l == "7").map(|k| (r, k)))
+            .unwrap();
+        assert_ne!(page.point(EditorTarget::Pad(row, col)), Aim::Refused);
+        assert_eq!(page.press(), Press::Changed);
+        let Sheet::Entry(entry) = &page.sheet else {
+            panic!("no pad")
+        };
+        assert_eq!(entry.text, "7");
+        assert_eq!(page.point(EditorTarget::Pad(9, 0)), Aim::Refused);
+        // Back -- the pad's ground -- closes it without taking what was typed.
+        assert_eq!(page.back(), Some(Press::Changed));
+        assert!(!page.modal());
     }
 
     #[test]

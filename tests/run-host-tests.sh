@@ -395,6 +395,49 @@ for f in packaging/mediabox-display-guard packaging/mediabox-display-recover; do
 done
 
 echo
+echo "-- a pointer goes at a key, and does nothing where it is disabled"
+
+# The arrow is up while a pointer is the thing in use and gone at the first
+# key: the remote's own road (infrared, a keyboard's remote keys), the
+# daemon's (CEC, the phone, injected), and a keyboard's typed keys. The rules
+# themselves are tested in src/pointer.rs; this is that each road calls them.
+tv_main="$here/rust/crates/mediabox-tv/src/main.rs"
+contains "a remote's key hides the pointer" \
+  "$(sed -n '/pub fn remote_key(/,/^    fn press(/p' "$tv_main")" 'self.hide_pointer();'
+contains "a key from the daemon hides the pointer" \
+  "$(sed -n '/fn bus_input(/,/^    fn open(/p' "$tv_main")" 'self.hide_pointer();'
+contains "a keyboard's key hides the pointer" \
+  "$(sed -n '/window.on_key_pressed(/,/});/p' "$tv_main")" 'app.hide_pointer()'
+# Where src/pointer.rs's table says Disabled, motion, the button and the
+# wheel stop at the door -- a click is never turned into Ok there.
+for entry in pointer_motion pointer_button pointer_wheel pointer_back; do
+  contains "$entry stops where the pointer is disabled" \
+    "$(sed -n "/pub fn $entry(/,/^    }/p" "$tv_main")" 'if !self.pointer_policy().enabled() {'
+done
+# A click on a target that cannot take the focus (disabled, out of range,
+# under a modal) presses nothing -- never Ok on whatever had the focus.
+contains "a refused target is not pressed" \
+  "$(sed -n '/pub fn pointer_press(/,/^    }/p' "$tv_main")" 'pointer::Aim::Refused => return,'
+contains "every paint settles the pointer's policy" \
+  "$(sed -n '/^    fn paint(&mut self) {/,/^    }/p' "$tv_main")" 'self.pointer_sync();'
+# Nothing is left held. A press taken away lets a held Ok go without
+# firing; a key, a hidden arrow or another screen drops a drag along the
+# film's bar without seeking; the bar's drag is the player's alone (Full).
+contains "a cancelled press lets a held Ok go" \
+  "$(sed -n '/pub fn pointer_cancel(/,/^    }/p' "$tv_main")" 'self.ok_hold = None;'
+contains "hiding the arrow drops a drag" \
+  "$(sed -n '/    fn hide_pointer(/,/^    }/p' "$tv_main")" 'self.pointer_drop_drag();'
+contains "another screen drops a drag" \
+  "$(sed -n '/    fn pointer_sync(/,/^    }/p' "$tv_main")" 'self.pointer_drop_drag();'
+contains "the bar's drag is the player's only" \
+  "$(sed -n '/pub fn pointer_scrub(/,/^    }/p' "$tv_main")" 'self.pointer_policy() != pointer::Policy::Full'
+contains "a drag goes to the film by the remote's own seek" \
+  "$(sed -n '/pub fn pointer_scrub(/,/^    }/p' "$tv_main")" 'self.transport(Transport::SeekTo(seconds));'
+# A pointer's own Back -- its right or thumb button -- is the remote's Back.
+contains "a pointer's Back is the remote's Back" \
+  "$(sed -n '/pub fn pointer_back(/,/^    }/p' "$tv_main")" 'self.press(InputAction::Back, pressed, input::Origin::Keyboard);'
+
+echo
 echo "-- the television can sign in to a Stremio account, and cannot leak the password"
 
 tv="$here/rust/crates/mediabox-tv/src"

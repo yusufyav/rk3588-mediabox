@@ -209,6 +209,27 @@ impl Sheet {
         }
     }
 
+    /// The row or button a pointer is over: the remote on it. For a yes/no,
+    /// 0 is "Vazgeç" and 1 "Evet", in the order they are drawn.
+    pub fn point(&mut self, at: usize) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        let (index, count) = match self {
+            Sheet::Power { index, television } => {
+                let count = choices(*television).len();
+                (index, count)
+            }
+            Sheet::Resume { index, .. } | Sheet::Player { index, .. } => (index, 2),
+            Sheet::Peer { choices, index, .. } => {
+                let count = choices.len();
+                (index, count)
+            }
+            Sheet::Confirm { yes, .. } | Sheet::ConfirmPeer { yes, .. } => {
+                return Aim::set(yes, at == 1, at <= 1);
+            }
+        };
+        Aim::set(index, at, at < count)
+    }
+
     /// What Ok on this sheet means. `Ask` opens a second sheet; `Do` is the
     /// only way an action ever leaves this module, and it can only be reached
     /// from a confirmation whose focus was deliberately moved to "Evet".
@@ -283,6 +304,29 @@ pub enum Press {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pointer over a row is the remote on it, and Ok is that row's;
+    /// over "Evet" it is the confirmation's yes, as Right would make it.
+    #[test]
+    fn a_pointer_on_a_row_is_the_remote_on_it() {
+        use crate::pointer::Aim;
+        let mut sheet = Sheet::power_with(true);
+        assert_eq!(sheet.point(0), Aim::Here);
+        assert_eq!(sheet.point(1), Aim::Moved);
+        assert_eq!(sheet.press(), Press::Do(Action::StandbyTelevision));
+        assert_eq!(
+            sheet.point(99),
+            Aim::Refused,
+            "no such row: a click does nothing"
+        );
+        let mut confirm = Sheet::confirm(Action::StandbyTelevision, "?");
+        assert_eq!(confirm.point(0), Aim::Here);
+        assert_eq!(confirm.point(1), Aim::Moved);
+        assert_eq!(confirm.press(), Press::Do(Action::StandbyTelevision));
+        assert_eq!(confirm.point(0), Aim::Moved);
+        assert_eq!(confirm.press(), Press::Close, "Vazgeç");
+        assert_eq!(confirm.point(2), Aim::Refused);
+    }
 
     #[test]
     fn with_cec_off_the_power_sheet_has_no_television_row() {

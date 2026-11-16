@@ -421,6 +421,12 @@ impl Home {
             .unwrap_or_else(|| self.column.min(self.apps.len().saturating_sub(1)));
     }
 
+    /// The remote on a given tile, as a pointer puts it there.
+    pub fn point_at(&mut self, index: usize) -> crate::pointer::Aim {
+        let allowed = index < self.apps.len();
+        crate::pointer::Aim::set(&mut self.column, index, allowed)
+    }
+
     /// Along the launcher. There is one row, so up and down go nowhere.
     pub fn step(&mut self, dx: isize) -> bool {
         if self.apps.is_empty() || dx == 0 {
@@ -579,6 +585,24 @@ fn hue_of(name: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hover is focus: the pointer moves the same column the remote does,
+    /// and a tile that is already focused is not a change to draw.
+    #[test]
+    fn pointing_at_a_tile_is_the_remote_s_focus() {
+        let mut home = Home::new();
+        home.set_apps(launcher());
+        use crate::pointer::Aim;
+        assert_eq!(home.point_at(0), Aim::Here);
+        assert_eq!(home.point_at(2), Aim::Moved);
+        assert_eq!(home.column(), 2);
+        assert_eq!(home.focused_app().map(|t| t.id.as_str()), Some("settings"));
+        assert_eq!(home.point_at(9), Aim::Refused, "past the last tile");
+        assert_eq!(home.column(), 2);
+        // And the remote goes on from there.
+        assert!(home.step(-1));
+        assert_eq!(home.column(), 1);
+    }
 
     fn launcher() -> Vec<AppEntryTile> {
         vec![

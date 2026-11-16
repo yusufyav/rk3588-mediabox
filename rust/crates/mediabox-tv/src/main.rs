@@ -14,6 +14,8 @@ mod textfit;
 mod actions;
 mod detail;
 mod fdstore;
+#[cfg(test)]
+mod hit;
 mod images;
 mod input;
 mod keyboard;
@@ -21,6 +23,7 @@ mod metrics;
 mod model;
 mod monitor;
 mod platform;
+mod pointer;
 mod prefs;
 mod route;
 mod rpc;
@@ -203,6 +206,23 @@ struct App {
     stack: route::Stack,
 
     home: state::Home,
+    /// A pointer, wherever `pointer::policy` allows one: where it is and
+    /// whether its arrow is drawn.
+    pointer: pointer::Pointer,
+    /// What the pointer's policy was last decided from; a change forgets
+    /// what the pointer was over and pressing.
+    pointer_context: Option<pointer::Context>,
+    /// A wheel's part-detents.
+    wheel: pointer::Wheel,
+    /// The remote's key the main button is holding down, from its press on
+    /// a target to its release.
+    pointer_held: Option<InputAction>,
+    /// The first row of each column of the film's panel that is drawn, as
+    /// last painted: a pointer names a row by its place in what is drawn.
+    np_menu_window: (usize, usize),
+    /// The panel has been given to another application, which reads its own
+    /// input. Cleared if it could not be started.
+    handed_over: bool,
     /// Everything the media core last answered with, for the catalogue, the
     /// library and "Devam Et". Asked for each time "Filmler ve Diziler" is
     /// opened, and never by the home screen.
@@ -711,6 +731,541 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------ the pointer
+
+    /// What the pointer's policy is decided from (`pointer::policy`).
+    fn pointer_context(&self) -> pointer::Context {
+        let route = self.route();
+        // A film this interface plays is its player, over whatever route it
+        // was started from; live television plays through the same player
+        // and is its own route.
+        let film = self.here.is_some() && self.live.is_none();
+        pointer::Context {
+            route,
+            layer: if self.sheet.is_some() {
+                pointer::Layer::Sheet
+            } else if film {
+                if self.now.menu == screens::now_playing::Menu::None {
+                    pointer::Layer::Screen
+                } else {
+                    pointer::Layer::Choice
+                }
+            } else if match route {
+                Route::Settings => self.settings.modal(),
+                Route::Media => self.media.modal(),
+                Route::Discover => self.discover.modal(),
+                Route::Library => self.library.modal(),
+                Route::MediaSettings => self.media_settings.modal(),
+                Route::Detail => self
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.filter_open),
+                Route::Search => self.search.editing,
+                Route::Live => self
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.layer != screens::live::Layer::None),
+                _ => false,
+            } || (self.on_search_box() && self.account_focus > 0)
+            {
+                pointer::Layer::Choice
+            } else {
+                pointer::Layer::Screen
+            },
+            film,
+            handed_over: self.handed_over,
+        }
+    }
+
+    fn pointer_policy(&self) -> pointer::Policy {
+        pointer::policy(self.pointer_context())
+    }
+
+    /// Called with every paint: where what is on the panel changed -- a
+    /// screen, a sheet, a list over it, a film -- what the pointer was over
+    /// and pressing is forgotten, and where the pointer is now disabled the
+    /// arrow goes.
+    fn pointer_sync(&mut self) {
+        let context = self.pointer_context();
+        let change = pointer::transition(self.pointer_context.replace(context), context);
+        if change != pointer::Transition::Keep {
+            self.wheel.reset();
+            self.pointer_drop_drag();
+        }
+        match change {
+            pointer::Transition::Keep => {}
+            pointer::Transition::Forget => {
+                platform::to_slint(slint::platform::WindowEvent::PointerExited)
+            }
+            pointer::Transition::Hide => self.hide_pointer(),
+        }
+    }
+
+    /// A pointer moved, by everything it said since the loop last asked: the
+    /// platform hands over one motion per pass, however fast it reports, and
+    /// a move under a whole pixel sets nothing and draws nothing. Where the
+    /// pointer is disabled it means nothing.
+    pub fn pointer_motion(&mut self, motion: pointer::Motion) {
+        self.pointer_sync();
+        if !self.pointer_policy().enabled() {
+            return;
+        }
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let size = window
+            .window()
+            .size()
+            .to_logical(window.window().scale_factor());
+        if !self.pointer.apply(motion, size.width, size.height) {
+            return;
+        }
+        let Some((x, y)) = self.pointer.at() else {
+            return;
+        };
+        window.set_pointer_x(x);
+        window.set_pointer_y(y);
+        window.set_pointer_shown(true);
+        window.global::<PointerHub>().set_shown(true);
+        // A film shows nothing until somebody reaches for it: a pointer
+        // that moves over it brings its controls up, as any key does.
+        // Already up, they are only kept up: nothing new to draw.
+        if self.pointer_context().film && self.now.menu == screens::now_playing::Menu::None {
+            if self.controls_open() {
+                if let Some(playing) = self.here.as_mut() {
+                    playing.controls_until = Some(std::time::Instant::now() + CONTROLS_LINGER);
+                }
+            } else {
+                self.open_controls();
+            }
+        }
+        platform::to_slint(slint::platform::WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, y),
+        });
+    }
+
+    /// The pointer's main button, handed to Slint's hit testing at the
+    /// arrow: a press and release on a target is its `select`, anywhere else
+    /// it is nothing. Where the pointer is disabled, or its arrow is not up,
+    /// the button does nothing -- it is never turned into Ok.
+    pub fn pointer_button(&mut self, pressed: bool) {
+        self.pointer_sync();
+        if !self.pointer_policy().enabled() {
+            return;
+        }
+        let Some((x, y)) = self.pointer.at() else {
+            return;
+        };
+        let position = slint::LogicalPosition::new(x, y);
+        let button = slint::platform::PointerEventButton::Left;
+        platform::to_slint(if pressed {
+            slint::platform::WindowEvent::PointerPressed { position, button }
+        } else {
+            slint::platform::WindowEvent::PointerReleased { position, button }
+        });
+    }
+
+    /// A wheel's detents, as the arrows: down and right positive. Through
+    /// the dispatcher, so a fast wheel steps at the remote's own rate.
+    pub fn pointer_wheel(&mut self, horizontal: f64, vertical: f64) {
+        self.pointer_sync();
+        if !self.pointer_policy().enabled() {
+            return;
+        }
+        let (mut dx, mut dy) = self.wheel.add(horizontal, vertical);
+        if pointer::wheel_is_along(self.route()) {
+            (dx, dy) = (dx + dy, 0);
+        }
+        let steps = [
+            (dx, InputAction::Right, InputAction::Left),
+            (dy, InputAction::Down, InputAction::Up),
+        ];
+        for (count, forward, back) in steps {
+            let action = if count > 0 { forward } else { back };
+            for _ in 0..count.unsigned_abs() {
+                if let Some(action) = self.dispatcher.accept(action, input::Origin::Keyboard) {
+                    self.act(action);
+                }
+            }
+        }
+    }
+
+    /// The remote's focus onto a target, through the screen's own focus
+    /// model.
+    fn pointer_point(&mut self, zone: pointer::Zone, index: usize, hover: bool) -> pointer::Aim {
+        if hover && !zone.hovers(index) {
+            return pointer::Aim::Here;
+        }
+        use pointer::Zone;
+        use screens::settings::EditorTarget;
+        let (row, col) = pointer::cell(index);
+        match zone {
+            Zone::HomeApps => self.home.point_at(index),
+            Zone::SettingsSections => self.settings.point_section(index),
+            // A way back is no focus: a click on it is Back (or, out of a
+            // film, Stop).
+            Zone::Back | Zone::PlayerExit => pointer::Aim::Here,
+            Zone::SettingsRows => self.settings.point_row(index),
+            Zone::SettingsChoice => self.settings.point_choice(index),
+            Zone::EditorCards => self.settings.point_editor(EditorTarget::Card(index)),
+            Zone::EditorActions => self.settings.point_editor(EditorTarget::Action(index)),
+            Zone::OutputResolutions => self.settings.point_editor(EditorTarget::Resolution(index)),
+            Zone::OutputRates => self.settings.point_editor(EditorTarget::Rate(index)),
+            Zone::OutputColours => self.settings.point_editor(EditorTarget::Colour(index)),
+            Zone::CoolingChips => self.settings.point_editor(EditorTarget::Chip(index)),
+            Zone::CoolingCells => self.settings.point_editor(EditorTarget::Cell(row, col)),
+            Zone::EditorPicker => self.settings.point_editor(EditorTarget::Picker(index)),
+            Zone::EditorPad => self.settings.point_editor(EditorTarget::Pad(row, col)),
+            Zone::EditorConfirm => self.settings.point_editor(EditorTarget::Confirm(index)),
+            Zone::DiagnosticsGroups => self.diagnostics.point(index),
+            Zone::FramePlaces => self.catalog_point(screens::CatalogTarget::Place(index)),
+            Zone::FrameSearch => self.catalog_point(screens::CatalogTarget::SearchBox),
+            Zone::Shelves => self.catalog_point(screens::CatalogTarget::Shelf(row, col)),
+            Zone::Grid => self.catalog_point(screens::CatalogTarget::Item(index)),
+            Zone::SearchKeys => {
+                self.search
+                    .point(screens::CatalogTarget::SearchBox, Some((row, col)), None)
+            }
+            Zone::SearchList => {
+                self.search
+                    .point(screens::CatalogTarget::SearchBox, None, Some(index))
+            }
+            Zone::MsCategories | Zone::MsControls | Zone::MsOptions => {
+                use screens::media_settings::MsTarget;
+                let category = self.media_settings.current();
+                let rows = self
+                    .with_media_context(|context| screens::media_settings::rows(category, context));
+                let target = match zone {
+                    Zone::MsCategories => MsTarget::Category(index),
+                    Zone::MsControls => MsTarget::Control(index),
+                    // The list draws a window of its options; the target is
+                    // its place in that window.
+                    _ => {
+                        let total = rows
+                            .get(self.media_settings.row())
+                            .map_or(0, |row| row.choices.len());
+                        let focus = self.media_settings.picker.map_or(0, |picker| picker.focus);
+                        MsTarget::Option(
+                            screens::media_settings::picker_first(total, focus) + index,
+                        )
+                    }
+                };
+                self.media_settings.point(target, &rows)
+            }
+            Zone::DetailActions
+            | Zone::DetailSources
+            | Zone::DetailEpisodes
+            | Zone::DetailFilter
+            | Zone::DetailProviders
+            | Zone::DetailSeasons
+            | Zone::DetailMarks => {
+                let target = match zone {
+                    Zone::DetailActions => detail::DetailTarget::Action(index),
+                    Zone::DetailSources => detail::DetailTarget::Source(index),
+                    Zone::DetailEpisodes => detail::DetailTarget::Episode(index),
+                    Zone::DetailFilter => detail::DetailTarget::Filter,
+                    Zone::DetailProviders => detail::DetailTarget::Provider(index),
+                    Zone::DetailSeasons => detail::DetailTarget::Season(index),
+                    _ => detail::DetailTarget::Mark(index),
+                };
+                self.detail
+                    .as_mut()
+                    .map_or(pointer::Aim::Refused, |detail| detail.point(target))
+            }
+            // The modal's ground takes no focus; its click is Back.
+            Zone::Shield => pointer::Aim::Here,
+            Zone::MediaMenu => self.media.point_menu(index),
+            Zone::PosterDismiss | Zone::PosterMenu => {
+                self.catalog_point(screens::CatalogTarget::Shelf(row, col))
+            }
+            Zone::DiscoverFilters => self.discover.point_filter(index),
+            Zone::DiscoverOptions => self.discover.point_option(index),
+            // As the buttons are drawn: the trailer only with one, the
+            // library and watched marks only once the account knows the title.
+            Zone::DiscoverPanel => {
+                let item = self.discover.items.get(self.discover.index);
+                let enabled = match index {
+                    0 => item.is_some_and(|item| item.trailer.is_some()),
+                    1 | 2 => item.is_some_and(|item| self.hero_state.contains_key(&item.id)),
+                    _ => true,
+                };
+                if enabled {
+                    self.discover.point_button(index)
+                } else {
+                    pointer::Aim::Refused
+                }
+            }
+            Zone::LibraryFilters => self.library.point_filter(index),
+            Zone::LibraryOptions => self.library.point_option(index),
+            Zone::LibraryMenu => self.library.point_menu(index),
+            Zone::LibraryMark => self.catalog_point(screens::CatalogTarget::Item(index)),
+            // The mark is reached from the search box, as the remote reaches
+            // it with Right; a click on it is the remote's Ok there, which
+            // drops the menu onto its button.
+            Zone::FrameAccount => {
+                if !self
+                    .catalog_point(screens::CatalogTarget::SearchBox)
+                    .taken()
+                {
+                    return pointer::Aim::Refused;
+                }
+                let mut focus = self.account_focus;
+                let aim = pointer::Aim::set(&mut focus, 1, true);
+                self.account_focus = focus;
+                aim
+            }
+            Zone::FrameAccountMenu => {
+                let mut focus = self.account_focus;
+                let aim = pointer::Aim::set(&mut focus, 2, self.account_focus > 0);
+                self.account_focus = focus;
+                aim
+            }
+            Zone::EditorVolume => self.settings.point_editor(EditorTarget::Volume),
+            Zone::Sheet => self
+                .sheet
+                .as_mut()
+                .map_or(pointer::Aim::Refused, |sheet| sheet.point(index)),
+            Zone::AccountForm | Zone::AccountKeys => {
+                use screens::account::{AccountTarget, Field};
+                let target = match (zone, index) {
+                    (Zone::AccountKeys, _) => AccountTarget::Key(row, col),
+                    (_, 0) => AccountTarget::Field(Field::Email),
+                    (_, 1) => AccountTarget::Field(Field::Password),
+                    (_, 2) => AccountTarget::Show,
+                    (_, 3) => AccountTarget::Submit,
+                    _ => return pointer::Aim::Refused,
+                };
+                self.account.point(target)
+            }
+            Zone::WifiRows
+            | Zone::WifiInfo
+            | Zone::WifiButtons
+            | Zone::WifiForm
+            | Zone::WifiKeys => {
+                use screens::wireless::{PasswordFocus, WifiTarget};
+                let target = match zone {
+                    Zone::WifiRows => WifiTarget::Row(index),
+                    Zone::WifiInfo => WifiTarget::Info(index),
+                    Zone::WifiButtons => WifiTarget::Button(index),
+                    Zone::WifiKeys => WifiTarget::Key(row, col),
+                    _ => WifiTarget::Form(match index {
+                        0 => PasswordFocus::Ssid,
+                        1 => PasswordFocus::Security,
+                        2 => PasswordFocus::Field,
+                        3 => PasswordFocus::Show,
+                        4 => PasswordFocus::Join,
+                        _ => return pointer::Aim::Refused,
+                    }),
+                };
+                self.wifi.point(target)
+            }
+            Zone::BtRows => self.bt.point(index),
+            Zone::NpControls | Zone::PlayerButtons => self.now.point_control(index),
+            Zone::PlayerBar => self.now.point_bar(),
+            Zone::PlayerMenu | Zone::PlayerTracks | Zone::PlayerSide => {
+                use screens::now_playing::MenuTarget;
+                // A panel's columns draw a window of their rows; the target
+                // is its place in that window.
+                let (first, track_first) = self.np_menu_window;
+                self.now.point_menu(match zone {
+                    Zone::PlayerMenu => MenuTarget::Row(first + index),
+                    Zone::PlayerTracks => MenuTarget::Track(track_first + index),
+                    _ => MenuTarget::Delay,
+                })
+            }
+            Zone::LiveSurface
+            | Zone::LiveMenu
+            | Zone::LiveGuide
+            | Zone::LivePanel
+            | Zone::LiveKeypad
+            | Zone::LiveSetup
+            | Zone::LiveActions => {
+                use screens::live::LiveTarget;
+                let target = match zone {
+                    Zone::LiveSurface => LiveTarget::Surface,
+                    Zone::LiveMenu => LiveTarget::Menu(row, col),
+                    Zone::LiveGuide => LiveTarget::Guide(row, col),
+                    Zone::LivePanel => LiveTarget::Panel(index),
+                    Zone::LiveKeypad => LiveTarget::Keypad(index),
+                    Zone::LiveSetup => LiveTarget::Setup(index),
+                    _ => LiveTarget::Action(index),
+                };
+                let (at, now) = (Instant::now(), screens::live::utc_now());
+                self.live
+                    .as_mut()
+                    .map_or(pointer::Aim::Refused, |live| live.point(target, at, now))
+            }
+        }
+    }
+
+    /// A drag along the film's bar (`PointerScrub`): down picks the place
+    /// under the arrow, a move follows it, up goes there through the
+    /// remote's own road (`Transport::SeekTo`), and a press taken away goes
+    /// nowhere. The controls stay up while it lasts. Only where the policy
+    /// is `Full` -- the player -- and the bar is on top.
+    pub fn pointer_scrub(&mut self, zone: &str, phase: i32, at: f32) {
+        let Some(zone) = self.pointer_zone(zone) else {
+            // Taken away, or never this bar's: nothing is left held.
+            self.pointer_drop_drag();
+            return;
+        };
+        if zone != pointer::Zone::PlayerBar || self.pointer_policy() != pointer::Policy::Full {
+            return;
+        }
+        match phase {
+            0 | 1 => {
+                if phase == 1 && !self.now.dragging {
+                    return;
+                }
+                self.now.drag_to(at);
+                self.open_controls();
+            }
+            2 => {
+                if let Some(seconds) = self.now.drag_end() {
+                    self.transport(Transport::SeekTo(seconds));
+                }
+                self.open_controls();
+            }
+            _ => self.pointer_drop_drag(),
+        }
+    }
+
+    /// A drag along the film's bar that will not end in a release: the bar
+    /// is the film's again and nothing is gone to.
+    fn pointer_drop_drag(&mut self) {
+        if self.now.drag_cancel() {
+            self.paint();
+        }
+    }
+
+    /// The catalogue's shared parts -- its frame, its shelves, its grids --
+    /// on whichever of its screens is up.
+    fn catalog_point(&mut self, target: screens::CatalogTarget) -> pointer::Aim {
+        match self.route() {
+            Route::Media => self.media.point(target),
+            Route::Discover => self.discover.point(target),
+            Route::Library => self.library.point(target),
+            Route::Search => self.search.point(target, None, None),
+            Route::MediaSettings => match target {
+                screens::CatalogTarget::Place(at) => {
+                    let category = self.media_settings.current();
+                    let rows = self.with_media_context(|context| {
+                        screens::media_settings::rows(category, context)
+                    });
+                    self.media_settings
+                        .point(screens::media_settings::MsTarget::Place(at), &rows)
+                }
+                _ => pointer::Aim::Refused,
+            },
+            _ => pointer::Aim::Refused,
+        }
+    }
+
+    /// Which zone a target names, if it is one the pointer may reach now.
+    fn pointer_zone(&self, zone: &str) -> Option<pointer::Zone> {
+        let zone = pointer::Zone::parse(zone)?;
+        (self.pointer.shown() && pointer::accepts(self.pointer_context(), zone)).then_some(zone)
+    }
+
+    /// The arrow came over a target: hover is the remote's focus.
+    pub fn pointer_hover(&mut self, zone: &str, index: i32) {
+        let (Some(zone), Ok(index)) = (self.pointer_zone(zone), usize::try_from(index)) else {
+            return;
+        };
+        if self.pointer_point(zone, index, true) == pointer::Aim::Moved {
+            self.paint();
+        }
+    }
+
+    /// The main button on a target: down puts the remote's focus on it and
+    /// presses the remote's own key for it -- Ok with its hold, Back, an
+    /// arrow -- through the remote's own road (`press`); up releases that
+    /// key. A target that cannot take the focus is not pressed, and neither
+    /// is whatever had the focus.
+    pub fn pointer_press(&mut self, zone: &str, index: i32, down: bool) {
+        if !down {
+            if let Some(key) = self.pointer_held.take() {
+                self.press(key, false, input::Origin::Keyboard);
+            }
+            return;
+        }
+        self.pointer_held = None;
+        let (Some(zone), Ok(index)) = (self.pointer_zone(zone), usize::try_from(index)) else {
+            return;
+        };
+        match self.pointer_point(zone, index, false) {
+            pointer::Aim::Refused => return,
+            pointer::Aim::Moved => self.paint(),
+            pointer::Aim::Here => {}
+        }
+        match zone.activation(index) {
+            pointer::Activation::Key(key) => {
+                self.pointer_held = Some(key);
+                self.press(key, true, input::Origin::Keyboard);
+            }
+            // What a held Ok opens on this poster: its menu.
+            pointer::Activation::OpenMenu => {
+                let opened = match self.route() {
+                    Route::Media => self.media.open_menu(),
+                    Route::Library => self.library.open_menu(),
+                    _ => false,
+                };
+                if opened {
+                    self.paint();
+                }
+            }
+            // The menu's "Vazgeç", through the menu itself.
+            pointer::Activation::DismissPoster => {
+                let line = screens::media::MENU
+                    .iter()
+                    .position(|act| *act == screens::media::MenuAct::Dismiss);
+                if let Some(line) = line.filter(|_| self.media.open_menu()) {
+                    self.media.point_menu(line);
+                    if let Some(action) = self
+                        .dispatcher
+                        .accept(InputAction::Ok, input::Origin::Keyboard)
+                    {
+                        self.act(action);
+                    }
+                }
+            }
+            pointer::Activation::Nothing => {}
+        }
+    }
+
+    /// The press was taken away before the button came up: the key is let go
+    /// without firing -- a held Ok that was waiting to be a press is not one.
+    pub fn pointer_cancel(&mut self) {
+        if self.pointer_held.take() == Some(InputAction::Ok) {
+            self.ok_hold = None;
+        }
+    }
+
+    /// A pointer's own Back -- its right button, or the thumb button a mouse
+    /// calls back -- where a pointer is allowed: the remote's Back.
+    pub fn pointer_back(&mut self, pressed: bool) {
+        self.pointer_sync();
+        if !self.pointer_policy().enabled() {
+            return;
+        }
+        self.press(InputAction::Back, pressed, input::Origin::Keyboard);
+    }
+
+    /// The arrow off the panel: a key was pressed, so the remote is the thing
+    /// in use, or the pointer is disabled here. What it was over and pressing
+    /// is forgotten. The next allowed motion puts it back.
+    fn hide_pointer(&mut self) {
+        if !self.pointer.hide() {
+            return;
+        }
+        if let Some(window) = self.window.upgrade() {
+            window.set_pointer_shown(false);
+            window.global::<PointerHub>().set_shown(false);
+        }
+        self.pointer_drop_drag();
+        platform::to_slint(slint::platform::WindowEvent::PointerExited);
+    }
+
     /// One of this interface's own screens, from wherever it was chosen.
     fn open_screen(&mut self, nav: state::Nav) {
         match nav {
@@ -756,6 +1311,10 @@ impl App {
             // The control plane stops this unit as part of starting the other
             // one, so nothing after this call is guaranteed to run.
             state::AppAction::Launch(id) => {
+                // The panel is the other application's from here, and so is
+                // its input: no arrow of ours over it, nothing pressed.
+                self.handed_over = true;
+                self.pointer_sync();
                 self.say(format!("{name} açılıyor…"));
                 self.remember();
                 self.store.flush();
@@ -1390,21 +1949,11 @@ impl App {
             }
             Intent::Dismiss => {
                 // One press, one step: the list back to the letters, the panel
-                // closed, then out.
-                match self.search.pane {
-                    Pane::List => {
-                        self.search.pane = Pane::Keys;
-                        self.paint();
-                    }
-                    Pane::Keys if self.search.showing_results() => {
-                        self.search.close_editing();
-                        self.paint();
-                    }
-                    Pane::Places => {
-                        self.search.pane = Pane::Box;
-                        self.paint();
-                    }
-                    _ => self.back(),
+                // closed, then out (`Search::dismiss`).
+                if self.search.dismiss() {
+                    self.paint();
+                } else {
+                    self.back();
                 }
             }
             _ => {}
@@ -4875,6 +5424,7 @@ impl App {
                 talls: 0,
                 notes: 0,
                 heads: 0,
+                slot: -1,
             }
         };
         let mut rows: Vec<WifiRow> = Vec::new();
@@ -4891,20 +5441,30 @@ impl App {
                         kind: "header".into(),
                         label: "Diğer ağlar".into(),
                         bars: -1,
+                        slot: -1,
                         ..Default::default()
                     });
                 }
                 for (at, ssid) in wifi.saved().iter().enumerate() {
                     if let Some(network) = wifi.network(ssid) {
-                        rows.push(card(network, at == wifi.saved_index, true));
+                        let mut row = card(network, at == wifi.saved_index, true);
+                        row.slot = at as i32;
+                        rows.push(row);
                     }
                 }
             }
             _ => {
                 window.set_wifi_title("Wi-Fi".into());
                 let focused = wifi.focused_row();
+                // A row's place among the rows the remote stops on, which
+                // is how a pointer names it (`Wifi::point`).
+                let mut slots = 0..;
                 for row in wifi.list_rows() {
                     let here = focused.as_ref() == Some(&row);
+                    let slot = match row {
+                        Row::Note(_) | Row::Header(_) => -1,
+                        _ => slots.next().unwrap_or_default(),
+                    };
                     rows.push(match &row {
                         Row::Toggle => WifiRow {
                             kind: "toggle".into(),
@@ -4965,6 +5525,9 @@ impl App {
                             }
                         }
                     });
+                    if let Some(last) = rows.last_mut() {
+                        last.slot = slot;
+                    }
                 }
             }
         }
@@ -5069,8 +5632,13 @@ impl App {
         window.set_bt_summary(bt.summary().into());
         let focused = bt.focused_row();
         let mut rows: Vec<WifiRow> = Vec::new();
+        let mut slots = 0..;
         for row in bt.rows() {
             let here = focused.as_ref() == Some(&row);
+            let slot = match row {
+                BtLine::Note(_) | BtLine::Header(_) => -1,
+                _ => slots.next().unwrap_or_default(),
+            };
             rows.push(match &row {
                 BtLine::Toggle => WifiRow {
                     kind: "toggle".into(),
@@ -5109,6 +5677,9 @@ impl App {
                     None => continue,
                 },
             });
+            if let Some(last) = rows.last_mut() {
+                last.slot = slot;
+            }
         }
         let focus = place_rows(&mut rows).unwrap_or_default();
         window.set_bt_focus_flats(focus.0);
@@ -5394,6 +5965,15 @@ impl App {
     /// media keys -- already normalised. Ok says when it comes up, as the
     /// television's remote does, so a hold of it is told from a press.
     pub fn remote_key(&mut self, action: InputAction, pressed: bool, origin: input::Origin) {
+        if pressed {
+            self.hide_pointer();
+        }
+        self.press(action, pressed, origin);
+    }
+
+    /// A press or a release of a remote's key or a mouse's button, on the
+    /// same road: the dispatcher, and Ok's hold told from its press.
+    fn press(&mut self, action: InputAction, pressed: bool, origin: input::Origin) {
         if action == InputAction::Ok {
             if !pressed {
                 self.ok_up();
@@ -5413,6 +5993,9 @@ impl App {
 
     /// A press or a release from the daemon's bus.
     fn bus_input(&mut self, action: InputAction, pressed: bool, source: mediabox_core::InputSource) {
+        if pressed {
+            self.hide_pointer();
+        }
         // Only the remote says when a key comes up; a press from anywhere
         // else is acted on as it arrives, as it always was.
         if action == InputAction::Ok && source == mediabox_core::InputSource::Cec {
@@ -5679,6 +6262,7 @@ impl App {
             return;
         };
         let route = self.route();
+        self.pointer_sync();
         {
             let session = screens::account::Session::from_status(self.status.as_ref());
             let chip = window.global::<AccountChip>();
@@ -6595,6 +7179,7 @@ impl App {
             ),
         };
         let first = screens::now_playing::menu_window(rows.len(), now.menu_focus);
+        self.np_menu_window = (first, track_first);
         window.set_np_menu_above(first > 0);
         window.set_np_menu_below(first + screens::now_playing::MENU_VISIBLE < rows.len());
         let rows: Vec<MenuRow> = rows.into_iter().skip(first).take(screens::now_playing::MENU_VISIBLE).collect();
@@ -7441,6 +8026,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window: window.as_weak(),
         stack: route::Stack::new(),
         home: state::Home::new(),
+        pointer: pointer::Pointer::default(),
+        pointer_context: None,
+        wheel: pointer::Wheel::default(),
+        pointer_held: None,
+        np_menu_window: (0, 0),
+        handed_over: false,
         shelves: Vec::new(),
         loading: false,
         media: screens::media::Media::new(),
@@ -7591,10 +8182,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             with_app(|app| app.space_down = false);
         }
     });
+    // What the arrow is over, and a click on it (ui/pointer.slint).
+    let hub = window.global::<PointerHub>();
+    hub.on_hover(|zone, index| with_app(|app| app.pointer_hover(zone.as_str(), index)));
+    hub.on_press(|zone, index, down| with_app(|app| app.pointer_press(zone.as_str(), index, down)));
+    hub.on_cancel(|| with_app(|app| app.pointer_cancel()));
+    hub.on_scrub(|zone, phase, at| with_app(|app| app.pointer_scrub(zone.as_str(), phase, at)));
     window.on_key_pressed(move |text| {
         let Some(first) = text.chars().next() else {
             return;
         };
+        with_app(|app| app.hide_pointer());
         if input::action_for_key(text.as_str()) == Some(InputAction::Ok) {
             let mut held = false;
             with_app(|app| held = app.ok_down());
@@ -9356,7 +9954,10 @@ fn spawn_launch(id: String, name: String) {
             eprintln!("mediabox-tv.launch {id} failed: {e}");
             let message = format!("{name} açılamadı — {e}");
             let _ = slint::invoke_from_event_loop(move || {
-                with_app(|app| app.say(message));
+                with_app(|app| {
+                    app.handed_over = false;
+                    app.say(message);
+                });
             });
         } else {
             eprintln!("mediabox-tv.launch {id} started");

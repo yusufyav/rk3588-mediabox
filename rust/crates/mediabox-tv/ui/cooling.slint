@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow, PointerClose } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { FocusRing, StateNote } from "kit.slint";
 
@@ -107,6 +108,9 @@ component Button inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> focused;
     in property <bool> primary;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     in property <length> font: Metrics.t-secondary;
     property <bool> lit: primary && enabled;
     height: Metrics.button-h;
@@ -131,6 +135,13 @@ component Button inherits Rectangle {
         height: 100%;
         radius: parent.height / 2;
         on: focused;
+    }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
     }
 }
 
@@ -188,6 +199,9 @@ component Cell inherits Rectangle {
     in property <bool> editing;
     in property <bool> locked;
     in property <bool> row-selected;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     border-radius: Metrics.root-font * 0.42;
     background: editing ? Theme.accent : (focused ? Theme.s-card-hi : (row-selected && !locked ? #ffffff0d : transparent));
     border-width: editing ? 2px : 0px;
@@ -229,6 +243,11 @@ component Cell inherits Rectangle {
         radius: parent.border-radius;
         on: focused && !editing;
     }
+
+    if pointer-zone != "": PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 // A small square button on the selected row.
@@ -236,6 +255,9 @@ component RowButton inherits Rectangle {
     in property <string> label;
     in property <bool> enabled;
     in property <bool> focused;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     border-radius: Metrics.root-font * 0.42;
     background: focused ? Theme.s-card-hi : #ffffff14;
     opacity: enabled ? 1.0 : 0.3;
@@ -252,6 +274,13 @@ component RowButton inherits Rectangle {
         font-weight: 800;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
     }
 }
 
@@ -351,7 +380,7 @@ export component CoolingPane inherits Rectangle {
         chips := HorizontalLayout {
             padding: rf * 0.22;
             spacing: rf * 0.25;
-            for chip in view.chips: Rectangle {
+            for chip[k] in view.chips: Rectangle {
                 min-width: word.preferred-width + rf * 2;
                 border-radius: rf * 0.45;
                 background: chip.focused && active-pane ? Theme.s-card-hi : (chip.on ? #ffffff1c : transparent);
@@ -369,6 +398,10 @@ export component CoolingPane inherits Rectangle {
                     font-weight: 700;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                }
+                if chip.enabled: PointerTarget {
+                    zone: "cooling-chips";
+                    index: k;
                 }
             }
         }
@@ -822,6 +855,8 @@ export component CoolingPane inherits Rectangle {
                 height: inner;
                 label: row.temperature;
                 focused: active-pane && row.focus-col == 0;
+                pointer-zone: "cooling-cells";
+                pointer-index: i * 100 + 0;
                 editing: row.edit-col == 0;
                 row-selected: row.selected;
             }
@@ -834,6 +869,8 @@ export component CoolingPane inherits Rectangle {
                 sub: row.raw;
                 locked: row.locked;
                 focused: active-pane && row.focus-col == 1;
+                pointer-zone: "cooling-cells";
+                pointer-index: i * 100 + 1;
                 editing: row.edit-col == 1;
                 row-selected: row.selected;
             }
@@ -845,6 +882,8 @@ export component CoolingPane inherits Rectangle {
                 label: "+";
                 enabled: row.can-add;
                 focused: active-pane && row.focus-col == 2;
+                pointer-zone: "cooling-cells";
+                pointer-index: i * 100 + 2;
             }
             if row.selected: RowButton {
                 x: num-w + temp-w + duty-w + btn-w + sp * 4;
@@ -854,6 +893,8 @@ export component CoolingPane inherits Rectangle {
                 label: "−";
                 enabled: row.can-remove;
                 focused: active-pane && row.focus-col == 3;
+                pointer-zone: "cooling-cells";
+                pointer-index: i * 100 + 3;
             }
         }
 
@@ -950,6 +991,8 @@ export component CoolingPane inherits Rectangle {
                 enabled: act.enabled;
                 focused: active-pane && act.focused;
                 primary: i == 0;
+                pointer-zone: act.enabled ? "editor-actions" : "";
+                pointer-index: i;
             }
         }
         Rectangle { horizontal-stretch: 1; }
@@ -970,6 +1013,8 @@ export component CoolingPane inherits Rectangle {
         width: root.width;
         height: root.height;
         background: #000000a8;
+        // Nothing under the question is pointed at through it.
+        PointerShield { }
         Rectangle {
             width: min(parent.width * 0.72, rf * 38);
             height: sheet.preferred-height;
@@ -979,6 +1024,12 @@ export component CoolingPane inherits Rectangle {
             background: Theme.bg-sheet;
             border-width: 1px;
             border-color: Theme.line;
+            PointerSwallow { }
+            // The remote's Back for a pointer: the question is put away.
+            PointerClose {
+                x: parent.width - self.width - rf;
+                y: rf;
+            }
             sheet := VerticalLayout {
                 padding: rf * 1.9;
                 spacing: rf * 0.6;
@@ -1001,10 +1052,14 @@ export component CoolingPane inherits Rectangle {
                     Button {
                         label: "Şimdi yeniden başlat";
                         focused: view.prompt-focus == 0;
+                        pointer-zone: "editor-confirm";
+                        pointer-index: 0;
                     }
                     Button {
                         label: "Daha sonra";
                         focused: view.prompt-focus == 1;
+                        pointer-zone: "editor-confirm";
+                        pointer-index: 1;
                     }
                 }
             }

@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { Rail, RailModel } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -75,6 +76,8 @@ export component Media inherits Rectangle {
                 head: head;
                 focus-col: r < columns.length ? columns[r] : 0;
                 active: zone == 0 && focus-row == r;
+                pointer-zone: "shelves";
+                pointer-row: r;
             }
         }
     }
@@ -84,6 +87,12 @@ export component Media inherits Rectangle {
     // The reference's, measured off its board: just right of the focused
     // poster's name, 0.96 of a poster in from its left, 80% of one wide,
     // a line every 0.29 of its width, #0f0d20 with a faint violet edge.
+    // Under the menu, the board is not pointed at; a click on it is Back,
+    // which closes the menu.
+    if menu-line >= 0: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     if menu-line >= 0 && rails.length > focus-row: Rectangle {
         property <length> step: Metrics.card-w + Metrics.rail-gap;
         property <length> x0: content-x - Metrics.focus-room;
@@ -106,6 +115,8 @@ export component Media inherits Rectangle {
         drop-shadow-blur: Metrics.card-w * 0.05;
         drop-shadow-color: #7b5bf533;
 
+        PointerSwallow { }
+
         for label[k] in menu: Rectangle {
             y: k * parent.line-h;
             height: parent.line-h;
@@ -118,6 +129,10 @@ export component Media inherits Rectangle {
                 color: Theme.text;
                 font-size: Metrics.card-w * 0.09;
                 vertical-alignment: center;
+            }
+            PointerTarget {
+                zone: "media-menu";
+                index: k;
             }
         }
     }

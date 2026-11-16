@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { Icon } from "kit.slint";
 import { Chrome, AccountChip } from "chrome.slint";
@@ -88,6 +89,9 @@ component Stop inherits Rectangle {
     in property <bool> focused;
     in property <bool> current;
     in property <length> port;
+    // Pointed at, where the screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
 
     Rectangle {
         x: 0;
@@ -138,6 +142,11 @@ component Stop inherits Rectangle {
             }
         }
     }
+
+    if pointer-zone != "": PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 component Switch inherits Rectangle {
@@ -164,6 +173,9 @@ component Switch inherits Rectangle {
 component Control inherits Rectangle {
     in property <MsRow> line;
     in property <bool> focused;
+    // Pointed at, where the screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     property <color> ink: root.focused ? Look.ink : root.line.enabled ? Theme.text : Look.dim;
     property <color> soft: root.focused ? Look.ink-soft : Look.dim;
     property <length> pad: self.height * 0.3;
@@ -246,6 +258,11 @@ component Control inherits Rectangle {
                 ink: root.focused ? Look.ink : Look.soft;
             }
         }
+    }
+
+    if pointer-zone != "": PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
     }
 }
 
@@ -447,6 +464,8 @@ export component MediaSettings inherits Rectangle {
         item: item;
         focused: root.zone == 0 && i == root.category;
         current: root.zone != 0 && i == root.category;
+        pointer-zone: "ms-categories";
+        pointer-index: i;
     }
 
     // ------------------------------------------------------- the stop's page
@@ -566,6 +585,8 @@ export component MediaSettings inherits Rectangle {
                     height: root.row-h;
                     line: item;
                     focused: root.zone == 1 && i == root.focus-row;
+                    pointer-zone: item.enabled ? "ms-controls" : "";
+                    pointer-index: i;
                 }
             }
         }
@@ -775,6 +796,12 @@ export component MediaSettings inherits Rectangle {
     // Over the control it belongs to, at its right where its value is, kept
     // on the panel when the control is low. The option in force carries a
     // tick; the remote's is white.
+    // While a list is open over a control, nothing else is pointed at; a
+    // click off it is Back, which closes it unchanged.
+    if root.picker-open: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     if root.picker-open: Rectangle {
         property <length> opt-h: root.row-h * 0.82;
         property <length> pad: root.row-h * 0.22;
@@ -788,6 +815,7 @@ export component MediaSettings inherits Rectangle {
         y: max(root.body-y, min(want-y, root.height * 0.97 - self.height));
         border-radius: root.unit * 0.7;
         background: #1b1830;
+        PointerSwallow { }
         border-width: max(1px, root.unit * 0.08);
         border-color: #7b5bf580;
         drop-shadow-blur: root.unit * 1.2;
@@ -850,6 +878,12 @@ export component MediaSettings inherits Rectangle {
                         ink: focused ? Theme.film : Look.violet;
                     }
                 }
+            }
+            // The option's place in the window drawn; Rust adds where the
+            // window starts.
+            PointerTarget {
+                zone: "ms-options";
+                index: k;
             }
         }
         if root.picker-below: Path {

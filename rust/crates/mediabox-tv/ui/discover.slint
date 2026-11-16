@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { GridPoster, PosterItem } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -62,6 +63,9 @@ component RoundButton inherits Rectangle {
     in property <string> mark;
     in property <bool> focused;
     in property <bool> enabled: true;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     in property <string> label;
     in property <string> tip;
     width: label == "" ? self.height : measure.preferred-width + self.height * 1.4;
@@ -115,6 +119,11 @@ component RoundButton inherits Rectangle {
         anchor-w: root.width;
         anchor-h: root.height;
     }
+
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 // One stop in the reference's group of two -- the library and watched
@@ -123,6 +132,9 @@ component GroupStop inherits Rectangle {
     in property <string> mark;
     in property <bool> focused;
     in property <bool> enabled: true;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     in property <string> tip;
     width: self.height;
     opacity: enabled ? 1.0 : 0.35;
@@ -141,6 +153,11 @@ component GroupStop inherits Rectangle {
         shown: focused;
         anchor-w: root.width;
         anchor-h: root.height;
+    }
+
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
     }
 }
 
@@ -248,6 +265,8 @@ export component Discover inherits Rectangle {
                 name-size: root.width * 0.0078;
                 item: item;
                 focused: on-grid && i == index;
+                pointer-zone: "grid";
+                pointer-index: i;
             }
 
             // The next page on its way: a row of empty frames where it lands.
@@ -401,6 +420,8 @@ export component Discover inherits Rectangle {
                 tip: "Fragman";
                 enabled: has-trailer;
                 focused: zone == 3 && button == 0;
+                pointer-zone: "discover-panel";
+                pointer-index: 0;
             }
             Rectangle {
                 width: self.height * 2;
@@ -414,12 +435,16 @@ export component Discover inherits Rectangle {
                         tip: in-library ? "Kitaplıktan Kaldır" : "Kitaplığa Ekle";
                         enabled: known;
                         focused: zone == 3 && button == 1;
+                        pointer-zone: "discover-panel";
+                        pointer-index: 1;
                     }
                     GroupStop {
                         mark: watched ? "eye-off" : "eye";
                         tip: watched ? "izlenmedi olarak işaretle" : "İzlendi olarak işaretle";
                         enabled: known;
                         focused: zone == 3 && button == 2;
+                        pointer-zone: "discover-panel";
+                        pointer-index: 2;
                     }
                 }
             }
@@ -428,6 +453,8 @@ export component Discover inherits Rectangle {
                 mark: "play";
                 label: "Göster";
                 focused: zone == 3 && button == 3;
+                pointer-zone: "discover-panel";
+                pointer-index: 3;
             }
         }
     }
@@ -445,7 +472,12 @@ export component Discover inherits Rectangle {
     // ------------------------------------------------------------ the filters
     //
     // The reference's three dropdowns, value only, a caret at the right. Last
-    // in the file, so an open list is drawn over the grid.
+    // in the file, so an open list is drawn over the grid. While one is
+    // down nothing else is pointed at; a click off it is Back.
+    if picker >= 0: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     HorizontalLayout {
         x: root.width * 0.051;
         y: root.height * 0.0833;
@@ -481,6 +513,10 @@ export component Discover inherits Rectangle {
                 commands: "M0 0L10 0L5 6z";
                 fill: focused ? #0a0c10 : #ffffffb0;
             }
+            PointerTarget {
+                zone: "discover-filters";
+                index: i;
+            }
 
             // The open list, under its own filter. Nine lines at most, kept
             // around the highlighted one.
@@ -497,6 +533,8 @@ export component Discover inherits Rectangle {
                 border-width: 1px;
                 border-color: #ffffff1f;
                 clip: true;
+
+                PointerSwallow { }
 
                 for option[k] in f.options: Rectangle {
                     x: Metrics.root-font * 0.4;
@@ -518,6 +556,10 @@ export component Discover inherits Rectangle {
                         vertical-alignment: center;
                         overflow: elide;
                         wrap: no-wrap;
+                    }
+                    PointerTarget {
+                        zone: "discover-options";
+                        index: k;
                     }
                 }
             }

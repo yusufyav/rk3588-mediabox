@@ -312,6 +312,75 @@ impl Library {
         }
     }
 
+    /// The remote onto what a pointer is over: a poster of the grid, a
+    /// place, the search box. Nothing under an open dropdown or a poster's
+    /// menu.
+    pub fn point(&mut self, target: super::CatalogTarget) -> crate::pointer::Aim {
+        use super::CatalogTarget;
+        use crate::pointer::Aim;
+        if self.modal() {
+            return Aim::Refused;
+        }
+        let before = (self.zone, self.index(), self.place);
+        let zone = match target {
+            CatalogTarget::Item(at) if at < self.items().len() => {
+                if let Some(slot) = self.positions.get_mut(self.tab) {
+                    *slot = at;
+                }
+                self.action = 0;
+                Zone::Grid
+            }
+            CatalogTarget::Place(at) if at < 4 => {
+                self.place = at;
+                Zone::Places
+            }
+            CatalogTarget::SearchBox => Zone::Search,
+            _ => return Aim::Refused,
+        };
+        if zone == Zone::Places && self.zone != Zone::Places {
+            self.returns_to = self.zone;
+        }
+        self.zone = zone;
+        if before == (self.zone, self.index(), self.place) {
+            Aim::Here
+        } else {
+            Aim::Moved
+        }
+    }
+
+    /// The type dropdown (0) or an order chip (1..) a pointer is over; the
+    /// chips only where this section can be ordered.
+    pub fn point_filter(&mut self, at: usize) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if self.modal() || at >= self.filter_stops() {
+            return Aim::Refused;
+        }
+        let mut place = (self.zone, self.tab_focus);
+        let aim = Aim::set(&mut place, (Zone::Filters, at), true);
+        (self.zone, self.tab_focus) = place;
+        aim
+    }
+
+    /// A section of the open type dropdown.
+    pub fn point_option(&mut self, at: usize) -> crate::pointer::Aim {
+        let count = self.sections.len();
+        match self.type_open.as_mut() {
+            Some(open) => crate::pointer::Aim::set(open, at, at < count),
+            None => crate::pointer::Aim::Refused,
+        }
+    }
+
+    /// A line of the focused poster's open menu.
+    pub fn point_menu(&mut self, at: usize) -> crate::pointer::Aim {
+        let count = self.actions().len();
+        crate::pointer::Aim::set(&mut self.action, at, self.zone == Zone::Menu && at < count)
+    }
+
+    /// The type dropdown or a poster's menu is open over the page.
+    pub fn modal(&self) -> bool {
+        self.type_open.is_some() || self.zone == Zone::Menu
+    }
+
     pub fn items(&self) -> &[Item] {
         self.sections
             .get(self.tab)
@@ -624,6 +693,74 @@ mod tests {
         let mut library = Library::new();
         library.build(&account, &[], &[]);
         library
+    }
+
+    /// A pointer on a poster of the grid, a place or the search box is the
+    /// remote on it; under the dropdown or a poster's menu nothing moves.
+    /// The type dropdown, the order chips, the dropdown's options and a
+    /// poster's menu each take the pointer only on their own layer.
+    #[test]
+    fn the_library_s_dropdown_chips_and_menu_take_the_pointer_in_turn() {
+        use crate::pointer::Aim;
+        let mut library = built(vec![film("a"), film("b"), series("c")]);
+        library.zone = Zone::Grid;
+        assert_eq!(library.point_filter(0), Aim::Moved);
+        assert_eq!((library.zone, library.tab_focus), (Zone::Filters, 0));
+        if library.sortable() {
+            assert_eq!(library.point_filter(2), Aim::Moved);
+            assert_eq!(library.focused_chip(), Some(1));
+        }
+        assert_eq!(library.point_filter(1 + SORTS.len()), Aim::Refused);
+        assert_eq!(library.point_option(0), Aim::Refused, "the dropdown is up");
+        library.type_open = Some(0);
+        assert_eq!(library.point_filter(0), Aim::Refused, "under the dropdown");
+        assert_eq!(
+            library.point_option(library.sections.len() - 1),
+            if library.sections.len() > 1 {
+                Aim::Moved
+            } else {
+                Aim::Here
+            }
+        );
+        assert_eq!(library.point_option(library.sections.len()), Aim::Refused);
+        library.type_open = None;
+        // A poster's menu, open over the grid.
+        library.zone = Zone::Menu;
+        assert!(library.modal());
+        let last = library.actions().len() - 1;
+        assert_eq!(
+            library.point_menu(last),
+            if last > 0 { Aim::Moved } else { Aim::Here }
+        );
+        assert_eq!(library.point_menu(last + 1), Aim::Refused);
+        assert_eq!(
+            library.point(crate::screens::CatalogTarget::Item(0)),
+            Aim::Refused
+        );
+    }
+
+    #[test]
+    fn a_pointer_walks_the_library() {
+        use crate::pointer::Aim;
+        use crate::screens::CatalogTarget;
+        let mut library = built(vec![film("a"), film("b"), series("c")]);
+        library.zone = Zone::Grid;
+        let count = library.items().len();
+        assert!(count >= 2);
+        assert_eq!(library.point(CatalogTarget::Item(1)), Aim::Moved);
+        assert_eq!((library.zone, library.index()), (Zone::Grid, 1));
+        assert_eq!(library.point(CatalogTarget::Item(1)), Aim::Here);
+        assert_eq!(library.point(CatalogTarget::Item(count)), Aim::Refused);
+        assert_eq!(library.point(CatalogTarget::Place(0)), Aim::Moved);
+        assert_eq!(library.point(CatalogTarget::SearchBox), Aim::Moved);
+        assert_eq!(library.zone, Zone::Search);
+        library.type_open = Some(0);
+        assert!(library.modal());
+        assert_eq!(
+            library.point(CatalogTarget::Item(0)),
+            Aim::Refused,
+            "under the dropdown"
+        );
     }
 
     #[test]

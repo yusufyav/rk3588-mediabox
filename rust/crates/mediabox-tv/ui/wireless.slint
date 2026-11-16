@@ -1,5 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { KeyRow, KeyCap, Keyboard, VitalsModel } from "components.slint";
+import { PointerTarget } from "pointer.slint";
 import {
     SettingCard, SectionHeader, PageHeader, SideNav, StatusCorner, Backdrop, FocusRing, Icon,
     ActionButton, InfoLine,
@@ -31,6 +32,9 @@ export struct WifiRow {
     talls: int,
     notes: int,
     heads: int,
+    // Its place among the rows the remote stops on, which is how a pointer
+    // names it; -1 for a row the remote passes over.
+    slot: int,
 }
 
 // A scan running: Android's indeterminate circular progress
@@ -98,9 +102,19 @@ component RadioCard inherits Rectangle {
     in property <bool> info;
     in property <bool> info-focused;
     in property <string> icon;
+    // Pointed at, where the list gives it zones: the card, and its (i).
+    in property <string> pointer-zone;
+    in property <string> info-zone;
+    in property <int> pointer-index;
     property <bool> lit: focused && !info-focused;
 
     height: under == "" ? Metrics.set-h-flat : Metrics.set-h;
+
+    // First, so the (i) drawn later is over it and takes its own click.
+    if pointer-zone != "": PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
     border-radius: Metrics.s-radius;
     background: lit ? Theme.s-card-hi : Theme.s-card;
     border-width: 1px;
@@ -203,6 +217,10 @@ component RadioCard inherits Rectangle {
                     radius: parent.width / 2;
                     on: info-focused;
                 }
+                if info-zone != "": PointerTarget {
+                    zone: root.info-zone;
+                    index: root.pointer-index;
+                }
             }
         }
     }
@@ -238,6 +256,7 @@ component Frame inherits Rectangle {
         parent-label: "Bağlantılar";
         page-label: root.page;
         page-icon: root.page-icon;
+        back-zone: "back";
     }
     StatusCorner {
         x: root.width - Metrics.safe-x - self.width;
@@ -310,6 +329,9 @@ component RadioList inherits Rectangle {
     in property <int> focus-notes;
     in property <int> focus-heads;
     in property <bool> focus-tall;
+    // The rows' zone and the networks' (i) zone, by the row's slot.
+    in property <string> rows-zone;
+    in property <string> info-zone;
 
     property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
     property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
@@ -373,6 +395,12 @@ component RadioList inherits Rectangle {
                             radius: parent.height / 2;
                             on: row.focused;
                         }
+                        // "Yenile": a new search. Not while one runs, when
+                        // the spinner stands here and Ok does nothing.
+                        if row.slot >= 0: PointerTarget {
+                            zone: root.rows-zone;
+                            index: row.slot;
+                        }
                     }
                     // Measured off the reference recording: the ring is
                     // about 1.7 times the heading's text, near white.
@@ -392,6 +420,8 @@ component RadioList inherits Rectangle {
                     value: !known ? "…" : (present ? "" : "Bu kartta yok");
                     enabled: !known || present;
                     focused: row.focused;
+                    pointer-zone: row.slot >= 0 ? root.rows-zone : "";
+                    pointer-index: row.slot;
                 }
                 if row.kind == "card": RadioCard {
                     width: 100%;
@@ -406,6 +436,9 @@ component RadioList inherits Rectangle {
                     info: row.info;
                     info-focused: row.info-focused;
                     icon: row.icon;
+                    pointer-zone: row.slot >= 0 ? root.rows-zone : "";
+                    info-zone: row.info ? root.info-zone : "";
+                    pointer-index: row.slot;
                 }
                 if row.kind == "note": Text {
                     x: Metrics.card-pad * 0.4;
@@ -487,6 +520,8 @@ export component WifiScreen inherits Rectangle {
             focus-notes: root.focus-notes;
             focus-heads: root.focus-heads;
             focus-tall: root.focus-tall;
+            rows-zone: "wifi-rows";
+            info-zone: "wifi-info";
         }
     }
 
@@ -515,6 +550,8 @@ export component WifiScreen inherits Rectangle {
                 for label[i] in buttons: ActionButton {
                     label: label;
                     focused: i == button;
+                    pointer-zone: "wifi-buttons";
+                    pointer-index: i;
                 }
             }
             if facts.length > 0: Facts { rows: facts; }
@@ -584,6 +621,7 @@ export component WifiScreen inherits Rectangle {
                         font-weight: 700;
                     }
                 }
+                PointerTarget { zone: "wifi-form"; index: 0; }
             }
             if adding: Rectangle {
                 height: Metrics.vh * 0.07;
@@ -611,6 +649,7 @@ export component WifiScreen inherits Rectangle {
                         font-weight: 700;
                     }
                 }
+                PointerTarget { zone: "wifi-form"; index: 1; }
             }
 
             // The field and, beside it, the switch that turns the bullets
@@ -638,6 +677,7 @@ export component WifiScreen inherits Rectangle {
                             font-weight: 700;
                         }
                     }
+                    PointerTarget { zone: "wifi-form"; index: 2; }
                 }
 
                 Rectangle {
@@ -652,6 +692,7 @@ export component WifiScreen inherits Rectangle {
                         font-size: Metrics.root-font * 0.95;
                         font-weight: 700;
                     }
+                    PointerTarget { zone: "wifi-form"; index: 3; }
                 }
             }
 
@@ -660,6 +701,7 @@ export component WifiScreen inherits Rectangle {
                 key-row: root.key-row;
                 key-col: root.key-col;
                 active: focus-at == "keys";
+                pointer-zone: "wifi-keys";
             }
 
             Rectangle {
@@ -674,6 +716,7 @@ export component WifiScreen inherits Rectangle {
                     font-size: Metrics.root-font * 1.05;
                     font-weight: 700;
                 }
+                PointerTarget { zone: "wifi-form"; index: 4; }
             }
             }
         }
@@ -717,6 +760,7 @@ export component BluetoothScreen inherits Rectangle {
             focus-notes: root.focus-notes;
             focus-heads: root.focus-heads;
             focus-tall: root.focus-tall;
+            rows-zone: "bt-rows";
         }
     }
 }

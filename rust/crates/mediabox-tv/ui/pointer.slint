@@ -1,0 +1,158 @@
+import { Theme, Metrics, Icons } from "theme.slint";
+
+// A pointer on the television: where it is drawn, and what it is over.
+//
+// Rust decides where a pointer means anything (src/pointer.rs, one table)
+// and owns every focus; this only says which target the arrow is over. A
+// shared component that can be pointed at carries a `PointerTarget` when it
+// is given a zone, and names itself with the zone and its index; hover and a
+// click go to Rust, which moves the screen's own focus and runs the screen's
+// own Ok. A target never acts by itself.
+export global PointerHub {
+    // The arrow came over a target.
+    callback hover(string /* zone */, int /* index */);
+    // The main button went down (true) or up (false) on a target. Rust
+    // presses and releases the remote's own key with it, so a held button is
+    // a held Ok -- the remote's long press -- and a click is a press.
+    callback press(string /* zone */, int /* index */, bool /* down */);
+    // The press was taken away before the button came up (the arrow hidden,
+    // the screen changed): nothing is released, nothing fires.
+    callback cancel();
+    // A drag along a scrub bar (`PointerScrub`): phase 0 the button went
+    // down, 1 it moved while held, 2 it came up there, 3 it was taken away;
+    // `at` is the fraction of the bar's length, 0..=1.
+    callback scrub(string /* zone */, int /* phase */, float /* at */);
+    // Whether a pointer is the thing in use: its arrow is on the panel. The
+    // marks only a pointer needs -- a way back, a close -- are drawn only
+    // then, so a remote's screen is exactly what it was.
+    in-out property <bool> shown;
+}
+
+// Fills its parent; invisible. Only created where a zone is given, so a
+// component nobody made pointer-ready is exactly what it was.
+export component PointerTarget inherits TouchArea {
+    in property <string> zone;
+    in property <int> index;
+
+    changed has-hover => {
+        if self.has-hover {
+            PointerHub.hover(zone, index);
+        }
+    }
+    pointer-event(event) => {
+        if event.button == PointerEventButton.left {
+            if event.kind == PointerEventKind.down {
+                PointerHub.press(zone, index, true);
+            } else if event.kind == PointerEventKind.up {
+                PointerHub.press(zone, index, false);
+            } else if event.kind == PointerEventKind.cancel {
+                PointerHub.cancel();
+            }
+        }
+    }
+}
+
+// A modal's ground, the size of the panel: nothing under the modal is
+// pointed at through it, and a click on it is Back -- the modal closes, or
+// is answered "no", as the remote's Back does it.
+export component PointerShield inherits PointerTarget {
+    zone: "shield";
+    index: 0;
+}
+
+// A modal's own panel: a click on it where it has no target is nothing, and
+// does not fall through to the ground's Back.
+export component PointerSwallow inherits TouchArea { }
+
+// The arrow. Its tip is at (tip-x, tip-y) of the window; drawn last, over
+// everything, while a pointer is the thing in use.
+export component PointerArrow inherits Path {
+    in property <length> tip-x;
+    in property <length> tip-y;
+
+    width: Metrics.root-font * 1.4;
+    height: self.width;
+    x: tip-x - self.width * 3 / 24;
+    y: tip-y - self.height * 2 / 24;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: "M 3 2 L 3 19.5 L 7.6 15.2 L 10.6 22 L 13.6 20.7 L 10.7 14 L 17 14 Z";
+    fill: #ffffff;
+    stroke: #000000c0;
+    stroke-width: 1.5px;
+}
+
+// A bar a pointer drags along: a film's position. Down picks the place under
+// the arrow, a move with the button held follows it -- the TouchArea keeps
+// the arrow while the button is down, wherever it goes, so a drag that leaves
+// the bar is still this drag -- and up goes there. A press taken away (the
+// arrow hidden, the screen changed) is a cancel: nothing is gone to.
+export component PointerScrub inherits TouchArea {
+    in property <string> zone;
+
+    function at() -> float {
+        return self.width > 0 ? clamp(self.mouse-x / self.width, 0.0, 1.0) : 0.0;
+    }
+    changed has-hover => {
+        if self.has-hover {
+            PointerHub.hover(zone, 0);
+        }
+    }
+    pointer-event(event) => {
+        if event.button == PointerEventButton.left {
+            if event.kind == PointerEventKind.down {
+                PointerHub.scrub(zone, 0, at());
+            } else if event.kind == PointerEventKind.up {
+                PointerHub.scrub(zone, 2, at());
+            } else if event.kind == PointerEventKind.cancel {
+                PointerHub.scrub(zone, 3, 0.0);
+            }
+        }
+    }
+    moved => {
+        if self.pressed {
+            PointerHub.scrub(zone, 1, at());
+        }
+    }
+}
+
+// The way back, for a pointer: the remote's Back under the arrow. Round,
+// in the corner of whatever it closes -- a sheet, a list, a panel -- with a
+// cross, or with the back arrow where it leaves a screen. Drawn only while a
+// pointer is in use.
+export component PointerClose inherits Rectangle {
+    // "close" or "back".
+    in property <string> mark: "close";
+    in property <length> size: Metrics.root-font * 2.2;
+    // "back"; or the way out of a film, which is its own ("player-exit").
+    in property <string> zone: "back";
+    property <bool> lit: target.has-hover;
+
+    visible: PointerHub.shown;
+    width: size;
+    height: size;
+    border-radius: size / 2;
+    background: lit ? Theme.focus-fill : #ffffff1a;
+    border-width: 1px;
+    border-color: lit ? transparent : #ffffff33;
+    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: size * 0.5;
+        height: size * 0.5;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: Icons.path(mark);
+        fill: transparent;
+        stroke: lit ? #0a0c10 : Theme.text;
+        stroke-width: max(1.6px, size * 0.05);
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    target := PointerTarget {
+        zone: root.zone;
+        index: 0;
+    }
+}

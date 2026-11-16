@@ -23,6 +23,8 @@
 //! a degree. The board's own curve, before one of these is saved, is steps,
 //! and is drawn as steps.
 
+use super::settings::EditorTarget;
+use crate::pointer::Aim;
 use mediabox_core::{
     FAN_CURVE_MAX_POINTS, FAN_CURVE_MIN_POINTS, FAN_PWM_MAX, FAN_TEMP_MAX_C, FanBoardFix, FanCurve,
     FanProfile, FanStatus, fan_pwm_allowed, fan_pwm_from_percent, fan_pwm_percent,
@@ -496,6 +498,63 @@ impl Cooling {
     }
 
     // ------------------------------------------------------------ the keys
+
+    /// The focus onto what a pointer is over: a preset chip that can be
+    /// loaded, a cell of the table (the add and remove buttons only on the
+    /// selected row, as drawn), a button that can be pressed, or -- only
+    /// while it is up -- an answer to the question. While a cell is open for
+    /// editing, only that cell: a click on it is Ok, which closes it.
+    pub fn point(&mut self, target: EditorTarget) -> Aim {
+        if !self.available() {
+            return Aim::Refused;
+        }
+        if self.prompt {
+            return match target {
+                EditorTarget::Confirm(at) => Aim::set(&mut self.prompt_idx, at, at <= 1),
+                _ => Aim::Refused,
+            };
+        }
+        if let Some(edit) = &self.edit {
+            return if target == EditorTarget::Cell(edit.row, edit.col) {
+                Aim::Here
+            } else {
+                Aim::Refused
+            };
+        }
+        let before = (self.zone, self.row, self.col, self.idx);
+        match target {
+            EditorTarget::Chip(at) if self.chips().get(at).is_some_and(|(_, on)| *on) => {
+                self.zone = Zone::Profile;
+                self.idx = at;
+            }
+            EditorTarget::Cell(row, col)
+                if row < self.count()
+                    && col < 4
+                    && (col < 2 || row == self.row)
+                    && self.row_cells(row)[col] =>
+            {
+                self.zone = Zone::Table;
+                self.row = row;
+                self.col = col;
+            }
+            EditorTarget::Action(at) if self.actions().get(at).is_some_and(|(_, on)| *on) => {
+                self.zone = Zone::Actions;
+                self.idx = at;
+            }
+            _ => return Aim::Refused,
+        }
+        if before == (self.zone, self.row, self.col, self.idx) {
+            Aim::Here
+        } else {
+            self.note.clear();
+            Aim::Moved
+        }
+    }
+
+    /// Whether the question after a save is over the page.
+    pub fn modal(&self) -> bool {
+        self.prompt
+    }
 
     pub fn press(&mut self) -> Press {
         if !self.available() {
@@ -1206,6 +1265,89 @@ mod tests {
     }
 
     /// Walking the whole editor, every cell and button, changes nothing.
+    /// A pointer on a chip, a cell or a button is the remote on it; a chip
+    /// that cannot be loaded and a button that cannot be pressed refuse it;
+    /// the add and remove buttons are only the selected row's.
+    /// A cell opened by a click is changed by the wheel (Up and Down), kept
+    /// by a click on the same cell (Ok, as the remote's), and put back as it
+    /// was by Back -- the right button. A click on another cell while one is
+    /// open does nothing: neither keeps nor drops the edit.
+    #[test]
+    fn a_cell_open_by_the_pointer_is_kept_by_ok_and_put_back_by_back() {
+        use crate::pointer::Aim;
+        let mut cooling = editor();
+        let before = points(&cooling);
+        assert!(cooling.point(EditorTarget::Cell(1, 0)).taken());
+        assert_eq!(cooling.press(), Press::Changed, "opened");
+        assert_eq!(cooling.step(0, -1), Nav::Moved, "the wheel up");
+        assert_ne!(points(&cooling), before);
+        assert_eq!(
+            cooling.point(EditorTarget::Cell(2, 0)),
+            Aim::Refused,
+            "another cell"
+        );
+        assert_ne!(points(&cooling), before, "still open, still changed");
+        assert!(cooling.back(), "Back");
+        assert_eq!(points(&cooling), before, "put back as it was");
+        // Again, and kept this time.
+        assert_eq!(cooling.point(EditorTarget::Cell(1, 0)), Aim::Here);
+        cooling.press();
+        cooling.step(0, -1);
+        let changed = points(&cooling);
+        assert_eq!(
+            cooling.point(EditorTarget::Cell(1, 0)),
+            Aim::Here,
+            "the same cell"
+        );
+        assert_eq!(cooling.press(), Press::Changed, "kept");
+        assert_eq!(points(&cooling), changed);
+        assert_eq!(
+            cooling.point(EditorTarget::Cell(2, 0)),
+            Aim::Moved,
+            "closed: the others take it again"
+        );
+    }
+
+    #[test]
+    fn a_pointer_walks_the_fan_curve() {
+        use crate::pointer::Aim;
+        let mut cooling = editor();
+        assert_eq!(cooling.point(EditorTarget::Cell(1, 0)), Aim::Moved);
+        assert_eq!(
+            (cooling.zone, cooling.row, cooling.col),
+            (Zone::Table, 1, 0)
+        );
+        assert_eq!(
+            cooling.point(EditorTarget::Cell(2, 2)),
+            Aim::Refused,
+            "row 2 is not selected"
+        );
+        assert_eq!(cooling.point(EditorTarget::Cell(99, 0)), Aim::Refused);
+        assert_eq!(cooling.point(EditorTarget::Chip(1)), Aim::Moved);
+        assert_eq!(cooling.zone, Zone::Profile);
+        assert_eq!(
+            cooling.point(EditorTarget::Chip(2)),
+            Aim::Refused,
+            "Özel is not a preset"
+        );
+        assert_eq!(
+            cooling.point(EditorTarget::Action(2)),
+            Aim::Moved,
+            "Varsayılan"
+        );
+        assert_eq!(
+            cooling.point(EditorTarget::Action(0)),
+            Aim::Refused,
+            "nothing to save"
+        );
+        // A cell open for editing keeps the pointer to itself.
+        assert_eq!(cooling.point(EditorTarget::Cell(0, 0)), Aim::Moved);
+        assert_eq!(cooling.press(), Press::Changed);
+        assert_eq!(cooling.point(EditorTarget::Cell(1, 0)), Aim::Refused);
+        assert_eq!(cooling.point(EditorTarget::Cell(0, 0)), Aim::Here);
+        assert!(!cooling.modal());
+    }
+
     #[test]
     fn navigation_alone_never_changes_a_value() {
         let mut cooling = editor();

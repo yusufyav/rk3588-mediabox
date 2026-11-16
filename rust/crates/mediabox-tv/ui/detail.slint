@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { ReferenceIcon } from "reference-icons.slint";
 import { Tip } from "tip.slint";
@@ -37,9 +38,19 @@ component EpisodeLine inherits Rectangle {
     in property <bool> focused;
     // The remote is on the row's watched button rather than on the row.
     in property <bool> marking;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     property <length> rem: Metrics.vw / 128;
 
     border-radius: rem * 0.75;
+
+    // First, so the row's own watched button -- a target of its own -- is
+    // over it: a click on the button is the button, never the episode.
+    if pointer-zone != "": PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
     background: focused ? #ffffff1f : transparent;
     border-width: focused ? max(2px, rem * 0.15) : 0px;
     border-color: Theme.focus-ring;
@@ -159,6 +170,11 @@ component EpisodeLine inherits Rectangle {
             width: focused ? Metrics.vh * 0.05 : 0px;
             visible: focused;
 
+            if focused && root.pointer-zone != "": PointerTarget {
+                zone: "detail-marks";
+                index: root.pointer-index;
+            }
+
             Rectangle {
                 y: (parent.height - self.height) / 2;
                 width: parent.width;
@@ -262,6 +278,9 @@ component GroupStop inherits Rectangle {
     in property <string> cut;
     in property <bool> focused;
     in property <bool> enabled: true;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
 
     width: self.height;
     opacity: enabled ? 1.0 : 0.38;
@@ -285,6 +304,13 @@ component GroupStop inherits Rectangle {
         anchor-w: root.width;
         anchor-h: root.height;
     }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 // Round, marked and named — the reference's shape, and the shape that survives
@@ -297,6 +323,9 @@ component Action inherits Rectangle {
     in property <string> cut;
     in property <bool> focused;
     in property <bool> enabled: true;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
 
     height: Metrics.vh * 0.056;
     // The reference's trailer button carries its word; its library and
@@ -336,6 +365,13 @@ component Action inherits Rectangle {
             wrap: no-wrap;
         }
     }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 // One row of the source column, as the reference's stream row, off its
@@ -347,6 +383,9 @@ component SourceLine inherits Rectangle {
     // layout, and a property cannot shadow it.
     in property <SourceRow> entry;
     in property <bool> focused;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     property <length> rem: Metrics.vw / 128;
 
     border-radius: rem * 0.75;
@@ -401,6 +440,11 @@ component SourceLine inherits Rectangle {
                 }
             }
         }
+    }
+
+    if pointer-zone != "": PointerTarget {
+        zone: root.pointer-zone;
+        index: root.pointer-index;
     }
 }
 
@@ -537,8 +581,17 @@ export component Detail inherits Rectangle {
         viewbox-width: 24;
         viewbox-height: 24;
         commands: "M15.5 3.2L6.7 12l8.8 8.8";
-        stroke: Theme.text;
+        stroke: detail-back.has-hover ? Theme.focus : Theme.text;
         stroke-width: 2.1px;
+    }
+    // The chevron is the way back for a pointer too: a click on it is Back.
+    detail-back := PointerTarget {
+        x: root.width * 0.018 - Metrics.vh * 0.02;
+        y: root.height * 0.03 - Metrics.vh * 0.02;
+        width: Metrics.vh * 0.064;
+        height: Metrics.vh * 0.064;
+        zone: "back";
+        index: 0;
     }
 
     // ------------------------------------------------------------ the record
@@ -666,6 +719,8 @@ export component Detail inherits Rectangle {
             enabled: enabled[0];
             // One focus on the panel: not while the remote is in the column.
             focused: !on-sources && !on-episodes && focus-col == 0;
+            pointer-zone: "detail-actions";
+            pointer-index: 0;
         }
         if actions.length > 1: Rectangle {
             width: self.height * (actions.length - 1);
@@ -682,6 +737,8 @@ export component Detail inherits Rectangle {
                     cut: cuts[i];
                     enabled: enabled[i];
                     focused: !on-sources && !on-episodes && i == focus-col;
+                    pointer-zone: label == "" ? "detail-actions" : "";
+                    pointer-index: i;
                 }
             }
         }
@@ -756,6 +813,11 @@ export component Detail inherits Rectangle {
 
                 animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
+                PointerTarget {
+                    zone: "detail-filter";
+                    index: 0;
+                }
+
                 HorizontalLayout {
                     padding-left: rem;
                     padding-right: rem;
@@ -825,10 +887,20 @@ export component Detail inherits Rectangle {
                         entry: source;
                         height: list.row-h;
                         focused: on-sources && !on-filter && !filter-open && i == source-focus;
+                        pointer-zone: "detail-sources";
+                        pointer-index: i;
                     }
                 }
             }
 
+            // While the list is down nothing else is pointed at; a click off
+            // it is Back, which closes it.
+            if filter-open: PointerShield {
+                x: -parent.absolute-position.x;
+                y: -parent.absolute-position.y;
+                width: root.width;
+                height: root.height;
+            }
             if filter-open: Rectangle {
                 x: select.x;
                 y: panel-pad + head-h + rem * 0.3;
@@ -838,6 +910,8 @@ export component Detail inherits Rectangle {
                 background: #141a29;
                 border-width: 1px;
                 border-color: #ffffff1f;
+
+                PointerSwallow { }
 
                 VerticalLayout {
                     x: 0;
@@ -883,6 +957,10 @@ export component Detail inherits Rectangle {
                                 }
                             }
                         }
+                        PointerTarget {
+                            zone: "detail-providers";
+                            index: i;
+                        }
                     }
                 }
             }
@@ -910,6 +988,10 @@ export component Detail inherits Rectangle {
                     x: 0;
                     width: bar.rem * 6.5;
                     opacity: season-index > 0 ? 1.0 : 0.5;
+                    if season-index > 0: PointerTarget {
+                        zone: "detail-seasons";
+                        index: 0;
+                    }
                     HorizontalLayout {
                         padding: bar.rem * 0.5;
                         spacing: bar.rem * 0.5;
@@ -943,6 +1025,14 @@ export component Detail inherits Rectangle {
                     border-radius: self.height / 2;
                     background: bar.focused ? Theme.focus-fill : transparent;
                     animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                    // The season's name is where the remote stands on the
+                    // bar: hover puts it there, a click is its Ok -- which
+                    // chooses nothing; Left and Right (the ends, the
+                    // wheel) walk the seasons.
+                    if seasons.length > 0: PointerTarget {
+                        zone: "detail-seasons";
+                        index: 2;
+                    }
 
                     HorizontalLayout {
                         alignment: center;
@@ -972,6 +1062,10 @@ export component Detail inherits Rectangle {
                     x: parent.width - self.width;
                     width: bar.rem * 6.5;
                     opacity: season-index + 1 < seasons.length ? 1.0 : 0.5;
+                    if season-index + 1 < seasons.length: PointerTarget {
+                        zone: "detail-seasons";
+                        index: 1;
+                    }
                     HorizontalLayout {
                         padding: bar.rem * 0.5;
                         spacing: bar.rem * 0.5;
@@ -1038,6 +1132,8 @@ export component Detail inherits Rectangle {
                         height: episode-list.row-h;
                         focused: on-episodes && !on-seasons && i == episode-focus;
                         marking: on-mark;
+                        pointer-zone: "detail-episodes";
+                        pointer-index: i;
                     }
                 }
             }

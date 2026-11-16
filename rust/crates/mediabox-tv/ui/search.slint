@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { Rail, RailModel, KeyRow, KeyCap, Keyboard } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -78,6 +79,8 @@ export component Search inherits Rectangle {
                 head: head;
                 focus-col: r < rail-cols.length ? rail-cols[r] : 0;
                 active: pane == 2 && rail-row == r;
+                pointer-zone: "shelves";
+                pointer-row: r;
             }
         }
     }
@@ -109,6 +112,12 @@ export component Search inherits Rectangle {
     //
     // Under the search box, over the page: the letters, and beside them the
     // reference's suggestions and earlier searches.
+    // While the panel is down, the results and the frame under it are not
+    // pointed at; a click off it is Back, which takes it up.
+    if editing: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     if editing: Rectangle {
         property <length> keys-w: Metrics.key-w * 10 + Metrics.key-gap * 9;
         property <length> pad: Metrics.root-font * 1.1;
@@ -122,6 +131,8 @@ export component Search inherits Rectangle {
         border-width: 1px;
         border-color: #ffffff1a;
 
+        PointerSwallow { }
+
         keyboard := Keyboard {
             x: pad;
             y: pad;
@@ -130,6 +141,7 @@ export component Search inherits Rectangle {
             key-row: root.key-row;
             key-col: root.key-col;
             active: root.pane == 0;
+            pointer-zone: "search-keys";
         }
 
         VerticalLayout {
@@ -195,6 +207,11 @@ export component Search inherits Rectangle {
                             horizontal-alignment: right;
                             wrap: no-wrap;
                         }
+                    }
+
+                    PointerTarget {
+                        zone: "search-list";
+                        index: i;
                     }
                 }
             }

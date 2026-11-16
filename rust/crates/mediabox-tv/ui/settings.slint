@@ -74,6 +74,8 @@ export component Settings inherits Rectangle {
         parent-label: page == "" ? "" : sections[section].label;
         page-label: page;
         page-icon: page-icon;
+        pointer-zone: "settings-sections";
+        back-zone: "back";
     }
 
     StatusCorner {
@@ -187,6 +189,8 @@ export component Settings inherits Rectangle {
                     enabled: entry.enabled;
                     toggle: entry.toggle;
                     focused: entry.enabled && !on-sections && !choice-open && i == row-index;
+                    pointer-zone: entry.enabled ? "settings-rows" : "";
+                    pointer-index: i;
                 }
             }
         }
@@ -202,5 +206,6 @@ export component Settings inherits Rectangle {
         items: choice;
         focus-at: choice-focus;
         note: choice-note;
+        pointer-zone: "settings-choice";
     }
 }

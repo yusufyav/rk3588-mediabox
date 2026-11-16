@@ -1,3 +1,4 @@
+import { PointerTarget } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import {
     SettingCard, InfoPanel, InfoLine, Badge, StateNote, ChoiceItem, ChoiceSheet,
@@ -73,6 +74,8 @@ export component AudioPane inherits Rectangle {
                 kind: card.kind;
                 enabled: card.enabled;
                 focused: active-pane && card.focused && !view.picker-open;
+                pointer-zone: card.enabled ? "editor-cards" : "";
+                pointer-index: i;
             }
             // The level, drawn: a bar the remote's Left and Right move.
             if i == 4: Rectangle {
@@ -86,6 +89,25 @@ export component AudioPane inherits Rectangle {
                     border-radius: parent.border-radius;
                     background: view.muted ? Theme.dim : (view.volume-focused && active-pane ? Theme.focus : #c9ced8);
                     animate width { duration: Theme.t-focus; easing: Theme.ease; }
+                }
+                // Its lower and upper halves are Left and Right on the volume
+                // card: a step down or up, as the remote's. Taller than the
+                // bar, so a thin line can be hit.
+                PointerTarget {
+                    x: 0;
+                    y: -gap * 0.5;
+                    width: parent.width / 2;
+                    height: parent.height + gap;
+                    zone: "editor-volume";
+                    index: 0;
+                }
+                PointerTarget {
+                    x: parent.width / 2;
+                    y: -gap * 0.5;
+                    width: parent.width / 2;
+                    height: parent.height + gap;
+                    zone: "editor-volume";
+                    index: 1;
                 }
             }
         }
@@ -118,5 +140,6 @@ export component AudioPane inherits Rectangle {
         title: view.picker-title;
         items: view.picker;
         focus-at: view.picker-focus;
+        pointer-zone: "editor-picker";
     }
 }
