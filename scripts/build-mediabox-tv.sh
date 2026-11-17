@@ -115,7 +115,9 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
 export CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
 export CFLAGS_aarch64_unknown_linux_gnu="--sysroot=$sysroot"
-( cd "$crate" && cargo build --release --target "$triple" )
+# Warning-free or no binary: rustc's lints, the Slint compiler's and anything
+# else cargo calls a warning fail the build (scripts/cargo-no-warnings.sh).
+"$here/scripts/cargo-no-warnings.sh" "$crate" build --release --target "$triple"
 
 bin="$crate/target/$triple/release/mediabox-tv"
 
