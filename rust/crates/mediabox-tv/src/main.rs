@@ -950,6 +950,16 @@ impl App {
         self.pointer_wake();
         let height = self.logical_size().map_or(720.0, |size| size.height);
         let scrolled = self.scroller.add(scroll, pointer::detent(height));
+        // The end of a finger or continuous scroll moves nothing itself:
+        // fingers lifted while moving leave the surface coasting, as a drag
+        // let go while moving does; anything else stops where it is.
+        if let pointer::Scroll::Ended { fingers, stopped } = scroll {
+            if self.gesture.lift(stopped, fingers, height, Instant::now()) {
+                self.coast_timer.stop();
+                self.pointer_coast_start();
+            }
+            return;
+        }
         let lanes = self
             .pointer_lit
             .map(|(zone, index)| zone.lanes(index))

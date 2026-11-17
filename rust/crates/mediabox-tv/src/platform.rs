@@ -3620,14 +3620,11 @@ impl SplitPlatform {
                     }
                     input::event::PointerEvent::ScrollFinger(fingers) => {
                         use input::event::pointer::{Axis, PointerScrollEvent};
-                        let value = |axis| {
-                            if fingers.has_axis(axis) {
-                                fingers.scroll_value(axis)
-                            } else {
-                                0.0
-                            }
-                        };
-                        let scroll = crate::pointer::Scroll::Finger(
+                        // Each axis the event has, or none: a 0 on every one
+                        // it has is the sequence's end (`Scroll::of_axes`).
+                        let value = |axis| fingers.has_axis(axis).then(|| fingers.scroll_value(axis));
+                        let scroll = crate::pointer::Scroll::of_axes(
+                            true,
                             value(Axis::Horizontal),
                             value(Axis::Vertical),
                         );
@@ -3635,14 +3632,11 @@ impl SplitPlatform {
                     }
                     input::event::PointerEvent::ScrollContinuous(continuous) => {
                         use input::event::pointer::{Axis, PointerScrollEvent};
-                        let value = |axis| {
-                            if continuous.has_axis(axis) {
-                                continuous.scroll_value(axis)
-                            } else {
-                                0.0
-                            }
-                        };
-                        let scroll = crate::pointer::Scroll::Continuous(
+                        // Each axis the event has, or none: a 0 on every one
+                        // it has is the sequence's end (`Scroll::of_axes`).
+                        let value = |axis| continuous.has_axis(axis).then(|| continuous.scroll_value(axis));
+                        let scroll = crate::pointer::Scroll::of_axes(
+                            false,
                             value(Axis::Horizontal),
                             value(Axis::Vertical),
                         );

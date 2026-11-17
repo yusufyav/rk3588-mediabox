@@ -1157,15 +1157,7 @@ impl Gesture {
                 let lane = *lane;
                 *total = lane.along((at.0 - origin.0, at.1 - origin.1));
                 let total = *total;
-                self.trail.push((now, total));
-                if let Some(keep) = self
-                    .trail
-                    .iter()
-                    .position(|(t, _)| now.duration_since(*t) <= TRAIL)
-                {
-                    // Keep one sample before the window, for a speed across it.
-                    self.trail.drain(..keep.saturating_sub(1));
-                }
+                self.sample(now, total);
                 Step::Pan {
                     lane,
                     gesture: self.id,
@@ -1351,6 +1343,7 @@ impl Gesture {
             }
             Phase::Idle | Phase::Coasting { .. } | Phase::Wheeling { .. } => {
                 self.id += 1;
+                self.trail.clear();
                 0.0
             }
             _ => return Step::Nothing,
@@ -1362,10 +1355,65 @@ impl Gesture {
             total,
             at: now,
         };
+        // The fingers' speed, for a coast when they are lifted (`lift`).
+        self.sample(now, total);
         Step::Pan {
             lane,
             gesture: self.id,
             total,
+        }
+    }
+
+    /// A scroll sequence ended (`Scroll::Ended`) on the axes `stopped`
+    /// (horizontal, vertical). Fingers lifted off a touchpad while moving
+    /// leave a pixel surface coasting, as a drag let go while moving does
+    /// (`release`); a list drawn a row at a time stops where they left it,
+    /// and so does anything else (a continuous scroll). The panel is
+    /// `height` logical pixels tall: the coast's speeds are fractions of
+    /// it. Returns whether the surface coasts now.
+    pub fn lift(
+        &mut self,
+        stopped: (bool, bool),
+        fingers: bool,
+        height: f32,
+        now: std::time::Instant,
+    ) -> bool {
+        let Phase::Wheeling { lane, total, .. } = self.phase else {
+            return false;
+        };
+        let along = match lane.axis {
+            Axis::Horizontal => stopped.0,
+            Axis::Vertical => stopped.1,
+        };
+        if !along {
+            return false;
+        }
+        self.height = height.max(1.0);
+        let velocity = self.velocity(now);
+        self.phase = if fingers && !lane.stepped() && velocity.abs() >= self.height * 0.3 {
+            Phase::Coasting {
+                lane,
+                total,
+                velocity: velocity.clamp(-self.height * 4.0, self.height * 4.0),
+                since: 0.0,
+            }
+        } else {
+            Phase::Idle
+        };
+        self.coasting()
+    }
+
+    /// Where the hand or the fingers have taken the surface, at `now`: the
+    /// last moment of it is kept for its speed (`velocity`).
+    fn sample(&mut self, now: std::time::Instant, total: f32) {
+        self.trail.push((now, total));
+        if let Some(keep) = self
+            .trail
+            .iter()
+            .position(|(t, _)| now.duration_since(*t) <= TRAIL)
+        {
+            // Keep one sample before the window, for a speed across it.
+            self.trail.drain(..keep.saturating_sub(1));
         }
     }
 }
@@ -1382,6 +1430,35 @@ pub enum Scroll {
     Finger(f64, f64),
     /// A scroll that is neither: a trackball's, a button held while moving.
     Continuous(f64, f64),
+    /// A scroll sequence ended on the axes `stopped` (horizontal,
+    /// vertical): libinput's terminating event, a value of 0 on every axis
+    /// it has. Guaranteed for fingers and for a continuous scroll, never
+    /// for a wheel (`Scroll::of_axes`). `fingers`: they were lifted off a
+    /// touchpad, which may leave the surface coasting (`Gesture::lift`).
+    Ended { fingers: bool, stopped: (bool, bool) },
+}
+
+impl Scroll {
+    /// A finger or continuous scroll event as libinput reports it: each
+    /// axis's value, or `None` where the event does not have the axis. An
+    /// event whose every axis is 0 is the sequence's end; otherwise an axis
+    /// it does not have is no movement on it.
+    pub fn of_axes(fingers: bool, horizontal: Option<f64>, vertical: Option<f64>) -> Scroll {
+        let has = (horizontal.is_some(), vertical.is_some());
+        let zero = |value: Option<f64>| value.is_none_or(|value| value == 0.0);
+        if (has.0 || has.1) && zero(horizontal) && zero(vertical) {
+            return Scroll::Ended {
+                fingers,
+                stopped: has,
+            };
+        }
+        let (h, v) = (horizontal.unwrap_or(0.0), vertical.unwrap_or(0.0));
+        if fingers {
+            Scroll::Finger(h, v)
+        } else {
+            Scroll::Continuous(h, v)
+        }
+    }
 }
 
 /// A scroll, in what a surface moves by and what the arrows step by.
@@ -1446,6 +1523,12 @@ impl Scroller {
                     ),
                     eased: false,
                 }
+            }
+            // A part-step left over is the sequence's own: the next one
+            // starts from nothing.
+            Scroll::Ended { .. } => {
+                self.fingers = (0.0, 0.0);
+                Scrolled::default()
             }
         }
     }
@@ -2606,6 +2689,126 @@ mod tests {
         gesture.release(Instant::now());
         assert!(!gesture.settle());
         assert_eq!(gesture.phase(), Phase::Scrub);
+    }
+
+    /// libinput ends a finger and a continuous scroll with an event that is
+    /// 0 on every axis it has; that end is kept, never taken for no
+    /// movement. An axis the event does not have is no movement on it.
+    #[test]
+    fn a_scroll_s_end_is_its_own_event() {
+        assert_eq!(
+            Scroll::of_axes(true, None, Some(12.5)),
+            Scroll::Finger(0.0, 12.5)
+        );
+        assert_eq!(
+            Scroll::of_axes(false, Some(-3.0), Some(0.0)),
+            Scroll::Continuous(-3.0, 0.0),
+            "one axis still moving is no end"
+        );
+        assert_eq!(
+            Scroll::of_axes(true, None, Some(0.0)),
+            Scroll::Ended {
+                fingers: true,
+                stopped: (false, true)
+            }
+        );
+        assert_eq!(
+            Scroll::of_axes(true, Some(0.0), Some(0.0)),
+            Scroll::Ended {
+                fingers: true,
+                stopped: (true, true)
+            }
+        );
+        assert_eq!(
+            Scroll::of_axes(false, Some(0.0), None),
+            Scroll::Ended {
+                fingers: false,
+                stopped: (true, false)
+            }
+        );
+        // An event with no axis at all says nothing.
+        assert_eq!(Scroll::of_axes(true, None, None), Scroll::Finger(0.0, 0.0));
+        // The end moves nothing, and the part-step left over is forgotten.
+        let steps = |s: Scrolled| s.steps;
+        let mut scroller = Scroller::default();
+        let ended = Scroll::Ended {
+            fingers: true,
+            stopped: (false, true),
+        };
+        assert_eq!(steps(scroller.add(Scroll::Finger(0.0, 30.0), 50.0)), (0, 0));
+        assert_eq!(scroller.add(ended, 50.0), Scrolled::default());
+        assert_eq!(steps(scroller.add(Scroll::Finger(0.0, 30.0), 50.0)), (0, 0));
+    }
+
+    /// Fingers lifted off a touchpad while moving leave a pixel surface
+    /// coasting the way they went, slowing to a stop, as a drag let go
+    /// while moving does. Fingers that had stopped, a list drawn a row at a
+    /// time, a continuous scroll and the end of the other axis do not.
+    #[test]
+    fn fingers_lifted_while_moving_coast_and_nothing_else_does() {
+        use std::time::Duration;
+        let lane = Lane::vertical(Zone::Shelves);
+        let start = Instant::now();
+        let flick = |gesture: &mut Gesture, lane: Lane| {
+            for n in 0..6 {
+                gesture.wheel(lane, 30.0, start + Duration::from_millis(10 * n));
+            }
+            start + Duration::from_millis(55)
+        };
+        let both = (true, true);
+
+        let mut gesture = Gesture::default();
+        let lifted = flick(&mut gesture, lane);
+        assert!(gesture.lift(both, true, 720.0, lifted));
+        let Phase::Coasting { velocity, total, .. } = gesture.phase() else {
+            panic!("{:?}", gesture.phase());
+        };
+        // Content follows the fingers: scrolled down, it went up, and runs on.
+        assert!(velocity < 0.0 && total == -180.0, "{velocity} {total}");
+        let id = gesture.id();
+        let Step::Pan {
+            total: on,
+            gesture: same,
+            ..
+        } = gesture.coast(0.016)
+        else {
+            panic!("a coast moves the surface");
+        };
+        assert!(on < total && same == id, "on the way it went, one gesture");
+        let mut frames = 0;
+        while gesture.coasting() {
+            gesture.coast(0.016);
+            frames += 1;
+            assert!(frames < 200, "a coast ends");
+        }
+        assert_eq!(gesture.phase(), Phase::Idle);
+
+        // Fingers that had stopped before they were lifted.
+        let mut gesture = Gesture::default();
+        let lifted = flick(&mut gesture, lane);
+        assert!(!gesture.lift(both, true, 720.0, lifted + Duration::from_millis(200)));
+        assert_eq!(gesture.phase(), Phase::Idle);
+
+        // A list drawn a row at a time stops where they left it.
+        let mut gesture = Gesture::default();
+        let lifted = flick(&mut gesture, Lane::vertical(Zone::LiveGuide));
+        assert!(!gesture.lift(both, true, 720.0, lifted));
+        assert_eq!(gesture.phase(), Phase::Idle);
+
+        // A continuous scroll's end is an end, never a coast.
+        let mut gesture = Gesture::default();
+        let lifted = flick(&mut gesture, lane);
+        assert!(!gesture.lift(both, false, 720.0, lifted));
+        assert_eq!(gesture.phase(), Phase::Idle);
+
+        // The other axis ending leaves this one scrolling.
+        let mut gesture = Gesture::default();
+        let lifted = flick(&mut gesture, lane);
+        assert!(!gesture.lift((true, false), true, 720.0, lifted));
+        assert!(matches!(gesture.phase(), Phase::Wheeling { .. }));
+
+        // Nothing scrolling: nothing to lift.
+        assert!(!Gesture::default().lift(both, true, 720.0, lifted));
     }
 
     /// Held still, a press may be the remote's long Ok (the application

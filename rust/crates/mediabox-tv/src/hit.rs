@@ -1011,3 +1011,43 @@ fn a_press_on_nothing_leaves_the_application_free() {
     ));
     assert_eq!(settings_focus(), focus);
 }
+
+/// Two fingers on a touchpad over the settings rows, moving, then lifted:
+/// libinput's end of the sequence reaches the application as its own
+/// event and the rows coast on the way the fingers went, the focus where
+/// it was. Before, the end was read as no movement and thrown away.
+#[test]
+fn fingers_lifted_off_a_touchpad_leave_the_rows_coasting() {
+    use crate::pointer::{Phase, Scroll, Zone};
+    let ui = driven();
+    app(|app| app.open(crate::route::Route::Settings));
+    let rows = find(&ui, Some(Zone::SettingsRows));
+    point(&ui, rows.0, rows.1);
+    let focus = settings_focus();
+    for _ in 0..6 {
+        crate::platform::hand_scroll(ui.window(), Scroll::of_axes(true, None, Some(30.0)));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(matches!(
+        app(|app| app.gesture.phase()),
+        Phase::Wheeling { lane, .. } if lane.zone == Zone::SettingsRows
+    ));
+    crate::platform::hand_scroll(ui.window(), Scroll::of_axes(true, None, Some(0.0)));
+    let phase = app(|app| app.gesture.phase());
+    assert!(
+        matches!(phase, Phase::Coasting { lane, velocity, .. }
+            if lane.zone == Zone::SettingsRows && velocity < 0.0),
+        "{phase:?}"
+    );
+    assert!(app(|app| app.coast_timer.running()), "its frames are timed");
+    assert_eq!(settings_focus(), focus);
+    // A key ends it, as it ends every gesture.
+    app(|app| {
+        app.remote_key(
+            mediabox_core::InputAction::Back,
+            true,
+            crate::input::Origin::Keyboard,
+        )
+    });
+    assert!(!app(|app| app.gesture.coasting()));
+}
