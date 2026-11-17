@@ -849,7 +849,16 @@ fn a_pointer_moves_only_the_surface_it_drags_and_the_remote_brings_it_back() {
 /// `platform::hand_scroll`). What is checked is what the application does
 /// in that order -- where the remote's focus is, what the gesture moves --
 /// not what a source file says.
-fn driven() -> MediaBoxWindow {
+/// The test's own place for what an `App` keeps, removed when the test ends.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn driven() -> (MediaBoxWindow, Scratch) {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     window.set_size(slint::PhysicalSize::new(W, H));
     slint::platform::set_platform(Box::new(Headless {
@@ -874,7 +883,7 @@ fn driven() -> MediaBoxWindow {
     let app = crate::App::new(&ui, std::time::Instant::now(), false, files);
     crate::APP.with(|slot| *slot.borrow_mut() = Some(Rc::new(RefCell::new(app))));
     crate::wire_pointer(&ui);
-    ui
+    (ui, Scratch(dir))
 }
 
 fn app<R>(f: impl FnOnce(&mut crate::App) -> R) -> R {
@@ -934,7 +943,7 @@ fn settings_focus() -> (usize, crate::screens::settings::Pane) {
 fn the_first_wheel_after_a_key_scrolls_what_is_under_the_arrow() {
     use crate::pointer::{Phase, Scroll, Zone};
     use mediabox_core::InputAction;
-    let ui = driven();
+    let (ui, _scratch) = driven();
     app(|app| app.open(crate::route::Route::Settings));
     let rows = find(&ui, Some(Zone::SettingsRows));
     // The remote's own pace (`input::Dispatcher`): a step sooner than this
@@ -989,7 +998,7 @@ fn the_first_wheel_after_a_key_scrolls_what_is_under_the_arrow() {
 #[test]
 fn a_press_on_nothing_leaves_the_application_free() {
     use crate::pointer::{Phase, Scroll, Zone};
-    let ui = driven();
+    let (ui, _scratch) = driven();
     app(|app| app.open(crate::route::Route::Settings));
     let nothing = find(&ui, None);
     let rows = find(&ui, Some(Zone::SettingsRows));
@@ -1019,7 +1028,7 @@ fn a_press_on_nothing_leaves_the_application_free() {
 #[test]
 fn fingers_lifted_off_a_touchpad_leave_the_rows_coasting() {
     use crate::pointer::{Phase, Scroll, Zone};
-    let ui = driven();
+    let (ui, _scratch) = driven();
     app(|app| app.open(crate::route::Route::Settings));
     let rows = find(&ui, Some(Zone::SettingsRows));
     point(&ui, rows.0, rows.1);
