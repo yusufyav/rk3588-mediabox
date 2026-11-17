@@ -1272,6 +1272,27 @@ impl Gesture {
         }
     }
 
+    /// Slint has seen every pointer event handed to it so far: a press it
+    /// put on no target and no surface's ground -- it said nothing about it
+    /// -- that has come up is over, and was nothing. Only after the queue is
+    /// drained (`platform::deliver_pointer`), never in `release`: the
+    /// press's hit may still be on its way in the same queue, and its
+    /// target's release is the click. Returns whether it ended one.
+    pub fn settle(&mut self) -> bool {
+        if matches!(
+            self.phase,
+            Phase::Pressed {
+                hit: None,
+                released: true,
+                ..
+            }
+        ) {
+            self.phase = Phase::Idle;
+            return true;
+        }
+        false
+    }
+
     /// Everything is let go of: nothing clicks, nothing coasts. Returns
     /// whether anything was going on.
     pub fn cancel(&mut self) -> bool {
@@ -2515,6 +2536,76 @@ mod tests {
         gesture.press((1.0, 1.0), on(Route::Media), 720.0);
         gesture.hit(SHELF, other);
         assert!(matches!(gesture.phase(), Phase::Pressed { hit: None, .. }));
+    }
+
+    /// A press on nothing -- no target, no surface's ground: Slint says
+    /// nothing about it -- is over once Slint has seen its release, and
+    /// was nothing: no click, and hover and the wheel are free again. It
+    /// was once left pressed until the next press, and the arrow lit
+    /// nothing and the wheel moved nothing meanwhile.
+    #[test]
+    fn a_press_on_nothing_settles_to_idle_and_frees_hover_and_the_wheel() {
+        let context = on(Route::Media);
+        let mut gesture = Gesture::default();
+        gesture.press((100.0, 100.0), context, 720.0);
+        assert!(!gesture.settle(), "still down: a drag may yet come");
+        gesture.release(Instant::now());
+        assert!(!gesture.idle(), "until Slint has seen it, it is pressed");
+        assert!(gesture.settle());
+        assert_eq!(gesture.phase(), Phase::Idle);
+        assert!(gesture.idle(), "hover may light a target again");
+        assert!(!gesture.settle(), "settled once");
+        // Whatever a target's release says afterwards is no click.
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Nothing
+        );
+        let lane = Lane::vertical(Zone::Shelves);
+        assert!(matches!(
+            gesture.wheel(lane, 40.0, Instant::now()),
+            Step::Pan { total, .. } if total == -40.0
+        ));
+    }
+
+    /// The press's own hit arrives in the same queue as its release: a
+    /// settle after Slint has seen both leaves the click to the target, and
+    /// it is one click.
+    #[test]
+    fn a_settle_after_the_queue_leaves_a_target_s_click_to_it() {
+        let context = on(Route::Media);
+        let mut gesture = Gesture::default();
+        gesture.press((100.0, 100.0), context, 720.0);
+        gesture.release(Instant::now());
+        // Slint, in queue order: the press's target, then its release.
+        assert_eq!(gesture.hit(SHELF, context), Step::Nothing);
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Click(Zone::Shelves, 203)
+        );
+        assert!(!gesture.settle(), "nothing left to settle");
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Nothing,
+            "once"
+        );
+        // A target that has said it went down is never settled away
+        // before its release.
+        let (mut gesture, context) = pressed((100.0, 100.0), SHELF);
+        gesture.release(Instant::now());
+        assert!(!gesture.settle());
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Click(Zone::Shelves, 203)
+        );
+        // A surface's ground, the film's bar: not this settle's either.
+        let (mut gesture, _) = pressed((100.0, 100.0), Hit::Area(Lanes::default()));
+        assert!(!gesture.settle());
+        let mut gesture = Gesture::default();
+        gesture.press((1.0, 1.0), context, 720.0);
+        gesture.scrub();
+        gesture.release(Instant::now());
+        assert!(!gesture.settle());
+        assert_eq!(gesture.phase(), Phase::Scrub);
     }
 
     /// Held still, a press may be the remote's long Ok (the application

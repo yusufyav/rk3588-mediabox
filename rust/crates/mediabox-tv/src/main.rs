@@ -1733,6 +1733,13 @@ impl App {
         }
     }
 
+    /// Slint has seen every pointer event queued for it
+    /// (`platform::deliver_pointer`): a press it found nothing under, now
+    /// let go of, was nothing -- hover and the wheel are free again.
+    pub fn pointer_settle(&mut self) {
+        self.gesture.settle();
+    }
+
     /// The press was taken away before the button came up: nothing fires,
     /// nothing is dragged on.
     pub fn pointer_cancel(&mut self) {

@@ -3151,6 +3151,24 @@ pub fn to_slint(event: WindowEvent) {
     TO_SLINT.with(|queue| queue.borrow_mut().push_back(event));
 }
 
+/// Hands `window` the pointer events the interface queued (`to_slint`),
+/// outside every borrow of the application: what they reach -- a target's
+/// press and release, which Slint says at once, and its hover, which is a
+/// change handler Slint runs afterwards -- calls back into it. Once all of
+/// it has been said, the application settles what nothing answered
+/// (`App::pointer_settle`).
+pub fn deliver_pointer(window: &slint::Window) {
+    let mut delivered = false;
+    while let Some(event) = TO_SLINT.with(|queue| queue.borrow_mut().pop_front()) {
+        window.dispatch_event(event);
+        delivered = true;
+    }
+    if delivered {
+        slint::platform::update_timers_and_animations();
+        crate::with_app(|app| app.pointer_settle());
+    }
+}
+
 /// Draw every frame for `span`: for a transition the loop must not wait on
 /// Slint's own "animation running" signal to notice, which left gaps of
 /// tens of milliseconds in the Bluetooth card's slide (measured 2026-10-08).
@@ -3706,13 +3724,8 @@ impl SplitPlatform {
         Ok(())
     }
 
-    /// Hands Slint the pointer events the interface queued (`to_slint`),
-    /// outside every borrow of the application: what they reach -- a
-    /// target's hover, its click -- calls back into it.
     fn drain_pointer(&self) {
-        while let Some(event) = TO_SLINT.with(|queue| queue.borrow_mut().pop_front()) {
-            self.window.window.dispatch_event(event);
-        }
+        deliver_pointer(&self.window.window);
     }
 
     /// Start repeating a press after its device's delay.
