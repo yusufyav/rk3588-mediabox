@@ -202,8 +202,11 @@ lacks "the C++ probes do not default to ScreenBridge" "$(cat "$here/CMakeLists.t
 # path, a pkg-config path, an install prefix or an rpath. Naming it in order to
 # check it — a guard, an ldd, a diff — is the whole point of some of these
 # files, so the rule is about what the line does, not about the word.
+# Cargo's build output is not source: rust/crates/*/target holds tens of
+# gigabytes of objects, and scanning them was nearly all of this script's
+# running time.
 uses_foreign_prefix() {
-  grep -rnE '(LD_LIBRARY_PATH|PKG_CONFIG_PATH|--prefix|-rpath|Environment)[^#]*/opt/rk3588-screenbridge' \
+  grep -rnE --exclude-dir=target '(LD_LIBRARY_PATH|PKG_CONFIG_PATH|--prefix|-rpath|Environment)[^#]*/opt/rk3588-screenbridge' \
     "$here/scripts" "$here/packaging" "$here/config" "$here/rust/crates" 2>/dev/null \
     | grep -v '^.*:#' || true
 }
