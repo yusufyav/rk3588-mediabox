@@ -3169,6 +3169,17 @@ pub fn deliver_pointer(window: &slint::Window) {
     }
 }
 
+/// A scroll, in order: the arrow back where it was if a key had put it
+/// away, Slint told and its answer heard -- the surface under the arrow --
+/// and only then the scroll, which goes to that surface. Handed over in one
+/// call, the scroll was decided before Slint had said anything, and the
+/// first turn after a key moved the remote's focus instead.
+pub fn hand_scroll(window: &slint::Window, scroll: crate::pointer::Scroll) {
+    crate::with_app(|app| app.pointer_wake());
+    deliver_pointer(window);
+    crate::with_app(|app| app.pointer_scroll(scroll));
+}
+
 /// Draw every frame for `span`: for a transition the loop must not wait on
 /// Slint's own "animation running" signal to notice, which left gaps of
 /// tens of milliseconds in the Bluetooth card's slide (measured 2026-10-08).
@@ -3605,7 +3616,7 @@ impl SplitPlatform {
                             value(Axis::Horizontal),
                             value(Axis::Vertical),
                         );
-                        crate::with_app(|app| app.pointer_scroll(scroll));
+                        hand_scroll(&self.window.window, scroll);
                     }
                     input::event::PointerEvent::ScrollFinger(fingers) => {
                         use input::event::pointer::{Axis, PointerScrollEvent};
@@ -3620,7 +3631,7 @@ impl SplitPlatform {
                             value(Axis::Horizontal),
                             value(Axis::Vertical),
                         );
-                        crate::with_app(|app| app.pointer_scroll(scroll));
+                        hand_scroll(&self.window.window, scroll);
                     }
                     input::event::PointerEvent::ScrollContinuous(continuous) => {
                         use input::event::pointer::{Axis, PointerScrollEvent};
@@ -3635,7 +3646,7 @@ impl SplitPlatform {
                             value(Axis::Horizontal),
                             value(Axis::Vertical),
                         );
-                        crate::with_app(|app| app.pointer_scroll(scroll));
+                        hand_scroll(&self.window.window, scroll);
                     }
                     _ => {}
                 }

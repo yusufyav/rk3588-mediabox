@@ -890,6 +890,17 @@ impl App {
         });
     }
 
+    /// A wheel is a pointer in use, as a motion is: the arrow comes back
+    /// where it was, if it was put away and the pointer is allowed here.
+    /// What is under it is Slint's to say, once the motion it queued is
+    /// delivered (`platform::hand_scroll`).
+    pub fn pointer_wake(&mut self) {
+        self.pointer_sync();
+        if self.pointer_policy().enabled() && !self.pointer.shown() {
+            self.pointer_motion(pointer::Motion::Relative(0.0, 0.0));
+        }
+    }
+
     /// The pointer's main button. Down starts a gesture where the arrow is
     /// and hands the press to Slint's hit testing, which says what it went
     /// down on (`pointer_press`, `pointer_press_area`, `pointer_scrub`); up
@@ -933,11 +944,10 @@ impl App {
         if !self.pointer_policy().enabled() {
             return;
         }
-        // A wheel is a pointer in use, as a motion is: the arrow comes back
-        // where it was.
-        if !self.pointer.shown() {
-            self.pointer_motion(pointer::Motion::Relative(0.0, 0.0));
-        }
+        // The platform has already put the arrow back and let Slint say what
+        // is under it (`platform::hand_scroll`); this is only for a scroll
+        // that came another way, which then reaches what was last said.
+        self.pointer_wake();
         let height = self.logical_size().map_or(720.0, |size| size.height);
         let scrolled = self.scroller.add(scroll, pointer::detent(height));
         let lanes = self
@@ -8551,6 +8561,143 @@ enum DetailAnswer {
     Watch(Box<model::TitleState>),
 }
 
+/// Where an `App` keeps what outlives it: the product's own places, or a
+/// test's.
+struct AppFiles {
+    cache: String,
+    state: String,
+    prefs: std::path::PathBuf,
+    live_kept: LiveKept,
+}
+
+impl AppFiles {
+    fn from_env() -> Self {
+        AppFiles {
+            cache: cache_dir(),
+            state: state_file(),
+            prefs: prefs_file(),
+            live_kept: read_live_kept(),
+        }
+    }
+}
+
+impl App {
+    /// The interface's state, on `window`, before anything is shown.
+    fn new(window: &MediaBoxWindow, started: Instant, trace_input: bool, files: AppFiles) -> Self {
+        App {
+            window: window.as_weak(),
+            stack: route::Stack::new(),
+            home: state::Home::new(),
+            pointer: pointer::Pointer::default(),
+            pointer_context: None,
+            scroller: pointer::Scroller::default(),
+            gesture: pointer::Gesture::default(),
+            coast_timer: slint::Timer::default(),
+            pointer_lit: None,
+            pointer_area: None,
+            windows: pointer::Windows::default(),
+            views: pointer::Views::default(),
+            np_menu_window: (0, 0),
+            ms_picker_window: 0,
+            handed_over: false,
+            shelves: Vec::new(),
+            loading: false,
+            media: screens::media::Media::new(),
+            search: screens::search::Search::new(),
+            discover: screens::discover::Discover::new(),
+            library: screens::library::Library::new(),
+            settings: screens::settings::Settings::new(),
+            media_settings: screens::media_settings::MediaSettings::new(),
+            prefs: prefs::read(&files.prefs),
+            account: screens::account::Account::new(),
+            wifi: screens::wireless::Wifi::new(),
+            bt: screens::wireless::Bluetooth::new(),
+            diagnostics: screens::diagnostics::Diagnostics::new(),
+            now: screens::now_playing::NowPlaying::new(),
+            detail: None,
+            sheet: None,
+            images: images::ImageManager::new(&files.cache, || {
+                let _ = slint::invoke_from_event_loop(|| {
+                    with_app(|app| {
+                        if app.images.collect() {
+                            app.paint();
+                        }
+                    })
+                });
+            }),
+            meter: metrics::Metrics::new(started),
+            dispatcher: input::Dispatcher::new(trace_input),
+            store: session::Store::new(&files.state),
+            status: None,
+            diag: None,
+            leds_pending: None,
+            cec_pending: false,
+            output_seconds: (0, false),
+            ethernet_seconds: None,
+            fan_pending: false,
+            display: None,
+            controls_were_open: false,
+            handing_over: false,
+            left_film: None,
+            caption: String::new(),
+            subtitle_generation: 0,
+            ok_hold: None,
+            space_down: false,
+            here: None,
+            live: None,
+            live_kept: files.live_kept,
+            live_asked: None,
+            live_setup_asked: None,
+            live_signal_asked: None,
+            live_signal_on: false,
+            live_tuned: None,
+            live_receiver_asked: None,
+            live_receiver_lost: false,
+            live_receiver_state: None,
+            live_monitor: false,
+            live_monitor_painted: None,
+            live_reports: monitor::PlayerReports::default(),
+            live_reopened: None,
+            hero_meta: std::collections::HashMap::new(),
+            hero_state: std::collections::HashMap::new(),
+            library_listing: None,
+            detail_backdrop: None,
+            notice_until: None,
+            device_toast_until: None,
+            volume_osd: None,
+            detail_fade: 0.0,
+            epoch: 0,
+            resume: session::read(&files.state),
+            account_focus: 0,
+            wifi_polling: false,
+            bt_polling: false,
+        }
+    }
+}
+
+/// The interface's pointer callbacks (ui/pointer.slint) to the application:
+/// what the arrow is over, a press and a click on it, the surfaces it moves.
+fn wire_pointer(window: &MediaBoxWindow) {
+    let hub = window.global::<PointerHub>();
+    hub.on_hover(|zone, index, over| with_app(|app| app.pointer_hover(zone.as_str(), index, over)));
+    hub.on_press(|zone, index, down| with_app(|app| app.pointer_press(zone.as_str(), index, down)));
+    hub.on_cancel(|| with_app(|app| app.pointer_cancel()));
+    hub.on_scrub(|zone, phase, at| with_app(|app| app.pointer_scrub(zone.as_str(), phase, at)));
+    hub.on_area(|surface, lane, over| {
+        with_app(|app| app.pointer_over_area(surface.as_str(), lane, over))
+    });
+    hub.on_press_area(|surface, lane| {
+        with_app(|app| app.pointer_press_area(surface.as_str(), lane))
+    });
+    hub.on_step(|surface, lane, rows| {
+        with_app(|app| app.pointer_rows(surface.as_str(), lane, rows))
+    });
+    hub.on_edge(|surface, lane| with_app(|app| app.pointer_edge(surface.as_str(), lane)));
+    hub.on_view(|surface, lane, first| {
+        with_app(|app| app.pointer_view(surface.as_str(), lane, first))
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before anything that can spawn a thread — the image workers, the state
     // store, tokio, the Mali driver's own four, and the timeline's. A thread
@@ -8595,94 +8742,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let window = MediaBoxWindow::new()?;
 
-    let app = Rc::new(RefCell::new(App {
-        window: window.as_weak(),
-        stack: route::Stack::new(),
-        home: state::Home::new(),
-        pointer: pointer::Pointer::default(),
-        pointer_context: None,
-        scroller: pointer::Scroller::default(),
-        gesture: pointer::Gesture::default(),
-        coast_timer: slint::Timer::default(),
-        pointer_lit: None,
-        pointer_area: None,
-        windows: pointer::Windows::default(),
-        views: pointer::Views::default(),
-        np_menu_window: (0, 0),
-        ms_picker_window: 0,
-        handed_over: false,
-        shelves: Vec::new(),
-        loading: false,
-        media: screens::media::Media::new(),
-        search: screens::search::Search::new(),
-        discover: screens::discover::Discover::new(),
-        library: screens::library::Library::new(),
-        settings: screens::settings::Settings::new(),
-        media_settings: screens::media_settings::MediaSettings::new(),
-        prefs: prefs::read(prefs_file()),
-        account: screens::account::Account::new(),
-        wifi: screens::wireless::Wifi::new(),
-        bt: screens::wireless::Bluetooth::new(),
-        diagnostics: screens::diagnostics::Diagnostics::new(),
-        now: screens::now_playing::NowPlaying::new(),
-        detail: None,
-        sheet: None,
-        images: images::ImageManager::new(cache_dir(), || {
-            let _ = slint::invoke_from_event_loop(|| {
-                with_app(|app| {
-                    if app.images.collect() {
-                        app.paint();
-                    }
-                })
-            });
-        }),
-        meter: metrics::Metrics::new(started),
-        dispatcher: input::Dispatcher::new(trace_input),
-        store: session::Store::new(state_file()),
-        status: None,
-        diag: None,
-        leds_pending: None,
-        cec_pending: false,
-        output_seconds: (0, false),
-        ethernet_seconds: None,
-        fan_pending: false,
-        display: None,
-        controls_were_open: false,
-        handing_over: false,
-        left_film: None,
-        caption: String::new(),
-        subtitle_generation: 0,
-        ok_hold: None,
-        space_down: false,
-        here: None,
-        live: None,
-        live_kept: read_live_kept(),
-        live_asked: None,
-        live_setup_asked: None,
-        live_signal_asked: None,
-        live_signal_on: false,
-        live_tuned: None,
-        live_receiver_asked: None,
-        live_receiver_lost: false,
-        live_receiver_state: None,
-        live_monitor: false,
-        live_monitor_painted: None,
-        live_reports: monitor::PlayerReports::default(),
-        live_reopened: None,
-        hero_meta: std::collections::HashMap::new(),
-        hero_state: std::collections::HashMap::new(),
-        library_listing: None,
-        detail_backdrop: None,
-        notice_until: None,
-        device_toast_until: None,
-        volume_osd: None,
-        detail_fade: 0.0,
-        epoch: 0,
-        resume: session::read(state_file()),
-        account_focus: 0,
-        wifi_polling: false,
-        bt_polling: false,
-    }));
+    let app = Rc::new(RefCell::new(App::new(&window, started, trace_input, AppFiles::from_env())));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
     // The earlier searches outlive the process, as they do in the reference.
     {
@@ -8762,24 +8822,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     // What the arrow is over, and a click on it (ui/pointer.slint).
-    let hub = window.global::<PointerHub>();
-    hub.on_hover(|zone, index, over| with_app(|app| app.pointer_hover(zone.as_str(), index, over)));
-    hub.on_press(|zone, index, down| with_app(|app| app.pointer_press(zone.as_str(), index, down)));
-    hub.on_cancel(|| with_app(|app| app.pointer_cancel()));
-    hub.on_scrub(|zone, phase, at| with_app(|app| app.pointer_scrub(zone.as_str(), phase, at)));
-    hub.on_area(|surface, lane, over| {
-        with_app(|app| app.pointer_over_area(surface.as_str(), lane, over))
-    });
-    hub.on_press_area(|surface, lane| {
-        with_app(|app| app.pointer_press_area(surface.as_str(), lane))
-    });
-    hub.on_step(|surface, lane, rows| {
-        with_app(|app| app.pointer_rows(surface.as_str(), lane, rows))
-    });
-    hub.on_edge(|surface, lane| with_app(|app| app.pointer_edge(surface.as_str(), lane)));
-    hub.on_view(|surface, lane, first| {
-        with_app(|app| app.pointer_view(surface.as_str(), lane, first))
-    });
+    wire_pointer(&window);
     window.on_key_pressed(move |text| {
         let Some(first) = text.chars().next() else {
             return;

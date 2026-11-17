@@ -840,3 +840,174 @@ fn a_pointer_moves_only_the_surface_it_drags_and_the_remote_brings_it_back() {
     );
     ui.set_np_menu("".into());
 }
+
+// ------------------------------------------------- the application, driven
+
+/// The application itself on the real interface: `App` with the product's
+/// own pointer callbacks (`wire_pointer`), its events handed over the way
+/// the platform hands them (`platform::deliver_pointer`,
+/// `platform::hand_scroll`). What is checked is what the application does
+/// in that order -- where the remote's focus is, what the gesture moves --
+/// not what a source file says.
+fn driven() -> MediaBoxWindow {
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    window.set_size(slint::PhysicalSize::new(W, H));
+    slint::platform::set_platform(Box::new(Headless {
+        window: window.clone(),
+    }))
+    .expect("one platform");
+    let ui = MediaBoxWindow::new().expect("the interface");
+    ui.window().set_size(slint::PhysicalSize::new(W, H));
+    ui.show().expect("shown");
+    // Nothing of the product's is read or written: a place of the test's own.
+    let dir = std::env::temp_dir().join(format!(
+        "mediabox-tv-driven-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let files = crate::AppFiles {
+        cache: dir.join("cache").display().to_string(),
+        state: dir.join("state.json").display().to_string(),
+        prefs: dir.join("media-preferences.json"),
+        live_kept: crate::LiveKept::default(),
+    };
+    let app = crate::App::new(&ui, std::time::Instant::now(), false, files);
+    crate::APP.with(|slot| *slot.borrow_mut() = Some(Rc::new(RefCell::new(app))));
+    crate::wire_pointer(&ui);
+    ui
+}
+
+fn app<R>(f: impl FnOnce(&mut crate::App) -> R) -> R {
+    let app = crate::APP.with(|slot| slot.borrow().clone()).expect("the application");
+    f(&mut app.borrow_mut())
+}
+
+/// The arrow to (x, y), and everything it says delivered, as one pass of
+/// the platform's loop: what the wheel would scroll there.
+fn point(ui: &MediaBoxWindow, x: f32, y: f32) -> crate::pointer::Lanes {
+    app(|app| {
+        app.pointer_motion(crate::pointer::Motion::Absolute(
+            x / W as f32,
+            y / H as f32,
+        ))
+    });
+    crate::platform::deliver_pointer(ui.window());
+    app(|app| {
+        app.pointer_lit
+            .map(|(zone, index)| zone.lanes(index))
+            .or(app.pointer_area)
+            .unwrap_or_default()
+    })
+}
+
+/// The first place, walking the panel, where the arrow is over `want`'s
+/// surface (or, with `None`, over nothing that scrolls).
+fn find(ui: &MediaBoxWindow, want: Option<crate::pointer::Zone>) -> (f32, f32) {
+    for y in (STEP / 2..H as usize).step_by(STEP * 3) {
+        for x in (STEP / 2..W as usize).step_by(STEP * 3) {
+            let (x, y) = (x as f32, y as f32);
+            let lanes = point(ui, x, y);
+            let found = match want {
+                Some(zone) => lanes.vertical.is_some_and(|lane| lane.zone == zone),
+                None => lanes.is_empty() && app(|app| app.pointer_lit.is_none()),
+            };
+            if found {
+                return (x, y);
+            }
+        }
+    }
+    panic!("nowhere on the panel is {want:?}");
+}
+
+/// Where the remote's focus is on the settings screen.
+fn settings_focus() -> (usize, crate::screens::settings::Pane) {
+    app(|app| (app.settings.section, app.settings.pane))
+}
+
+/// A key puts the arrow away and forgets what it was over; the first wheel
+/// after it brings the arrow back where it was and scrolls what is under
+/// it -- never the remote's focus -- and the second does the same. Where
+/// nothing scrolls under the arrow, the wheel is the arrows, as before.
+/// Handed over in one call (no `hand_scroll`), the first turn was decided
+/// before Slint had said what was under the arrow, and moved the focus.
+#[test]
+fn the_first_wheel_after_a_key_scrolls_what_is_under_the_arrow() {
+    use crate::pointer::{Phase, Scroll, Zone};
+    use mediabox_core::InputAction;
+    let ui = driven();
+    app(|app| app.open(crate::route::Route::Settings));
+    let rows = find(&ui, Some(Zone::SettingsRows));
+    // The remote's own pace (`input::Dispatcher`): a step sooner than this
+    // after the last is dropped, and a dropped arrow would pass for a focus
+    // that stayed.
+    let pace = || std::thread::sleep(std::time::Duration::from_millis(200));
+    let key = |action| {
+        pace();
+        app(|app| {
+            app.remote_key(action, true, crate::input::Origin::Keyboard);
+            app.remote_key(action, false, crate::input::Origin::Keyboard);
+        });
+        crate::platform::deliver_pointer(ui.window());
+    };
+    let wheel = || {
+        pace();
+        crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, 120.0));
+        app(|app| app.gesture.phase())
+    };
+    let over_rows = |phase: Phase| {
+        matches!(phase, Phase::Wheeling { lane, .. } if lane.zone == Zone::SettingsRows)
+    };
+
+    key(InputAction::Down);
+    assert!(!app(|app| app.pointer.shown()), "a key puts the arrow away");
+    let focus = settings_focus();
+    let first = wheel();
+    assert!(app(|app| app.pointer.shown()), "the wheel brings it back");
+    assert_eq!(
+        app(|app| app.pointer.at()),
+        Some(rows),
+        "where it was"
+    );
+    assert!(over_rows(first), "the first turn: {first:?}");
+    assert_eq!(settings_focus(), focus, "the focus stays");
+    let second = wheel();
+    assert!(over_rows(second), "the second turn: {second:?}");
+    assert_eq!(settings_focus(), focus, "the focus stays");
+
+    // Over nothing that scrolls, the wheel is the arrows, first turn too.
+    let nothing = find(&ui, None);
+    key(InputAction::Up);
+    let focus = settings_focus();
+    assert!(!over_rows(wheel()));
+    assert_eq!(app(|app| app.pointer.at()), Some(nothing));
+    assert_ne!(settings_focus(), focus, "the arrows moved the focus");
+}
+
+/// A press on nothing, delivered as the platform delivers it, is nothing:
+/// no click, the focus where it was, and the next hover and wheel work
+/// at once -- not only after another press.
+#[test]
+fn a_press_on_nothing_leaves_the_application_free() {
+    use crate::pointer::{Phase, Scroll, Zone};
+    let ui = driven();
+    app(|app| app.open(crate::route::Route::Settings));
+    let nothing = find(&ui, None);
+    let rows = find(&ui, Some(Zone::SettingsRows));
+    point(&ui, nothing.0, nothing.1);
+    let focus = settings_focus();
+    for pressed in [true, false] {
+        app(|app| app.pointer_button(pressed));
+        crate::platform::deliver_pointer(ui.window());
+    }
+    assert_eq!(app(|app| app.gesture.phase()), Phase::Idle);
+    assert_eq!(settings_focus(), focus, "no click, no focus");
+    // The arrow onto the rows: their surface is what it is over again.
+    let lanes = point(&ui, rows.0, rows.1);
+    assert!(lanes.vertical.is_some_and(|lane| lane.zone == Zone::SettingsRows));
+    crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, 120.0));
+    assert!(matches!(
+        app(|app| app.gesture.phase()),
+        Phase::Wheeling { lane, .. } if lane.zone == Zone::SettingsRows
+    ));
+    assert_eq!(settings_focus(), focus);
+}
