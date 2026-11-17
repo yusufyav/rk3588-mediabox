@@ -114,10 +114,12 @@ if [ -n "$only" ]; then
     esac
   }
   names=(${only//,/ })
-  services=()
+  # Each service with the binary its main process is, for the check that it
+  # runs what was installed: <unit>=<binary>.
+  units=()
   for name in "${names[@]}"; do
     service="$(service_of "$name")" || exit 2
-    [ -n "$service" ] && services+=("$service")
+    [ -n "$service" ] && units+=("$service=$name")
   done
   stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
   for name in "${names[@]}"; do
@@ -134,53 +136,15 @@ if [ -n "$only" ]; then
   ( cd "$stage" && sha256sum "${names[@]}" > SHA256SUMS )
   say "only: ${names[*]} -> $prefix/bin"
   cat "$stage/SHA256SUMS"
-  # Run on the appliance: <prefix> <services...> -- with the binaries and
-  # their SHA256SUMS beside it.
-  cat > "$stage/install.sh" <<'REMOTE'
-#!/bin/sh
-set -e
-prefix=$1; shift
-here=$(cd "$(dirname "$0")" && pwd)
-cd "$here"
-sha256sum -c --quiet SHA256SUMS
-names=$(awk '{print $2}' SHA256SUMS)
-R=$prefix/rollback/only-$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -p "$R/bin"
-for b in $names; do [ -e "$prefix/bin/$b" ] && cp -a "$prefix/bin/$b" "$R/bin/"; done
-( cd "$R" && sha256sum bin/* > SHA256SUMS )
-{
-  echo '#!/bin/sh'
-  echo 'set -e'
-  echo 'cd "$(dirname "$0")"'
-  echo 'sha256sum -c SHA256SUMS'
-  echo "for f in \$(awk '{print \$2}' SHA256SUMS); do install -m 0755 \$f $prefix/\$f; done"
-  [ $# -gt 0 ] && echo "systemctl restart $*"
-} > "$R/rollback.sh"
-chmod 0755 "$R/rollback.sh"
-for b in $names; do
-  install -m 0755 "$b" "$prefix/bin/.$b.new"
-  mv -f "$prefix/bin/.$b.new" "$prefix/bin/$b"
-done
-for u in "$@"; do
-  # The interface is not started by an install: which process owns the
-  # display is the control plane's to say.
-  if [ "$u" = mediabox-tv-ui.service ] && ! systemctl is-active --quiet "$u"; then continue; fi
-  systemctl restart "$u"
-done
-( cd "$prefix/bin" && sha256sum -c --quiet "$here/SHA256SUMS" ) || { echo "installed binaries differ: sh $R/rollback.sh" >&2; exit 1; }
-sleep 2
-for u in "$@"; do
-  [ "$u" = mediabox-tv-ui.service ] && ! systemctl is-active --quiet "$u" && continue
-  systemctl is-active --quiet "$u" || { echo "$u is not active: sh $R/rollback.sh" >&2; exit 1; }
-  pid=$(systemctl show -p MainPID --value "$u")
-  echo "$u active, pid $pid, running $(sha256sum /proc/$pid/exe | cut -c1-16)"
-done
-echo "rollback: sh $R/rollback.sh"
-REMOTE
+  # Run on the appliance, beside the binaries and their SHA256SUMS: the
+  # rollback first, the binaries by rename, the sums on disk before any
+  # restart, and each restarted service's process by its full sha256
+  # (scripts/deploy-only-install.sh; tests/check-deploy-only.sh).
+  cp "$here/scripts/deploy-only-install.sh" "$stage/install.sh"
   remote=/var/tmp/mediabox-only
   sh_ "rm -rf $remote && mkdir -p $remote"
   cp_ "$stage"/* "$MEDIABOX_TARGET:$remote/"
-  sh_ "sh $remote/install.sh $prefix ${services[*]:-}; s=\$?; rm -rf $remote; exit \$s"
+  sh_ "sh $remote/install.sh $prefix ${units[*]:-}; s=\$?; rm -rf $remote; exit \$s"
   exit 0
 fi
 

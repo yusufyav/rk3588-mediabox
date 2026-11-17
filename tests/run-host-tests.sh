@@ -850,6 +850,19 @@ else
   "$here/tests/check-install-bootstrap.sh" | sed 's/^/     /'
   failures=$((failures + 1))
 fi
+# A scoped deploy's appliance half and its rollback, on a scratch prefix with
+# a stub systemctl: rollback first, rename, sums before a restart, the
+# running process by its full sha256, a stopped service never started.
+if "$here/tests/check-deploy-only.sh" >/dev/null 2>&1; then
+  echo "ok   DEPLOY_ONLY=PASS"
+else
+  echo "FAIL DEPLOY_ONLY:"
+  "$here/tests/check-deploy-only.sh" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
+contains "deploy --only ships that script and names each unit's binary" \
+  "$(sed -n '/^if \[ -n "\$only" \]; then/,/^fi$/p' "$here/scripts/deploy-mediabox-v3.sh")" \
+  'cp "$here/scripts/deploy-only-install.sh" "$stage/install.sh"'
 # The text, too, so a verifier that grows a readelf back is caught even if the
 # fixture ever stops exercising the line that would use it.
 if strip_sh "$here/packaging/mediabox-product-verify" |
