@@ -1112,12 +1112,6 @@ impl NowPlaying {
     pub fn set_technical(&mut self, rows: Vec<(String, String)>) {
         self.technical = rows;
     }
-
-    pub fn clear(&mut self) {
-        let focus = self.focus;
-        *self = Self::new();
-        self.focus = focus;
-    }
 }
 
 /// Kodi answers with `{hours, minutes, seconds, milliseconds}`.

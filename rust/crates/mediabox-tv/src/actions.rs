@@ -62,20 +62,6 @@ pub enum Transport {
     Mute,
 }
 
-/// What a decision would do to the machine. Used by the interface to draw the
-/// right confirmation, and by the tests below to state the invariant in the
-/// vocabulary the fault was reported in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SystemEffect {
-    /// Nothing outside this process.
-    None,
-    /// Ask the television to go to standby over CEC. The appliance keeps
-    /// running; this is what the Power key on a television remote means.
-    StandbyTelevision,
-    Restart,
-    Shutdown,
-}
-
 /// The one routing table.
 ///
 /// `modal` is true while a sheet owns the remote — the source selector, the
@@ -152,46 +138,32 @@ pub fn intent_for(_route: Route, modal: bool, action: InputAction) -> Intent {
     }
 }
 
-/// What an intent, on its own, is permitted to do to the machine.
-///
-/// The answer is `None` for every intent there is. A power decision is not an
-/// intent — it is a row on a sheet, chosen with `Select` while that sheet is
-/// open and confirmed on a second sheet. This function is the statement that
-/// no press can shortcut that.
-pub fn effect_of(intent: Intent) -> SystemEffect {
-    match intent {
-        // Opening a sheet is drawing a rectangle.
-        Intent::OfferPower => SystemEffect::None,
-        _ => SystemEffect::None,
-    }
-}
-
-/// Every action the appliance's vocabulary has. Used by the tests, and by the
-/// diagnostics screen to show what the remote can send.
-pub const ALL_ACTIONS: [InputAction; 18] = [
-    InputAction::Up,
-    InputAction::Down,
-    InputAction::Left,
-    InputAction::Right,
-    InputAction::Ok,
-    InputAction::Back,
-    InputAction::Home,
-    InputAction::Play,
-    InputAction::Pause,
-    InputAction::PlayPause,
-    InputAction::Stop,
-    InputAction::SeekForward,
-    InputAction::SeekBackward,
-    InputAction::VolumeUp,
-    InputAction::VolumeDown,
-    InputAction::Mute,
-    InputAction::Power,
-    InputAction::Menu,
-];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The remote's actions the routing table is checked against.
+    const ALL_ACTIONS: [InputAction; 18] = [
+        InputAction::Up,
+        InputAction::Down,
+        InputAction::Left,
+        InputAction::Right,
+        InputAction::Ok,
+        InputAction::Back,
+        InputAction::Home,
+        InputAction::Play,
+        InputAction::Pause,
+        InputAction::PlayPause,
+        InputAction::Stop,
+        InputAction::SeekForward,
+        InputAction::SeekBackward,
+        InputAction::VolumeUp,
+        InputAction::VolumeDown,
+        InputAction::Mute,
+        InputAction::Power,
+        InputAction::Menu,
+    ];
 
     const ROUTES: [Route; 9] = [
         Route::Home,
@@ -213,7 +185,6 @@ mod tests {
                 let intent = intent_for(route, modal, InputAction::Ok);
                 assert_eq!(intent, Intent::Select, "{route:?} modal={modal}");
                 assert_ne!(intent, Intent::OfferPower);
-                assert_eq!(effect_of(intent), SystemEffect::None);
             }
         }
     }
@@ -224,7 +195,6 @@ mod tests {
             for modal in [false, true] {
                 let intent = intent_for(route, modal, InputAction::Back);
                 assert_eq!(intent, Intent::Dismiss, "{route:?} modal={modal}");
-                assert_eq!(effect_of(intent), SystemEffect::None);
             }
         }
     }
@@ -242,8 +212,7 @@ mod tests {
                 for (action, expected) in directions {
                     let intent = intent_for(route, modal, action);
                     assert_eq!(intent, expected, "{route:?} modal={modal} {action:?}");
-                    assert_eq!(effect_of(intent), SystemEffect::None);
-                }
+                    }
             }
         }
     }
@@ -259,22 +228,6 @@ mod tests {
                         assert_eq!(action, InputAction::Power, "{route:?} modal={modal}");
                         assert!(!modal, "a sheet must not open another sheet");
                     }
-                }
-            }
-        }
-    }
-
-    /// No intent, on its own, touches the machine — including Power's.
-    #[test]
-    fn no_intent_has_a_system_effect() {
-        for route in ROUTES {
-            for modal in [false, true] {
-                for action in ALL_ACTIONS {
-                    assert_eq!(
-                        effect_of(intent_for(route, modal, action)),
-                        SystemEffect::None,
-                        "{route:?} modal={modal} {action:?}"
-                    );
                 }
             }
         }

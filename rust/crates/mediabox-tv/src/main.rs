@@ -1859,7 +1859,6 @@ impl App {
                 self.store.flush();
                 spawn_launch(id, name);
             }
-            state::AppAction::Absent => self.say(format!("{name} henüz yok")),
         }
     }
 
@@ -9797,17 +9796,6 @@ fn spawn_live_tkgs_update() {
 }
 
 /// The manual scan: answered when it is done.
-/// A setup command with no arguments, then the channel list it changes.
-fn spawn_live_command(command: &'static str) {
-    detached("mediabox-tv-live-command", async move {
-        let client = rpc::Client::new(socket_path());
-        if let Err(error) = client.call(serde_json::json!({"command": command})).await {
-            eprintln!("mediabox-tv.live {command} failed: {error}");
-        }
-        spawn_live_channels();
-    });
-}
-
 fn spawn_live_scan(source: Option<mediabox_core::LiveSource>, add_only: bool, free_only: bool, scrambled_only: bool, keep: mediabox_core::LiveScanKeep) {
     detached("mediabox-tv-live-scan", async move {
         let client = rpc::Client::new(socket_path());

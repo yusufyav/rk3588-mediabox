@@ -312,35 +312,6 @@ pub struct TitleStateEnvelope {
     pub state: TitleState,
 }
 
-impl MetaPreview {
-    /// The same title, in the shape the detail screen draws.
-    ///
-    /// A shelf already holds everything the top of a title's page shows — the
-    /// name, the artwork, the year, the genres — and throwing it away to ask
-    /// the addon for it again is what left the screen black for as long as the
-    /// request took. What a preview does not carry (runtime, cast, directors)
-    /// arrives with the full record and fills in underneath.
-    pub fn as_meta(&self) -> Meta {
-        Meta {
-            id: self.id.clone(),
-            kind: self.kind.clone(),
-            name: self.name.clone(),
-            poster: self.poster.clone(),
-            background: self.background.clone(),
-            logo: self.logo.clone(),
-            description: self.description.clone(),
-            release_info: self.release_info.clone(),
-            runtime: None,
-            imdb_rating: self.imdb_rating.clone(),
-            genres: self.genres.clone(),
-            cast: Vec::new(),
-            director: Vec::new(),
-            trailer: None,
-            videos: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct MetaEnvelope {
     pub meta: Meta,
@@ -387,14 +358,6 @@ pub struct Stream {
 }
 
 impl Stream {
-    pub fn label(&self) -> String {
-        self.name
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .unwrap_or("Kaynak")
-            .replace('\n', " ")
-    }
-
     /// The addon's own label, verbatim — "[RD+]\n<the addon>\n1080p".
     ///
     /// The reference draws this down the left of the row exactly as the addon
@@ -803,105 +766,9 @@ impl Plan {
             .and_then(|decision| decision.track.as_ref())
             .or_else(|| self.media.audio.first())
     }
-
-    /// The one sentence that matters: what will actually happen on the TV.
-    pub fn verdict(&self) -> (&'static str, &'static str) {
-        match self.playback.mode.as_str() {
-            "Direct" => ("Doğrudan oynatma", "good"),
-            "DirectWithAudioTranscode" => ("Video kopyalanır, ses AC-3'e çevrilir", "warn"),
-            "Remux" => ("Kapsayıcı yeniden paketlenir, video kopyalanır", "warn"),
-            "FallbackSourcePreferred" => ("Başka bir kaynak tercih edilmeli", "warn"),
-            "Unsupported" => ("Bu cihazda oynatılamaz", "bad"),
-            _ => ("Karar bilinmiyor", ""),
-        }
-    }
-
-    pub fn preview_available(&self) -> bool {
-        matches!(self.preview.mode.as_str(), "BrowserDirect" | "BrowserRemux")
-    }
 }
 
 // ------------------------------------------------------------------ status
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ServiceHealth {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub healthy: bool,
-    #[serde(default)]
-    pub detail: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct KodiStatus {
-    #[serde(default)]
-    pub running: bool,
-    #[serde(rename = "jsonrpc_reachable", default)]
-    pub jsonrpc_reachable: bool,
-    #[serde(default)]
-    pub state: String,
-    #[serde(default)]
-    pub item: Option<serde_json::Value>,
-    #[serde(default)]
-    pub speed: Option<i64>,
-    #[serde(default)]
-    pub time: Option<KodiTime>,
-    #[serde(rename = "total_time", default)]
-    pub total_time: Option<KodiTime>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-impl KodiStatus {
-    pub fn title(&self) -> Option<String> {
-        let item = self.item.as_ref()?;
-        item.get("title")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .or_else(|| {
-                item.get("label")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-            })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-pub struct KodiTime {
-    #[serde(default)]
-    pub hours: u64,
-    #[serde(default)]
-    pub minutes: u64,
-    #[serde(default)]
-    pub seconds: u64,
-}
-
-impl KodiTime {
-    pub fn total_seconds(self) -> u64 {
-        self.hours * 3600 + self.minutes * 60 + self.seconds
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct CecStatus {
-    #[serde(default)]
-    pub available: bool,
-    #[serde(default)]
-    pub adapter: Option<String>,
-    #[serde(default)]
-    pub driver: Option<String>,
-    #[serde(rename = "physical_address", default)]
-    pub physical_address: Option<String>,
-    #[serde(rename = "logical_addresses", default)]
-    pub logical_addresses: Vec<u8>,
-    #[serde(rename = "known_devices", default)]
-    pub known_devices: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
 
 /// One thing this box can be used for.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -926,44 +793,6 @@ pub struct DisplayStatus {
     pub owner: Option<String>,
     #[serde(default)]
     pub applications: Vec<AppEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SurfaceStatus {
-    #[serde(default)]
-    pub active: String,
-    #[serde(default)]
-    pub kodi_active: bool,
-    #[serde(default)]
-    pub ui_active: bool,
-    #[serde(default)]
-    pub ui_installed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SystemStatus {
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub hostname: String,
-    #[serde(default)]
-    pub kernel: String,
-    #[serde(default)]
-    pub architecture: String,
-    #[serde(rename = "uptime_seconds", default)]
-    pub uptime_seconds: u64,
-    #[serde(rename = "input_mode", default)]
-    pub input_mode: String,
-    #[serde(rename = "input_devices", default)]
-    pub input_devices: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub services: Vec<ServiceHealth>,
-    pub kodi: KodiStatus,
-    pub cec: CecStatus,
-    #[serde(default)]
-    pub media: serde_json::Value,
-    #[serde(default)]
-    pub surface: Option<SurfaceStatus>,
 }
 
 #[cfg(test)]

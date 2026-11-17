@@ -630,7 +630,8 @@ fn read_display_events(kms: &SharedKms, crtc: control::crtc::Handle, s: &mut Sta
     let read = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let events = match kms.receive_events() {
         Ok(events) if fail_every > 0 && read % fail_every == 0 => {
-            drop(events.count());
+            // The events read are thrown away, as a failed read would lose them.
+            events.for_each(|_| ());
             Err(std::io::Error::other("injected (MEDIABOX_TV_FAULT=readerr)"))
         }
         result => result,
@@ -1025,13 +1026,13 @@ thread_local! {
     static MODE: Cell<(u32, u32, u32)> = const { Cell::new((0, 0, 0)) };
 }
 
-/// Where to write the next frame, when something has asked for one.
-///
-/// Taken by the swap that follows, so a snapshot is a real frame off the panel
-/// rather than a re-render into a different surface: what lands in the file is
-/// the image the display controller is about to scan out, at the panel's own
-/// resolution.
 thread_local! {
+    /// Where to write the next frame, when something has asked for one.
+    ///
+    /// Taken by the swap that follows, so a snapshot is a real frame off the
+    /// panel rather than a re-render into a different surface: what lands in
+    /// the file is the image the display controller is about to scan out, at
+    /// the panel's own resolution.
     static SNAPSHOT: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
 }
 

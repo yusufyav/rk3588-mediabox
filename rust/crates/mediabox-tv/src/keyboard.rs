@@ -119,7 +119,9 @@ fn letters() -> Vec<Vec<Cap>> {
 
 /// How many columns a grid is laid out at. Every row is exactly this wide,
 /// counting spans: the panel draws at a fixed column width and a row that came
-/// to more put a key off the edge of the television.
+/// to more put a key off the edge of the television. The grids' own rows are
+/// that width by construction; only the tests count it.
+#[cfg(test)]
 pub const COLUMNS: usize = 10;
 
 /// What pressing a key means to whatever is holding the text.

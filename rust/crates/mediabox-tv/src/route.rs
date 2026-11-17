@@ -60,6 +60,7 @@ impl Route {
         }
     }
 
+    #[cfg(test)]
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "home" => Route::Home,
@@ -132,6 +133,7 @@ impl Stack {
         true
     }
 
+    #[cfg(test)]
     pub fn depth(&self) -> usize {
         self.entries.len()
     }
