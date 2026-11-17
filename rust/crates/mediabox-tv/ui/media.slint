@@ -1,4 +1,4 @@
-import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { Rail, RailModel } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -39,7 +39,15 @@ export component Media inherits Rectangle {
     property <length> head: root.height * 0.037 - Metrics.focus-room;
     property <length> viewport-h: root.height - rails-top;
     property <length> content-h: max(1px, rail-h * rails.length);
-    property <length> scroll: clamp(focus-row * rail-h, 0px, max(0px, content-h - viewport-h));
+    // Where the remote's focus scrolls the board, or a pointer's hand.
+    pan := PanState {
+        surface: "shelves";
+        item: rail-h;
+        remote: clamp(focus-row * rail-h, 0px, max(0px, content-h - viewport-h));
+        limit: max(0px, content-h - viewport-h);
+        remote-duration: Theme.glide;
+    }
+    property <length> scroll: pan.value;
 
     background: Theme.catalog-bg;
     clip: true;
@@ -57,13 +65,15 @@ export component Media inherits Rectangle {
         height: viewport-h + Metrics.focus-room;
         clip: true;
 
+        PointerPanArea { surface: "shelves"; }
+
         Rectangle {
             x: 0;
             y: Metrics.focus-room - scroll;
             width: 100%;
             height: content-h;
 
-            animate y { duration: Theme.glide; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for rail[r] in rails: Rail {
                 x: 0;

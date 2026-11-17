@@ -1,4 +1,4 @@
-import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { Icon } from "kit.slint";
 import { Chrome, AccountChip } from "chrome.slint";
@@ -261,6 +261,7 @@ component Control inherits Rectangle {
     }
 
     if pointer-zone != "": PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -408,7 +409,15 @@ export component MediaSettings inherits Rectangle {
     property <length> rows-y: body-y + (card-h > 0 ? card-h + root.height * 0.025 : 0px);
     property <length> rows-view: body-y + body-h - rows-y;
     property <length> focus-bottom: focus-row < rows.length ? focus-row * row-step + rows[focus-row].heads * head-h + row-h : 0px;
-    property <length> scroll: zone == 1 ? clamp(focus-bottom - rows-view, 0px, max(0px, rows-h - rows-view)) : 0px;
+    // The remote's focus scrolls the controls while it is on them; a
+    // pointer's hand and wheel move them on their own.
+    pan := PanState {
+        surface: "ms-controls";
+        remote: zone == 1 ? clamp(focus-bottom - rows-view, 0px, self.limit) : 0px;
+        limit: max(0px, rows-h - rows-view);
+        remote-duration: Theme.glide;
+    }
+    property <length> scroll: pan.value;
 
     property <length> node-h: root.height * 0.104;
     property <length> node-gap: root.height * 0.03;
@@ -557,11 +566,13 @@ export component MediaSettings inherits Rectangle {
         height: min(root.rows-view, root.rows-h + 2px);
         clip: true;
 
+        PointerPanArea { surface: "ms-controls"; }
+
         Rectangle {
             y: -root.scroll;
             width: 100%;
             height: root.rows-h;
-            animate y { duration: Theme.glide; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for item[i] in root.rows: Rectangle {
                 y: i * root.row-step + item.heads * root.head-h - (item.group != "" ? root.head-h : 0px);
@@ -816,6 +827,13 @@ export component MediaSettings inherits Rectangle {
         border-radius: root.unit * 0.7;
         background: #1b1830;
         PointerSwallow { }
+        // A window of the options Rust keeps: the hand moves it a row at
+        // a time (`PointerHub.step`).
+        PanState {
+            surface: "ms-options";
+            pitch: parent.opt-h;
+        }
+        PointerPanArea { surface: "ms-options"; }
         border-width: max(1px, root.unit * 0.08);
         border-color: #7b5bf580;
         drop-shadow-blur: root.unit * 1.2;

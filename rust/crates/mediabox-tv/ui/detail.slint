@@ -1,4 +1,4 @@
-import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { ReferenceIcon } from "reference-icons.slint";
 import { Tip } from "tip.slint";
@@ -47,10 +47,16 @@ component EpisodeLine inherits Rectangle {
 
     // First, so the row's own watched button -- a target of its own -- is
     // over it: a click on the button is the button, never the episode.
-    if pointer-zone != "": PointerTarget {
+    row-target := PointerTarget {
+        enabled: pointer-zone != "";
         zone: root.pointer-zone;
         index: root.pointer-index;
+        radius: root.border-radius;
     }
+    // The watched button is on the focused row, and on the row the arrow
+    // is over: a pointer reaches it without moving the remote's focus.
+    property <bool> pointed: pointer-zone != "" && (row-target.lit || mark-target.lit);
+    property <bool> marked: focused || pointed;
     background: focused ? #ffffff1f : transparent;
     border-width: focused ? max(2px, rem * 0.15) : 0px;
     border-color: Theme.focus-ring;
@@ -167,12 +173,14 @@ component EpisodeLine inherits Rectangle {
         // The watched button, on the focused row only: Right reaches it, Ok
         // turns the episode watched or not, as the reference's row menu does.
         Rectangle {
-            width: focused ? Metrics.vh * 0.05 : 0px;
-            visible: focused;
+            width: marked ? Metrics.vh * 0.05 : 0px;
+            visible: marked;
 
-            if focused && root.pointer-zone != "": PointerTarget {
+            mark-target := PointerTarget {
+                enabled: marked && root.pointer-zone != "";
                 zone: "detail-marks";
                 index: root.pointer-index;
+                radius: self.width / 2;
             }
 
             Rectangle {
@@ -369,6 +377,7 @@ component Action inherits Rectangle {
     // Not while it cannot be pressed: hover, focus and a click are refused
     // as the remote's are.
     if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -443,6 +452,7 @@ component SourceLine inherits Rectangle {
     }
 
     if pointer-zone != "": PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -581,7 +591,7 @@ export component Detail inherits Rectangle {
         viewbox-width: 24;
         viewbox-height: 24;
         commands: "M15.5 3.2L6.7 12l8.8 8.8";
-        stroke: detail-back.has-hover ? Theme.focus : Theme.text;
+        stroke: detail-back.lit ? Theme.focus : Theme.text;
         stroke-width: 2.1px;
     }
     // The chevron is the way back for a pointer too: a click on it is Back.
@@ -592,6 +602,7 @@ export component Detail inherits Rectangle {
         height: Metrics.vh * 0.064;
         zone: "back";
         index: 0;
+        radius: self.width / 2;
     }
 
     // ------------------------------------------------------------ the record
@@ -866,22 +877,26 @@ export component Detail inherits Rectangle {
                 clip: true;
                 background: transparent;
 
+                // The focused row is kept on the panel and the list slides
+                // under it, which is what makes forty releases usable with
+                // five keys. A pointer's hand and wheel slide it on their own.
+                sources-pan := PanState {
+                    surface: "detail-sources";
+                    remote: clamp(source-focus * (list.row-h + rem * 0.5) - list.height * 0.4, 0px, self.limit);
+                    limit: max(0px, sources.length * (list.row-h + rem * 0.5) - list.height);
+                    remote-duration: Theme.glide;
+                }
+                PointerPanArea { surface: "detail-sources"; }
+
                 VerticalLayout {
                     x: 0;
-                    // The focused row is kept on the panel and the list slides
-                    // under it, which is what makes forty releases usable with
-                    // five keys.
-                    y: -clamp(source-focus * (list.row-h + rem * 0.5)
-                                - list.height * 0.4,
-                              0px,
-                              max(0px, sources.length * (list.row-h + rem * 0.5)
-                                         - list.height));
+                    y: -sources-pan.value;
                     width: 100%;
                     height: max(1px, sources.length * (list.row-h + rem * 0.5));
                     spacing: rem * 0.5;
                     alignment: start;
 
-                    animate y { duration: Theme.glide; easing: Theme.ease; }
+                    animate y { duration: sources-pan.duration; easing: Theme.ease; }
 
                     for source[i] in sources: SourceLine {
                         entry: source;
@@ -1113,19 +1128,24 @@ export component Detail inherits Rectangle {
                     wrap: word-wrap;
                 }
 
+                episodes-pan := PanState {
+                    surface: "detail-episodes";
+                    item: episode-list.row-h + episode-list.gap;
+                    remote: clamp(episode-focus * (episode-list.row-h + episode-list.gap) - episode-list.height * 0.4, 0px, self.limit);
+                    limit: max(0px, episodes.length * (episode-list.row-h + episode-list.gap) - episode-list.height);
+                    remote-duration: Theme.glide;
+                }
+                PointerPanArea { surface: "detail-episodes"; }
+
                 VerticalLayout {
                     x: 0;
-                    y: -clamp(episode-focus * (episode-list.row-h + episode-list.gap)
-                                - episode-list.height * 0.4,
-                              0px,
-                              max(0px, episodes.length * (episode-list.row-h + episode-list.gap)
-                                         - episode-list.height));
+                    y: -episodes-pan.value;
                     width: 100%;
                     height: max(1px, episodes.length * (episode-list.row-h + episode-list.gap));
                     spacing: episode-list.gap;
                     alignment: start;
 
-                    animate y { duration: Theme.glide; easing: Theme.ease; }
+                    animate y { duration: episodes-pan.duration; easing: Theme.ease; }
 
                     for episode[i] in episodes: EpisodeLine {
                         entry: episode;

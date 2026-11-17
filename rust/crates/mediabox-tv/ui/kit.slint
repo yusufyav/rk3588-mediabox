@@ -1,5 +1,5 @@
 import { Theme, Metrics, Icons } from "theme.slint";
-import { PointerTarget, PointerShield, PointerSwallow, PointerHub, PointerClose } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerHub, PointerClose, PointerPanArea, PanState } from "pointer.slint";
 
 // The pieces the settings screens are built from, and the screens they open.
 //
@@ -315,6 +315,7 @@ export component SettingCard inherits Rectangle {
     // Not while it cannot be pressed: hover, focus and a click are refused
     // as the remote's are.
     if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -415,6 +416,7 @@ export component ActionButton inherits Rectangle {
     // Not while it cannot be pressed: hover, focus and a click are refused
     // as the remote's are.
     if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -504,6 +506,7 @@ export component ChoiceRow inherits Rectangle {
     // Not while it cannot be pressed: hover, focus and a click are refused
     // as the remote's are.
     if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -719,7 +722,15 @@ export component ChoiceSheet inherits Dialog {
     property <int> shown: min(items.length, 6);
     property <length> viewport: shown * pitch + Metrics.glow-w * 4;
     property <length> total: items.length * pitch + Metrics.glow-w * 4;
-    property <length> scroll: clamp(focus-at * pitch - (viewport - pitch) / 2, 0px, max(0px, total - viewport));
+    // The remote keeps the focused option in the middle; a pointer's hand
+    // and wheel move the list on their own.
+    pan := PanState {
+        surface: root.pointer-zone;
+        remote: clamp(focus-at * pitch - (viewport - pitch) / 2, 0px, self.limit);
+        limit: max(0px, total - viewport);
+        remote-duration: Theme.t-row;
+    }
+    property <length> scroll: pan.value;
 
     Text {
         text: root.title;
@@ -730,13 +741,14 @@ export component ChoiceSheet inherits Dialog {
     Rectangle {
         height: viewport;
         clip: true;
+        if root.pointer-zone != "": PointerPanArea { surface: root.pointer-zone; }
         VerticalLayout {
             x: Metrics.glow-w * 2;
             y: Metrics.glow-w * 2 - scroll;
             width: parent.width - Metrics.glow-w * 4;
             spacing: Metrics.row-gap * 0.4;
             alignment: start;
-            animate y { duration: Theme.t-row; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
             for c[i] in items: ChoiceRow {
                 height: Metrics.set-h * 0.9;
                 title: c.title;
@@ -1074,12 +1086,12 @@ export component SideNav inherits Rectangle {
             Icon {
                 name: heading-back ? "back" : heading-icon;
                 size: Metrics.t-nav-head * 1.1;
-                ink: heading-back && heading-target.has-hover ? Theme.focus : Theme.text;
+                ink: heading-back && heading-target.lit ? Theme.focus : Theme.text;
             }
         }
         Text {
             text: heading;
-            color: heading-back && heading-target.has-hover ? Theme.focus : Theme.text;
+            color: heading-back && heading-target.lit ? Theme.focus : Theme.text;
             font-size: Metrics.t-nav-head;
             font-weight: 700;
             vertical-alignment: center;
@@ -1172,11 +1184,11 @@ export component SideNav inherits Rectangle {
                 spacing: Metrics.nav-pad * 0.8;
                 VerticalLayout {
                     alignment: center;
-                    Icon { name: "back"; size: Metrics.icon-small; ink: back-row.has-hover ? Theme.focus : Theme.muted; }
+                    Icon { name: "back"; size: Metrics.icon-small; ink: back-row.lit ? Theme.focus : Theme.muted; }
                 }
                 Text {
                     text: parent-label;
-                    color: back-row.has-hover ? Theme.focus : Theme.muted;
+                    color: back-row.lit ? Theme.focus : Theme.muted;
                     font-size: Metrics.t-secondary;
                     font-weight: 520;
                     vertical-alignment: center;

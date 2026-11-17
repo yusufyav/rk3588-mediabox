@@ -1,5 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
-import { PointerTarget, PointerShield, PointerSwallow, PointerScrub, PointerClose } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerScrub, PointerClose, PointerPanArea, PanState } from "pointer.slint";
 // The subtitle face: Stremio's own (stremio-core `subtitles_font: "Roboto"`),
 // carried in the binary so a board draws it whatever fonts it has, in the four
 // styles a subtitle file can ask for. Apache 2.0, ui/fonts/Roboto-LICENSE.txt.
@@ -173,7 +173,7 @@ component FilmButton inherits Rectangle {
         stroke: focused ? #05070c : #ffffff;
         stroke-width: size / 11;
     }
-    PointerTarget { zone: "player-buttons"; index: root.pointer-index; }
+    PointerTarget { zone: "player-buttons"; index: root.pointer-index; radius: root.border-radius; }
 }
 
 // The line along the bottom of a film.
@@ -599,6 +599,32 @@ export component Player inherits Rectangle {
             fill: transparent;
             stroke: #ffffff80;
             stroke-width: 2px;
+        }
+
+        // Each column is a window of its rows Rust keeps: the hand and the
+        // wheel move it a row at a time (`PointerHub.step`), the remote's
+        // focus never.
+        PanState {
+            surface: "player-menu";
+            pitch: Metrics.vh * 0.058;
+        }
+        PanState {
+            surface: "player-tracks";
+            pitch: Metrics.vh * 0.058;
+        }
+        PointerPanArea {
+            x: Metrics.vh * 0.03;
+            y: Metrics.vh * 0.085;
+            width: grouped ? parent.width * 0.28 : parent.width - Metrics.vh * 0.06;
+            height: parent.height - self.y;
+            surface: "player-menu";
+        }
+        if grouped: PointerPanArea {
+            x: parent.width * 0.32;
+            y: Metrics.vh * 0.085;
+            width: sectioned ? parent.width * 0.68 - Metrics.vh * 0.03 : parent.width * 0.32;
+            height: parent.height - self.y;
+            surface: "player-tracks";
         }
 
         // The languages.

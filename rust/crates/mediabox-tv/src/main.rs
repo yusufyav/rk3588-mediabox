@@ -212,14 +212,28 @@ struct App {
     /// What the pointer's policy was last decided from; a change forgets
     /// what the pointer was over and pressing.
     pointer_context: Option<pointer::Context>,
-    /// A wheel's part-detents.
-    wheel: pointer::Wheel,
-    /// The remote's key the main button is holding down, from its press on
-    /// a target to its release.
-    pointer_held: Option<InputAction>,
+    /// A wheel's part-detents and a touchpad's part-steps.
+    scroller: pointer::Scroller,
+    /// The button and the hand: a press, a drag, a scrub, a coast, a wheel
+    /// (`pointer::Gesture`), one at a time.
+    gesture: pointer::Gesture,
+    /// Runs a coast's frames while one lasts, and nothing after.
+    coast_timer: slint::Timer,
+    /// The target the arrow is over and lit, and the surface's ground it is
+    /// over where it has no target: what a wheel moves.
+    pointer_lit: Option<(pointer::Zone, usize)>,
+    pointer_area: Option<pointer::Lanes>,
+    /// Where a list drawn as a window of rows starts while a pointer is in
+    /// use, apart from the remote's focus.
+    windows: pointer::Windows,
+    /// What the surfaces a pointer moved show: where artwork is wanted.
+    views: pointer::Views,
     /// The first row of each column of the film's panel that is drawn, as
     /// last painted: a pointer names a row by its place in what is drawn.
     np_menu_window: (usize, usize),
+    /// The first option of the catalogue settings' open list that is drawn,
+    /// as last painted: a pointer names an option by its place in it.
+    ms_picker_window: usize,
     /// The panel has been given to another application, which reads its own
     /// input. Cleared if it could not be started.
     handed_over: bool,
@@ -787,10 +801,25 @@ impl App {
     /// arrow goes.
     fn pointer_sync(&mut self) {
         let context = self.pointer_context();
-        let change = pointer::transition(self.pointer_context.replace(context), context);
+        let before = self.pointer_context.replace(context);
+        // Another screen draws other surfaces: what the last one's showed
+        // is nothing to load artwork for. A list over the same screen leaves
+        // the screen where it was, and its artwork with it.
+        if before.map(|b| (b.route, b.film, b.handed_over))
+            != Some((context.route, context.film, context.handed_over))
+        {
+            self.views.clear();
+        }
+        let change = pointer::transition(before, context);
         if change != pointer::Transition::Keep {
-            self.wheel.reset();
+            self.scroller.reset();
             self.pointer_drop_drag();
+            self.pointer_end_gesture();
+            self.pointer_unlight();
+            self.pointer_area = None;
+            // A list over the screen drawn as a window of rows is another
+            // list once the screen, or the list, is another.
+            self.windows.clear();
         }
         match change {
             pointer::Transition::Keep => {}
@@ -799,6 +828,17 @@ impl App {
             }
             pointer::Transition::Hide => self.hide_pointer(),
         }
+    }
+
+    /// The panel's size in the window's logical pixels.
+    fn logical_size(&self) -> Option<slint::LogicalSize> {
+        let window = self.window.upgrade()?;
+        Some(
+            window
+                .window()
+                .size()
+                .to_logical(window.window().scale_factor()),
+        )
     }
 
     /// A pointer moved, by everything it said since the loop last asked: the
@@ -813,11 +853,16 @@ impl App {
         let Some(window) = self.window.upgrade() else {
             return;
         };
-        let size = window
-            .window()
-            .size()
-            .to_logical(window.window().scale_factor());
-        if !self.pointer.apply(motion, size.width, size.height) {
+        let Some(size) = self.logical_size() else {
+            return;
+        };
+        let changed = self.pointer.apply(motion, size.width, size.height);
+        // The gesture follows the hand to the fraction, drawn or not.
+        if let Some(at) = self.pointer.exact() {
+            let step = self.gesture.motion(at, Instant::now());
+            self.pointer_step(step);
+        }
+        if !changed {
             return;
         }
         let Some((x, y)) = self.pointer.at() else {
@@ -827,6 +872,7 @@ impl App {
         window.set_pointer_y(y);
         window.set_pointer_shown(true);
         window.global::<PointerHub>().set_shown(true);
+        window.global::<PointerPan>().set_pinned(true);
         // A film shows nothing until somebody reaches for it: a pointer
         // that moves over it brings its controls up, as any key does.
         // Already up, they are only kept up: nothing new to draw.
@@ -844,10 +890,13 @@ impl App {
         });
     }
 
-    /// The pointer's main button, handed to Slint's hit testing at the
-    /// arrow: a press and release on a target is its `select`, anywhere else
-    /// it is nothing. Where the pointer is disabled, or its arrow is not up,
-    /// the button does nothing -- it is never turned into Ok.
+    /// The pointer's main button. Down starts a gesture where the arrow is
+    /// and hands the press to Slint's hit testing, which says what it went
+    /// down on (`pointer_press`, `pointer_press_area`, `pointer_scrub`); up
+    /// ends a drag -- coasting if the hand was still moving -- and hands the
+    /// release over, which is a click only on the target it went down on.
+    /// Where the pointer is disabled, or its arrow is not up, the button
+    /// does nothing -- it is never turned into Ok.
     pub fn pointer_button(&mut self, pressed: bool) {
         self.pointer_sync();
         if !self.pointer_policy().enabled() {
@@ -856,23 +905,106 @@ impl App {
         let Some((x, y)) = self.pointer.at() else {
             return;
         };
-        let position = slint::LogicalPosition::new(x, y);
         let button = slint::platform::PointerEventButton::Left;
-        platform::to_slint(if pressed {
-            slint::platform::WindowEvent::PointerPressed { position, button }
+        let position = slint::LogicalPosition::new(x, y);
+        if pressed {
+            let at = self.pointer.exact().unwrap_or((x, y));
+            let height = self.logical_size().map_or(720.0, |size| size.height);
+            self.coast_timer.stop();
+            self.gesture.press(at, self.pointer_context(), height);
+            platform::to_slint(slint::platform::WindowEvent::PointerPressed { position, button });
         } else {
-            slint::platform::WindowEvent::PointerReleased { position, button }
-        });
+            self.gesture.release(Instant::now());
+            if self.gesture.coasting() {
+                self.pointer_coast_start();
+            }
+            platform::to_slint(slint::platform::WindowEvent::PointerReleased { position, button });
+        }
     }
 
-    /// A wheel's detents, as the arrows: down and right positive. Through
-    /// the dispatcher, so a fast wheel steps at the remote's own rate.
-    pub fn pointer_wheel(&mut self, horizontal: f64, vertical: f64) {
+    /// A wheel's turn or a touchpad's fingers: the surface under the arrow
+    /// scrolls, and the remote's focus stays where it is. Where nothing
+    /// scrolls under the arrow, a wheel is the arrows, as it always was --
+    /// along the one row of a screen that is one row -- through the
+    /// dispatcher, so a fast wheel steps at the remote's own rate. Over a
+    /// modal only the modal moves: nothing under it is under the arrow.
+    pub fn pointer_scroll(&mut self, scroll: pointer::Scroll) {
         self.pointer_sync();
         if !self.pointer_policy().enabled() {
             return;
         }
-        let (mut dx, mut dy) = self.wheel.add(horizontal, vertical);
+        // A wheel is a pointer in use, as a motion is: the arrow comes back
+        // where it was.
+        if !self.pointer.shown() {
+            self.pointer_motion(pointer::Motion::Relative(0.0, 0.0));
+        }
+        let height = self.logical_size().map_or(720.0, |size| size.height);
+        let scrolled = self.scroller.add(scroll, pointer::detent(height));
+        let lanes = self
+            .pointer_lit
+            .map(|(zone, index)| zone.lanes(index))
+            .or(self.pointer_area)
+            .unwrap_or_default();
+        let elsewhere = pointer::wheel_elsewhere(self.route());
+        let context = self.pointer_context();
+        let mut fallback = (0, 0);
+        for (axis, pixels, steps) in [
+            (pointer::Axis::Vertical, scrolled.pixels.1, scrolled.steps.1),
+            (
+                pointer::Axis::Horizontal,
+                scrolled.pixels.0,
+                scrolled.steps.0,
+            ),
+        ] {
+            if pixels == 0.0 && steps == 0 {
+                continue;
+            }
+            // Up and down on what scrolls up and down; on a single row that
+            // only scrolls along, along it.
+            let lane = lanes
+                .on(axis)
+                .or(if lanes.vertical.is_none() {
+                    lanes.horizontal
+                } else {
+                    None
+                })
+                .or(match elsewhere {
+                    // Off every surface, a catalogue's wheel scrolls its
+                    // page, up and down, where the page is on top.
+                    pointer::WheelElsewhere::Page(page) if lanes.is_empty() => page
+                        .filter(|page| page.axis == axis)
+                        .filter(|page| pointer::accepts(context, page.zone)),
+                    _ => None,
+                });
+            match lane {
+                // A window of rows Rust keeps moves a row a detent; fingers
+                // are counted in rows by the list itself (`PanState`).
+                Some(lane) if lane.stepped() && scrolled.eased => {
+                    if steps != 0 {
+                        self.pointer_shift(lane, steps);
+                    }
+                }
+                Some(lane) => {
+                    if let Some(window) = self.window.upgrade() {
+                        window.global::<PointerPan>().set_eased(scrolled.eased);
+                    }
+                    let step = self.gesture.wheel(lane, pixels, Instant::now());
+                    self.coast_timer.stop();
+                    self.pointer_step(step);
+                }
+                // A catalogue's wheel moves nothing else, and never the
+                // focus.
+                None if elsewhere != pointer::WheelElsewhere::Arrows => {}
+                None => match axis {
+                    pointer::Axis::Vertical => fallback.1 = steps,
+                    pointer::Axis::Horizontal => fallback.0 = steps,
+                },
+            }
+        }
+        let (mut dx, mut dy) = fallback;
+        if (dx, dy) == (0, 0) {
+            return;
+        }
         if pointer::wheel_is_along(self.route()) {
             (dx, dy) = (dx + dy, 0);
         }
@@ -890,12 +1022,214 @@ impl App {
         }
     }
 
-    /// The remote's focus onto a target, through the screen's own focus
-    /// model.
-    fn pointer_point(&mut self, zone: pointer::Zone, index: usize, hover: bool) -> pointer::Aim {
-        if hover && !zone.hovers(index) {
-            return pointer::Aim::Here;
+    /// What a step of the gesture asks for: a surface moved, or a click.
+    fn pointer_step(&mut self, step: pointer::Step) {
+        match step {
+            pointer::Step::Nothing => {}
+            pointer::Step::Pan {
+                lane,
+                gesture,
+                total,
+            } => {
+                let Some(window) = self.window.upgrade() else {
+                    return;
+                };
+                // A hand on a surface lights nothing.
+                self.pointer_unlight();
+                let pan = window.global::<PointerPan>();
+                if !matches!(self.gesture.phase(), pointer::Phase::Wheeling { .. }) {
+                    pan.set_eased(false);
+                }
+                pan.set_surface(pointer::zone_name(lane.zone).into());
+                pan.set_lane(lane.lane);
+                let (dx, dy) = match lane.axis {
+                    pointer::Axis::Vertical => (0.0, total),
+                    pointer::Axis::Horizontal => (total, 0.0),
+                };
+                pan.set_dx(dx);
+                pan.set_dy(dy);
+                pan.set_gesture(gesture);
+            }
+            pointer::Step::Click(zone, index) => self.pointer_click(zone, index),
         }
+    }
+
+    /// A coast's frames, at the panel's pace, while it lasts.
+    fn pointer_coast_start(&mut self) {
+        let mut last = Instant::now();
+        self.coast_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(16),
+            move || {
+                let now = Instant::now();
+                let dt = now.duration_since(last).as_secs_f32();
+                last = now;
+                with_app(|app| app.pointer_coast(dt));
+            },
+        );
+    }
+
+    fn pointer_coast(&mut self, dt: f32) {
+        let step = self.gesture.coast(dt);
+        self.pointer_step(step);
+        if !self.gesture.coasting() {
+            self.coast_timer.stop();
+        }
+    }
+
+    /// A surface ran into its end: a coast moving it stops there.
+    pub fn pointer_edge(&mut self, surface: &str, lane: i32) {
+        let Some(zone) = pointer::Zone::parse(surface) else {
+            return;
+        };
+        if let pointer::Phase::Coasting { lane: moving, .. } = self.gesture.phase()
+            && moving.zone == zone
+            && moving.lane == lane
+        {
+            self.gesture.edge(moving);
+            self.coast_timer.stop();
+        }
+    }
+
+    /// A surface a pointer moved shows `first` onwards (-1: it is the
+    /// focus's again). Artwork is wanted around it, and a catalogue grid
+    /// moved near its end asks for its next page, as the remote's focus
+    /// arriving there does.
+    pub fn pointer_view(&mut self, surface: &str, lane: i32, first: i32) {
+        let Some(zone) = pointer::Zone::parse(surface) else {
+            return;
+        };
+        if !self.views.set(zone, lane, first) {
+            return;
+        }
+        match (self.route(), zone) {
+            (Route::Media, pointer::Zone::Shelves) => {
+                self.media.sync_artwork(&mut self.images, &self.views);
+            }
+            (Route::Search, pointer::Zone::Shelves) => self.sync_search_artwork(),
+            (Route::Discover, pointer::Zone::Grid) => {
+                if let Ok(row) = usize::try_from(first)
+                    && let Some(page) = self.discover.more_near(row * screens::discover::COLUMNS, 4)
+                {
+                    spawn_discover_page(page);
+                }
+                self.paint();
+            }
+            (Route::Library | Route::Detail, _) => self.paint(),
+            _ => {}
+        }
+    }
+
+    fn sync_search_artwork(&mut self) {
+        search_artwork(&mut self.search, &mut self.images, &self.views);
+    }
+
+    /// The focus a grid's artwork is wanted around: the remote's, or the
+    /// row after the first a pointer left shown (three rows fit).
+    fn grid_anchor(&self, focus: usize, columns: usize) -> usize {
+        self.views
+            .first(pointer::Zone::Grid, -1)
+            .map_or(focus, |row| (row + 1) * columns)
+    }
+
+    /// A list drawn as a window of rows moved by whole rows, by the hand or
+    /// the wheel -- the window only, never the remote's focus.
+    pub fn pointer_rows(&mut self, surface: &str, lane: i32, rows: i32) {
+        let Some(zone) = self.pointer_zone(surface) else {
+            return;
+        };
+        let lanes = zone.lanes(0);
+        if let Some(found) = lanes.vertical.filter(|found| found.lane == lane) {
+            self.pointer_shift(found, rows);
+        }
+    }
+
+    fn pointer_shift(&mut self, lane: pointer::Lane, rows: i32) {
+        if rows == 0 || !pointer::accepts(self.pointer_context(), lane.zone) {
+            return;
+        }
+        match lane.zone {
+            pointer::Zone::LiveGuide | pointer::Zone::LivePanel => {
+                let (at, now) = (Instant::now(), screens::live::utc_now());
+                if self
+                    .live
+                    .as_mut()
+                    .is_some_and(|live| live.scroll_view(rows, at, now))
+                {
+                    self.paint();
+                }
+            }
+            zone => {
+                self.windows.step(zone, rows);
+                self.paint();
+            }
+        }
+    }
+
+    /// Whatever the button and the hand were doing is let go of: nothing
+    /// clicks, nothing coasts. A surface stays where the hand left it.
+    fn pointer_end_gesture(&mut self) {
+        self.gesture.cancel();
+        self.coast_timer.stop();
+    }
+
+    /// The remote is picked up again, or the pointer is gone: every surface
+    /// a pointer moved goes back to where the remote's focus keeps it, so
+    /// the focus is in view again.
+    fn pointer_release_views(&mut self) {
+        self.pointer_end_gesture();
+        self.windows.clear();
+        self.views.clear();
+        if let Some(live) = self.live.as_mut() {
+            live.reveal_focus();
+        }
+        if let Some(window) = self.window.upgrade() {
+            window.global::<PointerPan>().set_pinned(false);
+        }
+    }
+
+    /// One surface given back to the remote's focus: a poster's menu is
+    /// placed by the focus, so its shelf goes back under it.
+    fn pointer_release_lane(&mut self, lane: pointer::Lane) {
+        self.pointer_release_named(pointer::zone_name(lane.zone), lane.lane);
+    }
+
+    /// Every surface given back to the remote's focus, the pointer still in
+    /// use: a pointer's Back is the remote's Back, and the page scrolls to
+    /// where it puts the focus, as it does for a key. The next drag or
+    /// wheel moves them again.
+    fn pointer_return_to_focus(&mut self) {
+        self.windows.clear();
+        self.views.clear();
+        if let Some(live) = self.live.as_mut() {
+            live.reveal_focus();
+        }
+        self.pointer_release_named("*", -1);
+    }
+
+    fn pointer_release_named(&mut self, surface: &str, lane: i32) {
+        if let Some(window) = self.window.upgrade() {
+            let pan = window.global::<PointerPan>();
+            pan.set_release_surface(surface.into());
+            pan.set_release_lane(lane);
+            pan.set_release(pan.get_release().wrapping_add(1));
+        }
+    }
+
+    /// Nothing lit any more.
+    fn pointer_unlight(&mut self) {
+        if self.pointer_lit.take().is_some()
+            && let Some(window) = self.window.upgrade()
+        {
+            let hub = window.global::<PointerHub>();
+            hub.set_lit_zone("".into());
+            hub.set_lit_index(-1);
+        }
+    }
+
+    /// The remote's focus onto a target, through the screen's own focus
+    /// model: what a click does before its Select.
+    fn pointer_point(&mut self, zone: pointer::Zone, index: usize) -> pointer::Aim {
         use pointer::Zone;
         use screens::settings::EditorTarget;
         let (row, col) = pointer::cell(index);
@@ -940,15 +1274,7 @@ impl App {
                     Zone::MsControls => MsTarget::Control(index),
                     // The list draws a window of its options; the target is
                     // its place in that window.
-                    _ => {
-                        let total = rows
-                            .get(self.media_settings.row())
-                            .map_or(0, |row| row.choices.len());
-                        let focus = self.media_settings.picker.map_or(0, |picker| picker.focus);
-                        MsTarget::Option(
-                            screens::media_settings::picker_first(total, focus) + index,
-                        )
-                    }
+                    _ => MsTarget::Option(self.ms_picker_window + index),
                 };
                 self.media_settings.point(target, &rows)
             }
@@ -983,13 +1309,7 @@ impl App {
             // As the buttons are drawn: the trailer only with one, the
             // library and watched marks only once the account knows the title.
             Zone::DiscoverPanel => {
-                let item = self.discover.items.get(self.discover.index);
-                let enabled = match index {
-                    0 => item.is_some_and(|item| item.trailer.is_some()),
-                    1 | 2 => item.is_some_and(|item| self.hero_state.contains_key(&item.id)),
-                    _ => true,
-                };
-                if enabled {
+                if self.pointer_enabled(zone, index) {
                     self.discover.point_button(index)
                 } else {
                     pointer::Aim::Refused
@@ -1102,7 +1422,8 @@ impl App {
     /// under the arrow, a move follows it, up goes there through the
     /// remote's own road (`Transport::SeekTo`), and a press taken away goes
     /// nowhere. The controls stay up while it lasts. Only where the policy
-    /// is `Full` -- the player -- and the bar is on top.
+    /// is `Full` -- the player -- and the bar is on top. The bar has the
+    /// gesture: nothing else is dragged or clicked meanwhile.
     pub fn pointer_scrub(&mut self, zone: &str, phase: i32, at: f32) {
         let Some(zone) = self.pointer_zone(zone) else {
             // Taken away, or never this bar's: nothing is left held.
@@ -1114,25 +1435,47 @@ impl App {
         }
         match phase {
             0 | 1 => {
-                if phase == 1 && !self.now.dragging {
+                if phase == 0 {
+                    // Only the press the platform said went down.
+                    if !matches!(
+                        self.gesture.phase(),
+                        pointer::Phase::Pressed { hit: None, .. }
+                    ) {
+                        return;
+                    }
+                    self.gesture.scrub();
+                } else if !self.now.dragging || self.gesture.phase() != pointer::Phase::Scrub {
                     return;
                 }
                 self.now.drag_to(at);
                 self.open_controls();
             }
             2 => {
+                if self.gesture.phase() != pointer::Phase::Scrub {
+                    self.pointer_drop_drag();
+                    return;
+                }
+                self.gesture.cancel();
                 if let Some(seconds) = self.now.drag_end() {
                     self.transport(Transport::SeekTo(seconds));
                 }
                 self.open_controls();
             }
-            _ => self.pointer_drop_drag(),
+            _ => {
+                if self.gesture.phase() == pointer::Phase::Scrub {
+                    self.gesture.cancel();
+                }
+                self.pointer_drop_drag();
+            }
         }
     }
 
     /// A drag along the film's bar that will not end in a release: the bar
     /// is the film's again and nothing is gone to.
     fn pointer_drop_drag(&mut self) {
+        if self.gesture.phase() == pointer::Phase::Scrub {
+            self.gesture.cancel();
+        }
         if self.now.drag_cancel() {
             self.paint();
         }
@@ -1167,44 +1510,201 @@ impl App {
         (self.pointer.shown() && pointer::accepts(self.pointer_context(), zone)).then_some(zone)
     }
 
-    /// The arrow came over a target: hover is the remote's focus.
-    pub fn pointer_hover(&mut self, zone: &str, index: i32) {
-        let (Some(zone), Ok(index)) = (self.pointer_zone(zone), usize::try_from(index)) else {
-            return;
-        };
-        if self.pointer_point(zone, index, true) == pointer::Aim::Moved {
-            self.paint();
+    /// Whether a target the interface draws may be taken, where only Rust
+    /// knows: the record's buttons that are drawn but take nothing.
+    fn pointer_enabled(&self, zone: pointer::Zone, index: usize) -> bool {
+        match zone {
+            pointer::Zone::DiscoverPanel => {
+                let item = self.discover.items.get(self.discover.index);
+                match index {
+                    0 => item.is_some_and(|item| item.trailer.is_some()),
+                    1 | 2 => item.is_some_and(|item| self.hero_state.contains_key(&item.id)),
+                    _ => true,
+                }
+            }
+            _ => true,
         }
     }
 
-    /// The main button on a target: down puts the remote's focus on it and
-    /// presses the remote's own key for it -- Ok with its hold, Back, an
-    /// arrow -- through the remote's own road (`press`); up releases that
-    /// key. A target that cannot take the focus is not pressed, and neither
-    /// is whatever had the focus.
-    pub fn pointer_press(&mut self, zone: &str, index: i32, down: bool) {
-        if !down {
-            if let Some(key) = self.pointer_held.take() {
-                self.press(key, false, input::Origin::Keyboard);
+    /// The arrow came over a target (`over`) or left it. Over one the
+    /// pointer may reach, it is lit -- a look, never the remote's focus,
+    /// which only a click moves -- and is what a wheel scrolls. Nothing is
+    /// lit while the button is down or a hand moves a surface.
+    pub fn pointer_hover(&mut self, zone: &str, index: i32, over: bool) {
+        let (Some(zone), Ok(index)) = (pointer::Zone::parse(zone), usize::try_from(index)) else {
+            return;
+        };
+        if !over {
+            if self.pointer_lit == Some((zone, index)) {
+                self.pointer_unlight();
             }
             return;
         }
-        self.pointer_held = None;
+        if self.pointer_zone(pointer::zone_name(zone)).is_none()
+            || !zone.lights()
+            || !self.pointer_enabled(zone, index)
+            || !self.gesture.idle()
+        {
+            self.pointer_unlight();
+            return;
+        }
+        self.pointer_area = None;
+        if self.pointer_lit == Some((zone, index)) {
+            return;
+        }
+        self.pointer_lit = Some((zone, index));
+        if let Some(window) = self.window.upgrade() {
+            let hub = window.global::<PointerHub>();
+            hub.set_lit_zone(pointer::zone_name(zone).into());
+            hub.set_lit_index(index as i32);
+        }
+    }
+
+    /// The arrow over a surface's ground, or off it: what a wheel scrolls
+    /// where no target is under the arrow.
+    pub fn pointer_over_area(&mut self, surface: &str, lane: i32, over: bool) {
+        let lanes = pointer::Lanes::of_area(surface, lane);
+        if !over {
+            if self.pointer_area == Some(lanes) {
+                self.pointer_area = None;
+            }
+            return;
+        }
+        self.pointer_area = lanes.taken(self.pointer_context()).then_some(lanes);
+    }
+
+    /// The main button on a target (`down`) or its release there. Down only
+    /// says what the gesture went down on; up is a click when the hand has
+    /// stayed where it went down -- the target's focus, then its Select,
+    /// once (`pointer_click`). A drag, a cancel or a release elsewhere is
+    /// no click. A press held still on what a long Ok means something for
+    /// is that long Ok.
+    pub fn pointer_press(&mut self, zone: &str, index: i32, down: bool) {
+        let context = self.pointer_context();
         let (Some(zone), Ok(index)) = (self.pointer_zone(zone), usize::try_from(index)) else {
+            // A target the pointer may not reach is no click, nor a drag of
+            // what is under it.
+            if down {
+                self.gesture.cancel();
+            }
             return;
         };
-        match self.pointer_point(zone, index, false) {
+        if !down {
+            let step = self.gesture.target_up(zone, index, context);
+            self.pointer_step(step);
+            return;
+        }
+        let step = self.gesture.hit(pointer::Hit::Target(zone, index), context);
+        self.pointer_step(step);
+        if zone.holds() {
+            let id = self.gesture.id();
+            slint::Timer::single_shot(OK_HOLD, move || with_app(|app| app.pointer_held(id)));
+        }
+    }
+
+    /// The button went down on a surface's ground: a drag of the surface
+    /// if the hand moves, nothing if it does not.
+    pub fn pointer_press_area(&mut self, surface: &str, lane: i32) {
+        let lanes = pointer::Lanes::of_area(surface, lane);
+        let context = self.pointer_context();
+        let hit = pointer::Hit::Area(if lanes.taken(context) {
+            lanes
+        } else {
+            pointer::Lanes::default()
+        });
+        let step = self.gesture.hit(hit, context);
+        self.pointer_step(step);
+    }
+
+    /// A press still held, unmoved, on a target where a long Ok means
+    /// something: the remote's focus goes onto it, and its menu opens as a
+    /// held Ok opens it. Where a hold means nothing there, the release is
+    /// the click it always was.
+    fn pointer_held(&mut self, id: i32) {
+        let Some((zone, index)) = self.gesture.holding(id) else {
+            return;
+        };
+        // Where it can be told from the target alone, a hold that would mean
+        // nothing moves no focus either: the press stays a candidate for a
+        // click or a drag, which must leave the focus where it is.
+        let (row, col) = pointer::cell(index);
+        let means = match (self.route(), zone) {
+            _ if self.here.is_some() => false,
+            (Route::Media, pointer::Zone::Shelves) => {
+                self.media.menu.is_none()
+                    && self
+                        .media
+                        .item_at(row, col)
+                        .is_some_and(|item| item.continuing)
+            }
+            (Route::Library, pointer::Zone::Grid) => self.library.item_at(index).is_some(),
+            // A radio's row: whether it has a menu is the row's own once the
+            // focus is on it (`wants_ok_hold`).
+            (Route::Wifi, pointer::Zone::WifiRows) => !self.wifi.busy,
+            (Route::Bluetooth, pointer::Zone::BtRows) => !self.bt.busy,
+            _ => false,
+        };
+        if !means {
+            return;
+        }
+        match self.pointer_point(zone, index) {
             pointer::Aim::Refused => return,
+            pointer::Aim::Moved => self.paint(),
+            pointer::Aim::Here => {}
+        }
+        if self.wants_ok_hold() {
+            self.gesture.held();
+            self.pointer_menu_lane(zone, index);
+            self.open_hold_menu();
+        }
+    }
+
+    /// A poster's menu is placed by the focus: the shelf it opens over goes
+    /// back to where the focus keeps it.
+    fn pointer_menu_lane(&mut self, zone: pointer::Zone, index: usize) {
+        if self.route() == Route::Media
+            && let Some(lane) = zone.lanes(index).horizontal
+        {
+            self.pointer_release_lane(lane);
+        }
+    }
+
+    /// A click: the remote's focus onto the target through the screen's own
+    /// focus model, then the target's own activation -- the remote's key
+    /// through the dispatcher and the screen's own Select, once. A target
+    /// that cannot take the focus is not pressed, and neither is whatever
+    /// had the focus.
+    fn pointer_click(&mut self, zone: pointer::Zone, index: usize) {
+        match self.pointer_point(zone, index) {
+            pointer::Aim::Refused => return,
+            // Discover's poster that was not the selected one is selected:
+            // its record comes up beside the grid, and the next click on it
+            // opens it, as Stremio's Discover does.
+            pointer::Aim::Moved if pointer::click_selects_first(self.route(), zone) => {
+                self.want_hero();
+                self.paint();
+                return;
+            }
             pointer::Aim::Moved => self.paint(),
             pointer::Aim::Here => {}
         }
         match zone.activation(index) {
             pointer::Activation::Key(key) => {
-                self.pointer_held = Some(key);
-                self.press(key, true, input::Origin::Keyboard);
+                // A way back is the remote's Back, and the page scrolls to
+                // where it puts the focus, as for a key. (A modal's ground
+                // closes the modal and leaves the page as it was.)
+                if zone == pointer::Zone::Back {
+                    self.pointer_return_to_focus();
+                }
+                // A click is a press and its release at once: never a hold.
+                self.ok_hold = None;
+                if let Some(action) = self.dispatcher.accept(key, input::Origin::Keyboard) {
+                    self.act(action);
+                }
             }
             // What a held Ok opens on this poster: its menu.
             pointer::Activation::OpenMenu => {
+                self.pointer_menu_lane(zone, index);
                 let opened = match self.route() {
                     Route::Media => self.media.open_menu(),
                     Route::Library => self.library.open_menu(),
@@ -1233,11 +1733,14 @@ impl App {
         }
     }
 
-    /// The press was taken away before the button came up: the key is let go
-    /// without firing -- a held Ok that was waiting to be a press is not one.
+    /// The press was taken away before the button came up: nothing fires,
+    /// nothing is dragged on.
     pub fn pointer_cancel(&mut self) {
-        if self.pointer_held.take() == Some(InputAction::Ok) {
-            self.ok_hold = None;
+        if matches!(
+            self.gesture.phase(),
+            pointer::Phase::Pressed { .. } | pointer::Phase::Panning { .. }
+        ) {
+            self.gesture.cancel();
         }
     }
 
@@ -1248,16 +1751,25 @@ impl App {
         if !self.pointer_policy().enabled() {
             return;
         }
+        if pressed {
+            self.pointer_end_gesture();
+            self.pointer_return_to_focus();
+        }
         self.press(InputAction::Back, pressed, input::Origin::Keyboard);
     }
 
     /// The arrow off the panel: a key was pressed, so the remote is the thing
     /// in use, or the pointer is disabled here. What it was over and pressing
-    /// is forgotten. The next allowed motion puts it back.
+    /// is forgotten, nothing is lit, and every surface it scrolled goes back
+    /// to the remote's focus. The next allowed motion puts it back.
     fn hide_pointer(&mut self) {
         if !self.pointer.hide() {
             return;
         }
+        self.pointer_unlight();
+        self.pointer_area = None;
+        self.scroller.reset();
+        self.pointer_release_views();
         if let Some(window) = self.window.upgrade() {
             window.set_pointer_shown(false);
             window.global::<PointerHub>().set_shown(false);
@@ -1880,7 +2392,7 @@ impl App {
 
     fn paint_media(&mut self, window: &MediaBoxWindow) {
         use screens::media::{Zone, PLACES};
-        self.media.sync_artwork(&mut self.images);
+        self.media.sync_artwork(&mut self.images, &self.views);
         window.set_media_row(self.media.row() as i32);
         window.set_media_col(self.media.column() as i32);
         window.set_media_columns(slint::ModelRc::new(slint::VecModel::from(self.media.columns())));
@@ -2181,10 +2693,11 @@ impl App {
             _ => String::new(),
         };
         window.set_discover_note(note.into());
+        let anchor = self.grid_anchor(self.discover.index, screens::discover::COLUMNS);
         let tiles = grid_posters(
             &mut self.images,
             &self.discover.items,
-            self.discover.index,
+            anchor,
             screens::discover::COLUMNS,
         );
         window.set_discover_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
@@ -4913,13 +5426,24 @@ impl App {
         });
         window.set_ms_picker_open(picker.is_some());
         if let Some((picker, title, choices, selected)) = picker {
-            let first = ms::picker_first(choices.len(), picker.focus);
+            // While a pointer is in use the window stays where the hand left
+            // it, and the focus may be out of it (-1 then, or past the end).
+            let first = self.windows.first(
+                pointer::Zone::MsOptions,
+                ms::picker_first(choices.len(), picker.focus),
+                choices.len(),
+                ms::PICKER_VISIBLE,
+                self.pointer.shown(),
+            );
+            self.ms_picker_window = first;
             window.set_ms_picker_title(title.into());
             window.set_ms_picker_above(first > 0);
             window.set_ms_picker_below(first + ms::PICKER_VISIBLE < choices.len());
-            window.set_ms_picker_focus((picker.focus - first) as i32);
+            window.set_ms_picker_focus(picker.focus as i32 - first as i32);
             window.set_ms_picker_selected(selected as i32 - first as i32);
-            window.set_ms_picker_options(strings(choices.into_iter().skip(first).take(ms::PICKER_VISIBLE)));
+            window.set_ms_picker_options(strings(
+                choices.into_iter().skip(first).take(ms::PICKER_VISIBLE),
+            ));
         }
 
         let session = screens::account::Session::from_status(self.status.as_ref());
@@ -5925,6 +6449,12 @@ impl App {
         if !self.wants_ok_hold() {
             return;
         }
+        self.open_hold_menu();
+    }
+
+    /// What a long Ok opens where it means something: a poster's menu, a
+    /// network's, a paired device's.
+    fn open_hold_menu(&mut self) {
         let opened = match self.route() {
             Route::Media => self.media.open_menu(),
             Route::Wifi => self.open_wifi_menu(),
@@ -6817,8 +7347,7 @@ impl App {
         window.set_search_entries(slint::ModelRc::new(slint::VecModel::from(entries)));
         window.set_search_list_index(search.list_index as i32);
 
-        let anchor = search.results.row as i32;
-        search.results.sync_artwork(&mut self.images, anchor);
+        search_artwork(search, &mut self.images, &self.views);
         window.set_search_rails(slint::ModelRc::from(search.results.rails.clone()));
         window.set_search_rail_row(search.results.row as i32);
         window.set_search_rail_col(search.results.column() as i32);
@@ -6848,10 +7377,11 @@ impl App {
         window.set_library_index(library.index() as i32);
         window.set_library_columns(screens::library::COLUMNS as i32);
 
+        let anchor = self.grid_anchor(self.library.index(), screens::library::COLUMNS);
         let tiles = grid_posters(
             &mut self.images,
             self.library.items(),
-            self.library.index(),
+            anchor,
             screens::library::COLUMNS,
         );
         window.set_library_items(slint::ModelRc::new(slint::VecModel::from(tiles)));
@@ -6900,8 +7430,13 @@ impl App {
         // Stills for the episodes near the remote, and none for the rest:
         // a season of twenty is twenty pictures nobody is looking at.
         let episodes = detail.episodes();
+        // Where a pointer moved the list, the rows it shows.
+        let near = self
+            .views
+            .first(pointer::Zone::DetailEpisodes, -1)
+            .map_or(detail.episode_focus, |first| first + 3);
         for (index, row) in rows.iter_mut().enumerate() {
-            if index.abs_diff(detail.episode_focus) > 6 {
+            if index.abs_diff(near) > 6 {
                 continue;
             }
             let Some(url) = episodes
@@ -7090,7 +7625,14 @@ impl App {
         };
         // Long columns scroll: only what fits is drawn, and the focus is
         // given relative to it.
-        let track_first = screens::now_playing::menu_window(tracks_all.len(), now.menu_track_focus);
+        let pinned = self.pointer.shown();
+        let track_first = self.windows.first(
+            pointer::Zone::PlayerTracks,
+            screens::now_playing::menu_window(tracks_all.len(), now.menu_track_focus),
+            tracks_all.len(),
+            screens::now_playing::MENU_VISIBLE,
+            pinned,
+        );
         let tracks_shown: Vec<MenuRow> = tracks_all
             .into_iter()
             .skip(track_first)
@@ -7178,7 +7720,13 @@ impl App {
                 None,
             ),
         };
-        let first = screens::now_playing::menu_window(rows.len(), now.menu_focus);
+        let first = self.windows.first(
+            pointer::Zone::PlayerMenu,
+            screens::now_playing::menu_window(rows.len(), now.menu_focus),
+            rows.len(),
+            screens::now_playing::MENU_VISIBLE,
+            pinned,
+        );
         self.np_menu_window = (first, track_first);
         window.set_np_menu_above(first > 0);
         window.set_np_menu_below(first + screens::now_playing::MENU_VISIBLE < rows.len());
@@ -7843,6 +8391,24 @@ impl App {
     }
 }
 
+/// The search's result shelves' artwork: around the focused shelf and its
+/// column, or what a pointer left on the panel (`pointer::Views`).
+fn search_artwork(
+    search: &mut screens::search::Search,
+    images: &mut images::ImageManager,
+    views: &pointer::Views,
+) {
+    let anchor = views
+        .first(pointer::Zone::Shelves, -1)
+        .map_or(search.results.row as i32, |first| first as i32 + 1);
+    let shown = |row: usize| {
+        i32::try_from(row)
+            .ok()
+            .and_then(|lane| views.first(pointer::Zone::Shelves, lane))
+    };
+    search.results.sync_artwork(images, anchor, &shown);
+}
+
 /// Poster tiles with whatever artwork is already decoded, and a request for
 /// what is not.
 ///
@@ -8028,9 +8594,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         home: state::Home::new(),
         pointer: pointer::Pointer::default(),
         pointer_context: None,
-        wheel: pointer::Wheel::default(),
-        pointer_held: None,
+        scroller: pointer::Scroller::default(),
+        gesture: pointer::Gesture::default(),
+        coast_timer: slint::Timer::default(),
+        pointer_lit: None,
+        pointer_area: None,
+        windows: pointer::Windows::default(),
+        views: pointer::Views::default(),
         np_menu_window: (0, 0),
+        ms_picker_window: 0,
         handed_over: false,
         shelves: Vec::new(),
         loading: false,
@@ -8184,10 +8756,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     // What the arrow is over, and a click on it (ui/pointer.slint).
     let hub = window.global::<PointerHub>();
-    hub.on_hover(|zone, index| with_app(|app| app.pointer_hover(zone.as_str(), index)));
+    hub.on_hover(|zone, index, over| with_app(|app| app.pointer_hover(zone.as_str(), index, over)));
     hub.on_press(|zone, index, down| with_app(|app| app.pointer_press(zone.as_str(), index, down)));
     hub.on_cancel(|| with_app(|app| app.pointer_cancel()));
     hub.on_scrub(|zone, phase, at| with_app(|app| app.pointer_scrub(zone.as_str(), phase, at)));
+    hub.on_area(|surface, lane, over| {
+        with_app(|app| app.pointer_over_area(surface.as_str(), lane, over))
+    });
+    hub.on_press_area(|surface, lane| {
+        with_app(|app| app.pointer_press_area(surface.as_str(), lane))
+    });
+    hub.on_step(|surface, lane, rows| {
+        with_app(|app| app.pointer_rows(surface.as_str(), lane, rows))
+    });
+    hub.on_edge(|surface, lane| with_app(|app| app.pointer_edge(surface.as_str(), lane)));
+    hub.on_view(|surface, lane, first| {
+        with_app(|app| app.pointer_view(surface.as_str(), lane, first))
+    });
     window.on_key_pressed(move |text| {
         let Some(first) = text.chars().next() else {
             return;

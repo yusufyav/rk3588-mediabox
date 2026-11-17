@@ -1856,6 +1856,45 @@ impl Live {
     /// A pointer that reaches an overlay keeps it up for its life again, as
     /// a key does. Nothing here tunes or chooses: a click is the remote's Ok
     /// after it, through `key`.
+    /// A pointer's hand or wheel moving the guide's channels or a side
+    /// panel's rows by whole rows: the view only, kept in range, never the
+    /// focus. The overlay stays up for it, as for a key. Returns whether
+    /// the view moved.
+    pub fn scroll_view(&mut self, rows: i32, at: Instant, now: i64) -> bool {
+        let shift =
+            |top: usize, last: usize| (top as i64 + rows as i64).clamp(0, last as i64) as usize;
+        let moved = match self.layer {
+            Layer::Guide => {
+                let count = self.channels.len();
+                let top = shift(
+                    self.guide_focus.top,
+                    count.saturating_sub(GUIDE_ROWS.min(count)),
+                );
+                std::mem::replace(&mut self.guide_focus.top, top) != top
+            }
+            Layer::Panel(panel) => {
+                let count = self.panel_rows(panel, now).len();
+                let top = shift(self.panel.top, count.saturating_sub(PANEL_ROWS));
+                std::mem::replace(&mut self.panel.top, top) != top
+            }
+            _ => false,
+        };
+        if self.layer != Layer::None {
+            self.extend_layer(at);
+        }
+        moved
+    }
+
+    /// The remote picked up again: the guide and a side panel are drawn
+    /// around their focus, as the remote's own keys keep them.
+    pub fn reveal_focus(&mut self) {
+        match self.layer {
+            Layer::Guide => self.park_guide_row(),
+            Layer::Panel(panel) => self.scroll_panel(panel),
+            _ => {}
+        }
+    }
+
     pub fn point(&mut self, target: LiveTarget, at: Instant, now: i64) -> crate::pointer::Aim {
         use crate::pointer::Aim;
         let aim = match (self.layer, target) {

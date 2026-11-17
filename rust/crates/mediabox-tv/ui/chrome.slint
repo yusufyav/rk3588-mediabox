@@ -89,8 +89,10 @@ export component Chrome inherits Rectangle {
         width: root.width * 0.0169;
         height: self.width;
         border-radius: self.width * 0.28;
-        background: PointerHub.shown && back-mark.has-hover ? Theme.focus-fill : Theme.film;
-        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+        background: Theme.film;
+        // The arrow over it: a light edge, never the remote's white.
+        border-width: back-mark.lit ? max(1px, self.width * 0.06) : 0px;
+        border-color: #ffffffb3;
 
         if !PointerHub.shown: Path {
             x: parent.width * 0.3;
@@ -111,7 +113,7 @@ export component Chrome inherits Rectangle {
             viewbox-height: 24;
             commands: "M15 5l-7 7 7 7";
             fill: transparent;
-            stroke: back-mark.has-hover ? #0a0c10 : #ffffff;
+            stroke: #ffffff;
             stroke-width: max(1.6px, parent.width * 0.09);
             stroke-line-cap: round;
             stroke-line-join: round;
@@ -124,6 +126,7 @@ export component Chrome inherits Rectangle {
             height: parent.height * 1.8;
             zone: "back";
             index: 0;
+            veil: false;
         }
     }
 

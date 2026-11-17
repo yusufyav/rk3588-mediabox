@@ -3568,9 +3568,12 @@ impl SplitPlatform {
                         );
                         crate::with_app(|app| app.pointer_back(pressed));
                     }
-                    // A wheel's detents. A touchpad's two-finger scroll and
-                    // a trackball's continuous one are not steps, and do
-                    // nothing yet.
+                    // A wheel's detents, a touchpad's fingers and a
+                    // continuous scroll (a trackball's, a button held while
+                    // moving): one scroll, normalised in `pointer::Scroller`.
+                    // The values are libinput's, natural scrolling and all,
+                    // positive down and right; an axis it does not report
+                    // in this event is no movement on it.
                     input::event::PointerEvent::ScrollWheel(wheel) => {
                         use input::event::pointer::{Axis, PointerScrollEvent};
                         let value = |axis| {
@@ -3580,9 +3583,41 @@ impl SplitPlatform {
                                 0.0
                             }
                         };
-                        let (horizontal, vertical) =
-                            (value(Axis::Horizontal), value(Axis::Vertical));
-                        crate::with_app(|app| app.pointer_wheel(horizontal, vertical));
+                        let scroll = crate::pointer::Scroll::Wheel(
+                            value(Axis::Horizontal),
+                            value(Axis::Vertical),
+                        );
+                        crate::with_app(|app| app.pointer_scroll(scroll));
+                    }
+                    input::event::PointerEvent::ScrollFinger(fingers) => {
+                        use input::event::pointer::{Axis, PointerScrollEvent};
+                        let value = |axis| {
+                            if fingers.has_axis(axis) {
+                                fingers.scroll_value(axis)
+                            } else {
+                                0.0
+                            }
+                        };
+                        let scroll = crate::pointer::Scroll::Finger(
+                            value(Axis::Horizontal),
+                            value(Axis::Vertical),
+                        );
+                        crate::with_app(|app| app.pointer_scroll(scroll));
+                    }
+                    input::event::PointerEvent::ScrollContinuous(continuous) => {
+                        use input::event::pointer::{Axis, PointerScrollEvent};
+                        let value = |axis| {
+                            if continuous.has_axis(axis) {
+                                continuous.scroll_value(axis)
+                            } else {
+                                0.0
+                            }
+                        };
+                        let scroll = crate::pointer::Scroll::Continuous(
+                            value(Axis::Horizontal),
+                            value(Axis::Vertical),
+                        );
+                        crate::with_app(|app| app.pointer_scroll(scroll));
                     }
                     _ => {}
                 }

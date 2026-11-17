@@ -1,6 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { KeyRow, KeyCap, Keyboard, VitalsModel } from "components.slint";
-import { PointerTarget } from "pointer.slint";
+import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
 import {
     SettingCard, SectionHeader, PageHeader, SideNav, StatusCorner, Backdrop, FocusRing, Icon,
     ActionButton, InfoLine,
@@ -112,6 +112,7 @@ component RadioCard inherits Rectangle {
 
     // First, so the (i) drawn later is over it and takes its own click.
     if pointer-zone != "": PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -342,7 +343,23 @@ component RadioList inherits Rectangle {
     Rectangle {
         property <length> pad: Metrics.glow-w * 3;
         property <length> focus-y: focus-flats * flat-step + focus-talls * tall-step + focus-notes * note-step + focus-heads * Metrics.header-h;
-        property <length> scroll: max(0px, focus-y + (focus-tall ? tall-step : flat-step) + pad * 2 - self.height);
+        property <length> view-h: self.height;
+        property <length> content-h: rows.length == 0 ? 0px : row-y(rows[rows.length - 1]) + row-h(rows[rows.length - 1]);
+        pure function row-y(row: WifiRow) -> length {
+            return row.flats * flat-step + row.talls * tall-step + row.notes * note-step + row.heads * Metrics.header-h;
+        }
+        pure function row-h(row: WifiRow) -> length {
+            return row.kind == "header" ? Metrics.header-h
+                : (row.kind == "note" ? note-step : (row.under != "" ? Metrics.set-h : Metrics.set-h-flat));
+        }
+        // The remote's focus scrolls it; a pointer's hand and wheel too.
+        pan := PanState {
+            surface: root.rows-zone;
+            remote: max(0px, focus-y + (focus-tall ? tall-step : flat-step) + pad * 2 - view-h);
+            limit: max(0px, content-h + pad * 2 - view-h);
+            remote-duration: Theme.t-row;
+        }
+        property <length> scroll: pan.value;
 
         x: Metrics.pane-x - pad;
         y: top - pad;
@@ -350,17 +367,18 @@ component RadioList inherits Rectangle {
         height: root.height - Metrics.safe-y - top + pad;
         clip: true;
 
+        if root.rows-zone != "": PointerPanArea { surface: root.rows-zone; }
+
         Rectangle {
             x: pad;
             y: pad - scroll;
             width: Metrics.list-w;
-            animate y { duration: Theme.t-row; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for row in rows: Rectangle {
-                y: row.flats * flat-step + row.talls * tall-step + row.notes * note-step + row.heads * Metrics.header-h;
+                y: row-y(row);
                 width: 100%;
-                height: row.kind == "header" ? Metrics.header-h
-                    : (row.kind == "note" ? note-step : (row.under != "" ? Metrics.set-h : Metrics.set-h-flat));
+                height: row-h(row);
 
                 // A group's title, small and grey, as the reference screen
                 // draws it: "Kayıtlı ağlar", "Diğer ağlar" with "Yenile" or

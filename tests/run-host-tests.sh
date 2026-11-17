@@ -410,25 +410,42 @@ contains "a keyboard's key hides the pointer" \
   "$(sed -n '/window.on_key_pressed(/,/});/p' "$tv_main")" 'app.hide_pointer()'
 # Where src/pointer.rs's table says Disabled, motion, the button and the
 # wheel stop at the door -- a click is never turned into Ok there.
-for entry in pointer_motion pointer_button pointer_wheel pointer_back; do
+for entry in pointer_motion pointer_button pointer_scroll pointer_back; do
   contains "$entry stops where the pointer is disabled" \
     "$(sed -n "/pub fn $entry(/,/^    }/p" "$tv_main")" 'if !self.pointer_policy().enabled() {'
 done
+# Hover is a look, never the remote's focus: only a click moves the focus,
+# through the screen's own model. The gesture machine (src/pointer.rs) and
+# the real interface (src/hit.rs) test the rest; this is that the roads
+# call them.
+lacks "hover does not move the remote's focus" \
+  "$(sed -n '/pub fn pointer_hover(/,/^    }/p' "$tv_main")" 'pointer_point'
+contains "the button's release is the click, through the gesture" \
+  "$(sed -n '/pub fn pointer_press(/,/^    }/p' "$tv_main")" 'self.gesture.target_up(zone, index, context)'
+lacks "a press down is no Ok" \
+  "$(sed -n '/pub fn pointer_press(/,/^    }/p' "$tv_main")" 'self.press('
 # A click on a target that cannot take the focus (disabled, out of range,
 # under a modal) presses nothing -- never Ok on whatever had the focus.
 contains "a refused target is not pressed" \
-  "$(sed -n '/pub fn pointer_press(/,/^    }/p' "$tv_main")" 'pointer::Aim::Refused => return,'
+  "$(sed -n '/    fn pointer_click(/,/^    }/p' "$tv_main")" 'pointer::Aim::Refused => return,'
 contains "every paint settles the pointer's policy" \
   "$(sed -n '/^    fn paint(&mut self) {/,/^    }/p' "$tv_main")" 'self.pointer_sync();'
-# Nothing is left held. A press taken away lets a held Ok go without
-# firing; a key, a hidden arrow or another screen drops a drag along the
-# film's bar without seeking; the bar's drag is the player's alone (Full).
-contains "a cancelled press lets a held Ok go" \
-  "$(sed -n '/pub fn pointer_cancel(/,/^    }/p' "$tv_main")" 'self.ok_hold = None;'
+# Nothing is left held. A click is a press and its release at once, never a
+# held Ok; a press taken away fires nothing; a key, a hidden arrow or another
+# screen drops a drag along the film's bar without seeking, and ends any
+# drag or coast; the bar's drag is the player's alone (Full).
+contains "a click holds no Ok" \
+  "$(sed -n '/    fn pointer_click(/,/^    }/p' "$tv_main")" 'self.ok_hold = None;'
+contains "a cancelled press fires nothing" \
+  "$(sed -n '/pub fn pointer_cancel(/,/^    }/p' "$tv_main")" 'self.gesture.cancel();'
 contains "hiding the arrow drops a drag" \
   "$(sed -n '/    fn hide_pointer(/,/^    }/p' "$tv_main")" 'self.pointer_drop_drag();'
+contains "the remote brings the scrolled surfaces back to its focus" \
+  "$(sed -n '/    fn hide_pointer(/,/^    }/p' "$tv_main")" 'self.pointer_release_views();'
 contains "another screen drops a drag" \
   "$(sed -n '/    fn pointer_sync(/,/^    }/p' "$tv_main")" 'self.pointer_drop_drag();'
+contains "another screen ends a gesture" \
+  "$(sed -n '/    fn pointer_sync(/,/^    }/p' "$tv_main")" 'self.pointer_end_gesture();'
 contains "the bar's drag is the player's only" \
   "$(sed -n '/pub fn pointer_scrub(/,/^    }/p' "$tv_main")" 'self.pointer_policy() != pointer::Policy::Full'
 contains "a drag goes to the film by the remote's own seek" \

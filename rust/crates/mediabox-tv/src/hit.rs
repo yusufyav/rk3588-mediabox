@@ -10,6 +10,11 @@
 //! that a disabled control is no target, that a way back is drawn where one
 //! is promised.
 //!
+//! The pointer's surfaces are here too: a `PanState` moved the way Rust
+//! moves it (`PointerPan`) shows other targets under the same walk, only
+//! the surface it names moves, it stops at its ends, and it goes back to
+//! the remote's focus once the pointer is put away.
+//!
 //! What only a television says -- that the arrow is drawn where the hand
 //! expects, that a press on a real mouse arrives as one -- is not here.
 
@@ -22,8 +27,8 @@ use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, ModelRc, VecModel};
 
 use crate::{
-    LiveCard, LiveMenuRow, LivePanelRow, MediaBoxWindow, MenuRow, PointerHub, PosterItem,
-    SettingNav, SettingRow, WifiRow,
+    LiveCard, LiveMenuRow, LivePanelRow, MediaBoxWindow, MenuRow, PointerHub, PointerPan,
+    PosterItem, RailModel, SettingNav, SettingRow, WifiRow,
 };
 
 const W: u32 = 1920;
@@ -49,6 +54,14 @@ type Reached = BTreeSet<(String, i32)>;
 struct Panel {
     ui: MediaBoxWindow,
     log: Rc<RefCell<Reached>>,
+    /// Hover's comings and goings, in order: (zone, index, over).
+    hovers: Rc<RefCell<Vec<(String, i32, bool)>>>,
+    /// What the surfaces said back: a window of rows moved by whole rows,
+    /// and a surface run into its end.
+    steps: Rc<RefCell<Vec<(String, i32, i32)>>>,
+    edges: Rc<RefCell<Vec<(String, i32)>>>,
+    /// What moved surfaces said they show: (surface, lane, first item).
+    views: Rc<RefCell<Vec<(String, i32, i32)>>>,
 }
 
 impl Panel {
@@ -76,9 +89,63 @@ impl Panel {
                 scrubbed.borrow_mut().insert((zone.to_string(), -1));
             }
         });
-        // A pointer is in use: the marks only a pointer needs are drawn.
+        // Hover lights a target as Rust does (`App::pointer_hover`): the one
+        // the arrow came over, until it leaves it.
+        let hovers: Rc<RefCell<Vec<(String, i32, bool)>>> = Rc::default();
+        let heard = hovers.clone();
+        let weak = ui.as_weak();
+        hub.on_hover(move |zone, index, over| {
+            heard.borrow_mut().push((zone.to_string(), index, over));
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let hub = ui.global::<PointerHub>();
+            if over && zone != "shield" {
+                hub.set_lit_zone(zone);
+                hub.set_lit_index(index);
+            } else if hub.get_lit_zone() == zone && hub.get_lit_index() == index {
+                hub.set_lit_zone("".into());
+                hub.set_lit_index(-1);
+            }
+        });
+        let steps: Rc<RefCell<Vec<(String, i32, i32)>>> = Rc::default();
+        let stepped = steps.clone();
+        hub.on_step(move |surface, lane, rows| {
+            stepped.borrow_mut().push((surface.to_string(), lane, rows));
+        });
+        let edges: Rc<RefCell<Vec<(String, i32)>>> = Rc::default();
+        let edged = edges.clone();
+        hub.on_edge(move |surface, lane| edged.borrow_mut().push((surface.to_string(), lane)));
+        let views: Rc<RefCell<Vec<(String, i32, i32)>>> = Rc::default();
+        let viewed = views.clone();
+        hub.on_view(move |surface, lane, first| {
+            viewed.borrow_mut().push((surface.to_string(), lane, first))
+        });
+        // A pointer is in use: the marks only a pointer needs are drawn, and
+        // the surfaces stay where they are under a click.
         hub.set_shown(true);
-        Self { ui, log }
+        ui.global::<PointerPan>().set_pinned(true);
+        Self {
+            ui,
+            log,
+            hovers,
+            steps,
+            edges,
+            views,
+        }
+    }
+
+    /// The hand moves `surface` (lane `lane`) by a running total, as Rust
+    /// sends a gesture, and the interface catches up.
+    fn pan(&self, surface: &str, lane: i32, gesture: i32, dx: f32, dy: f32) {
+        let pan = self.ui.global::<PointerPan>();
+        pan.set_eased(false);
+        pan.set_surface(surface.into());
+        pan.set_lane(lane);
+        pan.set_dx(dx);
+        pan.set_dy(dy);
+        pan.set_gesture(gesture);
+        self.settle();
     }
 
     /// Every target a press reaches, the pointer walked over the panel.
@@ -96,6 +163,23 @@ impl Panel {
         }
         window.dispatch_event(WindowEvent::PointerExited);
         self.log.borrow().clone()
+    }
+}
+
+impl Panel {
+    /// Runs what changed, as a frame would: what a screen draws is made
+    /// (an event puts the tree up to date), and the surfaces' change
+    /// handlers run.
+    fn settle(&self) {
+        self.ui.window().dispatch_event(WindowEvent::PointerExited);
+        slint::platform::update_timers_and_animations();
+    }
+
+    /// After the remote's own easing has run its course.
+    fn settle_eased(&self) {
+        self.settle();
+        std::thread::sleep(std::time::Duration::from_millis(260));
+        self.settle();
     }
 }
 
@@ -306,8 +390,20 @@ fn a_pointer_reaches_what_each_screen_draws_and_nothing_else() {
         "the focused poster's menu mark"
     );
     assert!(
-        !has(&reached, "library-mark", 1),
-        "only the focused poster carries it"
+        has(&reached, "library-mark", 1),
+        "the poster the arrow is over carries it too: a pointer reaches the \
+         menu without moving the remote's focus"
+    );
+    // Hover came and went: every target the arrow came over it also left.
+    {
+        let hovers = panel.hovers.borrow();
+        assert!(hovers.contains(&("grid".to_string(), 1, true)));
+        assert!(hovers.contains(&("grid".to_string(), 1, false)));
+    }
+    assert_eq!(
+        ui.global::<PointerHub>().get_lit_index(),
+        -1,
+        "the arrow off the panel lights nothing"
     );
     assert!(zones(&reached).contains("frame-places"));
     assert!(
@@ -472,4 +568,275 @@ fn a_pointer_reaches_what_each_screen_draws_and_nothing_else() {
     assert!(has(&reached, "live-panel", 1));
     assert!(zones(&reached).contains("shield"));
     ui.set_live_panel_shown(false);
+}
+
+fn indices(reached: &Reached, zone: &str) -> BTreeSet<i32> {
+    reached
+        .iter()
+        .filter(|(z, _)| z == zone)
+        .map(|(_, index)| *index)
+        .collect()
+}
+
+/// The surfaces a pointer moves, on the real interface: a hand's drag (as
+/// Rust hands it over, `PointerPan`) brings other targets under the same
+/// walk; only the surface it names moves; it stops at its ends and turns
+/// back at once; a modal's list moves and the screen under it does not; a
+/// shelf moves along and the board and the other shelves stay; a list Rust
+/// keeps as a window of rows is told whole rows; and the remote picked up
+/// again brings every surface back to its focus. One window per thread, as
+/// above.
+#[test]
+fn a_pointer_moves_only_the_surface_it_drags_and_the_remote_brings_it_back() {
+    let panel = Panel::open();
+    let ui = &panel.ui;
+
+    // ------------------------------------------------- a long settings list
+    ui.set_screen("settings".into());
+    ui.set_settings_on_sections(false);
+    ui.set_settings_sections(model(vec![SettingNav {
+        label: "Ağ".into(),
+        icon: "wifi".into(),
+        blurb: "".into(),
+    }]));
+    let rows: Vec<SettingRow> = (0..30)
+        .map(|n| SettingRow {
+            label: format!("Ayar {n}").into(),
+            kind: "link".into(),
+            selectable: true,
+            enabled: true,
+            toggle: -1,
+            n_card: n,
+            ..Default::default()
+        })
+        .collect();
+    ui.set_settings_rows(model(rows));
+    ui.set_settings_row(0);
+    panel.settle();
+    let reached = panel.reach();
+    let shown = indices(&reached, "settings-rows");
+    assert!(shown.contains(&0) && !shown.contains(&29), "{shown:?}");
+
+    // Dragged up a long way: the list's end, and no further.
+    panel.pan("settings-rows", -1, 1, 0.0, -5000.0);
+    let reached = panel.reach();
+    let bottom = indices(&reached, "settings-rows");
+    assert!(bottom.contains(&29) && !bottom.contains(&0), "{bottom:?}");
+    assert!(
+        panel
+            .edges
+            .borrow()
+            .contains(&("settings-rows".to_string(), -1)),
+        "the end is said, for a coast to stop at"
+    );
+    assert!(
+        has(&reached, "settings-sections", 0),
+        "the column beside it did not move"
+    );
+    // Turned back by 400 pixels: it moves at once, not after the 5000
+    // pixels past its end are undone.
+    panel.pan("settings-rows", -1, 1, 0.0, -4600.0);
+    let turned = indices(&panel.reach(), "settings-rows");
+    assert!(
+        !turned.contains(&29) && turned.iter().max() < bottom.iter().max(),
+        "{turned:?}"
+    );
+    // A new gesture down past the top: the start, and no further.
+    panel.pan("settings-rows", -1, 2, 0.0, 100_000.0);
+    let top = indices(&panel.reach(), "settings-rows");
+    assert_eq!(top.iter().min(), Some(&0), "{top:?}");
+
+    // The remote's focus moving under a pointer does not move the list: a
+    // click's focus is not a scroll.
+    panel.pan("settings-rows", -1, 3, 0.0, -5000.0);
+    ui.set_settings_row(3);
+    panel.settle();
+    assert!(indices(&panel.reach(), "settings-rows").contains(&29));
+    // The remote picked up again: the list is the focus's once more.
+    ui.global::<PointerPan>().set_pinned(false);
+    panel.settle_eased();
+    let back = indices(&panel.reach(), "settings-rows");
+    assert!(
+        back.contains(&3) && !back.contains(&29),
+        "the focus in view again: {back:?}"
+    );
+    ui.set_settings_row(29);
+    panel.settle_eased();
+    assert!(
+        indices(&panel.reach(), "settings-rows").contains(&29),
+        "the remote scrolls it as it always did"
+    );
+    ui.global::<PointerPan>().set_pinned(true);
+    panel.settle();
+
+    // ------------------------------------------- a modal's list over it
+    ui.set_settings_row(0);
+    ui.global::<PointerPan>().set_pinned(false);
+    panel.settle_eased();
+    ui.global::<PointerPan>().set_pinned(true);
+    ui.set_settings_choice_open(true);
+    ui.set_settings_choice(model(
+        (0..20)
+            .map(|n| crate::ChoiceItem {
+                title: format!("Seçenek {n}").into(),
+                enabled: true,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    ));
+    ui.set_settings_choice_focus(0);
+    panel.settle();
+    let choices = indices(&panel.reach(), "settings-choice");
+    assert!(
+        choices.contains(&0) && !choices.contains(&19),
+        "{choices:?}"
+    );
+    panel.pan("settings-choice", -1, 4, 0.0, -5000.0);
+    let choices = indices(&panel.reach(), "settings-choice");
+    assert!(
+        choices.contains(&19) && !choices.contains(&0),
+        "{choices:?}"
+    );
+    ui.set_settings_choice_open(false);
+    panel.settle();
+    let under = indices(&panel.reach(), "settings-rows");
+    assert!(
+        under.contains(&0) && !under.contains(&29),
+        "the list under the modal stayed where it was: {under:?}"
+    );
+
+    // ------------------------------------------------- the board's shelves
+    ui.set_screen("media".into());
+    let poster = |n: usize| PosterItem {
+        title: format!("Film {n}").into(),
+        ..Default::default()
+    };
+    let rail = |title: &str| RailModel {
+        title: title.into(),
+        items: model((0..25).map(poster).collect()),
+        ..Default::default()
+    };
+    ui.set_media_rails(model(vec![
+        rail("Bir"),
+        rail("İki"),
+        rail("Üç"),
+        rail("Dört"),
+    ]));
+    ui.set_media_columns(model(vec![0, 0, 0, 0]));
+    ui.set_media_row(0);
+    ui.set_media_zone(0);
+    panel.settle();
+    let shelves = indices(&panel.reach(), "shelves");
+    assert!(
+        shelves.contains(&0) && shelves.contains(&100),
+        "{shelves:?}"
+    );
+    assert!(!shelves.contains(&24), "{shelves:?}");
+    // The first shelf along to its end: its last poster in reach; the
+    // second shelf and the board did not move.
+    panel.views.borrow_mut().clear();
+    panel.pan("shelves", 0, 5, -20_000.0, 0.0);
+    let shelves = indices(&panel.reach(), "shelves");
+    assert!(
+        shelves.contains(&24) && !shelves.contains(&0),
+        "{shelves:?}"
+    );
+    // The shelf says what it shows, so its artwork is loaded there and not
+    // around the remote's column (0).
+    let shown = panel
+        .views
+        .borrow()
+        .iter()
+        .rev()
+        .find(|(surface, lane, _)| surface == "shelves" && *lane == 0)
+        .map(|(.., first)| *first);
+    assert!(
+        shown.is_some_and(|first| first >= 10),
+        "the shelf's end is what is shown: {shown:?}"
+    );
+    assert!(
+        shelves.contains(&100) && !shelves.contains(&124),
+        "{shelves:?}"
+    );
+    // The board down: the last shelf in reach, the first gone.
+    panel.pan("shelves", -1, 6, 0.0, -20_000.0);
+    let shelves = indices(&panel.reach(), "shelves");
+    assert!(shelves.iter().any(|i| i / 100 == 3), "{shelves:?}");
+    assert!(!shelves.iter().any(|i| i / 100 == 0), "{shelves:?}");
+
+    // -------------------------------------------------- the library's grid
+    ui.set_screen("library".into());
+    ui.set_library_zone(1);
+    ui.set_library_index(0);
+    ui.set_library_items(model((0..60).map(poster).collect()));
+    panel.settle();
+    let grid = indices(&panel.reach(), "grid");
+    assert!(grid.contains(&0) && !grid.contains(&59), "{grid:?}");
+    panel.pan("grid", -1, 7, 0.0, -50_000.0);
+    let grid = indices(&panel.reach(), "grid");
+    assert!(grid.contains(&59) && !grid.contains(&0), "{grid:?}");
+
+    // A pointer's own Back is the remote's Back: every surface goes back to
+    // the focus (here the first poster), the pointer still in use.
+    let pan = ui.global::<PointerPan>();
+    pan.set_release_surface("*".into());
+    pan.set_release_lane(-1);
+    pan.set_release(pan.get_release() + 1);
+    panel.settle_eased();
+    let grid = indices(&panel.reach(), "grid");
+    assert!(grid.contains(&0) && !grid.contains(&59), "{grid:?}");
+    assert!(pan.get_pinned(), "the pointer is still in use");
+
+    // A screen opened under a pointer, whose items and remembered focus
+    // arrive after it is drawn: it shows the focus, not the top it had
+    // before they came (where no artwork is wanted).
+    ui.set_screen("home".into());
+    ui.set_library_items(model(Vec::new()));
+    ui.set_library_index(0);
+    panel.settle();
+    ui.set_screen("library".into());
+    panel.settle();
+    ui.set_library_items(model((0..60).map(poster).collect()));
+    ui.set_library_index(55);
+    panel.settle_eased();
+    let grid = indices(&panel.reach(), "grid");
+    assert!(grid.contains(&55) && !grid.contains(&0), "{grid:?}");
+
+    // ------------------------------- a window of rows: the film's panel
+    ui.set_screen("film".into());
+    ui.set_np_menu("speed".into());
+    ui.set_np_menu_rows(model(
+        (0..9)
+            .map(|n| MenuRow {
+                label: format!("{n}").into(),
+                ..Default::default()
+            })
+            .collect(),
+    ));
+    panel.settle();
+    panel.steps.borrow_mut().clear();
+    let pitch = H as f32 * 0.058;
+    // Two and a half rows up: two whole rows further down the list...
+    panel.pan("player-menu", -1, 8, 0.0, -pitch * 2.5);
+    // ...and on by one more: the half carried over makes another row.
+    panel.pan("player-menu", -1, 8, 0.0, -pitch * 3.6);
+    // A new gesture back up.
+    panel.pan("player-menu", -1, 9, 0.0, pitch * 1.2);
+    assert_eq!(
+        *panel.steps.borrow(),
+        vec![
+            ("player-menu".to_string(), -1, 2),
+            ("player-menu".to_string(), -1, 1),
+            ("player-menu".to_string(), -1, -1),
+        ]
+    );
+    // The column beside it was not told anything.
+    assert!(
+        !panel
+            .steps
+            .borrow()
+            .iter()
+            .any(|(surface, ..)| surface == "player-tracks")
+    );
+    ui.set_np_menu("".into());
 }

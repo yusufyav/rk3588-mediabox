@@ -399,6 +399,11 @@ impl Library {
         self.items().get(self.index())
     }
 
+    /// The poster at `index` of the grid, wherever the remote is.
+    pub fn item_at(&self, index: usize) -> Option<&Item> {
+        self.items().get(index)
+    }
+
     /// Whether the open section is the account's library, where the order
     /// applies.
     pub fn sortable(&self) -> bool {

@@ -116,6 +116,12 @@ impl Media {
         self.shelves.focused()
     }
 
+    /// The poster at `row`, `column` of the board, wherever the remote is:
+    /// what a pointer's long press is on before it moves any focus.
+    pub fn item_at(&self, row: usize, column: usize) -> Option<&Item> {
+        self.shelves.item_at(row, column)
+    }
+
     /// Where "Tümünü Gör" leads, when the remote is on it.
     pub fn focused_more(&self) -> Option<&More> {
         if self.zone != Zone::Shelves {
@@ -295,9 +301,21 @@ impl Media {
         }
     }
 
-    pub fn sync_artwork(&mut self, images: &mut ImageManager) {
-        let anchor = self.shelves.row as i32;
-        self.shelves.sync_artwork(images, anchor);
+    /// Artwork around what is on the panel: the focused shelf and its
+    /// column, or -- where a pointer moved the board or a shelf -- what it
+    /// shows (`crate::pointer::Views`).
+    pub fn sync_artwork(&mut self, images: &mut ImageManager, views: &crate::pointer::Views) {
+        use crate::pointer::Zone;
+        // Three shelves fit down the panel: the middle one of those shown.
+        let anchor = views
+            .first(Zone::Shelves, -1)
+            .map_or(self.shelves.row as i32, |first| first as i32 + 1);
+        let shown = |row: usize| {
+            i32::try_from(row)
+                .ok()
+                .and_then(|lane| views.first(Zone::Shelves, lane))
+        };
+        self.shelves.sync_artwork(images, anchor, &shown);
     }
 }
 

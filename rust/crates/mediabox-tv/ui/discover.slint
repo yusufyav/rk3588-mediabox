@@ -1,4 +1,4 @@
-import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { GridPoster, PosterItem } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -121,6 +121,7 @@ component RoundButton inherits Rectangle {
     }
 
     if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -225,9 +226,14 @@ export component Discover inherits Rectangle {
     // Kept on the row the remote was last on whichever zone it is in, as
     // the reference's page does not scroll when the focus leaves the grid;
     // the posters are loaded around that same row.
-    property <length> scroll: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
-                0px,
-                max(0px, rows * cell-h - viewport-h));
+    pan := PanState {
+        surface: "grid";
+        item: cell-h;
+        remote: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1, 0px, self.limit);
+        limit: max(0px, rows * cell-h - viewport-h);
+        remote-duration: Theme.glide;
+    }
+    property <length> scroll: pan.value;
 
     background: Theme.catalog-bg;
     clip: true;
@@ -239,6 +245,8 @@ export component Discover inherits Rectangle {
         width: panel-x - self.x;
         height: viewport-h + Metrics.focus-room;
         clip: true;
+
+        PointerPanArea { surface: "grid"; }
 
         if items.length == 0: Text {
             x: Metrics.focus-room;
@@ -256,7 +264,7 @@ export component Discover inherits Rectangle {
             width: columns * cell-w;
             height: max(1px, rows * cell-h);
 
-            animate y { duration: Theme.glide; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for item[i] in items: GridPoster {
                 x: Math.mod(i, columns) * cell-w;
@@ -524,6 +532,14 @@ export component Discover inherits Rectangle {
                 property <length> line-h: Metrics.root-font * 2.3;
                 property <int> shown: min(f.options.length, 9);
                 property <int> first: max(0, min(picker - 4, f.options.length - shown));
+                // Kept around the highlighted line by the remote; a
+                // pointer's hand and wheel move it on their own.
+                options-pan := PanState {
+                    surface: "discover-options";
+                    remote: first * line-h;
+                    limit: (f.options.length - shown) * line-h;
+                    remote-duration: 0ms;
+                }
                 x: 0;
                 y: parent.height + Metrics.root-font * 0.3;
                 width: max(parent.width, Metrics.root-font * 14);
@@ -535,13 +551,13 @@ export component Discover inherits Rectangle {
                 clip: true;
 
                 PointerSwallow { }
+                PointerPanArea { surface: "discover-options"; }
 
                 for option[k] in f.options: Rectangle {
                     x: Metrics.root-font * 0.4;
-                    y: Metrics.root-font * 0.4 + (k - first) * line-h;
+                    y: Metrics.root-font * 0.4 + k * line-h - options-pan.value;
                     width: parent.width - Metrics.root-font * 0.8;
                     height: line-h;
-                    visible: k >= first && k < first + shown;
                     border-radius: parent.border-radius * 0.7;
                     background: k == picker ? #ffffff26 : transparent;
 

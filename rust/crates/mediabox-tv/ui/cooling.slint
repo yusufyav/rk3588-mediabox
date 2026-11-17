@@ -140,6 +140,7 @@ component Button inherits Rectangle {
     // Not while it cannot be pressed: hover, focus and a click are refused
     // as the remote's are.
     if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -245,6 +246,7 @@ component Cell inherits Rectangle {
     }
 
     if pointer-zone != "": PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -279,6 +281,7 @@ component RowButton inherits Rectangle {
     // Not while it cannot be pressed: hover, focus and a click are refused
     // as the remote's are.
     if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }

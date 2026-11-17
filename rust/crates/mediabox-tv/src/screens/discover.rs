@@ -299,6 +299,17 @@ impl Discover {
         self.page()
     }
 
+    /// The next page, where what is shown is within `rows` rows of the end
+    /// of what is loaded: a pointer moved the grid there, and the focus
+    /// stayed behind.
+    pub fn more_near(&mut self, shown: usize, rows: usize) -> Option<Request> {
+        if shown + COLUMNS * rows >= self.items.len() {
+            self.page()
+        } else {
+            None
+        }
+    }
+
     /// The next page, if there is one and none is on its way.
     fn page(&mut self) -> Option<Request> {
         if self.loading || self.ended {

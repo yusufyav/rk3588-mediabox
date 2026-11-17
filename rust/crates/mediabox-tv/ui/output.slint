@@ -1,4 +1,4 @@
-import { PointerTarget } from "pointer.slint";
+import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import {
     Icon, FocusRing, ValueBadge, StatusChip, SettingCard, ActionButton, ChoiceRow,
@@ -256,6 +256,7 @@ component ListRow inherits Rectangle {
     // Not while it cannot be pressed: hover, focus and a click are refused
     // as the remote's are.
     if pointer-zone != "" && !root.item.refused: PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -341,6 +342,7 @@ component ColourCellBox inherits Rectangle {
     }
 
     if pointer-zone != "": PointerTarget {
+        radius: root.border-radius;
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
@@ -534,18 +536,31 @@ component AdvancedFace inherits Rectangle {
             property <length> focus-bottom: (view.resolution-focus + 1) * pitch
                 + (view.divider-at >= 0 && view.resolution-focus >= view.divider-at ? divider-h : 0px)
                 + Metrics.glow-w * 2;
+            property <length> last-bottom: view.resolutions.length * pitch
+                + (view.divider-at >= 0 ? divider-h : 0px)
+                + Metrics.glow-w * 2;
+            property <length> view-h: self.height;
+            // The remote's focus scrolls it by whole rows; a pointer's hand
+            // and wheel move it on their own.
+            pan := PanState {
+                surface: "output-resolutions";
+                remote: max(0px, focus-bottom - view-h + Metrics.glow-w);
+                limit: max(0px, last-bottom - view-h + Metrics.glow-w);
+                remote-duration: Theme.t-row;
+            }
             x: pad;
             y: parent.head-h;
             width: parent.width - pad * 2;
             height: parent.height - self.y - pad;
             clip: true;
+            PointerPanArea { surface: "output-resolutions"; }
             VerticalLayout {
-                y: min(Metrics.glow-w, parent.height - focus-bottom);
+                y: Metrics.glow-w - pan.value;
                 x: Metrics.glow-w;
                 width: parent.width - Metrics.glow-w * 2;
                 spacing: row-gap;
                 alignment: start;
-                animate y { duration: Theme.t-row; easing: Theme.ease; }
+                animate y { duration: pan.duration; easing: Theme.ease; }
                 for row[i] in view.resolutions: VerticalLayout {
                     spacing: 0px;
                     if row.divider: Text {

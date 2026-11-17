@@ -9,11 +9,12 @@ import { Theme, Metrics, Icons } from "theme.slint";
 // click go to Rust, which moves the screen's own focus and runs the screen's
 // own Ok. A target never acts by itself.
 export global PointerHub {
-    // The arrow came over a target.
-    callback hover(string /* zone */, int /* index */);
-    // The main button went down (true) or up (false) on a target. Rust
-    // presses and releases the remote's own key with it, so a held button is
-    // a held Ok -- the remote's long press -- and a click is a press.
+    // The arrow came over a target (true) or left it (false). Hover is a
+    // look, not the remote's focus: Rust says which target is lit.
+    callback hover(string /* zone */, int /* index */, bool /* over */);
+    // The main button went down (true) or up (false) on a target. Rust keeps
+    // the gesture: a press is only a click once the button comes up near
+    // where it went down, and the click is the remote's own Select there.
     callback press(string /* zone */, int /* index */, bool /* down */);
     // The press was taken away before the button came up (the arrow hidden,
     // the screen changed): nothing is released, nothing fires.
@@ -22,22 +23,72 @@ export global PointerHub {
     // down, 1 it moved while held, 2 it came up there, 3 it was taken away;
     // `at` is the fraction of the bar's length, 0..=1.
     callback scrub(string /* zone */, int /* phase */, float /* at */);
+    // The arrow over (true) or off (false) a surface's ground where it has
+    // no target, or the button down on it: a surface is named by its
+    // targets' zone and a lane (a shelf's row; -1 for the surface itself).
+    callback area(string /* surface */, int /* lane */, bool /* over */);
+    callback press-area(string /* surface */, int /* lane */);
+    // A list drawn as a window of rows Rust keeps (`PanState`'s `pitch`):
+    // the hand moved it by whole rows, positive further down the list.
+    callback step(string /* surface */, int /* lane */, int /* rows */);
+    // A surface ran into its end while the gesture moving it coasts.
+    callback edge(string /* surface */, int /* lane */);
+    // The first item a surface a pointer moved shows (`PanState`'s `item`),
+    // or -1 once it is the remote's focus's again: what is on the panel is
+    // where artwork is wanted, not where the focus is.
+    callback view(string /* surface */, int /* lane */, int /* first */);
     // Whether a pointer is the thing in use: its arrow is on the panel. The
     // marks only a pointer needs -- a way back, a close -- are drawn only
     // then, so a remote's screen is exactly what it was.
     in-out property <bool> shown;
+    // The target the arrow is over and Rust took as one, drawn lit: a light
+    // veil, not the remote's ring. -1 for none.
+    in property <string> lit-zone;
+    in property <int> lit-index: -1;
 }
 
-// Fills its parent; invisible. Only created where a zone is given, so a
-// component nobody made pointer-ready is exactly what it was.
+// Where a pointer moves a surface with the hand or the wheel, apart from the
+// remote's focus (`PanState`). Rust keeps the gesture (src/pointer.rs) and
+// writes here; each surface reads what is its own.
+export global PointerPan {
+    // The surface the gesture moves, by its targets' zone, and its lane.
+    in property <string> surface;
+    in property <int> lane: -1;
+    // A new number for each gesture, and how far the hand has gone since it
+    // began, in logical pixels: the content follows it, so a drag up (dy
+    // negative) scrolls down.
+    in property <int> gesture: -1;
+    in property <length> dx;
+    in property <length> dy;
+    // A wheel's step, eased rather than followed.
+    in property <bool> eased;
+    // Whether a pointer is in use: the surfaces stay where they are while
+    // the remote's focus moves under a click, and go back to it -- the
+    // remote's own scrolling -- once it is not.
+    in property <bool> pinned;
+    // One surface given back to the remote's focus (a poster's menu, which
+    // is placed by it), or every one ("*": a pointer's own Back, which is
+    // the remote's Back and scrolls to where it puts the focus): a new
+    // number each time.
+    in property <string> release-surface;
+    in property <int> release-lane: -1;
+    in property <int> release: 0;
+}
+
+// Fills its parent; invisible but for a light veil while the arrow is over
+// it and Rust took it (`PointerHub.lit-zone`). Only created where a zone is
+// given, so a component nobody made pointer-ready is exactly what it was.
 export component PointerTarget inherits TouchArea {
     in property <string> zone;
     in property <int> index;
+    // The veil's corners, as the shape it lies over.
+    in property <length> radius: Theme.radius * 0.6;
+    // The veil may be left to the component, which draws its own.
+    in property <bool> veil: true;
+    out property <bool> lit: PointerHub.shown && PointerHub.lit-index == index && PointerHub.lit-zone == zone;
 
     changed has-hover => {
-        if self.has-hover {
-            PointerHub.hover(zone, index);
-        }
+        PointerHub.hover(zone, index, self.has-hover);
     }
     pointer-event(event) => {
         if event.button == PointerEventButton.left {
@@ -49,6 +100,12 @@ export component PointerTarget inherits TouchArea {
                 PointerHub.cancel();
             }
         }
+    }
+
+    if root.veil: Rectangle {
+        border-radius: root.radius;
+        background: root.lit ? Theme.hover-veil : transparent;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
     }
 }
 
@@ -63,6 +120,126 @@ export component PointerShield inherits PointerTarget {
 // A modal's own panel: a click on it where it has no target is nothing, and
 // does not fall through to the ground's Back.
 export component PointerSwallow inherits TouchArea { }
+
+// A surface's ground where it has no target: a press here is a drag of the
+// surface (never a click), and the wheel over it moves it. Put first, under
+// the surface's targets.
+export component PointerPanArea inherits TouchArea {
+    in property <string> surface;
+    in property <int> lane: -1;
+
+    changed has-hover => {
+        PointerHub.area(surface, lane, self.has-hover);
+    }
+    pointer-event(event) => {
+        if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+            PointerHub.press-area(surface, lane);
+        } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.cancel {
+            PointerHub.cancel();
+        }
+    }
+}
+
+// How far a surface is scrolled: where the remote's focus puts it, or --
+// once a pointer is in use on it (it came onto the panel, or moved it) --
+// where the hand and the wheel leave it, kept to the surface's ends. The remote's focus is never moved by it, and the
+// surface goes back to the focus when the remote is picked up again.
+//
+// Rust sends a gesture as a running total (`PointerPan`), so totals that
+// arrive together are one move and nothing is lost; each step applies what
+// is new since the last and is clamped there, so turning back at an end
+// moves at once.
+//
+// A list drawn as a window of rows Rust keeps gives a `pitch` instead: the
+// hand's travel is counted in rows and handed back (`PointerHub.step`).
+export component PanState {
+    in property <string> surface;
+    in property <int> lane: -1;
+    in property <bool> horizontal;
+    // Where the remote's focus scrolls the surface, and how far it can go.
+    in property <length> remote;
+    in property <length> limit;
+    in property <length> pitch: 0px;
+    // One item's length along the surface -- a poster's step, a shelf's
+    // height, a grid's row -- where Rust wants to know what is shown.
+    in property <length> item: 0px;
+    out property <bool> free;
+    out property <length> value: free ? clamp(own, 0px, max(0px, limit)) : remote;
+    // How long a change of `value` is eased: a hand is followed exactly, a
+    // wheel's step eased, and the focus as the surface always did.
+    in property <duration> remote-duration;
+    out property <duration> duration: free ? (PointerPan.eased ? 110ms : 0ms) : remote-duration;
+
+    property <length> own;
+    property <int> seen: -1;
+    property <length> applied;
+    property <length> rows;
+    property <bool> mine: PointerPan.surface == surface && PointerPan.lane == lane;
+    property <int> gesture: mine ? PointerPan.gesture : -1;
+    property <length> total: mine ? (horizontal ? PointerPan.dx : PointerPan.dy) : 0px;
+    property <bool> pinned: PointerPan.pinned;
+    property <int> release: PointerPan.release;
+    property <int> first: free && item > 0px ? floor(value / item) : -1;
+
+    function hold() {
+        own = clamp(remote, 0px, max(0px, limit));
+        free = true;
+    }
+    function follow() {
+        if gesture < 0 {
+            return;
+        }
+        if gesture != seen {
+            seen = gesture;
+            applied = 0px;
+            rows = 0px;
+            if !free {
+                hold();
+            }
+        }
+        if pitch > 0px {
+            rows += applied - total;
+            applied = total;
+            if rows >= pitch || rows <= -pitch {
+                let n = rows > 0px ? floor(rows / pitch) : -floor(-rows / pitch);
+                rows -= n * pitch;
+                PointerHub.step(surface, lane, n);
+            }
+            return;
+        }
+        let wanted = own - (total - applied);
+        applied = total;
+        own = clamp(wanted, 0px, max(0px, limit));
+        if own != wanted {
+            PointerHub.edge(surface, lane);
+        }
+    }
+
+    // Not held when made: a screen opened under a pointer gets its items,
+    // and its remembered focus, a moment later, and a surface held at what
+    // it was before that showed rows nobody wanted (and loaded no artwork
+    // for them). It follows the focus until a hand or a wheel moves it.
+    changed first => { PointerHub.view(surface, lane, first); }
+    changed gesture => { follow(); }
+    changed total => { follow(); }
+    changed pinned => {
+        if pinned {
+            if pitch == 0px && !free {
+                hold();
+            }
+        } else {
+            free = false;
+            seen = -1;
+        }
+    }
+    changed release => {
+        if PointerPan.release-surface == "*"
+            || (PointerPan.release-surface == surface && PointerPan.release-lane == lane) {
+            free = false;
+            seen = -1;
+        }
+    }
+}
 
 // The arrow. Its tip is at (tip-x, tip-y) of the window; drawn last, over
 // everything, while a pointer is the thing in use.
@@ -94,9 +271,7 @@ export component PointerScrub inherits TouchArea {
         return self.width > 0 ? clamp(self.mouse-x / self.width, 0.0, 1.0) : 0.0;
     }
     changed has-hover => {
-        if self.has-hover {
-            PointerHub.hover(zone, 0);
-        }
+        PointerHub.hover(zone, 0, self.has-hover);
     }
     pointer-event(event) => {
         if event.button == PointerEventButton.left {
@@ -126,16 +301,18 @@ export component PointerClose inherits Rectangle {
     in property <length> size: Metrics.root-font * 2.2;
     // "back"; or the way out of a film, which is its own ("player-exit").
     in property <string> zone: "back";
-    property <bool> lit: target.has-hover;
+    // The arrow over it: the same light veil as any target, a step
+    // brighter, never the remote's white.
+    property <bool> lit: target.lit;
 
     visible: PointerHub.shown;
     width: size;
     height: size;
     border-radius: size / 2;
-    background: lit ? Theme.focus-fill : #ffffff1a;
+    background: lit ? #ffffff33 : #ffffff1a;
     border-width: 1px;
-    border-color: lit ? transparent : #ffffff33;
-    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    border-color: lit ? #ffffff73 : #ffffff33;
+    animate background, border-color { duration: Theme.focus-in; easing: Theme.ease; }
 
     Path {
         x: (parent.width - self.width) / 2;
@@ -146,7 +323,7 @@ export component PointerClose inherits Rectangle {
         viewbox-height: 24;
         commands: Icons.path(mark);
         fill: transparent;
-        stroke: lit ? #0a0c10 : Theme.text;
+        stroke: Theme.text;
         stroke-width: max(1.6px, size * 0.05);
         stroke-line-cap: round;
         stroke-line-join: round;
@@ -154,5 +331,6 @@ export component PointerClose inherits Rectangle {
     target := PointerTarget {
         zone: root.zone;
         index: 0;
+        veil: false;
     }
 }

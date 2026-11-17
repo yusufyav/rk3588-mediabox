@@ -9,14 +9,19 @@
 //! Where a pointer means anything is one table, `route_policy`, and one
 //! context, `Context`: a screen nobody has made pointer-ready is `Disabled`,
 //! and there a pointer does nothing at all -- no arrow, no hover, and a click
-//! is not turned into Ok. A screen that is `Navigation` takes hover as the
-//! remote's focus and a click as the remote's Ok, through the screen's own
-//! focus model (`App::pointer_point`) and its own Select: there is no second
-//! road for what a click does.
+//! is not turned into Ok. On a screen that is `Navigation` the arrow over a
+//! target only lights it; a click puts the remote's focus on it through the
+//! screen's own focus model (`App::pointer_point`) and runs the screen's own
+//! Select once: there is no second road for what a click does.
 //!
 //! What is under the arrow is Slint's to say: the shared components carry a
 //! `PointerTarget` (ui/pointer.slint) naming a `Zone` and an index, and a
 //! zone is taken only while its layer is the one on top (`accepts`).
+//!
+//! What the button and the hand do is one machine, `Gesture`: a press is a
+//! candidate until it is a click (let go where it went down) or a drag (moved
+//! further than `slop`), which moves the surface under it -- a `Lane` -- and
+//! never the remote's focus. The wheel moves the same surfaces (`Scroller`).
 
 use crate::route::Route;
 
@@ -26,8 +31,8 @@ pub enum Policy {
     /// Nothing: motion, buttons and the wheel are ignored and no arrow is
     /// drawn. A click is not Ok.
     Disabled,
-    /// Hover is the remote's focus, a click is the remote's Ok on what is
-    /// under the arrow, the wheel is the arrows.
+    /// Hover lights a target, a click is the remote's Ok on what is under
+    /// the arrow, a drag and the wheel scroll what is under it.
     Navigation,
     /// Navigation, and a screen's own pointer gesture besides: the film's
     /// position bar takes a click as a place to go and a drag as a scrub
@@ -74,6 +79,46 @@ pub fn route_policy(route: Route) -> Policy {
 /// one row, where Up and Down go nowhere.
 pub fn wheel_is_along(route: Route) -> bool {
     route == Route::Home
+}
+
+/// What a wheel does where nothing that scrolls is under the arrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelElsewhere {
+    /// The remote's arrows, as on a screen that is all focus.
+    Arrows,
+    /// The catalogue's page scrolls -- its board, its grid, its controls --
+    /// or, with none, nothing does: Stremio's pages are scrolled by the
+    /// browser, which never moves the focus (stremio-web has no wheel
+    /// handler of its own), and neither does a wheel here.
+    Page(Option<Lane>),
+}
+
+/// The table, as `route_policy` is: a new route says what its wheel does.
+pub fn wheel_elsewhere(route: Route) -> WheelElsewhere {
+    match route {
+        Route::Media | Route::Search => WheelElsewhere::Page(Some(Lane::vertical(Zone::Shelves))),
+        Route::Discover | Route::Library => WheelElsewhere::Page(Some(Lane::vertical(Zone::Grid))),
+        Route::MediaSettings => WheelElsewhere::Page(Some(Lane::vertical(Zone::MsControls))),
+        // A title's page: its lists scroll under the arrow, and nothing else.
+        Route::Detail => WheelElsewhere::Page(None),
+        Route::Home
+        | Route::Settings
+        | Route::Diagnostics
+        | Route::Account
+        | Route::Wifi
+        | Route::Bluetooth
+        | Route::NowPlaying
+        | Route::Live
+        | Route::Boot => WheelElsewhere::Arrows,
+    }
+}
+
+/// Whether a click on a target that is not the focused one only selects
+/// it: Discover's grid, as Stremio's (`metaItemOnClick` prevents the link
+/// and focuses the poster unless it is the selected one), where the record
+/// beside the grid is the focused title's. The second click opens it.
+pub fn click_selects_first(route: Route, zone: Zone) -> bool {
+    route == Route::Discover && zone == Zone::Grid
 }
 
 /// Which layer of the panel is on top, and so the only one a pointer reaches.
@@ -508,22 +553,241 @@ impl Zone {
         }
     }
 
-    /// Whether hovering target `index` of this zone moves the remote's
-    /// focus. Not the account mark: on it the remote's focus drops the
-    /// account's menu over the page, and an arrow passing over it must not
-    /// put a modal up. Not a way back, a ground, or the way out of a film,
-    /// which take no focus. Not a live menu row's title: the row it brings
-    /// forward moves the rows under a still arrow, which would bring the
-    /// next one forward in turn.
-    pub fn hovers(self, index: usize) -> bool {
+    /// Whether the arrow over target `index` of this zone lights it. Not a
+    /// modal's ground, nor the picture under live television: they fill the
+    /// panel, and are no control.
+    pub fn lights(self) -> bool {
+        !matches!(self, Zone::Shield | Zone::LiveSurface)
+    }
+
+    /// Whether a press held still on a target of this zone may be the
+    /// remote's long Ok -- the poster's, a network's, a paired device's menu
+    /// (`App::wants_ok_hold` decides, once the focus is on it).
+    pub fn holds(self) -> bool {
+        matches!(
+            self,
+            Zone::Shelves | Zone::Grid | Zone::WifiRows | Zone::BtRows
+        )
+    }
+
+    /// The surfaces a target of this zone lies on, which a drag starting on
+    /// it moves: a list, a grid, a shelf and the board it is on. A target on
+    /// nothing that scrolls has none, and a drag from it is only not a click.
+    pub fn lanes(self, index: usize) -> Lanes {
+        let vertical = |zone| Lanes {
+            vertical: Some(Lane::vertical(zone)),
+            horizontal: None,
+        };
         match self {
-            Zone::FrameAccount
-            | Zone::Shield
-            | Zone::Back
-            | Zone::PlayerExit
-            | Zone::LiveSurface => false,
-            Zone::LiveMenu => index % 100 != ROW_TITLE,
-            _ => true,
+            Zone::Shelves | Zone::PosterDismiss | Zone::PosterMenu => Lanes {
+                vertical: Some(Lane::vertical(Zone::Shelves)),
+                horizontal: Some(Lane {
+                    zone: Zone::Shelves,
+                    lane: i32::try_from(cell(index).0).unwrap_or(-1),
+                    axis: Axis::Horizontal,
+                }),
+            },
+            Zone::Grid | Zone::LibraryMark => vertical(Zone::Grid),
+            Zone::WifiRows | Zone::WifiInfo => vertical(Zone::WifiRows),
+            Zone::DetailEpisodes | Zone::DetailMarks => vertical(Zone::DetailEpisodes),
+            Zone::SettingsRows
+            | Zone::SettingsChoice
+            | Zone::EditorPicker
+            | Zone::OutputResolutions
+            | Zone::BtRows
+            | Zone::MsControls
+            | Zone::MsOptions
+            | Zone::DetailSources
+            | Zone::DiscoverOptions
+            | Zone::PlayerMenu
+            | Zone::PlayerTracks
+            | Zone::LiveGuide
+            | Zone::LivePanel => vertical(self),
+            _ => Lanes::default(),
+        }
+    }
+}
+
+/// The name each zone has in the interface (`Zone::parse` the other way);
+/// every one is used by a .slint file (`every_zone_is_named_in_the_interface`).
+pub fn zone_name(zone: Zone) -> &'static str {
+    match zone {
+        Zone::HomeApps => "home",
+        Zone::SettingsSections => "settings-sections",
+        Zone::Back => "back",
+        Zone::SettingsRows => "settings-rows",
+        Zone::SettingsChoice => "settings-choice",
+        Zone::EditorCards => "editor-cards",
+        Zone::EditorActions => "editor-actions",
+        Zone::OutputResolutions => "output-resolutions",
+        Zone::OutputRates => "output-rates",
+        Zone::OutputColours => "output-colours",
+        Zone::CoolingChips => "cooling-chips",
+        Zone::CoolingCells => "cooling-cells",
+        Zone::EditorPicker => "editor-picker",
+        Zone::EditorPad => "editor-pad",
+        Zone::EditorConfirm => "editor-confirm",
+        Zone::DiagnosticsGroups => "diagnostics-groups",
+        Zone::FramePlaces => "frame-places",
+        Zone::FrameSearch => "frame-search",
+        Zone::Shelves => "shelves",
+        Zone::Grid => "grid",
+        Zone::SearchKeys => "search-keys",
+        Zone::SearchList => "search-list",
+        Zone::MsCategories => "ms-categories",
+        Zone::MsControls => "ms-controls",
+        Zone::MsOptions => "ms-options",
+        Zone::DetailActions => "detail-actions",
+        Zone::DetailSources => "detail-sources",
+        Zone::DetailEpisodes => "detail-episodes",
+        Zone::DetailFilter => "detail-filter",
+        Zone::DetailProviders => "detail-providers",
+        Zone::DetailSeasons => "detail-seasons",
+        Zone::DetailMarks => "detail-marks",
+        Zone::Shield => "shield",
+        Zone::MediaMenu => "media-menu",
+        Zone::PosterDismiss => "poster-dismiss",
+        Zone::PosterMenu => "poster-menu",
+        Zone::DiscoverFilters => "discover-filters",
+        Zone::DiscoverOptions => "discover-options",
+        Zone::DiscoverPanel => "discover-panel",
+        Zone::LibraryFilters => "library-filters",
+        Zone::LibraryOptions => "library-options",
+        Zone::LibraryMenu => "library-menu",
+        Zone::LibraryMark => "library-mark",
+        Zone::FrameAccount => "frame-account",
+        Zone::FrameAccountMenu => "frame-account-menu",
+        Zone::EditorVolume => "editor-volume",
+        Zone::Sheet => "sheet",
+        Zone::AccountForm => "account-form",
+        Zone::AccountKeys => "account-keys",
+        Zone::WifiRows => "wifi-rows",
+        Zone::WifiInfo => "wifi-info",
+        Zone::WifiButtons => "wifi-buttons",
+        Zone::WifiForm => "wifi-form",
+        Zone::WifiKeys => "wifi-keys",
+        Zone::BtRows => "bt-rows",
+        Zone::NpControls => "np-controls",
+        Zone::PlayerBar => "player-bar",
+        Zone::PlayerButtons => "player-buttons",
+        Zone::PlayerExit => "player-exit",
+        Zone::PlayerMenu => "player-menu",
+        Zone::PlayerTracks => "player-tracks",
+        Zone::PlayerSide => "player-side",
+        Zone::LiveSurface => "live-surface",
+        Zone::LiveMenu => "live-menu",
+        Zone::LiveGuide => "live-guide",
+        Zone::LivePanel => "live-panel",
+        Zone::LiveKeypad => "live-keypad",
+        Zone::LiveSetup => "live-setup",
+        Zone::LiveActions => "live-actions",
+    }
+}
+
+/// Which way a surface scrolls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    Vertical,
+    Horizontal,
+}
+
+/// A surface a pointer scrolls, named as the interface names it: by its
+/// targets' zone, and a lane -- a shelf's own row on the board, -1 for the
+/// surface itself (`PanState`, ui/pointer.slint).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lane {
+    pub zone: Zone,
+    pub lane: i32,
+    pub axis: Axis,
+}
+
+impl Lane {
+    pub fn vertical(zone: Zone) -> Self {
+        Lane {
+            zone,
+            lane: -1,
+            axis: Axis::Vertical,
+        }
+    }
+
+    /// A list drawn as a window of rows Rust keeps rather than one Slint
+    /// scrolls: it moves by whole rows (`App::pointer_shift`).
+    pub fn stepped(self) -> bool {
+        matches!(
+            self.zone,
+            Zone::MsOptions
+                | Zone::PlayerMenu
+                | Zone::PlayerTracks
+                | Zone::LiveGuide
+                | Zone::LivePanel
+        )
+    }
+
+    /// Of a pair of numbers along both axes, the one along this lane.
+    pub fn along(self, (x, y): (f32, f32)) -> f32 {
+        match self.axis {
+            Axis::Vertical => y,
+            Axis::Horizontal => x,
+        }
+    }
+}
+
+/// What scrolls at a point: a surface each way at most.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lanes {
+    pub vertical: Option<Lane>,
+    pub horizontal: Option<Lane>,
+}
+
+impl Lanes {
+    /// The ground of a surface where it has no target (`PointerPanArea`),
+    /// by the name and lane the interface gives it: a shelf's row lies on
+    /// the board, which a drag up or down moves instead.
+    pub fn of_area(surface: &str, lane: i32) -> Self {
+        let Some(zone) = Zone::parse(surface) else {
+            return Lanes::default();
+        };
+        match usize::try_from(lane) {
+            Ok(row) => zone.lanes(row * 100),
+            Err(_) => Lanes {
+                vertical: zone.lanes(0).vertical,
+                horizontal: None,
+            },
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.vertical.is_none() && self.horizontal.is_none()
+    }
+
+    /// Whether these surfaces may be moved now: each is on the layer on top
+    /// (`accepts`), so with a modal up only the modal's own list moves and
+    /// nothing under it does.
+    pub fn taken(self, context: Context) -> bool {
+        !self.is_empty()
+            && [self.vertical, self.horizontal]
+                .into_iter()
+                .flatten()
+                .all(|lane| accepts(context, lane.zone))
+    }
+
+    /// The surface a movement of (dx, dy) takes: the one along the way it
+    /// mostly goes -- a grid's dominant axis, a shelf sideways and the board
+    /// up and down -- or, with nothing that way, the one there is.
+    pub fn along(self, dx: f32, dy: f32) -> Option<Lane> {
+        if dx.abs() > dy.abs() {
+            self.horizontal.or(self.vertical)
+        } else {
+            self.vertical.or(self.horizontal)
+        }
+    }
+
+    /// The surface along one axis only: a wheel turned up and down moves
+    /// what scrolls up and down, and a sideways one what scrolls sideways.
+    pub fn on(self, axis: Axis) -> Option<Lane> {
+        match axis {
+            Axis::Vertical => self.vertical,
+            Axis::Horizontal => self.horizontal,
         }
     }
 }
@@ -646,37 +910,630 @@ impl Pointer {
         self.shown
     }
 
+    /// Where the motion has brought it, to the fraction, while it is up.
+    pub fn exact(&self) -> Option<(f32, f32)> {
+        self.exact.filter(|_| self.shown)
+    }
+
     /// Where the arrow is, while it is up.
     pub fn at(&self) -> Option<(f32, f32)> {
         self.exact.filter(|_| self.shown).map(|_| self.drawn)
     }
 }
 
-/// A wheel's detents, as libinput's v120 values (120 is one detent; a
-/// high-resolution wheel reports fractions of one), turned into steps.
-#[derive(Default)]
-pub struct Wheel {
-    pending: (i32, i32),
+/// How far a hand moves before a press is a drag, in the window's logical
+/// pixels: a few, and more on a larger panel, so an air-mouse's tremor and
+/// a finger's roll under a click stay a click.
+pub fn slop(height: f32) -> f32 {
+    (height * 0.012).max(6.0)
 }
 
-impl Wheel {
-    /// Adds a report; returns the whole steps it completes on each axis,
-    /// positive down and right.
-    pub fn add(&mut self, horizontal: f64, vertical: f64) -> (i32, i32) {
-        let take = |pending: &mut i32, value: f64| {
-            *pending += value.round() as i32;
-            let steps = *pending / 120;
-            *pending -= steps * 120;
-            steps
-        };
-        (
-            take(&mut self.pending.0, horizontal),
-            take(&mut self.pending.1, vertical),
+/// How far a wheel's detent scrolls a surface, in logical pixels: a short
+/// row's worth of the panel.
+pub fn detent(height: f32) -> f32 {
+    (height * 0.075).max(24.0)
+}
+
+/// What a press landed on: a target, or a surface's ground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Target(Zone, usize),
+    Area(Lanes),
+}
+
+impl Hit {
+    pub fn lanes(self) -> Lanes {
+        match self {
+            Hit::Target(zone, index) => zone.lanes(index),
+            Hit::Area(lanes) => lanes,
+        }
+    }
+}
+
+/// Where the button and the hand are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Phase {
+    Idle,
+    /// The button is down: not yet a click, nor a drag. `hit` is what it
+    /// went down on, once Slint's hit testing says; `moved` that the hand
+    /// has gone further than the slop; `held` that a hold opened a menu.
+    Pressed {
+        start: (f32, f32),
+        at: (f32, f32),
+        hit: Option<Hit>,
+        moved: bool,
+        released: bool,
+        held: bool,
+    },
+    /// The hand moves a surface: `total` is how far along it since `origin`.
+    Panning {
+        lane: Lane,
+        origin: (f32, f32),
+        total: f32,
+    },
+    /// The film's bar has the button (`PointerScrub`): nothing else does.
+    Scrub,
+    /// Let go while moving: the surface runs on and slows to a stop.
+    Coasting {
+        lane: Lane,
+        total: f32,
+        velocity: f32,
+        since: f32,
+    },
+    /// A wheel turns a surface; turns close together are one gesture.
+    Wheeling {
+        lane: Lane,
+        total: f32,
+        at: std::time::Instant,
+    },
+}
+
+/// What the application does about a step of the gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Step {
+    Nothing,
+    /// A surface moved: the gesture's number and its running total along
+    /// the lane, content following the hand (`PointerPan`).
+    Pan {
+        lane: Lane,
+        gesture: i32,
+        total: f32,
+    },
+    /// A click on a target: its focus, then its Select, once.
+    Click(Zone, usize),
+}
+
+/// A coast lasts no longer than this, however fast it began.
+const COAST_LONGEST: f32 = 1.4;
+/// How fast a coast slows: its speed falls by e every this many seconds.
+const COAST_TAU: f32 = 0.28;
+/// How far back the hand's speed is measured at release, and how long a
+/// still hand must have been still to let go without a coast.
+const TRAIL: std::time::Duration = std::time::Duration::from_millis(90);
+
+/// The pointer's button and hand, in one place: a press, a drag of a
+/// surface, the film's scrub, a coast, a wheel. Everything that ends a
+/// gesture -- a cancel, another screen, the remote -- is `cancel`.
+pub struct Gesture {
+    phase: Phase,
+    id: i32,
+    context: Option<Context>,
+    /// The panel's logical height when the gesture began: the slop, the
+    /// coast's speeds, a wheel's detent are fractions of it.
+    height: f32,
+    trail: Vec<(std::time::Instant, f32)>,
+}
+
+impl Default for Gesture {
+    fn default() -> Self {
+        Gesture {
+            phase: Phase::Idle,
+            id: 0,
+            context: None,
+            height: 720.0,
+            trail: Vec::new(),
+        }
+    }
+}
+
+impl Gesture {
+    pub fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    pub fn id(&self) -> i32 {
+        self.id
+    }
+
+    /// Whether nothing is pressed nor moving: hover may light a target.
+    pub fn idle(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Idle | Phase::Coasting { .. } | Phase::Wheeling { .. }
         )
     }
 
+    pub fn coasting(&self) -> bool {
+        matches!(self.phase, Phase::Coasting { .. })
+    }
+
+    /// The button went down at `at`. Whatever was coasting stops there, as
+    /// a finger stops a list.
+    pub fn press(&mut self, at: (f32, f32), context: Context, height: f32) {
+        self.id += 1;
+        self.context = Some(context);
+        self.height = height.max(1.0);
+        self.trail.clear();
+        self.phase = Phase::Pressed {
+            start: at,
+            at,
+            hit: None,
+            moved: false,
+            released: false,
+            held: false,
+        };
+    }
+
+    /// What the press went down on, as Slint's hit testing says it a little
+    /// after the button (the events reach it once the loop hands them
+    /// over). Only for the press that is down, on the panel it went down on.
+    pub fn hit(&mut self, hit: Hit, context: Context) -> Step {
+        if self.context != Some(context) {
+            return Step::Nothing;
+        }
+        let Phase::Pressed {
+            hit: slot @ None,
+            moved,
+            released,
+            at,
+            ..
+        } = &mut self.phase
+        else {
+            return Step::Nothing;
+        };
+        *slot = Some(hit);
+        let (moved, released, at) = (*moved, *released, *at);
+        // The hand was already away before Slint said what was under it:
+        // the drag starts from where the hand is now.
+        if moved && !released {
+            self.begin_pan(hit, at, (0.0, 0.0));
+        }
+        if matches!(hit, Hit::Area(_)) && released {
+            self.phase = Phase::Idle;
+        }
+        Step::Nothing
+    }
+
+    fn begin_pan(&mut self, hit: Hit, at: (f32, f32), away: (f32, f32)) {
+        match hit.lanes().along(away.0, away.1) {
+            Some(lane) => {
+                self.trail.clear();
+                self.phase = Phase::Panning {
+                    lane,
+                    origin: at,
+                    total: 0.0,
+                };
+            }
+            // Nothing to move: no click either.
+            None => {
+                if let Phase::Pressed { moved, .. } = &mut self.phase {
+                    *moved = true;
+                }
+            }
+        }
+    }
+
+    /// The hand moved to `at`, in the window's logical pixels.
+    pub fn motion(&mut self, at: (f32, f32), now: std::time::Instant) -> Step {
+        let slop = slop(self.height);
+        match &mut self.phase {
+            Phase::Pressed {
+                start,
+                at: here,
+                hit,
+                moved,
+                released,
+                ..
+            } => {
+                *here = at;
+                if *moved || *released {
+                    return Step::Nothing;
+                }
+                let away = (at.0 - start.0, at.1 - start.1);
+                if away.0.hypot(away.1) <= slop {
+                    return Step::Nothing;
+                }
+                *moved = true;
+                if let Some(hit) = *hit {
+                    self.begin_pan(hit, at, away);
+                }
+                Step::Nothing
+            }
+            Phase::Panning {
+                lane,
+                origin,
+                total,
+            } => {
+                let lane = *lane;
+                *total = lane.along((at.0 - origin.0, at.1 - origin.1));
+                let total = *total;
+                self.trail.push((now, total));
+                if let Some(keep) = self
+                    .trail
+                    .iter()
+                    .position(|(t, _)| now.duration_since(*t) <= TRAIL)
+                {
+                    // Keep one sample before the window, for a speed across it.
+                    self.trail.drain(..keep.saturating_sub(1));
+                }
+                Step::Pan {
+                    lane,
+                    gesture: self.id,
+                    total,
+                }
+            }
+            _ => Step::Nothing,
+        }
+    }
+
+    /// The button came up (the platform's word, before Slint's). A drag let
+    /// go while moving coasts -- not a short list drawn a row at a time,
+    /// which stops where the hand left it; a press on a target waits for the
+    /// target's own release, which is the click (`target_up`).
+    pub fn release(&mut self, now: std::time::Instant) {
+        match self.phase {
+            Phase::Panning { lane, total, .. } => {
+                let velocity = self.velocity(now);
+                let height = self.height;
+                self.phase = if velocity.abs() >= height * 0.3 && !lane.stepped() {
+                    Phase::Coasting {
+                        lane,
+                        total,
+                        velocity: velocity.clamp(-height * 4.0, height * 4.0),
+                        since: 0.0,
+                    }
+                } else {
+                    Phase::Idle
+                };
+            }
+            Phase::Pressed {
+                hit: Some(Hit::Area(_)),
+                ..
+            } => self.phase = Phase::Idle,
+            Phase::Pressed {
+                ref mut released, ..
+            } => *released = true,
+            _ => {}
+        }
+    }
+
+    /// The hand's speed along its lane over the last moment, in logical
+    /// pixels a second; nothing if it had stopped before it let go.
+    fn velocity(&self, now: std::time::Instant) -> f32 {
+        let (Some(first), Some(last)) = (self.trail.first(), self.trail.last()) else {
+            return 0.0;
+        };
+        if now.duration_since(last.0) > TRAIL / 2 {
+            return 0.0;
+        }
+        let span = last.0.duration_since(first.0).as_secs_f32();
+        if span < 0.008 {
+            return 0.0;
+        }
+        (last.1 - first.1) / span
+    }
+
+    /// A target's own release: a click if the button went down on it, the
+    /// hand stayed within the slop, and no hold took it.
+    pub fn target_up(&mut self, zone: Zone, index: usize, context: Context) -> Step {
+        let Phase::Pressed {
+            hit: Some(Hit::Target(down_zone, down_index)),
+            moved,
+            held,
+            ..
+        } = self.phase
+        else {
+            return Step::Nothing;
+        };
+        if (down_zone, down_index) != (zone, index) {
+            return Step::Nothing;
+        }
+        self.phase = Phase::Idle;
+        if moved || held || self.context != Some(context) {
+            return Step::Nothing;
+        }
+        Step::Click(zone, index)
+    }
+
+    /// The press is the film's bar's: no click, no drag of anything else.
+    pub fn scrub(&mut self) {
+        self.phase = Phase::Scrub;
+    }
+
+    /// The target a press of gesture `id` is still held on, without having
+    /// moved or come up: a long press may be the remote's long Ok there.
+    pub fn holding(&self, id: i32) -> Option<(Zone, usize)> {
+        match self.phase {
+            Phase::Pressed {
+                hit: Some(Hit::Target(zone, index)),
+                moved: false,
+                released: false,
+                held: false,
+                ..
+            } if id == self.id => Some((zone, index)),
+            _ => None,
+        }
+    }
+
+    /// A hold opened a menu: the release that follows is no click.
+    pub fn held(&mut self) {
+        if let Phase::Pressed { held, .. } = &mut self.phase {
+            *held = true;
+        }
+    }
+
+    /// Everything is let go of: nothing clicks, nothing coasts. Returns
+    /// whether anything was going on.
+    pub fn cancel(&mut self) -> bool {
+        let busy = self.phase != Phase::Idle;
+        self.phase = Phase::Idle;
+        busy
+    }
+
+    /// A coast's next moment, `dt` seconds on. The last step is the one
+    /// that stops it.
+    pub fn coast(&mut self, dt: f32) -> Step {
+        let Phase::Coasting {
+            lane,
+            total,
+            velocity,
+            since,
+        } = &mut self.phase
+        else {
+            return Step::Nothing;
+        };
+        let dt = dt.clamp(0.0, 0.1);
+        let decay = (-dt / COAST_TAU).exp();
+        // The distance the decaying speed covers over dt.
+        *total += *velocity * COAST_TAU * (1.0 - decay);
+        *velocity *= decay;
+        *since += dt;
+        let step = Step::Pan {
+            lane: *lane,
+            gesture: self.id,
+            total: *total,
+        };
+        if velocity.abs() < self.height * 0.05 || *since >= COAST_LONGEST {
+            self.phase = Phase::Idle;
+        }
+        step
+    }
+
+    /// The surface a coast moves ran into its end: it stops there.
+    pub fn edge(&mut self, at: Lane) {
+        if matches!(self.phase, Phase::Coasting { lane, .. } if lane == at) {
+            self.phase = Phase::Idle;
+        }
+    }
+
+    /// A wheel moved `lane` by `pixels` (positive: further down or along).
+    /// Turns close together are one gesture, so the surface eases on from
+    /// where the last left it. Not while the button is down.
+    pub fn wheel(&mut self, lane: Lane, pixels: f32, now: std::time::Instant) -> Step {
+        let total = match self.phase {
+            Phase::Wheeling {
+                lane: was,
+                total,
+                at,
+            } if was == lane && now.duration_since(at) < std::time::Duration::from_millis(400) => {
+                total
+            }
+            Phase::Idle | Phase::Coasting { .. } | Phase::Wheeling { .. } => {
+                self.id += 1;
+                0.0
+            }
+            _ => return Step::Nothing,
+        };
+        // Content follows the hand: scrolling down moves it up.
+        let total = total - pixels;
+        self.phase = Phase::Wheeling {
+            lane,
+            total,
+            at: now,
+        };
+        Step::Pan {
+            lane,
+            gesture: self.id,
+            total,
+        }
+    }
+}
+
+/// What a pointer scrolled, as libinput reports it, positive down and
+/// right: the device's own direction, natural scrolling included, as the
+/// platform configured it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scroll {
+    /// A wheel's detents, as libinput's v120 values (120 is one detent; a
+    /// high-resolution wheel reports fractions of one).
+    Wheel(f64, f64),
+    /// Fingers on a touchpad, in libinput's scroll units -- its motion's.
+    Finger(f64, f64),
+    /// A scroll that is neither: a trackball's, a button held while moving.
+    Continuous(f64, f64),
+}
+
+/// A scroll, in what a surface moves by and what the arrows step by.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scrolled {
+    /// Logical pixels, positive down and right.
+    pub pixels: (f32, f32),
+    /// Whole steps completed: a detent each, or a detent's worth of
+    /// fingers. For a list that moves a row at a time, and for the arrows
+    /// where nothing scrolls.
+    pub steps: (i32, i32),
+    /// A wheel's step, eased; fingers are followed.
+    pub eased: bool,
+}
+
+/// Scrolls, normalised: a wheel's detents and a touchpad's fingers move a
+/// surface the same way, and add up to the same whole steps.
+#[derive(Default)]
+pub struct Scroller {
+    /// Part-detents, in v120.
+    wheel: (i32, i32),
+    /// Part-steps of fingers, in pixels.
+    fingers: (f32, f32),
+}
+
+impl Scroller {
+    /// Adds a report, with a detent `detent` logical pixels long.
+    pub fn add(&mut self, scroll: Scroll, detent: f32) -> Scrolled {
+        match scroll {
+            Scroll::Wheel(horizontal, vertical) => {
+                let take = |pending: &mut i32, value: f64| {
+                    *pending += value.round() as i32;
+                    let steps = *pending / 120;
+                    *pending -= steps * 120;
+                    steps
+                };
+                Scrolled {
+                    pixels: (
+                        (horizontal / 120.0) as f32 * detent,
+                        (vertical / 120.0) as f32 * detent,
+                    ),
+                    steps: (
+                        take(&mut self.wheel.0, horizontal),
+                        take(&mut self.wheel.1, vertical),
+                    ),
+                    eased: true,
+                }
+            }
+            Scroll::Finger(horizontal, vertical) | Scroll::Continuous(horizontal, vertical) => {
+                let (horizontal, vertical) = (horizontal as f32, vertical as f32);
+                let take = |pending: &mut f32, value: f32| {
+                    *pending += value;
+                    let steps = (*pending / detent).trunc();
+                    *pending -= steps * detent;
+                    steps as i32
+                };
+                Scrolled {
+                    pixels: (horizontal, vertical),
+                    steps: (
+                        take(&mut self.fingers.0, horizontal),
+                        take(&mut self.fingers.1, vertical),
+                    ),
+                    eased: false,
+                }
+            }
+        }
+    }
+
     pub fn reset(&mut self) {
-        self.pending = (0, 0);
+        *self = Scroller::default();
+    }
+}
+
+/// Where a list drawn as a window of rows Rust keeps starts while a pointer
+/// is in use: where the remote's focus put it when the pointer came, moved
+/// only by the hand and the wheel, never by a click moving the focus. The
+/// remote picked up again forgets it, and the focus's window is drawn.
+#[derive(Default)]
+pub struct Windows {
+    /// A list's first row, once drawn under a pointer, and rows the hand
+    /// moved it by since.
+    lists: Vec<(Zone, Option<usize>, i32)>,
+}
+
+impl Windows {
+    /// The first row to draw of `total`, `shown` at a time, where the
+    /// remote's focus would start it at `focus_first`.
+    pub fn first(
+        &mut self,
+        zone: Zone,
+        focus_first: usize,
+        total: usize,
+        shown: usize,
+        pinned: bool,
+    ) -> usize {
+        let last = total.saturating_sub(shown);
+        if !pinned {
+            self.lists.retain(|(list, ..)| *list != zone);
+            return focus_first.min(last);
+        }
+        let at = match self.lists.iter().position(|(list, ..)| *list == zone) {
+            Some(at) => at,
+            None => {
+                self.lists.push((zone, None, 0));
+                self.lists.len() - 1
+            }
+        };
+        let (_, first, moved) = &mut self.lists[at];
+        let wanted = first.unwrap_or(focus_first) as i64 + *moved as i64;
+        let drawn = wanted.clamp(0, last as i64) as usize;
+        *first = Some(drawn);
+        *moved = 0;
+        drawn
+    }
+
+    /// The hand moved a list by `rows`, positive further down.
+    pub fn step(&mut self, zone: Zone, rows: i32) {
+        match self.lists.iter_mut().find(|(list, ..)| *list == zone) {
+            Some((_, _, moved)) => *moved += rows,
+            None => self.lists.push((zone, None, rows)),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.lists.clear();
+    }
+}
+
+/// What the surfaces a pointer moved show, by their first item: the window
+/// artwork is loaded around, and a catalogue's next page asked for at, are
+/// where the panel is, not where the remote's focus was left. A surface
+/// back with the remote's focus is not here.
+#[derive(Default)]
+pub struct Views {
+    shown: Vec<(Zone, i32, usize)>,
+}
+
+impl Views {
+    /// A surface now shows `first` onwards; negative: it is the focus's
+    /// again. Returns whether anything changed.
+    pub fn set(&mut self, zone: Zone, lane: i32, first: i32) -> bool {
+        let at = self
+            .shown
+            .iter()
+            .position(|(z, l, _)| (*z, *l) == (zone, lane));
+        match (at, usize::try_from(first)) {
+            (Some(at), Ok(first)) if self.shown[at].2 == first => false,
+            (Some(at), Ok(first)) => {
+                self.shown[at].2 = first;
+                true
+            }
+            (None, Ok(first)) => {
+                self.shown.push((zone, lane, first));
+                true
+            }
+            (Some(at), Err(_)) => {
+                self.shown.remove(at);
+                true
+            }
+            (None, Err(_)) => false,
+        }
+    }
+
+    /// The first item `zone`'s lane shows, if a pointer moved it.
+    pub fn first(&self, zone: Zone, lane: i32) -> Option<usize> {
+        self.shown
+            .iter()
+            .find(|(z, l, _)| (*z, *l) == (zone, lane))
+            .map(|(.., first)| *first)
+    }
+
+    pub fn clear(&mut self) {
+        self.shown.clear();
     }
 }
 
@@ -758,82 +1615,6 @@ mod tests {
         Zone::LiveSetup,
         Zone::LiveActions,
     ];
-
-    /// The name each zone has in the interface; every one is used by a
-    /// .slint file (`every_zone_is_named_in_the_interface`).
-    fn zone_name(zone: Zone) -> &'static str {
-        match zone {
-            Zone::HomeApps => "home",
-            Zone::SettingsSections => "settings-sections",
-            Zone::Back => "back",
-            Zone::SettingsRows => "settings-rows",
-            Zone::SettingsChoice => "settings-choice",
-            Zone::EditorCards => "editor-cards",
-            Zone::EditorActions => "editor-actions",
-            Zone::OutputResolutions => "output-resolutions",
-            Zone::OutputRates => "output-rates",
-            Zone::OutputColours => "output-colours",
-            Zone::CoolingChips => "cooling-chips",
-            Zone::CoolingCells => "cooling-cells",
-            Zone::EditorPicker => "editor-picker",
-            Zone::EditorPad => "editor-pad",
-            Zone::EditorConfirm => "editor-confirm",
-            Zone::DiagnosticsGroups => "diagnostics-groups",
-            Zone::FramePlaces => "frame-places",
-            Zone::FrameSearch => "frame-search",
-            Zone::Shelves => "shelves",
-            Zone::Grid => "grid",
-            Zone::SearchKeys => "search-keys",
-            Zone::SearchList => "search-list",
-            Zone::MsCategories => "ms-categories",
-            Zone::MsControls => "ms-controls",
-            Zone::MsOptions => "ms-options",
-            Zone::DetailActions => "detail-actions",
-            Zone::DetailSources => "detail-sources",
-            Zone::DetailEpisodes => "detail-episodes",
-            Zone::DetailFilter => "detail-filter",
-            Zone::DetailProviders => "detail-providers",
-            Zone::DetailSeasons => "detail-seasons",
-            Zone::DetailMarks => "detail-marks",
-            Zone::Shield => "shield",
-            Zone::MediaMenu => "media-menu",
-            Zone::PosterDismiss => "poster-dismiss",
-            Zone::PosterMenu => "poster-menu",
-            Zone::DiscoverFilters => "discover-filters",
-            Zone::DiscoverOptions => "discover-options",
-            Zone::DiscoverPanel => "discover-panel",
-            Zone::LibraryFilters => "library-filters",
-            Zone::LibraryOptions => "library-options",
-            Zone::LibraryMenu => "library-menu",
-            Zone::LibraryMark => "library-mark",
-            Zone::FrameAccount => "frame-account",
-            Zone::FrameAccountMenu => "frame-account-menu",
-            Zone::EditorVolume => "editor-volume",
-            Zone::Sheet => "sheet",
-            Zone::AccountForm => "account-form",
-            Zone::AccountKeys => "account-keys",
-            Zone::WifiRows => "wifi-rows",
-            Zone::WifiInfo => "wifi-info",
-            Zone::WifiButtons => "wifi-buttons",
-            Zone::WifiForm => "wifi-form",
-            Zone::WifiKeys => "wifi-keys",
-            Zone::BtRows => "bt-rows",
-            Zone::NpControls => "np-controls",
-            Zone::PlayerBar => "player-bar",
-            Zone::PlayerButtons => "player-buttons",
-            Zone::PlayerExit => "player-exit",
-            Zone::PlayerMenu => "player-menu",
-            Zone::PlayerTracks => "player-tracks",
-            Zone::PlayerSide => "player-side",
-            Zone::LiveSurface => "live-surface",
-            Zone::LiveMenu => "live-menu",
-            Zone::LiveGuide => "live-guide",
-            Zone::LivePanel => "live-panel",
-            Zone::LiveKeypad => "live-keypad",
-            Zone::LiveSetup => "live-setup",
-            Zone::LiveActions => "live-actions",
-        }
-    }
 
     /// A zone nobody draws is a part of a screen the pointer cannot reach.
     #[test]
@@ -955,15 +1736,9 @@ mod tests {
                 "{zone:?}"
             );
         }
-        // Passing over the account mark must not drop its menu (a modal).
-        assert!(!Zone::FrameAccount.hovers(0));
-        assert!(Zone::Shelves.hovers(0));
-        // A way back takes no focus; a live menu title does not move the
-        // rows under a still arrow.
-        assert!(!Zone::Back.hovers(0));
-        assert!(!Zone::PlayerExit.hovers(0));
-        assert!(!Zone::LiveMenu.hovers(ROW_TITLE));
-        assert!(Zone::LiveMenu.hovers(1));
+        // The arrow lights controls, never a ground that fills the panel.
+        assert!(Zone::FrameAccount.lights() && Zone::Back.lights() && Zone::PlayerExit.lights());
+        assert!(!Zone::Shield.lights() && !Zone::LiveSurface.lights());
     }
 
     /// Every modal of every pointer screen has a ground that takes the
@@ -1472,13 +2247,51 @@ mod tests {
 
     #[test]
     fn a_wheel_steps_once_per_detent_and_adds_up_fractions() {
-        let mut wheel = Wheel::default();
-        assert_eq!(wheel.add(0.0, 120.0), (0, 1));
-        assert_eq!(wheel.add(0.0, -240.0), (0, -2));
-        assert_eq!(wheel.add(60.0, 30.0), (0, 0));
-        assert_eq!(wheel.add(60.0, 30.0), (1, 0));
+        let mut wheel = Scroller::default();
+        let steps = |s: Scrolled| s.steps;
+        assert_eq!(steps(wheel.add(Scroll::Wheel(0.0, 120.0), 50.0)), (0, 1));
+        assert_eq!(steps(wheel.add(Scroll::Wheel(0.0, -240.0), 50.0)), (0, -2));
+        assert_eq!(steps(wheel.add(Scroll::Wheel(60.0, 30.0), 50.0)), (0, 0));
+        assert_eq!(steps(wheel.add(Scroll::Wheel(60.0, 30.0), 50.0)), (1, 0));
         wheel.reset();
-        assert_eq!(wheel.add(0.0, 90.0), (0, 0), "a reset forgets the fraction");
+        assert_eq!(
+            steps(wheel.add(Scroll::Wheel(0.0, 90.0), 50.0)),
+            (0, 0),
+            "a reset forgets the fraction"
+        );
+    }
+
+    /// A wheel's detent, a touchpad's fingers and a continuous scroll are
+    /// one scroll: pixels for a surface, whole steps for the arrows, with
+    /// libinput's own direction (natural scrolling is its to apply).
+    #[test]
+    fn wheel_fingers_and_continuous_scroll_are_normalised_alike() {
+        let mut scroller = Scroller::default();
+        let detent = 60.0;
+        let wheel = scroller.add(Scroll::Wheel(0.0, 120.0), detent);
+        assert_eq!(wheel.pixels, (0.0, 60.0));
+        assert_eq!(wheel.steps, (0, 1));
+        assert!(wheel.eased, "a wheel's step is eased");
+        // A high-resolution wheel's half detent is half the pixels, no step.
+        let half = scroller.add(Scroll::Wheel(0.0, -60.0), detent);
+        assert_eq!(half.pixels, (0.0, -30.0));
+        assert_eq!(half.steps, (0, 0));
+        // Fingers: followed, pixel for pixel, and a detent's worth of them
+        // is a step.
+        let mut scroller = Scroller::default();
+        let fingers = scroller.add(Scroll::Finger(-12.5, 40.0), detent);
+        assert_eq!(fingers.pixels, (-12.5, 40.0));
+        assert_eq!(fingers.steps, (0, 0));
+        assert!(!fingers.eased);
+        let more = scroller.add(Scroll::Finger(0.0, 25.0), detent);
+        assert_eq!(more.steps, (0, 1), "40 + 25 is one 60-pixel step");
+        // Natural scrolling reaches here already reversed: a negative
+        // report scrolls back, whichever device sent it.
+        let mut scroller = Scroller::default();
+        let back = scroller.add(Scroll::Continuous(0.0, -130.0), detent);
+        assert_eq!(back.pixels, (0.0, -130.0));
+        assert_eq!(back.steps, (0, -2));
+        assert!(detent > 0.0 && super::detent(720.0) >= 24.0);
     }
 
     /// The pointer is decided by the event, never the device: the code that
@@ -1518,5 +2331,599 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------- the gesture machine
+
+    use std::time::{Duration, Instant};
+
+    const SHELF: Hit = Hit::Target(Zone::Shelves, 203);
+
+    fn pressed(at: (f32, f32), hit: Hit) -> (Gesture, Context) {
+        let context = on(Route::Media);
+        let mut gesture = Gesture::default();
+        gesture.press(at, context, 720.0);
+        assert_eq!(gesture.hit(hit, context), Step::Nothing);
+        (gesture, context)
+    }
+
+    /// A press and its release where it went down is a click on that
+    /// target -- once: its focus, then its Select (`App::pointer_click`).
+    #[test]
+    fn a_click_is_the_target_s_release_and_only_once() {
+        let (mut gesture, context) = pressed((100.0, 100.0), SHELF);
+        gesture.release(Instant::now());
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Click(Zone::Shelves, 203)
+        );
+        assert_eq!(gesture.phase(), Phase::Idle);
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Nothing,
+            "a second release is nothing"
+        );
+    }
+
+    /// An air-mouse trembles under a click: a few pixels either way is
+    /// still the click, and moves nothing.
+    #[test]
+    fn a_tremor_inside_the_slop_is_still_a_click() {
+        let (mut gesture, context) = pressed((100.0, 100.0), SHELF);
+        let now = Instant::now();
+        for at in [(103.0, 98.0), (97.5, 102.0), (101.0, 104.5)] {
+            assert_eq!(gesture.motion(at, now), Step::Nothing);
+        }
+        assert!(slop(720.0) > 6.0_f32.hypot(4.5));
+        gesture.release(now);
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Click(Zone::Shelves, 203)
+        );
+    }
+
+    /// Past the slop the press is a drag: no click, no long press, and the
+    /// surface it is on follows the hand along its own axis -- the board up
+    /// and down, the shelf sideways -- from where the drag began.
+    #[test]
+    fn past_the_slop_a_press_is_a_drag_of_its_surface_and_never_a_click() {
+        let (mut gesture, context) = pressed((100.0, 300.0), SHELF);
+        let id = gesture.id();
+        let now = Instant::now();
+        assert_eq!(gesture.motion((100.0, 280.0), now), Step::Nothing);
+        assert!(
+            matches!(gesture.phase(), Phase::Panning { lane, .. } if lane == Lane::vertical(Zone::Shelves))
+        );
+        assert_eq!(gesture.holding(id), None, "no long press once it moves");
+        assert_eq!(
+            gesture.motion((101.0, 250.0), now),
+            Step::Pan {
+                lane: Lane::vertical(Zone::Shelves),
+                gesture: id,
+                total: -30.0
+            }
+        );
+        gesture.release(now + Duration::from_millis(200));
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Nothing,
+            "the poster under the drag is not opened"
+        );
+        // Sideways, the shelf -- row 2 of the board -- and not the board.
+        let (mut gesture, _) = pressed((100.0, 300.0), SHELF);
+        gesture.motion((60.0, 305.0), now);
+        let row = Lane {
+            zone: Zone::Shelves,
+            lane: 2,
+            axis: Axis::Horizontal,
+        };
+        assert!(matches!(gesture.phase(), Phase::Panning { lane, .. } if lane == row));
+        assert_eq!(
+            gesture.motion((20.0, 340.0), now),
+            Step::Pan {
+                lane: row,
+                gesture: gesture.id(),
+                total: -40.0
+            },
+            "a lane takes its own axis only"
+        );
+    }
+
+    /// A grid scrolls one way: a drag mostly sideways on it still moves it,
+    /// along the axis it has. A target on nothing that scrolls is no drag,
+    /// and no click once the hand has left it.
+    #[test]
+    fn a_grid_takes_its_own_axis_and_a_fixed_target_takes_no_drag() {
+        let (mut gesture, context) = pressed((300.0, 300.0), Hit::Target(Zone::Grid, 9));
+        gesture.motion((260.0, 290.0), Instant::now());
+        assert!(
+            matches!(gesture.phase(), Phase::Panning { lane, .. } if lane == Lane::vertical(Zone::Grid))
+        );
+        let (mut gesture, _) = pressed((300.0, 300.0), Hit::Target(Zone::HomeApps, 1));
+        assert_eq!(
+            gesture.motion((300.0, 250.0), Instant::now()),
+            Step::Nothing
+        );
+        assert!(matches!(
+            gesture.phase(),
+            Phase::Pressed { moved: true, .. }
+        ));
+        gesture.release(Instant::now());
+        assert_eq!(gesture.target_up(Zone::HomeApps, 1, context), Step::Nothing);
+    }
+
+    /// The release belongs to the target the press went down on: another
+    /// one under the button at release is never opened.
+    #[test]
+    fn a_release_on_another_target_does_nothing() {
+        let (mut gesture, context) = pressed((100.0, 100.0), SHELF);
+        gesture.release(Instant::now());
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 204, context),
+            Step::Nothing
+        );
+        assert_eq!(gesture.target_up(Zone::Grid, 203, context), Step::Nothing);
+        // And the press is still waiting for its own target, which is the
+        // only click it can be.
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Click(Zone::Shelves, 203)
+        );
+    }
+
+    /// The loop hands a fast click's down and up to Slint together, after
+    /// both reached the gesture: the click still lands. A fast flick does
+    /// not become one.
+    #[test]
+    fn a_click_whose_target_is_named_after_the_release_still_lands_and_a_flick_does_not() {
+        let context = on(Route::Media);
+        let mut gesture = Gesture::default();
+        gesture.press((10.0, 10.0), context, 720.0);
+        gesture.release(Instant::now());
+        gesture.hit(SHELF, context);
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Click(Zone::Shelves, 203)
+        );
+        gesture.press((10.0, 10.0), context, 720.0);
+        gesture.motion((10.0, 90.0), Instant::now());
+        gesture.release(Instant::now());
+        gesture.hit(SHELF, context);
+        assert!(
+            !matches!(gesture.phase(), Phase::Panning { .. }),
+            "let go before the drag began"
+        );
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Nothing
+        );
+    }
+
+    /// Another screen or layer between the press and its release: the
+    /// press is not what it went down on any more.
+    #[test]
+    fn a_press_across_a_change_of_screen_is_no_click() {
+        let (mut gesture, _) = pressed((100.0, 100.0), SHELF);
+        gesture.release(Instant::now());
+        let other = Context {
+            layer: Layer::Choice,
+            ..on(Route::Media)
+        };
+        assert_eq!(gesture.target_up(Zone::Shelves, 203, other), Step::Nothing);
+        // And a target named on another panel is not taken.
+        let mut gesture = Gesture::default();
+        gesture.press((1.0, 1.0), on(Route::Media), 720.0);
+        gesture.hit(SHELF, other);
+        assert!(matches!(gesture.phase(), Phase::Pressed { hit: None, .. }));
+    }
+
+    /// Held still, a press may be the remote's long Ok (the application
+    /// decides whether one means anything there); once a hold took it, the
+    /// release is no click. A press that moved, or came up, holds nothing.
+    #[test]
+    fn a_hold_is_offered_only_to_a_still_press_and_then_is_no_click() {
+        let (mut gesture, context) = pressed((100.0, 100.0), SHELF);
+        let id = gesture.id();
+        assert_eq!(gesture.holding(id), Some((Zone::Shelves, 203)));
+        assert_eq!(gesture.holding(id - 1), None, "an older press's timer");
+        gesture.held();
+        assert_eq!(gesture.holding(id), None);
+        gesture.release(Instant::now());
+        assert_eq!(
+            gesture.target_up(Zone::Shelves, 203, context),
+            Step::Nothing
+        );
+        let (mut gesture, _) = pressed((100.0, 100.0), SHELF);
+        gesture.release(Instant::now());
+        assert_eq!(
+            gesture.holding(gesture.id()),
+            None,
+            "let go before the hold"
+        );
+    }
+
+    /// The film's bar takes the press: nothing is dragged or clicked.
+    #[test]
+    fn a_scrub_keeps_the_hand_from_every_surface() {
+        let context = Context {
+            film: true,
+            ..on(Route::Detail)
+        };
+        let mut gesture = Gesture::default();
+        gesture.press((500.0, 650.0), context, 720.0);
+        gesture.scrub();
+        assert_eq!(
+            gesture.motion((300.0, 600.0), Instant::now()),
+            Step::Nothing
+        );
+        assert_eq!(
+            gesture.hit(Hit::Target(Zone::PlayerMenu, 0), context),
+            Step::Nothing
+        );
+        gesture.release(Instant::now());
+        assert_eq!(gesture.phase(), Phase::Scrub);
+        assert!(gesture.cancel());
+        assert_eq!(gesture.phase(), Phase::Idle);
+    }
+
+    /// A press on a surface's ground drags it and never clicks; a ground
+    /// with nothing that may move (under a modal) is a press of nothing.
+    #[test]
+    fn a_ground_drags_its_surface_and_never_clicks() {
+        let lanes = Lanes::of_area("settings-rows", -1);
+        assert_eq!(lanes.vertical, Some(Lane::vertical(Zone::SettingsRows)));
+        let (mut gesture, _) = pressed((50.0, 50.0), Hit::Area(lanes));
+        gesture.motion((50.0, 10.0), Instant::now());
+        assert!(matches!(gesture.phase(), Phase::Panning { .. }));
+        let (mut gesture, _) = pressed((50.0, 50.0), Hit::Area(lanes));
+        gesture.release(Instant::now());
+        assert_eq!(
+            gesture.phase(),
+            Phase::Idle,
+            "a still press on a ground is nothing"
+        );
+        // A shelf's ground is on the board: up and down moves the board.
+        let shelf = Lanes::of_area("shelves", 3);
+        assert_eq!(shelf.vertical, Some(Lane::vertical(Zone::Shelves)));
+        assert_eq!(shelf.horizontal.map(|lane| lane.lane), Some(3));
+        assert_eq!(Lanes::of_area("shelves", -1).horizontal, None);
+        assert!(Lanes::of_area("nothing", -1).is_empty());
+    }
+
+    /// With a modal up only the modal's own lists move; the screen under it
+    /// takes no drag and no wheel.
+    #[test]
+    fn with_a_modal_up_only_the_modal_scrolls() {
+        let screen = on(Route::Settings);
+        let modal = Context {
+            layer: Layer::Choice,
+            ..screen
+        };
+        assert!(Zone::SettingsRows.lanes(0).taken(screen));
+        assert!(!Zone::SettingsRows.lanes(0).taken(modal));
+        assert!(Zone::SettingsChoice.lanes(0).taken(modal));
+        assert!(!Zone::SettingsChoice.lanes(0).taken(screen));
+        let media = on(Route::Media);
+        let menu = Context {
+            layer: Layer::Choice,
+            ..media
+        };
+        assert!(Lanes::of_area("shelves", 1).taken(media));
+        assert!(!Lanes::of_area("shelves", 1).taken(menu));
+        let film = Context {
+            film: true,
+            layer: Layer::Choice,
+            ..on(Route::Detail)
+        };
+        assert!(Zone::PlayerMenu.lanes(0).taken(film));
+        assert!(!Zone::PlayerMenu.lanes(0).taken(Context {
+            layer: Layer::Screen,
+            ..film
+        }));
+        assert!(!Lanes::default().taken(screen));
+    }
+
+    fn fling(speed: f32) -> Gesture {
+        let (mut gesture, _) = pressed((100.0, 400.0), Hit::Target(Zone::Grid, 0));
+        let start = Instant::now();
+        // Past the slop at once; then `speed` pixels a second, for 80 ms.
+        gesture.motion((100.0, 380.0), start);
+        for ms in (0..=80).step_by(8) {
+            let at = start + Duration::from_millis(ms);
+            gesture.motion((100.0, 380.0 - speed * ms as f32 / 1000.0), at);
+        }
+        gesture.release(start + Duration::from_millis(84));
+        gesture
+    }
+
+    /// Let go while moving fast, a surface coasts on, slower and slower, and
+    /// stops by itself: no frame is asked for once it has. A hand that let
+    /// go still, or slowly, leaves the surface where it is.
+    #[test]
+    fn a_fling_coasts_to_a_stop_and_a_still_release_does_not() {
+        let mut gesture = fling(1500.0);
+        assert!(gesture.coasting());
+        let mut last = match gesture.phase() {
+            Phase::Coasting {
+                total, velocity, ..
+            } => {
+                assert!(velocity < 0.0, "up, as the hand went");
+                total
+            }
+            other => panic!("{other:?}"),
+        };
+        let mut frames = 0;
+        while gesture.coasting() {
+            let Step::Pan { total, .. } = gesture.coast(0.016) else {
+                panic!("a coast moves its surface");
+            };
+            assert!(total <= last, "it runs on the way it went");
+            last = total;
+            frames += 1;
+            assert!(frames < 200, "a coast ends by itself");
+        }
+        assert!(frames as f32 * 0.016 <= COAST_LONGEST + 0.02);
+        assert_eq!(gesture.coast(0.016), Step::Nothing, "nothing after its end");
+        assert!(!fling(50.0).coasting(), "slow is no fling");
+        // A list drawn a row at a time stops where the hand left it.
+        let (mut stepped, _) = pressed((100.0, 400.0), Hit::Target(Zone::PlayerMenu, 0));
+        let start = Instant::now();
+        stepped.motion((100.0, 380.0), start);
+        stepped.motion((100.0, 300.0), start + Duration::from_millis(40));
+        stepped.release(start + Duration::from_millis(44));
+        assert!(!stepped.coasting());
+        // A hand held still before letting go.
+        let (mut gesture, _) = pressed((100.0, 400.0), Hit::Target(Zone::Grid, 0));
+        let start = Instant::now();
+        gesture.motion((100.0, 300.0), start);
+        gesture.motion((100.0, 200.0), start + Duration::from_millis(16));
+        gesture.release(start + Duration::from_millis(300));
+        assert!(!gesture.coasting());
+    }
+
+    /// A coast stops at its surface's end (`PanState` says so), at a new
+    /// press, and at anything that cancels the gesture.
+    #[test]
+    fn a_coast_stops_at_the_end_a_press_or_a_cancel() {
+        let mut gesture = fling(2000.0);
+        gesture.edge(Lane::vertical(Zone::SettingsRows));
+        assert!(gesture.coasting(), "another surface's end");
+        gesture.edge(Lane::vertical(Zone::Grid));
+        assert!(!gesture.coasting());
+        let mut gesture = fling(2000.0);
+        gesture.press((5.0, 5.0), on(Route::Library), 720.0);
+        assert!(!gesture.coasting());
+        let mut gesture = fling(2000.0);
+        assert!(gesture.cancel());
+        assert_eq!(gesture.coast(0.016), Step::Nothing);
+    }
+
+    /// Turns of a wheel close together are one gesture that adds up, so
+    /// the surface eases on from where the last left it; a pause, another
+    /// surface, or a press, starts anew. Not while the button is down.
+    #[test]
+    fn a_wheel_s_turns_add_up_into_one_gesture() {
+        let mut gesture = Gesture::default();
+        let lane = Lane::vertical(Zone::SettingsRows);
+        let now = Instant::now();
+        let first = gesture.wheel(lane, 40.0, now);
+        let Step::Pan {
+            gesture: id, total, ..
+        } = first
+        else {
+            panic!("{first:?}");
+        };
+        assert_eq!(total, -40.0, "down the list: the content goes up");
+        assert_eq!(
+            gesture.wheel(lane, 40.0, now + Duration::from_millis(50)),
+            Step::Pan {
+                lane,
+                gesture: id,
+                total: -80.0
+            }
+        );
+        let later = gesture.wheel(lane, -10.0, now + Duration::from_secs(2));
+        assert!(
+            matches!(later, Step::Pan { gesture, total, .. } if gesture == id + 1 && total == 10.0)
+        );
+        let other = Lane::vertical(Zone::Grid);
+        assert!(
+            matches!(gesture.wheel(other, 5.0, now + Duration::from_secs(2)), Step::Pan { gesture, .. } if gesture == id + 2)
+        );
+        gesture.press((0.0, 0.0), on(Route::Settings), 720.0);
+        assert_eq!(gesture.wheel(lane, 40.0, now), Step::Nothing);
+    }
+
+    /// A list drawn as a window of rows stays where it was while a pointer
+    /// is in use, whatever the remote's focus does under a click; the hand
+    /// moves it, kept to the list's ends; the remote picked up again draws
+    /// the focus's window.
+    #[test]
+    fn a_window_of_rows_stays_put_under_a_pointer_and_returns_to_the_focus() {
+        let mut windows = Windows::default();
+        let zone = Zone::PlayerMenu;
+        assert_eq!(windows.first(zone, 4, 30, 9, true), 4);
+        // A click moved the focus: the remote's window would go to 10.
+        assert_eq!(windows.first(zone, 10, 30, 9, true), 4);
+        windows.step(zone, 3);
+        assert_eq!(windows.first(zone, 10, 30, 9, true), 7);
+        windows.step(zone, 100);
+        assert_eq!(windows.first(zone, 10, 30, 9, true), 21, "the list's end");
+        windows.step(zone, -100);
+        assert_eq!(windows.first(zone, 10, 30, 9, true), 0, "its start");
+        // The remote: the focus's window, and nothing remembered.
+        assert_eq!(windows.first(zone, 10, 30, 9, false), 10);
+        assert_eq!(windows.first(zone, 12, 30, 9, true), 12);
+        windows.clear();
+        assert_eq!(windows.first(zone, 2, 30, 9, true), 2);
+        // A step before the list was drawn under the pointer starts from
+        // the focus's window.
+        let mut windows = Windows::default();
+        windows.step(Zone::MsOptions, 2);
+        assert_eq!(windows.first(Zone::MsOptions, 1, 20, 7, true), 3);
+        assert_eq!(
+            windows.first(Zone::MsOptions, 0, 3, 7, true),
+            0,
+            "a short list does not move"
+        );
+    }
+
+    /// Which surfaces a target lies on: a poster on its shelf and the
+    /// board, a grid poster on its grid, a list's row on its list; the
+    /// lists drawn as windows of rows move by rows.
+    #[test]
+    fn targets_lie_on_their_surfaces() {
+        let poster = Zone::Shelves.lanes(305);
+        assert_eq!(poster.vertical, Some(Lane::vertical(Zone::Shelves)));
+        assert_eq!(
+            poster.horizontal.map(|lane| (lane.lane, lane.axis)),
+            Some((3, Axis::Horizontal))
+        );
+        assert_eq!(Zone::PosterMenu.lanes(305), poster);
+        assert_eq!(
+            Zone::LibraryMark.lanes(7).vertical,
+            Some(Lane::vertical(Zone::Grid))
+        );
+        assert_eq!(
+            Zone::WifiInfo.lanes(2).vertical,
+            Some(Lane::vertical(Zone::WifiRows))
+        );
+        assert_eq!(
+            Zone::DetailMarks.lanes(2).vertical,
+            Some(Lane::vertical(Zone::DetailEpisodes))
+        );
+        for fixed in [
+            Zone::HomeApps,
+            Zone::Shield,
+            Zone::Back,
+            Zone::PlayerBar,
+            Zone::SearchKeys,
+        ] {
+            assert!(fixed.lanes(0).is_empty(), "{fixed:?}");
+        }
+        for stepped in [
+            Zone::MsOptions,
+            Zone::PlayerMenu,
+            Zone::PlayerTracks,
+            Zone::LiveGuide,
+            Zone::LivePanel,
+        ] {
+            assert!(stepped.lanes(0).vertical.unwrap().stepped(), "{stepped:?}");
+        }
+        assert!(!Lane::vertical(Zone::SettingsRows).stepped());
+        // The film's bar is the scrub's alone: no surface lies under it.
+        assert!(Zone::PlayerBar.lanes(0).is_empty());
+    }
+
+    /// Every surface a target or a ground names is drawn with a `PanState`
+    /// of that name: a lane Rust moves that nothing reads would be a drag
+    /// that does nothing.
+    #[test]
+    fn every_surface_has_a_pan_state_in_the_interface() {
+        let ui = [
+            include_str!("../ui/components.slint"),
+            include_str!("../ui/kit.slint"),
+            include_str!("../ui/media.slint"),
+            include_str!("../ui/search.slint"),
+            include_str!("../ui/library.slint"),
+            include_str!("../ui/discover.slint"),
+            include_str!("../ui/settings.slint"),
+            include_str!("../ui/wireless.slint"),
+            include_str!("../ui/output.slint"),
+            include_str!("../ui/media_settings.slint"),
+            include_str!("../ui/detail.slint"),
+            include_str!("../ui/player.slint"),
+            include_str!("../ui/live.slint"),
+        ]
+        .concat();
+        for zone in ALL_ZONES {
+            let Some(lane) = zone.lanes(0).vertical else {
+                continue;
+            };
+            let name = zone_name(lane.zone);
+            // Shared lists name their surface by the zone they are given.
+            let shared = matches!(
+                lane.zone,
+                Zone::SettingsChoice | Zone::EditorPicker | Zone::WifiRows | Zone::BtRows
+            );
+            assert!(
+                shared || ui.contains(&format!("surface: \"{name}\"")),
+                "{name} has no PanState"
+            );
+        }
+        assert!(
+            ui.contains("surface: root.pointer-zone;"),
+            "ChoiceSheet and Rail"
+        );
+        assert!(ui.contains("surface: root.rows-zone;"), "the radios' list");
+    }
+
+    /// What a moved surface shows is remembered by surface and lane, and
+    /// forgotten once it is the focus's again.
+    #[test]
+    fn views_follow_what_a_moved_surface_shows() {
+        let mut views = Views::default();
+        assert_eq!(views.first(Zone::Shelves, 2), None);
+        assert!(views.set(Zone::Shelves, 2, 14));
+        assert!(!views.set(Zone::Shelves, 2, 14), "the same is no change");
+        assert!(views.set(Zone::Shelves, -1, 1));
+        assert_eq!(views.first(Zone::Shelves, 2), Some(14));
+        assert_eq!(views.first(Zone::Shelves, -1), Some(1));
+        assert_eq!(views.first(Zone::Shelves, 3), None, "another shelf");
+        assert!(views.set(Zone::Shelves, 2, -1));
+        assert_eq!(views.first(Zone::Shelves, 2), None);
+        assert!(!views.set(Zone::Grid, -1, -1));
+        views.clear();
+        assert_eq!(views.first(Zone::Shelves, -1), None);
+    }
+
+    /// The catalogue's wheel never moves the focus: off a surface it
+    /// scrolls the page, or nothing. Elsewhere it is still the arrows.
+    #[test]
+    fn a_catalogue_s_wheel_scrolls_its_page_and_never_the_focus() {
+        for route in [
+            Route::Media,
+            Route::Search,
+            Route::Discover,
+            Route::Library,
+            Route::MediaSettings,
+            Route::Detail,
+        ] {
+            assert!(
+                matches!(wheel_elsewhere(route), WheelElsewhere::Page(_)),
+                "{route:?}"
+            );
+        }
+        assert_eq!(
+            wheel_elsewhere(Route::Media),
+            WheelElsewhere::Page(Some(Lane::vertical(Zone::Shelves)))
+        );
+        assert_eq!(
+            wheel_elsewhere(Route::Discover),
+            WheelElsewhere::Page(Some(Lane::vertical(Zone::Grid)))
+        );
+        assert_eq!(wheel_elsewhere(Route::Detail), WheelElsewhere::Page(None));
+        for route in [Route::Home, Route::Settings, Route::Wifi, Route::Live] {
+            assert_eq!(wheel_elsewhere(route), WheelElsewhere::Arrows, "{route:?}");
+        }
+        // The page's surface is on the screen, and only with no modal up.
+        let menu = Context {
+            layer: Layer::Choice,
+            ..on(Route::Discover)
+        };
+        let WheelElsewhere::Page(Some(grid)) = wheel_elsewhere(Route::Discover) else {
+            unreachable!()
+        };
+        assert!(accepts(on(Route::Discover), grid.zone) && !accepts(menu, grid.zone));
+    }
+
+    /// Discover's posters: a first click selects, a second opens -- and
+    /// nowhere else.
+    #[test]
+    fn on_discover_a_first_click_selects_and_only_there() {
+        assert!(click_selects_first(Route::Discover, Zone::Grid));
+        assert!(!click_selects_first(Route::Library, Zone::Grid));
+        assert!(!click_selects_first(Route::Discover, Zone::DiscoverPanel));
+        assert!(!click_selects_first(Route::Media, Zone::Shelves));
     }
 }

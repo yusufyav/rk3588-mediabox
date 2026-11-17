@@ -1,4 +1,4 @@
-import { PointerTarget, PointerShield, PointerSwallow } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { GridPoster, PosterItem } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -53,9 +53,14 @@ export component Library inherits Rectangle {
     // Kept on the row the remote was last on whichever zone it is in, as
     // the reference's page does not scroll when the focus leaves the grid;
     // the posters are loaded around that same row.
-    property <length> scroll: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
-                0px,
-                max(0px, Math.ceil(items.length / columns) * cell-h - viewport-h));
+    pan := PanState {
+        surface: "grid";
+        item: cell-h;
+        remote: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1, 0px, self.limit);
+        limit: max(0px, Math.ceil(items.length / columns) * cell-h - viewport-h);
+        remote-duration: Theme.glide;
+    }
+    property <length> scroll: pan.value;
 
     background: Theme.catalog-bg;
     clip: true;
@@ -67,6 +72,8 @@ export component Library inherits Rectangle {
         width: root.width - self.x;
         height: viewport-h + Metrics.focus-room;
         clip: true;
+
+        PointerPanArea { surface: "grid"; }
 
         if items.length == 0: Text {
             x: Metrics.focus-room;
@@ -84,7 +91,7 @@ export component Library inherits Rectangle {
             width: columns * cell-w;
             height: max(1px, Math.ceil(items.length / columns) * cell-h);
 
-            animate y { duration: Theme.glide; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for item[i] in items: GridPoster {
                 x: Math.mod(i, columns) * cell-w;

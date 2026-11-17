@@ -1,5 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
-import { PointerTarget, PointerShield, PointerSwallow, PointerClose } from "pointer.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerClose, PointerPanArea, PanState } from "pointer.slint";
 
 // Live television, over the broadcast.
 //
@@ -388,14 +388,21 @@ component Guide inherits Rectangle {
         }
     }
 
+    // The channels are a window of rows Rust keeps: the hand and the wheel
+    // move it a channel at a time (`PointerHub.step`), the focus never.
+    PanState {
+        surface: "live-guide";
+        pitch: row-h;
+    }
+
     for row[i] in root.rows: Rectangle {
         x: left;
         y: rows-y + i * row-h;
         width: root.width - left;
         height: row-h;
         // The channel's name is read, not chosen: a click on it is nothing,
-        // not the guide's Back.
-        PointerSwallow { }
+        // not the guide's Back; a drag on it moves the channels.
+        PointerPanArea { surface: "live-guide"; }
         // The channel column. Placed, not left to Slint, which centres an
         // element given only a width.
         Rectangle {
@@ -524,6 +531,17 @@ component Panel inherits Rectangle {
     drop-shadow-color: #00000080;
 
     PointerSwallow { }
+    // A window of rows Rust keeps: the hand and the wheel move it a row at
+    // a time (`PointerHub.step`), the focus never.
+    PanState {
+        surface: "live-panel";
+        pitch: 48 * dp;
+    }
+    PointerPanArea {
+        y: 76 * dp;
+        height: parent.height - self.y;
+        surface: "live-panel";
+    }
 
     Text {
         x: 24 * dp;
