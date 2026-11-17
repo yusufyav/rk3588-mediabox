@@ -43,7 +43,11 @@ export struct WifiRow {
 // catches it up in the second, the trim offset turning a quarter meanwhile;
 // the whole ring turns 720 degrees every 4444 ms. Head and tail ease as
 // fast-out-slow-in, drawn here as smoothstep.
-component Spinner inherits Path {
+//
+// The arc is a child of the spinner's own box: Slint applies no transform to
+// a component's root element, so a rotation set on a root Path was dropped
+// (and said so at build time) and the ring never turned.
+component Spinner inherits Rectangle {
     in property <length> size: Metrics.icon;
     in property <brush> ink: Theme.muted;
     property <float> p: mod(animation-tick(), 1333ms) / 1333ms;
@@ -55,19 +59,26 @@ component Spinner inherits Path {
     // At least a dot, as the stroke's round cap draws it.
     property <angle> a0: (tail + offset) * 360deg;
     property <angle> a1: max((head + offset) * 360deg, a0 + 4deg);
+    // The whole ring's turn.
+    out property <angle> turn: mod(animation-tick(), 4444ms) / 4444ms * 720deg - 90deg;
     width: size;
     height: size;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    commands: "M " + (12 + 9 * cos(a0)) + " " + (12 + 9 * sin(a0))
-        + " A 9 9 0 " + (a1 - a0 > 180deg ? "1" : "0") + " 1 "
-        + (12 + 9 * cos(a1)) + " " + (12 + 9 * sin(a1));
-    fill: transparent;
-    stroke: ink;
-    stroke-width: max(1.6px, size * 0.075);
-    stroke-line-cap: round;
-    transform-origin: { x: self.width / 2, y: self.height / 2 };
-    transform-rotation: mod(animation-tick(), 4444ms) / 4444ms * 720deg - 90deg;
+
+    arc := Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M " + (12 + 9 * cos(root.a0)) + " " + (12 + 9 * sin(root.a0))
+            + " A 9 9 0 " + (root.a1 - root.a0 > 180deg ? "1" : "0") + " 1 "
+            + (12 + 9 * cos(root.a1)) + " " + (12 + 9 * sin(root.a1));
+        fill: transparent;
+        stroke: root.ink;
+        stroke-width: max(1.6px, root.size * 0.075);
+        stroke-line-cap: round;
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        transform-rotation: root.turn;
+    }
 }
 
 // Four bars, as many lit as the signal earns.

@@ -1051,3 +1051,74 @@ fn fingers_lifted_off_a_touchpad_leave_the_rows_coasting() {
     });
     assert!(!app(|app| app.gesture.coasting()));
 }
+
+/// The Wi-Fi scan's spinner is drawn and runs on the animation clock: half
+/// an arc cycle (1333 ms) apart, its arc is another. The ring's own turn --
+/// 720 degrees every 4444 ms, on the arc's Path now that it is a child of
+/// the spinner's box (Slint applies no transform to a component's root) --
+/// is not drawn here: the software renderer this test has leaves
+/// `rotate` unimplemented (i-slint-renderer-software 1.17, slint #6068),
+/// so two frames one arc cycle apart draw alike with or without it. That
+/// the turn is applied is the build's to say (no warning), and the
+/// panel's (FemtoVG).
+#[test]
+fn the_wifi_scan_spinner_runs_on_the_animation_clock() {
+    use slint::platform::software_renderer::PremultipliedRgbaColor;
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    window.set_size(slint::PhysicalSize::new(W, H));
+    slint::platform::set_platform(Box::new(Headless {
+        window: window.clone(),
+    }))
+    .expect("one platform");
+    let ui = MediaBoxWindow::new().expect("the interface");
+    ui.window().set_size(slint::PhysicalSize::new(W, H));
+    ui.show().expect("shown");
+    ui.set_screen("wifi".into());
+    ui.set_wifi_face("list".into());
+    ui.set_wifi_known(true);
+    ui.set_wifi_present(true);
+    ui.set_wifi_rows(model(vec![WifiRow {
+        kind: "header".into(),
+        label: "Kullanılabilir ağlar".into(),
+        on: true,
+        bars: -1,
+        slot: -1,
+        ..Default::default()
+    }]));
+    let frame = || {
+        slint::platform::update_timers_and_animations();
+        ui.window().request_redraw();
+        let mut pixels = vec![PremultipliedRgbaColor::default(); (W * H) as usize];
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, W as usize);
+        });
+        pixels
+    };
+    let differ = |a: &[PremultipliedRgbaColor], b: &[PremultipliedRgbaColor]| {
+        a.iter()
+            .zip(b)
+            .filter(|(a, b)| (a.red, a.green, a.blue, a.alpha) != (b.red, b.green, b.blue, b.alpha))
+            .count()
+    };
+    let _ = frame();
+    let start = std::time::Instant::now();
+    let first = frame();
+    std::thread::sleep(std::time::Duration::from_millis(667).saturating_sub(start.elapsed()));
+    let half = frame();
+    assert!(
+        differ(&first, &half) > 0,
+        "the spinner's arc is drawn and moves with the animation clock"
+    );
+    // And it is the spinner that moves: with the scan over, nothing does.
+    ui.set_wifi_rows(model(vec![WifiRow {
+        kind: "header".into(),
+        label: "Kullanılabilir ağlar".into(),
+        on: false,
+        bars: -1,
+        slot: -1,
+        ..Default::default()
+    }]));
+    let still = frame();
+    std::thread::sleep(std::time::Duration::from_millis(667));
+    assert_eq!(differ(&still, &frame()), 0, "no spinner, nothing moving");
+}
