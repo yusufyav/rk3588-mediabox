@@ -85,6 +85,33 @@ if ! cmp -s <(tar -xJOf "$gst_tarball" "${gst_prefix#/}/BUILD-INFO") "$sysroot$g
 fi
 head -1 "$sysroot$gst_prefix/BUILD-INFO"
 
+# gstreamer-audio-1.0.pc, which build.rs probes, names orc-0.4 in
+# Requires.private, and pkg-config refuses the probe without orc-0.4.pc. The
+# appliance carries no -dev packages, so a sysroot read from it has none; one
+# taken while live television still installed Debian's GStreamer -dev on the
+# appliance (before ccae2be) had it by accident. Here it comes from the
+# snapshot and version the runtime was built against (its BUILD-INFO: liborc
+# 1:0.4.41-1, snapshot 20261101T000000Z), checked by sha256.
+orc_deb=liborc-0.4-dev_0.4.41-1_arm64.deb
+orc_sha256=e4f05510a528c713ee071e3e3e5f75e065054a8d906b2231d3f549487ab062d1
+orc_url="http://snapshot.debian.org/archive/debian/20261101T000000Z/pool/main/o/orc/$orc_deb"
+orc_pc="$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig/orc-0.4.pc"
+if [ ! -e "$orc_pc" ]; then
+  say "sysroot <- orc-0.4.pc ($orc_deb)"
+  orc_dir="$here/build/sysroot-pc"
+  mkdir -p "$orc_dir"
+  if [ ! -e "$orc_dir/$orc_deb" ] ||
+     ! ( cd "$orc_dir" && echo "$orc_sha256  $orc_deb" | sha256sum -c --quiet >/dev/null 2>&1 ); then
+    curl -fsSL -o "$orc_dir/$orc_deb" "$orc_url"
+    ( cd "$orc_dir" && echo "$orc_sha256  $orc_deb" | sha256sum -c --quiet )
+  fi
+  mkdir -p "${orc_pc%/*}"
+  bsdtar -xOf "$orc_dir/$orc_deb" 'data.tar*' |
+    bsdtar -xOf - ./usr/lib/aarch64-linux-gnu/pkgconfig/orc-0.4.pc >"$orc_pc.new"
+  grep -q '^Version: 0.4.41$' "$orc_pc.new"
+  mv "$orc_pc.new" "$orc_pc"
+fi
+
 say "mediabox-live ($triple, release)"
 export PKG_CONFIG_ALLOW_CROSS=1
 export PKG_CONFIG_SYSROOT_DIR="$sysroot"
