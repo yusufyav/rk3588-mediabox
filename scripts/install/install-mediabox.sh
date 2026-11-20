@@ -670,7 +670,7 @@ fi
 
 # ------------------------------------------------- 18. the product verifier
 step "product verifier"
-MEDIABOX_VERIFY_NO_DISPLAY="$headless" "$verifier" \
+"$verifier" \
   || die "the installed product did not verify"
 
 # ------------------------------------------- 19. and it has to play a film

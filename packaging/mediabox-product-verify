@@ -26,10 +26,6 @@ set -eu
 ROOT="${MEDIABOX_VERIFY_ROOT:-}"
 META="${MEDIABOX_VERIFY_META:-}"
 STATIC="${MEDIABOX_VERIFY_STATIC_ONLY:-0}"
-# Set by the installer when it measured no connected connector before it
-# started. It waives nothing on its own: the checks below re-measure, and a
-# board with a television attached is judged whatever the caller said.
-NO_DISPLAY="${MEDIABOX_VERIFY_NO_DISPLAY:-0}"
 P="$ROOT/opt/rk3588-mediabox"
 ETC="$ROOT/etc"
 DVB_FW="$ROOT/var/lib/mediabox-dvb/firmware"
@@ -433,10 +429,13 @@ if [ "$STATIC" != 1 ]; then
     [ -e "$s" ] || continue
     [ "$(cat "$s")" = connected ] && out="$out $(basename "$(dirname "$s")")"
   done
-  # Headless is a state of the cabling, not a mode the caller can declare: it
-  # holds only while this loop agrees that nothing is connected.
+  # Headless is a state of the cabling, measured here and nowhere else: no
+  # caller declares it and none can waive it. A board with no television
+  # attached is a correct installation; what needs one -- an output selected,
+  # the interface on the screen -- is reported as not present, and judged in
+  # full on any board where this loop finds a connected output.
   headless=0
-  [ -z "$out" ] && [ "$NO_DISPLAY" = 1 ] && headless=1
+  [ -z "$out" ] && headless=1
 
   # `inspect` exits 1 on a board with nothing plugged in, having printed the
   # entire topology and failed only to select an output. The description is
@@ -484,8 +483,15 @@ if [ "$STATIC" != 1 ]; then
   # interface passes just as well as a live one. What the player needs is
   # something accepting on the other end, so that is what is asked.
   sock=/run/mediabox-ui/video.sock
-  if [ "$headless" = 1 ] && [ "$ui_state" != active ]; then
-    skip "interface video socket" "the interface is not running: no display is attached"
+  if [ "$headless" = 1 ]; then
+    # Nothing can listen without a television: the interface either was not
+    # started (an install with no display) or is up and waiting for one, as
+    # it does after every boot with no cable (it never gives up or exits).
+    if [ "$ui_state" = active ]; then
+      skip "interface video socket" "no display is attached: the interface is waiting for one"
+    else
+      skip "interface video socket" "no display is attached: the interface is not running"
+    fi
   elif [ "$ui_state" != active ]; then
     # Nothing to listen: the socket belongs to the interface's runtime
     # directory and goes away with it. Checked whenever the interface is up,

@@ -117,9 +117,12 @@ systemctl start mediabox-tv-ui.service
 /opt/rk3588-mediabox/bin/mediabox-playback-smoke
 ```
 
-Muafiyet istenerek alınamaz: doğrulayıcı `/sys/class/drm` taramasını kendi
-yapar, ekran takılı bir kartta `MEDIABOX_VERIFY_NO_DISPLAY` hiçbir şeyi
-atlatmaz.
+Muafiyet istenerek alınamaz: ekransızlığı doğrulayıcı `/sys/class/drm`
+taramasıyla kendisi ölçer, hiçbir bayrak ya da ortam değişkeni almaz. Ekran
+takılı bir kartta hiçbir madde atlanmaz; ekransız kartta arayüz ekranı
+beklerken de doğrulama geçer (ekran maddeleri `SKIP`). Kanky gibi bir DVB
+alıcısı da gerekmez: doğrulayıcı yalnız firmware dosyalarını ve hash'lerini
+denetler.
 
 ## 2. Derleme bağımlılıkları
 
