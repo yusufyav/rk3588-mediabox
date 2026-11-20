@@ -248,10 +248,11 @@ family name, not an identity.
   has taken.
 
 * **Kodi is built on the appliance and does not have to be.** It takes hours on
-  eight Cortex cores, and the sysroot a cross build needs is already fetched —
-  `scripts/build-mediabox-tv.sh` rsyncs the appliance's own `/usr/lib` and
-  `/usr/include` into `.sysroot/aarch64-trixie` and cross-compiles the
-  television interface against it. What stands in the way is not the libraries
+  eight Cortex cores, and the environment a cross build needs already exists —
+  the build image (`scripts/build-container.sh`, `packaging/build-image/`):
+  Debian's cross gcc, glibc 2.41 and the appliance's libraries as trixie arm64
+  packages at a pinned snapshot, in which the control plane, the television
+  interface and mediabox-live are built. What stands in the way is not the libraries
   but Kodi's own build: it produces host tools during the build (TexturePacker,
   JsonSchemaBuilder, the SWIG wrappers), so a cross build needs a second, native
   build tree for those. Kodi supports that; nobody here has set it up.

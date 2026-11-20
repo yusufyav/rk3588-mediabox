@@ -16,7 +16,8 @@ __pycache__/
 # Agent session telemetry and local tool settings
 .claude/
 
-# Cross-compilation sysroot copied from the appliance (scripts/build-mediabox-tv.sh).
+# A cross sysroot once copied off an appliance; no build reads one now
+# (scripts/build-container.sh). Kept ignored for checkouts that still hold one.
 /.sysroot/
 
 # Cihaz çıktıları kaynak kodu değil. Bir oturumun kanıtı commit mesajında ve

@@ -15,9 +15,11 @@
 #      plugin directory. The media runtime's lib/gstreamer-1.0 plugin, built
 #      against Debian's GStreamer, is not touched and no longer loaded by
 #      live television.
-#   3. mediabox-live itself, cross-compiled against the appliance's libraries
-#      (the sysroot build-mediabox-tv.sh keeps) and the runtime, with a
-#      RUNPATH to the runtime.
+#   3. mediabox-live itself, cross-compiled in the build image
+#      (scripts/build-container.sh: Debian's cross gcc, glibc 2.41, glib and
+#      orc as trixie's arm64 packages at the pinned snapshot) against the
+#      runtime, with a RUNPATH to the runtime. Nothing is read from an
+#      appliance or from this machine's own compiler and libraries.
 #
 # The result is a bundle, build/mediabox-live-bundle: the four files, their
 # hashes, and the script that installs them on the appliance.
@@ -52,9 +54,7 @@ if [ -n "${MEDIABOX_PREFIX:-}" ] && [ "$MEDIABOX_PREFIX" != "$fixed_prefix" ]; t
   echo "MEDIABOX_PREFIX=$MEDIABOX_PREFIX, but mediabox-live and its runtime are built for $fixed_prefix" >&2
   exit 1
 fi
-crate="$here/rust/crates/mediabox-live"
 triple="aarch64-unknown-linux-gnu"
-sysroot="${MEDIABOX_SYSROOT:-$here/.sysroot/aarch64-trixie}"
 gst_version=1.26.11
 gst_prefix="$fixed_prefix/gstreamer-1.26"
 gst_tarball="$here/build/gstreamer-runtime/gstreamer-$gst_version-aarch64.tar.xz"
@@ -62,11 +62,6 @@ mpp_plugin="$here/build/gstreamer-rockchip/libgstrockchipmpp.so"
 bundle="$here/build/mediabox-live-bundle"
 
 say() { printf '\n== %s\n' "$*"; }
-
-[ -e "$sysroot/usr/lib/aarch64-linux-gnu/libc.so.6" ] || {
-  echo "no sysroot at $sysroot; run scripts/build-mediabox-tv.sh once first" >&2
-  exit 1
-}
 
 say "GStreamer runtime (scripts/build-gstreamer-runtime.sh)"
 [ -e "$gst_tarball" ] || "$here/scripts/build-gstreamer-runtime.sh"
@@ -78,54 +73,18 @@ say "mppvideodec (scripts/build-mppvideodec.sh)"
 [ -e "$mpp_plugin" ] || "$here/scripts/build-mppvideodec.sh"
 ( cd "${mpp_plugin%/*}" && sha256sum -c libgstrockchipmpp.so.sha256 )
 
-say "sysroot <- the same GStreamer runtime, at the same prefix"
-if ! cmp -s <(tar -xJOf "$gst_tarball" "${gst_prefix#/}/BUILD-INFO") "$sysroot$gst_prefix/BUILD-INFO" 2>/dev/null; then
-  rm -rf "${sysroot:?}$gst_prefix"
-  tar -C "$sysroot" -xJf "$gst_tarball"
-fi
-head -1 "$sysroot$gst_prefix/BUILD-INFO"
-
-# gstreamer-audio-1.0.pc, which build.rs probes, names orc-0.4 in
-# Requires.private, and pkg-config refuses the probe without orc-0.4.pc. The
-# appliance carries no -dev packages, so a sysroot read from it has none; one
-# taken while live television still installed Debian's GStreamer -dev on the
-# appliance (before ccae2be) had it by accident. Here it comes from the
-# snapshot and version the runtime was built against (its BUILD-INFO: liborc
-# 1:0.4.41-1, snapshot 20261101T000000Z), checked by sha256.
-orc_deb=liborc-0.4-dev_0.4.41-1_arm64.deb
-orc_sha256=e4f05510a528c713ee071e3e3e5f75e065054a8d906b2231d3f549487ab062d1
-orc_url="http://snapshot.debian.org/archive/debian/20261101T000000Z/pool/main/o/orc/$orc_deb"
-orc_pc="$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig/orc-0.4.pc"
-if [ ! -e "$orc_pc" ]; then
-  say "sysroot <- orc-0.4.pc ($orc_deb)"
-  orc_dir="$here/build/sysroot-pc"
-  mkdir -p "$orc_dir"
-  if [ ! -e "$orc_dir/$orc_deb" ] ||
-     ! ( cd "$orc_dir" && echo "$orc_sha256  $orc_deb" | sha256sum -c --quiet >/dev/null 2>&1 ); then
-    curl -fsSL -o "$orc_dir/$orc_deb" "$orc_url"
-    ( cd "$orc_dir" && echo "$orc_sha256  $orc_deb" | sha256sum -c --quiet )
-  fi
-  mkdir -p "${orc_pc%/*}"
-  bsdtar -xOf "$orc_dir/$orc_deb" 'data.tar*' |
-    bsdtar -xOf - ./usr/lib/aarch64-linux-gnu/pkgconfig/orc-0.4.pc >"$orc_pc.new"
-  grep -q '^Version: 0.4.41$' "$orc_pc.new"
-  mv "$orc_pc.new" "$orc_pc"
-fi
-
-say "mediabox-live ($triple, release)"
-export PKG_CONFIG_ALLOW_CROSS=1
-export PKG_CONFIG_SYSROOT_DIR="$sysroot"
-export PKG_CONFIG_LIBDIR="$sysroot$gst_prefix/lib/pkgconfig:$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig:$sysroot/usr/share/pkgconfig"
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+say "mediabox-live ($triple, release, build image)"
 # Its GStreamer found through a RUNPATH, never Debian's in /usr/lib.
 # Built from one fixed path (mediabox-live-source.sh), named nowhere in
 # the binary (panic locations read ./rust/crates/...): the same sources --
 # a commit, or a dirty tree's same snapshot -- build the same bytes from any
-# worktree (checked 2026-11-06 with two of a commit).
+# worktree and any machine. The runtime is at its own prefix in the image
+# (build-container.sh -g), so its .pc files need no sysroot.
+# shellcheck source=build-container.sh
+source "$here/scripts/build-container.sh"
 # shellcheck source=mediabox-live-source.sh
 source "$here/scripts/mediabox-live-source.sh"
 mediabox_live_source "$here"
-source_crate="$MEDIABOX_LIVE_CRATE"
 if [ "$MEDIABOX_LIVE_DIRTY" = 1 ]; then
   echo "mediabox-live source: $MEDIABOX_LIVE_SOURCE" >&2
   echo "  WARNING: rust/ has uncommitted changes; a development binary, traced by snapshot $MEDIABOX_LIVE_SNAPSHOT" >&2
@@ -133,15 +92,20 @@ else
   echo "mediabox-live source: commit $MEDIABOX_LIVE_COMMIT"
 fi
 echo "mediabox-live snapshot: $MEDIABOX_LIVE_SNAPSHOT"
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="$MEDIABOX_LIVE_REMAP -C link-arg=--sysroot=$sysroot -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$sysroot/usr/lib/aarch64-linux-gnu"
-( cd "$source_crate" && CARGO_TARGET_DIR="$crate/target" cargo build -q --locked --release --target "$triple" )
-bin="$crate/target/$triple/release/mediabox-live"
-aarch64-linux-gnu-readelf -d "$bin" | grep -q "RUNPATH.*\[$gst_prefix/lib\]" ||
-  { echo "mediabox-live has no RUNPATH to $gst_prefix/lib" >&2; exit 1; }
+target="$(mediabox_cargo_target mediabox-live)"
+bin="$target/$triple/release/mediabox-live"
 # The appliance runs glibc 2.41, as for the interface.
-max="$(aarch64-linux-gnu-objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-[ "${max##*.}" -le 41 ] || { echo "binary needs $max but the appliance has GLIBC_2.41" >&2; exit 1; }
-printf '%-20s %s (highest %s)\n' mediabox-live "$(du -h "$bin" | cut -f1)" "$max"
+mediabox_build_run -g -v "$MEDIABOX_LIVE_SRC:$MEDIABOX_LIVE_SRC" -w "$MEDIABOX_LIVE_CRATE" -- "
+  export PKG_CONFIG_LIBDIR=$gst_prefix/lib/pkgconfig:\$PKG_CONFIG_LIBDIR
+  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='$MEDIABOX_LIVE_REMAP -C link-arg=-Wl,-rpath,$gst_prefix/lib -C link-arg=-Wl,-rpath-link=$gst_prefix/lib'
+  CARGO_TARGET_DIR=/work/build/cargo-arm64/mediabox-live cargo build -q --locked --release --target $triple
+  bin=/work/build/cargo-arm64/mediabox-live/$triple/release/mediabox-live
+  aarch64-linux-gnu-readelf -d \$bin | grep -q 'RUNPATH.*\[$gst_prefix/lib\]' ||
+    { echo 'mediabox-live has no RUNPATH to $gst_prefix/lib' >&2; exit 1; }
+  max=\$(aarch64-linux-gnu-objdump -T \$bin | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+  [ \${max##*.} -le 41 ] || { echo \"binary needs \$max but the appliance has GLIBC_2.41\" >&2; exit 1; }
+  printf '%-20s %s (highest %s)\n' mediabox-live \$(du -h \$bin | cut -f1) \$max
+"
 
 say "bundle ($bundle)"
 rm -rf "$bundle" && mkdir -p "$bundle"

@@ -28,12 +28,13 @@
 #     dirty tree is built, and said so; it is a development binary, traced by
 #     its snapshot, not refused.
 #
-# The fixed path is the same for every user and home; Cargo's own home
-# ($CARGO_HOME, its registry's sources in panic locations) is remapped
-# too. $MEDIABOX_LIVE_REMAP is the --remap-path-prefix pair for RUSTFLAGS.
+# The fixed path is the same for every user and home, and so is Cargo's own
+# home in the build image (/cargo, scripts/build-container.sh): its
+# registry's sources in panic locations need no remapping.
+# $MEDIABOX_LIVE_REMAP is the --remap-path-prefix pair for RUSTFLAGS.
 
 MEDIABOX_LIVE_SRC="/tmp/rk3588-mediabox-build/mediabox-live-src"
-MEDIABOX_LIVE_REMAP="--remap-path-prefix=$MEDIABOX_LIVE_SRC=. --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+MEDIABOX_LIVE_REMAP="--remap-path-prefix=$MEDIABOX_LIVE_SRC=."
 
 mediabox_live_source() {
   local checkout=$1

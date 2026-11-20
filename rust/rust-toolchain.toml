@@ -1,0 +1,8 @@
+# One Rust for every workspace under rust/, on every machine and in the build
+# image (packaging/build-image). A version, never "stable": stable moves by
+# itself, and a binary built a week later is then built by another compiler.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-unknown-linux-gnu", "wasm32-unknown-unknown"]
